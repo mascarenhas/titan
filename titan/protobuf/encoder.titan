@@ -158,6 +158,13 @@ local function Encoder:field(
   when is_string() then
     local bytes: string = candidate
     write_bytes(buf, number, bytes)
+  when is_value() then
+    -- Nil is absent; anything else is one nested TitanValue message.
+    if candidate ~= nil then
+      local mark = begin_nested(buf, number)
+      self:dynamic(buf, candidate, depth)
+      end_nested(buf, mark)
+    end
   when is_array{elem_descriptor} then
     local mark = begin_nested(buf, number)
     self:array(buf, candidate, elem_descriptor, depth)
@@ -239,5 +246,63 @@ local function Encoder:field(
     end_nested(buf, mark)
   else raise "protobuf: unsupported field type"
   end
+end
+
+-- One TitanValue arm for a non-nil dynamic value at the field's depth:
+-- 1 boolean, 2 integer, 3 float, 4 string, 5 nominal, 6 Titan Array.
+local function Encoder:dynamic(
+    buf: foreign *titan_protobuf_buffer,
+    candidate: value,
+    depth: integer)
+  local raw: foreign TValue = candidate
+  local tag = ffi.lmacro_ttype(raw)
+  if tag == ffi.LUA_TBOOLEAN then
+    self:field(buf, 1, candidate, dynamic_boolean, depth)
+  elseif tag == ffi.LUA_TNUMBER then
+    if ffi.lmacro_ttypetag(raw) == ffi.LUA_VNUMINT then
+      self:field(buf, 2, candidate, dynamic_integer, depth)
+    else
+      self:field(buf, 3, candidate, dynamic_float, depth)
+    end
+  elseif tag == ffi.LUA_TSTRING then
+    self:field(buf, 4, candidate, dynamic_string, depth)
+  elseif tag == ffi.LUA_TUSERDATA then
+    case reflect.inspect(candidate)
+    when is_record(record_value) then
+      self:dynamic_nominal(buf, candidate, record_value.type.name,
+          reflect.Type.is_record(record_value.type), depth)
+    when is_union(union_value) then
+      self:dynamic_nominal(buf, candidate, union_value.type.name,
+          reflect.Type.is_union(union_value.type), depth)
+    when is_array() then
+      local mark = begin_nested(buf, 6)
+      self:array(buf, candidate, dynamic_value, depth)
+      end_nested(buf, mark)
+    when is_const_array() then
+      local mark = begin_nested(buf, 6)
+      self:array(buf, candidate, dynamic_value, depth)
+      end_nested(buf, mark)
+    else raise "protobuf: unsupported dynamic value"
+    end
+  else raise "protobuf: unsupported dynamic value"
+  end
+end
+
+-- The declaring module and qualified name, then exactly the bytes a field of
+-- that nominal type carries: its message, hook payload, or resource index.
+local function Encoder:dynamic_nominal(
+    buf: foreign *titan_protobuf_buffer,
+    candidate: value,
+    name: string,
+    descriptor: reflect.Type,
+    depth: integer)
+  local raw: foreign TValue = candidate
+  local module = ffi.titan_codec_nominal_module(raw)
+  if module == nil then raise "protobuf: unsupported dynamic value" end
+  local mark = begin_nested(buf, 5)
+  write_bytes(buf, 1, c_text(module))
+  write_bytes(buf, 2, name)
+  self:field(buf, 3, candidate, descriptor, depth)
+  end_nested(buf, mark)
 end
 

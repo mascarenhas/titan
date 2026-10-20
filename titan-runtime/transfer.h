@@ -1036,6 +1036,117 @@ static inline void titan_codec_get_nominal(lua_State *L, TitanCodecState *state,
       data, length, depth, scratch);
 }
 
+/* The module name of a nominal value's declaring module, from its canonical
+ * metatable and the module's manifest; NULL for anything else. Raw reads. */
+static inline const char *titan_codec_nominal_module(TValue candidate) {
+  if (!ttisfulluserdata(&candidate)) {
+    return NULL;
+  }
+  Udata *module = titan_codec_module(uvalue(&candidate)->metatable);
+  if (module == NULL || module->len < sizeof(TitanModuleData)) {
+    return NULL;
+  }
+  const TitanModuleData *data = (const TitanModuleData *)getudatamem(module);
+  if (data->symbols == NULL) {
+    return NULL;
+  }
+  const TitanTransferModule *manifest = (const TitanTransferModule *)
+      data->symbols(TITAN_TRANSFER_MANIFEST_SYMBOL);
+  return manifest != NULL ? manifest->name : NULL;
+}
+
+/* Encoder:field for a `value` field: nil is absent; booleans, integers,
+ * floats, and strings are the arms 1-4 of one nested TitanValue message.
+ * Every other dynamic value uses the reflective field encoder. */
+static inline void titan_codec_put_value(lua_State *L, TitanCodecState *state,
+    const TValue *field, int number, const TitanCodecPath *path, int depth,
+    const char *owner, int variant, int index) {
+  int64_t key = (int64_t)number * 8 + 2;
+  int64_t mark;
+  if (ttisnil(field)) {
+    return;
+  }
+  if (ttisboolean(field)) {
+    mark = titan_codec_begin(L, state, key);
+    titan_codec_put_varint(L, state->buf, 8, ttistrue(field) ? 1 : 0);
+    titan_codec_end(L, state, mark);
+    return;
+  }
+  if (ttisinteger(field)) {
+    mark = titan_codec_begin(L, state, key);
+    titan_codec_put_varint(L, state->buf, 16, titan_codec_zigzag(ivalue(field)));
+    titan_codec_end(L, state, mark);
+    return;
+  }
+  if (ttisfloat(field)) {
+    mark = titan_codec_begin(L, state, key);
+    titan_codec_put_double(L, state->buf, 25, fltvalue(field));
+    titan_codec_end(L, state, mark);
+    return;
+  }
+  if (ttisstring(field)) {
+    mark = titan_codec_begin(L, state, key);
+    titan_codec_put_string(L, state->buf, 34, field);
+    titan_codec_end(L, state, mark);
+    return;
+  }
+  titan_codec_encode_handoff(L, state, TITAN_CODEC_ENCODE_FIELD, owner,
+      variant, index, number, path, depth, field);
+}
+
+/* decode_field for a `value` field: absent is nil; one length-delimited
+ * TitanValue holding at most one scalar arm decodes natively, with the
+ * reflective arm checks. Everything else uses the reflective field decoder
+ * through the frame's one-field Message (`scratch`). */
+static inline void titan_codec_get_value(lua_State *L, TitanCodecState *state,
+    const TitanCodecField *field, int number, const uint8_t *data,
+    size_t length, int depth, const char *owner, int variant, int index,
+    ptrdiff_t scratch) {
+  if (field->count == 0) {
+    lua_pushnil(L);
+    return;
+  }
+  if (field->count == 1 && field->wire == 2) {
+    TitanCodecField arms[6];
+    const uint8_t *slice = data + field->offset;
+    uint32_t total = 0;
+    uint32_t only = 0;
+    titan_codec_parse(L, slice, field->length, arms, 6);
+    for (uint32_t arm = 1; arm <= 6; arm++) {
+      if (arms[arm - 1].count != 0) {
+        total += arms[arm - 1].count;
+        only = arm;
+      }
+    }
+    if (total == 0) {
+      lua_pushnil(L);
+      return;
+    }
+    if (total == 1 && only <= 4) {
+      const TitanCodecField *selected = &arms[only - 1];
+      switch (only) {
+        case 1:
+          lua_pushboolean(L, titan_codec_get_boolean(L, selected));
+          return;
+        case 2:
+          lua_pushinteger(L, titan_codec_get_integer(L, selected));
+          return;
+        case 3:
+          lua_pushnumber(L, titan_codec_get_float(L, selected, slice));
+          return;
+        default: {
+          TString *text = titan_codec_get_string(L, selected, slice);
+          setsvalue2s(L, L->top.p, text);
+          L->top.p++;
+          return;
+        }
+      }
+    }
+  }
+  titan_codec_decode_field(L, state, owner, variant, index, number, field,
+      data, length, depth, scratch);
+}
+
 /* A protobuf root, a transfer packet, or the reflective decoder's
  * structural branch for a nominal with a codec. Leaves one value pushed. */
 static inline void titan_codec_decode_nominal(lua_State *L, TValue resources,

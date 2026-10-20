@@ -165,17 +165,17 @@ The compiler emits a codec pair for every public record or union that the
 reflective codec could encode (`coder/nominal_codec.lua`): every field or
 variant is public, no member is named `to_transfer_payload` or
 `from_transfer_payload`, and every field or part type is `nil`, a boolean,
-integer, float, string, record, union, Titan Array, or a foreign integer,
-float, pointer, complete struct, or fixed array, or an Option of one of those.
-Eligibility is per nominal, so recursive declarations never depend on
-declaration order. A nominal with a field the reflective codec always rejects
-(callables, Maps, Interfaces, `value` and erased generic parameters, owned or
-union C types), private members, or hooks stays entirely reflective, as does a
-nominal whose decoder directory would exceed 64 entries (record fields; union
-variants plus every variant's parts). Each entry is 32 bytes of the decoder's C
-frame at up to 128 nesting levels, while a reflective level's C stack does not
-grow with field count, so a deep graph of wide nominals raises the nesting
-error instead of exhausting the C stack.
+integer, float, string, `value` (including erased generic parameters),
+record, union, Titan Array, or a foreign integer, float, pointer, complete
+struct, or fixed array, or an Option of one of those. Eligibility is per
+nominal, so recursive declarations never depend on declaration order. A
+nominal with a field the reflective codec always rejects (callables, Maps,
+Interfaces, owned or union C types), private members, or hooks stays entirely
+reflective, as does a nominal whose decoder directory would exceed 64 entries
+(record fields; union variants plus every variant's parts). Each entry is 32
+bytes of the decoder's C frame at up to 128 nesting levels, while a reflective
+level's C stack does not grow with field count, so a deep graph of wide
+nominals raises the nesting error instead of exhausting the C stack.
 
 The declaring module emits one immutable `TitanTransferCodec` array next to
 its `TitanTransferModule` manifest (`transfer.h`) and binds each canonical
@@ -191,13 +191,15 @@ context, the reflective `Encoder`'s active Map, a C-stack path of the open
 generated frames, and one Lua stack slot holding the root's reusable
 `Encoder`. It writes identical bytes and raises the identical error string at
 the identical point; it never declines or reruns. Booleans, integers, floats,
-strings, their Options, and nested records and unions are encoded natively,
-the latter through their own bound codec after the same registered-resource
-check by expected type. Every other field is handed to the reflective field
-codec through one fixed Titan entry (`codec_handoff`), called through its
-native entry like any first-class Titan call. Before that call the runtime
-checks the closure's function-type tag against `TITAN_CODEC_HANDOFF_TYPE`, the
-exact type `function (value, value, value, value): (value)`, and raises
+strings, their Options, nested records and unions, and the nil and scalar arms
+of `value` fields are encoded natively, nested nominals through their own bound
+codec after the same registered-resource check by expected type. Every other
+field, including a `value` holding a nominal or Array, is handed to the
+reflective field codec through one fixed Titan entry (`codec_handoff`), called
+through its native entry like any first-class Titan call. Before that call the
+runtime checks the closure's function-type tag against
+`TITAN_CODEC_HANDOFF_TYPE`, the exact type
+`function (value, value, value, value): (value)`, and raises
 `protobuf: invalid codec handoff` otherwise, so a changed handoff signature
 fails closed; `spec/coder/nominal_codec_spec.lua` pins that spelling and the
 `TitanCodecHandoffEntry` typedef to the compiler's own function-type identity
@@ -214,9 +216,30 @@ resource and hook checks and before any inspection. Cycle detection consults
 both the active Map and the path, so cycles through mixed frames raise
 `protobuf: cyclic object graph` exactly as on the reflective path, and depth
 is passed through both sides unchanged. An encoding frame with any field that
-can reach the reflective codec (a handed-off field or a nested nominal) pushes
-its record onto the Lua stack, so a hook that drops the last reference to it
-and collects cannot free the record under the frame.
+can reach the reflective codec (a handed-off field, a `value`, or a nested
+nominal) pushes its record onto the Lua stack, so a hook that drops the last
+reference to it and collects cannot free the record under the frame.
+
+A `value` field is one nested `TitanValue` message (absent when nil) holding a
+single arm: 1 boolean, 2 sint64, 3 double, 4 bytes, 5 a nominal as {1 module,
+2 qualified name, 3 the bytes a field of that nominal type carries}, or 6 a
+Titan Array of `TitanValue` elements. The reflective `Encoder:dynamic` and
+`decode_dynamic` own the arms; decoding selects the last recognized arm, a
+message with none is nil, and Array constness is the observed one. The nominal
+arm decodes through `decode_field` with the resolved record or union
+descriptor, so hooks, registered resources, and generated codecs apply as for
+a static field. Lookup uses the registered nominal; `titan.transfer`
+installs `set_nominal_loader(initialize_nominal)` so a packet decode (a
+non-nil context) loads the named module on demand, exactly as for a packet
+root, in any destination state (the native lua tests cover a worker thread
+receiving a value-held and a generic-held nominal of a module it never
+loaded). A generated decoder reads one length-delimited `TitanValue` holding
+at most one scalar arm natively and hands every other `TitanValue` to
+`decode_field` through the frame's one-field `Message`; a generated encoder
+writes the nil and scalar arms and hands a nominal or Array to the state's
+`Encoder`. The `TitanValue` encoding is new and additive: earlier builds
+rejected every non-nil `value` and erased generic field, so no earlier wire
+form changes meaning, and earlier builds cannot decode the new form.
 
 The generated decoder mirrors `read_message_slice` and `decode_field`: it
 validates the complete message first with the same error strings (keys,
@@ -423,8 +446,14 @@ field.length)` directly on the borrowed wire slice using the carried
 reflected hook closure, or re-inspecting the constructed wrapper. No partially
 constructed value is published after a failure. Type lookup uses the
 destination state's initialized nominal registry; the nominal helper checks
-both name and requested record/union kind. It does not guess a module name or
-execute a module loader.
+both name and requested record/union kind and never guesses a module name.
+Protobuf itself executes no module loader, with one exception: the nominal arm
+of a `value` field names its declaring module, and while decoding with a
+packet context (a non-nil `Message.context`) a missed name runs the loader
+`titan.transfer` installed (`set_nominal_loader(initialize_nominal)`), then
+looks the name up once more. Standalone decoding has no context and loads no
+module, and `TransferValue:to_value` outside a packet loads only its root's
+module (transfer's own step), never one named inside a `value`.
 
 Every reconstruction builder (record fields, union parts, foreign-struct fields,
 and foreign or const Array entries) is a fresh decoder-local Array, and every

@@ -424,6 +424,9 @@ local function decode_field(message: Message, number: integer,
   when is_nil() then
     if field ~= nil then message:merged_message(number) end
     return nil
+  when is_value() then
+    if field == nil then return nil end
+    return decode_dynamic(message:merged_message(number), depth)
   end
   if field == nil then raise "protobuf: missing required field " .. number end
   case resolved
@@ -504,4 +507,45 @@ local function decode_field(message: Message, number: integer,
     return decode_foreign_array(message:merged_message(number), elem_descriptor, depth)
   else raise "protobuf: unsupported field type"
   end
+end
+
+-- A TitanValue message: its last recognized arm selects the value; with no
+-- recognized arm it is nil. Arms decode with the ordinary field rules.
+local function decode_dynamic(message: Message, depth: integer): value
+  local selected = 0
+  for index = 1, message.count do
+    local number: integer = message:entry(index).number
+    if number >= 1 and number <= 6 then selected = number end
+  end
+  if selected == 1 then return decode_field(message, 1, dynamic_boolean, depth)
+  elseif selected == 2 then return decode_field(message, 2, dynamic_integer, depth)
+  elseif selected == 3 then return decode_field(message, 3, dynamic_float, depth)
+  elseif selected == 4 then return decode_field(message, 4, dynamic_string, depth)
+  elseif selected == 5 then
+    return decode_dynamic_nominal(message:merged_message(5), depth)
+  elseif selected == 6 then
+    return decode_array(message:merged_message(6), dynamic_constness, dynamic_value, depth)
+  end
+  return nil
+end
+
+-- Resolve the qualified name, loading its module only inside a packet decode
+-- (a transfer-installed loader with a carried context), then decode the
+-- payload exactly as a field of that nominal type.
+local function decode_dynamic_nominal(message: Message, depth: integer): value
+  local module: string = decode_field(message, 1, dynamic_string, depth)
+  local name: string = decode_field(message, 2, dynamic_string, depth)
+  local found? = reflect.find_nominal(name)
+  if found == nil and message.context ~= nil and nominal_loader ~= nil then
+    nominal_loader(module, name)
+    found = reflect.find_nominal(name)
+  end
+  if found == nil then raise "protobuf: unknown nominal type " .. name end
+  case found
+  when is_record(record_type) then
+    return decode_field(message, 3, reflect.Type.is_record(record_type), depth)
+  when is_union(union_type) then
+    return decode_field(message, 3, reflect.Type.is_union(union_type), depth)
+  end
+  raise "protobuf: nominal kind mismatch for " .. name
 end

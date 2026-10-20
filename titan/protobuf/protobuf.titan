@@ -53,12 +53,28 @@ end
 local resource_codecs: {value: ResourceCodec} = {}
 local resource_nominals: {string: {value: value}} = {}
 local packet_context_provider: (function (boolean): (value))? = nil
+local nominal_loader: (function (string, string): ())? = nil
+
+-- Descriptors of the TitanValue arms that carry a `value` field.
+local dynamic_value = reflect.Type.is_value()
+local dynamic_boolean = reflect.Type.is_boolean()
+local dynamic_integer = reflect.Type.is_integer()
+local dynamic_float = reflect.Type.is_float()
+local dynamic_string = reflect.Type.is_string()
+local dynamic_constness = reflect.ArrayTypeConstness.is_maybe_const()
 
 -- Transfer installs the packet-scope resolver exactly once. Protobuf never
 -- imports the transport, and an unresolved or direction-mismatched execution
 -- yields no context, so a standalone protobuf call carries no authority.
 function set_packet_context_provider(provider: function (boolean): (value))
   packet_context_provider = provider
+end
+
+-- Transfer installs its demand-driven module initializer once. A nominal held
+-- by a `value` field is loaded through it only while decoding with a packet
+-- context; standalone decoding requires the nominal to be registered already.
+function set_nominal_loader(loader: function (string, string): ())
+  nominal_loader = loader
 end
 
 local function packet_context(encoding: boolean): value

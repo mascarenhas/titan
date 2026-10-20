@@ -67,14 +67,15 @@ local function all_public(owner)
 end
 
 -- Field types the reflective codec can encode at all. A nominal with any
--- other field (callables, Maps, Interfaces, `value`, owned or union C types)
--- stays entirely reflective: no generated code for a field that always raises.
+-- other field (callables, Maps, Interfaces, owned or union C types) stays
+-- entirely reflective: no generated code for a field that always raises.
 local function encodable(typ)
     typ = erased(typ)
     local tag = typ._tag
     if tag == "Type.Option" then return encodable(typ.base) end
     if tag == "Type.Nil" or tag == "Type.Boolean" or tag == "Type.Integer"
-        or tag == "Type.Float" or tag == "Type.String" or tag == "Type.Array" then
+        or tag == "Type.Float" or tag == "Type.String" or tag == "Type.Array"
+        or tag == "Type.Value" then
         return true
     end
     if tag == "Type.Nominal" then return nominal_owner(typ) ~= nil end
@@ -88,11 +89,12 @@ local function encodable(typ)
 end
 
 -- The natively encoded kind of a field, or nil for a reflective handoff.
+-- `value` fields, including erased generic parameters, dispatch at run time.
 local function native_kind(typ)
     typ = erased(typ)
     local tag = typ._tag
     if tag == "Type.Nil" or tag == "Type.Boolean" or tag == "Type.Integer"
-        or tag == "Type.Float" or tag == "Type.String" then
+        or tag == "Type.Float" or tag == "Type.String" or tag == "Type.Value" then
         return { tag = tag }
     elseif tag == "Type.Nominal" then
         local owner = nominal_owner(typ)
@@ -101,6 +103,7 @@ local function native_kind(typ)
         end
     elseif tag == "Type.Option" then
         local base = native_kind(typ.base)
+        if base and base.tag == "Type.Value" then return base end
         if base and base.tag ~= "Type.Nil" then
             return { tag = tag, base = base }
         end
@@ -208,6 +211,12 @@ local function encode_field(ctx, plan, env, field, ordinal)
     local tag = kind.tag
     if tag == "Type.Nil" then
         return "/* nil field " .. number .. " emits no wire field */"
+    elseif tag == "Type.Value" then
+        assert(slot.storage == "uv")
+        local where = coordinates(env, ordinal)
+        return "titan_codec_put_value(L, _st, " .. uv_of(slot) .. ", " .. number
+            .. ", &_self, _depth + 1, " .. where.OWNER .. ", " .. where.VARIANT
+            .. ", " .. where.INDEX .. ");"
     elseif tag == "Type.String" or tag == "Type.Nominal" then
         assert(slot.storage == "uv")
         return encode_reference(kind, number, uv_of(slot), env, ordinal)
@@ -265,7 +274,8 @@ end
 local function decodes_reflectively(kind)
     if not kind then return true end
     local base = kind.tag == "Type.Option" and kind.base or kind
-    return kind.tag == "Type.Nil" or base.tag == "Type.Nominal"
+    return kind.tag == "Type.Nil" or kind.tag == "Type.Value"
+        or base.tag == "Type.Nominal"
 end
 
 -- decode_field for one declared field or part at depth `_depth + 1`, from
@@ -302,6 +312,12 @@ local function decode_field(ctx, plan, env, field, ordinal)
     local tag = kind.tag
     if tag == "Type.Nil" then
         return "if ((" .. entry .. ")->count != 0) {\n" .. handoff .. "\nL->top.p--;\n}"
+    elseif tag == "Type.Value" then
+        assert(slot.storage == "uv")
+        return "titan_codec_get_value(L, _st, " .. entry .. ", " .. number .. ", "
+            .. env.data .. ", " .. env.length .. ", _depth + 1, " .. where.OWNER .. ", "
+            .. where.VARIANT .. ", " .. where.INDEX .. ", _scratch);\n"
+            .. store_top(uv_of(slot))
     end
     local required = tag ~= "Type.Option"
     local base = required and kind or kind.base
@@ -389,12 +405,13 @@ local function decode_fields(ctx, plan, env, node, fields)
 end
 
 -- Whether encoding the fields can run Titan code (a handoff, a resource
--- codec, or a nested frame that hands off): such a frame roots its record on
--- the Lua stack, since a hook may drop the last reference to it.
+-- codec, a `value` holding a nominal or Array, or a nested frame that hands
+-- off): such a frame roots its record on the Lua stack, since a hook may drop
+-- the last reference to it.
 local function encodes_reflectively(fields)
     for _, field in ipairs(fields) do
         local kind = native_kind(field.type)
-        if not kind then return true end
+        if not kind or kind.tag == "Type.Value" then return true end
         local base = kind.tag == "Type.Option" and kind.base or kind
         if base.tag == "Type.Nominal" then return true end
     end

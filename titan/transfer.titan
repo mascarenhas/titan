@@ -1479,6 +1479,7 @@ end
 
 do
   protobuf.set_packet_context_provider(packet_context)
+  protobuf.set_nominal_loader(initialize_nominal)
   gc.ephemeron(resource_scopes as {value: value})
   gc.ephemeron(transfer_active_closures as {value: value})
   closure_fields = {

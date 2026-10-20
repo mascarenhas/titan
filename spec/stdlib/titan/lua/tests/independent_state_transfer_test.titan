@@ -459,3 +459,33 @@ function test_lua_worker_registers_a_missed_nominal_when_its_packet_decodes(
     end
   end)
 end
+
+-- The same late registration for a nominal held by a `value` field and by an
+-- erased generic field: the worker has loaded the holder's module, and decoding
+-- the held value loads the record's declaring module on demand.
+local function check_late_held(boxed: boolean, number: integer)
+  runtime_test.run(function ()
+    local tx, rx = nominal_thread.channel<|value|>(1)
+    defer tx:close()
+    defer rx:close()
+    local worker = lua_support.spawn_late_held_probe(rx,
+      "lua.transfer_fixture.TransferRecord")
+    if boxed then
+      tx:send(lua_support.LateBox.new(transfer_fixture.record_value(number)))
+    else
+      tx:send(lua_support.LateHolder(transfer_fixture.record_value(number)))
+    end
+    case worker:join()
+    when succeeded(received) then
+      test.assert(received == number, "worker reconstructed a different held record")
+    when failed(failure) then failure:raise()
+    else raise "late held nominal worker did not finish normally"
+    end
+  end)
+end
+
+function test_lua_worker_registers_a_missed_nominal_held_by_a_value_field(
+    context: test.Context)
+  context:run("value_field", function (_: test.Context) check_late_held(false, 29) end)
+  context:run("generic_field", function (_: test.Context) check_late_held(true, 31) end)
+end

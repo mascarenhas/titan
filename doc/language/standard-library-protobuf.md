@@ -187,20 +187,20 @@ protobuf and transfer operation uses them for any such nominal it meets, at the
 root or nested in another value, and they produce exactly the bytes, values,
 errors, hook calls, and resource attachments described on this page. Fields
 they do not encode natively (Arrays, foreign values, hooked records, endpoints
-and other registered resources) and unusual wire forms use the reflective
-codec for that field, which costs what that field costs reflectively plus, per
-root or decoding nominal that has such fields, one reflective encoder or one
-one-field message; a nominal whose fields are all scalars, strings, and
-generated nominals allocates only its decoded values. A nominal with a
-`value`, callable, Map, or Interface field, private members, its own hooks, or
-a wider declaration stays reflective. `find_generated_codec` returns the codec
-of a nominal instance (nil when reflection owns it) and
-`serialize_generated_to_buffer` appends that root with an optional packet
-`context` (false when `codec` is not the value's codec); they are compiled
-collaboration entries for `titan.transfer`. `use_generated_codecs(false)` is a
-diagnostic: it makes the current Lua state use only the reflective codec and
-returns the previous setting, changes no observable result, and exists for
-differential testing.
+and other registered resources, and `value` fields holding nominals or Arrays)
+and unusual wire forms use the reflective codec for that field, which costs
+what that field costs reflectively plus, per root or decoding nominal that has
+such fields, one reflective encoder or one one-field message; a nominal whose
+fields are all scalars, strings, scalar-holding `value` fields, and generated
+nominals allocates only its decoded values. A nominal with a callable, Map, or
+Interface field, private members, its own hooks, or a wider declaration stays
+reflective. `find_generated_codec` returns the codec of a nominal instance
+(nil when reflection owns it) and `serialize_generated_to_buffer` appends that
+root with an optional packet `context` (false when `codec` is not the value's
+codec); they are compiled collaboration entries for `titan.transfer`.
+`use_generated_codecs(false)` is a diagnostic: it makes the current Lua state
+use only the reflective codec and returns the previous setting, changes no
+observable result, and exists for differential testing.
 
 ## Anonymous messages
 
@@ -254,14 +254,16 @@ Eligible field and payload types are:
 - Options of eligible values.
 - Public records and unions whose encountered data meets these rules.
 - Mutable, const, or maybe-const Titan Arrays of eligible elements.
+- `value` fields and parts, including erased generic parameters, holding nil,
+  a boolean, integer, float, or string, a public record or union whose
+  encountered data meets these rules, or a Titan Array of such values.
 - Foreign integer and floating scalars, object and function pointers, complete embedded C
   structs, and fixed embedded C arrays, recursively containing eligible data.
 
-The module rejects declared `value`, Maps, Interfaces, Titan/Lua callables, owned foreign
-resources, C unions, incomplete aggregates, and flexible arrays. An erased
-generic field has its erased descriptor; a runtime value does not restore the
-missing generic schema. Foreign C exportability and declaration visibility
-also follow the [FFI contract](ffi.md).
+The module rejects Maps, Interfaces, Titan/Lua callables, owned foreign
+resources, C unions, incomplete aggregates, and flexible arrays, including
+inside a `value` (`protobuf: unsupported dynamic value`). Foreign C
+exportability and declaration visibility also follow the [FFI contract](ffi.md).
 
 Encoding visits the actual graph without a preliminary schema walk. Unsupported
 data fails when encountered. For example, an absent optional field or an empty
@@ -295,6 +297,7 @@ message. Field numbering skips protobuf's reserved interval 19000–19999.
 | Record or embedded C struct | Nested message |
 | Union | Nested message with a `oneof` of variant payload messages |
 | Titan Array or embedded C array | Nested message with repeated element-slot messages |
+| `value` | Nested `TitanValue` message with a `oneof` (below); absent when nil |
 
 An Array slot is a message containing its value at field 1. An empty slot
 represents nil, preserving interior holes without shifting subsequent elements.
@@ -303,6 +306,24 @@ also carry constness at field 2; maybe-const reconstruction preserves the
 observed qualifier. Fixed C array reconstruction checks the actual target
 extent. As elsewhere in Titan, trailing absent elements do not add observable
 Array length.
+
+A `value` field is self-describing: its `TitanValue` message holds exactly one
+arm, `bool boolean = 1`, `sint64 integer = 2`, `double number = 3`,
+`bytes string = 4`, `TitanValue_Nominal nominal = 5`, or a Titan Array of
+`TitanValue` elements at 6. The nominal arm carries the declaring module name
+(1), the qualified nominal name (2), and at 3 exactly the bytes a field of that
+nominal type carries: its message, its custom hook payload, or its packet
+resource index. Decoding selects the last recognized arm and treats a message
+with none as nil; a decoded Array keeps its observed constness. Standalone
+decoding requires the named nominal to be registered (`protobuf: unknown
+nominal type`), while decoding a transfer packet loads its declaring module
+on demand, in any state, including a thread or independent Lua state that has
+not loaded it yet. `TransferValue:to_value` outside a packet decodes like a
+standalone call: it loads the root nominal's module, but a nominal named only
+inside a `value` field must already be registered. The `TitanValue` encoding
+is new: earlier builds rejected every non-nil `value` field and erased generic
+field, so it adds wire forms without changing any existing one, and an
+earlier build cannot decode bytes that contain it.
 
 Absent options and nil fields emit no field. Other scalars are emitted even
 when equal to protobuf defaults. Decoding requires present non-optional fields

@@ -191,6 +191,14 @@ dispatch `from_transfer_payload`. The native scope owner disposes the packet and
 unclaimed attachments after reconstruction or an error; already claimed endpoint
 wrappers retain their own finalized ownership.
 
+A nominal held by a `value` (or erased generic) field anywhere in the packet
+names its declaring module on the wire. Transfer installs
+`protobuf.set_nominal_loader(initialize_nominal)` once, so decoding with the
+packet's scope loads that module on demand, like the root's. Outside a packet,
+`TransferValue:to_value` initializes only its root nominal's module before the
+standalone protobuf call, which has no context, so a nominal named only inside
+one of its `value` fields must already be registered in the destination state.
+
 ### Consuming raw-slot decode
 
 Decode is an ordinary public Titan function, available through ordinary

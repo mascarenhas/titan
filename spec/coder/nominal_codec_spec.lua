@@ -55,16 +55,19 @@ describe("generated nominal codecs", function()
         local _, tables = c:gsub("static const TitanTransferCodec ", "")
         assert.equal(1, tables)
         for _, name in ipairs({ "test.Point", "test.Chain", "test.Listed",
-                                "test.UsesListed" }) do
-            assert.truthy(c:find('"' .. name .. '", 0,', 1, true), name)
+                                "test.UsesListed", "test.Dynamic" }) do
+            assert.truthy(c:find('{ "' .. name .. '", 0,', 1, true), name)
         end
-        assert.truthy(c:find('"test.Shape", 1,', 1, true))
-        for _, name in ipairs({ "test.Dynamic", "test.Mapped", "test.Hidden",
-                                "test.Private", "test.Hooked" }) do
-            assert.is_nil(c:find('"' .. name .. '", 0,', 1, true), name)
+        assert.truthy(c:find('{ "test.Shape", 1,', 1, true))
+        for _, name in ipairs({ "test.Mapped", "test.Hidden", "test.Private",
+                                "test.Hooked" }) do
+            assert.is_nil(c:find('{ "' .. name .. '", 0,', 1, true), name)
         end
         local _, bindings = c:gsub("lua_rawsetp%(L, %-2, TITAN_MT_CODEC%);", "")
-        assert.equal(5, bindings)
+        assert.equal(6, bindings)
+        -- `value` fields dispatch on the run-time tag.
+        assert.truthy(c:find("titan_codec_put_value(L, _st", 1, true))
+        assert.truthy(c:find("titan_codec_get_value(L, _st", 1, true))
         -- Nested nominals dispatch at run time; Arrays use the reflective field
         -- codec through the fixed handoff entry, never a decline.
         assert.truthy(c:find("titan_codec_put_nominal(L, _st", 1, true))
