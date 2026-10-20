@@ -304,7 +304,7 @@ local function decode_field(ctx, plan, env, field, ordinal)
     if not kind then
         if erased(field.type)._tag == "Type.Option" then
             return "if ((" .. entry .. ")->count == 0) {\n"
-                .. "setnilvalue(s2v(L->top.p));\nL->top.p++;\n} else {\n"
+                .. "setnilvalue2s(L->top.p);\nL->top.p++;\n} else {\n"
                 .. handoff .. "\n}"
         end
         return handoff
@@ -385,7 +385,7 @@ local function decode_fields(ctx, plan, env, node, fields)
     if env.variant > 0 then code[#code + 1] = env.tag end
     if scratch then
         code[#code + 1] = "_scratch = savestack(L, L->top.p);\n"
-            .. "setnilvalue(s2v(L->top.p));\nL->top.p++;"
+            .. "setnilvalue2s(L->top.p);\nL->top.p++;"
     end
     if #fields > 0 then code[#code + 1] = "titan_codec_depth(L, _depth + 1);" end
     local reflective = {}

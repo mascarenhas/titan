@@ -219,6 +219,9 @@ is passed through both sides unchanged. An encoding frame with any field that
 can reach the reflective codec (a handed-off field, a `value`, or a nested
 nominal) pushes its record onto the Lua stack, so a hook that drops the last
 reference to it and collects cannot free the record under the frame.
+Generated nil result and reusable scratch slots are initialized through
+`setnilvalue2s` before advancing the Lua stack top, following the coder's
+stack-aware slot-initialization contract.
 
 A `value` field is one nested `TitanValue` message (absent when nil) holding a
 single arm: 1 boolean, 2 sint64, 3 double, 4 bytes, 5 a nominal as {1 module,
