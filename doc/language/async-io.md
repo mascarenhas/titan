@@ -605,9 +605,10 @@ Runtime:
   packet before another waiter consumes it. The reservation is free as soon as
   `cancel` returns, so another Task may start waiting before the cancelled one
   has unwound; that unwinding never releases the newer reservation.
-- **No per-wait reader state:** Each `Receiver` owns one reader token and one
-  cancellation action for its whole lifetime, so `wait` allocates no
-  reservation state of its own.
+- **No per-wait reader state:** A `Receiver` creates one reader token and one
+  cancellation action on its first `wait` and reuses them for its whole
+  lifetime, so later waits allocate no reservation state of their own. A
+  `Receiver` that is only sent to and closed, never waited on, allocates none.
 
 **Closing.** `close()` is idempotent and does not require a Task. It marks the
 Receiver closed, atomically takes and disposes any unread packet in the native

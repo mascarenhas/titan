@@ -256,6 +256,41 @@ function test_receiver_cancelled_reader_exit_keeps_successor_reservation(_contex
   end)
 end
 
+function test_receiver_failed_first_wait_leaves_reusable_reader_state(_context: test.Context)
+  local receiver = async.receiver()
+  defer receiver:close()
+  -- A wait outside a Task fails before it creates or reserves reader state.
+  receiver_error(function () receiver:wait() end)
+  runtime_test.run(function ()
+    -- The first wait in a Task creates and reserves the reader state, then
+    -- fails at its checkpoint; that failure must release the reservation.
+    local pre_cancelled = async.run<|value, value|>(function (): value
+      async.running():cancel(async.CancellationReason.simple("first Receiver wait cancelled"))
+      return receiver:wait()
+    end)
+    task_support.cleanup_task(pre_cancelled, "first Receiver wait cleanup")
+    test.assert(support.cancelled_with(async.join(pre_cancelled), "first Receiver wait cancelled"))
+    async.send(receiver:handle(), async.TransferValue.is_integer(61))
+    test.assert(receiver_integer(receiver:wait()) == 61,
+                "failed first Receiver wait kept its reservation")
+    -- Later suspended waits reuse the same token and cancellation action.
+    for ordinal = 62, 64 do
+      local cancelled = async.run<|value, value|>(receiver:wait)
+      task_support.cleanup_task(cancelled, "reused Receiver reader cleanup")
+      support.wait_until_waiting(cancelled)
+      cancelled:cancel(async.CancellationReason.simple("reused Receiver reader cancelled"))
+      test.assert(support.cancelled_with(async.join(cancelled), "reused Receiver reader cancelled"))
+      local delivered = async.run<|value, value|>(receiver:wait)
+      task_support.cleanup_task(delivered, "reused Receiver reader delivery cleanup")
+      support.wait_until_waiting(delivered)
+      async.send(receiver:handle(), async.TransferValue.is_integer(ordinal))
+      case async.join(delivered)
+      when succeeded(item) then test.assert(receiver_integer(item) == ordinal)
+      else raise "reused Receiver reader state missed a wake" end
+    end
+  end)
+end
+
 function test_receiver_close_wakes_successor_after_cancelled_reader(_context: test.Context)
   runtime_test.run(function ()
     local receiver = async.receiver()

@@ -696,19 +696,25 @@ enters the destination Lua state:
   callback or status conversion ensures that once the atomic exchange commits,
   the slot owns the allocation even when `uv_async_send` returns a negative
   status and `check_status` raises `OperationError` (`"async.send"`).
-- **Persistent reader state (`ReceiverReader`)**: `receiver()` allocates the
-  Receiver's only reader state once: a `ReceiverReader` with an empty
-  `task`, a `notified` bit, one `ResumeToken("async.Receiver.wait")`, and one
-  `withdraw` cancellation action (`reader.task = nil`). The reservation is the
-  reserving Task's identity in `reader.task`, so `wait()` allocates no reader
-  record, token, or closure. Clearing `task` on release also drops the
-  Receiver's reference to a finished reader Task.
+- **Persistent reader state (`ReceiverReader`)**: `receiver()` leaves
+  `self.reader` nil, so a Receiver used only as a notification target never
+  allocates reader state. After `running()` succeeds, the first `wait()`
+  (`Receiver:reader_state`) allocates the Receiver's only reader state: a
+  `ReceiverReader` with an empty `task`, a `notified` bit, one
+  `ResumeToken("async.Receiver.wait")`, and one `withdraw` cancellation action
+  (`reader.task = nil`). It publishes that record in `self.reader` only after
+  the action exists, so an allocation failure leaves no partial state, and
+  every later wait reuses it. The reservation is the reserving Task's identity
+  in `reader.task`, so a wait after the first allocates no reader record,
+  token, or closure. Clearing `task` on release also drops the Receiver's
+  reference to a finished reader Task.
 - **Wake-only callback and direct slot retention (`Receiver:wake`)**: `Receiver`
   does not copy or decode payloads in its libuv callback. Its callback
-  (`Receiver:wake()`) returns unless `reader.task` is reserved and
-  `reader.notified` is clear; it then marks `reader.notified = true` and
-  requests a deferred wake via `task:resume(reader.token)` (resetting
-  `reader.notified = false` if `resume` raises). The owned
+  (`Receiver:wake()`) returns unless reader state exists, `reader.task` is
+  reserved, and `reader.notified` is clear; it then marks
+  `reader.notified = true` and requests a deferred wake via
+  `task:resume(reader.token)` (resetting `reader.notified = false` if `resume`
+  raises). The owned
   `titan_async_message` remains in `self.native.message`—including while the
   reader's deferred wake is queued in the Runtime ready FIFO—until `wait()`
   takes it. Replacing or closing the slot before that take disposes unread
