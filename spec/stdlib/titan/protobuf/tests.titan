@@ -778,6 +778,238 @@ function test_indexed_union_merge_keeps_last_variant_reset_and_payload_order(
   else raise "oneof replacement failed to reset earlier payloads" end
 end
 
+function test_directory_empty_single_and_group_wire_validation(context: test.Context)
+  context:run("empty", function (_child: test.Context)
+    local decoded: NilValue = protobuf.deserialize("", descriptor(NilValue(nil)))
+    test.assert(decoded.nothing == nil)
+  end)
+  context:run("single_group", function (_child: test.Context)
+    -- Nested unknown fields are validated but do not enter the directory.
+    local decoded: NilValue = protobuf.deserialize(
+      string.char(51, 8, 2, 59, 16, 4, 60, 52), descriptor(NilValue(nil)))
+    test.assert(decoded.nothing == nil)
+  end)
+  context:run("unexpected_end_group", function (_child: test.Context)
+    expect_error(function ()
+      protobuf.deserialize(string.char(52), descriptor(NilValue(nil)))
+    end, "invalid wire type")
+  end)
+  context:run("unterminated_group", function (_child: test.Context)
+    expect_error(function ()
+      protobuf.deserialize(string.char(51, 8, 2), descriptor(NilValue(nil)))
+    end, "unterminated group")
+  end)
+  context:run("malformed_unknown_group_field", function (_child: test.Context)
+    expect_error(function ()
+      protobuf.deserialize(string.char(51, 8, 128), descriptor(NilValue(nil)))
+    end, "truncated varint")
+  end)
+  context:run("invalid_unknown_wire", function (_child: test.Context)
+    expect_error(function ()
+      protobuf.deserialize(string.char(54), descriptor(NilValue(nil)))
+    end, "invalid wire type")
+  end)
+end
+
+function test_directory_index_chains_colliding_tags(_context: test.Context)
+  local none: {integer} = {}
+  local frozen = none as const {integer}
+  local output = string.writer()
+  for index = 1, 64 do
+    output:write(protobuf.serialize(Arrays({index}, frozen, frozen, nil, {})))
+    -- Each unknown tag shares the index bucket of present field 1 or absent
+    -- field 4 for every index capacity through 2^16 buckets.
+    local field_one_peer = (index << 16) | (1 ~ index)
+    local field_four_peer = (index << 16) | (4 ~ index)
+    -- The repeat replaces its chain head; the next field 1 replaces a later link.
+    append_test_varint(output, field_one_peer << 3)
+    append_test_varint(output, index)
+    append_test_varint(output, field_one_peer << 3)
+    append_test_varint(output, index)
+    append_test_varint(output, field_four_peer << 3)
+    append_test_varint(output, index)
+  end
+  local decoded: Arrays = protobuf.deserialize(output:drain(),
+    descriptor(Arrays(none, frozen, frozen, nil, none)))
+  test.assert(#decoded.mutable == 64 and decoded.absent == nil)
+  for index = 1, 64 do
+    test.assert(decoded.mutable[index] == index, "colliding tags reordered a merged Array")
+  end
+end
+
+local function directory_node_bytes(count: integer): string
+  local output = string.writer()
+  output:write(string.char(10, 0))
+  local bytes = output:drain()
+  -- Build wire bytes directly so the encoder's depth guard is not the oracle.
+  for index = 2, count do
+    output:write(string.char(10, 0, 18))
+    append_test_varint(output, #bytes)
+    output:write(bytes)
+    bytes = output:drain()
+  end
+  return bytes
+end
+
+function test_directory_decode_depth_limit(context: test.Context)
+  local target = descriptor(Node("", nil))
+  context:run("accepted_boundary", function (_child: test.Context)
+    -- Each Node also decodes its name and optional next at depth + 1.
+    local decoded: Node = protobuf.deserialize(directory_node_bytes(127), target)
+    local count = 1
+    while decoded.next ~= nil do
+      decoded = decoded.next
+      count = count + 1
+    end
+    test.assert(count == 127)
+  end)
+  context:run("rejected_boundary", function (_child: test.Context)
+    expect_error(function ()
+      protobuf.deserialize(directory_node_bytes(128), target)
+    end, "nesting exceeds 128")
+  end)
+end
+
+record DirectoryHook
+  local payload: string
+end
+
+local record DirectoryFailure
+  const label: string
+end
+
+local const directory_failure = DirectoryFailure("directory decode failure")
+local directory_hook_calls = 0
+local directory_input: string? = nil
+local directory_overwrite: string? = nil
+
+function DirectoryHook:to_transfer_payload(): string
+  return self.payload
+end
+
+function DirectoryHook.from_transfer_payload(payload: string): DirectoryHook
+  directory_hook_calls = directory_hook_calls + 1
+  local released = 0
+  if payload == "release" then
+    -- Drop the string entry caller's only input reference before collecting.
+    released = #directory_input
+    directory_input = nil
+  end
+  gc.collect()
+  -- Without a decoder-owned root, this same-length string can reuse the freed
+  -- input block before later fields read it.
+  if released > 0 then directory_overwrite = string.rep("!", released) end
+  if payload == "raise" then raise directory_failure end
+  return DirectoryHook(payload)
+end
+
+record DirectorySlices
+  hook: DirectoryHook
+  tail: string
+  number: integer
+end
+
+record DirectoryOuter
+  inner: DirectorySlices
+end
+
+local function append_directory_fragment(output: string.StringWriter, bytes: string)
+  output:write(string.char(10))
+  append_test_varint(output, #bytes)
+  output:write(bytes)
+end
+
+function test_directory_keeps_root_and_merged_slices_live_across_hook_gc(
+    _context: test.Context)
+  local expected = string.rep("directory-tail\0", 1024)
+  local original = DirectorySlices(DirectoryHook("collect"), expected, 37)
+  local decoded: DirectorySlices = protobuf.deserialize(
+    protobuf.serialize(original), descriptor(original))
+  test.assert(decoded.tail == expected and decoded.number == 37,
+    "root wire slices did not survive collection in a custom decoder")
+
+  local output = string.writer()
+  append_directory_fragment(output, protobuf.serialize_fields(
+    {descriptor(DirectoryHook("collect"))}, DirectoryHook("collect")))
+  append_directory_fragment(output, protobuf.serialize_fields(
+    {reflect.Type.is_nil(), reflect.Type.is_string(), reflect.Type.is_integer()},
+    nil, expected, 91))
+  local merged: DirectoryOuter = protobuf.deserialize(
+    output:drain(), descriptor(DirectoryOuter(original)))
+  test.assert(merged.inner.tail == expected and merged.inner.number == 91,
+    "merged byte owner did not survive collection in a custom decoder")
+end
+
+-- Build the wire bytes here so no test-frame temporary retains them: the module
+-- variable is the only caller-side reference when the hook releases it.
+local function store_directory_input(expected: string, anonymous: boolean)
+  directory_overwrite = nil
+  local hook = DirectoryHook("release")
+  if anonymous then
+    directory_input = protobuf.serialize_fields(
+      {descriptor(hook), reflect.Type.is_string(), reflect.Type.is_integer()},
+      hook, expected, 53)
+  else
+    directory_input = protobuf.serialize(DirectorySlices(hook, expected, 53))
+  end
+end
+
+local function check_directory_release(retained: boolean)
+  directory_overwrite = nil
+  test.assert(directory_input == nil, "custom decoder did not release the input")
+  test.assert(retained, "string entry did not retain an input released by a custom decoder")
+end
+
+function test_directory_string_entries_retain_input_released_by_custom_decoder(
+    context: test.Context)
+  local expected = string.rep("directory-input\0", 1024)
+  local target = descriptor(DirectorySlices(DirectoryHook("release"), "", 0))
+  context:run("deserialize", function (_child: test.Context)
+    store_directory_input(expected, false)
+    local decoded: DirectorySlices = protobuf.deserialize(directory_input, target)
+    check_directory_release(decoded.tail == expected and decoded.number == 53)
+  end)
+  context:run("deserialize_fields", function (_child: test.Context)
+    store_directory_input(expected, true)
+    local fields: const {reflect.Type} =
+      {descriptor(DirectoryHook("release")), reflect.Type.is_string(), reflect.Type.is_integer()}
+    local hook: DirectoryHook, tail: string, number: integer =
+      protobuf.deserialize_fields(directory_input, fields)
+    check_directory_release(hook.payload == "release" and tail == expected and number == 53)
+  end)
+  context:run("deserialize_nominal", function (_child: test.Context)
+    store_directory_input(expected, false)
+    local decoded: DirectorySlices = protobuf.deserialize_nominal(
+      directory_input, "protobuf.tests.DirectorySlices", false)
+    check_directory_release(decoded.tail == expected and decoded.number == 53)
+  end)
+end
+
+function test_directory_custom_decoder_uses_last_payload_and_preserves_error_value(
+    _context: test.Context)
+  local fields: const {reflect.Type} = {descriptor(DirectoryHook("ok"))}
+  local bad = protobuf.serialize_fields(fields, DirectoryHook("raise"))
+  local good = protobuf.serialize_fields(fields, DirectoryHook("ok"))
+  directory_hook_calls = 0
+  local decoded: DirectoryHook = protobuf.deserialize_fields(bad .. good, fields)
+  test.assert(decoded.payload == "ok" and directory_hook_calls == 1,
+    "custom decoder merged payloads or decoded an earlier occurrence")
+  directory_hook_calls = 0
+  local caught = false
+  do
+    protobuf.deserialize_fields(good .. bad, fields)
+  catch
+    caught = true
+    test.assert(error == directory_failure, "custom decoder replaced the raised value")
+  end
+  test.assert(caught and directory_hook_calls == 1,
+    "last custom-decoder failure did not propagate exactly once")
+  -- A malformed superseded wire kind is ignored only for opaque hook payloads,
+  -- just like scalar last-selection; structural-message merges validate it.
+  local last: DirectoryHook = protobuf.deserialize_fields(string.char(8, 0) .. good, fields)
+  test.assert(last.payload == "ok")
+end
+
 record HookedToken
   local secret: integer
   local label: string

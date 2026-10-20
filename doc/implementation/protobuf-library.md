@@ -282,26 +282,57 @@ bit. Length-delimited fields must fit both the remaining source and the protobuf
 size limit. Unknown groups are skipped with a bounded, matching start/end
 field-number walk.
 
-Parsed `WireField` entries record integer bits or `(offset, length)` slices into
-the underlying byte buffer without allocating intermediate Lua strings. Singular
-scalars select their final occurrence. Single-occurrence embedded messages and
-union variants parse their child fields in place from the parent buffer slice;
-repeated occurrences of a singular embedded message or union variant concatenate
-their slices before parsing child fields, implementing protobuf merge behavior.
-Unknown fields do not change the selected union variant.
+Each message owns a compact native directory of `titan_protobuf_field` entries.
+An entry contains a field number, wire kind, integer bits or `(offset, length)`
+slice, a previous-occurrence ordinal, and an index-chain ordinal; it contains
+no GC pointers. The first entry lives inline in `Message`. Empty and
+single-field messages allocate neither entry storage nor a lookup index. The
+second entry allocates a counted `owned titan_protobuf_field[]` of capacity
+four for entries after the inline first entry, doubling only when full. Growth
+copies populated overflow entries, not wire bytes, and finishes before any
+decoder borrows an entry address. There is no per-field record, Array
+proxy/backing table, external malloc/free lifetime, or finalizer.
 
-Each parsed message keeps its ordered field Array. Empty and single-field
-messages answer lookups directly. The first lookup in a multi-field message
-builds a sparse Map from field number to the last Array index, linking each
-field to the previous occurrence of that number. Later scalar lookups use the
-Map; message merging follows only matching links and restores their original
-encounter order. A single occurrence returns its bytes directly. The Map grows
-with encountered field numbers, never the largest numeric tag. Ordered-only
-Array and union readers allocate no index. Building the index takes time linear
-in the parsed field count; subsequent scalar lookups take expected constant
-time, and message merging visits only matching occurrences. Every merged
-occurrence's wire kind is validated, and encounter order governs Array slots
-and oneof replacement.
+The first lookup in a multi-field message builds one zeroed, counted
+`owned uint32_t[]` index. Its power-of-two capacity is at least twice the entry
+count, and its size depends on the encountered field count, never the largest
+numeric tag. Each bucket heads a chain of 1-based directory ordinals, with zero
+as the empty sentinel. A chain links only the latest entry of each distinct
+field number: insertion records the entry's preceding same-number occurrence
+and lets the new entry take over that occurrence's chain position, so singular
+scalars select only their final occurrence and repeated tags never lengthen a
+chain. A probe visits only the distinct numbers sharing its bucket, so
+adversarial tags cannot build open-addressing clusters across buckets.
+Building the index takes expected linear time; later scalar lookups take
+expected constant time. Ordered-only Array and union readers allocate no index.
+
+Single-occurrence embedded messages and union variants parse child fields in
+place. Repeated singular messages validate every matching occurrence's wire
+kind, follow only same-number links, and concatenate slices in encounter order
+before parsing the merged child. Merge scratch Arrays contain integer ordinals,
+not wrappers for entries. Union traversal likewise keeps ordinals and discards
+earlier chunks on a recognized variant change; unknown fields do not change the
+selection. Array traversal retains wire order, slot positions, and the final
+constness marker. Unknown-group contents are validated and skipped without
+directory entries for their children.
+
+The owning `Message` remains traced throughout entry and byte-slice use. Its
+`holder` retains the backing string and is propagated to child slices: string
+entry points pass their input as the root holder, and merged children hold
+their concatenated merge string. A custom decoder that drops its caller's last
+input reference therefore cannot free the bytes behind `Message.base`; native
+call inputs alone are not roots ([values and GC](values-and-gc.md#calls-c-only-inputs-immediate-result-roots-and-vm-transport)).
+Raw-buffer entry points pass no holder and retain their existing synchronous
+caller-owned borrow contract. Neither an entry pointer nor `Message.base` owns
+its bytes. Directory owners and holders therefore survive allocations,
+reentrant custom decoders, and collection in a custom decoder without an
+untraced owner hidden in native storage.
+
+For allocation attribution, the `local entry = self:entry(self.count)` line in
+`Message:append` runs once per wire-field directory entry. The
+`require_depth(depth)` line in `decode_field` remains the per-decoded-field probe
+point, including the existing recursive Option dispatch. These are diagnostic
+probe locations, not production instrumentation or changes to wire parsing.
 
 Schema-directed decoding requires each non-optional field, validates the wire
 kind, and constructs children before calling reflected construction for the

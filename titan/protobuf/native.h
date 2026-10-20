@@ -6,6 +6,20 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Decoder entries contain only native bits and byte offsets, never GC values.
+ * One entry is embedded in Message; larger directories use counted GC owners.
+ * `previous` links earlier same-number occurrences, while `chain` links the
+ * latest entries of distinct numbers sharing one index bucket. */
+typedef struct titan_protobuf_field {
+  uint32_t number;
+  uint32_t wire;
+  int64_t bits;
+  uint32_t offset;
+  uint32_t length;
+  uint32_t previous;
+  uint32_t chain;
+} titan_protobuf_field;
+
 typedef struct titan_protobuf_buffer titan_protobuf_buffer;
 
 typedef int (*titan_protobuf_grow_fn)(

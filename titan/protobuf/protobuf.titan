@@ -428,21 +428,24 @@ function serialize(candidate: value): string
   return buffer_to_string(buf)
 end
 
+-- String entry points pass their input as the root holder, so it stays traced
+-- even when a custom decoder drops the caller's reference; raw buffers pass nil
+-- and keep their caller-owned synchronous borrow.
 local function deserialize_buffer(
     data: foreign const *void,
     length: integer,
-    descriptor: reflect.Type, context: value): value
+    descriptor: reflect.Type, context: value, holder: string?): value
   check_message_size(length)
   local resolved = resolve_type(descriptor)
   local base = data as foreign const *uint8_t
   case resolved
   when is_record(record_type) then
     require_record(record_type)
-    local message = read_message_slice(base, 0, length, nil, context)
+    local message = read_message_slice(base, 0, length, holder, context)
     return decode_record(message, record_type, 1)
   when is_union(union_type) then
     require_union(union_type)
-    local message = read_message_slice(base, 0, length, nil, context)
+    local message = read_message_slice(base, 0, length, holder, context)
     return decode_union(message, union_type, 1)
   else raise "protobuf: root descriptor must be a public record or union"
   end
@@ -454,11 +457,10 @@ end
 -- @return Fresh nominal value and recursively copied fields.
 -- @usage standard-library-protobuf.md#api
 function deserialize(bytes: string, descriptor: reflect.Type): value
-  -- bytes remains rooted on the caller stack throughout deserialize_buffer.
   return deserialize_buffer(
       ffi.titan_protobuf_bytes_ptr(bytes) as foreign const *void,
       #bytes,
-      descriptor, packet_context(false))
+      descriptor, packet_context(false), bytes)
 end
 
 --- Append the wire encoding of an anonymous root message to an initialized titan_protobuf_buffer.
@@ -525,20 +527,29 @@ function deserialize_fields_buffer(
       data, length, fields, packet_context(false))
 end
 
+-- Shared anonymous decoding; `holder` follows the deserialize_buffer rule.
+local function deserialize_fields_slice(
+    base: foreign const *uint8_t,
+    length: integer,
+    fields: const {reflect.Type},
+    context: value, holder: string?): (...: value)
+  check_message_size(length)
+  local message = read_message_slice(base, 0, length, holder, context)
+  local values: {value} = {}
+  for index = 1, #fields do
+    values[index] = decode_field(message, field_number(index), fields[index], 2)
+  end
+  return ...values[1, #fields]
+end
+
 -- As above, the context stays traced only for this synchronous reconstruction.
 function deserialize_fields_buffer_with_context(
     data: foreign const *void,
     length: integer,
     fields: const {reflect.Type},
     context: value): (...: value)
-  check_message_size(length)
-  local message = read_message_slice(
-      data as foreign const *uint8_t, 0, length, nil, context)
-  local values: {value} = {}
-  for index = 1, #fields do
-    values[index] = decode_field(message, field_number(index), fields[index], 2)
-  end
-  return ...values[1, #fields]
+  return deserialize_fields_slice(
+      data as foreign const *uint8_t, length, fields, context, nil)
 end
 
 --- Decode an anonymous message using the same ordered schema as its encoder.
@@ -547,11 +558,8 @@ end
 -- @return Exactly one result per declared field, preserving nil positions.
 -- @usage standard-library-protobuf.md#anonymous-messages
 function deserialize_fields(bytes: string, fields: const {reflect.Type}): (...: value)
-  -- bytes remains rooted on the caller stack throughout deserialize_fields_buffer.
-  return deserialize_fields_buffer(
-      ffi.titan_protobuf_bytes_ptr(bytes) as foreign const *void,
-      #bytes,
-      fields)
+  return deserialize_fields_slice(
+      ffi.titan_protobuf_bytes_ptr(bytes), #bytes, fields, packet_context(false), bytes)
 end
 
 --- Resolve an initialized nominal type by name and decode it from a raw byte buffer.
@@ -570,6 +578,29 @@ function deserialize_nominal_buffer(
       data, length, name, is_union, packet_context(false))
 end
 
+-- Shared nominal decoding; `holder` follows the deserialize_buffer rule.
+local function deserialize_nominal_slice(
+    data: foreign const *void,
+    length: integer,
+    name: string,
+    is_union: boolean, context: value, holder: string?): value
+  local found? = reflect.find_nominal(name)
+  if found == nil then raise "protobuf: unknown nominal type " .. name end
+  case found
+  when is_record(descriptor) then
+    if not is_union then
+      return deserialize_buffer(
+          data, length, reflect.Type.is_record(descriptor), context, holder)
+    end
+  when is_union(descriptor) then
+    if is_union then
+      return deserialize_buffer(
+          data, length, reflect.Type.is_union(descriptor), context, holder)
+    end
+  end
+  raise "protobuf: nominal kind mismatch for " .. name
+end
+
 -- Internal compiled collaboration used by `titan.transfer`: the caller passes
 -- the decode scope it already resolved for this packet, so decoding a nominal
 -- never re-resolves the execution's packet context. A nil context carries no
@@ -579,19 +610,7 @@ function deserialize_nominal_buffer_with_context(
     length: integer,
     name: string,
     is_union: boolean, context: value): value
-  local found? = reflect.find_nominal(name)
-  if found == nil then raise "protobuf: unknown nominal type " .. name end
-  case found
-  when is_record(descriptor) then
-    if not is_union then
-      return deserialize_buffer(data, length, reflect.Type.is_record(descriptor), context)
-    end
-  when is_union(descriptor) then
-    if is_union then
-      return deserialize_buffer(data, length, reflect.Type.is_union(descriptor), context)
-    end
-  end
-  raise "protobuf: nominal kind mismatch for " .. name
+  return deserialize_nominal_slice(data, length, name, is_union, context, nil)
 end
 
 --- Resolve an initialized nominal type by name for cross-state transfer decoding.
@@ -601,12 +620,9 @@ end
 -- @return Fresh nominal value of the requested kind.
 -- @usage standard-library-protobuf.md#api
 function deserialize_nominal(bytes: string, name: string, is_union: boolean): value
-  -- bytes remains rooted on the caller stack throughout deserialize_nominal_buffer.
-  return deserialize_nominal_buffer(
+  return deserialize_nominal_slice(
       ffi.titan_protobuf_bytes_ptr(bytes) as foreign const *void,
-      #bytes,
-      name,
-      is_union)
+      #bytes, name, is_union, packet_context(false), bytes)
 end
 
 --- Render a complete proto3 schema describing the public record or union wire format.
