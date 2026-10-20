@@ -1,0 +1,109 @@
+foreign import "abandon_process_probe.h"
+
+local function assert_abandoned(loop: uv.loop_t, calls: integer)
+  test.assert(calls == 0, "abandonment delivered a user callback")
+  test.assert(uv.loop_close(loop) == uv.EINVAL and not uv.loop_alive(loop),
+    "abandonment left the native loop initialized")
+end
+
+function test_loop_abandon_retires_streams_and_connect_write_requests(_: test.Context)
+  local loop = new_loop()
+  defer success(uv.loop_abandon(loop))
+  local calls = 0
+  local reader, writer = open_pipe_pair(loop)
+  success(uv.read_start(reader:as_stream_t(),
+    function (_handle: uv.handle_t, _suggested: integer): uv.buf_t
+      calls = calls + 1
+      return uv.buf_t.allocate(64)
+    end,
+    function (_stream: uv.stream_t, _count: integer, _buffer: uv.buf_t?) calls = calls + 1 end))
+  local written = uv.write_t()
+  success(uv.write_string(written, writer:as_stream_t(), strings.rep("abandon\0", 32768),
+    function (_request: uv.write_t, _status: integer) calls = calls + 1 end))
+  test.assert(written:handle() ~= nil)
+
+  local listener, client = uv.tcp_t(), uv.tcp_t()
+  success(uv.tcp_init(loop, listener))
+  success(uv.tcp_init(loop, client))
+  local address_status, address? = uv.ip4_addr("127.0.0.1", 0)
+  success(address_status)
+  success(uv.tcp_bind(listener, address, 0))
+  success(uv.listen(listener:as_stream_t(), 1,
+    function (_stream: uv.stream_t, _status: integer) calls = calls + 1 end))
+  local name_status, actual? = uv.tcp_getsockname(listener)
+  success(name_status)
+  local connected = uv.connect_t()
+  success(uv.tcp_connect(connected, client, actual,
+    function (_request: uv.connect_t, _status: integer) calls = calls + 1 end))
+  test.assert(connected:handle() ~= nil)
+  success(uv.loop_abandon(loop))
+  assert_abandoned(loop, calls)
+  test.assert(not reader:as_handle_t():is_initialized() and
+    not writer:as_handle_t():is_initialized() and
+    not listener:as_handle_t():is_initialized() and
+    not client:as_handle_t():is_initialized(), "abandonment retained stream owners")
+end
+
+function test_loop_abandon_retires_udp_receive_and_send(_: test.Context)
+  local loop = new_loop()
+  defer success(uv.loop_abandon(loop))
+  local calls = 0
+  local receiver, address = bound(loop, 0)
+  local sender = uv.udp_t()
+  success(uv.udp_init(loop, sender))
+  success(uv.udp_recv_start(receiver,
+    function (_handle: uv.handle_t, _suggested: integer): uv.buf_t
+      calls = calls + 1
+      return uv.buf_t.allocate(64)
+    end,
+    function (_handle: uv.udp_t, _count: integer, _buffer: uv.buf_t?,
+              _peer: uv.sockaddr_t?, _flags: integer)
+      calls = calls + 1
+    end))
+  local sent = uv.udp_send_t()
+  success(uv.udp_send(sent, sender, {uv.buf_t.from_string("abandon\0")}, address,
+    function (_request: uv.udp_send_t, _status: integer) calls = calls + 1 end))
+  success(uv.loop_abandon(loop))
+  assert_abandoned(loop, calls)
+  test.assert(not receiver:as_handle_t():is_initialized() and
+    not sender:as_handle_t():is_initialized(), "abandonment retained UDP owners")
+end
+
+function test_loop_abandon_retires_signal_watcher(_: test.Context)
+  if uv.SIGINT == nil then test.skip("capability: SIGINT is unavailable") end
+  local loop = new_loop()
+  defer success(uv.loop_abandon(loop))
+  local calls = 0
+  local signal = uv.signal_t()
+  success(uv.signal_init(loop, signal))
+  success(uv.signal_start(signal,
+    function (_handle: uv.signal_t, _signum: integer) calls = calls + 1 end, uv.SIGINT))
+  test.assert(uv.is_active(signal:as_handle_t()))
+  success(uv.loop_abandon(loop))
+  assert_abandoned(loop, calls)
+  test.assert(not signal:as_handle_t():is_initialized(),
+    "abandonment retained the signal watcher")
+end
+
+function test_loop_abandon_retires_process_without_exit_delivery(_: test.Context)
+  local loop = new_loop()
+  defer success(uv.loop_abandon(loop))
+  local calls = 0
+  local output = fresh_pipe(loop)
+  local process = uv.process_t()
+  local options = exit_options(output, nil)
+  options.exit_cb = function (_owner: uv.process_t, _status: integer, _signal: integer)
+    calls = calls + 1
+  end
+  success(uv.spawn(loop, process, options))
+  local pid = uv.process_get_pid(process)
+  -- Native watcher close does not kill or reap an application-owned child.
+  defer do
+    success(uv.loop_abandon(loop))
+    success(ffi.titan_uv_abandon_reap(pid))
+  end
+  success(uv.loop_abandon(loop))
+  assert_abandoned(loop, calls)
+  test.assert(not process:as_handle_t():is_initialized() and
+    not output:as_handle_t():is_initialized(), "abandonment retained process owners")
+end

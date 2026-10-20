@@ -199,9 +199,11 @@ reflective. `find_generated_codec` returns the codec of a nominal instance
 (nil when reflection owns it) and `serialize_generated_to_buffer` appends that
 root with an optional packet `context` (false when `codec` is not the value's
 codec); they are compiled collaboration entries for `titan.transfer`.
-`use_generated_codecs(false)` is a diagnostic: it makes the current Lua state
-use only the reflective codec and returns the previous setting, changes no
-observable result, and exists for differential testing.
+`use_generated_codecs(false)` is a diagnostic: it makes ordinary codec lookup
+in the current Lua state use the reflective codec and returns the previous
+setting; no encoded bytes, decoded values, errors, hook calls, or resource
+attachments change. Previously obtained codec handles still run generated code
+when passed to `serialize_generated_to_buffer`.
 
 ## Anonymous messages
 

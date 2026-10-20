@@ -6,6 +6,7 @@ local string = import "string"
 local gc = import "gc"
 local thread = import "thread"
 local transfer = import "transfer"
+local coroutine = import "coroutine"
 foreign import "titan/ffi.h"
 foreign import "limits.h"
 foreign import "protobuf_fixture.h"
@@ -2123,4 +2124,154 @@ function test_registered_resource_codec_precedes_generated_codec(_context: test.
   test.assert(protobuf.find_generated_codec(probe) == nil,
       "a registered resource codec must precede the generated codec")
   test.assert(protobuf.serialize(probe) == before, "structural root bytes changed")
+end
+
+-- A full 64-entry record directory at every recursive level.
+record CodecBoundaryRecord64
+  f1: integer
+  f2: integer
+  f3: integer
+  f4: integer
+  f5: integer
+  f6: integer
+  f7: integer
+  f8: integer
+  f9: integer
+  f10: integer
+  f11: integer
+  f12: integer
+  f13: integer
+  f14: integer
+  f15: integer
+  f16: integer
+  f17: integer
+  f18: integer
+  f19: integer
+  f20: integer
+  f21: integer
+  f22: integer
+  f23: integer
+  f24: integer
+  f25: integer
+  f26: integer
+  f27: integer
+  f28: integer
+  f29: integer
+  f30: integer
+  f31: integer
+  f32: integer
+  f33: integer
+  f34: integer
+  f35: integer
+  f36: integer
+  f37: integer
+  f38: integer
+  f39: integer
+  f40: integer
+  f41: integer
+  f42: integer
+  f43: integer
+  f44: integer
+  f45: integer
+  f46: integer
+  f47: integer
+  f48: integer
+  f49: integer
+  f50: integer
+  f51: integer
+  f52: integer
+  f53: integer
+  f54: integer
+  f55: integer
+  f56: integer
+  f57: integer
+  f58: integer
+  f59: integer
+  f60: integer
+  f61: integer
+  f62: integer
+  f63: integer
+  next: CodecBoundaryRecord64?
+end
+
+-- One selector plus 63 parts is the same 64-entry decoder budget.
+union CodecBoundaryUnion63
+  wide(p1: integer, p2: integer, p3: integer, p4: integer,
+    p5: integer, p6: integer, p7: integer, p8: integer,
+    p9: integer, p10: integer, p11: integer, p12: integer,
+    p13: integer, p14: integer, p15: integer, p16: integer,
+    p17: integer, p18: integer, p19: integer, p20: integer,
+    p21: integer, p22: integer, p23: integer, p24: integer,
+    p25: integer, p26: integer, p27: integer, p28: integer,
+    p29: integer, p30: integer, p31: integer, p32: integer,
+    p33: integer, p34: integer, p35: integer, p36: integer,
+    p37: integer, p38: integer, p39: integer, p40: integer,
+    p41: integer, p42: integer, p43: integer, p44: integer,
+    p45: integer, p46: integer, p47: integer, p48: integer,
+    p49: integer, p50: integer, p51: integer, p52: integer,
+    p53: integer, p54: integer, p55: integer, p56: integer,
+    p57: integer, p58: integer, p59: integer, p60: integer,
+    p61: integer, p62: integer, p63: integer)
+end
+
+local function codec_boundary_record(next: CodecBoundaryRecord64?): CodecBoundaryRecord64
+  return CodecBoundaryRecord64(
+    1, -2, 3, -4, 5, -6, 7, -8, 9, -10, 11, -12, 13, -14, 15, -16,
+    17, -18, 19, -20, 21, -22, 23, -24, 25, -26, 27, -28, 29, -30, 31, -32,
+    33, -34, 35, -36, 37, -38, 39, -40, 41, -42, 43, -44, 45, -46, 47, -48,
+    49, -50, 51, -52, 53, -54, 55, -56, 57, -58, 59, -60, 61, -62, 63, next)
+end
+
+local function codec_boundary_scalar_fields(): string
+  local output = string.writer()
+  for field = 1, 63 do
+    append_test_varint(output, field << 3)
+    local zigzag = field * 2
+    if field % 2 == 0 then zigzag = zigzag - 1 end
+    append_test_varint(output, zigzag)
+  end
+  return output:drain()
+end
+
+function test_generated_codecs_maximum_directory_roundtrips(context: test.Context)
+  check_generated_codec(context, "record_64", codec_boundary_record(codec_boundary_record(nil)))
+  check_generated_codec(context, "union_63", CodecBoundaryUnion63.wide(
+    1, -2, 3, -4, 5, -6, 7, -8, 9, -10, 11, -12, 13, -14, 15, -16,
+    17, -18, 19, -20, 21, -22, 23, -24, 25, -26, 27, -28, 29, -30, 31, -32,
+    33, -34, 35, -36, 37, -38, 39, -40, 41, -42, 43, -44, 45, -46, 47, -48,
+    49, -50, 51, -52, 53, -54, 55, -56, 57, -58, 59, -60, 61, -62, 63))
+end
+
+function test_generated_codecs_maximum_width_depth_on_coroutine_stack(_: test.Context)
+  local leaf = codec_boundary_record(nil)
+  local target = descriptor(leaf)
+  test.assert(protobuf.find_generated_codec(leaf) ~= nil)
+  local fields = codec_boundary_scalar_fields()
+  local bytes = fields
+  for _ = 2, 127 do bytes = fields .. backpatch_field(64, bytes) end
+  local too_deep = fields .. backpatch_field(64, bytes)
+  -- Keep the reflective error oracle on the host stack: its existing deep
+  -- decoder plus traceback capture can exhaust a coroutine stack at rejection.
+  local reflective_error = decode_outcome(too_deep, target, false)
+  local co = coroutine.create(function (_: value): value
+    test.assert(coroutine.running() ~= nil, "codec depth test did not use a coroutine stack")
+    local decoded: CodecBoundaryRecord64 = generated_decode(bytes, target)
+    local count = 1
+    local current = decoded
+    while current.next ~= nil do
+      test.assert(current.f1 == 1 and current.f32 == -32 and current.f63 == 63)
+      current = current.next
+      count = count + 1
+    end
+    test.assert(count == 127 and current.f63 == 63)
+    test.assert(generated_wire(decoded) == bytes)
+    test.assert(reflective_serialize(reflective_deserialize(bytes, target)) == bytes)
+    -- Scalar fields of the 128th full-width record exceed the shared depth
+    -- budget. The generated path must reject safely on this coroutine stack.
+    local generated = decode_outcome(too_deep, target, true)
+    test.assert(generated == reflective_error, generated)
+    test.assert(string.find(generated, "nesting exceeds 128", 1, true) ~= nil, generated)
+    return count
+  end, "codec-boundary")
+  test.assert(co:resume(nil) == 127 and co:status() == "dead")
 end

@@ -174,6 +174,14 @@ the channel under its mutex after the Task yields. Cancellation withdraws that
 exact waiter synchronously; a notification reserves neither a buffer slot nor
 a message, so a woken Task may need to wait again.
 
+Before closing a Lua state, cancel and join Tasks and drain their Runtime;
+abandoning any parked stack-backed native wait is unsafe. Channel endpoints
+that predate the Runtime can encounter a waiter on an already-destroyed
+coroutine stack during finalization, and an endpoint clone retained by another
+state or thread can keep that waiter linked and wake the freed stack after
+state close regardless of local creation order. Runtime loop abandonment does
+not withdraw these native borrows.
+
 ### Closing, cloning, and transferring endpoints
 
 - `Sender:close()` marks the shared channel closed (`is_closed() == true`) for

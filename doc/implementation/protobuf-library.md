@@ -177,7 +177,7 @@ parts. Each entry is 32 bytes at up to 128 nesting levels. The union selector
 validates the complete wire message but stores only the one recognized
 occurrence; zero, repeated, replaced, or non-message variants hand back to the
 reflective decoder after that validation. One shared parts directory serves
-the selected variant, so variant count does not grow the C frame. Wider
+the selected variant, so variant count does not grow that directory. Wider
 records or payloads stay reflective, whose per-level C stack does not grow
 with field count, so deep wide graphs raise the nesting error instead of
 exhausting the C stack.

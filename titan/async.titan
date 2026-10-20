@@ -611,7 +611,8 @@ end
 -- raised) still owns an initialized loop whose native state is not GC memory:
 -- retire every handle without resuming a Task, then close the loop. Close
 -- listeners belong to ordinary retirement and do not run here.
-local function runtime_finalize(runtime: Runtime)
+local function runtime_finalize(candidate: value)
+  local runtime: Runtime = candidate
   if active_runtime ~= runtime then return end
   require_main_thread()
   runtime.closing = true
@@ -644,7 +645,7 @@ local function new_runtime(): Runtime
     tasks = {}, next_task = 1,
     current_task = nil, driving = false, closing = false, failure = nil, shutdown_cancelled = false, exit_code = nil, close_registrations = {}, external = nil, retirement_error = nil}
   -- Register before native acquisition so lua_close can retire this loop.
-  gc.finalizable(runtime, runtime_finalize)
+  gc.finalizable<|value|>(runtime, runtime_finalize)
   check_status(uv.loop_init(runtime.loop), "runtime.loop.init")
   do uv.bind_transfer_loop(runtime.loop)
   catch uv.loop_close(runtime.loop); raise end

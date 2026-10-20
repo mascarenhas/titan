@@ -1937,6 +1937,58 @@ function test_run_with_cleanup_native_retirement_error_preserves_runtime_for_exp
       "explicit driver retry lost or duplicated accepted native retirement")
 end
 
+-- Public only for the independent-state teardown test below.
+function external_wait_abandon_failed_driver(counts_raw: value)
+  local counts = counts_raw as foreign *void
+  local oracle = CoalescingReceiverLoopOracle(nil, counts)
+  coalescing_receiver_gc.finalizable(oracle, coalescing_receiver_loop_oracle)
+  coalescing_receiver_loop_probe = oracle
+  local owner, fixture = external_wait_prepare_retirement(false)
+  local loop = async.current_loop()
+  oracle.loop = loop
+  fixture.retire_error = uv.EIO as foreign int
+  local task = async.run_with_cleanup<|integer, value|>(
+    function (): integer
+      test.assert((external_retirement_signal(fixture as foreign *void) as integer) == 0)
+      return 103
+    end, function (_: async.CancellationReason<|value|>?) end, owner)
+  task:add_terminal_listener(function (_: async.TaskStatus<|integer, value|>)
+    coalescing_receiver_count(counts, 0)
+  end)
+  async.add_close_listener(function () coalescing_receiver_count(counts, 3) end)
+  local rejected = false
+  do async.loop()
+  catch
+    local failure: async.OperationError = error
+    test.assert(failure.code == uv.EIO and
+      failure.operation == "async.native_retirement.retire")
+    rejected = true
+  end
+  test.assert(rejected and not task:status():has_finished() and
+    fixture.retirements == 0 and fixture.target == nil and
+    async.current_loop() == loop,
+    "failed driver did not leave its original Runtime and native gate owned")
+  -- Deliberately do not retry, close the view or drain the Runtime.
+end
+
+function test_lua_close_abandons_runtime_after_native_retirement_driver_error(
+    _: test.Context)
+  local counts: owned int[] = foreign int.new_array(6)
+  for index = 0, 5 do counts[index] = 0 end
+  local state = coalescing_receiver_lua.new()
+  defer state:close()
+  state:run([[
+    package.path, package.cpath = '', ''
+    require('async.tests').external_wait_abandon_failed_driver(...)
+  ]], "=abandon-failed-driver", async.TransferValue.is_pointer(counts as foreign *void))
+  test.assert(counts[0] == 0 and counts[3] == 0 and counts[5] == 0)
+  state:close()
+  test.assert(counts[5] == 1,
+    "lua_close left the failed driver's Runtime loop initialized")
+  test.assert(counts[0] == 0 and counts[3] == 0,
+    "lua_close published a terminal outcome or entered a Runtime-close listener")
+end
+
 function test_run_with_cleanup_prestart_cancellation_and_terminal_ordering(
     context: test.Context)
   context:run("prestart_simple_and_complex_first_reason_vs_ordinary_run",

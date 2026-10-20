@@ -102,6 +102,19 @@ local function fixture_file(): string
   return path
 end
 
+local function assert_descriptor_retired(descriptor: integer, device: integer,
+                                         inode: integer, message: string)
+  local probe = uv.fs_t()
+  defer uv.fs_req_cleanup(probe)
+  local status = uv.fs_fstat(nil, probe, descriptor)
+  -- DNS/NSS workers can reuse a closed descriptor for an unrelated socket or
+  -- file. Prove the original file is gone, not that its number stays unused.
+  if status == uv.EBADF then return end
+  success(status)
+  local current = uv.fs_get_statbuf(probe)
+  test.assert(current.st_dev ~= device or current.st_ino ~= inode, message)
+end
+
 function test_loop_abandon_retires_requests_without_user_delivery(_: test.Context)
   local path = fixture_file()
   defer remove_file(path)
@@ -112,6 +125,10 @@ function test_loop_abandon_retires_requests_without_user_delivery(_: test.Contex
   local close_request = uv.fs_t()
   local descriptor_to_close = uv.fs_open(nil, close_request, path, uv.FS_O_RDONLY, 0)
   test.assert(descriptor_to_close >= 0)
+  uv.fs_req_cleanup(close_request)
+  success(uv.fs_fstat(nil, close_request, descriptor_to_close))
+  local identity = uv.fs_get_statbuf(close_request)
+  local device, inode = identity.st_dev, identity.st_ino
   uv.fs_req_cleanup(close_request)
   success(uv.fs_close(loop, close_request, descriptor_to_close, fs_callback))
   success(uv.fs_open(loop, opened, path, uv.FS_O_RDONLY, 0, fs_callback))
@@ -129,14 +146,10 @@ function test_loop_abandon_retires_requests_without_user_delivery(_: test.Contex
     uv.fs_get_ptr(stat) == nil, "abandonment left native FS request results owned")
   local descriptor = uv.fs_get_result(opened)
   if descriptor >= 0 then
-    local probe = uv.fs_t()
-    defer uv.fs_req_cleanup(probe)
-    test.assert(uv.fs_fstat(nil, probe, descriptor) == uv.EBADF,
+    assert_descriptor_retired(descriptor, device, inode,
       "abandonment leaked an undelivered open descriptor")
   end
-  local closed_probe = uv.fs_t()
-  defer uv.fs_req_cleanup(closed_probe)
-  test.assert(uv.fs_fstat(nil, closed_probe, descriptor_to_close) == uv.EBADF,
+  assert_descriptor_retired(descriptor_to_close, device, inode,
     "abandonment cancelled an accepted native file close")
   local dns_status, result? = resolved:addrinfo()
   test.assert(dns_status ~= uv.EBUSY, "abandonment left DNS pending")
