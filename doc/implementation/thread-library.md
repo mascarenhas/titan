@@ -373,10 +373,17 @@ resource table, four-byte little-endian slot index format
   `Receiver.from_transfer_payload(payload)` (calling `transfer.claim_resource`
   with the four-byte string) first call `new_sender` or `new_receiver`—which
   allocate a fresh wrapper with `native = nil` and register `sender_finalize` or
-  `receiver_finalize` with `gc.finalizable`—and then immediately assign
+  `receiver_finalize` with `gc.finalizable<|value|>`—and then immediately assign
   `self.native` from the claim with no fallible ordinary entry, allocation, or
-  yield after the slot's `resource` is cleared to nil. Claim validation checks
-  direction, four-byte width, bounds (`0..count - 1`, `~= 0xffffffff`),
+  yield after the slot's `resource` is cleared to nil. Both finalizers are
+  declared exactly `function (value): ()` and strictly project their argument to
+  `Sender<|value|>` / `Receiver<|value|>` themselves, matching `finalizable`'s
+  erased callback formal. The generic call therefore passes the module closure
+  unchanged, and every wrapper construction (`thread.channel`, `clone`, both
+  adoption routes) allocates only its record userdata: no per-construction
+  callable-adjustment closure, and the shared endpoint metatable's `__gc` stays
+  that one closure, so finalization runs without an adapter hop. Claim
+  validation checks direction, four-byte width, bounds (`0..count - 1`, `~= 0xffffffff`),
   expected release callback (`Sender` vs `Receiver`), and a non-nil resource
   pointer in that order. The release callback remains after consumption so kind
   checks precede duplicate checks. If a composite decode fails on a subsequent

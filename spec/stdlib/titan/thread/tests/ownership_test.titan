@@ -2581,3 +2581,37 @@ function test_direct_endpoint_resource_codec_routes_and_validation(
     assert_receiver_released_exactly_once(peer_tx, rel_rx, "standalone refusals Receiver")
   end)
 end
+
+-- Every endpoint construction route installs the one exact erased finalizer
+-- closure as the shared metatable's `__gc`; none reinstalls a fresh
+-- per-construction callable-adjustment wrapper around it.
+function test_endpoint_constructions_share_one_exact_finalizer(_context: test.Context)
+  local finalizer_of = thread_fault_common.lua_helper([[
+return function(candidate) return rawget(debug.getmetatable(candidate), "__gc") end
+]]) as function (value): (value)
+  local tx, rx = thread.channel<|integer|>(1)
+  defer rx:close()
+  local sender_gc = finalizer_of(tx)
+  local receiver_gc = finalizer_of(rx)
+  test.assert(sender_gc ~= nil and receiver_gc ~= nil and sender_gc ~= receiver_gc,
+              "channel endpoints did not install their own finalizers")
+
+  local tx_clone = tx:clone()
+  local rx_clone = rx:clone()
+  test.assert(finalizer_of(tx) == sender_gc and finalizer_of(tx_clone) == sender_gc,
+              "Sender:clone installed a fresh finalizer callable")
+  test.assert(finalizer_of(rx) == receiver_gc and finalizer_of(rx_clone) == receiver_gc,
+              "Receiver:clone installed a fresh finalizer callable")
+
+  -- Registered-codec adoption constructs through the same path.
+  local outer_tx, outer_rx = thread.channel<|thread.Sender<|integer|>|>(1)
+  defer outer_rx:close()
+  test.assert(outer_tx:try_send(tx_clone), "could not enqueue a Sender")
+  local got, adopted? = outer_rx:try_receive()
+  test.assert(got and adopted ~= nil, "could not adopt the queued Sender")
+  test.assert(finalizer_of(adopted) == sender_gc,
+              "adopted Sender installed a fresh finalizer callable")
+  test.assert(adopted:try_send(7), "adopted Sender could not send")
+  local delivered, item? = rx_clone:try_receive()
+  test.assert(delivered and item == 7, "adopted Sender delivered the wrong item")
+end

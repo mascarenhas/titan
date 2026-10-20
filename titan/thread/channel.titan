@@ -183,7 +183,12 @@ local foreign function channel_unregister_receive_wait(context: *void)
   channel_unregister_underflow_waiter(wait.channel, ffi.titan_thread_channel_waiter(wait))
 end
 
-local function sender_finalize(self: Sender<|value|>)
+-- gc.finalizable erases its callback to `function (value): ()`. Declaring the
+-- finalizers with exactly that type and selecting `<|value|>` installs these
+-- closures themselves as the shared metatable's `__gc`; a concrete endpoint
+-- parameter would need a fresh callable-adjustment wrapper per construction.
+local function sender_finalize(candidate: value)
+  local self: Sender<|value|> = candidate
   local ch = self.native
   self.native = nil
   if ch ~= nil then
@@ -191,7 +196,8 @@ local function sender_finalize(self: Sender<|value|>)
   end
 end
 
-local function receiver_finalize(self: Receiver<|value|>)
+local function receiver_finalize(candidate: value)
+  local self: Receiver<|value|> = candidate
   local ch = self.native
   self.native = nil
   if ch ~= nil then
@@ -201,13 +207,13 @@ end
 
 local function new_sender<|T|>(): Sender<|T|>
   local tx = Sender<|T|> { native = nil }
-  gc.finalizable(tx, sender_finalize)
+  gc.finalizable<|value|>(tx, sender_finalize)
   return tx
 end
 
 local function new_receiver<|T|>(): Receiver<|T|>
   local rx = Receiver<|T|> { native = nil }
-  gc.finalizable(rx, receiver_finalize)
+  gc.finalizable<|value|>(rx, receiver_finalize)
   return rx
 end
 

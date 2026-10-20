@@ -79,6 +79,33 @@ results are discarded. Finalization follows Lua's ordinary garbage-collection
 rules: it is not prompt or deterministic, and a callback may resurrect its
 value.
 
+The adjustment is a fresh closure per `finalizable` call, so the raw `__gc`
+then differs from the callback you passed. A callback already declared
+`function (value): ()` and registered with `finalizable<|value|>` needs no
+adjustment: the installed `__gc` is that exact closure. For an owner created
+often, register such a callback and project its argument yourself (for example
+`local owner: Owner = candidate`) to avoid one closure allocation per
+registration:
+
+```titan
+local gc = import "gc"
+
+local record Handle
+  released: boolean
+end
+
+local function finish_handle(candidate: value): ()
+  local handle: Handle = candidate
+  handle.released = true
+end
+
+local function new_handle(): Handle
+  local handle = Handle(false)
+  gc.finalizable<|value|>(handle, finish_handle)
+  return handle
+end
+```
+
 When `v` has no metatable, `finalizable` creates and installs one. When a
 metatable already exists, the exact table and all fields other than raw
 `__gc` are preserved; `finalizable` replaces that `__gc` field and reinstalls
