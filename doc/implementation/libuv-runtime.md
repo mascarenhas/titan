@@ -698,16 +698,17 @@ enters the destination Lua state:
   status and `check_status` raises `OperationError` (`"async.send"`).
 - **Persistent reader state (`ReceiverReader`)**: `receiver()` leaves
   `self.reader` nil, so a Receiver used only as a notification target never
-  allocates reader state. After `running()` succeeds, the first `wait()`
-  (`Receiver:reader_state`) allocates the Receiver's only reader state: a
+  allocates reader state. After `running()` succeeds, `wait()` reads
+  `self.reader or self:create_reader()`: only the first wait calls
+  `Receiver:create_reader`, which allocates the Receiver's only reader state: a
   `ReceiverReader` with an empty `task`, a `notified` bit, one
   `ResumeToken("async.Receiver.wait")`, and one `withdraw` cancellation action
   (`reader.task = nil`). It publishes that record in `self.reader` only after
   the action exists, so an allocation failure leaves no partial state, and
-  every later wait reuses it. The reservation is the reserving Task's identity
-  in `reader.task`, so a wait after the first allocates no reader record,
-  token, or closure. Clearing `task` on release also drops the Receiver's
-  reference to a finished reader Task.
+  every later wait reuses it without a call. The reservation is the reserving
+  Task's identity in `reader.task`, so a wait after the first allocates no
+  reader record, token, or closure. Clearing `task` on release also drops the
+  Receiver's reference to a finished reader Task.
 - **Wake-only callback and direct slot retention (`Receiver:wake`)**: `Receiver`
   does not copy or decode payloads in its libuv callback. Its callback
   (`Receiver:wake()`) returns unless reader state exists, `reader.task` is
@@ -736,9 +737,10 @@ enters the destination Lua state:
   return `transfer.decode_message(raw)`, following the
   [consuming raw-slot decode contract](transfer-library.md#consuming-raw-slot-decode):
   the guard follows the native take, no later write reaches `raw`, and the only
-  enclosing protected region (`defer detach()`) never reads `raw`, so the local
-  never gets a recovery spill; decode clears that actual local on return and
-  before any error propagates.
+  enclosing protected region
+  (`defer if reader.task == task then reader.task = nil end`) never reads
+  `raw`, so the local never gets a recovery spill; decode clears that actual
+  local on return and before any error propagates.
   Decode errors consume the packet and raise from `wait()` with no lazy retry;
   `nil` and `false` return as ordinary data. When
   the slot is empty (initially or after a coalesced/stale wake), `wait()` clears

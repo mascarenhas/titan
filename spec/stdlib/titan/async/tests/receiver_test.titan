@@ -259,8 +259,9 @@ end
 function test_receiver_failed_first_wait_leaves_reusable_reader_state(_context: test.Context)
   local receiver = async.receiver()
   defer receiver:close()
-  -- A wait outside a Task fails before it creates or reserves reader state.
-  receiver_error(function () receiver:wait() end)
+  -- A wait outside a Task is rejected and leaves the Receiver usable by Tasks.
+  receiver_error(function () receiver:wait() end,
+                 "asynchronous operation must be called from an async Task")
   runtime_test.run(function ()
     -- The first wait in a Task creates and reserves the reader state, then
     -- fails at its checkpoint; that failure must release the reservation.
@@ -273,20 +274,81 @@ function test_receiver_failed_first_wait_leaves_reusable_reader_state(_context: 
     async.send(receiver:handle(), async.TransferValue.is_integer(61))
     test.assert(receiver_integer(receiver:wait()) == 61,
                 "failed first Receiver wait kept its reservation")
-    -- Later suspended waits reuse the same token and cancellation action.
-    for ordinal = 62, 64 do
+  end)
+end
+
+-- Run one wait under the limited Lua allocator from transfer_payload_test:
+-- the countdown-th fresh allocation fails, as does its emergency-GC retry.
+-- Returns whether the wait raised, the injected failures and the unused count.
+local function receiver_wait_with_failing_allocation(receiver: async.Receiver,
+    countdown: integer): (boolean, integer, integer)
+  local ctrl: owned size_t[] = foreign size_t.new_array(3)
+  ctrl[0] = 1 as foreign size_t
+  ctrl[1] = countdown as foreign size_t
+  ctrl[2] = 0 as foreign size_t
+  local failed = false
+  local previous_data: foreign *void = nil
+  local previous = ffi.lua_getallocf(L, previous_data)
+  ffi.lua_setallocf(L, transfer_limited_lua_alloc, ctrl as foreign *void)
+  do
+    receiver:wait()
+  catch
+    failed = true
+  end
+  ffi.lua_setallocf(L, previous, previous_data)
+  return failed, ctrl[2] as integer, ctrl[1] as integer
+end
+
+function test_receiver_first_wait_allocation_failure_leaves_no_partial_state(_context: test.Context)
+  runtime_test.run(function ()
+    -- Keep the collector from running finalizers between counted allocations.
+    support.collect_garbage()
+    support.collect_garbage()
+    ffi.lua_gc(L, ffi.LUA_GCSTOP)
+    defer ffi.lua_gc(L, ffi.LUA_GCRESTART)
+    -- Warm this call depth on one Receiver, then count every fresh Lua
+    -- allocation of a first wait on another (a packet is ready, so the
+    -- wait never suspends and the scalar decode allocates nothing).
+    local warm = async.receiver()
+    defer warm:close()
+    async.send(warm:handle(), async.TransferValue.is_integer(1))
+    local warm_failed, warm_injected, _warm_left =
+      receiver_wait_with_failing_allocation(warm, 1000000)
+    test.assert(not warm_failed and warm_injected == 0, "warm Receiver wait failed")
+    local counted = async.receiver()
+    defer counted:close()
+    async.send(counted:handle(), async.TransferValue.is_integer(2))
+    local count_failed, count_injected, unused =
+      receiver_wait_with_failing_allocation(counted, 1000000)
+    local first_wait_allocations = 1000000 - unused
+    -- At least the reader record, its ResumeToken and its cancellation action.
+    test.assert(not count_failed and count_injected == 0 and first_wait_allocations >= 3,
+                "first Receiver wait did not allocate its reader state")
+    for nth = 1, first_wait_allocations do
+      local receiver = async.receiver()
+      defer receiver:close()
+      local handle = receiver:handle()
+      async.send(handle, async.TransferValue.is_integer(100 + nth))
+      local failed, injected, _left = receiver_wait_with_failing_allocation(receiver, nth)
+      test.assert(failed and injected >= 1,
+                  "first Receiver wait survived failing allocation " .. nth)
+      -- No partial reader state remains: a later wait succeeds, a suspended
+      -- reader's cancellation withdraws its reservation at once, and a
+      -- further wait still works.
+      async.send(handle, async.TransferValue.is_integer(200 + nth))
+      test.assert(receiver_integer(receiver:wait()) == 200 + nth,
+                  "Receiver wait after allocation failure " .. nth .. " failed")
       local cancelled = async.run<|value, value|>(receiver:wait)
-      task_support.cleanup_task(cancelled, "reused Receiver reader cleanup")
+      task_support.cleanup_task(cancelled, "Receiver reader after allocation failure cleanup")
       support.wait_until_waiting(cancelled)
-      cancelled:cancel(async.CancellationReason.simple("reused Receiver reader cancelled"))
-      test.assert(support.cancelled_with(async.join(cancelled), "reused Receiver reader cancelled"))
-      local delivered = async.run<|value, value|>(receiver:wait)
-      task_support.cleanup_task(delivered, "reused Receiver reader delivery cleanup")
-      support.wait_until_waiting(delivered)
-      async.send(receiver:handle(), async.TransferValue.is_integer(ordinal))
-      case async.join(delivered)
-      when succeeded(item) then test.assert(receiver_integer(item) == ordinal)
-      else raise "reused Receiver reader state missed a wake" end
+      async.send(handle, async.TransferValue.is_integer(300 + nth))
+      cancelled:cancel(async.CancellationReason.simple("Receiver reader cancelled after OOM"))
+      test.assert(receiver_integer(receiver:wait()) == 300 + nth,
+                  "cancellation after allocation failure " .. nth .. " kept its reservation")
+      test.assert(support.cancelled_with(async.join(cancelled), "Receiver reader cancelled after OOM"))
+      async.send(handle, async.TransferValue.is_integer(400 + nth))
+      test.assert(receiver_integer(receiver:wait()) == 400 + nth,
+                  "further Receiver wait after allocation failure " .. nth .. " failed")
     end
   end)
 end

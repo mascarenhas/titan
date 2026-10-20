@@ -4827,9 +4827,7 @@ end
 
 -- Notification-only Receivers never allocate reader state. The first wait
 -- publishes it only once complete; every later wait reuses it.
-local function Receiver:reader_state(): ReceiverReader
-  local existing? = self.reader
-  if existing ~= nil then return existing end
+local function Receiver:create_reader(): ReceiverReader
   local reader = ReceiverReader(nil, false, ResumeToken("async.Receiver.wait"), nil)
   -- Task:cancel runs this only while the reserving Task is suspended in wait,
   -- so the reservation it withdraws is necessarily that Task's.
@@ -4845,7 +4843,7 @@ end
 -- @usage async-io.md#cross-state-receivers
 function Receiver:wait(): value
   local task = running()
-  local reader = self:reader_state()
+  local reader = self.reader or self:create_reader()
   if reader.task ~= nil then raise "receiver already has a waiting reader" end
   -- Cancellation withdraws the reservation before this Task unwinds, so a
   -- successor may already hold it on exit; release only this Task's own.
