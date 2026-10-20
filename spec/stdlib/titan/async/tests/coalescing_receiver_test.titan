@@ -629,6 +629,180 @@ function test_receiver_close_and_shutdown_dispose_endpoints_without_decode(
   end)
 end
 
+local foreign function coalescing_receiver_count(counter: *void, slot: int)
+  local counts = counter as foreign *int
+  counts[slot] = counts[slot] + (1 as foreign int)
+end
+
+local coalescing_receiver_abandoned_inbox: async.Receiver? = nil
+local coalescing_receiver_abandoned_sender: coalescing_receiver_thread.Sender<|integer|>? = nil
+
+record CoalescingReceiverLoopOracle
+  loop: uv.loop_t?
+  counts: foreign *void
+end
+local coalescing_receiver_loop_probe: CoalescingReceiverLoopOracle? = nil
+
+local function coalescing_receiver_loop_oracle(owner: CoalescingReceiverLoopOracle)
+  -- Registered before Runtime creation, so it observes retirement afterward.
+  if owner.loop ~= nil and uv.loop_close(owner.loop) == uv.EINVAL then
+    coalescing_receiver_count(owner.counts, 5)
+  end
+end
+
+-- Public only so a fresh independent state can call it; test infrastructure.
+-- Leaves that state's Runtime unretired with a live Receiver, an active timer
+-- and a timer whose requested close was never drained. With park_task, one
+-- borrowed loop turn first parks a Task in a linked external wait.
+-- Host counters: [0] finalized-owner callback, [1] registrations,
+-- [2] unregistrations, [3] Runtime listeners, [4] recursive-loop callback,
+-- [5] successful loop-closure oracle.
+function coalescing_receiver_abandoned_runtime_bootstrap(
+    counts_raw: value, park_task: boolean): foreign *void
+  local counts = counts_raw as foreign *void
+  local oracle = CoalescingReceiverLoopOracle(nil, counts)
+  coalescing_receiver_gc.finalizable(oracle, coalescing_receiver_loop_oracle)
+  coalescing_receiver_loop_probe = oracle
+  local owner = async.receiver()
+  coalescing_receiver_abandoned_inbox = owner
+  local loop = async.current_loop()
+  oracle.loop = loop
+  async.add_close_listener(function ()
+    coalescing_receiver_count(counts, 3)
+  end)
+  local live = uv.timer_t.new()
+  test.assert(uv.timer_init(loop, live) == 0)
+  test.assert(uv.timer_start(live, function (_: uv.timer_t) end, 60000, 0) == 0)
+  if park_task then
+    local parked = async.run<|nil, value|>(function (): nil
+      async.wait_external(function (_: foreign *void): boolean
+        coalescing_receiver_count(counts, 1)
+        return true
+      end, function ()
+        coalescing_receiver_count(counts, 2)
+      end)
+      return nil
+    end)
+    local channel_waiter = async.run<|integer, value|>(function (): integer
+      -- Endpoints are newer than this coroutine, so their finalizers withdraw
+      -- the intrusive wait while its stack is still allocated.
+      local tx, rx = coalescing_receiver_thread.channel<|integer|>(1)
+      coalescing_receiver_abandoned_sender = tx
+      return rx:receive()
+    end)
+    uv.run(loop, uv.RUN_NOWAIT)
+    test.assert(parked:status():as_string() == "waiting",
+      "abandoned Runtime Task did not park in its external wait")
+    test.assert(channel_waiter:status():as_string() == "waiting",
+      "abandoned Runtime channel Task did not register a real native waiter")
+  end
+  -- This Thread's finalizer runs before Runtime retirement and clears its
+  -- native pointer. Dispatching its captured callback afterward is unsafe.
+  local worker = coalescing_receiver_thread.spawn(function (): integer return 17 end)
+  local closing = uv.timer_t.new()
+  test.assert(uv.timer_init(loop, closing) == 0)
+  uv.close(closing:as_handle_t(), function (_: uv.handle_t)
+    coalescing_receiver_count(counts, 0)
+    worker:status()
+  end)
+  local recursive = uv.timer_t.new()
+  test.assert(uv.timer_init(loop, recursive) == 0)
+  uv.close(recursive:as_handle_t(), function (_: uv.handle_t)
+    coalescing_receiver_count(counts, 4)
+    async.loop()
+  end)
+  return owner:handle()
+end
+
+local function coalescing_receiver_close_unretired_runtime(park_task: boolean)
+  local counts: owned int[] = foreign int.new_array(6)
+  counts[0] = 0
+  counts[1] = 0
+  counts[2] = 0
+  counts[3] = 0
+  counts[4] = 0
+  counts[5] = 0
+  local registrations = 0
+  if park_task then registrations = 1 end
+  local state = coalescing_receiver_lua.new()
+  defer state:close()
+  local remote = coalescing_receiver_unwrap_handle(state:run([[
+    package.path, package.cpath = '', ''
+    return require('async.tests').coalescing_receiver_abandoned_runtime_bootstrap(...)
+  ]], "=abandoned-runtime-bootstrap",
+    async.TransferValue.is_pointer(counts as foreign *void),
+    async.TransferValue.is_boolean(park_task)))
+  local rx = send_ephemeral_sender(remote, 701)
+  defer rx:close()
+  test.assert((counts[0] as integer) == 0 and (counts[1] as integer) == registrations and
+              (counts[2] as integer) == 0 and not rx:is_closed(),
+    "unretired Runtime delivered a close or disposed its unread packet early")
+  -- Neither requested user callback may run after owner finalization. A
+  -- separately ordered finalizer must observe successful native loop close.
+  state:close()
+  test.assert((counts[0] as integer) == 0,
+    "lua_close dispatched a callback capturing an already-finalized Thread")
+  test.assert((counts[5] as integer) == 1,
+    "lua_close did not successfully close the unretired Runtime's loop")
+  test.assert((counts[1] as integer) == registrations and (counts[2] as integer) == 0,
+    "lua_close re-entered an abandoned external wait")
+  test.assert((counts[3] as integer) == 0,
+    "lua_close entered a Runtime-close listener")
+  test.assert((counts[4] as integer) == 0,
+    "lua_close dispatched a callback that could recursively drive async.loop")
+  test.assert(rx:is_closed(),
+    "lua_close finalization of an unclosed Receiver kept its unread packet")
+end
+
+function test_receiver_lua_close_retires_unretired_runtime_loop(context: test.Context)
+  context:run("undriven", function (_: test.Context)
+    coalescing_receiver_close_unretired_runtime(false)
+  end)
+  context:run("abandoned-with-parked-task", function (_: test.Context)
+    coalescing_receiver_close_unretired_runtime(true)
+  end)
+end
+
+local function coalescing_receiver_retire_runtime()
+  local owner = async.receiver()
+  owner:close()
+  async.loop()
+end
+
+-- Public only for execution in an independent state with its own Runtime.
+function coalescing_receiver_collect_runtime()
+  coalescing_receiver_gc.pause()
+  coalescing_receiver_retire_runtime()
+  local owner = async.receiver()
+  local loop = async.current_loop()
+  local closed = false
+  async.add_close_listener(function () closed = true end)
+  coalescing_receiver_gc.resume()
+  -- The old Runtime is unreachable; the new active one is module-rooted.
+  coalescing_receiver_gc.collect()
+  coalescing_receiver_gc.collect()
+  test.assert(async.current_loop() == loop and not closed,
+    "ordinary GC retired the active Runtime or notified its close listener")
+  async.send(owner:handle(), 709)
+  local task = async.run<|integer, value|>(function (): integer
+    defer owner:close()
+    return owner:wait()
+  end)
+  async.loop()
+  local succeeded, result? = task:status():has_succeeded()
+  test.assert(succeeded and result == 709 and closed,
+    "ordinary GC changed driven Runtime completion or listener notification")
+end
+
+function test_receiver_runtime_finalizer_is_inert_during_ordinary_gc(_: test.Context)
+  local state = coalescing_receiver_lua.new()
+  defer state:close()
+  state:run([[
+    package.path, package.cpath = '', ''
+    require('async.tests').coalescing_receiver_collect_runtime()
+  ]], "=runtime-ordinary-gc")
+end
+
 local function send_decode_failing_envelope_in_frame(
     handle: foreign *void,
     first: foreign *void,

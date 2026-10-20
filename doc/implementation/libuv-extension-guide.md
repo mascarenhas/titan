@@ -409,6 +409,36 @@ other worker-acquired resources. An adapter must own those resources itself.
 `async.is_closing()` is a synchronous admission query; it neither requires a
 Task nor injects pending Task cancellation. See [runtime shutdown](libuv-runtime.md#shutdown-and-process-control).
 
+### Final state teardown is not ordinary shutdown
+
+Public `uv.loop_abandon` is the destructive boundary for an exclusively owned
+loop during final Lua-state teardown, outside run/walk/inline dispatch. It
+returns zero for fresh/already-closed storage, rejects an active native boundary
+with `EBUSY`, and requires the owning main thread for initialized storage.
+Async's Runtime finalizer calls this public capability rather than importing
+private UV source or driving callbacks itself.
+
+The implementation clears each handle/request's user callback slots once,
+before any native drive, while retaining the accepted owners and borrowed
+storage. Existing internal terminal bridges retire handle/request roots.
+Abandoned FS and DNS requests instead use internal terminal handlers that free
+native results without creating public result copies: FS request allocations,
+undelivered open/mkstemp descriptors and opendir results, and DNS address lists.
+External-wake close repeats its native-only idempotent detach. No callback
+capture, public userdata or domain object is asked to clean up: its native
+resources may already have been released by an earlier finalizer. No user
+Lua/Titan callback, Task continuation, unregister function or Runtime-close
+listener runs, including an already-requested close callback.
+
+New bindings must extend the one-time abandonment sweep when adding a callback
+slot and provide abandonment-only cleanup for an independently allocated
+request result. Do not add an abandonment branch to ordinary operation paths.
+Native work still finishes before its borrowed storage is released. Resources
+owned by arbitrary workers/domains or previously delivered results are not
+UV's to dispose. Successful `uv.loop_close`, not suppressed callback counts,
+is the retirement oracle. See the [public contract](../language/standard-library-uv.md#abandoned-loop-retirement)
+and [Runtime ordering](libuv-runtime.md#lua-state-close-of-an-unretired-runtime).
+
 ## Native socket and pipe handoff
 
 `uv/transfer.titan` owns the direct custom hooks for TCP and non-IPC pipe

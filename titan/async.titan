@@ -604,11 +604,47 @@ function Error:raise()
   rethrow_failure(self)
 end
 
+-- lua_close runs every finalizer, latest registration first, before freeing
+-- any object. This Runtime registers before its Receivers, external wake owner
+-- and Task coroutines exist, so those are already finalized here. A Runtime
+-- never driven to retirement (only bootstrapped, or left after its driver
+-- raised) still owns an initialized loop whose native state is not GC memory:
+-- retire every handle without resuming a Task, then close the loop. Close
+-- listeners belong to ordinary retirement and do not run here.
+local function runtime_finalize(runtime: Runtime)
+  if active_runtime ~= runtime then return end
+  require_main_thread()
+  runtime.closing = true
+  runtime.driving = true
+  -- Keep shutdown admission and recursive driver entry closed throughout
+  -- native retirement, even though UV suppresses every user callback.
+  uv.unbind_transfer_loop(runtime.loop)
+  -- Coroutines are destroyed. Retire every Task and the ready queue: a late
+  -- settlement finds no current Wait and raises, a resume finds no token, and
+  -- no queued continuation remains, so no callback can enter a Task.
+  for index = 1, runtime.next_task - 1 do
+    local task? = runtime.tasks[index]
+    if task ~= nil then
+      task.wait = nil
+      clear_suspension(task)
+      task.phase = TASK_FINISHED
+    end
+  end
+  runtime.ready_head = nil
+  runtime.ready_tail = nil
+  runtime.ready_count = 0
+  runtime.wake_armed = false
+  check_status(uv.loop_abandon(runtime.loop), "runtime.loop.abandon")
+  active_runtime = nil
+end
+
 local function new_runtime(): Runtime
   local runtime = Runtime {loop = uv.loop_t.new(), wake = uv.timer_t.new(),
     ready_head = nil, ready_tail = nil, ready_count = 0, wake_armed = false,
     tasks = {}, next_task = 1,
     current_task = nil, driving = false, closing = false, failure = nil, shutdown_cancelled = false, exit_code = nil, close_registrations = {}, external = nil, retirement_error = nil}
+  -- Register before native acquisition so lua_close can retire this loop.
+  gc.finalizable(runtime, runtime_finalize)
   check_status(uv.loop_init(runtime.loop), "runtime.loop.init")
   do uv.bind_transfer_loop(runtime.loop)
   catch uv.loop_close(runtime.loop); raise end

@@ -1,6 +1,19 @@
 # Supplemental public API reference
 
-These 232 [supplemental declarations](supplemental-public-signatures.tsv) complement the 305 canonical native wrappers. Constructors and owner methods are also grouped with their type in [types](types.md). Every entry uses the public signature; private native fields are omitted. See [ownership contracts](CONTRACT-NOTES.md) for the owner, buffer, callback, and native worker rules, and [synchronization and native-carrier ownership](types.md#synchronization-and-native-carrier-ownership) for blocking synchronization, raw heap mutex/thread-token ownership, `once_t`/`key_t`, and cross-thread wake rules.
+These 233 [supplemental declarations](supplemental-public-signatures.tsv) complement the 305 canonical native wrappers. Constructors and owner methods are also grouped with their type in [types](types.md). Every entry uses the public signature; private native fields are omitted. See [ownership contracts](CONTRACT-NOTES.md) for the owner, buffer, callback, and native worker rules, and [synchronization and native-carrier ownership](types.md#synchronization-and-native-carrier-ownership) for blocking synchronization, raw heap mutex/thread-token ownership, `once_t`/`key_t`, and cross-thread wake rules.
+
+## Abandoned-loop retirement
+
+```text
+function loop_abandon(loop: loop_t): integer
+```
+
+Exclusively owned final state teardown only; see the complete
+[abandonment contract](../standard-library-uv.md#abandoned-loop-retirement).
+Suppresses every user callback, waits for internal native retirement, releases
+undelivered request-owned results and closes the loop. Fresh/already-closed
+storage returns zero; active native boundaries return `EBUSY` without mutation.
+This is not ordinary shutdown or domain-resource cleanup.
 
 ## Native resource handoff
 

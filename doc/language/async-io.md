@@ -620,7 +620,18 @@ send before calling `close` or allowing the owning Runtime to shut down.**
 Concurrent send and close are unsupported. Receiving a stop message alone does
 not prove its sender has returned; arrange sender completion separately before
 remote teardown. Native handle retirement still needs the owning `async.loop` to
-drain its close callback.
+drain its close callback. If a Lua state is closed while its Runtime was never
+driven to completion, closing the state still closes the Runtime's remaining
+handles and closes its loop without delivering any user callback (including
+already-requested close callbacks), resuming any Task, running domain unregister
+functions or notifying Runtime-close listeners. Native request retirement still
+waits for accepted work. Treat this as a leak-free loop fallback, not a replacement
+for closing receivers and draining the loop normally. Ordinary garbage collection does not retire
+an active Runtime, which remains rooted by the async module; finalization of
+an already-retired Runtime has no effect on a newer Runtime.
+This loop fallback does not make abandonment of stack-backed native waits
+safe: cancel and join Tasks blocked in thread-channel operations and drain
+their Runtime before destroying the state.
 
 **Borrowed handle lifetime.** `Receiver:handle()` is borrowed and does not root
 its `Receiver` or its Lua state. Atomic slot exchange synchronizes packet

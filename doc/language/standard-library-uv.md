@@ -118,6 +118,45 @@ drain while a valid target borrow/reference remains. Native unregister is a
 consuming **destination-loop-thread-only** entry, not a foreign producer call;
 it may unreference the loop handle and immediately free the registration borrow.
 
+## Abandoned-loop retirement
+
+```text
+function loop_abandon(loop: loop_t): integer
+```
+
+This destructive capability is only for an exclusively owned loop during final
+teardown of its owning Lua state, after native producers are quiescent or
+independently retained. It is **not ordinary shutdown**, cancellation or a
+replacement for lexical cleanup. Async uses it from its Runtime finalizer.
+Call it on the owning main Lua thread, outside every native run, walk and inline
+callback boundary. A live native boundary returns `EBUSY` without changing the
+loop; a wrong Lua thread raises.
+
+It unbinds the transfer loop, clears all user callback slots on initialized
+handles and accepted requests, closes remaining handles, waits for native
+requests to retire, and closes the native loop. No user Lua/Titan callback is
+delivered, including a close callback already requested. Task continuations,
+domain unregister functions and Runtime-close listeners do not run. UV's private
+native retirement/bookkeeping still runs over UV-owned storage; it never invokes
+methods on domain objects in callback captures or public userdata, whose native
+resources may already have been finalized.
+
+Accepted filesystem/DNS requests release request-owned result storage.
+Undelivered successful open/mkstemp descriptors and opendir results are closed.
+Already-delivered descriptors/directories, arbitrary C-worker result resources,
+and child-process lifetime remain the responsibility of their independent
+owners. Running workers keep borrowed storage until real native completion;
+abandonment can therefore block.
+Accepted work is not blanket-cancelled: queued native close/finalize operations
+must execute even though their user continuations will not be delivered.
+
+Zero means the loop was successfully closed, or its storage was fresh/already
+closed. Calling again is harmless, including for an empty initialized loop.
+Other native failures are returned or raised through the usual UV boundary.
+After abandonment do not reuse the loop or its request/handle owners. This is a
+supplemental Titan capability, not a canonical native wrapper recognized by
+`has_api`.
+
 ## Read status and lifetime together
 
 Native status positions use zero for success and negative libuv error codes for
@@ -275,7 +314,7 @@ wrapper. Type, field, callback, macro, and platform-constant mappings accompany
 the function inventory. Coverage does not remove platform-specific native
 limitations or make every operation appropriate inside a cooperative Task.
 
-The **232** [supplemental declarations](uv/supplemental.md) include the direct
+The **233** [supplemental declarations](uv/supplemental.md) include the direct
 synchronization map, **12** external-wake helpers, and three heap-thread-token
 helpers. None of them adds a distinct libuv C operation. Counts describe the
 exported API inventory, not a claim that every operation has been executed on

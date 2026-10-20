@@ -767,7 +767,9 @@ waiting reader with `"receiver is closed"`, and initiates `uv.close` on the
 handle. The Runtime's handle walk (`close_handles`) disables `Receiver` owners
 before generic handle close, and `Receiver`'s GC finalizer (`receiver_finalize`)
 calls `receiver_disable_native` to release any unread native packet during
-Lua-state destruction.
+Lua-state destruction. The Runtime's own finalizer then closes that Receiver's
+handle and retires the loop when the state closes before its Runtime retired
+([state-close retirement](#lua-state-close-of-an-unretired-runtime)).
 
 An exported `handle()` does not retain its `Receiver` owner or the originating
 Lua state. Applications must retain the receiver owner, withdraw handles, and
@@ -873,6 +875,66 @@ ownership remain in UV; the generic listeners are not a domain-resource registry
 OS descriptors and native objects returned by workers are not automatically
 libuv handles. Their lexical/domain owners must close or dispose of them.
 Closing a process watcher does not kill or reap the process.
+
+### Lua-state close of an unretired Runtime
+
+A Runtime retires its loop only when `loop()` completes. A state can close
+while its Runtime is still active: an independent-state bootstrap that created
+a `Receiver` (or another Runtime-owned handle) and never drove the loop, or a
+state whose driver raised and was never retried. Its initialized `uv.loop_t`
+lives in GC memory, but libuv's loop internals and watcher arrays are C-heap
+allocations that only `uv_loop_close` frees, and registered handles still sit in
+the loop's queues.
+
+`new_runtime` therefore registers `runtime_finalize` immediately after
+constructing the Runtime, before `uv.loop_init`. `lua_close` runs every
+finalizer before freeing any object, latest registration first, so this
+finalizer runs after those of the Runtime's later Receivers (which disposed
+unread packets natively), its external wake owner (which detached its core) and
+its Task coroutines (which destroyed their stacks). During ordinary GC an
+active Runtime cannot become unreachable: the initialized async module roots
+it through `active_runtime`. A retired or never-activated Runtime's finalizer
+returns immediately, even if a newer Runtime is active, before checking the
+calling thread or touching libuv. For the exact active Runtime at state close,
+the finalizer requires the main thread, sets both `closing` and `driving`,
+unbinds the transfer loop, detaches every Task from its Wait and explicit
+suspension, marks it finished, and empties the ready queue. Keeping the exact
+Runtime active and closing preserves shutdown admission, and `driving` makes
+recursive `async.loop()` fail immediately throughout retirement. It never
+runs `close_handles`, `Receiver:disable`, `ExternalBridge:close`, domain
+unregister functions or Runtime-close listeners.
+
+The finalizer calls public `uv.loop_abandon`, not the ordinary driver. UV
+clears all user callback slots before driving libuv, including callbacks on
+already-closing handles and accepted requests. No user Lua/Titan callback,
+Task continuation, decoder or domain cleanup is dispatched. Although Lua has
+not freed its objects yet, their native resources may already have been
+released by later-registered finalizers: a requested callback capturing a
+finalized `thread.Thread`, for example, cannot safely call `status()`.
+Suppressing callback exceptions is not protection against that native use.
+
+UV's own terminal handlers still retire native registrations and remove their
+roots. Its external-wake close handler only repeats the idempotent native
+detach; it does not run an abandoned registration's `unregister_fn`. Pending
+filesystem and DNS requests use abandonment-only internal handlers to release
+request-owned native results without invoking adapters. Pending C workers
+retain their existing argument graph until real native completion. Arbitrary
+worker/domain-owned results, descriptors obtained before abandonment and child
+processes are not resources owned by this loop fallback.
+
+The drain waits for accepted native requests rather than freeing storage still
+in use, then requires successful `uv.loop_close` before clearing
+`active_runtime`. An earlier-registered test-owned finalizer observes the
+loop's closed state, independently of callback suppression. The application
+contract is unchanged: withdraw handles, finish sends and drain the ordinary
+loop before closing the state. Abandonment reclaims libuv's loop internals,
+not application cleanup semantics.
+An existing separate limitation remains: an abandoned stack-backed native
+channel waiter can outlive its coroutine stack if its endpoints were created
+before the coroutine. An endpoint finalizer can then encounter the invalid
+intrusive node before the Runtime finalizer runs. Loop abandonment does not
+repair that native-borrow lifetime violation; ordinary cancel/join/drain is
+still required for these Tasks.
 
 `request_exit(code)` obtains the current Task, records only the first code,
 unbinds the Runtime's UV transfer loop before cancellation can enter cleanup,

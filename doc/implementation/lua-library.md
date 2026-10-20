@@ -106,7 +106,11 @@ After the worker returns, a synchronous cleanup chunk can close any remaining re
 its loop to drain native closure, then drop the root. This also covers bootstrap
 or worker-admission failure before asynchronous execution starts. The
 [complete two-phase example](../language/standard-library-lua.md#two-phase-receiver-bootstrap)
-keeps all sends local and uses this order on success and failure.
+keeps all sends local and uses this order on success and failure. If the state
+is closed with its Runtime still unretired anyway, the Runtime's finalizer
+closes its remaining handles and the loop during `lua_close`
+([state-close retirement](libuv-runtime.md#lua-state-close-of-an-unretired-runtime));
+that fallback does not relax the send-quiescence rule.
 
 A remote Runtime shares libuv's process-wide thread pool with its host and all
 other states. A worker that drives a long-lived Runtime still occupies its

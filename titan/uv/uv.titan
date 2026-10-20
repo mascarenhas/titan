@@ -203,6 +203,153 @@ function run(loop: loop_t, mode: run_mode?): integer
   return result
 end
 
+-- These handlers replace only abandoned requests' terminal handlers. They do
+-- not call domain code or inspect resources stored in public userdata.
+local function fs_abandoned(owner: fs_t, loop: loop_t)
+  local kind = ffi.uv_fs_get_type(owner.native)
+  local result = ffi.uv_fs_get_result(owner.native)
+  if result >= 0 then
+    local cleanup = foreign uv_fs_t.new()
+    if kind == ffi.UV_FS_OPEN or kind == ffi.UV_FS_MKSTEMP then
+      ffi.uv_fs_close(nil, cleanup, result as foreign uv_file, nil)
+      ffi.uv_fs_req_cleanup(cleanup)
+    elseif kind == ffi.UV_FS_OPENDIR then
+      local directory = ffi.uv_fs_get_ptr(owner.native) as foreign *uv_dir_t
+      ffi.uv_fs_closedir(nil, cleanup, directory, nil)
+      cleanup.ptr = nil
+      ffi.uv_fs_req_cleanup(cleanup)
+    end
+  end
+  local directory? = owner.directory
+  if directory ~= nil and kind == ffi.UV_FS_CLOSEDIR then
+    if result >= 0 then directory.native = nil end
+    directory.busy = false
+  end
+  owner.pending = false
+  owner.callback = nil
+  fs_req_cleanup(owner)
+  loop.requests[owner] = nil
+catch
+  if loop.failure_count == 0 then loop.failure_error = error; loop.failure_trace = traceback end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function getaddrinfo_abandoned(owner: getaddrinfo_t, loop: loop_t,
+                                    status: integer, native: foreign *addrinfo)
+  ffi.uv_freeaddrinfo(native)
+  local result = owner.result as addrinfo_result_t
+  result.native = nil
+  result.released = true
+  owner.result_status = status
+  owner.pending = false
+  owner.callback = nil
+  loop.requests[owner] = nil
+catch
+  if loop.failure_count == 0 then loop.failure_error = error; loop.failure_trace = traceback end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function getnameinfo_abandoned(owner: getnameinfo_t, loop: loop_t,
+    status: integer, hostname: foreign const *char, service: foreign const *char)
+  owner.result_status = status
+  owner.pending = false
+  owner.callback = nil
+  loop.requests[owner] = nil
+catch
+  if loop.failure_count == 0 then loop.failure_error = error; loop.failure_trace = traceback end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function abandon_handle(handle: handle_t, _: value)
+  case handle
+  when timer(owner) then
+    owner.callback = nil
+    owner.close_callback = nil
+    owner.typed_close_callback = nil
+  when process(owner) then
+    owner.exit_callback = nil
+    owner.close_callback = nil
+  when tcp(owner) then
+    owner.connection_callback = nil
+    owner.alloc_callback = nil
+    owner.read_callback = nil
+    owner.close_callback = nil
+  when pipe(owner) then
+    owner.connection_callback = nil
+    owner.alloc_callback = nil
+    owner.read_callback = nil
+    owner.close_callback = nil
+  when tty(owner) then
+    owner.connection_callback = nil
+    owner.alloc_callback = nil
+    owner.read_callback = nil
+    owner.close_callback = nil
+  when udp(owner) then
+    owner.alloc_callback = nil
+    owner.recv_callback = nil
+    owner.close_callback = nil
+  when fs_event(owner) then owner.callback = nil; owner.close_callback = nil
+  when fs_poll(owner) then owner.callback = nil; owner.close_callback = nil
+  when idle(owner) then owner.callback = nil; owner.close_callback = nil
+  when prepare(owner) then owner.callback = nil; owner.close_callback = nil
+  when check(owner) then owner.callback = nil; owner.close_callback = nil
+  when async(owner) then owner.callback = nil; owner.close_callback = nil
+  when signal(owner) then owner.callback = nil; owner.close_callback = nil
+  when poll(owner) then owner.callback = nil; owner.close_callback = nil
+  end
+  if not is_closing(handle) then close(handle) end
+end
+
+--- Retire an abandoned loop without delivering any user callback.
+-- @param loop Owning main-state loop, exclusively held for final state teardown; never use for ordinary shutdown.
+-- @return Zero after native loop closure (also for fresh or already closed storage), or EBUSY if a native callback boundary is active.
+-- @usage standard-library-uv.md#abandoned-loop-retirement
+function loop_abandon(loop: loop_t): integer
+  if not loop.initialized then return 0 end
+  if L ~= main_thread then raise "uv.loop_abandon requires the owning main Lua thread" end
+  if driving or walking_depth > 0 or inline_dispatch_depth > 0 then return ffi.UV_EBUSY end
+  unbind_transfer_loop(loop)
+  -- Do not cancel accepted cleanup work: a queued close/finalize operation
+  -- must still execute even when its user continuation will be discarded.
+  -- Keep every native borrow rooted through real completion. Only callback
+  -- slots change here; no new branch is added to ordinary operation dispatch.
+  for candidate in iteration.pairs(loop.requests) do
+    if candidate is fs_t then
+      local owner = candidate as fs_t
+      owner.callback = nil
+      owner.handler = fs_abandoned
+    elseif candidate is getaddrinfo_t then
+      local owner = candidate as getaddrinfo_t
+      owner.callback = nil
+      owner.handler = getaddrinfo_abandoned
+    elseif candidate is getnameinfo_t then
+      local owner = candidate as getnameinfo_t
+      owner.callback = nil
+      owner.handler = getnameinfo_abandoned
+    elseif candidate is connect_t then (candidate as connect_t).callback = nil
+    elseif candidate is write_t then (candidate as write_t).callback = nil
+    elseif candidate is shutdown_t then (candidate as shutdown_t).callback = nil
+    elseif candidate is udp_send_t then (candidate as udp_send_t).callback = nil
+    elseif candidate is random_t then
+      local owner = candidate as random_t
+      owner.callback = nil
+    elseif candidate is work_t then
+      local owner = candidate as work_t
+      owner.callback = nil
+    end
+  end
+  walk(loop, abandon_handle)
+  -- Discard an earlier run's failure, not errors in this internal drain.
+  loop.failure_count = 0
+  loop.failure_error = nil
+  loop.failure_trace = ""
+  while loop_alive(loop) do run(loop, RUN_DEFAULT) end
+  return loop_close(loop)
+end
+
 
 --- Return the number of later callback errors suppressed behind the first error at the native driver boundary.
 -- @return Native integer result with the documented lifetime and units.
