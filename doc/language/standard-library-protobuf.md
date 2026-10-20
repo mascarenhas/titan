@@ -80,9 +80,8 @@ foreign function write_resource_index_bytes(dst: *void, index: unsigned int)
 foreign function write_resource_index(raw_buf: *void, index: unsigned int): int
 find_generated_codec(candidate: value): foreign const *void
 serialize_generated_to_buffer(buf: foreign *void, codec: foreign const *void,
-                              candidate: value): boolean
-deserialize_generated_buffer(data: foreign const *void, length: integer,
-                             name: string): (boolean, value)
+                              candidate: value, context: value): boolean
+use_generated_codecs(enabled: boolean): boolean
 ```
 
 The root must be a public Titan record or union. `deserialize` and `schema`
@@ -181,20 +180,27 @@ value, or wire condition.
 ## Generated codecs
 
 The compiler generates a native encoder and decoder for each public record or
-union whose declared fields are all public and are booleans, integers, floats,
-strings, nil, other such records or unions, or Options of these, and which has no
-custom transfer hooks. `serialize`, `serialize_to_buffer`, `deserialize`,
-`deserialize_nominal`, and transfer packets use them for the root. They produce
-exactly the bytes, values, and errors described on this page; they only avoid
-reflective inspection and bookkeeping allocations. A nominal with an Array,
-`value`, callable, Interface, or foreign field, a custom hook, or a registered
-resource capability, and any unusual or malformed wire input, take the
-reflective path. `find_generated_codec` returns the codec of a nominal instance
-(nil when reflection owns it). `serialize_generated_to_buffer` appends that
-root or returns false with the buffer's length restored (capacity may have
-grown), and `deserialize_generated_buffer` returns `true` and the decoded value
-or `false` without decoding; all three are compiled collaboration entries for
-`titan.transfer` and diagnostics that must know which path handled a value.
+union whose fields are all public and of types this module can encode, which
+has no custom transfer hooks, and whose decoder directory fits its fixed bound
+(at most 64 fields; for a union, its variants plus all of their parts). Every
+protobuf and transfer operation uses them for any such nominal it meets, at the
+root or nested in another value, and they produce exactly the bytes, values,
+errors, hook calls, and resource attachments described on this page. Fields
+they do not encode natively (Arrays, foreign values, hooked records, endpoints
+and other registered resources) and unusual wire forms use the reflective
+codec for that field, which costs what that field costs reflectively plus, per
+root or decoding nominal that has such fields, one reflective encoder or one
+one-field message; a nominal whose fields are all scalars, strings, and
+generated nominals allocates only its decoded values. A nominal with a
+`value`, callable, Map, or Interface field, private members, its own hooks, or
+a wider declaration stays reflective. `find_generated_codec` returns the codec
+of a nominal instance (nil when reflection owns it) and
+`serialize_generated_to_buffer` appends that root with an optional packet
+`context` (false when `codec` is not the value's codec); they are compiled
+collaboration entries for `titan.transfer`. `use_generated_codecs(false)` is a
+diagnostic: it makes the current Lua state use only the reflective codec and
+returns the previous setting, changes no observable result, and exists for
+differential testing.
 
 ## Anonymous messages
 

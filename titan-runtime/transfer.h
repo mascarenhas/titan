@@ -314,31 +314,60 @@ static inline double titan_protobuf_read_double(
 /* ------------------------------------------------------------------------
  * Compiler-generated nominal codecs.
  *
- * A generated codec replicates titan.protobuf's reflective record/union codec
- * exactly on the inputs it accepts and otherwise declines with status 0. It
- * never raises a codec error, calls a hook or resource codec, loads a module,
- * or enters Lua: an encoder only appends bytes, a decoder only allocates fresh
- * nominals and strings. The caller therefore restores its buffer or stack and
- * reruns the complete root reflectively, which raises the exact reflective
- * errors in the exact reflective order. `resources` is titan.protobuf's
- * registered resource-codec table keyed by canonical metatable; a registered
- * capability takes precedence over every generated codec.
+ * A generated codec is titan.protobuf's reflective record/union codec
+ * specialized to one nominal's storage plan. It writes and accepts exactly the
+ * reflective wire and raises the exact reflective error string at the exact
+ * reflective point; it never declines or reruns. A field it does not encode
+ * natively (Arrays, foreign values, hooked or private nominals, registered
+ * resource capabilities, merged or otherwise unusual wire) is handed to
+ * titan.protobuf's reflective field codec through one fixed Titan entry, and
+ * the reflective codec calls back into the generated codec of any nominal
+ * that has one. Both sides share the root's buffer, cycle path, depth, packet
+ * context, and one reflective Encoder per root.
  * ------------------------------------------------------------------------ */
 
 #define TITAN_CODEC_DEPTH_LIMIT 128
 
-/* The current encode path, one automatic link per open record or union. */
+/* Reflective handoff operations (TitanCodecHandoff.op). */
+#define TITAN_CODEC_ENCODE_FIELD 1
+#define TITAN_CODEC_ENCODE_RESOURCE 2
+#define TITAN_CODEC_DECODE_FIELD 3
+#define TITAN_CODEC_DECODE_RESOURCE 4
+#define TITAN_CODEC_DECODE_NOMINAL 5
+
+/* The open generated records and unions of the current root, one automatic
+ * link per frame. Reflective frames keep their own active Map instead. */
 typedef struct TitanCodecPath {
-    const Udata *object;
+    const void *object;
     const struct TitanCodecPath *parent;
 } TitanCodecPath;
 
-typedef int (*TitanCodecEncode)(lua_State *L, const TValue *resources,
-    titan_protobuf_buffer *buf, Udata *object, const TitanCodecPath *path,
-    int depth);
+/* Root-scoped collaboration state on the C stack. Its TValues copy values
+ * that the calling Titan frames keep rooted for the whole operation:
+ * titan.protobuf's resource-codec table and handoff entry, the packet
+ * context, the enclosing reflective Encoder's active Map (or nil), and the
+ * string owning the decoded bytes (or nil). An encode state also owns one
+ * Lua stack slot (`encoder`, a savestack offset; -1 when decoding) holding
+ * the reflective Encoder that every field handoff of this state reuses: the
+ * enclosing Encoder when a reflective frame entered the generated codec, or
+ * nil until the first handoff of a generated root creates one. */
+typedef struct TitanCodecState {
+    TValue resources;
+    TValue context;
+    TValue active;
+    TValue handoff;
+    TValue holder;
+    ptrdiff_t encoder;
+    int lazy_context;
+    titan_protobuf_buffer *buf;
+} TitanCodecState;
 
-/* On success pushes exactly one fresh nominal; on decline leaves the stack. */
-typedef int (*TitanCodecDecode)(lua_State *L, const TValue *resources,
+/* Encode appends one record or union message body at `depth`. Decode parses
+ * `data`, leaves exactly one fresh nominal on the stack, and raises the exact
+ * reflective error for malformed or ineligible input. */
+typedef void (*TitanCodecEncode)(lua_State *L, TitanCodecState *state,
+    Udata *object, const TitanCodecPath *path, int depth);
+typedef void (*TitanCodecDecode)(lua_State *L, TitanCodecState *state,
     Udata *module, const uint8_t *data, size_t length, int depth);
 
 /* One immutable entry per generated record or union, emitted beside the
@@ -352,10 +381,78 @@ typedef struct TitanTransferCodec {
     TitanCodecDecode decode;
 } TitanTransferCodec;
 
+/* The latest occurrence of one declared field and its occurrence count. */
+typedef struct TitanCodecField {
+    uint32_t count;
+    uint32_t wire;
+    uint64_t bits;
+    size_t offset;
+    size_t length;
+} TitanCodecField;
+
+/* One reflective field operation. `owner` names the nominal whose hydrated
+ * descriptor supplies field `index` of `variant` (0 for a record), or the
+ * expected resource/decoded nominal. `data`/`length` are the message holding
+ * the field (decode) or the payload slice (resource decode). A field decode
+ * also carries the field's directory entry (`field_*`, with the reflective
+ * reader's signed bits): at most one occurrence decodes from that entry
+ * alone, and only a repeated field reparses `data`. `keep` is the savestack
+ * offset of the Lua stack slot holding the reusable reflective object (the
+ * state's Encoder, or the decoding frame's one-field Message), or -1. */
+typedef struct TitanCodecHandoff {
+    int op;
+    int lazy_context;
+    const char *owner;
+    int variant;
+    int index;
+    int number;
+    int depth;
+    titan_protobuf_buffer *buf;
+    const TitanCodecPath *path;
+    const uint8_t *data;
+    size_t length;
+    uint32_t field_count;
+    uint32_t field_wire;
+    int64_t field_bits;
+    size_t field_offset;
+    size_t field_length;
+    ptrdiff_t keep;
+} TitanCodecHandoff;
+
+/* The exact value of Titan `raise "..."`: the string itself, no location. */
+static inline void titan_codec_raise(lua_State *L, const char *message) {
+  lua_checkstack(L, 1);
+  lua_pushstring(L, message);
+  lua_error(L);
+}
+
+static inline void titan_codec_depth(lua_State *L, int depth) {
+  if (depth > TITAN_CODEC_DEPTH_LIMIT) {
+    titan_codec_raise(L, "protobuf: nesting exceeds 128 levels");
+  }
+}
+
+static inline void titan_codec_reserve(lua_State *L, int slots) {
+  if (!lua_checkstack(L, slots)) {
+    titan_codec_raise(L, "protobuf: cannot reserve Lua stack");
+  }
+}
+
+/* Registered resource capabilities precede every structural encoding. */
+static inline int titan_codec_has_resource(
+    lua_State *L, const TValue *resources, Table *metatable) {
+  TValue key;
+  TValue slot;
+  if (metatable == NULL || !ttistable(resources)) {
+    return 0;
+  }
+  sethvalue(L, &key, metatable);
+  return !tagisempty(luaH_get(hvalue(resources), &key, &slot));
+}
+
 /* Resolve a canonical nominal metatable to its bound generated codec. Raw
  * reads only: no allocation, metamethod, or error. NULL selects reflection:
- * no generated codec, or a registered resource capability, which precedes
- * every structural encoding exactly as on the reflective path. */
+ * no generated codec, or a registered resource capability. */
 static inline const TitanTransferCodec *titan_codec_for_metatable(
     lua_State *L, const TValue *resources, Table *metatable) {
   TValue key;
@@ -367,14 +464,38 @@ static inline const TitanTransferCodec *titan_codec_for_metatable(
   if (tagisempty(luaH_get(metatable, &key, &slot)) || !ttislightuserdata(&slot)) {
     return NULL;
   }
-  const TitanTransferCodec *codec = (const TitanTransferCodec *)pvalue(&slot);
-  if (resources != NULL && ttistable(resources)) {
-    sethvalue(L, &key, metatable);
-    if (!tagisempty(luaH_get(hvalue(resources), &key, &slot))) {
-      return NULL;
-    }
+  if (titan_codec_has_resource(L, resources, metatable)) {
+    return NULL;
+  }
+  return (const TitanTransferCodec *)pvalue(&slot);
+}
+
+/* `name` NULL accepts any nominal; `kind` -1 any, 0 record, 1 union. */
+static inline const TitanTransferCodec *titan_codec_match(
+    const TitanTransferCodec *codec, const char *name, int kind) {
+  if (codec == NULL || (kind >= 0 && codec->is_union != kind) ||
+      (name != NULL && strcmp(codec->name, name) != 0)) {
+    return NULL;
   }
   return codec;
+}
+
+static inline const TitanTransferCodec *titan_codec_find(lua_State *L,
+    TValue resources, TValue candidate, const char *name, int kind) {
+  if (!ttisfulluserdata(&candidate)) {
+    return NULL;
+  }
+  return titan_codec_match(titan_codec_for_metatable(
+      L, &resources, uvalue(&candidate)->metatable), name, kind);
+}
+
+static inline const TitanTransferCodec *titan_codec_find_metatable(lua_State *L,
+    TValue resources, TValue metatable, const char *name, int kind) {
+  if (!ttistable(&metatable)) {
+    return NULL;
+  }
+  return titan_codec_match(titan_codec_for_metatable(
+      L, &resources, hvalue(&metatable)), name, kind);
 }
 
 /* The declaring module of a canonical nominal metatable, which generated
@@ -382,6 +503,9 @@ static inline const TitanTransferCodec *titan_codec_for_metatable(
 static inline Udata *titan_codec_module(Table *metatable) {
   TValue key;
   TValue slot;
+  if (metatable == NULL) {
+    return NULL;
+  }
   setpvalue(&key, TITAN_MT_MOD);
   if (tagisempty(luaH_get(metatable, &key, &slot)) || !ttisfulluserdata(&slot)) {
     return NULL;
@@ -389,40 +513,40 @@ static inline Udata *titan_codec_module(Table *metatable) {
   return uvalue(&slot);
 }
 
-/* The codec for a field statically typed as the nominal `name`. The name and
- * kind recheck keeps a mistyped value on the reflective path. */
-static inline const TitanTransferCodec *titan_codec_for_field(
-    lua_State *L, const TValue *resources, const TValue *field,
-    const char *name, int is_union) {
-  if (!ttisfulluserdata(field)) {
-    return NULL;
-  }
-  const TitanTransferCodec *codec = titan_codec_for_metatable(
-      L, resources, uvalue(field)->metatable);
-  if (codec == NULL || codec->is_union != is_union ||
-      strcmp(codec->name, name) != 0) {
-    return NULL;
-  }
-  return codec;
-}
-
-static inline const TitanTransferCodec *titan_codec_for_value(
-    lua_State *L, const TValue *resources, const TValue *candidate) {
-  if (!ttisfulluserdata(candidate)) {
-    return NULL;
-  }
-  return titan_codec_for_metatable(
-      L, resources, uvalue(candidate)->metatable);
-}
-
 static inline int titan_codec_on_path(
-    const TitanCodecPath *path, const Udata *object) {
+    const TitanCodecPath *path, const void *object) {
   for (; path != NULL; path = path->parent) {
     if (path->object == object) {
       return 1;
     }
   }
   return 0;
+}
+
+/* Reflective Encoder:enter consults the generated frames of its root too. */
+static inline int titan_codec_path_has(
+    const TitanCodecPath *path, TValue candidate) {
+  if (!iscollectable(&candidate)) {
+    return 0;
+  }
+  return titan_codec_on_path(path, gcvalue(&candidate));
+}
+
+/* Encoder:enter for a generated frame: generated and reflective ancestors. */
+static inline void titan_codec_enter(lua_State *L, const TitanCodecState *state,
+    const TitanCodecPath *path, Udata *object) {
+  if (titan_codec_on_path(path, obj2gco(object))) {
+    titan_codec_raise(L, "protobuf: cyclic object graph");
+  }
+  if (ttistable(&state->active)) {
+    TValue key;
+    TValue slot;
+    setuvalue(L, &key, object);
+    if (!tagisempty(luaH_get(hvalue(&state->active), &key, &slot)) &&
+        !l_isfalse(&slot)) {
+      titan_codec_raise(L, "protobuf: cyclic object graph");
+    }
+  }
 }
 
 static inline int64_t titan_codec_zigzag(lua_Integer number) {
@@ -434,157 +558,501 @@ static inline lua_Integer titan_codec_unzigzag(uint64_t bits) {
   return (lua_Integer)((bits >> 1) ^ (0 - (bits & 1)));
 }
 
-static inline int titan_codec_write_string(
-    titan_protobuf_buffer *buf, int64_t key, const TValue *field) {
-  if (!ttisstring(field)) {
-    return 0;
+static inline void titan_codec_put_varint(lua_State *L,
+    titan_protobuf_buffer *buf, int64_t key, int64_t bits) {
+  if (!titan_protobuf_buf_write_varint(buf, key) ||
+      !titan_protobuf_buf_write_varint(buf, bits)) {
+    titan_codec_raise(L, "protobuf: out of memory");
   }
+}
+
+static inline void titan_codec_put_double(lua_State *L,
+    titan_protobuf_buffer *buf, int64_t key, lua_Number number) {
+  if (!titan_protobuf_buf_write_double(buf, key, number)) {
+    titan_codec_raise(L, "protobuf: out of memory");
+  }
+}
+
+static inline void titan_codec_put_string(lua_State *L,
+    titan_protobuf_buffer *buf, int64_t key, const TValue *field) {
   TString *text = tsvalue(field);
   size_t length = tsslen(text);
   if (length > 2147483647u) {
-    return 0;
+    titan_codec_raise(L, "protobuf: message exceeds 2 GiB");
   }
-  return titan_protobuf_buf_write_bytes(buf, key, getstr(text), length);
+  if (!titan_protobuf_buf_write_bytes(buf, key, getstr(text), length)) {
+    titan_codec_raise(L, "protobuf: out of memory");
+  }
 }
 
-/* Varint with the reflective reader's exact acceptance: at most ten bytes,
- * the tenth no larger than one. */
-static inline int titan_codec_read_varint(const uint8_t *data, size_t length,
-    size_t *position, uint64_t *out) {
-  uint64_t bits = 0;
-  size_t at = *position;
-  for (unsigned index = 0; index < 10; index++) {
-    if (at >= length) {
-      return 0;
+static inline int64_t titan_codec_begin(lua_State *L, TitanCodecState *state,
+    int64_t key) {
+  int64_t mark = titan_protobuf_buf_begin_nested(state->buf, key);
+  if (mark < 0) {
+    titan_codec_raise(L, "protobuf: out of memory");
+  }
+  return mark;
+}
+
+static inline void titan_codec_end(lua_State *L, TitanCodecState *state,
+    int64_t mark) {
+  int rc = titan_protobuf_buf_end_nested(state->buf, mark);
+  if (rc == 0) {
+    titan_codec_raise(L, "protobuf: out of memory");
+  }
+  if (rc < 0) {
+    titan_codec_raise(L, "protobuf: message exceeds 2 GiB");
+  }
+}
+
+/* titan.protobuf's handoff entry is an ordinary Titan function of exactly
+ * this type; titan_codec_call invokes its native entry directly, as a
+ * first-class Titan call does, without a Lua call frame. The function-type
+ * tag in the closure's upvalue 1 must spell TITAN_CODEC_HANDOFF_TYPE, so a
+ * handoff whose Titan signature no longer matches TitanCodecHandoffEntry
+ * raises instead of calling through a mismatched pointer.
+ * spec/coder/nominal_codec_spec.lua pins both spellings to the compiler's own
+ * function-type identity and native-entry signature. */
+#define TITAN_CODEC_HANDOFF_TYPE \
+    "Function({Value(),Value(),Value(),Value()},{Value()},false,nil,nil)"
+typedef TValue (*TitanCodecHandoffEntry)(lua_State *L, Udata *_mod,
+    CClosure *_fn, TValue, TValue, TValue, TValue);
+
+/* The reusable object of a request, or nil. */
+static inline TValue titan_codec_kept(lua_State *L,
+    const TitanCodecHandoff *request) {
+  TValue kept;
+  setnilvalue(&kept);
+  if (request->keep >= 0) {
+    setobj(L, &kept, s2v(restorestack(L, request->keep)));
+  }
+  return kept;
+}
+
+/* titan.protobuf stores the reusable object it created for this request. */
+static inline void titan_codec_keep(lua_State *L, TitanCodecHandoff *request,
+    TValue kept) {
+  if (request->keep >= 0) {
+    setobj2s(L, restorestack(L, request->keep), &kept);
+  }
+}
+
+static inline TValue titan_codec_call(lua_State *L, TitanCodecState *state,
+    TitanCodecHandoff *request, const TValue *item) {
+  TValue handle;
+  CClosure *closure = ttisCclosure(&state->handoff)
+      ? clCvalue(&state->handoff) : NULL;
+  if (closure == NULL || closure->nupvalues < 5 ||
+      !ttisfulluserdata(&closure->upvalue[0]) ||
+      !ttislightuserdata(&closure->upvalue[1]) ||
+      !ttislightuserdata(&closure->upvalue[2]) ||
+      !ttislightuserdata(&closure->upvalue[3]) ||
+      pvalue(&closure->upvalue[3]) != TITAN_BRAND ||
+      strcmp((const char *)pvalue(&closure->upvalue[1]),
+          TITAN_CODEC_HANDOFF_TYPE) != 0) {
+    titan_codec_raise(L, "protobuf: invalid codec handoff");
+  }
+  request->lazy_context = state->lazy_context;
+  setpvalue(&handle, request);
+  TitanCodecHandoffEntry entry = titan_cast_func(
+      TitanCodecHandoffEntry, pvalue(&closure->upvalue[2]));
+  return entry(L, uvalue(&closure->upvalue[0]), closure, handle, *item,
+      state->context, titan_codec_kept(L, request));
+}
+
+/* `item` is the field value (rooted by its owner or on the stack). */
+static inline void titan_codec_encode_handoff(lua_State *L,
+    TitanCodecState *state, int op, const char *owner, int variant, int index,
+    int number, const TitanCodecPath *path, int depth, const TValue *item) {
+  TitanCodecHandoff request;
+  memset(&request, 0, sizeof(request));
+  request.op = op;
+  request.owner = owner;
+  request.variant = variant;
+  request.index = index;
+  request.number = number;
+  request.depth = depth;
+  request.buf = state->buf;
+  request.path = path;
+  request.keep = op == TITAN_CODEC_ENCODE_FIELD ? state->encoder : -1;
+  (void)titan_codec_call(L, state, &request, item);
+}
+
+/* Encoder:field for a statically typed record or union field. A registered
+ * resource capability, a generated codec of exactly that nominal, and
+ * otherwise the reflective field encoder, in the reflective order. */
+static inline void titan_codec_put_nominal(lua_State *L, TitanCodecState *state,
+    const TValue *field, const char *name, int is_union, int number,
+    const TitanCodecPath *path, int depth, const char *owner, int variant,
+    int index) {
+  if (ttisfulluserdata(field)) {
+    Table *metatable = uvalue(field)->metatable;
+    if (!is_union && titan_codec_has_resource(L, &state->resources, metatable)) {
+      titan_codec_encode_handoff(L, state, TITAN_CODEC_ENCODE_RESOURCE, name,
+          0, 0, number, path, depth, field);
+      return;
     }
-    uint64_t byte = data[at++];
+    const TitanTransferCodec *codec = titan_codec_match(
+        titan_codec_for_metatable(L, &state->resources, metatable), name,
+        is_union);
+    if (codec != NULL) {
+      int64_t mark = titan_codec_begin(L, state, (int64_t)number * 8 + 2);
+      codec->encode(L, state, uvalue(field), path, depth);
+      titan_codec_end(L, state, mark);
+      return;
+    }
+  }
+  titan_codec_encode_handoff(L, state, TITAN_CODEC_ENCODE_FIELD, owner,
+      variant, index, number, path, depth, field);
+}
+
+static inline void titan_codec_state(TitanCodecState *state, TValue resources,
+    TValue context, TValue active, TValue handoff, TValue holder,
+    int lazy_context, titan_protobuf_buffer *buf, ptrdiff_t encoder) {
+  state->resources = resources;
+  state->context = context;
+  state->active = active;
+  state->handoff = handoff;
+  state->holder = holder;
+  state->encoder = encoder;
+  state->lazy_context = lazy_context;
+  state->buf = buf;
+}
+
+/* Push the Encoder slot of an encode state (balanced by the caller). */
+static inline ptrdiff_t titan_codec_encoder_slot(lua_State *L,
+    const TValue *encoder) {
+  titan_codec_reserve(L, 1);
+  setobj2s(L, L->top.p, encoder);
+  L->top.p++;
+  return savestack(L, L->top.p - 1);
+}
+
+/* A protobuf or packet root. Without a carried context, a handoff resolves
+ * the current execution's encode scope exactly as the reflective root does.
+ * The Encoder slot stays rooted until the root returns or raises. */
+static inline void titan_codec_encode_root(lua_State *L, TValue resources,
+    TValue context, int lazy_context, TValue handoff,
+    titan_protobuf_buffer *buf,
+    const TitanTransferCodec *codec, TValue candidate) {
+  TitanCodecState state;
+  TValue none;
+  setnilvalue(&none);
+  ptrdiff_t encoder = titan_codec_encoder_slot(L, &none);
+  titan_codec_state(&state, resources, context, none, handoff, none,
+      lazy_context, buf, encoder);
+  codec->encode(L, &state, uvalue(&candidate), NULL, 1);
+  L->top.p--;
+}
+
+/* The reflective Encoder's structural branch for a nominal with a codec:
+ * every handoff below reuses that Encoder and consults its active Map. */
+static inline void titan_codec_encode_field(lua_State *L, TValue resources,
+    TValue context, TValue active, TValue encoder, TValue handoff,
+    titan_protobuf_buffer *buf, const TitanCodecPath *path,
+    const TitanTransferCodec *codec, TValue candidate, lua_Integer number,
+    lua_Integer depth) {
+  TitanCodecState state;
+  TValue none;
+  setnilvalue(&none);
+  ptrdiff_t slot = titan_codec_encoder_slot(L, &encoder);
+  titan_codec_state(&state, resources, context, active, handoff, none, 0, buf,
+      slot);
+  int64_t mark = titan_codec_begin(L, &state, (int64_t)number * 8 + 2);
+  codec->encode(L, &state, uvalue(&candidate), path, (int)depth);
+  titan_codec_end(L, &state, mark);
+  L->top.p--;
+}
+
+/* WireReader, with the exact reflective acceptance and error strings. */
+static inline uint64_t titan_codec_varint(lua_State *L, const uint8_t *data,
+    size_t limit, size_t *position) {
+  uint64_t bits = 0;
+  for (unsigned index = 0; index < 10; index++) {
+    if (*position >= limit) {
+      titan_codec_raise(L, "protobuf: truncated varint");
+    }
+    uint64_t byte = data[(*position)++];
     if (index == 9 && byte > 1) {
-      return 0;
+      titan_codec_raise(L, "protobuf: varint overflow");
     }
     bits |= (byte & 127) << (index * 7);
     if (byte < 128) {
-      *position = at;
-      *out = bits;
-      return 1;
+      return bits;
     }
   }
+  titan_codec_raise(L, "protobuf: varint overflow");
   return 0;
 }
 
-/* 1 consumes the next key when it equals `key`; 0 leaves another field (or
- * the end) for later declared fields; -1 reports a malformed key. */
-static inline int titan_codec_take_key(const uint8_t *data, size_t length,
-    size_t *position, uint64_t key) {
-  if (*position >= length) {
-    return 0;
+static inline size_t titan_codec_take(lua_State *L, size_t limit,
+    size_t *position, uint64_t count) {
+  if (count > (uint64_t)(limit - *position)) {
+    titan_codec_raise(L, "protobuf: truncated field");
   }
-  size_t at = *position;
-  uint64_t bits;
-  if (!titan_codec_read_varint(data, length, &at, &bits)) {
-    return -1;
-  }
-  if (bits != key) {
-    return 0;
-  }
-  *position = at;
-  return 1;
+  size_t offset = *position;
+  *position += (size_t)count;
+  return offset;
 }
 
-static inline int titan_codec_take_slice(const uint8_t *data, size_t length,
-    size_t *position, size_t *offset, size_t *count) {
-  size_t at = *position;
-  uint64_t bits;
-  if (!titan_codec_read_varint(data, length, &at, &bits)) {
-    return 0;
+static inline void titan_codec_key(lua_State *L, const uint8_t *data,
+    size_t limit, size_t *position, uint32_t *number, uint32_t *wire) {
+  uint64_t key = titan_codec_varint(L, data, limit, position);
+  if (key > 4294967295u) {
+    titan_codec_raise(L, "protobuf: invalid field key");
   }
-  if (bits > 2147483647u || bits > (uint64_t)(length - at)) {
-    return 0;
+  *number = (uint32_t)(key >> 3);
+  *wire = (uint32_t)(key & 7);
+  if (*number == 0) {
+    titan_codec_raise(L, "protobuf: field number zero");
   }
-  *offset = at;
-  *count = (size_t)bits;
-  *position = at + (size_t)bits;
-  return 1;
 }
 
-static inline int titan_codec_take_fixed64(const uint8_t *data, size_t length,
-    size_t *position, double *out) {
-  if (length - *position < 8) {
-    return 0;
+static inline void titan_codec_field(lua_State *L, const uint8_t *data, size_t limit,
+    size_t *position, uint32_t number, uint32_t wire, int depth,
+    TitanCodecField *field) {
+  field->bits = 0;
+  field->offset = 0;
+  field->length = 0;
+  switch (wire) {
+    case 0:
+      field->bits = titan_codec_varint(L, data, limit, position);
+      return;
+    case 1:
+      field->offset = titan_codec_take(L, limit, position, 8);
+      field->length = 8;
+      return;
+    case 2: {
+      uint64_t count = titan_codec_varint(L, data, limit, position);
+      if (count > 2147483647u) {
+        titan_codec_raise(L, "protobuf: invalid byte length");
+      }
+      field->offset = titan_codec_take(L, limit, position, count);
+      field->length = (size_t)count;
+      return;
+    }
+    case 5:
+      field->offset = titan_codec_take(L, limit, position, 4);
+      field->length = 4;
+      return;
+    case 3: {
+      TitanCodecField nested;
+      titan_codec_depth(L, depth);
+      while (*position < limit) {
+        uint32_t nested_number;
+        uint32_t nested_wire;
+        titan_codec_key(L, data, limit, position, &nested_number, &nested_wire);
+        if (nested_wire == 4) {
+          if (nested_number != number) {
+            titan_codec_raise(L, "protobuf: mismatched end group");
+          }
+          return;
+        }
+        titan_codec_field(L, data, limit, position, nested_number, nested_wire,
+            depth + 1, &nested);
+      }
+      titan_codec_raise(L, "protobuf: unterminated group");
+      return;
+    }
+    default:
+      titan_codec_raise(L, "protobuf: invalid wire type");
+      return;
   }
-  *out = titan_protobuf_read_double(data, *position);
-  *position += 8;
-  return 1;
 }
 
-/* One nested nominal field: its key, a length prefix, and the nested codec's
- * fields, exactly as Encoder:field writes a nested message. */
-static inline int titan_codec_encode_nested(lua_State *L,
-    const TValue *resources, titan_protobuf_buffer *buf, const TValue *field,
-    const char *name, int is_union, int64_t key, const TitanCodecPath *path,
-    int depth) {
-  const TitanTransferCodec *codec =
-      titan_codec_for_field(L, resources, field, name, is_union);
-  if (codec == NULL) {
+/* protobuf field_ordinal: numbering skips 19000..19999. */
+static inline uint32_t titan_codec_ordinal(uint32_t number) {
+  if (number >= 20000) {
+    return number - 1000;
+  }
+  if (number >= 19000) {
     return 0;
   }
-  int64_t mark = titan_protobuf_buf_begin_nested(buf, key);
-  if (mark < 0) {
-    return 0;
-  }
-  if (!codec->encode(L, resources, buf, uvalue(field), path, depth)) {
-    return 0;
-  }
-  return titan_protobuf_buf_end_nested(buf, mark) > 0;
+  return number;
 }
 
-/* Decode one nominal from the exact canonical metatable of its declared type.
- * Success pushes it; decline leaves the stack unchanged. */
-static inline int titan_codec_decode_nested(lua_State *L,
-    const TValue *resources, const TValue *metatable, const uint8_t *data,
-    size_t length, int depth) {
-  if (!ttistable(metatable)) {
-    return 0;
+/* read_message_slice: validate the complete message before any field is
+ * decoded, recording the latest occurrence of each declared ordinal. */
+static inline void titan_codec_parse(lua_State *L, const uint8_t *data,
+    size_t length, TitanCodecField *fields, uint32_t count) {
+  size_t position = 0;
+  memset(fields, 0, (count > 0 ? count : 1) * sizeof(TitanCodecField));
+  while (position < length) {
+    uint32_t number;
+    uint32_t wire;
+    TitanCodecField entry;
+    titan_codec_key(L, data, length, &position, &number, &wire);
+    titan_codec_field(L, data, length, &position, number, wire, 1, &entry);
+    uint32_t ordinal = titan_codec_ordinal(number);
+    if (ordinal >= 1 && ordinal <= count) {
+      TitanCodecField *field = &fields[ordinal - 1];
+      field->count++;
+      field->wire = wire;
+      field->bits = entry.bits;
+      field->offset = entry.offset;
+      field->length = entry.length;
+    }
   }
-  Table *nominal = hvalue(metatable);
-  const TitanTransferCodec *codec =
-      titan_codec_for_metatable(L, resources, nominal);
-  if (codec == NULL) {
-    return 0;
+}
+
+/* The selected variant when the union message holds exactly one recognized
+ * occurrence and it is length-delimited; otherwise 0, and the reflective
+ * decoder applies its scan order, oneof replacement, and merge rules. */
+static inline uint32_t titan_codec_single(const TitanCodecField *variants,
+    uint32_t count) {
+  uint32_t selected = 0;
+  for (uint32_t ordinal = 1; ordinal <= count; ordinal++) {
+    if (variants[ordinal - 1].count != 0) {
+      if (selected != 0 || variants[ordinal - 1].count != 1 ||
+          variants[ordinal - 1].wire != 2) {
+        return 0;
+      }
+      selected = ordinal;
+    }
   }
-  Udata *module = titan_codec_module(nominal);
+  return selected;
+}
+
+static inline void titan_codec_need(lua_State *L, const TitanCodecField *field,
+    int number) {
+  if (field->count == 0) {
+    lua_checkstack(L, 1);
+    lua_pushfstring(L, "protobuf: missing required field %I",
+        (LUAI_UACINT)number);
+    lua_error(L);
+  }
+}
+
+static inline void titan_codec_wire(lua_State *L, const TitanCodecField *field,
+    uint32_t wire) {
+  if (field->wire != wire) {
+    titan_codec_raise(L, "protobuf: unexpected wire type");
+  }
+}
+
+static inline int titan_codec_get_boolean(lua_State *L,
+    const TitanCodecField *field) {
+  titan_codec_wire(L, field, 0);
+  if (field->bits > 1) {
+    titan_codec_raise(L, "protobuf: invalid boolean");
+  }
+  return (int)field->bits;
+}
+
+static inline lua_Integer titan_codec_get_integer(lua_State *L,
+    const TitanCodecField *field) {
+  titan_codec_wire(L, field, 0);
+  return titan_codec_unzigzag(field->bits);
+}
+
+static inline lua_Number titan_codec_get_float(lua_State *L,
+    const TitanCodecField *field, const uint8_t *data) {
+  titan_codec_wire(L, field, 1);
+  return titan_protobuf_read_double(data, field->offset);
+}
+
+static inline TString *titan_codec_get_string(lua_State *L,
+    const TitanCodecField *field, const uint8_t *data) {
+  titan_codec_wire(L, field, 2);
+  return luaS_newlstr(L, (const char *)data + field->offset, field->length);
+}
+
+/* Pushes the reflective result. The caller reserved its stack slot before
+ * the call, so the returned value is rooted without another allocation. */
+static inline void titan_codec_decode_handoff(lua_State *L,
+    TitanCodecState *state, int op, const char *owner, int variant, int index,
+    int number, const uint8_t *data, size_t length, int depth) {
+  TitanCodecHandoff request;
+  memset(&request, 0, sizeof(request));
+  request.op = op;
+  request.owner = owner;
+  request.variant = variant;
+  request.index = index;
+  request.number = number;
+  request.depth = depth;
+  request.data = data;
+  request.length = length;
+  request.keep = -1;
+  TValue result = titan_codec_call(L, state, &request, &state->holder);
+  lua_pushtvalue(L, result);
+}
+
+/* decode_field for one field the generated decoder does not decode natively.
+ * `field` is its directory entry in the message `data`/`length`; `scratch`
+ * is the savestack offset of the frame's one-field Message slot. Pushes the
+ * reflective result into a slot the caller reserved. */
+static inline void titan_codec_decode_field(lua_State *L,
+    TitanCodecState *state, const char *owner, int variant, int index,
+    int number, const TitanCodecField *field, const uint8_t *data,
+    size_t length, int depth, ptrdiff_t scratch) {
+  TitanCodecHandoff request;
+  memset(&request, 0, sizeof(request));
+  request.op = TITAN_CODEC_DECODE_FIELD;
+  request.owner = owner;
+  request.variant = variant;
+  request.index = index;
+  request.number = number;
+  request.depth = depth;
+  request.data = data;
+  request.length = length;
+  request.field_count = field->count;
+  request.field_wire = field->wire;
+  memcpy(&request.field_bits, &field->bits, sizeof(request.field_bits));
+  request.field_offset = field->offset;
+  request.field_length = field->length;
+  request.keep = scratch;
+  TValue result = titan_codec_call(L, state, &request, &state->holder);
+  lua_pushtvalue(L, result);
+}
+
+/* decode_field for a present record or union field after its missing check.
+ * `metatable` is the declared type's canonical metatable in the decoding
+ * module. `data`/`length` are the message holding the field. */
+static inline void titan_codec_get_nominal(lua_State *L, TitanCodecState *state,
+    const TValue *metatable, const char *name, int is_union,
+    const TitanCodecField *field, int number, const uint8_t *data,
+    size_t length, int depth, const char *owner, int variant, int index,
+    ptrdiff_t scratch) {
+  Table *nominal = ttistable(metatable) ? hvalue(metatable) : NULL;
+  if (!is_union && titan_codec_has_resource(L, &state->resources, nominal)) {
+    titan_codec_wire(L, field, 2);
+    titan_codec_decode_handoff(L, state, TITAN_CODEC_DECODE_RESOURCE, name, 0,
+        0, number, data + field->offset, field->length, depth);
+    return;
+  }
+  if (field->count == 1) {
+    const TitanTransferCodec *codec = titan_codec_match(
+        titan_codec_for_metatable(L, &state->resources, nominal), name,
+        is_union);
+    Udata *module = codec != NULL ? titan_codec_module(nominal) : NULL;
+    if (module != NULL) {
+      titan_codec_wire(L, field, 2);
+      codec->decode(L, state, module, data + field->offset, field->length,
+          depth);
+      return;
+    }
+  }
+  titan_codec_decode_field(L, state, owner, variant, index, number, field,
+      data, length, depth, scratch);
+}
+
+/* A protobuf root, a transfer packet, or the reflective decoder's
+ * structural branch for a nominal with a codec. Leaves one value pushed. */
+static inline void titan_codec_decode_nominal(lua_State *L, TValue resources,
+    TValue context, TValue handoff, TValue holder,
+    const TitanTransferCodec *codec, TValue metatable, const void *data,
+    size_t length, lua_Integer depth) {
+  TitanCodecState state;
+  TValue none;
+  setnilvalue(&none);
+  titan_codec_state(&state, resources, context, none, handoff, holder, 0, NULL,
+      -1);
+  Udata *module = ttistable(&metatable)
+      ? titan_codec_module(hvalue(&metatable)) : NULL;
   if (module == NULL) {
-    return 0;
+    titan_codec_raise(L, "protobuf: invalid codec handoff");
   }
-  return codec->decode(L, resources, module, data, length, depth);
-}
-
-/* Root encode. `codec` comes from titan_codec_for_value; rechecking the
- * candidate's binding keeps a stale or mismatched handle from reading another
- * nominal's layout. Decline restores the append boundary. */
-static inline int titan_codec_encode_root(lua_State *L, const TValue *resources,
-    titan_protobuf_buffer *buf, const TitanTransferCodec *codec,
-    const TValue *candidate) {
-  if (codec == NULL || titan_codec_for_value(L, resources, candidate) != codec) {
-    return 0;
-  }
-  size_t start = buf->length;
-  if (codec->encode(L, resources, buf, uvalue(candidate), NULL, 1) &&
-      buf->length - start <= 2147483647u) {
-    return 1;
-  }
-  buf->length = start;
-  return 0;
-}
-
-/* Root decode for a canonical nominal metatable. Success leaves exactly one
- * fresh nominal above the entry top; decline leaves the stack unchanged. */
-static inline int titan_codec_decode_root(lua_State *L, const TValue *resources,
-    const TValue *metatable, const void *data, size_t length) {
-  if (length > 2147483647u) {
-    return 0;
-  }
-  return titan_codec_decode_nested(
-      L, resources, metatable, (const uint8_t *)data, length, 1);
+  codec->decode(L, &state, module, (const uint8_t *)data, length, (int)depth);
 }
 
 #endif

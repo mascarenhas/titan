@@ -105,10 +105,11 @@ after loading the declaring module. The shared slice raises the unknown-name
 error for nil and the kind-mismatch error otherwise, then hands the record or
 union descriptor to private `deserialize_record_buffer` /
 `deserialize_union_buffer`. Those check the message size and require public
-members, then try the [generated decoder](#generated-nominal-codecs) bound to
-the descriptor's name; when it declines they parse the root slice and decode it
-reflectively. These name-based roots therefore perform one registry lookup and
-allocate no `reflect.Type` wrapper.
+members. A descriptor whose name has a
+[generated codec](#generated-nominal-codecs) (`find_named_codec`) then decodes
+through it with the caller's context and holder; any other root slice is parsed
+and decoded reflectively. These name-based roots therefore perform one registry
+lookup and allocate no `reflect.Type` wrapper.
 
 `deserialize(bytes, descriptor)` reaches the same helpers after `resolve_type`.
 A `Type.is_record` / `is_union` descriptor dispatches directly. A
@@ -160,18 +161,21 @@ public-data rules. See the
 
 ## Generated nominal codecs
 
-The compiler emits a codec pair for every public record or union whose whole
-declared graph it can encode directly (`coder/nominal_codec.lua`). Every field or
-variant must be public, no member may be named `to_transfer_payload` or
-`from_transfer_payload`, and every field or part type must be `nil`, a boolean,
-integer, float, string, a statically eligible record or union, or an Option of
-one of those except nil. Eligibility is the greatest fixpoint over the complete
-reachable nominal graph: a nominal is eligible when its own fields are, and
-loses eligibility when any nested nominal is ineligible, so mutually recursive
-declarations resolve identically in every declaration order.
-Arrays, Maps, `value` (including erased generic parameters), functions,
-Interfaces, foreign types, hooks, and private members keep the whole nominal
-reflective, so an endpoint-bearing root never attempts the generated path.
+The compiler emits a codec pair for every public record or union that the
+reflective codec could encode (`coder/nominal_codec.lua`): every field or
+variant is public, no member is named `to_transfer_payload` or
+`from_transfer_payload`, and every field or part type is `nil`, a boolean,
+integer, float, string, record, union, Titan Array, or a foreign integer,
+float, pointer, complete struct, or fixed array, or an Option of one of those.
+Eligibility is per nominal, so recursive declarations never depend on
+declaration order. A nominal with a field the reflective codec always rejects
+(callables, Maps, Interfaces, `value` and erased generic parameters, owned or
+union C types), private members, or hooks stays entirely reflective, as does a
+nominal whose decoder directory would exceed 64 entries (record fields; union
+variants plus every variant's parts). Each entry is 32 bytes of the decoder's C
+frame at up to 128 nesting levels, while a reflective level's C stack does not
+grow with field count, so a deep graph of wide nominals raises the nesting
+error instead of exhausting the C stack.
 
 The declaring module emits one immutable `TitanTransferCodec` array next to
 its `TitanTransferModule` manifest (`transfer.h`) and binds each canonical
@@ -181,38 +185,71 @@ raw table reads and returns nil when the metatable also has a registered
 resource codec, so resource capabilities keep their precedence. Erased generic
 applications share the one metatable and entry.
 
-A generated codec replicates the reflective codec on the inputs it accepts and
-otherwise **declines** with status 0. It never raises a codec error, runs a
-hook or resource codec, loads a module, or enters Lua: the encoder only appends
-bytes and the decoder only allocates fresh nominals and strings. The caller
-restores its buffer length, or its stack, and runs the
-complete root reflectively, which raises the exact reflective errors in the
-exact reflective order. The encoder writes fields in declaration order through
-the same writers and eagerly widened nested length prefixes, and declines at depth 128 or
-more, on an object already on its automatic path chain (cycles), on a string or
-message over 2 GiB, on allocation failure, and at a nested nominal without a
-bound codec, with a registered resource codec, or with a different nominal name
-or kind. The decoder accepts only canonical wire: declared fields in order, each
-at most once, with the expected wire types (non-minimal key varints decode as
-they do reflectively); a union holds exactly one recognized variant. Unknown,
-repeated, reordered, or malformed fields, missing required fields, invalid
-booleans, groups, and depth 128 or more decline. Allocation failure while
-decoding raises Lua's ordinary memory error, as on the reflective path. On
-canonical input the reflective last-wins, merge, and oneof rules select the
-single occurrence. Decoding allocates the destination with the reflective
-constructor's storage steps (`luaS_newudata`, module metatable, zeroed payload),
-roots it before any other allocation, stores traced fields with
-`luaC_barrierback`, and never calls `new`.
+A generated codec *is* the reflective codec specialized to one storage plan,
+sharing one root state with it (`TitanCodecState`): the buffer, the packet
+context, the reflective `Encoder`'s active Map, a C-stack path of the open
+generated frames, and one Lua stack slot holding the root's reusable
+`Encoder`. It writes identical bytes and raises the identical error string at
+the identical point; it never declines or reruns. Booleans, integers, floats,
+strings, their Options, and nested records and unions are encoded natively,
+the latter through their own bound codec after the same registered-resource
+check by expected type. Every other field is handed to the reflective field
+codec through one fixed Titan entry (`codec_handoff`), called through its
+native entry like any first-class Titan call. Before that call the runtime
+checks the closure's function-type tag against `TITAN_CODEC_HANDOFF_TYPE`, the
+exact type `function (value, value, value, value): (value)`, and raises
+`protobuf: invalid codec handoff` otherwise, so a changed handoff signature
+fails closed; `spec/coder/nominal_codec_spec.lua` pins that spelling and the
+`TitanCodecHandoffEntry` typedef to the compiler's own function-type identity
+and native-entry signature. A registered resource field runs the reflective
+resource branch with the carried context (resolved from the current execution
+only when the root carried none). Any other field runs `Encoder:field` with the
+field's hydrated descriptor on the state's `Encoder`: the enclosing reflective
+`Encoder` when `Encoder:generated` entered the codec, otherwise one created by
+the root's first such handoff and rooted in the state's stack slot until the
+root returns. Each handoff sets that `Encoder`'s `path` to the handing frame's
+path for the field. In the other direction `Encoder:field` and `decode_field`
+call the generated codec of a record or union field that has one, after the
+resource and hook checks and before any inspection. Cycle detection consults
+both the active Map and the path, so cycles through mixed frames raise
+`protobuf: cyclic object graph` exactly as on the reflective path, and depth
+is passed through both sides unchanged. An encoding frame with any field that
+can reach the reflective codec (a handed-off field or a nested nominal) pushes
+its record onto the Lua stack, so a hook that drops the last reference to it
+and collects cannot free the record under the frame.
 
-Generated codecs are used only at roots: `serialize_to_buffer` (before
-`reflect.inspect`), the inspected-root entries, `deserialize`,
-`deserialize_nominal*`, and transfer packets. The reflective encoder and decoder
-never call them, so the anonymous root is a reflective oracle for differential
-tests and the two cycle detectors never mix. The collaboration entries
-`serialize_generated_to_buffer` and `deserialize_generated_buffer` run only the
-generated root and report a decline, which native tests use to prove which path
-handled a value. After a transfer decline, the reflective inspected-root entry
-tries the generated codec once more before encoding reflectively.
+The generated decoder mirrors `read_message_slice` and `decode_field`: it
+validates the complete message first with the same error strings (keys,
+varints, lengths, groups and their depth, wire kinds), recording the latest
+occurrence of each declared field, then checks depth and decodes the declared
+fields in order with the reflective missing-field, wire, and boolean checks.
+Nested messages are parsed when their field is decoded. A field without a
+native decoding (and a present `nil`-typed field, whose slice the reflective
+decoder validates) runs `decode_field` with the field's hydrated descriptor on
+a `Message` holding only that field's single latest occurrence (or none):
+`decode_field` reads only the latest occurrence of its number, so it decodes
+exactly as from the parsed message, and one such `Message` per decoding frame,
+rooted in a frame stack slot, serves all of the frame's handed-off fields. A
+repeated field, which merges, reparses the frame's message instead, as does a
+union message with other than exactly one length-delimited recognized
+occurrence for the whole union. An absent optional field is nil without a
+handoff. Decoding allocates the destination with the reflective constructor's
+storage steps (`luaS_newudata`, module metatable, zeroed payload), roots it
+before any other allocation, stores traced fields with `luaC_barrierback`, and
+never calls `new`. Reflectively decoded fields stay on the Lua stack until the
+frame has decoded every field and are then stored through the reflective
+constructor's field conversions in field order, because `decode_record`
+decodes every field before `construct` converts any: a later malformed field
+therefore raises before an earlier field's conversion error, and every
+field's hooks and resource claims run first, as on the reflective path.
+
+Generated codecs serve `serialize_to_buffer` (before `reflect.inspect`), the
+inspected-root entries, `deserialize`, `deserialize_nominal*`, transfer
+packets, and every nested record or union reached by either codec; a nominal
+with a codec always decodes through it. The collaboration entry
+`serialize_generated_to_buffer` runs only the generated root, and the
+diagnostic `use_generated_codecs(false)` makes the whole state reflective,
+which native differential tests use as the oracle.
 
 ## Encoding
 

@@ -1225,9 +1225,10 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
     return finalize_buf_message(buf, ffi.TITAN_ASYNC_MESSAGE_CLOSURE,
         "", module, entry, scope.native) as foreign *void
   end
-  -- A compiler-generated codec writes the reflective wire bytes without
-  -- inspection, Encoder, or cycle-table allocations. It runs no hook or
-  -- resource codec, so a decline leaves nothing to undo before reflection.
+  -- A compiler-generated codec writes the reflective wire bytes and raises the
+  -- reflective errors without root inspection, Encoder, or cycle-table
+  -- allocations; fields it does not encode natively, including endpoints,
+  -- use the reflective field encoder with this packet's scope.
   local generated = protobuf.find_generated_codec(candidate)
   if generated ~= nil then
     local codec = generated as foreign const *TitanTransferCodec
@@ -1238,14 +1239,16 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
       raise "transfer: out of memory copying message"
     end
     defer ffi.titan_protobuf_buf_free_heap(buf)
-    if protobuf.serialize_generated_to_buffer(buf as foreign *void, generated, candidate) then
-      if codec.is_union ~= 0 then
-        return finalize_buf_message(buf, ffi.TITAN_ASYNC_MESSAGE_UNION,
-            name, module, nil, scope.native) as foreign *void
-      end
-      return finalize_buf_message(buf, ffi.TITAN_ASYNC_MESSAGE_RECORD,
+    if not protobuf.serialize_generated_to_buffer(
+        buf as foreign *void, generated, candidate, scope) then
+      raise "transfer: generated codec does not match its value"
+    end
+    if codec.is_union ~= 0 then
+      return finalize_buf_message(buf, ffi.TITAN_ASYNC_MESSAGE_UNION,
           name, module, nil, scope.native) as foreign *void
     end
+    return finalize_buf_message(buf, ffi.TITAN_ASYNC_MESSAGE_RECORD,
+        name, module, nil, scope.native) as foreign *void
   end
   case reflect.inspect(candidate)
   when is_lua_userdata() then

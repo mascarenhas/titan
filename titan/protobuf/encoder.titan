@@ -1,14 +1,41 @@
 --- Optimistic traversal of a single live value graph.
 -- @module titan.protobuf
 
+-- `active` holds the reflective frames of this root (shared with every
+-- reflective subtree a generated codec hands back to); `path` holds the
+-- enclosing generated frames. Together they are the complete active path. A
+-- generated root's handoffs reuse one Encoder, setting `path` to the handing
+-- frame's path for the duration of each field.
 local record Encoder
   const active: {value: boolean}
   const context: value
+  path: foreign const *TitanCodecPath
 end
 
 local function Encoder:enter(candidate: value)
-  if self.active[candidate] then raise "protobuf: cyclic object graph" end
+  if self.active[candidate] or ffi.titan_codec_path_has(self.path, candidate) ~= 0 then
+    raise "protobuf: cyclic object graph"
+  end
   self.active[candidate] = true
+end
+
+-- The structural branch for a nominal with a generated codec: the same nested
+-- message, depth, cycle, and handoff rules, with the shared root state. The
+-- generated frames below hand their fields back to this same Encoder.
+local function Encoder:generated(
+    buf: foreign *titan_protobuf_buffer,
+    codec: foreign const *TitanTransferCodec,
+    number: integer,
+    candidate: value,
+    depth: integer)
+  local resources: foreign TValue = resource_codecs as value
+  local context: foreign TValue = self.context
+  local active: foreign TValue = self.active as value
+  local encoder: foreign TValue = self as value
+  local handoff: foreign TValue = codec_handoff_entry
+  local raw: foreign TValue = candidate
+  ffi.titan_codec_encode_field(L, resources, context, active, encoder, handoff, buf,
+      self.path, codec, raw, number, depth)
 end
 
 local function Encoder:record_value(
@@ -138,15 +165,12 @@ local function Encoder:field(
   when is_record(expected) then
     local codec? = find_resource_codec_by_name(expected.name)
     if codec ~= nil then
-      local identity = record_identity(candidate)
-      if identity == nil then raise "protobuf: expected a record" end
-      if identity ~= codec.identity then raise "protobuf: record type mismatch" end
-      local index = codec.encode(self.context, candidate)
-      write_key(buf, number, 2)
-      write_varint(buf, 4)
-      if write_resource_index(buf as foreign *void, index as foreign unsigned int) == 0 then
-        raise "protobuf: out of memory"
-      end
+      encode_resource_field(buf, codec, number, candidate, self.context)
+      return
+    end
+    local generated = find_field_codec(candidate, expected.name, false)
+    if generated ~= nil then
+      self:generated(buf, generated, number, candidate, depth)
       return
     end
     case reflect.inspect(candidate)
@@ -167,6 +191,11 @@ local function Encoder:field(
     else raise "protobuf: expected a record"
     end
   when is_union(expected) then
+    local generated = find_field_codec(candidate, expected.name, true)
+    if generated ~= nil then
+      self:generated(buf, generated, number, candidate, depth)
+      return
+    end
     case reflect.inspect(candidate)
     when is_union(actual) then
       if actual.type.name ~= expected.name then raise "protobuf: union type mismatch" end

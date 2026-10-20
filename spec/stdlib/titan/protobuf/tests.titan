@@ -1460,18 +1460,19 @@ local function backpatch_transfer_roundtrip(candidate: value): value
   return result
 end
 
--- Compiler-generated nominal codecs. The anonymous-message root stays
--- reflective at every depth, so a nominal wrapped as its single field is the
--- reflective oracle for both directions.
-local function reflective_wire(candidate: value): string
-  local fields: const {reflect.Type} = {descriptor(candidate)}
-  return protobuf.serialize_fields(fields, candidate)
+-- Compiler-generated nominal codecs. `protobuf.use_generated_codecs(false)`
+-- makes every protobuf and transfer operation purely reflective in this state,
+-- which is the differential oracle for bytes, values, and error strings.
+local function reflective_serialize(candidate: value): string
+  local previous = protobuf.use_generated_codecs(false)
+  defer protobuf.use_generated_codecs(previous)
+  return protobuf.serialize(candidate)
 end
 
-local function reflective_decode(bytes: string, target: reflect.Type): value
-  local fields: const {reflect.Type} = {target}
-  local decoded: value = protobuf.deserialize_fields(backpatch_field(1, bytes), fields)
-  return decoded
+local function reflective_deserialize(bytes: string, target: reflect.Type): value
+  local previous = protobuf.use_generated_codecs(false)
+  defer protobuf.use_generated_codecs(previous)
+  return protobuf.deserialize(bytes, target)
 end
 
 local function raised_message(action: function (): ()): string
@@ -1488,16 +1489,30 @@ local function raised_message(action: function (): ()): string
   return message
 end
 
-local function decode_outcome(bytes: string, target: reflect.Type, wrapped: boolean): string
+local function reflective_message(action: function (): ()): string
+  local previous = protobuf.use_generated_codecs(false)
+  defer protobuf.use_generated_codecs(previous)
+  return raised_message(action)
+end
+
+-- The generated and reflective outcomes of an action must be identical.
+local function check_same_error(context: test.Context, name: string,
+    action: function (): (), expected: string)
+  context:run(name, function (_: test.Context)
+    local generated = raised_message(action)
+    local reflective = reflective_message(action)
+    test.assert(generated == reflective, generated .. " ~= " .. reflective)
+    test.assert(string.find(generated, expected, 1, true) ~= nil, generated)
+  end)
+end
+
+local function decode_outcome(bytes: string, target: reflect.Type, generated: boolean): string
+  local previous = protobuf.use_generated_codecs(generated)
+  defer protobuf.use_generated_codecs(previous)
   local outcome = "error"
   do
-    local decoded: value = nil
-    if wrapped then
-      decoded = reflective_decode(bytes, target)
-    else
-      decoded = protobuf.deserialize(bytes, target)
-    end
-    outcome = "ok " .. reflective_wire(decoded)
+    local decoded: value = protobuf.deserialize(bytes, target)
+    outcome = "ok " .. reflective_serialize(decoded)
   catch
     if error is string then
       local message: string = error
@@ -1505,14 +1520,6 @@ local function decode_outcome(bytes: string, target: reflect.Type, wrapped: bool
     end
   end
   return outcome
-end
-
-local function nominal_name(candidate: value): string
-  case reflect.inspect(candidate)
-  when is_record(record_value) then return record_value.type.name
-  when is_union(union_value) then return union_value.type.name
-  else raise "expected nominal test value"
-  end
 end
 
 local function buffer_bytes(buf: foreign *titan_protobuf_buffer): string
@@ -1523,43 +1530,39 @@ local function buffer_bytes(buf: foreign *titan_protobuf_buffer): string
   return ffi.lua_totvalue(L, -1) as value
 end
 
--- Run only the generated root encoder. A decline must leave the append
--- boundary where it started, even after nested bytes were written.
-local function generated_wire(candidate: value): (boolean, string)
+-- Run the generated root encoder alone, proving that it handled the value.
+local function generated_wire(candidate: value): string
   local codec = protobuf.find_generated_codec(candidate)
   test.assert(codec ~= nil, "missing generated codec")
   local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
   ffi.titan_protobuf_buf_init_heap(buf, 0)
   defer ffi.titan_protobuf_buf_free_heap(buf)
-  local accepted = protobuf.serialize_generated_to_buffer(buf as foreign *void, codec, candidate)
-  test.assert(accepted or buf.length == 0, "a declined root left bytes behind")
-  return accepted, buffer_bytes(buf)
+  test.assert(protobuf.serialize_generated_to_buffer(buf as foreign *void, codec,
+      candidate, nil), "the generated codec did not match its value")
+  return buffer_bytes(buf)
 end
 
--- Run only the generated root decoder.
-local function generated_decode(bytes: string, name: string): (boolean, value)
-  return protobuf.deserialize_generated_buffer(
-      ffi.titan_protobuf_bytes_ptr(bytes) as foreign const *void, #bytes, name)
+-- A nominal with a generated codec always decodes through it, so a decoded
+-- value with a codec proves which decoder ran.
+local function generated_decode(bytes: string, target: reflect.Type): value
+  local decoded: value = protobuf.deserialize(bytes, target)
+  test.assert(protobuf.find_generated_codec(decoded) ~= nil, "missing generated decoder")
+  return decoded
 end
 
 local function check_generated_codec(context: test.Context, name: string, candidate: value)
   context:run(name, function (_: test.Context)
     local target = descriptor(candidate)
-    local accepted, bytes = generated_wire(candidate)
-    test.assert(accepted, "the generated encoder declined")
-    test.assert(bytes == protobuf.serialize(candidate), "serialize did not use the generated bytes")
-    test.assert(reflective_wire(candidate) == backpatch_field(1, bytes),
+    local bytes = generated_wire(candidate)
+    test.assert(bytes == reflective_serialize(candidate),
         "generated bytes differ from the reflective encoder")
-    local decoded, generated = generated_decode(bytes, nominal_name(candidate))
-    test.assert(decoded, "the generated decoder declined")
-    test.assert(reflective_wire(generated) == reflective_wire(reflective_decode(bytes, target)),
-        "generated decode differs from the reflective decoder")
-    test.assert(reflective_wire(generated) == reflective_wire(candidate),
-        "generated decode lost data")
-    test.assert(reflective_wire(protobuf.deserialize(bytes, target)) == reflective_wire(candidate),
-        "deserialize lost data")
-    test.assert(reflective_wire(backpatch_transfer_roundtrip(candidate)) ==
-        reflective_wire(candidate), "generated transfer packet lost data")
+    test.assert(bytes == protobuf.serialize(candidate), "serialize did not use the generated bytes")
+    local generated = generated_decode(bytes, target)
+    test.assert(reflective_serialize(generated) == bytes, "generated decode lost data")
+    test.assert(reflective_serialize(reflective_deserialize(bytes, target)) == bytes)
+    test.assert(reflective_serialize(protobuf.deserialize(bytes, target)) == bytes)
+    test.assert(reflective_serialize(backpatch_transfer_roundtrip(candidate)) == bytes,
+        "generated transfer packet lost data")
   end)
 end
 
@@ -1578,15 +1581,33 @@ record Tagged<|T|>
   label: string
 end
 
+-- A generated parent of reflective fields: Arrays, hooked records, foreign
+-- scalars and pointers, and a nested Array of generated nominals.
+record MixedFields
+  id: integer
+  list: {Node}
+  token: HookedToken
+  maybe_token: HookedToken?
+  narrow: foreign unsigned char
+  ratio: foreign float
+  pointer: foreign *void
+  choices: const {Choice}
+end
+
 local function node_chain(count: integer): Node
   local chain = Node("leaf", nil)
   for index = 2, count do chain = Node("n" .. index, chain) end
   return chain
 end
 
-function test_generated_codecs_match_reflective_wire(context: test.Context)
+function test_generated_codecs_match_reflective_codec(context: test.Context)
   local deep = BackpatchNode(nil, string.rep("b", 126))
   for _ = 1, 40 do deep = BackpatchNode(deep, string.rep("c", 130)) end
+  local holes: {integer} = {7}
+  holes[3] = 9
+  local frozen = holes as const {integer}
+  local owner: owned *int = foreign int.new()
+  local first = HookedToken(42, "alpha\0beta")
   check_generated_codec(context, "integer", IntegerValue(-37))
   check_generated_codec(context, "boolean_absent", BooleanValue(false, nil))
   check_generated_codec(context, "boolean_present", BooleanValue(true, false))
@@ -1608,13 +1629,22 @@ function test_generated_codecs_match_reflective_wire(context: test.Context)
   check_generated_codec(context, "generic_integer", Tagged<|integer|>.new(1, "one"))
   check_generated_codec(context, "generic_string", Tagged<|string|>.new(2, "two"))
   check_generated_codec(context, "custom_constructor", CustomConstructor(17))
+  check_generated_codec(context, "arrays", Arrays(holes, frozen, frozen, nil, {}))
+  check_generated_codec(context, "hooked_fields",
+      HookedEnvelope(7, first, nil, {first, HookedToken(99, "gamma")}))
+  check_generated_codec(context, "hooked_union", HookedChoice.single(first))
+  check_generated_codec(context, "foreign_scalars", ForeignScalars(ffi.LLONG_MIN,
+      ffi.ULLONG_MAX, 255, 1.25, -2.5, owner))
+  check_generated_codec(context, "mixed_fields", MixedFields(3,
+      {Node("a", Node("b", nil)), Node("c", nil)}, first, nil, 7, 0.5, owner,
+      {Choice.empty(), Choice.pair(1, "one")} as const {Choice}))
   check_generated_codec(context, "nested_127",
       NestedOuter("p", NestedPayload(string.rep("b", 125)), 9))
   check_generated_codec(context, "nested_128",
       NestedOuter("p", NestedPayload(string.rep("b", 126)), 9))
   check_generated_codec(context, "nested_16384",
       NestedOuter("p", NestedPayload(string.rep("b", 16382)), 9))
-  check_generated_codec(context, "backpatch_fallback_depth40", deep)
+  check_generated_codec(context, "deep_nested_lengths", deep)
 end
 
 function test_generated_codecs_share_erased_generic_applications(_context: test.Context)
@@ -1624,12 +1654,215 @@ function test_generated_codecs_share_erased_generic_applications(_context: test.
       "erased applications must share one codec")
 end
 
+function test_generated_codecs_cover_public_hook_free_nominals(_context: test.Context)
+  test.assert(protobuf.find_generated_codec(IntegerValue(1)) ~= nil)
+  test.assert(protobuf.find_generated_codec(Choice.empty()) ~= nil)
+  test.assert(protobuf.find_generated_codec(ChoiceHolder(Choice.empty(), nil)) ~= nil)
+  test.assert(protobuf.find_generated_codec(reflect.NamedType("x")) ~= nil, "imported record")
+  test.assert(protobuf.find_generated_codec(HookedChoice.none()) ~= nil, "hooked part")
+  test.assert(protobuf.find_generated_codec(AnyValue(nil)) == nil, "value field")
+  test.assert(protobuf.find_generated_codec(LocalRecord(1)) == nil, "local record")
+  test.assert(protobuf.find_generated_codec(PrivateVariants.visible()) == nil, "private variant")
+  test.assert(protobuf.find_generated_codec(Optimistic.empty()) == nil, "callable part")
+  test.assert(protobuf.find_generated_codec(HookedToken(1, "x")) == nil, "own hooks")
+  test.assert(protobuf.find_generated_codec(7) == nil, "scalar")
+  test.assert(protobuf.find_generated_codec("text") == nil, "string")
+  local previous = protobuf.use_generated_codecs(false)
+  defer protobuf.use_generated_codecs(previous)
+  test.assert(protobuf.find_generated_codec(IntegerValue(1)) == nil, "disabled codecs")
+end
+
+local function check_decode_outcome(context: test.Context, name: string,
+    bytes: string, target: reflect.Type)
+  context:run(name, function (_: test.Context)
+    local generated = decode_outcome(bytes, target, true)
+    local reflective = decode_outcome(bytes, target, false)
+    test.assert(generated == reflective, generated .. " ~= " .. reflective)
+  end)
+end
+
+function test_generated_codecs_decode_every_wire_reflectively(context: test.Context)
+  local integer_type = descriptor(IntegerValue(0))
+  local node_type = descriptor(Node("", nil))
+  local choice_type = descriptor(Choice.empty())
+  local holder_type = descriptor(ChoiceHolder(Choice.empty(), nil))
+  local nil_type = descriptor(NilValue(nil))
+  local boolean_type = descriptor(BooleanValue(false, nil))
+  local hooked_type = descriptor(HookedEnvelope(1, HookedToken(1, ""), nil, {}))
+  check_decode_outcome(context, "empty", "", integer_type)
+  check_decode_outcome(context, "zero_field", string.char(0), integer_type)
+  check_decode_outcome(context, "truncated_varint", string.char(8, 128), integer_type)
+  check_decode_outcome(context, "varint_overflow",
+      string.char(8, 255, 255, 255, 255, 255, 255, 255, 255, 255, 2), integer_type)
+  check_decode_outcome(context, "wrong_wire", string.char(10, 0), integer_type)
+  check_decode_outcome(context, "invalid_wire", string.char(14), integer_type)
+  check_decode_outcome(context, "invalid_key",
+      string.char(128, 128, 128, 128, 128, 1), integer_type)
+  check_decode_outcome(context, "truncated_field", string.char(10, 5, 1), node_type)
+  check_decode_outcome(context, "invalid_length",
+      string.char(10, 255, 255, 255, 255, 15), node_type)
+  check_decode_outcome(context, "group", string.char(11, 12), integer_type)
+  check_decode_outcome(context, "group_then_field", string.char(19, 8, 1, 20, 8, 2), integer_type)
+  check_decode_outcome(context, "mismatched_group", string.char(19, 28), integer_type)
+  check_decode_outcome(context, "unterminated_group", string.char(19, 8, 1), integer_type)
+  check_decode_outcome(context, "repeated_last_wins", string.char(8, 2, 8, 4), integer_type)
+  check_decode_outcome(context, "unknown_first", string.char(16, 1, 8, 2), integer_type)
+  check_decode_outcome(context, "unknown_bytes", string.char(8, 2, 42, 3) .. "abc", integer_type)
+  check_decode_outcome(context, "nonminimal_key", string.char(136, 0, 2), integer_type)
+  check_decode_outcome(context, "invalid_boolean", string.char(8, 2), boolean_type)
+  check_decode_outcome(context, "present_nil_field", string.char(10, 0), nil_type)
+  check_decode_outcome(context, "present_nil_bad_slice", string.char(10, 1, 8), nil_type)
+  check_decode_outcome(context, "reordered", backpatch_field(2, backpatch_field(1, "t"))
+      .. backpatch_field(1, "h"), node_type)
+  check_decode_outcome(context, "merged_next", backpatch_field(1, "h")
+      .. backpatch_field(2, backpatch_field(1, "a"))
+      .. backpatch_field(2, backpatch_field(1, "b")), node_type)
+  check_decode_outcome(context, "union_replaced", string.char(10, 0, 18, 2, 8, 4), choice_type)
+  check_decode_outcome(context, "union_merged",
+      string.char(18, 2, 8, 4, 18, 3, 18, 1, 120), choice_type)
+  check_decode_outcome(context, "union_missing", "", choice_type)
+  check_decode_outcome(context, "union_wrong_wire", string.char(8, 0), choice_type)
+  check_decode_outcome(context, "union_field_missing", "", holder_type)
+  check_decode_outcome(context, "union_field_bad", backpatch_field(1, string.char(8, 0)),
+      holder_type)
+  check_decode_outcome(context, "hooked_field_failure",
+      string.char(8, 2) .. backpatch_field(2, "bad-hook"), hooked_type)
+end
+
+record Ring
+  name: string
+  items: {Ring}
+end
+
+-- A handed-off field decodes from its single occurrence; a repeated one merges
+-- through its whole message; an absent one is nil or the missing-field error.
+-- Construction converts handed-off fields only after every field decoded, as
+-- the reflective constructor runs after decode_record.
+function test_generated_codecs_hand_off_field_occurrences(context: test.Context)
+  local ring_type = descriptor(Ring("", {}))
+  -- One Array slot holding the element as its field 1.
+  local slot = backpatch_field(1, backpatch_field(1,
+      backpatch_field(1, "s") .. backpatch_field(2, "")))
+  local single = backpatch_field(1, "r") .. backpatch_field(2, slot)
+  check_decode_outcome(context, "single_array", single, ring_type)
+  test.assert(string.sub(decode_outcome(single, ring_type, true), 1, 3) == "ok ")
+  check_decode_outcome(context, "merged_array", protobuf.serialize(Ring("r", {}))
+      .. backpatch_field(2, slot), ring_type)
+  check_decode_outcome(context, "missing_array", backpatch_field(1, "r"), ring_type)
+  local packet = foreign titan_protobuf_packet.new()
+  local row = foreign int.new_array(3)
+  local embedded_type = descriptor(Embedded(packet, row))
+  -- A second packet occurrence merges a fourth row element, which only
+  -- construction rejects.
+  local oversized = protobuf.serialize(Embedded(packet, row))
+      .. backpatch_field(1, backpatch_field(2, backpatch_field(1, string.char(8, 2))))
+  check_decode_outcome(context, "conversion_error", oversized, embedded_type)
+  local both = oversized .. string.char(16, 1)
+  check_decode_outcome(context, "decode_error_before_conversion", both, embedded_type)
+  test.assert(string.find(decode_outcome(both, embedded_type, true),
+      "unexpected wire type", 1, true) ~= nil, "a later field must fail first")
+end
+
+-- A hook below a generated frame drops the last reference to that frame's
+-- record and collects; the frame keeps encoding the record it rooted.
+record DroppingToken
+  const label: string
+end
+
+record DroppingChild
+  token: DroppingToken
+  label: string
+end
+
+record DroppingParent
+  child: DroppingChild?
+end
+
+local dropping_parent: DroppingParent? = nil
+
+function DroppingToken:to_transfer_payload(): string
+  local parent? = dropping_parent
+  dropping_parent = nil
+  if parent ~= nil then parent.child = nil end
+  gc.collect()
+  return self.label
+end
+
+function DroppingToken.from_transfer_payload(payload: string): DroppingToken
+  return DroppingToken(payload)
+end
+
+local function dropping_bytes(generated: boolean): string
+  local previous = protobuf.use_generated_codecs(generated)
+  defer protobuf.use_generated_codecs(previous)
+  local parent = DroppingParent(DroppingChild(DroppingToken("token"),
+      string.rep("label", 20)))
+  dropping_parent = parent
+  return protobuf.serialize(parent)
+end
+
+function test_generated_encode_frames_root_their_record(_context: test.Context)
+  test.assert(protobuf.find_generated_codec(DroppingParent(nil)) ~= nil)
+  test.assert(dropping_bytes(true) == dropping_bytes(false),
+      "a generated frame lost its record to a collecting hook")
+end
+
+record EndpointJob
+  id: integer
+  body: string
+  reply: thread.Sender<|integer|>
+  maybe: thread.Sender<|integer|>?
+end
+
+function test_generated_codecs_raise_reflective_errors(context: test.Context)
+  local cyclic = Node("cycle", nil)
+  cyclic.next = cyclic
+  check_same_error(context, "cycle", function () protobuf.serialize(cyclic) end,
+      "cyclic object graph")
+  local ring = Ring("ring", {})
+  ring.items[1] = Ring("inner", {ring})
+  check_same_error(context, "cycle_through_reflective_array", function ()
+    protobuf.serialize(ring)
+  end, "cyclic object graph")
+  check_same_error(context, "cycle_in_packet", function ()
+    backpatch_transfer_roundtrip(ring)
+  end, "cyclic object graph")
+  check_same_error(context, "depth_128", function ()
+    protobuf.serialize(node_chain(128))
+  end, "nesting exceeds 128")
+  check_same_error(context, "hook_failure_under_generated_parent", function ()
+    protobuf.serialize(HookedChoice.single(HookedToken(-1, "neg")))
+  end, "hooked token encode rejected negative secret")
+  local tx, rx = thread.channel<|integer|>(1)
+  defer tx:close()
+  defer rx:close()
+  check_same_error(context, "endpoint_without_packet_scope", function ()
+    protobuf.serialize(EndpointJob(1, "x", tx, nil))
+  end, "requires an encode scope")
+end
+
+function test_generated_codecs_carry_endpoints_in_packets(_context: test.Context)
+  local tx, rx = thread.channel<|integer|>(1)
+  defer tx:close()
+  defer rx:close()
+  test.assert(protobuf.find_generated_codec(EndpointJob(1, "x", tx, nil)) ~= nil)
+  local decoded: EndpointJob = backpatch_transfer_roundtrip(EndpointJob(7, "body", tx, tx))
+  test.assert(decoded.id == 7 and decoded.body == "body")
+  test.assert(decoded.reply ~= tx, "a decoded endpoint is a fresh wrapper")
+  decoded.reply:send(21)
+  test.assert(rx:receive() == 21, "the decoded endpoint lost its channel")
+  -- The inferred local forces the optional endpoint, raising if it is absent.
+  local maybe = decoded.maybe
+  maybe:send(22)
+  test.assert(rx:receive() == 22)
+end
+
 record DepthChain
   next: DepthChain?
   choice: Choice?
 end
 
--- Hand-built wire oracles: an anonymous wrapper would add one nesting level.
+-- Hand-built wire oracles at the depth boundary.
 local function node_chain_bytes(count: integer): string
   local bytes = backpatch_field(1, "leaf")
   for index = 2, count do
@@ -1657,116 +1890,29 @@ end
 function test_generated_codecs_depth_boundaries(context: test.Context)
   local node_type = descriptor(Node("", nil))
   context:run("encode_127_accepted", function (_: test.Context)
-    local accepted, bytes = generated_wire(node_chain(127))
-    test.assert(accepted, "the generated encoder declined depth 128 fields")
-    test.assert(bytes == node_chain_bytes(127), "generated boundary bytes differ")
-    test.assert(protobuf.serialize(node_chain(127)) == bytes)
-  end)
-  context:run("encode_128_rejected_by_both", function (_: test.Context)
-    local chain = node_chain(128)
-    local accepted, bytes = generated_wire(chain)
-    test.assert(not accepted and bytes == "", "the generated encoder accepted depth 129 fields")
-    local generated = raised_message(function () protobuf.serialize(chain) end)
-    local fields: const {reflect.Type} = {node_type}
-    test.assert(generated == raised_message(function ()
-      protobuf.serialize_fields(fields, chain)
-    end), generated)
-    test.assert(string.find(generated, "nesting exceeds 128") ~= nil, generated)
+    test.assert(generated_wire(node_chain(127)) == node_chain_bytes(127))
+    test.assert(reflective_serialize(node_chain(127)) == node_chain_bytes(127))
   end)
   context:run("decode_127_accepted", function (_: test.Context)
-    local decoded, generated = generated_decode(node_chain_bytes(127), "protobuf.tests.Node")
-    test.assert(decoded, "the generated decoder declined depth 128 fields")
-    local chain: Node = generated
+    local chain: Node = generated_decode(node_chain_bytes(127), node_type)
     test.assert(chain_length(chain) == 127)
-    local accepted, bytes = generated_wire(chain)
-    test.assert(accepted and bytes == node_chain_bytes(127), "decoded chain differs")
+    test.assert(generated_wire(chain) == node_chain_bytes(127))
   end)
   context:run("decode_128_rejected_by_both", function (_: test.Context)
-    local decoded = generated_decode(directory_node_bytes(128), "protobuf.tests.Node")
-    test.assert(not decoded, "the generated decoder accepted depth 129 fields")
-    local outcome = decode_outcome(directory_node_bytes(128), node_type, false)
-    test.assert(outcome == decode_outcome(directory_node_bytes(128), node_type, true), outcome)
-    test.assert(string.find(outcome, "nesting exceeds 128") ~= nil, outcome)
+    local generated = decode_outcome(node_chain_bytes(128), node_type, true)
+    test.assert(generated == decode_outcome(node_chain_bytes(128), node_type, false), generated)
+    test.assert(string.find(generated, "nesting exceeds 128", 1, true) ~= nil, generated)
   end)
-  context:run("decline_after_written_bytes_reruns_reflectively", function (_: test.Context)
-    -- The empty union sits at depth 128: valid reflectively (it has no parts),
-    -- but past the generated limit after 127 levels of bytes were appended.
+  context:run("partless_union_at_128", function (_: test.Context)
+    -- Valid on both paths: the empty variant at depth 128 has no fields.
     local chain = DepthChain(nil, Choice.empty())
     for _ = 2, 127 do chain = DepthChain(chain, nil) end
-    local accepted, bytes = generated_wire(chain)
-    test.assert(not accepted and bytes == "", "decline did not restore the buffer")
-    local wire = protobuf.serialize(chain)
-    test.assert(wire == depth_chain_bytes(127), "reflective rerun bytes differ")
-    local target = descriptor(chain)
-    local decoded = generated_decode(wire, "protobuf.tests.DepthChain")
-    test.assert(not decoded, "the generated decoder accepted depth 128")
-    test.assert(protobuf.serialize(protobuf.deserialize(wire, target)) == wire)
-    test.assert(protobuf.serialize(backpatch_transfer_roundtrip(chain)) == wire)
+    test.assert(generated_wire(chain) == depth_chain_bytes(127))
+    test.assert(reflective_serialize(chain) == depth_chain_bytes(127))
+    local decoded = generated_decode(depth_chain_bytes(127),
+        descriptor(DepthChain(nil, nil)))
+    test.assert(reflective_serialize(decoded) == depth_chain_bytes(127))
   end)
-end
-
-function test_generated_codecs_cover_only_plain_public_graphs(_context: test.Context)
-  test.assert(protobuf.find_generated_codec(IntegerValue(1)) ~= nil)
-  test.assert(protobuf.find_generated_codec(Choice.empty()) ~= nil)
-  test.assert(protobuf.find_generated_codec(ChoiceHolder(Choice.empty(), nil)) ~= nil)
-  test.assert(protobuf.find_generated_codec(reflect.NamedType("x")) ~= nil, "imported record")
-  test.assert(protobuf.find_generated_codec(AnyValue(nil)) == nil, "value field")
-  test.assert(protobuf.find_generated_codec(LocalRecord(1)) == nil, "local record")
-  test.assert(protobuf.find_generated_codec(PrivateVariants.visible()) == nil, "private variant")
-  test.assert(protobuf.find_generated_codec(Optimistic.empty()) == nil, "callable part")
-  test.assert(protobuf.find_generated_codec(HookedChoice.none()) == nil, "nested hooks")
-  test.assert(protobuf.find_generated_codec(7) == nil, "scalar")
-  test.assert(protobuf.find_generated_codec("text") == nil, "string")
-end
-
-local function check_decode_outcome(context: test.Context, name: string,
-    bytes: string, target: reflect.Type)
-  context:run(name, function (_: test.Context)
-    local root = decode_outcome(bytes, target, false)
-    local nested = decode_outcome(bytes, target, true)
-    test.assert(root == nested, root .. " ~= " .. nested)
-  end)
-end
-
-function test_generated_codecs_keep_reflective_decoding_of_any_wire(context: test.Context)
-  local integer_type = descriptor(IntegerValue(0))
-  local node_type = descriptor(Node("", nil))
-  local choice_type = descriptor(Choice.empty())
-  check_decode_outcome(context, "empty", "", integer_type)
-  check_decode_outcome(context, "zero_field", string.char(0), integer_type)
-  check_decode_outcome(context, "truncated_varint", string.char(8, 128), integer_type)
-  check_decode_outcome(context, "wrong_wire", string.char(10, 0), integer_type)
-  check_decode_outcome(context, "group", string.char(11, 12), integer_type)
-  check_decode_outcome(context, "repeated_last_wins", string.char(8, 2, 8, 4), integer_type)
-  check_decode_outcome(context, "unknown_first", string.char(16, 1, 8, 2), integer_type)
-  check_decode_outcome(context, "unknown_bytes", string.char(8, 2, 42, 3) .. "abc", integer_type)
-  check_decode_outcome(context, "nonminimal_key", string.char(136, 0, 2), integer_type)
-  check_decode_outcome(context, "reordered", backpatch_field(2, backpatch_field(1, "t"))
-      .. backpatch_field(1, "h"), node_type)
-  check_decode_outcome(context, "merged_next", backpatch_field(1, "h")
-      .. backpatch_field(2, backpatch_field(1, "a"))
-      .. backpatch_field(2, backpatch_field(1, "b")), node_type)
-  check_decode_outcome(context, "union_replaced", string.char(10, 0, 18, 2, 8, 4), choice_type)
-  check_decode_outcome(context, "union_missing", "", choice_type)
-  check_decode_outcome(context, "union_wrong_wire", string.char(8, 0), choice_type)
-end
-
-function test_generated_codecs_keep_reflective_encode_errors(_context: test.Context)
-  local cyclic = Node("cycle", nil)
-  cyclic.next = cyclic
-  local cyclic_fields: const {reflect.Type} = {descriptor(cyclic)}
-  local generated = raised_message(function () protobuf.serialize(cyclic) end)
-  test.assert(generated == raised_message(function ()
-    protobuf.serialize_fields(cyclic_fields, cyclic)
-  end), generated)
-  test.assert(string.find(generated, "cyclic object graph") ~= nil, generated)
-  local deep = Node("leaf", nil)
-  for _ = 1, 130 do deep = Node("branch", deep) end
-  local deep_message = raised_message(function () protobuf.serialize(deep) end)
-  test.assert(string.find(deep_message, "nesting exceeds 128") ~= nil, deep_message)
-  test.assert(deep_message == raised_message(function ()
-    backpatch_transfer_roundtrip(deep)
-  end), deep_message)
 end
 
 record GeneratedResourceProbe

@@ -3,14 +3,17 @@ local _ENV = core
 
 -- Compiler-generated protobuf codecs for public records and unions.
 --
--- Each eligible nominal gets one straight-line encoder and one canonical-wire
--- decoder over its own native storage plan. They replicate titan.protobuf's
--- reflective codec exactly on the inputs they accept and otherwise decline
--- with status 0 (see titan-runtime/transfer.h): no generated code raises a
--- codec error, runs a transfer hook or registered resource codec, loads a
--- module, or enters Lua. The declaring module publishes the entries in its
--- TitanTransferModule manifest and binds each canonical metatable to its entry
--- under TITAN_MT_CODEC during nominal registration.
+-- Each eligible nominal gets one encoder and one decoder specialized to its
+-- native storage plan (titan-runtime/transfer.h). They are titan.protobuf's
+-- reflective codec for that nominal: identical wire, identical error strings
+-- raised at identical points, and no decline. Scalars, strings, and nested
+-- records/unions are handled natively; a nested nominal re-enters its own
+-- generated codec when it has one. Every other field, and every merged or
+-- otherwise unusual wire form, is handed to the reflective field codec through
+-- titan.protobuf's fixed handoff entry with the shared root state. The
+-- declaring module emits the entries in one static array beside its transfer
+-- manifest, whose layout is unchanged, and binds each canonical metatable
+-- under TITAN_MT_CODEC.
 
 local HOOKS = { "to_transfer_payload", "from_transfer_payload" }
 
@@ -21,7 +24,7 @@ local function field_number(ordinal)
 end
 
 local function key_bits(number, wire)
-    return string.format("%d", number * 8 + wire)
+    return string.format("INT64_C(%d)", number * 8 + wire)
 end
 
 local function erased(typ)
@@ -48,8 +51,7 @@ local function has_hooks(owner)
 end
 
 -- The reflective require_record/require_union visibility rule: a public
--- nominal whose complete field or variant list is public. Imported
--- interfaces expose only public members, so compare against the full count.
+-- nominal whose complete field or variant list is public.
 local function all_public(owner)
     if owner.islocal then return false end
     if owner._tag == "Type.Record" then
@@ -64,93 +66,29 @@ local function all_public(owner)
     return (owner.nvariants or #owner.variants) == #owner.variants
 end
 
-local eligibility = setmetatable({}, { __mode = "k" })
-
--- A field type's direct shape: "scalar" for natively encoded scalars and
--- strings (and their Options), the nominal owner for a record or union (or
--- its Option), and nil for every reflective-only shape.
-local function field_shape(typ)
+-- Field types the reflective codec can encode at all. A nominal with any
+-- other field (callables, Maps, Interfaces, `value`, owned or union C types)
+-- stays entirely reflective: no generated code for a field that always raises.
+local function encodable(typ)
     typ = erased(typ)
     local tag = typ._tag
+    if tag == "Type.Option" then return encodable(typ.base) end
     if tag == "Type.Nil" or tag == "Type.Boolean" or tag == "Type.Integer"
-        or tag == "Type.Float" or tag == "Type.String" then
-        return "scalar"
-    elseif tag == "Type.Nominal" then
-        return nominal_owner(typ)
-    elseif tag == "Type.Option" then
-        local base = erased(typ.base)
-        if base._tag ~= "Type.Nil" then return field_shape(base) end
+        or tag == "Type.Float" or tag == "Type.String" or tag == "Type.Array" then
+        return true
     end
-    return nil
+    if tag == "Type.Nominal" then return nominal_owner(typ) ~= nil end
+    if types.is_direct_c(typ) then
+        local resolved = types.resolve_c_typedef(typ)._tag
+        return resolved == "Type.CInteger" or resolved == "Type.CFloat"
+            or resolved == "Type.CPointer" or resolved == "Type.CStruct"
+            or resolved == "Type.CArray"
+    end
+    return false
 end
 
-local function field_lists(owner)
-    local lists = owner._tag == "Type.Record" and { owner.fields } or {}
-    if owner._tag == "Type.Union" then
-        for _, variant in ipairs(owner.variants) do lists[#lists + 1] = variant.parts end
-    end
-    return lists
-end
-
--- Local eligibility (visibility, hooks, field shapes) and the nested nominal
--- owners the answer also depends on.
-local function local_eligibility(owner)
-    if not all_public(owner) or has_hooks(owner) then return false, {} end
-    local deps = {}
-    for _, list in ipairs(field_lists(owner)) do
-        for _, field in ipairs(list) do
-            local shape = field_shape(field.type)
-            if not shape then return false, {} end
-            if shape ~= "scalar" then deps[#deps + 1] = shape end
-        end
-    end
-    return true, deps
-end
-
--- Greatest fixpoint over the complete reachable nominal graph: every owner
--- starts eligible when its own fields are, and loses eligibility when any
--- nested owner is ineligible, until nothing changes. Only then are results
--- cached, so recursive groups never depend on declaration order.
-local function eligible_owner(owner)
-    local known = eligibility[owner]
-    if known ~= nil then return known end
-    local nodes, order, pending = {}, {}, { owner }
-    while #pending > 0 do
-        local current = table.remove(pending)
-        if nodes[current] == nil and eligibility[current] == nil then
-            local ok, deps = local_eligibility(current)
-            nodes[current] = { ok = ok, deps = deps }
-            order[#order + 1] = current
-            for _, dep in ipairs(deps) do pending[#pending + 1] = dep end
-        end
-    end
-    local changed = true
-    while changed do
-        changed = false
-        for _, current in ipairs(order) do
-            local node = nodes[current]
-            if node.ok then
-                for _, dep in ipairs(node.deps) do
-                    local dep_ok = eligibility[dep]
-                    if dep_ok == nil then dep_ok = nodes[dep].ok end
-                    if not dep_ok then
-                        node.ok = false
-                        changed = true
-                        break
-                    end
-                end
-            end
-        end
-    end
-    for _, current in ipairs(order) do eligibility[current] = nodes[current].ok end
-    return eligibility[owner]
-end
-
--- A field descriptor the generated code handles directly, or nil. Nested
--- nominals must themselves be eligible, so a root whose declared graph
--- reaches an endpoint, hook, private, or reflective-only nominal never
--- attempts the generated path. Runtime lookup remains authoritative.
-local function field_kind(typ)
+-- The natively encoded kind of a field, or nil for a reflective handoff.
+local function native_kind(typ)
     typ = erased(typ)
     local tag = typ._tag
     if tag == "Type.Nil" or tag == "Type.Boolean" or tag == "Type.Integer"
@@ -158,11 +96,11 @@ local function field_kind(typ)
         return { tag = tag }
     elseif tag == "Type.Nominal" then
         local owner = nominal_owner(typ)
-        if owner and eligible_owner(owner) then
+        if owner then
             return { tag = tag, owner = owner, type = types.Nominal(owner.name) }
         end
     elseif tag == "Type.Option" then
-        local base = field_kind(typ.base)
+        local base = native_kind(typ.base)
         if base and base.tag ~= "Type.Nil" then
             return { tag = tag, base = base }
         end
@@ -170,53 +108,116 @@ local function field_kind(typ)
     return nil
 end
 
+-- A generated decoder keeps one 32-byte directory entry per declared field
+-- (a union: per variant plus every variant's parts) on the C stack, at up to
+-- 128 nesting levels. Wider nominals stay reflective, whose per-level C stack
+-- use does not grow with field count, so deep wide graphs raise the nesting
+-- error instead of exhausting the C stack.
+local DIRECTORY_LIMIT = 64
+
+local function eligible(node)
+    local owner = node._type
+    if node.islocal or not all_public(owner) or has_hooks(owner) then
+        return false
+    end
+    local lists = owner._tag == "Type.Record" and { owner.fields } or {}
+    local entries = owner._tag == "Type.Record" and #owner.fields or 0
+    if owner._tag == "Type.Union" then
+        entries = #owner.variants
+        for _, variant in ipairs(owner.variants) do
+            lists[#lists + 1] = variant.parts
+            entries = entries + #variant.parts
+        end
+    end
+    if entries > DIRECTORY_LIMIT then return false end
+    for _, list in ipairs(lists) do
+        for _, field in ipairs(list) do
+            if not encodable(field.type) then return false end
+        end
+    end
+    return true
+end
+
 local function uv_of(slot)
     return coder._nominal_uv(slot, "_rec")
 end
 
-local function encode_scalar(tag, key_number, expression)
+-- The reflective descriptor coordinates of one field: its declaring nominal,
+-- 1-based variant ordinal (0 for a record), and 1-based field ordinal.
+local function coordinates(env, ordinal)
+    return {
+        OWNER = c_string_literal(env.owner.name),
+        VARIANT = c_integer_literal(env.variant),
+        INDEX = c_integer_literal(ordinal),
+    }
+end
+
+local function nominal_args(kind)
+    return c_string_literal(kind.owner.name) .. ", "
+        .. (kind.owner._tag == "Type.Union" and "1" or "0")
+end
+
+local function encode_scalar(tag, number, expression)
     if tag == "Type.Integer" then
-        return "if (!titan_protobuf_buf_write_varint(_buf, INT64_C(" .. key_bits(key_number, 0)
-            .. ")) || !titan_protobuf_buf_write_varint(_buf, titan_codec_zigzag("
-            .. expression .. "))) return 0;"
+        return "titan_codec_put_varint(L, _st->buf, " .. key_bits(number, 0)
+            .. ", titan_codec_zigzag(" .. expression .. "));"
     elseif tag == "Type.Boolean" then
-        return "if (!titan_protobuf_buf_write_varint(_buf, INT64_C(" .. key_bits(key_number, 0)
-            .. ")) || !titan_protobuf_buf_write_varint(_buf, (" .. expression
-            .. ") ? 1 : 0)) return 0;"
+        return "titan_codec_put_varint(L, _st->buf, " .. key_bits(number, 0)
+            .. ", (" .. expression .. ") ? 1 : 0);"
     elseif tag == "Type.Float" then
-        return "if (!titan_protobuf_buf_write_double(_buf, INT64_C(" .. key_bits(key_number, 1)
-            .. "), " .. expression .. ")) return 0;"
+        return "titan_codec_put_double(L, _st->buf, " .. key_bits(number, 1)
+            .. ", " .. expression .. ");"
     end
     error("unexpected generated codec scalar " .. tag)
 end
 
-local function encode_reference(kind, key_number, source)
+local function encode_reference(kind, number, source, env, ordinal)
     if kind.tag == "Type.String" then
-        return "titan_codec_write_string(_buf, INT64_C(" .. key_bits(key_number, 2)
-            .. "), " .. source .. ")"
+        return "titan_codec_put_string(L, _st->buf, " .. key_bits(number, 2)
+            .. ", " .. source .. ");"
     end
-    return "titan_codec_encode_nested(L, _resources, _buf, " .. source .. ", "
-        .. c_string_literal(kind.owner.name) .. ", "
-        .. (kind.owner._tag == "Type.Union" and "1" or "0")
-        .. ", INT64_C(" .. key_bits(key_number, 2) .. "), &_self, _depth + 1)"
+    local where = coordinates(env, ordinal)
+    return "titan_codec_put_nominal(L, _st, " .. source .. ", " .. nominal_args(kind)
+        .. ", " .. number .. ", &_self, _depth + 1, " .. where.OWNER .. ", "
+        .. where.VARIANT .. ", " .. where.INDEX .. ");"
 end
 
--- Encoder:field for one declared field or part.
-local function encode_field(plan, field, kind, number)
+-- Encoder:field for one declared field or part at depth `_depth + 1`. The
+-- enclosing frame has already checked that depth.
+local function encode_field(ctx, plan, env, field, ordinal)
     local slot = assert(plan.by_index[field.index], "generated codec slot")
+    local number = field_number(ordinal)
+    local kind = native_kind(field.type)
+    if not kind then
+        local where = coordinates(env, ordinal)
+        return render([[
+            {
+                titan_ensure_stack(L, 2);
+                $PROJECT
+                titan_codec_encode_handoff(L, _st, TITAN_CODEC_ENCODE_FIELD,
+                    $OWNER, $VARIANT, $INDEX, $NUMBER, &_self, _depth + 1,
+                    s2v(L->top.p - 1));
+                L->top.p--;
+            }
+        ]], {
+            PROJECT = coder._reflection_projection(ctx, plan, field, "_rec"),
+            OWNER = where.OWNER, VARIANT = where.VARIANT, INDEX = where.INDEX,
+            NUMBER = c_integer_literal(number),
+        })
+    end
     local tag = kind.tag
     if tag == "Type.Nil" then
         return "/* nil field " .. number .. " emits no wire field */"
     elseif tag == "Type.String" or tag == "Type.Nominal" then
         assert(slot.storage == "uv")
-        return "if (!" .. encode_reference(kind, number, uv_of(slot)) .. ") return 0;"
+        return encode_reference(kind, number, uv_of(slot), env, ordinal)
     elseif tag == "Type.Option" then
         local base = kind.base
         if base.tag == "Type.String" or base.tag == "Type.Nominal" then
             assert(slot.storage == "uv")
             local source = uv_of(slot)
-            return "if (!ttisnil(" .. source .. ") && !"
-                .. encode_reference(base, number, source) .. ") return 0;"
+            return "if (!ttisnil(" .. source .. ")) {\n"
+                .. encode_reference(base, number, source, env, ordinal) .. "\n}"
         end
         assert(slot.storage == "payload" and slot.kind == "option")
         local member = coder._nominal_member(plan, slot, "_rec")
@@ -227,111 +228,113 @@ local function encode_field(plan, field, kind, number)
     return encode_scalar(tag, number, coder._nominal_member(plan, slot, "_rec"))
 end
 
-local function decode_scalar(tag, destination)
+local function decode_scalar(tag, field, data, destination)
     if tag == "Type.Integer" then
-        return "if (!titan_codec_read_varint(_data, _length, &_position, &_bits)) goto decline;\n"
-            .. destination .. " = titan_codec_unzigzag(_bits);"
+        return destination .. " = titan_codec_get_integer(L, " .. field .. ");"
     elseif tag == "Type.Boolean" then
-        return "if (!titan_codec_read_varint(_data, _length, &_position, &_bits) || _bits > 1) goto decline;\n"
-            .. destination .. " = (int)_bits;"
+        return destination .. " = titan_codec_get_boolean(L, " .. field .. ");"
     elseif tag == "Type.Float" then
-        return "if (!titan_codec_take_fixed64(_data, _length, &_position, &_number)) goto decline;\n"
-            .. destination .. " = _number;"
+        return destination .. " = titan_codec_get_float(L, " .. field .. ", " .. data .. ");"
     end
     error("unexpected generated codec scalar " .. tag)
 end
 
-local function wire_of(tag)
-    if tag == "Type.Integer" or tag == "Type.Boolean" then return 0 end
-    if tag == "Type.Float" then return 1 end
-    return 2
-end
-
-local function decode_reference(ctx, kind, destination)
-    if kind.tag == "Type.String" then
-        return "if (!titan_codec_take_slice(_data, _length, &_position, &_offset, &_count)) goto decline;\n"
-            .. "setsvalue(L, " .. destination
-            .. ", luaS_newlstr(L, (const char *)_data + _offset, _count));\n"
-            .. "luaC_barrierback(L, obj2gco(_rec), " .. destination .. ");"
-    end
-    return "if (!titan_codec_take_slice(_data, _length, &_position, &_offset, &_count)) goto decline;\n"
-        .. "if (!titan_codec_decode_nested(L, _resources, &_mod->uv["
-        .. c_integer_literal(type2metatable(ctx, kind.type))
-        .. "].uv, _data + _offset, _count, _depth + 1)) goto decline;\n"
-        .. "setobj(L, " .. destination .. ", s2v(L->top.p - 1));\n"
+local function store_top(destination)
+    return "setobj(L, " .. destination .. ", s2v(L->top.p - 1));\n"
         .. "luaC_barrierback(L, obj2gco(_rec), " .. destination .. ");\n"
         .. "L->top.p--;"
 end
 
--- decode_field for one declared field on canonical wire: the next key is this
--- field's exact key or the field is absent here. Absent required fields,
--- unconsumed (unknown, duplicate, or reordered) fields, and every wire
--- anomaly decline into the reflective decoder.
-local function decode_field(ctx, plan, field, kind, number)
+local function decode_reference(ctx, kind, field, number, env, ordinal, destination)
+    if kind.tag == "Type.String" then
+        return "{ TString *_text = titan_codec_get_string(L, " .. field .. ", "
+            .. env.data .. ");\n"
+            .. "setsvalue(L, " .. destination .. ", _text);\n"
+            .. "luaC_barrierback(L, obj2gco(_rec), " .. destination .. "); }"
+    end
+    local where = coordinates(env, ordinal)
+    return "titan_codec_get_nominal(L, _st, &_mod->uv["
+        .. c_integer_literal(type2metatable(ctx, kind.type)) .. "].uv, "
+        .. nominal_args(kind) .. ", " .. field .. ", " .. number .. ", "
+        .. env.data .. ", " .. env.length .. ", _depth + 1, " .. where.OWNER .. ", "
+        .. where.VARIANT .. ", " .. where.INDEX .. ", _scratch);\n" .. store_top(destination)
+end
+
+-- Whether decoding a field can call titan_codec_decode_field, which reuses
+-- the frame's one-field Message slot (`_scratch`).
+local function decodes_reflectively(kind)
+    if not kind then return true end
+    local base = kind.tag == "Type.Option" and kind.base or kind
+    return kind.tag == "Type.Nil" or base.tag == "Type.Nominal"
+end
+
+-- decode_field for one declared field or part at depth `_depth + 1`, from
+-- the latest occurrence in the parsed directory. A field without a native
+-- kind, and a present nil-typed field (whose nested slice the reflective
+-- decoder validates), use the reflective field decoder: on the field's single
+-- occurrence, or on the whole message when the field repeats. An absent
+-- optional field is nil without a handoff, as decode_field returns nil before
+-- touching it. A reflective result stays on the stack (`_scratch` + k) until
+-- store_results, because the reflective constructor converts fields only
+-- after decode_record has decoded every one of them.
+local function decode_field(ctx, plan, env, field, ordinal)
     local slot = assert(plan.by_index[field.index], "generated codec slot")
+    local number = field_number(ordinal)
+    local entry = "&" .. env.fields .. "[" .. (ordinal - 1) .. "]"
+    local kind = native_kind(field.type)
+    local where = coordinates(env, ordinal)
+    local handoff = render([[
+        titan_codec_decode_field(L, _st, $OWNER, $VARIANT, $INDEX, $NUMBER,
+            $ENTRY, $DATA, $LENGTH, _depth + 1, _scratch);
+    ]], {
+        OWNER = where.OWNER, VARIANT = where.VARIANT, INDEX = where.INDEX,
+        NUMBER = c_integer_literal(number), ENTRY = entry, DATA = env.data,
+        LENGTH = env.length,
+    })
+    if not kind then
+        if erased(field.type)._tag == "Type.Option" then
+            return "if ((" .. entry .. ")->count == 0) {\n"
+                .. "setnilvalue(s2v(L->top.p));\nL->top.p++;\n} else {\n"
+                .. handoff .. "\n}"
+        end
+        return handoff
+    end
     local tag = kind.tag
     if tag == "Type.Nil" then
-        return "/* nil field " .. number .. " is absent on canonical wire */"
+        return "if ((" .. entry .. ")->count != 0) {\n" .. handoff .. "\nL->top.p--;\n}"
     end
     local required = tag ~= "Type.Option"
     local base = required and kind or kind.base
     local body
     if base.tag == "Type.String" or base.tag == "Type.Nominal" then
         assert(slot.storage == "uv")
-        body = decode_reference(ctx, base, uv_of(slot))
+        body = decode_reference(ctx, base, entry, number, env, ordinal, uv_of(slot))
     elseif required then
         assert(slot.storage == "payload" and slot.kind == "scalar")
-        body = decode_scalar(base.tag, coder._nominal_member(plan, slot, "_rec"))
+        body = decode_scalar(base.tag, entry, env.data,
+            coder._nominal_member(plan, slot, "_rec"))
     else
         assert(slot.storage == "payload" and slot.kind == "option")
         local member = coder._nominal_member(plan, slot, "_rec")
-        body = decode_scalar(base.tag, "(" .. member .. ").value")
+        body = decode_scalar(base.tag, entry, env.data, "(" .. member .. ").value")
             .. "\n(" .. member .. ").present = 1;"
     end
-    return render([[
-        _taken = titan_codec_take_key(_data, _length, &_position, UINT64_C($KEY));
-        if (_taken < 0) goto decline;
-        if (_taken) {
-            $BODY
-        }$MISSING
-    ]], {
-        KEY = key_bits(number, wire_of(base.tag)),
-        BODY = body,
-        MISSING = required and " else goto decline;" or "",
-    })
+    if required then
+        return "titan_codec_need(L, " .. entry .. ", " .. number .. ");\n" .. body
+    end
+    return "if ((" .. entry .. ")->count != 0) {\n" .. body .. "\n}"
 end
 
-local function encode_fields(plan, fields)
+local function encode_fields(ctx, plan, env, fields)
     local code = {}
+    if #fields > 0 then code[1] = "titan_codec_depth(L, _depth + 1);" end
     for ordinal, field in ipairs(fields) do
-        code[#code + 1] = encode_field(plan, field,
-            assert(field_kind(field.type)), field_number(ordinal))
+        code[#code + 1] = encode_field(ctx, plan, env, field, ordinal)
     end
     return table.concat(code, "\n")
 end
 
-local function decode_fields(ctx, plan, fields)
-    local code = {}
-    for ordinal, field in ipairs(fields) do
-        code[#code + 1] = decode_field(ctx, plan, field,
-            assert(field_kind(field.type)), field_number(ordinal))
-    end
-    return table.concat(code, "\n")
-end
-
-local DECODE_LOCALS = [[
-    size_t _position = 0;
-    size_t _offset = 0;
-    size_t _count = 0;
-    uint64_t _bits = 0;
-    double _number = 0;
-    int _taken = 0;
-    ptrdiff_t _saved;
-    Udata *_rec;
-    (void)_resources; (void)_offset; (void)_count;
-    (void)_bits; (void)_number; (void)_taken;
-]]
-
+-- The reflective constructor's storage steps, rooted before any field.
 local function allocate(ctx, plan, owner)
     return render([[
         _rec = luaS_newudata(L, $SIZE, $NUV);
@@ -346,138 +349,207 @@ local function allocate(ctx, plan, owner)
     })
 end
 
-local function emit_record(ctx, owner, encode, decode)
+-- A decoding frame's Lua stack plan: its record, then (when a field can
+-- decode reflectively) the one-field Message slot `_scratch` followed by one
+-- result per field without a native kind, plus one transient slot.
+local function decode_plan(fields)
+    local scratch, results = false, 0
+    for _, field in ipairs(fields) do
+        local kind = native_kind(field.type)
+        if decodes_reflectively(kind) then scratch = true end
+        if not kind then results = results + 1 end
+    end
+    return scratch, results
+end
+
+local function decode_fields(ctx, plan, env, node, fields)
+    local scratch, results = decode_plan(fields)
+    local code = { "titan_codec_reserve(L, " .. (2 + (scratch and 1 or 0) + results) .. ");" }
+    code[#code + 1] = allocate(ctx, plan, env.owner)
+    if env.variant > 0 then code[#code + 1] = env.tag end
+    if scratch then
+        code[#code + 1] = "_scratch = savestack(L, L->top.p);\n"
+            .. "setnilvalue(s2v(L->top.p));\nL->top.p++;"
+    end
+    if #fields > 0 then code[#code + 1] = "titan_codec_depth(L, _depth + 1);" end
+    local reflective = {}
+    for ordinal, field in ipairs(fields) do
+        code[#code + 1] = decode_field(ctx, plan, env, field, ordinal)
+        if not native_kind(field.type) then reflective[#reflective + 1] = field end
+    end
+    -- store_results: construction conversions in field order, after decoding.
+    for k, field in ipairs(reflective) do
+        code[#code + 1] = "{ TValue _source = *s2v(restorestack(L, _scratch) + "
+            .. k .. ");\n"
+            .. coder._reflection_store(ctx, node.loc, plan, field, "_rec", "&_source")
+            .. "\n}"
+    end
+    if scratch then code[#code + 1] = "L->top.p = restorestack(L, _scratch);" end
+    return table.concat(code, "\n")
+end
+
+-- Whether encoding the fields can run Titan code (a handoff, a resource
+-- codec, or a nested frame that hands off): such a frame roots its record on
+-- the Lua stack, since a hook may drop the last reference to it.
+local function encodes_reflectively(fields)
+    for _, field in ipairs(fields) do
+        local kind = native_kind(field.type)
+        if not kind then return true end
+        local base = kind.tag == "Type.Option" and kind.base or kind
+        if base.tag == "Type.Nominal" then return true end
+    end
+    return false
+end
+
+local ROOT_RECORD = "titan_codec_reserve(L, 1);\n"
+    .. "setuvalue(L, s2v(L->top.p), _rec);\nL->top.p++;"
+
+local function emit_record(ctx, node, encode, decode)
+    local owner = node._type
     local plan = coder._nominal_plan(ctx, owner)
+    local env = {
+        owner = owner, variant = 0, fields = "_fields",
+        data = "_data", length = "_length",
+    }
+    local rooted = encodes_reflectively(owner.fields)
     return render([[
-        static int $ENCODE(lua_State *L, const TValue *_resources,
-            titan_protobuf_buffer *_buf, Udata *_rec, const TitanCodecPath *_path,
-            int _depth) {
+        static void $ENCODE(lua_State *L, TitanCodecState *_st, Udata *_rec,
+            const TitanCodecPath *_path, int _depth) {
             TitanCodecPath _self;
-            (void)L; (void)_resources;
-            if (_depth >= TITAN_CODEC_DEPTH_LIMIT || titan_codec_on_path(_path, _rec))
-                return 0;
-            _self.object = _rec;
+            titan_codec_depth(L, _depth);
+            titan_codec_enter(L, _st, _path, _rec);
+            _self.object = obj2gco(_rec);
             _self.parent = _path;
             (void)_self;
+            $ROOT
             $ENCODE_FIELDS
-            return 1;
+            $UNROOT
         }
-        static int $DECODE(lua_State *L, const TValue *_resources, Udata *_mod,
+        static void $DECODE(lua_State *L, TitanCodecState *_st, Udata *_mod,
             const uint8_t *_data, size_t _length, int _depth) {
-            $LOCALS
-            if (_depth >= TITAN_CODEC_DEPTH_LIMIT)
-                return 0;
-            titan_ensure_stack(L, 2);
-            _saved = savestack(L, L->top.p);
-            $ALLOCATE
+            TitanCodecField _fields[$CAPACITY];
+            Udata *_rec;
+            ptrdiff_t _scratch = -1;
+            (void)_scratch;
+            titan_codec_parse(L, _data, _length, _fields, $COUNT);
+            titan_codec_depth(L, _depth);
             $DECODE_FIELDS
-            if (_position != _length) goto decline;
-            return 1;
-        decline:
-            L->top.p = restorestack(L, _saved);
-            return 0;
         }
     ]], {
         ENCODE = encode,
         DECODE = decode,
-        LOCALS = DECODE_LOCALS,
-        ALLOCATE = allocate(ctx, plan, owner),
-        ENCODE_FIELDS = encode_fields(plan, owner.fields),
-        DECODE_FIELDS = decode_fields(ctx, plan, owner.fields),
+        CAPACITY = c_integer_literal(math.max(#owner.fields, 1)),
+        COUNT = c_integer_literal(#owner.fields),
+        ROOT = rooted and ROOT_RECORD or "",
+        UNROOT = rooted and "L->top.p--;" or "",
+        ENCODE_FIELDS = encode_fields(ctx, plan, env, owner.fields),
+        DECODE_FIELDS = decode_fields(ctx, plan, env, node, owner.fields),
     })
 end
 
-local function emit_union(ctx, owner, encode, decode)
+local function emit_union(ctx, node, encode, decode)
+    local owner = node._type
     local encode_cases, decode_cases = {}, {}
     for ordinal, variant in ipairs(owner.variants) do
         local plan = coder._nominal_plan(ctx, owner, variant)
-        local number = field_number(ordinal)
+        local env = {
+            owner = owner, variant = ordinal, fields = "_parts",
+            data = "_part_data", length = "_part_length",
+            tag = coder._nominal_tag("_rec") .. " = "
+                .. c_integer_literal(variant.index) .. ";",
+        }
+        local rooted = encodes_reflectively(variant.parts)
         encode_cases[#encode_cases + 1] = render([[
             case $TAG: {
-                int64_t _mark = titan_protobuf_buf_begin_nested(_buf, INT64_C($KEY));
-                if (_mark < 0) return 0;
+                int64_t _mark;
+                $ROOT
+                _mark = titan_codec_begin(L, _st, $KEY);
                 $PARTS
-                return titan_protobuf_buf_end_nested(_buf, _mark) > 0;
+                titan_codec_end(L, _st, _mark);
+                $UNROOT
+                return;
             }
         ]], {
             TAG = c_integer_literal(variant.index),
-            KEY = key_bits(number, 2),
-            PARTS = encode_fields(plan, variant.parts),
+            KEY = key_bits(field_number(ordinal), 2),
+            ROOT = rooted and ROOT_RECORD or "",
+            UNROOT = rooted and "L->top.p--;" or "",
+            PARTS = encode_fields(ctx, plan, env, variant.parts),
         })
         decode_cases[#decode_cases + 1] = render([[
-            case UINT64_C($KEY): {
-                $ALLOCATE
-                $TAGFIELD = $TAG;
+            case $ORDINAL: {
+                const uint8_t *_part_data = _data + _variants[$SLOT].offset;
+                size_t _part_length = _variants[$SLOT].length;
+                TitanCodecField _parts[$CAPACITY];
+                ptrdiff_t _scratch = -1;
+                (void)_scratch;
+                titan_codec_parse(L, _part_data, _part_length, _parts, $COUNT);
                 $PARTS
-                break;
+                return;
             }
         ]], {
-            KEY = key_bits(number, 2),
-            ALLOCATE = allocate(ctx, plan, owner),
-            TAGFIELD = coder._nominal_tag("_rec"),
-            TAG = c_integer_literal(variant.index),
-            PARTS = decode_fields(ctx, plan, variant.parts),
+            ORDINAL = c_integer_literal(ordinal),
+            SLOT = c_integer_literal(ordinal - 1),
+            CAPACITY = c_integer_literal(math.max(#variant.parts, 1)),
+            COUNT = c_integer_literal(#variant.parts),
+            PARTS = decode_fields(ctx, plan, env, node, variant.parts),
         })
     end
     return render([[
-        static int $ENCODE(lua_State *L, const TValue *_resources,
-            titan_protobuf_buffer *_buf, Udata *_rec, const TitanCodecPath *_path,
-            int _depth) {
+        static void $ENCODE(lua_State *L, TitanCodecState *_st, Udata *_rec,
+            const TitanCodecPath *_path, int _depth) {
             TitanCodecPath _self;
-            (void)L; (void)_resources;
-            if (_depth >= TITAN_CODEC_DEPTH_LIMIT || titan_codec_on_path(_path, _rec))
-                return 0;
-            _self.object = _rec;
+            titan_codec_depth(L, _depth);
+            titan_codec_enter(L, _st, _path, _rec);
+            _self.object = obj2gco(_rec);
             _self.parent = _path;
             (void)_self;
             switch ($UNIONTAG) {
                 $ENCODE_CASES
                 default:
-                    return 0;
+                    titan_codec_raise(L, "protobuf: private union variant");
+                    return;
             }
         }
-        static int $DECODE(lua_State *L, const TValue *_resources, Udata *_mod,
+        static void $DECODE(lua_State *L, TitanCodecState *_st, Udata *_mod,
             const uint8_t *_data, size_t _length, int _depth) {
-            $LOCALS
-            uint64_t _key = 0;
-            if (_depth >= TITAN_CODEC_DEPTH_LIMIT)
-                return 0;
-            titan_ensure_stack(L, 2);
-            /* Canonical oneof: exactly one recognized length-delimited variant. */
-            if (!titan_codec_read_varint(_data, _length, &_position, &_key)
-                || !titan_codec_take_slice(_data, _length, &_position, &_offset, &_count)
-                || _position != _length)
-                return 0;
-            _data += _offset;
-            _length = _count;
-            _position = 0;
-            _saved = savestack(L, L->top.p);
-            switch (_key) {
+            TitanCodecField _variants[$CAPACITY];
+            Udata *_rec;
+            uint32_t _selected;
+            titan_codec_parse(L, _data, _length, _variants, $COUNT);
+            _selected = titan_codec_single(_variants, $COUNT);
+            if (_selected == 0) {
+                /* Zero, repeated, replaced, or non-message variants. */
+                titan_codec_reserve(L, 1);
+                titan_codec_decode_handoff(L, _st, TITAN_CODEC_DECODE_NOMINAL,
+                    $NAME, 0, 0, 0, _data, _length, _depth);
+                return;
+            }
+            titan_codec_depth(L, _depth);
+            switch (_selected) {
                 $DECODE_CASES
                 default:
-                    return 0;
+                    titan_codec_raise(L, "protobuf: union has no recognized variant");
+                    return;
             }
-            if (_position != _length) goto decline;
-            return 1;
-        decline:
-            L->top.p = restorestack(L, _saved);
-            return 0;
         }
     ]], {
         ENCODE = encode,
         DECODE = decode,
-        LOCALS = DECODE_LOCALS,
         UNIONTAG = coder._nominal_tag("_rec"),
+        CAPACITY = c_integer_literal(math.max(#owner.variants, 1)),
+        COUNT = c_integer_literal(#owner.variants),
+        NAME = c_string_literal(owner.name),
         ENCODE_CASES = table.concat(encode_cases, "\n"),
         DECODE_CASES = table.concat(decode_cases, "\n"),
     })
 end
 
 -- Emit the codec pair for one source nominal declaration and register its
--- manifest entry. Returns nothing for ineligible nominals.
+-- manifest entry. Ineligible nominals stay entirely reflective.
 function coder._codec_emit(ctx, code, node)
+    if not eligible(node) then return end
     local owner = node._type
-    if node.islocal or not eligible_owner(owner) then return end
     local tlcontext = ctx.tlcontext or ctx
     tlcontext.transfer_codecs = tlcontext.transfer_codecs or {}
     tlcontext.transfer_codec_index = tlcontext.transfer_codec_index or {}
@@ -491,7 +563,7 @@ function coder._codec_emit(ctx, code, node)
     tlcontext.transfer_codecs[#tlcontext.transfer_codecs + 1] = entry
     tlcontext.transfer_codec_index[owner.name] = entry
     local emit = entry.is_union and emit_union or emit_record
-    code[#code + 1] = emit(ctx, owner, entry.encode, entry.decode)
+    code[#code + 1] = emit(ctx, node, entry.encode, entry.decode)
 end
 
 -- Metatable registration lines binding a nominal to its manifest entry.

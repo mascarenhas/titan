@@ -350,11 +350,13 @@ per generated module. The existing native-symbol resolver returns it for
 perform no additional lookup and keep their existing upvalue layout. Each
 first-class source function, lambda, bound method, and realized callable
 adapter has an entry containing its native/strict lookup key, immediate capture
-count, and generated projection/restoration functions. The manifest also
-publishes one `TitanTransferCodec` per generated record or union codec
+count, and generated projection/restoration functions; its layout is unchanged
+by generated nominal codecs. Beside it, the module emits one static
+`TitanTransferCodec` array with an entry per generated record or union codec
 (`coder/nominal_codec.lua`): its qualified name, kind, and generated encode and
 decode functions, emitted next to the nominal's other storage helpers. The
-nominal's metatable registration binds `TITAN_MT_CODEC` to that entry; see
+array is not reachable from the manifest; the nominal's metatable registration
+binds `TITAN_MT_CODEC` to the entry's address; see
 [generated nominal codecs](protobuf-library.md#generated-nominal-codecs). A
 referenced local function has the same transfer capability
 as an exported function. Captured nominals still follow the public protobuf or
@@ -876,6 +878,18 @@ call shapes. Their target adapters and strict relays are private consumer
 artifacts, with no serialized field, provider symbol, or module-state slot. Any
 implementation that needs another fixed slot or signature requires a coordinated
 ABI advance.
+
+Generated nominal codecs add generated-code ABI that no load-time check
+covers: the `TITAN_MT_CODEC` metatable binding, the `TitanTransferCodec`,
+`TitanCodecState`, `TitanCodecHandoff`, and `TitanCodecField` layouts, and the
+inline codec runtime that every module compiles from the SDK's `transfer.h`.
+They changed without a `TITAN_ABI_VERSION` advance, so every provider, the
+standard library included, must be rebuilt from clean against one SDK; a
+module compiled against another `transfer.h` is not detected when it loads.
+The one cross-module call, a generated codec into `titan.protobuf`'s
+`codec_handoff`, checks the closure's function-type tag against
+`TITAN_CODEC_HANDOFF_TYPE` before using the native entry and raises otherwise
+(see [generated nominal codecs](protobuf-library.md#generated-nominal-codecs)).
 
 ## The module protocol
 

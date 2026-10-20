@@ -121,6 +121,34 @@ local function read_message_slice(
   return message
 end
 
+-- A generated decoder hands the reflective field decoder one field's latest
+-- occurrence instead of its whole message. decode_field reads only the latest
+-- occurrence of its number, so a Message holding just that entry (or none, for
+-- an absent field) decodes the field exactly as the parsed message would; a
+-- repeated field, which merges, reparses its message instead. One such
+-- Message serves every handed-off field of one decoding frame.
+local function occurrence_message(base: foreign const *uint8_t, holder: string?,
+                                  context: value): Message
+  return Message {
+    base = base, holder = holder, context = context,
+    first = foreign titan_protobuf_field.new(), entries = nil, count = 0, index = nil,
+  }
+end
+
+local function Message:hold_occurrence(number: integer, count: integer, wire: integer,
+                                       bits: integer, offset: integer, length: integer)
+  self.count = count
+  if count == 0 then return end
+  local entry = self:entry(1)
+  entry.number = number
+  entry.wire = wire
+  entry.bits = bits
+  entry.offset = offset
+  entry.length = length
+  entry.previous = 0
+  entry.chain = 0
+end
+
 -- The sparse index heads one chain per bucket with 1-based entry ordinals,
 -- zero being the empty sentinel. A chain links only the latest entry of each
 -- distinct field number, so a probe visits only numbers sharing its bucket and
@@ -192,18 +220,16 @@ end
 
 -- Singular embedded messages merge across repeated occurrences. Scalars use
 -- the final occurrence, as required by the Protocol Buffers wire contract.
-local function Message:merged_message(number: integer): Message
+-- The merged bytes of one embedded field: its base, offset, length, and the
+-- string owning them, after the same wire checks in the same order.
+local function Message:merged_slice(
+    number: integer): (foreign const *uint8_t, integer, integer, string?)
   local index = self:last_index(number)
-  if index == 0 then
-    return Message {
-      base = self.base, holder = self.holder, context = self.context,
-      first = foreign titan_protobuf_field.new(), entries = nil, count = 0, index = nil,
-    }
-  end
+  if index == 0 then return self.base, 0, 0, self.holder end
   local field = self:entry(index)
   require_wire(field, 2)
   if field.previous == 0 then
-    return read_message_slice(self.base, field.offset, field.length, self.holder, self.context)
+    return self.base, field.offset, field.length, self.holder
   end
   -- Walk only this field's occurrences, then restore wire encounter order.
   local chunks: {integer} = {}
@@ -219,7 +245,20 @@ local function Message:merged_message(number: integer): Message
     output:write(slice_to_string(self.base, chunk.offset, chunk.length))
   end
   local merged = output:drain()
-  return read_message_slice(ffi.titan_protobuf_bytes_ptr(merged), 0, #merged, merged, self.context)
+  return ffi.titan_protobuf_bytes_ptr(merged), 0, #merged, merged
+end
+
+local function Message:merged_message(number: integer): Message
+  local base, offset, length, holder? = self:merged_slice(number)
+  return read_message_slice(base, offset, length, holder, self.context)
+end
+
+-- The structural branch for an embedded nominal with a generated codec.
+local function Message:generated_nominal(number: integer,
+    codec: foreign const *TitanTransferCodec, metatable: value, depth: integer): value
+  local base, offset, length, holder? = self:merged_slice(number)
+  return decode_generated(codec, metatable, base + offset, length, self.context,
+      holder, depth)
 end
 
 -- Each result below is a standalone `local frozen = ... as const {value}` of a
@@ -421,8 +460,16 @@ local function decode_field(message: Message, number: integer,
       end
       raise "protobuf: record type mismatch"
     end
+    local generated, metatable = find_named_codec(record_type.name, 0)
+    if generated ~= nil then
+      return message:generated_nominal(number, generated, metatable, depth)
+    end
     return decode_record(message:merged_message(number), record_type, depth)
   when is_union(union_type) then
+    local generated, metatable = find_named_codec(union_type.name, 1)
+    if generated ~= nil then
+      return message:generated_nominal(number, generated, metatable, depth)
+    end
     return decode_union(message:merged_message(number), union_type, depth)
   when is_foreign_integer{spelling, is_signed, bits} then
     require_wire(field, 0)

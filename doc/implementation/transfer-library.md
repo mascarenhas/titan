@@ -95,12 +95,16 @@ reflection; `encode_packet` additionally recognizes registered resource roots:
    the record or union through the ordinary owned packet buffer
    (`init_packet_buffer` with the codec's name and the `nominal_module`, then
    `protobuf.serialize_generated_to_buffer` and `finalize_buf_message` with
-   the codec's record or union kind). It allocates no inspection, `Encoder`,
-   or cycle Map and attaches no resources. When it declines, the buffer is
-   freed and the reflective steps below run unchanged from the start. Decoding
-   reaches the generated decoder through
+   the codec's record or union kind), carrying the packet's `ResourceScope` as
+   its context. It allocates no root inspection. Endpoint fields and other
+   registered resources attach through the reflective resource branch with
+   that scope, allocating no `Encoder`; hooked, Array, and foreign fields use
+   the reflective field encoder, through one `Encoder` and cycle Map created
+   on the root's first such field and reused for the rest, so attachment order
+   and errors are those of the reflective root. Decoding reaches the generated
+   decoder through
    `protobuf.deserialize_nominal_buffer_with_context` after the unchanged
-   demand-driven `initialize_nominal_raw`. See
+   demand-driven `initialize_nominal_raw`, and claims resources the same way. See
    [generated nominal codecs](protobuf-library.md#generated-nominal-codecs).
 5. **Single structural root inspection and carried packet context**: When a
    non-scalar, non-function value is inspected once with
