@@ -261,16 +261,17 @@ function coder._transfer_emit_manifest(tlcontext, sigs, code)
         code[#code + 1] = "static const TitanTransferEntry " .. array
             .. "[] = {\n" .. table.concat(initializers, ",\n") .. "\n};"
     end
-    local codecs, codec_count = coder._codec_emit_table(tlcontext, code)
+    -- Generated nominal codecs are reached through their metatable binding
+    -- (TITAN_MT_CODEC); only the immutable entry array is emitted here.
+    coder._codec_emit_table(tlcontext, code)
     tlcontext.transfer_manifest = tlcontext.prefix .. "transfer_manifest"
     code[#code + 1] = render([[
         static const TitanTransferModule $MANIFEST = {
-            $NAME, $COUNT, $ENTRIES, $CODEC_COUNT, $CODECS
+            $NAME, $COUNT, $ENTRIES
         };
     ]], {
         MANIFEST = tlcontext.transfer_manifest,
         NAME = c_string_literal(tlcontext.module),
         COUNT = #entries, ENTRIES = array,
-        CODEC_COUNT = codec_count, CODECS = codecs,
     })
 end

@@ -81,6 +81,8 @@ foreign function write_resource_index(raw_buf: *void, index: unsigned int): int
 find_generated_codec(candidate: value): foreign const *void
 serialize_generated_to_buffer(buf: foreign *void, codec: foreign const *void,
                               candidate: value): boolean
+deserialize_generated_buffer(data: foreign const *void, length: integer,
+                             name: string): (boolean, value)
 ```
 
 The root must be a public Titan record or union. `deserialize` and `schema`
@@ -188,9 +190,11 @@ reflective inspection and bookkeeping allocations. A nominal with an Array,
 `value`, callable, Interface, or foreign field, a custom hook, or a registered
 resource capability, and any unusual or malformed wire input, take the
 reflective path. `find_generated_codec` returns the codec of a nominal instance
-(nil when reflection owns it), and `serialize_generated_to_buffer` appends that
-root or returns false without changing the buffer; both are compiled
-collaboration entries for `titan.transfer`.
+(nil when reflection owns it). `serialize_generated_to_buffer` appends that
+root or returns false with the buffer's length restored (capacity may have
+grown), and `deserialize_generated_buffer` returns `true` and the decoded value
+or `false` without decoding; all three are compiled collaboration entries for
+`titan.transfer` and diagnostics that must know which path handled a value.
 
 ## Anonymous messages
 

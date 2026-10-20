@@ -165,18 +165,21 @@ declared graph it can encode directly (`coder/nominal_codec.lua`). Every field o
 variant must be public, no member may be named `to_transfer_payload` or
 `from_transfer_payload`, and every field or part type must be `nil`, a boolean,
 integer, float, string, a statically eligible record or union, or an Option of
-one of those except nil. Eligibility is a fixpoint over recursive nominals.
+one of those except nil. Eligibility is the greatest fixpoint over the complete
+reachable nominal graph: a nominal is eligible when its own fields are, and
+loses eligibility when any nested nominal is ineligible, so mutually recursive
+declarations resolve identically in every declaration order.
 Arrays, Maps, `value` (including erased generic parameters), functions,
 Interfaces, foreign types, hooks, and private members keep the whole nominal
 reflective, so an endpoint-bearing root never attempts the generated path.
 
-The declaring module publishes the entries in its `TitanTransferModule`
-manifest (`codec_count`/`codecs`, `transfer.h`) and binds each canonical
-metatable to its entry under `TITAN_MT_CODEC` during nominal registration.
-`find_generated_codec` reads that binding with raw table reads and returns nil
-when the metatable also has a registered resource codec, so resource
-capabilities keep their precedence. Erased generic applications share the one
-metatable and entry.
+The declaring module emits one immutable `TitanTransferCodec` array next to
+its `TitanTransferModule` manifest (`transfer.h`) and binds each canonical
+metatable to its entry under `TITAN_MT_CODEC` during nominal registration; the
+manifest itself is unchanged. `find_generated_codec` reads that binding with
+raw table reads and returns nil when the metatable also has a registered
+resource codec, so resource capabilities keep their precedence. Erased generic
+applications share the one metatable and entry.
 
 A generated codec replicates the reflective codec on the inputs it accepts and
 otherwise **declines** with status 0. It never raises a codec error, runs a
@@ -190,9 +193,11 @@ more, on an object already on its automatic path chain (cycles), on a string or
 message over 2 GiB, on allocation failure, and at a nested nominal without a
 bound codec, with a registered resource codec, or with a different nominal name
 or kind. The decoder accepts only canonical wire: declared fields in order, each
-at most once, with exact keys and wire types; a union holds exactly one
-recognized variant. Unknown, repeated, reordered, or malformed fields, missing
-required fields, invalid booleans, groups, and depth 128 or more decline. On
+at most once, with the expected wire types (non-minimal key varints decode as
+they do reflectively); a union holds exactly one recognized variant. Unknown,
+repeated, reordered, or malformed fields, missing required fields, invalid
+booleans, groups, and depth 128 or more decline. Allocation failure while
+decoding raises Lua's ordinary memory error, as on the reflective path. On
 canonical input the reflective last-wins, merge, and oneof rules select the
 single occurrence. Decoding allocates the destination with the reflective
 constructor's storage steps (`luaS_newudata`, module metatable, zeroed payload),
@@ -203,7 +208,11 @@ Generated codecs are used only at roots: `serialize_to_buffer` (before
 `reflect.inspect`), the inspected-root entries, `deserialize`,
 `deserialize_nominal*`, and transfer packets. The reflective encoder and decoder
 never call them, so the anonymous root is a reflective oracle for differential
-tests and the two cycle detectors never mix.
+tests and the two cycle detectors never mix. The collaboration entries
+`serialize_generated_to_buffer` and `deserialize_generated_buffer` run only the
+generated root and report a decline, which native tests use to prove which path
+handled a value. After a transfer decline, the reflective inspected-root entry
+tries the generated codec once more before encoding reflectively.
 
 ## Encoding
 

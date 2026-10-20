@@ -64,13 +64,93 @@ local function all_public(owner)
     return (owner.nvariants or #owner.variants) == #owner.variants
 end
 
-local eligible_owner
+local eligibility = setmetatable({}, { __mode = "k" })
+
+-- A field type's direct shape: "scalar" for natively encoded scalars and
+-- strings (and their Options), the nominal owner for a record or union (or
+-- its Option), and nil for every reflective-only shape.
+local function field_shape(typ)
+    typ = erased(typ)
+    local tag = typ._tag
+    if tag == "Type.Nil" or tag == "Type.Boolean" or tag == "Type.Integer"
+        or tag == "Type.Float" or tag == "Type.String" then
+        return "scalar"
+    elseif tag == "Type.Nominal" then
+        return nominal_owner(typ)
+    elseif tag == "Type.Option" then
+        local base = erased(typ.base)
+        if base._tag ~= "Type.Nil" then return field_shape(base) end
+    end
+    return nil
+end
+
+local function field_lists(owner)
+    local lists = owner._tag == "Type.Record" and { owner.fields } or {}
+    if owner._tag == "Type.Union" then
+        for _, variant in ipairs(owner.variants) do lists[#lists + 1] = variant.parts end
+    end
+    return lists
+end
+
+-- Local eligibility (visibility, hooks, field shapes) and the nested nominal
+-- owners the answer also depends on.
+local function local_eligibility(owner)
+    if not all_public(owner) or has_hooks(owner) then return false, {} end
+    local deps = {}
+    for _, list in ipairs(field_lists(owner)) do
+        for _, field in ipairs(list) do
+            local shape = field_shape(field.type)
+            if not shape then return false, {} end
+            if shape ~= "scalar" then deps[#deps + 1] = shape end
+        end
+    end
+    return true, deps
+end
+
+-- Greatest fixpoint over the complete reachable nominal graph: every owner
+-- starts eligible when its own fields are, and loses eligibility when any
+-- nested owner is ineligible, until nothing changes. Only then are results
+-- cached, so recursive groups never depend on declaration order.
+local function eligible_owner(owner)
+    local known = eligibility[owner]
+    if known ~= nil then return known end
+    local nodes, order, pending = {}, {}, { owner }
+    while #pending > 0 do
+        local current = table.remove(pending)
+        if nodes[current] == nil and eligibility[current] == nil then
+            local ok, deps = local_eligibility(current)
+            nodes[current] = { ok = ok, deps = deps }
+            order[#order + 1] = current
+            for _, dep in ipairs(deps) do pending[#pending + 1] = dep end
+        end
+    end
+    local changed = true
+    while changed do
+        changed = false
+        for _, current in ipairs(order) do
+            local node = nodes[current]
+            if node.ok then
+                for _, dep in ipairs(node.deps) do
+                    local dep_ok = eligibility[dep]
+                    if dep_ok == nil then dep_ok = nodes[dep].ok end
+                    if not dep_ok then
+                        node.ok = false
+                        changed = true
+                        break
+                    end
+                end
+            end
+        end
+    end
+    for _, current in ipairs(order) do eligibility[current] = nodes[current].ok end
+    return eligibility[owner]
+end
 
 -- A field descriptor the generated code handles directly, or nil. Nested
--- nominals must themselves be statically eligible, so a root whose declared
--- graph reaches an endpoint, hook, private, or reflective-only nominal never
+-- nominals must themselves be eligible, so a root whose declared graph
+-- reaches an endpoint, hook, private, or reflective-only nominal never
 -- attempts the generated path. Runtime lookup remains authoritative.
-local function field_kind(typ, active)
+local function field_kind(typ)
     typ = erased(typ)
     local tag = typ._tag
     if tag == "Type.Nil" or tag == "Type.Boolean" or tag == "Type.Integer"
@@ -78,46 +158,16 @@ local function field_kind(typ, active)
         return { tag = tag }
     elseif tag == "Type.Nominal" then
         local owner = nominal_owner(typ)
-        if owner and eligible_owner(owner, active) then
+        if owner and eligible_owner(owner) then
             return { tag = tag, owner = owner, type = types.Nominal(owner.name) }
         end
     elseif tag == "Type.Option" then
-        local base = field_kind(typ.base, active)
+        local base = field_kind(typ.base)
         if base and base.tag ~= "Type.Nil" then
             return { tag = tag, base = base }
         end
     end
     return nil
-end
-
-local eligibility = setmetatable({}, { __mode = "k" })
-
--- Cycles assume eligibility while in progress; the runtime binding lookup
--- still declines a nested nominal that has no codec.
-eligible_owner = function(owner, active)
-    local known = eligibility[owner]
-    if known ~= nil then return known end
-    active = active or {}
-    if active[owner] then return true end
-    if not all_public(owner) or has_hooks(owner) then
-        eligibility[owner] = false
-        return false
-    end
-    active[owner] = true
-    local ok = true
-    local lists = owner._tag == "Type.Record" and { owner.fields } or {}
-    if owner._tag == "Type.Union" then
-        for _, variant in ipairs(owner.variants) do lists[#lists + 1] = variant.parts end
-    end
-    for _, list in ipairs(lists) do
-        for _, field in ipairs(list) do
-            if not field_kind(field.type, active) then ok = false break end
-        end
-        if not ok then break end
-    end
-    active[owner] = nil
-    eligibility[owner] = ok
-    return ok
 end
 
 local function uv_of(slot)

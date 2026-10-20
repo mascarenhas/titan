@@ -372,8 +372,9 @@ closure and projected values remain rooted while ordinary Titan code converts
 and serializes them. Owning-state foreign functions in `titan.transfer` discover
 entries, project captures, and invoke generated restoration; for closures
 `transfer.h` only declares the immutable manifest layout. Capture snapshots use
-no native recursive serializer, allocation arena, or source identity map
-(nominal captures reach generated codecs only through their protobuf root).
+no native recursive serializer, allocation arena, or source identity map; a
+captured nominal becomes a `TransferValue` whose snapshot bytes come from the
+ordinary protobuf root entry, including its generated codec when it has one.
 Generated code rejects Lua-managed `Udata *`
 before native-pointer projection, including typedef spellings and present
 optional pointers; an absent optional projects and reconstructs as nil. This

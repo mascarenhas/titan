@@ -460,10 +460,15 @@ function serialize(candidate: value): string
   return buffer_to_string(buf)
 end
 
--- Decode with the generated codec bound to `name`'s canonical metatable. False
--- leaves no stack effect and the same bytes to the reflective decoder, which
--- owns every error, hook, resource claim, and non-canonical wire form.
-local function deserialize_generated(data: foreign const *void, length: integer,
+--- Decode a nominal root with the generated codec bound to its canonical metatable.
+-- False leaves no stack effect and the same bytes to the reflective decoder,
+-- which owns every error, hook, resource claim, and non-canonical wire form.
+-- @param data Pointer to the raw Protocol Buffers wire bytes.
+-- @param length Byte length of the wire buffer, at most 2 GiB.
+-- @param name Fully qualified record or union name registered in this state.
+-- @return True and the fresh nominal when the generated decoder accepted the bytes.
+-- @usage standard-library-protobuf.md#generated-codecs
+function deserialize_generated_buffer(data: foreign const *void, length: integer,
     name: string): (boolean, value)
   local identity? = resource_nominals[name]
   if identity == nil then return false, nil end
@@ -489,7 +494,7 @@ local function deserialize_record_buffer(
     descriptor: reflect.RecordType, context: value, holder: string?): value
   check_message_size(length)
   require_record(descriptor)
-  local decoded, result = deserialize_generated(data, length, descriptor.name)
+  local decoded, result = deserialize_generated_buffer(data, length, descriptor.name)
   if decoded then return result end
   local message = read_message_slice(
       data as foreign const *uint8_t, 0, length, holder, context)
@@ -502,7 +507,7 @@ local function deserialize_union_buffer(
     descriptor: reflect.UnionType, context: value, holder: string?): value
   check_message_size(length)
   require_union(descriptor)
-  local decoded, result = deserialize_generated(data, length, descriptor.name)
+  local decoded, result = deserialize_generated_buffer(data, length, descriptor.name)
   if decoded then return result end
   local message = read_message_slice(
       data as foreign const *uint8_t, 0, length, holder, context)

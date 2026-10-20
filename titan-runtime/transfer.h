@@ -25,6 +25,12 @@ typedef struct TitanTransferEntry {
     void (*restore)(lua_State *, Udata *, int);
 } TitanTransferEntry;
 
+typedef struct TitanTransferModule {
+    const char *name;
+    unsigned entry_count;
+    const TitanTransferEntry *entries;
+} TitanTransferModule;
+
 /* ------------------------------------------------------------------------
  * Protocol Buffers wire buffer. titan.protobuf owns the wire format; this SDK
  * header carries the writer primitives because compiler-generated nominal
@@ -335,23 +341,16 @@ typedef int (*TitanCodecEncode)(lua_State *L, const TValue *resources,
 typedef int (*TitanCodecDecode)(lua_State *L, const TValue *resources,
     Udata *module, const uint8_t *data, size_t length, int depth);
 
-/* One immutable manifest entry per generated record or union. The declaring
- * module's initializer binds its canonical metatable to the entry address
- * under TITAN_MT_CODEC, beside TITAN_MT_PROJECT/TITAN_MT_CONSTRUCT. */
+/* One immutable entry per generated record or union, emitted beside the
+ * module manifest. The declaring module's initializer binds its canonical
+ * metatable to the entry address under TITAN_MT_CODEC, beside
+ * TITAN_MT_PROJECT/TITAN_MT_CONSTRUCT. */
 typedef struct TitanTransferCodec {
     const char *name;
     int is_union;
     TitanCodecEncode encode;
     TitanCodecDecode decode;
 } TitanTransferCodec;
-
-typedef struct TitanTransferModule {
-    const char *name;
-    unsigned entry_count;
-    const TitanTransferEntry *entries;
-    unsigned codec_count;
-    const TitanTransferCodec *codecs;
-} TitanTransferModule;
 
 /* Resolve a canonical nominal metatable to its bound generated codec. Raw
  * reads only: no allocation, metamethod, or error. NULL selects reflection:

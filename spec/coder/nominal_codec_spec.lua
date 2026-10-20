@@ -66,13 +66,78 @@ describe("generated nominal codecs", function()
         assert.is_nil(c:find("luaL_error(L, \"protobuf", 1, true))
     end)
 
-    it("publishes an empty codec table as NULL in the module manifest", function()
+    it("emits no codec table or binding without eligible nominals", function()
         local c = h.compile_and_read_c([[
             function answer(): integer
                 return 42
             end
         ]])
         assert.is_nil(c:find("static const TitanTransferCodec ", 1, true))
-        assert.truthy(c:find("0, NULL", 1, true))
+        assert.is_nil(c:find("TITAN_MT_CODEC", 1, true))
+    end)
+
+    -- A recursive group is resolved as a whole: one ineligible member makes
+    -- every member that reaches it ineligible, in either declaration order.
+    local function check_recursive_group(source, ineligible, eligible)
+        local c = h.compile_and_read_c(source)
+        for _, name in ipairs(ineligible) do
+            assert.is_nil(c:find('"' .. name .. '", [01],'), name)
+        end
+        for _, name in ipairs(eligible) do
+            assert.truthy(c:find('"' .. name .. '", [01],'), name)
+        end
+    end
+
+    it("resolves a recursive record group independently of declaration order", function()
+        local tree = [[
+            record Tree
+                root: Leaf
+                tags: {string}
+            end
+        ]]
+        local leaf = [[
+            record Leaf
+                owner: Tree?
+            end
+        ]]
+        local plain = [[
+            record Plain
+                next: Plain?
+                label: string
+            end
+        ]]
+        check_recursive_group(tree .. leaf .. plain,
+            { "test.Tree", "test.Leaf" }, { "test.Plain" })
+        check_recursive_group(leaf .. tree .. plain,
+            { "test.Tree", "test.Leaf" }, { "test.Plain" })
+    end)
+
+    it("resolves a recursive union group independently of declaration order", function()
+        local expr = [[
+            union Expr
+                lit(Literal)
+                list({Expr})
+            end
+        ]]
+        local literal = [[
+            record Literal
+                parent: Expr?
+                text: string
+            end
+        ]]
+        local tree = [[
+            union Shape
+                leaf(Corner)
+                none()
+            end
+            record Corner
+                owner: Shape?
+                x: integer
+            end
+        ]]
+        check_recursive_group(expr .. literal .. tree,
+            { "test.Expr", "test.Literal" }, { "test.Shape", "test.Corner" })
+        check_recursive_group(literal .. expr .. tree,
+            { "test.Expr", "test.Literal" }, { "test.Shape", "test.Corner" })
     end)
 end)
