@@ -71,20 +71,18 @@ or full userdata; passing nil, a scalar, a function, a thread, or light
 userdata raises. The Lua stack is restored on that error as well as on success.
 
 At run time `T` is erased. The installed `__gc` value is the ordinary
-Lua-callable erased callback (including Titan's normal callable adjustment
-when an exact record or Map callback requires one), and Lua supplies the
-finalized object as its sole argument. The concrete callback consequently sees
-its exact static parameter type without a source `value as T` cast. Callback
-results are discarded. Finalization follows Lua's ordinary garbage-collection
-rules: it is not prompt or deterministic, and a callback may resurrect its
-value.
+Lua-callable erased callback, and Lua supplies the finalized object as its sole
+argument. The concrete callback consequently sees its exact static parameter
+type without a source `value as T` cast. Callback results are discarded.
+Finalization follows Lua's ordinary garbage-collection rules: it is not prompt
+or deterministic, and a callback may resurrect its value.
 
-Whenever the callback's parameter type is not exactly `value`, that adjustment
-is a fresh closure per `finalizable` call, so the raw `__gc` then differs from
-the callback you passed. A callback already declared `function (value): ()`
-and registered with `finalizable<|value|>` needs no adjustment: the installed
-`__gc` is that exact closure. For an owner created
-often, register such a callback and project its argument yourself (for example
+Unless the callback's parameter type is exactly `value`, Titan's ordinary
+callable adjustment wraps it in a fresh closure on every `finalizable` call, so
+the installed `__gc` is not the function that was passed. A callback whose type
+is already `function (value): ()`, registered through `finalizable<|value|>`,
+is installed unchanged. For an owner that is created often, use that form and
+recover the owner type inside the callback (for example with
 `local owner: Owner = candidate`) to avoid one closure allocation per
 registration:
 
@@ -95,7 +93,7 @@ local record Handle
   released: boolean
 end
 
-local function finish_handle(candidate: value): ()
+local function finish_handle(candidate: value)
   local handle: Handle = candidate
   handle.released = true
 end

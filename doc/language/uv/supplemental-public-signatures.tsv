@@ -1,5 +1,5 @@
 public_name	signature	source	parameter_roles
-loop_abandon	function loop_abandon(loop: loop_t): integer	titan/uv/uv.titan:310	loop: INPUT/OUTPUT exclusive owning-main-state final teardown loop; suppresses user callbacks and retires native storage; idempotent, not ordinary shutdown.
+loop_abandon	function loop_abandon(loop: loop_t): integer	titan/uv/uv.titan:310	loop: INPUT/OUTPUT exclusively owned loop, on its main Lua thread during final state teardown; suppresses user callbacks and retires native storage; idempotent; not ordinary shutdown.
 bind_transfer_loop	function bind_transfer_loop(loop: loop_t)	titan/uv/transfer.titan:8	loop: INPUT initialized destination loop; one state-local binding until explicit unbind.
 unbind_transfer_loop	function unbind_transfer_loop(loop: loop_t)	titan/uv/transfer.titan:18	loop: INPUT exact loop to unbind; an unrelated loop leaves the binding unchanged.
 stream_transfer_status	function stream_transfer_status(stream: stream_t, allow_reading: boolean?): integer	titan/uv/transfer.titan:40	stream: INPUT live TCP or pipe; allow_reading: INPUT permits an adapter watcher but never pending native requests; no ownership mutation.

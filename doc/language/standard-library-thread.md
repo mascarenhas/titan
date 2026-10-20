@@ -167,20 +167,20 @@ For a nonnullable message type, an ordinary payload binding such as
 `for _, job in rx:incoming() do` forces the optional iterator result to that
 required message type.
 
-Immediate send/dequeue paths prepare no external wait or registrar closures.
-Only a full/empty slow path uses the shared
-[`async.wait_external_native`](async-io.md#external-waits) bridge, which rechecks
-the channel under its mutex after the Task yields. Cancellation withdraws that
-exact waiter synchronously; a notification reserves neither a buffer slot nor
-a message, so a woken Task may need to wait again.
+A Task blocked in `send`, `receive`, `receive_result`, or `incoming` suspends
+through the Runtime's shared
+[external wake bridge](async-io.md#external-waits); other Tasks in its state
+keep running. Cancelling the Task removes its waiter from the channel before
+`Task:cancel` returns.
 
-Before closing a Lua state, cancel and join Tasks and drain their Runtime;
-abandoning any parked stack-backed native wait is unsafe. Channel endpoints
-older than the waiting Task's coroutine can encounter a waiter on an
-already-destroyed coroutine stack during finalization; an endpoint clone retained
-by another state or thread can keep that waiter linked and wake the freed stack after
-state close regardless of local creation order. Runtime loop abandonment does
-not withdraw these native borrows.
+**Do not close a Lua state while a Task is blocked in a channel operation.** The
+channel links a waiter that lives on the blocked Task's coroutine stack, and
+closing the state destroys that stack without unlinking the waiter. A channel
+endpoint finalized during state close, or a clone held by another state or
+thread, can then reach the destroyed stack. Cancel and join such Tasks and
+drain their Runtime before closing the state;
+[closing a state with an active Runtime](async-io.md#closing-a-lua-state-with-an-active-runtime)
+does not withdraw these waiters.
 
 ### Closing, cloning, and transferring endpoints
 
@@ -209,67 +209,60 @@ not withdraw these native borrows.
   closed.
 - Packet attachments count as live native endpoints even while unread in a
   channel or `async.Receiver` slot. Native reference cycles are not collected by
-  Lua GC: for example,
-  enqueueing a channel's own `Receiver` can keep its receiver count nonzero
-  after every public wrapper is dropped. Retain a reachable receiver and call
-  `Receiver:close()` to drain and break such cycles before dropping the last
-  application handle. `Sender:close()` alone preserves the unread packets.
-- Each sender or receiver reference unit is owned by **exactly one** of: a live
-  finalized `Sender` / `Receiver` wrapper, or an unconsumed in-flight packet
-  attachment entry. Adoption moves a unit to a fresh finalized wrapper; native
-  packet discard releases unclaimed units in C; `Sender:close()` and
-  `Receiver:close()` change channel state only and never decrement counts. Both
-  `Sender` and `Receiver` register a direct nominal capability and also
-  implement `to_transfer_payload` and `from_transfer_payload` backed by
+  Lua GC: for example, enqueueing a channel's own `Receiver` can keep its
+  receiver count nonzero after every public wrapper is dropped. Retain a
+  reachable receiver and call `Receiver:close()` to drain and break such cycles
+  before dropping the last application handle. `Sender:close()` alone preserves
+  the unread packets.
+- Every endpoint reference has exactly one owner: a live `Sender` or `Receiver`
+  wrapper, or an undelivered packet that carries it. Decoding the packet moves
+  the reference to a new wrapper, and disposing of the packet releases it.
+  `Sender:close()` and `Receiver:close()` change the channel's state but release
+  no reference; a wrapper's reference is released when the wrapper is
+  collected.
+- Endpoints transfer as
   [packet-scoped resource attachments](standard-library-transfer.md#scoped-resource-attachments-and-packet-local-indexes):
-  - When `Sender<|T|>` or `Receiver<|T|>` is transferred at the packet root,
-    nested inside public records, unions, or their Array fields, or converted
-    via `TransferValue.from_value` / `:to_value()` (including closure captures),
-    `titan.transfer` and `titan.protobuf` use the registered `ResourceCodec`
-    capability (keyed by canonical erased metatable identity) to retain one unit
-    per occurrence and write/claim the four-byte little-endian packet-local slot
-    index without reflective hook dispatch (`TransferValue` policies still use
-    the `is_record_payload` four-byte index string representation).
-  - `Sender:to_transfer_payload()` and `Receiver:to_transfer_payload()` call
-    `transfer.attach_resource` with the channel pointer and the public C-ABI
+  - An endpoint can be sent at the packet root, nested in public records,
+    unions, or their Array fields, captured by a closure, or converted with
+    `TransferValue.from_value` and `to_value` inside a packet operation. Each
+    occurrence retains its own reference and is encoded as a four-byte
+    little-endian packet-local slot index; the sender's handle stays valid.
+    `titan.transfer` encodes and claims endpoints directly, without calling
+    their hook methods.
+  - `Sender:to_transfer_payload()` and `Receiver:to_transfer_payload()` attach
+    the endpoint with `transfer.attach_resource`, using the public C-ABI
     `channel_retain_{sender,receiver}_native` and
-    `channel_release_{sender,receiver}_native` callbacks. Each encoded
-    occurrence retains an independent sender or receiver reference in the active
-    packet's resource table and returns the identical four-byte little-endian
-    packet-local slot index string without invalidating the caller's handle.
-    This explicit hook route remains available for custom user
-    `to_transfer_payload` / `from_transfer_payload` hooks.
-  - Both the registered constructor (`sender_from_resource` /
-    `receiver_from_resource`) and `Sender.from_transfer_payload(payload)` /
-    `Receiver.from_transfer_payload(payload)` first create a fresh inert
-    destination wrapper that owns no endpoint yet and register its finalizer,
-    then claim the slot (`transfer.claim_registered_resource` or
-    `transfer.claim_resource` with `channel_release_{sender,receiver}_native`)
-    and assign the pointer immediately. Once the claim succeeds, the wrapper
-    owns the endpoint through its finalizer even if decoding a later field of
-    the same packet fails. A channel pair created inside a worker thread and
-    returned through `Thread:join()` or `Thread:task()` survives the worker's
-    `lua_close` because the unconsumed result packet owns the endpoint units
-    until parent reconstruction.
-  - Attachment and claim are authorized only by the current execution's exact
-    top encode or decode scope (`transfer.encode_message` and
-    `transfer.decode_message`); endpoints can cross `Sender:send`,
+    `channel_release_{sender,receiver}_native` callbacks, and return the
+    slot-index bytes. A custom hook of a record that keeps an endpoint in a
+    private field can call them to embed the endpoint in its own payload.
+  - Decoding an endpoint, directly or through
+    `Sender.from_transfer_payload(payload)` or
+    `Receiver.from_transfer_payload(payload)`, creates the destination wrapper
+    and registers its finalizer before claiming the slot. Once the claim
+    succeeds, the wrapper owns the endpoint even if decoding a later field of
+    the same packet fails.
+  - A channel created inside a worker thread and returned through
+    `Thread:join()` or `Thread:task()` survives the close of the worker's state:
+    the undelivered result packet owns the endpoint references until the parent
+    reconstructs the result.
+  - Only the current execution's exact top encode or decode scope, opened by
+    `transfer.encode_message` or `transfer.decode_message`, authorizes
+    attachment and claim. Endpoints can therefore cross `Sender:send`,
     `Sender:try_send`, `thread.spawn*`, `Group:spawn*`, and
     [`async.Receiver`](async-io.md#cross-state-receivers) (`async.send` /
     `Receiver:wait()`), as well as public records, unions, Array fields inside
     transferable roots, custom hooks, and closure captures within a packet.
   - `protobuf.serialize`, `transfer.TransferValue.from_value`, and
-    `transfer.TransferValue:to_value()` do not create packet scopes. Endpoint
-    hooks outside the current execution's matching top scope raise
+    `transfer.TransferValue:to_value()` do not create packet scopes. Outside the
+    current execution's matching top scope, endpoint conversion raises
     `"transfer: resource attachment requires an encode scope"` or
     `"transfer: resource claim requires a decode scope"`. Opaque hooks and
-    closure-policy conversion within such a scope may reuse its packet, but
-    index bytes/policies own no attachments independently. Independent
-    `lua.Lua:run` / `run_async` carriers copy those bytes over a separate
-    carrier without the enclosing packet's native resource table, and cannot
-    provide standalone endpoint ownership.
-    Other Tasks and separately resumed child Coroutines do not inherit a
-    caller's packet authority. Custom hooks remain synchronous and nonyielding.
+    closure-policy conversion within such a scope reuse its packet, but the
+    index bytes and policies they produce own no attachments. Independent
+    `lua.Lua:run` and `run_async` copy those bytes over a separate carrier
+    without the packet's resource table, so they cannot move endpoints. Other
+    Tasks and separately resumed child Coroutines do not inherit a caller's
+    packet authority. Custom hooks remain synchronous and nonyielding.
   - Duplicate occurrences of the same `Sender` or `Receiver` in one packet attach
     and claim separate slot entries. Claiming with a wrong byte width, an
     out-of-bounds or `0xffffffff` index, a mismatched endpoint kind (`Sender` vs
@@ -290,12 +283,13 @@ not withdraw these native borrows.
     destination collector.
   - **Manual-handoff resources are not auto-disposed by channel discard**:
     native packet discard releases only resources registered in the packet's
-    resource table (initially `Sender` and `Receiver` endpoints) and never runs
-    `from_transfer_payload` decoders. Sending an `http.Exchange`,
-    `ssl.Connection`, `net.Connection`, `websocket.Connection`, or custom manual
-    resource over a channel still requires the caller to recover or explicitly
-    dispose rejected payloads through that type's actual API and to drain and
-    dispose unread payloads before `Receiver:close()`. See the
+    resource table (in the standard library, only `Sender` and `Receiver`
+    endpoints) and never runs `from_transfer_payload` decoders. Sending an
+    `http.Exchange`, `ssl.Connection`, `net.Connection`, `websocket.Connection`,
+    or custom manual resource over a channel still requires the caller to
+    recover or explicitly dispose rejected payloads through that type's actual
+    API and to drain and dispose unread payloads before `Receiver:close()`.
+    See the
     [manual-handoff inventory](standard-library-transfer.md#manual-handoff-api-inventory);
     not every native-backed type exports `discard_transfer_payload`.
 

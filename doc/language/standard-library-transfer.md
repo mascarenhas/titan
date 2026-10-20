@@ -34,21 +34,22 @@ the same-process lifetime contract.
 
 Transfer hooks fall into two ownership categories:
 
-1. **Packet-scoped reference-counted resources** registered in a native packet's
-   resource table via `transfer.attach_resource` and claimed via
-   `transfer.claim_resource`. In the standard library, this category initially
-   comprises **only [`thread.Sender<|T|>` and `thread.Receiver<|T|>`](standard-library-thread.md#closing-cloning-and-transferring-endpoints)**.
-   Each encoded occurrence retains an independent native reference in the active
-   packet's resource table and writes a four-byte little-endian packet-local
-   slot index into the payload. Decoding claims each slot into a pre-finalized
-   destination wrapper, and native packet disposal (`transfer.discard_message`,
-   channel close/drain, failed or cancelled sends, abandoned thread results, or
-   overwritten or closed [`async.Receiver`](async-io.md#cross-state-receivers)
-   slots) automatically releases any unclaimed entries in C without entering
-   Lua, loading modules, invoking user decoders, or requiring an active Runtime.
-   Each endpoint reference unit is owned by **exactly one** of a live finalized
-   wrapper or an unconsumed in-flight native message entry: adoption moves the
-   unit, native discard releases it, and `close()` changes channel state only.
+1. **Packet-scoped reference-counted resources**, registered in a native
+   packet's resource table with `transfer.attach_resource` and claimed with
+   `transfer.claim_resource`. In the standard library these are only
+   [`thread.Sender<|T|>` and `thread.Receiver<|T|>`](standard-library-thread.md#closing-cloning-and-transferring-endpoints).
+   Each encoded occurrence retains its own native reference in the packet and
+   appears in the payload as a four-byte little-endian packet-local slot index.
+   Decoding claims each slot into a destination wrapper whose finalizer is
+   already registered. A reference is always held either by a live wrapper or
+   by an undelivered packet: claiming moves it, and disposing of a packet
+   releases the references it still holds. Disposal happens through
+   `transfer.discard_message`, channel close or drain, failed or cancelled
+   sends, abandoned thread results, and replaced or closed
+   [`async.Receiver`](async-io.md#cross-state-receivers) slots, and runs in C
+   without entering Lua, loading modules, invoking user decoders, or requiring
+   an active Runtime. Closing an endpoint changes the channel's state but
+   releases no reference.
 2. **Manual-handoff resources**, including only the specific types in the
    [inventory below](#manual-handoff-api-inventory), and user hooks that do not
    register a C release callback via `attach_resource`. These hooks explicitly
@@ -78,21 +79,19 @@ manual-handoff payloads before closing a receiver. Copying or dropping a byte
 string does not duplicate or close the resources named by it.
 
 An [`async.Receiver`](async-io.md#cross-state-receivers) is a lossy, coalescing
-notification slot that encodes transferable values or explicit `TransferValue`
-policies into native packets via `transfer.encode_message`, decodes eagerly in
-`Receiver:wait()` via `transfer.decode_message`, and disposes overwritten or
-unread packets natively via `transfer.discard_message`. Standalone
-`TransferValue.from_value` and `protobuf.serialize` calls do not create a packet
-scope: without a matching enclosing scope, endpoint hooks raise. Nested
-opaque/capture conversion can reuse its enclosing packet's scope, but the
-returned index bytes own nothing; that packet still owns the attachments. Direct
-`async.send` / `Receiver:wait()` and thread channels/spawn open a packet scope
-and can carry endpoint attachments, whereas independent `lua.Lua:run` /
-`run_async` carriers copy policy data without a packet resource table. For
+slot for native packets: `async.send` encodes with `transfer.encode_message`,
+`Receiver:wait()` decodes with `transfer.decode_message`, and replaced or unread
+packets are disposed of with `transfer.discard_message`. Like thread channels
+and spawn, it can therefore carry endpoint attachments; `lua.Lua:run` and
+`run_async` copy policies over a separate carrier without a resource table and
+cannot. Standalone `TransferValue.from_value` and `protobuf.serialize` calls
+open no packet scope, so converting an endpoint raises outside one. Inside an
+enclosing packet scope the conversion reuses that packet, and the packet's
+resource table, not the returned index bytes, owns the attachment. For
 manual-handoff resources, keep ownership outside a lossy mailbox or use a
-protocol that guarantees exactly-once adoption or explicit disposal; a
-successful coalescing send alone is not proof of either, and repeating the same
-manual-handoff payload may cause double adoption.
+protocol that guarantees exactly-once adoption or explicit disposal. A
+successful coalescing send alone proves neither, and sending the same
+manual-handoff payload twice can cause double adoption.
 
 Preflight rejection and failed native duplication preserve that endpoint's
 source ownership. If io's second pipe duplication fails, its source retains
@@ -181,10 +180,10 @@ exceptions.
 
 ## Native message packets
 
-`titan.transfer` owns heap-allocated native transfer packets
-(`titan_async_message`) and the packet-scoped native resource table used by
-cross-thread channels, thread spawn/outcomes, and
-[cross-state receivers](async-io.md#cross-state-receivers):
+`titan.transfer` encodes values into heap-allocated native packets, each with
+its own resource table. Cross-thread channels, thread spawn and results, and
+[cross-state receivers](async-io.md#cross-state-receivers) all carry these
+packets:
 
 ```text
 function encode_message(candidate: value): foreign *void
@@ -209,89 +208,47 @@ function register_resource(
     release: foreign function (*void): void,
     construct: function (value, foreign const *void, integer): (value))
 ```
+
 ### Raw packet encoding, decoding, copying, and disposal
 
-`encode_message(candidate)` accepts any transferable Titan value or an explicit
-`TransferValue`. Explicit scalar, string, and borrowed-pointer `TransferValue`
-policies and direct scalar Lua tags (`nil`, `boolean`, `integer`, `float`
-including integral floats and `-0.0`, binary `string`, lightuserdata pointers,
-Lua threads as borrowed `*lua_State`, unbranded or unknown-brand Lua userdata
-whose metatable has no metatable as borrowed payload pointers, and bare Lua C
-functions or zero-upvalue C closures) are classified before opening a packet
-resource scope and initialize their heap packet headers directly, without
-constructing a `reflect.Value` wrapper, invoking transfer hooks, or granting
-scope authority.
-
-Explicit nominal byte carriers (`is_record`, `is_union`, `is_closure`, and
-`is_record_payload`) also bypass encode-scope acquisition and initialize their
-heap packet header, payload, and `name`/`module` strings directly in a single
-allocation (`new_nominal_message`).
-
-Userdata whose metatable itself has a metatable, Titan-branded userdata, and
-branded Titan closures open an execution-local encode scope. Registered
-packet-scoped resource records (`thread.Sender` and `thread.Receiver`) at the
-root are recognized by their canonical erased metatable identity
-(`protobuf.find_resource_codec`). They reserve the complete packet size,
-including the aligned one-entry attachment tail, before attaching the resource,
-write the four-byte little-endian slot index via
-`protobuf.write_resource_index`, and finalize the
-`TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD` packet in place without allocating a Lua
-index string or copying a staged header. Branded Titan closures are validated
-directly against their module manifest, project their captures once before
-initializing the bounded packet buffer, and pass `scope` to
-`protobuf.serialize_fields_to_buffer_with_context`. Root records with custom
-`to_transfer_payload` hooks encode their payload string in the active scope and
-allocate their heap packet header, payload, metadata, and aligned attachment
-tail directly in one allocation (`new_nominal_message`). Public records without
-hooks and public unions are inspected once at the root and serialized directly
-into an expandable native buffer prefixed with the message header, carrying the
-packet's `ResourceScope` once into `protobuf` without creating an intermediate
-`TransferValue` or Lua string for the root message.
-
-Small packets start from a bounded initial reservation and grow through
-power-of-two capacities. A single reservation exceeding four times the current
-capacity (using 64 as the minimum) instead grows to
-`needed + max(256, needed / 8)`, where `needed` is the total required buffer
-length and division rounds down. This applies to byte fields and to large
-metadata/attachment or root resource-codec reservations. Spare capacity is at
-most 12.5% of `needed` for requests of at least 2,048 bytes, or
-256 bytes for smaller bulk requests; if adding it would exceed `SIZE_MAX`, the
-request stays at exactly `needed`. Proportional trailing fields, metadata, and
-attachment entries can use that space without another payload-sized growth;
-trailing data exceeding it grows normally, returning to the power-of-two
-capacity sequence unless doubling would overflow, when it requests exactly
-`needed`. The actual metadata, alignment, and attachment tail are always reserved
-before the packet is detached; wire bytes,
-hook invocation order, and resource ownership do not depend on spare capacity.
-See the [buffer implementation](../implementation/protobuf-library.md#encoding).
+`encode_message(candidate)` encodes any transferable Titan value or explicit
+`TransferValue` into a new packet and returns its raw owner. Scalars, strings,
+borrowed pointers, C functions, and explicit policies are copied into the packet
+without a packet scope and never call a transfer hook. Records, unions, Titan
+closures, and endpoints are encoded inside an encode scope for the new packet,
+so their hooks, nested fields, and closure captures can attach resources to it
+([below](#scoped-resource-attachments-and-packet-local-indexes)). Records
+without hooks and unions are serialized straight into the packet, without an
+intermediate `TransferValue` or Lua string. How packet storage grows is not part
+of the contract; the
+[implementation chapter](../implementation/transfer-library.md#flat-packets-and-direct-classification)
+describes it.
 
 `decode_message(slot)` is an ordinary public Titan function for trusted native
-integrations. It reconstructs the semantic value in the current Lua state and
-returns it. Pass a **real caller-owned `foreign *void` local** that holds one
-uniquely owned packet: an exact pointer-local argument passes the address of
-that local itself (see
+integrations. It reconstructs the value in the current Lua state and returns
+it. Pass a **real caller-owned `foreign *void` local** that holds one uniquely
+owned packet: passing a pointer local passes the address of that local itself
+(see
 [contextual object-pointer conversions](c-ffi-expressions.md#contextual-object-pointer-conversions)),
-or pass an explicit `foreign *(*void)` slot address. A copied borrowed packet
-address grants no ownership. Keep the slot and its enclosing owner alive
-throughout the call.
+or pass an explicit `foreign *(*void)` slot address. A copied packet address
+grants no ownership. Keep the slot and its enclosing owner alive throughout the
+call. Lua code cannot call `decode_message`, because its raw C pointer
+parameter has no dynamic Lua coercion.
 
 Guard the local with `defer transfer.discard_message(raw)` as soon as it holds
-the packet and call `decode_message(raw)` **directly on that local**. Do not
-route the slot through an ordinary forwarding wrapper. Lua code cannot call
-`decode_message` directly, because its raw C pointer parameter has no dynamic
-Lua coercion.
+the packet, and call `decode_message(raw)` **directly on that local**, not
+through a forwarding wrapper.
 
 The guarded local must never receive a **recovery spill**. After a caught
-error, Titan restores a local from a saved copy when the local is written
-(assigned, or filled through a mutating C out-argument) inside any protected
-region, meaning a block with `catch` or the code after a `defer`, whose catch,
-deferred cleanup, or code after a handled catch reads it. The saved copy
-belongs to the declaration for the whole function: every later recovery
-reloads it, and `decode_message` clearing the slot never updates it. A spilled
-guarded local would therefore hand its deferred discard a stale owner, and a
-decode error would dispose of the packet twice. This applies to every
-protected region in the function, not only the guard's own; a write in an
-earlier `do ... catch` is enough:
+error, Titan restores a local from a saved copy if the local was written
+(assigned, or filled through a mutating C out-argument) inside a protected
+region—a block with `catch`, or the code after a `defer`—whose catch, deferred
+cleanup, or code after a handled catch reads it. The saved copy belongs to the
+declaration for the whole function: every later recovery reloads it, and
+`decode_message` clearing the slot never updates it. A spilled guard would
+therefore hand its deferred discard a stale owner, and a decode error would
+dispose of the packet twice. Any protected region in the function counts, not
+only the guard's own; a write in an earlier `do ... catch` is enough:
 
 ```text
 local raw: foreign *void = nil
@@ -311,37 +268,21 @@ return transfer.decode_message(raw)
 ```
 
 Once its body runs, `decode_message` consumes the packet and clears the slot on
-every outcome before it returns or an error propagates: success, result-stack
-reservation failure, module initialization failure, decoder or hook failure,
-partial endpoint claims, and destination setup failure. Only its own entry,
-which reserves its Lua frame, can fail with a memory or stack error before the
-body runs; the slot then still owns the packet, and the caller's deferred
+every outcome, before it returns or an error propagates with its original
+traceback: success, failure to reserve the result's stack slot
+(`"transfer: cannot reserve packet operation stack"`), module initialization
+failure, decoder or hook failure, partially claimed endpoints, and destination
+setup failure. Only its own function entry can fail first, with a memory or
+stack error; the slot then still owns the packet, and the caller's deferred
 `discard_message` disposes of it.
-
-Allocation-free scalar packets (`nil`, `boolean`, `integer`, `float`, borrowed
-`lua_State`, borrowed pointer, and non-nil bare C function) reserve their one
-result stack slot without `longjmp`, build the result directly in C, clear the
-slot, and dispose of the packet without opening a decode scope or a protected
-region. A failed reservation clears the slot and disposes of the packet before
-raising `"transfer: cannot reserve packet operation stack"`. Every other packet
-runs the decoder worker inside one Titan `catch`. Binary strings (`STRING`)
-copy their bytes while the slot still owns the packet, then clear the slot and
-dispose of it. Malformed nil C-function (`FUNCTION`) packets raise
-`"cannot transfer a NULL Lua C function"` without acquiring a `ResourceScope`.
-Only nominal packets (`RECORD`, `UNION`, `CLOSURE`, `RECORD_PAYLOAD`) acquire a
-decode `ResourceScope` and move `slot[0]` into that scope. On any error the
-catch clears `slot[0]`, disposes of any residual packet natively, and re-raises
-the original error with its original traceback.
 
 A nil `slot` raises `"transfer: invalid packet owner slot"`, and an empty slot
 raises `"transfer: cannot decode a NULL packet"`. Decoding leaves the caller's
-Lua stack top unchanged.
-
-Decode may enter Lua, load modules, allocate, and run hooks. It is not the
-no-Lua discard chain, it does not synchronize access to the state, and it does
-not create a Runtime. Ordinary cross-thread and cross-state callers use
+Lua stack top unchanged. Decoding may enter Lua, load modules, allocate, and
+run hooks. It is not part of the no-Lua discard chain, it does not synchronize
+access to the state, and it does not create a Runtime. Ordinary code uses
 `thread.channel`, `thread.spawn*`, or `async.send` / `Receiver:wait`, which
-manage guarded raw packet locals around `encode_message` and `decode_message`.
+manage guarded packet locals themselves.
 
 `discard_message(raw)` is a public C-ABI `foreign function` that releases any
 unclaimed entries in the packet's resource table and frees the packet storage.
@@ -352,109 +293,82 @@ a packet returned by `encode_message` or `copy_message` is not consumed by
 allocation to a second consuming operation is invalid, even if every attachment
 was already claimed. An emptied slot is not authority to reuse a saved address.
 
-`copy_message(raw)` is a public C-ABI `foreign function` that duplicates only
-attachment-free packets (`resources.entries == nil` and `resources.count == 0`).
-It returns `nil` if `raw` is `nil`, if the packet owns any resource-table
-entries, or if heap allocation fails; it never shallow-copies a resource table.
+`copy_message(raw)` is a public C-ABI `foreign function` that duplicates a
+packet without resource attachments. It returns `nil` if `raw` is `nil`, if the
+packet has any resource-table entry, or if allocation fails; it never shares a
+resource table between packets.
 
 ### Scoped resource attachments and packet-local indexes
 
-`encode_message` and `decode_message` maintain a direction-specific scope stack
-for each actual Lua thread within the state for structural values, registered
-resource roots, transfer hooks, and closure capture work. Retired scope frames
-may be reused within the
-state; the idle retention bound and native scratch layout are private
-implementation details. Scalar/policy encoding, C-only scalar decoding, and
-scope-free protected `STRING` / `NULL`-`FUNCTION` decoding bypass scopes while
-leaving any enclosing scope intact:
+While `encode_message` or `decode_message` encodes or decodes a record, union,
+closure, or endpoint, it installs a packet scope for the current execution, the
+Lua thread running the call. Scalar and policy packets need none. Scopes nest:
+a nested `encode_message` or `decode_message` installs its own scope, then
+restores the enclosing one on every normal or error exit, after disposing of
+whatever its unfinished packet still owns.
 
-- **Standard endpoint ownership**: Each reference-counted resource unit is owned
-  by **exactly one** of: a live finalized wrapper (`Sender` or `Receiver`), or
-  an unconsumed in-flight native message entry. Adoption moves a unit from the
-  message entry to a fresh finalized wrapper; native discard releases unclaimed
-  message entries; `close()` changes state only and never decrements counts.
-  Message bytes, wake targets, loop liveness, and OS-thread retirement are
-  separate lifetimes.
-- **Execution-local exact top authority and carried packet context**:
-  `encode_message` and `decode_message` pass their active `ResourceScope` once
-  into `protobuf` (including closure envelopes via
-  `serialize_fields_to_buffer_with_context` and
-  `deserialize_fields_buffer_with_context`) and registered `ResourceCodec`
-  callbacks (`register_resource` and `claim_registered_resource`), while
-  `TransferValue.from_value` and `TransferValue:to_value` pass
-  `packet_context(true)` and `packet_context(false)` to registered
-  `ResourceCodec` callbacks before reflective hook lookup, and public
-  `attach_resource` and `claim_resource` resolve the current execution's
-  exact top scope on every call for custom
-  `to_transfer_payload` and `from_transfer_payload` hooks. Attachment
-  is permitted only when the active scope is an encode scope (otherwise raising
-  `"transfer: resource attachment requires an encode scope"`), and claim requires
-  a decode scope (otherwise raising
-  `"transfer: resource claim requires a decode scope"`). Neither path searches an
-  older enclosing frame or another Task's scope for permission, and idle pooled
-  frames grant no authority. A separately resumed child `coroutine.Coroutine`
-  does not inherit its caller's packet authority. Hooks remain synchronous and
-  nonyielding; this isolation does not
-  authorize yielding hooks.
-- **Nested and standalone calls**: Opaque custom hooks, nested protobuf
-  messages, and closure capture snapshots belonging to the same packet share its
-  top scope. A nested packet operation that needs a scope restores the exact
-  enclosing scope on every normal or error exit and disposes its unfinished
-  native ownership before the frame can be reused. `protobuf.serialize`,
-  `protobuf.deserialize`, `protobuf.deserialize_nominal_buffer`,
-  `TransferValue.from_value`, and `TransferValue:to_value` do not create scopes.
-  When invoked as opaque-hook or capture work inside a matching current scope,
-  they reuse that enclosing packet; without it both direct `ResourceCodec`
-  fields and endpoint hooks raise. Their temporary index bytes/policies own no
-  attachments and are not standalone reusable ownership. While no packet
-  operation is active anywhere in the Lua state, these standalone calls answer
-  "no scope" without resolving the current execution at all; otherwise they
-  perform the full exact-top lookup, so another execution's active (or
-  abandoned) packet never lends them authority. Scope ownership also
-  has a nonyielding finalizer guard: if an execution stack is abandoned without
-  lexical unwind, its active frame is never pooled and its unfinished native
-  scratch table or packet is disposed when collected. That safety mechanism
-  does not broaden the hook contract.
-- **Attachment (`attach_resource` and registered `ResourceCodec` encode)**:
-  Rejects a `nil` `resource`, `retain`, or
-  `release` argument (`"transfer: invalid native resource attachment"`),
-  reserves space in the encode scope's scratch resource table **before**
-  calling `retain(resource)`
-  (`"transfer: out of memory reserving resource attachment"`), records
-  `(resource, release)`, and encodes a four-byte little-endian unsigned slot
-  index (`0..0xfffffffe`; `0xffffffff` is reserved as invalid) through the shared
-  `protobuf.write_resource_index_bytes` writer: directly into the packet buffer
-  on the registered route or as the string returned by `attach_resource`. Each
-  encoded occurrence of a resource adds a separate retain and entry. When the
-  packet is finalized, its committed entries are stored in the aligned tail of
-  the single packet allocation. Both `retain` and `release` must be C-only
-  `foreign function (*void): void` callbacks that can run without a Lua state,
-  module loader, or active Runtime. If encoding raises after one or more
-  attachments, unwinding the encode scope automatically releases all entries in
-  the uncommitted scratch table.
-- **Claim and adoption (`claim_resource` and `claim_registered_resource`)**:
-  Validates that the index slice is exactly four bytes
-  (`"transfer: invalid resource attachment index width"`), decodes the four-byte
-  little-endian unsigned slot index, checks that the index is not `0xffffffff`
-  and lies within the current packet's attachment count
-  (`"transfer: resource attachment index is out of bounds"`), checks that
-  `expected_release` is non-nil and matches the entry's recorded `release`
-  callback (`"transfer: resource attachment kind mismatch"`, preventing a
-  `Sender` decoder from claiming a `Receiver` slot or vice versa), and checks
-  that the slot's `resource` pointer is still non-nil
-  (`"transfer: resource attachment was already claimed"`). It then clears
-  `entry.resource = nil` (retaining `entry.release` so kind checks still precede
-  duplicate checks on consumed slots) and returns the native pointer without
+- **Authority**: `attach_resource` succeeds only when the current execution's
+  innermost scope is an encode scope, and `claim_resource` only when it is a
+  decode scope. Otherwise they raise
+  `"transfer: resource attachment requires an encode scope"` or
+  `"transfer: resource claim requires a decode scope"`. Neither consults an
+  enclosing scope or another Task's scope, and a separately resumed child
+  `coroutine.Coroutine` does not inherit its caller's packet authority. Hooks
+  remain synchronous and nonyielding; this isolation does not license a
+  yielding hook.
+- **Nested and standalone calls**: Custom hooks, nested protobuf messages, and
+  closure capture snapshots that belong to a packet share its scope.
+  `protobuf.serialize`, `protobuf.deserialize`,
+  `protobuf.deserialize_nominal_buffer`, `TransferValue.from_value`, and
+  `TransferValue:to_value` create no scope. Called from such hook or capture
+  work, they use the enclosing packet; called anywhere else, endpoint fields and
+  endpoint hooks raise. The index bytes and policies they produce own no
+  attachments; the packet does. A packet operation active in another
+  execution, including one in an abandoned coroutine, never lends authority. If
+  an execution is abandoned mid-operation without unwinding, its unfinished
+  packet and attachments are disposed of when the scope is collected; that
+  safety net does not relax the hook rules.
+- **Attachment (`attach_resource`)**: Rejects a `nil` `resource`, `retain`, or
+  `release` (`"transfer: invalid native resource attachment"`), reserves room in
+  the packet's resource table **before** calling `retain(resource)`
+  (`"transfer: out of memory reserving resource attachment"`), records the
+  resource with its `release` callback, and returns the entry's slot index as a
+  four-byte little-endian string (`0` to `0xfffffffe`; `0xffffffff` is reserved
+  as invalid). Each encoded occurrence of a resource adds its own entry and
+  retain. `retain` and `release` must be C-only `foreign function (*void): void`
+  callbacks that can run without a Lua state, module loader, or active Runtime.
+  If encoding raises after one or more attachments, unwinding the scope
+  releases every attachment of the unfinished packet.
+- **Claim (`claim_resource`)**: Checks, in this order, that `index_bytes` is
+  exactly four bytes (`"transfer: invalid resource attachment index width"`),
+  that the index is not `0xffffffff` and lies within the packet's attachment
+  count (`"transfer: resource attachment index is out of bounds"`), that
+  `expected_release` is non-nil and equals the entry's recorded `release`
+  callback (`"transfer: resource attachment kind mismatch"`, so a `Sender`
+  decoder cannot claim a `Receiver` slot or vice versa), and that the entry has
+  not been claimed (`"transfer: resource attachment was already claimed"`). It
+  then marks the entry claimed and returns the resource pointer without
   allocating or yielding.
-- **Finalizer-first adoption**: Both the registered `ResourceCodec` constructor
-  (`sender_from_resource` / `receiver_from_resource`) and a resource's
-  `from_transfer_payload` hook must allocate a fresh destination wrapper with an
-  inert `nil` native pointer and register its GC finalizer **before** claiming
-  the slot, then assign the returned pointer immediately with no intervening
-  fallible entry. If wrapper setup or the claim fails, the retain remains in the
-  packet table and is released when `decode_message` disposes the packet; once
-  the claim succeeds, the wrapper owns the retain through its normal finalizer
-  even if decoding a later field in the same packet raises.
+- **Finalizer-first adoption**: A `from_transfer_payload` hook must create its
+  destination wrapper with an inert `nil` native pointer and register its GC
+  finalizer **before** claiming, then store the returned pointer immediately,
+  with no fallible call in between. If wrapper setup or the claim fails, the
+  reference stays in the packet and is released when `decode_message` disposes
+  of the packet; once the claim succeeds, the wrapper's finalizer owns it even
+  if decoding a later field of the same packet raises.
+- **Registered resources**: `register_resource(candidate, get, retain, release,
+  construct)` and `claim_registered_resource` are compiled collaboration
+  entries through which `titan.thread` registers its endpoint records, so that
+  encoding and decoding need no hook call. `candidate` is any instance of the
+  record; the registration covers every application of a generic record, and a
+  non-record raises `"transfer: registered resource must be a record"`. In a
+  packet, encoding such a record attaches `get(record)` with `retain` and
+  `release` and writes its slot index directly. Decoding calls
+  `construct(context, data, length)`, which must follow the finalizer-first
+  order and claim with `claim_registered_resource(context, data, length,
+  expected_release)`, passing on the `context` it received. A `nil` context
+  raises `"transfer: resource claim requires a decode scope"`; the other checks
+  are those of `claim_resource`.
 - **Packet-local index guarantee**: The four-byte slot index is meaningful only
   against the active packet's resource table; it is **not** a global
   anti-replay token across different packets (where slot `0` may name a valid

@@ -3,8 +3,9 @@
 Import `protobuf` in Titan, or require `titan.protobuf` in Lua. The module copies
 public record and union values using the [Protocol Buffers wire
 format](https://protobuf.dev/programming-guides/encoding/). It also emits the
-matching proto3 schema. Reflection supplies the declared types and fresh
-field-by-field construction; decoding never calls a user-defined `new`.
+matching proto3 schema. The declared types determine the wire format, and
+decoding constructs fresh values field by field without calling a user-defined
+`new`.
 
 ```titan
 local protobuf = import "protobuf"
@@ -28,59 +29,20 @@ end
 
 ```text
 serialize(candidate: value): string
-serialize_to_buffer(buf: foreign *void, candidate: value)
-serialize_inspected_record_to_buffer(buf: foreign *void,
-                                     candidate: reflect.RecordValue,
-                                     context: value)
-serialize_inspected_union_to_buffer(buf: foreign *void,
-                                    candidate: reflect.UnionValue,
-                                    context: value)
 deserialize(bytes: string, descriptor: reflect.Type): value
-schema(descriptor: reflect.Type): string
 deserialize_nominal(bytes: string, name: string, is_union: boolean): value
-deserialize_nominal_buffer(data: foreign const *void, length: integer,
-                           name: string, is_union: boolean): value
-deserialize_nominal_buffer_with_context(data: foreign const *void,
-                                        length: integer,
-                                        nominal: reflect.NominalType?,
-                                        name: string, is_union: boolean,
-                                        context: value): value
+schema(descriptor: reflect.Type): string
 serialize_fields(fields: const {reflect.Type}, ...: value): string
+deserialize_fields(bytes: string, fields: const {reflect.Type}): (...: value)
+
+serialize_to_buffer(buf: foreign *void, candidate: value)
 serialize_fields_to_buffer(buf: foreign *void,
                            fields: const {reflect.Type}, ...: value)
-serialize_fields_to_buffer_with_context(buf: foreign *void,
-                                        fields: const {reflect.Type},
-                                        context: value, ...: value)
-deserialize_fields(bytes: string, fields: const {reflect.Type}): (...: value)
+deserialize_nominal_buffer(data: foreign const *void, length: integer,
+                           name: string, is_union: boolean): value
 deserialize_fields_buffer(data: foreign const *void, length: integer,
                           fields: const {reflect.Type}): (...: value)
-deserialize_fields_buffer_with_context(data: foreign const *void,
-                                       length: integer,
-                                       fields: const {reflect.Type},
-                                       context: value): (...: value)
-find_transfer_hooks(descriptor: reflect.RecordType, prefix: string):
-    (reflect.MethodType?, reflect.StaticFunctionType?)
-encode_transfer_payload(candidate: value, encode: reflect.MethodType,
-                        err_msg: string): string
 
-record ResourceCodec
-  const identity: value
-  const descriptor: reflect.RecordType
-  const encode: function (value, value): (integer)
-  const decode: function (value, foreign const *void, integer): (value)
-end
-set_packet_context_provider(provider: function (boolean): (value))
-register_resource_codec(
-    candidate: value, descriptor: reflect.RecordType,
-    encode: function (value, value): (integer),
-    decode: function (value, foreign const *void, integer): (value))
-find_resource_codec(candidate: value): ResourceCodec?
-find_resource_codec_by_name(name: string): ResourceCodec?
-foreign function write_resource_index_bytes(dst: *void, index: unsigned int)
-foreign function write_resource_index(raw_buf: *void, index: unsigned int): int
-find_generated_codec(candidate: value): foreign const *void
-serialize_generated_to_buffer(buf: foreign *void, codec: foreign const *void,
-                              candidate: value, context: value): boolean
 use_generated_codecs(enabled: boolean): boolean
 ```
 
@@ -89,126 +51,137 @@ accept its record/union descriptor or a named descriptor that resolves to it.
 `deserialize_nominal` performs the same operation using a fully qualified name,
 and checks the requested nominal kind. It is also the independent-state
 argument conversion entry. Unknown names raise; lookup does not load modules.
-Every record/union root decoding entry reports root problems in one order: an
-unknown name or unresolvable descriptor first, then a root that is not a record
-or union of the requested kind, then the 2 GiB message limit, and finally the
-public-member requirement. An oversized input with a bad root descriptor
-therefore reports the descriptor error.
+When a root fails several checks, decoding reports the first of: an unknown
+name or unresolvable descriptor, a root of the wrong kind, a message larger
+than 2 GiB, and a root that is local or has private members.
 
-`serialize_to_buffer` and `serialize_fields_to_buffer` append encoded wire bytes
-into a caller-initialized `titan_protobuf_buffer` (`buf`) without allocating an
-intermediate Lua string. `deserialize_nominal_buffer` and
-`deserialize_fields_buffer` decode directly from a borrowed `const void *` byte
-slice of length `length`. `find_transfer_hooks` returns a record's validated
-`(to_transfer_payload, from_transfer_payload)` pair as its reflected
-`MethodType` and `StaticFunctionType` (memoized per nominal record name
-`descriptor.name`), or `(nil, nil)` when the record has neither hook; `prefix`
-(`"protobuf"` or `"transfer"`) only labels its validation errors.
-`encode_transfer_payload` invokes that `encode` method under the shared
-active-record cycle guard and raises `err_msg` if `candidate` is already active.
-
-The caller retains ownership of a raw buffer and must keep its descriptor and
-any `context` owner alive until serialization returns, then free or detach its
-storage using the matching native buffer operations. The `grow` callback can be
-invoked synchronously while appending. Small writes grow through power-of-two
-capacities from a 64-byte minimum. A single reservation exceeding four times the
-current capacity (using 64 as the minimum) requests
-`needed + max(256, needed / 8)`, where `needed` is the current length plus the
-requested bytes and division rounds down. For `needed` of at least
-2,048 bytes the spare capacity is at most 12.5% of that need; smaller bulk
-requests leave 256 bytes. If adding the slack would exceed `SIZE_MAX`, the
-request is exactly `needed`. This leaves room for proportional trailers without
-retaining the next power-of-two block. Later normal growth starts doubling from
-the largest power of two no greater than `max(capacity, 64)`, returning capacity
-to the power-of-two sequence unless doubling would overflow, when it requests
-exactly `needed`. Buffer capacity and allocation counts are not part of the
-serialized wire format; see the
-[implementation growth policy](../implementation/protobuf-library.md#encoding).
-
-`serialize_inspected_record_to_buffer`, `serialize_inspected_union_to_buffer`,
-`deserialize_nominal_buffer_with_context`,
-`serialize_fields_to_buffer_with_context`,
-`deserialize_fields_buffer_with_context`, `ResourceCodec`,
-`set_packet_context_provider`, `register_resource_codec`,
-`find_resource_codec`, `find_resource_codec_by_name`,
-`write_resource_index_bytes`, and `write_resource_index` are ordinary compiled
-collaboration entries used by `titan.transfer`. `buf` must point to a live,
-initialized `titan_protobuf_buffer`, just as for `serialize_to_buffer`; the
-inspected-root helpers append to it and do not own or finalize the buffer.
-Passing the already-inspected `reflect.RecordValue` or `reflect.UnionValue` and
-the packet's resolved `context` avoids a second root inspection and repeated
-per-field execution-scope lookups while preserving all public-nominal/member
-visibility, active-record cycle, nesting-depth (128), custom-hook dispatch, and
-2 GiB message-size checks. `deserialize_nominal_buffer_with_context` takes the
-caller's own `reflect.find_nominal(name)` result as `nominal` instead of
-looking `name` up again; it raises the same unknown-name error when `nominal` is
-nil and the same kind-mismatch error as `deserialize_nominal_buffer`, using
-`name` only in those messages. `register_resource_codec` registers a state-local
-nominal resource capability (used for `thread.Sender` and `thread.Receiver`)
-keyed by the record's canonical erased metatable identity, and
-`write_resource_index_bytes` / `write_resource_index` write its four-byte
-little-endian packet-local slot index. These internal-purpose entries do not
-introduce a new standalone serialization policy or make unsupported roots
-transferable.
-
-The `context` argument is an explicit capability: a packet transport passes the
-`ResourceScope` it already resolved for that packet.
-`serialize_fields_to_buffer_with_context`,
-`deserialize_fields_buffer_with_context`, and
-`deserialize_nominal_buffer_with_context` use the value they are given and never
-fall back to the execution's current scope, so `nil` carries no resource
-authority. A `thread.Sender` or `thread.Receiver` field encoded or decoded with
-`nil` raises `transfer: resource attachment requires an encode scope` or
-`transfer: resource claim requires a decode scope`, even when the call runs
-inside a `to_transfer_payload` or `from_transfer_payload` hook whose packet
-scope is active. The public `serialize_fields_to_buffer`,
-`deserialize_fields_buffer`, and `deserialize_nominal_buffer` wrappers resolve
-the exact top scope of the current execution in the matching direction once
-(`nil` when there is none, as in a standalone call; while no packet operation
-is active anywhere in the Lua state that answer needs no execution lookup) and
-delegate. The two
-`serialize_inspected_*_to_buffer` entries differ deliberately: given `nil`, they
-substitute that same current-execution encode scope, so `serialize_to_buffer`,
-which passes no context, can attach endpoints only inside an active packet
-encode scope.
+`serialize_to_buffer` and `serialize_fields_to_buffer` append wire bytes to a
+caller-initialized `titan_protobuf_buffer` (`buf`) without building a Lua
+string. The caller owns the buffer, keeps it and whatever its `context` field
+refers to valid until the call returns, and afterwards frees or detaches the
+storage with the matching native buffer operations. The buffer's `grow`
+callback may run synchronously during an append and must provide at least the
+capacity it is asked for. The capacities requested are not part of the
+contract; the
+[implementation chapter](../implementation/protobuf-library.md#encoding)
+describes the current growth policy. `deserialize_nominal_buffer` and
+`deserialize_fields_buffer` decode from the borrowed byte range of `length`
+bytes at `data`.
 
 The serialized result of `serialize` and `serialize_fields` is a binary string.
 Names, filenames, and schemas are ordinary strings too, but wire bytes need not
 be text and may contain NULs. Errors are strings identifying the rejected type,
 value, or wire condition.
 
+### Transfer collaboration entries
+
+`titan.transfer` shares protobuf's codec with its packets through the
+following public declarations. They are compiled collaboration entries, not an
+application API: they add no serialization policy and make no unsupported root
+transferable.
+
+```text
+find_transfer_hooks(descriptor: reflect.RecordType, prefix: string):
+    (reflect.MethodType?, reflect.StaticFunctionType?)
+encode_transfer_payload(candidate: value, encode: reflect.MethodType,
+                        err_msg: string): string
+serialize_inspected_record_to_buffer(buf: foreign *void,
+                                     candidate: reflect.RecordValue,
+                                     context: value)
+serialize_inspected_union_to_buffer(buf: foreign *void,
+                                    candidate: reflect.UnionValue,
+                                    context: value)
+serialize_fields_to_buffer_with_context(buf: foreign *void,
+                                        fields: const {reflect.Type},
+                                        context: value, ...: value)
+deserialize_fields_buffer_with_context(data: foreign const *void,
+                                       length: integer,
+                                       fields: const {reflect.Type},
+                                       context: value): (...: value)
+deserialize_nominal_buffer_with_context(data: foreign const *void,
+                                        length: integer,
+                                        nominal: reflect.NominalType?,
+                                        name: string, is_union: boolean,
+                                        context: value): value
+find_generated_codec(candidate: value): foreign const *void
+serialize_generated_to_buffer(buf: foreign *void, codec: foreign const *void,
+                              candidate: value, context: value): boolean
+
+record ResourceCodec
+  const identity: value
+  const descriptor: reflect.RecordType
+  const encode: function (value, value): (integer)
+  const decode: function (value, foreign const *void, integer): (value)
+end
+register_resource_codec(
+    candidate: value, descriptor: reflect.RecordType,
+    encode: function (value, value): (integer),
+    decode: function (value, foreign const *void, integer): (value))
+find_resource_codec(candidate: value): ResourceCodec?
+find_resource_codec_by_name(name: string): ResourceCodec?
+foreign function write_resource_index_bytes(dst: *void, index: unsigned int)
+foreign function write_resource_index(raw_buf: *void, index: unsigned int): int
+set_packet_context_provider(provider: function (boolean): (value))
+set_nominal_loader(loader: function (string, string): ())
+```
+
+- `find_transfer_hooks` returns a record's validated `to_transfer_payload`
+  method and `from_transfer_payload` static function, or `(nil, nil)` when the
+  record defines neither; `prefix` (`"protobuf"` or `"transfer"`) only labels
+  validation errors. `encode_transfer_payload` calls that method under the
+  shared active-record cycle guard and raises `err_msg` if `candidate` is
+  already being encoded.
+- The `serialize_inspected_*` entries append a root, already inspected by the
+  caller, to a live, initialized buffer that they neither own nor free. All
+  visibility, cycle, nesting-depth, hook, and size checks still apply.
+- `context` is the packet scope that the transport has already resolved. The
+  three `*_with_context` entries use exactly the context they are given, so
+  `nil` grants no resource authority, even inside a hook whose packet is
+  active: a `thread.Sender` or `thread.Receiver` field then raises
+  `"transfer: resource attachment requires an encode scope"` or
+  `"transfer: resource claim requires a decode scope"`. Given `nil`, the
+  `serialize_inspected_*` entries and `serialize_generated_to_buffer` instead
+  use the current execution's encode scope, if any, as `serialize_to_buffer`
+  does. `deserialize_nominal_buffer_with_context` takes the caller's
+  `reflect.find_nominal(name)` result as `nominal` and raises the same
+  unknown-name and kind-mismatch errors as `deserialize_nominal_buffer`, using
+  `name` only in those messages.
+- `find_generated_codec` returns the [generated codec](#generated-codecs) of a
+  nominal instance, or nil when the reflective codec handles it.
+  `serialize_generated_to_buffer` appends that root with the given codec, or
+  returns false and appends nothing when `codec` is not the value's codec.
+- `register_resource_codec` registers a packet-scoped resource record type for
+  the current Lua state (in the standard library, `thread.Sender` and
+  `thread.Receiver`). The registration is keyed by the record's erased type, so
+  it covers every application of a generic record. `find_resource_codec` and
+  `find_resource_codec_by_name` look it up by instance or by qualified name.
+  `write_resource_index_bytes` and `write_resource_index` write a four-byte
+  little-endian packet-local slot index to raw memory or to a buffer.
+- `set_packet_context_provider` and `set_nominal_loader` install
+  `titan.transfer`'s scope lookup and module loader in the current state.
+
 ## Generated codecs
 
 The compiler generates a native encoder and decoder for each public record or
-union whose fields are all public and of types this module can encode, which
-has no custom transfer hooks, and whose decoder frame fits its fixed bound
-(at most 64 record fields, or 63 parts in any union variant plus one selector;
-the number of variants does not count against that bound). Every
-protobuf and transfer operation uses them for any such nominal it meets, at the
-root or nested in another value, and they produce exactly the bytes, values,
-errors, hook calls, and resource attachments described on this page. Fields
-they do not encode natively (Arrays, foreign values, hooked records, endpoints
-and other registered resources, and `value` fields holding nominals or Arrays)
-and unusual wire forms use the reflective codec for that field, which costs
-what that field costs reflectively plus, per root or decoding nominal that has
-such fields, one reflective encoder or one one-field message; a nominal whose
-fields are all scalars, strings, scalar-holding `value` fields, and generated
-nominals allocates only its decoded values. A nominal with a callable, Map, or
-Interface field, private members, its own hooks, or a wider declaration stays
-reflective. `find_generated_codec` returns the codec of a nominal instance
-(nil when reflection owns it) and `serialize_generated_to_buffer` appends that
-root with an optional packet `context` (false when `codec` is not the value's
-codec); they are compiled collaboration entries for `titan.transfer`.
-`use_generated_codecs(false)` is a diagnostic: it makes ordinary codec lookup
-in the current Lua state use the reflective codec and returns the previous
-setting; no encoded bytes, decoded values, errors, hook calls, or resource
-attachments change. Previously obtained codec handles still run generated code
-when passed to `serialize_generated_to_buffer`.
+union whose members are all public, whose fields all have types this module can
+encode (so no callables, Maps, Interfaces, or owned or union C types), and that
+has no custom transfer hooks. Wide declarations stay reflective: a record with
+more than 64 fields, or a union with a variant of more than 63 parts; the
+number of variants does not matter. Every protobuf and transfer operation uses
+a generated codec wherever it meets such a nominal, as the root or nested in
+another value. Generated codecs produce exactly the bytes, values, errors, hook
+calls, and resource attachments described in this chapter; only their cost
+differs. Fields that a generated codec does not handle natively—Arrays, foreign
+values, records with hooks, `thread` endpoints, and `value` fields holding
+nominals or Arrays—use the reflective codec for that field. The
+[implementation chapter](../implementation/protobuf-library.md#generated-nominal-codecs)
+describes the allocation profile.
 
-Decoded byte fields are independent Lua strings, not borrowed views of the
-input. Generated decoding roots each decoded string before polling the
-collector, with the same allocation/poll order as reflective decoding; this
-does not add a string copy or change packet-resource authority.
+`use_generated_codecs(false)` makes later codec lookups in the current Lua
+state choose the reflective codec, and returns the previous setting. It is a
+diagnostic for comparing the two codecs and changes no observable result.
+Codec handles obtained before the call still run generated code when passed to
+`serialize_generated_to_buffer`.
 
 ## Anonymous messages
 
@@ -269,9 +242,10 @@ Eligible field and payload types are:
   structs, and fixed embedded C arrays, recursively containing eligible data.
 
 The module rejects Maps, Interfaces, Titan/Lua callables, owned foreign
-resources, C unions, incomplete aggregates, and flexible arrays, including
-inside a `value` (`protobuf: unsupported dynamic value`). Foreign C
-exportability and declaration visibility also follow the [FFI contract](ffi.md).
+resources, C unions, incomplete aggregates, and flexible arrays. A `value`
+holding a Map, a callable, a raw pointer, or another unsupported kind raises
+`protobuf: unsupported dynamic value`. Foreign C exportability and declaration
+visibility also follow the [FFI contract](ffi.md).
 
 Encoding visits the actual graph without a preliminary schema walk. Unsupported
 data fails when encountered. For example, an absent optional field or an empty
@@ -315,23 +289,21 @@ observed qualifier. Fixed C array reconstruction checks the actual target
 extent. As elsewhere in Titan, trailing absent elements do not add observable
 Array length.
 
-A `value` field is self-describing: its `TitanValue` message holds exactly one
-arm, `bool boolean = 1`, `sint64 integer = 2`, `double number = 3`,
+A `value` field is self-describing. Its `TitanValue` message holds one `oneof`
+arm: `bool boolean = 1`, `sint64 integer = 2`, `double number = 3`,
 `bytes string = 4`, `TitanValue_Nominal nominal = 5`, or a Titan Array of
 `TitanValue` elements at 6. The nominal arm carries the declaring module name
-(1), the qualified nominal name (2), and at 3 exactly the bytes a field of that
-nominal type carries: its message, its custom hook payload, or its packet
-resource index. Decoding selects the last recognized arm and treats a message
-with none as nil; a decoded Array keeps its observed constness. Standalone
-decoding requires the named nominal to be registered (`protobuf: unknown
-nominal type`), while decoding a transfer packet loads its declaring module
-on demand, in any state, including a thread or independent Lua state that has
-not loaded it yet. `TransferValue:to_value` outside a packet decodes like a
-standalone call: it loads the root nominal's module, but a nominal named only
-inside a `value` field must already be registered. The `TitanValue` encoding
-is new: earlier builds rejected every non-nil `value` field and erased generic
-field, so it adds wire forms without changing any existing one, and an
-earlier build cannot decode bytes that contain it.
+at field 1, the qualified nominal name at field 2, and at field 3 the bytes that
+a field of that nominal type carries: its message, its custom hook payload, or
+its packet resource index. Decoding uses the last recognized arm and treats a
+message with none as nil; a decoded Array keeps the constness it was encoded
+with.
+
+A nominal named inside a `value` field must already be initialized in the
+decoding state, or decoding raises `protobuf: unknown nominal type`. The one
+exception is decoding a transfer packet, which loads the declaring module on
+demand. `TransferValue:to_value` outside a packet therefore loads the root
+nominal's module but not a module named only inside a `value` field.
 
 Absent options and nil fields emit no field. Other scalars are emitted even
 when equal to protobuf defaults. Decoding requires present non-optional fields
@@ -353,20 +325,13 @@ lengths, groups, wire kinds, out-of-range native integers, missing required
 fields, and unrecognized union selections raise. Nesting is limited to 128
 levels, and messages must fit the protobuf 2 GiB size bound.
 
-Decoding keeps a compact directory of wire offsets rather than constructing a
-Titan object for each wire field. Empty and single-field messages need no
-directory backing allocation or lookup index; multi-field lookup is sparse even
-when unknown tags have very large field numbers. This bookkeeping does not
-change the wire mapping, scalar last-selection, repeated-message merging, or
-oneof replacement rules above.
-
-String entry points retain their input throughout decoding, including custom
-decoder calls that drop the caller's last reference to it. Internally merged
-message bytes remain retained while any child slice uses them. The raw
-`*_buffer` entry points borrow caller-owned memory: keep that complete byte
-range alive and unchanged until the synchronous call returns or raises,
-including while a custom decoder runs. A raw pointer does not retain a Titan
-string or native allocation.
+String entry points keep their input alive throughout decoding, including
+while a custom decoder runs after the caller has dropped its last reference to
+it. The raw `*_buffer` entry points borrow caller-owned memory: keep the
+complete byte range alive and unchanged until the synchronous call returns or
+raises, including while a custom decoder runs. A raw pointer does not retain a
+Titan string or native allocation. Decoded byte fields are independent strings,
+not views of the input.
 
 Extended C floating values use C hexadecimal text to avoid narrowing to Titan
 `float`; they do not acquire a standard protobuf numeric interpretation. Pointer
@@ -394,30 +359,24 @@ initialized type. See [independent Lua states](standard-library-lua.md) and
 
 ### Custom record transfer hooks
 
-Records with the [custom transfer-hook pair](async-io.md#custom-record-transfer)
-use an `is_record_payload(module, name, bytes)` carrier instead during automatic
-transfer at the root. When such a record appears as a nested field inside an
-outer public record or union (or inside an Array field), `protobuf.serialize`,
-`protobuf.deserialize`, and `protobuf.schema` represent it on the wire as
-`optional bytes` without requiring public fields on the hooked record.
-Registered packet-scoped resource records (`thread.Sender<|T|>` and
-`thread.Receiver<|T|>`) use their transfer-registered `ResourceCodec`
-capability to attach and claim the four-byte little-endian slot index directly
-in the packet buffer without reflective hook calls or intermediate four-byte
-Lua strings (and `TransferValue.from_value` / `:to_value` likewise dispatch
-registered `ResourceCodec` records before reflective hooks); other hooked
-records delegate to `to_transfer_payload(): string` and
-`from_transfer_payload(payload: string): Record`. Hooks may use an
-anonymous-message descriptor to encode native tokens and copied state. Calling
-`protobuf.serialize` directly on a root record continues to apply the
-structural public-data rules in this chapter.
+During automatic transfer, a root record with the
+[custom transfer-hook pair](async-io.md#custom-record-transfer) travels as an
+`is_record_payload(module, name, bytes)` carrier. When such a record is a field,
+variant part, or Array element inside another public record or union,
+`protobuf.serialize`, `protobuf.deserialize`, and `protobuf.schema` represent
+it as `optional bytes` holding its hook payload, and its own fields need not be
+public. `thread.Sender` and `thread.Receiver` fields use the same
+representation, but their payload is a four-byte packet-local slot index that
+`titan.transfer` writes and claims directly, without calling their hooks. Hooks
+may use an anonymous-message descriptor to encode native tokens and copied
+state. Calling `protobuf.serialize` on a hooked record as the root still
+applies the structural public-data rules of this chapter.
 
-Standalone protobuf operations open no packet resource scope. Neither direct
-`ResourceCodec` fields nor `to_transfer_payload` / `from_transfer_payload`
-hooks invoked from standalone `protobuf.serialize`, `protobuf.deserialize`, or
-`protobuf.deserialize_nominal_buffer` authorize `thread.Sender` or
-`thread.Receiver` attachment or claim; they raise unless the work belongs to
-the exact current packet scope opened by a
+Standalone protobuf calls open no packet scope. When `protobuf.serialize`,
+`protobuf.deserialize`, or `protobuf.deserialize_nominal_buffer` meets a
+`thread.Sender` or `thread.Receiver` field, or a hook that attaches or claims
+one, it raises unless the call runs inside the current execution's matching
+scope, opened by a
 [packet transfer operation](standard-library-transfer.md#scoped-resource-attachments-and-packet-local-indexes).
-Hooks remain synchronous and nonyielding; nested hook dispatch does not change
-their ownership or execution contract.
+Hooks remain synchronous and nonyielding, including when called for nested
+fields.

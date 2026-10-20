@@ -140,15 +140,13 @@ the error is swallowed and execution continues after the whole construct.
 If there is no catch, the error keeps propagating. Automatic cleanup via
 `defer` statements is described in [Defer](defer.md).
 
-Once execution has entered a protected block, boundary recovery into `catch`
-or `defer` does not allocate to snapshot or clear traceback state. If a
-low-memory failure (`"not enough memory"`) bypasses traceback construction,
-`catch` still runs with `error` set to that memory error and `traceback` set to
-`""` when no earlier trace remains in the registry, and registered `defer` statements still execute before the block exits.
-Re-raising (`raise` or propagating an uncaught error after `defer` cleanup)
-runs only after the current block's cleanup has finished; even if recording
-the propagated trace encounters another allocation failure, enclosing `defer`
-and `catch` blocks still run their own recovery and cleanup.
+Recovery works even when memory is exhausted: entering a `catch` or a
+registered `defer` does not allocate, so both still run after a
+`"not enough memory"` error. If that error was raised before Titan could
+capture a traceback, `traceback` is the empty string, or a trace that an
+earlier error left recorded. If recording the trace of a re-raised or
+propagating error runs out of memory, enclosing `defer` and `catch` blocks
+still run.
 
 ## Interacting with Lua
 
@@ -194,11 +192,9 @@ The returned string is the raw frame list: it does not include the error
 message, a `stack traceback:` header, or tab indentation.
 
 When Titan catches and handles an error, the registry slot backing
-`titan.backtrace()` is cleared without allocating; the handled trace is
-available as the catch-local `traceback` (or `""` when a low-level memory
-error bypassed the message handler and no earlier trace remains). A bare re-raise pins that saved trace so
-the outer handler sees the original stack. A fresh `raise <exp>` builds a
-fresh trace.
+`titan.backtrace()` is cleared; the handled trace is available as the
+catch-local `traceback`. A bare re-raise pins that saved trace so the outer
+handler sees the original stack. A fresh `raise <exp>` builds a fresh trace.
 
 The merged trace uses libbacktrace and the generated C debug information
 on Linux, macOS, and Windows. Windows providers retain their DWARF sections;

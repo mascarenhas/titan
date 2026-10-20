@@ -87,10 +87,11 @@ keep the shared async handle referenced until every activated wait is retired,
 including already-drained targets. Native notification queues at most one
 pending node per target and never reads Lua/Titan GC values. The destination
 drains bounded identity batches and validates/schedules its own live waits.
-Clear destination map entries and borrows before `unregister`, which may cache
-or free the target. A consumed borrow may alias a later reservation on the same
-core. Retained producers may survive unregister or close and receive
-`EINVAL` on late notification; release each retained reference exactly once.
+Clear destination map entries and borrows before `unregister`, which may free
+the target or keep its storage for a later reservation on the same core, so a
+consumed borrow may alias a new target. Retained producers may survive
+unregister or close and receive `EINVAL` on late notification; release each
+retained reference exactly once.
 
 [`native_external_wake_is_notified`](supplemental.md#native_external_wake_is_notified)
 returns `1` for `PENDING` or `DELIVERED`, and `0` otherwise, under the core mutex;
@@ -98,9 +99,9 @@ drain does not clear that latch. The caller still needs a valid borrow/retain
 through the query, and the snapshot does not protect a later dereference from
 retirement. [`native_external_wake_unregister`](supplemental.md#native_external_wake_unregister)
 is C-only but **destination-loop-thread-only**: it can unreference the handle.
-It consumes the registration on `0`, not a producer reference, and may cache or
-free a borrowed target immediately. Never use both unregister forms for one
-registration or dereference a consumed borrow.
+It consumes the registration on `0`, not a producer reference, and may
+immediately free a borrowed target or keep its storage for reuse. Never use both
+unregister forms for one registration or dereference a consumed borrow.
 
 
 Normal bridge close returns `EBUSY` for any registration, even a prepared
