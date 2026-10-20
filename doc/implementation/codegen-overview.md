@@ -350,8 +350,13 @@ per generated module. The existing native-symbol resolver returns it for
 perform no additional lookup and keep their existing upvalue layout. Each
 first-class source function, lambda, bound method, and realized callable
 adapter has an entry containing its native/strict lookup key, immediate capture
-count, and generated projection/restoration functions. The manifest contains
-only the actual module name and entry array. A referenced local function has the same transfer capability
+count, and generated projection/restoration functions. The manifest also
+publishes one `TitanTransferCodec` per generated record or union codec
+(`coder/nominal_codec.lua`): its qualified name, kind, and generated encode and
+decode functions, emitted next to the nominal's other storage helpers. The
+nominal's metatable registration binds `TITAN_MT_CODEC` to that entry; see
+[generated nominal codecs](protobuf-library.md#generated-nominal-codecs). A
+referenced local function has the same transfer capability
 as an exported function. Captured nominals still follow the public protobuf or
 custom-record transfer policy; local nominal types remain ineligible.
 
@@ -365,9 +370,11 @@ as reflected native fields. One generated function projects **all** immediate
 semantic captures onto the source stack before custom hooks run. The source
 closure and projected values remain rooted while ordinary Titan code converts
 and serializes them. Owning-state foreign functions in `titan.transfer` discover
-entries, project captures, and invoke generated restoration; `transfer.h` only
-declares the immutable manifest layout. There is no native recursive serializer,
-allocation arena, or source identity map. Generated code rejects Lua-managed `Udata *`
+entries, project captures, and invoke generated restoration; for closures
+`transfer.h` only declares the immutable manifest layout. Capture snapshots use
+no native recursive serializer, allocation arena, or source identity map
+(nominal captures reach generated codecs only through their protobuf root).
+Generated code rejects Lua-managed `Udata *`
 before native-pointer projection, including typedef spellings and present
 optional pointers; an absent optional projects and reconstructs as nil. This
 guard prevents the trusted GC-bearing pointer representation from becoming a

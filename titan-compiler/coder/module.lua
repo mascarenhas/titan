@@ -533,6 +533,7 @@ function coderecorddec(ctx, code, initrecs, node)
         lua_rawsetp(L, -2, TITAN_MT_PROJECT);
         lua_pushlightuserdata(L, titan_cast_func(void *, $CONSTRUCTOR));
         lua_rawsetp(L, -2, TITAN_MT_CONSTRUCT);
+        $CODEC
         titan_pushmodule(L, _mod);
         lua_rawsetp(L, -2, TITAN_MT_MOD);
         lua_newtable(L);
@@ -574,7 +575,8 @@ function coderecorddec(ctx, code, initrecs, node)
         PUBLIC = node.islocal and "0" or "1",
         PROJECTOR = projector,
         CONSTRUCTOR = constructor,
-        FIELDMAP = table.concat(fieldmap, "\n")
+        FIELDMAP = table.concat(fieldmap, "\n"),
+        CODEC = coder._codec_binding(ctx, node),
     }))
 end
 
@@ -716,6 +718,7 @@ function coder._codeuniondec(ctx, code, initnominals, node)
             lua_rawsetp(L, -2, TITAN_MT_PROJECT);
             lua_pushlightuserdata(L, titan_cast_func(void *, $CONSTRUCTOR));
             lua_rawsetp(L, -2, TITAN_MT_CONSTRUCT);
+            $CODEC
             titan_pushmodule(L, _mod);
             lua_rawsetp(L, -2, TITAN_MT_MOD);
             lua_pushlightuserdata(L, titan_cast_func(void *, $PAYLOAD_READER));
@@ -758,6 +761,7 @@ function coder._codeuniondec(ctx, code, initnominals, node)
         PROJECTOR = projector,
         CONSTRUCTOR = constructor,
         METHODMAP = table.concat(methodmap, "\n"),
+        CODEC = coder._codec_binding(ctx, node),
     }))
 end
 

@@ -261,14 +261,16 @@ function coder._transfer_emit_manifest(tlcontext, sigs, code)
         code[#code + 1] = "static const TitanTransferEntry " .. array
             .. "[] = {\n" .. table.concat(initializers, ",\n") .. "\n};"
     end
+    local codecs, codec_count = coder._codec_emit_table(tlcontext, code)
     tlcontext.transfer_manifest = tlcontext.prefix .. "transfer_manifest"
     code[#code + 1] = render([[
         static const TitanTransferModule $MANIFEST = {
-            $NAME, $COUNT, $ENTRIES
+            $NAME, $COUNT, $ENTRIES, $CODEC_COUNT, $CODECS
         };
     ]], {
         MANIFEST = tlcontext.transfer_manifest,
         NAME = c_string_literal(tlcontext.module),
         COUNT = #entries, ENTRIES = array,
+        CODEC_COUNT = codec_count, CODECS = codecs,
     })
 end

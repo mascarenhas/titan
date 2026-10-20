@@ -269,11 +269,13 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
                 codevardec(initctx, initvars, switch_get, switch_set, gvar_map, node)
             elseif tag == "Ast.TopLevelRecord" then
                 coder._nominal_plan(initctx, node._type)
+                coder._codec_emit(initctx, code, node)
                 coderecorddec(initctx, code, initrecs, node)
             elseif tag == "Ast.TopLevelUnion" then
                 for _, variant in ipairs(node._type.variants) do
                     coder._nominal_plan(initctx, node._type, variant)
                 end
+                coder._codec_emit(initctx, code, node)
                 coder._codeuniondec(initctx, code, initrecs, node)
             elseif tag == "Ast.TopLevelInterface" then
                 coder._codeinterfacedec(

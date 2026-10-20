@@ -89,7 +89,20 @@ reflection; `encode_packet` additionally recognizes registered resource roots:
    hook dispatch, passing `packet_context(true)` / `packet_context(false)` to
    the registered capability while retaining the four-byte little-endian index
    string inside `is_record_payload` (including for closure-captured endpoints).
-4. **Single structural root inspection and carried packet context**: When a
+4. **Generated nominal codec**: after the root resource-capability and closure
+   checks and before `reflect.inspect`, `encode_packet` asks
+   `protobuf.find_generated_codec(candidate)`. A bound generated codec writes
+   the record or union through the ordinary owned packet buffer
+   (`init_packet_buffer` with the codec's name and the `nominal_module`, then
+   `protobuf.serialize_generated_to_buffer` and `finalize_buf_message` with
+   the codec's record or union kind). It allocates no inspection, `Encoder`,
+   or cycle Map and attaches no resources. When it declines, the buffer is
+   freed and the reflective steps below run unchanged from the start. Decoding
+   reaches the generated decoder through
+   `protobuf.deserialize_nominal_buffer_with_context` after the unchanged
+   demand-driven `initialize_nominal_raw`. See
+   [generated nominal codecs](protobuf-library.md#generated-nominal-codecs).
+5. **Single structural root inspection and carried packet context**: When a
    non-scalar, non-function value is inspected once with
    `reflect.inspect(candidate)` and yields `is_record(record_value)` (with no
    custom transfer hooks) or `is_union(union_value)`, transfer passes that
@@ -101,8 +114,8 @@ reflection; `encode_packet` additionally recognizes registered resource roots:
    compiled functions on `titan.protobuf` with an internal role: they avoid a
    second `reflect.inspect` at the root and carry `scope` once for all nested
    fields while preserving all visibility, active-record cycle, nesting-depth
-   (128), and 2 GiB message-size checks. Public `protobuf.serialize` and
-   `protobuf.serialize_to_buffer` remain unchanged.
+   (128), and 2 GiB message-size checks. They also try the generated codec
+   first, as do public `protobuf.serialize` and `protobuf.serialize_to_buffer`.
 
 Custom hook signatures are exactly `to_transfer_payload(): string` and
 `from_transfer_payload(payload: string): Record`; both remain synchronous and

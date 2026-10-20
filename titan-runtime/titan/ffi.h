@@ -79,6 +79,8 @@ static inline int titan_posix_getsockname(int descriptor,
 #define TITAN_MT_PROJECT ((void *)(uintptr_t)UINT64_C(0x730AB98A6741201C))
 #define TITAN_MT_CONSTRUCT ((void *)(uintptr_t)UINT64_C(0x730AB98A6741201D))
 #define TITAN_MT_PUBLIC ((void *)(uintptr_t)UINT64_C(0x730AB98A6741201E))
+/* Generated nominal codec bound by the declaring module (see transfer.h). */
+#define TITAN_MT_CODEC ((void *)(uintptr_t)UINT64_C(0x730AB98A6741201F))
 
 /*
 ** Titan types that have a metatable

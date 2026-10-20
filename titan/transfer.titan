@@ -610,6 +610,15 @@ local function nominal_module(candidate: value): string
   return ffi.lua_totvalue(L, -1) as value
 end
 
+-- The qualified nominal name published by a generated codec's manifest entry.
+local function generated_codec_name(codec: foreign const *TitanTransferCodec): string
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve nominal transfer stack" end
+  ffi.lua_pushstring(L, codec.name)
+  return ffi.lua_totvalue(L, -1) as value
+end
+
 local function project_closure_captures(
     candidate: value): (string, foreign const *void, {TransferValue}, {boolean})
   if transfer_active_closures[candidate] then raise "cannot transfer cyclic closure captures" end
@@ -1215,6 +1224,28 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
         buf as foreign *void, closure_fields, scope, policies, was_policy)
     return finalize_buf_message(buf, ffi.TITAN_ASYNC_MESSAGE_CLOSURE,
         "", module, entry, scope.native) as foreign *void
+  end
+  -- A compiler-generated codec writes the reflective wire bytes without
+  -- inspection, Encoder, or cycle-table allocations. It runs no hook or
+  -- resource codec, so a decline leaves nothing to undo before reflection.
+  local generated = protobuf.find_generated_codec(candidate)
+  if generated ~= nil then
+    local codec = generated as foreign const *TitanTransferCodec
+    local module = nominal_module(candidate)
+    local name = generated_codec_name(codec)
+    local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+    if init_packet_buffer(buf, #name as foreign size_t, #module as foreign size_t) == 0 then
+      raise "transfer: out of memory copying message"
+    end
+    defer ffi.titan_protobuf_buf_free_heap(buf)
+    if protobuf.serialize_generated_to_buffer(buf as foreign *void, generated, candidate) then
+      if codec.is_union ~= 0 then
+        return finalize_buf_message(buf, ffi.TITAN_ASYNC_MESSAGE_UNION,
+            name, module, nil, scope.native) as foreign *void
+      end
+      return finalize_buf_message(buf, ffi.TITAN_ASYNC_MESSAGE_RECORD,
+          name, module, nil, scope.native) as foreign *void
+    end
   end
   case reflect.inspect(candidate)
   when is_lua_userdata() then

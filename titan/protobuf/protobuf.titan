@@ -362,9 +362,44 @@ local function unzigzag(number: integer): integer
   return (number >> 1) ~ -(number & 1)
 end
 
--- Internal compiled transfer entries. Callers supply the already inspected
--- root; Encoder retains the normal visibility, cycle, depth, and size guards.
-function serialize_inspected_record_to_buffer(
+--- Return the compiler-generated codec bound to this nominal instance's canonical metatable.
+-- Nil selects the reflective codec: no generated codec, a non-nominal value, or
+-- a registered resource capability, which keeps its precedence.
+-- @param candidate Value whose exact nominal identity selects the codec.
+-- @return Opaque codec handle for serialize_generated_to_buffer, or nil.
+-- @usage standard-library-protobuf.md#generated-codecs
+function find_generated_codec(candidate: value): foreign const *void
+  local raw: foreign TValue = candidate
+  local resources: foreign TValue = resource_codecs as value
+  return ffi.titan_codec_for_value(L, resources, raw) as foreign const *void
+end
+
+--- Append a root with its generated codec, or decline without changing the buffer.
+-- The generated encoder writes exactly the reflective encoder's bytes. It
+-- declines, instead of raising, wherever reflection could raise or run a
+-- hook or resource codec; the caller then encodes the root reflectively.
+-- @param buf Pointer to an initialized titan_protobuf_buffer.
+-- @param codec Handle returned by find_generated_codec for this candidate.
+-- @param candidate The exact nominal instance the handle was found for.
+-- @return True when the complete root was appended.
+-- @usage standard-library-protobuf.md#generated-codecs
+function serialize_generated_to_buffer(buf: foreign *void, codec: foreign const *void,
+    candidate: value): boolean
+  local raw: foreign TValue = candidate
+  local resources: foreign TValue = resource_codecs as value
+  return ffi.titan_codec_encode_root(L, resources, buf as foreign *titan_protobuf_buffer,
+      codec as foreign const *TitanTransferCodec, raw) ~= 0
+end
+
+local function serialize_generated(buf: foreign *void, candidate: value): boolean
+  local codec = find_generated_codec(candidate)
+  if codec == nil then return false end
+  return serialize_generated_to_buffer(buf, codec, candidate)
+end
+
+-- Reflective roots. Encoder retains the visibility, cycle, depth, hook,
+-- resource, and size guards for everything a generated codec declined.
+local function encode_record_root(
     buf: foreign *void, candidate: reflect.RecordValue, context: value)
   local pbuf = buf as foreign *titan_protobuf_buffer
   local start = pbuf.length as integer
@@ -374,7 +409,7 @@ function serialize_inspected_record_to_buffer(
   check_message_size((pbuf.length as integer) - start)
 end
 
-function serialize_inspected_union_to_buffer(
+local function encode_union_root(
     buf: foreign *void, candidate: reflect.UnionValue, context: value)
   local pbuf = buf as foreign *titan_protobuf_buffer
   local start = pbuf.length as integer
@@ -384,16 +419,31 @@ function serialize_inspected_union_to_buffer(
   check_message_size((pbuf.length as integer) - start)
 end
 
+-- Internal compiled transfer entries. Callers supply the already inspected
+-- root; a generated codec takes it first, otherwise the reflective root.
+function serialize_inspected_record_to_buffer(
+    buf: foreign *void, candidate: reflect.RecordValue, context: value)
+  if serialize_generated(buf, candidate.value) then return end
+  encode_record_root(buf, candidate, context)
+end
+
+function serialize_inspected_union_to_buffer(
+    buf: foreign *void, candidate: reflect.UnionValue, context: value)
+  if serialize_generated(buf, candidate.value) then return end
+  encode_union_root(buf, candidate, context)
+end
+
 --- Append the wire encoding of a public record or union instance to an initialized titan_protobuf_buffer.
 -- @param buf Pointer to an initialized titan_protobuf_buffer.
 -- @param candidate Public record or union instance to traverse.
 -- @usage standard-library-protobuf.md#api
 function serialize_to_buffer(buf: foreign *void, candidate: value)
+  if serialize_generated(buf, candidate) then return end
   case reflect.inspect(candidate)
   when is_record(record_value) then
-    serialize_inspected_record_to_buffer(buf, record_value)
+    encode_record_root(buf, record_value, nil)
   when is_union(union_value) then
-    serialize_inspected_union_to_buffer(buf, union_value)
+    encode_union_root(buf, union_value, nil)
   else raise "protobuf: root must be a public record or union"
   end
 end
@@ -410,6 +460,24 @@ function serialize(candidate: value): string
   return buffer_to_string(buf)
 end
 
+-- Decode with the generated codec bound to `name`'s canonical metatable. False
+-- leaves no stack effect and the same bytes to the reflective decoder, which
+-- owns every error, hook, resource claim, and non-canonical wire form.
+local function deserialize_generated(data: foreign const *void, length: integer,
+    name: string): (boolean, value)
+  local identity? = resource_nominals[name]
+  if identity == nil then return false, nil end
+  local metatable: foreign TValue = identity as value
+  local resources: foreign TValue = resource_codecs as value
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.titan_codec_decode_root(L, resources, metatable, data,
+      length as foreign size_t) == 0 then
+    return false, nil
+  end
+  return true, ffi.lua_totvalue(L, -1) as value
+end
+
 -- Root reconstruction from an already-resolved nominal descriptor, so a
 -- caller that holds one never allocates a reflect.Type wrapper to reach it.
 -- String entry points pass their input as the root holder, so it stays traced
@@ -421,6 +489,8 @@ local function deserialize_record_buffer(
     descriptor: reflect.RecordType, context: value, holder: string?): value
   check_message_size(length)
   require_record(descriptor)
+  local decoded, result = deserialize_generated(data, length, descriptor.name)
+  if decoded then return result end
   local message = read_message_slice(
       data as foreign const *uint8_t, 0, length, holder, context)
   return decode_record(message, descriptor, 1)
@@ -432,6 +502,8 @@ local function deserialize_union_buffer(
     descriptor: reflect.UnionType, context: value, holder: string?): value
   check_message_size(length)
   require_union(descriptor)
+  local decoded, result = deserialize_generated(data, length, descriptor.name)
+  if decoded then return result end
   local message = read_message_slice(
       data as foreign const *uint8_t, 0, length, holder, context)
   return decode_union(message, descriptor, 1)

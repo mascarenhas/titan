@@ -78,6 +78,9 @@ find_resource_codec(candidate: value): ResourceCodec?
 find_resource_codec_by_name(name: string): ResourceCodec?
 foreign function write_resource_index_bytes(dst: *void, index: unsigned int)
 foreign function write_resource_index(raw_buf: *void, index: unsigned int): int
+find_generated_codec(candidate: value): foreign const *void
+serialize_generated_to_buffer(buf: foreign *void, codec: foreign const *void,
+                              candidate: value): boolean
 ```
 
 The root must be a public Titan record or union. `deserialize` and `schema`
@@ -172,6 +175,22 @@ The serialized result of `serialize` and `serialize_fields` is a binary string.
 Names, filenames, and schemas are ordinary strings too, but wire bytes need not
 be text and may contain NULs. Errors are strings identifying the rejected type,
 value, or wire condition.
+
+## Generated codecs
+
+The compiler generates a native encoder and decoder for each public record or
+union whose declared fields are all public and are booleans, integers, floats,
+strings, nil, other such records or unions, or Options of these, and which has no
+custom transfer hooks. `serialize`, `serialize_to_buffer`, `deserialize`,
+`deserialize_nominal`, and transfer packets use them for the root. They produce
+exactly the bytes, values, and errors described on this page; they only avoid
+reflective inspection and bookkeeping allocations. A nominal with an Array,
+`value`, callable, Interface, or foreign field, a custom hook, or a registered
+resource capability, and any unusual or malformed wire input, take the
+reflective path. `find_generated_codec` returns the codec of a nominal instance
+(nil when reflection owns it), and `serialize_generated_to_buffer` appends that
+root or returns false without changing the buffer; both are compiled
+collaboration entries for `titan.transfer`.
 
 ## Anonymous messages
 

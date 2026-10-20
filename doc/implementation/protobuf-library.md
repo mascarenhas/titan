@@ -104,9 +104,11 @@ passes the result of the lookup `initialize_nominal_raw` performs before or
 after loading the declaring module. The shared slice raises the unknown-name
 error for nil and the kind-mismatch error otherwise, then hands the record or
 union descriptor to private `deserialize_record_buffer` /
-`deserialize_union_buffer`. Those check the message size, require public
-members, parse the root slice, and decode it. These name-based roots therefore
-perform one registry lookup and allocate no `reflect.Type` wrapper.
+`deserialize_union_buffer`. Those check the message size and require public
+members, then try the [generated decoder](#generated-nominal-codecs) bound to
+the descriptor's name; when it declines they parse the root slice and decode it
+reflectively. These name-based roots therefore perform one registry lookup and
+allocate no `reflect.Type` wrapper.
 
 `deserialize(bytes, descriptor)` reaches the same helpers after `resolve_type`.
 A `Type.is_record` / `is_union` descriptor dispatches directly. A
@@ -156,6 +158,53 @@ public-data rules. See the
 [owning API inventory](../language/standard-library-protobuf.md#api) and
 [transfer classification](transfer-library.md#flat-packets-and-direct-classification).
 
+## Generated nominal codecs
+
+The compiler emits a codec pair for every public record or union whose whole
+declared graph it can encode directly (`coder/nominal_codec.lua`). Every field or
+variant must be public, no member may be named `to_transfer_payload` or
+`from_transfer_payload`, and every field or part type must be `nil`, a boolean,
+integer, float, string, a statically eligible record or union, or an Option of
+one of those except nil. Eligibility is a fixpoint over recursive nominals.
+Arrays, Maps, `value` (including erased generic parameters), functions,
+Interfaces, foreign types, hooks, and private members keep the whole nominal
+reflective, so an endpoint-bearing root never attempts the generated path.
+
+The declaring module publishes the entries in its `TitanTransferModule`
+manifest (`codec_count`/`codecs`, `transfer.h`) and binds each canonical
+metatable to its entry under `TITAN_MT_CODEC` during nominal registration.
+`find_generated_codec` reads that binding with raw table reads and returns nil
+when the metatable also has a registered resource codec, so resource
+capabilities keep their precedence. Erased generic applications share the one
+metatable and entry.
+
+A generated codec replicates the reflective codec on the inputs it accepts and
+otherwise **declines** with status 0. It never raises a codec error, runs a
+hook or resource codec, loads a module, or enters Lua: the encoder only appends
+bytes and the decoder only allocates fresh nominals and strings. The caller
+restores its buffer length, or its stack, and runs the
+complete root reflectively, which raises the exact reflective errors in the
+exact reflective order. The encoder writes fields in declaration order through
+the same writers and eagerly widened nested length prefixes, and declines at depth 128 or
+more, on an object already on its automatic path chain (cycles), on a string or
+message over 2 GiB, on allocation failure, and at a nested nominal without a
+bound codec, with a registered resource codec, or with a different nominal name
+or kind. The decoder accepts only canonical wire: declared fields in order, each
+at most once, with exact keys and wire types; a union holds exactly one
+recognized variant. Unknown, repeated, reordered, or malformed fields, missing
+required fields, invalid booleans, groups, and depth 128 or more decline. On
+canonical input the reflective last-wins, merge, and oneof rules select the
+single occurrence. Decoding allocates the destination with the reflective
+constructor's storage steps (`luaS_newudata`, module metatable, zeroed payload),
+roots it before any other allocation, stores traced fields with
+`luaC_barrierback`, and never calls `new`.
+
+Generated codecs are used only at roots: `serialize_to_buffer` (before
+`reflect.inspect`), the inspected-root entries, `deserialize`,
+`deserialize_nominal*`, and transfer packets. The reflective encoder and decoder
+never call them, so the anonymous root is a reflective oracle for differential
+tests and the two cycle detectors never mix.
+
 ## Encoding
 
 The encoder keeps an active-path Map keyed by the original nominal or Array
@@ -167,7 +216,11 @@ active payload only; the all-public type flag still rejects private variants
 anywhere on that nominal declaration.
 
 All wire accumulation writes into a pluggable, expandable native buffer
-(`titan_protobuf_buffer` in `titan/protobuf/native.h`).
+(`titan_protobuf_buffer`). The buffer, its writers, and the fixed64/double
+readers live in the SDK header `transfer.h`
+because generated nominal codecs in every module append through them;
+`titan/protobuf/native.h` includes it and keeps the reflective decoder's
+directory entry and remaining helpers.
 `titan_protobuf_buf_reserve` grows small writes through power-of-two capacities
 from a 64-byte minimum via its `grow` callback and `context` pointer. When one
 reservation exceeds four times the current capacity (using 64 as the minimum),
