@@ -4055,7 +4055,7 @@ printf '%s\0' "$@" > "$TITAN_SELECTOR_ARGV_LOG"
                 for shard = 1, 5 do
                     expected_total = expected_total + #expected[shard]
                 end
-                assert.equal(159, expected_total)
+                assert.equal(161, expected_total)
                 assert.equal(expected_total, total)
 
                 local complete_log = root .. "/complete"
@@ -5572,7 +5572,7 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 41, 29, 41, 40 }, shard_counts)
+            assert.same({ 43, 29, 41, 40 }, shard_counts)
             assert.equal(151, assigned_count)
             local integration_count = 0
             for line in read_file(
