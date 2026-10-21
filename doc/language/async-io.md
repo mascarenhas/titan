@@ -1085,10 +1085,17 @@ native callback.
 `unregister_fn()` and
 [`external_wake_t:unregister(target)`](uv/supplemental.md#external_wake_tunregister).
 That unlinks any pending notification and unreferences the shared handle when
-active waits reach zero. The bridge checks both the unique `ExternalWait`
-identity and the Task's suspension epoch, so stale or duplicate native
-notifications are ignored and can never wake a replacement wait on the same
-Task.
+active waits reach zero. An ordinary `wait()` stays active until its Task
+resumes, even after a producer has notified it: a `Task:cancel` that arrives
+between the notification and the resumption still calls `unregister_fn()`, and
+the wait raises the cancellation instead of completing. If the producer chose
+this waiter over others when it notified it, for example to report that a
+bounded queue has room again, `unregister_fn` must pass that wakeup on to
+another waiter, or the wakeup is lost; the
+[thread channels](standard-library-thread.md#sending-and-receiving) do this.
+The bridge checks both the unique `ExternalWait` identity and the Task's
+suspension epoch, so stale or duplicate native notifications are ignored and
+can never wake a replacement wait on the same Task.
 
 **Convenience wrappers.** `wait_external(register_fn, unregister_fn)` and
 `wait_external_cleanup(register_fn, unregister_fn)` require a running Task. They
@@ -1115,10 +1122,12 @@ no cleanup shielding and does not hold back Task publication.
   left linked or retained. A negative status raises `OperationError` with
   operation `"async.external_wait.register"`.
 - `unregister_fn(context)` withdraws exactly that waiter, idempotently, when
-  the wait is cancelled or registration fails. It is not called after a normal
-  notification or when `register_fn` returns `0`. Cancellation, notification,
-  and target reference rules are otherwise those of `prepare_external_wait`
-  above.
+  registration fails or the wait is cancelled, including a cancellation that
+  arrives after a notification but before the Task resumes; it must then pass
+  the consumed wakeup on, as described under **Cancellation** above. It is not
+  called when the Task resumes after a notification or when `register_fn`
+  returns `0`. Notification and target reference rules are otherwise those of
+  `prepare_external_wait` above.
 - `context` is borrowed; it is neither a GC root nor a native owner. Keep its
   storage, and every GC object it refers to, alive until the call returns,
   including through a cancellation unlink. A context in automatic storage is

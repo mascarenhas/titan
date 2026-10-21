@@ -134,9 +134,11 @@ set_nominal_loader(loader: function (string, string): ())
 - The `serialize_inspected_*` entries append a root, already inspected by the
   caller, to a live, initialized buffer that they neither own nor free. All
   visibility, cycle, nesting-depth, hook, and size checks still apply.
-- `context` is the packet scope that the transport has already resolved. The
-  three `*_with_context` entries use exactly the context they are given, so
-  `nil` grants no resource authority, even inside a hook whose packet is
+- `context` is the packet scope that the transport has already resolved. It is
+  valid only during the call that receives it, including a `ResourceCodec`
+  `encode` or `decode` call; never keep it for later use. The three
+  `*_with_context` entries use exactly the context they are given, so `nil`
+  grants no resource authority, even inside a hook whose packet is
   active: a `thread.Sender` or `thread.Receiver` field then raises
   `"transfer: resource attachment requires an encode scope"` or
   `"transfer: resource claim requires a decode scope"`. Given `nil`, the

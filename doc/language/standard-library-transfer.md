@@ -353,7 +353,10 @@ whatever its unfinished packet still owns.
   `release` and writes its slot index directly. Decoding calls
   `construct(context, data, length)`, which must follow the finalizer-first
   order and claim with `claim_registered_resource(context, data, length,
-  expected_release)`, passing on the `context` it received. A `nil` context
+  expected_release)`, passing on the `context` it received. That `context` is
+  valid only until `construct` returns: do not store it or pass it to a later
+  call. Using it afterwards is outside the contract and is not reliably
+  detected; it can crash or claim from an unrelated packet. A `nil` context
   raises `"transfer: resource claim requires a decode scope"`; the other checks
   are those of `claim_resource`.
 - **Packet-local index guarantee**: The four-byte slot index is meaningful only
