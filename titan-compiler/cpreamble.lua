@@ -33,14 +33,13 @@ static TITAN_UNUSED inline int titan_errfunc_is_errorhandler(lua_State *L) {
 }
 
 /*
- * Read an already-published string-keyed registry entry without using or
- * changing the Lua stack. luaS_new can allocate, so callers holding StkId
- * values must restore them after this helper returns.
+ * Read a string-keyed registry entry without allocating or using the Lua stack.
+ * The caller supplies an already-rooted key, including on low-memory recovery
+ * paths where interning even a fixed key string could raise another error.
  */
 static TITAN_UNUSED inline lu_byte titan_registry_get_string(
-        lua_State *L, const char *key, TValue *result) {
+        lua_State *L, TString *registry_key, TValue *result) {
     setnilvalue(result);
-    TString *registry_key = luaS_new(L, key);
     lua_assert(ttistable(&G(L)->l_registry));
     return luaH_getstr(
         hvalue(&G(L)->l_registry), registry_key, result);
@@ -48,21 +47,19 @@ static TITAN_UNUSED inline lu_byte titan_registry_get_string(
 
 
 /*
- * Set one of Titan's bounded process-lifetime string-keyed registry entries
- * through Lua's internal table machinery. The caller must keep a collectable
- * value traced across this call and pass a stable C key string. Copy the value
- * before string interning can relocate its source StkId. For a missing key,
- * resize only when the hash has no genuinely free node, then reacquire the
- * key. In either case the subsequent insertion roots the key before
- * HARDMEMTESTS can force an emergency collection.
+ * Set a string-keyed registry entry using an already-rooted key. The caller
+ * must also keep a collectable value traced across this call. Copy the value
+ * before a resize can relocate its source StkId. For a missing non-nil entry,
+ * resize only when the hash has no genuinely free node. The insertion roots
+ * the key before HARDMEMTESTS can force an emergency collection.
+ * Clearing an entry never allocates, even when the key is absent.
  * This helper never reads or changes L->top.
  */
 static TITAN_UNUSED inline void titan_registry_set_string(
-        lua_State *L, const char *key, const TValue *value) {
+        lua_State *L, TString *registry_key, const TValue *value) {
     TValue value_copy = *value;
     TValue key_value;
     Table *registry = hvalue(&G(L)->l_registry);
-    TString *registry_key = luaS_new(L, key);
     int hres = luaH_psetstr(registry, registry_key, &value_copy);
     if (hres == HNOTFOUND && !ttisnil(&value_copy)) {
         unsigned node_count = allocsizenode(registry);
@@ -75,7 +72,6 @@ static TITAN_UNUSED inline void titan_registry_set_string(
         }
         if (!has_free_node) {
             luaH_resize(L, registry, registry->asize, node_count + 1u);
-            registry_key = luaS_new(L, key);
             hres = luaH_psetstr(registry, registry_key, &value_copy);
             lua_assert(hres == HOK || hres == HNOTFOUND);
         }

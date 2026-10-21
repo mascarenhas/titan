@@ -64,6 +64,10 @@ int titan_transfer_fault_watch_finalizer(lua_State *state, int index) {
   return finalizer_metatable != NULL;
 }
 
+size_t titan_transfer_fault_inline_resources(void) {
+  return TITAN_TRANSFER_INLINE_RESOURCES;
+}
+
 titan_transfer_fault_resource *titan_transfer_fault_resource_at(unsigned int index) {
   return index < 2 ? &resources[index] : NULL;
 }
@@ -99,9 +103,13 @@ static int fail_allocation(int allocator, void *pointer, size_t size) {
   int matches = 0;
   if (in_lua_allocator || !armed_mode) return 0;
   if (armed_mode == 1) {
-    matches = pointer == NULL && size == 4 * sizeof(titan_transfer_resource);
+    /* The first spill doubles the inline capacity with a fresh malloc. */
+    matches = pointer == NULL &&
+      size == 2 * TITAN_TRANSFER_INLINE_RESOURCES * sizeof(titan_transfer_resource);
   } else if (armed_mode == 2) {
-    matches = pointer != NULL && size == 8 * sizeof(titan_transfer_resource);
+    /* The next growth doubles that spill in place with realloc. */
+    matches = pointer != NULL &&
+      size == 4 * TITAN_TRANSFER_INLINE_RESOURCES * sizeof(titan_transfer_resource);
   } else if (armed_mode == 3) {
     matches = (allocator == 1 || allocator == 2) &&
       size >= sizeof(titan_async_message);

@@ -22,12 +22,19 @@ local function attach(index: integer): string
     ffi.titan_transfer_fault_retain, ffi.titan_transfer_fault_release)
 end
 
+-- Spill modes cross the provider's inline scratch capacity: the first spill
+-- happens one past it and the first growth one past twice it.
+local function inline_resources(): integer
+  return ffi.titan_transfer_fault_inline_resources() as integer
+end
+
 function TransferNativeFaultProbe:to_transfer_payload(): string
   if self.mode == 1 then
+    for _ = 1, inline_resources() do attach(0) end
     ffi.titan_transfer_fault_arm(1)
     return attach(0)
   elseif self.mode == 2 then
-    for _ = 1, 4 do attach(0) end
+    for _ = 1, 2 * inline_resources() do attach(0) end
     ffi.titan_transfer_fault_arm(2)
     return attach(0)
   end
@@ -52,21 +59,25 @@ end
 
 local function expect_native_failure(mode: integer, candidate: value,
                                      expected_retains: integer)
+  local r0 = ffi.titan_transfer_fault_resource_at(0 as foreign unsigned int)
+  local r1 = ffi.titan_transfer_fault_resource_at(1 as foreign unsigned int)
+  local base_retains = r0.retains + r1.retains
+  local base_releases = r0.releases + r1.releases
   local failed = false
   if mode == 4 then ffi.titan_transfer_fault_arm(4) end
   do
-    local packet = transfer.Packet.from_value(candidate)
-    defer packet:close()
+    local raw = transfer.encode_message(candidate)
+    defer transfer.discard_message(raw)
   catch
     failed = true
   end
   ffi.titan_transfer_fault_disarm()
   test.assert(failed and ffi.titan_transfer_fault_fired() == 1,
               "did not exercise exactly one native allocation failure")
-  test.assert(ffi.titan_transfer_fault_retains_at_failure() ==
+  test.assert(ffi.titan_transfer_fault_retains_at_failure() - base_retains ==
                 (expected_retains as foreign size_t),
               "failed reserve retained before capacity was secured")
-  test.assert(ffi.titan_transfer_fault_releases_at_failure() ==
+  test.assert(ffi.titan_transfer_fault_releases_at_failure() - base_releases ==
                 (0 as foreign size_t),
               "injection observed an unrelated release instead of the requested boundary")
   local allocator = ffi.titan_transfer_fault_allocator()
@@ -93,8 +104,8 @@ local function expect_native_failure(mode: integer, candidate: value,
   local rejected = false
   do attach(0) catch rejected = true end
   test.assert(rejected, "failed encode left attachment authority behind")
-  local recovered = transfer.Packet.from_value(TransferNativeFaultProbe(0))
-  recovered:close()
+  local recovered = transfer.encode_message(TransferNativeFaultProbe(0))
+  transfer.discard_message(recovered)
   for index = 0, 1 do
     local resource = ffi.titan_transfer_fault_resource_at(index as foreign unsigned int)
     test.assert(resource.references == (1 as foreign size_t) and
@@ -127,6 +138,15 @@ function TransferFinalizerFaultProbe.from_transfer_payload(
   return { sender = nil, receiver = receiver }
 end
 
+-- No payload hooks: nested endpoints reach the registered constructors.
+record TransferDirectSenderFinalizerFault
+  sender: thread.Sender<|integer|>
+end
+
+record TransferDirectReceiverFinalizerFault
+  receiver: thread.Receiver<|integer|>
+end
+
 local function watch_finalizer(candidate: value)
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
@@ -136,21 +156,27 @@ local function watch_finalizer(candidate: value)
               "could not select the endpoint's public finalizer boundary")
 end
 
-local function expect_endpoint_finalizer_failure(sender_kind: boolean)
+local function expect_endpoint_finalizer_failure(sender_kind: boolean, direct: boolean)
   local peer_tx: (thread.Sender<|integer|>)? = nil
   local peer_rx: (thread.Receiver<|integer|>)? = nil
-  local packet = (function (): transfer.Packet
+  local raw = (function (): foreign *void
     local tx, rx = thread.channel<|integer|>(1)
     if sender_kind then
       watch_finalizer(tx)
       peer_rx = rx
-      return transfer.Packet.from_value(TransferFinalizerFaultProbe(tx, nil))
+      if direct then
+        return transfer.encode_message(TransferDirectSenderFinalizerFault(tx))
+      end
+      return transfer.encode_message(TransferFinalizerFaultProbe(tx, nil))
     end
     watch_finalizer(rx)
     peer_tx = tx
-    return transfer.Packet.from_value(TransferFinalizerFaultProbe(nil, rx))
+    if direct then
+      return transfer.encode_message(TransferDirectReceiverFinalizerFault(rx))
+    end
+    return transfer.encode_message(TransferFinalizerFaultProbe(nil, rx))
   end)()
-  defer packet:close()
+  defer transfer.discard_message(raw)
   defer do
     if peer_tx ~= nil then peer_tx:close() end
     if peer_rx ~= nil then peer_rx:close() end
@@ -159,10 +185,17 @@ local function expect_endpoint_finalizer_failure(sender_kind: boolean)
   gc.collect()
   if peer_tx ~= nil then test.assert(not peer_tx:is_closed()) end
   if peer_rx ~= nil then test.assert(not peer_rx:is_closed()) end
+  -- The hook route arms inside its decoder; direct fields invoke no hook.
+  if direct then ffi.titan_transfer_fault_arm(6) end
   local failed = false
-  do packet:decode() catch failed = true end
+  do
+    transfer.decode_message(raw)
+  catch
+    failed = true
+  end
   ffi.titan_transfer_fault_disarm()
-  test.assert(failed and ffi.titan_transfer_fault_fired() == 1,
+  test.assert(failed and raw == nil and
+              ffi.titan_transfer_fault_fired() == 1,
               "endpoint adoption did not exercise finalizer registration failure")
   gc.collect()
   gc.collect()
@@ -183,9 +216,9 @@ function main(args: {string}): integer
   defer gc.resume()
   local scenario = args[1]
   if scenario == "reserve-initial" then
-    expect_native_failure(1, TransferNativeFaultProbe(1), 0)
+    expect_native_failure(1, TransferNativeFaultProbe(1), inline_resources())
   elseif scenario == "reserve-growth" then
-    expect_native_failure(2, TransferNativeFaultProbe(2), 4)
+    expect_native_failure(2, TransferNativeFaultProbe(2), 2 * inline_resources())
   elseif scenario == "payload-copy" then
     expect_native_failure(3, TransferNativeFaultProbe(3), 2)
   elseif scenario == "buffer-initial" then
@@ -201,10 +234,24 @@ function main(args: {string}): integer
     local policy = transfer.TransferValue.is_integer(99)
     ffi.titan_transfer_fault_arm(3)
     expect_native_failure(3, policy, 0)
+    local nominal_policies: {transfer.TransferValue} = {
+      transfer.TransferValue.is_record("m", "R", "rec\0bytes"),
+      transfer.TransferValue.is_union("m", "U", "union\0bytes"),
+      transfer.TransferValue.is_closure("m", nil, "closure\0bytes"),
+      transfer.TransferValue.is_record_payload("m", "P", "payload\0bytes"),
+    }
+    for i = 1, #nominal_policies do
+      ffi.titan_transfer_fault_arm(3)
+      expect_native_failure(3, nominal_policies[i], 0)
+    end
   elseif scenario == "sender-finalizer" then
-    expect_endpoint_finalizer_failure(true)
+    expect_endpoint_finalizer_failure(true, false)
   elseif scenario == "receiver-finalizer" then
-    expect_endpoint_finalizer_failure(false)
+    expect_endpoint_finalizer_failure(false, false)
+  elseif scenario == "sender-finalizer-direct" then
+    expect_endpoint_finalizer_failure(true, true)
+  elseif scenario == "receiver-finalizer-direct" then
+    expect_endpoint_finalizer_failure(false, true)
   else
     raise "unknown native OOM scenario"
   end

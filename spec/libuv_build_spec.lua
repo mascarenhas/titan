@@ -1028,24 +1028,24 @@ esac
     end)
 
     it("builds and invalidates separate stdlib objects in parallel", function()
-            if platform.windows then
-                pending("Unix Make stdlib object DAG and shell compiler fixtures")
-                return
-            end
+        if platform.windows then
+            pending("Unix Make stdlib object DAG and shell compiler fixtures")
+            return
+        end
         local root = make_temp_dir()
         local tested, test_error = xpcall(function()
             local inputs = stdlib_source_files()
-            inputs[#inputs + 1] = "titan/sqlite3/native.h"
-            inputs[#inputs + 1] = "titan/lua/native.h"
-            inputs[#inputs + 1] = "titan/thread/native.h"
-            inputs[#inputs + 1] = "titan/transfer_native.h"
-            inputs[#inputs + 1] = "titan/async_receiver_native.h"
-            inputs[#inputs + 1] = "prepared"
+            for _, header in ipairs({
+                "titan/sqlite3/native.h", "titan/lua/native.h",
+                "titan/thread/native.h", "titan/protobuf/native.h",
+                "titan/transfer_native.h", "titan/async_receiver_native.h",
+                "titan/async_signal_platform.h", "prepared",
+            }) do inputs[#inputs + 1] = header end
             local folders = { uv = true, http = true, websocket = true, peg = true,
                 string = true, sqlite3 = true, json = true, lua = true, protobuf = true, thread = true }
-            local callbacks = { coroutine = true, uv = true, transfer = true, async = true, fs = true,
-                http = true, sqlite3 = true, lua = true, thread = true }
-            local outputs, objects = {}, {}
+            local callbacks = { coroutine = true, uv = true, transfer = true, async = true,
+                http = true, sqlite3 = true, lua = true, protobuf = true, thread = true }
+            local outputs = {}
             local compiler = { "#!/bin/sh", "set -eu",
                 'test "$1 $2" = "--output out"', 'shift 2',
                 'test "$1 $2 $3 $4" = "--source-first --incremental -j1 -c"',
@@ -1053,7 +1053,6 @@ esac
             for _, module in ipairs(STDLIB_MODULES) do
                 local stem = "out/titan/" .. module ..
                     (folders[module] and "/" .. module or "")
-                objects[module] = stem .. ".o"
                 local files = { stem .. ".o", stem .. ".c", stem .. ".ffi.h" }
                 if callbacks[module] then files[#files + 1] = stem .. ".titan.h" end
                 for _, file in ipairs(files) do outputs[#outputs + 1] = file end
@@ -1075,10 +1074,10 @@ esac
             compiler[#compiler + 1] = "printf '%s\\n' \"$module\" >> build.log"
             write_file(root .. "/fake-titanc", table.concat(compiler, "\n") .. "\n")
             write_file(root .. "/Makefile", read_file("Makefile"))
-            local copied, copy_error = run_argv({ "mkdir", "-p", root .. "/spec/support" })
-            assert.truthy(copied, copy_error)
-            copied, copy_error = run_argv({ "mkdir", "-p", root .. "/scripts" })
-            assert.truthy(copied, copy_error)
+            for _, directory in ipairs({ "spec/support", "scripts" }) do
+                local copied, copy_error = run_argv({ "mkdir", "-p", root .. "/" .. directory })
+                assert.truthy(copied, copy_error)
+            end
             write_file(root .. "/scripts/install_compiler.mk",
                 read_file("scripts/install_compiler.mk"))
             write_file(root .. "/spec/support/stdlib_test_modules.mk",
@@ -1092,18 +1091,26 @@ esac
                 end
                 write_file(root .. "/" .. source, "build input\n")
             end
-            local argv = { "make", "--no-print-directory", "-s", "-j4", "-C", root,
-                "MAKE=false", "PREFIX=" .. root,
+            local argv = {
+                "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "GNUMAKEFLAGS",
+                "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES",
+                "make", "--no-print-directory", "-s", "-j4", "-C", root,
+                "MAKE=false", "PREFIX=" .. root, "STDLIB_USE_INSTALLED_RUNTIME=0",
                 "OPENSSL_MODE=system", "OPENSSL_PKG_CONFIG=true",
-                "TITANC=sh ./fake-titanc",
+                "TITANC=sh ./fake-titanc", "SQLITE3_HEADER=",
                 "STDLIB_COMPILER_PREREQS=prepared", "STDLIB_TOOL_PREREQS=prepared",
                 "STDLIB_NATIVE_PREREQS=prepared", "STDLIB_PLATFORM_PREREQS=prepared",
                 "STDLIB_RUNTIME_ARCHIVE_PREREQ=prepared", "STDLIB_BOOTSTRAP_PREREQ=prepared",
-                "stdlib-objects" }
+                "stdlib-objects",
+            }
+            -- Preserve the real local native-header wiring; replace only the
+            -- unrelated external SDK inputs with this fixture's prepared file.
+            local native_inputs = { sqlite3 = true, lua = true, protobuf = true,
+                transfer = true, async = true, thread = true }
             for _, module in ipairs(STDLIB_MODULES) do
-                argv[#argv + 1] = "STDLIB_C_INPUTS_" .. module .. "=" ..
-                    ((module == "sqlite3" or module == "lua") and
-                        "titan/" .. module .. "/native.h" or "prepared")
+                if not native_inputs[module] then
+                    argv[#argv + 1] = "STDLIB_C_INPUTS_" .. module .. "=prepared"
+                end
             end
             local function build()
                 local ok, output = run_argv(argv)
@@ -1120,8 +1127,15 @@ esac
             for _, module in ipairs(STDLIB_MODULES) do all[module] = true end
             assert.same(all, build())
             local old = os.time() - 30
-            for _, source in ipairs(inputs) do assert(lfs.touch(root .. "/" .. source, old, old)) end
-            for _, output in ipairs(outputs) do assert(lfs.touch(root .. "/" .. output, old + 1, old + 1)) end
+            local function age_build()
+                for _, source in ipairs(inputs) do
+                    assert(lfs.touch(root .. "/" .. source, old, old))
+                end
+                for _, output in ipairs(outputs) do
+                    assert(lfs.touch(root .. "/" .. output, old + 1, old + 1))
+                end
+            end
+            age_build()
             assert.same({}, build())
             for _, output in ipairs(outputs) do
                 assert.equal(old + 1, lfs.attributes(root .. "/" .. output, "modification"))
@@ -1135,13 +1149,22 @@ esac
             assert.same({ test = true }, build())
             assert(os.remove(root .. "/out/titan/test.c"))
             assert.same({ test = true }, build())
-            assert(lfs.touch(root .. "/titan/sqlite3/native.h", os.time(), os.time()))
-            -- Ensure the changed header is strictly newer at Make's precision.
-            assert(lfs.touch(root .. "/" .. objects.sqlite3, old + 3, old + 3))
+            age_build()
+            assert(lfs.touch(root .. "/titan/sqlite3/native.h", old + 2, old + 2))
             assert.same({ sqlite3 = true }, build())
-            assert(lfs.touch(root .. "/titan/lua/native.h", os.time(), os.time()))
-            assert(lfs.touch(root .. "/" .. objects.lua, old + 3, old + 3))
+            age_build()
+            assert(lfs.touch(root .. "/titan/lua/native.h", old + 2, old + 2))
             assert.same({ lua = true, thread = true }, build())
+            age_build()
+            assert(lfs.touch(root .. "/titan/protobuf/native.h", old + 2, old + 2))
+            assert.same({ protobuf = true, transfer = true, uv = true, async = true,
+                timer = true, os = true, io = true, fs = true, net = true, ssl = true,
+                http = true, websocket = true, lua = true, sqlite3 = true, thread = true }, build())
+            age_build()
+            assert(lfs.touch(root .. "/titan/transfer_native.h", old + 2, old + 2))
+            assert.same({ transfer = true, async = true, timer = true, os = true,
+                io = true, fs = true, net = true, ssl = true, http = true,
+                websocket = true, lua = true, sqlite3 = true, thread = true }, build())
         end, debug.traceback)
         remove_tree(root)
         if not tested then error(test_error, 0) end
@@ -2371,53 +2394,6 @@ int main(void) {
             }, stdlib_source_files())
         end)
 
-    it("cleans every standard module C environment header", function()
-        local root = make_temp_dir()
-        local tested, ok, output = pcall(function()
-            local fragment = root .. "/inventory.mk"
-            write_file(fragment, ".PHONY: __titan_header_inventory\n" ..
-                "__titan_header_inventory:\n\t@printf '%s\\n' " ..
-                "$(STDLIB_GENERATED_FOREIGN_HEADERS)\n")
-            -- Keep the query independent of inherited jobserver descriptors
-            -- and use a Makefile fragment supported by macOS's older Make.
-            return run_argv({
-                "env", "-u", "MAKEFLAGS", "-u", "MFLAGS",
-                "make", "--no-print-directory", "-s", "MAKE=false",
-                "-f", "Makefile", "-f", fragment,
-                "__titan_header_inventory",
-            })
-        end)
-        remove_tree(root)
-        assert.truthy(tested, ok)
-        assert.truthy(ok, output)
-        local expected = {}
-        for _, module in ipairs(STDLIB_MODULES) do
-            local stem = "titan/" .. module
-            if not file_exists(stem .. ".titan") then
-                stem = stem .. "/" .. module
-            end
-            assert.truthy(file_exists(stem .. ".titan"), stem)
-            expected[#expected + 1] = "out/" .. stem .. ".ffi.h"
-        end
-        for _, header in ipairs({
-            "titan/coroutine.titan.h", "titan/transfer.titan.h",
-            "titan/uv/uv.titan.h", "titan/async.titan.h", "titan/http/http.titan.h",
-            "titan/sqlite3/sqlite3.titan.h", "titan/lua/lua.titan.h", "titan/thread/thread.titan.h",
-        }) do
-            expected[#expected + 1] = "out/" .. header
-        end
-        local actual = {}
-        for header in output:gmatch("[^\r\n]+") do
-            actual[#actual + 1] = header
-        end
-        table.sort(expected)
-        table.sort(actual)
-        assert.same(expected, actual)
-        local makefile = read_file("Makefile")
-        assert.truthy(makefile:find(
-            "rm -f $(STDLIB_GENERATED_FOREIGN_HEADERS)", 1, true))
-    end)
-
     it("keeps titan.gc as the sole stdlib lua_setmetatable owner",
         function()
             local callers = {}
@@ -2551,6 +2527,54 @@ int main(void) {
         local http = read_file("titan/http/server.titan")
         assert.truthy(http:find("local actual_port = 80", 1, true), http)
         assert.truthy(http:find("local actual_port = 443", 1, true), http)
+    end)
+
+    it("cleans every standard module C environment header", function()
+        local root = make_temp_dir()
+        local tested, ok, output = pcall(function()
+            local fragment = root .. "/inventory.mk"
+            write_file(fragment, ".PHONY: __titan_header_inventory\n" ..
+                "__titan_header_inventory:\n\t@printf '%s\\n' " ..
+                "$(STDLIB_GENERATED_FOREIGN_HEADERS)\n")
+            -- Keep the query independent of inherited jobserver descriptors
+            -- and use a Makefile fragment supported by macOS's older Make.
+            return run_argv({
+                "env", "-u", "MAKEFLAGS", "-u", "MFLAGS",
+                "make", "--no-print-directory", "-s", "MAKE=false",
+                "-f", "Makefile", "-f", fragment,
+                "__titan_header_inventory",
+            })
+        end)
+        remove_tree(root)
+        assert.truthy(tested, ok)
+        assert.truthy(ok, output)
+        local expected = {}
+        for _, module in ipairs(STDLIB_MODULES) do
+            local stem = "titan/" .. module
+            if not file_exists(stem .. ".titan") then
+                stem = stem .. "/" .. module
+            end
+            assert.truthy(file_exists(stem .. ".titan"), stem)
+            expected[#expected + 1] = "out/" .. stem .. ".ffi.h"
+        end
+        for _, header in ipairs({
+            "titan/coroutine.titan.h", "titan/transfer.titan.h",
+            "titan/uv/uv.titan.h", "titan/async.titan.h", "titan/http/http.titan.h",
+            "titan/sqlite3/sqlite3.titan.h", "titan/lua/lua.titan.h",
+            "titan/protobuf/protobuf.titan.h", "titan/thread/thread.titan.h",
+        }) do
+            expected[#expected + 1] = "out/" .. header
+        end
+        local actual = {}
+        for header in output:gmatch("[^\r\n]+") do
+            actual[#actual + 1] = header
+        end
+        table.sort(expected)
+        table.sort(actual)
+        assert.same(expected, actual)
+        local makefile = read_file("Makefile")
+        assert.truthy(makefile:find(
+            "rm -f $(STDLIB_GENERATED_FOREIGN_HEADERS)", 1, true))
     end)
 
     it("parses titan.io as seven ordered Interfaces plus public helpers",
@@ -4031,7 +4055,7 @@ printf '%s\0' "$@" > "$TITAN_SELECTOR_ARGV_LOG"
                 for shard = 1, 5 do
                     expected_total = expected_total + #expected[shard]
                 end
-                assert.equal(160, expected_total)
+                assert.equal(159, expected_total)
                 assert.equal(expected_total, total)
 
                 local complete_log = root .. "/complete"
@@ -5548,8 +5572,8 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 43, 29, 40, 40 }, shard_counts)
-            assert.equal(152, assigned_count)
+            assert.same({ 41, 29, 41, 40 }, shard_counts)
+            assert.equal(151, assigned_count)
             local integration_count = 0
             for line in read_file(
                 "spec/support/ci_stdlib_compiler_test_files.txt"):gmatch("[^\n]+") do
@@ -5562,7 +5586,7 @@ done
                 end
             end
             assert.equal(8, integration_count)
-            assert.equal(160, assigned_count + integration_count)
+            assert.equal(159, assigned_count + integration_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")

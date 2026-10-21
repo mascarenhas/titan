@@ -14,8 +14,9 @@ typedef size_t titan_thread_write_count;
 #endif
 
 /* Native layouts for cross-state channels and OS-thread lifecycles.
- * All structures live on the process heap and are synchronized by borrowed
- * native uv_mutex_t capabilities without exposing one state's GC objects. */
+ * Shareable channel/control structures live on the process heap and are
+ * synchronized by borrowed native uv_mutex_t capabilities. Wait contexts are
+ * call-scoped automatic storage; no GC objects cross states. */
 typedef struct titan_thread_channel titan_thread_channel;
 typedef titan_async_message titan_thread_message;
 typedef titan_thread_message *titan_thread_message_ptr;
@@ -32,6 +33,22 @@ typedef struct titan_thread_waiter_queue {
   titan_thread_waiter *head;
   titan_thread_waiter *tail;
 } titan_thread_waiter_queue;
+
+/* One suspended channel call owns this automatic frame until its external wait
+ * returns or synchronously unlinks on cancellation. The bridge roots the
+ * endpoint; producers only access waiter under the channel mutex. */
+typedef struct titan_thread_channel_wait {
+  titan_thread_channel *channel;
+  titan_thread_message *message;
+  titan_thread_waiter waiter;
+  int status;
+} titan_thread_channel_wait;
+
+/* Titan's mutable address coercion accepts locals/formals, not struct fields. */
+static inline titan_thread_waiter *titan_thread_channel_waiter(
+    titan_thread_channel_wait *wait) {
+  return &wait->waiter;
+}
 
 struct titan_thread_channel {
   void *mutex;

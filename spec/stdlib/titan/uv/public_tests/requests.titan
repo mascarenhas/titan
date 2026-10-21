@@ -102,6 +102,63 @@ local function fixture_file(): string
   return path
 end
 
+local function assert_descriptor_retired(descriptor: integer, device: integer,
+                                         inode: integer, message: string)
+  local probe = uv.fs_t()
+  defer uv.fs_req_cleanup(probe)
+  local status = uv.fs_fstat(nil, probe, descriptor)
+  -- DNS/NSS workers can reuse a closed descriptor for an unrelated socket or
+  -- file. Prove the original file is gone, not that its number stays unused.
+  if status == uv.EBADF then return end
+  success(status)
+  local current = uv.fs_get_statbuf(probe)
+  test.assert(current.st_dev ~= device or current.st_ino ~= inode, message)
+end
+
+function test_loop_abandon_retires_requests_without_user_delivery(_: test.Context)
+  local path = fixture_file()
+  defer remove_file(path)
+  local loop = new_loop()
+  local opened, directory, stat, resolved = uv.fs_t(), uv.fs_t(), uv.fs_t(), uv.getaddrinfo_t()
+  local calls = 0
+  local fs_callback = function (_: uv.fs_t) calls = calls + 1 end
+  local close_request = uv.fs_t()
+  local descriptor_to_close = uv.fs_open(nil, close_request, path, uv.FS_O_RDONLY, 0)
+  test.assert(descriptor_to_close >= 0)
+  uv.fs_req_cleanup(close_request)
+  success(uv.fs_fstat(nil, close_request, descriptor_to_close))
+  local identity = uv.fs_get_statbuf(close_request)
+  local device, inode = identity.st_dev, identity.st_ino
+  uv.fs_req_cleanup(close_request)
+  success(uv.fs_close(loop, close_request, descriptor_to_close, fs_callback))
+  success(uv.fs_open(loop, opened, path, uv.FS_O_RDONLY, 0, fs_callback))
+  success(uv.fs_opendir(loop, directory, ".", fs_callback))
+  success(uv.fs_stat(loop, stat, path, fs_callback))
+  success(uv.getaddrinfo(loop, resolved,
+    function (_request: uv.getaddrinfo_t, _status: integer, _result: uv.addrinfo_result_t?)
+      calls = calls + 1
+    end, "localhost"))
+  success(uv.loop_abandon(loop))
+  test.assert(calls == 0, "abandonment delivered a request callback")
+  test.assert(uv.loop_close(loop) == uv.EINVAL and not uv.loop_alive(loop),
+    "abandonment left accepted native requests or loop internals live")
+  test.assert(uv.fs_get_ptr(opened) == nil and uv.fs_get_ptr(directory) == nil and
+    uv.fs_get_ptr(stat) == nil, "abandonment left native FS request results owned")
+  local descriptor = uv.fs_get_result(opened)
+  if descriptor >= 0 then
+    assert_descriptor_retired(descriptor, device, inode,
+      "abandonment leaked an undelivered open descriptor")
+  end
+  assert_descriptor_retired(descriptor_to_close, device, inode,
+    "abandonment cancelled an accepted native file close")
+  local dns_status, result? = resolved:addrinfo()
+  test.assert(dns_status ~= uv.EBUSY, "abandonment left DNS pending")
+  if result ~= nil then
+    expect_error(function () result:entries() end, "addrinfo result was released")
+  end
+  success(uv.loop_abandon(loop))
+end
+
 local function submit_file_chain(loop: uv.loop_t, path: string, weak: {value: value},
                                 files: {integer}, delivered: function (): ())
   local request = uv.fs_t()

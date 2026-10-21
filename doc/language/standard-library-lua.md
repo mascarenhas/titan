@@ -111,25 +111,26 @@ likewise retain their supplied module, name, and opaque bytes.
 **Custom records.** Public records with the exact synchronous
 [`to_transfer_payload` / `from_transfer_payload` pair](async-io.md#custom-record-transfer)
 use that protocol before structural protobuf encoding. Their fields may be
-private. The returned `is_record_payload` is an inspectable packet;
-`packet:to_value()` invokes the current state's reconstruction hook. Incoming
-custom-record arguments reconstruct before the chunk runs. Their flat packet
+private. The returned `is_record_payload` is an inspectable policy;
+`policy:to_value()` invokes the current state's reconstruction hook. Incoming
+custom-record arguments reconstruct before the chunk runs. Their policy
 carries the defining module name, record name, and opaque byte string. If the
 record is absent from the destination registry, transfer calls that module's
 native preload loader and retries lookup. It does not infer a module name from
 the record's dotted name. The reconstruction hook interprets the bytes, using
 the same descriptor as its encoder when it uses an anonymous protobuf message.
 
-**No packet attachments.** These calls use Lua's separate native `titan_lua_value` carrier, not an owned
-`transfer.Packet`. `Lua:run`, `run_async`, and both Reader-loading companions
-open no packet attachment/claim scope and cannot transport packet-attached
-resources such as `thread.Sender` or `thread.Receiver`, including endpoints
-nested in records, opaque hook bytes, or closure captures. Endpoint policy
-conversion without a matching enclosing packet scope raises. Conversion inside
-such a scope may reuse its packet, but its index bytes own nothing and do not
-upgrade this separate Lua carrier into an attachment transport. Use a
+**No packet attachments.** These calls carry values over the Lua library's own
+native carrier, not a transfer packet. `Lua:run`, `run_async`, and both
+Reader-loading companions open no packet scope, so they cannot move
+packet-attached resources such as `thread.Sender` or `thread.Receiver`, whether
+passed directly, nested in records, inside opaque hook bytes, or in closure
+captures. Converting an endpoint to a policy outside a packet scope raises.
+Inside an enclosing packet scope the conversion reuses that packet, but the
+index bytes own nothing and do not turn this carrier into an attachment
+transport. Use a
 [`thread` packet route](standard-library-thread.md#closing-cloning-and-transferring-endpoints)
-or an [`async.PacketReceiver`](async-io.md#owned-packet-receivers) when endpoint
+or an [`async.Receiver`](async-io.md#cross-state-receivers) when endpoint
 ownership must cross states.
 
 **Manual handoff.** The programmer owns safe native resource handoff inside supported custom hooks.
@@ -151,7 +152,7 @@ receives fresh mutable cells,
 module globals belong to the destination module, and unsupported captures or
 cycles raise in the origin. The returned `is_closure` contains the module name,
 an immutable native entry token, and capture bytes. Calling `to_value()` builds
-a callable owned by the caller's collector. The packet survives the independent
+a callable owned by the caller's collector. The policy survives the independent
 state closing, subject to the lifetime of any borrowed native pointers it contains.
 
 **Records and unions.** Public records without custom transfer hooks, and public unions, are serialized through

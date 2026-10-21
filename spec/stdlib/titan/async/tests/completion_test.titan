@@ -86,6 +86,54 @@ function test_completion_preserves_typed_nil_false_and_all_wait_policies(context
   end)
 end
 
+local function completion_test_success_context(
+    done: async.Completion<|integer?, integer?, nil|>, number: integer): uv.req_t?
+  done:resolve(number, done:context(number))
+  return nil
+end
+
+local function completion_test_later_success_nil(
+    done: async.Completion<|integer, nil, nil|>, number: integer): uv.req_t?
+  completion_test_later(0, function ()
+    do done:resolve(number, nil)
+    catch done:fatal(number, error, traceback); raise end
+  end)
+  return nil
+end
+
+function test_completion_retained_payloadless_successes_keep_their_outcomes(context: test.Context)
+  runtime_test.run(function ()
+    -- Payload-less successes may share one immutable Result per state. Results
+    -- retained across later inline and callback settlements, other type
+    -- applications, rejections and the cancellable family keep their outcomes.
+    local first = async.await_with<|integer?, integer?, nil|>(nil, completion_test_success_context)
+    local present = async.await_with<|integer?, integer?, nil|>(42, completion_test_success_context)
+    local deferred = async.await_with<|integer, nil, nil|>(41, completion_test_later_success_nil)
+    local rejected = async.await_with<|integer, nil, nil|>(41, completion_test_error_nil)
+    local cancellable = async.await_cancellable_with<|integer, nil, nil|>(
+      41, completion_test_success_nil)
+    local cleanup = async.await_cleanup_with<|integer, nil, nil|>(41, completion_test_success_nil)
+    case first
+    when success(item) then test.assert(item == nil, "retained nil success gained a payload")
+    else raise "retained nil success changed its tag" end
+    case present
+    when success(item) then test.assert(item == 42, "payload success changed after a nil success")
+    else raise "payload success changed its tag" end
+    case deferred
+    when success(item) then test.assert(item == nil, "callback nil success gained a payload")
+    else raise "callback nil success changed its tag" end
+    case rejected
+    when error(item) then test.assert(item == nil, "nil rejection changed its payload")
+    else raise "nil rejection became a success" end
+    case cancellable
+    when success(item) then test.assert(item == nil, "cancellable nil success gained a payload")
+    else raise "cancellable nil success changed its tag" end
+    case cleanup
+    when success(item) then test.assert(item == nil, "cleanup nil success gained a payload")
+    else raise "cleanup nil success changed its tag" end
+  end)
+end
+
 function test_completion_same_stack_successor_has_independent_typed_context(context: test.Context)
   runtime_test.run(function ()
     local second_registered, first_checked, second_completed = false, false, false

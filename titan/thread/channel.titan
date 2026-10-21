@@ -154,7 +154,41 @@ local foreign function channel_unregister_underflow_waiter(
   uv.native_mutex_unlock(ch.mutex)
 end
 
-local function sender_finalize(self: Sender<|value|>)
+local foreign function channel_register_send_wait(context: *void, target: *void): int
+  local wait = context as foreign *titan_thread_channel_wait
+  wait.status = channel_try_enqueue_native(
+    wait.channel, wait.message, ffi.titan_thread_channel_waiter(wait), target)
+  if wait.status == 0 then wait.message = nil end
+  if wait.status == 1 then return 1 end
+  return 0
+end
+
+local foreign function channel_unregister_send_wait(context: *void)
+  local wait = context as foreign *titan_thread_channel_wait
+  channel_unregister_overflow_waiter(wait.channel, ffi.titan_thread_channel_waiter(wait))
+end
+
+local foreign function channel_register_receive_wait(context: *void, target: *void): int
+  local wait = context as foreign *titan_thread_channel_wait
+  local message: foreign *titan_thread_message = nil
+  wait.status = channel_try_dequeue_native(
+    wait.channel, ffi.titan_thread_channel_waiter(wait), target, message)
+  wait.message = message
+  if wait.status == 1 then return 1 end
+  return 0
+end
+
+local foreign function channel_unregister_receive_wait(context: *void)
+  local wait = context as foreign *titan_thread_channel_wait
+  channel_unregister_underflow_waiter(wait.channel, ffi.titan_thread_channel_waiter(wait))
+end
+
+-- gc.finalizable erases its callback to `function (value): ()`. Declaring the
+-- finalizers with exactly that type and selecting `<|value|>` installs these
+-- closures themselves as the shared metatable's `__gc`; a concrete endpoint
+-- parameter would need a fresh callable-adjustment wrapper per construction.
+local function sender_finalize(candidate: value)
+  local self: Sender<|value|> = candidate
   local ch = self.native
   self.native = nil
   if ch ~= nil then
@@ -162,7 +196,8 @@ local function sender_finalize(self: Sender<|value|>)
   end
 end
 
-local function receiver_finalize(self: Receiver<|value|>)
+local function receiver_finalize(candidate: value)
+  local self: Receiver<|value|> = candidate
   local ch = self.native
   self.native = nil
   if ch ~= nil then
@@ -172,14 +207,49 @@ end
 
 local function new_sender<|T|>(): Sender<|T|>
   local tx = Sender<|T|> { native = nil }
-  gc.finalizable(tx, sender_finalize)
+  gc.finalizable<|value|>(tx, sender_finalize)
   return tx
 end
 
 local function new_receiver<|T|>(): Receiver<|T|>
   local rx = Receiver<|T|> { native = nil }
-  gc.finalizable(rx, receiver_finalize)
+  gc.finalizable<|value|>(rx, receiver_finalize)
   return rx
+end
+
+-- Exact fixed callables for transfer's registered nominal capability. Private
+-- native fields stay under the generated typed accessors in this module.
+local function sender_resource(candidate: value): foreign *void
+  local tx: Sender<|value|> = candidate
+  return tx.native as foreign *void
+end
+
+local function receiver_resource(candidate: value): foreign *void
+  local rx: Receiver<|value|> = candidate
+  return rx.native as foreign *void
+end
+
+local function sender_from_resource(context: value, data: foreign const *void,
+    length: integer): value
+  local tx = new_sender<|value|>()
+  tx.native = transfer.claim_registered_resource(
+      context, data, length, channel_release_sender_native) as foreign *titan_thread_channel
+  return tx
+end
+
+local function receiver_from_resource(context: value, data: foreign const *void,
+    length: integer): value
+  local rx = new_receiver<|value|>()
+  rx.native = transfer.claim_registered_resource(
+      context, data, length, channel_release_receiver_native) as foreign *titan_thread_channel
+  return rx
+end
+
+local function register_channel_resources()
+  transfer.register_resource(new_sender<|value|>(), sender_resource,
+      channel_retain_sender_native, channel_release_sender_native, sender_from_resource)
+  transfer.register_resource(new_receiver<|value|>(), receiver_resource,
+      channel_retain_receiver_native, channel_release_receiver_native, receiver_from_resource)
 end
 
 --- Create a bounded cross-thread channel pair.
@@ -207,38 +277,29 @@ end
 -- @param message Value to transfer into the channel buffer.
 -- @usage standard-library-thread.md
 function Sender:send(message: T)
-  local msg: foreign *titan_thread_message = value_to_thread_message(message as value)
-  defer if msg ~= nil then thread_message_discard(msg) end
+  -- The native cell owns the packet even when registration commits inline and
+  -- cancellation wins delivery. No mutable local is captured on either path.
+  -- Every access goes through the pointer: a by-value automatic aggregate read
+  -- by the defer would get a setjmp spill whose recovery reload restores stale
+  -- bytes over the C registrar's packet commit.
+  local wait_storage = foreign titan_thread_channel_wait.new()
+  local wait: foreign *titan_thread_channel_wait = wait_storage
+  wait.channel = self.native
+  wait.message = value_to_thread_message(message as value)
+  defer if wait.message ~= nil then thread_message_discard(wait.message) end
   while true do
-    local fast = channel_try_enqueue_native(self.native, msg, nil, nil)
+    local fast = channel_try_enqueue_native(wait.channel, wait.message, nil, nil)
     if fast == 0 then
-      msg = nil
+      wait.message = nil
       return
     elseif fast == 2 then
       raise "channel is closed"
     end
-    local waiter_storage = foreign titan_thread_waiter.new()
-    local waiter: foreign *titan_thread_waiter = waiter_storage
-    local closed_err = false
-    async.wait_external(
-      function (wake_target: foreign *void): boolean
-        local rc = channel_try_enqueue_native(
-          self.native, msg, waiter, wake_target)
-        if rc == 0 then
-          msg = nil
-          return false
-        elseif rc == 2 then
-          closed_err = true
-          return false
-        end
-        return true
-      end,
-      function ()
-        channel_unregister_overflow_waiter(self.native, waiter)
-      end)
-    if msg == nil then
+    async.wait_external_native(self, wait,
+      channel_register_send_wait, channel_unregister_send_wait)
+    if wait.message == nil then
       return
-    elseif closed_err then
+    elseif wait.status == 2 then
       raise "channel is closed"
     end
   end
@@ -307,43 +368,27 @@ function Sender.from_transfer_payload(payload: string): Sender<|T|>
 end
 
 local function Receiver:dequeue_or_wait(): (boolean, foreign *void)
+  local wait_storage = foreign titan_thread_channel_wait.new()
+  local wait: foreign *titan_thread_channel_wait = wait_storage
+  wait.channel = self.native
   while true do
     local fast_msg: foreign *titan_thread_message = nil
-    local fast_status = channel_try_dequeue_native(self.native, nil, nil, fast_msg)
-    if fast_status == 0 then
+    local fast = channel_try_dequeue_native(wait.channel, nil, nil, fast_msg)
+    if fast == 0 then
       return true, fast_msg
-    elseif fast_status == 2 then
+    elseif fast == 2 then
       return false, nil
     end
-    local waiter_storage = foreign titan_thread_waiter.new()
-    local waiter: foreign *titan_thread_waiter = waiter_storage
-    local received = false
-    local closed_empty = false
-    local slow_msg: foreign *titan_thread_message = nil
-    defer if slow_msg ~= nil then thread_message_discard(slow_msg) end
-    async.wait_external(
-      function (wake_target: foreign *void): boolean
-        local msg: foreign *titan_thread_message = nil
-        local status = channel_try_dequeue_native(
-          self.native, waiter, wake_target, msg)
-        if status == 0 then
-          slow_msg = msg
-          received = true
-          return false
-        elseif status == 2 then
-          closed_empty = true
-          return false
-        end
-        return true
-      end,
-      function ()
-        channel_unregister_underflow_waiter(self.native, waiter)
-      end)
-    if received then
-      local msg = slow_msg
-      slow_msg = nil
+    -- Only a waiting iteration enters this protected boundary. Access through
+    -- the pointer keeps the registrar's committed packet visible on unwind.
+    defer if wait.message ~= nil then thread_message_discard(wait.message) end
+    async.wait_external_native(self, wait,
+      channel_register_receive_wait, channel_unregister_receive_wait)
+    if wait.status == 0 then
+      local msg = wait.message
+      wait.message = nil
       return true, msg
-    elseif closed_empty then
+    elseif wait.status == 2 then
       return false, nil
     end
   end
@@ -358,12 +403,7 @@ function Receiver:receive(): T
   if not ok then
     raise "channel is closed"
   end
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  local status = transfer.decode_message(L, raw)
-  local decoded_value: value = nil
-  if status >= 0 then decoded_value = ffi.lua_totvalue(L, -1) end
-  return thread_message_value(status, decoded_value) as T
+  return transfer.decode_message(raw) as T
 end
 
 --- Receive the next message or a closed status without raising on clean stream completion.
@@ -375,12 +415,7 @@ function Receiver:receive_result(): ReceiveResult<|T|>
   if not ok then
     return ReceiveResult<|T|>.closed()
   end
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  local status = transfer.decode_message(L, raw)
-  local decoded_value: value = nil
-  if status >= 0 then decoded_value = ffi.lua_totvalue(L, -1) end
-  return ReceiveResult<|T|>.message(thread_message_value(status, decoded_value) as T)
+  return ReceiveResult<|T|>.message(transfer.decode_message(raw) as T)
 end
 
 --- Attempt to receive a buffered message without blocking.
@@ -392,12 +427,7 @@ function Receiver:try_receive(): (boolean, T?)
   local raw: foreign *void = msg
   defer thread_message_discard(raw)
   if status == 0 then
-    local top = ffi.lua_gettop(L)
-    defer ffi.lua_settop(L, top)
-    local decoded_status = transfer.decode_message(L, raw)
-    local decoded_value: value = nil
-    if decoded_status >= 0 then decoded_value = ffi.lua_totvalue(L, -1) end
-    return true, thread_message_value(decoded_status, decoded_value) as T
+    return true, transfer.decode_message(raw) as T
   end
   return false, nil
 end
@@ -412,12 +442,7 @@ function Receiver:incoming(): (function (Receiver<|T|>, boolean?): (boolean?, T?
     if not ok then
       return nil, nil
     end
-    local top = ffi.lua_gettop(L)
-    defer ffi.lua_settop(L, top)
-    local status = transfer.decode_message(L, raw)
-    local decoded_value: value = nil
-    if status >= 0 then decoded_value = ffi.lua_totvalue(L, -1) end
-    return true, thread_message_value(status, decoded_value) as T
+    return true, transfer.decode_message(raw) as T
   end, self, nil
 end
 

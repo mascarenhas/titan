@@ -350,8 +350,15 @@ per generated module. The existing native-symbol resolver returns it for
 perform no additional lookup and keep their existing upvalue layout. Each
 first-class source function, lambda, bound method, and realized callable
 adapter has an entry containing its native/strict lookup key, immediate capture
-count, and generated projection/restoration functions. The manifest contains
-only the actual module name and entry array. A referenced local function has the same transfer capability
+count, and generated projection/restoration functions; its layout is unchanged
+by generated nominal codecs. Beside it, the module emits one static
+`TitanTransferCodec` array with an entry per generated record or union codec
+(`coder/nominal_codec.lua`): its qualified name, kind, and generated encode and
+decode functions, emitted next to the nominal's other storage helpers. The
+array is not reachable from the manifest; the nominal's metatable registration
+binds `TITAN_MT_CODEC` to the entry's address; see
+[generated nominal codecs](protobuf-library.md#generated-nominal-codecs). A
+referenced local function has the same transfer capability
 as an exported function. Captured nominals still follow the public protobuf or
 custom-record transfer policy; local nominal types remain ineligible.
 
@@ -365,9 +372,12 @@ as reflected native fields. One generated function projects **all** immediate
 semantic captures onto the source stack before custom hooks run. The source
 closure and projected values remain rooted while ordinary Titan code converts
 and serializes them. Owning-state foreign functions in `titan.transfer` discover
-entries, project captures, and invoke generated restoration; `transfer.h` only
-declares the immutable manifest layout. There is no native recursive serializer,
-allocation arena, or source identity map. Generated code rejects Lua-managed `Udata *`
+entries, project captures, and invoke generated restoration; for closures
+`transfer.h` only declares the immutable manifest layout. Capture snapshots use
+no native recursive serializer, allocation arena, or source identity map; a
+captured nominal becomes a `TransferValue` whose snapshot bytes come from the
+ordinary protobuf root entry, including its generated codec when it has one.
+Generated code rejects Lua-managed `Udata *`
 before native-pointer projection, including typedef spellings and present
 optional pointers; an absent optional projects and reconstructs as nil. This
 guard prevents the trusted GC-bearing pointer representation from becoming a
@@ -869,6 +879,18 @@ artifacts, with no serialized field, provider symbol, or module-state slot. Any
 implementation that needs another fixed slot or signature requires a coordinated
 ABI advance.
 
+Generated nominal codecs add generated-code ABI that no load-time check
+covers: the `TITAN_MT_CODEC` metatable binding, the `TitanTransferCodec`,
+`TitanCodecState`, `TitanCodecHandoff`, and `TitanCodecField` layouts, and the
+inline codec runtime that every module compiles from the SDK's `transfer.h`.
+They changed without a `TITAN_ABI_VERSION` advance, so every provider, the
+standard library included, must be rebuilt from clean against one SDK; a
+module compiled against another `transfer.h` is not detected when it loads.
+The one cross-module call, a generated codec into `titan.protobuf`'s
+`codec_handoff`, checks the closure's function-type tag against
+`TITAN_CODEC_HANDOFF_TYPE` before using the native entry and raises otherwise
+(see [generated nominal codecs](protobuf-library.md#generated-nominal-codecs)).
+
 ## The module protocol
 
 Each Lua state owns one canonical `Udata` for each initialized logical module,
@@ -1107,21 +1129,27 @@ on the fixed source-private slots. Remaining private slots are
 allocated as
 their inventories or first uses are encountered during code generation:
 module-local Array writers; record/union, Interface, and owned-C metatables;
-concrete-owner module caches needed by wrappers; and transitive module
-`Udata` caches may therefore interleave. No ordering among
-those categories is serialized.
+concrete-owner module caches needed by wrappers; transitive module
+`Udata` caches; and up to three error-recovery `TString` anchors
+(`TITAN_BACKTRACE_KEY`, `TITAN_TRACE_PINNED`, and `""`) requested by
+generated `catch`/`defer`/re-raise code may therefore interleave. No ordering
+among those categories is serialized.
 
-Code generation freezes the distinct constructed Array element types and
-initializes each corresponding writer after nominal metatables, imports, and
-function-type tag publication but before `$INITVARS`, so an initializer can
-construct an Array without observing an empty slot. Publishing tags first is
-also required because a variable initializer may construct a lambda or
-bound-method closure and must copy a live exact tag into it. First-use private
-objects are filled by `init_data_from_other_modules` or the module
-initializer. Thus all private slots, beginning with the Array cache and fixed
-provider-identity token, come *after* the importer-visible public prefix. Their
-fixed header is part of the current ABI, while later inventory/first-use slots remain
-coder-private and do not perturb the public importer slot math.
+Any requested error-recovery `TString` slots are initialized first in
+`$INITNAME`, immediately after `titan_pushmodule(L, _mod)` and before
+metatables, dependency loading, or generated initializers/bodies can enter a
+protected boundary. Code generation also freezes the distinct constructed
+Array element types and initializes each corresponding writer after nominal
+metatables, imports, and function-type tag publication but before `$INITVARS`,
+so an initializer can construct an Array without observing an empty slot.
+Publishing tags first is also required because a variable initializer may
+construct a lambda or bound-method closure and must copy a live exact tag into
+it. Other first-use private objects are filled by `init_data_from_other_modules`
+or the module initializer. Thus all private slots, beginning with the Array
+cache and fixed provider-identity token, come *after* the importer-visible
+public prefix. Their fixed header is part of the current ABI, while later
+inventory/first-use slots remain coder-private and do not perturb the public
+importer slot math.
 
 An importing module never sees this module's AST. The `Type.Module` interface
 reconstructs the public prefix at compilation, but a separately loaded provider

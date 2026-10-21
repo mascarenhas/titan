@@ -413,7 +413,11 @@ and keep the expectation owned by the case that produces it.
 `spec/support/windows_stdlib_tests.sh`. It compiles every root serially with the
 native CLANG64/UCRT SDK in a marked, disposable local NTFS workspace. The
 workspace contains a private SDK copy, test sources, authored child fixtures,
-generated objects, logs, and scratch paths. Windows retains its Job Object
+generated objects, logs, and scratch paths. Test sources retain their
+`source/spec/stdlib/titan/` paths. The authoritative transfer and protobuf native
+headers are copied under `source/titan/`, preserving authored relative imports
+without exporting private collaboration headers through the SDK.
+Windows retains its Job Object
 supervisor: descendants enter the private job before execution and are killed
 when supervision ends. PowerShell drains both output pipes concurrently and
 preserves the complete native exit status. The aggregate still uses

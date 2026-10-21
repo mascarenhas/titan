@@ -121,7 +121,27 @@ without the extra C lexical blocks that a user-written `do ... finally`
 would get, preserving any tail locals for a following `repeat` condition.
 Normal fallthrough, returns, breaks, and raises are still recorded as
 pending actions, the synthetic finally block is emitted, and pending
-action dispatch continues exactly as for user-written `finally`.
+action dispatch continues exactly as for user-written `finally`. Because
+`boundary_recover_open` reads the module-rooted registry-key and
+empty-traceback `TString` anchors and clears the registry entries with `nil`
+without allocating (and `luaD_closeprotected` wraps any intervening Lua
+`__close` metamethods in `luaD_rawrunprotected`), unwinding into a registered
+`defer` block after an in-body error (including `LUA_ERRMEM` after emergency
+collection) cannot fail in generated recovery before the deferred cleanup
+statement begins. Re-inserting a saved trace during post-cleanup `PA_RAISE`
+happens only after the current `defer` body has completed, and any enclosing
+`defer` or `catch` boundary recovers through the same allocation-free path.
+
+Deferred cleanup participates in the same liveness analysis as a written
+`finally`. If a non-GC scalar whose mutable C address is taken can be changed
+in the protected tail and read by cleanup, the actual local/parameter has a
+volatile C home and a declaration-time compiler escape barrier, not an
+ordinary auto plus a stale snapshot. Together they preserve a callee's
+indirect write before an opaque raise, including when that callee is inlined;
+volatility alone is insufficient. This also applies when an earlier protected
+region already made the declaration recovery-sensitive. The guarantee is for
+supported GCC/Clang, with the ISO C 6.7.3p6 qualifier caveat; see
+[recovery storage](error-handling.md#setjmp-sensitive-localparameter-spills).
 
 ## Tests
 

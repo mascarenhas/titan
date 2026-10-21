@@ -508,18 +508,29 @@ byte loops after initialization, assignments, and normally returning mutable C
 calls, then reloads it on recovery. It intentionally does not cast away
 volatility through `memcpy`.
 
-An `automatic_array_borrow` declaration instead uses the ordinary volatile
-pointer-scalar spill. Reassigning the view or passing its mutable address to a
-normally returning C out-parameter call commits the pointer value; recovery
-reloads that pointer, never snapshots or restores its backing bytes. Writes
-through the borrowed pointer therefore remain in the live backing, including
-raw-slot mutations observed by deferred cleanup after a caught error. Capturing
+An `automatic_array_borrow` declaration instead preserves only its pointer
+value, never snapshots or restores its backing bytes. An unexposed pointer
+uses the ordinary volatile scalar spill; a recovery-sensitive pointer whose
+mutable address is exposed uses the actual volatile pointer object as its
+single home, with a declaration-time compiler escape barrier. Together they
+preserve an indirect write even if an ordinary Titan or C callee is inlined
+and raises without returning; volatility alone is insufficient. This supported
+GCC/Clang guarantee retains the ISO C 6.7.3p6 qualifier caveat; see
+[recovery storage](error-handling.md#setjmp-sensitive-localparameter-spills).
+Writes through the borrowed pointer remain in the live backing. Capturing
 the pointer does not extend the backing's lifetime.
 
-A C call that mutates a declaration and then longjmps does not commit that
-declaration's partial post-call state to its spill; untracked aliases do not
-participate in spill updates. Foreign functions themselves have no such spill
-protocol because their bodies cannot establish a Titan recovery boundary.
+A C call that mutates an aggregate and then longjmps does not commit that
+aggregate's partial post-call state to its byte spill; untracked aliases do
+not participate in spill updates. The scalar volatile-home rule above does
+not change that aggregate contract. Foreign functions themselves have no
+such spill protocol because their bodies cannot establish a Titan recovery
+boundary.
+
+Ordinary Titan callees also do not yet commit normally returned mutable
+aggregate out-arguments to their byte spills: if another protected assignment
+made the aggregate spill-tracked, recovery can restore stale pre-call bytes.
+This pre-existing limitation is separate from scalar preservation.
 
 ## Standard-library callback migrations
 

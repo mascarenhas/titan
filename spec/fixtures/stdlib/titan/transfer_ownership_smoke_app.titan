@@ -61,29 +61,35 @@ union SmokeChoice
   pair(tx: thread.Sender<|integer|>, rx: thread.Receiver<|integer|>)
 end
 
-local function expect_consumed(action: function (): ())
-  expect_raises(action)
-end
-
-local function make_ephemeral_envelope_packet(
-    id: integer): (transfer.Packet, thread.Receiver<|integer|>)
+local function encode_ephemeral_envelope_raw(
+    id: integer): (foreign *void, thread.Receiver<|integer|>)
   local tx, rx = thread.channel<|integer|>(1)
-  return transfer.Packet.from_value(SmokeEnvelope(id, tx)), rx
+  return transfer.encode_message(SmokeEnvelope(id, tx)), rx
 end
 
-local function make_dropped_packet_peer(): thread.Receiver<|integer|>
-  local _pkt, rx = make_ephemeral_envelope_packet(40)
+local function send_ephemeral_envelope(
+    handle: foreign *void,
+    id: integer): thread.Receiver<|integer|>
+  local tx, rx = thread.channel<|integer|>(1)
+  async.send(handle, SmokeEnvelope(id, tx))
   return rx
 end
 
-local function make_closure_packet(
-    base: integer): (transfer.Packet, thread.Receiver<|integer|>, thread.Sender<|integer|>)
+local function encode_closure_raw(
+    base: integer): (
+    foreign *void,
+    thread.Receiver<|integer|>,
+    thread.Sender<|integer|>,
+    thread.Receiver<|integer|>)
   local rep_tx, rep_rx = thread.channel<|integer|>(1)
   local in_tx, in_rx = thread.channel<|integer|>(1)
+  local direct_tx, direct_rx = thread.channel<|integer|>(1)
   local choice = SmokeChoice.pair(rep_tx, in_rx)
   local acc = base
   local fn = function (delta: integer): integer
     acc = acc + delta
+    direct_tx:send(acc * 2)
+    direct_tx:close()
     case choice
     when pair(tx, rx) then
       local item = rx:receive()
@@ -95,67 +101,47 @@ local function make_closure_packet(
     end
     return acc
   end
-  return transfer.Packet.from_value(fn), rep_rx, in_tx
+  return transfer.encode_message(fn), rep_rx, in_tx, direct_rx
 end
 
 local function run_smoke()
-  -- 1. Packet.from_value / decode / close / take_message / discard_message / GC drop.
-  local pkt1, rx1 = make_ephemeral_envelope_packet(10)
+  -- 1. Raw encode_message / decode_message / discard_message and duplicate/claim rules.
+  local raw1, rx1 = encode_ephemeral_envelope_raw(10)
+  defer transfer.discard_message(raw1)
   defer rx1:close()
   gc.collect()
   gc.collect()
-  test.assert(not rx1:is_closed(), "Packet did not retain attached Sender")
-  local env1: SmokeEnvelope = pkt1:decode()
-  expect_consumed(function () pkt1:decode() end)
-  expect_consumed(function () pkt1:take_message() end)
-  pkt1:close()
+  test.assert(not rx1:is_closed(), "encoded packet did not retain attached Sender")
+  local env1: SmokeEnvelope = transfer.decode_message(raw1)
+  test.assert(raw1 == nil)
   env1.reply:send(env1.id + 100)
   env1.reply:close()
   test.assert(rx1:receive() == 110)
   test.assert(rx1:is_closed())
 
-  local pkt2, rx2 = make_ephemeral_envelope_packet(20)
+  local raw2, rx2 = encode_ephemeral_envelope_raw(20)
+  defer transfer.discard_message(raw2)
   defer rx2:close()
   gc.collect()
   gc.collect()
   test.assert(not rx2:is_closed())
-  pkt2:close()
-  pkt2:close()
-  test.assert(rx2:is_closed(), "Packet:close did not release attached Sender")
-  expect_consumed(function () pkt2:decode() end)
-
-  local pkt3, rx3 = make_ephemeral_envelope_packet(30)
-  defer rx3:close()
-  gc.collect()
-  gc.collect()
-  test.assert(not rx3:is_closed())
-  local raw3: foreign *void = nil
-  defer do transfer.discard_message(raw3) end
-  raw3 = pkt3:take_message()
-  expect_consumed(function () pkt3:take_message() end)
-  transfer.discard_message(raw3)
-  raw3 = nil
+  transfer.discard_message(raw2)
+  raw2 = nil
   transfer.discard_message(nil)
-  test.assert(rx3:is_closed(), "discard_message did not release attached Sender")
+  test.assert(rx2:is_closed(), "discard_message did not release attached Sender")
 
-  local rx4 = make_dropped_packet_peer()
-  defer rx4:close()
-  gc.collect()
-  gc.collect()
-  test.assert(rx4:is_closed(), "dropped Packet finalizer did not release attached Sender")
-
-
-  -- 1b. Duplicate references in one Packet retain independently, and scoped
+  -- 1b. Duplicate references in one packet retain independently, and scoped
   -- malformed/wrong-kind/repeated claims are rejected safely.
-  local dup_pkt, dup_rx = (function (): (transfer.Packet, thread.Receiver<|integer|>)
+  local dup_raw, dup_rx = (function (): (foreign *void, thread.Receiver<|integer|>)
     local tx, rx = thread.channel<|integer|>(2)
-    return transfer.Packet.from_value(SmokeDuplicatePair(tx, tx)), rx
+    return transfer.encode_message(SmokeDuplicatePair(tx, tx)), rx
   end)()
+  defer transfer.discard_message(dup_raw)
   defer dup_rx:close()
   gc.collect()
   gc.collect()
   test.assert(not dup_rx:is_closed())
-  local dup_decoded: SmokeDuplicatePair = dup_pkt:decode()
+  local dup_decoded: SmokeDuplicatePair = transfer.decode_message(dup_raw)
   dup_decoded.left = nil
   gc.collect()
   gc.collect()
@@ -168,43 +154,69 @@ local function run_smoke()
   test.assert(ok_dup and v_dup == 77 and dup_rx:is_closed(),
               "dropping second duplicate Sender did not close peer")
 
-  local mal_fail_pkt, mal_fail_rx = (function (): (transfer.Packet, thread.Receiver<|integer|>)
+  local mal_fail_raw, mal_fail_rx = (function (): (foreign *void, thread.Receiver<|integer|>)
     local tx, rx = thread.channel<|integer|>(1)
-    return transfer.Packet.from_value(SmokeMalformedClaim(tx, "fail-unclaimed")), rx
+    return transfer.encode_message(SmokeMalformedClaim(tx, "fail-unclaimed")), rx
   end)()
+  defer transfer.discard_message(mal_fail_raw)
   defer mal_fail_rx:close()
   gc.collect()
   gc.collect()
-  expect_raises(function () mal_fail_pkt:decode() end)
-  test.assert(mal_fail_rx:is_closed(),
+  local malformed_failed = false
+  do
+    transfer.decode_message(mal_fail_raw)
+  catch
+    malformed_failed = true
+  end
+  test.assert(malformed_failed, "expected malformed attachment decode to raise")
+  test.assert(mal_fail_raw == nil and mal_fail_rx:is_closed(),
               "failed decode after rejected malformed claims leaked unclaimed Sender")
 
-  local mal_ok_pkt, mal_ok_rx = (function (): (transfer.Packet, thread.Receiver<|integer|>)
+  local mal_ok_raw, mal_ok_rx = (function (): (foreign *void, thread.Receiver<|integer|>)
     local tx, rx = thread.channel<|integer|>(1)
-    return transfer.Packet.from_value(SmokeMalformedClaim(tx, "adopt-and-reject-repeat")), rx
+    return transfer.encode_message(SmokeMalformedClaim(tx, "adopt-and-reject-repeat")), rx
   end)()
+  defer transfer.discard_message(mal_ok_raw)
   defer mal_ok_rx:close()
   gc.collect()
   gc.collect()
-  local mal_ok: SmokeMalformedClaim = mal_ok_pkt:decode()
+  local mal_ok: SmokeMalformedClaim = transfer.decode_message(mal_ok_raw)
   test.assert((mal_ok.tx as thread.Sender<|integer|>):try_send(88))
   mal_ok.tx = nil
   gc.collect()
   gc.collect()
   local ok_mal, v_mal? = mal_ok_rx:try_receive()
   test.assert(ok_mal and v_mal == 88 and mal_ok_rx:is_closed())
-  -- 2. Nested union + closure capture packet across a worker thread.
-  local closure_pkt, rep_rx, in_tx = make_closure_packet(50)
+
+  -- 2. Direct nominal policy, protected string decode, and closure capture packet.
+  local str_raw = transfer.encode_message("smoke\0string")
+  defer transfer.discard_message(str_raw)
+  local val_str = transfer.decode_message(str_raw)
+  test.assert(str_raw == nil and (val_str as string) == "smoke\0string")
+
+  local nom_policy = transfer.TransferValue.from_value(SmokeChoice.empty())
+  local nom_raw = transfer.encode_message(nom_policy)
+  defer transfer.discard_message(nom_raw)
+  local dec_nom: SmokeChoice = transfer.decode_message(nom_raw)
+  case dec_nom
+  when empty() then
+  else raise "nominal policy smoke round-trip failed"
+  end
+
+  local closure_raw, rep_rx, in_tx, direct_rx = encode_closure_raw(50)
+  defer transfer.discard_message(closure_raw)
   defer rep_rx:close()
   defer in_tx:close()
+  defer direct_rx:close()
   gc.collect()
   gc.collect()
-  test.assert(not rep_rx:is_closed() and not in_tx:is_closed())
-  local restored_fn: function (integer): integer = closure_pkt:decode()
+  test.assert(not rep_rx:is_closed() and not in_tx:is_closed() and not direct_rx:is_closed())
+  local restored_fn: function (integer): integer = transfer.decode_message(closure_raw)
   in_tx:send(7)
   local worker = thread.spawn_one(function (cb: function (integer): integer): integer
     return cb(5)
   end, restored_fn)
+  test.assert(direct_rx:receive() == 110)
   test.assert(rep_rx:receive() == 62)
   case worker:join()
   when succeeded(total) then test.assert(total == 55)
@@ -223,41 +235,37 @@ local function run_smoke()
   else raise "worker proxy failed source-free execution"
   end
 
-  -- 3. Owned async.PacketReceiver coalescing replacement, delivery, and close discard.
-  local inbox = async.packet_receiver()
+  -- 3. Eager async.Receiver coalescing replacement, delivery, and close discard.
+  local inbox = async.receiver()
   defer inbox:close()
-  local first_pkt, first_rx = make_ephemeral_envelope_packet(1)
-  local second_pkt, second_rx = make_ephemeral_envelope_packet(2)
+  local first_rx = send_ephemeral_envelope(inbox:handle(), 1)
   defer first_rx:close()
+  gc.collect()
+  gc.collect()
+  test.assert(not first_rx:is_closed())
+  local second_rx = send_ephemeral_envelope(inbox:handle(), 2)
   defer second_rx:close()
   gc.collect()
   gc.collect()
-  async.send_packet(inbox:handle(), first_pkt)
-  expect_consumed(function () first_pkt:decode() end)
-  test.assert(not first_rx:is_closed())
-  async.send_packet(inbox:handle(), second_pkt)
-  expect_consumed(function () second_pkt:decode() end)
   test.assert(first_rx:is_closed(),
-              "coalescing send_packet overwrite did not discard replaced Packet")
+              "coalescing send overwrite did not discard replaced packet")
   test.assert(not second_rx:is_closed())
 
-  local received_pkt = inbox:wait_packet()
-  local env2: SmokeEnvelope = received_pkt:decode()
+  local env2: SmokeEnvelope = inbox:wait()
   test.assert(env2.id == 2)
   env2.reply:send(202)
   env2.reply:close()
   test.assert(second_rx:receive() == 202)
 
-  local unread_pkt, unread_rx = make_ephemeral_envelope_packet(3)
+  local unread_rx = send_ephemeral_envelope(inbox:handle(), 3)
   defer unread_rx:close()
   gc.collect()
   gc.collect()
-  async.send_packet(inbox:handle(), unread_pkt)
   test.assert(not unread_rx:is_closed())
   inbox:close()
   inbox:close()
   test.assert(unread_rx:is_closed(),
-              "closing PacketReceiver did not discard unread Packet")
+              "closing Receiver did not discard unread packet")
 end
 
 function main(_args: {string}): integer

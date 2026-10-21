@@ -19,13 +19,7 @@ function test_lua_record_payload_native_handle_survives_detached_origin_gc(
       "source wrapper was not collected before destination reconstruction")
     test.assert(handle_transfer.close_calls(resource) == 0,
       "detached source finalizer closed the transferred descriptor")
-    local packet = inbox:wait()
-    case packet
-    when is_record_payload(module, name, payload) then
-      test.assert(module == "lua.handle_transfer_fixture" and
-        name == "lua.handle_transfer_fixture.Pipe" and #payload > 0)
-    else raise "native wrapper did not use its record payload hooks" end
-    local restored: handle_transfer.Pipe = packet:to_value()
+    local restored: handle_transfer.Pipe = inbox:wait()
     defer restored:close()
     test.assert(restored:read_byte() == 107,
       "destination wrapper could not use the live transferred descriptor")

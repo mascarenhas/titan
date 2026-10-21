@@ -34,7 +34,7 @@ work()
 -- on exit: work(), second(), first()
 ```
 
-This is true for normal fallthrough, `return`, `break`, and errors. If a deferred statement raises an exception, it overrides the pending action.
+This is true for normal fallthrough, `return`, `break`, and errors, including out-of-memory errors: reaching registered cleanup does not itself allocate, so a deferred statement that does not allocate still runs. If a deferred statement raises, including through a failed allocation, its error replaces the pending action, and enclosing `defer` and `catch` blocks still run.
 
 Return expressions are evaluated before cleanup runs. For example, this returns `"body"` even though the deferred statement mutates `log` before control reaches the caller:
 

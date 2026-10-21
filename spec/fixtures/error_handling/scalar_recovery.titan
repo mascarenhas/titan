@@ -1,0 +1,44 @@
+local function change(slot: foreign *int)
+  slot[0] = 7
+  raise "changed"
+end
+
+local function change_checked(slot: foreign *int, bad: integer): foreign unsigned char
+  slot[0] = 7
+  -- The checked return raises after the write, with no C fallthrough path.
+  return bad
+end
+
+function run(): integer
+  local n: foreign int = 1
+  do
+    change_checked(n, -1)
+    return -1
+  catch
+    return n as integer
+  end
+  return -2
+end
+
+local function explicit_raise(): integer
+  local n: foreign int = 1
+  do
+    change(n)
+    return -1
+  catch
+    return n as integer
+  end
+  return -2
+end
+
+function main(_args: {string}): integer
+  local checked = run()
+  if checked ~= 7 then
+    raise "lost inlined write before checked return raised: expected 7, got " .. checked
+  end
+  local explicit = explicit_raise()
+  if explicit ~= 7 then
+    raise "lost inlined write before explicit raise: expected 7, got " .. explicit
+  end
+  return 0
+end

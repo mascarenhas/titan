@@ -1,6 +1,20 @@
 # Supplemental public API reference
 
-These 232 [supplemental declarations](supplemental-public-signatures.tsv) complement the 305 canonical native wrappers. Constructors and owner methods are also grouped with their type in [types](types.md). Every entry uses the public signature; private native fields are omitted. See [ownership contracts](CONTRACT-NOTES.md) for the owner, buffer, callback, and native worker rules, and [synchronization and native-carrier ownership](types.md#synchronization-and-native-carrier-ownership) for blocking synchronization, raw heap mutex/thread-token ownership, `once_t`/`key_t`, and cross-thread wake rules.
+These 233 [supplemental declarations](supplemental-public-signatures.tsv) complement the 305 canonical native wrappers. Constructors and owner methods are also grouped with their type in [types](types.md). Every entry uses the public signature; private native fields are omitted. See [ownership contracts](CONTRACT-NOTES.md) for the owner, buffer, callback, and native worker rules, and [synchronization and native-carrier ownership](types.md#synchronization-and-native-carrier-ownership) for blocking synchronization, raw heap mutex/thread-token ownership, `once_t`/`key_t`, and cross-thread wake rules.
+
+## Abandoned-loop retirement
+
+```text
+function loop_abandon(loop: loop_t): integer
+```
+
+Retire an exclusively owned loop during the final teardown of its Lua state; see
+the complete [abandonment contract](../standard-library-uv.md#abandoned-loop-retirement).
+It suppresses every user callback, waits for accepted native work, releases
+undelivered request-owned results, and closes the loop. It returns zero for a
+closed, fresh, or already closed loop, and `EBUSY` without changing anything
+when called inside an active run, walk, or callback. It is not ordinary
+shutdown or domain-resource cleanup.
 
 ## Native resource handoff
 
@@ -488,7 +502,7 @@ function external_wake_t:drain(output: foreign *unsigned long long, capacity: fo
 
 ## external_wake_t:reserve
 
-Preallocate a `PREPARED` target for an opaque `foreign unsigned long long` identity without referencing the internal async handle. Return `(0, target)` or `(status, nil)` (`uv.EINVAL` or `uv.ENOMEM`). `target` is borrowed from the destination bridge's registration reference until exact unregister or detach; the pointer is not a GC root or an independent owner. Before cross-thread publication, take a separate [`native_external_wake_retain`](#native_external_wake_retain) producer reference. Preparation alone does not admit a wait or keep the loop alive.
+Preallocate a `PREPARED` target for an opaque `foreign unsigned long long` identity without referencing the internal async handle; the target may reuse the storage of a target previously retired on the same core. Return `(0, target)` or `(status, nil)` (`uv.EINVAL` or `uv.ENOMEM`). `target` is borrowed from the destination bridge's registration reference until exact unregister or detach; the pointer is not a GC root or an independent owner, and storage reuse gives no protection against stale or dangling pointers. Before cross-thread publication, take a separate [`native_external_wake_retain`](#native_external_wake_retain) producer reference. Preparation alone does not admit a wait or keep the loop alive.
 
 ```titan
 function external_wake_t:reserve(identity: foreign unsigned long long): (integer, foreign *void)
@@ -499,7 +513,7 @@ function external_wake_t:reserve(identity: foreign unsigned long long): (integer
 
 ## external_wake_t:unregister
 
-Retire a `PREPARED`, `ARMED`, `PENDING`, or `DELIVERED` target from this bridge in $O(1)$ time. Unlink any pending entry, decrement active waits if activated (`uv_unref` at zero), and consume the registration reference. Clear the destination identity-map entry and borrowed pointer first: success may free the target. A separately retained producer reference may outlive unregister and must eventually be released. Return `0`, or `uv.EINVAL` for nil, a live foreign-core target, or a live retired target. These checks do not make a dangling pointer or a second call using a freed borrow safe.
+Retire a `PREPARED`, `ARMED`, `PENDING`, or `DELIVERED` target from this bridge in $O(1)$ time. Unlink any pending entry, decrement active waits if activated (`uv_unref` at zero), and consume the registration reference. Clear the destination identity-map entry and borrowed pointer first: success may immediately free the target or keep its storage for a later reservation. A separately retained producer reference may outlive unregister and must eventually be released. Return `0`, or `uv.EINVAL` for nil, a live foreign-core target, or a live retired target. These checks do not make a dangling pointer or a second call using a freed borrow safe.
 
 ```titan
 function external_wake_t:unregister(target: foreign *void): integer
@@ -1034,7 +1048,7 @@ foreign function native_external_wake_notify(target: *void): int
 
 ## native_external_wake_release
 
-Release one native producer reference directly from C or Titan; NULL is a no-op. The last target reference frees that target, and the core is freed only after its owner reference and all target pins are gone. Producer references may survive unregister, native close completion, or destination state teardown, but neither retain Lua/Titan owners nor pin the provider image. Calls remain C-only and require the [provider to stay mapped](../../implementation/foreign-functions.md); a released pointer must not be reused.
+Release one native producer reference directly from C or Titan; NULL is a no-op. Once a target's last reference (its registration and every producer reference) is gone, the target retires: its storage is freed or kept for a later reservation on the same core. The core itself is freed once its owner reference and all of its targets are gone. Producer references may survive unregister, native close completion, or destination state teardown, but they neither retain Lua/Titan owners nor pin the provider image. Calls remain C-only and require the [provider to stay mapped](../../implementation/foreign-functions.md); a released pointer must not be reused, and storage reuse gives no protection against stale pointers.
 
 ```titan
 foreign function native_external_wake_release(target: *void): void
@@ -1072,10 +1086,12 @@ separately retained live target; success consumes the registration reference.
 Clear destination identity-map entries and the registration borrow before
 calling. Return `0` on retirement, or `uv.EINVAL` for NULL or an already-retired
 target whose storage is still valid. A nonzero result does not consume a
-registration. Success may free a merely borrowed target immediately; never
-dereference it afterward. An independent producer reference survives and still
-requires its matching release. Do not call both unregister forms for one
-registration or mistake this operation for releasing a producer reference.
+registration. Success may immediately free a merely borrowed target or keep its
+storage for a later reservation on the same core, so a consumed borrow may alias
+a new target; never dereference it afterward. An independent producer reference
+survives and still requires its matching release. Do not call both unregister
+forms for one registration or mistake this operation for releasing a producer
+reference.
 
 
 ## native_key_get

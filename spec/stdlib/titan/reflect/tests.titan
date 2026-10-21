@@ -434,6 +434,41 @@ function test_named_type_resolve_unknown(_context: test.Context)
   end
 end
 
+local function describe_resolved(resolved: reflect.Type): string
+  case resolved
+  when is_record(descriptor) then
+    return "record " .. descriptor.name .. "/" .. #descriptor.fields
+  when is_union(descriptor) then
+    return "union " .. descriptor.name .. "/" .. #descriptor.variants
+  when is_interface(descriptor) then
+    return "interface " .. descriptor.name .. "/" .. #descriptor.methods
+  when is_value() then return "value"
+  else return "unexpected descriptor"
+  end
+end
+
+-- Reuse of a cached wrapper is only an allocation detail (no identity
+-- contract), so repeated resolutions are checked by what they describe.
+function test_named_type_resolve_repeats_registered_resolutions(_context: test.Context)
+  for round = 1, 3 do
+    local record_type = reflect.NamedType("reflect.tests.SimpleRecord"):resolve()
+    test.assert(describe_resolved(record_type) == "record reflect.tests.SimpleRecord/2",
+                "record resolution changed in round " .. round)
+    local union_type =
+      reflect.Type.is_named(reflect.NamedType("reflect.tests.TestShape")):resolve()
+    test.assert(describe_resolved(union_type) == "union reflect.tests.TestShape/3",
+                "union resolution changed in round " .. round)
+    local interface_type = reflect.NamedType.new("reflect.tests.Greeter"):resolve()
+    test.assert(describe_resolved(interface_type) == "interface reflect.tests.Greeter/1",
+                "interface resolution changed in round " .. round)
+    -- Unknown names are never cached; each lookup consults the registry again.
+    local missing = reflect.NamedType("nonexistent.CachedNominal"):resolve()
+    test.assert(describe_resolved(missing) == "value",
+                "unknown name resolution changed in round " .. round)
+  end
+  test.assert(reflect.find_nominal("nonexistent.CachedNominal") == nil)
+end
+
 record AccessRecord
   local hidden_first: string
   number: integer

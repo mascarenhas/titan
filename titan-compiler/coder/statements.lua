@@ -1881,6 +1881,25 @@ function codereturn(ctx, node)
     return table.concat(cstats, "\n")
 end
 
+-- Recovery must not intern registry keys or an empty traceback after an OOM.
+-- Keep these fixed strings in ordinary compiler-private module slots, rooted
+-- before any generated function can run. Only modules using them pay for slots.
+function recovery_string(ctx, literal)
+    local strings = ctx.tlcontext.recovery_strings
+    if not strings then
+        strings = {}
+        ctx.tlcontext.recovery_strings = strings
+    end
+    local slot = strings[literal]
+    if slot == nil then
+        slot = nextupvalue(ctx.tlcontext)
+        strings[literal] = slot
+    end
+    return getslot(types.String(), nil, render("&_mod->uv[$INDEX].uv", {
+        INDEX = c_integer_literal(slot),
+    }))
+end
+
 -- `raise <exp>`: evaluate the (already `value`-coerced) operand into an anchored
 -- temp, place it in the one top slot required by Lua's error ABI, then
 -- `lua_error(L)`. The
@@ -1912,9 +1931,9 @@ function coderaise(ctx, node)
             setsvalue(L, &_reraise_trace_$ID, $TB);
             setbtvalue(&_reraise_pin_$ID);
             titan_registry_set_string(
-                L, TITAN_BACKTRACE_KEY, &_reraise_trace_$ID);
+                L, $TRACEKEY, &_reraise_trace_$ID);
             titan_registry_set_string(
-                L, TITAN_TRACE_PINNED, &_reraise_pin_$ID);
+                L, $PINKEY, &_reraise_pin_$ID);
             _base = restorestack(L, _base_off);
             titan_ensure_stack(L, 1);
             setobj2s(L, L->top.p, &$ERR);
@@ -1926,6 +1945,8 @@ function coderaise(ctx, node)
             LINEDIR = emitline(node),
             TB = tbcvar,
             ERR = errcvar,
+            TRACEKEY = recovery_string(ctx, "TITAN_BACKTRACE_KEY"),
+            PINKEY = recovery_string(ctx, "TITAN_TRACE_PINNED"),
         })
     end
     local cstats, cexp = codeexp(ctx, node.exp)
@@ -2086,9 +2107,9 @@ function dispatch_after_finally(ctx, pa_var, frame, d_pa_err, d_pa_tb)
         setbtvalue(&_pa_pin_$ID);
         setobj(L, &_pa_error_$ID, $PAERR);
         titan_registry_set_string(
-            L, TITAN_BACKTRACE_KEY, &_pa_trace_$ID);
+            L, $TRACEKEY, &_pa_trace_$ID);
         titan_registry_set_string(
-            L, TITAN_TRACE_PINNED, &_pa_pin_$ID);
+            L, $PINKEY, &_pa_pin_$ID);
         _base = restorestack(L, _base_off);
         titan_ensure_stack(L, 1);
         setobj2s(L, L->top.p, &_pa_error_$ID);
@@ -2098,6 +2119,8 @@ function dispatch_after_finally(ctx, pa_var, frame, d_pa_err, d_pa_tb)
         ID = frame.id,
         PATB = slotat(d_pa_tb),
         PAERR = slotat(d_pa_err),
+        TRACEKEY = recovery_string(ctx, "TITAN_BACKTRACE_KEY"),
+        PINKEY = recovery_string(ctx, "TITAN_TRACE_PINNED"),
     })
 
     return render([[
@@ -2167,18 +2190,17 @@ function boundary_recover_open(ctx, tag, d_err, d_tb)
              * touching any reserved slot */
             _base = restorestack(L, _base_off);
             /* Save the error object into its anchored slot, then drop it from the
-             * top. Registry bookkeeping below uses Lua internals directly and
-             * does not borrow the Lua stack. */
+             * top. The registry keys and fallback trace are module-rooted, so
+             * snapshot/clear below cannot allocate even after emergency GC. */
             setobj2s(L, $ERRSTACK, s2v(L->top.p - 1));
             L->top.p = restorestack(L, _oldtop_$T);
             /* snapshot registry[TITAN_BACKTRACE_KEY] into the traceback slot */
             TValue _caught_trace_$T;
             lu_byte _caught_trace_tag_$T = titan_registry_get_string(
-                L, TITAN_BACKTRACE_KEY, &_caught_trace_$T);
+                L, $TRACEKEY, &_caught_trace_$T);
             if (tagisempty(_caught_trace_tag_$T)
                     || !ttisstring(&_caught_trace_$T)) {
-                TString *_empty_trace_$T = luaS_newliteral(L, "");
-                setsvalue(L, &_caught_trace_$T, _empty_trace_$T);
+                setsvalue(L, &_caught_trace_$T, $EMPTYTRACE);
             }
             (void)_caught_trace_tag_$T;
             _base = restorestack(L, _base_off);
@@ -2188,9 +2210,9 @@ function boundary_recover_open(ctx, tag, d_err, d_tb)
             TValue _cleared_trace_$T = {0};
             setnilvalue(&_cleared_trace_$T);
             titan_registry_set_string(
-                L, TITAN_BACKTRACE_KEY, &_cleared_trace_$T);
+                L, $TRACEKEY, &_cleared_trace_$T);
             titan_registry_set_string(
-                L, TITAN_TRACE_PINNED, &_cleared_trace_$T);
+                L, $PINKEY, &_cleared_trace_$T);
             _base = restorestack(L, _base_off);
             /* re-establish the function's steady-state reserved top
              * (`_base + nslots`) so any reserved slots used in the recovery sit
@@ -2203,6 +2225,9 @@ function boundary_recover_open(ctx, tag, d_err, d_tb)
         ERRSTACK = stackslotat(d_err),
         TBSTACK = stackslotat(d_tb),
         SPILLRELOAD = spill_reload(ctx),
+        TRACEKEY = recovery_string(ctx, "TITAN_BACKTRACE_KEY"),
+        PINKEY = recovery_string(ctx, "TITAN_TRACE_PINNED"),
+        EMPTYTRACE = recovery_string(ctx, '""'),
     })
 end
 
@@ -2498,7 +2523,7 @@ function code_hidden_decl(ctx, decl, exp, prepared)
         $CSET
     ]], {
         CSTATS = cstats,
-        CDECL = cvardecl(ctx, typ, decl._cvar) .. " = " .. initval(typ) .. ";",
+        CDECL = coder._local_cvardecl(ctx, decl) .. " = " .. initval(typ) .. ";",
         CVAR = decl._cvar,
         CEXP = cexp,
         CSET = cset,
@@ -2513,7 +2538,7 @@ function code_hidden_result_decls(ctx, decls)
         if types.is_gc(typ) then
             decl._slot = newslot(ctx)
         end
-        table.insert(out, cvardecl(ctx, typ, decl._cvar)
+        table.insert(out, coder._local_cvardecl(ctx, decl)
             .. " = " .. initval(typ) .. ";")
     end
     return table.concat(out, "\n")
@@ -2541,12 +2566,12 @@ function predeclare_defer_tail(ctx, block)
                             decl._cvar = "_local_" .. localname(ctx, decl.name)
                             if decl._c_zero_init then
                                 table.insert(out,
-                                    cvardecl(ctx, decl._type, decl._cvar)
+                                    coder._local_cvardecl(ctx, decl)
                                     .. " = {0};")
                                 decl._c_zero_predeclared = true
                             else
                                 table.insert(out,
-                                    cvardecl(ctx, decl._type, decl._cvar) .. ";")
+                                    coder._local_cvardecl(ctx, decl) .. ";")
                             end
                             local spill = decl._c_zero_init
                                 and spill_decl_init(ctx, decl)
@@ -2711,7 +2736,7 @@ function coder._codeautomaticallocationdecl(ctx, decl)
         ]], {
             BACKING = coder._render_c_declaration(array_type, backing),
             BACKING_NAME = backing,
-            POINTER = coder._render_c_declaration(decl._type, decl._cvar),
+            POINTER = coder._local_cvardecl(ctx, decl),
             CSPILLDECL = spill_decl_init(ctx, decl),
         })
     elseif storage == "automatic_fam" then
@@ -2799,7 +2824,7 @@ function coder._codeinitializeddecl(ctx, decl, cstats, cexp)
             decl._cvar = "_local_" .. localname(ctx, decl.name)
         end
         local cdecl = decl._defer_tail_predeclared
-            and "" or cvardecl(ctx, typ, decl._cvar) .. ";"
+            and "" or coder._local_cvardecl(ctx, decl) .. ";"
         local cset = ""
         local cspilldecl = decl._defer_tail_spill_predeclared
             and "" or spill_decl_zero(ctx, decl)

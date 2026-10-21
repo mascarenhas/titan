@@ -22,17 +22,23 @@ local function clean_generated_modules()
 end
 
 local function without_reflection_payload_reader(source, owner)
-    for _, suffix in ipairs({ "payload_reader", "projection" }) do
+    for _, suffix in ipairs({ "payload_reader", "projection", "codec_encode" }) do
         local marker = "static void test_\\u2133_" .. owner
             .. "_\\u2131_" .. suffix .. "("
-        local start = assert(source:find(marker, 1, true))
-        local body_start = assert(source:find("{", start, true))
-        local body = assert(source:match("^%b{}", body_start))
-        -- Reflection boxes an Array for Lua. Exclude these readers while
-        -- retaining every constructor, case load, and other function in the
-        -- no-proxy assertion for compiler-internal payload storage.
-        source = source:sub(1, start - 1)
-            .. source:sub(body_start + #body)
+        local start = source:find(marker, 1, true)
+        -- Only nominals with a generated codec have an encoder.
+        assert(start or suffix == "codec_encode", marker)
+        if start then
+            local body_start = assert(source:find("{", start, true))
+            local body = assert(source:match("^%b{}", body_start))
+            -- Reflection, and a generated codec handing a field to the
+            -- reflective field encoder, box an Array for Lua. Exclude these
+            -- functions while retaining every constructor, case load, and
+            -- other function in the no-proxy assertion for compiler-internal
+            -- payload storage.
+            source = source:sub(1, start - 1)
+                .. source:sub(body_start + #body)
+        end
     end
     return source
 end

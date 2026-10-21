@@ -355,14 +355,46 @@ size overflow at run time. While the original owner or automatic local retains i
 the parent to raw `T *` erases the provenance; a FAM reached through that raw
 pointer has neither length nor count-aware indexing.
 
-Titan spills and reloads automatic objects and arrays across catchable Titan
-calls, so mutation that Titan code made before a caught error remains
-observable afterwards. FAM backing uses the same protocol for its full dynamic
-extent. This tracks Titan's own writes and calls only: mutation through a raw
-pointer or another untracked alias, or asynchronously from C, is not tracked and
-is not rolled back. A borrowed pointer view (`foreign *T` or `foreign T[]`)
-spills only the pointer value; the bytes it points to are never snapshotted or
-restored.
+## C storage after a caught error
+
+After a caught error, `catch` blocks, deferred statements, and code after a
+handled `catch` see automatic C storage as follows.
+
+**Aggregates and fixed arrays** show the bytes as of Titan's last completed
+write to them or the last call to a C function that wrote them through a
+mutable address and returned normally. A C call that writes the object and
+then raises does not count: its writes are discarded and the earlier bytes come
+back. An ordinary Titan function that writes the object through its mutable
+address does not count either, even when it returns normally, so recovery may
+restore the bytes from before that call. FAM backing follows the same rules for
+its full dynamic extent. Mutation through a raw pointer or another alias that
+Titan does not track, or asynchronously from C, is outside these rules. A
+borrowed pointer view (`foreign *T` or `foreign T[]`) preserves only the
+pointer value; the bytes it points to are never saved or restored, so storage
+reached only through a pointer local shows its current memory. Keep state that
+C writes during a protected region, such as a native wait cell, in automatic
+storage accessed through a pointer local, as
+[external waits](async-io.md#external-waits) describe.
+
+**Scalars and pointers** whose mutable address is taken are never restored. If
+a non-GC scalar local or parameter, such as a C integer or pointer, is passed
+as a mutable out pointer to a call and recovery code reads it, it keeps a single
+storage location. A value that the callee stores through that address before
+raising, whether the callee is C or an ordinary Titan function, is what
+recovery sees, even when an earlier protected region also assigned the local.
+This is how a `defer` guard observes
+[`transfer.decode_message`](standard-library-transfer.md#raw-packet-encoding-decoding-copying-and-disposal)
+clearing its packet slot.
+
+The scalar rule is a guarantee of Titan's supported GCC and Clang toolchains,
+including Clang on Windows (MSYS2), not of ISO C. The generated C declares such
+a local `volatile` and adds a compiler barrier at its declaration, so the
+optimizer keeps the callee's store even when it inlines the callee; `volatile`
+alone does not ensure that. The callee still writes through an unqualified
+pointer, which ISO C 6.7.3p6 leaves undefined. The
+[implementation chapter](../implementation/error-handling.md#setjmp-sensitive-localparameter-spills)
+states the optimizer and link-time-optimization assumptions behind this
+guarantee.
 
 ## A callback-options example
 

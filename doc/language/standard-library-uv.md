@@ -118,6 +118,45 @@ drain while a valid target borrow/reference remains. Native unregister is a
 consuming **destination-loop-thread-only** entry, not a foreign producer call;
 it may unreference the loop handle and immediately free the registration borrow.
 
+## Abandoned-loop retirement
+
+```text
+function loop_abandon(loop: loop_t): integer
+```
+
+`loop_abandon` retires a loop during the final teardown of its owning Lua
+state without delivering any callback. It is **not ordinary shutdown**,
+cancellation, or a replacement for lexical cleanup; `async` uses it only from
+its Runtime finalizer, when a state closes before its Runtime has finished. The
+caller must own the loop exclusively, and native producers must already be
+quiescent or hold their own references. Call it on the owning main Lua thread
+and outside any `run`, `walk`, or inline callback: inside one it returns
+`EBUSY` without changing the loop, and on another Lua thread it raises.
+
+It unbinds the loop if it is the
+[transfer loop](#native-resource-handoff), clears the user callbacks of every
+initialized handle and accepted request, closes the remaining handles, runs the
+loop until accepted native requests have finished, and closes the loop. No Lua
+or Titan callback runs, not even a close callback that was already requested,
+so Task continuations, domain unregister functions, and Runtime-close listeners
+do not run either. UV still performs its own native bookkeeping, but it never
+calls methods on domain objects held in callback captures or public userdata,
+whose native resources may already have been finalized.
+
+Accepted filesystem and DNS requests release the results they own: a
+successful `open` or `mkstemp` descriptor, or an `opendir` directory, that was
+never delivered is closed. Descriptors and directories that were already
+delivered, results of arbitrary C workers, and child processes remain with their
+own owners. Accepted work is not cancelled, so queued native close and finalize
+operations still execute, and a running worker keeps its borrowed storage until
+it finishes; abandonment can therefore block.
+
+The result is zero when the loop has been closed, and also for fresh or already
+closed storage, so calling it again is harmless. Other native failures are
+returned or raised as usual at the UV boundary. Do not reuse the loop or its
+request and handle owners afterwards. `loop_abandon` is a supplemental Titan
+operation, not a libuv wrapper, and `has_api` does not recognize it.
+
 ## Read status and lifetime together
 
 Native status positions use zero for success and negative libuv error codes for
@@ -275,7 +314,7 @@ wrapper. Type, field, callback, macro, and platform-constant mappings accompany
 the function inventory. Coverage does not remove platform-specific native
 limitations or make every operation appropriate inside a cooperative Task.
 
-The **232** [supplemental declarations](uv/supplemental.md) include the direct
+The **233** [supplemental declarations](uv/supplemental.md) include the direct
 synchronization map, **12** external-wake helpers, and three heap-thread-token
 helpers. None of them adds a distinct libuv C operation. Counts describe the
 exported API inventory, not a claim that every operation has been executed on

@@ -141,15 +141,49 @@ function test_walk_is_synchronous_and_loop_driving_cannot_reenter(_context: test
     test.assert(argument == "walk user data")
     test.assert(uv.handle_get_loop(view) == loop)
     test.assert(uv.loop_close(loop) == uv.EBUSY)
+    test.assert(uv.loop_abandon(loop) == uv.EBUSY)
     expect_error(function () uv.run(loop) end, "uv.run cannot reenter the event loop")
     visited = visited + 1
   end, "walk user data")
   test.assert(visited == 1, "walk deferred its callback")
   success(uv.timer_start(timer, function (owner: uv.timer_t)
     expect_error(function () uv.run(loop) end, "uv.run cannot reenter the event loop")
+    test.assert(uv.loop_abandon(loop) == uv.EBUSY)
     uv.close(owner:as_handle_t())
   end, 0, 0))
   success(uv.run(loop))
+end
+
+function test_loop_abandon_is_idempotent_and_suppresses_user_callbacks(context: test.Context)
+  context:run("fresh", function (_: test.Context)
+    local loop = uv.loop_t()
+    success(uv.loop_abandon(loop))
+    success(uv.loop_abandon(loop))
+  end)
+  context:run("empty-initialized", function (_: test.Context)
+    local loop = new_loop()
+    success(uv.loop_abandon(loop))
+    test.assert(uv.loop_close(loop) == uv.EINVAL)
+    success(uv.loop_abandon(loop))
+  end)
+  context:run("live-and-closing-handles", function (_: test.Context)
+    local loop = new_loop()
+    local live, closing, typed = uv.timer_t(), uv.timer_t(), uv.timer_t()
+    local calls = 0
+    success(uv.timer_init(loop, live))
+    success(uv.timer_init(loop, closing))
+    success(uv.timer_init(loop, typed))
+    success(uv.timer_start(live, function (_: uv.timer_t) calls = calls + 1 end, 0, 0))
+    uv.close(closing:as_handle_t(), function (_: uv.handle_t) calls = calls + 1 end)
+    uv.timer_close(typed, function (_: uv.timer_t) calls = calls + 1 end)
+    success(uv.loop_abandon(loop))
+    test.assert(calls == 0, "abandonment delivered a user callback")
+    test.assert(not live:as_handle_t():is_initialized() and
+      not closing:as_handle_t():is_initialized() and not typed:as_handle_t():is_initialized(),
+      "abandonment skipped internal handle retirement")
+    test.assert(uv.loop_close(loop) == uv.EINVAL and not uv.loop_alive(loop))
+    success(uv.loop_abandon(loop))
+  end)
 end
 
 local record TimerReceiver

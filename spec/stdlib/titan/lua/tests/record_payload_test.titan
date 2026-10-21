@@ -110,7 +110,9 @@ function test_lua_record_payload_receiver_reconstructs_after_sender_close(
       async.TransferValue.is_pointer(inbox:handle()))
     state:close()
     gclib.collect()
-    check_record_payload(inbox:wait(), 97)
+    local restored: transfer_fixture.PayloadRecord = inbox:wait()
+    test.assert(restored:number_value() == 97)
+    test.assert(restored:text_value() == strings.rep("payload\0bytes", 1024))
   end)
 end
 

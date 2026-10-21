@@ -378,7 +378,8 @@ STDLIB_GENERATED_FFI_HEADERS := $(addprefix $(TITAN_OUTPUT_DIR)/,$(addsuffix .ff
 STDLIB_GENERATED_FOREIGN_HEADERS := $(STDLIB_GENERATED_FFI_HEADERS) \
 	$(addprefix $(TITAN_OUTPUT_DIR)/,titan/coroutine.titan.h \
 	titan/uv/uv.titan.h titan/async.titan.h titan/http/http.titan.h \
-	titan/sqlite3/sqlite3.titan.h titan/lua/lua.titan.h titan/transfer.titan.h titan/thread/thread.titan.h)
+	titan/sqlite3/sqlite3.titan.h titan/lua/lua.titan.h titan/protobuf/protobuf.titan.h \
+	titan/transfer.titan.h titan/thread/thread.titan.h)
 # One native compilation unit per logical module, including folder ensembles.
 # This reviewed import graph owns rebuild propagation and parallel ordering;
 # titanc's object fast path deliberately does not track dependency freshness.

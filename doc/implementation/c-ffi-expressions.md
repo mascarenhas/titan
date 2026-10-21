@@ -477,7 +477,35 @@ The recovery path reloads the last committed bytes before Titan reads the
 object. The loops preserve volatile accesses; they do not cast volatility away
 through `memcpy`. A call that mutates and then nonlocally exits does not commit
 partial bytes. Mutation through an untracked raw alias or asynchronously from C
-remains outside Titan's guarantee.
+remains outside Titan's guarantee for the spilled object itself. Storage reached
+only through a pointer local is never spilled or restored: the pointer walk
+stops at the first pointer, so reads after recovery observe the storage's current
+memory. Code that lets C commit state during a protected region (for example a
+native registrar writing a wait cell) should therefore hold that cell as automatic
+storage plus a pointer local rather than rolling back its bytes on recovery.
+Address escape alone does not exempt a non-volatile automatic object from
+ISO C's `setjmp` rule.
+
+Known limitation: a normally returning **ordinary Titan** callee does not
+commit a mutable aggregate out-argument to its byte spill. If that aggregate
+was already spill-tracked by another protected assignment, later recovery can
+restore pre-call bytes and lose the callee's completed write. The mutable
+foreign-call commit rule above does not yet extend to ordinary Titan callees.
+
+Non-GC **scalar** locals/parameters whose mutable C address is taken and whose
+value is live across recovery use a different home: the actual C object is
+volatile, with a declaration-time compiler escape barrier and no separate
+spill/reload. The write analysis treats a contextual mutable address conversion
+as a possible write even for an ordinary Titan call. The empty GNU extended
+asm keeps the home escaped when that callee is inlined; volatility alone is
+not sufficient to preserve an unqualified indirect store. Writes through the
+address are visible to catch/deferred cleanup even if the callee raises
+instead of returning. Earlier protected assignments do not create a stale
+snapshot. This is a supported GCC/Clang implementation guarantee, with the
+ISO C 6.7.3p6 caveat for unqualified callee access to the volatile object;
+see [recovery storage](error-handling.md#setjmp-sensitive-localparameter-spills)
+for the barrier, opaque-raise and LTO assumptions. It changes neither the
+aggregate limitation above nor untracked raw-alias/asynchronous mutation rules.
 
 ## C operator traits
 

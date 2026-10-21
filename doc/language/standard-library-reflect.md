@@ -297,13 +297,16 @@ end
 A nominal reference inside another descriptor is `Type.is_named`, carrying
 its fully qualified name. `NamedType:resolve()` returns the corresponding
 `Type.is_record`, `Type.is_union`, or `Type.is_interface`; an unknown name
-resolves to `Type.is_value()`.
+resolves to `Type.is_value()`. Resolving a registered name again in the same
+Lua state returns a cached descriptor instead of allocating a new one. `Type`
+values still have no identity: inspect them with `case`, and do not compare
+them with `==` or use them as Map keys. Unknown names are not cached, so a name
+that a later module initialization registers resolves on the next call.
 
 `Type:resolve()` performs that lookup when its receiver is `is_named`. An
 `is_foreign_named` receiver instead resolves a retained C declaration, as
 described below; other receivers are returned unchanged. This operation does
 not recursively expand Array elements, field schemas, or Option contents.
-Repeated nominal lookups reuse cached descriptors.
 
 ## Type descriptors
 

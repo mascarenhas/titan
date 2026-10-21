@@ -1,0 +1,958 @@
+-- Focused scalar/envelope classification, C-only decode, consuming-slot error,
+-- and bounded structural presize tests for titan.transfer (issue #255 / #256).
+local tse_reflect = import "reflect"
+local tse_protobuf = import "protobuf"
+local tse_transfer = import "transfer"
+local tse_math = import "math"
+local tse_string = import "string"
+local tse_gc = import "gc"
+foreign import "stdlib.h"
+foreign import "lauxlib.h"
+foreign import "../../../../../titan/transfer_native.h"
+
+local tse_hook_encode_calls = 0
+local tse_hook_decode_calls = 0
+
+local foreign function tse_cfunc_echo(state: *lua_State): int
+  local n = ffi.lua_gettop(state)
+  ffi.lua_pushinteger(state, (n + 100) as foreign lua_Integer)
+  return 1
+end
+
+local foreign function tse_resource_retain(raw: *void)
+  local count = raw as foreign *int
+  count[0] = count[0] + 1
+end
+
+local foreign function tse_resource_release(raw: *void)
+  local count = raw as foreign *int
+  count[0] = count[0] - 1
+end
+
+local foreign function tse_meta_index_probe(state: *lua_State): int
+  local key = (tse_meta_index_probe as foreign function(*lua_State): int) as foreign *void
+  ffi.lua_rawgetp(state, 1, key)
+  local ctrl = ffi.lua_touserdata(state, -1) as foreign *int
+  if ctrl ~= nil then
+    if ctrl[0] ~= 0 then
+      return ffi.luaL_error(state, "tse-metatable-index-boom")
+    end
+  end
+  ffi.lua_pushnil(state)
+  return 1
+end
+
+local foreign function tse_deny_lua_alloc(
+    ud: *void, ptr: *void, osize: size_t, nsize: size_t): *void
+  if nsize == 0 then
+    ffi.free(ptr)
+    return nil
+  end
+  if ptr ~= nil then
+    if nsize <= osize then return ptr end
+  end
+  local denied = ud as foreign *size_t
+  if denied ~= nil then denied[0] = denied[0] + 1 end
+  return nil
+end
+
+local foreign function tse_clear_encoded_cfunction_pointer(
+    raw: *void, target: function(*lua_State): int): int
+  local message = raw as foreign *titan_async_message
+  if message.function ~= target then return 0 end
+  message.function = nil
+  return 1
+end
+
+local foreign function tse_rewrite_packet_kind(raw: *void, template_raw: const *void)
+  local dst = raw as foreign *titan_async_message
+  local src = template_raw as foreign const *titan_async_message
+  dst.kind = src.kind
+end
+
+local function tse_expect_error(action: function (): (), fragment: string)
+  local caught = false
+  do
+    action()
+  catch
+    caught = error is string and support.contains(error, fragment)
+  end
+  test.assert(caught, "missing expected transfer error containing: " .. fragment)
+end
+
+-- Own the raw packet local in this helper's own frame: decode_message
+-- consumes and clears that actual guarded local on return and on every error.
+-- Never wrap a caller-owned raw slot.
+local function tse_roundtrip_raw(candidate: value): value
+  local raw = tse_transfer.encode_message(candidate)
+  defer tse_transfer.discard_message(raw)
+  local top = ffi.lua_gettop(L)
+  local result = tse_transfer.decode_message(raw)
+  test.assert(raw == nil, "decode_message did not clear its owned local slot")
+  test.assert(ffi.lua_gettop(L) == top,
+              "decode_message changed the caller's Lua stack top")
+  return result
+end
+
+local function tse_roundtrip_copied_raw(candidate: value): value
+  local original = tse_transfer.encode_message(candidate)
+  defer tse_transfer.discard_message(original)
+  local copied = tse_transfer.copy_message(original)
+  defer tse_transfer.discard_message(copied)
+  test.assert(copied ~= nil, "copy_message rejected an attachment-free packet")
+  tse_transfer.discard_message(original)
+  original = nil
+  local top = ffi.lua_gettop(L)
+  local result = tse_transfer.decode_message(copied)
+  test.assert(copied == nil, "decode_message did not clear copied local slot")
+  test.assert(ffi.lua_gettop(L) == top,
+              "copied decode_message changed the caller's Lua stack top")
+  return result
+end
+
+local function tse_make_cfunction_value(): value
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 1) ~= 0)
+  ffi.lua_pushcclosure(L, tse_cfunc_echo, 0)
+  return ffi.lua_totvalue(L, -1) as value
+end
+
+local function tse_make_thread_value(): (value, foreign *lua_State)
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 1) ~= 0)
+  local th = ffi.lua_newthread(L)
+  return ffi.lua_totvalue(L, -1) as value, th
+end
+
+local function tse_make_userdata_with_plain_mt(
+    brand_override: integer?): (value, foreign *void)
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 4) ~= 0)
+  local ptr = ffi.lua_newuserdatauv(L, foreign int.sizeof as foreign size_t, 0)
+  local cell = ptr as foreign *int
+  cell[0] = 2561
+  ffi.lua_createtable(L, 0, 1)
+  if brand_override ~= nil then
+    ffi.lua_pushinteger(L, brand_override as foreign lua_Integer)
+    ffi.lua_rawsetp(L, -2, ffi.TITAN_BRAND)
+  end
+  ffi.lua_setmetatable(L, -2)
+  return ffi.lua_totvalue(L, -1) as value, ptr
+end
+
+local function tse_make_userdata_with_nested_mt(
+    ctrl: foreign *int): (value, foreign *void)
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 6) ~= 0)
+  local ptr = ffi.lua_newuserdatauv(L, foreign int.sizeof as foreign size_t, 0)
+  local cell = ptr as foreign *int
+  cell[0] = 2562
+  ffi.lua_createtable(L, 0, 1)
+  local key = (tse_meta_index_probe as foreign function(*lua_State): int) as foreign *void
+  ffi.lua_pushlightuserdata(L, ctrl as foreign *void)
+  ffi.lua_rawsetp(L, -2, key)
+  ffi.lua_createtable(L, 0, 1)
+  ffi.lua_pushcclosure(L, tse_meta_index_probe, 0)
+  ffi.lua_setfield(L, -2, "__index")
+  ffi.lua_setmetatable(L, -2)
+  ffi.lua_setmetatable(L, -2)
+  return ffi.lua_totvalue(L, -1) as value, ptr
+end
+
+record TransferScalarEnvelopeShortRecord
+  code: integer
+  label: string
+end
+
+union TransferScalarEnvelopeShortUnion
+  empty()
+  tagged(code: integer, label: string)
+end
+
+record TransferScalarEnvelopeLongMetadataNominalNameExceedingSixtyFourBytesForPresizeCheck
+  code: integer
+  payload: string
+end
+
+union TransferScalarEnvelopeLongMetadataUnionNameExceedingSixtyFourBytesForPresizeCheck
+  idle()
+  active(code: integer, payload: string)
+end
+
+record TransferScalarEnvelopeCustomHookPayload
+  local secret: integer
+  local tag: string
+end
+
+function TransferScalarEnvelopeCustomHookPayload:to_transfer_payload(): string
+  tse_hook_encode_calls = tse_hook_encode_calls + 1
+  if self.secret < 0 then
+    raise "tse-custom-hook-encode-boom"
+  end
+  if self.secret == 0 and self.tag == "" then
+    return ""
+  end
+  return tse_protobuf.serialize_fields(
+    {tse_reflect.Type.is_integer(), tse_reflect.Type.is_string()},
+    self.secret, self.tag)
+end
+
+function TransferScalarEnvelopeCustomHookPayload.from_transfer_payload(
+    payload: string): TransferScalarEnvelopeCustomHookPayload
+  tse_hook_decode_calls = tse_hook_decode_calls + 1
+  if payload == "" then
+    return { secret = 0, tag = "" }
+  end
+  local secret: integer, tag: string = tse_protobuf.deserialize_fields(
+    payload, {tse_reflect.Type.is_integer(), tse_reflect.Type.is_string()})
+  return { secret = secret, tag = tag }
+end
+
+record TransferScalarEnvelopeAttachedBytesProbe
+  local ptr1: foreign *void
+  local ptr2: foreign *void
+  local payload: string
+end
+
+function TransferScalarEnvelopeAttachedBytesProbe:to_transfer_payload(): string
+  tse_transfer.attach_resource(
+    self.ptr1, tse_resource_retain, tse_resource_release)
+  tse_transfer.attach_resource(
+    self.ptr2, tse_resource_retain, tse_resource_release)
+  return self.payload
+end
+
+function TransferScalarEnvelopeAttachedBytesProbe.from_transfer_payload(
+    payload: string): TransferScalarEnvelopeAttachedBytesProbe
+  return { ptr1 = nil, ptr2 = nil, payload = payload }
+end
+
+record TransferScalarEnvelopeScopeBypassProbe
+  local ptr1: foreign *void
+  local ptr2: foreign *void
+end
+
+function TransferScalarEnvelopeScopeBypassProbe:to_transfer_payload(): string
+  local first_idx = tse_transfer.attach_resource(
+    self.ptr1, tse_resource_retain, tse_resource_release)
+  test.assert(first_idx == "\0\0\0\0",
+              "first attachment before scalar bypass did not use slot 0")
+  -- Scalar and explicit-policy encode/decode inside an active encode hook must
+  -- neither clobber nor consume the enclosing execution's ResourceScope.
+  test.assert(tse_roundtrip_raw(nil) == nil)
+  test.assert(tse_roundtrip_raw(false) == false)
+  test.assert(tse_roundtrip_raw(true) == true)
+  test.assert(tse_roundtrip_raw(-99) as integer == -99)
+  case tse_reflect.inspect(tse_roundtrip_raw(-0.0))
+  when is_float(f) then test.assert(f == 0.0 and 1.0 / f < 0.0)
+  else raise "nested scalar -0.0 lost float tag or sign"
+  end
+  test.assert(tse_roundtrip_raw("nested\0scalar") as string == "nested\0scalar")
+  test.assert(tse_roundtrip_raw(
+    tse_transfer.TransferValue.is_boolean(false)) == false)
+  test.assert(tse_roundtrip_raw(
+    tse_transfer.TransferValue.is_integer(777)) as integer == 777)
+  local second_idx = tse_transfer.attach_resource(
+    self.ptr2, tse_resource_retain, tse_resource_release)
+  test.assert(second_idx == "\1\0\0\0",
+              "scalar/policy round-trip inside encode hook disturbed outer scope")
+  return first_idx .. second_idx
+end
+
+function TransferScalarEnvelopeScopeBypassProbe.from_transfer_payload(
+    payload: string): TransferScalarEnvelopeScopeBypassProbe
+  local p1 = tse_transfer.claim_resource(
+    tse_string.sub(payload, 1, 4), tse_resource_release)
+  -- Scalar and explicit-policy round-trips inside an active decode hook must
+  -- preserve the enclosing decode ResourceScope for subsequent claims.
+  test.assert(tse_roundtrip_raw(nil) == nil)
+  test.assert(tse_roundtrip_raw(false) == false)
+  test.assert(tse_roundtrip_raw(1234) as integer == 1234)
+  test.assert(tse_roundtrip_raw("decode\0nested") as string == "decode\0nested")
+  test.assert(tse_roundtrip_raw(
+    tse_transfer.TransferValue.is_float(-0.0)) as float == 0.0)
+  local p2 = tse_transfer.claim_resource(
+    tse_string.sub(payload, 5, 8), tse_resource_release)
+  return { ptr1 = p1, ptr2 = p2 }
+end
+
+function test_transfer_scalar_envelope_userdata_metatable_and_scope_bypass(
+    context: test.Context)
+  context:run("plain-and-unknown-brand-userdata-metatables", function (_context: test.Context)
+    local ud_plain, ptr_plain = tse_make_userdata_with_plain_mt(nil)
+    case tse_transfer.TransferValue.from_value(ud_plain)
+    when is_pointer(p) then test.assert(p == ptr_plain)
+    else raise "plain-metatable userdata did not classify as borrowed pointer policy"
+    end
+    case tse_reflect.inspect(tse_roundtrip_raw(ud_plain))
+    when is_raw_pointer(p) then
+      test.assert(p == ptr_plain and (p as foreign *int)[0] == 2561)
+    else raise "plain-metatable userdata did not round-trip as borrowed pointer"
+    end
+
+    local ud_zero, ptr_zero = tse_make_userdata_with_plain_mt(0)
+    local ud_high, ptr_high = tse_make_userdata_with_plain_mt(99)
+    case tse_reflect.inspect(tse_roundtrip_raw(ud_zero))
+    when is_raw_pointer(p) then test.assert(p == ptr_zero)
+    else raise "userdata with brand 0 outside Titan range did not round-trip as pointer"
+    end
+    case tse_reflect.inspect(tse_roundtrip_raw(ud_high))
+    when is_raw_pointer(p) then test.assert(p == ptr_high)
+    else raise "userdata with brand 99 outside Titan range did not round-trip as pointer"
+    end
+  end)
+
+  context:run("metatable-of-metatable-preserves-pointer-and-propagates-index-errors",
+    function (_context: test.Context)
+      local ctrl: owned int[] = foreign int.new_array(1)
+      ctrl[0] = 0
+      local ud_nested, ptr_nested = tse_make_userdata_with_nested_mt(ctrl)
+      case tse_transfer.TransferValue.from_value(ud_nested)
+      when is_pointer(p) then
+        test.assert(p == ptr_nested,
+                    "TransferValue.from_value changed metatable-of-metatable userdata pointer")
+      else raise "metatable-of-metatable userdata did not produce is_pointer policy"
+      end
+
+      case tse_reflect.inspect(tse_roundtrip_raw(ud_nested))
+      when is_raw_pointer(p) then
+        test.assert(p == ptr_nested and (p as foreign *int)[0] == 2562,
+                    "metatable-of-metatable userdata lost its borrowed pointer or payload")
+      else raise "metatable-of-metatable userdata did not round-trip as raw pointer"
+      end
+
+      -- A raising __index must propagate without leaving attachment authority.
+      ctrl[0] = 1
+      tse_expect_error(function ()
+        local raw = tse_transfer.encode_message(ud_nested)
+        tse_transfer.discard_message(raw)
+      end, "tse-metatable-index-boom")
+      local counter: owned int[] = foreign int.new_array(1)
+      counter[0] = 1
+      tse_expect_error(function ()
+        tse_transfer.attach_resource(
+          counter as foreign *void, tse_resource_retain, tse_resource_release)
+      end, "transfer: resource attachment requires an encode scope")
+    end)
+
+  context:run("nested-scalar-and-policy-roundtrips-preserve-active-scopes",
+    function (_context: test.Context)
+      local c1: owned int[] = foreign int.new_array(1)
+      local c2: owned int[] = foreign int.new_array(1)
+      c1[0] = 1
+      c2[0] = 1
+      local probe = TransferScalarEnvelopeScopeBypassProbe(
+        c1 as foreign *void, c2 as foreign *void)
+      local restored: TransferScalarEnvelopeScopeBypassProbe = tse_roundtrip_raw(probe)
+      test.assert(restored.ptr1 == (c1 as foreign *void) and
+                  restored.ptr2 == (c2 as foreign *void) and
+                  c1[0] == 2 and c2[0] == 2,
+                  "active encode/decode scopes were not preserved across scalar/policy bypass")
+      tse_resource_release(restored.ptr1)
+      tse_resource_release(restored.ptr2)
+      test.assert(c1[0] == 1 and c2[0] == 1)
+    end)
+end
+
+function test_transfer_scalar_envelope_explicit_policy_matrix(context: test.Context)
+  context:run("scalar-policies-direct-and-copied", function (_context: test.Context)
+    case tse_reflect.inspect(tse_roundtrip_copied_raw(tse_transfer.TransferValue.is_nil()))
+    when is_nil() then
+    else raise "is_nil policy did not decode to nil"
+    end
+
+    case tse_reflect.inspect(tse_roundtrip_copied_raw(
+      tse_transfer.TransferValue.is_boolean(false)))
+    when is_boolean(flag) then test.assert(not flag)
+    else raise "is_boolean(false) policy lost boolean tag or turned into nil"
+    end
+
+    case tse_reflect.inspect(tse_roundtrip_copied_raw(
+      tse_transfer.TransferValue.is_boolean(true)))
+    when is_boolean(flag) then test.assert(flag)
+    else raise "is_boolean(true) policy lost boolean tag"
+    end
+
+    local ints = {0, -1, 1, tse_math.mininteger, tse_math.maxinteger}
+    for i = 1, #ints do
+      local expected = ints[i]
+      case tse_reflect.inspect(tse_roundtrip_copied_raw(
+        tse_transfer.TransferValue.is_integer(expected)))
+      when is_integer(actual) then
+        test.assert(actual == expected, "is_integer policy changed value")
+      else raise "is_integer policy lost integer subtype"
+      end
+    end
+
+    case tse_reflect.inspect(tse_roundtrip_copied_raw(
+      tse_transfer.TransferValue.is_float(0.0)))
+    when is_float(f) then test.assert(f == 0.0 and 1.0 / f > 0.0)
+    else raise "is_float(+0.0) policy lost float tag or sign"
+    end
+
+    case tse_reflect.inspect(tse_roundtrip_copied_raw(
+      tse_transfer.TransferValue.is_float(-0.0)))
+    when is_float(f) then test.assert(f == 0.0 and 1.0 / f < 0.0)
+    else raise "is_float(-0.0) policy lost negative zero sign"
+    end
+
+    case tse_reflect.inspect(tse_roundtrip_copied_raw(
+      tse_transfer.TransferValue.is_float(42.0)))
+    when is_float(f) then test.assert(f == 42.0)
+    else raise "is_float(42.0) integral float policy was coerced to integer"
+    end
+
+    test.assert(tse_roundtrip_copied_raw(
+      tse_transfer.TransferValue.is_string("")) as string == "")
+    test.assert(tse_roundtrip_copied_raw(
+      tse_transfer.TransferValue.is_string("\0\255policy\0bytes")) as string ==
+      "\0\255policy\0bytes")
+
+    local _th_val, th_ptr = tse_make_thread_value()
+    local null_state: foreign *lua_State = nil
+    case tse_reflect.inspect(tse_roundtrip_copied_raw(
+      tse_transfer.TransferValue.is_lua_state(null_state)))
+    when is_raw_pointer(p) then test.assert(p == nil)
+    else raise "is_lua_state(nil) policy did not decode to NULL raw pointer"
+    end
+    case tse_reflect.inspect(tse_roundtrip_copied_raw(
+      tse_transfer.TransferValue.is_lua_state(th_ptr)))
+    when is_raw_pointer(p) then test.assert(p == (th_ptr as foreign *void))
+    else raise "is_lua_state(th) policy did not decode to thread pointer"
+    end
+
+    local cell: owned int[] = foreign int.new_array(1)
+    cell[0] = 909
+    case tse_reflect.inspect(tse_roundtrip_copied_raw(
+      tse_transfer.TransferValue.is_pointer(nil)))
+    when is_raw_pointer(p) then test.assert(p == nil)
+    else raise "is_pointer(nil) policy did not decode to NULL raw pointer"
+    end
+    case tse_reflect.inspect(tse_roundtrip_copied_raw(
+      tse_transfer.TransferValue.is_pointer(cell as foreign *void)))
+    when is_raw_pointer(p) then
+      test.assert(p == (cell as foreign *void) and (p as foreign *int)[0] == 909)
+    else raise "is_pointer(cell) policy did not decode to cell address"
+    end
+
+    local fn_dec: function (...: value): (...: value) = tse_roundtrip_copied_raw(
+      tse_transfer.TransferValue.is_function(tse_cfunc_echo))
+    test.assert(fn_dec("a", "b") as integer == 102,
+                "is_function policy did not round-trip C function")
+  end)
+
+  context:run("nominal-byte-carrier-policies-direct-and-copied", function (_context: test.Context)
+    local rec_policy = tse_transfer.TransferValue.from_value(
+      TransferScalarEnvelopeShortRecord(51, "rec\0policy"))
+    local rec_direct: TransferScalarEnvelopeShortRecord = tse_roundtrip_raw(rec_policy)
+    local rec_dec: TransferScalarEnvelopeShortRecord = tse_roundtrip_copied_raw(rec_policy)
+    test.assert(rec_direct.code == 51 and rec_direct.label == "rec\0policy" and
+                rec_dec.code == 51 and rec_dec.label == "rec\0policy")
+
+    local union_policy = tse_transfer.TransferValue.from_value(
+      TransferScalarEnvelopeShortUnion.tagged(52, "union\0policy"))
+    local union_direct: TransferScalarEnvelopeShortUnion = tse_roundtrip_raw(union_policy)
+    local union_dec: TransferScalarEnvelopeShortUnion = tse_roundtrip_copied_raw(union_policy)
+    case union_direct
+    when tagged(code, label) then
+      test.assert(code == 52 and label == "union\0policy")
+    else raise "expected tagged union variant from direct policy"
+    end
+    case union_dec
+    when tagged(code, label) then
+      test.assert(code == 52 and label == "union\0policy")
+    else raise "expected tagged union variant from copied policy"
+    end
+
+    local empty_union_policy = tse_transfer.TransferValue.from_value(
+      TransferScalarEnvelopeShortUnion.empty())
+    local empty_union_dec: TransferScalarEnvelopeShortUnion =
+      tse_roundtrip_copied_raw(empty_union_policy)
+    case empty_union_dec
+    when empty() then
+    else raise "expected empty union variant from policy"
+    end
+
+    local custom_policy = tse_transfer.TransferValue.from_value(
+      TransferScalarEnvelopeCustomHookPayload(53, "custom\0policy"))
+    local custom_direct: TransferScalarEnvelopeCustomHookPayload =
+      tse_roundtrip_raw(custom_policy)
+    local custom_dec: TransferScalarEnvelopeCustomHookPayload =
+      tse_roundtrip_copied_raw(custom_policy)
+    test.assert(custom_direct.secret == 53 and custom_direct.tag == "custom\0policy" and
+                custom_dec.secret == 53 and custom_dec.tag == "custom\0policy")
+
+    local empty_custom_copied: TransferScalarEnvelopeCustomHookPayload =
+      tse_roundtrip_copied_raw(TransferScalarEnvelopeCustomHookPayload(0, ""))
+    local empty_custom_policy = tse_transfer.TransferValue.from_value(
+      TransferScalarEnvelopeCustomHookPayload(0, ""))
+    local empty_custom_dec: TransferScalarEnvelopeCustomHookPayload =
+      tse_roundtrip_copied_raw(empty_custom_policy)
+    test.assert(empty_custom_copied.secret == 0 and empty_custom_copied.tag == "" and
+                empty_custom_dec.secret == 0 and empty_custom_dec.tag == "")
+
+    local captured = 54
+    local closure_policy = tse_transfer.TransferValue.from_value(
+      function (delta: integer): integer return captured + delta end)
+    local closure_direct: function (integer): integer = tse_roundtrip_raw(closure_policy)
+    local closure_dec: function (integer): integer = tse_roundtrip_copied_raw(closure_policy)
+    test.assert(closure_direct(6) == 60 and closure_dec(6) == 60)
+
+    local zero_cap_policy = tse_transfer.TransferValue.from_value(
+      function (): integer return 77 end)
+    local zero_cap_direct: function (): integer = tse_roundtrip_raw(zero_cap_policy)
+    local zero_cap_dec: function (): integer = tse_roundtrip_copied_raw(zero_cap_policy)
+    test.assert(zero_cap_direct() == 77 and zero_cap_dec() == 77)
+  end)
+end
+
+function test_transfer_scalar_envelope_c_only_decode_oom_and_malformed_packets(
+    context: test.Context)
+  context:run("c-only-scalar-decode-succeeds-under-lua-allocator-denial",
+    function (_context: test.Context)
+      local _th_val, th_ptr = tse_make_thread_value()
+      local cell: owned int[] = foreign int.new_array(1)
+      cell[0] = 31337
+      local cfunc_val = tse_make_cfunction_value()
+
+      local raw_nil = tse_transfer.encode_message(nil)
+      defer tse_transfer.discard_message(raw_nil)
+      local raw_false = tse_transfer.encode_message(false)
+      defer tse_transfer.discard_message(raw_false)
+      local raw_true = tse_transfer.encode_message(true)
+      defer tse_transfer.discard_message(raw_true)
+      local raw_min = tse_transfer.encode_message(tse_math.mininteger)
+      defer tse_transfer.discard_message(raw_min)
+      local raw_neg_zero = tse_transfer.encode_message(-0.0)
+      defer tse_transfer.discard_message(raw_neg_zero)
+      local raw_state = tse_transfer.encode_message(
+        tse_transfer.TransferValue.is_lua_state(th_ptr))
+      defer tse_transfer.discard_message(raw_state)
+      local raw_ptr = tse_transfer.encode_message(cell as foreign *void)
+      defer tse_transfer.discard_message(raw_ptr)
+      local raw_fn = tse_transfer.encode_message(cfunc_val)
+      defer tse_transfer.discard_message(raw_fn)
+      -- Long strings are copied afresh on decode rather than reused by interning.
+      local raw_str = tse_transfer.encode_message(
+        tse_string.rep("protected\0string\0allocation", 64))
+      defer tse_transfer.discard_message(raw_str)
+
+      local top = ffi.lua_gettop(L)
+      defer ffi.lua_settop(L, top)
+      -- Settle pending finalizers, then reserve decode's entry frame and result
+      -- slot before denial, so every failure below surfaces inside its
+      -- protected body after entry.
+      tse_gc.collect()
+      test.assert(ffi.lua_checkstack(L, 64) ~= 0)
+
+      local denied: owned size_t[] = foreign size_t.new_array(1)
+      denied[0] = 0 as foreign size_t
+      local prev_ud: foreign *void = nil
+      local prev_alloc = ffi.lua_getallocf(L, prev_ud)
+      ffi.lua_setallocf(L, tse_deny_lua_alloc, denied as foreign *void)
+      defer ffi.lua_setallocf(L, prev_alloc, prev_ud)
+
+      local v_nil = tse_transfer.decode_message(raw_nil)
+      local v_false = tse_transfer.decode_message(raw_false)
+      local v_true = tse_transfer.decode_message(raw_true)
+      local v_min = tse_transfer.decode_message(raw_min)
+      local v_nz = tse_transfer.decode_message(raw_neg_zero)
+      local v_state = tse_transfer.decode_message(raw_state)
+      local v_ptr = tse_transfer.decode_message(raw_ptr)
+      local v_fn = tse_transfer.decode_message(raw_fn)
+      local scalar_top = ffi.lua_gettop(L)
+      local denied_after_scalars = denied[0]
+
+      -- The long binary string requires an allocation even with a reused scope.
+      -- OOM must still consume raw_str before its error propagates.
+      local str_failed = false
+      local str_error: value = nil
+      do
+        tse_transfer.decode_message(raw_str)
+      catch
+        str_failed = true
+        str_error = error
+      end
+
+      ffi.lua_setallocf(L, prev_alloc, prev_ud)
+
+      test.assert(raw_nil == nil and v_nil == nil,
+                  "C-only nil decode failed or left slot occupied")
+      test.assert(raw_false == nil and v_false == false,
+                  "C-only false decode failed or confused false with nil")
+      test.assert(raw_true == nil and v_true == true,
+                  "C-only true decode failed")
+      test.assert(raw_min == nil and (v_min as integer) == tse_math.mininteger,
+                  "C-only integer decode failed")
+      case tse_reflect.inspect(v_nz)
+      when is_float(f) then
+        test.assert(raw_neg_zero == nil and f == 0.0 and 1.0 / f < 0.0)
+      else raise "C-only float decode lost -0.0 tag or sign"
+      end
+      case tse_reflect.inspect(v_state)
+      when is_raw_pointer(p) then
+        test.assert(raw_state == nil and p == (th_ptr as foreign *void))
+      else raise "C-only state decode failed"
+      end
+      case tse_reflect.inspect(v_ptr)
+      when is_raw_pointer(p) then
+        test.assert(raw_ptr == nil and p == (cell as foreign *void))
+      else raise "C-only pointer decode failed"
+      end
+      local fn_restored: function (...: value): (...: value) = v_fn
+      test.assert(raw_fn == nil and fn_restored(1, 2, 3) as integer == 103,
+                  "C-only bare C function decode failed")
+      test.assert(scalar_top == top,
+                  "C-only scalar decodes changed the caller's Lua stack top")
+      test.assert(denied_after_scalars == (0 as foreign size_t),
+                  "C-only scalar decodes attempted a Lua heap allocation")
+
+      test.assert(str_failed and raw_str == nil and str_error ~= nil and
+                  denied[0] > (0 as foreign size_t),
+                  "protected string decode under OOM did not consume slot or raise")
+      -- Before any GC or follow-up packet operation, OOM unwind must have
+      -- retired the execution's decode scope rather than leaving stale authority.
+      tse_expect_error(function ()
+        tse_transfer.claim_resource("\0\0\0\0", tse_resource_release)
+      end, "transfer: resource claim requires a decode scope")
+      tse_expect_error(function ()
+        tse_transfer.attach_resource(
+          cell as foreign *void, tse_resource_retain, tse_resource_release)
+      end, "transfer: resource attachment requires an encode scope")
+
+      -- A resource-bearing packet decoded under sustained Lua heap denial must
+      -- also consume its slot, release unclaimed units, and retire scope
+      -- authority before any GC runs, then allow a normal decode afterward.
+      local res_c1: owned int[] = foreign int.new_array(1)
+      local res_c2: owned int[] = foreign int.new_array(1)
+      res_c1[0] = 1
+      res_c2[0] = 1
+      local raw_res = tse_transfer.encode_message(
+        TransferScalarEnvelopeScopeBypassProbe(
+          res_c1 as foreign *void, res_c2 as foreign *void))
+      defer tse_transfer.discard_message(raw_res)
+      test.assert(res_c1[0] == 2 and res_c2[0] == 2,
+                  "resource-bearing packet did not retain both attachments")
+
+      local denied_before_res = denied[0]
+      tse_gc.collect()
+      test.assert(ffi.lua_checkstack(L, 64) ~= 0)
+      local res_failed = false
+      local res_error: value = nil
+      ffi.lua_setallocf(L, tse_deny_lua_alloc, denied as foreign *void)
+      do
+        tse_transfer.decode_message(raw_res)
+      catch
+        res_failed = true
+        res_error = error
+      end
+      ffi.lua_setallocf(L, prev_alloc, prev_ud)
+
+      test.assert(res_failed and raw_res == nil and res_error ~= nil and
+                  denied[0] > denied_before_res,
+                  "resource-bearing decode under OOM did not consume slot or raise")
+      -- The >40-byte qualified nominal name allocates in copy_native_bytes
+      -- before the probe decoder can claim either attached resource.
+      test.assert(res_c1[0] == 1 and res_c2[0] == 1,
+                  "resource-bearing decode under OOM did not release unclaimed units before GC")
+      tse_expect_error(function ()
+        tse_transfer.claim_resource("\0\0\0\0", tse_resource_release)
+      end, "transfer: resource claim requires a decode scope")
+      tse_expect_error(function ()
+        tse_transfer.attach_resource(
+          cell as foreign *void, tse_resource_retain, tse_resource_release)
+      end, "transfer: resource attachment requires an encode scope")
+      tse_gc.collect()
+      test.assert(res_c1[0] == 1 and res_c2[0] == 1,
+                  "resource-bearing decode under OOM released unclaimed units twice")
+
+      local restored_after_oom: TransferScalarEnvelopeScopeBypassProbe =
+        tse_roundtrip_raw(TransferScalarEnvelopeScopeBypassProbe(
+          res_c1 as foreign *void, res_c2 as foreign *void))
+      test.assert(restored_after_oom.ptr1 == (res_c1 as foreign *void) and
+                  restored_after_oom.ptr2 == (res_c2 as foreign *void) and
+                  res_c1[0] == 2 and res_c2[0] == 2,
+                  "normal resource-bearing decode after OOM recovery failed")
+      tse_resource_release(restored_after_oom.ptr1)
+      tse_resource_release(restored_after_oom.ptr2)
+      test.assert(res_c1[0] == 1 and res_c2[0] == 1)
+    end)
+
+  context:run("malformed-null-cfunction-packet-uses-protected-semantic-error",
+    function (_context: test.Context)
+      local raw = tse_transfer.encode_message(
+        tse_transfer.TransferValue.is_function(tse_cfunc_echo))
+      defer tse_transfer.discard_message(raw)
+      test.assert(tse_clear_encoded_cfunction_pointer(raw, tse_cfunc_echo) == 1,
+                  "could not locate encoded C function pointer in packet header")
+      local caught = false
+      do
+        tse_transfer.decode_message(raw)
+      catch
+        caught = error is string and
+          support.contains(error, "cannot transfer a NULL Lua C function")
+      end
+      test.assert(caught and raw == nil,
+                  "malformed NULL C function packet did not fail via protected decode")
+    end)
+
+  context:run("scope-free-string-with-injected-attachments-success",
+    function (_context: test.Context)
+      -- The scope-free STRING branch keeps ownership in the caller slot while
+      -- it copies, then clears it and disposes every unclaimed attachment.
+      local str_template = tse_transfer.encode_message("kind-template")
+      defer tse_transfer.discard_message(str_template)
+      local c1: owned int[] = foreign int.new_array(1)
+      local c2: owned int[] = foreign int.new_array(1)
+      c1[0] = 1
+      c2[0] = 1
+      local raw = tse_transfer.encode_message(
+        TransferScalarEnvelopeAttachedBytesProbe(
+          c1 as foreign *void, c2 as foreign *void, "scope\0free\0attached"))
+      defer tse_transfer.discard_message(raw)
+      test.assert(c1[0] == 2 and c2[0] == 2)
+      tse_rewrite_packet_kind(raw, str_template)
+      local top = ffi.lua_gettop(L)
+      local result = tse_transfer.decode_message(raw)
+      local after_top = ffi.lua_gettop(L)
+      test.assert(raw == nil and after_top == top and
+                  (result as string) == "scope\0free\0attached" and
+                  c1[0] == 1 and c2[0] == 1,
+                  "scope-free STRING decode did not consume slot or release injected attachments")
+      tse_gc.collect()
+      test.assert((result as string) == "scope\0free\0attached" and
+                  c1[0] == 1 and c2[0] == 1,
+                  "scope-free STRING result was not rooted or attachments released twice")
+    end)
+
+  context:run("scope-free-string-with-injected-attachments-oom",
+    function (_context: test.Context)
+      local str_template = tse_transfer.encode_message("kind-template")
+      defer tse_transfer.discard_message(str_template)
+      local c1: owned int[] = foreign int.new_array(1)
+      local c2: owned int[] = foreign int.new_array(1)
+      c1[0] = 1
+      c2[0] = 1
+      local raw = tse_transfer.encode_message(
+        TransferScalarEnvelopeAttachedBytesProbe(
+          c1 as foreign *void, c2 as foreign *void,
+          tse_string.rep("scope\0free\0oom\0string", 64)))
+      defer tse_transfer.discard_message(raw)
+      test.assert(c1[0] == 2 and c2[0] == 2)
+      tse_rewrite_packet_kind(raw, str_template)
+      local denied: owned size_t[] = foreign size_t.new_array(1)
+      denied[0] = 0 as foreign size_t
+      local top = ffi.lua_gettop(L)
+      defer ffi.lua_settop(L, top)
+      -- Reserve before denial so decode's entry frame and result slot need no
+      -- stack growth; denial then surfaces inside its protected body.
+      tse_gc.collect()
+      test.assert(ffi.lua_checkstack(L, 64) ~= 0)
+      local prev_ud: foreign *void = nil
+      local prev_alloc = ffi.lua_getallocf(L, prev_ud)
+      ffi.lua_setallocf(L, tse_deny_lua_alloc, denied as foreign *void)
+      defer ffi.lua_setallocf(L, prev_alloc, prev_ud)
+      local failed = false
+      local raised_error: value = nil
+      do
+        tse_transfer.decode_message(raw)
+      catch
+        failed = true
+        raised_error = error
+      end
+      ffi.lua_setallocf(L, prev_alloc, prev_ud)
+      test.assert(failed and raw == nil and raised_error ~= nil and
+                  denied[0] > (0 as foreign size_t) and c1[0] == 1 and c2[0] == 1,
+                  "scope-free STRING OOM decode did not consume slot or release injected attachments")
+      tse_gc.collect()
+      test.assert(c1[0] == 1 and c2[0] == 1,
+                  "scope-free STRING OOM released injected attachments twice")
+    end)
+
+  context:run("scope-free-null-cfunction-with-injected-attachments-semantic-error",
+    function (_context: test.Context)
+      local fn_template = tse_transfer.encode_message(
+        tse_transfer.TransferValue.is_function(tse_cfunc_echo))
+      defer tse_transfer.discard_message(fn_template)
+      local c1: owned int[] = foreign int.new_array(1)
+      local c2: owned int[] = foreign int.new_array(1)
+      c1[0] = 1
+      c2[0] = 1
+      local raw = tse_transfer.encode_message(
+        TransferScalarEnvelopeAttachedBytesProbe(
+          c1 as foreign *void, c2 as foreign *void, "unused"))
+      defer tse_transfer.discard_message(raw)
+      test.assert(c1[0] == 2 and c2[0] == 2)
+      tse_rewrite_packet_kind(raw, fn_template)
+      local caught = false
+      do
+        tse_transfer.decode_message(raw)
+      catch
+        caught = error is string and
+          support.contains(error, "cannot transfer a NULL Lua C function")
+      end
+      test.assert(caught and raw == nil and c1[0] == 1 and c2[0] == 1,
+                  "scope-free NULL-FUNCTION decode did not consume slot or release injected attachments")
+      tse_gc.collect()
+      test.assert(c1[0] == 1 and c2[0] == 1,
+                  "scope-free NULL-FUNCTION decode released injected attachments twice")
+    end)
+
+  context:run("null-slot-and-result-stack-reservation-failure",
+    function (_context: test.Context)
+      tse_expect_error(function ()
+        tse_transfer.decode_message(nil)
+      end, "transfer: invalid packet owner slot")
+
+      -- Scan the free Lua stack under allocator denial with an attachment-bearing
+      -- packet relabeled as a C-only integer. Too little room fails decode's
+      -- own entry before it takes ownership, so the guarded local still owns
+      -- the packet. Exactly one free slot past that entry frame fails only the
+      -- explicit result reservation, which consumes the packet before raising.
+      -- More room decodes normally.
+      local int_template = tse_transfer.encode_message(7)
+      defer tse_transfer.discard_message(int_template)
+      local denied: owned size_t[] = foreign size_t.new_array(1)
+      denied[0] = 0 as foreign size_t
+      local prev_ud: foreign *void = nil
+      local prev_alloc = ffi.lua_getallocf(L, prev_ud)
+      local saw_entry_failure = false
+      local saw_reservation_failure = false
+      local decoded = false
+      local free = 1
+      while not decoded and free <= 128 do
+        local c1: owned int[] = foreign int.new_array(1)
+        local c2: owned int[] = foreign int.new_array(1)
+        c1[0] = 1
+        c2[0] = 1
+        local raw = tse_transfer.encode_message(
+          TransferScalarEnvelopeScopeBypassProbe(c1 as foreign *void, c2 as foreign *void))
+        defer tse_transfer.discard_message(raw)
+        tse_rewrite_packet_kind(raw, int_template)
+        tse_gc.collect()
+        local base = ffi.lua_gettop(L)
+        local failed = false
+        ffi.lua_setallocf(L, tse_deny_lua_alloc, denied as foreign *void)
+        while ffi.lua_checkstack(L, 1) ~= 0 do
+          ffi.lua_pushnil(L)
+        end
+        -- Exactly one slot is free here; leave `free` slots for decode.
+        local filled = ffi.lua_gettop(L) as integer
+        ffi.lua_settop(L, (filled - free + 1) as foreign int)
+        do
+          tse_transfer.decode_message(raw)
+        catch
+          failed = true
+        end
+        ffi.lua_setallocf(L, prev_alloc, prev_ud)
+        ffi.lua_settop(L, base)
+        if not failed then
+          test.assert(raw == nil and c1[0] == 1 and c2[0] == 1,
+                      "reserved C-only decode did not consume its packet")
+          decoded = true
+        elseif raw == nil then
+          test.assert(not saw_reservation_failure and c1[0] == 1 and c2[0] == 1,
+                      "result reservation failure did not release the consumed packet")
+          saw_reservation_failure = true
+        else
+          test.assert(not saw_reservation_failure and c1[0] == 2 and c2[0] == 2,
+                      "decode entry failure consumed the caller-owned packet")
+          saw_entry_failure = true
+        end
+        free = free + 1
+      end
+      test.assert(saw_entry_failure and saw_reservation_failure and decoded,
+                  "stack scan did not reach entry failure, reservation failure, and success")
+    end)
+end
+
+function test_transfer_scalar_envelope_bounded_presize_and_single_closure_projection(
+    context: test.Context)
+  context:run("short-and-long-metadata-records-unions-and-closures",
+    function (_context: test.Context)
+      local sizes = {0, 1, 48, 128, 256, 1024, 32768}
+      for i = 1, #sizes do
+        local payload = tse_string.rep("p\0", sizes[i])
+        local short_rec: TransferScalarEnvelopeShortRecord = tse_roundtrip_raw(
+          TransferScalarEnvelopeShortRecord(i, payload))
+        test.assert(short_rec.code == i and short_rec.label == payload)
+
+        local long_rec: TransferScalarEnvelopeLongMetadataNominalNameExceedingSixtyFourBytesForPresizeCheck =
+          tse_roundtrip_raw(
+            TransferScalarEnvelopeLongMetadataNominalNameExceedingSixtyFourBytesForPresizeCheck(
+              i + 100, payload))
+        test.assert(long_rec.code == i + 100 and long_rec.payload == payload)
+
+        local short_u: TransferScalarEnvelopeShortUnion = tse_roundtrip_raw(
+          TransferScalarEnvelopeShortUnion.tagged(i + 200, payload))
+        case short_u
+        when tagged(c, s) then test.assert(c == i + 200 and s == payload)
+        else raise "short union presize round-trip failed"
+        end
+
+        local long_u: TransferScalarEnvelopeLongMetadataUnionNameExceedingSixtyFourBytesForPresizeCheck =
+          tse_roundtrip_raw(
+            TransferScalarEnvelopeLongMetadataUnionNameExceedingSixtyFourBytesForPresizeCheck.active(
+              i + 300, payload))
+        case long_u
+        when active(c, s) then test.assert(c == i + 300 and s == payload)
+        else raise "long-metadata union presize round-trip failed"
+        end
+
+        local cl: function (): string = tse_roundtrip_raw(
+          function (): string return payload end)
+        test.assert(cl() == payload)
+      end
+
+      local empty_long_u: TransferScalarEnvelopeLongMetadataUnionNameExceedingSixtyFourBytesForPresizeCheck =
+        tse_roundtrip_raw(
+          TransferScalarEnvelopeLongMetadataUnionNameExceedingSixtyFourBytesForPresizeCheck.idle())
+      case empty_long_u
+      when idle() then
+      else raise "empty long-metadata union variant round-trip failed"
+      end
+    end)
+
+  context:run("closure-projects-captures-once-before-buffer-and-rolls-back-on-failure",
+    function (_context: test.Context)
+      tse_hook_encode_calls = 0
+      tse_hook_decode_calls = 0
+      local first_ok = TransferScalarEnvelopeCustomHookPayload(10, "first")
+      local second_ok = TransferScalarEnvelopeCustomHookPayload(20, "second")
+      local ok_closure = function (): integer
+        return first_ok.secret + second_ok.secret
+      end
+      local restored_ok: function (): integer = tse_roundtrip_raw(ok_closure)
+      test.assert(tse_hook_encode_calls == 2 and tse_hook_decode_calls == 2 and
+                  restored_ok() == 30,
+                  "closure encode/decode invoked capture hooks more than once")
+
+      -- When a later capture fails during projection, earlier capture hooks ran
+      -- exactly once and any resource attached in the outer scope is released.
+      tse_hook_encode_calls = 0
+      local c1: owned int[] = foreign int.new_array(1)
+      local c2: owned int[] = foreign int.new_array(1)
+      c1[0] = 1
+      c2[0] = 1
+      local cap_resource = TransferScalarEnvelopeScopeBypassProbe(
+        c1 as foreign *void, c2 as foreign *void)
+      local cap_ok = TransferScalarEnvelopeCustomHookPayload(30, "before-fail")
+      local cap_fail = TransferScalarEnvelopeCustomHookPayload(-1, "boom")
+      local failing_closure = function (): integer
+        if cap_resource.ptr1 == nil then return 0 end
+        return cap_ok.secret + cap_fail.secret
+      end
+      tse_expect_error(function ()
+        local raw = tse_transfer.encode_message(failing_closure)
+        tse_transfer.discard_message(raw)
+      end, "tse-custom-hook-encode-boom")
+      test.assert(tse_hook_encode_calls == 2,
+                  "failed closure capture projection re-ran earlier capture hooks")
+      test.assert(c1[0] == 1 and c2[0] == 1,
+                  "failed closure capture projection leaked earlier capture attachments")
+    end)
+end

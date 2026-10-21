@@ -1,15 +1,6 @@
 --- Bounded wire parsing and fresh nominal reconstruction.
 -- @module titan.protobuf
 
-local record WireField
-  const number: integer
-  const wire: integer
-  const bits: integer
-  const offset: integer
-  const length: integer
-  previous: integer
-end
-
 local record WireReader
   const base: foreign const *uint8_t
   const limit: integer
@@ -19,8 +10,11 @@ end
 local record Message
   const base: foreign const *uint8_t
   const holder: string?
-  const fields: {WireField}
-  last_by_number: {integer: integer}?
+  const context: value
+  const first: foreign titan_protobuf_field
+  entries: (owned titan_protobuf_field[])?
+  count: integer
+  index: (owned uint32_t[])?
 end
 
 local function WireReader:varint(): integer
@@ -54,22 +48,23 @@ local function WireReader:key(): (integer, integer)
   return number, wire
 end
 
-local function WireReader:field(number: integer, wire: integer, depth: integer): WireField
-  if wire == 0 then return WireField(number, wire, self:varint(), 0, 0, 0) end
-  if wire == 1 then return WireField(number, wire, 0, self:take(8), 8, 0) end
+local function WireReader:field(number: integer, wire: integer,
+                                 depth: integer): (integer, integer, integer)
+  if wire == 0 then return self:varint(), 0, 0 end
+  if wire == 1 then return 0, self:take(8), 8 end
   if wire == 2 then
     local count = self:varint()
     if count < 0 or count > 2147483647 then raise "protobuf: invalid byte length" end
-    return WireField(number, wire, 0, self:take(count), count, 0)
+    return 0, self:take(count), count
   end
-  if wire == 5 then return WireField(number, wire, 0, self:take(4), 4, 0) end
+  if wire == 5 then return 0, self:take(4), 4 end
   if wire == 3 then
     require_depth(depth)
     while self.position < self.limit do
       local nested_number, nested_wire = self:key()
       if nested_wire == 4 then
         if nested_number ~= number then raise "protobuf: mismatched end group" end
-        return WireField(number, wire, 0, 0, 0, 0)
+        return 0, 0, 0
       end
       self:field(nested_number, nested_wire, depth + 1)
     end
@@ -78,79 +73,198 @@ local function WireReader:field(number: integer, wire: integer, depth: integer):
   raise "protobuf: invalid wire type"
 end
 
+-- Borrowed entry addresses stay valid after parsing: directory growth finishes
+-- before decoding, and every reader keeps the owning Message reachable.
+local function Message:entry(index: integer): foreign *titan_protobuf_field
+  if index == 1 then return self.first end
+  local entries: owned titan_protobuf_field[] = self.entries
+  return (entries as foreign *titan_protobuf_field) + (index - 2)
+end
+
+local function Message:append(number: integer, wire: integer, bits: integer,
+                               offset: integer, length: integer)
+  if self.count == 1 then
+    local entries: owned titan_protobuf_field[] = foreign titan_protobuf_field.new_array(4)
+    self.entries = entries
+  elseif self.count > 1 and self.count - 1 == #self.entries then
+    local populated: owned titan_protobuf_field[] = self.entries
+    local entries: owned titan_protobuf_field[] =
+        foreign titan_protobuf_field.new_array((self.count - 1) * 2)
+    ffi.memcpy(entries, populated,
+        ((self.count - 1) * foreign titan_protobuf_field.sizeof) as foreign size_t)
+    self.entries = entries
+  end
+  self.count = self.count + 1
+  local entry = self:entry(self.count)
+  entry.number = number
+  entry.wire = wire
+  entry.bits = bits
+  entry.offset = offset
+  entry.length = length
+end
+
 local function read_message_slice(
     base: foreign const *uint8_t,
     offset: integer,
     length: integer,
-    holder: string?): Message
+    holder: string?, context: value): Message
   local reader = WireReader(base, offset + length, offset)
-  local fields: {WireField} = {}
+  local message = Message {
+    base = base, holder = holder, context = context,
+    first = foreign titan_protobuf_field.new(), entries = nil, count = 0, index = nil,
+  }
   while reader.position < reader.limit do
     local number, wire = reader:key()
-    fields[#fields + 1] = reader:field(number, wire, 1)
+    local bits, start, count = reader:field(number, wire, 1)
+    message:append(number, wire, bits, start, count)
   end
-  return Message(base, holder, fields, nil)
+  return message
+end
+
+-- A generated decoder hands the reflective field decoder one field's latest
+-- occurrence instead of its whole message. decode_field reads only the latest
+-- occurrence of its number, so a Message holding just that entry (or none, for
+-- an absent field) decodes the field exactly as the parsed message would; a
+-- repeated field, which merges, reparses its message instead. One such
+-- Message serves every handed-off field of one decoding frame.
+local function occurrence_message(base: foreign const *uint8_t, holder: string?,
+                                  context: value): Message
+  return Message {
+    base = base, holder = holder, context = context,
+    first = foreign titan_protobuf_field.new(), entries = nil, count = 0, index = nil,
+  }
+end
+
+local function Message:hold_occurrence(number: integer, count: integer, wire: integer,
+                                       bits: integer, offset: integer, length: integer)
+  self.count = count
+  if count == 0 then return end
+  local entry = self:entry(1)
+  entry.number = number
+  entry.wire = wire
+  entry.bits = bits
+  entry.offset = offset
+  entry.length = length
+  entry.previous = 0
+  entry.chain = 0
+end
+
+-- The sparse index heads one chain per bucket with 1-based entry ordinals,
+-- zero being the empty sentinel. A chain links only the latest entry of each
+-- distinct field number, so a probe visits only numbers sharing its bucket and
+-- adversarial tags cannot build clusters across buckets. Capacity depends on
+-- entry count, never numeric tags.
+local function index_bucket(number: integer, buckets: owned uint32_t[]): integer
+  return ((number ~ (number >> 16)) * 2654435761) & (#buckets - 1)
+end
+
+-- Returns the latest ordinal for `number`, or zero, and its chain predecessor,
+-- or zero at the bucket head.
+local function Message:chained(number: integer, head: integer): (integer, integer)
+  local before = 0
+  local current = head
+  while current ~= 0 do
+    local field = self:entry(current)
+    if field.number == number then return current, before end
+    before = current
+    current = field.chain
+  end
+  return 0, before
 end
 
 local function Message:last_index(number: integer): integer
-  local count = #self.fields
-  if count == 0 then return 0 end
-  if count == 1 then
-    if self.fields[1].number == number then return 1 end
+  if self.count == 0 then return 0 end
+  if self.count == 1 then
+    if self.first.number == number then return 1 end
     return 0
   end
-  local last_by_number? = self.last_by_number
-  if last_by_number == nil then
-    -- Ordered-only readers need no index; grow with encountered numeric tags.
-    local built: {integer: integer} = {}
-    for index = 1, count do
-      local field = self.fields[index]
-      field.previous = built[field.number] or 0
-      built[field.number] = index
+  local buckets? = self.index
+  if buckets == nil then
+    -- Ordered-only readers need no index; the load factor stays at most 1/2.
+    local capacity = 4
+    while capacity < self.count * 2 do capacity = capacity * 2 end
+    buckets = foreign uint32_t.new_array(capacity)
+    for index = 1, self.count do
+      local field = self:entry(index)
+      local bucket = index_bucket(field.number, buckets)
+      local current, before = self:chained(field.number, buckets[bucket])
+      field.previous = current
+      if current == 0 then
+        field.chain = buckets[bucket]
+        buckets[bucket] = index
+      else
+        -- The latest occurrence takes over the earlier one's chain position.
+        field.chain = self:entry(current).chain
+        if before == 0 then
+          buckets[bucket] = index
+        else
+          local predecessor = self:entry(before)
+          predecessor.chain = index
+        end
+      end
     end
-    self.last_by_number = built
-    last_by_number = built
+    self.index = buckets
   end
-  return last_by_number[number] or 0
+  return (self:chained(number, buckets[index_bucket(number, buckets)]))
 end
 
-local function Message:last(number: integer): WireField?
+local function Message:last(number: integer): foreign *titan_protobuf_field
   local index = self:last_index(number)
   if index == 0 then return nil end
-  return self.fields[index]
+  return self:entry(index)
 end
 
-local function require_wire(field: WireField, expected: integer)
+local function require_wire(field: foreign const *titan_protobuf_field, expected: integer)
   if field.wire ~= expected then raise "protobuf: unexpected wire type" end
 end
 
 -- Singular embedded messages merge across repeated occurrences. Scalars use
 -- the final occurrence, as required by the Protocol Buffers wire contract.
-local function Message:merged_message(number: integer): Message
+-- The merged bytes of one embedded field: its base, offset, length, and the
+-- string owning them, after the same wire checks in the same order.
+local function Message:merged_slice(
+    number: integer): (foreign const *uint8_t, integer, integer, string?)
   local index = self:last_index(number)
-  if index == 0 then return Message(self.base, self.holder, {}, nil) end
-  local field = self.fields[index]
+  if index == 0 then return self.base, 0, 0, self.holder end
+  local field = self:entry(index)
   require_wire(field, 2)
   if field.previous == 0 then
-    return read_message_slice(self.base, field.offset, field.length, self.holder)
+    return self.base, field.offset, field.length, self.holder
   end
   -- Walk only this field's occurrences, then restore wire encounter order.
-  local chunks: {WireField} = {}
+  local chunks: {integer} = {}
   while index ~= 0 do
-    field = self.fields[index]
+    field = self:entry(index)
     require_wire(field, 2)
-    chunks[#chunks + 1] = field
+    chunks[#chunks + 1] = index
     index = field.previous
   end
   local output = string.writer()
   for part = #chunks, 1, -1 do
-    local chunk = chunks[part]
+    local chunk = self:entry(chunks[part])
     output:write(slice_to_string(self.base, chunk.offset, chunk.length))
   end
   local merged = output:drain()
-  return read_message_slice(ffi.titan_protobuf_bytes_ptr(merged), 0, #merged, merged)
+  return ffi.titan_protobuf_bytes_ptr(merged), 0, #merged, merged
 end
 
+local function Message:merged_message(number: integer): Message
+  local base, offset, length, holder? = self:merged_slice(number)
+  return read_message_slice(base, offset, length, holder, self.context)
+end
+
+-- The structural branch for an embedded nominal with a generated codec.
+local function Message:generated_nominal(number: integer,
+    codec: foreign const *TitanTransferCodec, metatable: value, depth: integer): value
+  local base, offset, length, holder? = self:merged_slice(number)
+  return decode_generated(codec, metatable, base + offset, length, self.context,
+      holder, depth)
+end
+
+-- Each result below is a standalone `local frozen = ... as const {value}` of a
+-- fresh builder local, or of decode_array_entries' linear call result, so the
+-- checker retags the proxy in place instead of shallow-copying it. A cast nested
+-- in a call argument or an implicitly converted return would copy instead.
 local function decode_record(message: Message, descriptor: reflect.RecordType,
                               depth: integer): value
   require_depth(depth)
@@ -160,7 +274,8 @@ local function decode_record(message: Message, descriptor: reflect.RecordType,
     fields[index] = decode_field(message, field_number(index),
                                  descriptor.fields[index].type, depth + 1)
   end
-  return descriptor:construct(fields as const {value})
+  local frozen = fields as const {value}
+  return descriptor:construct(frozen)
 end
 
 local function decode_union(message: Message, descriptor: reflect.UnionType,
@@ -168,26 +283,26 @@ local function decode_union(message: Message, descriptor: reflect.UnionType,
   require_depth(depth)
   require_union(descriptor)
   local selected = 0
-  local selected_field: WireField? = nil
-  local extra_chunks: {WireField}? = nil
-  for index = 1, #message.fields do
-    local field = message.fields[index]
+  local selected_field = 0
+  local extra_chunks: {integer}? = nil
+  for index = 1, message.count do
+    local field = message:entry(index)
     local ordinal = field_ordinal(field.number)
     if ordinal >= 1 and ordinal <= #descriptor.variants then
       require_wire(field, 2)
       if selected ~= ordinal then
         selected = ordinal
-        selected_field = field
+        selected_field = index
         extra_chunks = nil
       else
         if extra_chunks == nil then
-          extra_chunks = {selected_field as WireField}
+          extra_chunks = {selected_field}
         end
-        (extra_chunks as {WireField})[#(extra_chunks as {WireField}) + 1] = field
+        extra_chunks[#extra_chunks + 1] = index
       end
     end
   end
-  if selected == 0 or selected_field == nil then
+  if selected == 0 then
     raise "protobuf: union has no recognized variant"
   end
   local variant = descriptor.variants[selected]
@@ -195,52 +310,73 @@ local function decode_union(message: Message, descriptor: reflect.UnionType,
     if extra_chunks ~= nil then
       local payload = string.writer()
       for index = 1, #extra_chunks do
-        local chunk = extra_chunks[index]
+        local chunk = message:entry(extra_chunks[index])
         payload:write(slice_to_string(message.base, chunk.offset, chunk.length))
       end
       local merged = payload:drain()
       return read_message_slice(
-          ffi.titan_protobuf_bytes_ptr(merged), 0, #merged, merged)
+          ffi.titan_protobuf_bytes_ptr(merged), 0, #merged, merged, message.context)
     end
+    local field = message:entry(selected_field)
     return read_message_slice(
-        message.base, selected_field.offset, selected_field.length, message.holder)
+        message.base, field.offset, field.length, message.holder, message.context)
   end)()
   local parts: {value} = {}
   for index = 1, #variant.parts do
     parts[index] = decode_field(parts_message, field_number(index),
                                 variant.parts[index].type, depth + 1)
   end
-  return descriptor:construct(variant.tag, parts as const {value})
+  local frozen = parts as const {value}
+  return descriptor:construct(variant.tag, frozen)
 end
 
-local function decode_array(message: Message, constness: reflect.ArrayTypeConstness,
-                             element: reflect.Type, depth: integer): value
-  require_depth(depth)
+-- Elements decode in wire order, and every constness flag occurrence is
+-- validated in that same walk. The linear result lets a const caller freeze it.
+local function decode_array_entries(message: Message, element: reflect.Type,
+                                    depth: integer): {value}
   local entries: {value} = {}
   local count = 0
-  local is_const = false
-  for index = 1, #message.fields do
-    local field = message.fields[index]
+  for index = 1, message.count do
+    local field = message:entry(index)
     if field.number == 1 then
       require_wire(field, 2)
       count = count + 1
       local slot = read_message_slice(
-          message.base, field.offset, field.length, message.holder)
+          message.base, field.offset, field.length, message.holder, message.context)
       if slot:last(1) ~= nil then
         entries[count] = decode_field(slot, 1, element, depth + 1)
       end
     elseif field.number == 2 then
       require_wire(field, 0)
       if field.bits ~= 0 and field.bits ~= 1 then raise "protobuf: invalid boolean" end
-      is_const = field.bits == 1
     end
   end
-  case constness
-  when is_const() then return entries as const {value}
-  when is_maybe_const() then
-    if is_const then return entries as const {value} end
-  end
   return entries
+end
+
+-- The final flag occurrence wins. Reading it before the element walk only
+-- selects the result shape; decode_array_entries still rejects a malformed
+-- occurrence at its wire position before any Array is returned.
+local function Message:marks_const_array(): boolean
+  for index = self.count, 1, -1 do
+    local field = self:entry(index)
+    if field.number == 2 then return field.bits == 1 end
+  end
+  return false
+end
+
+local function decode_array(message: Message, constness: reflect.ArrayTypeConstness,
+                             element: reflect.Type, depth: integer): value
+  require_depth(depth)
+  case constness
+  when is_mutable() then return decode_array_entries(message, element, depth)
+  when is_maybe_const() then
+    if not message:marks_const_array() then
+      return decode_array_entries(message, element, depth)
+    end
+  end
+  local frozen = decode_array_entries(message, element, depth) as const {value}
+  return frozen
 end
 
 local function decode_foreign_array(message: Message, element: reflect.Type,
@@ -248,17 +384,18 @@ local function decode_foreign_array(message: Message, element: reflect.Type,
   require_depth(depth)
   local entries: {value} = {}
   local count = 0
-  for index = 1, #message.fields do
-    local field = message.fields[index]
+  for index = 1, message.count do
+    local field = message:entry(index)
     if field.number == 1 then
       require_wire(field, 2)
       count = count + 1
       local slot = read_message_slice(
-          message.base, field.offset, field.length, message.holder)
+          message.base, field.offset, field.length, message.holder, message.context)
       entries[count] = decode_field(slot, 1, element, depth + 1)
     end
   end
-  return entries as const {value}
+  local frozen = entries as const {value}
+  return frozen
 end
 
 local function decode_foreign_struct(message: Message,
@@ -271,14 +408,15 @@ local function decode_foreign_struct(message: Message,
     fields[index] = decode_field(message, field_number(index),
                                  descriptor.fields[index].type, depth + 1)
   end
-  return fields as const {value}
+  local frozen = fields as const {value}
+  return frozen
 end
 
 local function decode_field(message: Message, number: integer,
                               descriptor: reflect.Type, depth: integer): value
   require_depth(depth)
   local resolved = resolve_type(descriptor)
-  local field? = message:last(number)
+  local field = message:last(number)
   case resolved
   when is_option(base) then
     if field == nil then return nil end
@@ -286,6 +424,9 @@ local function decode_field(message: Message, number: integer,
   when is_nil() then
     if field ~= nil then message:merged_message(number) end
     return nil
+  when is_value() then
+    if field == nil then return nil end
+    return decode_dynamic(message:merged_message(number), depth)
   end
   if field == nil then raise "protobuf: missing required field " .. number end
   case resolved
@@ -305,6 +446,12 @@ local function decode_field(message: Message, number: integer,
   when is_array{is_const, elem_descriptor} then
     return decode_array(message:merged_message(number), is_const, elem_descriptor, depth)
   when is_record(record_type) then
+    local codec? = find_resource_codec_by_name(record_type.name)
+    if codec ~= nil then
+      require_wire(field, 2)
+      return codec.decode(message.context,
+          (message.base + field.offset) as foreign const *void, field.length)
+    end
     local _?, decode? = find_transfer_hooks(record_type, "protobuf")
     if decode ~= nil then
       require_wire(field, 2)
@@ -316,8 +463,16 @@ local function decode_field(message: Message, number: integer,
       end
       raise "protobuf: record type mismatch"
     end
+    local generated, metatable = find_named_codec(record_type.name, 0)
+    if generated ~= nil then
+      return message:generated_nominal(number, generated, metatable, depth)
+    end
     return decode_record(message:merged_message(number), record_type, depth)
   when is_union(union_type) then
+    local generated, metatable = find_named_codec(union_type.name, 1)
+    if generated ~= nil then
+      return message:generated_nominal(number, generated, metatable, depth)
+    end
     return decode_union(message:merged_message(number), union_type, depth)
   when is_foreign_integer{spelling, is_signed, bits} then
     require_wire(field, 0)
@@ -352,4 +507,45 @@ local function decode_field(message: Message, number: integer,
     return decode_foreign_array(message:merged_message(number), elem_descriptor, depth)
   else raise "protobuf: unsupported field type"
   end
+end
+
+-- A TitanValue message: its last recognized arm selects the value; with no
+-- recognized arm it is nil. Arms decode with the ordinary field rules.
+local function decode_dynamic(message: Message, depth: integer): value
+  local selected = 0
+  for index = 1, message.count do
+    local number: integer = message:entry(index).number
+    if number >= 1 and number <= 6 then selected = number end
+  end
+  if selected == 1 then return decode_field(message, 1, dynamic_boolean, depth)
+  elseif selected == 2 then return decode_field(message, 2, dynamic_integer, depth)
+  elseif selected == 3 then return decode_field(message, 3, dynamic_float, depth)
+  elseif selected == 4 then return decode_field(message, 4, dynamic_string, depth)
+  elseif selected == 5 then
+    return decode_dynamic_nominal(message:merged_message(5), depth)
+  elseif selected == 6 then
+    return decode_array(message:merged_message(6), dynamic_constness, dynamic_value, depth)
+  end
+  return nil
+end
+
+-- Resolve the qualified name, loading its module only inside a packet decode
+-- (a transfer-installed loader with a carried context), then decode the
+-- payload exactly as a field of that nominal type.
+local function decode_dynamic_nominal(message: Message, depth: integer): value
+  local module: string = decode_field(message, 1, dynamic_string, depth)
+  local name: string = decode_field(message, 2, dynamic_string, depth)
+  local found? = reflect.find_nominal(name)
+  if found == nil and message.context ~= nil and nominal_loader ~= nil then
+    nominal_loader(module, name)
+    found = reflect.find_nominal(name)
+  end
+  if found == nil then raise "protobuf: unknown nominal type " .. name end
+  case found
+  when is_record(record_type) then
+    return decode_field(message, 3, reflect.Type.is_record(record_type), depth)
+  when is_union(union_type) then
+    return decode_field(message, 3, reflect.Type.is_union(union_type), depth)
+  end
+  raise "protobuf: nominal kind mismatch for " .. name
 end

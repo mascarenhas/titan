@@ -82,10 +82,14 @@ if [[ $mode == build ]]; then
   shopt -s globstar nullglob
   for input in "$source_root"/spec/stdlib/titan/**/*.titan "$source_root"/spec/stdlib/titan/**/*.h; do
     case "$input" in *.titan.h|*.ffi.h) continue ;; esac
-    relative=${input#"$source_root/spec/stdlib/titan/"}
+    relative=${input#"$source_root/"}
     mkdir -p "$work/source/$(dirname "$relative")"
     cp "$input" "$work/source/$relative"
   done
+  # Preserve authored relative imports of private collaboration headers.
+  mkdir -p "$work/source/titan/protobuf"
+  cp "$source_root/titan/transfer_native.h" "$work/source/titan/transfer_native.h"
+  cp "$source_root/titan/protobuf/native.h" "$work/source/titan/protobuf/native.h"
   # Fresh-process tests read their authored fixtures from the ordinary root CWD.
   # Same-stem generated C and synthetic runner headers are not fixture inputs.
   for input in "$source_root"/spec/fixtures/**/*; do
@@ -160,7 +164,7 @@ if [[ $mode == build ]]; then
     export TITAN_PROBE_CACHE_DISABLE=1 TITAN_PATH_0_6="$winprefix/lib/titan/0.6"
     unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 LUA_INIT LUA_INIT_5_5 ROCKS_TREE
     export PATH="$work/sdk/bin:$PATH"
-    test_tree=$(cygpath -m "$work/source")
+    test_tree=$(cygpath -m "$work/source/spec/stdlib/titan")
     coverage_args=()
     payload=("$winnative/async_foreign_work.o" "$winnative/fs_fixture.o" "$winnative/uv_stdio_probe.o")
     if [[ ${TITAN_TEST_COVERAGE:-0} == 1 ]]; then
