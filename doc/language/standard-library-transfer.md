@@ -249,8 +249,9 @@ return transfer.decode_message(raw)
 When `decode_message` raises, the guard sees the slot it has already cleared
 and does not dispose of the packet again. This holds however the local
 received its packet, including by assignment inside an earlier protected
-region such as a `do ... catch` block: an address-exposed scalar local that
-recovery code reads keeps a single storage location
+region such as a `do ... catch` block: a scalar local whose mutable address is
+passed to a call and that recovery code reads is never restored from an older
+copy, on Titan's supported toolchains
 ([C storage after a caught error](c-ffi-expressions.md#c-storage-after-a-caught-error)).
 
 Once its body runs, `decode_message` consumes the packet and clears the slot on
