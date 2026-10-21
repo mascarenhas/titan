@@ -5573,7 +5573,7 @@ done
                 end
             end
             assert.same({ 43, 29, 41, 40 }, shard_counts)
-            assert.equal(151, assigned_count)
+            assert.equal(153, assigned_count)
             local integration_count = 0
             for line in read_file(
                 "spec/support/ci_stdlib_compiler_test_files.txt"):gmatch("[^\n]+") do
@@ -5586,7 +5586,7 @@ done
                 end
             end
             assert.equal(8, integration_count)
-            assert.equal(159, assigned_count + integration_count)
+            assert.equal(161, assigned_count + integration_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")
