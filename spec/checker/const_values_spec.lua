@@ -398,4 +398,72 @@ describe("const values (typechecker)", function()
         local used_after = find_function(tree, "used_after").block.stats[2]
         assert.equal("copy", used_after.exps[1]._written_cast.value.mode)
     end)
+
+    it("freezes a standalone builder cast consumed by a later statement",
+    function()
+        local ok, err, tree = run_checker([[
+            local function consume(items: const { integer }): integer
+                return #items
+            end
+
+            function call_consumer(count: integer): integer
+                local items: { integer } = {}
+                for index = 1, count do
+                    items[index] = index
+                end
+                local frozen = items as const { integer }
+                return consume(frozen)
+            end
+
+            function value_return(): value
+                local items = { 1, 2 }
+                local frozen = items as const { integer }
+                return frozen
+            end
+
+            function nested_argument(): integer
+                local items = { 1, 2 }
+                return consume(items as const { integer })
+            end
+
+            function converted_return(): value
+                local items = { 1, 2 }
+                return items as const { integer }
+            end
+
+            local function build(count: integer): { integer }
+                local items: { integer } = {}
+                for index = 1, count do
+                    items[index] = index
+                end
+                return items
+            end
+
+            function linear_call(count: integer): const { integer }
+                local frozen = build(count) as const { integer }
+                return frozen
+            end
+        ]])
+        assert.truthy(ok, err)
+        local consumed = find_function(tree, "call_consumer").block.stats[3]
+        assert.equal("freeze", consumed.exps[1]._written_cast.value.mode)
+        assert.is_true(consumed.exps[1]._linear_array_freeze)
+
+        local returned = find_function(tree, "value_return").block.stats[2]
+        assert.equal("freeze", returned.exps[1]._written_cast.value.mode)
+        assert.is_true(returned.exps[1]._linear_array_freeze)
+
+        local nested = only_return_expression(
+            find_function(tree, "nested_argument"))
+        local argument = nested.args.args[1]
+        assert.equal("copy", argument._written_cast.value.mode)
+
+        local converted = only_return_expression(
+            find_function(tree, "converted_return"))
+        assert.is_true(converted._implicit_coercion)
+        assert.equal("copy", converted.exp._written_cast.value.mode)
+
+        local linear = find_function(tree, "linear_call").block.stats[1]
+        assert.equal("freeze", linear.exps[1]._written_cast.value.mode)
+    end)
 end)

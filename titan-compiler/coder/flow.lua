@@ -286,6 +286,24 @@ function coder._collect_writes_exp(node, out)
             set_add(out, decl)
         end
     end
+    -- An ordinary Titan callee can mutate an automatic scalar through a
+    -- contextual C address, then raise instead of returning. Such writes must
+    -- reach the recovery home during the call, not a post-call spill update.
+    if node._tag == "Ast.ExpCast" then
+        local adjustment = node._adjustment
+        local written = node._written_cast
+            and node._written_cast.tag == "just"
+            and maybe3.get_checked(node._written_cast, "written cast") or nil
+        local coercion = adjustment and adjustment.coercion
+            or written and written.coercion
+        if coercion and coercion.op == "mutable_c_address" then
+            local decl = coder._lvalue_root_decl(node.exp)
+            if decl and not types.is_gc(decl._type)
+               and not types.is_c_aggregate(decl._type) then
+                set_add(out, decl)
+            end
+        end
+    end
     expression_children(node, function(child)
         coder._collect_writes_exp(child, out)
     end)
@@ -716,8 +734,21 @@ function newslot(ctx --[[:table]])
     return slotat(reserveslot(ctx))
 end
 
+function coder._decl_volatile_home(decl)
+    return decl and decl._needs_spill and decl._c_address_taken
+        and not decl._boxed and not types.is_gc(decl._type)
+        and not types.is_c_aggregate(decl._type)
+        and not decl._c_backing_storage
+end
+
+function coder._local_cvardecl(ctx, decl)
+    return cvardecl(ctx, decl._type, decl._cvar,
+        coder._decl_volatile_home(decl) and { "volatile" } or nil)
+end
+
 function decl_needs_spill(decl)
     return decl and decl._needs_spill and decl._used and not decl._boxed
+        and not coder._decl_volatile_home(decl)
 end
 
 function register_spill_decl(ctx, decl)
@@ -773,7 +804,18 @@ function coder._aggregate_spill_copy(decl, to_spill)
     })
 end
 
+local function volatile_home_escape(decl)
+    -- An inlined callee may store through an unqualified alias. Keep the
+    -- actual home escaped so GCC cannot discard that store before a raise.
+    return render([[
+        __asm__ __volatile__("" : : "r"(&($CVAR)) : "memory");
+    ]], { CVAR = decl._cvar })
+end
+
 function spill_decl_init(ctx, decl)
+    if coder._decl_volatile_home(decl) then
+        return volatile_home_escape(decl)
+    end
     if not decl_needs_spill(decl) then return "" end
     register_spill_decl(ctx, decl)
     if types.is_gc(decl._type) then
@@ -803,6 +845,9 @@ function spill_decl_init(ctx, decl)
 end
 
 function spill_decl_zero(ctx, decl)
+    if coder._decl_volatile_home(decl) then
+        return volatile_home_escape(decl)
+    end
     if not decl_needs_spill(decl) then return "" end
     register_spill_decl(ctx, decl)
     if types.is_gc(decl._type) then return "" end

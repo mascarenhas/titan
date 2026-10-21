@@ -313,15 +313,23 @@ freeze the original proxy in place only when a conservative linear-use proof
 shows that the allocation has not escaped before the cast and that neither the
 source binding nor any mutable alias is used afterward.
 
-1. **Local builder pattern:** Starts with one local initialized from a fresh
-   mutable Array `{}`. Structured control flow and loops may query `#` and read
-   or write elements. If the local does not escape before being cast or returned
-   to a `const` target, the compiler emits in-place `titan_array_freeze`.
-2. **Linear function returns:** When all return paths of a function return a
-   freshly constructed array or an unaliased local builder array, the function's
-   return type is marked linear. Directly assigning or casting the call result to
-   `const { T }` (e.g. `local res: const { B } = map(xs, f)`) freezes the
-   returned array in place without copying.
+1. **Local builder pattern:** A local initialized from a fresh mutable Array
+   constructor may be filled by structured control flow and loops that query
+   `#` and read or write elements. If the Array has not escaped, it is frozen
+   in place when it is cast to a `const` Array as the whole initializer of a
+   one-name local declaration, or as the whole returned expression, in the
+   builder's own block. Later statements may use the frozen local
+   (`local frozen = items as const { T }` followed by `consume(frozen)`). A
+   cast nested inside another expression, such as
+   `consume(items as const { T })`, or a returned cast whose result the function
+   then converts to `value`, still copies.
+2. **Linear function returns:** A function whose every return is a fresh Array
+   constructor, an unaliased builder local, or the result of an earlier linear
+   call has a linear result. Assigning or casting such a call result to
+   `const { T }` (for example `local res: const { B } = map(xs, f)`) freezes the
+   returned Array in place. A call has this property only when its callee
+   precedes the caller in the module's logical declaration order; a written cast
+   of any other call result copies.
 
 Code must not depend on whether this optimization fires. If both the mutable
 source and const result could still be observed, the proof is not valid and

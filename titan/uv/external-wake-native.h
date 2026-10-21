@@ -14,6 +14,9 @@ enum {
   TITAN_UV_WAKE_DELIVERED = 4
 };
 
+/* At most one drain batch of reference-zero targets is retained per core. */
+#define TITAN_UV_WAKE_TARGET_CACHE_LIMIT 64
+
 typedef struct titan_uv_external_wake_core {
   /* First-member address identity permits a mutex borrow without a C shim. */
   uv_mutex_t mutex;
@@ -24,6 +27,9 @@ typedef struct titan_uv_external_wake_core {
   titan_uv_external_wake_target *registered;
   titan_uv_external_wake_target *head;
   titan_uv_external_wake_target *tail;
+  /* Unpinned, reference-zero targets; their next field forms a free stack. */
+  titan_uv_external_wake_target *free_targets;
+  size_t free_count;
 } titan_uv_external_wake_core;
 
 struct titan_uv_external_wake_target {

@@ -47,10 +47,13 @@ When a Titan catch re-raises the original error, codegen first writes the
 saved catch-local `traceback` back to `TITAN_BACKTRACE_KEY`, sets the pin,
 places the saved `error` in the single top slot required by Lua's error ABI,
 and calls `lua_error`. The registry writes use `luaH_*` and the registry
-`Table` directly; they neither call the public stack API nor change
-`L->top`. The handler sees the pin and preserves the original deep trace. A
-fresh `raise <exp>` leaves the pin clear, so the handler captures a new trace
-at the new raise site.
+`Table` directly with already-rooted `TString *` keys stored in
+compiler-private module user-value slots; they neither intern key strings nor
+call the public stack API nor change `L->top`. Non-nil re-raise insertion can
+still grow the registry hash table only when no free node exists, after the
+enclosing block's cleanup (`finally` / `defer` body or `catch`-block defers) has already executed. The handler sees the
+pin and preserves the original deep trace. A fresh `raise <exp>` leaves the
+pin clear, so the handler captures a new trace at the new raise site.
 
 Coroutines use one extra registry slot, `TITAN_TRACE_APPEND_KEY`, for
 uncaught errors in a dead coroutine. The coroutine entry stages its own
@@ -61,18 +64,32 @@ trace to the staged coroutine trace, writes the combined string to
 original payload. The final handler therefore preserves the combined trace
 instead of replacing it with only the shallow propagation site.
 
-When a boundary catches an error for a Titan `catch`, it snapshots the
-trace into a reserved stack slot and then clears both the trace slot and
-the pin. A fully handled catch therefore leaves `titan.backtrace()` as
-`nil`; the handled trace is available only through the catch-local
-`traceback`. Snapshot and clear also access `G(L)->l_registry` through the
-internal table machinery without pushing registry keys or values. String-key
-lookup can allocate while interning the fixed key, so generated recovery
-restores `_base` from its saved offset before it writes any reserved slot.
-The lookup tag is checked before its result: an absent trace (for example on
-an exceptional low-level error path that did not populate the registry) falls
-back to the empty traceback string without inspecting an uninitialized
-`TValue`.
+When a boundary catches an error for a Titan `catch` or `finally`, it
+snapshots the trace into a reserved stack slot and then clears both the trace
+slot and the pin. A fully handled catch therefore leaves `titan.backtrace()`
+as `nil`; the handled trace is available only through the catch-local
+`traceback`. Snapshot and clear access `G(L)->l_registry` through Lua's
+internal table machinery (`titan_registry_get_string` and
+`titan_registry_set_string`) without using the Lua stack or interning strings.
+The registry keys (`TITAN_BACKTRACE_KEY` and `TITAN_TRACE_PINNED`) and the
+empty-traceback fallback `""` are stored in at most three lazily allocated
+compiler-private `_mod->uv` slots (allocated only when generated recovery or
+re-raise code requests them, after the public and fixed source-private
+prefixes). Each slot is initialized in `$INITNAME` immediately after
+`titan_pushmodule(L, _mod)` (with `luaC_barrierback` before the next
+allocation), prior to metatables, dependency loading, module-variable
+initializers, or the module `do ... end` initializer. Because `luaH_getstr`,
+the rooted `""` fallback, and short-string `nil` clears in `luaH_psetshortstr`
+/ `luaH_finishset` never allocate—even after an emergency garbage collection
+has swept dead nil-valued registry keys—the generated recovery reads and nil
+clears after restoring `L->errorJmp` cannot raise a secondary `LUA_ERRMEM` that
+skips `catch` or `finally` (`defer`) cleanup. Intervening Lua-frame `__close`
+handlers can allocate; `luaD_closeprotected` runs them under its own protection,
+capturing and retrying their errors. No extra `lua_pcallk` wrapper or
+state-global root protocol is used. The lookup tag is checked
+before its result: an absent trace (such as `LUA_ERRMEM` raised directly by
+`luaD_throw` without calling `L->errfunc`) falls back to the module-rooted
+empty string without inspecting an uninitialized `TValue`.
 
 ### libbacktrace and frame merging
 
@@ -262,9 +279,10 @@ included by `titan.h`. It mirrors the parts of `luaD_rawrunprotected` and
 4. restore `L->errorJmp` and `L->nCcalls` on normal fallthrough;
 5. on error, restore `ci`/`allowhook`, run `luaD_closeprotected`, move the
    error object to the saved top with `luaD_seterrorobj`, recompute `_base`
-   from `_base_off`, snapshot the error and trace into reserved slots, clear
-   the registry trace/pin, and restore `L->top.p` to the function's reserved
-   stack area.
+   from `_base_off`, snapshot the error and trace into reserved slots using
+   the module-rooted registry keys and empty-string fallback, clear the
+   registry trace/pin with `nil` without allocating, and restore `L->top.p`
+   to the function's reserved stack area.
 
 Before `luaD_closeprotected`, Titan restores the `errfunc` value saved at
 boundary entry. This matters when the longjmp skipped an inner Titan
@@ -365,6 +383,9 @@ The pass marks a Decl as needing a spill only when all of these are true:
 * it is assigned in a protected body whose error path can later read it
   from a catch, finally, or handled post-try path; or it is assigned in a
   catch that has its own protected boundary and its finally can read it.
+  A contextual mutable C-address conversion of a scalar counts as a possible
+  write, including an ordinary Titan call that can raise. Aggregate
+  out-arguments have the known limitation below.
 
 Marked GC-typed Decls use their existing reserved Lua stack slots as the
 stable storage. Assignments keep the slot current, and protected recovery
@@ -374,7 +395,8 @@ remain valid across collections; the relocation hazard is only pointers to
 Lua stack locations, which are always recomputed from saved offsets such
 as `_base_off`.
 
-Marked non-GC scalar Decls get a tiny internal C-stack spill:
+Marked non-GC scalar Decls whose address is not exposed get a tiny internal
+C-stack spill:
 
 ```c
 lua_Integer _local_n_1;
@@ -383,10 +405,82 @@ volatile lua_Integer _spill_local_n_1;
 
 Codegen updates the spill after assignments that update the Titan
 local/parameter, and protected recovery reloads the ordinary C auto from
-the volatile spill before catch/finally/post-try code can read it. The
-`volatile` qualifier is therefore limited to internal spill storage; the
-Titan-visible local/parameter variables and the native function ABI remain
-plain C declarations.
+the volatile spill before catch/finally/post-try code can read it.
+
+A non-GC scalar whose **mutable** C address is taken anywhere in the function
+instead uses **one genuinely volatile automatic object** as its canonical
+recovery home, plus a compiler escape barrier at its declaration:
+
+```c
+void *volatile _local_raw_1;
+__asm__ __volatile__("" : : "r"(&(_local_raw_1)) : "memory");
+```
+
+`coder._decl_volatile_home` selects this home for an address-taken scalar
+that the liveness pass marks, including a declaration marked by an earlier
+protected region. `_local_cvardecl` applies it to locals and parameters
+(including lambda parameters); no second spill or recovery reload is emitted.
+The callee receives the address of that very object. The internal top-level
+qualifier is removed from the outgoing address type, not from the object's
+declaration; native signatures and ABI are unchanged.
+
+This is an **implementation guarantee on the supported GCC and Clang
+toolchains (including Windows Clang/MSYS2), not a strictly conforming ISO C
+guarantee**. ISO C 6.7.3p6 makes referring to an object defined volatile
+through a non-volatile lvalue undefined behavior. The existing out-parameter
+API uses unqualified pointers, so its stores have exactly that caveat.
+`spill_decl_init` and `spill_decl_zero` emit the empty GNU extended-asm escape
+barrier for every volatile home, including parameters and predeclared locals.
+Without it, GCC can delete an inlined unqualified store when a subsequent
+checked conversion raises through terminal `luaL_error`/`abort` and the body's
+normal return skips the catch-status dispatch: only nonlocal recovery reads
+the home. Volatility alone does not preserve that indirect store. The barrier's
+address operand and memory clobber keep the home escaped after inlining.
+Supported toolchains then perform the indirect store to that storage before
+the opaque raising/longjmp call, and catch/deferred reads reload the home.
+MSVC is not a supported generated-C toolchain; native Windows uses MSYS2 Clang.
+
+Production Linux generated code defaults to
+`-O3 -flto=auto -ffat-lto-objects`; Darwin/Windows default to `-O3` without
+LTO. Ordinary native Titan functions can be inlined within one translation
+unit or across units under Linux LTO. The escape barrier remains in the
+caller and prevents an inlined unqualified store being deleted as dead merely
+because only recovery reads the home. The default Lua build has no LTO IR,
+leaving `lua_error`/its nonlocal exit opaque. In contrast, `decode_message`
+contains a `catch` and thus a generated `setjmp`. It was verified to remain
+out of line with GCC/Clang at `-O2`/`-O3` in a single translation unit.
+This follows [GCC's documented `setjmp` inlining restriction](https://gcc.gnu.org/onlinedocs/gcc/Inline.html)
+and [LLVM's `isInlineViable` rule](https://github.com/llvm/llvm-project/blob/llvmorg-22.1.8/llvm/lib/Analysis/InlineCost.cpp#L3346-L3350):
+an ordinary function cannot be inlined if it exposes a `returns_twice` call
+without itself carrying that attribute. Inspection of the linked GCC 16.2.1
+production provider (`-O3 -flto=auto`) additionally confirmed direct calls to
+`decode_message` from `async.Receiver:wait` and `thread.Receiver:receive`.
+Clang LTO was not separately verified. The native decode regression covers
+that out-of-line ownership path, not inlining. The coder spec also builds
+`spec/fixtures/error_handling/scalar_recovery.titan` as a native executable
+at `-O2`/`-O3`, using the driver's default inlining thresholds. Its checked-return
+callee writes `7` through the scalar's address, then raises; only the catch
+reads the local. The fixture separately covers an explicit `raise`.
+The Windows corrective evidence used an effective `-O2` provider and
+`-O0 -fno-lto` test objects, not an `-O3` provider.
+Whole-program LTO exposing Lua's error machinery or new optimizer
+behavior still requires renewed qualification.
+
+The barrier emits no instruction, but is a compiler memory barrier (`"memory"`
+clobber) once per declaration, including each `Receiver:wait` loop iteration.
+It constrains register caching across that point. The volatile home adds
+loads/stores, not allocation, copying, a call, or a new ownership protocol.
+It does not promise recovery for untracked aliases/asynchronous C writes.
+
+**Known aggregate limitation:** ordinary Titan callees do not commit a
+mutable aggregate out-argument to its byte spill, even when they return
+normally. If another protected assignment has made the aggregate spill-tracked,
+a later recovery can restore the pre-call bytes and lose the completed write.
+This is a pre-existing gap, not the scalar volatile-home contract. Mutable
+foreign calls that return normally do commit their tracked aggregate spills;
+a nonlocal exit during such a call does not commit partial bytes. Fixing
+ordinary Titan aggregate out-argument commits requires separate write tracking
+and post-call byte-spill updates; this scalar fix does not implement them.
 
 `coder.lua` also tracks lexical spill scopes, so a recovery boundary
 reloads only spill slots whose Decls are currently in C scope.
@@ -446,8 +540,9 @@ The highest-value regression tests are:
   raise legality, finally transfer bans, and non-fallthrough analysis.
 * `spec/coder/error_handling_spec.lua` — catch, fresh raise vs. re-raise,
   trace clearing, pending actions, finally override, nested finally order,
-  GC-valued pending returns, including flexible tails across allocating/nested
-  finally blocks, and standalone uncaught-error reporting.
+  sustained-OOM catch/defer recovery across functions, closures, and module
+  initializers, GC-valued pending returns (including flexible tails across
+  allocating/nested finally blocks), and standalone uncaught-error reporting.
 * `spec/coder/stack_relocation_spec.lua` — stack relocation through
   protected recovery.
 * `spec/abi_spec.lua` — runtime/compiler ABI constants.

@@ -1,13 +1,41 @@
 --- Optimistic traversal of a single live value graph.
 -- @module titan.protobuf
 
+-- `active` holds the reflective frames of this root (shared with every
+-- reflective subtree a generated codec hands back to); `path` holds the
+-- enclosing generated frames. Together they are the complete active path. A
+-- generated root's handoffs reuse one Encoder, setting `path` to the handing
+-- frame's path for the duration of each field.
 local record Encoder
   const active: {value: boolean}
+  const context: value
+  path: foreign const *TitanCodecPath
 end
 
 local function Encoder:enter(candidate: value)
-  if self.active[candidate] then raise "protobuf: cyclic object graph" end
+  if self.active[candidate] or ffi.titan_codec_path_has(self.path, candidate) ~= 0 then
+    raise "protobuf: cyclic object graph"
+  end
   self.active[candidate] = true
+end
+
+-- The structural branch for a nominal with a generated codec: the same nested
+-- message, depth, cycle, and handoff rules, with the shared root state. The
+-- generated frames below hand their fields back to this same Encoder.
+local function Encoder:generated(
+    buf: foreign *titan_protobuf_buffer,
+    codec: foreign const *TitanTransferCodec,
+    number: integer,
+    candidate: value,
+    depth: integer)
+  local resources: foreign TValue = resource_codecs as value
+  local context: foreign TValue = self.context
+  local active: foreign TValue = self.active as value
+  local encoder: foreign TValue = self as value
+  local handoff: foreign TValue = codec_handoff_entry
+  local raw: foreign TValue = candidate
+  ffi.titan_codec_encode_field(L, resources, context, active, encoder, handoff, buf,
+      self.path, codec, raw, number, depth)
 end
 
 local function Encoder:record_value(
@@ -130,11 +158,28 @@ local function Encoder:field(
   when is_string() then
     local bytes: string = candidate
     write_bytes(buf, number, bytes)
+  when is_value() then
+    -- Nil is absent; anything else is one nested TitanValue message.
+    if candidate ~= nil then
+      local mark = begin_nested(buf, number)
+      self:dynamic(buf, candidate, depth)
+      end_nested(buf, mark)
+    end
   when is_array{elem_descriptor} then
     local mark = begin_nested(buf, number)
     self:array(buf, candidate, elem_descriptor, depth)
     end_nested(buf, mark)
   when is_record(expected) then
+    local codec? = find_resource_codec_by_name(expected.name)
+    if codec ~= nil then
+      encode_resource_field(buf, codec, number, candidate, self.context)
+      return
+    end
+    local generated = find_field_codec(candidate, expected.name, false)
+    if generated ~= nil then
+      self:generated(buf, generated, number, candidate, depth)
+      return
+    end
     case reflect.inspect(candidate)
     when is_record(actual) then
       if actual.type.name ~= expected.name then raise "protobuf: record type mismatch" end
@@ -153,6 +198,11 @@ local function Encoder:field(
     else raise "protobuf: expected a record"
     end
   when is_union(expected) then
+    local generated = find_field_codec(candidate, expected.name, true)
+    if generated ~= nil then
+      self:generated(buf, generated, number, candidate, depth)
+      return
+    end
     case reflect.inspect(candidate)
     when is_union(actual) then
       if actual.type.name ~= expected.name then raise "protobuf: union type mismatch" end
@@ -196,5 +246,63 @@ local function Encoder:field(
     end_nested(buf, mark)
   else raise "protobuf: unsupported field type"
   end
+end
+
+-- One TitanValue arm for a non-nil dynamic value at the field's depth:
+-- 1 boolean, 2 integer, 3 float, 4 string, 5 nominal, 6 Titan Array.
+local function Encoder:dynamic(
+    buf: foreign *titan_protobuf_buffer,
+    candidate: value,
+    depth: integer)
+  local raw: foreign TValue = candidate
+  local tag = ffi.lmacro_ttype(raw)
+  if tag == ffi.LUA_TBOOLEAN then
+    self:field(buf, 1, candidate, dynamic_boolean, depth)
+  elseif tag == ffi.LUA_TNUMBER then
+    if ffi.lmacro_ttypetag(raw) == ffi.LUA_VNUMINT then
+      self:field(buf, 2, candidate, dynamic_integer, depth)
+    else
+      self:field(buf, 3, candidate, dynamic_float, depth)
+    end
+  elseif tag == ffi.LUA_TSTRING then
+    self:field(buf, 4, candidate, dynamic_string, depth)
+  elseif tag == ffi.LUA_TUSERDATA then
+    case reflect.inspect(candidate)
+    when is_record(record_value) then
+      self:dynamic_nominal(buf, candidate, record_value.type.name,
+          reflect.Type.is_record(record_value.type), depth)
+    when is_union(union_value) then
+      self:dynamic_nominal(buf, candidate, union_value.type.name,
+          reflect.Type.is_union(union_value.type), depth)
+    when is_array() then
+      local mark = begin_nested(buf, 6)
+      self:array(buf, candidate, dynamic_value, depth)
+      end_nested(buf, mark)
+    when is_const_array() then
+      local mark = begin_nested(buf, 6)
+      self:array(buf, candidate, dynamic_value, depth)
+      end_nested(buf, mark)
+    else raise "protobuf: unsupported dynamic value"
+    end
+  else raise "protobuf: unsupported dynamic value"
+  end
+end
+
+-- The declaring module and qualified name, then exactly the bytes a field of
+-- that nominal type carries: its message, hook payload, or resource index.
+local function Encoder:dynamic_nominal(
+    buf: foreign *titan_protobuf_buffer,
+    candidate: value,
+    name: string,
+    descriptor: reflect.Type,
+    depth: integer)
+  local raw: foreign TValue = candidate
+  local module = ffi.titan_codec_nominal_module(raw)
+  if module == nil then raise "protobuf: unsupported dynamic value" end
+  local mark = begin_nested(buf, 5)
+  write_bytes(buf, 1, c_text(module))
+  write_bytes(buf, 2, name)
+  self:field(buf, 3, candidate, descriptor, depth)
+  end_nested(buf, mark)
 end
 

@@ -12,7 +12,6 @@ typedef struct titan_async_receiver {
   int (*send)(void *);
   titan_async_message *message;
   int closed;
-  int mode; /* 0: reusable copied policies; 1: exclusively owned packets. */
 } titan_async_receiver;
 
 /* Loop-thread-only native retirement state. No producer keeps a pointer into

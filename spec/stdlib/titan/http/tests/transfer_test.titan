@@ -39,7 +39,7 @@ local function http_exchange_cross_state(secure: boolean)
       return packet
     end
     local client = async.run<|nil, value|>(function (): nil
-      local port: integer = ready:wait():to_value()
+      local port: integer = ready:wait()
       local connection: io.ReaderWriterCloser = (function (): io.ReaderWriterCloser
         if secure then return ssl.connect("localhost", port, support.TRUST_ROOT) end
         return net.connect("127.0.0.1", port)

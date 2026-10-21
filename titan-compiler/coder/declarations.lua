@@ -1205,7 +1205,7 @@ function codefuncdec(tlcontext, node)
             table.insert(stats, codeboxparam(ctx, param))
         end
         table.insert(stats, spill_decl_init(ctx, param))
-        table.insert(cparams, cvardecl(ctx, param._type, param._cvar))
+        table.insert(cparams, coder._local_cvardecl(ctx, param))
     end
     -- Variadic: the backing struct + start offset, pinned after the declared
     -- params and before the out-params, and threaded into ctx for `...` lowering.
@@ -1797,7 +1797,7 @@ function codelambdadec(tlcontext, node)
             table.insert(stats, codeboxparam(ctx, param))
         end
         table.insert(stats, spill_decl_init(ctx, param))
-        table.insert(cparams, cvardecl(ctx, param._type, param._cvar))
+        table.insert(cparams, coder._local_cvardecl(ctx, param))
     end
     -- A lambda's `ctx` is fresh (newcontext), so ctx.varargs starts nil; set it
     -- only for a variadic lambda. An inner lambda thus NEVER inherits an enclosing

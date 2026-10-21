@@ -15,6 +15,7 @@ require "titan-compiler.coder.core"
 -- trace. A `raise` from a Titan function caught by Lua `pcall` therefore
 -- surfaces the raised value as the pcall error and records the Titan frames.
 local h = require 'spec.support.helpers'
+local temporary = require 'spec.support.temporary'
 local coder = require 'titan-compiler.coder'
 local coder_names = require 'titan-compiler.coder.names'
 
@@ -22,9 +23,21 @@ local compile_and_run = h.compile_and_run
 local compile_and_read_c = h.compile_and_read_c
 local compile_and_run_app = h.compile_and_run_app
 
+local function with_header(contents, body)
+    local path = temporary.name(".h")
+    local file = assert(io.open(path, "wb"))
+    assert(file:write(contents))
+    assert(file:close())
+    local results = table.pack(xpcall(function() return body(path) end,
+        debug.traceback))
+    os.remove(path)
+    if not results[1] then error(results[2], 0) end
+    return table.unpack(results, 2, results.n)
+end
+
 local function clean()
     os.execute("rm -rf *.o *.so *.dSYM test test__entrypoint.c")
-    if not h.verbose then os.execute("rm -f *.c") end
+    if not h.verbose then os.execute("rm -f *.c *.ffi.h *.titan.h") end
 end
 
 local function native_body(csrc, name)
@@ -871,6 +884,300 @@ describe("finally / defer cleanup", function()
         ]==])
         assert.match("OK", out)
     end)
+
+    it("recovers into native defer and catch boundaries under sustained Lua OOM",
+    function()
+        with_header([[
+            #include <stddef.h>
+            #include "lua.h"
+
+            static lua_Alloc oom_saved_alloc = NULL;
+            static void *oom_saved_ud = NULL;
+            static int oom_entered = 0;
+            static int oom_markers = 0;
+            static int oom_trace = 0;
+            static int oom_denied = 0;
+
+            static void *oom_deny_alloc(
+                    void *ud, void *ptr, size_t osize, size_t nsize) {
+                (void)ud;
+                if (nsize == 0) {
+                    return oom_saved_alloc(oom_saved_ud, ptr, osize, 0);
+                }
+                if (ptr != NULL && nsize <= osize) {
+                    return oom_saved_alloc(oom_saved_ud, ptr, osize, nsize);
+                }
+                oom_denied++;
+                return NULL;
+            }
+
+            static void oom_reset(lua_State *L) {
+                if (oom_saved_alloc != NULL) {
+                    lua_setallocf(L, oom_saved_alloc, oom_saved_ud);
+                    oom_saved_alloc = NULL;
+                    oom_saved_ud = NULL;
+                }
+                oom_entered = 0;
+                oom_markers = 0;
+                oom_trace = 0;
+                oom_denied = 0;
+            }
+
+            static void oom_restore(lua_State *L) {
+                if (oom_saved_alloc != NULL) {
+                    lua_setallocf(L, oom_saved_alloc, oom_saved_ud);
+                    oom_saved_alloc = NULL;
+                    oom_saved_ud = NULL;
+                }
+            }
+
+            static void oom_step(int step, int bit) {
+                oom_markers |= bit;
+                oom_trace = oom_trace * 10 + step;
+            }
+
+            static int oom_is_armed(void) {
+                return oom_saved_alloc != NULL ? 1 : 0;
+            }
+
+            static int oom_get_entered(void) { return oom_entered; }
+            static int oom_get_markers(void) { return oom_markers; }
+            static int oom_get_trace(void) { return oom_trace; }
+            static int oom_get_denied(void) { return oom_denied; }
+
+            static void oom_arm_and_fail_long_string(lua_State *L, int salt) {
+                char buf[256];
+                size_t i;
+                for (i = 0; i < sizeof(buf); i++) {
+                    buf[i] = (char)('a' + (int)((i + (unsigned)salt) % 23));
+                }
+                oom_entered = 1;
+                if (oom_saved_alloc == NULL) {
+                    oom_saved_alloc = lua_getallocf(L, &oom_saved_ud);
+                    lua_setallocf(L, oom_deny_alloc, NULL);
+                }
+                lua_pushlstring(L, buf, sizeof(buf));
+                lua_pop(L, 1);
+            }
+        ]], function(header)
+            local out = compile_and_run([[
+                foreign import "]] .. header .. [["
+
+                init_recovered: integer = 0
+
+                function init_status(): integer
+                    return init_recovered
+                end
+
+                function restore_alloc()
+                    ffi.oom_restore(L)
+                end
+
+                function is_armed(): integer
+                    return ffi.oom_is_armed() as integer
+                end
+
+                function entered(): integer
+                    return ffi.oom_get_entered() as integer
+                end
+
+                function markers(): integer
+                    return ffi.oom_get_markers() as integer
+                end
+
+                function trace_order(): integer
+                    return ffi.oom_get_trace() as integer
+                end
+
+                function denied_calls(): integer
+                    return ffi.oom_get_denied() as integer
+                end
+
+                function warm_and_clear_trace()
+                    do
+                        raise "warm-trace-keys"
+                    catch
+                    end
+                end
+
+                function exercise_sustained_oom(
+                        salt: integer): (boolean, string, integer)
+                    ffi.oom_reset(L)
+                    defer ffi.oom_restore(L)
+                    local caught_mem = false
+                    local caught_tb = "unset"
+                    do
+                        defer do
+                            if ffi.oom_is_armed() ~= 0 then
+                                ffi.oom_step(4, 8)
+                            end
+                        end
+                        do
+                            defer do
+                                if ffi.oom_is_armed() ~= 0 then
+                                    ffi.oom_step(2, 2)
+                                end
+                            end
+                            do
+                                defer do
+                                    if ffi.oom_is_armed() ~= 0 then
+                                        ffi.oom_step(1, 1)
+                                    end
+                                end
+                                ffi.oom_arm_and_fail_long_string(
+                                    L, salt as foreign int)
+                                ffi.oom_step(9, 256)
+                            end
+                            ffi.oom_step(9, 512)
+                        catch
+                            if ffi.oom_is_armed() ~= 0 then
+                                ffi.oom_step(3, 4)
+                            end
+                            raise
+                        end
+                        ffi.oom_step(9, 1024)
+                    catch
+                        if ffi.oom_is_armed() ~= 0 then
+                            ffi.oom_step(5, 16)
+                        end
+                        caught_mem = (error is string)
+                            and ((error as string) == "not enough memory")
+                        caught_tb = traceback
+                    end
+                    return caught_mem, caught_tb,
+                        ffi.oom_is_armed() as integer
+                end
+
+                function make_oom_closure(salt: integer): value
+                    return function (): (boolean, string)
+                        ffi.oom_reset(L)
+                        defer ffi.oom_restore(L)
+                        local caught_mem = false
+                        local caught_tb = "unset"
+                        do
+                            defer do
+                                if ffi.oom_is_armed() ~= 0 then
+                                    ffi.oom_step(2, 2)
+                                end
+                            end
+                            do
+                                defer do
+                                    if ffi.oom_is_armed() ~= 0 then
+                                        ffi.oom_step(1, 1)
+                                    end
+                                end
+                                ffi.oom_arm_and_fail_long_string(
+                                    L, salt as foreign int)
+                                ffi.oom_step(9, 256)
+                            end
+                        catch
+                            if ffi.oom_is_armed() ~= 0 then
+                                ffi.oom_step(3, 4)
+                            end
+                            caught_mem = (error is string)
+                                and ((error as string) == "not enough memory")
+                            caught_tb = traceback
+                        end
+                        return caught_mem, caught_tb
+                    end
+                end
+
+                do
+                    ffi.oom_reset(L)
+                    defer ffi.oom_restore(L)
+                    defer init_recovered = init_recovered + 10
+                    do
+                        defer init_recovered = init_recovered + 1
+                        ffi.oom_arm_and_fail_long_string(L, 0 as foreign int)
+                    catch
+                        if (error is string)
+                                and ((error as string) == "not enough memory")
+                                and traceback == "" then
+                            init_recovered = init_recovered + 100
+                        end
+                    end
+                end
+            ]], [==[
+                local titan = require 'titan'
+                local restore = test.restore_alloc
+
+                assert(test.init_status() == 111,
+                    "module initializer recovery failed: "
+                    .. tostring(test.init_status()))
+
+                -- 1. Cold registry after clearing trace keys and collecting.
+                titan.clear()
+                collectgarbage("collect")
+                collectgarbage("collect")
+                local ok, caught_mem, caught_tb, armed_before_exit =
+                    pcall(test.exercise_sustained_oom, 1)
+                restore()
+                assert(test.entered() == 1,
+                    "sustained-OOM probe failed before entering protected body")
+                assert(ok,
+                    "sustained OOM escaped native catch/defer (markers="
+                    .. tostring(test.markers()) .. ", trace="
+                    .. tostring(test.trace_order()) .. "): "
+                    .. tostring(caught_mem))
+                assert(caught_mem == true,
+                    "outer catch did not observe rooted memory error")
+                assert(caught_tb == "",
+                    "ERRMEM without errorhandler did not use empty fallback: "
+                    .. string.format("%q", tostring(caught_tb)))
+                assert(armed_before_exit == 1 and test.is_armed() == 0,
+                    "outer defer did not restore allocator on exit")
+                assert(test.markers() == 31 and test.trace_order() == 12345,
+                    "wrong cleanup/catch progression under sustained OOM: "
+                    .. tostring(test.markers()) .. " / "
+                    .. tostring(test.trace_order()))
+                assert(test.denied_calls() >= 2,
+                    "sustained-OOM allocator was not exercised")
+                assert(titan.backtrace() == nil,
+                    "handled OOM left a stale registry backtrace")
+
+                -- 2. Warmed then nil-cleared registry keys swept by GC.
+                test.warm_and_clear_trace()
+                collectgarbage("collect")
+                collectgarbage("collect")
+                ok, caught_mem, caught_tb, armed_before_exit =
+                    pcall(test.exercise_sustained_oom, 2)
+                restore()
+                assert(test.entered() == 1,
+                    "second sustained-OOM probe did not enter protected body")
+                assert(ok and caught_mem == true and caught_tb == "",
+                    "post-clear sustained OOM failed (ok=" .. tostring(ok)
+                    .. ", err=" .. tostring(caught_mem)
+                    .. ", markers=" .. tostring(test.markers()) .. ")")
+                assert(armed_before_exit == 1 and test.is_armed() == 0)
+                assert(test.markers() == 31 and test.trace_order() == 12345,
+                    "post-clear cleanup/catch progression wrong: "
+                    .. tostring(test.markers()) .. " / "
+                    .. tostring(test.trace_order()))
+
+                -- 3. First-class closure owner invoked across Lua value boundary.
+                local fn = test.make_oom_closure(3)
+                test.warm_and_clear_trace()
+                collectgarbage("collect")
+                collectgarbage("collect")
+                local fn_ok, fn_caught, fn_tb = pcall(fn)
+                restore()
+                assert(test.entered() == 1,
+                    "closure sustained-OOM probe did not enter protected body")
+                assert(fn_ok and fn_caught == true and fn_tb == "",
+                    "closure sustained OOM failed (ok=" .. tostring(fn_ok)
+                    .. ", err=" .. tostring(fn_caught)
+                    .. ", markers=" .. tostring(test.markers()) .. ")")
+                assert(test.is_armed() == 0,
+                    "closure outer defer did not restore allocator")
+                assert(test.markers() == 7 and test.trace_order() == 123,
+                    "closure cleanup/catch progression wrong: "
+                    .. tostring(test.markers()) .. " / "
+                    .. tostring(test.trace_order()))
+                print("OK")
+            ]==])
+            assert.match("OK", out)
+        end)
+    end)
 end)
 
 describe("catch", function()
@@ -1263,6 +1570,129 @@ describe("catch", function()
         assert.match("lua_Integer%s+volatile%s+_spill_param_n", csrc)
         assert.match("lua_Integer%s+volatile%s+_spill_local_m_1", csrc)
     end)
+
+    it("uses one volatile home for recovery-sensitive address-exposed scalars", function()
+        local csrc = compile_and_read_c([[
+            local function clear(slot: foreign *(*void))
+                slot[0] = nil
+                raise "cleared"
+            end
+            local function change(slot: foreign *int)
+                slot[0] = 7
+                raise "changed"
+            end
+            local function inspect(slot: foreign const *int): boolean
+                return slot[0] == 7
+            end
+            function run(n: foreign int): boolean
+                local raw: foreign *void = nil
+                local untouched: foreign *void = nil
+                do
+                    raw = untouched
+                catch
+                    return false
+                end
+                defer if raw ~= nil then raise "stale owner" end
+                do
+                    clear(raw)
+                catch
+                end
+                do
+                    change(n)
+                catch
+                end
+                local lambda = function (m: foreign int): boolean
+                    do
+                        change(m)
+                    catch
+                        return m == 7
+                    end
+                    return false
+                end
+                return raw == nil and inspect(n) and lambda(1)
+            end
+        ]])
+        assert.match("void%s*%*%s*volatile%s+_local_raw_1", csrc)
+        assert.match("volatile%s+int%s+_param_n", csrc)
+        assert.truthy(csrc:find(
+            '__asm__ __volatile__("" : : "r"(&(_local_raw_1)) : "memory");',
+            1, true))
+        assert.truthy(csrc:find(
+            '__asm__ __volatile__("" : : "r"(&(_param_n)) : "memory");',
+            1, true))
+        assert.truthy(csrc:find(
+            "((const int *)((&(_param_n))))", 1, true))
+        assert.match("volatile%s+int%s+_param_m", csrc)
+        assert.truthy(csrc:find(
+            '__asm__ __volatile__("" : : "r"(&(_param_m)) : "memory");',
+            1, true))
+        assert.not_match("_spill_local_raw_1", csrc)
+        assert.not_match("_spill_param_n", csrc)
+        assert.not_match("_spill_param_m", csrc)
+        assert.not_match("volatile%s+_local_untouched_", csrc)
+        assert.not_match("_spill_local_untouched_", csrc)
+    end)
+
+    for _, optimization in ipairs({ "-O2", "-O3" }) do
+        it("preserves indirect scalar writes when an ordinary callee raises at "
+            .. optimization, function()
+            local out = h.with_extra_cflags({ optimization }, function()
+                return compile_and_run([[
+                    local function change(slot: foreign *int)
+                        slot[0] = 7
+                        raise "changed"
+                    end
+                    local function parameter(n: foreign int): integer
+                        do
+                            change(n)
+                        catch
+                        end
+                        return n as integer
+                    end
+                    function run(): integer
+                        local n: foreign int = 1
+                        do
+                            n = 2
+                        catch
+                            return -1
+                        end
+                        local cleaned: integer = 0
+                        do
+                            defer cleaned = n as integer
+                            change(n)
+                        catch
+                        end
+                        local lambda = function (m: foreign int): integer
+                            do
+                                change(m)
+                            catch
+                            end
+                            return m as integer
+                        end
+                        return cleaned * 100 + parameter(1) * 10 + lambda(1)
+                    end
+                ]], [==[
+                    for _ = 1, 20 do
+                        assert(test.run() == 777, "lost indirect recovery write")
+                    end
+                    print("OK")
+                ]==])
+            end)
+            assert.match("OK", out)
+        end)
+
+        it("preserves an inlined scalar write read only during recovery at "
+            .. optimization, function()
+            local fixture = assert(io.open(
+                "spec/fixtures/error_handling/scalar_recovery.titan", "rb"))
+            local source = assert(fixture:read("*a"))
+            assert(fixture:close())
+            local status, out = h.with_extra_cflags({ optimization }, function()
+                return compile_and_run_app(source)
+            end)
+            assert.equal(0, status, out)
+        end)
+    end
 
     it("does not spill locals and params just because a function contains catch", function()
         local csrc = compile_and_read_c([[

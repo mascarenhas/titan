@@ -1,9 +1,13 @@
--- Public behavior of schema-directed protobuf serialization.
+-- Public protobuf behavior and caller-owned raw-buffer collaboration.
 local test = import "test"
 local protobuf = import "protobuf"
 local reflect = import "reflect"
 local string = import "string"
 local gc = import "gc"
+local thread = import "thread"
+local transfer = import "transfer"
+local coroutine = import "coroutine"
+foreign import "titan/ffi.h"
 foreign import "limits.h"
 foreign import "protobuf_fixture.h"
 
@@ -230,6 +234,152 @@ union NativeChoice
   packet(foreign titan_protobuf_packet)
 end
 
+-- The public raw-buffer API invokes this synchronous C-only grow callback;
+-- its context borrows the rooted test-owned counters only during encoding.
+local foreign function record_buffer_growth(
+    buf: *titan_protobuf_buffer, min_capacity: size_t): int
+  local counts = buf.context as foreign *size_t
+  counts[0] = counts[0] + 1
+  if min_capacity >= 65536 then counts[1] = counts[1] + 1 end
+  return ffi.titan_protobuf_heap_grow(buf, min_capacity)
+end
+
+function test_buffer_bulk_growth_leaves_room_for_trailing_fields(_context: test.Context)
+  local counts: owned size_t[] = foreign size_t.new_array(2)
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init(buf, nil, 0, 0,
+    counts as foreign *void, record_buffer_growth)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+  local payload = string.rep("p\0", 32768)
+  local tail = string.rep("t\0", 2048)
+  local fields: const {reflect.Type} = {
+    reflect.Type.is_string(), reflect.Type.is_string(),
+  }
+
+  protobuf.serialize_fields_to_buffer(buf as foreign *void, fields, payload, tail)
+  test.assert(counts[0] == 2 and counts[1] == 1,
+    "bulk payload or trailing field caused an extra buffer growth")
+  test.assert(buf.capacity == 65540 + 65540 // 8,
+    "bulk write did not retain one-eighth proportional slack")
+  local decoded_payload: string, decoded_tail: string =
+    protobuf.deserialize_fields_buffer(
+      buf.data as foreign const *void, buf.length as integer, fields)
+  test.assert(decoded_payload == payload and decoded_tail == tail,
+    "buffer growth changed binary payload or trailing field bytes")
+end
+
+local function check_buffer_bulk_boundary(
+    payload_size: integer, expected_capacity: integer)
+  local counts: owned size_t[] = foreign size_t.new_array(2)
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init(buf, nil, 0, 0,
+    counts as foreign *void, record_buffer_growth)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+  local payload = string.rep("b", payload_size)
+  local fields: const {reflect.Type} = {reflect.Type.is_string()}
+
+  protobuf.serialize_fields_to_buffer(buf as foreign *void, fields, payload)
+  test.assert(counts[0] == 2 and buf.capacity == expected_capacity,
+    "first byte field used the wrong side of the strict bulk threshold")
+  local decoded: string = protobuf.deserialize_fields_buffer(
+    buf.data as foreign const *void, buf.length as integer, fields)
+  test.assert(decoded == payload, "boundary growth changed the field bytes")
+end
+
+function test_buffer_bulk_growth_has_strict_four_capacity_boundary(
+    context: test.Context)
+  context:run("256_bytes_doubles_to_512", function (_: test.Context)
+    -- The key and length use three bytes; 256 == 4 * 64 stays on doubling.
+    check_buffer_bulk_boundary(256, 512)
+  end)
+  context:run("257_bytes_bulk_grows_to_516", function (_: test.Context)
+    -- The 260-byte need receives the 256-byte minimum bulk slack.
+    check_buffer_bulk_boundary(257, 516)
+  end)
+end
+
+function test_buffer_growth_after_bulk_rejoins_power_of_two_capacity(
+    _context: test.Context)
+  local counts: owned size_t[] = foreign size_t.new_array(2)
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init(buf, nil, 0, 0,
+    counts as foreign *void, record_buffer_growth)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+  local payload = string.rep("p\0", 32768)
+  local tail = string.rep("t\0", 8192)
+  local fields: const {reflect.Type} = {
+    reflect.Type.is_string(), reflect.Type.is_string(),
+  }
+
+  -- The first field bulk-grows to 73,732. The second exceeds its slack,
+  -- so growth must resume at 131,072 rather than doubling to 147,464.
+  protobuf.serialize_fields_to_buffer(buf as foreign *void, fields, payload, tail)
+  test.assert(counts[0] == 3 and counts[1] == 2 and buf.capacity == 131072,
+    "growth after a bulk write did not rejoin the power-of-two sequence")
+  local decoded_payload: string, decoded_tail: string =
+    protobuf.deserialize_fields_buffer(
+      buf.data as foreign const *void, buf.length as integer, fields)
+  test.assert(decoded_payload == payload and decoded_tail == tail,
+    "growth after a bulk write changed the binary fields")
+end
+
+function test_buffer_small_writes_keep_geometric_growth(_context: test.Context)
+  local counts: owned size_t[] = foreign size_t.new_array(2)
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init(buf, nil, 0, 0,
+    counts as foreign *void, record_buffer_growth)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+  local fields: const {reflect.Type} = {reflect.Type.is_integer()}
+  local capacity = 0
+  local changes = 0
+  for _ = 1, 512 do
+    protobuf.serialize_fields_to_buffer(buf as foreign *void, fields, 0)
+    local next_capacity = buf.capacity as integer
+    if next_capacity ~= capacity then
+      if capacity == 0 then
+        test.assert(next_capacity == 64, "initial buffer capacity changed")
+      else
+        test.assert(next_capacity == capacity * 2,
+          "small writes no longer double buffer capacity")
+      end
+      capacity = next_capacity
+      changes = changes + 1
+    end
+  end
+  -- 1024 appended bytes cross at least the 64..1024 doublings; every grow
+  -- request must be one of those observed doublings, never a bulk request.
+  test.assert(changes >= 5 and counts[0] == changes,
+    "small-write stream made a non-doubling buffer growth")
+  local expected = string.rep(string.char(8, 0), 512)
+  test.assert(buf.length == #expected and
+    ffi.memcmp(buf.data, expected, #expected as foreign size_t) == 0,
+    "small-write growth changed the appended wire bytes")
+end
+
+-- Records the exact requested capacity and refuses the allocation.
+local foreign function record_refused_growth(
+    buf: *titan_protobuf_buffer, min_capacity: size_t): int
+  local requested = buf.context as foreign *size_t
+  requested[0] = min_capacity
+  return 0
+end
+
+function test_buffer_growth_near_size_limit_keeps_the_exact_need(
+    _context: test.Context)
+  local requested: owned size_t[] = foreign size_t.new_array(1)
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init(buf, nil, 0, 0, requested as foreign *void,
+    record_refused_growth)
+  -- A fixed 256-byte slack would fit, but the proportional slack would not.
+  local extra: foreign size_t = ffi.SIZE_MAX - (512 as foreign size_t)
+  test.assert(ffi.titan_protobuf_buf_reserve(buf, extra) == 0,
+    "refused near-limit growth reported success")
+  test.assert(requested[0] == extra,
+    "unrepresentable bulk slack inflated the requested capacity")
+  test.assert(buf.capacity == 0 and buf.length == 0 and buf.data == nil,
+    "failed growth changed the buffer descriptor")
+end
+
 function test_signed_wire_golden(_context: test.Context)
   test.assert(protobuf.serialize(IntegerValue(75)) == string.char(8, 150, 1))
   test.assert(protobuf.serialize(IntegerValue(-1)) == string.char(8, 1))
@@ -284,6 +434,54 @@ function test_arrays_preserve_holes_empty_absent_and_constness(_context: test.Co
   end
 end
 
+-- One anonymous Array field holding the single element 5, followed by raw
+-- field-2 constness markers.
+local function decode_marked_array(constness: reflect.ArrayTypeConstness,
+                                   markers: string): value
+  local fields: const {reflect.Type} = {
+    reflect.Type.is_array(constness, reflect.Type.is_integer()),
+  }
+  local array = string.char(10, 2, 8, 10) .. markers
+  local decoded: value = protobuf.deserialize_fields(
+    string.char(10, #array) .. array, fields)
+  return decoded
+end
+
+local function expect_marked_array(candidate: value, frozen: boolean)
+  case reflect.inspect(candidate)
+  when is_array(entries) then
+    test.assert(not frozen, "a const Array decoded as mutable")
+    local element: integer = entries[1]
+    test.assert(#entries == 1 and element == 5)
+  when is_const_array(entries) then
+    test.assert(frozen, "a mutable Array decoded as const")
+    local element: integer = entries[1]
+    test.assert(#entries == 1 and element == 5)
+  else raise "expected a decoded Array"
+  end
+end
+
+function test_array_constness_marker_uses_final_validated_occurrence(_context: test.Context)
+  local maybe = reflect.ArrayTypeConstness.is_maybe_const()
+  expect_marked_array(decode_marked_array(maybe, ""), false)
+  expect_marked_array(decode_marked_array(maybe, string.char(16, 0, 16, 1)), true)
+  expect_marked_array(decode_marked_array(maybe, string.char(16, 1, 16, 0)), false)
+  expect_marked_array(
+    decode_marked_array(reflect.ArrayTypeConstness.is_const(), string.char(16, 0)), true)
+  expect_marked_array(
+    decode_marked_array(reflect.ArrayTypeConstness.is_mutable(), string.char(16, 1)), false)
+  -- A malformed earlier marker is rejected even when a valid final one wins.
+  expect_error(function()
+    decode_marked_array(maybe, string.char(16, 2, 16, 1))
+  end, "invalid boolean")
+  expect_error(function()
+    decode_marked_array(reflect.ArrayTypeConstness.is_const(), string.char(16, 2))
+  end, "invalid boolean")
+  expect_error(function()
+    decode_marked_array(maybe, string.char(18, 0, 16, 1))
+  end, "unexpected wire type")
+end
+
 function test_union_empty_and_nullable_payloads(_context: test.Context)
   test.assert(protobuf.serialize(Choice.empty()) == string.char(10, 0))
   local empty: Choice = roundtrip(Choice.empty())
@@ -322,7 +520,8 @@ function test_optimistic_encoding_does_not_preflight_unvisited_types(_context: t
                  "unsupported field type")
   expect_error(function() protobuf.serialize(Optimistic.unavailable(function() end)) end,
                  "unsupported field type")
-  expect_error(function() protobuf.serialize(AnyValue(17)) end, "unsupported field type")
+  expect_error(function() protobuf.serialize(AnyValue(function() end)) end,
+               "unsupported dynamic value")
 end
 
 function test_cycles_and_nonpublic_nominals_are_rejected(_context: test.Context)
@@ -496,6 +695,42 @@ function test_nominal_lookup_requires_registered_matching_kind(_context: test.Co
   end, "nominal kind mismatch")
 end
 
+local function decode_with_nominal(bytes: string, nominal: reflect.NominalType?,
+                                   name: string, is_union: boolean): value
+  return protobuf.deserialize_nominal_buffer_with_context(
+    ffi.titan_protobuf_bytes_ptr(bytes) as foreign const *void, #bytes,
+    nominal, name, is_union, nil)
+end
+
+function test_nominal_buffer_with_context_decodes_the_supplied_descriptor(
+    _context: test.Context)
+  local record_bytes = protobuf.serialize(IntegerValue(41))
+  local record_nominal? = reflect.find_nominal("protobuf.tests.IntegerValue")
+  test.assert(record_nominal ~= nil)
+  -- The supplied descriptor selects the root; the name only labels errors.
+  local decoded: IntegerValue = decode_with_nominal(
+    record_bytes, record_nominal, "protobuf.tests.Unrelated", false)
+  test.assert(decoded.number == 41)
+  local union_bytes = protobuf.serialize(Choice.pair(-3, "note"))
+  local union_nominal? = reflect.find_nominal("protobuf.tests.Choice")
+  test.assert(union_nominal ~= nil)
+  local choice: Choice = decode_with_nominal(
+    union_bytes, union_nominal, "protobuf.tests.Choice", true)
+  case choice
+  when pair(number, note) then test.assert(number == -3 and note == "note")
+  else raise "union variant changed"
+  end
+  expect_error(function()
+    decode_with_nominal(record_bytes, nil, "protobuf.tests.Missing", false)
+  end, "unknown nominal type protobuf.tests.Missing")
+  expect_error(function()
+    decode_with_nominal(record_bytes, record_nominal, "protobuf.tests.IntegerValue", true)
+  end, "nominal kind mismatch for protobuf.tests.IntegerValue")
+  expect_error(function()
+    decode_with_nominal(union_bytes, union_nominal, "protobuf.tests.Choice", false)
+  end, "nominal kind mismatch for protobuf.tests.Choice")
+end
+
 function test_schema_is_stable_and_contains_matching_wire_types(_context: test.Context)
   local target = descriptor(Scalars(0, 0, false, 0.0, "", nil))
   local output = protobuf.schema(target)
@@ -627,6 +862,238 @@ function test_indexed_union_merge_keeps_last_variant_reset_and_payload_order(
   case reset
   when pair(number, note) then test.assert(number == 5 and note == nil)
   else raise "oneof replacement failed to reset earlier payloads" end
+end
+
+function test_directory_empty_single_and_group_wire_validation(context: test.Context)
+  context:run("empty", function (_child: test.Context)
+    local decoded: NilValue = protobuf.deserialize("", descriptor(NilValue(nil)))
+    test.assert(decoded.nothing == nil)
+  end)
+  context:run("single_group", function (_child: test.Context)
+    -- Nested unknown fields are validated but do not enter the directory.
+    local decoded: NilValue = protobuf.deserialize(
+      string.char(51, 8, 2, 59, 16, 4, 60, 52), descriptor(NilValue(nil)))
+    test.assert(decoded.nothing == nil)
+  end)
+  context:run("unexpected_end_group", function (_child: test.Context)
+    expect_error(function ()
+      protobuf.deserialize(string.char(52), descriptor(NilValue(nil)))
+    end, "invalid wire type")
+  end)
+  context:run("unterminated_group", function (_child: test.Context)
+    expect_error(function ()
+      protobuf.deserialize(string.char(51, 8, 2), descriptor(NilValue(nil)))
+    end, "unterminated group")
+  end)
+  context:run("malformed_unknown_group_field", function (_child: test.Context)
+    expect_error(function ()
+      protobuf.deserialize(string.char(51, 8, 128), descriptor(NilValue(nil)))
+    end, "truncated varint")
+  end)
+  context:run("invalid_unknown_wire", function (_child: test.Context)
+    expect_error(function ()
+      protobuf.deserialize(string.char(54), descriptor(NilValue(nil)))
+    end, "invalid wire type")
+  end)
+end
+
+function test_directory_index_chains_colliding_tags(_context: test.Context)
+  local none: {integer} = {}
+  local frozen = none as const {integer}
+  local output = string.writer()
+  for index = 1, 64 do
+    output:write(protobuf.serialize(Arrays({index}, frozen, frozen, nil, {})))
+    -- Each unknown tag shares the index bucket of present field 1 or absent
+    -- field 4 for every index capacity through 2^16 buckets.
+    local field_one_peer = (index << 16) | (1 ~ index)
+    local field_four_peer = (index << 16) | (4 ~ index)
+    -- The repeat replaces its chain head; the next field 1 replaces a later link.
+    append_test_varint(output, field_one_peer << 3)
+    append_test_varint(output, index)
+    append_test_varint(output, field_one_peer << 3)
+    append_test_varint(output, index)
+    append_test_varint(output, field_four_peer << 3)
+    append_test_varint(output, index)
+  end
+  local decoded: Arrays = protobuf.deserialize(output:drain(),
+    descriptor(Arrays(none, frozen, frozen, nil, none)))
+  test.assert(#decoded.mutable == 64 and decoded.absent == nil)
+  for index = 1, 64 do
+    test.assert(decoded.mutable[index] == index, "colliding tags reordered a merged Array")
+  end
+end
+
+local function directory_node_bytes(count: integer): string
+  local output = string.writer()
+  output:write(string.char(10, 0))
+  local bytes = output:drain()
+  -- Build wire bytes directly so the encoder's depth guard is not the oracle.
+  for index = 2, count do
+    output:write(string.char(10, 0, 18))
+    append_test_varint(output, #bytes)
+    output:write(bytes)
+    bytes = output:drain()
+  end
+  return bytes
+end
+
+function test_directory_decode_depth_limit(context: test.Context)
+  local target = descriptor(Node("", nil))
+  context:run("accepted_boundary", function (_child: test.Context)
+    -- Each Node also decodes its name and optional next at depth + 1.
+    local decoded: Node = protobuf.deserialize(directory_node_bytes(127), target)
+    local count = 1
+    while decoded.next ~= nil do
+      decoded = decoded.next
+      count = count + 1
+    end
+    test.assert(count == 127)
+  end)
+  context:run("rejected_boundary", function (_child: test.Context)
+    expect_error(function ()
+      protobuf.deserialize(directory_node_bytes(128), target)
+    end, "nesting exceeds 128")
+  end)
+end
+
+record DirectoryHook
+  local payload: string
+end
+
+local record DirectoryFailure
+  const label: string
+end
+
+local const directory_failure = DirectoryFailure("directory decode failure")
+local directory_hook_calls = 0
+local directory_input: string? = nil
+local directory_overwrite: string? = nil
+
+function DirectoryHook:to_transfer_payload(): string
+  return self.payload
+end
+
+function DirectoryHook.from_transfer_payload(payload: string): DirectoryHook
+  directory_hook_calls = directory_hook_calls + 1
+  local released = 0
+  if payload == "release" then
+    -- Drop the string entry caller's only input reference before collecting.
+    released = #directory_input
+    directory_input = nil
+  end
+  gc.collect()
+  -- Without a decoder-owned root, this same-length string can reuse the freed
+  -- input block before later fields read it.
+  if released > 0 then directory_overwrite = string.rep("!", released) end
+  if payload == "raise" then raise directory_failure end
+  return DirectoryHook(payload)
+end
+
+record DirectorySlices
+  hook: DirectoryHook
+  tail: string
+  number: integer
+end
+
+record DirectoryOuter
+  inner: DirectorySlices
+end
+
+local function append_directory_fragment(output: string.StringWriter, bytes: string)
+  output:write(string.char(10))
+  append_test_varint(output, #bytes)
+  output:write(bytes)
+end
+
+function test_directory_keeps_root_and_merged_slices_live_across_hook_gc(
+    _context: test.Context)
+  local expected = string.rep("directory-tail\0", 1024)
+  local original = DirectorySlices(DirectoryHook("collect"), expected, 37)
+  local decoded: DirectorySlices = protobuf.deserialize(
+    protobuf.serialize(original), descriptor(original))
+  test.assert(decoded.tail == expected and decoded.number == 37,
+    "root wire slices did not survive collection in a custom decoder")
+
+  local output = string.writer()
+  append_directory_fragment(output, protobuf.serialize_fields(
+    {descriptor(DirectoryHook("collect"))}, DirectoryHook("collect")))
+  append_directory_fragment(output, protobuf.serialize_fields(
+    {reflect.Type.is_nil(), reflect.Type.is_string(), reflect.Type.is_integer()},
+    nil, expected, 91))
+  local merged: DirectoryOuter = protobuf.deserialize(
+    output:drain(), descriptor(DirectoryOuter(original)))
+  test.assert(merged.inner.tail == expected and merged.inner.number == 91,
+    "merged byte owner did not survive collection in a custom decoder")
+end
+
+-- Build the wire bytes here so no test-frame temporary retains them: the module
+-- variable is the only caller-side reference when the hook releases it.
+local function store_directory_input(expected: string, anonymous: boolean)
+  directory_overwrite = nil
+  local hook = DirectoryHook("release")
+  if anonymous then
+    directory_input = protobuf.serialize_fields(
+      {descriptor(hook), reflect.Type.is_string(), reflect.Type.is_integer()},
+      hook, expected, 53)
+  else
+    directory_input = protobuf.serialize(DirectorySlices(hook, expected, 53))
+  end
+end
+
+local function check_directory_release(retained: boolean)
+  directory_overwrite = nil
+  test.assert(directory_input == nil, "custom decoder did not release the input")
+  test.assert(retained, "string entry did not retain an input released by a custom decoder")
+end
+
+function test_directory_string_entries_retain_input_released_by_custom_decoder(
+    context: test.Context)
+  local expected = string.rep("directory-input\0", 1024)
+  local target = descriptor(DirectorySlices(DirectoryHook("release"), "", 0))
+  context:run("deserialize", function (_child: test.Context)
+    store_directory_input(expected, false)
+    local decoded: DirectorySlices = protobuf.deserialize(directory_input, target)
+    check_directory_release(decoded.tail == expected and decoded.number == 53)
+  end)
+  context:run("deserialize_fields", function (_child: test.Context)
+    store_directory_input(expected, true)
+    local fields: const {reflect.Type} =
+      {descriptor(DirectoryHook("release")), reflect.Type.is_string(), reflect.Type.is_integer()}
+    local hook: DirectoryHook, tail: string, number: integer =
+      protobuf.deserialize_fields(directory_input, fields)
+    check_directory_release(hook.payload == "release" and tail == expected and number == 53)
+  end)
+  context:run("deserialize_nominal", function (_child: test.Context)
+    store_directory_input(expected, false)
+    local decoded: DirectorySlices = protobuf.deserialize_nominal(
+      directory_input, "protobuf.tests.DirectorySlices", false)
+    check_directory_release(decoded.tail == expected and decoded.number == 53)
+  end)
+end
+
+function test_directory_custom_decoder_uses_last_payload_and_preserves_error_value(
+    _context: test.Context)
+  local fields: const {reflect.Type} = {descriptor(DirectoryHook("ok"))}
+  local bad = protobuf.serialize_fields(fields, DirectoryHook("raise"))
+  local good = protobuf.serialize_fields(fields, DirectoryHook("ok"))
+  directory_hook_calls = 0
+  local decoded: DirectoryHook = protobuf.deserialize_fields(bad .. good, fields)
+  test.assert(decoded.payload == "ok" and directory_hook_calls == 1,
+    "custom decoder merged payloads or decoded an earlier occurrence")
+  directory_hook_calls = 0
+  local caught = false
+  do
+    protobuf.deserialize_fields(good .. bad, fields)
+  catch
+    caught = true
+    test.assert(error == directory_failure, "custom decoder replaced the raised value")
+  end
+  test.assert(caught and directory_hook_calls == 1,
+    "last custom-decoder failure did not propagate exactly once")
+  -- A malformed superseded wire kind is ignored only for opaque hook payloads,
+  -- just like scalar last-selection; structural-message merges validate it.
+  local last: DirectoryHook = protobuf.deserialize_fields(string.char(8, 0) .. good, fields)
+  test.assert(last.payload == "ok")
 end
 
 record HookedToken
@@ -777,3 +1244,1116 @@ function test_nested_message_varint_length_boundaries_and_realloc_error_cleanup(
   end, "hooked token encode rejected negative secret")
 end
 
+local function check_nil_context_endpoint_encode_refused(
+    tx: thread.Sender<|integer|>)
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init_heap(buf, 0)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+
+  local rejected = false
+  do
+    protobuf.serialize_fields_to_buffer_with_context(
+      buf as foreign *void, {descriptor(tx)}, nil, tx)
+  catch
+    rejected = true
+    test.assert(error == "transfer: resource attachment requires an encode scope",
+      "explicit nil encode context raised a different error")
+  end
+  test.assert(rejected, "explicit nil context authorized endpoint encoding")
+end
+
+local function check_nil_context_endpoint_decode_refused()
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init_heap(buf, 0)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+  -- Copy a synthetic field-1 attachment index into storage owned through decode.
+  -- The string argument is borrowed only for this copying C call.
+  test.assert(ffi.titan_protobuf_buf_write_bytes(buf, 10, "\0\0\0\0", 4) ~= 0,
+    "could not prepare endpoint wire bytes")
+  local fields: const {reflect.Type} = {
+    reflect.Type.is_named(reflect.NamedType("titan.thread.Sender")),
+  }
+
+  local rejected = false
+  do
+    protobuf.deserialize_fields_buffer_with_context(
+      buf.data as foreign const *void, buf.length as integer, fields, nil)
+  catch
+    rejected = true
+    test.assert(error == "transfer: resource claim requires a decode scope",
+      "explicit nil decode context raised a different error")
+  end
+  test.assert(rejected, "explicit nil context authorized endpoint decoding")
+end
+
+record NilContextEncodeProbe
+  local tx: thread.Sender<|integer|>
+end
+
+function NilContextEncodeProbe:to_transfer_payload(): string
+  check_nil_context_endpoint_encode_refused(self.tx)
+  return protobuf.serialize_fields({descriptor(self.tx)}, self.tx)
+end
+
+function NilContextEncodeProbe.from_transfer_payload(
+    payload: string): NilContextEncodeProbe
+  local tx: thread.Sender<|integer|> = protobuf.deserialize_fields(payload, {
+    reflect.Type.is_named(reflect.NamedType("titan.thread.Sender")),
+  })
+  return NilContextEncodeProbe(tx)
+end
+
+record NilContextDecodeProbe
+  local tx: thread.Sender<|integer|>
+end
+
+function NilContextDecodeProbe:to_transfer_payload(): string
+  return protobuf.serialize_fields({descriptor(self.tx)}, self.tx)
+end
+
+function NilContextDecodeProbe.from_transfer_payload(
+    payload: string): NilContextDecodeProbe
+  check_nil_context_endpoint_decode_refused()
+  local tx: thread.Sender<|integer|> = protobuf.deserialize_fields(payload, {
+    reflect.Type.is_named(reflect.NamedType("titan.thread.Sender")),
+  })
+  return NilContextDecodeProbe(tx)
+end
+
+function test_anonymous_fields_buffer_with_context_empty(_context: test.Context)
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init_heap(buf, 0)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+  local fields: const {reflect.Type} = {}
+
+  protobuf.serialize_fields_to_buffer_with_context(buf as foreign *void, fields, nil)
+  test.assert((buf.length as integer) == 0, "empty schema wrote wire bytes")
+  test.assert(anonymous_result_count(
+    protobuf.deserialize_fields_buffer_with_context(
+      buf.data as foreign const *void, buf.length as integer, fields, nil)) == 0,
+    "empty schema returned a value")
+end
+
+function test_anonymous_fields_buffer_with_context_rejects_count_mismatch(
+    _context: test.Context)
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init_heap(buf, 0)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+
+  local rejected = false
+  do
+    protobuf.serialize_fields_to_buffer_with_context(
+      buf as foreign *void, {reflect.Type.is_integer()}, nil, 1, 2)
+  catch
+    rejected = true
+    test.assert(error == "protobuf: anonymous field count mismatch",
+      "field count mismatch raised a different error")
+  end
+  test.assert(rejected, "anonymous buffer encoder accepted surplus values")
+end
+
+function test_anonymous_fields_buffer_with_context_mixed_roundtrip(
+    _context: test.Context)
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init_heap(buf, 0)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+  local tok = HookedToken(77, "with\0context")
+  local fields: const {reflect.Type} = {
+    reflect.Type.is_option(reflect.Type.is_integer()),
+    reflect.Type.is_nil(),
+    descriptor(tok),
+    reflect.Type.is_string(),
+  }
+
+  protobuf.serialize_fields_to_buffer_with_context(
+    buf as foreign *void, fields, nil, nil, nil, tok, "tail\0bytes")
+  local r_opt: integer?, r_nil: value, r_tok: HookedToken, r_str: string =
+    protobuf.deserialize_fields_buffer_with_context(
+      buf.data as foreign const *void, buf.length as integer, fields, nil)
+  test.assert(r_opt == nil and r_nil == nil, "nil field positions changed")
+  test.assert(r_tok:read_secret() == 77 and r_tok:read_label() == "with\0context",
+    "custom-hooked field did not round-trip")
+  test.assert(r_str == "tail\0bytes", "binary field did not round-trip")
+end
+
+function test_anonymous_fields_buffer_nil_context_rejects_standalone_encode(
+    _context: test.Context)
+  local tx, rx = thread.channel<|integer|>(1)
+  defer tx:close()
+  defer rx:close()
+  check_nil_context_endpoint_encode_refused(tx)
+end
+
+function test_anonymous_fields_buffer_nil_context_rejects_standalone_decode(
+    _context: test.Context)
+  check_nil_context_endpoint_decode_refused()
+end
+
+function test_anonymous_fields_buffer_nil_context_rejects_active_encode_hook(
+    _context: test.Context)
+  local tx, rx = thread.channel<|integer|>(1)
+  defer tx:close()
+  defer rx:close()
+  local carrier_tx, carrier_rx = thread.channel<|NilContextEncodeProbe|>(1)
+  defer carrier_tx:close()
+  defer carrier_rx:close()
+
+  -- Explicit nil refuses authority in the same hook where the public wrapper attaches.
+  test.assert(carrier_tx:try_send(NilContextEncodeProbe(tx)))
+  local available, decoded? = carrier_rx:try_receive()
+  test.assert(available and decoded ~= nil, "ordinary encode hook did not round-trip")
+  local destination_tx = decoded.tx
+  defer destination_tx:close()
+  test.assert(destination_tx ~= tx, "ambient encode reused the source Sender wrapper")
+  test.assert(destination_tx:try_send(314), "ambient encode Sender could not send")
+  local received, number? = rx:try_receive()
+  test.assert(received and number == 314,
+    "ambient encode Sender did not deliver to its live peer")
+end
+
+function test_anonymous_fields_buffer_nil_context_rejects_active_decode_hook(
+    _context: test.Context)
+  local tx, rx = thread.channel<|integer|>(1)
+  defer tx:close()
+  defer rx:close()
+  local carrier_tx, carrier_rx = thread.channel<|NilContextDecodeProbe|>(1)
+  defer carrier_tx:close()
+  defer carrier_rx:close()
+
+  -- Explicit nil refuses authority in the same hook where the public wrapper claims.
+  test.assert(carrier_tx:try_send(NilContextDecodeProbe(tx)))
+  local available, decoded? = carrier_rx:try_receive()
+  test.assert(available and decoded ~= nil, "ordinary decode hook did not round-trip")
+  local destination_tx = decoded.tx
+  defer destination_tx:close()
+  test.assert(destination_tx ~= tx, "ambient decode reused the source Sender wrapper")
+  test.assert(destination_tx:try_send(271), "ambient decode Sender could not send")
+  local received, number? = rx:try_receive()
+  test.assert(received and number == 271,
+    "ambient decode Sender did not deliver to its live peer")
+end
+
+-- Wire helpers for the generated-codec tests below.
+record BackpatchNode
+  child: BackpatchNode?
+  bytes: string
+end
+
+local function backpatch_varint(number: integer): string
+  local bytes = ""
+  while number >= 128 do
+    bytes = bytes .. string.char((number & 127) | 128)
+    number = number >> 7
+  end
+  return bytes .. string.char(number)
+end
+
+-- One length-delimited field.
+local function backpatch_field(number: integer, bytes: string): string
+  return backpatch_varint((number << 3) | 2) .. backpatch_varint(#bytes) .. bytes
+end
+
+-- Encode one transfer packet and decode it in this state.
+local function backpatch_transfer_roundtrip(candidate: value): value
+  local raw = transfer.encode_message(candidate)
+  defer transfer.discard_message(raw)
+  local result = transfer.decode_message(raw)
+  test.assert(raw == nil, "raw decode did not consume the actual packet slot")
+  return result
+end
+
+-- Compiler-generated nominal codecs. `protobuf.use_generated_codecs(false)`
+-- disables ordinary generated-codec lookup in this state; existing handles can
+-- still run generated code. These helpers use ordinary dispatch as the
+-- differential oracle for bytes, values, and error strings.
+local function reflective_serialize(candidate: value): string
+  local previous = protobuf.use_generated_codecs(false)
+  defer protobuf.use_generated_codecs(previous)
+  return protobuf.serialize(candidate)
+end
+
+local function reflective_deserialize(bytes: string, target: reflect.Type): value
+  local previous = protobuf.use_generated_codecs(false)
+  defer protobuf.use_generated_codecs(previous)
+  return protobuf.deserialize(bytes, target)
+end
+
+local function raised_message(action: function (): ()): string
+  local message = ""
+  local failed = false
+  do
+    action()
+  catch
+    failed = true
+    test.assert(error is string, "expected a string error")
+    message = error
+  end
+  test.assert(failed, "expected the operation to raise")
+  return message
+end
+
+local function reflective_message(action: function (): ()): string
+  local previous = protobuf.use_generated_codecs(false)
+  defer protobuf.use_generated_codecs(previous)
+  return raised_message(action)
+end
+
+-- The generated and reflective outcomes of an action must be identical.
+local function check_same_error(context: test.Context, name: string,
+    action: function (): (), expected: string)
+  context:run(name, function (_: test.Context)
+    local generated = raised_message(action)
+    local reflective = reflective_message(action)
+    test.assert(generated == reflective, generated .. " ~= " .. reflective)
+    test.assert(string.find(generated, expected, 1, true) ~= nil, generated)
+  end)
+end
+
+local function decode_outcome(bytes: string, target: reflect.Type, generated: boolean): string
+  local previous = protobuf.use_generated_codecs(generated)
+  defer protobuf.use_generated_codecs(previous)
+  local outcome = "error"
+  do
+    local decoded: value = protobuf.deserialize(bytes, target)
+    outcome = "ok " .. reflective_serialize(decoded)
+  catch
+    if error is string then
+      local message: string = error
+      outcome = "error " .. message
+    end
+  end
+  return outcome
+end
+
+local function buffer_bytes(buf: foreign *titan_protobuf_buffer): string
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve test stack" end
+  ffi.lua_pushlstring(L, buf.data as foreign const *char, buf.length)
+  return ffi.lua_totvalue(L, -1) as value
+end
+
+-- Run the generated root encoder alone, proving that it handled the value.
+local function generated_wire(candidate: value): string
+  local codec = protobuf.find_generated_codec(candidate)
+  test.assert(codec ~= nil, "missing generated codec")
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init_heap(buf, 0)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+  test.assert(protobuf.serialize_generated_to_buffer(buf as foreign *void, codec,
+      candidate, nil), "the generated codec did not match its value")
+  return buffer_bytes(buf)
+end
+
+-- A nominal with a generated codec always decodes through it, so a decoded
+-- value with a codec proves which decoder ran.
+local function generated_decode(bytes: string, target: reflect.Type): value
+  local decoded: value = protobuf.deserialize(bytes, target)
+  test.assert(protobuf.find_generated_codec(decoded) ~= nil, "missing generated decoder")
+  return decoded
+end
+
+local function check_generated_codec(context: test.Context, name: string, candidate: value)
+  context:run(name, function (_: test.Context)
+    local target = descriptor(candidate)
+    local bytes = generated_wire(candidate)
+    test.assert(bytes == reflective_serialize(candidate),
+        "generated bytes differ from the reflective encoder")
+    test.assert(bytes == protobuf.serialize(candidate), "serialize did not use the generated bytes")
+    local generated = generated_decode(bytes, target)
+    test.assert(reflective_serialize(generated) == bytes, "generated decode lost data")
+    test.assert(reflective_serialize(reflective_deserialize(bytes, target)) == bytes)
+    test.assert(reflective_serialize(protobuf.deserialize(bytes, target)) == bytes)
+    test.assert(reflective_serialize(backpatch_transfer_roundtrip(candidate)) == bytes,
+        "generated transfer packet lost data")
+  end)
+end
+
+record ChoiceHolder
+  choice: Choice
+  maybe: Choice?
+end
+
+record CrossModuleHolder
+  named: reflect.NamedType
+  optional: reflect.NamedType?
+end
+
+record Tagged<|T|>
+  id: integer
+  label: string
+end
+
+-- A generated parent of reflective fields: Arrays, hooked records, foreign
+-- scalars and pointers, and a nested Array of generated nominals.
+record MixedFields
+  id: integer
+  list: {Node}
+  token: HookedToken
+  maybe_token: HookedToken?
+  narrow: foreign unsigned char
+  ratio: foreign float
+  pointer: foreign *void
+  choices: const {Choice}
+end
+
+local function node_chain(count: integer): Node
+  local chain = Node("leaf", nil)
+  for index = 2, count do chain = Node("n" .. index, chain) end
+  return chain
+end
+
+function test_generated_codecs_match_reflective_codec(context: test.Context)
+  local deep = BackpatchNode(nil, string.rep("b", 126))
+  for _ = 1, 40 do deep = BackpatchNode(deep, string.rep("c", 130)) end
+  local holes: {integer} = {7}
+  holes[3] = 9
+  local frozen = holes as const {integer}
+  local owner: owned *int = foreign int.new()
+  local first = HookedToken(42, "alpha\0beta")
+  check_generated_codec(context, "integer", IntegerValue(-37))
+  check_generated_codec(context, "boolean_absent", BooleanValue(false, nil))
+  check_generated_codec(context, "boolean_present", BooleanValue(true, false))
+  check_generated_codec(context, "nil_field", NilValue(nil))
+  check_generated_codec(context, "scalars", Scalars(-9223372036854775807 - 1,
+      9223372036854775807, true, -0.0, "\0\255raw", "x"))
+  check_generated_codec(context, "shared", Shared(Node("leaf", nil),
+      Node("other", Node("tail", nil))))
+  check_generated_codec(context, "chain40", node_chain(40))
+  check_generated_codec(context, "union_empty", Choice.empty())
+  check_generated_codec(context, "union_pair", Choice.pair(3, nil))
+  check_generated_codec(context, "union_note", Choice.pair(-3, "note"))
+  check_generated_codec(context, "union_node", Choice.node(Node("x", nil)))
+  check_generated_codec(context, "union_record_field",
+      ChoiceHolder(Choice.pair(5, "five"), Choice.node(Node("y", nil))))
+  check_generated_codec(context, "union_record_field_absent", ChoiceHolder(Choice.empty(), nil))
+  check_generated_codec(context, "cross_module_field",
+      CrossModuleHolder(reflect.NamedType("a.B"), reflect.NamedType("c.D")))
+  check_generated_codec(context, "generic_integer", Tagged<|integer|>.new(1, "one"))
+  check_generated_codec(context, "generic_string", Tagged<|string|>.new(2, "two"))
+  check_generated_codec(context, "custom_constructor", CustomConstructor(17))
+  check_generated_codec(context, "arrays", Arrays(holes, frozen, frozen, nil, {}))
+  check_generated_codec(context, "hooked_fields",
+      HookedEnvelope(7, first, nil, {first, HookedToken(99, "gamma")}))
+  check_generated_codec(context, "hooked_union", HookedChoice.single(first))
+  check_generated_codec(context, "foreign_scalars", ForeignScalars(ffi.LLONG_MIN,
+      ffi.ULLONG_MAX, 255, 1.25, -2.5, owner))
+  check_generated_codec(context, "mixed_fields", MixedFields(3,
+      {Node("a", Node("b", nil)), Node("c", nil)}, first, nil, 7, 0.5, owner,
+      {Choice.empty(), Choice.pair(1, "one")} as const {Choice}))
+  check_generated_codec(context, "nested_127",
+      NestedOuter("p", NestedPayload(string.rep("b", 125)), 9))
+  check_generated_codec(context, "nested_128",
+      NestedOuter("p", NestedPayload(string.rep("b", 126)), 9))
+  check_generated_codec(context, "nested_16384",
+      NestedOuter("p", NestedPayload(string.rep("b", 16382)), 9))
+  check_generated_codec(context, "deep_nested_lengths", deep)
+end
+
+union StringPublicationChoice
+  text(string)
+  empty()
+end
+
+record StringPublication
+  first: string
+  second: string
+  last: string
+  optional_first: string?
+  optional_last: string?
+  absent: string?
+  choice: StringPublicationChoice
+  item: value
+end
+
+local function assert_published_strings(actual: StringPublication,
+                                       expected: StringPublication)
+  test.assert(actual.first == expected.first, "first required string changed")
+  test.assert(actual.second == expected.second, "second required string changed")
+  test.assert(actual.last == expected.last, "last required string changed")
+  test.assert(actual.optional_first == expected.optional_first,
+      "first optional string changed")
+  test.assert(actual.optional_last == expected.optional_last,
+      "last optional string changed")
+  test.assert(actual.absent == nil, "absent optional string became present")
+  test.assert(actual.item is string and actual.item == expected.item,
+      "value-field string changed")
+  case actual.choice
+  when text(contents) then
+    case expected.choice
+    when text(expected_contents) then
+      test.assert(contents == expected_contents, "union string part changed")
+    else raise "expected string union part"
+    end
+  else raise "decoded string union part changed variant"
+  end
+end
+
+function test_generated_string_fields_survive_aggressive_collection(
+    _context: test.Context)
+  local previous = protobuf.use_generated_codecs(true)
+  defer protobuf.use_generated_codecs(previous)
+  local expected = StringPublication(
+      string.rep("first\0", 12000), string.rep("second\255", 10000),
+      string.rep("last\0", 15000), string.rep("optional-first\0", 5000),
+      string.rep("optional-last\255", 5000), nil,
+      StringPublicationChoice.text(string.rep("union\0", 12000)),
+      string.rep("value\255", 12000))
+  local target = descriptor(expected)
+  local bytes = generated_wire(expected)
+  test.assert(bytes == reflective_serialize(expected))
+
+  local originally_paused = gc.paused()
+  local originally_incremental = gc.incremental()
+  local pause_percent = gc.pause_percent()
+  local stepmul = gc.stepmul()
+  local stepsize = gc.stepsize()
+  defer do
+    gc.pause_percent(pause_percent)
+    gc.stepmul(stepmul)
+    gc.stepsize(stepsize)
+    if originally_incremental then gc.incremental() else gc.generational() end
+    if originally_paused then gc.pause() else gc.resume() end
+  end
+  -- Each field exceeds 64 KiB; make allocation safepoints do collector work
+  -- while later fields are decoded, not just after the record is complete.
+  gc.pause_percent(0)
+  gc.stepmul(100000)
+  gc.stepsize(1)
+  gc.resume()
+  gc.collect()
+
+  local generated: StringPublication = generated_decode(bytes, target)
+  local reflected: StringPublication = reflective_deserialize(bytes, target)
+  gc.collect()
+  assert_published_strings(generated, expected)
+  assert_published_strings(reflected, expected)
+  assert_published_strings(generated, reflected)
+end
+
+function test_generated_codecs_share_erased_generic_applications(_context: test.Context)
+  local first = protobuf.find_generated_codec(Tagged<|integer|>.new(1, "one"))
+  test.assert(first ~= nil, "missing generic codec")
+  test.assert(first == protobuf.find_generated_codec(Tagged<|string|>.new(2, "two")),
+      "erased applications must share one codec")
+end
+
+function test_generated_codecs_cover_public_hook_free_nominals(_context: test.Context)
+  test.assert(protobuf.find_generated_codec(IntegerValue(1)) ~= nil)
+  test.assert(protobuf.find_generated_codec(Choice.empty()) ~= nil)
+  test.assert(protobuf.find_generated_codec(ChoiceHolder(Choice.empty(), nil)) ~= nil)
+  test.assert(protobuf.find_generated_codec(reflect.NamedType("x")) ~= nil, "imported record")
+  test.assert(protobuf.find_generated_codec(HookedChoice.none()) ~= nil, "hooked part")
+  test.assert(protobuf.find_generated_codec(AnyValue(nil)) ~= nil, "value field")
+  test.assert(protobuf.find_generated_codec(LocalRecord(1)) == nil, "local record")
+  test.assert(protobuf.find_generated_codec(PrivateVariants.visible()) == nil, "private variant")
+  test.assert(protobuf.find_generated_codec(Optimistic.empty()) == nil, "callable part")
+  test.assert(protobuf.find_generated_codec(HookedToken(1, "x")) == nil, "own hooks")
+  test.assert(protobuf.find_generated_codec(7) == nil, "scalar")
+  test.assert(protobuf.find_generated_codec("text") == nil, "string")
+  local previous = protobuf.use_generated_codecs(false)
+  defer protobuf.use_generated_codecs(previous)
+  test.assert(protobuf.find_generated_codec(IntegerValue(1)) == nil, "disabled codecs")
+end
+
+-- Variant count does not enlarge a generated decoder's C-stack directory.
+union WideGeneratedChoice
+  v1(integer)
+  v2(integer)
+  v3(integer)
+  v4(integer)
+  v5(integer)
+  v6(integer)
+  v7(integer)
+  v8(integer)
+  v9(integer)
+  v10(integer)
+  v11(integer)
+  v12(integer)
+  v13(integer)
+  v14(integer)
+  v15(integer)
+  v16(integer)
+  v17(integer)
+  v18(integer)
+  v19(integer)
+  v20(integer)
+  v21(integer)
+  v22(integer)
+  v23(integer)
+  v24(integer)
+  v25(integer)
+  v26(integer)
+  v27(integer)
+  v28(integer)
+  v29(integer)
+  v30(integer)
+  v31(integer)
+  v32(integer)
+  v33(integer)
+  v34(integer)
+  v35(integer)
+  v36(integer)
+  v37(integer)
+  v38(integer)
+  v39(integer)
+  v40(integer)
+  v41(integer)
+  v42(integer)
+  v43(integer)
+  v44(integer)
+  v45(integer)
+  v46(integer)
+  v47(integer)
+  v48(integer)
+  v49(integer)
+  v50(integer)
+  v51(integer)
+  v52(integer)
+  v53(integer)
+  v54(integer)
+  v55(integer)
+  v56(integer)
+  v57(integer)
+  v58(integer)
+  v59(integer)
+  v60(integer)
+  v61(integer)
+  v62(integer)
+  v63(integer)
+  v64(integer)
+end
+
+function test_generated_codecs_bound_wide_union_frames(context: test.Context)
+  check_generated_codec(context, "first_variant", WideGeneratedChoice.v1(7))
+  check_generated_codec(context, "last_variant", WideGeneratedChoice.v64(73))
+  local first = protobuf.serialize(WideGeneratedChoice.v1(7))
+  local last = protobuf.serialize(WideGeneratedChoice.v64(73))
+  local target = descriptor(WideGeneratedChoice.v64(0))
+  check_decode_outcome(context, "replaced_variant", first .. last, target)
+  check_decode_outcome(context, "repeated_variant", last .. last, target)
+  check_decode_outcome(context, "unknown_variant", backpatch_field(65, "") .. last, target)
+  check_decode_outcome(context, "invalid_trailing_field", last .. string.char(0), target)
+  check_decode_outcome(context, "missing_variant", "", target)
+  check_decode_outcome(context, "nonmessage_variant", string.char(8, 0), target)
+end
+
+local function check_decode_outcome(context: test.Context, name: string,
+    bytes: string, target: reflect.Type)
+  context:run(name, function (_: test.Context)
+    local generated = decode_outcome(bytes, target, true)
+    local reflective = decode_outcome(bytes, target, false)
+    test.assert(generated == reflective, generated .. " ~= " .. reflective)
+  end)
+end
+
+function test_generated_codecs_decode_every_wire_reflectively(context: test.Context)
+  local integer_type = descriptor(IntegerValue(0))
+  local node_type = descriptor(Node("", nil))
+  local choice_type = descriptor(Choice.empty())
+  local holder_type = descriptor(ChoiceHolder(Choice.empty(), nil))
+  local nil_type = descriptor(NilValue(nil))
+  local boolean_type = descriptor(BooleanValue(false, nil))
+  local hooked_type = descriptor(HookedEnvelope(1, HookedToken(1, ""), nil, {}))
+  check_decode_outcome(context, "empty", "", integer_type)
+  check_decode_outcome(context, "zero_field", string.char(0), integer_type)
+  check_decode_outcome(context, "truncated_varint", string.char(8, 128), integer_type)
+  check_decode_outcome(context, "varint_overflow",
+      string.char(8, 255, 255, 255, 255, 255, 255, 255, 255, 255, 2), integer_type)
+  check_decode_outcome(context, "wrong_wire", string.char(10, 0), integer_type)
+  check_decode_outcome(context, "invalid_wire", string.char(14), integer_type)
+  check_decode_outcome(context, "invalid_key",
+      string.char(128, 128, 128, 128, 128, 1), integer_type)
+  check_decode_outcome(context, "truncated_field", string.char(10, 5, 1), node_type)
+  check_decode_outcome(context, "invalid_length",
+      string.char(10, 255, 255, 255, 255, 15), node_type)
+  check_decode_outcome(context, "group", string.char(11, 12), integer_type)
+  check_decode_outcome(context, "group_then_field", string.char(19, 8, 1, 20, 8, 2), integer_type)
+  check_decode_outcome(context, "mismatched_group", string.char(19, 28), integer_type)
+  check_decode_outcome(context, "unterminated_group", string.char(19, 8, 1), integer_type)
+  check_decode_outcome(context, "repeated_last_wins", string.char(8, 2, 8, 4), integer_type)
+  check_decode_outcome(context, "unknown_first", string.char(16, 1, 8, 2), integer_type)
+  check_decode_outcome(context, "unknown_bytes", string.char(8, 2, 42, 3) .. "abc", integer_type)
+  check_decode_outcome(context, "nonminimal_key", string.char(136, 0, 2), integer_type)
+  check_decode_outcome(context, "invalid_boolean", string.char(8, 2), boolean_type)
+  check_decode_outcome(context, "present_nil_field", string.char(10, 0), nil_type)
+  check_decode_outcome(context, "present_nil_bad_slice", string.char(10, 1, 8), nil_type)
+  check_decode_outcome(context, "reordered", backpatch_field(2, backpatch_field(1, "t"))
+      .. backpatch_field(1, "h"), node_type)
+  check_decode_outcome(context, "merged_next", backpatch_field(1, "h")
+      .. backpatch_field(2, backpatch_field(1, "a"))
+      .. backpatch_field(2, backpatch_field(1, "b")), node_type)
+  check_decode_outcome(context, "union_replaced", string.char(10, 0, 18, 2, 8, 4), choice_type)
+  check_decode_outcome(context, "union_merged",
+      string.char(18, 2, 8, 4, 18, 3, 18, 1, 120), choice_type)
+  check_decode_outcome(context, "union_missing", "", choice_type)
+  check_decode_outcome(context, "union_wrong_wire", string.char(8, 0), choice_type)
+  check_decode_outcome(context, "union_field_missing", "", holder_type)
+  check_decode_outcome(context, "union_field_bad", backpatch_field(1, string.char(8, 0)),
+      holder_type)
+  check_decode_outcome(context, "hooked_field_failure",
+      string.char(8, 2) .. backpatch_field(2, "bad-hook"), hooked_type)
+end
+
+record Ring
+  name: string
+  items: {Ring}
+end
+
+-- A handed-off field decodes from its single occurrence; a repeated one merges
+-- through its whole message; an absent one is nil or the missing-field error.
+-- Construction converts handed-off fields only after every field decoded, as
+-- the reflective constructor runs after decode_record.
+function test_generated_codecs_hand_off_field_occurrences(context: test.Context)
+  local ring_type = descriptor(Ring("", {}))
+  -- One Array slot holding the element as its field 1.
+  local slot = backpatch_field(1, backpatch_field(1,
+      backpatch_field(1, "s") .. backpatch_field(2, "")))
+  local single = backpatch_field(1, "r") .. backpatch_field(2, slot)
+  check_decode_outcome(context, "single_array", single, ring_type)
+  test.assert(string.sub(decode_outcome(single, ring_type, true), 1, 3) == "ok ")
+  check_decode_outcome(context, "merged_array", protobuf.serialize(Ring("r", {}))
+      .. backpatch_field(2, slot), ring_type)
+  check_decode_outcome(context, "missing_array", backpatch_field(1, "r"), ring_type)
+  local packet = foreign titan_protobuf_packet.new()
+  local row = foreign int.new_array(3)
+  local embedded_type = descriptor(Embedded(packet, row))
+  -- A second packet occurrence merges a fourth row element, which only
+  -- construction rejects.
+  local oversized = protobuf.serialize(Embedded(packet, row))
+      .. backpatch_field(1, backpatch_field(2, backpatch_field(1, string.char(8, 2))))
+  check_decode_outcome(context, "conversion_error", oversized, embedded_type)
+  local both = oversized .. string.char(16, 1)
+  check_decode_outcome(context, "decode_error_before_conversion", both, embedded_type)
+  test.assert(string.find(decode_outcome(both, embedded_type, true),
+      "unexpected wire type", 1, true) ~= nil, "a later field must fail first")
+end
+
+-- A hook below a generated frame drops the last reference to that frame's
+-- record and collects; the frame keeps encoding the record it rooted.
+record DroppingToken
+  const label: string
+end
+
+record DroppingChild
+  token: DroppingToken
+  label: string
+end
+
+record DroppingParent
+  child: DroppingChild?
+end
+
+local dropping_parent: DroppingParent? = nil
+
+function DroppingToken:to_transfer_payload(): string
+  local parent? = dropping_parent
+  dropping_parent = nil
+  if parent ~= nil then parent.child = nil end
+  gc.collect()
+  return self.label
+end
+
+function DroppingToken.from_transfer_payload(payload: string): DroppingToken
+  return DroppingToken(payload)
+end
+
+local function dropping_bytes(generated: boolean): string
+  local previous = protobuf.use_generated_codecs(generated)
+  defer protobuf.use_generated_codecs(previous)
+  local parent = DroppingParent(DroppingChild(DroppingToken("token"),
+      string.rep("label", 20)))
+  dropping_parent = parent
+  return protobuf.serialize(parent)
+end
+
+function test_generated_encode_frames_root_their_record(_context: test.Context)
+  test.assert(protobuf.find_generated_codec(DroppingParent(nil)) ~= nil)
+  test.assert(dropping_bytes(true) == dropping_bytes(false),
+      "a generated frame lost its record to a collecting hook")
+end
+
+record EndpointJob
+  id: integer
+  body: string
+  reply: thread.Sender<|integer|>
+  maybe: thread.Sender<|integer|>?
+end
+
+function test_generated_codecs_raise_reflective_errors(context: test.Context)
+  local cyclic = Node("cycle", nil)
+  cyclic.next = cyclic
+  check_same_error(context, "cycle", function () protobuf.serialize(cyclic) end,
+      "cyclic object graph")
+  local ring = Ring("ring", {})
+  ring.items[1] = Ring("inner", {ring})
+  check_same_error(context, "cycle_through_reflective_array", function ()
+    protobuf.serialize(ring)
+  end, "cyclic object graph")
+  check_same_error(context, "cycle_in_packet", function ()
+    backpatch_transfer_roundtrip(ring)
+  end, "cyclic object graph")
+  check_same_error(context, "depth_128", function ()
+    protobuf.serialize(node_chain(128))
+  end, "nesting exceeds 128")
+  check_same_error(context, "hook_failure_under_generated_parent", function ()
+    protobuf.serialize(HookedChoice.single(HookedToken(-1, "neg")))
+  end, "hooked token encode rejected negative secret")
+  local tx, rx = thread.channel<|integer|>(1)
+  defer tx:close()
+  defer rx:close()
+  check_same_error(context, "endpoint_without_packet_scope", function ()
+    protobuf.serialize(EndpointJob(1, "x", tx, nil))
+  end, "requires an encode scope")
+end
+
+function test_generated_codecs_carry_endpoints_in_packets(_context: test.Context)
+  local tx, rx = thread.channel<|integer|>(1)
+  defer tx:close()
+  defer rx:close()
+  test.assert(protobuf.find_generated_codec(EndpointJob(1, "x", tx, nil)) ~= nil)
+  local decoded: EndpointJob = backpatch_transfer_roundtrip(EndpointJob(7, "body", tx, tx))
+  test.assert(decoded.id == 7 and decoded.body == "body")
+  test.assert(decoded.reply ~= tx, "a decoded endpoint is a fresh wrapper")
+  decoded.reply:send(21)
+  test.assert(rx:receive() == 21, "the decoded endpoint lost its channel")
+  -- The inferred local forces the optional endpoint, raising if it is absent.
+  local maybe = decoded.maybe
+  maybe:send(22)
+  test.assert(rx:receive() == 22)
+end
+
+record DepthChain
+  next: DepthChain?
+  choice: Choice?
+end
+
+-- Hand-built wire oracles at the depth boundary.
+local function node_chain_bytes(count: integer): string
+  local bytes = backpatch_field(1, "leaf")
+  for index = 2, count do
+    bytes = backpatch_field(1, "n" .. index) .. backpatch_field(2, bytes)
+  end
+  return bytes
+end
+
+local function depth_chain_bytes(count: integer): string
+  local bytes = backpatch_field(2, string.char(10, 0))
+  for _ = 2, count do bytes = backpatch_field(1, bytes) end
+  return bytes
+end
+
+local function chain_length(chain: Node): integer
+  local count = 1
+  local current = chain
+  while current.next ~= nil do
+    current = current.next
+    count = count + 1
+  end
+  return count
+end
+
+function test_generated_codecs_depth_boundaries(context: test.Context)
+  local node_type = descriptor(Node("", nil))
+  context:run("encode_127_accepted", function (_: test.Context)
+    test.assert(generated_wire(node_chain(127)) == node_chain_bytes(127))
+    test.assert(reflective_serialize(node_chain(127)) == node_chain_bytes(127))
+  end)
+  context:run("decode_127_accepted", function (_: test.Context)
+    local chain: Node = generated_decode(node_chain_bytes(127), node_type)
+    test.assert(chain_length(chain) == 127)
+    test.assert(generated_wire(chain) == node_chain_bytes(127))
+  end)
+  context:run("decode_128_rejected_by_both", function (_: test.Context)
+    local generated = decode_outcome(node_chain_bytes(128), node_type, true)
+    test.assert(generated == decode_outcome(node_chain_bytes(128), node_type, false), generated)
+    test.assert(string.find(generated, "nesting exceeds 128", 1, true) ~= nil, generated)
+  end)
+  context:run("partless_union_at_128", function (_: test.Context)
+    -- Valid on both paths: the empty variant at depth 128 has no fields.
+    local chain = DepthChain(nil, Choice.empty())
+    for _ = 2, 127 do chain = DepthChain(chain, nil) end
+    test.assert(generated_wire(chain) == depth_chain_bytes(127))
+    test.assert(reflective_serialize(chain) == depth_chain_bytes(127))
+    local decoded = generated_decode(depth_chain_bytes(127),
+        descriptor(DepthChain(nil, nil)))
+    test.assert(reflective_serialize(decoded) == depth_chain_bytes(127))
+  end)
+end
+
+record Box<|T|>
+  item: T
+  label: string
+end
+
+-- One TitanValue arm per dynamic kind, with a field number per arm.
+local function value_wire(arm: string): string
+  return backpatch_field(1, arm)
+end
+
+function test_value_fields_use_one_dynamic_wire(context: test.Context)
+  local frozen = {1, 2} as const {integer}
+  local mixed: {value} = {1, "two", Node("n", nil)}
+  mixed[5] = true
+  check_generated_codec(context, "nil", AnyValue(nil))
+  check_generated_codec(context, "boolean", AnyValue(false))
+  check_generated_codec(context, "integer", AnyValue(-17))
+  check_generated_codec(context, "float", AnyValue(-0.5))
+  check_generated_codec(context, "string", AnyValue("text\0bytes"))
+  check_generated_codec(context, "generated_record", AnyValue(IntegerValue(4)))
+  check_generated_codec(context, "generated_union", AnyValue(Choice.pair(2, "x")))
+  check_generated_codec(context, "hooked_record", AnyValue(HookedToken(5, "h")))
+  check_generated_codec(context, "cross_module_record", AnyValue(reflect.NamedType("a.B")))
+  check_generated_codec(context, "array", AnyValue(mixed))
+  check_generated_codec(context, "const_array", AnyValue(frozen))
+  check_generated_codec(context, "nested_value", AnyValue(AnyValue(AnyValue(3))))
+  check_generated_codec(context, "generic_integer", Box<|integer|>.new(5, "five"))
+  check_generated_codec(context, "generic_record", Box<|Node|>.new(Node("x", nil), "node"))
+  check_generated_codec(context, "generic_array", Box<|{string}|>.new({"a", "b"}, "array"))
+  context:run("golden_arms", function (_: test.Context)
+    test.assert(protobuf.serialize(AnyValue(nil)) == "")
+    test.assert(protobuf.serialize(AnyValue(true)) == value_wire(string.char(8, 1)))
+    test.assert(protobuf.serialize(AnyValue(-1)) == value_wire(string.char(16, 1)))
+    test.assert(protobuf.serialize(AnyValue("ab")) == value_wire(string.char(34, 2) .. "ab"))
+    test.assert(protobuf.serialize(AnyValue(IntegerValue(1))) ==
+        value_wire(backpatch_field(5, backpatch_field(1, "protobuf.tests")
+            .. backpatch_field(2, "protobuf.tests.IntegerValue")
+            .. backpatch_field(3, string.char(8, 2)))))
+  end)
+  context:run("schema", function (_: test.Context)
+    local output = protobuf.schema(descriptor(AnyValue(nil)))
+    test.assert(string.find(output, "message TitanValue {", 1, true) ~= nil, output)
+    test.assert(string.find(output, "TitanValue f_item = 1;", 1, true) ~= nil, output)
+  end)
+end
+
+function test_value_fields_decode_every_wire_reflectively(context: test.Context)
+  local any_type = descriptor(AnyValue(nil))
+  check_decode_outcome(context, "absent", "", any_type)
+  check_decode_outcome(context, "empty_value", value_wire(""), any_type)
+  check_decode_outcome(context, "unknown_arm_only", value_wire(string.char(56, 1)), any_type)
+  check_decode_outcome(context, "last_arm_wins", value_wire(string.char(8, 1, 16, 4)), any_type)
+  check_decode_outcome(context, "repeated_scalar_arm", value_wire(string.char(16, 4, 16, 6)),
+      any_type)
+  check_decode_outcome(context, "merged_values", value_wire(string.char(16, 4))
+      .. value_wire(string.char(8, 0)), any_type)
+  check_decode_outcome(context, "wrong_arm_wire", value_wire(string.char(9, 1, 2, 3, 4, 5, 6, 7, 8)),
+      any_type)
+  check_decode_outcome(context, "invalid_boolean", value_wire(string.char(8, 2)), any_type)
+  check_decode_outcome(context, "wrong_field_wire", string.char(8, 1), any_type)
+  check_decode_outcome(context, "truncated_value", value_wire(string.char(16)), any_type)
+  check_decode_outcome(context, "unknown_nominal", value_wire(backpatch_field(5,
+      backpatch_field(1, "nowhere") .. backpatch_field(2, "nowhere.Missing")
+      .. backpatch_field(3, ""))), any_type)
+  check_decode_outcome(context, "nominal_missing_payload", value_wire(backpatch_field(5,
+      backpatch_field(1, "protobuf.tests")
+      .. backpatch_field(2, "protobuf.tests.IntegerValue"))), any_type)
+end
+
+function test_value_fields_raise_reflective_errors(context: test.Context)
+  check_same_error(context, "callable", function ()
+    protobuf.serialize(AnyValue(function () end))
+  end, "unsupported dynamic value")
+  local map: {string: integer} = {}
+  map["k"] = 1
+  check_same_error(context, "map", function ()
+    protobuf.serialize(AnyValue(map))
+  end, "unsupported dynamic value")
+  local cyclic = AnyValue(nil)
+  cyclic.item = cyclic
+  check_same_error(context, "cycle", function () protobuf.serialize(cyclic) end,
+      "cyclic object graph")
+  local deep = AnyValue(1)
+  for _ = 1, 130 do deep = AnyValue(deep) end
+  check_same_error(context, "depth", function () protobuf.serialize(deep) end,
+      "nesting exceeds 128")
+end
+
+function test_value_fields_carry_endpoints_and_scalars_in_packets(_context: test.Context)
+  local tx, rx = thread.channel<|integer|>(1)
+  defer tx:close()
+  defer rx:close()
+  local decoded: AnyValue = backpatch_transfer_roundtrip(AnyValue(tx))
+  local reply: thread.Sender<|integer|> = decoded.item
+  reply:send(9)
+  test.assert(rx:receive() == 9, "a dynamic endpoint lost its channel")
+  local scalar: AnyValue = backpatch_transfer_roundtrip(AnyValue("bytes"))
+  test.assert(scalar.item == "bytes")
+  local boxed: Box<|Choice|> = backpatch_transfer_roundtrip(Box<|Choice|>.new(Choice.empty(), "c"))
+  test.assert(boxed.label == "c")
+end
+
+record GeneratedResourceProbe
+  id: integer
+end
+
+local foreign function generated_probe_retain(resource: *void)
+end
+
+local foreign function generated_probe_release(resource: *void)
+end
+
+function test_registered_resource_codec_precedes_generated_codec(_context: test.Context)
+  local probe = GeneratedResourceProbe(5)
+  test.assert(protobuf.find_generated_codec(probe) ~= nil, "eligible probe has no codec")
+  local before = protobuf.serialize(probe)
+  transfer.register_resource(probe,
+    function (_: value): (foreign *void) return nil end,
+    generated_probe_retain, generated_probe_release,
+    function (_: value, _data: foreign const *void, _length: integer): (value)
+      return nil
+    end)
+  test.assert(protobuf.find_generated_codec(probe) == nil,
+      "a registered resource codec must precede the generated codec")
+  test.assert(protobuf.serialize(probe) == before, "structural root bytes changed")
+end
+
+-- A full 64-entry record directory at every recursive level.
+record CodecBoundaryRecord64
+  f1: integer
+  f2: integer
+  f3: integer
+  f4: integer
+  f5: integer
+  f6: integer
+  f7: integer
+  f8: integer
+  f9: integer
+  f10: integer
+  f11: integer
+  f12: integer
+  f13: integer
+  f14: integer
+  f15: integer
+  f16: integer
+  f17: integer
+  f18: integer
+  f19: integer
+  f20: integer
+  f21: integer
+  f22: integer
+  f23: integer
+  f24: integer
+  f25: integer
+  f26: integer
+  f27: integer
+  f28: integer
+  f29: integer
+  f30: integer
+  f31: integer
+  f32: integer
+  f33: integer
+  f34: integer
+  f35: integer
+  f36: integer
+  f37: integer
+  f38: integer
+  f39: integer
+  f40: integer
+  f41: integer
+  f42: integer
+  f43: integer
+  f44: integer
+  f45: integer
+  f46: integer
+  f47: integer
+  f48: integer
+  f49: integer
+  f50: integer
+  f51: integer
+  f52: integer
+  f53: integer
+  f54: integer
+  f55: integer
+  f56: integer
+  f57: integer
+  f58: integer
+  f59: integer
+  f60: integer
+  f61: integer
+  f62: integer
+  f63: integer
+  next: CodecBoundaryRecord64?
+end
+
+-- One selector plus 63 parts is the same 64-entry decoder budget.
+union CodecBoundaryUnion63
+  wide(p1: integer, p2: integer, p3: integer, p4: integer,
+    p5: integer, p6: integer, p7: integer, p8: integer,
+    p9: integer, p10: integer, p11: integer, p12: integer,
+    p13: integer, p14: integer, p15: integer, p16: integer,
+    p17: integer, p18: integer, p19: integer, p20: integer,
+    p21: integer, p22: integer, p23: integer, p24: integer,
+    p25: integer, p26: integer, p27: integer, p28: integer,
+    p29: integer, p30: integer, p31: integer, p32: integer,
+    p33: integer, p34: integer, p35: integer, p36: integer,
+    p37: integer, p38: integer, p39: integer, p40: integer,
+    p41: integer, p42: integer, p43: integer, p44: integer,
+    p45: integer, p46: integer, p47: integer, p48: integer,
+    p49: integer, p50: integer, p51: integer, p52: integer,
+    p53: integer, p54: integer, p55: integer, p56: integer,
+    p57: integer, p58: integer, p59: integer, p60: integer,
+    p61: integer, p62: integer, p63: integer)
+end
+
+local function codec_boundary_record(next: CodecBoundaryRecord64?): CodecBoundaryRecord64
+  return CodecBoundaryRecord64(
+    1, -2, 3, -4, 5, -6, 7, -8, 9, -10, 11, -12, 13, -14, 15, -16,
+    17, -18, 19, -20, 21, -22, 23, -24, 25, -26, 27, -28, 29, -30, 31, -32,
+    33, -34, 35, -36, 37, -38, 39, -40, 41, -42, 43, -44, 45, -46, 47, -48,
+    49, -50, 51, -52, 53, -54, 55, -56, 57, -58, 59, -60, 61, -62, 63, next)
+end
+
+local function codec_boundary_scalar_fields(): string
+  local output = string.writer()
+  for field = 1, 63 do
+    append_test_varint(output, field << 3)
+    local zigzag = field * 2
+    if field % 2 == 0 then zigzag = zigzag - 1 end
+    append_test_varint(output, zigzag)
+  end
+  return output:drain()
+end
+
+function test_generated_codecs_maximum_directory_roundtrips(context: test.Context)
+  check_generated_codec(context, "record_64", codec_boundary_record(codec_boundary_record(nil)))
+  check_generated_codec(context, "union_63", CodecBoundaryUnion63.wide(
+    1, -2, 3, -4, 5, -6, 7, -8, 9, -10, 11, -12, 13, -14, 15, -16,
+    17, -18, 19, -20, 21, -22, 23, -24, 25, -26, 27, -28, 29, -30, 31, -32,
+    33, -34, 35, -36, 37, -38, 39, -40, 41, -42, 43, -44, 45, -46, 47, -48,
+    49, -50, 51, -52, 53, -54, 55, -56, 57, -58, 59, -60, 61, -62, 63))
+end
+
+function test_generated_codecs_maximum_width_depth_on_coroutine_stack(_: test.Context)
+  local leaf = codec_boundary_record(nil)
+  local target = descriptor(leaf)
+  test.assert(protobuf.find_generated_codec(leaf) ~= nil)
+  local fields = codec_boundary_scalar_fields()
+  local bytes = fields
+  for _ = 2, 127 do bytes = fields .. backpatch_field(64, bytes) end
+  local too_deep = fields .. backpatch_field(64, bytes)
+  -- Keep both reflective oracles on the host stack: deep reflective decoding
+  -- has little coroutine-stack headroom, and traceback capture can exhaust it.
+  local reflective_error = decode_outcome(too_deep, target, false)
+  test.assert(reflective_serialize(reflective_deserialize(bytes, target)) == bytes)
+  local co = coroutine.create(function (_: value): value
+    test.assert(coroutine.running() ~= nil, "codec depth test did not use a coroutine stack")
+    local decoded: CodecBoundaryRecord64 = generated_decode(bytes, target)
+    local count = 1
+    local current = decoded
+    while current.next ~= nil do
+      test.assert(current.f1 == 1 and current.f32 == -32 and current.f63 == 63)
+      current = current.next
+      count = count + 1
+    end
+    test.assert(count == 127 and current.f63 == 63)
+    test.assert(generated_wire(decoded) == bytes)
+    -- Scalar fields of the 128th full-width record exceed the shared depth
+    -- budget. The generated path must reject safely on this coroutine stack.
+    local generated = decode_outcome(too_deep, target, true)
+    test.assert(generated == reflective_error, generated)
+    test.assert(string.find(generated, "nesting exceeds 128", 1, true) ~= nil, generated)
+    return count
+  end, "codec-boundary")
+  test.assert(co:resume(nil) == 127 and co:status() == "dead")
+end

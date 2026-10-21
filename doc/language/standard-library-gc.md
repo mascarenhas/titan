@@ -71,13 +71,39 @@ or full userdata; passing nil, a scalar, a function, a thread, or light
 userdata raises. The Lua stack is restored on that error as well as on success.
 
 At run time `T` is erased. The installed `__gc` value is the ordinary
-Lua-callable erased callback (including Titan's normal callable adjustment
-when an exact record or Map callback requires one), and Lua supplies the
-finalized object as its sole argument. The concrete callback consequently sees
-its exact static parameter type without a source `value as T` cast. Callback
-results are discarded. Finalization follows Lua's ordinary garbage-collection
-rules: it is not prompt or deterministic, and a callback may resurrect its
-value.
+Lua-callable erased callback, and Lua supplies the finalized object as its sole
+argument. The concrete callback consequently sees its exact static parameter
+type without a source `value as T` cast. Callback results are discarded.
+Finalization follows Lua's ordinary garbage-collection rules: it is not prompt
+or deterministic, and a callback may resurrect its value.
+
+Unless the callback's parameter type is exactly `value`, Titan's ordinary
+callable adjustment wraps it in a fresh closure on every `finalizable` call, so
+the installed `__gc` is not the function that was passed. A callback whose type
+is already `function (value): ()`, registered through `finalizable<|value|>`,
+is installed unchanged. For an owner that is created often, use that form and
+recover the owner type inside the callback (for example with
+`local owner: Owner = candidate`) to avoid one closure allocation per
+registration:
+
+```titan
+local gc = import "gc"
+
+local record Handle
+  released: boolean
+end
+
+local function finish_handle(candidate: value)
+  local handle: Handle = candidate
+  handle.released = true
+end
+
+local function new_handle(): Handle
+  local handle = Handle(false)
+  gc.finalizable<|value|>(handle, finish_handle)
+  return handle
+end
+```
 
 When `v` has no metatable, `finalizable` creates and installs one. When a
 metatable already exists, the exact table and all fields other than raw

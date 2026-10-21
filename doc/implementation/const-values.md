@@ -175,8 +175,23 @@ calls that neither receive nor capture the Array may compute element values,
 and creating a closure is harmless when its body does not reference the Array
 or an alias. Passing, returning, storing, aliasing, actually capturing, or
 rebinding the Array, hiding the consuming cast inside control flow, or using
-the mutable binding later retains `copy`. The coder trusts only the checker
-annotation and never recomputes escape or liveness facts.
+the mutable binding later retains `copy`. The terminal cast must itself be the
+single expression of a `local` declaration or `return` (`sole_consuming_cast`):
+a cast nested in a call argument, or a returned cast wrapped by an implicit sink
+conversion such as `value` injection, is not recognized. The coder trusts only
+the checker annotation and never recomputes escape or liveness facts.
+
+`annotate_linear_function_returns` runs after each top-level function body.
+When every return of a mutable Array result is a fresh constructor, such an
+unaliased builder, or the call result of an earlier function whose result is
+already linear (`is_linear_returned_value` accepts `exp._type.linear`), it
+replaces that result type with a `linear` Array type. A linear call result may
+likewise initialize a builder local. Bodies are checked in logical declaration
+order, so only later callers in the same module see it: `types.written_cast`
+then selects `freeze` for a written cast of the call result, and assignment
+admits an implicit const target. The protobuf decoder relies on both the
+builder-local terminal cast and the linear call-result cast
+([decoding](protobuf-library.md#decoding)).
 
 A constructor checked under a const Array target is annotated as const at
 construction and needs neither conversion helper.

@@ -176,6 +176,30 @@ end
 coder._reflection_project_c = project_c
 coder._reflection_construct_c = construct_c
 
+-- Store one reflected field projection (`source`, a TValue pointer) into
+-- fresh nominal storage, with the field's construction conversion. Generated
+-- codecs reuse it for fields decoded by the reflective field decoder.
+function coder._reflection_store(ctx, loc, plan, field, object, source)
+    local slot = assert(plan.by_index[field.index])
+    if slot.storage == "payload" and types.is_direct_c(field.type) then
+        return construct_c(ctx, slot.type,
+            coder._nominal_member(plan, slot, object), source)
+    elseif slot.storage == "payload" and field.type._tag == "Type.Option"
+        and types.is_direct_c(field.type.base) then
+        local member = coder._nominal_member(plan, slot, object)
+        return "if (ttisnil(" .. source .. ")) { (" .. member .. ").present = 0; } else { "
+            .. construct_c(ctx, field.type.base, "(" .. member .. ").value", source)
+            .. " (" .. member .. ").present = 1; }"
+    elseif field.dynamic_plan and field.dynamic_plan.tag ~= "none" then
+        return cvardecl(ctx, field.type, "_converted") .. " = " .. initval(field.type) .. ";\n"
+            .. coder._dynamiccheckandget(ctx,
+                maybe3.get_checked(field.dynamic_plan, "reflected construction"),
+                field.type, "_converted", source, loc, "reflected construction") .. "\n"
+            .. coder._nominal_store(ctx, plan, slot, field.type, object, "_converted")
+    end
+    return "luaL_error(L, \"field has no reflected construction conversion\");"
+end
+
 function coder._reflection_constructor(ctx, node, variant)
     local owner = node._type
     local plan = coder._nominal_plan(ctx, owner, variant)
@@ -195,26 +219,8 @@ function coder._reflection_constructor(ctx, node, variant)
     }
     if variant then code[#code + 1] = coder._nominal_tag("_rec") .. " = " .. variant.index .. ";" end
     for index, field in ipairs(fields) do
-        local slot = assert(plan.by_index[field.index])
         code[#code + 1] = "{ TValue _source; titan_array_get(_fields, " .. index .. ", &_source);"
-        if slot.storage == "payload" and types.is_direct_c(field.type) then
-            code[#code + 1] = construct_c(ctx, slot.type,
-                coder._nominal_member(plan, slot, "_rec"), "&_source")
-        elseif slot.storage == "payload" and field.type._tag == "Type.Option"
-            and types.is_direct_c(field.type.base) then
-            local member = coder._nominal_member(plan, slot, "_rec")
-            code[#code + 1] = "if (ttisnil(&_source)) { (" .. member .. ").present = 0; } else { "
-                .. construct_c(ctx, field.type.base, "(" .. member .. ").value", "&_source")
-                .. " (" .. member .. ").present = 1; }"
-        elseif field.dynamic_plan and field.dynamic_plan.tag ~= "none" then
-            code[#code + 1] = cvardecl(ctx, field.type, "_converted") .. " = " .. initval(field.type) .. ";"
-            code[#code + 1] = coder._dynamiccheckandget(ctx,
-                maybe3.get_checked(field.dynamic_plan, "reflected construction"),
-                field.type, "_converted", "&_source", node.loc, "reflected construction")
-            code[#code + 1] = coder._nominal_store(ctx, plan, slot, field.type, "_rec", "_converted")
-        else
-            code[#code + 1] = "luaL_error(L, \"field has no reflected construction conversion\");"
-        end
+        code[#code + 1] = coder._reflection_store(ctx, node.loc, plan, field, "_rec", "&_source")
         code[#code + 1] = "}"
     end
     code[#code + 1] = "setuvalue(L, output, _rec); L->top.p = restorestack(L, _saved);"

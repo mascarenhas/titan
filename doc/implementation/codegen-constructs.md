@@ -818,9 +818,12 @@ the stored plan rather than treating every unequal pair as a scalar cast:
     lightuserdata. Ordinary already-native pointer conversions can remain a
     plain C cast ([FFI internals](ffi-internals.md)).
 13. **mutable Array → const Array** consumes the `array_freeze` plan. Its
-    default lowering calls `titan_array_shallow_copy`; only a checker-authored
-    `_linear_array_freeze` annotation may call `titan_array_freeze` and retag
-    the original proxy in place. The coder performs no liveness analysis.
+    default lowering calls `titan_array_shallow_copy`; only a checker-selected
+    `freeze` mode calls `titan_array_freeze` and retags the original proxy in
+    place. That mode comes either from a `_linear_array_freeze` builder proof or
+    from a source call result whose callee return the checker marked `linear`
+    ([linear-use analysis](const-values.md#array-relations-and-linear-use-analysis)).
+    The coder performs no liveness analysis.
 
 ## Type tests: `ExpIs`
 

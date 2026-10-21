@@ -133,6 +133,20 @@ function test_work_public_data_is_independent_of_native_callback_data(_context: 
   test.assert(calls == 1 and request:get_data() == "while pending")
 end
 
+function test_loop_abandon_finishes_native_work_without_after_work(_: test.Context)
+  local loop = new_loop()
+  local request = uv.work_t()
+  local cell: owned int[] = foreign int.new_array(1)
+  cell[0] = 40
+  local calls = 0
+  success(uv.queue_work(loop, request, increment_cell, cell,
+    function (_request: uv.work_t, _status: integer) calls = calls + 1 end, cell))
+  success(uv.loop_abandon(loop))
+  test.assert(cell[0] == 41, "abandonment cancelled accepted native cleanup work")
+  test.assert(calls == 0, "abandonment dispatched an after-work callback")
+  test.assert(uv.loop_close(loop) == uv.EINVAL and not uv.loop_alive(loop))
+end
+
 local function start_rooted_sync_worker(weak: {value: value})
   local mutex = uv.mutex_t()
   success(uv.mutex_init(mutex))

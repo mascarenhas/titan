@@ -12,10 +12,11 @@ column describes the underlying C ABI for binding maintainers. The
 actually supplies or receives; native pointer borrowing does not shorten the
 lifetime of an independently copied public value.
 
-The public API also has **232** [supplemental declarations](supplemental-public-signatures.tsv):
+The public API also has **233** [supplemental declarations](supplemental-public-signatures.tsv):
 constructors, owner views, result/data accessors, direct C-only synchronization,
-heap-thread-token and external-wake entries, `has_api`, `setup_process_args`, and native transfer
-hooks and loop binding. These are documented in [types](types.md) and
+heap-thread-token and external-wake entries, `has_api`, `setup_process_args`,
+native transfer hooks and loop binding, and loop abandonment for final state
+teardown. These are documented in [types](types.md) and
 [supplemental APIs](supplemental.md); they are not additional distinct libuv C
 functions and do not change the 319-function/305-wrapper native inventory.
 

@@ -47,6 +47,21 @@ local function Schema:array(element: reflect.Type, name: string,
   return name
 end
 
+-- One shared TitanValue oneof for every `value` field; its Array arm reuses
+-- the ordinary Titan Array message with TitanValue elements.
+local function Schema:dynamic(depth: integer): string
+  local name = "TitanValue"
+  if self.seen["value:"] ~= nil then return name end
+  self.seen["value:"] = name
+  local array = self:array(dynamic_value, "TitanValue_Array", true, depth)
+  self.output:write("message TitanValue_Nominal {\n  optional bytes module = 1;\n"
+      .. "  optional bytes name = 2;\n  optional bytes message = 3;\n}\n\n")
+  self.output:write("message TitanValue {\n  oneof kind {\n    bool boolean = 1;\n"
+      .. "    sint64 integer = 2;\n    double number = 3;\n    bytes string = 4;\n"
+      .. "    TitanValue_Nominal nominal = 5;\n    " .. array .. " array = 6;\n  }\n}\n\n")
+  return name
+end
+
 local function Schema:type_name(descriptor: reflect.Type, hint: string,
                                   depth: integer): (string, boolean)
   require_depth(depth)
@@ -57,6 +72,7 @@ local function Schema:type_name(descriptor: reflect.Type, hint: string,
   when is_integer() then return "sint64", true
   when is_float() then return "double", true
   when is_string() then return "bytes", true
+  when is_value() then return self:dynamic(depth), false
   when is_nil() then
     local name = hint .. "_Nil"
     self.output:write("message " .. name .. " {}\n\n")

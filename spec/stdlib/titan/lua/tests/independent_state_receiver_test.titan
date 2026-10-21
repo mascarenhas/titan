@@ -48,19 +48,19 @@ function test_receiver_lua_two_phase_worker_and_host_gc(_context: test.Context)
     defer do
       if not stop_sent then stop_receiver_worker(handle, working) end
     end
-    test.assert(transfer_string(replies:wait()) == "ready",
+    test.assert(replies:wait() == "ready",
                 "worker did not enter its independent Runtime")
     for ordinal = 1, 64 do
       async.send(handle, async.TransferValue.is_string(receiver_echo_payload(ordinal)))
       gclib.collect()
       gclib.collect()
-      test.assert(transfer_string(replies:wait()) == receiver_echo_payload(ordinal),
+      test.assert(replies:wait() == receiver_echo_payload(ordinal),
                   "cross-state Receiver corrupted copied bytes during a send/wait exchange")
     end
     async.send(handle, async.TransferValue.is_string("stop"))
     stop_sent = true
     gate:post()
-    test.assert(transfer_integer(replies:wait()) == 64)
+    test.assert(replies:wait() == 64)
     case async.join(working)
     when succeeded(count) then test.assert(count == 64)
     else raise "Receiver worker did not shut down normally" end
@@ -99,7 +99,7 @@ function test_receiver_lua_cancelled_worker_waits_for_orderly_stop(_context: tes
     defer do
       if not stop_sent then stop_receiver_worker(handle, working) end
     end
-    test.assert(transfer_string(replies:wait()) == "ready")
+    test.assert(replies:wait() == "ready")
     working:cancel(async.CancellationReason.simple("Receiver worker cancelled"))
     gclib.collect()
     test.assert(working:status():as_string() == "waiting",
@@ -108,7 +108,7 @@ function test_receiver_lua_cancelled_worker_waits_for_orderly_stop(_context: tes
     async.send(handle, async.TransferValue.is_string("stop"))
     stop_sent = true
     gate:post()
-    test.assert(transfer_integer(replies:wait()) == 0)
+    test.assert(replies:wait() == 0)
     test.assert(async.join(working):has_cancelled(),
                 "Receiver worker lost accepted cancellation after retirement")
     common.assert_raises_contains(function ()
@@ -166,13 +166,13 @@ function test_receiver_lua_coordinated_close_rejects_late_sends(_context: test.C
     defer do
       if not stop_sent then stop_receiver_worker(handle, working) end
     end
-    test.assert(transfer_string(replies:wait()) == "ready")
+    test.assert(replies:wait() == "ready")
     -- All earlier sends have finished. Do not overwrite this close command
     -- or send concurrently with the independent state's close operation.
     async.send(handle, async.TransferValue.is_string("close"))
     stop_sent = true
     gate:post()
-    test.assert(transfer_string(replies:wait()) == "closed",
+    test.assert(replies:wait() == "closed",
                 "worker did not acknowledge its explicit Receiver close")
     test.assert(async.join(working):has_succeeded(),
                 "coordinated Receiver close did not retire the worker")
