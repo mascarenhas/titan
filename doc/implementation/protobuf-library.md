@@ -216,8 +216,10 @@ field's hydrated descriptor on the state's `Encoder`: the enclosing reflective
 the root's first such handoff and rooted in the state's stack slot until the
 root returns. Each handoff sets that `Encoder`'s `path` to the handing frame's
 path for the field. In the other direction `Encoder:field` and `decode_field`
-call the generated codec of a record or union field that has one, after the
-resource and hook checks and before any inspection. Cycle detection consults
+check resources before calling a generated record or union codec, if present.
+The encoder looks up the codec before hooks, while the decoder checks hooks
+first; behavior is identical because hooked nominals never receive a generated
+codec. These checks precede value inspection. Cycle detection consults
 both the active Map and the path, so cycles through mixed frames raise
 `protobuf: cyclic object graph` exactly as on the reflective path, and depth
 is passed through both sides unchanged. An encoding frame with any field that
