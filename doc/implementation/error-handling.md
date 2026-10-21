@@ -447,8 +447,15 @@ unit or across units under Linux LTO. The escape barrier remains in the
 caller and prevents an inlined unqualified store being deleted as dead merely
 because only recovery reads the home. The default Lua build has no LTO IR,
 leaving `lua_error`/its nonlocal exit opaque. In contrast, `decode_message`
-contains a `catch` and thus a generated `setjmp`; supported GCC/Clang do not
-inline it, including under Linux LTO. The native decode regression covers
+contains a `catch` and thus a generated `setjmp`. It was verified to remain
+out of line with GCC/Clang at `-O2`/`-O3` in a single translation unit.
+This follows [GCC's documented `setjmp` inlining restriction](https://gcc.gnu.org/onlinedocs/gcc/Inline.html)
+and [LLVM's `isInlineViable` rule](https://github.com/llvm/llvm-project/blob/llvmorg-22.1.8/llvm/lib/Analysis/InlineCost.cpp#L3346-L3350):
+an ordinary function cannot be inlined if it exposes a `returns_twice` call
+without itself carrying that attribute. Inspection of the linked GCC 16.2.1
+production provider (`-O3 -flto=auto`) additionally confirmed direct calls to
+`decode_message` from `async.Receiver:wait` and `thread.Receiver:receive`.
+Clang LTO was not separately verified. The native decode regression covers
 that out-of-line ownership path, not inlining. The coder spec also builds
 `spec/fixtures/error_handling/scalar_recovery.titan` as a native executable
 at `-O2`/`-O3`, using the driver's default inlining thresholds. Its checked-return
@@ -459,7 +466,9 @@ The Windows corrective evidence used an effective `-O2` provider and
 Whole-program LTO exposing Lua's error machinery or new optimizer
 behavior still requires renewed qualification.
 
-The barrier emits no machine instruction. This selection adds volatile
+The barrier emits no instruction, but is a compiler memory barrier (`"memory"`
+clobber) once per declaration, including each `Receiver:wait` loop iteration.
+It constrains register caching across that point. The volatile home adds
 loads/stores, not allocation, copying, a call, or a new ownership protocol.
 It does not promise recovery for untracked aliases/asynchronous C writes.
 

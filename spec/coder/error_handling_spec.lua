@@ -1620,6 +1620,8 @@ describe("catch", function()
         assert.truthy(csrc:find(
             '__asm__ __volatile__("" : : "r"(&(_param_n)) : "memory");',
             1, true))
+        assert.truthy(csrc:find(
+            "((const int *)((&(_param_n))))", 1, true))
         assert.match("volatile%s+int%s+_param_m", csrc)
         assert.truthy(csrc:find(
             '__asm__ __volatile__("" : : "r"(&(_param_m)) : "memory");',
