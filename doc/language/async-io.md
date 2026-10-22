@@ -1924,14 +1924,18 @@ or `Thread:join()` are withdrawn this way, so channels and threads shared with
 other states stay usable. The parked Tasks never resume and their `defer`
 blocks do not run.
 
-Every unfinished Task of that Runtime still becomes terminal, without resuming
-and without calling its terminal listeners. Lua runs finalizers newest first, so
-a finalizer registered before the Runtime was created runs after this
-retirement. If it holds such a Task, it sees `has_finished()` and a `cancelled`
-status. Its reason is the first cancellation requested before the close, or
+The unfinished Tasks of that Runtime do not resume and do not call their
+terminal listeners, but most of them still become terminal. Lua runs finalizers
+newest first, so a finalizer registered before the Runtime was created runs
+after this retirement. If it holds such a Task, `status()` returns a `cancelled`
+status, whose `has_finished()` is true. Its reason is the first cancellation
+requested before the close, or
 `simple("async Runtime abandoned at Lua state close")` when there was none. A
-body that had already returned or raised while its cleanup or native
-retirement was still pending is reported the same way.
+body that had already returned or raised while its cleanup was still pending is
+reported the same way. A Task whose native-retirement gate is still armed stays
+nonterminal, because its terminal status follows native retirement: for
+example, a `Thread:task()` proxy whose OS thread was not joined reports
+`ready` or `waiting`, never a terminal status.
 
 This only reclaims native memory. It does not replace closing receivers,
 finishing or cancelling Tasks, and draining the loop before closing the state.

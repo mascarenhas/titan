@@ -780,9 +780,13 @@ together with its `phase`, so `Task:status()` stays consistent for a finalizer
 that runs later and still holds the Task (issue #271): `cancelled` with its
 sticky `cancel_value` when a cancellation was requested but never delivered,
 otherwise `cancelled(simple("async Runtime abandoned at Lua state close"))`.
-A pending recorded body outcome is not published, because its cleanup or native
-retirement never finished. Unlike `finish_task`, this calls no terminal
-listener. Keeping the Runtime active and closing
+A pending recorded body outcome is not published, because its cleanup never
+finished. A Task whose native-retirement gate is still armed stays nonterminal:
+when `cleanup_wait` is present with `native.ready == 0`, the predicate on which
+`finish_task` refuses, the finalizer detaches its Wait and suspension but
+publishes neither phase nor state, so a later finalizer cannot mistake an
+unjoined `Thread:task()` proxy for a retired one. Unlike `finish_task`, this
+calls no terminal listener. Keeping the Runtime active and closing
 preserves shutdown admission, and `driving` makes a recursive `async.loop()` fail
 immediately. It never runs `close_handles`, `Receiver:disable`,
 `ExternalBridge:close`, domain unregister functions, or close listeners.

@@ -137,37 +137,53 @@ local foreign function runtime_close_record(cells: *void, slot: int, code: int)
 end
 
 -- Observation codes recorded per abandoned Task: 0 unobserved, 1 status()
--- raised, 2 a status other than the expected cancellation, 3 expected.
+-- raised, 2 a stale or wrong status, 3 the expected status. An expected
+-- reason of nil means the Task must stay nonterminal and waiting.
 record RuntimeCloseTaskOracle
   cells: foreign *void
   tasks: {async.Task}
   reasons: {string}
+  gated: async.Task?
+  gate_context: foreign *void
 end
 local runtime_close_task_probe: RuntimeCloseTaskOracle? = nil
+
+local function runtime_close_task_code(task: async.Task, reason: string?): integer
+  local code = 1
+  do
+    local status = task:status()
+    code = 2
+    if reason == nil then
+      if status:as_string() == "waiting" and not status:has_finished() then code = 3 end
+    elseif status:has_finished() and support.cancelled_with(status, reason) then
+      code = 3
+    end
+  catch
+  end
+  return code
+end
 
 local function runtime_close_task_oracle(owner: RuntimeCloseTaskOracle)
   -- Registered before the Runtime, so lua_close runs it after abandonment.
   for index = 1, #owner.tasks do
-    local code = 1
-    do
-      local status = owner.tasks[index]:status()
-      code = 2
-      if status:has_finished() and support.cancelled_with(status, owner.reasons[index]) then
-        code = 3
-      end
-    catch
-    end
-    runtime_close_record(owner.cells, index - 1, code)
+    runtime_close_record(owner.cells, index - 1,
+      runtime_close_task_code(owner.tasks[index], owner.reasons[index]))
+  end
+  local gated? = owner.gated
+  if gated ~= nil then
+    runtime_close_record(owner.cells, #owner.tasks, runtime_close_task_code(gated, nil))
+    -- The abandoned gate never unregistered; release the domain's own retain.
+    external_retirement_unregister(owner.gate_context)
   end
 end
 
 -- Public only so a fresh independent state can call it; test infrastructure.
--- Leaves four Tasks of an unretired Runtime for a finalizer registered before
+-- Leaves five Tasks of an unretired Runtime for a finalizer registered before
 -- that Runtime: parked waiting, parked with a requested cancellation that the
--- closing state never delivers, queued and observed ready, and queued and
--- never observed.
+-- closing state never delivers, queued and observed ready, queued and never
+-- observed, and parked behind a still-armed native retirement gate.
 function runtime_close_abandoned_task_bootstrap(cells_raw: value)
-  local oracle = RuntimeCloseTaskOracle(cells_raw as foreign *void, {}, {})
+  local oracle = RuntimeCloseTaskOracle(cells_raw as foreign *void, {}, {}, nil, nil)
   runtime_close_gc.finalizable(oracle, runtime_close_task_oracle)
   runtime_close_task_probe = oracle
   local parked_token = async.ResumeToken("abandoned parked Task")
@@ -180,9 +196,20 @@ function runtime_close_abandoned_task_bootstrap(cells_raw: value)
     async.suspend(cancelled_token)
     return 2
   end)
+  local gate, gate_fixture = external_wait_prepare_retirement(false)
+  local gated_token = async.ResumeToken("abandoned gated Task")
+  local gated = async.run_with_cleanup<|value, value|>(function (): value
+    async.suspend(gated_token)
+    return 5
+  end, function (_: async.CancellationReason?)
+    gate:wait_cleanup()
+  end, gate)
+  oracle.gated = gated
+  oracle.gate_context = gate_fixture as foreign *void
   uv.run(async.current_loop(), uv.RUN_NOWAIT)
   test.assert(parked:status():as_string() == "waiting" and
-              cancelled:status():as_string() == "waiting",
+              cancelled:status():as_string() == "waiting" and
+              gated:status():as_string() == "waiting",
     "abandoned Runtime Tasks did not park")
   cancelled:cancel(async.CancellationReason.simple("requested before state close"))
   test.assert(cancelled:status():as_string() == "waiting",
@@ -196,13 +223,15 @@ function runtime_close_abandoned_task_bootstrap(cells_raw: value)
 end
 
 -- Issue #271: a Task of a Runtime abandoned at lua_close never resumes, but a
--- later finalizer that still holds it must read a consistent terminal status.
-function test_lua_close_publishes_cancelled_status_for_abandoned_tasks(_: test.Context)
-  local cells: owned int[] = foreign int.new_array(4)
+-- later finalizer that still holds it must read a consistent status: cancelled,
+-- unless its native retirement gate is still armed (then nonterminal).
+function test_lua_close_publishes_consistent_status_for_abandoned_tasks(_: test.Context)
+  local cells: owned int[] = foreign int.new_array(5)
   cells[0] = 0
   cells[1] = 0
   cells[2] = 0
   cells[3] = 0
+  cells[4] = 0
   local state = runtime_close_lua.new()
   defer state:close()
   state:run([[
@@ -210,11 +239,12 @@ function test_lua_close_publishes_cancelled_status_for_abandoned_tasks(_: test.C
     require('async.tests').runtime_close_abandoned_task_bootstrap(...)
   ]], "=abandoned-task-bootstrap", async.TransferValue.is_pointer(cells as foreign *void))
   state:close()
-  local names: {string} = {"parked", "cancel-requested", "observed-ready", "unobserved"}
-  local outcomes: {string} = {"unobserved", "raised", "stale or wrong", "cancelled"}
+  local names: {string} = {"parked", "cancel-requested", "observed-ready", "unobserved",
+                           "armed-retirement-gate"}
+  local outcomes: {string} = {"unobserved", "raised", "stale or wrong", "expected"}
   local report = ""
   local consistent = true
-  for index = 1, 4 do
+  for index = 1, 5 do
     local code = cells[index - 1] as integer
     consistent = consistent and code == 3
     report = report .. " " .. names[index] .. "=" .. outcomes[code + 1]
