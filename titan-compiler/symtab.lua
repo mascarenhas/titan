@@ -3,6 +3,7 @@ local maybe3 = require "titan-compiler.maybe3"
 
 symtab.__index = symtab
 
+-- Implementation notes: doc/implementation/checker.md#the-symbol-table-symtablua
 function symtab.new(modname)
     local self = {
         blocks = { {} },

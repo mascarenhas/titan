@@ -11,96 +11,33 @@ The user-facing contract is in the
 
 ## Module and provider placement
 
-The source is a folder ensemble rooted at `titan/string/string.titan`.
-The main owns every public record, method, and function together with its
-implementation. Contributors expose no public declarations; they contain only
-module-local records, state, and shared implementation machinery divided among
-byte operations, formatting, packing, and regex parsing/compilation. A helper
-remains separate when it is reused or represents a real internal operation
-such as recursive parsing, callback adaptation, or byte-storage handling, not
-merely to receive the unchanged arguments from one public function and return
-all of its results. The files are parsed separately but combined into one dense
-AST, one checker/code-generator pass, one `titan_string_*` protocol, one
-generated object, and one `titan/string.lua` shim.
+The source is a folder ensemble rooted at `titan/string/string.titan`. The
+main owns every public record, method, and function together with its body.
+The contributors `bytes.titan`, `format.titan`, `pack.titan`,
+`regex_parser.titan`, `regex_compile.titan`, and `regex_api.titan` declare
+nothing public; they hold module-local records, state, and shared machinery
+for byte operations, formatting, packing, and regex parsing/compilation. The
+[maintenance rules](standard-library-maintenance.md#keep-public-behavior-with-its-declaration)
+decide when a helper stays separate. All files form one logical module with
+one checker/code-generator pass, one `titan_string_*` protocol, one generated
+object, and one `titan/string.lua` shim.
 
-The dependency direction is:
+`titan.string` imports only `titan.peg` (format grammar, regex parser, and
+compiled regexes) and `titan.gc` (weak regex cache). `titan.peg` imports
+`titan.gc` but never `titan.string`, so its relabel implementation keeps small
+private byte/diagnostic helpers to avoid a cycle. `titan.string` uses only the
+typed PEG surface, never the embedded engine, and has no async-runtime
+dependency. Dependencies run the other way: most I/O-facing standard modules
+import `titan.string`. `titan.async` uses its byte operations and synchronous
+writer for the channel-backed string adapters, whose state and close rules
+live in [Async channel-backed string
+streams](../language/async-io.md#channel-backed-string-streams). `titan.net`
+and `titan.os` use literal `find` and byte-preserving `sub`; `titan.url` uses
+the writer and byte helpers beside its `titan.peg` grammar.
 
-```text
-titan.coroutine --> titan.uv --> titan.async
-titan.peg --> titan.string -----> titan.async
-                    | `--------> titan.net
-                    `----------> titan.os
-titan.gc ----------------------> titan.string
-titan.gc --> titan.peg
-private namespaced LPegLabel archive --> titan.peg
-```
-
-`titan.peg` does not import `titan.string`; its relabel implementation retains
-small private byte/diagnostic helpers to avoid a cycle. Both modules import the
-public `titan.gc` surface to configure their weak caches. `titan.string` uses
-the typed PEG surface but has no async-runtime dependency. The dependency runs
-the other way: `titan.async` uses this module's public byte operations and
-synchronous writer for its channel-backed string adapters. `titan.string`
-never reaches the embedded PEG engine or async Runtime through
-a raw escape hatch. Both
-`titan.net` and `titan.os` dogfood the literal
-`titan.string.find` and byte-preserving `titan.string.sub` operations.
-The independent `titan.url` module imports both public modules: `titan.peg`
-compiles and executes its labeled grammar, while `titan.string` supplies its
-writer and byte-preserving normalization helpers. Neither dependency exposes
-private engine or storage state to URL.
-The adapter state and close rules are documented with their owner in
-[Async channel-backed string streams](../language/async-io.md#channel-backed-string-streams).
-Production places all twenty-five logical modules and LPegLabel in one static
-bundle.
-
-The installed standard build requests twenty-five roots in stable order:
-
-```text
-titan.coroutine
-titan.uv
-titan.async
-titan.timer
-titan.io
-titan.fs
-titan.net
-titan.ssl
-titan.url
-titan.http
-titan.websocket
-titan.os
-titan.path
-titan.peg
-titan.string
-titan.math
-titan.lua
-titan.iteration
-titan.gc
-titan.test
-titan.reflect
-titan.sqlite3
-titan.json
-titan.protobuf
-titan.transfer
-```
-
-The request order keeps `titan.io` before its concrete stream users, places
-the high-level SSL, URL, and HTTP layers after `titan.net`, retains the four
-independent qualified utility modules, and remains
-non-topological. Recursive import loading resolves both the
-`titan.async`/`titan.net`/`titan.os` to `titan.string` to `titan.peg` chains
-and the `titan.url` PEG/string dependencies while those facades are processed.
-
-The paired `titan.so`/`titan.a` therefore contains twenty-five logical protocols
-and twenty-five archive metadata keys. The DSO exposes twenty-six Lua openers: bare
-`luaopen_titan` support plus one entry per logical module. The provider's
-metadata-free payload begins with `ltitanlib.o`, then the private
-`libtitan-lpeglabel.a`, then the selected libuv payload, private llhttp
-archive, and the selected OpenSSL payload used directly by `titan.ssl`. The
-source-defined HTTP foreign callbacks live in the generated logical-module
-object and require no adapter payload.
-Those native inputs have no Titan metadata keys and their private
-archives/headers are not installed in the compiler SDK.
+The module's place in the standard provider (root list, `-X` payload order,
+installed files) is described once in [the standard-library
+image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image).
 
 ## Exact-byte storage
 
@@ -118,8 +55,8 @@ leaves `storage` as the traced GC root. C calls and pointer arithmetic use the
 cast pointer while `#owned` recovers the allocation length. The raw pointer is
 valid only while `owned` is live. Casting the complete owned array to `string`
 creates an immutable Lua string with exactly that recorded length, including
-embedded and trailing zero bytes; no intermediate `StringBytes` record,
-untyped storage cast, or userdata constructor is needed.
+embedded and trailing zero bytes (`bytes.titan` `copy_interval` is the minimal
+example).
 
 `snprintf` destinations are the sole prefix-length exception. They allocate
 `required + 1` bytes for C's terminating zero but return only the first
@@ -130,10 +67,11 @@ zero-length case ordinary Titan code, and avoids manipulating the Lua stack.
 Every other exact-size builder casts its complete owned array directly without
 the prefix copy.
 
-The target maximum string length is likewise invariant for one loaded module.
-The initializer calls `maximum_string_bytes()` once and stores the result in
-`MAXIMUM_STRING_BYTES`; hot allocation and growth paths read that module
-value.
+Machine invariants are computed once by the module's final initializer in
+`string.titan`: `MAXIMUM_STRING_BYTES` (`bytes.titan` `maximum_string_bytes`),
+`INTEGER_LENGTH_MODIFIER`, `HOST_IS_LITTLE_ENDIAN`, and
+`NATIVE_MAXIMUM_ALIGNMENT`. Hot allocation, formatting, and packing paths read
+those module values.
 
 All size arithmetic remains in a checked Titan integer until it is known to
 fit both `lua_Integer` and target `size_t`. Multiplication and addition use
@@ -209,12 +147,11 @@ This bypasses `_G.tostring` while preserving the native number,
 boolean/nil, and `__tostring` behavior. `format`'s `%s` path calls the same
 helper.
 
-Format and pack do not push dynamic operands through
-`luaL_checkinteger`, `luaL_checknumber`, or `luaL_checklstring`. Their
-format-selected branches use ordinary checked Titan casts: `as integer`,
-`as float`, or `as string`. That removes the raw stack helpers and deliberately
-rejects Lua's numeric-string and number-to-string coercions. The integer cast
-still admits an exactly integral representable float.
+Format and pack never push dynamic operands through `luaL_checkinteger`,
+`luaL_checknumber`, or `luaL_checklstring`. Their format-selected branches use
+ordinary checked Titan casts: `as integer`, `as float`, or `as string`. This
+deliberately rejects Lua's numeric-string and number-to-string coercions; the
+integer cast still admits an exactly integral representable float.
 
 The `tostring` helper is a trusted standard-library-internal use of the raw
 Lua C API, not a general promise that arbitrary Titan FFI code can manipulate
@@ -224,13 +161,14 @@ Lua C API, not a general promise that arbitrary Titan FFI code can manipulate
 ## Format translation
 
 The formatter ports the Lua 5.5 conversion grammar and validation tables into
-a `titan.peg` pattern built once by the module initializer. Matching a format
-string produces one local `FormatPlan`: a dense Array of exact
-`FormatPartial` closures of type `function (value): (string)`, followed by one literal
+a `titan.peg` pattern built once by the module initializer (`format.titan`
+`build_format_pattern`). Matching a format string produces one local
+`FormatPlan` (`build_format_plan`): a dense Array of exact `FormatPartial`
+closures of type `function (value): (string)`, followed by one literal
 trailer. A `FormatFactory` constructs each partial from the literal prefix,
-the captured conversion form, and its conversion family. Integer factories
-also insert and retain the target-correct C length modifier once while
-building the plan.
+the captured conversion form, and its conversion family. The signed and
+unsigned factories insert the target C length modifier (`add_integer_length`)
+once while building the plan; `%q` and `pack` add it at render time.
 
 The PEG grammar folds `%%` into the literal runs surrounding conversions.
 Valid conversion captures select the character, signed, unsigned, number,
@@ -254,6 +192,7 @@ conversion. Integer families use `as integer`, number families use `as float`,
 and `%s` calls the module's explicit `tostring`. C-formatted conversions then
 call a bounded native formatter once to obtain the length and again with a
 rooted `required + 1` destination. A declaration/macro-only portability header
+(`titan/string/format_native.h`)
 selects `__mingw_snprintf` on native CLANG64/UCRT and ordinary `snprintf`
 elsewhere. Lua's `lprefix.h` selects MinGW ANSI stdio before `luaconf.h` enables
 its Windows C89 compatibility mode; reproducing that formatter choice keeps
@@ -274,9 +213,11 @@ attempt to forward a heterogeneous Titan `...` descriptor to C.
 `%p` obtains identity through `lua_topointer`; a null pointer is formatted as
 `"(null)"` without passing a null `%p` operand. `%q` is written directly in
 Titan, including decimal control-byte escapes, Lua-readable minimum-integer,
-infinity, NaN, and locale-neutral hexadecimal float forms. Modified `%s`
-checks for embedded NUL before entering C formatting; an unmodified `%s`
-appends the complete converted string.
+infinity, NaN, and locale-neutral hexadecimal float forms. An unmodified `%s`
+appends the complete converted string. A modified `%s` raises on an embedded
+NUL; without a precision, a converted string of at least 100 bytes is then
+appended whole, as in Lua, and only shorter or precision-limited strings
+reach C formatting (`format.titan` `string_format_partial`).
 
 `%q` performs its type dispatch with `is`. For numbers, `is integer` has the
 same success condition as the checked `as integer` cast, so an integral float
@@ -284,13 +225,15 @@ uses the integer literal branch rather than the hexadecimal-float branch.
 
 ## Pack translation
 
-One mutable `PackState` carries the format cursor, selected byte order, native
-byte order, and maximum alignment. `sizeof` and `alignof` on the imported C
-types supply the target's actual widths. The default maximum is the greatest
-alignment of Lua 5.5.1's `LUAI_MAXALIGN` members (`long double`, `void *`, and
-`long long` in Titan's required C99 mode), so `![n]` stays byte-for-byte
-compatible with the linked Lua. A small integer probe determines native
-endianness through `memcpy`, without type-punning.
+One mutable `PackState` (`pack.titan`) carries the format cursor, selected
+byte order, native byte order, and maximum alignment. `sizeof` and `alignof`
+on the imported C types supply the target's actual widths. The maximum
+alignment starts at 1, as in Lua. A `!` option without a number sets it to
+`NATIVE_MAXIMUM_ALIGNMENT`, which `native_maximum_alignment` computes as the
+largest `alignof` among `long double`, `void *`, and `long long` (the members
+of Lua 5.5.1's `LUAI_MAXALIGN` in C99 mode), so `!` stays byte-for-byte
+compatible with the linked Lua. `host_is_little_endian` determines native
+endianness once through `memcpy`, without type-punning.
 
 The format reader classifies one option and then computes alignment padding
 from the current output/data position. `X` consumes the following option only
@@ -324,7 +267,8 @@ never a zero-result operation.
 ## Regex parser and compiler
 
 The source parser is one `titan.peg` relabel grammar compiled during
-`titan.string`'s module initializer. Its definitions combine named lexical
+`titan.string`'s module initializer (`regex_parser.titan`
+`build_regex_parser`). Its definitions combine named lexical
 patterns from `peg.define` with tightly typed AST and match-time callbacks from
 `peg.define_value`; a grammar construction error is therefore an initialization
 regression and is not caught or translated into a source diagnostic.
@@ -368,7 +312,8 @@ into the public label/line/column/source/caret message before raising.
 LPegLabel's max-stack setting continues to govern execution of the PEG produced
 by the regex compiler, not construction of the regex AST.
 
-Compilation is continuation-based. Each AST node is converted with the
+Compilation is continuation-based (`regex_compile.titan`
+`regex_compile_node`). Each AST node is converted with the
 pattern that must follow it, which gives greedy repetition its required
 backtracking behavior. Ordered choice preserves left bias. Whole-expression
 anchors wrap the completed alternation instead of attaching to one branch.
@@ -389,13 +334,9 @@ Parsing Expression
 Grammars”](https://www.inf.puc-rio.br/~roberto/docs/ry10-01.pdf), PUC-Rio,
 2010.
 
-`RegexNode` is local to the combined `titan.string` folder module, but its
+`RegexNode` is local to the combined `titan.string` folder module; its
 constructors and `case` uses span `regex_parser.titan` and
-`regex_compile.titan` through the ordinary shared module namespace. The
-conversion changes no public `Regex`, `RegexMatch`, function signature,
-logical provider key, or Lua API; it is production dogfooding of private
-unions with several payload parts, selective named case bindings, Array
-payloads, and cross-contributor nominal visibility.
+`regex_compile.titan` through the ordinary shared module namespace.
 
 Before construction, the compiler:
 
@@ -406,7 +347,8 @@ Before construction, the compiler:
 * bounds active group nesting at 512;
 * validates each single-digit backreference against a previously closed group;
 * projects the resulting PEG tree size, including continuation and capture
-  wrappers, against `SHRT_MAX - 10`;
+  wrappers, against `REGEX_PATTERN_LIMIT` (32757, `SHRT_MAX - 10`) in
+  `regex_projected_size` and `string.titan` `compile_regex`;
 * limits the expression to the string API's 200-value projection bound.
 
 A private sentinel named capture is installed for every group. A participating
@@ -446,9 +388,11 @@ capture is visible as nil and has the language's ordinary generic-for
 termination meaning. This limitation is documented rather than hidden behind
 an extra public control value.
 
-Initial positions are normalized separately from the underlying PEG engine:
-zero and negative overshoot become 1, positive overshoot is immediate
-no-match, and `^` is compiled relative to that normalized search start.
+Initial positions are normalized separately from the underlying PEG engine
+(`regex_api.titan` `regex_normalized_init`): nil, zero, and negative values
+beyond the subject start become 1; other negative values count from the end;
+positive overshoot is immediate no-match. `^` is compiled relative to that
+normalized search start.
 
 ## Iteration and replacement
 
@@ -486,41 +430,35 @@ borrowed pointers. Delimiter search and slicing reuse the module's binary-safe
 `find` and `sub`.
 
 `StringWriter` is the checked accumulator used by formatting, packing,
-substitution, and other bounded joins. The record itself stores rooted chunks
-plus their checked aggregate length. Its local `StringWriter.new()` override
-initializes an empty chunk array and zero length with a context-typed record
-literal. Internal code calls `StringWriter()`; the public `writer()` factory
-uses that same constructor. The constructor remains source-private.
-Every public and internal `write` is
-synchronous; Task synchronization belongs to the channel-backed adapter owned
-by `async`. `drain` performs one exact-size allocation and copy, then replaces
-the chunk array and resets the length to zero. This
-avoids quadratic repeated concatenation while allowing the same writer to be
-reused after a drain.
-Neither close method owns a native resource. `StringReader:close` nevertheless
-discards its backing string and resets the cursor so it releases unread data
-promptly; subsequent reads return `nil`. `StringWriter:close` is a no-op.
+substitution, and other bounded joins. It stores rooted chunks plus their
+checked aggregate length. The local `StringWriter.new()` override in
+`format.titan` initializes an empty chunk Array and zero length; internal code
+and the public `writer()` factory both call `StringWriter()`, and the
+constructor stays source-private. Every `write` is synchronous; Task
+synchronization belongs to the channel-backed adapter owned by `async`.
+`drain` performs one exact-size allocation and copy, then replaces the chunk
+Array and resets the length, which avoids quadratic concatenation and lets the
+writer be reused. Neither close method owns a native resource.
+`StringReader:close` discards its backing string and resets the cursor so
+unread data is released promptly; subsequent reads return `nil`.
+`StringWriter:close` is a no-op.
 
 ## Roots, callbacks, and errors
 
-The regex cache has typed Map shape `{string: Regex}`; ordinary Map lookup
-produces `Regex?` for an absent key. Module state creates the cache directly
-at that type. Its initializer passes the same table through the public
-`gc.weak` boundary, which installs weak-value mode while preserving an existing
-metatable. The cast to `{value: value}` is confined to that configuration call;
-ordinary cache reads and writes remain typed Map operations. A live regex
-roots its PEG pattern, and a live iterator roots the regex, subject, and
-current position. During
+The regex cache (`regex_api.titan` `_regex_cache`) is created at its typed
+Map shape `{string: Regex}`, so an absent key reads as `Regex?`. The module
+initializer passes it once through a `{value: value}` view to `gc.weak`
+([weak-mode ledger](gc-library.md#weak-mode-stack-ledger)); ordinary cache reads
+and writes stay typed Map operations. A live regex roots its PEG pattern, and
+a live iterator roots the regex, subject, and current position. During
 synchronous `gsub`, the generated frame roots the regex, subject, replacement
-function, whole-match argument, and returned string across each callback. The
-PEG pattern's native uservalue graph roots constant captures, grammars,
-tables, and callbacks.
+function, whole-match argument, and returned string across each callback.
 
-Runtime/match-time/function captures and `gsub` replacement functions run
-through non-yieldable callable paths. They may allocate, collect, or raise,
-but only traced objects and checked offsets remain live across the call.
-`gsub` uses the ordinary generated function-call and return-conversion path
-rather than a manual Lua-stack `pcall`/type-dispatch wrapper. Callback
-execution is serial on the current Lua thread; no process-global mutable
-matching state is introduced. The separate stack-balanced `%s` conversion
-path continues to propagate `__tostring` errors as described above.
+Capture callbacks and `gsub` replacements follow the PEG callback rules in
+[Stack, roots, callbacks, and
+errors](lpeglabel-embedding.md#stack-roots-callbacks-and-errors): they cannot
+yield, may allocate, collect, or raise, and only traced objects and checked
+offsets stay live across them. `gsub` calls the replacement through the
+ordinary generated call and return-conversion path, with no manual Lua-stack
+`pcall` or type dispatch. The stack-balanced `%s` conversion propagates
+`__tostring` errors as described above.

@@ -792,6 +792,7 @@ end
 
 -- Constructors use the active variant's size and dense traced slots. The
 -- shared tag is the first real subobject of every variant payload.
+-- Implementation notes: doc/implementation/unions.md#run-time-representation
 function coder._codeunioninit(ctx, node, target)
     local union = assert(node._union)
     local variant = assert(node._variant)
@@ -950,6 +951,7 @@ local function code_map_length_value(ctx, loc, mapstats, map)
     }), result
 end
 
+-- Implementation notes: doc/implementation/codegen-constructs.md#length-code_map_length
 local function code_map_length(ctx, node, operand_stats, operand)
     local mapstats, map = materialize_code(
         ctx, node.exp._type, operand_stats, operand)
@@ -1207,6 +1209,7 @@ end
 -- Preserve Titan/Lua's left-to-right operand evaluation. If preparing the RHS
 -- emits statements, freeze the LHS first; otherwise those statements could
 -- mutate state that a deferred LHS expression still reads.
+-- Implementation notes: doc/implementation/codegen-constructs.md#operators-with-inlined-lua-semantics
 ordered_binary_operands = function(ctx, node)
     local lstats, lcode = codeexp(ctx, node.lhs)
     local rstats, rcode = codeexp(ctx, node.rhs)
@@ -1250,6 +1253,7 @@ end
 -- __eq machinery only for the distinct-table slow case. The ComparisonPlan
 -- supplies the original static types, so this path can include Map/value while
 -- leaving the otherwise-raw value/value operation unchanged.
+-- Implementation notes: doc/implementation/codegen-constructs.md#equality-codebinaryop
 local function code_map_equality(ctx, node, op, kind)
     local stats, lcode, rcode = ordered_binary_operands(ctx, node)
     local resultdecl, result = newtmp(ctx, types.Boolean())
@@ -1670,6 +1674,7 @@ function codebinaryop(ctx, node, _)
     end
 end
 
+-- Implementation notes: doc/implementation/dense-arrays.md#array-reads
 function codeindexarray(ctx, node)
     local castats, caexp = materialize(ctx, node.exp1)
     local cistats, ciexp = materialize(ctx, node.exp2)
@@ -1943,6 +1948,7 @@ end
 --     RAISES a Titan runtime error; result is the unboxed element value, type t.
 --   _nilfill == true (optional adjust-up): out-of-range yields nil; result is a
 --     t? option TValue (mirrors the codeindexarray option branch).
+-- Implementation notes: doc/implementation/variadic-parameters.md#lowering-index-count-and-constructor-forms
 function codedotsindex(ctx, node)
     local va = assert(ctx.varargs, "...[i] outside a variadic function")
     local elem = va.elem
@@ -2342,6 +2348,7 @@ local function code_spread_map_open_read(
     }), result
 end
 
+-- Implementation notes: doc/implementation/spread-expressions.md#generated-carrier-and-result-run
 local function code_spread_carrier(ctx, node)
     local kind = assert(node._spread_kind,
         "spread carrier lacks its checked subject kind")

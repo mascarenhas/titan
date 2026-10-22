@@ -765,6 +765,7 @@ local function _relabel_cached_source(
   return compiled
 end
 
+-- Implementation notes: doc/implementation/lpeglabel-embedding.md#relabel-translation
 local function _relabel_refresh_locale()
   local current = locale()
   local any_byte = any()

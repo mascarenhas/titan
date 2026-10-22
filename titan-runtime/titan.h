@@ -41,6 +41,7 @@
 ** ===========================================================================
 */
 
+/* Implementation notes: doc/implementation/error-handling.md#code-generator-overview */
 /* --- BEGIN verbatim from lua-5.5.1/src/ldo.c:61-65 --- */
 
 /* chained list of long jump buffers */
@@ -72,6 +73,7 @@ typedef struct lua_longjmp {
    the compiler and standard-library semantic version.
    TITAN_LIBRARY_VERSION is its major/minor component and owns installed
    library paths plus the versioned TITAN_PATH override. */
+/* Implementation notes: doc/implementation/codegen-overview.md#compiled-module-abi */
 #define TITAN_ABI_VERSION "2"
 #define TITAN_VERSION "0.6.0"
 #define TITAN_LIBRARY_VERSION "0.6"
@@ -120,6 +122,7 @@ typedef struct lua_longjmp {
 */
 typedef void (*TitanInterfaceMethod)(void);
 
+/* Implementation notes: doc/implementation/variadic-parameters.md#seven-titanvarg-structs-one-per-ctype */
 /* Variadic-parameter descriptors. One per `ctype` so `args` has the exact
 ** element pointer type. `n_args` is the TOTAL backing count; `start` is NOT a
 ** struct field — it travels as a separate `int _start` native parameter, so a
@@ -347,6 +350,7 @@ static l_inline void titan_array_set_length(Table *backing,
   *lenhint(backing) = cast_uint(length);
 }
 
+/* Implementation notes: doc/implementation/dense-arrays.md#structural-validation */
 static l_inline Udata *titan_array_require_proxy(Table *backing) {
   lua_assert(backing != NULL && backing->asize > 0);
   lua_assert(*getArrTag(backing, 0) == ctb(LUA_VUSERDATA));

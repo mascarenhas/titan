@@ -594,6 +594,7 @@ function defs.recorddecl(pos, islocal, name_loc, name, typeparams, fields,
     return { _tag = "Parser.Declarations", nodes = {record, new} }
 end
 
+-- Implementation notes: doc/implementation/unions.md#ast-and-parser-lowering
 function defs.uniondecl(pos, islocal, name_loc, name, typeparams, variants,
                         end_loc)
     local union = with_end_loc(with_name_loc(
@@ -698,6 +699,7 @@ function defs.append_program(list, node)
 end
 
 
+-- Implementation notes: doc/implementation/lexer-parser.md#fold-captures-and-expression-precedence
 local binary_precedence = {
     ["or"]=1, ["and"]=2,
     ["=="]=3, ["~="]=3, ["<"]=3, [">"]=3, ["<="]=3, [">="]=3,
@@ -1322,6 +1324,7 @@ for name, pattern in pairs(defs) do
 end
 local grammar = re.compile(grammar_source, defs)
 
+-- Implementation notes: doc/implementation/lexer-parser.md#non-reentrancy
 function parser.parse(filename, input)
     assert(type(filename) == "string")
     assert(THIS_FILENAME == nil, "the Titan parser is not reentrant")

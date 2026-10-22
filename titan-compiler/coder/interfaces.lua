@@ -726,6 +726,7 @@ function coder._validate_callable_adapter_rebases(adapter, use)
         use .. " is missing a rebase point")
 end
 
+-- Implementation notes: doc/implementation/closure-adjustment-wrappers.md#one-frozen-callable-adapter-plan
 function coder._validate_callable_adapter_plan(
         adapter, source_type, target_type, use, seen)
     use = use or "callable adapter"
@@ -1888,6 +1889,7 @@ function coder._emit_interface_adapter_results(
     return table.concat(code, "\n")
 end
 
+-- Implementation notes: doc/implementation/interfaces.md#native-entry-abi-and-adjustment-entries
 function coder._emit_interface_adapter(
         tlcontext, pair, index, mapping)
     local adapter = assert(mapping.interface_adapter)
@@ -2018,11 +2020,12 @@ function coder._interface_symbol_fragment(name)
     return table.concat(bytes)
 end
 
--- Emit the common Interface wrapper body. uv[0]/uv[1] retain the concrete
--- owner module and concrete value; uv[2+i] retains Interface field i's
+-- Emit the common Interface wrapper body. uv[0]/uv[1] retain the emitting
+-- module's `_mod` and the concrete value; uv[2+i] retains Interface field i's
 -- immutable, target-typed snapshot. Static conversions and dynamic-discovery
 -- witnesses differ only in how they prepare those snapshots, name the fresh
 -- Udata, and address its traced result slot.
+-- Implementation notes: doc/implementation/interfaces.md#wrapper-representation
 function coder._render_interface_wrapper_allocation(args)
     local vtable_size = args.vtable
         and "sizeof(" .. args.vtable .. ")" or "0"
@@ -2145,6 +2148,7 @@ end
 -- Validate and inventory one concrete/Interface pair. Exact slots point
 -- directly at the concrete method; adjusted slots carry one checker-frozen
 -- adapter plan and receive a deterministic private adapter symbol.
+-- Implementation notes: doc/implementation/interfaces.md#frozen-conversion-and-adapter-plans
 function coder._interface_pair(ctx, conversion, loc)
     local use = "concrete-to-Interface conversion"
     assert(conversion and conversion.kind == "interface_conversion",
@@ -2644,6 +2648,7 @@ function coder._code_interface_conversion(ctx, node)
     }), result
 end
 
+-- Implementation notes: doc/implementation/interfaces.md#tests-and-concrete-downcasts
 function coder._code_interface_downcast(ctx, node, predicate_only)
     local downcast = assert(node._interface_downcast,
         "Interface downcast lacks its checker annotation")

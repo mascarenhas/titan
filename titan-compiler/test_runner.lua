@@ -34,6 +34,7 @@ function test_runner.function_names(ast)
     return names
 end
 
+-- Implementation notes: doc/implementation/test-runner.md#source-discovery
 function test_runner.discover(requested_roots, imported, dependency_closure)
     local source_names = {}
     for _, root in ipairs(requested_roots) do
@@ -98,6 +99,7 @@ local MAIN_SUFFIX = [=[
 end
 ]=]
 
+-- Implementation notes: doc/implementation/test-runner.md#synthetic-source-and-native-outputs
 function test_runner.render(cases)
     local imports = { RUNNER_IMPORTS }
     local module_aliases = {}

@@ -28,15 +28,14 @@ existing generic-unaware coder
 
 The language contract is in [Generics](../language/generics.md). This chapter
 specifies the frontend representation, surface type algebra and solver,
-declaration staging, constraint erasure, cast elaboration, unchanged codegen and
-GC layouts, FFI admission, compiled metadata, and the all-`value` async Runtime.
-The existing [checker plan architecture](type-relations-and-boundaries.md) is a
-prerequisite: generics reuse those concrete plans rather than teaching the
-coder a new relation.
+declaration staging, constraint erasure, cast elaboration, code-generation and
+GC layouts, FFI admission, compiled metadata, and the generic shape of the
+async owners. The [checker plan architecture](type-relations-and-boundaries.md)
+is a prerequisite: generics reuse those concrete plans rather than teaching
+the coder a new relation.
 
-Generics include their declared type schema in compiled-module ABI metadata.
-The schema carries schemes and applications; it does **not** add a run-time
-generic calling convention.
+The declared type schema (schemes and applications) is part of the provider
+interface metadata; there is no run-time generic calling convention.
 
 ## Design and safety invariants
 
@@ -68,7 +67,7 @@ The implementation is governed by these invariants:
    are erased. Coder sees only ordinary monomorphic types and existing concrete
    annotations.
 9. Source order, declaration frontiers, duplicate precedence, visibility, and
-   parse-time constructor adjacency remain unchanged.
+   parse-time constructor adjacency are the same as for non-generic code.
 10. Generic storage is Transient/Shallow. The implementation promises open-
     world representation safety, not a reified application identity or a deep
     homogeneous heap invariant.
@@ -106,23 +105,25 @@ keeps their source order relative to `Ast.InterfaceMethod` children.
 
 Every absent `typeparams` or public `ExpCall.typeargs` list is `{}`. An absent
 `TypeParam.constraint` is nil. `TypeParam` is syntax, not a value `Decl`.
-An `ExpCall` has one callable-local `typeargs` list regardless of whether its
-ordinary argument carrier is `ArgsFunc`, `ArgsNamedFunc`, `ArgsMethod`, or
-`ArgsNamedMethod`; generics do not add another `Args` tag. Explicit owner
-arguments in `Pair<|T|>.member(...)` are a parser decoration on the namespace
-`ExpVar`, `_nominal_typeargs`, with its source location. The checker consumes
-that decoration before member selection, retaining the canonical owner and
-closed owner application separately; erased lowering removes the decoration.
-When owner and callable-local scopes are both open, the checker accepts both
-complete written lists or infers both; one written scope never requests partial
-inference of the other.
+An `ExpCall` has one `typeargs` list regardless of whether its argument node
+is `ArgsFunc`, `ArgsNamedFunc`, `ArgsMethod`, or `ArgsNamedMethod`; generics
+add no `Args` tag. Written type arguments after a name, dot member, or method
+reference are first recorded as the parser decoration `_nominal_typeargs`
+(`parser.lua` `defs.name_with_types`, `defs.dot_with_types`,
+`defs.method_with_types`); `defs.call_suffix` moves the callee's list into
+`ExpCall.typeargs`. Owner arguments in `Pair<|T|>.member(...)` therefore stay
+on the namespace `ExpVar`. The checker consumes that decoration before member
+selection, retaining the canonical owner and closed owner application
+separately, and rejects it on an `ExpVar` that is not a direct callee; erased
+lowering removes it. When owner and callable-local scopes are both open, the
+checker accepts both complete written lists or infers both; one written scope
+never requests partial inference of the other.
 
 Owner nodes contain owner binders. A method, nominal function, or Interface
 method contains only its callable-local binders; a top-level function contains
-its complete binder list. Foreign functions and `ExpFunction` retain their
-existing constructors and reject binder syntax. Existing locality storage also
-remains unchanged: `TopLevelFunc.islocal` is positional while owners, methods,
-statics, fields, and variants retain their existing decorations.
+its complete binder list. Foreign functions and `ExpFunction` reject binder
+syntax. `TopLevelFunc.islocal` is positional, while owners, methods, statics,
+fields, and variants carry locality as decorations.
 
 Adding `typeargs` to `TypeName` and `TypeQualName` makes even an unapplied name
 explicit in the AST. This is important for parser and lowering assertions: an
@@ -138,17 +139,18 @@ need neither a contextual `>` splitter nor a whole-source candidate scan.
 Ordinary `<`, `>`, and `>>` remain comparison and shift tokens.
 
 Fold captures accumulate nonempty binder/argument lists. Constraints use named
-type syntax, and the checker proves their Interface meaning and scope. The
-existing 100-item binder/argument guard remains separate from return-type lists
-and later calling-convention limits.
+type syntax, and the checker proves their Interface meaning and scope. Binder
+and argument lists share the parser's `LIST_LIMIT` (100) with parameter lists
+(`defs.checklist`); later calling-convention limits are separate.
 
 Base names and dot/colon member suffixes can carry written type arguments.
 The parser records these candidates once; a following call transfers its
 callable-local list into `ExpCall.typeargs`. The checker validates whether the
 base is a generic callable or an applicable nominal namespace, preserves the
 separate owner/callable scopes, and rejects explicit first-class owner-member
-applications. `Pair<|T|>.member(...)` still places owner arguments on the
-namespace rather than on `new`.
+applications. Bare record calls are handled in the checker's `Ast.ExpCall`
+visitor (`checker/expressions.lua`), which moves their call type arguments
+onto the record namespace.
 
 Missing binders, constraints, arguments, or `|>` receive committed syntax
 labels. Eligibility, owner arity, partial application, and direct-call-only
@@ -157,16 +159,16 @@ generic call.
 
 ### Parse-time constructor elaboration
 
-The parser continues to place synthesized record `new` and union-variant
-`TopLevelStatic` nodes immediately after their owner. For `Pair<|T, U|>` the
-synthetic constructor:
+`parser.lua` `defs.recorddecl` and `defs.uniondecl` place the synthesized
+record `new` and union-variant `TopLevelStatic` nodes immediately after their
+owner. For `Pair<|T, U|>` the synthetic constructor:
 
 - has `typeparams = {}` rather than copying the owner binders;
 - gives its field or payload parameters syntax that refers directly to `T` and
   `U`;
-- returns `TypeName("Pair", {TypeName("T", {}), TypeName("U", {})})`; and
-- retains `_record_constructor`, `_union_constructor`, and `_union_variant`
-  exactly as before.
+- returns `TypeName("Pair", {TypeName("T", {}), TypeName("U", {})})`
+  (`applied_owner_type`); and
+- carries `_record_constructor`, or `_union_constructor` and `_union_variant`.
 
 The checker attaches owner quantification only after completing the canonical
 record or union descriptor. It derives the constructor scheme from the
@@ -176,9 +178,9 @@ order, or giving constructors a second independent signature.
 
 An explicit record static `new` suppresses the synthetic declaration instead
 and gets the ordinary owner/member generic scopes. Bare record calls lower to
-that same member selection, moving written call type arguments onto the owner
-namespace. The record's `custom_constructor` flag survives both declared and
-erased graphs; see [record constructors](record-constructors.md).
+that same member selection. The record descriptor's `custom_constructor` flag
+survives both declared and erased graphs; see
+[record constructors](record-constructors.md).
 
 ## Surface type metadata algebra
 
@@ -186,17 +188,16 @@ Generic-aware checking uses declaration descriptors that never reach ordinary
 coder dispatch:
 
 ```text
-Type.GenericScope(modname, optional_owner_fqtn,
-                  optional_callable_name, role, declaration_kind)
-Type.TypeParameter(name, optional_constraint)
-Type.Parameter(scope, index, diagnostic_name,
-               optional_erased_interface_application)
+Type.GenericScope(modname, owner_fqtn, callable_name, role, declaration_kind)
+Type.TypeParameter(name, constraint)
+Type.Parameter(scope, index, diagnostic_name, erased_constraint)
 Type.Nominal(fqtn, args)
 Type.FunctionScheme(scope, typeparams, signature)
 Type.GenericAlias(module, name, locality, target_owner_fqtn,
-                  optional_target_alias_fqtn, target_scope, typeparams)
+                  target_alias_fqtn, target_scope, typeparams)
 
-Type.Record(name, fields, functions, methods, nfields, scope, typeparams)
+Type.Record(name, fields, functions, methods, nfields, scope, typeparams,
+            custom_constructor)
 Type.Union(name, variants, functions, methods, nvariants, scope, typeparams)
 Type.Interface(name, fields, methods, scope, typeparams)
 Type.Method(fqtn, name, params, rettypes, varargtype, flexrettype,
@@ -212,19 +213,19 @@ source name exists for diagnostics and is ignored by alpha-equivalence.
 declaration kind—not a filename or Lua table identity. Serialization therefore
 has deterministic identities across source checking and interface recovery.
 
-The `Parameter` stores nil for the implicit unconstrained `value` carrier, or
-the recursively erased ordinary Interface application for a constrained
-binder. Owner descriptors own owner binders. Method and static descriptors own
-only callable-local binders, although their signatures can refer to owner
-leaves. Constructors quantify owner binders; nominal functions quantify owner
-binders followed by local binders; receiver methods have their owner arguments
-fixed and instantiate only local binders. A top-level `FunctionScheme` wraps one
-ordinary function signature. Ordinary first-class function types are never
-schemes.
+`Parameter.erased_constraint` is nil for the implicit unconstrained `value`
+carrier, or the recursively erased ordinary Interface application for a
+constrained binder. Owner descriptors own owner binders. Method and static
+descriptors own only callable-local binders, although their signatures can
+refer to owner leaves. Constructors quantify owner binders; nominal functions
+quantify owner binders followed by local binders; receiver methods have their
+owner arguments fixed and instantiate only local binders. A top-level
+`FunctionScheme` wraps one ordinary function signature. Ordinary first-class
+function types are never schemes.
 
-All optional names and scopes use nil as well. When a consumer needs to recover
-a binder's surface constraint, `parameter_surface_constraint` returns the
-optional constraint plus a validity boolean. A valid unconstrained binder is
+Optional names and scopes are nil. When a consumer needs to recover a binder's
+surface constraint, `types.parameter_surface_constraint` returns the optional
+constraint plus a validity boolean. A valid unconstrained binder is
 `nil, true`; missing or malformed binder evidence is `nil, false`.
 
 ### Applications, aliases, and identity
@@ -264,14 +265,17 @@ unserialized back-pointer.
 
 ## Declaration staging and rigid checking
 
-The checker preserves the combined AST's existing source order. Its generic
-surface stages are:
+The checker preserves the combined AST's source order. Its generic surface
+stages (`checker/declarations.lua` `checktoplevel`) are:
 
-1. reserve imports, owner headers, `GenericScope`s, binder names, and arities;
+1. reserve imports, owner headers, `GenericScope`s, binder names, and arities
+   (`generic_reserve_generic_owner_headers`);
 2. resolve constraints and aliases;
 3. complete records, unions, Interfaces, and their constructor schemes;
-4. build top-level, method, and nominal-function schemes;
-5. check module variables at their existing import/variable frontier;
+4. build top-level, method, and nominal-function schemes, then validate the
+   constraints deferred while signatures were incomplete
+   (`generic_validate_pending_generic_constraints`);
+5. check module variables at their import/variable frontier;
 6. check bodies with declaration parameters rigid; and
 7. construct and validate the declared module type.
 
@@ -290,15 +294,17 @@ fields and methods. It does not inherit operations from a possible future
 binding. Distinct parameters do not become equal merely because erasure later
 gives them the same carrier.
 
-Generic Interface satisfaction is checked on the surface schemes. After owner
-substitution, every required field needs a visible same-name const record field
-with the ordinary assignment adjustment, and an implementation method must
-have the same callable-local binder arity as the required method. Corresponding
-binder constraints are compared by alpha-equivalence, and the existing
-directional method-callable compatibility check runs under the matched rigid
-parameters. Missing, inaccessible, mutable, differently constrained, or
-incompatible members fail before erasure. The erased signature is never used
-to make two incompatible generic methods appear equal.
+Generic Interface satisfaction is checked on the surface schemes
+(`types.generic_interface_implementation`). After owner substitution, every
+required field needs a visible same-name const record field with the ordinary
+assignment adjustment, and an implementation method must have the same
+callable-local binder arity as the required method. `close_generic_method_pair`
+substitutes one shared set of `Parameter`s into both binder lists, so
+corresponding constraints compare equal exactly when they are
+alpha-equivalent, and the directional method-callable check then runs under
+those shared rigid parameters. Missing, inaccessible, mutable, differently
+constrained, or incompatible members fail before erasure. The erased signature
+is never used to make two incompatible generic methods appear equal.
 
 Generic source visibility follows the same explicit opt-in. An import whose
 terminal `.titan` marker was paired with trusted source provenance can select a
@@ -308,27 +314,27 @@ public-only.
 
 ## Local instantiation and inference
 
-An inferred outer generic AST use owns one checker-only inference context. Its
-fresh cells use occurrence scopes distinct from declaration scopes and from
-every other application. Nested generic calls, constructors, methods, bound
-methods, and contextual first-class uses inherit that ambient context, register
-their own occurrence scopes and child use records, and may retain cell-to-cell
-or structural equations until a real term closes either side. Every equation is
-occurs-checked before a union/find class is joined or receives a structural
-binding.
+An inferred outer generic AST use owns one checker-only inference context
+(`checker/calls.lua`). Its fresh cells use occurrence scopes distinct from
+declaration scopes and from every other application. Nested generic calls,
+constructors, methods, bound methods, and contextual first-class uses inherit
+that ambient context, register their own occurrence scopes and child use
+records, and may retain cell-to-cell or structural equations until a real term
+closes either side. Every equation is occurs-checked before a union-find class
+(`generic_inference_root`) is joined or receives a structural binding.
 
 Inference has an explicit selection/checking split.
 
 ### Ordered selection
 
 The call scheduler first checks the callee or receiver. The helper
-`infer_static_result_context` then applies the current static policy: available
-expected-result slots are consumed left-to-right before evaluated arguments.
-Keeping that policy behind one phase boundary makes it independent of the
-run-time-order machinery. Positional arguments are then consumed left-to-right;
-named fields in their written order; a final expression's fixed results in
-result order followed by its open tail; and synthesized omissions only after
-all written expressions.
+`generic_infer_static_result_context` then applies the current static policy:
+available expected-result slots are consumed left-to-right before evaluated
+arguments. Keeping that policy behind one phase boundary makes it independent
+of the run-time-order machinery. Positional arguments are then consumed
+left-to-right; named fields in their written order; a final expression's fixed
+results in result order followed by its open tail; and synthesized omissions
+only after all written expressions.
 
 A possible generic first-class expression is checked in its lexical callback.
 It never pre-scans later positional arguments: the fresh child occurrence joins
@@ -340,7 +346,7 @@ whose resolved static type is `value` remains contextual, including field,
 index, and computed forms. The later real call consumes that transferred callee
 check instead of descending again.
 
-`unify_inference` is the equation/first-selection operation. At entry it
+`generic_unify_inference` is the equation/first-selection operation. At entry it
 smart-substitutes both the declaration-side pattern and producer type. If both
 are now closed with respect to the ambient context, it succeeds without raw
 comparison: the cell was already selected and the owning finalizer will run the
@@ -356,11 +362,12 @@ supertypes. A later independently built Array/Map/nominal application therefore
 reaches the ordinary invariant assignment relation after selection instead of
 being rebuilt component by component.
 
-Argument evidence may peel one outer Option when its formal is a nonoptional
-structural shape, allowing a Map parameter such as `{K: V}` to infer from
-`({string: T})?`. Direct inference-cell formals retain the entire optional
-type. This boundary adjustment does not alter recursive structural unification;
-the ordinary argument finalizer still owns the checked Option force and rejects
+Argument evidence may peel one outer Option (`checker/common.lua`
+`deoptionize`) when its formal is a nonoptional structural shape, allowing a
+Map parameter such as `{K: V}` to infer from `({string: T})?`. Direct
+inference-cell formals retain the entire optional type. This boundary
+adjustment does not alter recursive structural unification; the ordinary
+argument finalizer still owns the checked Option force and rejects
 incompatible nested shapes. For a literal passed to an optional Array formal,
 constructor finalization retains the present Array context, completes element
 inference and checking once, then applies the ordinary outer Option wrap.
@@ -405,21 +412,24 @@ constructor or computed key/value first completes its own default, and its
 completed type then becomes real evidence for the nonempty parent. The parent
 is marked invalid only when that ordinary component check actually failed.
 
-Discoveries have two finite phases. The `evidence` phase drains ready equations
-and context-ready producers to a fixed point. Only then may the `default` phase
-apply an ordinary constructor shape/default; evidence is drained again after
-each default round. Generic carrier closure runs after both phases. Deferred
-callbacks execute under their original AST-owned use, so any nested occurrence
-is registered at the correct postorder position. Each callback is one-shot.
+Discoveries have two finite phases (`generic_run_inference_discovery_phase`).
+The `"evidence"` phase drains ready equations and context-ready producers to a
+fixed point. Only then may the `"default"` phase apply an ordinary constructor
+shape/default (an empty constructor unifies with `Array(Integer)`); evidence
+is drained again after each default round. Generic carrier closure runs after
+both phases. Deferred callbacks execute under their original AST-owned use, so
+any nested occurrence is registered at the correct postorder position. Each
+callback is one-shot.
 
-Constraint propagation is a dirty-root worklist, not a global fixed-point scan.
-Every constrained occurrence owns a dense record with a lexical sequence;
-unioned equivalence classes merge those records in sequence order, and a changed
-binding queues only that root's records. Smart substitution similarly visits
-only inference scopes reachable from the type being rewritten, using a direct
-scope-to-entry index. These two bounds preserve first-evidence/diagnostic order
-while keeping independent constrained siblings linear rather than repeatedly
-rescanning the entire ambient context.
+Constraint propagation is a FIFO queue of changed union-find roots
+(`constraint_queue`, `generic_enqueue_constraint_root`), not a global
+fixed-point scan. Every constrained occurrence owns a dense record with a
+lexical sequence; unioned equivalence classes merge those records in sequence
+order, and a changed binding queues only that root's records. Smart
+substitution similarly visits only inference scopes reachable from the type
+being rewritten, using a direct `scope_entries` index. These two bounds
+preserve first-evidence/diagnostic order while keeping independent constrained
+siblings linear rather than repeatedly rescanning the entire ambient context.
 
 A derived operation use is registered before descending whenever an expression
 copies checker-owned annotations from an open child. This covers computed
@@ -428,20 +438,22 @@ bound methods, fixed/open result projections, and constructors. Postorder
 finalization refreshes those annotations after child uses close; it is an
 annotation dependency order, never permission to reorder source evidence.
 
-Only the owning outer use closes the context. Closure performs:
+Only the owning outer use closes the context
+(`generic_close_inference_context`). Closure performs:
 
 1. ordered callee/receiver, static-result, argument, result-slot, and constructor
    selection while the written subtree is checked;
 2. evidence discovery and constraint-equation propagation;
 3. ordinary constructor defaults followed by another evidence drain;
 4. declared-carrier closure of genuinely free equivalence classes, preferring a
-   resolvable constrained Interface application over unconstrained `value`;
+   resolvable constrained Interface application over unconstrained `value`
+   (`generic_default_inference_cells`);
 5. validation of every declaration-local constraint and
-   `types.transient_roundtrip`; and
+   `types.transient_roundtrip` of every binding; and
 6. postorder finalization of the application/operation tree.
 
 Finalization is phase two for stored surface edges. It smart-substitutes the
-resolved target and calls the existing `coerce_and_check`, open-run assignment,
+resolved target and calls `coerce_and_check`, the open-run assignment,
 record-field, or result-adjustment path exactly once. Those paths freeze the
 ordinary plan/cast/guard/Interface or callable wrapper and report a mismatch at
 the later source term. Generic erasure subsequently inserts only the separate
@@ -454,13 +466,14 @@ Operation markers and occurrence Parameters are removed before the code-facing
 AST returns. Result-only/phantom cells and unresolved nested equations therefore
 close without leaving a wildcard, metadata cell, or run-time type argument.
 
-Smart substitution uses Titan's canonical constructors rather than replacing
-leaves in place. It:
+Smart substitution (`types.substitute_inference`, wrapped by the checker's
+`generic_substitute_inference`) rebuilds types through the canonical
+constructors rather than replacing leaves in place. It:
 
-- collapses `Option(value)` and nested Options;
-- de-optionizes Array and Map value positions according to their existing
-  storage rules;
-- rejects nil/optional Map keys and other invalid reconstructed keys;
+- collapses `Option(value)` and nested Options (`types.canonical_option`);
+- de-optionizes Array element and Map value positions according to their
+  storage rules (`types.canonical_array`, `types.canonical_map`);
+- rejects nil/optional Map keys;
 - revalidates generic owner arity and constraints;
 - revalidates fixed, variadic, and flexible callable shapes; and
 - reruns recursive type-argument eligibility.
@@ -471,33 +484,38 @@ canonically ill-formed result around reconstruction.
 
 ## Freezing the declared graph
 
-After all surface bodies and uses are checked, the checker builds a detached,
-immutable declared module graph and stores it on `ast._declared_type`. That graph
-retains owners, scopes, schemes, parameters, applications, constraints, and
-public forwarding aliases exactly as required for ABI metadata.
+After all surface bodies and uses are checked, `checker/entry.lua` calls
+`generic_lower_erased_core` (`checker/lowering.lua`). It first freezes a
+detached, immutable declared module graph on `ast._declared_type`
+(`generic_freeze_declared_core`, `generic_freeze_declared_annotations`). That
+graph retains owners, scopes, schemes, parameters, applications, constraints,
+and public forwarding aliases exactly as required for interface metadata.
 
 The code-facing graph is separate:
 
 - `ast._type` becomes the ordinary erased module descriptor used for slots and
-  lowering;
-- declaration and expression `_type` annotations become ordinary erased types;
-- `types.registry` is replaced with or points at a detached erased owner
-  registry;
+  lowering, checked by `types.assert_erased`;
+- declaration and expression `_type` annotations become ordinary erased types
+  (`generic_lower_erased_annotations`, `generic_refresh_erased_annotations`);
+- `generic_prepare_erased_registry` builds an erased copy of `types.registry`,
+  stored as `ast._erased_registry`; `coder.generate` installs it as
+  `types.registry` before generating code;
 - temporary inference and surface-boundary links survive only until focused
   cast insertion has materialized ordinary annotations; and
-- written generic binders and applications remain on the private
+- written generic binders and applications move to the private
   `_surface_typeparams` and `_surface_typeargs` AST edges, with canonical
-  semantic `_decl` bindings, after their public runtime lists are cleared.
+  semantic `_decl` bindings, and their public lists are cleared.
 
 No descriptor reachable from `ast._declared_type` is mutated during erasure. In
 particular, the declared graph cannot share an owner table whose fields are
 later rewritten to `value`. This separation is what lets metadata remain
 precise while coder enumerates the same ordinary public/private slots and
-layouts as before.
+layouts as non-generic code.
 
 ## Constraint erasure
 
-Erasure is a pure recursive type transformation after surface checking:
+Erasure (`types.erase`, `types.erase_constraint`) is a pure recursive type
+transformation after surface checking:
 
 ```text
 erase(T unconstrained) = value
@@ -526,8 +544,8 @@ becomes the ordinary `IBar` nominal. A surface
 `IBar<|T|>:cons(T):IBar<|T|>` method becomes the code-facing
 `IBar:cons(value):IBar` method.
 
-The resulting physical types are exactly those already understood by
-`coder.lua`: `value` is a `TValue`; an Interface nominal is a `Udata *`; Arrays
+The resulting physical types are exactly those the generic-unaware coder
+handles: `value` is a `TValue`; an Interface nominal is a `Udata *`; Arrays
 and Maps keep their ordinary backing representations; and Options, vararg
 families, and flexible-output descriptors are selected from their erased
 ordinary element types. There is no generic carrier algebra or special Option
@@ -535,36 +553,41 @@ ABI in coder.
 
 At an optional Array boundary, a closed `({integer})?` and its erased
 `({value})?` carrier use the ordinary structural `gradual_view` in either
-direction. `assignment_adjustment` selects consistency before the separate
-Option/Array qualifier rules, so the outer Option does not turn this view into
-an unsupported element-adjustment wrapper. The same Array and optional slot
-are retained; closed element observations still use their ordinary strict
-guards. Consistency requires matching Array qualifiers, so a mutable-to-const
-freeze remains a separate operation and is never classified as this view.
+direction. `assignment_adjustment` selects consistency before its separate
+Option(Array) rule, so the outer Option does not turn this view into an
+unsupported element-adjustment wrapper. The same Array and optional slot are
+retained; closed element observations still use their ordinary strict guards.
+Consistency requires matching Array qualifiers, so a mutable-to-const freeze
+remains a separate operation and is never classified as this view.
 
-Generic-for lowering visits the complete adjusted setup tuple, including
-discarded surplus expressions, and its synthesized initial/next/close calls
-and visible-variable declaration. These private AST edges contain executable
-casts whose plans must be rebuilt before type erasure: an unconstrained
-`T? -> T` force becomes ordinary `value -> value`. Hidden calls remain raw
-producers so codegen can assign their fixed and extra results to loop slots.
+Generic-for lowering (`generic_lower_forin`) visits the complete adjusted
+setup tuple, including discarded surplus expressions, its synthesized
+`_init_call`/`_next_call`/`_close_call`, and the visible-variable declaration.
+These private AST edges contain executable casts that are reclassified before
+type erasure (`generic_lower_call_in_place`): an unconstrained `T? -> T` force
+becomes ordinary `value -> value`. Hidden calls remain raw producers so
+codegen can assign their fixed and extra results to loop slots.
 
 ## Focused cast and adapter insertion
 
 Erasure alone would lose the direction of a closed generic boundary. The
-checker therefore performs two bounded lowering steps over the already checked
+lowering pass therefore performs two bounded steps over the already checked
 AST:
 
 1. rewrite every declaration/expression occurrence to its ordinary erased
    source and target types, retaining a temporary reference to the frozen
    surface application where direction is needed; then
 2. insert ordinary casts, guards, and callable/Interface adjustment annotations
-   for those boundaries.
+   for those boundaries. `generic_erased_boundary_expression` asks for the
+   ordinary assignment adjustment between the two erased types and applies it
+   through `trycoerce`; when none exists it tries
+   `generic_interface_downcast_expression`, and otherwise raises an internal
+   compiler error.
 
 This is not a second semantic typecheck. It performs no inference, constraint
 search, or body recheck. It sees the exact types coder will see and emits only
-the existing `CoercionPlan`, `GuardPlan`, callable adapter, Interface conversion,
-written-cast, comparison, and AST cast forms already consumed by codegen. It
+the `CoercionPlan`, `GuardPlan`, callable adapter, Interface conversion,
+written-cast, comparison, and AST cast forms codegen already consumes. It
 does not ask an ordinary relation to rediscover an edge involving a
 `Parameter` that has already disappeared.
 
@@ -641,12 +664,11 @@ its concrete argument for the canonical erased entry and strictly projects the
 erased result. The concrete function tag and native relay belong to the wrapper;
 the canonical erased native pointer is never exposed under a concrete tag.
 
-A constrained callback component substitutes the erased Interface carrier and
-uses ordinary wrapper construction/downcast. If the current callable-adjustment
-emitter cannot lift a nested record/Interface action, the lowering pass
-synthesizes an ordinary `Ast.ExpFunction` adapter whose body contains the
-existing Interface casts. The same technique covers constrained input varargs
-and flexible results. Coder sees a normal lambda and normal annotations.
+A constrained callback component substitutes the erased Interface carrier.
+Its wrapper is an ordinary frozen callable adapter
+(`checker.freeze_callable_adapter`); the component actions include the
+Interface wrapper construction and checked downcast. The same applies to
+constrained input varargs and flexible results.
 
 Each realized adapter is a fresh, traced closure. Source-closure identity across
 an adjustment is not part of the contract, so removal or ownership protocols
@@ -655,12 +677,12 @@ must not compare the original callback with its adjusted wrapper.
 ## Arrays, Maps, Lua, and delayed projections
 
 An unconstrained generic Array `{T}` erases to `{value}` and selects the
-existing permissive `value` writer. For a binder `T: I`, `{T}` erases to
-`{erase(I)}` and selects the corresponding existing Interface writer. Array
-erasure preserves the outer qualifier, so `const { T }` becomes
-`const { value }` or `const { erase(I) }` and selects the canonical const tag
-without a writer. Maps use the same ordinary erased key/value behavior. No new
-element-writer family is generated.
+permissive `value` writer. For a binder `T: I`, `{T}` erases to `{erase(I)}`
+and selects the corresponding Interface writer. Array erasure preserves the
+outer qualifier, so `const { T }` becomes `const { value }` or
+`const { erase(I) }` and selects the canonical const tag without a writer.
+Maps use the same ordinary erased key/value behavior. Generics add no
+element-writer family.
 
 A literal `value` store into unconstrained dependent storage writes the raw
 `TValue` and returns normally. A read that remains in the same erased carrier
@@ -678,10 +700,10 @@ then a dependent child is guarded when eliminated.
 The generated Lua entry for a generic declaration uses the actual erased
 signature. Unconstrained positions use ordinary dynamic `value`; constrained
 positions use the erased Interface and its normal exact-or-witnessed dynamic
-cast. Known outer shapes keep today's Lua checks. Dependent unconstrained Lua writes may
-therefore delay their error until a closed Titan projection; fixed owner-
-independent fields keep their eager policy. Applied nominal `as/is` checks one
-owner metatable only.
+cast. Known outer shapes keep their ordinary Lua checks. Dependent
+unconstrained Lua writes may therefore delay their error until a closed Titan
+projection; fixed owner-independent fields keep their eager policy. Applied
+nominal `as/is` checks one owner metatable only.
 
 ## Type-argument admission and the FFI
 
@@ -737,67 +759,73 @@ Generic erasure changes type annotations, not object layouts:
 
 - an unconstrained native leaf is the ordinary `TValue` carrier;
 - a constrained native leaf is the ordinary Interface `Udata *` carrier;
-- fields, union payloads, Array/Map elements, and captures remain existing
+- fields, union payloads, Array/Map elements, and captures are ordinary
   boxed/traced slots;
 - all applications of one record/union/Interface share its metatable and
   userdata layout;
-- module user-value slots and exported/private ordering are unchanged; and
-- canonical function CClosures retain the existing module/tag/native/brand
+- module user-value slots and exported/private ordering are those of the
+  erased module; and
+- canonical function CClosures keep the ordinary module/tag/native/brand
   header, captures or bound receiver, and strict generic trailer.
 
 Generic functions do not receive an operation environment through `_fn`.
 Concrete-to-erased and erased-to-concrete callable adjustments are ordinary
 CClosures. They root their immediate source, module, captures, target relay, and
-any Interface wrapper through the same existing upvalue/userdata edges. Fresh
+any Interface wrapper through the ordinary upvalue/userdata edges. Fresh
 objects are anchored before allocation can trigger GC, and stores use the same
 forward or backward barrier selected by their owner kind. There is no
 per-application GC object, registry table, type-name string, or specialization
 cache.
 
 This also preserves closure and aggregate cycles. An adapter may be fresh, but
-its source and captured values remain traced. Vararg/flexible descriptors retain
-their current rule: the descriptor payload is not a new root, so the existing
-semantic/VM/allocation/result homes keep collectable elements alive. Generics do
-not weaken that discipline.
+its source and captured values remain traced. Vararg/flexible descriptors keep
+their rule that the descriptor payload is not a root, so the semantic, VM,
+allocation, and result homes keep collectable elements alive
+([variadic GC discipline](variadic-parameters.md)).
 
 ## Coder boundary: an ordinary erased core
 
-Immediately before `coder.generate`, a closed invariant walk rejects:
+Immediately before code generation, `coder._assert_erased_boundary`
+(`coder/generate.lua`) walks the AST (skipping `_declared_type`) and the
+installed erased registry and rejects:
 
-- `Type.Parameter`, `Type.FunctionScheme`, `Type.GenericAlias`, or an inference
-  cell in a code-facing annotation;
-- any applied nominal argument in a code-facing owner type;
-- a nonempty generic binder/type-argument list that lowering failed to consume;
-  and
-- any generic-only adjustment plan.
+- `Type.GenericScope`, `Type.TypeParameter`, `Type.Parameter`,
+  `Type.FunctionScheme`, `Type.GenericAlias`, or any inference tag;
+- a `Type.Nominal` with nonempty `args`;
+- a record, union, Interface, method, or static descriptor with a nonempty
+  `scope` or `typeparams`; and
+- `Ast.TypeParam`, or a nonempty `typeparams`, `typeargs`, or
+  `_nominal_typeargs` list that lowering failed to consume.
 
 Apart from this assertion and metadata selection, coder is generic-unaware. It
-continues to enumerate public/private slots from erased `ast._type`, generate
-one translation unit per logical module, choose native types from ordinary
-`Type.*` tags, and emit the existing function/closure/record/union/Interface,
+enumerates public/private slots from erased `ast._type`, generates one
+translation unit per logical module, chooses native types from ordinary
+`Type.*` tags, and emits the ordinary function/closure/record/union/Interface,
 vararg, flex, Array-writer, Lua-entry, and GC templates.
 
-The sole metadata-side selection is:
-
-```lua
-types.serialize(ast._declared_type)
-```
-
-rather than serialization of erased `ast._type`. Generated C does not contain a
-generic dispatch switch, type argument, per-application witness, or
-instantiation table. Two closed applications of one declaration have the same symbols and native entry;
-only their caller-side ordinary adjustments differ.
+The sole metadata-side selection is `ast._declared_type or ast._type` (and the
+per-declaration `_declared_type` equivalent) wherever metadata is serialized
+(`coder/binary.lua`, `coder/module.lua`, `coder/generate.lua`, `driver.lua`).
+Generated C does not contain a generic dispatch switch, type argument,
+per-application witness, or instantiation table. Two closed applications of
+one declaration have the same symbols and native entry; only their caller-side
+ordinary adjustments differ.
 
 ## Compiled metadata and ABI boundary
 
-The current ABI serializes the frozen declared module graph. The schema adds structural
-scopes, dense binder descriptors, rigid parameter references, applied nominal
-arguments, function/method/constructor schemes, generic owner descriptors, and
-public forwarding aliases. It does not serialize expression inference cells,
-erased AST annotations, run-time argument values, generic application
-witnesses, or provenance summaries.
+Provider metadata serializes the frozen declared module graph. The generic
+part of the schema is structural scopes, dense binder descriptors, rigid
+parameter references, applied nominal arguments,
+function/method/constructor schemes, generic owner descriptors, and public
+forwarding aliases. It does not serialize expression inference cells, erased
+AST annotations, run-time argument values, generic application witnesses, or
+provenance summaries.
 
-The closed validator proves:
+The closed validator
+([driver](driver.md#interface-recovery-and-the-closed-validator)) proves for
+generics, in `driver.lua` `validate_generic_scope`,
+`validate_generic_binders`, `validate_parameter_descriptor`,
+`validate_generic_alias`, and `validate_local_alias_projection`:
 
 - structural scope and `(scope,index)` parameter identity;
 - dense unique binder indexes and locally closed parameter references;
@@ -807,103 +835,64 @@ The closed validator proves:
   substitution results;
 - public visibility and canonical record/union/Interface member projections;
 - forwarding-alias target, chain, scope, and binder projection; and
-- the existing value-facing ban on descriptor-only/private forms.
+- the value-facing ban on descriptor-only/private forms.
 
-During recovery, referenced external generic owners and alias targets are loaded
-before their arity and constraints are reconciled. DSO callable metadata,
-embedded archive metadata, and prefix-container recovery validate the same
-schema. ABI 2 includes generic Interface field metadata while retaining erased
-implementation. A mismatched provider is rejected before decoding; generics add
-no cross-ABI migration or compatibility provider.
+A constraint that names an external generic owner is not checked by the
+validator; the checker reconciles it after the loader recovers that owner
+(`driver.lua` `recover_contextual_owner`). DSO callable metadata, embedded
+archive metadata, and prefix-container recovery validate the same schema.
+Version gating is described in
+[Compiled-module ABI](codegen-overview.md#compiled-module-abi).
 
 Metadata retains precise declared applications while native provenance remains
-owner-level. Selecting a static provider still records its physical archive as
-one direct link input; it does not specialize every carried key. Dynamic and
+owner-level. Selecting a static provider records its physical archive as one
+direct link input; it does not specialize every carried key. Dynamic and
 source providers likewise expose one native owner/entry per declaration.
 
-## Generic async implementation
+## Generic async owners
 
-`titan.async` owns the generic Task, status, cancellation, result, and
-subscription declarations together with the public `run`, combinator, and
-`channel<|T|>` schemes. These are ordinary public nominal owners; `titan.uv`
-contains the lower-level native owners and callbacks. Moving an owner between
-logical modules changes its nominal identity: consumers built against a former
-`uv.Task` owner must be rebuilt. This change does not introduce an ABI number
-change or an alias which preserves the former identity.
+`titan.async` (`titan/async.titan`) declares the generic Task, status,
+cancellation, and result owners and the generic `run`, combinator, and
+`channel<|T|>` schemes. Their runtime behavior (waits, listeners, suspension,
+combinators, channels, subscriptions) is specified in
+[the async runtime](libuv-runtime.md); this section records only how generics
+shape them.
 
-`Task<|A, B|>` retains its root coroutine, Runtime, concrete status and optional
-cancellation reason, one private `Wait`, root-array index, terminal-listener
-registrations, and explicit-suspension state. `TerminalRegistration<|A, B|>`
-stores the adjusted listener and its live bit. `ResumeToken` is a separate
-non-generic nominal owner with `const source: string?`: all Task applications
-store the same optional token type and compare it by record identity. The
-source text diagnoses an explicit-resume mismatch; the token carries no generic
-application witness.
-
-The token boundaries are `suspend(token: ResumeToken,
-cancel_action: SuspendCancelAction?)` and `Task:resume(token: ResumeToken)`.
-Closing or erasing `A` and `B` never changes either signature. Runtime inventory
-and dispatch use `Task<|value, value|>` views of the same userdata. Public
-`run<|A, B|>(func: function (): (A)): Task<|A, B|>` creates its Task, then retains
-that same Task through an all-value view in the Runtime's root Array.
-There is no existential Task, private application descriptor, or runtime
-recovery of `A` and `B`.
-
-A callback annotated `function (): (nil)` infers `A = nil`; a complete explicit
-application or surrounding result context can supply that application to an
-unannotated callback. Bare return or fallthrough supplies one nil to an exact
-`function (): (nil)` callable by ordinary return adjustment. Terminal success
-and complex cancellation retain their erased value; a later concrete projection
-inserts the strict `A` or `B` guard.
-
-The public `Result<|T, E|>` and `CancellableResult<|T, E|>` unions retain their
-exact success/error payload applications. `Operation<|T, E|>` captures the
-adjusted registration callback, while a pending private `Wait` stores erased
-payload and state. The fatal callback transports an arbitrary error value and
-trace separately from `E`. Subscription queues likewise retain erased values
-and explicit counts, then project through `SubscriptionBatch<|T|>:get`; nil
-payloads therefore do not become queue holes or alter the count. These are
-ordinary generic callable/record conversions, not extra runtime witnesses.
-See [async implementation](libuv-runtime.md) for the wait and queue lifetimes.
-
-Public `async.channel<|T|>(size)` declares `{T}` storage and returns
-`(function (T): (), function (): (T), function (): ())`. Because `size` provides no evidence for `T`,
-a result context, a complete explicit application, or final carrier closure
-selects the application. Erased-core lowering recursively maps the Array and
-callbacks to `{value}`, `function (value): ()`, and `function (): (value)`, exactly the single
-pre-generic implementation shape. Closed callers receive ordinary traced
-callable wrappers: send boxes its accepted `T`, receive strictly projects its
-`T`, and close is unchanged. The string-only `ChannelReader` and
-`ChannelWriter` records are not generic owners; their factory closes
-`channel<|string|>` and stores those exact wrappers. Each channel closure triple
-also captures one fresh private non-generic `ResumeToken`; its blocking paths
-pass that record to `suspend`, and its send, receive, and close paths pass the
-same record to `Task:resume(token)`.
-
-The public fixed-arity combinators quantify interleaved `(A_i,B_i)` per operand.
-Their named listener-based algorithms remain expanded through arity five; they
-never erase the operands into an Array merely to share implementation. Their
-ordinary erased bodies use all-value Task/status carriers, while closed
-`AnyNResult`, `RaceNResult`, `AllNError`, `join*`, and `all_*` projections receive
-the focused strict guards described above. Each invocation creates one fresh
-non-generic private token, captures it in every deciding listener, and suspends
-with that same record. The token carries no generic evidence; it only binds
-those listeners to that exact explicit suspension.
-
-Terminal listener removal no longer depends on closure identity.
-`add_terminal_listener` allocates one fresh `TerminalRegistration<|A, B|>`, stores
-the adjusted listener, appends that record, and returns a no-argument remover
-closure capturing the Task and registration. The remover is idempotent and
-removes that exact live record. If the Task is already terminal, registration
-returns an idempotent no-op remover.
-
-Publication detaches the dense registration Array as a stable snapshot,
-installs an empty live Array, and makes later removers no-ops before delivering
-the snapshot in registration order. Delivery ignores each listener error
-independently and does not consult a mutable `live` bit again. Duplicate source
-callbacks remain distinct, and removal during delivery cannot mutate or skip
-the snapshot. The remover, registration, adjusted listener, and Task links are
-ordinary traced state—never generic type witnesses.
+- **One all-`value` Runtime.** `run<|A, B|>(func: function (): (A)):
+  Task<|A, B|>` constructs `Task<|A, B|>`, then stores
+  `task as Task<|value, value|>` in the Runtime's `tasks: {Task}` (a bare
+  owner is its all-`value` application). Runtime inventory, the ready queue,
+  and dispatch use those all-value views of the same userdata. There is no
+  existential Task, private application descriptor, or run-time recovery of
+  `A` and `B`; a later concrete projection of a terminal value inserts the
+  strict `A` or `B` guard.
+- **Non-generic tokens.** `ResumeToken` is a non-generic record with
+  `const source: string?`. `suspend(token: ResumeToken, cancel_action:
+  (function (): ())?)` and `Task:resume(token: ResumeToken)` therefore have
+  the same signature for every application and compare tokens by record
+  identity.
+- **Nil results.** A callback annotated `function (): (nil)` infers `A = nil`;
+  a complete explicit application or surrounding result context can supply
+  that application to an unannotated callback. Bare return or fallthrough
+  supplies one nil to an exact `function (): (nil)` callable by ordinary
+  return adjustment.
+- **Channels.** `channel<|T|>(size: integer?)` returns
+  `(function (T): (), function (): (T), function (): ())`. Because `size`
+  provides no evidence for `T`, a result context, a complete explicit
+  application, or final carrier closure selects the application. Erasure
+  maps its `{T}` buffer and callbacks to `{value}`, `function (value): ()`,
+  and `function (): (value)`; closed callers receive ordinary callable
+  wrappers in which send boxes its accepted `T` and receive strictly projects
+  it. The string-only `ChannelReader`/`ChannelWriter` records are not generic
+  owners; their factory closes `channel<|string|>`.
+- **Combinators.** The fixed-arity combinators quantify interleaved
+  `(A_i, B_i)` per operand and never erase operands into an Array to share
+  implementation. Their erased bodies use all-value Task/status carriers,
+  while closed `Any*Result`, `Race*Result`, `All*Error`, `join*`, and `all_*`
+  projections receive the strict guards described above.
+- **Listeners.** `TerminalRegistration<|A, B|>` stores the adjusted listener.
+  Registrations, removers, and adjusted listeners are ordinary traced state,
+  never generic type witnesses.
 
 ## Failure boundaries and review checklist
 
@@ -919,7 +908,7 @@ Focused tests and reviews therefore establish:
 - a frozen generic `ast._declared_type` beside a code-facing AST containing no
   runtime-facing parameter, scheme, application, alias descriptor, or inference
   cell; private `_surface_typeparams`/`_surface_typeargs` source syntax and their
-  semantic bindings are explicitly outside the coder traversal;
+  semantic bindings are outside the coder traversal;
 - no guard on a statically typed closed-to-carrier argument, constructor, or
   write, but every carrier-to-closed edge uses the constraint-appropriate strict
   elimination—`gradual_guard` for unconstrained carriers (including
@@ -933,8 +922,7 @@ Focused tests and reviews therefore establish:
   `Udata *` Interface carriers for constrained leaves) and no generic coder
   branch;
 - source, DSO, archive, prefix-container, and Lua agreement; and
-- the concrete all-value Runtime plus precise public async projections and
-  registration-remover ownership.
+- the all-value Runtime plus precise public async projections.
 
 The invariant is fail-closed: after the explicit final carrier-closing pass, a
 free inference cell, malformed recovered scheme, ineligible nested FFI argument,

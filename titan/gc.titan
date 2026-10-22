@@ -6,6 +6,7 @@ foreign import "lua.h"
 foreign import "stddef.h"
 foreign import "titan/ffi.h"
 
+-- Implementation notes: doc/implementation/gc-library.md#direct-collector-control
 local function require_gc_result(result: foreign int): integer
   if result < 0 then
     raise "garbage collector operation is unavailable"
@@ -13,6 +14,7 @@ local function require_gc_result(result: foreign int): integer
   return result
 end
 
+-- Implementation notes: doc/implementation/gc-library.md#weak-mode-stack-ledger
 local function set_weak_mode(map: {value: value}, mode: string)
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
@@ -55,6 +57,7 @@ end
 -- @param f Callback over the exact value type; it must not yield or collect.
 -- @usage standard-library-gc.md
 function finalizable<|T|>(v: T, f: function (T): ()): ()
+  -- Implementation notes: doc/implementation/gc-library.md#finalizer-stack-ledger
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 4) == 0 then

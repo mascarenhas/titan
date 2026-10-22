@@ -42,6 +42,7 @@ local function rotate_left(word: integer, amount: integer): integer
   return (word << amount) | (word >> (64 - amount))
 end
 
+-- Implementation notes: doc/implementation/math-library.md#xoshiro256
 local function next_random(): integer
   local first = random_state.first
   local second = random_state.second
@@ -463,6 +464,7 @@ local function parsed_float(text: string,
   return ffi.strtod(normalized, nil) as float
 end
 
+-- Implementation notes: doc/implementation/math-library.md#length-bounded-numeral-parsing
 local function parse_numeral(text: string): value?
   local first = 1
   local last = #text

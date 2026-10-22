@@ -68,7 +68,7 @@ their longest common sequence of complete components:
 | `foo.left foo.right` | `foo` | `foo.so`, `foo.a` |
 | `foo.bar.left foo.bar.right` | `foo.bar` | `foo/bar.so`, `foo/bar.a` |
 | `foo foo.bar` | `foo` | `foo.so`, `foo.a` |
-| all twenty-five `titan.*` standard roots | `titan` | `titan.so`, `titan.a` |
+| all twenty-six `titan.*` standard roots | `titan` | `titan.so`, `titan.a` |
 
 The comparison is component-based: `foo.bar` and `foo.baz` share `foo`, but
 `foo` and `foobar` share no module component. Unrelated roots are therefore an
@@ -259,7 +259,7 @@ legal in one program.
 
 ## The standard-library provider
 
-Titan's standard library is the twenty-five-root production example of this
+Titan's standard library is the twenty-six-root production example of this
 model. One
 paired provider:
 

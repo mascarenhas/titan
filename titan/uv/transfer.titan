@@ -38,6 +38,7 @@ end
 -- pending native read request; the adapter must stop the watcher before handoff.
 -- @usage standard-library-uv.md#native-resource-handoff
 function stream_transfer_status(stream: stream_t, allow_reading: boolean?): integer
+  -- Implementation notes: doc/implementation/libuv-extension-guide.md#native-socket-and-pipe-handoff
   local native = stream:pointer()
   local loop? = stream:owner_loop()
   if native == nil or loop == nil then return ffi.UV_EINVAL end

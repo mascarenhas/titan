@@ -257,7 +257,7 @@ See the [UV reference](standard-library-uv.md) for the complete public surface.
 
 These files are one logical module and therefore produce one object and one
 `titan/uv.lua` loader, never one artifact per contributor. The production
-standard-library invocation links that object with the other twenty logical
+standard-library invocation links that object with the other twenty-five logical
 roots into the canonical `titan.so`/`titan.a` provider pair.
 Titan imports select the preferred compiled form, while Lua
 `require "titan.uv"` selects the independent `titan.uv` logical module inside

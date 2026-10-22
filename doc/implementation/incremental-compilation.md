@@ -8,18 +8,21 @@ example are in [Incremental and separate compilation](../language/incremental-co
 ## Resolver and CLI boundary
 
 `titanc` passes `incremental` and `forced_source_roots` to
-`driver.defaultloader`, alongside the existing complete `source_roots` set.
+`driver.defaultloader`, alongside the complete `source_roots` set.
 With `-c`, every explicitly requested root is in the forced set before any
 loader traversal. This matters when the first root imports a later root.
-`--source-first` selects the existing resolver policy independently from object
+`--source-first` selects the `source_first` resolver policy independently from object
 reuse and compilation mode.
 
-Reuse happens only after resolving an actual flat or folder source module.
-The object is derived from that module's native output stem; `.o` is not added
-to prefix-container binary discovery. The loader compares its timestamp with
-the current source constituent timestamps, then reads its source record. An
-accepted hit is a source entry with an existing compiled object and declared
-type state, not an analysis-only manifest or a binary provider.
+Reuse happens only after resolving an actual flat or folder source module
+(`driver.lua` `load_source_object`, local to `driver.defaultloader`). The object
+is derived from that module's native output stem; `.o` is not added to
+prefix-container binary discovery. The loader compares the object's mtime with
+the current source constituent mtimes, then reads its source record with
+`objectmetadata.read` and the expected ABI. An accepted hit is a source entry
+with an existing compiled object and declared type state, not an analysis-only
+manifest or a binary provider. A miss falls back to ordinary parsing and
+checking.
 
 The entry restores ordered import requests, nominal owners, baked native
 bindings, and native-reference accounting needed by finalization and linking.
@@ -34,37 +37,43 @@ imports determine whether dynamic access uses its own provider handle or a
 global symbol lookup. This matches `coder.generate`: an indirect record-method
 consumer can store `global` for an owner that another module imports through a
 handle. An invocation-wide dynamic-owner classification alone cannot validate
-both access paths. Validation retains exact handle-provider checks and existing
+both access paths. Validation keeps exact handle-provider checks and the
 source/static/dynamic identity constraints, and does not accept an unresolved
 owner as a global binding. It uses restored imports and resolver data without
 reparsing source or repeating provider discovery.
 
-Test records also retain discovered function names. `test_runner.discover`
+Test records also keep discovered function names. `test_runner.discover`
 combines checked ASTs and these names, preserving ordinary filtering, sorting,
 and source-closure discovery. `-c --test` discovers cases for test C flags but
 does not synthesize a runner. Incremental final test linking synthesizes the
 current runner and entrypoint while reusing eligible production and test-owner
-objects. The runner ordinarily imports `titan.test` and calls its public `run`
-function through the selected standard provider. There is no synthesized
-support object or source override. An unchanged production object can serve
-both an application and a test link when flags and dependency bindings match.
+objects. The runner imports `titan.test` and calls its public `run` function
+through the selected standard provider. An unchanged production object can
+serve both an application and a test link when flags and dependency bindings
+match.
 
 The CLI reads main and external-symbol facts from cached entries when no AST
 is available. Compile-only mode skips main selection and common provider-name
 derivation, emits the selected source closure's objects/headers, closes the
 resolver, and returns before target/provider validation and final linking.
 Normal incremental linking uses the same publication and target checks as a
-cold build. Reused objects are never rewritten; failed native compilation must
-not publish an object which a later invocation can mistake for a success.
+cold build. Reused objects are never rewritten. A fresh object is compiled to a
+sibling temporary and renamed into place only on success
+(`publish_compiled_object`), so a failed compilation never leaves an object a
+later invocation could mistake for a hit.
 
 ## Trusted source record
 
-Each generated relocatable module keeps its existing public `.titan.meta`
-(ELF/COFF) or `__TEXT,__titanmeta` (Mach-O) and callable ABI/type/layout protocol. A second
-`.titan.source` / `__TEXT,__titansrc` section holds a Lua reconstruction chunk.
-The existing in-process section reader locates these bytes. Emission uses the
-same byte alignment, `used` retention, relocation-free representation, and
-Clang address-sanitizer exclusion as public metadata.
+Each generated relocatable module carries its public `.titan.meta` (ELF/COFF)
+or `__TEXT,__titanmeta` (Mach-O) section and callable ABI/type/layout protocol.
+A second `.titan.source` / `__TEXT,__titansrc` section holds a Lua
+reconstruction chunk (`titan-compiler/objectmetadata.lua` `encode`/`render`,
+symbol `titan_object_source_<mangled>`). `driver.compile` appends it to the
+generated C; with coverage enabled it is appended after line conversion so the
+record carries the coverage anchors. The same in-process section reader
+locates these bytes. Emission uses the same byte alignment, `used` retention,
+relocation-free representation, and Clang address-sanitizer exclusion as the
+public metadata.
 
 Ordinary COFF uses the same `.titan.source` name and source-record format as
 ELF. Its section lookup follows the COFF long-name string table and rejects
@@ -86,27 +95,26 @@ installing its plans in the resolver. It does not retain checked function ASTs. 
 continues to represent only the public compiled interface; `source_manifest`
 is an equality representation, not the source record's restore format.
 
-The source section may remain inert in archives and DSOs. Their readers still
+The source section may remain inert in archives and DSOs. Their readers
 consume only public metadata. Physical layouts remain separate from semantic
 `types.serialize` and analysis inventories, which expose only ABI/types.
-See [Native nominal storage](nominal-storage.md). `LANGUAGE_SERVER_API_VERSION`
-remains 1, and the
-source record does not itself change the generated-code ABI. Make must rebuild
-objects after prerelease compiler/record representation changes within that ABI.
+See [Native nominal storage](nominal-storage.md). The source record is not
+part of the generated-code ABI or the language-server API, and
+`objectmetadata.read` checks only the ABI marker: the build system must rebuild
+objects after compiler changes to the record representation.
 
 ## Optimization across native objects
 
-`driver.CFLAGS` supplies `-O3` on supported platforms. Platform initialization
-adds `-flto=auto -ffat-lto-objects` on Linux for GCC and Clang; macOS retains native
-Mach-O objects without default LTO. Both generated-object compilation and
-the shared/executable link helpers use these defaults, including archive-backed
-validation images and executable protocol probes.
+The default optimization and LTO flags are defined in [Compiling one
+module](driver.md#compiling-one-module-drivercompile). Generated-object
+compilation and the shared/executable link helpers, including archive-backed
+validation images and executable protocol probes, all use them.
 
 Linux fat objects retain native ELF sections for target inspection and both
 Titan metadata protocols, alongside compiler IR. Archive extraction and
 repacking preserve the member bytes, so the final compiler-driver link can
-optimize across source objects or selected archive members. The public
-provider protocol and dynamic binding boundaries are unchanged. Do not replace
+optimize across source objects or selected archive members. LTO does not
+change the public provider protocol or dynamic binding boundaries. Do not replace
 these objects with bitcode-only containers or disable native metadata gates to
 accommodate an incompatible toolchain.
 
@@ -150,22 +158,13 @@ folder membership, compiler/toolchain/SDK settings, flags, provider choice, and
 other dependencies. No dependency hashes or configuration inventory are used
 to certify a hit.
 
-The stdlib object DAG keeps one object per logical module and the existing
-explicit folder inventories. The final publication stage reuses persistent
-objects in the selected output tree (`TITAN_OUTPUT_DIR`, default `out/`),
-combines the ordered native payload into both provider forms, and performs
-normal pair/shim validation. See [output-directory routing](output-directory.md).
-The source-rock
-default `all` build uses the same object targets with the in-tree compiler Lua
-sources, private support bootstrap, and matching Lua SDK. The install pass
-stages those built outputs; the copy-only `post_install` helper publishes the
-retained SDK/provider payload without rebuilding. Ordinary development
-`make stdlib` uses the installed compiler/SDK by default;
-`STDLIB_USE_INSTALLED_RUNTIME=0` selects the
-checkout compiler/runtime explicitly.
-The native stdlib test suite likewise has per-module object targets and
-installed-provider prerequisites, then a final incremental `--test` link in one
-build directory.
+The standard-library object graph keeps one object per logical module and the
+explicit folder inventories, then publishes the provider pair from the
+persistent objects in the selected output tree (`TITAN_OUTPUT_DIR`, default
+`out/`); see [Build and installation responsibilities](build-script-audit.md)
+and [output-directory routing](output-directory.md). The native stdlib test
+suite likewise has per-module object targets and installed-provider
+prerequisites, then a final incremental `--test` link in one build directory.
 
 Root driver/metadata specs cover object lookup, fallback, replay, and skipped
 compiler phases. `spec/coder/incremental_compilation_spec.lua` owns CLI and

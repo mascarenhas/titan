@@ -1,10 +1,11 @@
 # Mathematical-library implementation
 
 The public `titan.math` module is implemented in `titan/math.titan`. It does
-not call Lua functions or the Lua C API. Ordinary calculations use direct C99
-FFI declarations from `math.h`; numeric text uses validated input followed by
-`strtod`; weak default seeding uses `time.h`. `titan/ffi.h` contributes only
-portable C scalar typedefs for out-parameters and temporary buffers.
+not call Lua functions or the Lua C API. It imports only C99 headers:
+`math.h` for ordinary calculations, `stdlib.h` (`strtod`) and `locale.h`
+(`localeconv`) for numeral conversion, `string.h` (`memcpy`) and `stdint.h`
+(`uint8_t`) for byte access and temporary buffers, `time.h` (`time`, `clock`)
+for weak default seeding, and `limits.h` for the integer bounds.
 
 ## Fixed numeric signatures and C calls
 
@@ -21,8 +22,9 @@ public interface:
 * `tonumber` returns `value?`, preserving an existing number or the
   integer-first result of parsing.
 
-`fabs`, the trigonometric operations, `atan2`, `ceil`, `floor`, `exp`, `fmod`,
-`frexp`, `ldexp`, `log2`, `log10`, `modf`, and `sqrt` are direct FFI calls.
+`fabs`, the trigonometric operations, `atan` (through `atan2`), `ceil`,
+`floor`, `exp`, `fmod`, `frexp`, `ldexp`, `log2`, `log10`, `modf`, and `sqrt`
+are direct FFI calls.
 `log` uses the C natural logarithm directly when no base is supplied and
 computes `log(number) / log(base)` for every explicit base. It deliberately
 does not reproduce Lua's base-2/base-10 dispatch; callers select the dedicated
@@ -70,7 +72,8 @@ or cryptographic guarantee is claimed.
 
 ## Length-bounded numeral parsing
 
-`tonumber` first distinguishes three cases without reading a raw Lua tag:
+`tonumber` first distinguishes three cases without reading a raw Lua tag
+(the string parsers are `parse_numeral`, `parse_in_base`, and `parsed_float`):
 
 1. with no base, `candidate is float` recognizes either numeric
    representation and the original boxed `value` is returned unchanged;
@@ -89,7 +92,7 @@ integer. Hex integers deliberately wrap during accumulation, like Lua. Written
 floats and overflowing decimal integers reach `strtod` only after the complete
 lexical pass.
 
-Lua numeral syntax always uses `.`. Before `strtod`, the implementation reads
+Lua numeral syntax always uses `.`. Before `strtod`, `parsed_float` reads
 `localeconv().decimal_point`; when the active C locale differs, it copies the
 validated Titan string into owned C storage and replaces only the known decimal
 point. The copy is explicitly NUL-terminated. Thus `strtod` supplies the target
@@ -110,6 +113,4 @@ Titan gradual injection. The implementation never imports `lua.h`, unwraps a
 
 `math.type` is intentionally not implemented: its raw integer-versus-float tag
 query is different from Titan's public numeric convertibility predicate and
-would violate that boundary. This is a library API choice, not new compiler or
-ABI machinery; the standard provider lives in the current `0.6` library
-namespace and carries the independent ABI 2 compatibility marker.
+would violate that boundary.

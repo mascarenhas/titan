@@ -1,259 +1,164 @@
 # Transfer policy implementation
 
-`titan/transfer.titan` owns `TransferValue`, native packet
-encoding/decoding/copying/disposal (`encode_message`, `decode_message`,
-`copy_message`, `discard_message`), packet-scoped resource attachment/claim
-(`attach_resource`, `claim_resource`), `transfer_load_module`, custom-record
-hook selection, immediate closure capture conversion, and destination
-reconstruction. Its common native packet and resource-table header
-(`titan/transfer_native.h`) is separated from the receiver slot header
-(`titan/async_receiver_native.h`). `titan.transfer` imports `reflect`,
-`protobuf`, and `gc`, without depending on `uv`, `async`, or `thread`. `async`
-exports a transparent alias of `TransferValue`.
+`titan/transfer.titan` owns `TransferValue`, native packet encoding, decoding,
+copying and disposal (`encode_message`, `decode_message`, `copy_message`,
+`discard_message`), packet-scoped resource attachment and claim
+(`attach_resource`, `claim_resource`, `register_resource`),
+`transfer_load_module`, custom-record hook selection, closure capture conversion,
+and destination reconstruction. The packet and resource-table layouts are in
+`titan/transfer_native.h`; the `async.Receiver` slot header
+(`titan/async_receiver_native.h`) is separate. `titan.transfer` imports
+`reflect`, `protobuf` and `gc`, and does not depend on `uv`, `async` or
+`thread`. `async.TransferValue` is a transparent alias.
+
+The packet consumers are `titan.thread` (channel items, spawn closures,
+outcomes and cancellation reasons; see
+[thread packets](thread-library.md#native-message-packets-and-nested-custom-transfer-hooks))
+and the coalescing `async.Receiver`
+([receiver ownership](libuv-runtime.md#cross-state-receiver-ownership)). The
+`titan.lua` worker boundary uses `TransferValue` policies over its own carrier:
+it copies scalars and strings, never walks capture graphs or retains Lua
+objects, and has no packet resource table ([Lua state loading](lua-library.md)).
 
 ## Flat packets and direct classification
 
-Nominal and custom-record packets carry the actual defining module, qualified
-nominal name, and opaque bytes. A closure packet carries its defining module,
-immutable entry token, and opaque snapshot bytes. The `titan.lua` worker
-boundary copies scalar fields and strings over its separate carrier; it does
-not walk capture graphs, retain Lua objects, or attach packet-scoped resources.
+A packet is one heap allocation: a `titan_async_message` header, the payload
+bytes, the `name`/`module` strings, and, when resources are attached, an aligned
+tail of `titan_transfer_resource` entries. Nominal and custom-record packets
+carry the declaring module, the qualified nominal name and opaque bytes. A
+closure packet carries its defining module, the immutable entry token and the
+snapshot bytes.
 
-Transfer uses direct classification paths before falling back to general
-reflection; `encode_packet` additionally recognizes registered resource roots:
+`encode_message` classifies its candidate in this order. Only the last row
+acquires a `ResourceScope`; the first two leave any enclosing scope intact.
 
-1. **Direct scalar Lua tags (`scalar_message_kind`, `scalar_value_to_message`, `new_scalar_message`)**:
-   `scalar_message_kind` inspects the raw `TValue` tag before `encode_message`
-   queries `current_execution()` or allocates a `ResourceScope`. It returns the
-   non-negative `titan_async_message_kind` for `LUA_TNIL`, `LUA_TBOOLEAN`,
-   `LUA_TNUMBER` (testing `LUA_VNUMINT` to keep integers distinct from integral
-   floats and `-0.0`), `LUA_TSTRING` (preserving exact byte length),
-   `LUA_TLIGHTUSERDATA`, `LUA_TTHREAD` (borrowed `*lua_State`), unbranded or
-   unknown-brand `LUA_TUSERDATA` whose metatable has no metatable (borrowed
-   payload pointer via `lmacro_getudatamem`), and `LUA_TFUNCTION` for light C
-   functions and zero-upvalue C closures (rejecting `NULL` C functions and
-   non-Titan C closures with upvalues). If `userdata.metatable.metatable ~= nil`,
-   `scalar_message_kind` returns `-1`. In `encode_message`, this defers any
-   `__index` metamethod triggered by a brand lookup until the encode scope is
-   established, during resource-capability lookup or `reflect.inspect` (which
-   still encodes `is_lua_userdata` via `new_scalar_message`).
-   `TransferValue.from_value` shares the probe but does not establish a scope
-   before its `reflect.inspect` lookup. Known Titan userdata brands
-   (`TITAN_ARRAY..TITAN_OWNED`) and branded Titan closures likewise return `-1`.
-   Explicit scalar `TransferValue` policies and non-negative
-   `scalar_message_kind` results use `new_scalar_message`, which checks
-   `length <= SIZE_MAX - sizeof(titan_async_message)`, allocates
-   `sizeof(titan_async_message) + length` directly on the C heap, zeroes the
-   header, and writes the scalar fields and optional string bytes in one pass
-   without staging an automatic `titan_async_message` or using the packet-copy
-   path. Explicit `is_record`, `is_union`, `is_closure`, and `is_record_payload`
-   policies (with `owner == nil`) and opaque custom-hook roots (with
-   `owner == scope.native`) use `new_nominal_message`, which validates `length`,
-   `name_length`, and `module_length` against `SIZE_MAX`, computes the complete
-   allocation size via `packet_storage_size`, allocates the heap packet once,
-   zeroes the header, copies the payload and `name`/`module` strings, and
-   (when `owner ~= nil`) commits the scope's pending attachments via
-   `commit_resources` without automatic header staging.
-2. **Demand-driven Titan closure classification**: When `LUA_TFUNCTION` is a C
-   closure with `nupvalues >= 5` and `upvalue[3] == TITAN_BRAND`,
-   `scalar_message_kind` returns `-1` and transfer dispatches directly to
-   `snapshot_closure` or `encode_packet`'s closure path (`project_closure_captures`).
-   `transfer_closure_entry` validates the closure header, brand, module
-   userdata, and manifest entry (`entry.native` and `entry.strict`) directly in
-   C without calling `reflect.inspect`. `encode_packet` runs
-   `project_closure_captures` once before initializing the packet buffer, so
-   captures and custom hooks execute once and the defining module's byte length
-   is known before buffer reservation. Neither root nor nested closure transfer
-   hydrates reflection's `FunctionType` signature text, while explicit
-   `reflect.inspect` calls preserve eager full `FunctionValue` / `FunctionType`
-   descriptors without needing a signature cache.
-3. **Registered nominal resource capability (`protobuf.find_resource_codec`)**:
-   In `encode_packet`, before scalar or reflection dispatch, a `LUA_TUSERDATA`
-   candidate is checked against `protobuf.find_resource_codec(candidate)` by its
-   canonical erased metatable (`TITAN_BRAND == TITAN_RECORD`). On a hit
-   (`thread.Sender` or `thread.Receiver`), `encode_packet` resolves the
-   declaring module (`nominal_module`) and `codec.descriptor.name`, computes the
-   complete packet size including header, index, nominal metadata, and aligned
-   one-entry attachment tail, and reserves it in one heap-backed buffer
-   **before** calling `codec.encode(scope, candidate)`. It then sets
-   `buf.length = sizeof(titan_async_message)`, writes the four-byte
-   little-endian slot index via `protobuf.write_resource_index`, and calls
-   `finalize_buf_message` to append `name` and `module` and fill the packet
-   header in the same allocation prefix—producing the
-   `TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD` packet in one heap allocation with no
-   Lua index string, no reflective hook invocation, and no staged `copy_message`.
-   `TransferValue.from_value` and `TransferValue:to_value` likewise check
-   `protobuf.find_resource_codec` (when `mt ~= nil and mt.metatable == nil`,
-   preserving the single reflective lookup for metatable-of-metatable
-   candidates) and `protobuf.find_resource_codec_by_name` before reflective
-   hook dispatch, passing `packet_context(true)` / `packet_context(false)` to
-   the registered capability while retaining the four-byte little-endian index
-   string inside `is_record_payload` (including for closure-captured endpoints).
-4. **Generated nominal codec**: after the root resource-capability and closure
-   checks and before `reflect.inspect`, `encode_packet` asks
-   `protobuf.find_generated_codec(candidate)`. A bound generated codec writes
-   the record or union through the ordinary owned packet buffer
-   (`init_packet_buffer` with the codec's name and the `nominal_module`, then
-   `protobuf.serialize_generated_to_buffer` and `finalize_buf_message` with
-   the codec's record or union kind), carrying the packet's `ResourceScope` as
-   its context. It allocates no root inspection. Endpoint fields and other
-   registered resources attach through the reflective resource branch with
-   that scope, allocating no `Encoder`; hooked, Array, and foreign fields use
-   the reflective field encoder, through one `Encoder` and cycle Map created
-   on the root's first such field and reused for the rest, so attachment order
-   and errors are those of the reflective root. Decoding reaches the generated
-   decoder through
-   `protobuf.deserialize_nominal_buffer_with_context` after the unchanged
-   demand-driven `initialize_nominal_raw`, and claims resources the same way. See
-   [generated nominal codecs](protobuf-library.md#generated-nominal-codecs).
-5. **Single structural root inspection and carried packet context**: When a
-   non-scalar, non-function value is inspected once with
-   `reflect.inspect(candidate)` and yields `is_record(record_value)` (with no
-   custom transfer hooks) or `is_union(union_value)`, transfer passes that
-   already-inspected descriptor and the packet's `ResourceScope` (`scope`)
-   directly to `protobuf.serialize_inspected_record_to_buffer` or
-   `protobuf.serialize_inspected_union_to_buffer`. Because `titan.transfer` and
-   `titan.protobuf` are separate compiled modules that do not use private
-   `.titan` source imports across module boundaries, these helpers are ordinary
-   compiled functions on `titan.protobuf` with an internal role: they avoid a
-   second `reflect.inspect` at the root and carry `scope` once for all nested
-   fields while preserving all visibility, active-record cycle, nesting-depth
-   (128), and 2 GiB message-size checks. They also try the generated codec
-   first, as do public `protobuf.serialize` and `protobuf.serialize_to_buffer`.
+| Order | Test | Packet path |
+| --- | --- | --- |
+| 1 | `candidate is TransferValue` | `transfer_policy_to_message`: `new_scalar_message`, or `new_nominal_message(..., nil)` for `is_record`/`is_union`/`is_closure`/`is_record_payload` |
+| 2 | `scalar_message_kind(candidate) >= 0` | `scalar_value_to_message` → `new_scalar_message` |
+| 3 | otherwise | acquire a scope, then `encode_packet(candidate, scope)` |
 
-Custom hook signatures are exactly `to_transfer_payload(): string` and
-`from_transfer_payload(payload: string): Record`; both remain synchronous and
-nonyielding. Reflected signature checks precede invocation
-(`protobuf.find_transfer_hooks`). Resolve the source record's
-actual module (`nominal_module`) before invoking an encoder, since the encoder
-can detach native resources. Do not infer that module by splitting a qualified
-name.
+`encode_packet` then tries, in order:
 
-Nominal reconstruction queries the registry first (`reflect.find_nominal`). Only
-a miss invokes the recorded module's preload loader via `transfer_load_module`,
-then retries nominal lookup. Module initialization remains memoized. No raw
-initializer capability or source module userdata crosses states.
+1. **Registered resource root.** A `LUA_TUSERDATA` that
+   `protobuf.find_resource_codec` matches by canonical erased metatable
+   (`thread.Sender`, `thread.Receiver`). The complete one-entry packet size is
+   reserved before `codec.encode(scope, candidate)` attaches the endpoint; the
+   four-byte index is written with `protobuf.write_resource_index` and
+   `finalize_buf_message` produces a `RECORD_PAYLOAD` packet in place.
+2. **Titan closure.** `project_closure_captures` runs once, before
+   `init_packet_buffer`, so captures and hooks execute once and the module
+   length is known before reservation; see [closure snapshots](#closure-snapshots).
+3. **Generated nominal codec.** `protobuf.find_generated_codec(candidate)` writes
+   through `protobuf.serialize_generated_to_buffer` with the packet's scope as
+   context. Endpoint fields attach through the reflective resource branch;
+   hooked, Array and foreign fields use one reflective `Encoder` created on the
+   first such field, so attachment order and errors match the reflective root
+   ([generated nominal codecs](protobuf-library.md#generated-nominal-codecs)).
+4. **One `reflect.inspect`.** `is_lua_userdata` becomes a `POINTER` scalar
+   packet. A record with transfer hooks (`protobuf.find_transfer_hooks`) becomes
+   a `RECORD_PAYLOAD` packet through `new_nominal_message(..., scope.native)`,
+   which commits the scope's attachments. Other records and unions pass the
+   inspected descriptor and `scope` to
+   `protobuf.serialize_inspected_record_to_buffer` /
+   `serialize_inspected_union_to_buffer`, avoiding a second root inspection.
+   Anything else raises `"transfer: unsupported value"`.
 
-`encode_message` and `decode_message` provide direct native packet
-(`titan_async_message`) serialization for `titan.thread` and `titan.async`'s
-coalescing `Receiver` without requiring source imports across modules. Scalar
-and explicit-policy encoding and C-only scalar decoding acquire no scope and
-leave any enclosing scope intact. For structural records, unions, and closures,
-`init_packet_buffer` checks
-`name_length` and `module_length` against `SIZE_MAX - sizeof(titan_async_message)`,
-initializes an `owned *titan_protobuf_buffer` with
-`titan_protobuf_buf_init_heap(buf, 0)`, reserves
-`sizeof(titan_async_message) + min(name_length + module_length, 64)` upfront via
-`titan_protobuf_buf_reserve` (crediting up to 64 bytes of mandatory metadata so
-bounded packets share the existing doubling sequence without increasing retained
-capacity), and sets `buf.length = sizeof(titan_async_message)`. Because
-serializers only append at `buf.length` and never read the prefix—and failure
-cleanup (`titan_protobuf_buf_free_heap`) frees `buf->data` without inspecting
-header fields—`init_packet_buffer` leaves the header prefix uninitialized until
-`finalize_buf_message` completes the trailing reservation, zeroes
-`sizeof(titan_async_message)`, populates the packet header and attachment tail,
-and detaches the buffer with `titan_protobuf_buf_take_data`.
+`scalar_message_kind` reads the raw `TValue` tag before any scope or execution
+lookup:
 
-The shared buffer's bulk-write rule grows to
-`needed + max(256, needed / 8)` after a single reservation exceeding four times
-the current capacity (using 64 as the minimum), rather than rounding the large
-payload up to the next power of two. Division rounds down: for `needed` of at
-least 2,048 bytes the slack is at most 12.5% of that need; smaller bulk requests
-leave 256 bytes. If the addition would exceed `SIZE_MAX`, growth requests
-exactly `needed`. This slack is separate from the initial 64-byte metadata
-credit: the initial reservation stays below the bulk threshold and, like every
-small write, uses ordinary power-of-two growth. After a bulk growth, the doubling
-branch starts from the largest power of two no greater than
-`max(capacity, 64)`, so later growth rejoins that sequence (or requests exactly
-`needed` if doubling would overflow). A 64 KiB byte field needs only one bulk
-growth, with room for proportional trailing fields, name/module bytes, and the
-aligned one-endpoint tail. `finalize_buf_message` reserves the actual trailer
-and entry count before detachment; trailing data that exceeds the slack can
-require a second payload-sized reallocation through normal growth, even when
-rounding the original field up to the next power of two would have left enough
-room. See [buffer growth](protobuf-library.md#encoding).
+- `nil`, booleans, integers (`LUA_VNUMINT`, kept distinct from integral floats
+  and `-0.0`), floats, strings (exact byte length), light userdata and threads
+  (borrowed `*lua_State`) are scalars.
+- Full userdata is a borrowed `POINTER` when it has no metatable, or when its
+  metatable has no metatable and its brand is outside `TITAN_ARRAY..TITAN_OWNED`. A metatable
+  with its own metatable returns `-1`, deferring any `__index` triggered by a
+  brand lookup until the scope exists.
+- Light C functions and zero-upvalue C closures are `FUNCTION` scalars; a NULL C
+  function raises. A C closure with `nupvalues >= 5` and `TITAN_BRAND` in
+  `upvalue[3]` is a Titan closure and returns `-1`; any other C closure with
+  upvalues raises.
 
-Decode reads directly from the packet's byte slices using
-`protobuf.deserialize_nominal_buffer_with_context` (passing `scope` once for
-`RECORD` and `UNION` packets, together with the `reflect.NominalType?` that
-`initialize_nominal_raw` returns from its registry lookup, so protobuf neither
-repeats the lookup nor wraps the descriptor in a `reflect.Type`) and
-`protobuf.deserialize_fields_buffer_with_context` (passing `scope` through
-`restore_closure_from_buffer` for `CLOSURE` packets, matching `encode_packet`'s
-`protobuf.serialize_fields_to_buffer_with_context` call). For a `RECORD_PAYLOAD` packet, after
-`initialize_nominal_raw` ensures the destination module is loaded in the
-receiving state, `decode_message_worker` checks
-`protobuf.find_resource_codec_by_name(name)`: registered resource types invoke
-`codec.decode(scope, message.bytes, message.length)` directly on the borrowed
-packet slice without allocating a four-byte payload string or running a
-reflected hook, while other custom-hook records copy the payload string and
-dispatch `from_transfer_payload`. The native scope owner disposes the packet and
-unclaimed attachments after reconstruction or an error; already claimed endpoint
-wrappers retain their own finalized ownership.
+`new_scalar_message` and `new_nominal_message` check every length against
+`SIZE_MAX`, allocate the final packet once and write the header directly; they
+never stage an automatic header or go through `copy_message`. Structural
+packets use `init_packet_buffer` and `finalize_buf_message`:
 
-A nominal held by a `value` (or erased generic) field anywhere in the packet
-names its declaring module on the wire. Transfer installs
-`protobuf.set_nominal_loader(initialize_nominal)` once, so decoding with the
-packet's scope loads that module on demand, like the root's. Outside a packet,
-`TransferValue:to_value` initializes only its root nominal's module before the
-standalone protobuf call, which has no context, so a nominal named only inside
-one of its `value` fields must already be registered in the destination state.
+- `init_packet_buffer` reserves the header plus at most 64 bytes of metadata
+  credit in a heap `titan_protobuf_buffer` and leaves the header prefix
+  uninitialized. Serializers only append at `buf.length`, and
+  `titan_protobuf_buf_free_heap` never reads the header.
+- `finalize_buf_message` reserves the exact trailer (`packet_storage_size`),
+  zeroes and fills the header, copies `name`/`module`, commits the scope's
+  attachments into the tail, and detaches with `titan_protobuf_buf_take_data`.
+  A detached packet is never reallocated.
+
+Buffer growth, including how the metadata credit interacts with the bulk-write
+slack, is canonical in [protobuf encoding](protobuf-library.md#encoding).
+
+Custom hooks are exactly `to_transfer_payload(): string` and
+`from_transfer_payload(payload: string): Record`, checked by reflected signature
+in `protobuf.find_transfer_hooks` before invocation; both are synchronous and
+must not yield. Resolve the record's declaring module (`nominal_module`, from
+`TITAN_MT_MOD`) before invoking an encoder, because the encoder can detach
+native resources. Never derive the module by splitting a qualified name.
+
+`TransferValue.from_value` shares `scalar_message_kind` and opens no scope. For
+userdata whose metatable has no metatable it checks
+`protobuf.find_resource_codec` before reflective hook lookup and passes
+`packet_context(true)`. `TransferValue:to_value` resolves the capability with
+`protobuf.find_resource_codec_by_name` and passes `packet_context(false)`. Both
+keep the four-byte index inside `is_record_payload`. Without an enclosing packet
+scope, `packet_context` is nil and endpoint hooks raise.
+
+Nominal reconstruction (`initialize_nominal_raw`) queries `reflect.find_nominal`
+first. Only a miss calls `transfer_load_module` for the recorded module and
+retries. No initializer capability or module userdata crosses states. The
+module initializer installs `initialize_nominal` with
+`protobuf.set_nominal_loader`, so a nominal held in a `value` or erased generic
+field anywhere in a packet loads its declaring module on demand during packet
+decode. `TransferValue:to_value` outside a packet initializes only its root
+nominal's module; a nominal named only inside a `value` field must already be
+registered in the destination state.
 
 ### Consuming raw-slot decode
-
-Decode is an ordinary public Titan function, available through ordinary
-compiled imports:
 
 ```text
 function decode_message(slot: foreign *(*void)): value
 ```
 
-It decodes into the calling state's `L`. Its generated preamble
-(`luaC_checkGC` and `titan_ensure_stack` for its own frame) runs before the body
-reads `slot`. A memory or stack error there propagates with `slot[0]` still
-holding the packet, which the caller's mandatory
-`defer discard_message(raw)` disposes of. The body then:
+`decode_message` is an ordinary compiled function that decodes into the calling
+state and consumes the packet in `slot[0]`. Its generated preamble
+(`luaC_checkGC`, `titan_ensure_stack`) runs before the body reads `slot`; an
+error there leaves the packet in `slot[0]` for the caller's guard. The body:
 
 1. raises `"transfer: invalid packet owner slot"` for a nil `slot`;
-2. for a non-nil `slot[0]`, reserves the single result slot with
-   `lua_checkstack(L, 1)`, which reports failure without `longjmp`. On failure
-   it clears `slot[0]`, disposes of the packet via `discard_message`, and raises
-   `"transfer: cannot reserve packet operation stack"`. Otherwise
-   `decode_scalar_message` checks whether `message.kind` is an allocation-free
-   scalar (`NIL`, `BOOLEAN`, `INTEGER`, `FLOAT`, `STATE`, `POINTER`, or
-   `FUNCTION` with `message.function ~= nil`, pushed via
-   `lua_pushcclosure(L, message.function, 0)`). On a match it pushes the single
-   noncollectable value in C; `decode_message` clears `slot[0]`, disposes of the
-   packet, copies the value with `lua_totvalue`, restores the stack top, and
-   returns without entering a protected region, looking up any worker, or
-   allocating a `ResourceScope`;
-3. otherwise (allocating kinds, empty slots, and malformed `FUNCTION` packets)
-   calls the local `decode_message_worker(slot)` inside one inline Titan
-   `catch`, a `setjmp` boundary in the same C function. The catch clears
-   `slot[0]`, passes any residual owner to C-only `discard_message`, and
-   re-raises with a bare `raise`, which pins the original error value and
-   traceback (see [trace pinning](error-handling.md#trace-pinning)).
+2. reserves the result slot with `lua_checkstack`; on failure it clears
+   `slot[0]`, discards the packet and raises
+   `"transfer: cannot reserve packet operation stack"`;
+3. for an allocation-free scalar (`NIL`, `BOOLEAN`, `INTEGER`, `FLOAT`,
+   `STATE`, `POINTER`, or `FUNCTION` with a non-NULL pointer),
+   `decode_scalar_message` pushes the value in C; decode clears the slot,
+   discards the packet and returns without a protected region or scope;
+4. otherwise calls `decode_message_worker(slot)` inside one inline `catch`. The
+   catch clears `slot[0]`, discards any residual owner and re-raises with a bare
+   `raise`, preserving the original error and traceback
+   ([trace pinning](error-handling.md#trace-pinning)).
 
-No registry entry, dispatch thunk, `lua_pcallk`, `lua_callk`, or message
-handler is involved, and a successful decode leaves the caller's stack top
-unchanged.
-
-Inside `decode_message_worker`, `STRING` packets root-copy their bytes via
-`copy_native_bytes` while `slot[0]` still owns the packet, then clear the slot
-and dispose of the packet before returning. Malformed `FUNCTION` packets with a
-`NULL` pointer raise `"cannot transfer a NULL Lua C function"` with the packet
-still in `slot[0]`. Both paths run **before** `current_execution()`,
-`acquire_resource_scope()`, and `move_slot_to_scope`: neither can claim resource
-attachments, so they skip `ResourceScope` acquisition. Only nominal packets
-(`RECORD`, `UNION`, `CLOSURE`, `RECORD_PAYLOAD`) acquire either a fully retired
-pooled `ResourceScope` or a fresh inert frame. Only fresh creation registers the
-finalizer, before granting authority or native ownership; pooled frames are
-already finalizable. The worker installs lexical exact-top restoration/native
-disposal and inserts the scope before `move_slot_to_scope` moves and clears the
-caller's slot into the scope's native cell. Ordinary worker-entry failure,
-module initialization, primitive decode failure, and scope-preparation failure
-therefore leave the input in the caller's slot for `decode_message`'s catch;
-after commit the scope owns it, and the catch finds an empty slot.
+`decode_message_worker` copies `STRING` bytes while the slot still owns the
+packet, then discards it; a `FUNCTION` packet with a NULL pointer raises with
+the packet still in the slot. Neither acquires a scope. `RECORD`, `UNION`,
+`CLOSURE` and `RECORD_PAYLOAD` packets acquire a scope, install its retiring
+`defer`, and only then call `move_slot_to_scope`, so every earlier failure
+(worker entry, scope preparation) leaves the packet in the caller's slot for the
+catch. `RECORD`/`UNION` decode through
+`protobuf.deserialize_nominal_buffer_with_context` with the scope and the
+`reflect.NominalType?` from `initialize_nominal_raw`; `CLOSURE` through
+`restore_closure_from_buffer`. A `RECORD_PAYLOAD` whose name has a registered
+resource codec calls `codec.decode(scope, bytes, length)` on the borrowed packet
+slice; other hooked records copy the payload and call `from_transfer_payload`.
+Scope retirement then disposes the packet and any unclaimed attachments; claimed
+endpoint wrappers keep their own finalized ownership.
 
 | Outcome | Caller slot | Lua stack |
 | --- | --- | --- |
@@ -262,347 +167,269 @@ after commit the scope owns it, and the catch finds an empty slot.
 | error raised by decode's own entry preamble | unchanged; the caller's guard disposes | restored by the catching boundary |
 | nil slot address | no valid slot | unchanged |
 
-The caller passes its actual guarded `foreign *void` local. An exact pointer
-local supplied to the `foreign *(*void)` parameter uses the checker's
-`mutable_c_address` coercion, so codegen passes `&local`
-([contextual object-pointer conversion](c-ffi-expressions.md#contextual-object-pointer-conversion)).
-The scalar write analysis recognizes this conversion for ordinary Titan calls
-as well as foreign calls. If recovery or a deferred guard can read the local,
-codegen gives the actual scalar a volatile home (`void *volatile raw`) plus a
-declaration-time compiler escape barrier, with no separate spill snapshot.
-The barrier keeps the home escaped if an ordinary callee is inlined;
-volatility alone is insufficient. `decode_message` itself contains a
-`catch`/`setjmp` and is not inlined by supported GCC/Clang, including with Linux
-LTO. It clears that same storage, so cleanup sees nil even when decode raises
-without returning. Earlier protected assignments cannot restore a stale owner.
-This is the supported GCC/Clang implementation guarantee, including Windows
-Clang/MSYS2, not strictly conforming ISO C: the outgoing unqualified pointer
-has the ISO C 6.7.3p6 volatile-access caveat. See
-[recovery storage](error-handling.md#setjmp-sensitive-localparameter-spills)
-for the escape barrier, opaque-raise assumption and production LTO analysis.
+Caller recipe: give a real `foreign *void` local its packet in its own
+declaration, install `defer discard_message(raw)` (or the domain's discard
+wrapper) immediately, and call `decode_message(raw)` directly in that function.
+A forwarding helper would add its own fallible entry preamble before decode
+takes ownership, and a captured local cannot supply mutable pointer storage. The
+pointer local reaches the `foreign *(*void)` parameter through
+[contextual object-pointer conversion](c-ffi-expressions.md#contextual-object-pointer-conversion);
+because a deferred guard reads it, codegen gives it a volatile home plus a
+declaration-time escape barrier, so a stale spill cannot restore an owner that
+decode already cleared. `decode_message` itself contains a `setjmp` and is not
+inlined by supported GCC/Clang, including with LTO. The guarantee and its ISO C
+caveat are in
+[recovery storage](error-handling.md#setjmp-sensitive-localparameter-spills).
 
-Install `defer discard_message(raw)` immediately after taking ownership and
-call `decode_message(raw)` directly in that owning function. A fallible
-ordinary forwarding helper would introduce its own entry preamble before
-decode takes ownership. Captured locals still cannot supply mutable pointer
-storage. No registry ledger, heap cell, or raw-slot wrapper is needed.
+Callers are `thread.Receiver` receive paths, child bootstrap, cancellation
+delivery, terminal-status reconstruction and `async.Receiver:wait` (which
+declares a fresh local per loop turn and installs its guard only after
+`receiver_take_native` reports a packet). Lua cannot call `decode_message`:
+generated Lua entries have no coercion for raw C pointer parameters.
 
-The `thread.Receiver` receive paths, child bootstrap, cancellation delivery,
-terminal-status reconstruction, and `async.Receiver:wait` all follow this
-rule. `Receiver:wait` declares a fresh local per loop turn and installs its
-guard only after `receiver_take_native` reports a taken packet. Their
-recovery-sensitive raw slots use volatile loads/stores and an empty compiler
-escape barrier; these add no allocation, copy, ABI change, or additional call.
-The corrective Windows evidence used an effective `-O2` production provider,
-with `-O0 -fno-lto` test objects, not an `-O3` provider. Lua code
-cannot call `decode_message`: generated Lua entries have no dynamic coercion
-for raw C pointer parameters.
-
-Decode enters Lua, may initialize transfer and destination modules, and may run
-decoders; it cannot use a closed state and is not part of the no-Lua release
-chain. Raw `discard_message` still needs neither a state nor a Runtime.
+Decode enters Lua, may initialize modules and runs decoders, so it needs a live
+state. `discard_message` needs neither a state nor a Runtime.
 
 ### Native module loading
 
-`transfer_load_module` is a public source-defined foreign function shared with
-`titan.lua` and `titan.thread` through an ordinary compiled import. Its exact
-portable signature is
-`(state: *lua_State, name: const *char, length: unsigned long long)` with no C
-return value. It checks `length <= SIZE_MAX` before converting to `size_t` and
-borrows `length` valid bytes for the call. Inside the exclusively owned state's
-protected entry, the helper reserves three stack slots and calls the preload
-function with zero arguments and one result. It then checks that result against
-the existing `"Titan module " .. name` registry entry populated by the generated
-initializer. Only that canonical module remains above the saved entry top on
-success. Preload wrappers cannot substitute unrelated native userdata before
-manifest lookup. Allocation and Lua errors reach the enclosing protected entry;
-callers own the module root and subsequent stack cleanup.
+`transfer_load_module(state: *lua_State, name: const *char, length: unsigned long long)`
+is a public source-defined foreign function shared with `titan.lua` and
+`titan.thread`. It checks `length <= SIZE_MAX`, borrows the name bytes for the
+call, reserves three stack slots, calls the `LUA_PRELOAD_TABLE` loader with zero
+arguments and one result, and requires that result to be the
+`"Titan module " .. name` registry entry, so a preload wrapper cannot substitute
+other userdata before manifest lookup. On success only the canonical module
+remains above the entry top. It must run inside the target state's protected
+entry; Lua and allocation errors propagate there, and the caller owns the module
+root and later stack cleanup.
 
-This loader is stateful Lua-stack/registry work, not part of the no-Lua
-retain/release/discard chain. Provider code pointers used by that native chain
-remain valid after a state closes under the existing
-[stable native-image binding and process-lifetime DSO mapping](foreign-functions.md#source-collaboration-and-binary-isolation)
-rule; that does not make a closed `lua_State` usable by `transfer_load_module`.
+This is stateful Lua work, not part of the no-Lua release chain, and it cannot
+use a closed state. Provider code pointers that the native release chain calls
+stay mapped after a state closes under the
+[process-lifetime provider binding](foreign-functions.md#source-collaboration-and-binary-isolation).
 
 ## Closure snapshots
 
-`project_closure_captures` converts a closure's captures for both `from_value`
-and `encode_message`. Source-defined foreign helpers (`transfer_closure_entry`
-and `transfer_project`) validate its source entry and project **all immediate
-semantic captures onto the Lua stack before any custom hook runs**. That stack
-range roots and freezes the complete immediate capture frontier while Titan
-converts each capture once in declaration order via `TransferValue.from_value`,
-so a custom hook in an earlier capture cannot mutate a shared captured box
-before a later capture is read. A nested closure or custom record is already
-opaque bytes when inserted into its parent's snapshot.
+This section owns closure-transfer policy. The generated manifest, projection
+and restore functions are in
+[cross-state closure transfer metadata](codegen-overview.md#cross-state-closure-transfer-metadata).
 
-One anonymous protobuf message has two array fields: `{TransferValue}` policies
-and `{boolean}` flags recording which captures were already policy wrappers.
-The shared ordered `reflect.Type` descriptors serve serialization and
-deserialization. No public snapshot record, parallel private nominal metadata,
-or separate tagged binary codec is needed.
+**Eligibility.** Every first-class source function, lambda, bound method and
+realized callable adapter has a manifest entry, so a referenced local function
+transfers like an exported one. Captured nominals follow the public protobuf or
+custom-hook policy; local nominal types are ineligible. Unsupported
+reconstruction conversions fail during projection, before the packet exists.
 
-On reconstruction, load the destination owner and resolve the token by pointer
-equality against its entry manifest before dereferencing it or decoding any
-captured resource. Validate both array lengths against the manifest count and
-every policy slot before invoking any `to_value` decoder. Read flags as dynamic
-values and require every slot to be a boolean: Array holes are legal independently
-of their element descriptors, and a boolean conversion could turn nil into false.
+**Projection.** `project_closure_captures` serves both `from_value` and
+`encode_packet`. The source-defined foreign helpers `transfer_closure_entry`
+(header, brand, module userdata, and `entry.native`/`entry.strict` manifest
+match, all without `reflect.inspect`) and `transfer_project` push **all**
+immediate captures onto the Lua stack before any hook runs. That rooted range
+freezes the capture frontier while Titan converts each capture once, in
+declaration order, with `TransferValue.from_value`, so a hook in an earlier
+capture cannot mutate a shared box before a later capture is read. A nested
+closure or custom record is already opaque bytes inside its parent. Neither
+root nor nested closure transfer hydrates reflection's `FunctionType` signature
+text.
 
-Each reconstructed closure receives fresh mutable cells. Aliases between
-related source closures are intentionally not preserved. Module globals refer
-to destination state. The active-record and active-closure Maps detect only
-reentrant conversion cycles and unwind with `defer`; there are no graph
-identity indexes, mutable-cell registries, or graph allocation ledgers.
+**Snapshot format.** One anonymous protobuf message (`closure_fields`) has two
+Array fields: the `{TransferValue}` policies and `{boolean}` flags marking
+captures that were already `TransferValue` policies, which reconstruction keeps
+as unions instead of unwrapping. A captured record goes through its hook or
+protobuf policy and carries its declaring module from `TITAN_MT_MOD`.
+
+**Reconstruction** (`restore_closure_from_buffer`):
+
+1. Load the packet's module through `transfer_load_module`. No initializer
+   pointer travels with the packet.
+2. Resolve the token by pointer equality against that provider's manifest
+   entries (`transfer_resolve`) before dereferencing it. An invalid token or a
+   different physical provider is rejected before any capture is decoded.
+3. Check both array lengths against the entry's capture count and every policy
+   slot before any `to_value` decoder runs. Read each flag through a typed
+   `boolean` local: Array holes are legal regardless of the element descriptor,
+   and a truthiness conversion would turn nil into false.
+4. Push each policy (flagged slots as the union itself, others through
+   `to_value()`) and call the generated restore function (`transfer_restore`).
+
+Each reconstructed closure gets fresh mutable cells; aliasing between related
+source closures is not preserved. Module globals refer to the destination
+state. `transfer_active_closures` and protobuf's active-record Map detect only
+reentrant conversion cycles and unwind with `defer`; there are no identity
+indexes or cell registries.
+
+**Lifetime.** Titan's loader and generated Lua shims keep provider images mapped
+for the process lifetime, so a transferred closure stays valid after its source
+state closes. Manually loaded native libraries keep the caller-owned code
+lifetime, as for raw C functions and preload snapshots. A packet pins no origin
+Lua object.
 
 ## Scoped resource table and manual resource ownership
 
 ### Packet-scoped resource table (`titan_transfer_resource_table`)
 
-`titan/transfer_native.h` embeds `titan_transfer_resource_table resources`
-(`entries`, `count`; no committed `capacity`) in `titan_async_message`. Each
-entry (`titan_transfer_resource`) holds `(void *resource,
-titan_transfer_resource_fn release)` (16 bytes on LP64) with no separate
-`claimed` field: a `nil` `resource` pointer marks a consumed unit while
-`release` is retained so claim validation still checks resource kind before
-duplicate consumption. Entries contain only native pointers and C-ABI
-callbacks—no Lua/Titan GC objects or state-bound closures. Committed entries
-live in the aligned tail of the `titan_async_message` allocation itself; `entries`
-is `nil` when `count == 0` and otherwise points inside that single packet block.
-Changing `titan_async_message` or `titan_transfer_resource_table` alters the
-native packet contract while keeping ABI 2, SDK/package 0.6/0.6.0, and
-language-server API 1 unchanged, so every provider, consumer, and native fixture
-must be cleanly rebuilt with no mixed-layout shim.
+`titan_async_message.resources` is `{entries, count}` with no capacity. Each
+`titan_transfer_resource` is `{void *resource; titan_transfer_resource_fn release;}`
+and holds only a native pointer and a C-ABI callback, never a GC object or
+state-bound closure. A NULL `resource` marks a consumed entry; `release` stays,
+so a later wrong-kind claim still reports a kind mismatch before the duplicate
+claim. Committed entries live in the packet's aligned tail; `entries` is NULL
+when `count == 0`. Changing `titan_async_message` or
+`titan_transfer_resource_table` changes the packet contract shared by every
+provider: rebuild every provider, consumer and native fixture cleanly; there is
+no mixed-layout shim.
 
-The standard ownership rules are:
+Ownership rules:
 
-- **Each unit is owned by exactly one of: a live finalized wrapper, or an
-  unconsumed message entry.** Wrapper-only reference counting is insufficient:
-  when a worker creates a channel pair and returns it through `Thread:join()`,
-  the worker's `lua_close` finalizes both worker wrappers before the parent
-  reconstructs the result, so only the unconsumed result packet's entries keep
-  the channel alive until parent adoption. Likewise, if the sole source `Sender`
-  wrapper is collected while its encoded packet is still queued, the unconsumed
-  packet entry prevents premature EOF.
+- **Each endpoint reference unit is owned by exactly one of a live finalized
+  wrapper or an unconsumed packet entry.** Wrapper-only counting is
+  insufficient: a worker that returns a new channel pair through
+  `Thread:join()` finalizes both wrappers in its `lua_close` before the parent
+  decodes the result, so only the packet entries keep the channel alive until
+  adoption. Likewise a queued packet keeps a channel open after its sole source
+  `Sender` wrapper is collected.
 - **Adoption moves a unit; discard releases it; close changes state only.**
-- **Message bytes, wake targets, loop liveness, and OS-thread retirement are
-  separate lifetimes.** Wrapper counting simplifies none of them.
+- **Message bytes, wake targets, loop liveness and OS-thread retirement are
+  separate lifetimes.**
 
-The scope, registration, attachment, claim, and disposal mechanics are:
+The table adds no cycle collection: queued receiver attachments can keep their
+own channel, or a cycle of channels, alive after every wrapper is unreachable.
+The application must close a reachable receiver to break it
+([last-receiver pin](thread-library.md#endpoint-transfer-c-abi-release-chain-and-last-receiver-pin)).
 
-- **Execution-local exact-top authority and bounded state-local frame reuse
-  (`ResourceScope`)**: `resource_scopes` maps the actual current Lua thread
-  value, obtained by `current_execution()` with `lua_pushthread`, to that
-  execution's active top `ResourceScope`. It is an ephemeron Map, not a
-  raw-address registry: a reachable suspended execution keeps its active scope
-  alive through its stack. A scope has no back-edge to its execution, so an
-  unreachable execution does not remain rooted through the Map's value.
-  Each `ResourceScope`
-  stores only `encoding` (direction), an inline `titan_transfer_scope_owner`
-  native cell (`resources{entries,count}`, `capacity`, `message`, and
-  `inline_entries[4]`, totaling 96 bytes on LP64), a borrowed `message` pointer
-  for decode claim lookup, and `free_next` for the state-local idle free stack.
-  The current `execution` key and enclosing `previous` frame remain in the
-  lexical locals of `encode_message` and `decode_message_worker`, so a scope
-  frame never retains a strong edge back to its execution thread or parent frame.
-  `acquire_resource_scope()` pops a retired frame from the state-local
-  `idle_resource_scopes` stack (hard-bounded at `idle_resource_scope_limit = 8`
-  frames per Lua state, a private retention bound rather than a user contract,
-  independent of coroutine/Task identity so Task-per-message callers share the
-  pool); on an empty stack it allocates an inert
-  `ResourceScope` and registers `gc.finalizable(fresh, finalize_resource_scope)`
-  before granting execution authority or native ownership. Both entry points
-  increment the state-local `active_scope_count` immediately before registering
-  their lexical retirement `defer`, so no normal or error exit can uncount a
-  frame it never counted. Lexical deferred
-  retirement stays inline (introducing no fallible ordinary helper entry after
-  packet commitment) and runs in exact order:
-  1. restore `resource_scopes[execution] = previous` and decrement
-     `active_scope_count`;
-  2. call C-only `dispose_scope(scope.native)`, which detaches `message`,
-     `entries`, `count`, and `capacity`, releases any uncommitted scratch units
-     via `dispose_resource_entries`, frees `entries` only when
-     `capacity > TITAN_TRANSFER_INLINE_RESOURCES` (`4`), disposes any owned
-     decode `message` via `discard_message`, and zeroes the complete
-     `titan_transfer_scope_owner` cell with `memset`;
-  3. clear `scope.message = nil` and `scope.encoding = false`;
-  4. push `scope` onto `idle_resource_scopes` only when
-     `idle_resource_scope_count < 8`.
+#### `ResourceScope` frames and exact-top authority
 
-  Generated `defer`/`catch` recovery reaches this cleanup under sustained
-  `LUA_ERRMEM` without interning strings: the compiler roots its recovery keys
-  and empty traceback in private module slots before generated code can run.
-  Transfer needs no separate string-root workaround. See
-  [error recovery](error-handling.md) for the allocation-free recovery arm and
-  the separate, potentially allocating Lua `__close` behavior.
+`ResourceScope` holds `encoding` (direction), `native` (an inline
+`titan_transfer_scope_owner` cell: scratch `resources`, `capacity`, owned decode
+`message`, and `inline_entries[TITAN_TRANSFER_INLINE_RESOURCES]`, 96 bytes on
+LP64), a borrowed `message` mirror for claim lookup, and `free_next`. The
+current execution key and the enclosing `previous` frame stay in the lexical
+locals of `encode_message` and `decode_message_worker`, so a frame never
+references its execution or parent.
 
-  Idle pooled frames hold no native ownership and grant no authority. Deeper
-  nested bursts (`> 8` concurrent frames in one state) retire their overflow
-  frames normally and leave them for ordinary GC reclamation; when
-  `finalize_resource_scope` later runs on an already-retired overflow frame, its
-  zeroed native cell makes `dispose_scope` a no-op. Only the current execution's
-  exact top authorizes attachment or claim; no older matching phase is searched.
-  Same-stack protobuf fields, opaque hooks, and closure capture conversion share
-  the top, while nested structural/hook packet work pushes its own frame.
-  Scalar/policy encoding, C-only scalar decoding, and scope-free protected
-  `STRING` / `NULL`-`FUNCTION` decoding leave the enclosing frame intact without
-  acquiring another. Other Tasks and separately resumed child
-  Coroutines inherit no packet authority. An abandoned
-  active execution stack that never runs its lexical `defer` never returns its
-  frame to `idle_resource_scopes`; `finalize_resource_scope` reclaims its
-  unfinished scratch units, heap spill, and owned packet natively. This
-  isolation/abandonment mechanism does not make yielding transfer hooks
-  supported. Standalone protobuf/policy conversion opens no scope and cannot
-  manufacture ownerless endpoint references.
+- **Authority.** `resource_scopes` is an ephemeron Map from the current Lua
+  thread value (`current_execution`, via `lua_pushthread`) to that execution's
+  top frame. Only that exact top authorizes attach or claim, in the matching
+  direction; no older frame is searched. Protobuf fields, opaque hooks and
+  capture conversion on the same stack share the top; nested packet work pushes
+  its own frame. Other Tasks and separately resumed child coroutines inherit
+  nothing. Standalone protobuf and policy conversion open no scope and cannot
+  manufacture endpoint references.
+- **Fast negative.** `current_resource_scope` returns nil without resolving the
+  execution when the state-wide `active_scope_count` is zero. Each entry point
+  increments the count before registering its retiring `defer`, so the count
+  can only over-estimate (an abandoned stack never decrements it). A positive
+  count grants nothing.
+- **Acquisition.** `acquire_resource_scope` pops the state-local idle stack, or
+  allocates an inert frame and registers `finalize_resource_scope` with
+  `gc.finalizable` before the frame gains authority or native ownership.
+- **Retirement** is an inline `defer` (no fallible ordinary call after packet
+  commit), in this order: restore `resource_scopes[execution] = previous` and
+  decrement the count; `dispose_scope(scope.native)`, which detaches everything
+  before releasing uncommitted units, frees a heap spill, discards an owned
+  decode packet and zeroes the cell; clear `message` and `encoding`; push the
+  frame on the idle stack only while fewer than `idle_resource_scope_limit`
+  (8) frames are idle. Overflow frames are left to GC; their zeroed cell makes
+  the finalizer a no-op.
+- **Abandonment.** A suspended stack that never runs its `defer` never returns
+  its frame to the pool; `finalize_resource_scope` releases its scratch units,
+  heap spill and owned packet natively. This does not make yielding hooks
+  supported.
 
-  Every resolution of the current top frame goes through
-  `current_resource_scope()`. When `active_scope_count` is zero, no frame is
-  installed for any execution in the state, so it returns nil before calling
-  `current_execution()` (`lua_checkstack`, `lua_pushthread`, and the `defer`
-  frame) or probing the ephemeron Map; this keeps standalone
-  `protobuf.serialize`/`deserialize` and policy conversion free of execution
-  lookup. A frame abandoned on a never-resumed stack is never uncounted, so the
-  count can only over-estimate: the full exact-top lookup then runs and returns
-  only the current execution's own frame, if any. A positive count therefore
-  never grants authority; it only disables the shortcut.
-- **Transfer-mediated nominal capability registration (`register_resource` and
-  `claim_registered_resource`)**: During module initialization, `titan.transfer`
-  installs `packet_context` into `protobuf.set_packet_context_provider`, and
-  `titan.thread` calls `transfer.register_resource` with inert `Sender<|value|>`
-  and `Receiver<|value|>` instances, typed native-pointer accessors, C-ABI
-  retain/release functions, and finalizer-first constructors. `register_resource`
-  inspects the record once and registers a `protobuf.ResourceCodec` keyed on the
-  record's canonical erased metatable identity. All components—the metatable
-  identity, `RecordType` descriptor, and fixed `encode`/`decode` closures
-  retaining `titan.thread` and `titan.transfer`—stay traced in state-local
-  module variables, and private userdata field offsets never cross module
-  boundaries. The carried `context` passed to `codec.encode` and
-  `claim_registered_resource` is only ever a live `ResourceScope` from the
-  current packet call (never serialized or cached); a `nil` context raises the
-  standard missing-scope error. `TransferValue.from_value` and
-  `TransferValue:to_value` pass `packet_context(true)` and
-  `packet_context(false)` to the registered `ResourceCodec` callbacks, while
-  public `attach_resource` and `claim_resource` continue to resolve the exact
-  top through `current_resource_scope()` on every call for opaque user hooks.
-- **Inline scratch cell, heap spill, and pre-detach trailing reservation
-  (`reserve_resource`, `packet_storage_size`, `commit_resources`)**: After
-  checking the top encode scope and non-nil `resource`, `retain`, and `release`
-  pointers, `reserve_resource(scope.native)` reserves a scratch slot **before**
-  `attach_reserved` calls `retain(resource)`. The first
-  `TITAN_TRANSFER_INLINE_RESOURCES` (`4`) attachments use
-  `scope.native.inline_entries` directly (`capacity = 4`) with no heap
-  allocation, which covers packets carrying up to four endpoint occurrences. A
-  fifth attachment spills to an 8-entry heap array via one `malloc` and copies
-  the four inline entries (the inline address is never passed to
-  `realloc`); a ninth and later growth double `capacity` via `realloc`, saturating at
-  `TITAN_TRANSFER_INVALID_INDEX = 0xffffffff` (valid slot indexes
-  `0..0xfffffffe`) and checking `SIZE_MAX / sizeof(titan_transfer_resource)`. A
-  failed spill or growth leaves all prior units and the existing scratch buffer
-  owned by `scope.native` for native rollback. Once `retain` returns,
-  `attach_reserved` writes `{ resource, release }` and increments `count`. Every
-  packet-producing path reserves header, payload, metadata, alignment padding,
-  and the exact trailing entry bytes before buffer detachment or allocation so a
-  detached packet is never reallocated:
-  - `packet_storage_size(content_size, count)` returns `content_size` when
-    `count == 0` (adding no alignment padding or tail) and otherwise computes
-    `align_up(content_size, alignof(titan_transfer_resource)) + count * sizeof(titan_transfer_resource)`
-    with `SIZE_MAX` overflow checks on alignment padding, byte addition, and
-    entry multiplication.
-  - Structural records, unions, and closure snapshots call
-    `finalize_buf_message`, which reserves `storage_size - buf.length` in the
-    expandable buffer before zeroing and writing the header and `name`/`module`
-    trailers, derives all interior pointers after that final reservation, calls
-    `commit_resources(msg, owner, storage_size)` to `memcpy` the active scratch
-    units into the aligned packet tail and reset `owner.resources.count = 0`, and
-    detaches `buf.data`.
-  - Registered root endpoints pre-reserve the known one-entry `storage_size`
-    before attaching the endpoint and finalize in place.
-  - Opaque root custom-hook payloads call `new_nominal_message(...,
-    scope.native)`, which computes `storage_size` once (including the aligned
-    tail for `scope.native.resources.count`), allocates the single heap packet,
-    copies the payload and `name`/`module` strings, and moves the scope's units
-    via `commit_resources`.
-  - Scalar packets (`new_scalar_message`) and explicit-policy packets
-    (`new_scalar_message` or `new_nominal_message(..., nil)`) open no scope and
-    carry an empty `resources` table (`{ nil, 0 }`).
-- **Validated claim and finalizer-first adoption (`ResourceScope:claim`,
-  `claim_resource`, and `claim_registered_resource`)**: Checks the top decode
-  scope, requires `length == 4`, decodes the four-byte
-  little-endian unsigned slot index (inverse of
-  `protobuf.write_resource_index_bytes`), checks `index ~= 0xffffffff` and
-  `index < scope.message.resources.count`, checks
-  `expected_release ~= nil and entry.release == expected_release`, and checks
-  `entry.resource ~= nil`. It then sets `entry.resource = nil` (leaving
-  `entry.release` intact so a subsequent wrong-kind claim on the same consumed
-  slot still fails with kind mismatch before duplicate claim) and returns
-  `resource` with no subsequent allocation or yield. Both registered endpoint
-  constructors and hook decoders allocate their inert wrapper (`native = nil`)
-  and register `gc.finalizable` **before** claiming, then assign `native`
-  immediately. Thus a failure before or during the
-  claim leaves the retain owned by the packet's trailing table, while a failure in
-  a later field leaves already-claimed wrappers owned by the destination GC and
-  disposes only the remaining non-nil packet entries.
-- **Reentrant C-only disposal (`dispose_resources`, `discard_message`) and
-  `copy_message`**: `dispose_resources` detaches `entries` and `count` from the
-  table header (`table.entries = nil`, `table.count = 0`) before
-  `dispose_resource_entries` iterates over `0..count - 1`, clears
-  `entry.resource = nil`, and calls `release(resource)` on each non-nil entry.
-  Detaching first ensures recursive release paths (such as releasing the last
-  `thread.Receiver`, which drains its channel and discards nested packets) cannot
-  observe the table as still owned. Because committed `entries` points into the
-  packet's own trailing bytes, `discard_message(raw)` frees only the single
-  `message` allocation after `dispose_resources` finishes—without entering Lua,
-  loading modules, running user decoders, or requiring a Runtime. Public foreign
-  `copy_message(raw)` checks `resources.entries == nil` and
-  `resources.count == 0` directly and refuses any packet with attachments,
-  copying only attachment-free packets.
+Generated `defer`/`catch` recovery reaches retirement under sustained
+`LUA_ERRMEM` without interning strings ([error recovery](error-handling.md)).
 
-The resource table adds no native cycle collection. Queued receiver attachments
-can keep their own channel, or a cycle of channels, alive after all Lua wrappers
-are unreachable. The application must explicitly close/drain a reachable
-receiver to break that graph; see the
-[native endpoint lifetime rules](thread-library.md#endpoint-transfer-c-abi-release-chain-and-last-receiver-pin).
+#### Registration, attachment and claim
+
+- **Registration.** At initialization `titan.transfer` installs `packet_context`
+  with `protobuf.set_packet_context_provider`, and `titan.thread` calls
+  `register_resource` with inert `Sender<|value|>`/`Receiver<|value|>`
+  instances, native-pointer accessors, C-ABI retain/release callbacks and
+  finalizer-first constructors. `register_resource` inspects the record once and
+  calls `protobuf.register_resource_codec`, keyed by canonical erased metatable
+  identity. Everything stays in traced state-local module variables; private
+  field offsets never cross modules. The `context` passed to `codec.encode` and
+  `claim_registered_resource` is always the live scope of the current packet
+  call; nil raises the missing-scope error. Public `attach_resource` and
+  `claim_resource` resolve the top through `current_resource_scope` on every
+  call.
+- **Attachment** (`ResourceScope:attach`). After checking the encode scope and
+  non-nil `resource`, `retain` and `release`, `reserve_resource` reserves a slot
+  **before** `attach_reserved` calls `retain`. The first four entries use
+  `inline_entries`; the fifth moves them to an 8-entry `malloc` array (the
+  inline address is never passed to `realloc`); later growth doubles with
+  `realloc`, capped at `TITAN_TRANSFER_INVALID_INDEX` (`0xffffffff`, so valid
+  indexes are `0..0xfffffffe`) and checked against `SIZE_MAX`. A failed spill
+  leaves every prior unit owned by the scope for native rollback.
+- **Commit.** Every packet path reserves header, payload, metadata, padding and
+  the exact tail before detaching or allocating. `packet_storage_size` adds the
+  aligned tail only when `count > 0` and returns 0 on overflow;
+  `commit_resources` copies the scratch entries into the tail and zeroes the
+  scope's count. Root endpoints pre-reserve a one-entry packet; opaque hook roots
+  commit through `new_nominal_message(..., scope.native)`; scalar and policy
+  packets carry an empty table.
+- **Claim** (`ResourceScope:claim`, via `claim_resource` or
+  `claim_registered_resource`), in this order: decode-scope check; `length == 4`;
+  little-endian index `~= 0xffffffff` and `< count` (`"transfer: resource
+  attachment index is out of bounds"`); `entry.release == expected_release`
+  (`"transfer: resource attachment kind mismatch"`); `entry.resource ~= nil`
+  (`"transfer: resource attachment was already claimed"`). It then clears
+  `entry.resource` and returns the pointer with no further allocation or yield.
+  Constructors allocate the inert wrapper (`native = nil`) and register
+  `gc.finalizable` **before** claiming, then assign `native`. A failure before or
+  during the claim leaves the unit in the packet; a failure in a later field
+  leaves claimed wrappers to the destination GC and releases only the remaining
+  entries. Indexes are packet-local, not global anti-replay tokens.
+
+#### C-only disposal and copy
+
+`dispose_resources` detaches `entries` and `count` before
+`dispose_resource_entries` releases each non-NULL entry, so a recursive release
+(for example the last `thread.Receiver` draining nested packets) never sees the
+table as still owned. `discard_message` then frees the single packet allocation.
+It enters no Lua, loads no module, runs no decoder and needs no Runtime.
+`copy_message` returns NULL for any packet with attachments; only
+attachment-free packets can be copied.
 
 ### Manual resource handoff
 
-Only resources registered in the packet table via `attach_resource` (initially
-`thread.Sender` and `thread.Receiver`) are automatically released by
-`discard_message`. The
+Only packet-table resources registered through `attach_resource` (today
+`thread.Sender` and `thread.Receiver`) are released by `discard_message`. The
 [manual-handoff API inventory](../language/standard-library-transfer.md#manual-handoff-api-inventory)
-names the exact supported UV TCP/pipe, network/TLS/HTTP/WebSocket, File,
-process-stream, shell-stream, and SQLite Connection hooks. Watchers, Processes,
-SQLite Statements/Cursors, and arbitrary native-backed owners are not implied.
-These hooks select buffered bytes, scalar state, native address fields, and
-child hook bytes, usually through protobuf's anonymous field API. Only UV owns
-libuv duplication/adoption and pending-request checks; domain adapters own
-semantic state and fresh destination callbacks. The transport copies bytes
-without following native pointers, and `discard_message` never invokes
+lists the supported UV TCP/pipe, net/TLS/HTTP/WebSocket, File, process-stream,
+shell-stream and SQLite Connection hooks; Watchers, Processes, SQLite
+Statements/Cursors and other native-backed owners are not covered. Their
+hooks encode buffered bytes, scalar state, native identifiers and child hook
+bytes, usually through protobuf's anonymous field API. The transport copies
+those bytes without following pointers, and `discard_message` never calls
 `from_transfer_payload`.
 
-`async.Receiver` delivery is lossy: native notifications coalesce and newer
-sends replace unread slot packets before `wait()` takes them. Overwriting or
-discarding a packet in `async.Receiver` or `thread.Receiver` releases only
-transport storage and any packet-table entries registered via `attach_resource`,
-without invoking manual resource disposal hooks. A successful send therefore
-does not establish exactly-once delivery or adoption for manual-handoff
-resources, including native tokens hidden inside closure snapshots; the
-application must retain an ownership protocol outside the lossy packet.
+These rules are generic; domain chapters keep only their gate and schema:
 
-Preflight and duplication failures retain endpoint ownership. io preserves its
-first detached pipe when a second duplication fails. Other post-detach encoding
-failures can terminalize the composite after explicit disposal. This is not a
-generic transaction around hooks or delivery; successful manual-handoff payloads
-remain manually owned and must be adopted exactly once or explicitly disposed
-through an API that actually exists for that type. UV TCP/pipe and the
-network/TLS/HTTP/WebSocket owners export `discard_transfer_payload`; File,
-process/shell streams, and SQLite Connection instead require their documented
-adoption/close recovery.
-
-UV stores the destination loop binding in state-local module state. Runtime
-initialization binds its initialized loop, and shutdown admission clears that
-exact binding. Native reconstruction refuses an absent binding. Buffered
-adapters use `snapshot_pending()` before changing ownership and consume the old
-queue only after native detachment succeeds.
-
-See [Receiver ownership](libuv-runtime.md#cross-state-receiver-ownership),
-[Lua state loading](lua-library.md), and the individual resource chapters.
+- **Manual ownership.** A successfully encoded payload owns the duplicated
+  native resource. It must be adopted exactly once through
+  `from_transfer_payload` or disposed explicitly. UV TCP/pipe and the
+  net/TLS/HTTP/WebSocket owners export `discard_transfer_payload`, which ends in
+  UV's native close; a close attempt consumes ownership even when it returns an
+  error status. File, process/shell streams and SQLite Connection have no such
+  helper and require their documented adoption/close recovery.
+- **Lossy carriers.** `async.Receiver` coalesces: a newer send replaces an
+  unread packet. Discarding or overwriting a packet in either receiver releases
+  only transport storage and packet-table entries, never manual payloads, even
+  inside closure snapshots. A successful send establishes neither exactly-once
+  delivery nor adoption; the application needs its own ownership protocol.
+  Stop producers and recover handoffs before closing a receiver.
+- **Failure atomicity.** Preflight and duplication failures leave the source
+  owner intact (io keeps its first detached pipe when a second duplication
+  fails). A failure after detachment can terminalize the composite after
+  explicit disposal. There is no transaction around hooks or delivery.
+- **Buffered input.** Buffered adapters call `snapshot_pending()` before changing
+  ownership and consume the old queue only after native detachment succeeds.
+- **Stream eligibility.** UV's preflight (`stream_transfer_status` and
+  `titan_uv_transfer_stream_status`) rejects closing streams and streams with
+  queued writes or loop-rooted requests; Windows streams with a pending read
+  are ineligible even after `read_stop`. Details are in
+  [native socket and pipe handoff](libuv-extension-guide.md#native-socket-and-pipe-handoff).
+- **Destination loop.** UV keeps the destination loop binding in state-local
+  module state: Runtime initialization binds it, shutdown admission clears it,
+  and native reconstruction refuses an absent binding.

@@ -802,6 +802,7 @@ end
 -- `Ast.ExpDots` marker); `nstatic` is the static-prefix arg count.
 -- Shared by codecall (static call site) and codevaluecall (first-class value
 -- fast path) -- both build the struct identically (§5.7).
+-- Implementation notes: doc/implementation/variadic-parameters.md#static-call-sites-three-forwarding-cases
 function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
                             dots_tail, nstatic, caexps, castats)
     local callee_vararg = callee_ftype.varargtype
@@ -1132,6 +1133,7 @@ function coder._cleanup_result_run(run)
     })
 end
 
+-- Implementation notes: doc/implementation/closure-adjustment-wrappers.md#adapter-site-discovery
 function coder._callable_adapter_site(tlcontext, adapter)
     coder._validate_callable_adapter_plan(
         adapter, adapter.source, adapter.target,
@@ -1164,6 +1166,7 @@ end
 -- upvalues are initialized directly while it is white, then published into one
 -- traced result slot. Fallback values retain their original identity and are
 -- published into that same result slot by the mutually exclusive branch.
+-- Implementation notes: doc/implementation/closure-adjustment-wrappers.md#wrapper-layout
 function coder._emit_callable_adapter_value(
     ctx, adapter, raw, loc, use, result_root)
     use = use or "callable adapter construction"
@@ -1673,6 +1676,7 @@ end
 -- frame, which would dangle this native function's `_base`. We therefore use
 -- savestack/restorestack offsets for everything that must survive the call and
 -- recompute `_base` from `_base_off` afterwards (see codefuncdec).
+-- Implementation notes: doc/implementation/codegen-overview.md#calling-function-values-codevaluecall
 function codevaluecall(ctx, node)
     assert(not node._named_arg_order)
     ctx.uses_base_off = true

@@ -250,6 +250,7 @@ end
 -- @return Lua string representation of the candidate.
 -- @usage standard-library-string.md#value-conversion
 function tostring(candidate: value): string
+  -- Implementation notes: doc/implementation/string-library.md#raw-lua-conversions-and-fixed-call-adjustment
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   ffi.lua_pushtvalue(L, candidate)

@@ -141,6 +141,7 @@ end
 
 -- Generates the code for importing the module, and storing it
 -- in the corresponding local state slot
+-- Implementation notes: doc/implementation/codegen-overview.md#static-vs-dynamic-dependency-wiring
 function import_module(loadmods, initmods, sigs, mprefixes,
                        dynamic, node, tlcontext)
     local modname = node.modname
@@ -363,6 +364,7 @@ function init_data_from_other_modules(tlcontext, includes, loadmods,
     end
 end
 
+-- Implementation notes: doc/implementation/lua-interop-internals.md#records-from-lua
 function coderecorddec(ctx, code, initrecs, node)
     local projector, constructor = coder._reflection_metadata(ctx, code, node)
     -- (the type tag is forward-declared up front in generate(), so that
@@ -582,6 +584,7 @@ end
 
 -- Generate the Lua-facing metatable for a union. Variants, tags, and payloads
 -- are opaque; only public methods participate in lookup, and all writes fail.
+-- Implementation notes: doc/implementation/unions.md#functions-namespaces-and-lua-exposure
 function coder._codeuniondec(ctx, code, initnominals, node)
     local projector, constructor = coder._reflection_metadata(ctx, code, node)
     local payload_reader = coder._nominal_function_prefix(
@@ -934,6 +937,7 @@ end
 
 -- Interface declarations are type-only, but their owner module publishes one
 -- protected per-state metatable and all method/bound dispatch artifacts.
+-- Implementation notes: doc/implementation/interfaces.md#metatable-identity-and-dynamic-boundaries
 function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
     local interface = assert(node._type)
     assert(interface._tag == "Type.Interface"
@@ -1112,6 +1116,7 @@ end
 -- "init_data_from_other_modules"
 -- Native bindings and canonical function tags live in the module's native
 -- payload; they are private to the Lua state that owns this userdata.
+-- Implementation notes: doc/implementation/codegen-overview.md#user-value-allocation
 function allocate_upvalues(tlcontext, ast)
     -- Allocate the public ABI prefix from the serialized module interface, then
     -- stamp the corresponding source declarations. Importers walk the same

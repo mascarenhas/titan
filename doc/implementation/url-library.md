@@ -2,106 +2,83 @@
 
 The public API and normalization contract are documented in the
 [URL standard-library chapter](../language/standard-library-url.md). This
-chapter describes the one-time PEG construction, labeled failure boundary,
-and byte normalization in `titan.url`.
+chapter is the canonical home of URL parsing: the one-time PEG construction,
+the labeled failure boundary, and byte normalization in `titan/url.titan`.
 
 ## Module boundary
 
-`titan/url.titan` is one flat logical standard module. It imports the public
-short `peg` and `string` modules. Byte access uses the public `string.byte`
-operation; there is no foreign import, URL-specific C source, callback, queue,
-or native parser.
+`titan.url` is one flat logical standard module. It imports the public short
+`peg` and `string` modules and reads bytes through `string.byte`. It has no
+foreign import, C source, callback, queue, or native parser, so parsing is
+synchronous and never yields.
 
-HTTP imports `url` and consumes its public `Url` and `Error` records. The HTTP
-folder module does not own, duplicate, or re-export the URL grammar. This keeps
-URL parsing synchronous and reusable while the HTTP client and server remain
-high-level wrappers over `net` and `ssl`.
+HTTP imports `url` and consumes its public `Url` and `Error` records; it does
+not own, duplicate, or re-export the grammar. How HTTP uses the parsed fields,
+raises `url.Error`, and restricts its own entry points to `http`/`https` is in
+[HTTP URL consumption](http-library.md#headers-url-consumption-and-framing).
 
 ## Grammar construction and labels
 
 The RFC 3986 productions are a Titan translation, in `titan.peg`'s Relabel
 source syntax, of daurnimator/lpeg_patterns at commit
-`0da7cadb867858f8fdf2bfbfbc92a51a7c28c3d7`. The derivative uses the upstream
-MIT license recorded in `THIRD_PARTY_NOTICES.md` and
-`LICENSES/lpeg-patterns-LICENSE`.
+`0da7cadb867858f8fdf2bfbfbc92a51a7c28c3d7`, under the upstream MIT license
+(`LICENSES/lpeg-patterns-LICENSE`, `THIRD_PARTY_NOTICES.md`).
 
-The module initializer calls four private grammar constructors once and stores
-the resulting `peg.Pattern` values. `http_url_pattern` is the complete absolute
-URL grammar. `request_scheme_pattern` accepts exactly case-insensitive `http`,
-`https`, `ws` or `wss`, so delimiters in that separately supplied component cannot consume
-the authority. `request_authority_pattern` recognizes `[^/?#]*` followed by
-the end of the separately received authority and labels a delimiter or other
-tail as `authority_tail`. It deliberately permits `@`: the complete grammar
-then recognizes user information and preserves its more specific `userinfo`
-error. `request_origin_pattern` requires the separately received request
-target to begin with `/` and labels other target forms as `origin_form`. Calls
-match the stored patterns directly; parsing never rebuilds or recompiles a PEG.
+The module initializer calls four private constructors once and stores their
+`peg.Pattern` results; parsing never rebuilds or recompiles a PEG:
+
+| Stored pattern | Constructor | Recognizes |
+| --- | --- | --- |
+| `http_url_pattern` | `url_pattern` | The complete absolute URL grammar. |
+| `request_scheme_pattern` | `scheme_pattern` | Exactly case-insensitive `http`, `https`, `ws` or `wss`, so delimiters in the separately supplied scheme cannot consume the authority. |
+| `request_authority_pattern` | `authority_pattern` | `[^/?#]*` followed by the end of the received authority; any tail is labeled `authority_tail`. `@` is allowed here so the complete grammar can report its more specific `userinfo` error. |
+| `request_origin_pattern` | `origin_pattern` | A target beginning with `/`; other target forms are labeled `origin_form`. |
 
 The absolute grammar captures component text and the starting byte positions
-required for semantic failures. It requires an authority and nonempty host,
-labels unsupported user information and fragments, requires brackets around
-IP literals, labels a `%25` zone separator without a following zone identifier,
-and constrains an explicit port syntactically to digits. Titan code then accepts
-only `http` and `https` and checks the numeric port range `1..65535`.
+needed for semantic failures. It requires an authority and a nonempty host,
+labels unsupported user information and fragments, requires brackets around IP
+literals, labels a `%25` zone separator with no following zone identifier, and
+restricts an explicit port syntactically to digits. `parse` then accepts only
+the schemes `http` and `ws` (default port 80) and `https` and `wss` (default
+port 443), and `parse_port` enforces the numeric range `1..65535`. `scheme`
+keeps the normalized original protocol.
 
-A committed Relabel failure produces a stable label and one-based byte
-position. Semantic scheme and port failures use their captured component
-positions. `url_parse_error` converts either form into the public `Error`
-record and its rendered `URL parse error [kind] at byte N: detail` message.
-`parse` returns that value in the second tuple slot instead of raising. The
-success and failure tuple positions remain mutually exclusive on every path.
+A committed Relabel failure yields a stable label and a one-based byte
+position; semantic scheme and port failures use their captured component
+positions. `url_parse_error` converts either into the public `Error` record
+with the message `URL parse error [kind] at byte N: detail`. `parse` returns
+that value in the second tuple slot instead of raising, and the success and
+failure positions are mutually exclusive on every path.
+
+## Request components
 
 `parse_request` first matches the scheme, authority, and origin-form boundary
 patterns. Authority and target failure positions are offset into the virtual
-source `scheme .. "://" .. authority .. target`, which is also the public
-coordinate space for every returned `Error.position`; a scheme-boundary
-failure is at byte 1. Once all three boundaries hold, it passes that exact
-concatenation to `parse`; the absolute grammar remains the only component
-parser and the normalization and semantic checks therefore stay identical
-between the two entry points.
+source `scheme .. "://" .. authority .. target`, which is the coordinate space
+for every `Error.position` it returns; a scheme-boundary failure is at byte 1.
+Once all three boundaries hold, it passes that exact concatenation to `parse`.
+The absolute grammar therefore remains the only component parser, and
+normalization and semantic checks are identical between the two entry points.
 
 ## Normalization
 
-`normalize_component` walks immutable Titan strings through `string.byte`. It
-decodes percent-encoded RFC 3986 unreserved bytes, uppercases the hexadecimal
-digits of every retained escape, and optionally applies ASCII lowercase to a
-scheme or registered-name host. A synchronous `string.writer()` accumulates
-each result without introducing an asynchronous yield into the parse.
-Host normalization caches its first-byte tests instead of repeating byte
-lookups.
+`normalize_component` walks the string through `string.byte`. It decodes
+percent-encoded RFC 3986 unreserved bytes, uppercases the hexadecimal digits of
+every retained escape, and optionally lowercases ASCII in a scheme or
+registered-name host. A synchronous `string.writer()` accumulates the result.
 
 `normalize_host` distinguishes registered names, IPv4, IPv6, IPvFuture, and
-RFC 6874 zones. Connection identity omits URI brackets and decodes a zone's
-`%25` separator to `%`; the public authority keeps brackets and the encoded
-separator for an HTTP Host field. Default ports are assigned only when absent,
-while an explicit port is rendered from its parsed integer. An empty path
-becomes `/`, and the normalized path plus optional normalized query forms
-`Url.target`.
+RFC 6874 zones, and returns two spellings. The connection host (`Url.host`)
+omits URI brackets and decodes a zone's `%25` separator to `%`; the authority
+host keeps the brackets and the encoded separator, for use in an HTTP Host
+field. Default ports are assigned only when the port is absent, and an explicit
+port is rendered from its parsed integer. An empty path becomes `/`, and the
+normalized path plus the optional normalized query form `Url.target`.
 
-## HTTP consumption and provider composition
+## Tests
 
-The HTTP client connects with `Url.host` and `Url.port`, generates a missing
-Host field from `Url.authority`, and sends `Url.target`. The server calls
-`parse_request` with its scheme, received Host authority, and origin-form
-target. HTTP operations raise the returned `url.Error` when they cannot
-proceed; both standalone URL entry points remain nonthrowing.
-
-The URL root adds one logical protocol, archive metadata key, generated shim,
-and `luaopen_titan_url` entry to the coordinated provider. The current image
-contains twenty-five logical modules and shims, with twenty-six DSO openers
-including bare `luaopen_titan`.
-The complete image is published in the `0.6` library namespace; earlier Titan
-installations are not migrated or cleaned up.
-
-The non-LuaCov URL suite carries the accepted and rejected URI matrix,
-normalization cases, tuple exclusivity, exact `Error` fields, and the separate
-authority/origin-form boundary matrix. HTTP tests separately prove client
-propagation of the structured failure value plus server consumption of
-normalized URLs and rejection of malformed Host authorities.
-
-
-The absolute and separate-component parser both admit `ws` and `wss`, using the
-same RFC 3986 grammar, normalization and policy diagnostics. Their effective
-ports are 80 and 443. `scheme` retains the normalized original protocol. HTTP
-entry points perform their own HTTP/HTTPS scheme admission; accepting a WSS URL
-in the shared parser cannot select ordinary TCP for a secure request.
+The non-LuaCov native suite `spec/stdlib/titan/url/tests.titan` carries the
+accepted and rejected URI matrix, normalization cases, tuple exclusivity, exact
+`Error` fields, and the separate authority/origin-form boundary matrix. HTTP's
+own tests cover propagation of the structured failure and server use of
+normalized URLs.

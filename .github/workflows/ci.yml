@@ -17,6 +17,7 @@ env:
   OPENSSL_MODE: bundled
 
 jobs:
+  # Implementation notes: doc/implementation/continuous-integration.md#linux-job-graph-and-concurrency
   # Prepare only Lua, compiler dependencies and native compiler support. The
   # compiler shards can start without waiting for any standard-library build.
   build-compiler:
@@ -1034,6 +1035,7 @@ jobs:
             .lua/bin/lua spec/fixtures/libuv/os_production_smoke.lua \
               sanitizer "$TITAN_PROCESS_SMOKE_CHILD"
 
+      # Implementation notes: doc/implementation/continuous-integration.md#sanitizer-ownership-and-failure-diagnostics
       - name: Report generated C context for sanitizer failure
         if: ${{ failure() && !cancelled() }}
         continue-on-error: true

@@ -1591,6 +1591,7 @@ local function contains_nul(text: string): boolean
   return false
 end
 
+-- Implementation notes: doc/implementation/os-library.md#spawn-transaction-and-exit-delivery
 local function os_shell_command(command: string): (string, {string})
   if ffi.TITAN_OS_WINDOWS == 0 then return "/bin/sh", {"-c", command} end
   local capacity = 256
@@ -1629,6 +1630,7 @@ local function spawn_environment(config: ProcessConfig): {string}?
   return result
 end
 
+-- Implementation notes: doc/implementation/os-library.md#spawn-transaction-and-exit-delivery
 local function os_process_spawn_with_config(file: string, args: {string}, config: ProcessConfig): (ProcessOwner, Stdio?, Stdio?, Stdio?)
   check_status(validate_config(config), "process.spawn.config")
   local stdin_slot? = config_slot(config, 0)
@@ -1811,6 +1813,7 @@ local function discard_input_transfer_payload(payload: string): integer
   return uv.pipe_t.discard_transfer_payload(native)
 end
 
+-- Implementation notes: doc/implementation/os-library.md#process-stream-transfer
 local function stream_transfer_preflight(stream: Stdio, reading: boolean)
   if stream.loop ~= async.current_loop() then
     raise "stdio stream belongs to a different async Runtime"

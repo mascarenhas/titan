@@ -502,6 +502,7 @@ end
 -- `kept` is created here once and stored back into that rooted slot.
 local function codec_handoff(request_value: value, item: value, context: value,
     kept: value): value
+  -- Implementation notes: doc/implementation/protobuf-library.md#generated-nominal-codecs
   local request = request_value as foreign *TitanCodecHandoff
   local op: integer = request.op
   local owner = c_text(request.owner)
@@ -866,6 +867,7 @@ local function deserialize_nominal_slice(
   raise "protobuf: nominal kind mismatch for " .. name
 end
 
+-- Implementation notes: doc/implementation/protobuf-library.md#inspected-structural-root-collaboration
 -- Internal compiled collaboration used by `titan.transfer`: the caller passes
 -- the decode scope it already resolved for this packet, so decoding a nominal
 -- never re-resolves the execution's packet context. A nil context carries no

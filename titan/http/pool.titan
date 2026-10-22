@@ -119,6 +119,7 @@ catch
   return nil
 end
 
+-- Implementation notes: doc/implementation/http-library.md#client-pooling-and-abandoned-body-draining
 local function Client:watch_idle(lease: ClientConnection)
   local adopted = false
   defer if not adopted then

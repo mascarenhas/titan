@@ -131,6 +131,7 @@ local function Encoder:foreign_struct(
   end
 end
 
+-- Implementation notes: doc/implementation/protobuf-library.md#encoding
 local function Encoder:field(
     buf: foreign *titan_protobuf_buffer,
     number: integer,

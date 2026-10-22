@@ -560,6 +560,7 @@ local function emit_union(ctx, node, encode, decode)
     })
 end
 
+-- Implementation notes: doc/implementation/protobuf-library.md#generated-nominal-codecs
 -- Emit the codec pair for one source nominal declaration and register its
 -- manifest entry. Ineligible nominals stay entirely reflective.
 function coder._codec_emit(ctx, code, node)

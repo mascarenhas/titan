@@ -8,6 +8,7 @@ foreign import "string.h"
 foreign import "titan_lpeglabel.h"
 local gc = import "gc"
 
+-- Implementation notes: doc/implementation/lpeglabel-embedding.md#construction-accounting-and-string-labels
 -- LPegLabel 1.6.2-1 uses 16-bit tree offsets and keeps ten slots in
 -- reserve.  Titan enforces this consistently before entering the native
 -- constructors.
@@ -138,6 +139,7 @@ end
 
 -- Matching and grammar construction.
 
+-- Implementation notes: doc/implementation/lpeglabel-embedding.md#match-adapter-and-failure-positions
 local function pattern_match_attempt(
     pattern: Pattern, subject: string, start: integer,
     ...: value): PatternMatchAttempt

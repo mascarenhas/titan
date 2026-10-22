@@ -17,10 +17,11 @@ typed call avoids generic callable adjustment; measure its one-time wrapper
 cost against the hot path rather than removing adapters mechanically.
 
 Evaluate a pure zero-argument machine/module invariant once in the owning
-module's final initializer and cache it locally. Factories, mutable-state
+module's final initializer and cache it locally (the `titan.string` initializer
+in `titan/string/string.titan` is the model). Factories, mutable-state
 initialization, locale-sensitive builders, and intentionally lazy conditional
-work do not satisfy that rule. A maintainer's spot-check of one such antipattern
-calls for the same call-graph audit across sibling library implementations.
+work do not satisfy that rule. When you find one violation, audit the sibling
+library implementations for the same call-graph pattern.
 
 ## Use existing typed storage and narrow foreign boundaries
 
@@ -49,13 +50,15 @@ shortcuts when libuv provides it. See [foreign functions](foreign-functions.md)
 and [libuv extension rules](libuv-extension-guide.md).
 
 Foreign workers consume stable native callback data rather than the hosting
-state's Titan/Lua objects. UV's private `uv_work_t.data` points to embedded C worker/argument data
-that stays unchanged while work is pending; public `work_t:get_data`/`set_data`
-accesses a separate traced value. Keep those roles distinct and clear the old
-worker/argument state on terminal delivery before user code may requeue the
-request. The [foreign-worker contract](libuv-runtime.md#foreign-workers)
-specifies the stable storage, callback ordering, and C-only entry boundary,
-including the exclusive independent-state execution used by `titan.lua`.
+state's Titan/Lua objects. In `titan/uv/uv.titan`, `uv_work_t.data` points to
+the embedded C `titan_uv_work_data` (`titan/uv/work-data.h`) that `queue_work`
+fills and that stays unchanged while work is pending; public
+`work_t:get_data`/`set_data` accesses a separate traced value. Keep those roles
+distinct, and clear the old worker/argument state on terminal delivery
+(`work_deliver`) before user code may requeue the request. The
+[foreign-worker contract](libuv-runtime.md#foreign-workers) specifies the
+stable storage, callback ordering, and C-only entry boundary, including the
+exclusive independent-state execution used by `titan.lua`.
 
 ## Model actual call and result protocols
 
@@ -78,17 +81,10 @@ actual fixed formals must accept nil and, when behind an expected variadic
 tail, its element type. The [boundary chapter](type-relations-and-boundaries.md)
 owns the precise relation.
 
-All public substitution operations use exact `function (string): string`
-replacement callbacks receiving the complete matched byte string independently
-of captures. Dynamic templates/table replacements belong to an expression
-language such as Relabel, not public `value` dispatch. Module-level PEG
-`match` searches leftmost and returns `Match?`; `Pattern:match` is anchored,
-and `Match:values()` is the explicitly flexible capture projection. Public
-grammar rules/definitions are dense Titan Arrays. Labels preserve exact string
-bytes through the native engine; numeric-looking, empty, and embedded-NUL
-labels are not integer or sentinel encodings. Reserved `throw("fail")` is
-ordinary PEG failure. These contracts and their regressions are specified in
-[PEG embedding](lpeglabel-embedding.md) and [strings](string-library.md).
+The PEG and string substitution, search, label, and grammar-collection
+protocols that apply these rules are specified in [PEG
+embedding](lpeglabel-embedding.md) and
+[strings](string-library.md#iteration-and-replacement).
 
 ## Keep behavior tests at the public boundary
 

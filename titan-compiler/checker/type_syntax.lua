@@ -888,6 +888,7 @@ function adjust_unsafe_c_pointer(source, target, errors, use)
     return n
 end
 
+-- Implementation notes: doc/implementation/checker.md#trycoerce-tryforce-trytostr
 function trycoerce(source, target, errors, use,
                          precomputed_adjustment)
     if reject_const_c_mutable_address(

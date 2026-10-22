@@ -15,43 +15,23 @@ lowering and refer here for policy.
 
 ## Relation vocabulary
 
-`titan-compiler/types.lua` exposes the following operations:
+`titan-compiler/types.lua` exposes the following operations. Each returns a
+data-only plan (or `nil` for rejection) so later phases never rerun a relation:
 
 ```lua
 types.normalize(typ)
-
-types.consistent(left, right)
-    --> boolean
-
-types.coercion(source, target, policy)
-    --> nil | CoercionPlan
-
-types.gradual_guard(target)
-    --> nil | GuardPlan
-
-types.has_sound_gradual_guard(target)
-    --> boolean
-
+types.consistent(left, right)                          --> boolean
+types.coercion(source, target, policy)                 --> nil | CoercionPlan
+types.gradual_guard(target)                            --> nil | GuardPlan
+types.has_sound_gradual_guard(target)                  --> boolean
+types.accepts_missing_nil(target)                      --> boolean
 types.callable_adjustment(source_actual, target_expected, policy)
-    --> nil | CallablePlan
-
-types.assignment_adjustment(source, target, policy)
-    --> nil | AdjustmentPlan
-
-types.dynamic_coercion(target)
-    --> nil | DynamicCoercionPlan
-
-types.written_cast(source, target, policy)
-    --> nil | WrittenCastPlan
-
-types.comparable(left, right)
-    --> nil | ComparisonPlan
+                                                       --> nil | CallablePlan
+types.assignment_adjustment(source, target, policy)    --> nil | AdjustmentPlan
+types.dynamic_coercion(target)                         --> nil | DynamicCoercionPlan
+types.written_cast(source, target, policy)             --> nil | WrittenCastPlan
+types.comparable(left, right)                          --> nil | ComparisonPlan
 ```
-
-The retired `compatible`, `coerceable`, and `explicitly_coerceable`
-interfaces are not alternate spellings for these operations. Their former
-implementation mixed several different rules and let scalar conversions
-escape into structural recursion.
 
 The terms used by the compiler and manuals are:
 
@@ -78,18 +58,21 @@ license `function (): (T)` where `function (): (T?)` is expected.
 
 ## Normalization and gradual consistency
 
-`normalize` collapses transparent Titan aliases and C typedef wrappers before
-relation dispatch. It is cycle-safe: a malformed alias cycle returns no
-normalized type instead of recursing indefinitely. Collapsing a transparent
-name is identity normalization, not a transitive relation edge.
+Non-generic Titan type aliases have no type descriptor: the checker substitutes
+the target when it resolves type syntax, and the alias resolver rejects
+direct, mutual, and container-mediated cycles before a structural type can
+escape ([Type aliases](type-aliases.md#frontend-and-resolution)). `normalize`
+therefore only collapses `Type.CTypedef` wrapper chains. It is cycle-safe: a
+malformed typedef cycle returns `nil`, which every relation treats as
+rejection.
 
-`consistent(A, B)` is:
+`consistent(A, B)` (`types.lua` `consistent_impl`) is:
 
 - reflexive and symmetric;
 - deliberately non-transitive (`integer ~ value` and `value ~ string`, but
   not `integer ~ string`);
 - pointwise for Array, Map, and Option constructors, with equal Array
-  qualifiers required before element descent;
+  qualifier tags required before element descent;
 - nominal for records, unions, and Interface descriptors;
 - exact for concrete C types after typedef normalization; and
 - shape-aware for Functions.
@@ -106,15 +89,12 @@ but each aligned component is compared directly. The helper does not search
 for an intermediate type and does not call `coercion`, `dynamic_coercion`, or
 `written_cast`.
 
-Titan's structural type grammar is finite. Alias declarations are collected
-early to support forward references, but the resolver's pending state rejects
-direct, mutual, and container-mediated cycles before a structural type can
-escape. Recursive records, unions, and Interfaces instead reach a nominal
-leaf. Consistency can therefore recurse directly over the syntax tree. A
-completed-pair memo prevents repeated work on shared acyclic alias DAGs, while
-a separate active-pair check prevents a malformed non-identity cycle
-manufactured by an internal caller from serving as its own proof; neither is a
-fixed-point rule of the language relation.
+Titan's structural type grammar is finite; recursive records, unions, and
+Interfaces reach a nominal leaf. Consistency therefore recurses directly over
+the type tree. Its context keeps a `completed` pair memo, which avoids
+repeated work on shared acyclic graphs, and an `active` pair set, which stops
+a malformed non-identity cycle built by an internal caller from serving as its
+own proof. Neither is a fixed-point rule of the language relation.
 
 The C FFI separately builds recursive `Type.C*` graphs for self-referential
 aggregates and callbacks. Those graphs do not make Titan structural types
@@ -123,49 +103,98 @@ typedef normalization, and cycle-safe C equality owns its internal graph.
 
 ## Direct coercion and assignment
 
-`coercion(source, target)` returns a data-only `CoercionPlan`. Its cases
-include Titan numeric conversion, named Option wrap/map/force operations,
-the C/Titan numeric and address families, string/C-buffer conversion,
-whole-slot C `TValue` operations, and other explicitly enumerated direct
-rules. It never generically recurses through Array, Map, Function, record,
-union, or Interface structure. The Option cases are named language rules with
-explicit nil behavior, not a license to lift every coercion.
+`coercion(source, target)` (`types.lua` `coercion_impl`) returns a data-only
+`CoercionPlan`. Its cases include Titan numeric conversion, named Option
+wrap/map/force operations (including `option_nil`), the C/Titan numeric and
+address families, string/C-buffer conversion, whole-slot C `TValue`
+operations, and other explicitly enumerated direct rules. It never generically
+recurses through Array, Map, Function, record, union, or Interface structure.
+The Option cases are named language rules with explicit nil behavior, not a
+license to lift every coercion.
 
-`assignment_adjustment(source, target)` selects exactly one operation:
+`assignment_adjustment(source, target)` tries, in order, and returns the first
+plan:
 
 ```text
 identity
-direct_coercion(CoercionPlan)
-gradual_view(project | inject | structural, GuardPlan)
-callable(CallablePlan)
-rejected
+rejected            two applications of the same generic owner (invariant)
+callable            Function -> Function, via callable_adjustment
+written_cast        linear mutable Array -> const Array (array_freeze, mode "freeze")
+identity | gradual_view
+                    any Array -> maybe-const Array
+rejected            maybe-const Array -> mutable or const Array
+gradual_view        project | inject | structural, with its GuardPlan
+option_adjustment   Option(Array) -> Option(Array), wrapping the inner plan
+direct_coercion     CoercionPlan (unless policy.allow_coercion == false)
 ```
 
+Applications of one generic owner are invariant for implicit assignment.
+Erased-boundary passages between them are inserted by generic lowering
+([Generics](generics.md#focused-cast-and-adapter-insertion)).
+
+Mutable `{T}` and const `const { T }` are distinct invariant types, and
+`consistent` requires equal qualifier tags. Implicit assignment crosses
+qualifiers only toward the maybe-const view `const? { T }`, or from a call
+result whose type the checker marked `linear`. Written casts add the explicit
+mutable-to-const freeze and the checked maybe-const downcasts. All
+qualifier-crossing rules and the linear-use proof are in
+[Const values](const-values.md#array-relations-and-linear-use-analysis).
+
+### Callable adjustment rules
+
 Function assignment is directional even though `consistent` is symmetric.
-`callable_adjustment(source_actual, target_expected)` records aligned fixed
-arguments/results, ignored surplus, missing-argument nil fill, input-tail
-transfer, flexible-result projection, hidden results, end-of-tail actions, and
-the named missing-result action `nil_fill_result`. Every ordinary aligned
-component may be identical, a gradual injection/projection/view, or another
-callable adjustment. Numeric conversion, `T`/`T?` conversion, C conversion, and
+`types.callable_adjustment` (`types.lua` `callable_adjustment_impl`) records
+aligned fixed arguments/results, ignored surplus, missing-argument nil fill,
+input-tail transfer, flexible-result projection, hidden results, end-of-tail
+actions, and the missing-result action `nil_fill_result`. Every ordinary
+aligned component (`component_adjustment`) is identity, a gradual
+injection/projection/structural view, or another callable adjustment.
+Numeric conversion, `T`/`T?` conversion, C conversion, and
 record/union-to-Interface wrapper construction are rejected as callable
 component matches.
 
-Mutable `{T}` and `const { T }` are distinct invariant Array types. No
-assignment adjustment changes the qualifier, even when their elements are
-equal or gradually consistent. The only cross-qualifier relation is the
-explicit mutable-to-const written cast described below.
+Inputs:
 
-`nil_fill_result` is emitted only when an expected fixed result has neither a
-fixed nor flexible source and its target passes `accepts_missing_nil` (Nil,
-Value, Option, Titan Pointer, or CPointer). It records the target index/type and
-has no source component plan. Required scalar and nominal results reject; a
-source-flex action takes precedence. Shape-specific nil and flexible-result
-absence remain named callable actions rather than relation leaves. Thus a
-flexible actual tail can supply a finite optional projection and a truly absent
-result can be filled under the narrow policy, but neither makes an ordinary
-fixed result `T` consistent with `T?`. The complete freezing/lowering contract
-is [Closure adjustment wrappers](closure-adjustment-wrappers.md).
+* The actual callable may have fewer fixed parameters than the expected type;
+  it ignores the expected suffix.
+* When the actual has more fixed parameters, each additional position receives
+  nil through the callable's missing-nil rule. That rule admits only the
+  `accepts_missing_nil` targets (Nil, Value, Option, CPointer); it does not
+  consult the general coercion relation or become an aligned component
+  conversion.
+* Shared fixed parameters reverse gradual consistency: the actual parameter
+  must safely observe values admitted by the expected parameter.
+* If a shorter actual callable has an input vararg, every expected fixed value
+  moved into that tail is checked against its element type.
+* A non-variadic actual may ignore an expected input tail. When both tails are
+  present, the actual tail must accept the expected tail element.
+* `Type.CFunction` never enters this relation; C `...` and the one-result C
+  signature stay on the direct and pointer call paths.
+
+Results:
+
+* Shared fixed results preserve gradual consistency: the expected consumer
+  must safely observe the actual result.
+* A finite expected type hides extra actual fixed results.
+* When expected fixed slots extend into an actual flexible tail, the plan
+  records a flexible projection. An Option target either observes the element
+  as that Option or strictly observes its base and wraps a present value; an
+  allowed non-Option partial projection strictly observes a present element
+  and raises the named absence error when no value exists.
+* An expected flexible tail checks every remaining actual fixed result and the
+  actual flexible element, when present, against its element type. An actual
+  fixed-only result list may end under an expected flexible tail; zero
+  trailing values is a valid run.
+* An expected fixed result with neither a fixed nor a flexible actual source
+  uses [`nil_fill_result`](closure-adjustment-wrappers.md#relation-contract-nil_fill_result);
+  a source-flex projection takes precedence. Neither makes an ordinary fixed
+  result `T` consistent with `T?`.
+
+The local two-way `value` rule does not make whole function types symmetric
+or transitive. For a finite non-exact edge the checker inserts `Ast.ExpCast`
+and freezes a native adapter; Interface method satisfaction reuses the same
+machinery. See [Closure adjustment wrappers](closure-adjustment-wrappers.md)
+and [Interfaces](interfaces.md#frozen-conversion-and-adapter-plans).
 
 ## Strict gradual guards
 
@@ -186,7 +215,7 @@ are therefore:
 | `float` | float tag only |
 | `boolean` | boolean tag only |
 | `string` | string tag only |
-| Array | canonical proxy/shared-metatable check; contents deferred |
+| Array | canonical proxy with the target qualifier's metatable (`const? { T }` accepts either); contents deferred |
 | Map | table check; keys and values deferred |
 | record/union | exact nominal metatable |
 | Interface | exact nominal wrapper metatable, or non-nil compiler-witnessed entry on a bare full userdata's metatable |
@@ -200,9 +229,10 @@ are therefore:
 Every typed Titan Array and Map read uses this strict policy. Map reads do so
 regardless of whether the slot was written by Titan or Lua; a raw Lua table
 has no interception or provenance bit from which the compiler could select a
-different policy. Callable adjustment components also use strict guards: a realized wrapper
-executes them in its target-native adapter, while a branded exact-tag mismatch
-executes them through the existing strict generic entry/result path.
+different policy. Callable adjustment components also use strict guards: a
+realized wrapper executes them in its target-native adapter, while a branded
+exact-tag mismatch executes them through the existing strict generic
+entry/result path.
 
 `has_tvalue_representation(T)` asks only whether `T` can occupy a boxed slot.
 `has_sound_gradual_guard(T)` asks the stronger question above and recurses
@@ -214,9 +244,10 @@ reifiability.
 `dynamic_coercion(T)` is broader than a gradual guard. It is authorized only
 when the programmer wrote `value as/is T`, or when a value genuinely crosses
 from Lua into a typed Titan sink. Its native-result, boxed-store, and
-non-raising predicate lowerings are generated from the same plan.
-
-The initial target matrix is:
+non-raising predicate lowerings are generated from the same plan by
+`checkandget`/`checkandset` (`titan-compiler/coder/values.lua`). This table is
+the policy; [Lua interop](lua-interop-internals.md#dynamic-boundary-conversion)
+owns the error messages and generated C.
 
 | Target | Dynamic operation |
 | --- | --- |
@@ -226,7 +257,7 @@ The initial target matrix is:
 | `nil` | exact nil |
 | `string` | exact string |
 | `value` / C `TValue` | whole-slot copy |
-| Array | validate the exact qualified canonical Array representation |
+| Array | canonical proxy with the target qualifier's metatable (`const? { T }` accepts either); contents unchecked |
 | Map | validate only the outer table representation |
 | Function | preserve the boxed value; invocation decides callability |
 | record/union | exact nominal metatable |
@@ -242,25 +273,13 @@ nil. The corresponding `is` predicate reports whether that same conversion
 would succeed without returning the converted value. It is not a separate
 tag-only implementation.
 
-The Array row is qualifier-exact: `{T}` and `const { T }` have distinct
-canonical tags. A dynamic value carrying one cannot satisfy a target with the
-other qualifier.
-
-For a statically known mutable Array, `written_cast` returns an `array_freeze`
-plan only toward `const { T }`, and only when the element types are equal or
-gradually consistent. `as` performs a shallow copy by default; a
-checker-authored linear-use annotation may select the observationally
-equivalent in-place freeze. The matching static `is` reports admission without
-copying. Const-to-mutable and all other cross-qualifier Array relations are
-rejected.
-
 The Interface strict and dynamic leaves share one exact-or-witnessed codegen
-operation. An exact wrapper succeeds immediately. Otherwise a full userdata's
-metatable is raw-indexed by the target Interface metatable. A missing entry
-fails normally; a present entry is called with the userdata and its single
-result is trusted as the fresh wrapper. Option plans preserve nil before
-reaching that leaf. The predicate form tests only exact identity or non-nil
-entry presence and never calls the value.
+operation (`checkandget`). An exact wrapper succeeds immediately. Otherwise a
+full userdata's metatable is raw-indexed by the target Interface metatable. A
+missing entry fails normally; a present entry is called with the userdata and
+its single result is trusted as the fresh wrapper. Option plans preserve nil
+before reaching that leaf. The predicate form tests only exact identity or
+non-nil entry presence and never calls the value.
 
 This changes no type relation or checker plan. Concrete
 record/union-to-Interface conversion remains one checker-planned direct outer
@@ -273,7 +292,8 @@ documented in [Interfaces](interfaces.md).
 ## Checked C scalar conversions
 
 C integer and floating descriptors carry checker-local traits from the
-selected C target profile. The profile, not the host running the compiler,
+selected C target profile (`titan-compiler/csemantics.lua`
+`csemantics.build_profile`). The profile, not the host running the compiler,
 defines integer signedness/precision/ranges, floating radix/mantissa/range,
 and the `lua_Integer` and `lua_Number` carrier types. These traits guide
 lowering but are not serialized type identity.
@@ -315,20 +335,29 @@ deliberately permissive Interface protocol is the exception at the unsafe
 debug/native boundary: `is` tests only non-nil witness presence, whereas the
 cast calls that value and may inherit a forged entry's ordinary Lua error.
 
-`written_cast(source, target)` selects identity, direct coercion, dynamic
-coercion from `value`, gradual/callable view, or one separately enumerated
-explicit conversion. Under the raw-pointer policy, `value as foreign *C` is the one
-written unsafe reinterpretation: ordinary pointers check the broad
-lightuserdata/nil category, while Lua-internal `Udata *` checks
+## Written casts
+
+`written_cast(source, target)` tries, in order: identity; the current-module
+`M as foreign *Udata` reinterpretation; the Array qualifier casts
+(`array_freeze`, `maybe_array_cast_mutable`, `maybe_array_cast_const`,
+`maybe_array_cast_upcast`; see
+[Const values](const-values.md#array-relations-and-linear-use-analysis));
+dynamic coercion from `value`; a direct coercion; one enumerated explicit
+conversion (`types.lua` `explicit_conversion`); and finally a callable
+adjustment or gradual view.
+
+Under the raw-pointer policy, `value as foreign *C` is the one written unsafe
+reinterpretation (`unsafe_dynamic_c_pointer`): ordinary pointers check the
+broad lightuserdata/nil category, while Lua-internal `Udata *` checks
 full-userdata/nil. Neither proves an ordinary pointee type. No implicit
 assignment or compound gradual path can contain that operation.
 
-Two C operations are deliberately not complete type-only
-`written_cast` results. Taking a mutable address requires an addressable local
-or formal, and an unrelated object-pointer reinterpretation requires the
-active C toolchain's successful directional cast check.
-`check_explicit_cast_relation` finalizes those cases only after proving the
-expression shape or receiving the probe key. The resulting
+Two C operations are deliberately not complete type-only `written_cast`
+results. Taking a mutable address requires an addressable local or formal, and
+an unrelated object-pointer reinterpretation requires the active C
+toolchain's successful directional cast check. `check_explicit_cast_relation`
+(`titan-compiler/checker/calls.lua`) finalizes those cases only after proving
+the expression shape or receiving the probe key. The resulting
 `WrittenCastPlan` carries `mutable_c_address` or the exact probe-bearing
 conversion; candidate-only plans are never coder authority.
 
@@ -340,7 +369,7 @@ This table controls which of the two run-time policies a lowering may use:
 | --- | --- | --- |
 | exact Titan assignment/call | identity | preserve the source value; an exact call uses its native entry with no boundary check |
 | direct Titan scalar/Option/C assignment | `CoercionPlan` | exactly that conversion |
-| finite non-exact Function `A -> B` assignment or written callable `as` | raw `CallablePlan` plus frozen `CallableAdapterPlan` | evaluate once; exact branded A with upvalue room becomes a fresh B wrapper/native adapter, otherwise preserve the value for strict/non-Titan generic fallback |
+| finite non-exact Function `A -> B` assignment or written callable `as` | raw `CallablePlan` plus frozen `CallableAdapterPlan` | evaluate once; an eligible branded A becomes a fresh B wrapper ([eligibility](closure-adjustment-wrappers.md#runtime-eligibility-and-fallback)), otherwise preserve the value for strict/non-Titan generic fallback |
 | implicit/dynamic `value -> T` assignment | gradual or dynamic projection | strict/dynamic target rule; a Function target preserves the boxed carrier and never realizes a statically known wrapper |
 | Array or Map read yielding `T?` | `GuardPlan(T?)`, or static rejection | strict guard, recursively through Option |
 | callable arguments/results in a realized wrapper | frozen component actions and root/rebase ledger | target-native adapter executes strict actions, including nested conditional wrappers and `nil_fill_result` |
@@ -349,6 +378,7 @@ This table controls which of the two run-time policies a lowering may use:
 | written `value is T` | same dynamic plan | non-raising dynamic predicate |
 | written mutable Array `as const { T }` | `WrittenCastPlan(array_freeze)` | shallow copy, or checker-proven linear in-place freeze |
 | written mutable Array `is const { T }` | same admitted static plan | evaluate once and report true without conversion |
+| written `const? { T }` `as { T }` / `as const { T }` | `WrittenCastPlan(maybe_array_cast_*)` | exact metatable check of the target qualifier |
 | Lua call into a Titan function | per-formal `DynamicCoercionPlan` | dynamic coercion |
 | Lua module/record field write | per-slot `DynamicCoercionPlan` | dynamic coercion |
 | non-nil Lua Array write | construction-selected writer plan | dynamic coercion before mutation |
@@ -364,13 +394,14 @@ written/Lua boundary but fails an implicit gradual projection to boolean.
 
 ## Checker-owned plans
 
-`checker.lua` elaborates accepted edges and retains the decision:
+The checker (`titan-compiler/checker/`) elaborates accepted edges and retains
+the decision:
 
 - fixed casts use `_adjustment`; in particular, every finite non-exact
   callable edge is an `Ast.ExpCast` whose child remains A and whose cast type is
   B, with the original raw plan plus its frozen callable-adapter annotation;
 - same-representation Array/Map structural views use
-  `_assignment_adjustment`; callable plans no longer use this exception;
+  `_assignment_adjustment` on the source expression;
 - `_open_results`, `_open_dots`, `_open_args`, and positional-constructor
   adjustment records carry their element `adjustment`; the checker freezes and
   attaches callable-element adapters at the owning source location, and the
@@ -379,9 +410,9 @@ written/Lua boundary but fails an implicit gradual projection to boolean.
   recursive outer Option guard produced by ordinary indexing; if no sound
   guard exists, the checker rejects the read rather than storing an unavailable
   plan for code generation;
-- written `as`/`is` nodes carry `_written_cast`;
-- a proven terminal mutable-to-const Array cast additionally carries
-  `_linear_array_freeze`; the coder never repeats escape or last-use analysis;
+- written `as`/`is` nodes carry `_written_cast`; `checker/linear.lua` may
+  later switch an `array_freeze` plan's `mode` from `copy` to `freeze`, so the
+  coder never repeats escape or last-use analysis;
 - equality nodes carry `_comparison`;
 - strict function formals, variadic elements, fixed results, and open results
   carry their parallel GuardPlan annotations;
@@ -392,20 +423,20 @@ written/Lua boundary but fails an implicit gradual projection to boolean.
 - each Array constructor records its final context-adjusted element type and
   writer plan.
 
-`trycoerce` returns the exact decision it obtained for the sink, and
-`checkmatch` consumes that same object; it never calls a type relation. A
-representation-changing decision and every finite non-exact callable decision
-must already have produced an annotated cast. Only a same-representation
-Array/Map structural decision remains attached to the source expression.
-Callable casts may allocate a wrapper and their frozen adapters perform
-component observations; an ineligible run-time carrier is nevertheless
-preserved for generic fallback. An Option has no separate mutable backing:
-establishing
-`A?` as a gradual `B?` view immediately applies the recursive strict guard to
-its present payload (nil passes unchanged). This prevents a later identity
-Option force or map from forgetting which base tag was actually stored. A
-rejected checked-C conversion can suppress the
-generic mismatch only after its more precise diagnostic has been emitted.
+`trycoerce` (`checker/type_syntax.lua`) returns the exact decision it obtained
+for the sink, and `checkmatch` (`checker/common.lua`) consumes that same
+object; it never calls a type relation. A representation-changing decision and
+every finite non-exact callable decision must already have produced an
+annotated cast. Only a same-representation Array/Map structural decision
+remains attached to the source expression. Callable casts may allocate a
+wrapper and their frozen adapters perform component observations; an
+ineligible run-time carrier is nevertheless preserved for generic fallback.
+An Option has no separate mutable backing: establishing `A?` as a gradual `B?`
+view immediately applies the recursive strict guard to its present payload
+(nil passes unchanged). This prevents a later identity Option force or map from
+forgetting which base tag was actually stored. A rejected checked-C conversion
+can suppress the generic mismatch only after its more precise diagnostic has
+been emitted.
 
 Open consumers preserve the same plan instead of asking the coder to infer an
 element cast from unequal types. This covers flexible results, forwarded
@@ -414,16 +445,22 @@ constructor does not classify a provisional open edge: after inference or
 context chooses the final element type, it calls `assignment_adjustment`
 exactly once and stores that same plan on the sink and producer annotation.
 
+### Coder plan validation
+
 The coder validates the complete stored plan kind, operation, normalized
-source/target, action lists, and recursive children before lowering. This
-includes Adjustment, Callable, WrittenCast, Guard, DynamicCoercion, Coercion,
-and Comparison plans. Computed annotation wrappers initialize as
-`{tag="unknown"}`, then hold `{tag="none"}` or `{tag="just",value=plan}`.
-The coder unwraps them only after requiring a completed state. A checked
-`none` Guard or DynamicCoercion annotation is the deliberate unavailable-policy
-state: its lowering raises a normal run-time type error. Missing or unknown
-annotations, an unavailable plan in every other plan family, an unavailable
-recursive child, and unknown or mismatched operations are
+source/target, action lists, and recursive children before lowering, through
+the `coder._checked_*` validators in `titan-compiler/coder/values.lua`
+(`_checked_adjustment_plan`, `_checked_callable_plan`,
+`_checked_written_cast_plan`, `_checked_gradual_guard`,
+`_checked_dynamic_plan`, `_checked_coercion_plan`,
+`_checked_comparison_plan`, and their helpers). Computed annotation wrappers
+(`titan-compiler/maybe3.lua`) start as `{tag="unknown"}`, then hold
+`{tag="none"}` or `{tag="just",value=plan}`; `maybe3.get_checked` unwraps them
+only in a completed state. A checked `none` Guard or DynamicCoercion
+annotation is the deliberate unavailable-policy state: its lowering raises the
+run-time error "type error, dynamic coercion to T is unavailable". Missing or
+unknown annotations, an unavailable plan in every other plan family, an
+unavailable recursive child, and unknown or mismatched operations are
 compiler-integrity errors. Representation-specific emitters are not
 authorization oracles: they run only after this validation, must not call a
 semantic relation, and must not synthesize an unannotated semantic
@@ -432,12 +469,11 @@ semantic relation, and must not synthesize an unannotated semantic
 Written gradual and callable casts use the same plan-consuming adjustment
 lowering as implicit sinks. Array and Map views preserve their carrier; a
 written non-exact callable `as` conditionally realizes a wrapper, while its
-`is` twin remains allocation-free. An Option view performs its immediate strict
-present-payload observation. The `is` lowering consumes the same
-`WrittenCastPlan` as `as`,
-including partial float-to-integer and recursively composed Option
-coercions; it produces the non-raising acceptance predicate rather than
-assuming every statically admitted cast is total.
+`is` twin remains allocation-free. An Option view performs its immediate
+strict present-payload observation. The `is` lowering consumes the same
+`WrittenCastPlan` as `as`, including partial float-to-integer and recursively
+composed Option coercions; it produces the non-raising acceptance predicate
+rather than assuming every statically admitted cast is total.
 
 ## Comparison
 
@@ -447,17 +483,16 @@ comparison. Before classification, checker equality lifting turns Nil opposite
 an Option into that Option through the named `option_nil` coercion, so the
 classifier sees two same-representation option operands. When exactly one
 comparable operand is `value`, the same plan also carries the required gradual
-injection so both operands reach the boxed
-equality representation. The checker classifies the original pair before
-applying that recorded injection. Ordering retains its separate numeric/string
-rules. Equality does not reuse directional callable assignment and therefore
-cannot depend on operand order. Code generation validates the stored
-`ComparisonPlan` (and any recorded one-sided injection) before choosing raw,
-numeric, Option, or scoped Map-metamethod comparison lowering; it does not
-rediscover comparability from the adjusted operand tags. In particular,
-Map/`value` uses the plan's original types to add table `__eq` after raw
-inequality, while `value`/`value` stays raw despite having the same boxed C
-representation.
+injection so both operands reach the boxed equality representation. The
+checker classifies the original pair before applying that recorded injection.
+Ordering retains its separate numeric/string rules. Equality does not reuse
+directional callable assignment and therefore cannot depend on operand order.
+Code generation validates the stored `ComparisonPlan` (and any recorded
+one-sided injection) before choosing raw, numeric, Option, or scoped
+Map-metamethod comparison lowering; it does not rediscover comparability from
+the adjusted operand tags. In particular, Map/`value` uses the plan's original
+types to add table `__eq` after raw inequality, while `value`/`value` stays raw
+despite having the same boxed C representation.
 
 ## Failure contract and FFI boundary
 

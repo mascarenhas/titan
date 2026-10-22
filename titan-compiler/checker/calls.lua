@@ -1640,6 +1640,7 @@ function generic_assert_inference_derived_nodes_closed(context)
     for _, use in ipairs(context.roots) do visit_use(use) end
 end
 
+-- Implementation notes: doc/implementation/generics.md#local-instantiation-and-inference
 function generic_close_inference_context(context)
     if context.closed then return context.valid end
     assert(not context.closing, "recursive generic inference-context close")

@@ -5,6 +5,7 @@
 -- Module-local LPegLabel state and raw-Lua bootstrap used by peg.titan.
 
 local function _initialize_native()
+  -- Implementation notes: doc/implementation/lpeglabel-embedding.md#opening-one-private-engine-per-lua-state
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.titan_lpeglabel_open(L) ~= 1 or

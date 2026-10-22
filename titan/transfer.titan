@@ -37,6 +37,7 @@ local foreign function dispose_resources(table: *titan_transfer_resource_table)
   dispose_resource_entries(entries, count)
 end
 
+-- Implementation notes: doc/implementation/transfer-library.md#c-only-disposal-and-copy
 --- Consume a raw packet owner, releasing unclaimed resources entirely in C.
 -- NULL is harmless; disposing the same non-NULL owner twice is invalid.
 foreign function discard_message(raw: *void)
@@ -198,6 +199,7 @@ local foreign function attach_reserved(table: *titan_transfer_resource_table,
 end
 
 
+-- Implementation notes: doc/implementation/transfer-library.md#resourcescope-frames-and-exact-top-authority
 -- The native cell is the frame's only native owner. Execution identity and
 -- the enclosing frame stay in the lexical locals of the two entry points, so
 -- a retired frame cannot retain either one. `message` is a borrowed claim
@@ -301,6 +303,7 @@ function attach_resource(resource: foreign *void,
   return ffi.lua_totvalue(L, -1) as value
 end
 
+-- Implementation notes: doc/implementation/transfer-library.md#registration-attachment-and-claim
 local function ResourceScope:claim(data: foreign const *void, length: integer,
     expected_release: foreign function(*void): void): foreign *void
   if self.encoding then raise "transfer: resource claim requires a decode scope" end
@@ -482,6 +485,7 @@ local foreign function transfer_project(state: *lua_State, index: int,
   entry.project(state, ffi.lmacro_clCvalue(candidate))
 end
 
+-- Implementation notes: doc/implementation/transfer-library.md#native-module-loading
 --- Load and verify a native Titan module from package.preload in the given Lua state, pushing its module userdata.
 -- @param state Target Lua state with an initialized native preload table.
 -- @param name Canonical module name bytes.
@@ -619,6 +623,7 @@ local function generated_codec_name(codec: foreign const *TitanTransferCodec): s
   return ffi.lua_totvalue(L, -1) as value
 end
 
+-- Implementation notes: doc/implementation/transfer-library.md#closure-snapshots
 local function project_closure_captures(
     candidate: value): (string, foreign const *void, {TransferValue}, {boolean})
   if transfer_active_closures[candidate] then raise "cannot transfer cyclic closure captures" end
@@ -854,6 +859,7 @@ function TransferValue.from_closure_payload(module: string, entry: value,
   return TransferValue.is_closure(module, entry as foreign const *void, data)
 end
 
+-- Implementation notes: doc/implementation/transfer-library.md#closure-snapshots
 local function restore_closure_from_buffer(
     module: foreign const *char,
     module_len: foreign size_t,
@@ -1286,6 +1292,7 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
     raise "transfer: unsupported value"
   end
 end
+-- Implementation notes: doc/implementation/transfer-library.md#flat-packets-and-direct-classification
 --- Encode one independently owned packet. Scalars and explicit policies cannot
 -- attach resources; structural and hook work gets its own exact scope.
 function encode_message(candidate: value): foreign *void
@@ -1438,6 +1445,7 @@ local foreign function decode_scalar_message(
   return 1
 end
 
+-- Implementation notes: doc/implementation/transfer-library.md#consuming-raw-slot-decode
 --- Decode and consume the packet owned by an actual guarded raw slot.
 -- Pass the caller's own `foreign *void` local and guard it immediately with
 -- `defer discard_message(raw)`. A recovery-sensitive address-exposed scalar

@@ -10,6 +10,7 @@ local function json_byte(subject: string, position: integer): integer
   return bytes[position - 1] as integer
 end
 
+-- Implementation notes: doc/implementation/json-library.md#exact-scalar-conversion
 -- The PEG has already validated the token. Keep decimal arithmetic exact until
 -- an integer target has been decided; binary floating point cannot distinguish
 -- adjacent integers above 2^53.

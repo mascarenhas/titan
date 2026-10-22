@@ -350,6 +350,7 @@ local function json_parse_message(code: string): string
   return "invalid JSON"
 end
 
+-- Implementation notes: doc/implementation/json-library.md#whole-document-peg
 local function build_json_pattern(): peg.Pattern
   local definitions: {peg.Definition} = {
     peg.define("state", peg.argument(1)),

@@ -86,6 +86,7 @@ local function Connection:receive_close(work: Work, payload: string)
   end
 end
 
+-- Implementation notes: doc/implementation/websocket-library.md#protocol-state-and-fairness
 local function Connection:read_message(work: Work): (MessageType?, string?)
   local frames = 0
   local budget = 0

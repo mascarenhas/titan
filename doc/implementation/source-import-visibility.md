@@ -29,40 +29,47 @@ the marker. Bare `titan` remains the canonical standard-provider identity, and
 
 ## Loader result and module views
 
-`checker.checkimport` forwards a source-required request only for an import AST
-whose marker bit is set. `driver.defaultloader` services that request by running
-canonical folder/flat source lookup before any compiled-provider pass. A clean
-miss is the compile-time error `source module '<name>' not found`; a blocked
-folder constituent or source error is likewise terminal. The loader never
-falls back to a DSO or archive for this request, and it replaces or bypasses an
-already cached compiled selection when source exists.
+The checker's top-level import visitor (`checker/declarations.lua`
+`toplevel_visitor`) passes a `{ kind = "source-import" }` request to
+`checker.checkimport` only for an import AST whose marker bit is set; an
+object-backed source entry replays the same request for its recorded
+source-required imports (`driver.lua` `load_source_object`).
+`driver.defaultloader` services that request by running canonical folder/flat
+source lookup before any compiled-provider pass. A clean miss is the
+compile-time error `source module '<name>' not found`; a blocked folder
+constituent or source error is likewise terminal. The loader never falls back
+to a DSO or archive for this request, and it replaces or bypasses an already
+cached compiled selection when source exists.
 
 One resolver context records every serialized public projection of each
 compiled interface it has actually returned, including nominal-owner views
-recovered contextually through compiled facades. If a later source-required
-edge replaces that selection, the checked source module is serialized through
-the same public-only projection and must match every recorded view. A mismatch
-is added to the ordinary source-checker error list before foreign-header
-preparation, so compilation stops before finalization or code generation while
-retaining coherent source state for diagnostics. Process-global compiled
-entries that were not used by this resolver are intentionally replaceable; a
-later independent compilation must not be constrained by an old cache entry.
+recovered contextually through compiled facades
+(`remember_used_compiled_interface`, stored in
+`context.used_compiled_interfaces`). If a later source-required edge replaces
+that selection, the checked source module is serialized through the same
+public-only projection and must match every recorded view
+(`check_used_compiled_interface`). A mismatch (`source module '<name>' does not
+match a compiled interface already used in this compilation`) is appended to
+the ordinary source-checker error list before foreign-header preparation, so
+compilation stops before finalization or code generation while keeping
+coherent source state for diagnostics. Process-global compiled entries that
+were not used by this resolver are intentionally replaceable; a later
+independent compilation must not be constrained by an old cache entry.
 
-`driver.defaultloader` and `driver.tableloader` still report whether the selected
-module actually came from source, a DSO, or an archive. `checker.checkimport`
-returns that trusted provenance with the module type. Only an import that both
-has `source_required == true` and receives `kind == "source"` for a descriptor
-produced by the current checker sets the AST's `_source_import` capability.
+`driver.defaultloader` and `driver.tableloader` report whether the selected
+module came from source, a DSO, or an archive, and `checker.checkimport` returns
+that trusted provenance with the module type. The import visitor sets the AST's
+`_source_import` capability only when the import has `source_required == true`,
+the loader reports `kind == "source"`, and the descriptor carries `_source`
+(it was produced by the current checker).
 
 Ordinary resolver contexts may also select source after compiled-provider
-passes. The test runner's invocation-local `source_first` policy changes lookup
-order, not visibility: ordinary imports in either context remain public-only.
-The generated runner ordinarily imports `titan.test` and calls its public
-`Case.new`/`run` API. Its discovered source-backed owners are imported explicitly
-with `.titan`, so their public native fields retain the authored C header
-environment through the ordinary trusted source mechanism. Tests that inspect an
-application producer's locals still write their own explicit `.titan` import.
-See [Native test runner](test-runner.md).
+passes. The `source_first` policy (used by `--test` and `--source-first`)
+changes lookup order, not visibility: ordinary imports remain public-only. The
+generated test runner imports discovered source-backed owners explicitly with
+`.titan`, so their public native fields keep the authored C header environment;
+tests that inspect a producer's locals write their own explicit `.titan`
+import. See [Native test runner](test-runner.md).
 
 A checked source module retains a compiler-only overlay on its `Type.Module`:
 
@@ -78,8 +85,10 @@ path separately, and the consumer import AST records it for checking/codegen.
 
 The ordinary `members` and `type_members` tables remain the public projection.
 Serialization uses only that projection. The recovered-interface validator
-rejects every compiler-only source field, so evaluated DSO/archive metadata
-cannot spoof source provenance.
+rejects every compiler-only source field (`metadata contains compiler-only
+source interface state`), so evaluated DSO/archive metadata cannot spoof source
+provenance. `checker/imports.lua` builds the overlay; `checker/lowering.lua`
+empties it in erased copies.
 
 `types.registry` may retain a source-complete nominal descriptor when a compiled
 facade or ordinary source import for the same owner is loaded later. That
@@ -110,10 +119,12 @@ edge. Validation still checks the public projection before private declarations.
 
 ## Checker staging
 
-The import pass records the earliest explicit source edge per owner.
-Module-variable frontier checks consult that edge, so a local variable
-initializer sees only an owner import that was written earlier; body checking
-retains the ordinary placement-independent declaration rules.
+The import visitor records each explicit source edge in `st.source_imports`,
+keyed by module name. `symtab:source_import_visible` consults that edge
+together with `symtab:hidden_from_initializer`, so a module-variable
+initializer sees an owner's source overlay only through an import written
+earlier in combined top-level order (`_toplevel_order`); function signatures
+and bodies see every import.
 
 Module/type/member lookup first uses the public projection. It consults the
 source overlay only when the matching explicit-source capability is present.
@@ -139,8 +150,8 @@ builtin `ffi` value namespace and separate foreign type namespace throughout its
 headers. They are always local to source, have no `local` modifier, and do not
 occupy the exported or source-private Titan type-member maps. An explicit
 source importer sees their unqualified foreign names through the header graph,
-including transitive typedefs. Ordinary `type` aliases retain their existing
-Titan namespace and direct source-private visibility.
+including transitive typedefs. Ordinary `type` aliases stay in the Titan
+namespace with direct source-private visibility.
 
 This C include chain is transitive. Private Titan declarations still require a
 direct explicit source-import capability; a transitive C include does not make
@@ -161,53 +172,44 @@ may cause C declaration or conversion diagnostics during final compilation.
 
 ## Module state and native linkage
 
-The public reconstructible module-state prefix is unchanged by the generic
-visibility mechanism. Generated modules then allocate the unconditional
-Array-metatable cache and one immutable physical-provider identity slot,
-followed by a deterministic source-private region:
+Source-private module state follows the public prefix, the Array-metatable
+caches, and the physical-provider identity slot; the complete slot order is in
+[User-value allocation](codegen-overview.md#user-value-allocation). A foreign
+declaration has no closure or value slot and does not enter this layout. Every
+co-generated source importer reconstructs the producer's private slots from the
+same layout (`coder._source_prefix_layout`). Lua stores a userdata's user-value
+count in an `unsigned short`, so `coder.generate` asserts that the module needs
+at most `0xFFFF` slots before it renders `_init`; a larger module fails
+compilation with `module '<name>' requires <n> module-state slots; Lua supports
+at most 65535`.
 
-1. local module variables in source order;
-2. local top-level function closures in source order;
-3. local constructors and nominal-function closures in nominal/source order.
+Before reading a private slot, the importer compares the producer's identity
+slot with the hidden identity function linked from its exact producer
+translation unit (`coder/module.lua` `import_module`, `source_check`). A
+same-name state installed by another physical provider raises `source import
+'<name>' found canonical module state from a different physical provider`.
+Reads and writes otherwise target the producer `_mod`; GC-bearing writes use
+the userdata back barrier. Function and nominal-value reads load the producer's
+canonical closure slot, preserving identity across importers and Lua GC cycles.
 
-A foreign declaration has no closure or value slot and does not enter
-this layout. Every co-generated importer reconstructs those slots from the same layout.
-Before reading a private slot, it compares the canonical state token with the
-hidden identity entry linked from its exact producer translation unit. A
-same-name state installed by another physical provider is an error. Reads and
-writes otherwise target the producer `_mod`; GC-bearing writes use the userdata
-back barrier. Function and nominal-value reads load the producer's canonical
-closure slot, preserving identity across importers and Lua GC cycles.
-
-Local native entries needed across source translation units have hidden visibility.
-Public foreign entries have ordinary C external linkage and are callable through
-regular imports. Ordinary top-level functions and foreign declarations all
-use the current ABI's injective module/member UCN separator. Local nominal statics and
-methods use the same module/owner/member hierarchy as public ones; visibility,
-not an alternate spelling, keeps private entries out of the DSO's dynamic API. They
-remain linkable within one source/static composition. The coder rejects a module-state slot count larger than
-Lua's `unsigned short` user-value carrier before emitting an undersized Udata.
+Local native entries needed across source translation units are declared
+`TITAN_SOURCE_LOCAL` (`cpreamble.lua`), which is `visibility("hidden")` on
+GCC/Clang and empty elsewhere. Public foreign entries have ordinary C external
+linkage and are callable through regular imports. Local nominal statics and
+methods use the same module/owner/member name hierarchy as public ones;
+visibility, not an alternate spelling, keeps private entries out of the DSO's
+dynamic API, and they stay linkable within one source/static composition.
 
 ## Binary boundary and ABI
 
 Neither DSO callable metadata nor archive metadata contains the source overlay
-or private layout. Binary imports therefore use public closure slots and public
-native symbols exactly as before. A static provider selected as a dependency
-cannot grant local access merely because its objects enter the final link.
+or private layout. Binary imports therefore use only public closure slots and
+public native symbols. A static provider selected as a dependency cannot grant
+local access merely because its objects enter the final link.
 
-The overlay itself introduces no serialized constructor. ABI 2 covers the
-localized `titan.uv` public schema and closure prefix, every module's physical-
-provider identity slot, source foreign collaboration, callable symbol families,
-generic declarations, and current public standard-library and const metadata.
-The current compiler uses ABI 2, language version 0.6.0, and language-server
-API marker 1. The separate public nominal-layout protocol is described
-in [Native nominal storage](nominal-storage.md); private native layout remains
-producer-owned. Rebuild the compiler, runtime, and providers together after
-prerelease layout changes.
-An ABI-marker mismatch is rejected before type decoding or native linking.
-Native compilation also rejects missing or malformed physical-layout metadata;
-analysis-only recovery does not require it. These checks do not replace the
-clean rebuild required for same-marker prerelease changes. Earlier installations
-are neither migrated nor deleted. The explicit `.titan` parser marker and
-source-required request add no serialized field or native identity and
-therefore require no additional ABI change.
+The overlay, the `.titan` parser marker, and the source-required request add no
+serialized field or native identity. The identity slot and private-region
+layout are part of the compiled-module ABI; see [Compiled-module
+ABI](codegen-overview.md#compiled-module-abi). Private native layout remains
+producer-owned, and the public nominal-layout protocol is in [Native nominal
+storage](nominal-storage.md).

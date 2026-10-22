@@ -2,11 +2,14 @@
 
 The public contract is [Protocol Buffers standard
 library](../language/standard-library-protobuf.md). The logical `titan.protobuf`
-module has four source contributors: `protobuf.titan` owns the public API and
-shared scalar/type helpers, `encoder.titan` owns graph traversal,
-`decoder.titan` owns wire parsing and reconstruction, and `schema.titan` owns
-proto3 declarations. It depends on `reflect` and `string`; it does not depend
-on the asynchronous runtime or independent-state wrapper.
+module has four source contributors in `titan/protobuf/`: `protobuf.titan` owns
+the public API, resource-codec registry and shared scalar/type helpers,
+`encoder.titan` owns graph traversal, `decoder.titan` owns wire parsing and
+reconstruction, and `schema.titan` owns proto3 declarations. `native.h` holds
+the reflective decoder's directory entry and includes the SDK header
+`titan-runtime/transfer.h`, which owns the shared buffer and the generated-codec
+runtime. The module imports `reflect`, `string` and `gc`; it does not depend on
+the asynchronous runtime, `titan.transfer` or the independent-state wrapper.
 
 ## Reflection boundary
 
@@ -149,13 +152,12 @@ reserves and appends four bytes into an owned `titan_protobuf_buffer`) and
 `transfer.attach_resource` (which builds the four-byte index string for opaque
 hooks).
 
-`Encoder:record_value` / `union_value` still enforce public nominal and complete
+`Encoder:record_value` and `union_value` enforce public nominal and complete
 member visibility, active-path cycle detection, the 128-level depth limit, and
-the normal field/variant traversal with nested custom-hook dispatch. The helper
-checks the existing 2 GiB message limit after encoding. No policy is broadened:
-root custom-hook and root resource-codec selection remain transfer's
-responsibility, and ordinary `protobuf.serialize` retains its structural
-public-data rules. See the
+the normal field and variant traversal with nested custom-hook dispatch. The
+inspected-root helpers check the 2 GiB message limit after encoding. Root
+custom-hook and root resource-codec selection belong to `titan.transfer`;
+ordinary `protobuf.serialize` keeps its structural public-data rules. See the
 [owning API inventory](../language/standard-library-protobuf.md#api) and
 [transfer classification](transfer-library.md#flat-packets-and-direct-classification).
 
@@ -182,13 +184,16 @@ records or payloads stay reflective, whose per-level C stack does not grow
 with field count. Deep reflective decoding and its error traceback can still
 exhaust a coroutine's C stack in unoptimized (`-O0`) builds.
 
-The declaring module emits one immutable `TitanTransferCodec` array next to
-its `TitanTransferModule` manifest (`transfer.h`) and binds each canonical
-metatable to its entry under `TITAN_MT_CODEC` during nominal registration; the
-manifest itself is unchanged. `find_generated_codec` reads that binding with
-raw table reads and returns nil when the metatable also has a registered
-resource codec, so resource capabilities keep their precedence. Erased generic
-applications share the one metatable and entry.
+The declaring module emits one static `TitanTransferCodec` entry per codec and
+binds the nominal's canonical metatable to it under `TITAN_MT_CODEC`
+([closure transfer metadata](codegen-overview.md#cross-state-closure-transfer-metadata)).
+These layouts and the inline codec runtime in `transfer.h` are generated-code
+ABI that no load-time check covers
+([compiled-module ABI](codegen-overview.md#compiled-module-abi)).
+`find_generated_codec` reads the binding with raw table reads and returns nil
+when the metatable also has a registered resource codec
+(`transfer.h` `titan_codec_for_metatable`), so resource capabilities keep their
+precedence. Erased generic applications share the one metatable and entry.
 
 A generated codec *is* the reflective codec specialized to one storage plan,
 sharing one root state with it (`TitanCodecState`): the buffer, the packet
@@ -241,15 +246,11 @@ descriptor, so hooks, registered resources, and generated codecs apply as for
 a static field. Lookup uses the registered nominal; `titan.transfer`
 installs `set_nominal_loader(initialize_nominal)` so a packet decode (a
 non-nil context) loads the named module on demand, exactly as for a packet
-root, in any destination state (the native lua tests cover a worker thread
-receiving a value-held and a generic-held nominal of a module it never
-loaded). A generated decoder reads one length-delimited `TitanValue` holding
-at most one scalar arm natively and hands every other `TitanValue` to
-`decode_field` through the frame's one-field `Message`; a generated encoder
-writes the nil and scalar arms and hands a nominal or Array to the state's
-`Encoder`. The `TitanValue` encoding is new and additive: earlier builds
-rejected every non-nil `value` and erased generic field, so no earlier wire
-form changes meaning, and earlier builds cannot decode the new form.
+root, in any destination state. A generated decoder reads one length-delimited
+`TitanValue` holding at most one scalar arm natively and hands every other
+`TitanValue` to `decode_field` through the frame's one-field `Message`; a
+generated encoder writes the nil and scalar arms and hands a nominal or Array
+to the state's `Encoder`.
 
 The generated decoder mirrors `read_message_slice` and `decode_field`: it
 validates the complete message first with the same error strings (keys,
@@ -279,11 +280,10 @@ field's hooks and resource claims run first, as on the reflective path.
 Native string decoding publishes the new `TString` into the rooted record or
 union and applies its backward barrier before `luaC_checkGC`. The scalar
 string arm of `value` likewise pushes the result before polling. This matches
-the reflective decoder's `lua_pushlstring` allocation/poll order without an
-extra string copy or transient root. With a trimming allocator such as glibc's,
-deferring the poll until the next entry can let sweeping return the allocator's
-entire free tail before its next large string allocation, repeatedly releasing
-and faulting the same payload pages.
+the reflective decoder's `lua_pushlstring` allocation and poll order without an
+extra copy or transient root. Deferring the poll to the next entry would let a
+trimming allocator such as glibc's return its free tail before each large
+string allocation, repeatedly releasing and faulting the same pages.
 
 Generated codecs serve `serialize_to_buffer` (before `reflect.inspect`), the
 inspected-root entries, `deserialize`, `deserialize_nominal*`, transfer
@@ -303,62 +303,47 @@ checks descriptors as their values are visited. Union traversal visits the
 active payload only; the all-public type flag still rejects private variants
 anywhere on that nominal declaration.
 
-All wire accumulation writes into a pluggable, expandable native buffer
-(`titan_protobuf_buffer`). The buffer, its writers, and the fixed64/double
-readers live in the SDK header `transfer.h`
-because generated nominal codecs in every module append through them;
-`titan/protobuf/native.h` includes it and keeps the reflective decoder's
-directory entry and remaining helpers.
-`titan_protobuf_buf_reserve` grows small writes through power-of-two capacities
-from a 64-byte minimum via its `grow` callback and `context` pointer. When one
-reservation exceeds four times the current capacity (using 64 as the minimum),
-it instead requests `needed + max(256, needed / 8)`, where
-`needed = length + extra` and division rounds down. The slack absorbs proportional
-trailing fields and packet metadata without retaining the next power-of-two block
-for a large byte field. It is at most 12.5% of `needed` for requests of at least
-2,048 bytes; smaller bulk requests retain 256 spare bytes. `length + extra` is
-checked against `SIZE_MAX`, and the slack is added only when it still fits;
-otherwise the request stays at the exact `needed`. The four-capacity comparison
-also guards its multiplication. In the doubling branch, growth starts at the
-largest power of two no greater than `max(capacity, 64)` and doubles until
-`needed` fits, falling back to exactly `needed` if the next doubling would
-overflow. Thus growth after a bulk allocation rejoins the power-of-two sequence
-instead of doubling its off-sequence capacity. Growth remains amortized O(1)
-for streams of small writes. A grow failure leaves the heap buffer and its
-length/capacity unchanged.
+All wire accumulation writes into a pluggable, expandable native buffer,
+`titan_protobuf_buffer` (`data`, `length`, `capacity`, a `context` pointer and a
+`grow` callback). The buffer, its writers and the fixed64/double readers live in
+the SDK header `titan-runtime/transfer.h` because generated nominal codecs in
+every module append through them.
 
-Because serialization calls may raise Lua errors (`longjmp`)
-after buffer growth, callers allocate the buffer descriptor with
-`owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()` so its
-`data`, `length`, and `capacity` fields live in GC-owned userdata storage rather
-than a stack-spilled automatic C aggregate across `setjmp`/`longjmp`, and pair
+`titan_protobuf_buf_reserve(buf, extra)` computes `needed = length + extra`
+(failing if that overflows `SIZE_MAX`) and starts from `max(capacity, 64)`:
+
+| Case | Requested capacity |
+| --- | --- |
+| bulk: `extra > 4 * max(capacity, 64)` | `needed + max(256, needed / 8)` (division rounds down); exactly `needed` if the slack would overflow |
+| otherwise | the largest power of two no greater than `max(capacity, 64)`, doubled until `needed` fits; exactly `needed` if the next doubling would overflow |
+
+The bulk slack absorbs proportional trailing fields, packet metadata and
+attachment entries without retaining the next power-of-two block for one large
+byte field: at most 12.5% of `needed` for requests of at least 2,048 bytes, and
+256 bytes for smaller bulk requests. Growth after a bulk allocation rejoins the
+power-of-two sequence instead of doubling an off-sequence capacity, so streams
+of small writes stay amortized O(1). Later writes that together exceed the bulk
+slack trigger a second payload-sized reallocation through normal growth. A NULL
+`grow` fails the reservation; the heap grower `titan_protobuf_heap_grow` leaves
+`data` and `capacity` unchanged when `realloc` fails.
+
+Transfer's structural packets (`init_packet_buffer`,
+[flat packets](transfer-library.md#flat-packets-and-direct-classification))
+reserve the packet header plus at most 64 metadata bytes up front. On supported
+targets that request stays below an empty buffer's 256-byte bulk threshold, so
+it takes the doubling branch and never receives bulk slack. A 64 KiB top-level
+byte field then causes one bulk growth after the small initial allocations, and
+ordinary metadata and a one-endpoint attachment tail fit in its slack.
+
+Because serialization can raise (`longjmp`) after buffer growth, callers
+allocate the descriptor as GC-owned storage
+(`owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()`), not a
+stack-spilled automatic C aggregate across `setjmp`, and pair
 `titan_protobuf_buf_init_heap` with `defer ffi.titan_protobuf_buf_free_heap(buf)`
-to free `buf->data` on normal exit or unwind. Ordinary string-returning entry
-points initialize a heap-backed buffer outside the Lua GC with
-`titan_protobuf_buf_init_heap` and materialize the final Lua string once at the
-root; `titan.transfer.encode_message` initializes the heap buffer with
-`titan_protobuf_buf_init_heap(buf, 0)`, reserves `sizeof(titan_async_message)`
-plus at most 64 bytes of the mandatory `name`/`module` trailer upfront via
-`titan_protobuf_buf_reserve`, sets `buf->length = sizeof(titan_async_message)`
-so the serialized wire payload and trailing `name`/`module` bytes are written
-directly after the header prefix without an extra allocation or intermediate Lua
-string, and zeroes/populates the `titan_async_message` header once in
-`finalize_buf_message` before `titan_protobuf_buf_take_data`. That initial
-reservation, `sizeof(titan_async_message)` plus at most 64 metadata bytes, stays
-below an empty buffer's bulk threshold (four times the 64-byte minimum) on
-supported targets, so it takes the doubling branch and never receives the
-bulk-write slack. For a 64 KiB top-level byte field, the encoder performs one
-bulk growth after its small initial allocations; ordinary metadata and the
-one-endpoint attachment tail fit in that bulk block. On a target with a 120-byte
-packet header, a transfer packet whose name and module total at most eight bytes
-first grows to 128, then 256 bytes before the bulk growth. The final transfer
-reservation computes the exact metadata, alignment, and actual attachment count
-before detaching.
-Later fields, metadata, and attachment entries that together exceed the bulk
-slack can require a second payload-sized reallocation through normal growth,
-even when rounding the original field up to the next power of two would have
-left enough room. The proportional slack avoids that extra growth for trailers
-up to about one eighth of a large field's size.
+so `buf->data` is freed on normal exit or unwind. String-returning entry points
+use such a heap buffer outside the Lua GC and materialize the final Lua string
+once at the root. Never keep an interior `data` pointer across a reservation.
+
 No sizing pass replays a custom encoder. Nested length-delimited
 messages reserve a one-byte length slot at `begin_nested` and patch or shift in
 place at `end_nested`, avoiding intermediate per-message writers or string
@@ -377,17 +362,17 @@ per nominal record name (`descriptor.name`) in a module-local Map, and
 `encode_transfer_payload` shares the module-local
 `active_record_payloads` ephemeron Map so nested (`depth > 1`) and root hook
 invocations enforce one reentrancy guard without permanently rooting abandoned
-encoding graphs. Lexical removals still restore that guard on normal/error exit.
-Nested records (`depth > 1`) first check `find_resource_codec_by_name`: when a
-registered `ResourceCodec` matches `expected.name`, `Encoder:field` verifies
-`record_identity(candidate) == codec.identity`, invokes
-`codec.encode(self.context, candidate)` using the packet's carried `context`,
-and writes the wire key, length `4`, and four-byte little-endian slot index
-directly via `write_resource_index` without calling `reflect.inspect`,
-`encode.callable`, or allocating a four-byte Lua string. Other nested records
-(`depth > 1`) that provide both `to_transfer_payload` and
-`from_transfer_payload` encode as `optional bytes` via their hooks rather than
-requiring public fields.
+encoding graphs. Lexical removals restore that guard on normal and error exit.
+Nested records (`depth > 1`) first check `find_resource_codec_by_name`. When a
+registered `ResourceCodec` matches `expected.name`, `Encoder:field` calls
+`encode_resource_field`, which checks `record_identity(candidate)` against
+`codec.identity`, calls `codec.encode(self.context, candidate)` with the
+packet's carried context, and writes the wire key, length 4 and the four-byte
+little-endian slot index through `write_resource_index`, without
+`reflect.inspect` or a four-byte Lua string. Generated codecs run the same
+function for their resource fields. Other nested records that provide both
+`to_transfer_payload` and `from_transfer_payload` encode as `optional bytes`
+through their hooks instead of requiring public fields.
 
 Array wrappers retain slot positions and distinguish absence from an empty
 container. Nil slots produce empty element messages. The constness field
@@ -396,8 +381,8 @@ scalar defaults match the presence markers in generated proto3 schemas.
 
 ## Decoding
 
-`WireReader` operates directly on a `const uint8_t *` byte buffer with explicit
-`(offset, limit)` bounds, validating each key and length before reading. A
+`WireReader` (`base`, `limit`, `position`) reads a `const uint8_t *` buffer
+directly, validating each key and length before reading. A
 varint has at most ten bytes and its tenth byte contains at most one payload
 bit. Length-delimited fields must fit both the remaining source and the protobuf
 size limit. Unknown groups are skipped with a bounded, matching start/end
@@ -449,11 +434,10 @@ its bytes. Directory owners and holders therefore survive allocations,
 reentrant custom decoders, and collection in a custom decoder without an
 untraced owner hidden in native storage.
 
-For allocation attribution, the `local entry = self:entry(self.count)` line in
-`Message:append` runs once per wire-field directory entry. The
-`require_depth(depth)` line in `decode_field` remains the per-decoded-field probe
-point, including the existing recursive Option dispatch. These are diagnostic
-probe locations, not production instrumentation or changes to wire parsing.
+For allocation attribution, `Message:append`'s `self:entry(self.count)` call
+runs once per wire-field directory entry, and `decode_field`'s
+`require_depth(depth)` call runs once per decoded field, including recursive
+Option dispatch.
 
 Schema-directed decoding requires each non-optional field, validates the wire
 kind, and constructs children before calling reflected construction for the
@@ -532,13 +516,11 @@ strings use protobuf bytes so arbitrary byte sequences round-trip.
 
 ## Integration and verification
 
-Custom record transfer hooks are dispatched by `titan.transfer` before its
-structural protobuf fallback at the root, while `titan.protobuf` dispatches
-`to_transfer_payload` and `from_transfer_payload` for nested record fields
-(`depth > 1`) inside public records, unions, and Arrays, emitting them as
-`optional bytes` on the wire. The codec's `serialize` entry point retains its
-public-field policy at `depth == 1`. Custom payloads and closure snapshots are
-immutable byte strings before they enter the native transfer boundary.
+`titan.transfer` dispatches custom record hooks at a packet root before the
+structural fallback; `titan.protobuf` dispatches them for nested record fields
+as described under [Encoding](#encoding), and `serialize` keeps its public-field
+policy at the root. Custom payloads and closure snapshots are immutable byte
+strings before they enter the native transfer boundary.
 
 The Unix and Windows standard providers include `titan.protobuf`, its Lua shim,
 and its native tests in the shared inventory. `titan.lua` and `titan.async`

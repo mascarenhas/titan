@@ -12,6 +12,7 @@
 #include <unistd.h>
 #endif
 
+/* Implementation notes: doc/implementation/libuv-extension-guide.md#native-socket-and-pipe-handoff */
 /* Native requests can remain pending after read_stop. In particular, Windows
  * zero-byte reads retain their source IOCP until terminal delivery. */
 static inline int titan_uv_transfer_stream_status(const uv_stream_t *stream,

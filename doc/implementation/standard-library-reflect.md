@@ -16,23 +16,25 @@ object or callable is named `value`; a corresponding descriptor is `type`.
 
 ## Metadata ownership
 
-The per-state registry table at `TITAN_METATABLES_KEY` maps fully qualified
-nominal names to their canonical metatables. Reflection obtains this table
-during module initialization; lookup does not load additional modules.
+The complete inventory of metatable keys, and which nominal kinds carry each,
+is in [discoverable runtime type information](lua-interop-internals.md#discoverable-runtime-type-information).
+Reflection reads the per-state `TITAN_METATABLES_KEY` table (FQTN to canonical
+metatable) once during module initialization (`init_metatable_by_name`); lookup
+does not load additional modules. For the active metatable, the hydration
+context (`titan/reflect.titan` `hydrate_type`) reads:
 
-The relevant metatable entries use private lightuserdata keys:
-
-| Key | Value |
+| Key | Reflection use |
 | --- | --- |
-| `TITAN_BRAND` | Runtime kind: Array, const Array, record, union, Interface, or owned C storage |
-| `TITAN_MT_TYPE` | Compiler-generated `types.serialize(...)` expression for the schema |
-| `TITAN_MT_MEMBERMAP` | Public field accessor addresses and public method closures, keyed by name |
-| `TITAN_MT_STATICS` | Constructor and static-function closures, keyed by their member names |
-| `TITAN_MT_MOD` | Declaring module userdata for accessors and nominal construction |
-| `TITAN_MT_PAYLOAD` | Generated typed payload reader for a union |
-| `TITAN_MT_PROJECT` | Generated typed field/part storage projector |
-| `TITAN_MT_CONSTRUCT` | Generated default storage construction callback |
-| `TITAN_MT_PUBLIC` | Whether the nominal declaration is public |
+| `TITAN_BRAND` | `inspect` dispatch for userdata; `is_titan_closure` compares closure upvalue 3 with it |
+| `TITAN_MT_TYPE` | serialized schema (`types.serialize_semantic`) evaluated by `hydrate_type` |
+| `TITAN_MT_MEMBERMAP` | field accessors cached in `FieldType`; method closures for `Method` descriptors |
+| `TITAN_MT_STATICS` | constructor and static-function closures for `StaticMethod` and `Variant` descriptors |
+| `TITAN_MT_MOD` | declaring module owner for accessor calls and construction |
+| `TITAN_MT_PAYLOAD` | union payload reader cached in `UnionType` ([union payloads](#union-payloads)) |
+| `TITAN_MT_PROJECT`, `TITAN_MT_CONSTRUCT` | storage projector and default constructor ([native projections](#native-projections-and-default-construction)) |
+| `TITAN_MT_PUBLIC` | `is_public` of record and union descriptors |
+
+Reflection does not read `TITAN_MT_CODEC`.
 
 Record and Interface field entries in the member map are lightuserdata
 addresses of generated native accessors. Method entries remain Lua-callable C
@@ -40,7 +42,8 @@ closures. Union member maps contain methods only. The module owner is read
 directly from `TITAN_MT_MOD`, independently of the `__index` closure's upvalue
 layout.
 
-Nominal `TITAN_MT_TYPE` tags serialize the declared type, preserving generic
+Nominal `TITAN_MT_TYPE` tags (`types.serialize_semantic`, a wrapper over
+`types.serialize`) serialize the declared type, preserving generic
 binders and parameters for reflection hydration. Generated accessors still
 use the erased runtime type, and callable identity tags and compiled-provider
 export metadata retain their existing representations. Every specialization
@@ -69,8 +72,9 @@ tables.
 an audited `luaL_loadbufferx` transaction with an explicit constructor
 environment and text-only mode. The saved stack top is restored on every
 path, and the loaded callable is copied into traced Titan storage before
-invocation. Reflection depends only on `iteration`, allowing `titan.lua` and
-other state-transfer clients to use reflection without an import cycle.
+invocation. The only Titan module reflection imports is `iteration`, so
+`titan.lua` and other state-transfer clients can use reflection without an
+import cycle.
 This is an internal decoder for trusted compiler metadata, not a public
 source-evaluation API.
 Its constructors match serializer spellings such as `Record`, `Field`,
@@ -96,13 +100,11 @@ state-local `resolved_named_types` Map from that name to the `Type.is_record`,
 `is_union`, or `is_interface` wrapper it built. The name is the erased base
 name every generic application shares. Only successful lookups are stored;
 an unknown name returns a fresh `Type.is_value()` and consults the registry
-again next time, matching `find_nominal`'s retryable misses. Reusing the
-immutable wrapper removes one userdata allocation per resolved named field in
-protobuf encode/decode and in transfer's reflective paths. The cache is an
-allocation optimization, not an identity contract: no library code compares or
-keys `Type` values by identity, and the public chapter tells callers not to.
-Native tests assert resolution kinds and names, never wrapper identity. The
-lua owner's worker test covers a miss followed by later registration.
+again next time, matching `find_nominal`'s retryable misses. The cache saves
+one userdata allocation per resolved named field in protobuf and transfer's
+reflective paths. It is not an identity contract: no library code compares or
+keys `Type` values by identity, and native tests assert resolution kinds and
+names, never wrapper identity.
 
 Record and union hydration retain the generated projector, constructor, and
 declaring module owner. Existing serialized total field/variant counts are
@@ -144,8 +146,9 @@ type arguments.
 
 ## Generated field accessors
 
-Each public record or Interface field has one native accessor. Its common
-protocol returns void and accepts the current Lua state, declaring module
+Each public record or Interface field has one native accessor, emitted by
+`coderecorddec` (records) and `coder._codeinterfacedec` (Interfaces) in
+`coder/module.lua`. Its common protocol returns void and accepts the current Lua state, declaring module
 userdata, receiver userdata, a pointer to one `TValue` input/output slot, and
 a read/write flag. The pointer is stored in the member map as lightuserdata
 and recovered as the exact foreign function-pointer type during hydration.
@@ -180,17 +183,18 @@ an allocating call. A failed conversion must leave the old field intact.
 ## Native projections and default construction
 
 `coder/reflection.lua` generates storage projectors and constructors using the
-same `_nominal_plan`, `_nominal_member`, and `_nominal_store` operations as
-ordinary nominal construction. Their metatable protocol is part of ABI 2;
-compiler, runtime, and providers must be rebuilt together. The language-server
-API remains version 1.
+same `_nominal_plan`, `_nominal_member`, and `_nominal_store` operations
+(`coder/nominal.lua`) as ordinary nominal construction. Their metatable protocol
+is part of the runtime ABI ([binary compatibility](binary-compatibility.md));
+compiler, runtime, and providers must be rebuilt together.
 
 Each projector receives the rooted nominal owner and a public field ordinal
 or active part ordinal. Ordinary fields use normal boxing. Direct C integers
 copy their complete uint64 bit pattern into a Lua integer; C float/double use
 Lua numbers. Long doubles use bounded `%La` text and full-consumption `strtold`
-on construction, rejecting overflow and underflow to zero. Runtime helpers
-select MinGW's wide formatter and parser explicitly on Windows, since the
+on construction, rejecting overflow and underflow to zero. The runtime helpers
+(`titan-runtime/titan.h` `titan_reflect_format_long_double` and its parser)
+select MinGW's `__mingw_snprintf`/`__mingw_strtold` explicitly on Windows, since the
 x86_64 UCRT printf family treats long double as double. Structs recurse
 through typed C member expressions, including bitfields, and arrays through
 their actual C extent. The compiler never emits a dump of aggregate padding.
@@ -255,16 +259,19 @@ traced slot. Reflection never derives tag or arity from UV count. See
 
 ### Interface receivers
 
-An Interface wrapper retains its concrete receiver in user value 1. Its
-captured fields begin at user value 2. Field access uses generated accessors
+An Interface wrapper (`coder/interfaces.lua`) keeps the concrete owner module in
+C user value `uv[0]` and its concrete receiver in `uv[1]`; captured field `i`
+is at `uv[2 + i]`. Field access uses generated accessors
 to box those snapshots correctly; `.wrapped` exposes the concrete receiver
 as a value, while `.value` remains the Interface method receiver.
 
 ## Function inspection
 
-A Titan function is a branded C closure. Its descriptor string is carried in
-upvalue 1, the native entry address in upvalue 2, and `TITAN_BRAND` in upvalue
-3. `cl->f` is the Lua C entry. Hydration produces a `FunctionType`; a generic
+A Titan function is a branded C closure with five upvalues
+(`coder/generate.lua`): the module (index 0), a lightuserdata pointing at the
+serialized function-type descriptor string (1), the native entry address (2),
+`TITAN_BRAND` (3), and the strict entry (4). `is_titan_closure` requires at
+least five upvalues and the brand in slot 3. `cl->f` is the Lua C entry. Hydration produces a `FunctionType`; a generic
 function's descriptor is interpreted through the same erasure rules.
 
 Lua bytecode closures are inspected with `lua_getinfo(L, ">Su", ...)` for
@@ -281,8 +288,7 @@ is the ordinary application invocation path.
 
 The `TITAN_OWNED` brand selects an owned pointer or counted Array descriptor.
 The value variant exposes `getudatamem(u)` as its payload address and `u->len` as
-the storage size. Counted Arrays also carry their element count in user value
-0. A traced `value` part retains the storage owner; its raw payload pointer alone
+the storage size. Counted Arrays also carry their element count in C user value `uv[0]`. A traced `value` part retains the storage owner; its raw payload pointer alone
 does not root it or acquire any external resource lifetime.
 
 ## Verification boundaries

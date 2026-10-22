@@ -320,6 +320,7 @@ local foreign function thread_control_unregister_retirement_native(context: *voi
   uv.native_external_wake_release(target)
 end
 
+-- Implementation notes: doc/implementation/thread-library.md#join-proxy-retirement-and-the-native-terminal-barrier
 -- Join/detach observers are serialized on the owning host Runtime. Only the
 -- unfinished predicate may return pending: finished readiness is monotonic,
 -- and every later attempt returns actual join success or a preserved error.
@@ -379,6 +380,7 @@ local function safe_value_to_thread_message(item: value): foreign *titan_thread_
   return msg
 end
 
+-- Implementation notes: doc/implementation/thread-library.md#cancellation-reasons
 -- The generic CancellationReason schema erases complex(B) to value, which
 -- protobuf cannot encode. Transfer its actual payload in the owned packet;
 -- native metadata carries the reason variant through admission and outcome.
@@ -427,6 +429,7 @@ local function take_bootstrap_control(): foreign *titan_thread_control
   return ctrl
 end
 
+-- Implementation notes: doc/implementation/thread-library.md#isolated-os-thread-lifecycle-and-cancellation
 local function child_thread_bootstrap()
   local ctrl = take_bootstrap_control()
   local entry_msg = thread_control_take_entry_native(ctrl)
@@ -823,6 +826,7 @@ function Thread:cancel(reason: async.CancellationReason<|value|>?)
   end
 end
 
+-- Implementation notes: doc/implementation/thread-library.md#join-proxy-retirement-and-the-native-terminal-barrier
 --- Return an async.Task proxy for composing this thread with async combinators.
 -- @return Host-state Task that resolves, fails, or cancels with this thread.
 -- @usage standard-library-thread.md

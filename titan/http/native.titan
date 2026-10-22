@@ -467,6 +467,7 @@ local function raise_callback_failure(parser: Parser)
   raise failure
 end
 
+-- Implementation notes: doc/implementation/http-library.md#synchronous-llhttp-callback-bridge
 local function execute_input(parser: Parser, input: string)
   -- Empty calls advance llhttp epsilon transitions and are not transport
   -- input. Every nonempty input means EOF while still awaiting headers is not

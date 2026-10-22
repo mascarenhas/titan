@@ -61,6 +61,7 @@ static void titan_win_push_utf8(lua_State *L, const WCHAR *wide) {
 /* Success restores the entry stack. Failure leaves exactly one diagnostic.
 ** The per-state cache is keyed by the absolute UTF-8 spelling actually opened;
 ** logical module identity still belongs to TitanModuleData, not this cache. */
+/* Implementation notes: doc/implementation/windows-build.md#windows-loader-boundary */
 static HMODULE titan_win_load_library(lua_State *L, const char *filename,
                                        const char *registry_key) {
     int top = lua_gettop(L);

@@ -86,6 +86,7 @@ local function nominal(owner)
     return "unions", result
 end
 
+-- Implementation notes: doc/implementation/binary-compatibility.md#separate-metadata-and-canonical-erasure
 function binarycompat.module(modtype, registry)
     assert(modtype._tag == "Type.Module", "expected a module interface")
     registry = registry or types.registry

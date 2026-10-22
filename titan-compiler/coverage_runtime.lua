@@ -184,6 +184,7 @@ function coverage.prepare(config)
     return true
 end
 
+-- Implementation notes: doc/implementation/native-coverage.md#direct-execution-and-reports
 function coverage.finish(config)
     local sources, counts = {}, {}
     local cwd = config.working_directory or config.root

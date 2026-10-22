@@ -1,207 +1,198 @@
 # Operating-system library implementation
 
-`titan.os` owns the [OS API](../language/standard-library-os.md): environment and
-host policy, calendars, parent standard streams, process configuration, captured
-streams, signals, and graceful exit. It uses ordinary compiled imports of
-public `uv` and `async`. UV owns native storage and callback lifetimes; async
-owns Task waits and subscription queues. Neither contains OS-specific process
-or stdio policy.
+`titan/os.titan` implements the [OS API](../language/standard-library-os.md):
+environment and host queries, calendars, parent standard streams, process
+configuration, captured streams, signals, and graceful exit. It uses ordinary
+compiled imports of public `uv` and `async`. UV owns native storage and callback
+lifetimes and async owns Task waits and subscriptions
+([runtime](libuv-runtime.md)); all OS-specific process and stdio policy stays
+here.
 
-Calendar, formatting, locale, and time-difference operations retain their ISO C
-implementation and Lua 5.5-compatible validation. Clocks, environment snapshots,
-paths, process identifiers, and supported signal constants use public UV
-queries. Sized string queries retry `ENOBUFS`; missing environment variables
-remain nil. `os.exepath` first calls `uv.setup_process_args()`, rejects an
-ordinary Lua host, and grows its buffer when native exepath may have truncated
-at the capacity boundary. Async initialization owns the generated-main hook and
-SIGPIPE policy; importing UV alone applies neither.
+Calendar, formatting, locale, and time-difference operations keep their ISO C
+implementation, adapted from Lua 5.5.1 `loslib.c`, with Lua-compatible
+validation. Clocks, environment snapshots, paths, process identifiers, and
+signal constants use public UV queries. Sized string queries go through
+`os_sized_buffer`, which retries `ENOBUFS` and grows the buffer; a missing
+environment variable is nil. `os.exepath` first calls `uv.setup_process_args()`
+and raises in an ordinary Lua host, and treats a result that fills the buffer
+as possibly truncated. The SIGPIPE policy and generated-main hook belong to
+async initialization, not to this module
+([startup policy](libuv-runtime.md#startup-policy)).
 
 ## Domain owners
 
-| Owner | Responsibility |
+| Owner | Fields and responsibility |
 | --- | --- |
-| `Stdio` | One public `uv.stream_t`, its cached `uv.handle_t` view, owning loop, and optional buffered read subscription. |
-| `ProcessConfig` | Public process options, stdio slots, environment overlays, owning loop, and consumed state. |
-| `ProcessOwner` | One `uv.process_t`, owning loop, retained exit result, and coalescing exit subscription. |
-| Public `InputStream` / `OutputStream` | Stable parent-descriptor identity or a captured Stdio, plus InputStream delimiter excess. |
-| Public `Process` | The ProcessOwner and the selected parent-facing stream records. |
+| `Stdio` (private) | `native` (a `uv.stream_t` alternative), cached `handle` view, owning `loop`, optional `reads` buffered subscription, the prebuilt `alloc_read`/`deliver_read` callbacks, and `pending_writes`. |
+| `ProcessConfig` (private) | Process `options`, stdio `slots`, `environment` overlay, owning `loop`, `consumed` flag, and the rollback `cleanup` capability. |
+| `ProcessOwner` (private) | One `uv.process_t` (`native`), owning `loop`, retained exit `result`, and the coalescing `exits` subscription. |
+| `InputStream` / `OutputStream` (public) | A captured `Stdio` `handle` or a stable `parent_descriptor`; InputStream also keeps delimiter `excess`. |
+| `Process` (public) | The ProcessOwner `handle` and the parent-facing `stdin`, `stdout`, and `stderr` records. |
 
-These records keep domain policy separate from the public UV owner views. A
-stream's concrete kind is represented by `uv.stream_t`'s alternatives; parent or
-child provenance does not guess its native kind. Live process and captured
-stream operations retain explicit current-Task and same-Runtime checks.
-Terminal closed-facade behavior stays idempotent where the public API specifies
-it. A cached view preserves its native owner; operations still query current
-initialization and closing state instead of caching liveness.
+A stream's concrete kind is the `uv.stream_t` alternative; parent or child
+provenance never guesses it. Live process and captured-stream operations check
+the current Task and the same Runtime. Closed facades stay idempotent where the
+public API says so. Cached views keep their native owner, but operations query
+current initialization and closing state rather than caching liveness.
 
 ## Reads, writes, and signals
 
-A native input source publishes copied byte strings through
-`BufferedSubscription`. Buffered bytes precede EOF or a terminal error. Zero
-read notifications do not produce items. The subscription supplies the single
-reader reservation; `has_waiter()` gives the domain its established contention
-diagnostic without a shadow flag. `async.checkpoint()` checks ordinary
-cancellation at the established admission point before contention and before
-accepting a lazy read source, without constructing a wait or changing Task
-status. Cancelling one waiter removes its reservation synchronously and leaves
-the shared source alive.
+The generic one-shot and persistent adapter recipes are in
+[one-shot Task adapter](libuv-extension-guide.md#one-shot-task-adapter) and
+[persistent source adapter](libuv-extension-guide.md#persistent-source-adapter).
+The OS-specific choices are:
 
-Writes submit a fresh public request through ordinary `async.await_with` and
-`uv.write_string`. A private per-write context supplies the Stdio and string to
-a named registrar. Closed-stream validation and the empty-write fast path stay
-inside registration, after ordinary cancellation admission; the native request
-is constructed only for a nonempty write. The request retains the original binary string and embeds
-its scalar descriptor through terminal completion, without per-write buffer
-views or descriptor Arrays. Overlapping writes have independent requests;
-their terminal UV callbacks root each old payload before clearing request
-fields. Each context also captures the Task-owned Completion and its exact
-suspension number, and the request's userdata carries that context to a named
-callback. Close uses `async.await_cleanup_with` and its own handle context,
-preserving the native close obligation under sticky Task cancellation. Named
-terminal callbacks snapshot their Completion and number, then clear userdata
-and the context's Completion reference before settlement can resume the Task.
-Unexpected terminal callback failures call
-`completion:fatal(number, error, traceback)` and bare rethrow; ordinary negative
-statuses become `async.OperationError` with the existing operation label. The
-per-write context replaces a captured registrar; overlapping writes retain
-independent contexts and requests instead of sharing a mutable stream slot.
-
-`wait_signal` validates the symbolic signal, calls `async.checkpoint()`, and
-uses a coalescing subscription over a one-shot `uv.signal_t`.
-The producer owns stop/close and partial-initialization rollback. Lexical cleanup
-closes the subscription after delivery or cancellation; the signal handle is
-never a Task-owned scheduler special case.
+- **Reads.** A native input source publishes copied byte strings through a
+  `BufferedSubscription`; queued bytes precede EOF or a terminal error, and
+  zero-length reads publish nothing. `async.checkpoint()` runs before the
+  `has_waiter()` contention diagnostic and before a lazy read source starts, so
+  pending cancellation wins without constructing a wait. Cancelling one waiter
+  leaves the shared source alive.
+- **Writes.** `start_stdio_write` is the named registrar for
+  `async.await_with`, with a private per-write `WriteOperation` context.
+  Closed-stream validation and the empty-write fast path run inside
+  registration, after cancellation admission, so a native request exists only
+  for a nonempty write. `uv.write_string` retains the original binary string
+  and embeds its scalar buffer descriptor until the terminal callback, without
+  per-write buffer views. A successful submission increments
+  `Stdio.pending_writes`; the terminal callback `stdio_written` decrements it.
+  Overlapping writes have independent contexts and requests.
+- **Close.** `close_native` uses `async.await_cleanup_with`, so native close
+  completes under sticky Task cancellation.
+- **Signals.** `wait_signal` validates the symbolic name, calls
+  `async.checkpoint()`, and waits on a `CoalescingSubscription` over one
+  `uv.signal_t` started with `uv.signal_start_oneshot`. The producer owns stop,
+  close and partial-initialization rollback; lexical cleanup closes the
+  subscription after delivery or cancellation.
 
 ## Process stream transfer
 
-The public stream records implement ordinary custom `TransferValue` hooks.
-Transfer preflight checks the active Runtime's identity and shutdown state
-directly, without the current-Task requirement used by ordinary stream I/O.
-Encoding and reconstruction remain synchronous and never check cancellation.
-They preflight reader reservations, accepted writes, and UV native pending
-state before changing the source. `Stdio.pending_writes` counts accepted writes
-through their terminal callbacks, including callbacks whose bytes have already
-left the native write queue. Read callbacks are retained on the domain owner so
-a failed handoff can restart a stopped watcher without replacing its queue.
+The generic manual-handoff rules are in
+[manual resource handoff](transfer-library.md#manual-resource-handoff); this
+section covers the stream gate and schemas.
 
-Input hooks use `BufferedSubscription:snapshot_pending` to copy queued strings
-and the terminal result before detachment. Private ordered `reflect.Type` Arrays
-define the anonymous-root protobuf schemas. The input payload carries those
-strings, facade excess, a terminal marker, an optional `OperationError`, and an
-optional known `uv.pipe_t` byte payload. A closed native pipe needs no descriptor.
-Successful encoding clears the original facade's handle and excess; its old
-subscription and native owner retire through their existing ownership paths.
+The public stream records implement the custom `TransferValue` hooks.
+`stream_transfer_preflight` requires the stream's loop to be the current
+Runtime's loop and the Runtime not to be closing, but does not require a
+current Task; encoding and reconstruction are synchronous and never check
+cancellation. It rejects a nonzero `pending_writes`, a reserved reader, and any
+non-pipe stream, then asks `uv.stream_transfer_status` about native pending
+state. `pending_writes` covers accepted writes until their terminal callbacks,
+including writes whose bytes already left the native queue. The read callbacks
+live on the `Stdio` owner, so a failed handoff can restart a stopped reader
+without replacing its queue.
+
+The payloads use the private ordered `reflect.Type` schemas
+`input_transfer_fields` (descriptor, facade excess, terminal marker, optional
+`OperationError`, optional `uv.pipe_t` payload, and the queued strings from
+`snapshot_pending`) and `output_transfer_fields` (descriptor and optional pipe
+payload). A closed native pipe carries no pipe payload. Stable parent facades
+carry only their descriptor identity and reject active input state or pending
+writes. Successful encoding clears the source facade's `handle` and `excess`;
+the old subscription and native owner retire through their ordinary paths.
 Reconstruction creates a fresh subscription with destination closures and
-replays the copied strings before resuming production or publishing terminal
-state. Output hooks only carry the pipe packet. Stable parent facades instead
-copy descriptor identity, with active input state or pending writes rejected.
-A lexical guard discards detached child bytes if outer serialization fails; it
-uses the public UV cleanup method without adopting another native owner.
+replays the copied strings before resuming production or publishing the
+terminal state.
 
-The Process exit watcher, process owner, and reap obligation never move.
-Transferring a public endpoint leaves the original Process's stream field as an
-inert facade, so existing process cleanup cannot close the adopted descriptor.
-No resource registry or replay protection is introduced: the caller owns the
-manual exactly-once handoff and failure recovery contract.
+The exit watcher, `ProcessOwner`, and the reap obligation never move.
+Transferring a stream leaves the source Process's field as an inert facade, so
+process cleanup cannot close the adopted descriptor.
 
-Private input/output packet discard helpers support `io`'s handoff cleanup.
-They decode their known protobuf schemas and delegate to the public pipe
-discard method without a Runtime or native-handle adoption. The caller clears its retained packet after the native call, before
-reporting a close error, because a close attempt is terminal even on EINTR.
+The private helpers `discard_input_transfer_payload` and
+`discard_output_transfer_payload` decode these schemas and close an unadopted
+pipe through `uv.pipe_t.discard_transfer_payload`, without a Runtime. `io`
+uses them for shell-stream cleanup; callers clear their retained packet after
+the native close attempt and before reporting its status, because a close
+attempt is terminal even on `EINTR`.
 
 ## Stable parent streams and platform facts
 
-The module-level stdin/stdout/stderr records remain stable across Runtime
+The module-level `stdin`/`stdout`/`stderr` records are stable across Runtime
 sessions. Their native wrappers are acquired lazily and cached for the current
-loop; a later Runtime creates its own wrappers. A stable input facade retains
-its exact previous `Stdio` while that owner's loop is the current Runtime,
-even if EOF or a read error has retired the native duplicate. Its subscription
-queue and delimiter excess therefore remain readable in that Runtime. A later
-Runtime reacquires a wrapper and clears old excess. Parent-facade close is an
-idempotent no-op; Runtime cleanup retires any remaining native wrappers.
-`with_parent_*` configuration separately obtains a usable native wrapper for
-inheritance, which can replace a retired cache entry without replacing the
-input facade's buffered read owner.
+loop; a later Runtime acquires its own and clears old excess. Within the same
+Runtime, a stable input facade keeps its previous `Stdio` even after EOF or a
+read error retired the native duplicate, so its queued bytes and excess stay
+readable. Parent-facade close is an idempotent no-op; Runtime cleanup retires
+remaining wrappers. `with_parent_*` configuration obtains a separate usable
+wrapper for inheritance, which may replace a retired cache entry without
+replacing the input facade's buffered read owner.
 
-The OS platform helpers duplicate parent descriptors and inspect native facts.
-They contain no libuv header, owner layout, callback, or Task protocol. UV
-`guess_handle` selects pipe/TTY where possible. An unknown descriptor is
-inspected explicitly rather than trusting errno left by a failed guess.
-Socket-family and socket-type contradictions defeat a pipe hint; only the
-existing narrowly permitted metadata-denial case can use
-`TITAN_STDIO_PIPE_FDS`. The duplicate remains lexically owned until adoption by
-a public UV handle is established. Windows descriptor/HANDLE differences are
-handled by the platform helper and public identifier queries.
+The platform helpers (`os_platform.h`) duplicate parent descriptors and inspect
+native facts; they contain no libuv header, owner layout, callback, or Task
+protocol. UV `guess_handle` selects pipe or TTY where possible. An unknown
+descriptor is inspected explicitly instead of trusting errno from a failed
+guess. Socket-family and socket-type contradictions defeat a pipe hint; only
+the narrow metadata-denial case may use the `TITAN_STDIO_PIPE_FDS` hint
+(`parent_stdio_pipe_hint`). The duplicate stays lexically owned until a public
+UV handle adopts it. Windows descriptor/HANDLE differences are handled by the
+platform helper and public identifier queries.
 
-Captured stdout/stderr use the same buffered stream implementation. Merged
-output stores exactly one public InputStream in both Process fields, so excess,
-EOF, and close are shared. Domain slot replacement disposes an old owned capture
-or merged endpoint only when no retained slot still refers to it.
+Captured stdout and stderr use the same buffered stream implementation. Merged
+output stores one InputStream in both Process fields, so excess, EOF, and close
+are shared. Replacing a configuration slot disposes an old owned capture or
+merged endpoint only when no retained slot still refers to it.
 
 ## Spawn transaction and exit delivery
 
 Process configuration applies options in order and owns every unpublished
 stdio endpoint. Public UV process options carry the final argv, environment,
-and stdio records. The default environment is inherited; explicit overlays are
-constructed from a copied environment snapshot, using the platform's name
-comparison policy. The OS header supplies platform environment and shell facts
-without exposing UV internals. The Windows shell uses the system-directory
-`cmd.exe` and the public verbatim-argument flag; `io.popen` consumes that OS
-helper rather than duplicating transport policy.
+and stdio records. The environment is inherited by default; overlays are built
+from a copied environment snapshot using the platform's name-comparison
+policy. `os_shell_command` builds the shell command used by `io.popen` (through
+the private `spawn_shell`): `/bin/sh -c COMMAND` on POSIX, and on Windows the
+`cmd.exe` in the `GetSystemDirectoryW` directory with `/d /s /c` and the command
+in outer quotes. `COMSPEC` is not consulted. The private `with_shell_arguments`
+option sets `uv.PROCESS_WINDOWS_VERBATIM_ARGUMENTS` on Windows only, so ordinary
+`os.spawn` keeps its normal argument transport.
 
-Configuration creation and spawn reject an async Runtime whose closing flag is
-set. Spawn deliberately introduces no ordinary cancellation checkpoint:
-pending Task cancellation alone does not forbid spawning a child. It still
-requires a running Task, so a native callback cannot bypass that boundary. See `async.is_closing()` for the observation used here.
+Configuration creation and spawn require a running Task and reject a Runtime
+whose `async.is_closing()` is true. Spawn has no cancellation checkpoint: a
+pending Task cancellation alone does not forbid spawning a child.
 
-The configuration retains lexical ownership until native spawn, captured-read
-registration, and result construction are ready for publication. One private
-Config completion capability owns a preinitialized native timer and the
-unpublished process. Both handle views, callbacks, and signal numbers are
-prepared before child acceptance. Empty slots and the public Process are
-allocated before completion closes the unused timer; field-only assignments
-then clear Config ownership and commit publication.
+`os_process_spawn_with_config` keeps lexical ownership in the configuration
+until native spawn, captured-read registration, and result construction are
+ready to publish. One private Config completion capability owns a
+preinitialized native timer and the unpublished process. Both handle views,
+callbacks, and signal numbers are prepared before child acceptance. Empty slots
+and the public Process are allocated before completion closes the unused timer;
+field-only assignments then clear Config ownership and commit publication.
 
-The protected public spawn body catches failures before Config cleanup and
-uses a nested protected cleanup followed by bare rethrow. This preserves the
-original error and traceback across yielding cleanup and secondary failures.
-Config commits its consumed state and detaches the capability before invoking
-it. Rollback selects its exit callback branch before discarding streams, and a
-defer guarantees the cancellation-shielded `async.await_cleanup_with` even if stream
-discard fails. The branch skips ExitStatus construction and subscription
-publication, retaining the native watcher through the actual exit and close.
+The protected spawn body catches failures before Config cleanup and runs a
+nested protected cleanup followed by a bare rethrow, preserving the original
+error and traceback across yielding cleanup and secondary failures. Config
+commits its consumed state and detaches the capability before invoking it.
+Rollback selects its exit-callback branch before discarding streams, and a
+`defer` guarantees the cancellation-shielded `async.await_cleanup_with` even if
+stream discard fails. That branch skips `ExitStatus` construction and
+subscription publication but keeps the native watcher through the actual exit
+and close.
 
-An active unpublished child receives SIGTERM, followed by a one-shot 30000ms
-native timer that sends SIGKILL if the child remains active. Cached loop time is
-refreshed at the initial signal request. The timer is initialized before spawn;
-its fixed-duration, prebuilt-callback start is allocation-free under the pinned
-native contract. Early child exit closes the timer; escalation also closes it.
-Cleanup resolves only after both native close callbacks have retired their
-owners. Registration checks for already completed retirement as well. Negative
-signal results never abandon an active watcher: 30 seconds bounds the grace
-period, not exit completion if signaling fails. No cleanup Task, saved-PID
-poller, extra scheduler queue, or ProcessOwner state is introduced.
-This cold rollback path retains its captured registration, retirement,
-escalation, and Config-cleanup closures. Its shared state holds one Completion
-and the number captured at registration; retirement snapshots and clears that
-capability before settlement. The existing process exit and subscription
-callbacks remain unchanged.
+An active unpublished child receives SIGTERM, and a one-shot 30000 ms native
+timer sends SIGKILL if it is still active. Cached loop time is refreshed at the
+initial signal. The timer is initialized before spawn, so its fixed-duration
+start with a prebuilt callback cannot allocate. Early child exit or escalation
+closes the timer, and cleanup resolves only after both native close callbacks
+retired their owners; registration also checks for already completed
+retirement. A failed signal never abandons an active watcher: the 30 seconds
+bound the grace period, not exit completion. The rollback state holds one
+Completion and the operation number captured at registration; retirement
+snapshots and clears it before settlement. Do not add a cleanup Task, saved-PID
+poller, or extra scheduler queue.
 
 Native spawn failure follows actual handle state: an uninitialized process
 needs no close, an initialized inactive process must close, and an active
-process retains its exit obligation regardless of the returned status.
-CREATE_PIPE eligibility and the pinned native failed-spawn repair are
-documented in the [public process policy](../language/uv/PROCESS-POLICY.md).
+process keeps its exit obligation whatever the returned status. CREATE_PIPE
+eligibility and the pinned native failed-spawn repair are in the
+[public process policy](../language/uv/PROCESS-POLICY.md).
 
-The exit callback records the `ExitStatus`, closes the process handle, publishes
-the coalesced result, and ends the subscription. Wait cancellation detaches only
-the waiter: the accepted child remains retained until exit/reap. Repeated waits
-return the stored result. A wait calls `async.checkpoint()`
-before cached-result delivery and before the existing competing-wait diagnostic.
-`is_running` and `kill` keep the same Runtime checks and symbolic signal policy;
-closing captured streams does not kill the child.
+The exit callback records the `ExitStatus`, closes the process handle,
+publishes the coalesced result, and ends the subscription. Cancelling a wait
+detaches only the waiter; the child stays retained until exit and reap.
+Repeated waits return the stored result. `wait` calls `async.checkpoint()`
+before cached-result delivery and before the competing-wait diagnostic.
+`is_running` and `kill` keep the same Runtime checks and symbolic signal
+policy; closing captured streams does not kill the child.
 
-Graceful `os.exit` delegates to `async.request_exit`. Async owns cancellation and
-draining of the entrypoint session, including accepted requests and cleanup,
-before returning the requested process exit code. See the
-[Runtime shutdown protocol](libuv-runtime.md#shutdown-and-process-control).
+`os.exit` calls `async.request_exit`; async cancels and drains the entrypoint
+session, including accepted requests and cleanup, before returning the exit
+code ([shutdown protocol](libuv-runtime.md#shutdown-and-process-control)).

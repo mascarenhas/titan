@@ -1,246 +1,223 @@
 # DNS and TCP implementation
 
-`titan.net` implements the [TCP API](../language/standard-library-net.md) with
-ordinary imports of public `uv`, `async`, and `string`. It has no C FFI import
-or source-private UV dependency. The [UV binding](../language/standard-library-uv.md)
-owns native storage, callback frames, and native registration lifetimes;
-[async](libuv-runtime.md) owns Tasks, registration waits, delivery, cancellation,
-and subscriptions. Net owns socket policy, DNS result selection, buffering,
-delimiter parsing, and application-visible errors.
+`titan/net.titan` implements the [TCP API](../language/standard-library-net.md)
+with ordinary imports of public `uv`, `async`, and `string`. It has no C FFI
+import or source-private UV dependency. The
+[UV binding](../language/standard-library-uv.md) owns native storage, callback
+frames, and native registration lifetimes; [async](libuv-runtime.md) owns
+Tasks, waits, delivery, cancellation, and subscriptions. Net owns socket
+policy, DNS result selection, buffering, delimiter parsing, and
+application-visible errors. TLS composes over the public net records and never
+reaches their low-level owner ([TLS implementation](ssl-library.md)).
 
-A `Connection` retains one `uv.tcp_t`, its owning loop, delimiter excess, a
-`BufferedSubscription<|string, value|>`, and lazy-read state. A `Server` retains
-one `uv.tcp_t`, its loop, a `BufferedSubscription<|Connection, value|>`, and an
-optional saved failure. Both cache their public handle and stream views once
-during construction; operations still query current native initialization,
-closing, and writability state. These remain private fields of the public net
-records.
-The TLS implementation composes over these public records and never obtains
-their low-level owner; see [TLS implementation](ssl-library.md).
+## Records
 
-`Connection:has_pending_input()` is a pure snapshot of connection phase,
-native closed state, delimiter excess, and the public buffered subscription's
-`has_pending()`. It introduces no second receive counter, waiter, or native
-poll. False does not mean the kernel socket is empty; HTTP checks it again in
-its supervised exchange immediately before sending on an idle lease.
+| Record | Private fields |
+| --- | --- |
+| `Connection` | `handle` (`uv.tcp_t`) with cached `handle_view` and `stream` views, owning `loop`, delimiter `excess`, `input` (a buffered subscription of strings), `start_read`, the read flags `started`, `read_ahead_enabled` and `read_started`, the scratch `read_buffer`, `phase`, `input_listeners`, and `pending_outputs`. |
+| `Server` | `handle` with cached views, `loop`, `clients` (a buffered subscription of accepted Connections), the saved `failure` (nil until the listener fails), and `start_listen`. |
 
-`Connection:add_input_listener` owns a small ordered Array of private listener
-registrations. The receive callback publishes bytes or terminal state first,
-then notifies observers without consuming input. Removal marks a registration
-dead and replaces the current Array so an active notification keeps stable
-ordering. Explicit close clears registrations. Callback errors are collected
-until remaining listeners run and then retain their original traceback through
-`async.Error:raise`. Registration does not create a read watcher or Task.
+The views are cached once at construction; operations still query current
+native initialization, closing, and writability. `phase` is one of
+`CONNECTION_UNCONNECTED`, `CONNECTION_CONNECTING`, `CONNECTION_CONNECTED`, or
+`CONNECTION_FAILED`.
 
-## One-shot request adapters
+`Connection:has_pending_input()` is a pure snapshot. It returns true when the
+connection is not connected, its handle is closed, `excess` is nonempty, or the
+subscription's `has_pending()` is true. It adds no receive counter, waiter, or
+native poll. False does not mean the kernel socket is empty; HTTP checks it
+again immediately before sending on an idle lease.
 
-DNS, connect, write, and shutdown submit public request owners through
-`async.await_with`. Each operation has a private input context, a named
-registrar, and a named native callback. Registration stores the Task-owned
-`Completion` and its captured suspension number in that context, then attaches
-the context to the exclusive request's userdata. Concrete request data methods
-avoid allocating generic request views. A negative immediate native status
-clears that attachment and rejects without expecting a callback. Accepted
-requests retain their context and native inputs through terminal completion.
-Cancellation remains pending until that native retirement; it does not release
-borrowed buffers early or change the public method's result into a native
-cancellation API.
+`Connection:add_input_listener` appends a registration to the ordered
+`input_listeners` Array. After the receive callback publishes bytes or a
+terminal state, `notify_input` calls the live listeners without consuming
+input. Removal marks a registration dead and replaces the Array with a
+filtered copy, so an in-progress notification keeps a stable order. If
+listeners raise, `notify_input` keeps the first error and its traceback in an
+`async.Error`, runs the remaining listeners, and then raises it with
+`Error:raise`. Explicit close clears the registrations. Registering a listener
+creates no read watcher or Task.
 
-Every terminal callback snapshots its context, Completion, and captured number,
-then clears request userdata and the context's Completion reference before
-settlement can resume the Task. It wraps result handling and settlement in a
-catch that calls `completion:fatal(number, error, traceback)` and bare rethrows.
-An unexpected callback exception therefore reaches both the owning wait and the
-outer native-driver boundary, preserving the original error and trace. It is
-not converted into an ordinary operation error. Callbacks never read a later
-operation's number from the reusable Completion.
+## One-shot requests
 
-The contexts replace the input captures of the former registrars; they are
-still one allocation per operation. Writes keep independent contexts and
-requests, so an overlapping call cannot overwrite another callback's number.
+DNS, connect, write, and shutdown follow the generic
+[one-shot Task adapter](libuv-extension-guide.md#one-shot-task-adapter): a
+private per-operation context, a named registrar, and a named terminal
+callback that snapshots its Completion and operation number, clears the request
+userdata before settlement, and reports unexpected failures through
+`completion:fatal(number, error, traceback)` plus a bare rethrow. Net's
+registrars are `start_resolve` (with `async.await_cancellable_with`) and
+`start_connect`, `start_write`, and `start_shutdown` (with `async.await_with`);
+their callbacks are `resolved`, `connected`, `written`, and `shut_down`.
+Accepted requests keep their context and native inputs until terminal
+completion; cancellation never releases borrowed buffers early.
 
-DNS validates host text and submits `uv.getaddrinfo` with `AF_UNSPEC`,
-`SOCK_STREAM`, `IPPROTO_TCP`, and `AI_NUMERICSERV`. The public binding copies
-native address entries into ordinary owned values. Net selects IPv4/IPv6
-entries in resolver order and frees the native result before settlement. A
-lexical release also asks the request for its retained result and frees it;
-that idempotent path covers failure inside the binding's result copy before
-net's callback begins. Returned `uv.sockaddr_t` values survive that cleanup.
+**DNS.** `resolve_addresses` rejects host text containing NUL and submits
+`uv.getaddrinfo` with `AF_UNSPEC`, `SOCK_STREAM`, `IPPROTO_TCP`, and
+`AI_NUMERICSERV`. The binding copies native entries into owned
+`uv.sockaddr_t` values; net selects IPv4 and IPv6 entries in resolver order and
+frees the native result in the callback before settlement. A lexical `defer`
+also frees any result the request still retains, which covers a failure inside
+the binding's copy before net's callback runs. `start_resolve` returns the
+request view, so cancellation can request native `uv.cancel`; running DNS can
+still outlast an opening deadline while its callback retires. `net.resolve`
+exposes the copied addresses.
 
-Connect and listen try the copied addresses in order with a fresh TCP owner per
-attempt. A candidate stays lexically owned until successful publication. A
-failed attempt or a cancelled native success starts close on its unpublished
-socket; the native owner remains rooted until close completion. `listen`
-selects backlog 128 when absent and validates the positive native integer range
-before submission. Its optional `reuse_port` defaults to false. True selects
-public `uv.TCP_REUSEPORT` as the `uv.tcp_bind` flags; nil and false select zero.
-Each candidate has the same flags, and native bind failures continue through
-the existing candidate-close and `async.OperationError` path. There is no
-fallback that disables reuse when the platform reports `UV_ENOTSUP`.
+**Writes.** Each write owns a fresh `uv.write_t` and submits its immutable
+string through `uv.write_string`, which retains the string and embeds a scalar
+native buffer descriptor, so no buffer view or descriptor Array is needed.
+`uv.buf_check_length` runs before await admission, so the native-range error
+takes precedence even for an already cancelled Task. The terminal callback
+roots the old string before clearing request fields. Overlapping writes keep
+independent requests and payloads. Libuv orders accepted writes, so net has no
+writer queue.
 
-Each write owns one fresh `uv.write_t` and submits its immutable Titan string
-through `uv.write_string`. The public request retains the string and contains
-its scalar native descriptor, avoiding the buffer view and descriptor Arrays
-needed by a vector write. Net calls the nonallocating `uv.buf_check_length`
-before ordinary await admission, retaining the previous native-range error
-precedence even for an already cancelled Task. The terminal UV callback roots the old string before
-clearing request fields or calling Titan code. Overlapping writes retain
-independent requests and payloads; cancellation never recycles a live request.
-Libuv provides write ordering, so net adds no writer queue.
-Shutdown uses one `uv.shutdown_t`; subsequent shutdown is a no-op once the
+**Shutdown** uses one `uv.shutdown_t`; a later shutdown is a no-op once the
 native stream is no longer writable.
+
+## Dialing and listening
+
+`Connection.new` (after `async.checkpoint()`) allocates an initialized endpoint
+in the unconnected phase. `connect_address` validates Runtime, address, port,
+and cancellation before admitting the single attempt, then sets connecting
+before the native await. Successful dials and accepted sockets enter
+connected; failed or cancelled dials enter failed. Read, write and shutdown
+require connected, while close retires every phase. An independently runnable
+opening supervisor can therefore close a known endpoint before it drains its
+pending connect child.
+
+`net.connect` composes one resolution with the same one-address method,
+trying the copied addresses in resolver order with a fresh TCP owner per
+attempt. A candidate stays lexically owned until publication; a failed attempt
+or a cancelled native success starts close on the unpublished socket, whose
+native owner stays rooted until close completion.
+
+`listen` uses backlog 128 when absent and validates the positive native range
+before submission. `reuse_port` true passes `uv.TCP_REUSEPORT` as the
+`uv.tcp_bind` flags; nil and false pass zero. Every candidate uses the same
+flags, and bind failures go through the ordinary candidate-close and
+`async.OperationError` path. There is no fallback that drops reuse when the
+platform reports `UV_ENOTSUP`.
 
 ## Persistent reads
 
-A connection constructs its subscription and producer callbacks before native
-TCP initialization. It starts `uv.read_start` only when the first ordinary read
-needs native input. The allocation callback lazily creates a writable
-`uv.buf_t` and reuses it across callbacks, growing only to a maximum retained
-capacity of 64 KiB. Suggestions outside the positive bounded range select that
-cap. An idle open reader can retain at most 64 KiB of scratch storage; EOF,
-error, producer stop, and explicit close drop the Connection's reference. The
-public binding independently retains each allocation/read pair and handles
-allocation-callback failure across the native boundary.
-Runtime teardown closes raw handles without invoking Connection methods. A
-retained Connection can therefore retain its bounded scratch buffer afterward;
-the closed read/close paths clear that reference without native I/O.
+A connection builds its subscription and producer callbacks in
+`wrap_connection`, before native TCP initialization, and calls
+`uv.read_start` only when the first read needs native input. The allocation
+callback lazily creates one writable `uv.buf_t` and reuses it, replacing it
+only with a larger one. A suggestion outside `1..READ_BUFFER_IDLE_CAPACITY`
+(64 KiB) selects that cap. Libuv normally suggests 64 KiB, so a connection
+whose reader has been activated keeps about 64 KiB of scratch while idle,
+until EOF, a read error, producer stop, close, or transfer drops the
+`read_buffer` reference. The public binding separately retains each
+allocation/read pair and carries allocation-callback failure across the native
+boundary. Runtime teardown closes raw handles without calling Connection
+methods, so a retained Connection can keep its scratch buffer afterwards; its
+closed read and close paths clear the reference without native I/O.
 
-A positive read copies the exact byte prefix into a fresh immutable Titan
-string before publishing it; reusing scratch storage cannot change earlier
-chunks. This scratch cap does not bound the subscription's queued strings.
-Zero-byte notifications publish nothing. EOF or a negative status stops
-native reading and ends or fails the subscription. Previously queued bytes
-remain readable before the terminal EOF/error. Net retains only delimiter
-excess outside the subscription; there is no second native-input queue or
-extra reader lock. The literal delimiter algorithm still handles boundaries
-split across chunks and preserves bytes after a match.
+A positive read copies the exact byte prefix into a fresh immutable string
+before publishing it, so reusing the scratch buffer cannot change earlier
+chunks. The scratch cap does not bound the subscription's queued strings.
+Zero-byte notifications publish nothing. EOF or a negative status stops native
+reading and ends or fails the subscription after any queued bytes. Net keeps
+only delimiter excess outside the subscription; there is no second input queue
+or reader lock. The literal delimiter search handles matches split across
+chunks and keeps bytes after a match in `excess`.
 
-Closed/excess fast paths retain their existing order. A read which needs the
+The closed and excess fast paths run first. A read that needs the
 subscription validates its Task and owning Runtime, then calls
-`async.checkpoint()` before checking `input:has_waiter()`. Pending cancellation
-therefore wins over the existing
-`Connection already has a waiting reader` diagnostic. A successful checkpoint
-returns directly without a wait, status transition, or event-loop turn. The
-subscription's authoritative reservation remains held through deferred wake delivery; cancellation removes
-that reservation synchronously, allowing a replacement reader immediately.
-Cancelling one reader leaves the shared native read source active.
-
-## Accept delivery and unread sockets
-
-A listener's connection callback creates and accepts one new `Connection`.
-A lexical cleanup owns that socket until `publish(client)` returns true.
-Publishing transfers ownership to the subscription queue; rejection or an
-exception closes the unpublished socket. Accepted connections also start their
-read watcher lazily.
-
-Server failure takes precedence over unread accepted clients. It saves the
-failure, drains and closes every queued socket, closes the listening handle,
-and stops delivery. `accept` checks that saved failure before validation and
-after waking. Otherwise it performs the ordinary cancellation checkpoint before
-its authoritative reservation check and preserves the existing duplicate-wait
-diagnostic. Closing a server also drains and closes every unread accepted
-connection; a generic queue cannot infer that these values own sockets.
+`async.checkpoint()` before `input:has_waiter()`, so pending cancellation wins
+over the `Connection already has a waiting reader` diagnostic. The
+subscription's reservation is the authority
+([persistent source adapter](libuv-extension-guide.md#persistent-source-adapter));
+cancelling one reader leaves the shared native read source active.
 
 ## Demand-driven reads
 
 `Connection:read_ahead(enabled?)` selects the read policy before the first
-native arm. The default remains persistent prefetch. A separate first-read
-marker freezes the policy even though demand mode clears the active-watcher
-marker after each result. For nonzero callbacks, demand mode stops public UV
-reading and clears that marker before publishing bytes or terminal state. An
-empty callback keeps the existing read pending. The next public read drains
-excess and subscription results before arming another native read.
+native arm; the default is persistent prefetch. `read_started` freezes the
+policy even though demand mode clears `started` after each result. For a
+nonzero callback, demand mode calls `uv.read_stop` and clears `started` before
+publishing bytes or a terminal state; an empty callback leaves the read
+pending. The next public read drains excess and queued results before arming
+another native read.
 
-Stopping before publication prevents the Windows callback from requeueing its
-read. Its existing native request count is retired after that callback returns;
-`async.yield()` places handoff beyond this callback boundary. This does not
-weaken `uv.stream_transfer_status` or cancel an already-posted persistent read.
-The transfer schema preserves both the configured policy and first-read marker.
-Reconstruction starts a saved active reader only in read-ahead mode.
+Stopping before publication keeps the Windows callback from requeueing its
+read. Its native pending-request count is retired only after that callback
+returns, so a handoff must first `async.yield()` past the callback boundary.
+This neither weakens `uv.stream_transfer_status` nor cancels an
+already-posted persistent read.
+
+## Accept delivery and unread sockets
+
+A listener's connection callback creates and accepts one `Connection`, sets it
+connected, and owns it lexically until `publish(client)` returns true, which
+moves ownership into the `clients` queue. Rejection or an exception closes the
+unpublished socket; an exception also fails the server and is rethrown.
+Accepted connections start their read watcher lazily.
+
+Server failure takes precedence over unread accepted clients: it saves the
+failure, drains and closes every queued socket, closes the listening handle,
+and stops delivery. `accept` checks the saved failure before validation and
+after waking; otherwise it runs the cancellation checkpoint before the
+reservation check and keeps the duplicate-wait diagnostic. Closing a server
+also drains and closes every unread connection, because a generic queue cannot
+know its values own sockets.
 
 ## Connection transfer ownership
 
-`net.Connection` implements the synchronous custom record transfer hooks. Its
-encoder checks active, nonclosing Runtime ownership, connected state, subscription waiter,
-tracked output count and input observers before asking the public UV layer to
-validate native request ownership. It has no Task or cancellation checkpoint;
-idle handoff also works from synchronous transfer callbacks. `stream_transfer_status(stream, true)`
-permits a stoppable persistent read watcher but never an outstanding native
-read request. This preserves prefetch and HTTP observation semantics: Windows
-overlapped reads remain a reason to reject, rather than changing all net reads
-to demand-driven production.
+The generic rules are in
+[manual resource handoff](transfer-library.md#manual-resource-handoff) and
+[native socket and pipe handoff](libuv-extension-guide.md#native-socket-and-pipe-handoff).
+`Connection:to_transfer_payload` is synchronous, needs no Task or cancellation
+checkpoint, and can run in a transfer callback. Its gate requires the current
+Runtime's loop, a Runtime that is not closing, an open connected handle, no
+reserved reader, zero `pending_outputs`, and no input listeners, and then calls
+`uv.stream_transfer_status(stream, true)`. Passing true permits a stoppable
+persistent read watcher but never an outstanding native read request, so
+Windows overlapped reads cause rejection instead of making every net read
+demand-driven.
 
-Windows libuv decrements a connect request's native pending count after invoking
-its callback. Completion delivery can resume the waiting Titan Task inside that
-callback, so returning from `connect` alone does not prove native retirement.
-The transfer gate retains its rejection until the callback returns; callers
-moving a fresh connection yield once before handoff. No scheduler exception or
-pending-count exemption is needed.
+On Windows, libuv decrements a connect request's pending count after invoking
+its callback, and completion can resume the waiting Task inside that callback.
+Returning from `connect` therefore does not prove native retirement; the gate
+rejects until the callback returns, and callers moving a fresh connection
+yield once first.
 
-`BufferedSubscription:snapshot_pending()` copies unread queue references and
-terminal status without consuming the source queue. The encoder snapshots
-binary excess/queue bytes, typed failure and reader state before stopping the
-watcher and invoking the TCP handle hook. A rejected native handoff restarts a
-previously active watcher. After native detachment succeeds, it clears the
-source subscription, callback and scratch references. The source handle's
-ordinary asynchronous close retains its native callback ownership through
-retirement. A private protobuf schema combines those copied fields and the
-known TCP child bytes. A lexical guard discards the detached TCP payload if
-outer serialization raises. Public `Connection.discard_transfer_payload`
-decodes this same schema and delegates directly to UV without Runtime adoption.
+The encoder snapshots `excess`, the queued bytes and the terminal state with
+`snapshot_pending()` before stopping the watcher and calling the TCP handle
+hook. If native detachment fails, it restarts a previously active watcher.
+After detachment it clears the subscription, callback, and scratch references;
+the source handle closes asynchronously through its ordinary callback. The
+private `connection_transfer_fields` schema holds the TCP child payload, the
+copied input bytes, the terminal kind and optional `OperationError`, and the
+`started`, `read_ahead_enabled` and `read_started` flags. A lexical guard
+discards the TCP payload if serialization raises.
+`Connection.discard_transfer_payload` decodes the same schema and delegates to
+`uv.tcp_t.discard_transfer_payload` without a Runtime.
 
-Reconstruction decodes the same schema before adopting the endpoint, creates a
-fresh `Connection` and subscription on the destination Runtime, restores
-unread bytes, and resumes a previously active live reader. No source-state
-callback, Task or subscription is copied. The low-level endpoint gate rejects
-half-closed streams because opening the duplicate does not reproduce libuv's
-directional flags. Policy ownership is manual and exactly once; neither
-encoding nor transport delivery installs a recovery registry or drop finalizer.
+`from_transfer_payload` validates the schema before adopting the endpoint,
+creates a fresh `Connection` and subscription on the destination Runtime,
+restores unread bytes and the read policy, and restarts a previously active
+reader only in read-ahead mode. No source-state callback, Task or subscription
+is copied.
 
 ## Close and Runtime ownership
 
-A native owner is closed when it is no longer initialized or libuv reports it
-closing. Checking initialization first avoids a native query outside the valid
-handle lifetime. Public close methods retain idempotent terminal behavior,
-while live I/O checks the current Task and exact owning Runtime.
+A native owner counts as closed when it is no longer initialized or libuv
+reports it closing; checking initialization first avoids a native query outside
+the handle's lifetime. Close methods are idempotent, while live I/O checks the
+current Task and exact owning Runtime.
 
-Connection close discards delimiter excess and closes its subscription. The
-producer's stop action ends native reading; its close action drains unread
-bytes and uses `async.await_cleanup_with` for native close completion. The
-generic close path owns a private context containing the handle, Completion,
-and captured number; handle userdata carries it to the named close callback.
-Server close
-uses the same pattern while explicitly disposing queued connections. Cleanup
-waits retire ownership even when the closing Task already has sticky
-cancellation. Subscription close does not provide a second join barrier for
-another concurrent caller: the first closer owns its cleanup work.
+Connection close discards `excess` and closes its subscription. The producer's
+stop action ends native reading; its close action drains unread bytes and
+calls `close_handle`, which waits with `async.await_cleanup_with` and the named
+callback `closed`. Server close uses the same pattern and disposes queued
+connections. Cleanup waits retire ownership even when the closing Task already
+has sticky cancellation. Subscription close is not a join barrier for a second
+concurrent caller: the first closer owns the cleanup work.
 
-Runtime teardown belongs to async. After Tasks and accepted operations have
-retired, it walks remaining public native handles and closes them before closing
-the loop. Net has no Runtime networking registry, operation dispatcher, raw
-socket fallback, or domain-generated operation counter. The captured suspension
-number belongs to async. Compiler, native library,
-packaging, sanitizer, and platform gates validate their respective boundaries;
-API coverage alone does not imply every native backend has been executed.
-
-
-## Resolved-address TCP ownership
-
-`net.resolve` exposes the resolver's existing copied public socket addresses.
-Its named registrar creates the request view before `uv.getaddrinfo` acceptance
-and returns that exact view to `await_cancellable_with`. The callback copies
-address values and frees addrinfo before settling; lexical cleanup also frees
-any result retained by a failing binding conversion. A cancellation request
-never releases accepted native work early, and running DNS can outlast an
-opening timeout while its callback retires.
-
-`net.Connection.new` allocates an initialized endpoint with an explicit
-unconnected phase. `connect_address` validates Runtime/address/port and
-cancellation before admitting the single attempt, then sets connecting before
-the native await. Accepted server sockets and successful dials enter connected;
-failed or cancelled dials enter failed. Read/write/shutdown require connected,
-while close retires every phase. A known endpoint can therefore be closed by an
-independently runnable opening supervisor before that supervisor drains its
-pending connect child. `net.connect` composes the same one-address method over
-one resolution, preserving resolver-order fallback and asynchronous abandonment
-of unpublished failed candidates.
+Runtime teardown belongs to async: after Tasks and accepted operations retire,
+it walks and closes the remaining public handles before closing the loop. Net
+has no Runtime networking registry, operation dispatcher, raw socket fallback,
+or operation counter of its own.

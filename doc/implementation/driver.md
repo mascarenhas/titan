@@ -1,17 +1,17 @@
 # Driver and toolchain
 
 This chapter covers everything from resolving source/compiled modules through
-producing a `.so`/`.a` pair or executable: `titan-compiler/driver.lua` (module lookup, the
-import loader, C compilation and linking), the `titanc` command-line
-front end, the small utility module the whole compiler leans on
-(`util.lua`), and the C runtime-support library in
-`titan-runtime/`. A reference table of every environment variable,
-default path and flag closes the chapter.
+producing a `.so`/`.a` pair or executable: `titan-compiler/driver.lua` (module
+lookup, the import loader, the language-server compiler API, C compilation and
+linking), the `titanc` command-line front end, the small utility module the
+whole compiler leans on (`util.lua`), and the C runtime-support library in
+`titan-runtime/`. Reference tables of every `titanc` flag, environment
+variable and default path close the chapter.
 
 Unless a Windows section or row says otherwise, native output paths, paired
 providers, archive selection, and static Lua linking below describe Linux and
 macOS. Windows uses DLL-only Titan providers and the controlled Lua import
-library; see [Windows application launchers](binary-compatibility.md#windows-application-launchers)
+library; see [Windows application launchers](windows-build.md#windows-application-launchers)
 and the [Windows build guide](windows-build.md).
 
 ## Module names and the search paths
@@ -30,37 +30,25 @@ prefix derived from valid roots may end in that component, so
 `pkg.titan.left` and `pkg.titan.right` can share `pkg/titan.so` and
 `pkg/titan.a`.
 Binary lookup maps a logical name to every shallow-to-exact provider
-candidate. For `a.b.c`, those are `a.so`, `a/b.so`, and `a/b/c.so`, plus the
-corresponding `.a` names. It performs one complete format pass at a time
-(`.so` then `.a`, swapped by `--static`), walking search roots from left to
-right and candidates from shallowest to exact within a pass. Once an earlier
-root contains a relative candidate, that pathname is occupied for its format
-and shadows the same relative pathname in later roots even when its metadata
-does not claim the requested module. Missing files remain available in later
-roots. See [Multi-module shared
-libraries](multi-module-libraries.md#compiled-module-candidate-search) for
-the DSO ABI/types claim state machine and [Static compiled
-modules](static-compiled-modules.md) for the archive reader and shared
+candidate: for `a.b.c`, those are `a.so`, `a/b.so`, and `a/b/c.so`, plus the
+corresponding `.a` names (`driver.module_compiled_candidates`). It runs one
+complete format pass at a time (`.so` then `.a`, swapped by `--static`),
+walking search roots from left to right and candidates from shallowest to
+exact within a pass. An earlier root's existing candidate occupies that
+relative pathname for its format even when its metadata does not claim the
+requested module. [Compiled-module candidate
+search](multi-module-libraries.md#compiled-module-candidate-search) owns the
+shadowing and claim rules; [Static compiled
+modules](static-compiled-modules.md) owns the archive reader and the shared
 invocation-wide resolver state.
 
 Source lookup has a separate tagged resolver because a logical module may be
-flat or a [folder module](folder-modules.md). For logical name `M`, slash path
-`P`, and final component `B`, each source root is tested in this order:
-
-1. folder main `P/B.titan`; if it is a regular file, enumerate its directory,
-   collect immediate regular `.titan` siblings, and return the main followed
-   by contributors in `util.bytewise_less` basename order;
-2. flat source `P.titan`;
-3. before accepting a nested flat source, reject it as `blocked` when that
-   exact file is a constituent of an immediate parent folder module.
-
-The resolver distinguishes `flat`, `folder`, and `blocked` results; `nil` is
-only a clean miss. An error enumerating a selected folder is a separate hard
-failure. A selected or blocked result never falls through to another source
-form or later source root. Testing the requested folder first still permits a
-genuine deeper folder module even when its same-named sibling file contributes
-to the parent. A parent marker without the requested flat constituent does not
-reserve the missing child name.
+flat or a [folder module](folder-modules.md). In each source root it tests the
+folder main `P/B.titan` before the flat `P.titan` and returns a `flat`,
+`folder`, or `blocked` result; `nil` is only a clean miss, and a selected or
+blocked result never falls through to another source form or later root.
+[Tagged source resolution](folder-modules.md#tagged-source-resolution) owns the
+order, contributor enumeration, and the constituent-privacy rule.
 
 All modules, including the standard library, use the same two path strings:
 
@@ -71,13 +59,10 @@ All modules, including the standard library, use the same two path strings:
   `TITAN_PATH_0_6` wins over `TITAN_PATH`; with neither set, installed mode
   uses `".;" .. root .. "/lib/titan/0.6"`.
 
-For ordinary import `foo.bar`, each compiled-format pass probes the shallow `foo`
-provider and then exact `foo/bar` provider with that pass's extension:
-`foo.so`, `foo/bar.so` in the DSO pass and `foo.a`, `foo/bar.a` in the
-archive pass. If source is needed, lookup checks `foo/bar/bar.titan` before
-`foo/bar.titan` in each source root. The compile-time path walk expands `;;`
-with the same "insert the ordinary default here" convention as the run-time
-loader in `titan.c`, then skips empty separators.
+The compile-time path walk (`driver.expand_titan_bin_path`) expands `;;` with
+the same "insert the ordinary default here" convention as the run-time loader
+in `titan.c` `pushpath`, then skips empty separators.
+
 Here and below, `root` is the Titan SDK/rocks-tree root, not the owner of the
 Lua or LuaRocks installation. The Makefile's `PREFIX` owns Lua and LuaRocks;
 `ROCKS_TREE` owns the Titan rock, SDK, and stdlib. The supported developer and
@@ -100,10 +85,9 @@ for native test executables. Bundled libuv headers
 are staged under `include`, but its static archive remains a private
 source-build input rather than part of the installed SDK. Checkout mode
 deliberately retains the repository paths for compiler/runtime development.
-This is root discovery, not the previous policy of adding every
-`package.cpath` directory to the Titan path. Outside a checkout, failure to
-find that exact suffix becomes `driver.INSTALLATION_ERROR` and stops
-compiler/toolchain use instead of silently mixing installations.
+Outside a checkout, failure to find that exact suffix becomes
+`driver.INSTALLATION_ERROR` and stops compiler/toolchain use instead of
+silently mixing installations.
 
 The CLI's `--print-root` query calls the same
 `driver.resolve_installation_root(package.cpath, TITAN_ROCKS_ROOT)` function
@@ -140,55 +124,39 @@ Windows also keeps adjacent bundle provider/shim paths after discovered paths,
 so its DLL launcher can find the application's own provider.
 
 The chunk uses no compiler modules at runtime and embeds no build prefix.
-Ordinary Lua hosts keep the existing `titan_init_paths` behavior. This changes
-only generated executable startup, with no compiled-module ABI change.
+Ordinary Lua hosts keep the existing `titan_init_paths` behavior.
 
-Both Unix and Windows SDK installation also publish Titan's own `LICENSE` at
-`<root>/share/titan/LICENSE`, so SDK consumers can redistribute the license
-without access to the compiler source checkout.
+### Standard-library modules and short imports
 
-The standard library consists of twenty-five ordinary qualified logical modules:
-`titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.io`,
-`titan.fs`, `titan.net`, `titan.ssl`, `titan.url`, `titan.http`, `titan.websocket`, `titan.os`, `titan.path`,
-`titan.peg`, `titan.string`, `titan.math`, `titan.lua`, `titan.iteration`,
-`titan.gc`, `titan.test`, `titan.reflect`, `titan.sqlite3`, `titan.json`, `titan.protobuf`, and `titan.transfer`. Most
-checkout sources are `titan/<name>.titan`; `titan.uv`, `titan.http`, `titan.websocket`,
-`titan.peg`, `titan.string`, `titan.sqlite3`, `titan.json`, and `titan.protobuf` are folder
-ensembles. One `titanc` invocation links their independent objects and
-`ltitanlib.o` into the physical checkout provider pair `titan.so`/`titan.a`.
-The private namespaced LPegLabel archive follows `ltitanlib.o` as metadata-free
-payload; selected libuv, private llhttp/SQLite, and selected OpenSSL payloads follow
-it. Installation publishes both forms below `<root>/lib/titan/0.6/`
-and twenty-five generated logical-module shims below
-`<root>/share/lua/5.5/titan/`. Titan imports discover each module through the
-preferred compiled-format pass; Lua requires use a generated shim and the DSO
-form.
-
-`titan.uv` is the public low-level binding to the bundled libuv provider.
-`titan.async` owns the Runtime and its public Task, result, error, and
-subscription types. Async, timer, fs, net, os, and sqlite3 import the ordinary
-compiled `titan.uv` interface; none requires a source-private UV scheduler.
-All twenty-five modules share the canonical physical provider pair while
-retaining their separate logical and nominal identities. See the
-[public binding reference](../language/standard-library-uv.md) and
-[async implementation](libuv-runtime.md).
+The standard library is a set of ordinary qualified logical modules published
+together in the reserved physical provider pair `titan.so`/`titan.a`. The root
+list, folder ensembles, native payload order, and installed layout live in
+[Reserved `titan` and the standard-library
+image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image);
+the Make and LuaRocks build lives in [Build and installation
+responsibilities](build-script-audit.md). The driver gives these modules no
+special lookup: they use the same compiled-format passes and source roots as
+any other module. `titan.uv` is the public binding to the bundled libuv; see
+the [binding reference](../language/standard-library-uv.md) and the [async
+implementation](libuv-runtime.md).
 
 For source convenience, the parser first removes one terminal explicit-source
-marker, `.titan`, and then desugars the twenty-five short standard-library imports
-before module resolution: `import "async"`, for example, places
-`titan.async` in the import AST exactly as `import "titan.async"` would. The same
-mapping applies to `coroutine`, `uv`, `timer`, `io`, `fs`, `net`, `ssl`, `url`, `http`, `websocket`,
-`os`, `path`, `peg`, `string`, `test`, `math`, `lua`, `iteration`, `gc`, `reflect`,
-`sqlite3`, `json`, `protobuf`, and `transfer`; every other name is left unchanged. The driver, checker, code
-generator, and runtime thus
-see only the qualified module name. Each qualified name naturally produces its
-matching native symbols and Lua entry point (`titan_async_*` and
-`luaopen_titan_async`, for example), so no separate Lua alias is required and
-Lua's bare `coroutine` and `os` libraries remain unrelated.
-The AST retains the marker only as `TopLevelImport.source_required`; its
-`modname` is canonical. Thus `uv.titan` and `titan.uv.titan` both carry
-`modname == "titan.uv"`, and no cache key, dependency, symbol, output, or
-metadata entry includes the marker.
+marker, `.titan`, and then desugars the short standard-library imports before
+module resolution (`titan-compiler/parser.lua` `standard_imports` and
+`parser.normalize_import`): `import "async"`, for example, places
+`titan.async` in the import AST exactly as `import "titan.async"` would. The
+mapping covers `coroutine`, `uv`, `async`, `timer`, `io`, `fs`, `path`, `net`,
+`ssl`, `url`, `http`, `websocket`, `os`, `peg`, `string`, `test`, `lua`,
+`math`, `gc`, `iteration`, `reflect`, `sqlite3`, `json`, `protobuf`,
+`transfer`, and `thread`; every other name is left unchanged. The driver,
+checker, code generator, and runtime thus see only the qualified module name.
+Each qualified name naturally produces its matching native symbols and Lua
+entry point (`titan_async_*` and `luaopen_titan_async`, for example), so no
+separate Lua alias is required and Lua's bare `coroutine` and `os` libraries
+remain unrelated. The AST retains the marker only as
+`TopLevelImport.source_required`; its `modname` is canonical. Thus `uv.titan`
+and `titan.uv.titan` both carry `modname == "titan.uv"`, and no cache key,
+dependency, symbol, output, or metadata entry includes the marker.
 
 ### Source vs compiled providers: the selection logic
 
@@ -203,17 +171,13 @@ equally to standard-library and application dependencies. In particular, a
 stray `./titan/uv/uv.titan` folder does not capture `import "uv"` while an
 installed compiled standard provider claims `titan.uv` on the binary path.
 
-An import request carrying `kind == "source-import"` is source-required. The
-loader resolves the stripped canonical name through the same tagged folder/flat
-source resolver, without entering a compiled-provider pass. A clean miss returns
-`source module '<name>' not found`; blocked source and all source errors are also
-terminal. The request bypasses a cached DSO/archive selection and replaces it
-with source when source exists. It never falls back to that cached provider.
-When the current resolver has already returned that compiled interface to an
-earlier importer, replacement additionally requires the source module's
-serialized public projection to match it. This per-resolver guard prevents
-stale typed ASTs while leaving an unused process-global cache entry replaceable
-by a later independent compilation.
+An explicit `.titan` import arrives as `request.kind == "source-import"` and
+is source-required: the loader resolves it only through the tagged source
+resolver, a clean miss is terminal, and it replaces a cached DSO/archive
+selection without ever falling back to it. [Loader result and module
+views](source-import-visibility.md#loader-result-and-module-views) owns this
+request, the per-resolver projection guard (`check_used_compiled_interface`),
+and the visibility it grants.
 
 For an ordinary import, source privacy is evaluated only after the complete
 binary-candidate miss. A requested nested flat file that is an immediate
@@ -228,7 +192,7 @@ as `options.source_roots`; each such module tries source first, even if a
 binary for it was cached by an earlier import in the same compiler process.
 If its source is absent, compilation fails rather than treating an existing
 binary as an empty build root. Imports reached from that root remain binary
-first. This is why one standard-library invocation can force all twenty-five roots
+first. This is why one standard-library invocation can force all standard roots
 through source even when a bootstrap or prior combined provider pair is
 visible. Their internal imports resolve to the already selected source cache
 entries and are linked statically into the replacement provider pair.
@@ -248,28 +212,17 @@ through the internal lazy/local `titan._loadlib` helper for its
 selected relative pathname transiently in `Type.Module.file`. A static
 candidate is scanned in-process for canonical object-section metadata; a
 successful claim records the selected archive/provider but never places an
-archive path in `Type.Module.file`. The default order is all `.so`, then all
-`.a`; `--static` swaps those passes. Generated code uses handle-scoped dynamic
-wiring for the former and direct native symbols for source or physically
-carried static names. See [Static compiled
-modules](static-compiled-modules.md) for archive validation, contextual owner
-recovery, and native-binding constraints.
+archive path in `Type.Module.file`. [Claim and terminal-error
+states](multi-module-libraries.md#claim-and-terminal-error-states) owns the
+claim protocol, and [Static compiled modules](static-compiled-modules.md) owns
+archive validation, contextual owner recovery, and native-binding constraints.
 
-Compiled providers expose an `<mangled>_abi` marker before serialized
-`<mangled>_types`. `TITAN_ABI_VERSION` is the independent monotonic marker,
-currently `2`; a mismatch is terminal before type metadata is evaluated or
-native linking begins. The current ABI covers callable metadata and signatures,
-physical-provider selection, canonical Array proxies, unions, Interfaces,
-generic declarations, source-private provider identity, source foreign
-callbacks, const-qualified descriptors and wrappers, and native nominal storage.
-The separate `<mangled>_layouts` protocol supplies validated public physical
-plans; see [Native nominal storage](nominal-storage.md).
-
-`TITAN_VERSION` is the independent compiler and standard-library semantic
-version, currently `0.6.0`. Its derived `0.6` library version selects
-`TITAN_PATH_0_6`, `lib/titan/0.6`, and `share/titan/0.6`; patch releases share
-those paths. The reset provides no migration or compatibility aliases for
-earlier Titan installations.
+A provider's `<mangled>_abi` marker must equal `TITAN_ABI_VERSION` before its
+`<mangled>_types` is evaluated; a mismatch is terminal before native linking
+begins. The marker, `TITAN_VERSION`, and the versioned search paths are defined
+in [Compiled-module ABI](codegen-overview.md#compiled-module-abi); the
+separate `<mangled>_layouts` protocol is in [Native nominal
+storage](nominal-storage.md).
 
 ## The loader protocol
 
@@ -291,7 +244,251 @@ compiled nominal-owner recovery uses its separate contextual request. On
 failure `ok` is false and the second value is a message. See
 [the type checker](checker.md) for the consumer side.
 
-### Language-server compiler API
+### `driver.new_resolver_context(options)`
+
+A resolver context is the invocation-wide state shared by every loader call,
+header request, and C probe of one compilation or analysis. `titanc` creates
+one synchronous context per invocation; semantic clients create one per
+analysis and close it with `driver.close_resolver_context`. Unknown option keys
+are ignored. Callback options must be functions, and an invalid cache adapter,
+embedded provider, I/O strategy, or include list raises while the context is
+created.
+
+| Option | Meaning |
+| --- | --- |
+| `io` | Compiler I/O strategy; defaults to `compiler_io.new_sync()`. See [Compiler I/O strategy](#compiler-io-strategy). |
+| `output_root` | The `titanc --output` folder. Wraps `io:tmpname` so checking headers and transient probe payloads are reserved as `<output_root>/.titan-temporary-*`; persistent probe-cache destinations do not change. See [Output directory](output-directory.md). |
+| `prefer_static` | `titanc --static`: run the archive pass before the DSO pass. |
+| `source_first` | `--test` or `--source-first`: try source before compiled formats for every dependency, keeping compiled fallback on a clean miss. |
+| `verbose`, `pretty_print` | Carry `-v` and `--pretty-print` into resolver-owned C-probe and checking-header work. |
+| `extra_ffi_include_dirs` | Analysis-local include roots, normalized here and appended to a fresh C-probe toolchain descriptor without changing the process-global foreign-C configuration. |
+| `cache_adapter`, `header_inputs`, `c_header_analysis` | Persistent cache callbacks, host-validated input observations, and the per-analysis header-validation token; see [Cache adapter and persistent payloads](#cache-adapter-and-persistent-payloads). |
+| `embedded_interface_provider` | Trusted host ABI/type inventory; see [Embedded interface provider and target profile](#embedded-interface-provider-and-target-profile). |
+| `analysis_only`, `completion`, `completion_closed_world`, `transient_caches` | Semantic-analysis modes; see [Analysis loader options](#analysis-loader-options) and [Completion](completion.md). |
+| `source_process_trace`, `c_header_process_trace`, `c_probe_cache_trace`, `c_probe_semantic_trace`, `c_probe_execution_trace` | Best-effort observers; see [Observability callbacks](#observability-callbacks). |
+
+Checkout/installation discovery and platform initialization do not perform
+filesystem or subprocess work while `driver.lua` is loaded. Context creation
+resolves the compiler layout through `context.io` (`driver.initialize_layout`);
+`driver.configure_foreign_c(context)` later obtains `uname` and the target
+profile through the same strategy. `titanc` explicitly creates the default
+synchronous context before reading layout-dependent settings and configuring
+foreign C.
+
+`context.checked_source_modules` is an ordered dense list of modules actually
+parsed and checked by that context. Cached source entries and serialized
+interfaces are not appended. After each checked module is completely published
+in `driver.imported` and `static_deps`, the loader appends its name and calls
+`context.io:yield(modname)`. A Titan-backed strategy may suspend its own Task
+there; the synchronous strategy (`titan-compiler/io.lua` `Sync:yield`) ignores
+the argument and does nothing.
+
+### `driver.defaultloader(static_deps, options)`
+
+`defaultloader` uses three pieces of process state:
+
+* **`driver.imported`** — a process-global cache keyed by logical module name.
+  Source entries carry `{ kind = "source", ast, type, filename, native_output,
+  source_files, program_output, deps, c_header_dependencies, headers,
+  source_manifest }`; `source_manifest` is absent only when its serialization
+  reports an error, and object-backed entries ([Object-backed source
+  modules](incremental-compilation.md)) add `compiled`, `has_main`,
+  `test_functions`, and `external_symbols`. DSO entries carry
+  `{ kind = "dynamic", type, filename, relative, layouts, layout_inventory }`;
+  archive entries carry `{ kind = "static", type, filename, relative,
+  static_archive, static_provider, layouts, layout_inventory }`; trusted
+  host-inventory entries carry `{ kind = "embedded", type, filename,
+  embedded_provider }`. Tests and long-lived tools reset this cache together
+  with `types.registry`.
+* **`CIRCULAR_MARK`** — a unique sentinel stored before recursively checking a
+  source module; encountering it reports `"circular reference to module"`.
+* **the resolver context** — invocation-wide compiled-format preference,
+  archive-scan cache, the optional copied embedded inventory, ordinary
+  provenance, selected static providers,
+  contextual type-only owner recovery and its metadata-only physical
+  resolutions, native-binding constraints, and the finalized direct-name
+  sets.
+
+The loader's `options` table also seeds the resolver context: when
+`options.context` is absent, `defaultloader` creates one from the same table.
+Loader-owned options are:
+
+* `context` — the shared [resolver context](#drivernew_resolver_contextoptions).
+* `source_roots` — requested build roots, which are source-required (see
+  [the selection logic](#source-vs-compiled-providers-the-selection-logic));
+  `forced_source_roots` additionally bypasses object reuse for compile-only
+  roots.
+* `source_overrides` — in-memory source descriptors keyed by module name, such
+  as `titanc`'s generated `titan.test.runner`; an override makes that module
+  source-preferred.
+* `incremental`, `coverage`, `output_root` — [object-backed source
+  reuse](incremental-compilation.md), [native coverage](native-coverage.md)
+  instrumentation, and [output routing](output-directory.md).
+* `known_source_modules`, `cached_source_entries`, `cached_interfaces`,
+  `cached_binary_interfaces` — semantic-client inputs; see [Analysis loader
+  options](#analysis-loader-options).
+* `after_source_check` is rejected; cooperative suspension uses the context
+  checkpoint above. Recursive parents may still be mid-check, so abandoning a
+  Task requires closing the resolver and discarding the attempt's
+  `driver.imported`/`types.registry` state.
+
+The closure proceeds in this order:
+
+1. A contextual nominal-owner request first follows the exposing compiled
+   interface's producer choice. A carried static or embedded owner is recovered
+   from that same inventory; a DSO-carried owner is probed from that same DSO;
+   otherwise a compiled lookup may recover type information without committing
+   ordinary resolver state or selecting an archive. Each successful recovery
+   also adds one metadata-only `context.contextual_resolutions` entry with
+   logical owner, exposer, compiled kind, physical provider file, and whether
+   ordinary lookup supplied a separate provider. It does not add the owner to
+   `driver.imported` or select it for linking.
+2. The loader derives `source_required` for command-line roots and explicit
+   `.titan` requests, and `source_preferred` from that requirement, test mode's
+   invocation-wide `source_first`, or a source override. A preferred source may
+   replace a compiled cache entry; a required-source clean miss is terminal,
+   while `source_first` retains the compiled cache/fallback on a clean miss.
+3. A remaining cache hit returns its type and records the dependency. Otherwise
+   a preferred lookup tries folder/flat source first. An ordinary lookup first
+   consults a non-overlapping embedded inventory, then runs one complete
+   compiled pass per format on `TITAN_BIN_PATH`—`.so` then `.a` by default,
+   reversed by `prefer_static`—before its final source fallback on
+   `TITAN_SOURCE_PATH`. Root-major, shallow-to-exact order and occupied relative-
+   path shadowing are independent within each filesystem format.
+4. A source hit is a tagged flat/folder descriptor. Every listed file is read
+   and parsed independently with its real filename. The main initializer is
+   saved, contributor roots are appended in descriptor order, contributor
+   initializers are rejected, and the saved initializer is appended once.
+   The dense AST is recursively checked exactly once and cached with direct
+   source/static dependencies; the canonical main becomes `filename` and the
+   descriptor supplies `program_output`.
+5. A DSO hit is cached with dynamic provenance and the selected transient
+   relative provider path. A static hit is cached with its one claimed logical
+   interface and physical provider; sibling keys remain physical membership,
+   not ordinary resolver results.
+
+The folder descriptor is temporary loader input, not AST metadata. One cache
+entry, circularity sentinel, module type, direct-dependency set, and
+initializer remain keyed by `modname`. Node locations are the only retained
+per-contributor information. The checker receives the main filename as its
+source directory; because contributors are immediate siblings, quoted foreign
+headers from any file resolve under that same directory.
+
+The loader attempts source-interface serialization even when checking reports
+errors: a body error need not prevent a valid declaration manifest. If
+serialization fails, the checked entry is still published with its AST and
+module type, while `source_manifest` remains absent. The loader returns
+`true, module_type, errors, source_info`, adding a diagnostic at the canonical
+main's `1:1` location that names the module and serializer failure. Ordinary
+imports propagate this diagnostic with the existing checker errors, and CLI
+compilation stops before code generation. Semantic clients can publish these
+diagnostics but must exclude the failed module from reusable interface and
+project caches; absence of a source manifest is not an analyzer failure. A
+fresh analysis resets `driver.imported` and `types.registry` as usual and can
+retry serialization after the underlying problem is fixed.
+
+An embedded hit is described under [Embedded interface provider and target
+profile](#embedded-interface-provider-and-target-profile). For a DSO hit,
+`find_dynamic_interface` uses
+`titan._loadlib(path, symbol)` to map each existing candidate with
+`RTLD_LAZY | RTLD_LOCAL`, probe the requested callable pair, and validate a
+claim. For an archive hit, `find_static_interface` parses the complete regular
+archive and its ELF/Mach-O metadata sections in-process, validates every
+member and interface, and returns only the requested key. Both paths evaluate
+the serialized type expression in the `types` constructor environment and
+require a canonical `Type.Module` for the logical name. See [the complete
+claim rules](multi-module-libraries.md#claim-and-terminal-error-states).
+
+Each source entry's `deps` stores direct dependencies that are already native
+inputs—source or selected static—regardless of which contributor declared
+the import. The loader's `static_deps` argument retains this compatibility
+view for embedding callers and test helpers. Production `titanc` instead
+finalizes the shared resolver context after all roots are checked, deriving
+`native_static_names` as every invocation source name plus every logical key
+physically carried by the deduplicated selected archives. It passes that
+complete set to every `coder.generate` call and passes the selected archives
+once to native linking.
+
+Finalization also filters `context.contextual_resolutions` against the final
+compiled exposer selection. The exposer's physical file must still match the
+one observed during checking. A carried owner must share that provider; an
+ordinary-fallback owner may retain its separately resolved provider. This keeps
+simple nominal aliases whose canonical registry nodes do not replay recovery,
+while dropping provisional metadata made obsolete by a later source-root or
+provider selection. Long-lived semantic clients read the filtered table only
+after successful finalization and use it for cache graph edges, not native link
+inputs.
+
+`coder.generate` binds source and selected static names directly through
+`extern` symbols and DSO-selected dependencies through the handle-scoped
+provider protocol (`titan_module_provider`/`titan_module_symbol`); each
+importer retains the resolved pointers in its own per-state module payload
+([Static vs dynamic dependency
+wiring](codegen-overview.md#static-vs-dynamic-dependency-wiring)). Generated
+`_types` functions persist none of this provenance or the transient DSO path.
+Folder layout does not add a loader protocol; the relevant filesystem options
+are `source_roots` and the shared resolver `context`.
+
+#### Interface recovery and the closed validator
+
+Every compiled or cached serialized interface (DSO `_types`, archive metadata,
+embedded inventory entries, and cached interfaces) enters through
+`driver.decode_module_interface(serialized, modname, origin)`. It loads the
+text as one Lua chunk in the `types` constructor environment, so the payload
+can only call `Type.*` constructors, and requires exactly one returned value.
+It then resolves compiled C references (`types.resolve_compiled_c_references`)
+and runs `driver.validate_module_interface(modtype, modname)`, which returns
+`nil, message` on the first violation.
+
+The validator is closed: it rejects what it does not recognize. It requires a
+valid logical module name; a non-local `Type.Module` whose `name`, `prefix`
+(`<mangled>_`), and `file` (the slash path plus `.so`) are canonical for the
+requested name; and no compiler-only source state (`_source`,
+`source_members`, `source_type_members`, `_source_foreign_includes`,
+`_source_c_context`). Member lists must be dense. Every value and type member
+is walked by `validate_interface_type` with per-shape validators
+(`validate_record_interface`, `validate_union_interface`,
+`validate_declared_interface`, `validate_callable_descriptor`,
+`validate_function_scheme`, `validate_generic_alias`). Local alias projections
+and generic applications are then checked against their owners and
+constraints (`driver._validate_metadata_generic_application`). A final
+`types.serialize` call is the recursive schema walk that catches unknown tags
+and missing nested fields while this candidate is still the diagnostic subject.
+
+Feature-specific rules live in the validators named above. A callable may
+carry a `flexrettype` that is a valid vararg element
+(`types.valid_varg_element`); record and union constructors reject any
+`flexrettype`. Interfaces are accepted only as direct `Module.type_members`,
+with owner/key, public locality, the canonical nonempty ordered Method
+projection, parameter-name metadata, and every value-facing signature component
+checked before the checker registers them ([Interfaces](interfaces.md#separate-compilation-and-schema-validation)).
+The serialized form itself is described in [Lua entries and ABI, type, and
+layout metadata](codegen-overview.md#lua-entries-and-abi-type-and-layout-metadata).
+A source entry's `source_manifest` uses a different encoder,
+`titan-compiler/sourceinterface.lua` (`titan-source-interface-v1`): the public
+`types.serialize` text plus a closed-schema source delta and header inputs.
+
+### `driver.tableloader(modtable, imported, deps, options)`
+
+The in-memory variant used by the spec suite: module sources come from
+the `modtable` table instead of the filesystem (filename is faked as
+`"./" .. modname .. ".titan"`), and the caller supplies the `imported`
+cache (and optionally the `deps` set) explicitly. After a successful check, it
+retains both the trusted raw `source_type` and a public `type` round-tripped
+through `types.serialize` and `load`, exactly like the `.so` path. Ordinary
+calls receive the public projection by default. `options.interface == "source"`
+or an explicit `source-import` request receives the raw source view plus trusted
+source provenance; only the request can grant an import AST local visibility.
+Source-required replacement follows the same rules as `defaultloader`
+([Loader result and module
+views](source-import-visibility.md#loader-result-and-module-views)). The round
+trip exposes drift between the serializer and the constructor schema.
+It deliberately remains a flat one-string-per-module loader. Source folders,
+privacy blocks, and contributor enumeration belong only to
+`defaultloader`; neither tests nor embeddings acquire a synthetic source-unit
+AST shape.
+
+## Language-server compiler API
 
 [Caret-specific completion analysis](completion.md) extends this boundary with
 disposable source transforms, checker-produced candidates, detached scalar facts
@@ -312,7 +509,17 @@ stable changed identities for ordinary deleted or unreadable inputs. Analysis
 source/provider discovery, compiler probes, external topology resolution, and
 C-header restatting all use the exact strategy stored in the resolver context.
 The context owns cooperative `yield` checkpoints and the ordered
-`checked_source_modules` publication list described below.
+`checked_source_modules` publication list described with
+[`driver.new_resolver_context`](#drivernew_resolver_contextoptions), whose
+option table lists every context option.
+
+The subsections below are the complete compiler-side contract, in order: the
+embedded interface provider, declared project manifests, the cache adapter and
+its persistent payloads, observability callbacks, the compiler I/O strategy,
+analysis loader options, C-header dependency closures, and the two
+metadata-only helpers.
+
+### Embedded interface provider and target profile
 
 The optional trusted-host `embedded_interface_provider` supplies one inventory. The driver
 validates and decodes its closed ABI/type inventory when that raw provider
@@ -342,6 +549,40 @@ The checker's `target_profile_provider` is separate from its native
 `driver.get_probe_service(context)`, which acquires the live toolchain profile
 and requires it to agree with the declared target. Missing native prerequisites
 remain errors. Omitting the profile preserves ordinary driver/checker behavior.
+
+`options.embedded_interface_provider` has the closed schema
+`{ provider_file = <absolute path>, entries = { [module] = { abi, types } },
+target_profile = <optional exported profile data> }`
+(`validate_embedded_interface_provider` in `driver.lua`). The provider and
+every entry must be plain tables with no extra fields; logical names, ABI
+strings, serialized `Type.Module` graphs, and native symbol-prefix uniqueness
+are validated eagerly. The driver copies the inventory and retains no
+caller-owned entry table. A successfully validated raw provider table is a
+trusted immutable snapshot: reusing the same table identity uses a weak-keyed
+validated cache, so later mutation of that raw table is unsupported and is not
+observed. Every resolver context still receives a distinct provider object and
+cloned decoded type graphs; resolver-local rebinding or annotation therefore
+cannot leak across contexts. A distinct raw table identity is validated and
+decoded independently.
+
+Before cache reuse, the loader reconciles the process-global cache with
+the resolver's embedded inventory. It removes embedded entries owned by a
+different resolver/provider object; when the current closed inventory remains
+active, it evicts cached DSO/archive entries for every carried logical name and
+clears every carried name from the supplied `static_deps` map, including names
+whose cached import entry was already pruned. Cached source provenance instead
+rejects the complete embedded inventory and remains selected. An embedded hit
+carries `kind = "embedded"` and the trusted absolute `provider_file`; no
+filesystem or dynamic-loader operation occurs.
+
+Selected embedded entries and their carried contextual owners are replayed at
+finalization like a static provider's interface closure, but remain outside
+`static_deps`, `selected_static_providers`, `native_static_names`, native
+bindings, and linker arguments. A source identity discovered after an embedded
+entry was selected rejects the whole inventory and re-resolves every earlier
+selection through ordinary disk providers before source checking continues.
+
+### Declared project manifests
 
 Compiler-owned declared manifests preserve reusable analysis semantics. The
 embedding owns its database, transactions, file/provider validation, and
@@ -397,6 +638,8 @@ and store editor facts separately before releasing each checked AST.
   and native-module files, embedded provider, configuration, source roots and
   semantic schema. The generated-code ABI alone is not a cache namespace.
 
+### Cache adapter and persistent payloads
+
 `options.cache_adapter` on a resolver context supplies dot callbacks
 `get(kind, key)` and optional `put(kind, key, bytes, inputs)` and
 `refresh_inputs(kind, key, inputs)`. Reads return a binary string or a miss,
@@ -432,15 +675,13 @@ exception objects propagate unchanged through the graph boundary. Required
 header content hashing also uses this callback when available; a broken string
 result/error falls back to the ordinary Lua digest, while cancellation propagates.
 
-The `c-header-v7` payload stores extracted C declarations through a closed
-schema: CType shapes, canonical tags, typedef identity, qualifiers, callable
-signatures, declaration origins, field and array extents, exact integer tokens, final object-macro
-field classifications, and the finite predefined macro facts needed by target
-profiles. It excludes CPP macro environments, token/spacing/raw-spelling
-sidecars, body definitions, source parser records and conversion memo state.
-Fresh processing projects the completed header once; disk restoration performs
-one schema-checked reconstruction. The process cache then retains and returns
-the same immutable declaration object across resolver contexts and analysis
+The `c-header-v7` payload (`c-parser/cdriver.lua` `HEADER_CACHE_VERSION`)
+stores the closed extracted-declaration graph described in [FFI
+internals](ffi-internals.md#checker-rules); it excludes CPP macro environments,
+token/spacing sidecars, body definitions, and parser records. Fresh processing
+projects the completed header once; disk restoration performs one
+schema-checked reconstruction. The process cache then retains and returns the
+same immutable declaration object across resolver contexts and analysis
 tokens, with no projection or deep copy on a live hit. Checker conversion
 creates separate Titan types.
 
@@ -468,22 +709,18 @@ the complete file/search closure and clones its mutable context. Changes to
 ordered flags, macros, selection or physical inputs rebuild that context;
 failed scans or probes publish none.
 
-The `ffi-conversion-v3` payload stores one module-wide namespace's final
-`CModule`, converted `foreign_types`, canonical file tags, target profile, and
-object-macro field classifications. It excludes conversion histories, memos,
-raw CType roots, CPP environments and declaration ASTs. Its key includes
-module/source identity, the combined header graph key, complete observed C
-inputs, and the live target profile; importer body bytes are independent.
-Replay reconstructs the closed semantic graph, rebinds declaration origins to
-the current combined include, and skips `foreigntypes.convert`. The checker
-reconstructs its needed declaration-history entries from those final types.
-Final C validation uses the current combined environment after replay, and
-writes report its complete observed input closure in the fourth argument.
-Generated physical checking paths never become reusable input authority.
-Generated header descriptors contain immutable include plans; project
-restoration validates their contents, dependency order and recorded digests.
-Owned generated paths, including relative `..` components in nested includes,
-never become durable file inputs.
+The `ffi-conversion-v8` payload (`titan-compiler/foreigncache.lua` `KIND`)
+stores one module-wide namespace's final converted C module; its contents and
+replay are described in [FFI internals](ffi-internals.md#checker-rules). Its
+key includes module/source identity, the combined header graph key, complete
+observed C inputs, and the live target profile; importer body bytes are
+independent. Final C validation uses the current combined environment after
+replay, and writes report their complete observed input closure in the fourth
+`put` argument. Generated physical checking paths never become reusable input
+authority: generated header descriptors contain immutable include plans whose
+contents, dependency order and recorded digests project restoration validates,
+and owned generated paths, including relative `..` components in nested
+includes, never become durable file inputs.
 
 The graph codec bounds bytes, strings, nodes and edges, checks its version and
 SHA-256 integrity, and allocates table references before restoring edges. The
@@ -511,37 +748,16 @@ Use a fresh `c_header_analysis` token per saved analysis even when retaining
 the same I/O strategy's process cache: an analysis token intentionally skips
 repeat closure restats only within that one analysis.
 
-### `driver.new_resolver_context(options)`
-
 Optional resolver `header_inputs` supplies the current host-validated input
 observations for that analysis generation. The driver indexes them once by
-kind/path/semantic identity, then uses them as fresher baselines when retained
-project graphs still contain an earlier timestamp. Validation always checks
-current filesystem metadata before reusing the content identity; this baseline
-is separate from pass memoization and does not mutate retained graphs. Hosts
-can pass the complete current owner-closure union.
+kind/path/semantic identity (`cdriver.header_observation_index`), then uses
+them as fresher baselines when retained project graphs still contain an earlier
+timestamp. Validation always checks current filesystem metadata before reusing
+the content identity; this baseline is separate from pass memoization and does
+not mutate retained graphs. Hosts can pass the complete current owner-closure
+union.
 
-Every resolver context owns exactly one validated compiler-I/O strategy in
-`context.io`. `options.io` supplies a table or userdata whose colon methods are
-`cwd`, `realpath`, `stat`, `lstat`, `readable`, `read_file`, `write_file`,
-`list`, `mkdir`, `unlink`, `rmdir`, `rename`, `tmpname`, `run`, and `yield`.
-Omitting it constructs the canonical synchronous Lua implementation from
-`titan-compiler.io`, so ordinary compiler callers retain blocking behavior.
-Missing or non-callable methods are rejected while the context is created.
-
-`options.embedded_interface_provider`, when present, has the closed schema
-`{ provider_file = <absolute path>, entries = { [module] = { abi, types } },
-target_profile = <optional exported profile data> }`.
-The provider and every entry must be plain tables with no extra fields; logical
-names, ABI strings, serialized `Type.Module` graphs, and native symbol-prefix
-uniqueness are validated eagerly. The driver copies the inventory and retains
-no caller-owned entry table. A successfully validated raw provider table is a
-trusted immutable snapshot: reusing the same table identity uses a weak-keyed
-validated cache, so later mutation of that raw table is unsupported and is not
-observed. Every resolver context still receives a distinct provider object and
-cloned decoded type graphs; resolver-local rebinding or annotation therefore
-cannot leak across contexts. A distinct raw table identity is validated and
-decoded independently.
+### Observability callbacks
 
 `options.source_process_trace` is an optional best-effort observability
 callback with the scalar signature
@@ -607,6 +823,16 @@ milliseconds in its normalized `run` result; process CPU is never substituted.
 Both structured callbacks are protected and may not change compilation when
 they fail.
 
+### Compiler I/O strategy
+
+Every resolver context owns exactly one validated compiler-I/O strategy in
+`context.io`. `options.io` supplies a table or userdata whose colon methods are
+`cwd`, `realpath`, `stat`, `lstat`, `readable`, `read_file`, `write_file`,
+`list`, `mkdir`, `unlink`, `rmdir`, `rename`, `tmpname`, `run`, and `yield`.
+Omitting it constructs the canonical synchronous Lua implementation from
+`titan-compiler/io.lua`, so ordinary compiler callers retain blocking behavior.
+Missing or non-callable methods are rejected while the context is created.
+
 The following is the complete normative language-server strategy contract. Signatures use Lua multiple-return notation. Every table that crosses
 this boundary is an ordinary Lua table: implementations must not expose
 backend-specific records, arrays, error objects, or task handles.
@@ -627,7 +853,7 @@ backend-specific records, arrays, error objects, or task handles.
 | `rename(from, to)` | `true, nil` or `nil, message`. Renames within the filesystem using the platform's replacement semantics. |
 | `tmpname()` | `path, nil` or `nil, message`. On success `path` names an existing, process-unique, empty regular file owned by the caller. Ownership transfers only with the successful return; cancellation before that return must not leak the reservation. |
 | `run(argv, options?)` | One normalized result table. `argv` is a nonempty dense array of strings, not a shell-fragment interface. `LANG` and `LC_ALL` are fixed to `C`. `options.stderr_to_stdout` defaults to `true`; when false, only stdout is captured and stderr remains on the compiler process's stderr. |
-| `yield()` | No arguments or results. This is the cooperative post-module checkpoint; the synchronous implementation is a no-op. |
+| `yield(module_name)` | No results. The cooperative post-module checkpoint receives the name of the module just checked; the synchronous implementation ignores it. |
 
 `stat` and `lstat` metadata has the Lua-facing fields `kind`, `size`,
 `mode`, `modified_seconds`, and `modified_nanoseconds`, plus optional `device`
@@ -673,54 +899,16 @@ ownership rules remains rooted until it finishes. Callers must therefore close
 or discard the resolver attempt after cancellation and must not reuse its
 partially populated compiler state.
 
-Checkout/installation discovery and platform initialization do not perform
-filesystem or subprocess work while `driver.lua` is loaded. Context creation
-resolves the compiler layout through `context.io`; `configure_foreign_c(context)`
-later obtains `uname` and the target profile through the same strategy.
-`titanc` explicitly creates the default synchronous context before reading
-layout-dependent settings and configuring foreign C.
+### Analysis loader options
 
-`context.checked_source_modules` is an ordered dense list of modules actually
-parsed and checked by that context. Cached source entries and serialized
-interfaces are not appended. After each checked module is completely published
-in `driver.imported` and `static_deps`, the loader appends its name and invokes
-`context.io:yield()` with no arguments. A Titan-backed strategy may suspend its
-own Task there; the synchronous strategy's method is a no-op.
-
-### `driver.defaultloader(static_deps, options)`
-
-`defaultloader` uses three pieces of process state:
-
-* **`driver.imported`** — a process-global cache keyed by logical module name.
-  Source entries carry `{ kind = "source", ast, type, filename,
-  source_files, program_output, deps, c_header_dependencies, source_manifest }`;
-  `source_manifest` is absent only when its serialization reports an error.
-  DSO entries
-  carry `{ kind = "dynamic", type, filename, relative }`; archive entries
-  carry `{ kind = "static", type, filename, static_archive,
-  static_provider }`; trusted host-inventory entries carry
-  `{ kind = "embedded", type, filename, embedded_provider }`. Tests and
-  long-lived tools reset this cache together with `types.registry`.
-* **`CIRCULAR_MARK`** — a unique sentinel stored before recursively checking a
-  source module; encountering it reports `"circular reference to module"`.
-* **the resolver context** — invocation-wide compiled-format preference,
-  archive-scan cache, the optional copied embedded inventory, ordinary
-  provenance, selected static providers,
-  contextual type-only owner recovery and its metadata-only physical
-  resolutions, native-binding constraints, and the finalized direct-name
-  sets.
-
-The analysis-facing options are narrow and caller-owned:
+These loader options serve semantic clients; ordinary `titanc` compilation
+leaves them unset. `cached_binary_interfaces` belongs to closed completion
+analysis and is described in [Completion](completion.md).
 
 * `known_source_modules` is a validated `{[modname] = true}` identity set. It
   tells source/provider overlap planning which logical names belong to source
   without making any module dirty or retaining its AST. One overlap rejects the
   complete embedded inventory for that resolver context.
-* `embedded_interface_provider` is accepted by `new_resolver_context`, not as
-  mutable loader state. It is a semantic-client input with the closed
-  schema and optional build target profile above; after its first successful
-  validation, the host must treat that
-  raw table identity as immutable. Ordinary compiler callers omit it.
 * `analysis_only = true` opts a resolver context into declaration-manifest
   reuse and suppresses generated source foreign-function `.titan.h` bodies.
   Fresh dirty modules are parsed and fully checked, retaining their source-level
@@ -752,77 +940,8 @@ The analysis-facing options are narrow and caller-owned:
   when an earlier ordinary import in the same analysis already decoded that
   public view; the external AST is not added to the caller's retained project
   cache.
-* `io` is accepted by `new_resolver_context`, not as a second loader-owned
-  callback. `after_source_check` is rejected; cooperative suspension uses the
-  context checkpoint and checked-module list described above. Recursive parents
-  may still be mid-check, so abandoning the Task requires closing the resolver
-  and discarding the attempt's `driver.imported`/`types.registry` state.
-* `extra_ffi_include_dirs` is normalized while creating the resolver context and
-  appended to a fresh C-probe toolchain descriptor. It never changes the
-  process-global foreign-C configuration used by other compiler clients.
 
-Before cache reuse, the loader reconciles the process-global cache with
-the resolver's embedded inventory. It removes embedded entries owned by a
-different resolver/provider object; when the current closed inventory remains
-active, it evicts cached DSO/archive entries for every carried logical name and
-clears every carried name from the supplied `static_deps` map, including names
-whose cached import entry was already pruned. Cached source provenance instead
-rejects the complete embedded inventory and remains selected.
-
-The closure proceeds in this order:
-
-1. A contextual nominal-owner request first follows the exposing compiled
-   interface's producer choice. A carried static or embedded owner is recovered
-   from that same inventory; a DSO-carried owner is probed from that same DSO;
-   otherwise a compiled lookup may recover type information without committing
-   ordinary resolver state or selecting an archive. Each successful recovery
-   also adds one metadata-only `context.contextual_resolutions` entry with
-   logical owner, exposer, compiled kind, physical provider file, and whether
-   ordinary lookup supplied a separate provider. It does not add the owner to
-   `driver.imported` or select it for linking.
-2. The loader derives `source_required` for command-line roots and explicit
-   `.titan` requests, and `source_preferred` from that requirement, test mode's
-   invocation-wide `source_first`, or a source override. A preferred source may
-   replace a compiled cache entry; a required-source clean miss is terminal,
-   while `source_first` retains the compiled cache/fallback on a clean miss.
-3. A remaining cache hit returns its type and records the dependency. Otherwise
-   a preferred lookup tries folder/flat source first. An ordinary lookup first
-   consults a non-overlapping embedded inventory, then runs one complete
-   compiled pass per format on `TITAN_BIN_PATH`—`.so` then `.a` by default,
-   reversed by `prefer_static`—before its final source fallback on
-   `TITAN_SOURCE_PATH`. Root-major, shallow-to-exact order and occupied relative-
-   path shadowing are independent within each filesystem format.
-4. A source hit is a tagged flat/folder descriptor. Every listed file is read
-   and parsed independently with its real filename. The main initializer is
-   saved, contributor roots are appended in descriptor order, contributor
-   initializers are rejected, and the saved initializer is appended once.
-   The dense AST is recursively checked exactly once and cached with direct
-   source/static dependencies; the canonical main becomes `filename` and the
-   descriptor supplies `program_output`.
-5. A DSO hit is cached with dynamic provenance and the selected transient
-   relative provider path. A static hit is cached with its one claimed logical
-   interface and physical provider; sibling keys remain physical membership,
-   not ordinary resolver results.
-
-The folder descriptor is temporary loader input, not AST metadata. One cache
-entry, circularity sentinel, module type, direct-dependency set, and
-initializer remain keyed by `modname`. Node locations are the only retained
-per-contributor information. The checker receives the main filename as its
-source directory; because contributors are immediate siblings, quoted foreign
-headers from any file resolve under that same directory.
-
-The loader attempts source-interface serialization even when checking reports
-errors: a body error need not prevent a valid declaration manifest. If
-serialization fails, the checked entry is still published with its AST and
-module type, while `source_manifest` remains absent. The loader returns
-`true, module_type, errors, source_info`, adding a diagnostic at the canonical
-main's `1:1` location that names the module and serializer failure. Ordinary
-imports propagate this diagnostic with the existing checker errors, and CLI
-compilation stops before code generation. Semantic clients can publish these
-diagnostics but must exclude the failed module from reusable interface and
-project caches; absence of a source manifest is not an analyzer failure. A
-fresh analysis resets `driver.imported` and `types.registry` as usual and can
-retry serialization after the underlying problem is fixed.
+### C-header dependency closures
 
 Every successfully checked source entry also owns an ordered
 `c_header_dependencies` array. A `file` item names a header whose exact parsed
@@ -850,63 +969,6 @@ Exact physical author headers and search candidates still populate the observed
 closure. Saved source identity and regenerated descriptors cover generated
 inputs. The C probe baseline includes the same module `.ffi.h` and supplies the
 authoritative compilation check.
-
-For an embedded hit, the already-decoded entry carries `kind = "embedded"` and
-the trusted absolute `provider_file`; no filesystem or dynamic-loader operation
-occurs. For a DSO hit, `find_dynamic_interface` uses
-`titan._loadlib(path, symbol)` to map each existing candidate with
-`RTLD_LAZY | RTLD_LOCAL`, probe the requested callable pair, and validate a
-claim. For an archive hit, `find_static_interface` parses the complete regular
-archive and its ELF/Mach-O metadata sections in-process, validates every
-member and interface, and returns only the requested key. Both paths evaluate
-the serialized type expression in the `types` constructor environment and
-require a canonical `Type.Module` for the logical name. See [the complete
-claim rules](multi-module-libraries.md#claim-and-terminal-error-states).
-
-The shared closed validator accepts Interfaces only as direct
-`Module.type_members`. It checks the owner/key, public locality, canonical
-nonempty ordered Method projection, parameter-name metadata, and every
-value-facing signature component before the checker registers those
-descriptors. DSO and archive paths therefore recover the same nominal
-Interface graph and reject malformed wrappers before any native symbol is
-trusted. Embedded entries pass that same decoder during context creation. See
-[Interfaces](interfaces.md#separate-compilation-and-schema-validation).
-
-Each source entry's `deps` stores direct dependencies that are already native
-inputs—source or selected static—regardless of which contributor declared
-the import. The loader's `static_deps` argument retains this compatibility
-view for embedding callers and test helpers. Production `titanc` instead
-finalizes the shared resolver context after all roots are checked, deriving
-`native_static_names` as every invocation source name plus every logical key
-physically carried by the deduplicated selected archives. It passes that
-complete set to every `coder.generate` call and passes the selected archives
-once to native linking.
-
-Selected embedded entries and their carried contextual owners are replayed at
-finalization like a static provider's interface closure, but remain outside
-`static_deps`, `selected_static_providers`, `native_static_names`, native
-bindings, and linker arguments. A source identity discovered after an embedded
-entry was selected rejects the whole inventory and re-resolves every earlier
-selection through ordinary disk providers before source checking continues.
-
-Finalization also filters `context.contextual_resolutions` against the final
-compiled exposer selection. The exposer's physical file must still match the
-one observed during checking. A carried owner must share that provider; an
-ordinary-fallback owner may retain its separately resolved provider. This keeps
-simple nominal aliases whose canonical registry nodes do not replay recovery,
-while dropping provisional metadata made obsolete by a later source-root or
-provider selection. Long-lived semantic clients read the filtered table only
-after successful finalization and use it for cache graph edges, not native link
-inputs.
-
-`coder.generate` therefore has three binding paths: direct `extern` symbols
-for source/static names, handle-scoped `loadlib`/`loadsym` for selected DSOs,
-and process-global symbol recovery for producer-dynamic transitive record
-owners. Generated `_types` functions persist none of this provenance or the
-transient DSO path ([static vs dynamic
-wiring](codegen-overview.md)). Folder layout does not add a loader protocol;
-the relevant filesystem options are `source_roots` and the shared resolver
-`context`.
 
 ### `driver.restat_c_header_dependencies(dependencies, options)`
 
@@ -964,84 +1026,78 @@ reports `{ kind = "embedded", provider_file = <host executable> }` without
 opening that path. Existing two-argument callers therefore retain the
 synchronous default.
 
-### `driver.tableloader(modtable, imported, deps, options)`
-
-The in-memory variant used by the spec suite: module sources come from
-the `modtable` table instead of the filesystem (filename is faked as
-`"./" .. modname .. ".titan"`), and the caller supplies the `imported`
-cache (and optionally the `deps` set) explicitly. After a successful check, it
-retains both the trusted raw `source_type` and a public `type` round-tripped
-through `types.serialize` and `load`, exactly like the `.so` path. Ordinary
-calls receive the public projection by default. `options.interface == "source"`
-or an explicit `source-import` request receives the raw source view plus trusted
-source provenance; only the request can grant an import AST local visibility.
-An explicit request may replace a cached compiled entry when `modtable` has the
-source and fails when it does not. If that compiled interface was already
-returned in the same resolver, its public serialization must match the new
-source projection. The round trip already exposes constructor-schema drift such
-as `flexrettype`; it does not by itself authorize loading that schema under the
-current compiled-module ABI marker.
-It deliberately remains a flat one-string-per-module loader. Source folders,
-privacy blocks, and contributor enumeration belong only to
-`defaultloader`; neither tests nor embeddings acquire a synthetic source-unit
-AST shape.
-
 ## Compiling one module: `driver.compile`
 
-`driver.compile(modname, ast, sourcef, static_deps, verbose, options)`
-turns one checked logical-module AST into an object file. For a folder module,
-`sourcef` is its canonical main and `ast` is the combined dense list; there is
-still one call. `options.foreign_header_plan` carries the already validated
-invocation-wide source-header plan when the CLI owns the compilation:
+`driver.compile(modname, ast, sourcef, static_deps, verbose, options,
+source_entry)` turns one checked logical-module AST into an object file. For a
+folder module, `sourcef` is its canonical main and `ast` is the combined dense
+list; there is still one call. `options` carries `nominal_layouts`,
+`pretty_print`, `coverage`, `coverage_backend`, and per-request
+`extra_compile_flags`; `source_entry` receives coverage metadata.
 
 1. **Select the runtime SDK.** Installed mode is read-only: it uses headers
    from `<root>/include` and the already-built
    `<root>/lib/titan/0.6/libtitan.a`.
    Checkout developer mode lazily rebuilds and later links the corresponding
-   local archive, so edits to runtime support can be exercised without
-   reinstalling:
+   local archive (`check_runtime` in `driver.lua`), so edits to runtime support
+   can be exercised without reinstalling:
 
    ```sh
-   make --no-print-directory titan-runtime/libtitan.a
+   make --no-print-directory TITAN_RUNTIME_LUA_SOURCE_PATH=<lua source> \
+     titan-runtime/libtitan.a
    ```
 
-   Both modes link `libtitan.a`; the driver never substitutes a direct
-   `titan.o` link. The checkout freshness check covers `titan.c`, the reduced
-   `minicoro.c`, and their runtime headers. Source callback edits rebuild
-   their generated module objects instead.
+   `MAKE` selects the make command, and `TITAN_RUNTIME_PREBUILT=1` skips this
+   rebuild. Both modes link `libtitan.a`; the driver never substitutes a direct
+   `titan.o` link, and `driver.runtime_archive_members_are_exact` requires the
+   archive to contain exactly `titan.o` and `minicoro.o`. The checkout
+   freshness check covers `titan.c`, the reduced `minicoro.c`, and their
+   runtime headers. Source callback edits rebuild their generated module
+   objects instead.
 2. **Prepare generated C headers.** `titanc` plans each source module's
    `.ffi.h` and, when it defines foreign functions, `.titan.h`. It rewrites
    checking-tree dependency edges to final absolute paths and validates every
    destination before writing any. Each header is written to a sibling stage,
    normalized and optionally formatted, then renamed into place before the
-   first object is compiled. `driver.compile` consumes the supplied plan; direct
-   programmatic callers retain the one-module planning fallback. Folder headers
+   first object is compiled (`driver.plan_foreign_headers` and
+   `driver.write_foreign_header_plans`). `driver.compile` falls back to
+   one-module planning unless the AST is already marked prepared, so direct
+   programmatic callers still work. Folder headers
    live beside the canonical main, with no contributor-specific outputs. See
    [Foreign-function implementation](foreign-functions.md#generated-titanh-planning).
-3. `coder.generate(modname, ast, static_deps, abi,
-   emit_line_directives)` produces one raw C translation unit as a string plus
-   its direct-native-reference set. The qualified `modname` controls the native
-   prefix, registry identity, `_init`, `_abi`, `_types`, and `luaopen_*`
-   symbols consistently.
+3. `coder.generate(modname, ast, static_deps, abi, emit_line_directives,
+   options)` produces one raw C translation unit as a string plus its
+   direct-native-reference set, native bindings, and encoded nominal layouts.
+   The qualified `modname` controls the native prefix, registry identity,
+   `_init`, `_abi`, `_types`, and `luaopen_*` symbols consistently.
 4. The raw translation unit is written **next to the flat source or folder
    main** as `sourcef:gsub("[.]titan$", "") .. ".c"` (if `sourcef` is not
-   given it defaults to the dots-to-slashes path), then normalized in place.
-   `--pretty-print` additionally formats it before compilation. Formatting
-   failure aborts before its object is compiled but retains the raw or partially
-   formatted `.c` as a diagnostic artifact. Contributors never
+   given it defaults to the dots-to-slashes path), or, with `titanc --output`,
+   at the matching path below the output root (`driver.relocate_source_output`;
+   see [Output directory](output-directory.md)). It is then normalized in
+   place. `--pretty-print` additionally formats it before compilation.
+   Formatting failure aborts before its object is compiled but retains the raw
+   or partially formatted `.c` as a diagnostic artifact. Contributors never
    receive generated C or object files.
 5. The object is compiled with the parsed `driver.CC`, then
-   `TITAN_EXTRA_CPPFLAGS`, Titan's fixed `driver.CFLAGS`, and
-   `TITAN_EXTRA_CFLAGS`, in that order. A direct `driver.compile` call runs this
-   command immediately. The CLI's default one-job path preserves that same
-   generate/format/compile sequence for each logical module. With a larger
-   bound, it prepares every source module through step 4 in logical-name order,
-   then `driver.compile_modules` runs only these independent object commands
-   concurrently, bounded by `--jobs`/`TITAN_JOBS`:
+   `TITAN_EXTRA_CPPFLAGS`, Titan's fixed `driver.CFLAGS`,
+   `TITAN_EXTRA_CFLAGS`, the `-I` include roots, and per-request extra flags,
+   in that order (`driver.generated_compile_prefix`). When the resulting
+   command enables LTO and names no seed, the driver appends
+   `-frandom-seed=<modname>` so archive bytes stay reproducible. The output
+   goes to a sibling temporary that is renamed into place only after success.
+   A direct `driver.compile` call runs this command immediately. The CLI's
+   default one-job path preserves that same generate/format/compile sequence
+   for each logical module. With a larger bound, it prepares every source
+   module through step 4 in logical-name order, then `driver.compile_modules`
+   runs only these independent object commands concurrently, bounded by
+   `--jobs`/`TITAN_JOBS`:
 
    ```sh
-   cc --std=c99 -O3 -flto=auto -ffat-lto-objects -Wall -fPIC -g1 -c foo/bar.c \
-      -I <root>/include -I <root>/src/lua-5.5.1 -o foo/bar.o
+   cc --std=c99 -O3 -Wall -Wno-unused-but-set-variable -Wno-unused-function \
+      -fPIC -g1 -flto=auto -ffat-lto-objects \
+      -I <root>/include -I <root>/src/lua-5.5.1 \
+      -frandom-seed=foo.bar -c foo/bar.c -o <sibling temporary>
    ```
 
    These command examples show Linux defaults. Both GCC and Clang use
@@ -1058,8 +1114,11 @@ invocation-wide source-header plan when the CLI owns the compilation:
    The profiling option keeps the ordinary function records that Clang's line
    tables alone can omit. A lazy, header-free predefined-macro probe identifies
    the configured compiler command, with `__clang__` taking precedence over
-   `__GNUC__`. Other compilers conservatively retain `-g`. Explicit `CFLAGS`
-   remain caller-owned. Validation uses full `-g` for all compiler families.
+   `__GNUC__` (`select_platform_defaults`). Other compilers conservatively
+   retain `-g`. Explicit `CFLAGS` remain caller-owned. The validation build
+   profile (`TITAN_BUILD_PROFILE=validation`) uses `-O0 -fno-lto -g` for all
+   compiler families; any value other than `production` or `validation` is a
+   toolchain configuration error.
    A later `-g` in `TITAN_EXTRA_CFLAGS` restores debugger information; use the
    same override in `TITAN_EXTRA_LDFLAGS` for LTO links.
    Native test functions additionally receive
@@ -1149,10 +1208,12 @@ Compiled C probes use only SHA-256 of their complete unpreprocessed source as
 the cache key. Include directives count as literal text; forced-header
 contents, toolchain options, target profiles, and header search state do not.
 Memory and disk reuse acceptance and rejection under that same key. Format 2
-stores one bounded result with diagnostics and optional typed enum selection at
-`<prefix>/var/cache/titan-probes/2/<digest>.result`. Clear that directory or set
-`TITAN_PROBE_CACHE_DISABLE=1` to bypass persistent reuse if external changes make
-results stale. Generated C is compiled normally. See
+(`titan-compiler/cprobe_cache.lua` `VERSION`) stores one bounded result with
+diagnostics and optional typed enum selection at
+`<prefix>/var/cache/titan-probes/2/<digest>.result`, where `<prefix>` is
+`TITAN_PREFIX` when set and otherwise the installation root. Clear that
+directory or set `TITAN_PROBE_CACHE_DISABLE=1` to bypass persistent reuse if
+external changes make results stale. Generated C is compiled normally. See
 [compiled probe caching](c-ffi-expressions.md#analysis-local-and-persistent-semantic-results)
 for record and failure handling.
 
@@ -1180,12 +1241,13 @@ payload byte-for-byte.
 ### `driver.compile_library_output`
 
 `driver.compile_library_output(soname, libnames, link, verbose,
-extra_objects, static_archives, ordered_payload, install_name)` links an
-explicitly named DSO from the complete logical source-module object union.
-The final argument is an optional Darwin install name:
+extra_objects, static_archives, ordered_payload, install_name, module_names)`
+links an explicitly named DSO from the complete logical source-module object
+union. `install_name` is the optional Darwin install name; `module_names` is
+the logical inventory that Windows requires for its export file:
 
 ```sh
-cc --std=c99 -O3 -flto=auto -ffat-lto-objects -Wall -fPIC -g1 -shared \
+cc --std=c99 -O3 ... -fPIC -g1 -flto=auto -ffat-lto-objects -shared \
    -o app.so app_model.o app_view.o dep.o ... \
    [force-load selected-provider.a ...] \
    [ordered extra.o ... force-load native-payload.a ...] \
@@ -1208,27 +1270,32 @@ payload members without copying those common final libraries.
 `titanc` derives the public provider from the requested roots, links the DSO
 under the public basename in a sibling staging directory, builds the staged
 regular archive, and performs embedded/DSO/archive-backed protocol validation.
-On Darwin the shared flag is `-shared -undefined dynamic_lookup`; `dsymutil`
-must succeed before the bundle is valid, and preserving the DSO basename keeps
-the dSYM's inner name correct. `titanc` also passes the eventual relative
-public provider path as `install_name`; the driver forwards it as the
-`LC_ID_DYLIB` value instead of allowing Darwin's linker to derive that identity
+`driver.shared_library_flags` supplies `-shared`, plus `-undefined
+dynamic_lookup` on Darwin and `-Wl,--exclude-all-symbols` on Windows. Windows
+links also pass `-Xlinker --no-insert-timestamp` and a generated `.def` export
+file (`driver.windows_provider_exports`). On Darwin `dsymutil` must succeed
+before the bundle is valid, and preserving the DSO basename keeps the dSYM's
+inner name correct. `titanc` also passes the eventual relative public provider
+path as `install_name`; the driver forwards it as the `LC_ID_DYLIB` value
+(`-install_name`) instead of allowing Darwin's linker to derive that identity
 from the unique staging path. That public-provider link also uses Darwin's
-reproducible mode so its debug map does not encode volatile input-object
+`-reproducible` mode so its debug map does not encode volatile input-object
 properties. For this staged-provider case, the driver runs `dsymutil` from the
 unique stage directory with only the stable DSO leaf name; this keeps the
 dSYM's relocation-map `binary-path` metadata independent of the transaction's
 random directory. An unchanged relink can therefore retain byte-identical DSO,
-UUID, and dSYM contents. `publish_provider_bundle` then commits generated shims
-and dSYM, the archive, and finally the DSO as the dynamic-path commit point;
-caught failures restore the prior owned set. After building and validating the
-staged artifacts, the equivalence check described in [Static compiled
-modules](static-compiled-modules.md#publication-and-installation) discards an
-unchanged staged bundle and preserves public mtimes. The older `publish_library`
-helper remains DSO-only for programmatic/test callers and is not the `titanc`
-no-main path.
-See [Validated publication and generated
+UUID, and dSYM contents.
+
+Validation, the unchanged-bundle equivalence check, and the
+`publish_provider_bundle` commit order (shims and dSYM, archive, then the DSO
+as the commit point, with caught failures restoring the prior owned set) are
+owned by [Three-way validation](static-compiled-modules.md#three-way-validation)
+and [Publication and installation](static-compiled-modules.md#publication-and-installation);
+generated shims are covered in [Validated publication and generated
 shims](multi-module-libraries.md#validated-publication-and-generated-shims).
+Provider-validation child Lua processes preserve the compiler's
+`package.cpath`, so they can load the private bootstrap support image before a
+canonical provider exists.
 
 Ordinary UV clients import the [public compiled module](../language/standard-library-uv.md)
 and do not foreign-import `uv.h`. The packaging loader fixture in
@@ -1254,26 +1321,28 @@ preserves the original `modname:gsub("[.]", "/")` default for programmatic
 callers and `tableloader`. The trailing `static_archives` list contains
 selected self-describing providers. The optional entrypoint path and display
 name let test mode keep synthetic native artifacts beside the selected program
-without changing its logical main identity. The optional final table currently
-carries `no_uv_bootstrap`; omitting it preserves the ordinary hook-selection
-behavior for programmatic callers. Filesystem source descriptors
-cache:
+without changing its logical main identity. The optional final table carries
+`titanc`'s `no_uv_bootstrap`, `pretty_print`, `launcher_name`,
+`output_module`, `output_root`, `coverage_runtime`, `module_names`,
+`archive_entries`, `archive_names`, and `validate_titan_support`; omitting it
+preserves the ordinary hook-selection behavior for programmatic callers.
+Filesystem source descriptors cache:
 
 | Form for `foo.bar` | `program_output` |
 | --- | --- |
 | flat | `foo/bar` |
 | folder | `foo/bar__main` |
 
-It first writes `<mod>__entrypoint.c` from `entrypoint_template` — a small
-srlua-derived C `main` — compiles it with the normal extra compile flags,
-and then links its object with the same object set as a library:
+It first writes `<mod>__entrypoint.c` from `entrypoint_template` (rendered by
+`driver.entrypoint_contents`) — a small srlua-derived C `main` — compiles it
+with the normal extra compile flags, and then links its object with the same
+object set as a library:
 
 ```sh
-cc [TITAN_EXTRA_CPPFLAGS...] --std=c99 -O3 -flto=auto -ffat-lto-objects -Wall -fPIC -g1 \
-   [TITAN_EXTRA_CFLAGS...] \
-   -c foo/bar__entrypoint.c -I <root>/include -I <root>/src/lua-5.5.1 \
-   -o foo/bar__entrypoint.o
-cc --std=c99 -O3 -flto=auto -ffat-lto-objects -Wall -fPIC -g1 -o foo/bar \
+cc [TITAN_EXTRA_CPPFLAGS...] --std=c99 -O3 ... -fPIC -g1 -flto=auto -ffat-lto-objects \
+   [TITAN_EXTRA_CFLAGS...] -I <root>/include -I <root>/src/lua-5.5.1 \
+   -c foo/bar__entrypoint.c -o foo/bar__entrypoint.o
+cc --std=c99 -O3 ... -fPIC -g1 -flto=auto -ffat-lto-objects -o foo/bar \
    foo/bar__entrypoint.o foo/bar.o ... \
    [selected-provider.a ...] [extra.o ...] \
    <root>/lib/titan/0.6/libtitan.a [selected-provider.a ...] \
@@ -1287,9 +1356,12 @@ link output after `-o` to `foo/bar__main`. On ELF, selected providers first
 receive an ordinary grouped search, then `-X` retains its established
 standalone order, and a second group containing runtime `libtitan.a` plus the
 providers resolves references in either direction; the remaining
-runtime/platform/final inputs stay outside. Darwin's linker performs its
-continual archive search without those groups. No selected provider or `-X`
-archive is force-loaded into an executable.
+runtime/platform/final inputs stay outside (`driver.standalone_native_link_inputs`).
+Darwin's linker performs its continual archive search without those groups. No
+selected provider or `-X` archive is force-loaded into an executable. The SDK
+itself never supplies libuv: an executable carries the bundled libuv only when
+it selects the standard `titan.a`, whose private payload includes it, and
+extension DSOs leave their `uv_*` calls unresolved for the loaded provider.
 
 The entrypoint C/object path,
 `$MODNAME`, `$LUAOPEN_FN`, `$PROGNAME`, registry identity, and compiled module
@@ -1305,14 +1377,10 @@ The generated entrypoint, walked through (template substitutions:
 error alerts):
 
 * **`main`** creates a fresh `lua_State`, opens the standard libraries, and
-  calls `titan_init_paths`. That parses the inherited `package.cpath` for the
-  first `/lib/titan/0.6/?.so` template, falling back to the ordinary
-  `/lib/lua/5.5/?.so` template, initializes the root and Titan module
-  path in the registry, and
-  ensures `<root>/lib/titan/0.6/?.so` is in `package.cpath`; the configured
-  Titan-owned Lua already places it before the `lib/lua` templates. It then
-  registers the main module for
-  `require` *without* loading it:
+  runs `titan_init_standalone_paths`: the embedded
+  [startup path discovery](#standalone-startup-path-discovery) chunk, then
+  `titan_init_paths` (see [the dynamic loader](#titanc-the-dynamic-loader)). It
+  then registers the main module for `require` *without* loading it:
 
   ```c
   lua_getglobal(L, "package");
@@ -1323,12 +1391,13 @@ error alerts):
 
   The entrypoint registers no dependency itself. Generated module code takes
   over during initialization: after a module's `_init` completes successfully,
-  it stores its own `luaopen_<mangled>` function under its logical name in
-  `registry[LUA_PRELOAD_TABLE]`, the table exposed as `package.preload`.
-  Requiring the main module recursively initializes its imports, so that
-  successfully initialized closure publishes itself. A private static import
-  follows the same path. An unused or otherwise uninitialized linked module
-  publishes nothing.
+  its generated `<prefix>register_preload` helper calls `titan_module_preload`,
+  which stores the module's `luaopen_<mangled>` function under its logical
+  name in `registry[LUA_PRELOAD_TABLE]`, the table exposed as
+  `package.preload`. Requiring the main module recursively initializes its
+  imports, so that successfully initialized closure publishes itself. A
+  private static import follows the same path. An unused or otherwise
+  uninitialized linked module publishes nothing.
 
   It then pushes Titan's runtime `errorhandler` and runs `pmain` under
   `lua_pcall(L, 2, 1, -4)` with `argc` and `argv` as arguments; a
@@ -1339,16 +1408,20 @@ error alerts):
 * **`pmain`** first publishes the original `argc` integer and `argv` pointer
   under `TITAN_MAIN_ARGC_KEY` and `TITAN_MAIN_ARGV_KEY`, then calls global
   `require("$MODNAME")` and retrieves and retains that module's `main`
-  callable. Async initialization calls the public idempotent
-  `uv.setup_process_args()` helper, which uses only those original entrypoint
-  values and replaces the private `argv` slot with the pointer returned by
-  libuv. A low-level UV client can call the same helper explicitly; an ordinary
-  Lua host without the entrypoint registry contract receives false. After `require`, `pmain` rereads
-  that pointer and builds an Array with capacity `argc - 1`. It copies
-  `argv[i]` to logical index `i` only for `i = 1 .. argc-1`; the executable
-  name is omitted. A Titan `main(args: {string}): integer` therefore sees
-  `args[0] == nil`, `args[1]` as the first real argument, and
-  `#args == argc - 1`. Requiring the main module first
+  callable. A transitive `titan.async` initialization calls the public
+  idempotent `uv.setup_process_args()` helper, which passes only those
+  original entrypoint values to `uv_setup_args` and replaces the private
+  `argv` slot with the pointer returned by libuv. Importing `titan.uv` alone
+  neither calls it nor installs a Task bootstrap; a low-level UV client can
+  call the same helper explicitly, and an ordinary Lua host without the
+  entrypoint registry contract receives false. After `require`, `pmain`
+  rereads that pointer, creates the string-element Array writer closure
+  (`titan_main_string_array_writer`), and builds an Array with that writer and
+  capacity `argc - 1`. It copies `argv[i]` to logical index `i` only for
+  `i = 1 .. argc-1`; the executable name is omitted. A Titan
+  `main(args: {string}): integer` therefore sees `args[0] == nil`, `args[1]`
+  as the first real argument, and `#args == argc - 1`. Requiring the main
+  module first
   initializes all imports; an async standard module may install a
   callable under `registry[TITAN_MAIN_BOOTSTRAP_KEY]` during that work.
   The rendered `$SKIP_MAIN_BOOTSTRAP` constant is true only for
@@ -1365,11 +1438,11 @@ error alerts):
   `lua.c`'s string/number, `__tostring`, or typed-placeholder policy and
   prints a Lua-style report to stderr: `<progname>: <error message>`,
   `stack traceback:`, then the raw trace with a tab prepended to each
-  frame line through the Titan `main` frame. The report strips the
-  historical synthetic-bootstrap chunk prefix if present and omits
+  frame line through the Titan `main` frame. The report removes the synthetic
+  bootstrap chunk prefix from the headline (`strip_bootstrap_prefix`) and omits
   bootstrap Lua/C frames after `main`. If no Titan trace was captured, it reports
   only the converted error message. Either way the process exits
-  non-zero; see [the runtime library](#titanc-the-dynamic-loader).
+  non-zero; see [Runtime trace model](error-handling.md#runtime-trace-model).
 
 Mechanically, then, a standalone Titan program is an embedded Lua interpreter
 whose entrypoint preloads only the compiled main module. `pmain`'s require of
@@ -1382,19 +1455,27 @@ policy.
 ## The `titanc` command line
 
 ```sh
-./titanc [--print-ast] [--pretty-print] [-v|--verbose] \
-  [-j|--jobs <jobs>] [-u|--lua <luasrc>] [--static] [--test] \
-  [--source-first] [--incremental] [-c|--compile-only] \
-  [--no-uv-bootstrap] [--no-line-directives] \
-  [-t|--tree <srcroot>] [-l|--link lib1,lib2] \
-  [-X|--extra-object obj.o...] <module>...
+./titanc [--print-root] [--print-ast] [--pretty-print] [-v|--verbose] \
+  [-j|--jobs <jobs>] [--launcher-name <name>] [--static] [--source-first] \
+  [--incremental] [-c|--compile-only] [--test] \
+  [--coverage [--coverage-backend <backend>] [--coverage-module <glob>]... \
+    [--coverage-root <dir>] [--coverage-gcov <cmd>] \
+    [--coverage-format <format>]... [--coverage-output <dir>] \
+    [--coverage-gcovr <cmd>]] \
+  [--no-uv-bootstrap] [--no-line-directives] [-u|--lua <luasrc>] \
+  [-t|--tree <srcroot>] [-o|--output <dir>] [-l|--link lib1,lib2] \
+  [-X|--extra-object <payload>...] <module>...
 ```
 
 `titanc` (a short `argparse` script at the repository root) takes one
-or more dot-separated module names. `--tree` overrides
+or more dot-separated module names; the [flag table](#titanc-flags) lists every
+option. `--print-root` instead prints the installation root and exits (see
+[above](#module-names-and-the-search-paths)). `--tree` overrides
 `driver.TITAN_SOURCE_PATH`. In source-checkout mode, `--lua` overrides
 `driver.LUA_SOURCE_PATH`; installed mode rejects it so the installed headers,
-`liblua.a`, and `libtitan.a` remain a matched SDK. `--pretty-print` opts every
+`liblua.a`, and `libtitan.a` remain a matched SDK. `-o`/`--output` routes
+generated files below one folder while preserving the source hierarchy; see
+[Output directory](output-directory.md). `--pretty-print` opts every
 emitted C/header boundary into the fixed `clang-format` pass; default builds do
 not invoke it. `-v` prints every native-tool command line plus any opted-in
 formatter command, `--print-ast` dumps each module's AST after checking, and
@@ -1403,46 +1484,60 @@ value overrides `TITAN_JOBS`; an unset environment defaults to one process.
 Neither setting parallelizes checking, code generation, formatting, provider
 validation, archiving, or linking. `--static` swaps the compiled-provider passes
 to prefer self-describing archives before DSOs, `--test` selects the native test
-pipeline described in [Native test runner](test-runner.md), and
-`--no-uv-bootstrap`
-threads one entrypoint-only option through `driver.compile_program`. The driver
-renders the bootstrap condition with a constant direct-path operand; module
-initialization, `TITAN_MAIN_ARGC_KEY`/`TITAN_MAIN_ARGV_KEY` publication,
-libuv's possible argv replacement, main retrieval, protected error handling,
-and the registry hook itself are unchanged. The CLI rejects the option before
-finalization when no standalone main or generated test main exists.
-`--no-line-directives` tells the coder
-to leave native diagnostics attributed to the generated C file instead of
-Titan source, `-l` passes extra system libraries to the linker, and
-`-X`/`--extra-object` appends one or more already-built native payloads.
-The environment setting `TITAN_NO_LINE_DIRECTIVES=1` applies the same policy
-to direct driver users and build automation. `driver.compile` passes the
-resolved policy explicitly to `coder.generate`; every generation resets the
-coder's emission policy, including when one Lua process alternates modes.
-Because the traceback builder recognizes ordinary native Titan frames through
-their Titan-attributed debug filenames, disabling directives can omit those
-frames from logical tracebacks. Entry boundaries may instead render as `[C]`.
-In library mode those payloads must be supported relocatable objects or
-regular archives: archives are force-carried into the DSO and flattened into
-the paired `.a`, while mixed payload retains CLI order in both forms.
-Executable mode keeps the broader established final-link behavior. Runtime and
-callback-shim objects are not normally passed this way: both checkout and
-installed builds select them from `libtitan.a`. The standard provider's
-`ltitanlib.o` is the deliberate support payload. Bundled libuv joins it in
-`-X` in every build.
+pipeline described in [Native test runner](test-runner.md), and the
+`--coverage` family instruments and reports native line coverage as described
+in [Native coverage](native-coverage.md). `--launcher-name` names a Windows
+standalone or test launcher; see [Windows application
+launchers](windows-build.md#windows-application-launchers).
+
+`--no-uv-bootstrap` threads one entrypoint-only option through
+`driver.compile_program`. The driver renders the bootstrap condition with a
+constant direct-path operand; module initialization,
+`TITAN_MAIN_ARGC_KEY`/`TITAN_MAIN_ARGV_KEY` publication, libuv's possible argv
+replacement, main retrieval, protected error handling, and the registry hook
+itself are unchanged.
+
+`--no-line-directives` (or `TITAN_NO_LINE_DIRECTIVES=1`, for direct driver
+users and build automation) leaves native diagnostics attributed to the
+generated C file instead of Titan source; [Mixed-source `#line`
+attribution](codegen-overview.md#mixed-source-line-attribution) owns the
+directive policy. `driver.compile` passes the resolved policy explicitly to
+`coder.generate`; every generation resets the coder's emission policy,
+including when one Lua process alternates modes. Disabling directives can omit
+ordinary native Titan frames from logical tracebacks, and entry boundaries may
+instead render as `[C]`.
+
+`-l` passes extra system libraries to the linker, and `-X`/`--extra-object`
+appends one or more already-built native payloads. In library mode those
+payloads must be supported relocatable objects or regular archives: archives
+are force-carried into the DSO and flattened into the paired `.a`, while mixed
+payload retains CLI order in both forms. Executable mode keeps the broader
+established final-link behavior. Runtime and callback-shim objects are not
+normally passed this way: both checkout and installed builds select them from
+`libtitan.a`. The standard provider's `ltitanlib.o` is the deliberate support
+payload.
 
 `--incremental` enables source-object metadata reuse, and `-c/--compile-only`
 stops after object/header emission. Compile-only roots always rebuild; the
 complete requested-root set becomes `forced_source_roots` before traversal.
 `--source-first` selects the same source preference already used by `--test`
 without changing ordinary-import visibility. Cached roots supply `has_main`
-and `external_symbols` facts when their AST is absent. The CLI rejects
-`--incremental` with `--print-ast`, and compile-only mode with
-`-l`, `-X`, or `--no-uv-bootstrap`. Cached discovery records supply test
-function names, and only the final test invocation synthesizes the thin runner.
-Its `titan.test` dependency uses the ordinary standard provider. See
-[Object-backed source modules](incremental-compilation.md) for record replay,
-header restoration, and Make-owned invalidation.
+and `external_symbols` facts when their AST is absent. Cached discovery records
+supply test function names, and only the final test invocation synthesizes the
+thin runner. Its `titan.test` dependency uses the ordinary standard provider.
+See [Object-backed source modules](incremental-compilation.md) for record
+replay, header restoration, and Make-owned invalidation.
+
+Before creating a resolver, `titanc` rejects `--print-root` with module names,
+a missing module name, `--incremental` with `--print-ast`, any `--coverage-*`
+option without `--coverage`, `--static` on Windows, `--compile-only` with
+`--launcher-name`, `-l`, `-X`, or `--no-uv-bootstrap`, and a `--jobs` or
+`TITAN_JOBS` value that is not a positive integer. After checking, it rejects
+`--launcher-name` without a standalone or test main or on a non-Windows host,
+`--no-uv-bootstrap` without a standalone or test main, `--coverage` without a
+test or standalone executable unless `-c` is given, a requested module named
+`titan.test.runner` in test mode, and, on Windows, any selected static Titan
+archive.
 
 Every CLI module name is placed in one `requested_roots` set and passed to the
 filesystem loader. Those roots are source-first; everything they import runs
@@ -1472,117 +1567,16 @@ libraries](multi-module-libraries.md) documents logical grouping and DSO
 loading; [Static compiled modules](static-compiled-modules.md) documents the
 archive resolver, binding constraints, composition, and paired publication.
 
-After its per-module object targets complete, the standard library uses the
-same generic path to link all twenty-five qualified roots:
+The standard library is built through this same generic path: one
+source-first, incremental `titanc` invocation names every standard root and
+carries `ltitanlib.o` and the bundled native archives as `-X` payload. The
+exact invocation, payload order, and OpenSSL modes are in [Reserved `titan`
+and the standard-library
+image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image);
+the Make object graph, private bootstrap, and LuaRocks installation are in
+[Build and installation responsibilities](build-script-audit.md).
 
-```sh
-titanc --output out --source-first --incremental \
-  titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.net \
-  titan.ssl titan.url titan.http titan.websocket titan.os titan.path \
-  titan.peg titan.string \
-  titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json titan.protobuf titan.transfer \
-  -X titan-runtime/ltitanlib.o lpeglabel-build/libtitan-lpeglabel.a \
-     libuv-build/libuv.a llhttp-build/libtitan-llhttp.a \
-     sqlite3-build/libtitan-sqlite3.a \
-     openssl-build/libssl.a openssl-build/libcrypto.a  # OPENSSL_MODE=bundled
-```
-
-The provider prefix is `titan`, so checkout output is `out/titan.so`,
-`out/titan.a`, and twenty-five generated `out/titan/*.lua` shims. Each logical
-module retains its own `luaopen_titan_*`, `_init`, `_abi`, `_types`, registry module state, and
-initializer; `ltitanlib.o` supplies the twenty-fifth entry, `luaopen_titan`, and the
-support table without adding an archive metadata key. The `titan.uv` folder
-still generates one `out/titan/uv/uv.c`/`.o` pair, plus
-`out/titan/uv/uv.ffi.h` and `out/titan/uv/uv.titan.h`, and no contributor shim.
-The five-member LPegLabel archive is force-carried into both providers after
-`ltitanlib.o` but contributes no logical metadata. The build puts the private
-libuv archive after it in the shared `-X` payload, followed by the private
-llhttp and SQLite archives and then any bundled OpenSSL archives used directly by
-`titan.ssl`.
-The default system OpenSSL mode omits only the OpenSSL archives, keeps their
-pkg-config-selected settings as repeated final-link inputs, and never copies
-them into `titan.a`; libuv, llhttp, and SQLite remain private payload in either
-OpenSSL mode.
-Static consumers pass the ordered `pkg-config --libs openssl` result through
-`TITAN_EXTRA_LDFLAGS`; both the executable-context archive probe and final
-program link append those inputs after the consumer and provider objects.
-Foreign headers provide declarations, not link directives. A direct application
-FFI call such as `SHA256` therefore needs the same system inputs even when no
-TLS operation makes an OpenSSL reference reachable from `titan.ssl`. The
-production dependency-mode smoke checks this direct consumer call in both
-OpenSSL modes.
-The eight llhttp callbacks are source-defined in the generated `titan.http`
-object, so there is no HTTP adapter object.
-
-Make owns one object target per standard module, including one object for each
-whole folder ensemble. Explicit imports order the object/header prerequisites;
-each stale target invokes `titanc --source-first --incremental -j1 -c` with its
-own logical root. The compiler reuses dependencies already built by Make. An
-inexpensive completeness check repairs missing generated headers while leaving
-valid object/header mtimes unchanged. `make stdlib-objects` runs this graph
-without linking a provider.
-
-Make tracks every standard source explicitly, the selected compiler and SDK,
-and each module's native headers and imported generated outputs. The final
-completion marker depends on those objects and invokes one source-first
-incremental link for the provider pair. Missing providers, generated shims, or
-Darwin dSYM trigger a new link; a warm invocation leaves existing outputs alone.
-Callers run `make clean-stdlib` before changing tools, flags, profile, or OpenSSL
-mode, and clean affected native build directories or select a separate source
-copy and SDK. Exact child DSOs are removed as stale production outputs; the
-isolated coroutine test is the supported exact-image variant.
-
-The source-rock build uses a private bootstrap. The default `all` target builds
-`libtitan.a`, the native dependencies, and a distinct support-only image at
-`titan-runtime/bootstrap/titan.so`, then builds the standard library with
-the in-tree compiler Lua sources, private bootstrap, and matching Lua SDK.
-This build requires no previously installed Titan compiler or canonical
-provider and does not copy the bootstrap into the installation.
-Provider-validation child Lua processes preserve the compiler's `package.cpath`
-so they can load the same private bootstrap before a canonical provider exists.
-
-LuaRocks then runs the copying-only Make `install` target in the unpacked
-source tree. That target stages compiler Lua modules and stdlib shims in
-`INST_LUADIR`, and `titanc` and `titan-uninstall` in `INST_BINDIR`, for LuaRocks'
-ordinary manifest-backed deployment. The mirrored SDK/provider payload lives
-at `<rock-prefix>/titan-sdk`, beside the retained
-`installer/titan_install.lua` helper. A copy-only `post_install` hook runs
-that helper by absolute path and publishes the payload under `ROCKS_TREE`.
-It requires no source directory, Makefile, or compiler, so binary rocks use
-the same publication path. There is no manifest C module named `titan`.
-
-The build retains objects, providers, shims, and the completion stamp under
-`out/`, passing `--output out` in every object recipe and final link. Once the prefix contains `titanc`, ordinary
-`make stdlib` selects that installed compiler and SDK. Canonical compiler,
-Lua, and SDK paths identify the same inputs even when LuaRocks and PATH
-spell a symlinked prefix differently. Installed compiler Lua files, the retained
-compiler script, and SDK headers invalidate objects; runtime archives also
-invalidate the final link. Published providers and shims are outputs, not prerequisites, so
-publication cannot invalidate the retained build. `STDLIB_USE_INSTALLED_RUNTIME=0`
-selects the checkout compiler/runtime explicitly.
-
-The installation recipe copies the completed provider pair, generated shims,
-licenses, and optional macOS dSYM. Optional
-sanitizer snapshots capture the retained provider and exact generated C/object
-pairs before copying or tests can replace them. Explicit packaging tests own
-protocol, symbol, metadata, and dependency verification. The canonical installed artifacts are
-`<root>/lib/titan/0.6/{titan.so,titan.a}`, the DSO's macOS dSYM, and
-`<root>/share/lua/5.5/titan/*.lua` shims. LuaRocks owns the shims and compiler
-files; canonical SDK/providers are external copies. `titan-uninstall` removes
-all installed Titan rock versions in the selected tree through LuaRocks before
-removing exact external Titan files. A LuaRocks failure leaves external files
-untouched. Lua, LuaRocks, dependency Lua modules, and shared third-party native
-SDK inputs remain. Cleanup acts on the whole Titan installation because its
-canonical paths are shared across rock versions. `make binary-rock` packs the
-retained private payload and assigns the platform filename from
-`luarocks config arch`; stock LuaRocks 3.13 otherwise calls this package
-`.all.rock` despite its native bytes. Earlier Titan installations are neither
-migration sources nor active-layout predecessors. Linux CI rebuilds the active `0.6` rock and
-direct shims, and asserts that the
-resulting interpreter uses the `0.6` library path. This does not waive the
-ordinary manually dispatched full macOS pre-merge suite.
-
-Its flow:
+The `titanc` flow:
 
 1. **Typecheck everything first.** One loader and resolver context shared by
    the complete `source_roots` set checks every requested module through
@@ -1598,9 +1592,8 @@ Its flow:
    uses to choose direct native calls. Final linking separately consumes the
    resulting source objects and the context's deduplicated selected archives.
    All errors — load failures and type errors alike — accumulate into one list,
-   and if it
-   is nonempty `titanc` prints them all to stderr and exits with status
-   1 **before any code generation** (behavior introduced by PR #248).
+   and if it is nonempty `titanc` prints them all to stderr and exits with
+   status 1 **before any code generation**.
 2. **`main` detection.** For each successfully checked module,
    `checker.has_main(ast)` looks for a top-level function named `main`
    with exactly one fixed parameter of checked type `{string}`, no input tail,
@@ -1622,15 +1615,12 @@ Its flow:
    `program_output`, so a folder root uses `P__main` while a flat root retains
    `P`. Dependencies selected from DSOs remain dynamic. Otherwise the sorted
    source-object union, selected static providers, and `--extra-object`
-   payload feed one common provider bundle: the DSO force-carries archive
-   payload, while the sibling regular `.a` flattens the same native members
-   without duplicating runtime/final libraries. Titan validates the staged
-   archive's exact metadata set, the DSO callable protocols, their
-   byte-for-byte agreement, and an archive-backed validation image before
-   recoverably publishing shims/dSYM, archive, and finally the DSO commit
-   point. Link, archive, validation, and publication failures are collected
-   and make `titanc` exit with status 1; caught publication failures restore
-   the prior owned bundle.
+   payload feed one provider pair (see [Linking a provider
+   pair](#linking-a-provider-pair)), which is validated and published as
+   described in [Three-way
+   validation](static-compiled-modules.md#three-way-validation). Link,
+   archive, validation, and publication failures are collected and make
+   `titanc` exit with status 1.
 
 ## Optional `clang-format` generated-source formatting
 
@@ -1703,8 +1693,8 @@ commands.
   string representations; used by `types.serialize` for compound C-FFI type
   metadata (such as array lengths and bitfield tables).
 * **`util.to_set`**, **`util.curry`**, **`util.any`** — small
-  functional helpers (`any` in the coder, `to_set` in the c-parser,
-  `curry` only in the specs).
+  functional helpers (`to_set` in the C parser; `any` and `curry` only in the
+  specs).
 
 ## The runtime support library: `titan-runtime/`
 
@@ -1716,12 +1706,13 @@ minicoro implementation/tag support `minicoro.o`. Source foreign callbacks
 live in generated standard-module objects instead. Static-archive selection
 pulls in only referenced objects. Vendored `libbacktrace.a` is a separate link
 input. `ltitanlib.o` is also separate: it is the only input to the private
-support bootstrap and is passed once as shared native payload when the twenty-five
+support bootstrap and is passed once as shared native payload when the
 standard logical modules are published in the full `titan.so`/`titan.a` pair.
 The private five-member LPegLabel archive follows it only in the standard
 provider payload and is not part of the runtime SDK.
 The staged non-Lua SDK headers under `<root>/include` are `minicoro.h`,
-`titan.h`, `titan/ffi.h`, `llhttp.h`, and `sqlite3.h`. Bundled libuv also
+`titan.h`, `transfer.h`, `titan/ffi.h` (`Makefile` `TITAN_SDK_ROOT_HEADERS` and
+`TITAN_SDK_NAMESPACED_HEADERS`), `llhttp.h`, and `sqlite3.h`. Bundled libuv also
 installs `uv.h` and `uv/`; bundled OpenSSL installs the complete public
 `openssl/` tree, combining ordinary source headers with generated configuration
 headers. Reinstalling in the default system OpenSSL mode removes only the
@@ -1734,23 +1725,18 @@ runtime edits can be tested before reinstalling.
 * **`TITAN_LIKELY(x)` / `TITAN_UNLIKELY(x)`** — `__builtin_expect`
   wrappers (plain parentheses off GCC/Clang); used on the hot/cold
   sides of generated type checks.
-* **Constants** — `TITAN_ABI_VERSION "2"`, `TITAN_VERSION "0.6.0"`,
-  `TITAN_LIBRARY_VERSION "0.6"`, `TITAN_LIBRARY_VERSION_SUFFIX "_0_6"`,
-  `TITAN_PATH_VAR "TITAN_PATH"`, `TITAN_PATH_SEP "/"`,
-  `TITAN_ROOT_DEFAULT "/usr/local"`,
-  `TITAN_LUA_CPATH_SUFFIX "/lib/lua/5.5/?.so"`, and UUID
-  strings used as Lua-registry keys: `TITAN_PATH_KEY` (cached module search
-  path), `TITAN_ROOT_KEY` (normalized Titan SDK/rocks-tree root),
-  `TITAN_LIBS_KEY` (dlopen handle table), `TITAN_MAIN_BOOTSTRAP_KEY` (optional
-  standalone-main hook), `TITAN_MAIN_ARGC_KEY` and `TITAN_MAIN_ARGV_KEY`
-  (generated-entrypoint process arguments and libuv's possibly replaced
-  `argv` pointer),
-  `TITAN_BT_STATE_KEY` (registry-owned libbacktrace state cache),
-  `TITAN_BACKTRACE_KEY` (last raw error backtrace),
-  `TITAN_NAMES_KEY` (native-symbol display-name table),
-  `TITAN_TRACE_PINNED` (re-raise traceback pin), and
-  `TITAN_TRACE_APPEND_KEY` (temporary coroutine traceback append slot).
-  `TITAN_LUAINTEGER_NBITS` is used by shift code generation.
+* **Constants** — the version and path constants (`TITAN_ABI_VERSION`,
+  `TITAN_VERSION`, `TITAN_LIBRARY_VERSION`, `TITAN_LIBRARY_VERSION_SUFFIX`,
+  `TITAN_PATH_VAR`; see [Compiled-module
+  ABI](codegen-overview.md#compiled-module-abi)), `TITAN_PATH_SEP "/"`,
+  `TITAN_ROOT_DEFAULT "/usr/local"`, `TITAN_LUA_CPATH_SUFFIX
+  "/lib/lua/5.5/?.so"`, and `TITAN_LUAINTEGER_NBITS` for shift code
+  generation. `titan.h` defines the loader's registry keys `TITAN_ROOT_KEY`,
+  `TITAN_PATH_KEY`, `TITAN_LIBS_KEY`, `TITAN_BT_STATE_KEY`, and
+  `TITAN_NAMES_KEY`; the trace, entrypoint, preload, and metatable keys are in
+  `titan/ffi.h`. [The registry
+  footprint](lua-interop-internals.md#the-registry-footprint) owns every key's
+  role.
 * **`titan_pushmodule(L, c)`** — pushes a `Udata*` (the module state
   object) onto the Lua stack by writing the slot and bumping
   `L->top.p` directly.
@@ -1775,9 +1761,9 @@ It also declares the dynamic-loading and error functions exported by
 `titan.c`: `loadlib`, `loadsym`, `loadglobalsym`, `titan_module_provider`,
 `titan_module_symbol`, the ABI/compatibility check helpers, and `errorhandler`.
 Generated imports use `titan_check_module_abi` and
-`titan_check_module_compatibility` with the selected logical provider. The retained
-`titan_check_types` helper implements exact serialized comparison; generated
-separate-DSO imports use the selective compatibility protocol instead.
+`titan_check_module_compatibility` with the selected logical provider. The
+exported `titan_check_types` helper implements exact serialized comparison
+but has no generated-code callers.
 
 ### `titan.c`: the dynamic loader
 
@@ -1787,11 +1773,12 @@ separate-DSO imports use the selective compatibility protocol instead.
   `package.cpath` for the first entry ending in `/lib/titan/0.6/?.so`, then
   `/lib/lua/5.5/?.so` as a bootstrap fallback, falling
   back to `/usr/local` only when no such entry exists. `titan_init_paths` also
-  ensures the exact `<root>/lib/titan/0.6/?.so` template is in
-  `package.cpath` and eagerly initializes the Titan loader path. The configured
-  Titan-owned Lua already places that template before the ordinary `lib/lua`
-  templates, so Lua and standalone programs resolve the same qualified module
-  DSOs.
+  prepends the exact `<root>/lib/titan/0.6/?.so` template to `package.cpath`
+  when it is absent (`add_titan_package_cpath`) and eagerly initializes the
+  Titan loader path. The Titan Lua fork's POSIX default C path lists
+  `lib/lua/5.5/?.so` and `loadall.so` before `lib/titan/0.6/?.so`; generated
+  executables put the Titan template first through the [startup path
+  discovery](#standalone-startup-path-discovery) chunk.
 * **`pushpath(L)`** resolves the run-time module search path once per
   Lua state and caches it in the registry under `TITAN_PATH_KEY`. The
   order is: `getenv("TITAN_PATH_0_6")` (the versioned variable,
@@ -1803,8 +1790,8 @@ separate-DSO imports use the selective compatibility protocol instead.
   the environment value is replaced by that default path (two
   `luaL_gsub` passes through a `\1` placeholder), so
   `TITAN_PATH="/opt/titan;;"` means "look in `/opt/titan`, then the
-  installation defaults". The compiler-side expansion now follows the same
-  contract.
+  installation defaults". The compiler-side expansion
+  (`driver.expand_titan_bin_path`) follows the same contract.
 * **The libs registry** — a table under `TITAN_LIBS_KEY` maps `.so`
   file names to light-userdata `dlopen` handles. The cache avoids repeated
   `dlopen` calls within a state. Titan deliberately does not call `dlclose` at
@@ -1814,55 +1801,33 @@ separate-DSO imports use the selective compatibility protocol instead.
   system reclaims the mapped images when the process exits.
 * **`loadlib(L, file)`** — returns the cached handle for `file` if
   present; otherwise walks the path `;`-entry by entry, builds
-  `dir "/" file` (the coder passes the relative provider selected into the
-  imported `Type.Module.file`), and tries
-  `dlopen(filename, RTLD_LAZY | RTLD_GLOBAL)`. Newly needed runtime providers
-  use these same flags; there is no libuv-specific filename case. Lazy binding
-  lets a module's initializer load a provider before the module's unresolved
-  function calls bind, while global visibility lets that later provider
-  satisfy the calls. The first success is
-  cached and returned; total failure raises a Lua error with
-  `dlerror()` (which describes only the last attempt).
+  `dir "/" file`, and tries `dlopen(filename, RTLD_LAZY | RTLD_GLOBAL)`; total
+  failure raises a Lua error with `dlerror()` (which describes only the last
+  attempt). Lazy binding lets a module's initializer load a provider before the
+  module's unresolved function calls bind, while global visibility lets that
+  later provider satisfy them.
 * **Generated logical-module shims** — a Lua `require "titan.uv"` first finds
   `titan/uv.lua`, whose `package.searchpath("titan", package.cpath)` selects the
   physical provider. The shim calls `require "titan"`, then uses the support
   table's separate `_loadlibglobal` helper to map/promote that provider with
   lazy/global flags and resolve `luaopen_titan_uv`. The same template serves
   every logical module; `titan.c` has no shim-specific or libuv-specific case.
-* **`titan_module_provider(L, module, file)`** — first reads the canonical
-  logical module from the registry and uses the export callback in its native
-  payload. An absent module next uses a matching copied native provider
-  descriptor, then loads `file` only if no descriptor exists. A null filename
-  requires an already initialized transitive owner and does not select a
-  descriptor. Executable-embedded, archive-linked, and locally loaded modules
-  publish the same callback. Selection invokes no loader or initializer.
-* **`titan_module_symbol(L, provider, sym)`** — resolves a symbol through the
-  canonical/copied native callback or, for a newly opened provider, through
-  `loadsym`.
-  `loadsym(L, lib, sym)` is `dlsym` with `luaL_error(L, dlerror())` on `NULL`.
-  Generated initialization verifies ABI and consumer requirements before calling
-  a copied or newly loaded dependency's initializer, then retains resolved native pointers
-  and slot indices in its own per-state module payload
-  ([static vs dynamic wiring](codegen-overview.md)).
-* **`errorhandler(L)`** — the message handler that every generated Lua
-  entry wrapper ensures is active in `L->errfunc` around the native call
-  ([Lua interop internals](lua-interop-internals.md)). It builds **one
-  unified, intermingled trace** (innermost→outer): the CallInfo chain
-  supplies every Lua frame, and libbacktrace (`backtrace_full`,
-  DWARF/`#line`-symbolized to `.titan` file/line) supplies the Titan
-  native frames, spliced at the entry-wrapper boundaries (identified by
-  the `titanentry` symbol substring). Interpreter, standard-library,
-  `titan-runtime` and unsymbolized native frames are filtered out. The
-  result — raw merged frame lines only, with no error message, no `stack
-  traceback:` header, and no presentation tabs — is stored in the
-  registry under `TITAN_BACKTRACE_KEY` (subject to the
-  `TITAN_TRACE_PINNED` pin discipline). It then restores the stack top
-  and returns 1 — so the **original error value** reaches `pcall`
-  unchanged, and the enriched backtrace is fetched separately. (Its
-  push-everything-first ordering exists because a Lua 5.5 `luaL_Buffer`
-  must stay at the stack top while in use.) Without libbacktrace
-  (`TITAN_NO_LIBBACKTRACE`) it falls back to raw Lua traceback lines plus
-  raw `execinfo` C frames.
+* **`titan_module_provider(L, module, file)`** and
+  **`titan_module_symbol(L, provider, sym)`** — select a dependency's provider
+  (registry module, copied native descriptor, or `file`) and resolve its
+  symbols; `loadsym(L, lib, sym)` is `dlsym` with `luaL_error(L, dlerror())`
+  on `NULL`. The generated import sequence that uses them is owned by [Static
+  vs dynamic dependency
+  wiring](codegen-overview.md#static-vs-dynamic-dependency-wiring), and its
+  verification protocol by [Generated exports and runtime
+  verification](binary-compatibility.md#generated-exports-and-runtime-verification).
+* **`errorhandler(L)`** — the message handler that every generated Lua entry
+  wrapper ensures is active around the native call. It stores the raw unified
+  Lua and Titan trace in `registry[TITAN_BACKTRACE_KEY]` (subject to the
+  `TITAN_TRACE_PINNED` pin) and returns the original error value unchanged.
+  [Runtime trace model](error-handling.md#runtime-trace-model) and the
+  following sections own trace construction, pinning, frame merging, and the
+  `TITAN_NO_LIBBACKTRACE` fallback.
 
 ### `ltitanlib.c`: the `titan` Lua module
 
@@ -1871,9 +1836,10 @@ This companion is built separately from `libtitan.a`: Make compiles
 bootstrap `titan-runtime/bootstrap/titan.so`, and passes it once as native
 payload when building the full standard `titan.so`/`titan.a` provider pair.
 It is *not* part of the runtime SDK's `libtitan.a` or ordinary generated
-modules. Its user-facing operation is `backtrace`; it also exposes
-the internal testing helpers `pin` and `clear` used to exercise the traceback
-pin discipline, plus the compiler-only `_loadlib` helper:
+modules. Its table (`ltitanlib.c` `titanlib`) exports the user-facing
+`backtrace`, the internal testing helpers `pin` and `clear` used to exercise
+the traceback pin discipline, the loader helpers `_loadlib` and
+`_loadlibglobal`, and, on Windows only, `_abivalue`:
 
 ```lua
 -- Lua
@@ -1910,6 +1876,10 @@ Lua's C searcher loaded the same standard `titan.so` eager/local performs the
 required promotion. Errors retain the originally requested pathname and use
 the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
 
+`titan._abivalue(path, symbol)` (Windows only) is the compiler's ABI-marker
+query for PE providers; its contract is in [Windows loader
+boundary](windows-build.md#windows-loader-boundary).
+
 ## Lua installation and executable-relative search paths
 
 `make lua` compiles the Titan Lua fork pinned by
@@ -1934,19 +1904,16 @@ The Lua source bytes are identical across platforms and independent of `PREFIX`.
 The Windows implementation and DLL annotations are selected by the source's
 platform guards at compilation. `make lua` runs the fork's platform build and
 installation with `TITAN_LIBRARY_VERSION` and `PREFIX`; the fork's installer
-copies the archive, public headers, and internal sources. Linux defaults to
-`linux-readline`, macOS to `macosx`, and both expect system Readline development
-files. `LUA_PLATFORM` and native build flags remain explicit caller overrides.
-
-Preparation checks only `$PREFIX/bin/lua` and `$PREFIX/bin/luarocks`.
-An existing program skips rebuilding or reconfiguration even after source,
-version, platform, tool, or flag changes. Clean upstream objects and remove or
-replace the installed programs when intentionally rebuilding. LuaRocks uses
-stock `configure`, `make`, and `make install` with `--prefix`, `--rocks-tree`,
-`--with-lua`, and `--force-config`; it retains its ordinary generated
-configuration and wrappers. Pass custom native tools to later rock builds
-explicitly. Executable-relative Lua paths are not a complete relocation scheme
-for all installed tools.
+copies the archive, public headers, and internal sources. Platform defaults
+(`linux-readline`, `macosx`) and the rule that preparation checks only the
+installed `$PREFIX/bin/lua` and `$PREFIX/bin/luarocks` programs, so callers
+must clean and replace them when rebuilding, are in [Build and installation
+responsibilities](build-script-audit.md). LuaRocks uses stock `configure`,
+`make`, and `make install` with `--prefix`, `--rocks-tree`, `--with-lua`, and
+`--force-config`; it retains its ordinary generated configuration and
+wrappers. Pass custom native tools to later rock builds explicitly.
+Executable-relative Lua paths are not a complete relocation scheme for all
+installed tools.
 
 For native runtime builds and SDK staging, Make prefers the installed
 `$PREFIX/src/lua-5.5.1` source/header tree when its `lua.h` and `lobject.h`
@@ -1968,55 +1935,90 @@ the explicit public-header input for its native helper builds.
 
 ## Reference: environment variables, paths, and flags
 
-| Name | Where read | Default / value | Meaning |
+### `titanc` flags
+
+The complete `argparse` declaration is at the top of `titanc`; the checks are
+listed in [The `titanc` command line](#the-titanc-command-line).
+
+| Flag | Effect | Constraints |
+| --- | --- | --- |
+| `<module>...` | Logical modules to build; all become source-required roots. | At least one, unless `--print-root`. |
+| `--print-root` | Print the selected installation root and exit. | No module names. |
+| `--print-ast` | Print each module's AST after checking. | Not with `--incremental`. |
+| `--pretty-print` | Format generated C and headers with `CLANG_FORMAT`. | |
+| `-v`, `--verbose` | Print native-tool and formatter commands. | |
+| `-j`, `--jobs <n>` | Bound concurrent generated-C object compilations; overrides `TITAN_JOBS`, default 1. | Positive integer. |
+| `--launcher-name <name>` | Windows standalone/test launcher filename in `bin` (default: logical module name). | Windows only; requires a standalone or test main; not with `-c`. |
+| `--static` | Run the archive pass before the DSO pass. | Not on Windows. |
+| `--source-first` | Prefer source to compiled providers for every dependency. | |
+| `--incremental` | Reuse source objects no older than their sources. | Not with `--print-ast`. |
+| `-c`, `--compile-only` | Emit objects and headers only; always rebuild requested modules. | Not with `--launcher-name`, `-l`, `-X`, or `--no-uv-bootstrap`. |
+| `--test` | Build native tests (objects only with `-c`). | No requested module may be named `titan.test.runner`. |
+| `--coverage` | Instrument source modules without `test_` functions and report when the test executable runs. | Requires a test or standalone executable unless `-c`. |
+| `--coverage-backend <name>` | `gcc-gcov` (Unix default) or `llvm-gcov` (Windows default). | Every `--coverage-*` option requires `--coverage`. |
+| `--coverage-module <glob>` | Override automatic selection with a logical-module glob (`*`, `?`); repeat for a union. | |
+| `--coverage-root <dir>` | Source repository root for reports (default: current directory). | |
+| `--coverage-gcov <cmd>` | gcov reader (default: `GCOV`, `gcov`, or `llvm-cov gcov`). | |
+| `--coverage-format <format>` | Richer report via gcovr: `html`, `lcov`, or `cobertura`; repeatable. | |
+| `--coverage-output <dir>` | Report directory (default: `.coverage/report`). | |
+| `--coverage-gcovr <cmd>` | gcovr command (default: `GCOVR`, then `gcovr`). | |
+| `--no-uv-bootstrap` | Call `main` directly instead of the registered async bootstrap hook. | Requires a standalone or test main; not with `-c`. |
+| `--no-line-directives` | Omit generated Titan `#line` directives. | |
+| `-u`, `--lua <dir>` | Lua source tree (`driver.LUA_SOURCE_PATH`). | Source checkouts only. |
+| `-t`, `--tree <dir>` | Source root (`driver.TITAN_SOURCE_PATH`, default `.`). | |
+| `-o`, `--output <dir>` | Folder for generated files, preserving the source hierarchy. | |
+| `-l`, `--link <libs>` | Comma-separated libraries passed as `-l` to the final link. | |
+| `-X`, `--extra-object <payload>...` | Native objects/archives carried into the linked outputs. | Library mode accepts only relocatable objects and regular archives. |
+
+### Environment variables
+
+| Variable | Read by | Default | Meaning |
 | --- | --- | --- | --- |
-| `PREFIX` | Makefile / rockspec build input | Titan Lua prefix detected from `PATH`, otherwise `/usr/local`; explicit `PREFIX` takes precedence | Owns the Lua installation plus the LuaRocks executable and configuration; Lua module paths resolve from the running executable rather than embedding this build destination. |
-| `ROCKS_TREE` | Makefile / rockspec build input | empty for a direct build; LuaRocks' `$(SCRIPTS_DIR)/..` for a source install | Owns the installed Titan rock, SDK, and stdlib. The supported workflow currently sets it equal to `PREFIX`, but they are separate ownership concepts. |
-| `TITAN_PATH_0_6` | `driver.lua` (compile time), `titan.c` `pushpath` (run time) | unset | Versioned module search path; wins over `TITAN_PATH`. |
-| `TITAN_PATH` | same | unset | Module search path; `;;` expands to the ordinary default at compile time and run time. |
-| `TITAN_ROCKS_ROOT` | `driver.lua`, installed-compiler Make invocations | unset | Internal normalized `ROCKS_TREE` override for compiler SDK discovery; not a public deployment setting. The source-rock build uses the in-tree compiler and private bootstrap instead. |
-| `driver.TITAN_ROOT` | `driver.lua` | internal override, otherwise first current Titan `package.cpath` template (`/lib/titan/0.6/?.so`), then the ordinary Lua template (`/lib/lua/5.5/?.so`); Windows uses `?.dll` | Titan SDK/rocks-tree root. Module loading only parses absolute roots lexically; resolver initialization normalizes relative roots through `context.io`. Lua-owned default paths follow the equal-root layout; an explicit override can select a separate Unix rocks tree. |
-| `driver.SOURCE_CHECKOUT` / `driver.INSTALLED` | `driver.initialize_layout(context)` | detected from checkout files unless the internal root is set | Select the writable checkout SDK/archive inputs or read-only installed SDK inputs. Detection is lazy and uses `context.io`; before resolver initialization the module exposes only a provisional lexical checkout layout. |
-| `driver.INSTALL_PATHS` | `driver.installed_paths` | paths below `driver.TITAN_ROOT` | Holds `lua_source`, `include`, `lib`, `libtitan`, `libbacktrace`, `liblua`, `titan_bin`, and `lua_cpath`; bundled `libuv.a` is deliberately not an installed SDK path. |
-| `driver.TITAN_BIN_PATH` | `driver.lua` | `TITAN_PATH_0_6`, `TITAN_PATH`, or `.;<root>/lib/titan/0.6` in installed mode | Roots for root-major, shallow-to-exact compiled-provider search; checkout mode retains the legacy `/usr/local` fallback. |
-| `driver.TITAN_SOURCE_PATH` | `driver.lua` | `"."` (overridden by `titanc --tree`) | Semicolon-separated roots searched for folder `P/B.titan` before flat `P.titan`, including contributor privacy checks. |
-| `driver.LANGUAGE_SERVER_API_VERSION` | `driver.lua` | `1` | Exact compiler/semantic-client handshake, independent from generated-code ABI; covers private source metadata, exact C-header dependencies, context-owned I/O/checkpoints, the embedded interface/target provider, and compiler-owned declared analysis manifests. |
-| `TITAN_NO_LINE_DIRECTIVES` / `driver.EMIT_LINE_DIRECTIVES` | environment / `driver.lua` | unset / true | Exact environment value `1`, or `titanc --no-line-directives`, disables generated Titan `#line` directives for physical generated-C diagnostics; this can omit ordinary native Titan frames from logical tracebacks. |
-| `options.source_roots` | `titanc` / `driver.defaultloader` | every CLI module name | Requires explicit build roots to come from flat/folder source; other ordinary edges retain the resolver context's binary-first or source-first policy, while `.titan` edges remain source-required. Selected source descriptors also provide `program_output`. |
-| `options.incremental` | `titanc` / `driver.defaultloader` | `false` | Allows source companion objects no older than current source constituents to supply trusted declarations and native code; Make owns other invalidation. |
-| `options.forced_source_roots` | `titanc` / `driver.defaultloader` | `{}` | Complete explicit-root set for compile-only mode; bypasses object reuse even if a root is first reached through another import. |
-| `options.known_source_modules` | semantic clients / `driver.defaultloader` | `{}` | Validated module-name set used for resolver-wide source identity and source/provider overlap planning without marking modules dirty. |
-| `options.analysis_only` | semantic clients / `driver.new_resolver_context` | `false` | Retains the source-level checked AST without runtime generic erasure, enables compact analysis-manifest reuse and skips `.titan.h` body generation; analysis ASTs/manifests are not native code-generation input. |
-| `options.cached_source_entries` | semantic clients / `driver.defaultloader` | `{}` | Caller-certified checked or compact declared source entries, including exact C-header inputs; compact entries and marked analysis ASTs require analysis-only mode; compact entries restore C include plans without AST replay. |
-| `options.cached_interfaces` | semantic clients / `driver.defaultloader` | `{}` | Serialized clean source interfaces plus exact source and C-header provenance; used without AST for ordinary imports and as transient reparse input for explicit `.titan` edges. |
-| `options.embedded_interface_provider` | semantic clients / `driver.new_resolver_context` | `nil` | Closed `{ provider_file, entries, target_profile? }` ABI/type inventory with an optional declarative build target profile, copied from a trusted host; it precedes disk compiled lookup but never becomes a static dependency or link input. |
-| `options.io` / `context.io` | semantic clients / `driver.new_resolver_context` | `compiler_io.new_sync()` | Validated context-owned filesystem, process, and cooperative-yield strategy. The omitted default preserves synchronous compiler and `titanc` behavior. |
-| `options.source_process_trace` | semantic clients / `driver.new_resolver_context` | `nil` | Best-effort scalar `(module_name, filename, outcome, self_cpu_ms, total_cpu_ms, parse_cpu_ms, check_cpu_ms)` observer for exclusive source-module process CPU. Parse time sums folder constituents; check and self time exclude nested source work, post-child checkpoints, complete C-header processing, and downstream FFI conversion. Cached rehydration reports zero parse/check CPU; five-argument Lua callbacks remain valid. |
-| `context.checked_source_modules` | `driver.defaultloader` | `{}` | Ordered dense list of source modules checked during this resolver run. A module is appended after its complete result is published and before `context.io:yield()`; retained cached modules are excluded. |
-| `options.extra_ffi_include_dirs` | semantic clients / `driver.new_resolver_context` | `{}` | Analysis-local include roots appended to a fresh foreign-C probe descriptor without process-global reconfiguration. |
-| `options.c_probe_cache_trace` | semantic clients / `driver.new_resolver_context` | `nil` | Best-effort scalar `(module_name, stage, hit, key, path)` observer for persistent semantic-result lookups; it neither enables verbose evidence nor writes to stdout. |
-| `options.c_probe_semantic_trace` | semantic clients / `driver.new_resolver_context` | `nil` | Best-effort bounded event-table observer for one logical terminal result per probe request, including outcome, cache tier, repeat, and publication state. |
-| `options.c_probe_execution_trace` | semantic clients / `driver.new_resolver_context` | `nil` | Best-effort bounded event-table observer for physical compiler launches, including source digest, outcome, cache/publication state, and optional child wall milliseconds. |
-| `titan._loadlib` | `ltitanlib.c` / `driver.lua` | internal `RTLD_LAZY` + `RTLD_LOCAL` loader | Maps DSO candidates lazily for callable ABI/type interface recovery without initializing them or globalizing their symbols; archive candidates are parsed in-process instead. |
-| `titan._loadlibglobal` | `ltitanlib.c` / generated shims | internal canonical-path `RTLD_LAZY` + `RTLD_GLOBAL` loader | Maps or promotes a Lua-selected provider in a separate per-state cache and returns the requested logical `luaopen_*` entry. |
-| `Type.Module.file` | `types.lua`, `driver.lua`, `coder.lua` | exact logical `.so` path for a DSO claim, overwritten after dynamic lookup | Transient selected relative DSO used by generated handle imports; deliberately omitted from serialized interfaces and never populated with an archive path. |
-| `driver.LUA_SOURCE_PATH` | `driver.lua` | `<root>/src/lua-5.5.1` installed; `lua-5.5.1/src` in checkout mode; checkout-only override by `titanc --lua` | Lua internal source/header tree used at compile time. Installed mode rejects the override because `INSTALL_PATHS` supplies matching `<root>/lib/liblua.a` and `<root>/lib/titan/0.6/libtitan.a`. |
-| `driver.INCLUDE_PATH` | `driver.lua` | `<root>/include` in installed mode | Titan SDK and selected bundled-dependency headers used by generated C and foreign imports: `minicoro.h`, `titan.h`, `titan/ffi.h`, `llhttp.h`, `sqlite3.h`, plus bundled `uv.h`, `uv/`, and `openssl/`. Generated source-foreign companions are source-build intermediates, not installed SDK headers. |
-| `driver.TITAN_RUNTIME_PATH` / `driver.LIBBACKTRACE_PATH` | `driver.lua` | `titan-runtime/` / `libbacktrace` | Checkout-only runtime source/archive/header and separate libbacktrace locations. |
-| `CC` / `driver.CC` | environment / `driver.lua` | `"cc"` on Unix; `"clang.exe"` on Windows | C compiler command, parsed as shell words and shared with foreign-import probing. |
-| `TITAN_JOBS` / `titanc --jobs` | environment / CLI | `1` | Positive bound for concurrent generated logical-module C object compilations. The CLI wins over the environment. It does not affect checker probes, code generation, formatting, entrypoints, linking, archiving, or provider validation. |
-| `CLANG_FORMAT` / `driver.CLANG_FORMAT` | environment / `driver.lua` | `"clang-format"` | Formatter command used only by `titanc --pretty-print`, then parsed as shell words. The driver appends its in-place operation, fixed explicit style with include sorting disabled, and generated-source path; default builds neither parse nor invoke it. |
-| `driver.CFLAGS` | `driver.lua` | C99, `-O3`, warnings, PIC and compiler-specific backtrace debug info; Linux additionally uses `-flto=auto -ffat-lto-objects` | GCC uses `-g1`; Clang uses `-gline-tables-only -fdebug-info-for-profiling`; other compilers retain `-g`. Validation uses `-O0 -fno-lto -g`. macOS keeps native objects without LTO. |
-| `TITAN_EXTRA_CPPFLAGS` / `driver.EXTRA_CPPFLAGS` | environment / `driver.lua` | empty | Parsed `-I`/`-D` and other preprocessing inputs; used by foreign-import compiler probes and prepended to every Titan/runtime/entrypoint compilation. |
-| `TITAN_EXTRA_CFLAGS` / `driver.EXTRA_CFLAGS` | environment / `driver.lua` | empty | Parsed compilation-only flags, after fixed defaults; never used by final links. |
-| `TITAN_EXTRA_LDFLAGS` / `driver.EXTRA_LDFLAGS` | environment / `driver.lua` | empty | Parsed ordered linker inputs appended to final module and program links. |
-| shared-library flags | `shared_flag()` | `-shared`; on Darwin `-shared -undefined dynamic_lookup` | Platform from `driver.UNAME`, populated lazily by `driver.configure_foreign_c(context)` through `context.io:run({"uname"})`. |
-| installed link set | `driver.installed_link_inputs` / `append_runtime_libraries` | Unix: `<root>/lib/titan/0.6/libtitan.a` + separate `<root>/lib/libbacktrace.a` + `<root>/lib/liblua.a` + platform libraries; Windows: `libtitan.a` + `<root>/lib/libbacktrace.a` + `<root>/lib/liblua55.a` + `-static-libgcc` | Used by provider DSOs and programs; Linux adds `-ldl`, and Linux/macOS add `-lm`. These common final inputs are not copied into Unix package archives. The Unix standard build always supplies pinned libuv as `-X` payload to both `titan.so` and `titan.a`; system OpenSSL keeps explicit pkg-config link flags at final link. |
-| checkout link set | `driver.source_link_inputs` / `append_runtime_libraries` | local `libtitan.a` + separate local `libbacktrace.a` + matching `liblua.a` + `-ldl -lm` | Uses `<prefix>/lib/liblua.a` when `LUA_SOURCE_PATH` physically matches the active installed Lua SDK's `src/lua-5.5.1`; other source trees use their local archive. Preserves the writable source-development path and never links `titan.o` directly. |
-| `TITAN_ROOT_DEFAULT` / `TITAN_LUA_CPATH_SUFFIX` | `titan.h`/`titan.c` | `/usr/local` / `/lib/lua/5.5/?.so` | Legacy run-time root fallback and exact template suffix used for root discovery. |
-| `titan_init_paths` | generated standalone entrypoint / `titan.c` | standalone discovery above; otherwise root parsed from inherited `package.cpath` | Caches the root and Titan module path and ensures `<root>/lib/titan/0.6/?.so` is in `package.cpath`; Titan-owned Lua has it first by default, with `<root>` inferred from the running executable. |
-| registry keys | `titan.h` | `TITAN_ROOT_KEY`, `TITAN_PATH_KEY`, `TITAN_LIBS_KEY`, `TITAN_MAIN_BOOTSTRAP_KEY`, `TITAN_MAIN_ARGC_KEY`, `TITAN_MAIN_ARGV_KEY`, `TITAN_BT_STATE_KEY`, `TITAN_BACKTRACE_KEY`, `TITAN_NAMES_KEY`, `TITAN_TRACE_PINNED`, `TITAN_TRACE_APPEND_KEY` (UUID strings) | Per-state caches and hooks: Titan SDK/rocks-tree root, module path, dlopen handles, optional standalone bootstrap, original process arguments and libuv's possibly replaced `argv`, registry-owned libbacktrace state, last raw backtrace, native-frame display names, re-raise traceback pin, and coroutine traceback append handoff. |
-| generated ABI symbol | `coder.lua` | `<mangled>_abi` returning `TITAN_ABI_VERSION` | Checked before DSO type rehydration and before run-time dynamic-import `dlsym`; the same value is embedded in static metadata and compared during paired validation. Markerless compiled modules are incompatible. |
+| `CC` | `driver.lua`, `c-parser/cpp.lua`, `checker/c_types.lua` | `cc`; `clang.exe` on Windows | C compiler command, parsed as shell words and shared with foreign-import probing. |
+| `AR`, `RANLIB` | `driver.lua` | `ar`, `ranlib` | Archive tools for provider archives. |
+| `CLANG_FORMAT` | `driver.lua` | `clang-format` | Formatter command, parsed only when `--pretty-print` selects it. |
+| `RC` | `driver.lua` | `llvm-rc` | Windows launcher resource compiler. |
+| `MAKE` | `driver.lua` `check_runtime` | `make` | Make command for the checkout runtime archive. |
+| `TITAN_EXTRA_CPPFLAGS` | `driver.lua` | empty | Preprocessing words for foreign-import probes, prepended to every Titan, runtime, and entrypoint compilation. |
+| `TITAN_EXTRA_CFLAGS` | `driver.lua` | empty | Compilation-only words after the fixed defaults; never used by final links. |
+| `TITAN_EXTRA_LDFLAGS` | `driver.lua` | empty | Ordered linker inputs appended to final provider and program links. |
+| `TITAN_BUILD_PROFILE` | `driver.lua` | `production` | `validation` selects `-O0 -fno-lto -g`; any other value is a toolchain error. |
+| `TITAN_NO_LINE_DIRECTIVES` | `driver.lua` | unset | Exact value `1` disables generated `#line` directives, like `--no-line-directives`. |
+| `TITAN_JOBS` | `titanc` | `1` | Generated-C compilation bound when `--jobs` is absent. |
+| `TITAN_PATH_0_6`, `TITAN_PATH` | `driver.lua`, `titan.c` `pushpath`, `standalone_paths.lua` | unset | Compiled-module search path; the versioned name wins, and `;;` expands to the default. |
+| `TITAN_ROCKS_ROOT` | `driver.lua`, `titanc --print-root`, installed-compiler Make invocations | unset (empty means unset) | Internal `ROCKS_TREE` override for installation-root discovery; not a public deployment setting. |
+| `TITAN_PREFIX` | `driver.lua` | installation root | Root of the persistent C-probe cache `var/cache/titan-probes/2`. |
+| `TITAN_PROBE_CACHE_DISABLE` | `driver.lua` | unset | Exact value `1` disables persistent C-probe reuse. |
+| `TITAN_RUNTIME_PREBUILT` | `driver.lua` `check_runtime` | unset | Exact value `1` skips the checkout `libtitan.a` rebuild. |
+| `GCOV`, `GCOVR` | `coverage.lua` | `gcov`/`llvm-cov gcov`, `gcovr` | Coverage readers when the matching `--coverage-*` flag is absent. |
+| `TEMP`, `TMP` | `io.lua` (Windows) | system default | Directory for `Sync:tmpname` reservations. |
+| `LUA_PATH_5_5`, `LUA_PATH`, `LUA_CPATH_5_5`, `LUA_CPATH` | `standalone_paths.lua`, Lua | unset | Explicit paths that generated executables keep; probing is skipped only when the Lua paths and `TITAN_PATH` are all set. |
+
+Make-level settings such as `PREFIX`, `ROCKS_TREE`, `OPENSSL_MODE`, and
+`STDLIB_USE_INSTALLED_RUNTIME` belong to the build; see [Build and installation
+responsibilities](build-script-audit.md). `PREFIX` owns Lua and LuaRocks and
+`ROCKS_TREE` owns the Titan rock, SDK, and standard library; the supported
+workflow sets them equal, but they are separate ownership concepts.
+
+### Paths and internal settings
+
+| Name | Default / value | Meaning |
+| --- | --- | --- |
+| `driver.TITAN_ROOT` | internal override, otherwise first current Titan `package.cpath` template (`/lib/titan/0.6/?.so`), then the ordinary Lua template (`/lib/lua/5.5/?.so`); Windows uses `?.dll` | Titan SDK/rocks-tree root. Module loading only parses absolute roots lexically; resolver initialization normalizes relative roots through `context.io`. |
+| `driver.SOURCE_CHECKOUT` / `driver.INSTALLED` | detected from checkout files unless the internal root is set | Select the writable checkout SDK/archive inputs or read-only installed SDK inputs. Detection is lazy (`driver.initialize_layout`); before resolver initialization the module exposes only a provisional lexical checkout layout. |
+| `driver.INSTALL_PATHS` | `driver.installed_paths(root)` | `root`, `lua_source`, `include`, `lib`, `libtitan`, `libbacktrace`, `liblua` (`liblua55.a` on Windows), `titan_bin`, and `lua_cpath`; bundled `libuv.a` is deliberately not an installed SDK path. |
+| `driver.TITAN_BIN_PATH` | `TITAN_PATH_0_6`, `TITAN_PATH`, or `.;<root>/lib/titan/0.6` in installed mode | Roots for compiled-provider search; checkout mode retains the `/usr/local` fallback. |
+| `driver.TITAN_SOURCE_PATH` | `"."` (`titanc --tree`) | Semicolon-separated source roots. |
+| `driver.LUA_SOURCE_PATH` | `<root>/src/lua-5.5.1` installed; `lua-5.5.1/src` in checkout mode | Lua internal source/header tree; checkout-only override by `titanc --lua`. |
+| `driver.INCLUDE_PATH` | `<root>/include` in installed mode | SDK headers used by generated C and foreign imports; see [the runtime support library](#the-runtime-support-library-titan-runtime). |
+| `driver.TITAN_RUNTIME_PATH` / `driver.LIBBACKTRACE_PATH` | `titan-runtime/` / `libbacktrace` | Checkout-only runtime and libbacktrace locations. |
+| `driver.LANGUAGE_SERVER_API_VERSION` | `1` | Exact compiler/semantic-client handshake; see [Language-server compiler API](#language-server-compiler-api). |
+| `driver.EMIT_LINE_DIRECTIVES` | true unless `TITAN_NO_LINE_DIRECTIVES=1` | Default `#line` policy. |
+| `driver.CFLAGS` | `--std=c99 -O3 -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC` plus compiler-specific debug flags; Linux production adds `-flto=auto -ffat-lto-objects` | GCC uses `-g1`, Clang `-gline-tables-only -fdebug-info-for-profiling`, other compilers `-g`. |
+| shared-library flags | `driver.shared_library_flags` | `-shared`; Darwin adds `-undefined dynamic_lookup`, Windows `-Wl,--exclude-all-symbols`. |
+| installed link set | `driver.installed_link_inputs` | Unix: `libtitan.a`, `libbacktrace.a`, `liblua.a`, `-ldl` (non-Darwin), `-lm`; Windows: `libtitan.a`, `libbacktrace.a`, `liblua55.a`, `-static-libgcc`. Not copied into package archives. |
+| checkout link set | `driver.source_link_inputs` | Local `libtitan.a`, `libbacktrace.a`, matching `liblua.a` (`<prefix>/lib/liblua.a` when `LUA_SOURCE_PATH` physically matches the installed Lua SDK), `-ldl -lm`. |
+| `TITAN_ROOT_DEFAULT` / `TITAN_LUA_CPATH_SUFFIX` | `/usr/local` / `/lib/lua/5.5/?.so` | Run-time root fallback and Lua template suffix used for root discovery (`titan.h`). |
 
 The pieces upstream of the driver are described in
 [the type checker](checker.md) (which calls the loader) and the
@@ -2054,9 +2056,10 @@ The adapter closes process and pipe handles after completion and retains the
 native exit value, including 256 and 9009. Launch failures are distinct from
 child exit statuses. Windows exits are not decoded as POSIX signals. The common
 scheduler waits for launched compilers before returning from an error. Process
-tree termination is left to the external test runner. These changes preserve
-the compiler-I/O API and generated Titan ABI; the POSIX transports retain their
-existing FIFO completion and shell-status behavior.
+tree termination is left to the external test runner. The compiler-I/O API is
+the same on every platform; the POSIX transports use the FIFO completion and
+shell-status behavior described in [Compiling one
+module](#compiling-one-module-drivercompile).
 
 The synchronous compiler filesystem implementation uses LuaFileSystem and Lua's
 ordinary file operations. Windows `realpath` checks that the path exists and
@@ -2065,8 +2068,8 @@ query handle-based file identities. `stat` and `lstat` normalize LuaFileSystem's
 size, kind, mode and modification time; Windows device/inode fields are absent
 because LuaFileSystem does not expose useful Windows file identities. C-header
 validation therefore reads and hashes the file instead of using the optional
-identity-and-timestamp shortcut. Injected strategies keep their existing API-1
-surface and may still supply physical identities.
+identity-and-timestamp shortcut. Injected strategies may still supply physical
+identities.
 
 Temporary names come from `os.tmpname`; Windows puts the leaf beneath `TEMP` or
 `TMP` and creates the caller-owned file with `io.open`. Sibling stages use that

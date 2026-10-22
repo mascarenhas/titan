@@ -9,6 +9,7 @@ static int minicoro_tag_equal(void *t1, void *t2);
 #define MINICORO_IMPL
 #include "minicoro.h"
 
+/* Implementation notes: doc/implementation/coroutines.md#tagged-minicoro */
 static int minicoro_tag_equal(void *t1, void *t2) {
   return luaV_equalobj(NULL, (const TValue *)t1, (const TValue *)t2);
 }

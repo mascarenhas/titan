@@ -220,6 +220,7 @@ local symbols = {
     OPT = "?",
 }
 
+-- Implementation notes: doc/implementation/lexer-parser.md#longest-match-by-construction
 -- Enforce the longest match rule among the symbolic tokens.
 for tokname, symbol in pairs(symbols) do
     local pat = P(symbol)

@@ -1,56 +1,50 @@
 # Code generator: constructs
 
-This chapter walks construct by construct through how `coder.lua`
-translates Titan into C, with trimmed excerpts of **real compiler
-output** (`$VAR` placeholders appear only where a template is quoted).
-The translation-unit anatomy, calling convention and module protocol are
-in the [overview](codegen-overview.md); value representation, stack-slot
-anchoring and write barriers in [values and the GC](values-and-gc.md).
+This chapter walks construct by construct through how the code generator
+(`titan-compiler/coder/`) translates Titan into C, with trimmed excerpts of
+**real compiler output** (`$VAR` placeholders appear only where a template is
+quoted). The translation-unit anatomy, calling convention, and module protocol
+are in the [overview](codegen-overview.md); value representation, stack-slot
+anchoring, and write barriers are in [values and the GC](values-and-gc.md).
 
-Two contracts shape every generator: **statement generators** take
-`(ctx, node)` and return a string of C statements, while **expression
-generators** return *two* strings — preliminary C statements plus a C
-expression (`""` statements for trivial expressions). And every value
-has the **dual representation**: a C variable of its unboxed native type
-plus, when GC-able, a paired Lua stack slot (`s2v(_base + k)`) that
-keeps it visible to the collector; code computes with the C variable and
-refreshes the slot after every store. `codeexp(ctx, node, iscondition,
-target)` also threads `target` — a `VarName` lvalue's `_decl`, letting
-eligible constructors build directly into the lvalue's `_cvar`/`_slot`.
-Dense Array constructors deliberately ignore that optimization and first
-anchor their backing in a scanned temporary slot, because an owning module or
-record slot is not necessarily remembered until its caller emits the final
-barrier. The dispatch also threads `iscondition`, which no generator
-currently consumes: truth conversion
-happens in `codeif`, `codewhile`/`coderepeat`, and the `as boolean` cast,
-via `toboolean`.
+Two contracts shape every generator. **Statement generators** take
+`(ctx, node)` and return a string of C statements. **Expression generators**
+return *two* strings: preliminary C statements plus a C expression (`""`
+statements for trivial expressions). A GC-bearing value computed into a C
+variable is also stored into a traced slot before the next possible
+allocation; see
+[home roots and shadow slots](values-and-gc.md#2-home-roots-shadow-slots-and-borrowed-c-copies).
+
+`codeexp(ctx, node, iscondition, target)` also threads `target`, a `VarName`
+lvalue's `_decl`, which lets eligible constructors build directly into the
+lvalue's C variable and slot. Dense Array constructors deliberately ignore
+that optimization and first anchor their backing in a scanned temporary slot,
+because an owning module or record slot is not necessarily remembered until
+its caller emits the final barrier. Truth conversion happens through
+`toboolean` in `codeif`, `codewhile`/`coderepeat`, and the `as boolean` cast,
+not through the `iscondition` flag.
 
 ## Locals and assignment
 
-`Ast.StatDecl` (in `codestat`) gives a used local a C variable
-`_local_<name>_<n>` (the `localname` suffix keeps shadowing valid C)
-and, for GC-able types, a shadow slot refreshed at declaration and at
-every later assignment:
+`Ast.StatDecl` (in `codestat`, `coder/statements.lua`) gives a used local a C
+variable `_local_<name>_<n>` (the `localname` suffix keeps shadowing valid C)
+and, for GC-bearing types, a shadow slot refreshed at the declaration and at
+every later assignment. The generated shape is shown in
+[values and the GC](values-and-gc.md#2-home-roots-shadow-slots-and-borrowed-c-copies).
 
-```c
-TString* _local_t_1;
-TValue *_localslot_t_2 = s2v(_base + 0);
-_local_t_1 = _param_s;
-/* update slot */
-setsvalue(L, _localslot_t_2, _local_t_1);
-```
-
-A local the checker marked unused generates only `$CSTATS ((void)$CEXP);`
-— the initializer still runs. An unassigned/unspilled parameter
-(`_param_<name>`) remains only its C formal and relies on the input's existing
-allocation/result/semantic/VM provenance; native calls create no argument root.
-A `_paramslot_<name>` is a real local/spill home used only when the parameter is
-assigned or must survive setjmp recovery. Module variables live in `_mod`
-user values: reads are `getslot` from `&_mod->uv[i].uv`, writes add
-`luaC_barrierback(L, obj2gco(_mod), <slot>);` for GC-able types (a
-userdata owner, back barrier); imported-module variables go through the
-import's `Udata` (`uvalue(&_mod->uv[MOD].uv)->uv[VAR].uv`) with the same
-barrier.
+- A local that the checker marked unused still evaluates its initializer; the
+  result is discarded with a `(void)` statement.
+- An unassigned, unspilled parameter (`_param_<name>`) is only its C formal
+  and relies on the input's existing provenance; native calls create no
+  argument root. A `_paramslot_<name>` home exists only when the parameter is
+  assigned or must survive setjmp recovery.
+- Module variables live in `_mod` user values. Reads are `getslot` from
+  `&_mod->uv[i].uv`. Writes of GC-bearing values add
+  `luaC_barrierback(L, obj2gco(_mod), <slot>);` (a userdata owner takes the
+  back barrier).
+- Imported-module variables go through the import's `Udata`:
+  `Udata *_imod = uvalue(&_mod->uv[MOD].uv);` then `&_imod->uv[VAR].uv`, with
+  the back barrier on `_imod`.
 
 `codesingleassignment` and `codemultiassignment` share
 `_materialize_assignment_lvalue`, so assignment lowering separates target
@@ -135,11 +129,9 @@ while(1) {
 `coderepeat` is the same trick with the test at the bottom:
 `while(1) { $CBLK $CSTATS if($CEXP) { break; } $CHECKGC }`.
 
-`$CHECKGC` is `luaC_checkGC(L);` **only when the condition plus body
-created stack slots** — the generators diff `ctx.allocations` (bumped by
-every `newslot`) across the body. Pure-arithmetic loops carry no GC
-polling; allocating loops poll once per iteration, since native code
-never passes through `luaD_call` and would otherwise starve the collector.
+The `$CHECKGC` poll is emitted only when the condition plus body reserved
+stack slots; the rule is in
+[values and the GC](values-and-gc.md#4-luac_checkgc-at-entry-and-at-allocating-loop-tails).
 
 ## The numeric `for`
 
@@ -193,12 +185,13 @@ form is simpler: there is no count —
 addition hook, and the loop breaks once `_foridx` passes `_forlimit` in the
 step's direction.
 
-The body tail gets the same allocation-gated `luaC_checkGC(L);` as
-`while`. `codereturn` evaluates the checker's adjusted return list once,
-stores fixed returns 2..n through `foreign *_outparam_<i>`, fills a requested
-flexible-output descriptor when the function has one, resets
-`L->top.p = _base`, and returns the first fixed value in C (or `void` when
-there is no fixed result). See [Calls](#calls).
+The body tail gets the same allocation-gated poll as `while`.
+
+`codereturn` evaluates the checker's adjusted return list once, stores fixed
+returns 2..n through `*_outparam_<i>`, fills a requested flexible-output
+descriptor when the function has one, resets `L->top.p = _base`, and returns
+the first fixed value in C (or nothing when there is no fixed result). See
+[Calls](#calls).
 
 An [immediately called anonymous function](immediate-functions.md) instead has
 an inline result destination: its return supplies outer holders and exits its
@@ -258,94 +251,20 @@ unconditional.
 ## Arrays
 
 Array lowering operates on the internal backing `Table *`, never on the
-Lua-visible proxy. The complete representation, ownership, boxing, and
-authoritative-length protocol is in [Dense Arrays](dense-arrays.md).
+Lua-visible proxy. [Dense Arrays](dense-arrays.md) is the canonical
+description of the representation and of each lowering:
 
-### Constructor (`codearray`)
+- constructors (`codearray`, `coder/expressions.lua`):
+  [Runtime construction](dense-arrays.md#runtime-construction) and
+  [Constructors](dense-arrays.md#constructors);
+- reads (`codeindexarray`): [Array reads](dense-arrays.md#array-reads);
+- writes (`codeassignment` on an Array element):
+  [Array writes](dense-arrays.md#array-writes);
+- `#array`: [Length](dense-arrays.md#length).
 
-`codearray` consumes the checker's `_positional_adjustment`. It evaluates every
-retained scalar and open-tail producer in lexical order, asks the module-local
-writer inventory for the constructor's final element type, and chooses the
-qualified constructor from the checked Array context. A mutable constructor
-passes the cached writer to `titan_array_new`; a const constructor calls
-`titan_const_array_new`, whose second proxy user value is nil. Both receive the
-exact initial capacity and an active traced result slot, which the stack-neutral
-runtime helper uses to root and publish the backing/proxy cycle without a
-public Lua stack operation. They then fill only positive array-part slots;
-collectable element stores barrier the backing Table.
-
-The final logical length is the highest non-nil produced position, so trailing
-nils do not inflate `#array`. A final open producer (`...`, a flexible-return
-call, a contextual call through `value`, or a
-[spread expression](spread-expressions.md)) contributes its actual run after
-the fixed prefix. The same adjustment/lowering machinery is shared with a
-positional exact integer-keyed Map, whose destination is instead an ordinary
-Table.
-
-### Read (`codeindexarray`)
-
-```c
-Table *_t = _param_t;
-lua_Integer _k = _param_i;
-TValue _av = {0};
-if (_k < 1) {
-    setnilvalue(&_av);
-} else {
-    lua_Unsigned _slot = l_castS2U(_k) - 1u;
-    if (_slot < _t->asize) {
-        arr2obj(_t, cast_uint(_slot), &_av);
-        if (tagisempty(ttypetag(&_av)))
-            setnilvalue(&_av);
-    } else {
-        setnilvalue(&_av);
-    }
-}
-const TValue *_s = &_av;
-/* strict GuardPlan(elem-type) lowering follows */
-```
-
-The inline path returns nil for every index below 1, beyond capacity, or in a
-hole. It never consults the hash part. The mixed-domain converter then
-consumes the static element's strict `GuardPlan`: numeric and boolean tags are
-not coerced, Option recurses on its present arm, and C/nominal/container
-categories have explicit guards. Nested Array reads additionally accept either
-an internal backing Table or the exact qualified canonical proxy written by
-Lua. Runtime recovery recognizes either Array tag as a proxy before enforcing
-the target qualifier; it never infers mutability from a structurally similar
-userdata.
-
-### Write (`codeassignment`, VarBracket on an array)
-
-```c
-TValue _vv;
-/* represent _tmp_1 for an internal typed Array element in _vv */
-if (_k < 1) {
-    luaL_error(L, "array index must be positive");
-}
-if (l_castS2U(_k) - 1u < _t->asize) {
-    obj2arr(_t, cast_uint(l_castS2U(_k) - 1u), &_vv);
-    /* update titan_array_length(_t), including tail backscan */
-} else if (!ttisnil(&_vv)) {
-    titan_array_resize(L, _t, titan_array_growth(L, l_castS2U(_k)));
-    obj2arr(_t, cast_uint(l_castS2U(_k) - 1u), &_vv);
-    titan_array_set_length(_t, l_castS2U(_k));
-}
-```
-
-Writes require a positive index. An in-capacity store is direct; a non-nil
-write beyond capacity grows to the smallest power of two strictly greater
-than the logical index, while nil beyond capacity is a no-op. Unsupported
-growth raises `array index too large`; it never falls back to a hash entry.
-Every store updates the highest-present logical length, including a backward
-scan when deleting the tail, and barriers collectable elements against the
-backing Table. `#arr` reads the guarded authoritative `lenhint`; it never calls
-`luaH_getn`.
-
-Const Array assignment is rejected by the checker and cannot reach this
-lowering. This is the mutable typed Titan path and bypasses the proxy writer.
-The shared Lua `__newindex` path instead treats nil as deletion, or calls the
-construction writer's checker-provided `DynamicCoercionPlan` before any growth
-or store. Writer failure leaves length, capacity, and contents unchanged.
+A positional exact integer-keyed Map constructor shares the Array
+constructor's `_positional_adjustment` consumption but allocates an ordinary
+Table; see [`codemap`](#assignment-set_table_entry-and-constructor-codemap).
 
 ## Maps
 
@@ -387,7 +306,7 @@ _s = _key_slot;
 ```
 
 `checknoTM` covers both no metatable and the cached absence of `__index`; that
-likely branch preserves the old miss-to-nil behavior without a VM call. When
+likely branch turns a miss into nil without a VM call. When
 `__index` may exist, the original `Table *` is boxed for `luaV_finishget`. Its
 `StkId` result argument is the reserved key stack entry, never a local
 `TValue *`; this lets the VM implement function, table, and recursively
@@ -496,7 +415,8 @@ Map/`value` and `value`/Map likewise evaluate left to right and begin with
 are tables and `checknoTM` does not prove `__eq` absent from both; that narrow
 case calls `luaV_equalobj`. A non-table dynamic value therefore cannot enter
 table metamethod dispatch. Plain `value`/`value`, Arrays, Functions, nominal
-values, and Options retain their previous comparison paths.
+values, and Options use the comparisons described under
+[Operators](#operators-with-inlined-lua-semantics).
 
 Each metamethod-aware branch stores one boolean result. The potentially
 calling `luaV_equalobj` path restores `_base` before later stack-root use, and
@@ -507,21 +427,12 @@ reevaluating either operand.
 
 ### Construction and field access
 
-`nominallayout.lua` assigns physical slots independently of logical field
-indices. GC-bearing fields occupy dense user values, with public slots before
-private slots. Non-GC fields occupy generated C payload members; fixed
-aggregates and arrays are copied there, and eligible direct fresh allocations
-can occupy checked, aligned trailing regions. The new userdata is rooted before
-field initialization can allocate. Traced stores retain the ordinary userdata
-back barrier.
-
-`coder/nominal.lua` lowers reads, writes, and boxing from that plan. A native
-scalar read uses its payload member directly. An embedded aggregate or array
-read projects a borrowed interior pointer. Writes complete the checker-owned
-conversion before changing storage; only traced writes need a GC barrier.
-Ordinary typed access remains direct and requires neither hashing nor Lua
-member lookup. See [Native nominal storage](nominal-storage.md) for the public
-prefix, allocation, and separate-compilation contracts.
+Record layout, construction, field reads and writes, and boxing are lowered by
+`coder/nominal.lua` from the physical plan of `nominallayout.lua`. Ordinary
+typed access uses the payload member or user-value slot directly, with no
+hashing or Lua member lookup; only traced writes need a GC barrier. The layout,
+public prefix, allocation, and separate-compilation contracts are in
+[Native nominal storage](nominal-storage.md).
 
 ### Method and static calls
 
@@ -535,78 +446,53 @@ return test_\u2133_Point_\u2131_getx_titanmethod(L, _mod, NULL, _param_p);
 
 (naming: `<mangled-module>_\u2133_<owner>_\u2131_<name>_titanmethod` /
 `..._titanstatic`).
-Cross-module calls are still direct C calls — the caller holds the
-target module's `Udata` in one of its own user values and passes
-`uvalue(&_mod->uv[i].uv)` as the callee's `_mod`; dependencies selected from
-source or a static provider become `extern` prototypes, while dependencies
-selected from a DSO become `static` **function pointers** stitched in `_init`
-from the dlopened library:
+Cross-module calls are still direct C calls. The caller passes the target
+module's `Udata`, held in one of its own user values, as the callee's `_mod`.
+A dependency selected from source or a static provider is called through an
+`extern` prototype. A dependency selected from a DSO is called through the
+native entry pointer that `titan_module_symbol` resolved into the importer's
+module native payload during `_init`; see
+[Static vs dynamic dependency wiring](codegen-overview.md#static-vs-dynamic-dependency-wiring).
 
-```c
-static lua_Integer (*dep_\u2133_mk_titan)(lua_State *L, Udata *_mod,
-                                                CClosure *_fn, lua_Integer);
-/* in _init: */
-dep_\u2133_mk_titan = titan_cast_func(
-    lua_Integer (*)(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer),
-    loadsym(L, dep_handle, "dep_\u2133_mk_titan"));
-```
+Records cross the Lua boundary unchanged: the value Titan computes with *is*
+the `Udata` Lua sees (`setboxed`). Coming back, `checkandget`
+(`coder/values.lua`) verifies the record's metatable identity and uses the
+userdata directly ([Lua interop internals](lua-interop-internals.md)).
 
-Records cross the Lua boundary unchanged — the value Titan computes with
-*is* the Udata Lua sees (`setboxed`); coming back, `checkandget`
-verifies the record metatable/type identity and uses the udata directly
-([Lua interop internals](lua-interop-internals.md)).
-
-An Interface call is the deliberate exception to symbol-directed method
-dispatch. The checker records the declaration-order method slot; generated
-code anchors the wrapper, loads and casts that payload entry, and calls it with
-the concrete-owner module and receiver from wrapper user values 0 and 1.
-Exact slots point at the concrete method; adjusted slots point at a private
-adapter with the Interface signature. Bound references capture the wrapper in
-the ordinary branded-closure shape. See [Interfaces](interfaces.md).
+An Interface call is the exception to symbol-directed method dispatch: it
+loads the method from the wrapper's declaration-order payload. See
+[Interfaces](interfaces.md#four-dispatch-paths).
 
 ## Unions and `case`
 
-`coder._codeunioninit` allocates the selected variant's payload size and dense
-traced-slot count. Every variant payload starts with an actual shared tag-header
-subobject; the absolute tag is native data, never a user value. Empty variants
-therefore need no traced slots. Parts use the same native/traced classification
-as record fields. An Array part retains its internal `Table *` backing in its
-assigned UV slot, with a userdata back barrier.
+`coder._codeunioninit` allocates the selected variant's payload and dense
+traced slots; the layout is in [Native nominal storage](nominal-storage.md).
+`coder._codecase` evaluates and roots the scrutinee once and dispatches on the
+native tag through a goto-only `switch` whose arm bodies live outside it; see
+[Generated case dispatch](unions.md#generated-case-dispatch).
 
-`coder._codecase` evaluates and roots the scrutinee once, reads its tag header,
-and emits a switch containing only `case TAG: goto ARM;` entries. Arm bodies
-are labeled blocks outside the switch and end at one case-end label, preserving
-ordinary `break`, `catch`, `finally`, and `defer` behavior. Bindings use the
-selected variant's physical plan; aggregates and arrays project borrowed
-pointers, while numeric Options keep their exact native value. Logical part
-indices remain independent of both payload members and UV indices. See
-[Native nominal storage](nominal-storage.md).
-
-Statement-list generation stops after `break` or the first statement whose
-checker decoration has `_always_returns = true`. The coder therefore consumes
-one shared reachability result for direct `return`/`raise` and for compound
-blocks, `if`, `try`, `case`, and a proven non-fallthrough literal-true `while`;
-it does not try to rediscover termination from only the immediate AST tag. This
-boundary is necessary because the checker does not visit a dead tail after a
-non-fallthrough statement, so those nodes have no type/declaration decorations
-to generate safely.
+Statement-list generation stops after `break` or after the first statement
+whose checker decoration has `_always_returns = true`. The checker does not
+decorate a dead tail, so the coder must not generate it; the proof is in
+[Non-fallthrough analysis](checker.md#non-fallthrough-analysis).
 
 ## Strings
 
-**Literals** compile to `luaS_new(L, "<escaped>")` (`makestring`,
-escaping by `c_string_literal`); short strings are interned, so repeated
-evaluation of a short literal yields the same `TString*`. Without a
-`target` the result is anchored in a temp slot; with one, the local's
-own slot refresh anchors it. `c_string_literal` emits a dollar byte as the C
-octal escape `\044`: generated fragments are recursively template-rendered,
-so this preserves the user byte without letting a following identifier become
-another `$NAME` substitution.
+**Literals** compile to `luaS_newlstr(L, "<escaped>", <length>)`
+(`makestring`, `coder/calls.lua`; escaping by `c_string_literal`). `makestring`
+uses `luaS_new` only for C strings without a known length. Short strings are
+interned, so repeated evaluation of a short literal yields the same
+`TString*`. Without a `target` the result is anchored in a temporary slot;
+with one, the local's own slot refresh anchors it. `c_string_literal` emits a
+dollar byte as the C octal escape `\044`: generated fragments are recursively
+template-rendered, so this keeps the user's byte without letting a following
+identifier become another `$NAME` substitution.
 
-**Concatenation** (`Ast.ExpConcat`) flattens n-ary `..` chains into one
-operation and never calls `luaV_concat`: the total length is precomputed,
-then a short result is assembled in a C stack buffer and interned, while
-a long result allocates the string first and is filled in place. Real
-output for `a .. b .. "x"`, trimmed:
+**Concatenation** (`Ast.ExpConcat`) is one n-ary operation: the parser
+flattens `..` chains. The coder never calls `luaV_concat`. It precomputes the
+total length, then assembles a short result in a C stack buffer and interns
+it, or allocates a long result first and fills it in place. Real output for
+`a .. b .. "x"`, trimmed:
 
 ```c
 size_t _len = 0;
@@ -628,13 +514,13 @@ if(_len <= LUAI_MAXSHORTLEN) {
     char *_buff = getstr(_tmp_1);
     /* same memcpy sequence into the string's own payload */
 }
-setsvalue(L, _tmp_1_slot, _tmp_1);
+/* then anchor _tmp_1 in its reserved stack slot */
 ```
 
 Each operand is checked before adding its length, using Lua's own maximum
 string-object bound. This both prevents `size_t` wraparound and ensures that
 the short-buffer decision is made from the exact total length.
-`LUAI_MAXSHORTLEN` is 40 in this Lua build; at or below it the result must be
+`LUAI_MAXSHORTLEN` is 40 in Lua 5.5; at or below it the result must be
 interned (`luaS_newlstr`), above it `luaS_createlngstrobj` allocates up front
 so the copy happens exactly once.
 
@@ -650,48 +536,47 @@ Most operators on native types are the plain C operator —
 algorithm is inlined and shaped so constant operands let the C compiler
 delete the branches.
 
-**Shifts** (`generate_binop_shift`). The rationale comment in `coder.lua`:
+**Binary operand order.** `ordered_binary_operands` (`coder/expressions.lua`)
+generates the left operand, then the right. When the right operand needs
+preliminary statements, the left value is first frozen in a temporary (rooted
+when GC-bearing), so effects run left to right even though the C operator
+itself does not order its operands. The specialized templates below
+materialize both operands into temporaries in the same order.
 
-> Most of the time, the shift amount should be a constant, which will
-> allow the C compiler to eliminate all of these branches as dead code
-> and generate code that is just as good as a raw C bitshift without the
-> extra Lua semantics.
->
-> For the dynamic case, we gain a bit of performance (~20%) compared to
-> the algorithm in luaV_shiftl by reordering the branches to put the
-> common case (shift amount is a small positive integer) under only one
-> level of branching and with a TITAN_LIKELY annotation.
-
-(The ~20% is the comment's claim; no benchmark lives in the repository.)
-Real output for `x << y` (`>>` swaps the operator pair):
+**Shifts** (`generate_binop_shift`). The comment above it explains the shape:
+a constant shift amount lets the C compiler delete every branch, and the
+dynamic case reorders `luaV_shiftl`'s branches to put a small positive amount
+under one `TITAN_LIKELY` test (the comment claims about 20%; no benchmark lives
+in the repository). Output for `x << y` (`>>` swaps the operator pair):
 
 ```c
-if (TITAN_LIKELY(l_castS2U(_param_y) < TITAN_LUAINTEGER_NBITS)) {
-    _tmp_1 = intop(<<, _param_x, _param_y);
+_tmp_1 = _param_x;
+_tmp_2 = _param_y;
+if (TITAN_LIKELY(l_castS2U(_tmp_2) < TITAN_LUAINTEGER_NBITS)) {
+    _tmp_3 = intop(<<, _tmp_1, _tmp_2);
 } else {
-    if (l_castS2U(-_param_y) < TITAN_LUAINTEGER_NBITS) {
-        _tmp_1 = intop(>>, _param_x, -_param_y);
+    if (l_castS2U(intop(-, 0, _tmp_2)) < TITAN_LUAINTEGER_NBITS) {
+        _tmp_3 = intop(>>, _tmp_1, intop(-, 0, _tmp_2));
     } else {
-        _tmp_1 = 0;
+        _tmp_3 = 0;
     }
 }
 ```
 
-**Integer `//`** (`generate_binop_idiv_int`; comment: "Lua/Titan integer
-division rounds to negative infinity instead of towards zero. We inline
-luaV_div here to give the C compiler more optimization opportunities"):
+**Integer `//`** (`generate_binop_idiv_int`) inlines `luaV_div`, rounding
+toward negative infinity instead of toward zero:
 
 ```c
-if (l_castS2U(_param_b) + 1u <= 1u) {      /* n == 0 or n == -1 */
-    if (_param_b == 0){
+if (l_castS2U(_tmp_2) + 1u <= 1u) {      /* n == 0 or n == -1 */
+    if (_tmp_2 == 0){
         luaL_error(L, "error at line %d, divide by zero", 41);
     } else {
-        _tmp_1 = intop(-, 0, _param_a);    /* m // -1 == -m, overflow-safe */
+        _tmp_3 = intop(-, 0, _tmp_1);    /* m // -1 == -m, overflow-safe */
     }
 } else {
-    _tmp_1 = _param_a / _param_b;
-    if ((_param_a ^ _param_b) < 0 && _param_a % _param_b != 0) {
-        _tmp_1 -= 1;                       /* fix C's round-toward-zero */
+    _tmp_3 = _tmp_1 / _tmp_2;
+    if ((_tmp_1 ^ _tmp_2) < 0 && _tmp_1 % _tmp_2 != 0) {
+        _tmp_3 -= 1;                     /* fix C's round-toward-zero */
     }
 }
 ```
@@ -710,7 +595,9 @@ takes the sign of the divisor, as floored division requires.
 exponent `2` is special-cased as `b * b` (where `b` is the base hoisted
 into a float temp), every other exponent uses `pow(b, e)` — both
 operands are materialized into float temps first, so each is evaluated
-once. **Equality on ordinary dynamic values**: when both operands are
+once. **Strings** compare by content: `luaS_eqstr` for `==`/`~=`, and
+`luaV_lessthan`/`luaV_lessequal` on boxed temporaries for ordering.
+**Equality on ordinary dynamic values**: when both operands are
 `TValue`-represented (`value` or ordinary Options), `==`/`~=` normally compile to
 `luaV_rawequalobj(&l, &r)` and its negation. The narrowly selected
 [Map/`value` path](#equality-codebinaryop) adds table `__eq` after a failed raw
@@ -749,19 +636,14 @@ defined two's-complement wraparound instead of C's signed-overflow
 undefined behavior. So `math.maxinteger + 1` is `math.mininteger` and
 unary minus of `math.mininteger` is itself, with no UB regardless of
 optimizer or `-fwrapv`. Binary `~` (Lua's bitwise *exclusive-or*)
-compiles to `intop(^, x, y)` — C's binary xor is `^`, while Titan's `^`
-is exponentiation. Shifts negate the amount with `intop(-, 0, y)` so a
-shift amount of `math.mininteger` is well-defined rather than overflowing
-under `-y`. Integer `//`, `%` and the shifts now materialize their
-operands into temps first, so a side-effecting operand (`f() // g()`,
-`x << g()`) is evaluated exactly once even though the template references
-each operand several times.
+compiles to `intop(^, x, y)`: C's binary xor is `^`, while Titan's `^` is
+exponentiation. Shifts negate the amount with `intop(-, 0, y)`, so a shift
+amount of `math.mininteger` is well-defined.
 
-**Float literals** are emitted with `%.17g` — full round-trip precision
-for every finite `double`, where the old `%f` truncated to six fractional
-digits. A literal that overflows to `+inf` (e.g. `1e400`) becomes
-`HUGE_VAL` (and `-inf` becomes `(-HUGE_VAL)`), since C has no `inf`
-literal.
+**Float literals** are emitted by `c_float_literal` (`coder/names.lua`) with
+`%.17g`, which round-trips every finite `double`. A literal that overflows to
+`+inf` (e.g. `1e400`) becomes `HUGE_VAL` (and `-inf` becomes `(-HUGE_VAL)`),
+since C has no `inf` literal.
 
 **Mixed integer/float comparisons** (`< <= > >= == ~=` with one
 `integer` and one `float` operand) are inlined as calls to the
@@ -788,14 +670,13 @@ the stored plan rather than treating every unequal pair as a scalar cast:
 2. **Implicit `value` → T** consumes a gradual projection and performs the
    strict tag/shape guard. Numeric cross-tag conversion and truthiness are not
    available.
-3. **Written `value as T`** consumes the embedded
-   `DynamicCoercionPlan`: integral in-range floats may produce integers,
-   integers may produce floats, booleans use truthiness, and Option recurses.
-   The same plan's non-raising form implements `is`. For an Interface leaf,
+3. **Written `value as T`** consumes the embedded `DynamicCoercionPlan`, whose
+   accepted conversions are defined in
+   [Dynamic coercion](type-relations-and-boundaries.md#dynamic-coercion). The
+   same plan's non-raising form implements `is`. For an Interface leaf,
    `checkandget` accepts the exact wrapper or raw-looks up a
    compiler-witnessed entry on a bare full userdata's metatable and calls it
-   for one result. Implicit/strict Interface guards use that same leaf; no
-   checker plan changes.
+   for one result; implicit strict Interface guards use the same leaf.
 4. **T → `value`** uses `setboxed` into a `TValue` temp — records and unions
    remain their Udata and Arrays become their canonical proxy. No new slot:
    the source stays anchored where it was.
@@ -817,17 +698,16 @@ the stored plan rather than treating every unequal pair as a scalar cast:
     Lua-internal `Udata *` accepts full userdata or nil and rejects
     lightuserdata. Ordinary already-native pointer conversions can remain a
     plain C cast ([FFI internals](ffi-internals.md)).
-13. **mutable Array → const Array** consumes the `array_freeze` plan. Its
-    default lowering calls `titan_array_shallow_copy`; only a checker-selected
-    `freeze` mode calls `titan_array_freeze` and retags the original proxy in
-    place. That mode comes either from a `_linear_array_freeze` builder proof or
-    from a source call result whose callee return the checker marked `linear`
-    ([linear-use analysis](const-values.md#array-relations-and-linear-use-analysis)).
-    The coder performs no liveness analysis.
+13. **mutable Array → const Array** consumes the `array_freeze` plan and
+    dispatches on its `mode`. `copy` calls `titan_array_shallow_copy`;
+    `freeze` calls `titan_array_freeze` and retags the original proxy in
+    place. The checker selects the mode
+    ([linear-use analysis](const-values.md#array-relations-and-linear-use-analysis));
+    the coder performs no liveness analysis.
 
 ## Type tests: `ExpIs`
 
-`codeexp` lowers an `Ast.ExpIs` through `coder._codeis`. It first
+`codeexp` lowers an `Ast.ExpIs` through `coder._codeis` (`coder/numerics.lua`). It first
 `materialize`s the operand, which both evaluates it exactly once and keeps a
 GC value rooted while a metatable or Array-proxy predicate runs. It then emits
 the non-raising predicate corresponding to the admitted written `ExpCast`:
@@ -837,13 +717,13 @@ path instead of the generic scalar temporary path. This preserves exact-once
 evaluation without generating an invalid scalar initializer for a C
 aggregate.
 
-* A written `value is T` backed by a `DynamicCoercionPlan`: integer tests
-  accept an integer tag or an exact integral float that passes
-  `lua_numbertointeger`; float tests accept either numeric tag;
-  primitive/Map tests use `ttis*`; Array, nominal record/union, and owned-C
-  tests compare the expected metatable. An Interface test accepts that exact
-  wrapper or a non-nil raw entry under the target Interface metatable on a bare
-  full userdata's metatable. It never calls or validates the entry and remains
+* A written `value is T` backed by a `DynamicCoercionPlan` tests the same
+  acceptance as the written cast
+  ([Dynamic coercion](type-relations-and-boundaries.md#dynamic-coercion)):
+  primitive and Map tests use `ttis*`, and Array, record, union, and owned-C
+  tests compare the expected metatable. An Interface test accepts the exact
+  wrapper or a non-nil raw entry under the target Interface metatable on a
+  bare full userdata's metatable; it never calls the entry and stays
   allocation-free.
 * A target `Option(T)` first accepts nil, then recursively applies the same
   dynamic plan for `T`. Thus direct `value as boolean` and present
@@ -864,7 +744,9 @@ emitted. Errors from evaluating the operand are outside the predicate and
 therefore still propagate.
 
 `Ast.ExpAdjust` (truncating a multi-value expression to one value, the
-`(f())` form) is a pass-through to the inner expression.
+`(f())` form) passes through to the inner expression, with two exceptions: a
+`_adjusted_spread` first emits its spread carrier, and `_adjustvoid` runs a
+zero-result call for effect and yields nil.
 
 ## Calls
 
@@ -882,48 +764,25 @@ supplied too few fixed arguments, the checker has already appended
 `Ast.ExpNil` expressions and inserted the ordinary coercions, so code
 generation treats them exactly like written `nil` arguments.
 
-For fixed multiple returns the caller allocates one temp per visible extra
-return (with a shadow slot iff GC-able) and passes the ABI out-parameter
-addresses. The temp names are recorded in `node._extras` so the
-checker-synthesized `Ast.ExpExtra` nodes read them directly. The callable's
-declared ABI shape remains separate from this consumer-visible projection: a
-discarded result may still need a hidden ABI holder on an exact call, but it is
-never published as a live expression value.
+For fixed multiple returns the caller allocates one holder per visible extra
+return and passes the ABI out-parameter addresses. The holder names are
+recorded in `node._extras`, so the checker-synthesized `Ast.ExpExtra` nodes
+read them directly. The callable's declared ABI shape stays separate from this
+consumer-visible projection: a discarded result may still need a hidden ABI
+holder on an exact call, but it is never published as a live expression value.
 
-For a flexible producer `_flex_call_buffer` appends a typed caller-owned
+For a flexible producer, `_flex_call_buffer` appends a typed caller-owned
 descriptor and `_flexwant` budget to the call. A finite demand gets a
 right-sized buffer; an open demand gets the bounded `TITAN_VARARG_MAX` backing
-and publishes an actual count. After return and rebasing, every live GC-bearing
-fixed result and open-run element is immediately stored into its reserved caller
-slot/range—the callee never pushes native results and the raw descriptor is not
-a root.
-
-Real output for
-`local a, b = two()` where `two(): (integer, string)`, caller then
-callee:
-
-```c
-TString* _tmp_1 = 0;                /* paired with _tmp_1_slot */
-lua_Integer _tmp_2 = 0;
-_tmp_2 = test_\u2133_two_titan(L, _mod, NULL, &_tmp_1);
-setsvalue(L, _tmp_1_slot, _tmp_1);  /* re-anchor the GC-able result */
-```
-
-```c
-_tmp_1 = luaS_new(L, "a");
-setsvalue(L, _tmp_1_slot, _tmp_1);
-*_outparam_2 = _tmp_1;
-L->top.p = _base;
-return 1;
-```
+and publishes an actual count. Rebasing and rooting of the results after
+return follow
+[values and the GC](values-and-gc.md#calls-c-only-inputs-immediate-result-roots-and-vm-transport),
+which also shows the generated code for `local a, b = two()`.
 
 A call used as a statement has `_discard_results`/`_voidok`; its effects run
 but none of its results become consumer-visible. Calls *from Lua* go through
-the generated entry wrappers, which ignore surplus arguments for fixed
-functions (or collect them for input-variadic functions), pad missing fixed
-arguments with nil, check argument types, honor Lua's requested flexible-result
-count, and install the error handler — see
-[Lua interop internals](lua-interop-internals.md).
+the generated stack entries; see
+[Lua interop internals](lua-interop-internals.md#the-two-lua-stack-entries-genluaentry).
 
 ## Run-time errors: `codethrow` and message conventions
 
@@ -933,15 +792,18 @@ the two most common source-location formats; they are conventions, not an
 exhaustive inventory of every generated diagnostic:
 
 * **`%s:%d:%d:` — `filename:line:col`** (the `.titan` path given to the
-  checker). Used by all `checkandget`/`checkandset` sites: boundary
-  argument checks, `value` casts, array/map element checks, record tag
-  mismatches (`expected test.Rec but found test.Point`), the
-  option unwrap above, and the record `__index`/`__newindex`
-  field-not-found errors (`field '%s' not found in record '%s'`).
-* **`at line %d` — line only.** Used by the inlined arithmetic and the
-  float→integer coercion: `error at line %d, divide by zero`,
-  `error at line %d, % by zero` (Lua 5.5's `pushvfstring` passes the
-  unknown `%` sequence through literally), and
+  checker). Used by `checkandget`/`checkandset` (`coder/values.lua`) and the
+  strict guards: boundary argument checks, `value` casts, Array/Map element
+  checks, record identity mismatches (`type error, expected test.Rec but found
+  test.Point`), the Option unwrap above, an Array write below index 1
+  (`array index must be positive`), a zero numeric-`for` step, and the record
+  `__index`/`__newindex` field-not-found errors (`field '%s' not found in
+  record '%s'`, `coder/module.lua`). A boundary float that is not integral
+  raises `type error, number '%f' has no integer representation`.
+* **`at line %d` — line only.** Used by the inlined arithmetic and by the
+  float→integer `ExpCast`: `error at line %d, divide by zero`,
+  `error at line %d, % by zero` (Lua 5.5's `pushvfstring` passes the unknown
+  `%` sequence through literally), and
   `type error at line %d, number '%f' has no integer representation`.
 
 At a genuine Lua/dynamic boundary, boolean truthiness and copying an existing

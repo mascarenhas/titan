@@ -66,6 +66,7 @@ end
 -- @usage standard-library-lua.md
 function load(chunk: string, name: string?, env: value):
     function (...: value): (...: value)
+  -- Implementation notes: doc/implementation/lua-library.md#compiling-and-rooting-a-chunk
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 2) == 0 then
@@ -235,6 +236,7 @@ end
 -- @return Cached or newly loaded module value.
 -- @usage standard-library-lua.md
 function require(modname: string): value
+  -- Implementation notes: doc/implementation/lua-library.md#asynchronous-require
   local loaded = registry_map(ffi.LUA_LOADED_TABLE as string)
   local cached: value = loaded[modname]
   if cached then return cached end
@@ -293,6 +295,7 @@ record Lua
   local busy: boolean
 end
 
+-- Implementation notes: doc/implementation/lua-library.md#worker-ownership-and-cancellation
 -- A call retains every native carrier and every source string while its worker
 -- owns the independent state. Output string addresses remain rooted by that
 -- state's stack until conversion has finished on the caller's thread.
@@ -345,6 +348,7 @@ local record LuaPreload
   local const symbols: foreign function (const *char): *void
 end
 
+-- Implementation notes: doc/implementation/lua-library.md#independent-state-ownership
 -- Snapshot only loaders that have no state-owned upvalues, together with any
 -- matching native provider resolver. Names remain traced while the initialization
 -- packet borrows their bytes; no initialized module object crosses states.

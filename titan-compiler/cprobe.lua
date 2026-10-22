@@ -490,6 +490,7 @@ local function enum_selection_question(eligible_ids)
     return { ids = ids, valid_result = valid_result }
 end
 
+-- Implementation notes: doc/implementation/c-ffi-expressions.md#enum-carrier-selection
 local function render_enum_selection_source(context, declaration_type, question)
     local name = probe_identifier("d")
     local declaration = cdeclarator.render_declaration(

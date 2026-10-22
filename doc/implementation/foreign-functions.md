@@ -4,8 +4,8 @@ Titan-written `foreign function` declarations are plain C-ABI entry points
 implemented in Titan source. They reuse the imported-C type graph and the
 configured target profile, but they do **not** reuse the ordinary Titan
 function ABI. This chapter follows the feature from parser and source
-collaboration through raw-C lowering and generated headers. It also records the
-target-directed allocation work and callback ownership in the current ABI.
+collaboration through raw-C lowering, generated headers, and the standard
+library's native callbacks.
 
 For the source contract, see [Foreign functions](../language/foreign-functions.md).
 The imported-header pipeline and ordinary FFI boundary remain documented in
@@ -32,9 +32,7 @@ callable protocol; `Type.CFunction` continues to mean a direct C declaration.
 ## Parser and AST
 
 The factored top-level grammar distinguishes `foreign function`, `foreign
-import`, and `foreign type` using their next keyword. Predicate expansion is bounded and terminal-only;
-selected syntactic nonterminals carry committed error labels, and ordered
-alternatives factor any shared syntactic prefix. A foreign function uses
+import`, and `foreign type` by their next keyword. A foreign function uses
 foreign-only parameter and return types:
 
 ```text
@@ -51,8 +49,8 @@ unsupported-source-variadic diagnostic. Titan function types use their distinct
 Unqualified `Ast.TypeForeignName` nodes never consult term bindings. Foreign
 pointer/array constructors use existing `TypeCPointer`/`TypeCArray` syntax nodes;
 another constructor beneath a pointer must be parenthesized. Unsized array
-annotations retain the direct-local borrowed-view semantics. Written fixed
-array extents are removed; allocation inference creates semantic fixed arrays.
+annotations retain the direct-local borrowed-view semantics. There is no
+written fixed-array extent; allocation inference creates fixed arrays.
 
 `Ast.TypeOwned(loc, subtype)` belongs to the Titan type grammar. Its full foreign
 operand must resolve to a pointer or array, possibly through an alias; the
@@ -70,8 +68,9 @@ without making ordinary terms or imported type names into namespaces.
 ### Signature construction
 
 Foreign signatures are collected in the callable-signature pass, alongside
-ordinary top-level functions but before bodies. `_foreign_function_signature`
-uses `typefromnode` and accepts only direct declarable C FFI components:
+ordinary top-level functions but before bodies.
+`checker._foreign_function_signature` (`checker/interfaces.lua`) uses
+`typefromnode` and accepts only direct declarable C FFI components:
 
 * parameters cannot be `void`, owners, arrays, direct functions, C modules, or
   Titan values;
@@ -114,13 +113,15 @@ C namespace remains usable because its functions, values, fields, types,
 `sizeof`, and `alignof` are already direct C declarations. A producer's
 builtin `ffi` value namespace and separate foreign type namespace is established from the consumer's combined C header.
 
-After ordinary checking and elaboration, `_validate_foreign_body_node` performs
-a closed AST walk. It rejects `StatTry` (including parser-lowered `defer`),
-`raise`, generic `for`, `case`, constructors, lambdas, bound methods, variadic
-expressions, subset/spread expressions, concatenation, `is`, Titan boolean
-operators, and allocation pseudo-calls. Every local must have an initializer
-and a direct non-owner, non-function, non-module, non-void C type. A return has
-zero or one expression.
+After ordinary checking and elaboration, `checker._checkforeignfunc` runs
+`checker._validate_foreign_body_node` (`checker/declarations.lua`), a closed AST
+walk. It rejects every tag in `checker._foreign_forbidden_statements` and
+`checker._foreign_forbidden_expressions`, `StatTry` (reported as `defer` when
+it is a parser-lowered defer tail, otherwise as `catch`/`finally`), allocation
+pseudo-calls, `..`, `and`, `or`, `not`, and casts between Titan and C values
+other than literal and nil-to-pointer casts. Every local must have an
+initializer and a direct non-owner, non-function, non-module, non-void C type
+(`checker._valid_foreign_local_type`). A return has zero or one expression.
 This second pass is important: parser desugarings and checker-synthesized nodes
 cannot bypass the raw-C surface merely because their original spelling looked
 innocent.
@@ -204,14 +205,12 @@ Transitive C header inclusion does not grant transitive private Titan access.
 The consumer checker prepares one `A.ffi.h` containing explicit-source
 dependency FFI headers before its local directives, then preprocesses and parses
 that actual header. Include guards, final macro state, and actual C scopes
-produce the builtin `ffi` value namespace and separate foreign type namespace before aliases, signatures, initializers,
-and bodies are checked. Probes use the same deterministic generated FFI tree;
-there is no synthetic per-type origin reconstruction or forwarding header.
-The probe cache hashes the complete unpreprocessed source, including the
-stable logical include and generated-bundle digest comment, without hashing real author headers as
-extra key inputs. The configured C compiler checks the combined baseline and
-final generated unit. Additional consumer headers can cause late C diagnostics
-for imported declarations while Titan source-private visibility stays direct.
+produce the builtin `ffi` value namespace and the separate foreign type
+namespace before aliases, signatures, initializers, and bodies are checked.
+Probes use the same generated FFI tree (see
+[semantic-result caching](c-ffi-expressions.md#analysis-local-and-persistent-semantic-results)).
+Additional consumer headers can cause late C diagnostics for imported
+declarations while Titan source-private visibility stays direct.
 
 ## Exact raw-C lowering and sequencing
 
@@ -376,270 +375,64 @@ cleanup covers both generated header suffixes under their bounded
 generated-source ownership rules. Sanitizer generated-C snapshots preserve the required header closure with
 the saved translation unit.
 
-## Target-directed allocation plans
+## Allocation and recovery storage
 
-Target-directed `.new`/`.new_array` selection is part of the same FFI wrap-up,
-but it applies to ordinary Titan functions only; foreign bodies reject both
-pseudo-functions because they have no Lua allocation/root context.
+Foreign bodies reject `.new` and `.new_array` because they have no Lua
+allocation or root context, and they have no `setjmp` spill protocol because
+they cannot establish a Titan recovery boundary. Target-directed allocation
+plans, flexible-array-member provenance, automatic-to-owned copies and
+aggregate spills in ordinary Titan functions are documented in
+[target-directed automatic aggregates and fixed arrays](c-ffi-expressions.md#target-directed-automatic-aggregates-and-fixed-arrays).
 
-### Selection at the direct declaration sink
+## Standard-library foreign callbacks
 
-`Checker.CPseudoNew` remains a syntax-bound direct-callee descriptor, not a
-`Type.Function`. While `StatDecl` checks its expression list, the result-demand
-callback attaches the actual destination declaration as `allocation_decl`.
-`_plan_c_allocation` then freezes one `kind = "c_allocation"` plan on the call
-and, for an automatic or hidden-owner local, on the declaration. Important
-fields include `payload_type`, `result_type`, `storage`, `array`, `fam`, the
-literal count, and the FAM field descriptor.
+The standard library implements its native callback boundaries as source
+foreign functions compiled into the owning module objects:
 
-This happens before inference and sink coercion. Code generation switches only
-on the recorded plan; it never rediscovers stack versus owner storage from the
-endpoint tags. A module initializer, return, argument, assignment to an existing
-variable, nested expression, or discarded call has no direct declaration sink
-and retains the ordinary owned result.
-
-For a complete, eligible struct or union `T`, `.new()` selects:
-
-| Direct local sink | Plan/result |
-| --- | --- |
-| inferred, or explicitly `T` | `automatic_object`, a zeroed C `T` local |
-| `owned *T` | `owned`, a zeroed Lua userdata owner |
-| compatible `foreign *T` | `owned_borrow`, a pointer into a hidden owner rooted for the generated frame |
-| any non-direct-local context | ordinary `owned *T` |
-
-Automatic selection is aggregate-specific; a scalar, pointer, or enum
-pseudo-allocation does not silently become an automatic scalar. Completeness,
-nested-owner, and transitive GC-bearing-storage checks remain closed eligibility
-gates. A C array typedef cannot become owned storage or use
-`.new()`, but positive-literal `.new_array(N)` may use an imported array typedef as an
-element when the sink selects nested fixed automatic storage.
-
-For a non-FAM element type `T`, `.new_array(count)` selects:
-
-| Direct local sink/count | Plan/result |
-| --- | --- |
-| inferred positive integer literal or eligible integer macro `N` | `automatic_array`, zeroed `T[N]` |
-| written `foreign T[]` or `foreign *T`, positive literal or eligible macro | `automatic_array_borrow`, pointer over zeroed `T[N]` backing |
-| written `foreign T[]` or `foreign *T`, dynamic or zero count | `owned_borrow`, pointer into hidden counted-owner backing |
-| written `owned T[]` | `owned` for every count |
-| inferred dynamic/zero count or non-direct-local context | ordinary `owned T[]` |
-
-Written fixed extents are absent from the grammar. Constant selection accepts
-integer literal ASTs and proven object-like integer macros. The macro
-declaration retains its exact target-profile decimal value as
-`_c_integer_constant`; values outside the supported extent representation are
-rejected, without host arithmetic evaluation or a size threshold. Arbitrary
-constant expressions/Titan bindings do not qualify. The borrowed `foreign T[]`
-target becomes a raw pointer and carries no
-length; `#` and counted bounds checks are unavailable after that lowering. A
-pointer may escape and dangle after its automatic block/frame, and a pointer
-into a hidden owner loses ownership when that frame stops rooting the owner.
-
-`_codeautomaticallocationdecl` emits real declaration-owned storage rather than
-an expression temporary: `{0}` for an object/fixed array, a separate fixed
-array plus pointer for `automatic_array_borrow`, and the aligned backing below
-for a FAM. This keeps address-taking, C out-parameter mutation, block lifetime,
-defer-tail predeclaration, and try-spill analysis attached to the actual
-`Ast.Decl`.
-
-For `automatic_array_borrow`, that emitter owns both the backing declaration
-and the single pointer-view declaration initialized from it; generic local
-lowering must not redeclare the view. Defer-tail predeclaration likewise places
-the backing and initialized view together in the enclosing cleanup scope,
-then suppresses both declarations at the original statement. This lifetime
-handling does not turn the pointer view into an aggregate spill.
-
-### Flexible-array-member provenance
-
-For a complete `struct T` whose marked final field is `E field[]`,
-`c_pseudo_member` changes `.new` to one-count arity and makes `.new_array`
-unavailable. A literal nonnegative count at an inferred/by-value direct local
-selects `automatic_fam`; an explicit owner, explicit `foreign *T`, dynamic count, or
-non-local expression selects one owner (with a borrowed pointer for the raw
-pointer sink).
-
-The target C compiler remains the layout authority. Both paths use the exact
-extent
-
-```text
-max(sizeof(T), offsetof(T, field) + count * sizeof(E))
-```
-
-and zero the entire extent. Before recording `automatic_fam`, the checker asks
-the configured C probe context to prove
-`count <= (((size_t)-1 - offsetof(T, field)) / sizeof(E))`; this keeps the
-literal bounds provenance and generated backing extent identical without host
-layout guesses. The automatic form uses a union containing `T` for alignment
-and an unsigned-byte member for the complete constant extent. The owned form
-evaluates the count once, rejects a negative value, checks
-addition/multiplication overflow, allocates exactly that many payload bytes,
-and stores the logical count in one private integer user value. `Udata.len`
-remains the byte extent; padding is never mistaken for a logical element count.
-
-Field checking attaches `_c_fam_access` only while allocation provenance is
-present. Direct `owner.field[i]` and `automatic.field[i]` are 0-based and use
-the stored/literal count for bounds and `#field`. Converting either object to a
-raw `T *` erases that annotation; the resulting unsized C field has neither a
-recoverable length nor the count-aware index path. Titan does not invent a
-collection of variably extended `T` objects or a custom outer stride.
-
-### Copies to owners and longjmp spills
-
-`types.coercion` has two narrow directional operations:
-`c_automatic_to_owned` for a matching struct/union and
-`c_automatic_array_to_owned` for a matching fixed array. The coder validates
-the exact plan, materializes the source once, allocates and stack-roots the
-owner, copies the complete object representation, and only then publishes the
-owner. A FAM source is recognized from its declaration plan, so the copy uses
-the full extended backing and reproduces the logical-count user value. These
-are allocating direct coercions, not consistency, subtyping, or recursively
-lifted structural conversions.
-
-Ordinary Titan `catch`/`finally` still uses C `setjmp`/`longjmp`. The existing
-write/read analysis marks a declaration when a protected region can mutate it
-and recovery can observe it. Constructor-created storage participates because
-it is declaration-owned. Ordinary aggregates and fixed arrays spill their
-complete object representation using `&local`/`sizeof local`.
-`_c_backing_storage` supplies the address and byte extent for an automatic FAM's
-complete extended backing.
-
-For those aggregates, the coder maintains a volatile byte spill with explicit
-byte loops after initialization, assignments, and normally returning mutable C
-calls, then reloads it on recovery. It intentionally does not cast away
-volatility through `memcpy`.
-
-An `automatic_array_borrow` declaration instead preserves only its pointer
-value, never snapshots or restores its backing bytes. An unexposed pointer
-uses the ordinary volatile scalar spill; a recovery-sensitive pointer whose
-mutable address is exposed uses the actual volatile pointer object as its
-single home, with a declaration-time compiler escape barrier. Together they
-preserve an indirect write even if an ordinary Titan or C callee is inlined
-and raises without returning; volatility alone is insufficient. This supported
-GCC/Clang guarantee retains the ISO C 6.7.3p6 qualifier caveat; see
-[recovery storage](error-handling.md#setjmp-sensitive-localparameter-spills).
-Writes through the borrowed pointer remain in the live backing. Capturing
-the pointer does not extend the backing's lifetime.
-
-A C call that mutates an aggregate and then longjmps does not commit that
-aggregate's partial post-call state to its byte spill; untracked aliases do
-not participate in spill updates. The scalar volatile-home rule above does
-not change that aggregate contract. Foreign functions themselves have no
-such spill protocol because their bodies cannot establish a Titan recovery
-boundary.
-
-Ordinary Titan callees also do not yet commit normally returned mutable
-aggregate out-arguments to their byte spills: if another protected assignment
-made the aggregate spill-tracked, recovery can restore stale pre-call bytes.
-This pre-existing limitation is separate from scalar preservation.
-
-## Standard-library callback migrations
-
-The standard library uses foreign declarations at its native callback
-boundaries:
-
-* `titan.coroutine` defines `coro_entry_trampoline` in
-  `titan/coroutine.titan` and assigns it directly to `mco_desc.func`.
-  `titan-runtime/minicoro.c` now owns only the one `MINICORO_IMPL`
-  translation unit and the fixed raw-Lua tag comparator.
-* The `titan.uv` folder contributors define exact native callbacks for the
-  public low-level loop, handle, stream, request, process, and worker operations.
+* `titan/coroutine.titan` defines `coro_entry_trampoline` and assigns it
+  directly to `mco_desc.func`. `titan-runtime/minicoro.c` holds only the
+  `MINICORO_IMPL` translation unit and the fixed raw-Lua tag comparator.
+* The `titan.uv` folder contributors define the native callbacks for the public
+  low-level loop, handle, stream, request, process, and worker operations.
   Ordinary Titan callbacks remain main-thread entries; C-only workers, thread
   entries, and once callbacks have separate foreign signatures and cannot call
   into Titan or Lua.
 * `titan/http/native.titan` defines the eight synchronous llhttp data and
-  completion callbacks. The private llhttp archive still contains exactly
-  `llhttp.o`, `http.o`, and `api.o`; there is no separate HTTP adapter object.
+  completion callbacks; the private llhttp archive contains only `llhttp.o`,
+  `http.o`, and `api.o`.
+* `titan/transfer.titan` and `titan/thread/*.titan` define the C-ABI packet and
+  channel callbacks.
 
-The trusted callbacks need a few Lua-internal operations that remain awkward as
-function-like C macros. `titan/ffi.h` supplies only four typed inline bridges:
-`lmacro_thvalue`, `lmacro_uvalue`, `lmacro_clCvalue`, and `lmacro_pvalue`. The
-host preprocessor expands the real Lua macros inside those wrappers; general
-function-like macro inference remains unsupported. The same header owns small
-typed inline definitions of `lua_totvalue`, `lua_pushtvalue`, `lua_togco`, and
-`titan_newthread`, so trusted source modules do not depend on separate runtime
-exports for those bridges.
+The runtime SDK archive therefore contains only `titan.o` and `minicoro.o`; no
+adapter object carries callback code. The Lua-internal macro bridges these
+callbacks use (`lmacro_*`, `lua_totvalue`, `lua_pushtvalue`) are typed inline
+functions in `titan/ffi.h`; see
+[header support files](ffi-internals.md#header-support-files).
 
-Each UV/HTTP callback recovers the exact owner and callback closure, the
-owning main Lua state and module, and the closure's native entry through an
-exact `foreign function(...): ...` type. It invokes that entry with the original
-closure as `_fn` and preserves the Lua stack top. UV callbacks pin the owner and
-old callback frame while user code runs, even when the terminal callback retires
-the old request or close registration and reuses its concrete owner. Retiring an
-old frame cannot clear a new registration. Persistent callbacks preserve their
-live registration until stop/close according to the operation's native contract.
-Callback exceptions latch the original error and trace, complete mandatory
-native bookkeeping, and are rethrown only after returning across the native
-boundary. The synchronous HTTP parser retains its own parser-owner protocol.
-
-High-level fs/net/os/timer modules use ordinary Titan callbacks through the
-compiled UV interface, so they do not duplicate the raw C-to-Titan bridge or
-reach source-private callback fields. Their Task adapters use public async
-registration and subscription APIs. See the
-[extension guide](libuv-extension-guide.md) for the exact native pin, request,
-and terminal-callback ownership rules.
-
-The runtime SDK archive has exactly `titan.o` and `minicoro.o`.
-Transfer helpers and standard-library callbacks are source foreign functions
-compiled into their owning module objects.
-Its installed namespaced header set is only `titan/ffi.h`, alongside top-level
-`minicoro.h`, `titan.h`, and `transfer.h` (and the separately governed
-bundled libuv headers). The standard provider payload is `ltitanlib.o`, private
-LPegLabel, the bundled libuv payload, private llhttp/SQLite, and the selected OpenSSL
-payload; it has no `titan_uv.o`, `titan/coro.h`, `titan/uv.h`, or
-`titan_httpshim.o`.
+A UV or HTTP callback recovers the exact owner, callback closure, owning main
+Lua state and module, and the closure's native entry through an exact
+`foreign function(...): ...` type, then invokes that entry with the original
+closure as `_fn` and preserves the Lua stack top. Callback exceptions latch the
+original error and trace, complete mandatory native bookkeeping, and are
+rethrown only after returning across the native boundary. Pinning, request and
+terminal-callback ownership are in the
+[extension guide](libuv-extension-guide.md); the synchronous HTTP parser keeps
+its own parser-owner protocol. High-level fs/net/os/timer modules use ordinary
+Titan callbacks through the compiled UV interface and public async
+registration APIs, never this raw bridge.
 
 ## Native names and ABI
 
-`coder._function_prefix` separates a flattened logical module name from the
-remaining callable with `_\u2133_` (U+2133 SCRIPT CAPITAL M):
+A foreign declaration owns only the `<module>_\u2133_<name>_titan` spelling of
+the [generated-name hierarchy](codegen-overview.md#generated-names); it has no
+`_titanentry_lua` or `_titanentry_strict` entry. Public or local linkage and
+source visibility are properties of the declaration, not alternate name
+encodings. `coder.external_symbols` and `coder.foreign_external_symbols`
+(`coder/names.lua`) include hidden cross-object foreign entries, so library
+preflight catches collisions before the linker runs.
 
-```text
-foo.bar + baz -> foo_bar_\u2133_baz
-```
-
-`coder._nominal_function_prefix` adds `_\u2131_` (U+2131 SCRIPT CAPITAL F)
-between a record, union, or Interface owner and its member or synthetic
-metamethod role:
-
-```text
-foo.bar + Point:move -> foo_bar_\u2133_Point_\u2131_move_titanmethod
-```
-
-Neither character can occur in Titan's identifier alphabet, so both tuple
-boundaries are injective without a universal `titan_` prefix or a separate
-hexadecimal source-private scheme. C source retains the UCN spellings; object
-symbols, DWARF, libbacktrace, and native tools see UTF-8 `ℳ` and `ℱ`, which
-`_linkage_symbol_name` computes for native trace keys.
-
-Ordinary public and local top-level entries share the family:
-
-```text
-foo_bar_\u2133_baz_titan
-foo_bar_\u2133_baz_titanentry_lua
-foo_bar_\u2133_baz_titanentry_strict
-```
-
-A foreign declaration uses only the first native spelling. Public or local linkage and
-source/Lua visibility are properties of the declaration, not alternate name
-encodings. Library preflight calls `coder.external_symbols`, so hidden
-cross-object foreign and local entries still participate in collision checks
-before the linker runs.
-
-The native symbol contract has two ABI-visible properties: generated standard
-objects define callbacks absent from the runtime/HTTP support objects, and
-callable entry families use the separated module/nominal/member hierarchy.
-Current prerelease ABI 2 retains that contract together with generic and public
-standard-library metadata and [native nominal storage](nominal-storage.md).
-ABI-marker mismatches are rejected even when serialized public types match.
-Native compilation also rejects missing or malformed physical-layout metadata.
-Same-marker prerelease layout changes require a clean rebuild of the compiler,
-runtime, and providers together.
-
-`TITAN_VERSION` `0.6.0` derives the `0.6` library namespace used by
-`TITAN_PATH_0_6`, `lib/titan/0.6`, `share/titan/0.6`, and `stdlib_0_6`.
-Earlier Titan installations are not migration or compatibility inputs.
-
-Public foreign declarations reuse the existing `ModuleMember(CFunction)` type
-graph and function compatibility category. Local foreign declarations,
-allocation plans, and generated headers remain compiler-local. Neither kind of
-foreign function adds a module-state slot or Lua opener.
+Public foreign declarations reuse the `ModuleMember(CFunction)` type graph and
+the function compatibility category of the
+[compiled-module ABI](codegen-overview.md#compiled-module-abi). Local foreign
+declarations, allocation plans, and generated headers stay compiler-local.
+Neither kind adds a module-state slot or Lua opener.

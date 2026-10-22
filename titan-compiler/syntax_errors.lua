@@ -1,5 +1,6 @@
 local syntax_errors = {}
 
+-- Implementation notes: doc/implementation/lexer-parser.md#the-error-label-system
 local errors = {
     -- The `fail` label is the default "parsing failed" error number
     fail = "Syntax Error",

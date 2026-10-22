@@ -25,6 +25,7 @@ typedef struct titan_transfer_resource {
   titan_transfer_resource_fn release;
 } titan_transfer_resource;
 
+/* Implementation notes: doc/implementation/transfer-library.md#packet-scoped-resource-table-titan_transfer_resource_table */
 /* Committed packets retain an exact count, never scratch capacity. Their entry
  * pointer is NULL for zero entries and otherwise points inside the packet. */
 typedef struct titan_transfer_resource_table {

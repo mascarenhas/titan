@@ -373,6 +373,7 @@ catch
   do opening:abort() catch end
   raise
 end
+-- Implementation notes: doc/implementation/websocket-library.md#opening-ownership
 local function destination_key(address: uv.sockaddr_t): string
   local bytes = address:address_bytes()
   local scope = address:scope_id()

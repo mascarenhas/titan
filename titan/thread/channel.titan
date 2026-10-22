@@ -154,6 +154,7 @@ local foreign function channel_unregister_underflow_waiter(
   uv.native_mutex_unlock(ch.mutex)
 end
 
+-- Implementation notes: doc/implementation/thread-library.md#shared-external-wake-suspension
 local foreign function channel_register_send_wait(context: *void, target: *void): int
   local wait = context as foreign *titan_thread_channel_wait
   wait.status = channel_try_enqueue_native(

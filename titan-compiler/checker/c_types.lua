@@ -1196,6 +1196,7 @@ function checker._c_flexible_array_member(typ)
     error("C struct has_fam metadata lacks its flexible-array field")
 end
 
+-- Implementation notes: doc/implementation/c-ffi-expressions.md#flexible-array-member-provenance
 function checker._validate_automatic_fam_extent(plan, st, loc, errors)
     local field = assert(plan.fam_field)
     local array = assert(c_resolve(field.type))
@@ -1413,6 +1414,7 @@ local function plan_nominal_c_allocation(node, pseudo, demand, plan, st, errors)
     return true
 end
 
+-- Implementation notes: doc/implementation/c-ffi-expressions.md#selection-at-the-direct-declaration-sink
 function checker._plan_c_allocation(node, pseudo, demand, st, errors)
     local decl = demand and demand.allocation_decl
     local payload = pseudo.ctype

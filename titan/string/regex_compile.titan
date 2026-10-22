@@ -185,6 +185,7 @@ local function regex_group_result(
   return Span(group_first, group_after - 1)
 end
 
+-- Implementation notes: doc/implementation/string-library.md#regex-parser-and-compiler
 local function regex_compile_node(node: RegexNode,
                                   continuation: peg.Pattern,
                                   state: RegexCompileState?): peg.Pattern

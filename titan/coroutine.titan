@@ -11,6 +11,7 @@ foreign type VoidPointer = *void
 
 foreign type coro_entry_func = function (*lua_State, *Udata, *CClosure, TValue, *mco_coro): void
 
+-- Implementation notes: doc/implementation/coroutines.md#entry-function
 local foreign function coro_entry_trampoline(co: *mco_coro)
   -- Foreign bodies cannot read Titan module constants. These are the C-array
   -- indices corresponding to the first four owner uservalues below.
@@ -70,6 +71,7 @@ local function check_mco_result(result: foreign mco_result)
   end
 end
 
+-- Implementation notes: doc/implementation/coroutines.md#tvalue-ffi-boundary
 local function root_transfer(co: foreign *mco_coro, payload: value)
   if not co then
     return

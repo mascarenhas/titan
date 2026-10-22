@@ -32,10 +32,9 @@ edge that is source-required and collaboration-capable.
 `titan.test` follows this ordinary resolution policy. The compiler neither
 substitutes its source nor creates a separate support translation unit. An
 installed SDK provides it through the same compiled standard provider selected
-for other imports. A static test link therefore retains the standard archive
-without the artificial source overlap formerly created by a support override.
-Actual authored source overlaps retain the general whole-provider composition
-checks; test mode does not weaken those checks.
+for other imports, so a static test link retains the standard archive without
+any source overlap. Actual authored source overlaps retain the general
+whole-provider composition checks; test mode does not weaken those checks.
 
 The CLI's `source_overrides` supplies only generated `titan.test.runner`
 contents. Its descriptor carries `files`, an in-memory `contents` map, and the
@@ -65,8 +64,8 @@ restricted because the generated wrapper calls the function as a statement.
 Source module names and then full case names are sorted with
 `util.bytewise_less`; discovery never depends on `pairs` order. It returns both
 the case descriptors and the exact owner-module set used for compilation
-flags. Generated source-object metadata retains the `function_names` result;
-an object-backed source entry exposes it as `test_functions` for the same
+flags. Generated source-object metadata records `test_runner.function_names`
+as `test_functions`, so an object-backed source entry supports the same
 discovery traversal without an AST. Binary providers are never discovered,
 even when a static provider physically carries other logical keys.
 
@@ -121,9 +120,10 @@ symlink leaves, and leaves of the wrong kind. Generated-parent creation never
 replaces an occupied path.
 
 `driver.compile` accepts an invocation-local `extra_compile_flags` list.
-`titanc` adds `-fno-optimize-sibling-calls` only for discovery-owner modules.
-The standard provider, runner, entrypoint, production dependencies, and probes
-retain their normal flags. There is no invocation-wide test codegen mode.
+`titanc` passes `test_runner.TEST_COMPILE_FLAGS`
+(`-fno-optimize-sibling-calls`) only for discovery-owner modules. The standard
+provider, runner, entrypoint, production dependencies, and probes retain their
+normal flags. There is no invocation-wide test codegen mode.
 
 ## `titan.test` execution API and private state
 
@@ -235,52 +235,28 @@ lifecycle protocol.
 
 ## Validation profile and isolated SDKs
 
-`TITAN_BUILD_PROFILE` is selected before Make expands native flags or
-installed SDK paths. Ordinary targets and unset compiler invocations use
-`production`; repository test entry points and the Busted/CI wrappers default
-to `validation`. An implicit validation installation uses `.lua-validation`,
-separate from the discovered active-PATH prefix. Existing ordinary prefix
-discovery remains caller-owned; use matching profile/prefix settings rather
-than republishing another profile into an active SDK. `make test` prepares and
-reinstalls the selected installation; a cold `rock-test` re-enters through that
-complete preparation so runtime/header paths are expanded after installation.
-Leaf native targets require a prepared matching prefix.
+Profile selection, prefixes and command ownership are in [repository
+workflow](repository-workflow.md#choose-the-matching-profile-and-command); the
+per-component optimization policy is in [build
+profiles](../language/build-profiles.md). The test harness adds these flag
+rules:
 
-Validation sets generated-C and link defaults to `-O0 -fno-lto`, including
-libtitan, libbacktrace and bundled libuv/llhttp/SQLite/OpenSSL. Lua and
-its native compiler dependencies (LPegLabel and Lua filesystem), plus private
-LPegLabel, stay at O2/no LTO so compiler and test execution remains optimized.
-Sanitizer Lua/parser dependencies use O1/no LTO with complete instrumentation;
-Titan payloads retain O0/no LTO. The Titan rock receives separate O0 runtime
-flags while ordinary Lua dependencies use stock LuaRocks defaults. Sanitizer CI
-explicitly installs LPegLabel and Lua filesystem with instrumented host flags
-before the Titan rock. Lua/LuaRocks bootstrap targets check installed program
-existence only; their source/configuration rebuilds remain caller-owned.
-Parser-specific flags follow generic Titan extras. The SDK records its profile
-in `etc/titan/build-profile`. Ordinary native builds use source/header
-prerequisites; callers clean their output directories after changing build flags
-or toolchains. `make clean-stdlib` clears the paired provider and module outputs.
-
-The test environment reaches Busted workers, the aggregate executable and its
-fresh child compilers. Direct coder Busted fixtures also prepend cheap C/link
-flags through `spec.support.helpers` when no profile was explicitly selected.
-The small `spec/coder/lto_spec.lua` smoke clears the inherited profile and all
-cheap overrides, compiling and running cross-module providers and source-free
-consumers with the ordinary unset O3/fat-LTO defaults. Make's flag regression
-separately checks production/validation, platform defaults and explicit flags.
-The small fat-object metadata reader, foreign prototype diagnostics, nominal
-array-boundary diagnostics and `setjmp`/`longjmp` value-survival fixtures retain
-their explicit optimization levels because optimization is part of their oracle.
-Benchmark scripts keep the profiles recorded by their measurements.
-
-Production and validation prefixes are independent. Distinct `--output` roots
-can separate generated Titan objects, but repository Make builds default to
-one `out/` tree and authored runtime/native dependency builds still share their
-checkout locations. Serialize builds sharing those inputs or use private source
-copies. Linux and manually dispatched macOS CI prepare validation trees,
-include the profile in native/rock/probe cache keys, and share only their
-selected read-only SDK with isolated compiler workers. These internal test
-artifacts do not change normal installed production defaults.
+- The native aggregate and its fresh child compilers receive the profile's
+  native flags followed by `TITAN_EXTRA_*FLAGS` when set, otherwise
+  `TITAN_TEST_EXTRA_*FLAGS` (`Makefile` `TITAN_TEST_CFLAGS` and
+  `TITAN_TEST_COMPILER_ENV`). The same environment reaches Busted workers.
+- When no `TITAN_BUILD_PROFILE` is set, `spec/support/helpers.lua` prepends
+  `-O0 -fno-lto` to the driver's extra compile and link flags for direct coder
+  fixtures.
+- `spec/coder/lto_spec.lua` clears the inherited profile and cheap overrides for
+  its subprocess, compiling and running cross-module providers and source-free
+  consumers with the unset production defaults (O3, with fat LTO on Linux).
+- The fat-object metadata reader, foreign-prototype diagnostics, nominal
+  array-boundary diagnostics and `setjmp`/`longjmp` value-survival fixtures
+  keep explicit optimization levels because optimization is part of their
+  oracle. Make's flag regression separately checks production/validation,
+  platform defaults and explicit flags. Benchmark scripts keep the profiles
+  recorded by their measurements.
 
 ## Regression placement
 
@@ -336,83 +312,88 @@ teardown when the deadline wins, and timer-only cancellation when the reader win
 
 ## Repository dogfooding
 
-The shared `spec/support/stdlib_test_modules.mk` manifest names 29 module-owned
-roots under `spec/stdlib/titan/`, used by Linux, macOS, and native Windows.
-The same reviewed inventory names their test/helper compilation units, folder
-contributors, and direct source imports. On Unix, Make schedules per-module
-`-c --test --incremental` commands after their source dependencies. Every
-command runs from `TITAN_TEST_BUILD_DIR` (default `out/tests`) with `--output .`,
-uses the same absolute source tree and flags, and depends on the installed
-standard provider. No separate `titan.test`
-support object is compiled.
+The shared `spec/support/stdlib_test_modules.mk` manifest names 30
+module-owned roots under `spec/stdlib/titan/` (`TITAN_STDLIB_TEST_ROOTS`), used
+by Linux, macOS, and native Windows. The same inventory names their
+test/helper compilation units, folder contributors, and direct source imports.
+On Unix, Make schedules per-module `-c --test --incremental` commands after
+their source dependencies. Every command runs from `TITAN_TEST_BUILD_DIR`
+(default `out/tests`) with `--output .`, uses the same absolute source tree and
+flags, and depends on the installed standard provider. No separate
+`titan.test` support object is compiled.
 
 One final Unix `--output . --test --incremental --no-uv-bootstrap` invocation
-keeps all 29 roots explicit and discovers the complete source/object closure. The designated
-first root, `test.tests`, owns `out/tests/test/tests`; the current synthetic
-runner, entrypoint, and Darwin dSYM are also owned there. Module C, objects,
-and headers reproduce the test source hierarchy below `out/tests`, leaving
-the source tree untouched. Make owns their source-import,
-private-header, installed-provider, compiler/SDK, and configuration prerequisites.
-Native fixture objects and the host child executable are separate targets.
-A no-op `titan-stdlib-test-build` invokes neither the compiler nor the linker.
+keeps all roots explicit and discovers the complete source/object closure. The
+designated first root, `test.tests`, owns `out/tests/test/tests`; the current
+synthetic runner, entrypoint, and Darwin dSYM are also owned there. Module C,
+objects, and headers reproduce the test source hierarchy below `out/tests`,
+leaving the source tree untouched. Make owns their source-import,
+private-header, installed-provider, compiler/SDK, and configuration
+prerequisites. Native fixture objects and the host child executable are
+separate targets. A no-op `titan-stdlib-test-build` invokes neither the
+compiler nor the linker.
 
 `make titan-stdlib-test-run` returns to the repository root before executing,
 because several fixtures use repository-relative paths. `TITAN_FILTER` supplies
-one Lua pattern to this already built executable; it never changes the 29-root
-compile. `make titan-stdlib-test` composes build and run, while the split leaf
-targets let sanitizer and focused development runs reuse one build in multiple
-fresh processes. `BUSTED_FILTER` is independent and belongs to
+one Lua pattern to this already built executable; it never changes the
+compiled root set. `make titan-stdlib-test` composes build and run, while the
+split leaf targets let sanitizer and focused development runs reuse one build
+in multiple fresh processes. `BUSTED_FILTER` is independent and belongs to
 `busted-test`; `rock-test` enters both domains without inventing native group
-names.
-
-The explicit repository-root command
-`TITAN_ROCKS_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1 busted --run=checkout`
-uses the `.busted` `checkout` profile to prepend `./?.lua;./?/init.lua` after
-the LuaRocks launcher initializes its paths. It loads edited checkout Lua
-compiler modules without reinstalling them; an ambient `LUA_PATH` override
-alone does not have that precedence. The profile leaves the C module path
-unchanged. The existing `TITAN_ROCKS_ROOT` option separately preserves installed
-driver layout, headers, and runtime-library inputs. Keep that root override
-scoped to the focused invocation.
-
-The profile runs Busted's standard helper
-`spec/support/checkout_busted.lua` before loading specs. It requires the root
-option, creates one existing resolver context to initialize driver layout,
-calls `driver.configure_foreign_c` so direct checker FFI imports use the same
-installed SDK, and closes the context. It changes no compiler loader or
-source-identity mechanism.
-
-The real-launcher regression in `spec/libuv_build_spec.lua` compares a
-deliberate checkout compiler edit with the unchanged installed module. It
-proves default Busted stays installed even with `.busted` present, compares
-active native dependency/SDK paths in a recognizable source checkout, and
-checks an installed `lua.h` import through the direct checker with no checkout
-Lua headers. It also requires a missing root option and a broken local module
-to fail rather than silently change layout or fall back to the install.
-
-Default Busted, `make busted-test`, and `luarocks test` continue to use the
-installed compiler; reinstall compiler edits before those commands or an
-installed `titanc` invocation. Compiler workers still own private checkout and
-temporary directories. The profile does not refresh installed tools, the
-SDK/provider, or a compiled native aggregate. Reinstall after runtime or
-standard-library changes as well. `make test` remains the canonical full gate
-because it reinstalls the current compiler and provider before testing;
-`luarocks test` does not.
+names. Running edited compiler Lua through Busted without reinstalling uses the
+explicit [checkout profile](repository-workflow.md#run-checkout-compiler-lua-with-busted).
 
 `run_with_timeout.sh` uses Bash monitor mode to give the executable its own
 process group and polls it at a coarse interval. Make's default
-`TITAN_TEST_TIMEOUT=600` covers all 29 test roots, including repeated fresh
-child-fixture compilation under the selected profile. Explicit overrides, including the
-15-second CI shutdown check, remain independent of that default. At the deadline it sends
-`TERM`, then `KILL` after a short grace period, maps the timeout to status 124,
-and otherwise preserves the child's status. Make streams combined
-stdout/stderr through a pipe rather than redirecting either stream to a regular
-file, preserving the parent-pipe boundary tested by OS/stdio cases. Expected
-uncaught Task diagnostics are owned by their Titan tests: a case emits flushed
-`Context:log` messages containing `BEGIN expected uncaught async Task
-diagnostics` and `END expected uncaught async Task diagnostics` around the
-operation. Those prefixed brackets make a successful aggregate log readable
-and keep the expectation owned by the case that produces it.
+`TITAN_TEST_TIMEOUT=600` covers the whole aggregate, including repeated fresh
+child-fixture compilation under the selected profile. Explicit overrides,
+including the 15-second CI shutdown check, are independent of that default. At
+the deadline it sends `TERM`, then `KILL` after a short grace period, maps the
+timeout to status 124, and otherwise preserves the child's status. Make
+streams combined stdout/stderr through a pipe rather than redirecting either
+stream to a regular file, preserving the parent-pipe boundary tested by
+OS/stdio cases. Expected uncaught Task diagnostics are owned by their Titan
+tests: a case emits flushed `Context:log` messages containing `BEGIN expected
+uncaught async Task diagnostics` and `END expected uncaught async Task
+diagnostics` around the operation. Those prefixed brackets make a successful
+aggregate log readable and keep the expectation owned by the case that
+produces it.
+
+### Busted partitions
+
+`make busted-test`, `luarocks test` (the rockspec `test` command) and Windows
+`rock-test` all enter `spec/support/run_rock_tests.sh`. An exact unfiltered run,
+with no `BUSTED_FILTER` and no appended Busted arguments, has three phases:
+
+1. the retained runtime/packaging specs (`Makefile` `STDLIB_BUSTED_TESTS`,
+   `Makefile.win` `TITAN_ROCK_TEST_STDLIB_SPECS`), serially;
+2. the stdlib-dependent compiler integrations listed in
+   `spec/support/ci_stdlib_compiler_test_files.txt`, serially; then
+3. `spec/support/run_parallel_compiler_tests.sh`, which runs the four
+   compiler/language partitions of `spec/support/ci_compiler_test_groups.txt`
+   in private checkout copies.
+
+The partition file assigns files longest-first by measured time to the
+least-loaded shard; rebalance it when costs change materially. Busted 2.3 has no
+native sharding. `TITAN_ROCK_TEST_JOBS=1` through `4` selects the number of
+concurrent workers, defaulting to four on Unix and two on Windows. Each worker
+gets `MAKEFLAGS=-j1`, `TITAN_JOBS=1`, and a private `TMPDIR` and ccache scratch,
+and uses the installed SDK read-only. Unix workers base their scratch on the
+caller's `TMPDIR`; Windows workers also get private TEMP/TMP below MSYS2's short
+`/tmp`, so nested fixture paths fit ordinary Win32 filename limits, and run
+under the native Job Object supervisor. On Windows the shard containing
+`spec/coder/parallel_compilation_spec.lua` runs alone, so its explicit native
+job bound does not multiply with another active shard. Local workers collect no
+LuaCov and never upload coverage. A Busted filter or appended Busted argument
+selects the ordinary single-process route; a Titan-only filter leaves sharding
+enabled.
+
+On Unix `rock-test` runs `busted-test` and then `titan-stdlib-test`; on Windows
+it builds and runs the native aggregate first. Both Windows Busted launchers
+(`run_rock_tests.sh` and the worker launcher in `run_parallel_compiler_tests.sh`)
+preload `luv` before Busted's per-file isolation. The library owns its native
+loop through its first module table, so that table must stay loaded while
+Busted restores `package.loaded` between files.
 
 ### Platform portability and complete execution
 
@@ -427,8 +408,17 @@ without exporting private collaboration headers through the SDK.
 Windows retains its Job Object
 supervisor: descendants enter the private job before execution and are killed
 when supervision ends. PowerShell drains both output pipes concurrently and
-preserves the complete native exit status. The aggregate still uses
-`--no-uv-bootstrap`; fresh child tests select their own bootstrap normally.
+reads the complete Windows exit status, which can exceed 255. It prints that
+status and exits 1 for any nonzero value, because Bash keeps only eight exit
+bits and a native status such as 256 would otherwise read as success. The
+aggregate still uses `--no-uv-bootstrap`; fresh child tests select their own
+bootstrap normally.
+
+The same width difference applies inside the suite. A POSIX process exit
+status carries only eight bits, so `os.process_tests` skips its above-255 exit
+cases off Windows with a `platform:` reason, while `support.command` keeps the
+complete 32-bit Windows status (`code & 0xffffffff`) rather than treating high
+bits as POSIX signals.
 
 The platform runners audit named results with
 `spec/support/check_stdlib_test_output.lua`. An unfiltered run must execute every
@@ -467,40 +457,29 @@ Validation evidence records source identity, OS and architecture, SDK/compiler
 and provider settings, selected/passed/skipped/failed counts, and every skip
 reason. An Intel macOS run does not establish Apple Silicon behavior.
 
-Builds retain their reusable outputs; explicit `make clean` removes the selected
-`TITAN_OUTPUT_DIR` (default `out/`) as a Make-owned tree. The test cleanup helper
-prunes `out/` while inspecting synthetic fixtures and, unless `--keep-output`
-is selected, removes the owned `out/tests` and legacy `.titan-tests` directories
+Builds retain their reusable outputs; explicit `make clean` removes the
+selected `TITAN_OUTPUT_DIR` (default `out/`) as a Make-owned tree. The test
+cleanup helper (`spec/support/clean_generated_test_artifacts.sh`) prunes `out/`
+while inspecting synthetic fixtures and, unless `--keep-output` is selected,
+removes the owned `out/tests` and legacy `.titan-tests` directories
 recursively. Under `spec/`, legacy compiler outputs still use the bounded
-cleanup rules: remove generated `.o` files and a `.c` only when a same-stem
+cleanup rules: remove every generated `.o`, and a `.c` only when a same-stem
 `.titan` source exists. Generated headers require their exact compiler banner;
-synthetic test suffixes and root `test_runner_*` identify other owned fixtures.
-This does not consult Git, so it also works in a source rock while preserving
-author-written C/header fixtures and the ordinary `out/` provider stage.
+synthetic test suffixes and root `test_runner_*` identify other owned
+fixtures. This does not consult Git, so it also works in a source rock while
+preserving author-written C/header fixtures and the ordinary `out/` provider
+stage.
 
-Linux CI prepares a compiler/runtime SDK without standard modules, then starts
-two compiler shard pairs and the stdlib job in parallel. Compiler integration
-specs that consume installed standard modules run in the stdlib job with LuaCov;
-the other compiler specs remain independent of the stdlib build. The stdlib job
-runs retained host/packaging boundaries, then source-links the production stdlib
-into this aggregate for its one complete behavior run with native coverage.
-The coverage executable and generated artifacts use `out/coverage`, with
-reports in `out/coverage/report`, separate from ordinary `out/tests` outputs.
-Each execution resets coverage counters and replaces reports, so the saved
-report comes from the complete unfiltered run. The already built sanitizer
-aggregate owns the focused 15-second shutdown check without gcov/gcovr reporting
-overhead. Both OpenSSL mode smokes remain in the stdlib job. Each LuaCov producer uploads the `compiler` flag directly and
-Codecov merges those reports; native lines use `native-stdlib` separately.
-The sanitizer builds an independent ASan+UBSan aggregate once and selects focused
-cases with the run target; it never restores the regular artifact. The complete
-macOS pre-merge gate prefers the local VM; hosted manual dispatch is an
-explicitly requested fallback.
+CI runs this aggregate twice: once source-linked with native coverage in the
+`native-coverage` job, and once as an independent ASan+UBSan build in the
+`sanitizer` job, which selects focused cases with the run target. See
+[continuous integration](continuous-integration.md) for the lanes.
 
 ## Packaging and compatibility
 
 `titan.test` is an ordinary logical module in the combined
-`titan.so`/`titan.a` pair. The current provider has twenty-six `luaopen_*`
-entries including bare support and twenty-five generated logical-module shims.
+`titan.so`/`titan.a` pair (see the [standard-library
+image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image)).
 The same compiled `titan.test` implementation serves ordinary programs and
 generated test executables. Standard installation publishes the provider pair
 and shims; it does not install a private test-source payload. Packaging tests
@@ -511,19 +490,3 @@ The public `Case`, `Skip`, and `run` declarations use the existing native
 calling conventions and metadata schema. Reinstall the compiler and standard
 provider together when changing this API. Use a fresh installation after ABI
 changes; earlier Titan installations are not migration sources.
-
-The unfiltered Windows LuaRocks backend uses the same four compiler/language
-partitions in private NTFS checkout copies after its eight retained serial specs,
-eight stdlib-dependent compiler integration specs, and native aggregate pass. It defaults to two workers and accepts
-`TITAN_ROCK_TEST_JOBS=1` through `4`. The shard containing explicit compiler
-parallelism tests runs without other shards active. Workers inherit private
-TEMP/TMP, run installed Lua and Busted against the shared read-only SDK, and
-are supervised by native Job Objects. Windows uses MSYS2's `/tmp` as a short
-scratch base so nested fixture paths fit ordinary Win32 filename limits;
-Unix workers retain the caller's `TMPDIR`. Busted filters or appended arguments
-select the ordinary single-process route.
-
-Both Windows Busted launchers preload `luv` before test-file isolation. The
-library owns its native loop through its first module table, so that table must
-stay loaded while Busted restores `package.loaded` between files. This retains
-one loop for the complete invocation without changing ordinary compiler loading.

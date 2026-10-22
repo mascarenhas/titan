@@ -82,6 +82,7 @@ end
 --   typ:      the Titan type of the boxed variable (selects (G) vs (N))
 --   boxvar:   name of the `Udata*` C variable to declare
 --   slot: relocation-safe expression for the box's anchor slot
+-- Implementation notes: doc/implementation/values-and-gc.md#3-anchor-fresh-objects-before-the-next-allocation
 function newbox(ctx, typ, boxvar, slot)
     if is_rawbox(typ) then
         return render([[
@@ -319,6 +320,7 @@ function codeif(ctx, node, idx)
     }), ctx)
 end
 
+-- Implementation notes: doc/implementation/codegen-constructs.md#the-numeric-for
 function codefor(ctx, node)
     pushd(ctx)
     local frame = open_loop(ctx, node)
@@ -483,6 +485,7 @@ end
 -- raw stores go through luaH_set/luaH_setint, which take the value.
 -- The GC barrier for the stored value is the caller's responsibility;
 -- new keys are barriered internally by the insertion code.
+-- Implementation notes: doc/implementation/values-and-gc.md#5-write-barriers-back-for-userdata-and-tables-forward-for-closures
 function set_table_entry_raw(keytype, t, k, v)
     local tsetkey
     if keytype._tag == "Type.Integer" then
@@ -518,6 +521,7 @@ end
 -- present, Lua's partial setters update an existing slot in place and return a
 -- location code for a missing slot; only that latter case enters
 -- luaV_finishset and its function/table/value metamethod chain.
+-- Implementation notes: doc/implementation/codegen-constructs.md#assignment-set_table_entry-and-constructor-codemap
 function set_table_entry(ctx, keytype, t, k, v)
     ctx.uses_base_off = true
     local pset
@@ -752,6 +756,7 @@ function coder._prepared_c_field(base, name)
     })
 end
 
+-- Implementation notes: doc/implementation/ffi-internals.md#c-arrays-and-fields
 function coder._prepare_c_storage(ctx, exp, allow_temporary)
     if exp._tag ~= "Ast.ExpVar" then
         local basetype = types.resolve_c_typedef(exp._type)
@@ -1116,6 +1121,7 @@ end
 -- root while the index and RHS run, then let codeassignment perform only the
 -- mutation.  (The backing is non-moving, but it may otherwise be reachable
 -- solely through a transient C local returned by a call.)
+-- Implementation notes: doc/implementation/dense-arrays.md#array-writes
 function coder._materialize_array_lvalue(ctx, var)
     local castats, caexp = codeexp(ctx, var.exp1)
     local cta, taname, taslot = newtmp(ctx, var.exp1._type, true)
@@ -1295,6 +1301,7 @@ function codesingleassignment(ctx, node)
     return table.concat(stats, "\n")
 end
 
+-- Implementation notes: doc/implementation/codegen-constructs.md#locals-and-assignment
 function codemultiassignment(ctx, node)
     local lvalue_stats = {}
     local lvalues = {}
@@ -1351,6 +1358,7 @@ PA_RAISE  = "3"
 -- backing plus a volatile count; GC-bearing elements also get a parallel range
 -- of traced Lua-stack slots. The descriptor itself is deliberately not used:
 -- the pending frame owns its backing until dispatch copies it to the caller.
+-- Implementation notes: doc/implementation/flexible-returns.md#finally-and-flexible-pending-returns
 function make_return_frame(ctx, id)
     local rettypes = ctx.rettypes or {}
     local saves = {}
@@ -1544,6 +1552,7 @@ end
 -- the finally would longjmp to an out-of-scope `_lj_*` object. Stop at `floor`
 -- so outer still-active boundaries remain installed and can catch/cascade a
 -- raise from the finally (the plan's inside-out finally semantics).
+-- Implementation notes: doc/implementation/error-handling.md#boundary-restoration-on-generated-goto
 function restore_boundaries_to(ctx, floor)
     local bs = ctx.protected_boundary_stack or {}
     local lines = {}
@@ -1911,6 +1920,7 @@ end
 -- copy it to the new top.
 -- An `emitline` stamps the throw to the raise's exact `.titan` line so the native
 -- frame symbolizes there (mirrors `codethrow`).
+-- Implementation notes: doc/implementation/error-handling.md#trace-pinning
 function coderaise(ctx, node)
     if not node.exp then
         -- Bare `raise` (re-raise) — legal only inside a catch (checker-enforced).
@@ -2034,6 +2044,7 @@ end
 -- a C `switch` (which would capture PA_BREAK's `break`). PA_RETURN/PA_BREAK chain
 -- through any enclosing finally; PA_RAISE reinstalls the saved trace + pin and
 -- re-raises; PA_NONE falls through.
+-- Implementation notes: doc/implementation/error-handling.md#pending-actions-for-finally
 function dispatch_after_finally(ctx, pa_var, frame, d_pa_err, d_pa_tb)
     -- RETURN arm: chain to an outer finally if one encloses this try, else emit
     -- the real return epilogue with the saved values.
@@ -2145,6 +2156,7 @@ end
 
 -- The "save" prologue of an inline setjmp boundary (rawrunprotected save), tagged
 -- with `tag` so a try with two boundaries (body + catch) keeps distinct locals.
+-- Implementation notes: doc/implementation/error-handling.md#code-generator-overview
 function boundary_save(tag)
     return render([[
         /* inline protected boundary (rawrunprotected save) */
@@ -2544,6 +2556,7 @@ function code_hidden_result_decls(ctx, decls)
     return table.concat(out, "\n")
 end
 
+-- Implementation notes: doc/implementation/defer.md#defer-tail-scope
 function predeclare_defer_tail(ctx, block)
     local out = {}
     local function visit_block(b)
@@ -2707,6 +2720,7 @@ function codeforin(ctx, node)
     })
 end
 
+-- Implementation notes: doc/implementation/c-ffi-expressions.md#selection-at-the-direct-declaration-sink
 function coder._codeautomaticallocationdecl(ctx, decl)
     local plan = assert(decl._c_allocation_plan)
     decl._boxed = false
@@ -2867,6 +2881,7 @@ end
 -- Emit a tag-only switch whose arms live outside the switch. This preserves
 -- Titan's enclosing-loop `break` semantics while allowing each arm to be an
 -- ordinary full block (including catch/finally and lowered defers).
+-- Implementation notes: doc/implementation/unions.md#generated-case-dispatch
 function coder._codecase(ctx, node)
     ctx.case_id = (ctx.case_id or 0) + 1
     local id = ctx.case_id

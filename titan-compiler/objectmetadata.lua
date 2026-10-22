@@ -108,6 +108,7 @@ function objectmetadata.render(payload, symbol)
     return staticmetadata.source_declaration(payload, symbol)
 end
 
+-- Implementation notes: doc/implementation/incremental-compilation.md#trusted-source-record
 function objectmetadata.read(bytes, origin, expected_abi)
     local payload, err = staticmetadata.read_object_section(
         bytes, origin, SECTION, #bytes)

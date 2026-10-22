@@ -37,7 +37,7 @@ returned separately as a hard error. These distinctions matter because a
 selected or blocked result must not silently fall through to a flat candidate
 or a later source root.
 
-For each source-root entry, resolution:
+For each source-root entry, resolution (`driver.lua` `source_resolution_in_root`):
 
 1. tests the requested folder main `P/B.titan` as a regular file;
 2. if found, enumerates its directory, retains only immediate regular
@@ -56,13 +56,12 @@ parent marker alone does not block a missing child: the privacy result exists
 only when the requested flat constituent itself is present.
 
 The source resolver runs only after ordinary compiled-module lookup for a
-dependency has missed. Exact binaries therefore retain their existing
-precedence. `titanc` marks command-line modules as explicit source roots, so
-they skip binary selection but otherwise use the same folder/flat resolver.
-An import AST marked `source_required` takes the same canonical resolver path
-under its stripped logical name, but a clean miss is terminal and no compiled
-lookup or fallback occurs.
-The old in-memory `driver.tableloader` remains a one-entry, one-source loader;
+dependency has missed, so compiled providers keep precedence. `titanc` marks
+command-line modules as explicit source roots, so they skip binary selection
+but otherwise use the same folder/flat resolver. An import AST marked
+`source_required` takes the same canonical resolver path under its stripped
+logical name, but a clean miss is terminal and no compiled lookup or fallback
+occurs. The in-memory `driver.tableloader` is a one-entry, one-source loader;
 filesystem folder semantics do not leak into checker fixtures or embeddings.
 
 ## Source descriptors are not AST nodes
@@ -75,10 +74,10 @@ to one dense numeric AST list.
 
 Independent parsing preserves line and column coordinates and prevents token
 or comment boundaries from flowing between files. Sequential calls also
-preserve the parser's existing non-reentrant `THIS_FILENAME` contract: one
+preserve the parser's non-reentrant `THIS_FILENAME` contract: one
 parse finishes completely before the next begins.
 
-Assembly order is:
+Assembly order (`driver.lua` `parse_source_inner`) is:
 
 1. main-source roots in their parser order, temporarily excluding its final
    parser-marked module initializer when present;
@@ -86,10 +85,11 @@ Assembly order is:
 3. the saved main initializer, appended once at the end.
 
 The parser annotates that root role with `_module_initializer`, because a
-plain initializer is an `Ast.StatBlock` while one with `catch` or `finally`
-trailers is an `Ast.StatTry`. The driver uses the role annotation, rather than
-guessing from the statement tag, to extract the main initializer and reject an
-initializer from a contributor at its `do` location. Nested block statements
+plain initializer is an `Ast.StatBlock` while one with a `catch` trailer is an
+`Ast.StatTry`. The driver uses the role annotation, rather than guessing from
+the statement tag, to extract the main initializer and reject an initializer
+from a contributor at its `do` location (`module initializer is only allowed in
+the folder main source '…'`). Nested block statements
 are ordinary descendants and remain legal. Parser desugarings stay in their
 original per-file order: a record keeps its `_record_constructor` static
 adjacent, and a union keeps all `_union_constructor` statics adjacent in
@@ -125,42 +125,48 @@ The source cache entry is:
 
 ```lua
 driver.imported[M] = {
+    kind = "source",
     ast = combined_ast,
     type = module_type,
     filename = source.main,
+    source_files = source.files,
+    native_output = source.native_output,
     program_output = source.program_output,
     deps = direct_deps,
+    -- plus generated-header and C-header dependency state:
+    -- headers, c_header_dependencies, source_manifest
 }
 ```
 
-The cache does not retain contributor descriptors after parsing. Source
-filenames survive on each node's existing `loc` value. Duplicate-declaration
-diagnostics use those locations for both the later declaration and the full
-`filename:line:column` location of the earlier one.
+The entry keeps the constituent filenames (`source_files`) for timestamps and
+coverage, but no per-file AST wrapper. Source filenames survive on each node's
+`loc` value. Duplicate-declaration diagnostics use those locations for both the
+later declaration and the full `filename:line:column` location of the earlier
+one.
 
-The checker annotates this unchanged list with `_toplevel_order` and premarks
-ordinary duplicate winners in combined order. It then precollects aliases
-before reserving surviving ordinary names and visiting imports, alias targets,
-records/unions and their synthesized constructors, callable signatures, and
-nominal members in dependency order. Module variables and bodies follow. This
-visitation schedule makes nominal owners, aliases, functions, methods, and
-nominal functions visible across file boundaries regardless of placement. For each
-module variable, `initializer_order` temporarily masks imports and module
-variables at or beyond the applicable combined-order frontier. Thus folder
-composition supplies the order but does not create a new visibility mechanism.
+The checker annotates this unchanged list with `_toplevel_order`
+(`checker/declarations.lua`) and premarks ordinary duplicate winners in
+combined order. It then precollects aliases before reserving surviving ordinary
+names and visiting imports, alias targets, records/unions and their synthesized
+constructors, callable signatures, and nominal members in dependency order.
+Module variables and bodies follow. This visitation schedule makes nominal
+owners, aliases, functions, methods, and nominal functions visible across file
+boundaries regardless of placement. For each module variable,
+`st.initializer_order` and `symtab:hidden_from_initializer` mask imports and
+module variables at or beyond that combined-order frontier. Folder composition
+therefore supplies the order but no new visibility mechanism.
 
 ## One code-generation pass
 
-`coder.generate(M, combined_ast, static_deps, abi,
-emit_line_directives)` still receives the same AST shape and emits one
-translation unit. Whole-root-list allocation and emission passes use `ipairs`,
-making the declared composition order explicit. Internal maps and sets whose
-order is immaterial may continue to use `pairs`.
+`coder.generate` receives the same AST shape and emits one translation unit.
+Whole-root-list allocation and emission passes use `ipairs`, making the
+declared composition order explicit. Internal maps and sets whose order is
+immaterial may use `pairs`.
 
 Checker declaration staging never rearranges this list. Consequently duplicate
 precedence, ordered interface members, module slots, module-variable
-initialization, and code emission continue to follow main/contributor source
-order even though declaration visibility is broader.
+initialization, and code emission follow main/contributor source order even
+though declaration visibility is broader.
 
 The generated module name, mangled symbols, nominal type names, Lua registry
 key, `_init`, `luaopen_*`, ABI marker, and serialized interface all derive
@@ -168,19 +174,17 @@ from logical name `M`, never a contributor basename. Public declarations from
 contributors therefore occupy the same module member space and module
 `Udata` as declarations from the main source.
 
-`coder.emitline(node)` already quotes and emits each node's own
-`loc.filename`. Because functions and statements from several files are
-interleaved in one C output, code generation retains the existing per-node
-directives at safe physical-line sites: function entries, statements, calls,
-`raise`, and related throw sites. It does not emit one translation-unit-wide
-source directive or stamp expression fragments that may appear in the middle
-of a physical C line. DWARF and libbacktrace can consequently report the
-actual contributor filename and line.
+Because statements from several files are interleaved in one C file, per-node
+`#line` directives name each contributor's own file; see [Mixed-source `#line`
+attribution](codegen-overview.md#mixed-source-line-attribution).
 
 ## C, library, and program paths
 
-`driver.compile` already derives its `.c` and `.o` paths from the cached
-source filename, so storing the canonical main gives the required output:
+`driver.compile` derives its `.c` and `.o` paths from the entry's
+`native_output` stem, which is the canonical main's path. With `-o` that stem
+is rerooted under the output directory (see [output-directory
+routing](output-directory.md)); the table shows paths relative to the source
+root or output root:
 
 | Form for `foo.bar` | Cached filename | C/object | Foreign companion when needed |
 | --- | --- | --- | --- |
@@ -190,44 +194,41 @@ source filename, so storing the canonical main gives the required output:
 Only one compile call is made, so contributors produce no standalone C,
 object, generated header, provider, or Lua-shim artifacts. Foreign declarations
 from the combined AST share the canonical main's companion; all companions for
-an invocation are planned and written before the first object is compiled. In library mode the logical module's
-object joins the invocation-wide source union. A single `foo.bar` root derives
-the exact provider pair `foo/bar.so` and `foo/bar.a`; several compatible roots
-may derive a shallower common pair. Either way exactly one generated shim
-represents logical `foo.bar`. The provider and program link paths ensure their
-output parent directories exist, so a dotted module under an external
-`--tree` does not depend on source-shaped directories already existing in the
-working directory. Archive metadata still belongs to the one logical module
-object, never to its contributors; see [Static compiled
-modules](static-compiled-modules.md).
+an invocation are planned and written before the first object is compiled. In
+library mode the logical module's object joins the invocation-wide source
+union, and exactly one generated shim represents logical `foo.bar` (see
+[Multi-module libraries](multi-module-libraries.md#provider-selection-for-a-library-invocation)
+for provider naming). The provider and program link paths create their output
+parent directories, so a dotted module under an external `--tree` does not
+depend on source-shaped directories already existing in the working directory.
+Archive metadata belongs to the one logical module object, never to its
+contributors; see [Static compiled modules](static-compiled-modules.md).
 
-Standalone entrypoint generation also remains logical-name based:
-`write_entrypoint("foo.bar")` writes `foo/bar__entrypoint.c` and embeds the
-same module name, `luaopen_foo_bar`, and program name as before. The only new
-value is the cached executable path:
+Standalone entrypoint generation is logical-name based: the entrypoint is
+`foo/bar__entrypoint.c` and embeds `luaopen_foo_bar`. Only the executable path
+depends on the form (`source_resolution_in_root` sets `program_output`):
 
 - flat source: `foo/bar`;
 - folder source: `foo/bar__main`.
 
-`driver.compile_program` accepts that path as the optional `program_output`
-argument immediately before the trailing selected-static-archive list, and
-defaults to the old dotted-name mapping for existing callers and
-`tableloader`. `titanc` and filesystem-based child compilers pass the cached
-`program_output`. The `__main` sibling avoids colliding with the folder
-`foo/bar/`, including when `--tree` is outside the current directory.
+`titanc` passes that cached `program_output` to `driver.compile_program` (see
+[Linking a standalone
+program](driver.md#linking-a-standalone-program-drivercompile_program)); when it
+is absent the dotted-name mapping applies. The `__main` sibling avoids
+colliding with the folder `foo/bar/`, including when `--tree` is outside the
+current directory.
 
 ## Interface determinism and compatibility
 
 Folder modules add no AST tag, `Type.*` variant, serialized descriptor field,
 native function parameter, module-state slot category, or runtime DSO lookup
-rule. The representation mechanism does not itself require an ABI change.
+rule.
 
-One adjacent determinism fix makes interfaces reproducible: keyed module type
-aliases and nominal method/static-function maps are serialized in
-`util.bytewise_less` name order. This changes only the textual order chosen for
-maps whose Lua insertion order was never a contract. Ordered module members,
-record fields, and union variants retain source order because they define
-module slots, field slots, and absolute tags.
+Interfaces are reproducible because `types.serialize` emits keyed maps (module
+`type_members`, record/union method and static-function maps) in
+`util.bytewise_less` name order; Lua insertion order is never a contract.
+Ordered module members, record fields, and union variants keep source order
+because they define module slots, field slots, and absolute tags.
 
 A language `interface` declaration may appear in the main or any immediate
 contributor. Because the files become one dense AST before checking, it shares
@@ -237,79 +238,39 @@ order is its written declaration order inside that source file; contributor
 byte order decides only where the whole declaration appears in the combined
 AST. No contributor name enters the Interface identity or wrapper ABI.
 
-The `titan.uv` dogfood uses that rule rather than hiding public declarations
-in the main source. Exported records and functions live in their semantic
-contributors, so member order follows contributor order; the exact
-`titan_uv_types` fixture pins the deterministic public interface. Moving
-private records or constants among contributors changes private initialization
-order without changing the public schema.
-
-Folder composition has no independent ABI identity. ABI 2 covers the selected
-physical prefix container, module-private Array cache, union and Interface
-schemas, source-private provider identity, source foreign callbacks, generic
-metadata, and current public standard-library signatures. Contributors first
-become one checked AST and then emit one logical module, one `_mod` Udata, and
-one initializer per Lua state. Contributor filenames never enter runtime
-identity.
+Folder composition has no independent ABI identity: contributors first become
+one checked AST and then emit one logical module, one `_mod` Udata, and one
+initializer per Lua state. Contributor filenames never enter runtime identity.
 
 ## `titan.uv` dogfooding
 
-The production `titan.uv` folder ensemble is enumerated by the Makefile's
-`UV_TITAN_SOURCES`; the set is explicit rather than a wildcard. Its canonical
-`uv.titan` shares a logical module with contributors for callbacks, constants,
-data records, addresses, descriptors, streams, TCP/UDP, DNS, processes,
-threading, synchronization, dynamic libraries, startup, and utilities.
-Every listed source is a prerequisite of the combined standard-library build.
-
-The module exposes its low-level owners, views, callbacks, operations, and copied
-values through an ordinary compiled interface. `titan.async` owns the scheduler,
-Task/error/result/subscription declarations and automatic main hook in its own
-logical module. Async and the domain libraries consume public UV declarations
-without explicit source imports or a shared source-private operation union.
-The production compiler invocation names all twenty-five logical roots:
-
-```sh
-titanc --output out titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.net \
-  titan.ssl titan.url titan.http titan.websocket titan.os titan.path \
-  titan.peg titan.string \
-  titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json \
-  titan.protobuf titan.transfer \
-  -X titan-runtime/ltitanlib.o lpeglabel-build/libtitan-lpeglabel.a \
-     libuv-build/libuv.a llhttp-build/libtitan-llhttp.a \
-     sqlite3-build/libtitan-sqlite3.a \
-     openssl-build/libssl.a openssl-build/libcrypto.a  # OPENSSL_MODE=bundled
-```
-
-Generated `out/titan/uv/uv.c`, `out/titan/uv/uv.o`, and the callback-bearing
-`out/titan/uv/uv.titan.h` are build artifacts and are removed by `make clean`.
-The flat high-level `titan.fs` root uses public UV callbacks and does not
-emit a foreign-callback header. No contributor C/object/header, DSO, archive,
-or contributor shim is built or installed. The one logical `titan.uv` object, its one generated
-`out/titan/uv.lua` shim, and the remaining twenty-four logical modules (twenty-five in
-total) reside in the physical `out/titan.so`/`out/titan.a` pair. The private
-five-member LPegLabel archive is shared metadata-free payload for the
-`titan.peg`/`titan.string` folder modules. The private libuv archive always
-follows it, so its members enter both provider forms. The command above uses
-bundled OpenSSL. The default system OpenSSL mode omits only its two OpenSSL
-archives and repeats the ordered pkg-config link settings for the DSO; static
-consumers must repeat those settings too. Higher
-`async`/`timer`/`fs`/`net`/`os`/`sqlite3` modules still import
-the independent logical `titan.uv` protocol, but their calls are direct
-because all twenty-five source roots are linked together. The high-level `titan.fs` object uses the public UV filesystem and watcher
-wrappers; their source-defined native callbacks remain in the UV object. `titan.ssl` reaches the
-runtime only through public `titan.net`, and `titan.http` only through the
-public net/SSL/I/O/async layers; `titan.url` is synchronous composition over
-`titan.peg` and `titan.string`.
-
-`titan.http`, `titan.websocket`, `titan.peg`, and `titan.string` apply the same folder-module
-rules: each has one canonical main, immediate contributors sharing
+The standard-library folder ensembles are listed in [Reserved `titan` and the
+standard-library
+image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image),
+which also owns the root list, payload order, and provider counts. Each follows
+the rules above: one canonical main, immediate contributors sharing
 module-private scope, one generated C/object pair, and one logical shim.
+Contributor filenames never become modules or archive metadata keys.
+
+`titan.uv` is the largest. Its sources are enumerated explicitly by the
+Makefile's `UV_TITAN_SOURCES`, not by a wildcard, and every listed source is a
+prerequisite of the standard-library build. The canonical `uv.titan` shares one
+logical module with contributors for callbacks, constants, data records,
+addresses, descriptors, streams, TCP/UDP, DNS, processes, threading,
+synchronization, dynamic libraries, startup, and utilities. Exported records
+and functions live in their semantic contributors, so member order follows
+contributor order; `spec/fixtures/libuv/titan_uv_types.lua` pins the resulting
+public interface. Moving private records or constants among contributors
+changes private initialization order without changing the public schema. The
+one `titan.uv` object owns the callback-bearing `titan/uv/uv.titan.h`
+companion; consumers such as `titan.async` and `titan.fs` use its public
+declarations through ordinary imports, without explicit source imports.
+
 `titan.http`, like `titan.uv`, keeps public declarations with their semantic
-contributors and owns one callback-bearing `titan/http/http.titan.h` companion.
-The `titan.peg` and `titan.string` mains instead own their complete public APIs
-and their contributors have only module-local top-level declarations; neither
-currently needs a foreign companion. Contributor filenames do not become modules or archive metadata
-keys.
+contributors and owns one callback-bearing `titan/http/http.titan.h`
+companion. The `titan.peg` and `titan.string` mains instead own their complete
+public APIs, and their contributors have only module-local top-level
+declarations; neither needs a foreign companion.
 
 See [Driver and toolchain](driver.md) for the complete search/build flow,
 [Lexer and parser](lexer-parser.md) for locations and non-reentrancy,

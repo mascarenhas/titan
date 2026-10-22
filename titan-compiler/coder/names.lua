@@ -110,6 +110,7 @@ end
 -- with adjacent code; clang-format normalizes directive indentation before the
 -- driver invokes the C compiler. Nodes without a `loc` (synthesized AST) emit
 -- nothing.
+-- Implementation notes: doc/implementation/codegen-overview.md#mixed-source-line-attribution
 function emitline(node)
     -- Coverage uses scoped metadata until after optional C formatting. Legacy
     -- point stamps must not extend ownership into wrappers or housekeeping.
@@ -297,6 +298,7 @@ function modprefix(modname)
     return mangle_qn(modname) .. "_"
 end
 
+-- Implementation notes: doc/implementation/codegen-overview.md#generated-names
 function coder._function_prefix(modname, name)
     -- A C99 universal-character-name cannot occur in a Titan identifier, so
     -- this boundary cannot be confused with either the module or member text.

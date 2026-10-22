@@ -19,8 +19,8 @@ allocation primitive or third-party JSON dependency.
 
 ## Whole-document PEG
 
-The main initializer calls `build_json_pattern()` once. `parse_document`
-reuses the resulting `peg.Pattern` with anchored
+The main initializer stores `build_json_pattern()` (`parser.titan`) in
+`JSON_PATTERN` once. `parse_document` reuses it with anchored
 `Pattern:match(source, 1, budget)`. The start rule owns leading whitespace,
 one value, and an explicit end assertion. Module-level `peg.match` would search
 and discard the labeled failure protocol, so it is not the entry point.
@@ -67,7 +67,8 @@ fresh private accumulators, and abandoned results do not escape. The object
 reducer checks duplicate decoded names, including escaped spellings and names
 whose earlier value was null.
 
-A separate fresh `ParseBudget` is passed through `peg.argument(1)`. Small local
+A separate fresh `ParseBudget` (`parser.titan`) is passed through
+`peg.argument(1)`, bound as the grammar's `state` definition. Small local
 match-time callbacks count values and enter/leave containers. Their only result
 is match success; they do not retain one dynamic capture result per child.
 Guards are on committed paths and do not mutate state in predicates or in an
@@ -107,11 +108,12 @@ worst-case hashing guarantee. Exact numeric conversion also scans its bounded
 token, without looping according to an unbounded exponent value.
 
 The parser's linearity claim is separate from reflected schema traversal and
-encoding. In particular, deterministic Map output sorts keys with a byte-order
-merge sort. It does not promise linear-time encoding of arbitrarily wide
+encoding. In particular, deterministic Map output sorts keys with a bottom-up
+byte-order merge sort (`writer.titan` `sort_keys`). It does not promise linear-time encoding of arbitrarily wide
 objects.
 
-`max_depth` accepts positive integers and defaults to 32; it is an explicit
+`max_depth` accepts positive integers and defaults to 32 (`json.titan`
+`default_settings`); it is an explicit
 container budget, not an upper bound on the independent execution resources
 needed by every accepted document. Nesting consumes both PEG matching-stack
 space and native delayed-capture recursion space, plus decoder/writer traversal
@@ -166,7 +168,8 @@ eagerly expanded cyclic descriptor shells. Reflection's generic erasure remains
 visible: erased value leaves decode dynamically, with no specialization registry
 or implied proof from the result's outer nominal identity.
 
-Record decoding locates public static `new` and verifies that it takes fixed
+Record decoding (`decoder.titan` `Decoder:decode_record`) locates the reflected
+static `new` and verifies that it takes fixed
 parameters and returns exactly one value of the target record's nominal type.
 Absent constructors, input varargs, flexible results, optional results, and
 other result shapes raise `constructor_unavailable` before invocation. This
@@ -226,17 +229,15 @@ parse/schema/numeric errors share byte/line/column formatting.
 
 ## Publication and validation
 
-JSON joins the existing `titan.so`/`titan.a` pair as one ordinary logical root.
-The explicit manifests contain 23 module protocols, archive metadata keys,
-and generated shims, with 24 DSO openers including bare `luaopen_titan`. Its
-generated shim is `titan/json.lua`; there is no child DSO or independent
-LuaRocks C-module owner. The source-rock hook builds and copies the complete
-provider and its generated shims.
+JSON is one ordinary logical root of the combined standard-library provider,
+with generated shim `titan/json.lua`; there is no child DSO or independent
+LuaRocks C-module owner. Image layout and publication are in
+[the standard-library image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image).
 
 Public behavior lives under `spec/stdlib/titan/json/tests/`, as the explicit
-`json.tests` root in the 29-root aggregate, without LuaCov. The existing Titan
-parser spec tests only shorthand normalization. Packaging/native-build specs
-own exact sources, module protocols, metadata fixtures, and installed shims. Lua/provider and static production smokes exercise dynamic decoding,
+`json.tests` root of the native aggregate, without LuaCov. Packaging/native-build
+specs own exact sources, module protocols, metadata fixtures, and installed
+shims. Lua/provider and static production smokes exercise dynamic decoding,
 null preservation, and a reflected record/union constructor composition.
 
 The native suite covers syntax labels and positions, null/presence behavior,
@@ -249,5 +250,4 @@ as correctness assertions. JSON's focused sanitizer selection checks the same
 public allocation and lifetime behavior in the instrumented provider.
 
 The [Titan JSON skill](../../.agents/skills/titan-json/SKILL.md) contains
-agent-facing recipes and maintenance routing. Human API explanations remain
-in the language manual; implementation invariants remain here.
+agent-facing recipes and maintenance routing.

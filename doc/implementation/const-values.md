@@ -1,9 +1,9 @@
 # Const-value implementation
 
-ABI 2 adds const bindings, const record and Interface fields, and
-const-qualified Arrays across the parser, semantic descriptors, checker,
-generated C, Lua boundary, and compiled-module metadata. The language contract
-is [Const values](../language/const-values.md). This chapter records the
+Const bindings, const record and Interface fields, and const-qualified Arrays
+cross the parser, semantic descriptors, checker, generated C, Lua boundary,
+and compiled-module metadata. The language contract is
+[Const values](../language/const-values.md). This chapter records the
 cross-pass invariants that must stay aligned when the implementation changes.
 
 ## Frontend and AST contract
@@ -12,7 +12,7 @@ cross-pass invariants that must stay aligned when the implementation changes.
 qualifies the C pointer or array; ordinary mixed type positions spell that
 boundary explicitly, for example `foreign const *T`.
 
-The relevant AST constructors are:
+The relevant AST constructors (`titan-compiler/ast.lua`) are:
 
 ```lua
 Ast.TypeArray(loc, subtype, isconst)
@@ -23,11 +23,11 @@ Ast.TopLevelInterface(loc, name, members, fields, methods, typeparams)
 
 `TypeArray.isconst` is exactly `{tag="no"}`, `{tag="yes"}`, or
 `{tag="maybe"}`; declaration `isconst` flags remain exact booleans.
-`TopLevelVar.value == nil` preserves
-an omitted module initializer until the checker validates and normalizes it.
-`TopLevelInterface.members` retains source order, while `fields` and `methods`
-are independent ordered projections. Interface fields reuse `Ast.Decl` and are
-created with `isconst == true`.
+`TopLevelVar.value == nil` preserves an omitted module initializer until the
+checker validates and normalizes it. `TopLevelInterface.members` retains
+source order, while `fields` and `methods` are independent ordered
+projections. Interface fields reuse `Ast.Decl` and are created with
+`isconst == true`.
 
 The parser admits:
 
@@ -41,19 +41,20 @@ The parser admits:
 The Titan `const { T }` production is separate from foreign pointer parsing
 and rejects Map syntax. `{ foreign const *T }` is a mutable Titan Array
 whose element type is a const C pointer, subject to its normal representation
-and operation restrictions. Const-local grammar always commits to `= explist`; only mutable
-`local` uses the optional expression-list production.
+and operation restrictions. Const-local grammar always commits to
+`= explist`; only mutable `local` uses the optional expression-list
+production.
 
-Parser record desugaring still synthesizes `Record.new`. Its parameters retain
-field order and const flags, while the generated constructor body writes an
-initializer list rather than an ordinary assignment. This is the only reason
-construction can populate const fields without weakening later assignment
-checks.
+`parser.lua` `defs.recorddecl` synthesizes `Record.new` with one ordinary
+(non-const) parameter per field, in field order, and the body
+`return { field = field, ... }` as an `Ast.ExpInitList`. Construction
+therefore populates const fields through an initializer list, never through
+assignment, so later assignment checks need no constructor exemption.
 
 ## Semantic descriptors and serialization
 
-The ABI-2 constructors require their new axes rather than defaulting absent
-metadata to mutable:
+The descriptor constructors (`titan-compiler/types.lua`) require their
+qualifier axes rather than defaulting absent metadata to mutable:
 
 ```lua
 Type.Array(elem, isconst)
@@ -62,47 +63,47 @@ Type.ModuleVariable(modname, name, type, isconst)
 Type.Interface(name, fields, methods, scope, typeparams)
 ```
 
-Array qualifier equality is part of type equality, consistency, guard and
+The Array qualifier is part of type equality, consistency, guard and
 dynamic-plan identity, rewriting, substitution, erasure, stringification, and
-serialization. `types.tostring` renders mutable `{ T }`, const
-`const { T }`, and maybe-const `const? { T }`. The Array constructor,
-serializer, and compiled-interface validator accept exactly `{tag="no"}`,
-`{tag="yes"}`, and `{tag="maybe"}` for this axis, including Arrays nested in public fields,
-callable signatures, Options, and containers. An absent or otherwise malformed
-qualifier is rejected rather than defaulted. Compare the `tag` field, never
-wrapper identity or truthiness. Serialized constructors retain the tagged table,
-for example `Array(Integer(),{tag="maybe"})`. Decoding a maybe-const descriptor
-does not introduce another runtime Array representation or change the provider
-ABI.
+serialization. `types.tostring` renders mutable `{ T }`, const `const { T }`,
+and maybe-const `const? { T }`. The Array constructor, serializer, and
+compiled-interface validator accept exactly `{tag="no"}`, `{tag="yes"}`, and
+`{tag="maybe"}` (`types.valid_array_constness`), including Arrays nested in
+public fields, callable signatures, Options, and containers. An absent or
+otherwise malformed qualifier is rejected rather than defaulted. Compare the
+`tag` field, never wrapper identity or truthiness. Serialized constructors
+retain the tagged table, for example `Array(Integer(),{tag="maybe"})`. A
+maybe-const descriptor introduces no third runtime Array representation.
 
 Interface `fields` and `methods` are separately dense, source-ordered
 list/name-map projections. Their names share one namespace. A field is a
 canonical `Type.Field` owned by the Interface, has its zero-based target slot,
 and must carry `isconst == true`. Record fields and module variables retain
-their own required boolean. The closed decoder rejects a missing/non-boolean
+their own required boolean. The closed validator rejects a missing/non-boolean
 field or module-variable qualifier, sparse or keyed input, duplicate or
 cross-kind member names, incorrect owners or indices, and descriptors placed
-outside their allowed owner graph.
-
-The driver checks the provider ABI before evaluating serialized types, so
-mismatched metadata is rejected before a descriptor can be interpreted as ABI
-2 state. DSO and embedded archive metadata use the same validation path.
+outside their allowed owner graph. Validator placement and the ABI check that
+precedes it are in
+[Interface recovery and the closed validator](driver.md#interface-recovery-and-the-closed-validator).
 
 ## Checker rules for declarations
 
 `types.accepts_missing_nil` is the shared narrow predicate for omitted local
 initializers, initializer-less module variables, callable missing-result
-fill, and other existing missing-slot rules. It admits the actual nil-bearing
-representation domain, not general assignment adjustment; in particular,
-truthiness cannot make a Boolean declaration initializer-less.
+fill, and other missing-slot rules. It admits Nil, Value, Option, and CPointer
+targets: the actual nil-bearing representation domain, not general assignment
+adjustment. In particular, truthiness cannot make a Boolean declaration
+initializer-less.
 
-For a mutable `StatDecl` with no expression list, the checker:
+For a mutable `StatDecl` with no expression list
+(`checker/statements.lua`, the `Ast.StatDecl` visitor), the checker:
 
-1. requires every declaration to have a written type;
-2. resolves and validates each type;
-3. requires `accepts_missing_nil` for each slot;
-4. synthesizes one `Ast.ExpNil` per declaration; and
-5. runs the ordinary finite expression-list adjustment so the coder sees the
+1. marks the node `_omitted_initializer`;
+2. requires every declaration to have a written type;
+3. resolves and validates each type;
+4. requires `accepts_missing_nil` for each slot;
+5. synthesizes one `Ast.ExpNil` per declaration; and
+6. runs the ordinary finite expression-list adjustment so the coder sees the
    same normalized shape as an explicit nil list.
 
 Const locals arrive only with an expression list. Their `Decl.isconst` flag is
@@ -112,85 +113,95 @@ storage.
 
 Every initializer-less `TopLevelVar` requires an explicit nil-bearing type;
 the checker replaces `value == nil` with a checked `ExpNil`. A const one also
-receives `_initializerless_const` and its owning module name. `checkfuncbody` marks the
-synthetic root initializer frame with its owner module. Assignment to that
-module slot is authorized only when this marked frame is the current function
-frame and the owners match; nested blocks remain in the frame, while a nested
+receives `_initializerless_const` and its owning `_module_name`
+(`checker/declarations.lua`). `checkfuncbody` records the owning module name
+as `module_initializer` on the synthetic root-initializer frame.
+`const_module_write_authorized` (`checker/statements.lua`) admits a write to
+that slot only when the innermost function frame is that marked frame and the
+owners match: nested blocks remain in the frame, while a nested
 lambda/function or an importing module does not inherit permission. The rule
 does not count assignments or implement definite assignment.
 
-The central lvalue check rejects writes to const locals, const module members,
-const record/Interface fields, and const Array indices. C lvalue analysis also
-rejects mutation reached through a const local's inline struct/union/array
-storage and excludes that declaration from mutable address-taking and decay.
-Encountering a pointer or owned value ends the inline-storage walk, preserving
-shallow pointee mutability.
+`check_const_assignment` (`checker/statements.lua`) is the central lvalue
+check. It rejects writes to const locals, const module variables (local and
+imported), const record and Interface fields (`Type.Field.isconst`), and
+elements of const or maybe-const Arrays, and marks the lvalue
+`_const_write_rejected`. C lvalue analysis also rejects mutation reached
+through a const local's inline struct/union/array storage and excludes that
+declaration from mutable address-taking and decay. Encountering a pointer or
+owned value ends the inline-storage walk, preserving shallow pointee
+mutability.
 
-## Interface fields and frozen mappings
+## Interface fields
 
-Interface declaration checking builds all field and method descriptors before
-publication. A concrete implementation plan contains independent ordered
-`fields` and `methods` mappings. For each required field it records:
-
-- the visible same-name concrete `Type.Field` and its source index;
-- the required Interface field and its target snapshot index;
-- proof that the concrete field is const;
-- the exact source and target types; and
-- the frozen assignment/lowering plan, including nested callable or Interface
-  conversions that can allocate.
-
-Unions fail any field-bearing Interface before method matching. Diagnostics
-distinguish a missing field, wrong-kind collision, inaccessible field, mutable
-field, and incompatible type. Applied generic Interfaces substitute owner
-arguments through fields exactly as through methods. A constrained type
-parameter exposes the applied Interface's field reads as well as its methods.
-
-Field access on an Interface resolves to the target descriptor and wrapper
-snapshot slot. It is a read-only lvalue category. Because a field adjustment
-can inventory another concrete/Interface conversion, pair discovery runs a
-deterministic worklist to a fixpoint before pair sorting or C emission; code
-generation must never append to an inventory already being emitted.
+Interface fields are const snapshots. Satisfaction requires the visible
+same-name concrete field to be const, then freezes an ordinary assignment plan
+from its type to the Interface field type; unions fail any field-bearing
+Interface. Applied generic Interfaces substitute owner arguments through
+fields exactly as through methods, and a constrained type parameter exposes
+the applied Interface's field reads as well as its methods. Field access on an
+Interface resolves to the target descriptor and wrapper snapshot slot and is a
+read-only lvalue category. The mapping, diagnostics, pair-inventory worklist,
+and wrapper layout are in
+[Interfaces](interfaces.md#direct-structural-satisfaction) and
+[Wrapper representation](interfaces.md#wrapper-representation).
 
 ## Array relations and linear-use analysis
 
-`types.consistent` descends through Array elements only when both qualifiers
-are equal. Strict and dynamic plans carry `isconst` and choose the exact
-qualified tag. General assignment never changes the qualifier.
+Three Array qualifiers share one runtime representation and differ in their
+proxy metatable ([Runtime Array pair](#runtime-array-pair)). The relations
+(`types.lua` `assignment_adjustment` and `written_cast`) are:
 
-`types.written_cast` has one cross-qualifier operation,
-`array_freeze`, for mutable `Array(S, {tag="no"})` to const
-`Array(T, {tag="yes"})` when
-the element types are equal or gradually consistent. Its default mode is
-`copy`; const-to-mutable and other cross-qualifier relations are absent. The
-matching static `is` is marked allocation-free and returns the admission result
-without lowering the conversion. A `value is/as Array` plan instead tests the
-exact target qualifier at run time.
+| Source → target | Implicit sink | Written `as` | Runtime effect |
+| --- | --- | --- | --- |
+| `{S}` → `const { T }` | only when the source type is `linear` | `array_freeze` | `copy`: shallow copy; `freeze`: in-place freeze |
+| `const { S }` → `{T}` | rejected | rejected | — |
+| `{S}` or `const { S }` → `const? { T }` | identity or gradual view | `maybe_array_cast_upcast` | none; the carrier is preserved |
+| `const? { S }` → `{T}` / `const { T }` | rejected | `maybe_array_cast_mutable` / `_const` | exact metatable check of the target qualifier |
 
-After typechecking, `checker/linear.lua` may change an `array_freeze` plan from
-`copy` to `freeze`. A candidate is one un-rebound local initialized exactly
-once from a fresh mutable Array constructor. Its same-block terminal cast must
-be the final use on every admitted path. Before that cast, structured builder
-statements and loops may query `#array` and perform indexed reads or writes;
-calls that neither receive nor capture the Array may compute element values,
-and creating a closure is harmless when its body does not reference the Array
-or an alias. Passing, returning, storing, aliasing, actually capturing, or
-rebinding the Array, hiding the consuming cast inside control flow, or using
-the mutable binding later retains `copy`. The terminal cast must itself be the
-single expression of a `local` declaration or `return` (`sole_consuming_cast`):
-a cast nested in a call argument, or a returned cast wrapped by an implicit sink
-conversion such as `value` injection, is not recognized. The coder trusts only
-the checker annotation and never recomputes escape or liveness facts.
+Every cross-qualifier row requires equal or gradually consistent element
+types; a non-equal element pair records an `element_view`. `consistent`
+itself requires equal qualifier tags, so no gradual view crosses a qualifier.
+Static `is` for `array_freeze` and the upcast is allocation-free
+(`allocation_free_test`) and reports admission without converting; the
+maybe-const downcasts test the runtime metatable. A `value is/as` Array plan
+tests the target qualifier's metatable, and a `const? { T }` target accepts
+either.
 
-`annotate_linear_function_returns` runs after each top-level function body.
-When every return of a mutable Array result is a fresh constructor, such an
-unaliased builder, or the call result of an earlier function whose result is
-already linear (`is_linear_returned_value` accepts `exp._type.linear`), it
-replaces that result type with a `linear` Array type. A linear call result may
-likewise initialize a builder local. Bodies are checked in logical declaration
-order, so only later callers in the same module see it: `types.written_cast`
-then selects `freeze` for a written cast of the call result, and assignment
-admits an implicit const target. The protobuf decoder relies on both the
-builder-local terminal cast and the linear call-result cast
+`array_freeze` copies by default. `titan-compiler/checker/linear.lua`
+selects `freeze` only when it proves that the cast consumes the allocation's
+last mutable reference. There are two proofs, and the coder trusts their
+result without recomputing escape or liveness facts.
+
+**Builder local.** `select_linear_array_freezes` runs once after the module
+is checked (`checker/entry.lua`). In each block, a candidate is a
+single-name `local` declaration of a mutable Array type that is not
+`_captured`, initialized from a fresh constructor or a `linear` call result
+(`fresh_mutable_array_declaration`). A later statement in the same block must
+be a `local` declaration or `return` whose single expression is a copy-mode
+`array_freeze` cast of exactly that local, with no other use in that
+statement (`sole_consuming_cast`). Every statement in between may use the
+local only as a non-escaping builder (`builder_uses_are_non_escaping`):
+`#array`, indexed reads and writes, and arbitrary control flow, calls, and
+closures that neither receive nor reference it. No statement after the cast
+may name the local. On success the plan's `mode` becomes `freeze` and the cast
+is marked `_linear_array_freeze` (read only by specs). Passing, returning,
+storing, aliasing, capturing, or rebinding the Array, a cast nested in a call
+argument or wrapped by an implicit sink conversion such as `value` injection,
+or any use the classifier does not recognize keeps `copy`.
+
+**Linear function results.** `annotate_linear_function_returns` runs at the
+end of `checkfuncbody` for error-free top-level functions, methods, and
+statics. When every `return` supplies a mutable Array result position with a
+fresh constructor, a non-escaping builder local returned by its sole use, or
+an already `linear` value (`is_linear_returned_value`), it replaces that
+result type with a mutable Array type carrying `linear = true`. Bodies are
+checked in declaration order, so only later direct callers in the same module
+see the mark: `written_cast` then selects `freeze` immediately, and
+`assignment_adjustment` admits the call result at an implicit `const { T }`
+sink. A first-class reference strips the mark
+(`checker/expressions.lua` `strip_linear_from_type`), so a function value
+never carries it. The protobuf decoder relies on both proofs
 ([decoding](protobuf-library.md#decoding)).
 
 A constructor checked under a const Array target is annotated as const at
@@ -198,9 +209,11 @@ construction and needs neither conversion helper.
 
 ## Runtime Array pair
 
-Mutable and const Arrays retain the same internal `Table *` backing, logical
-`lenhint`, positive-index storage, key-0 reverse link, and zero-payload proxy
-with two traced user values. Their proxy metatables differ:
+Mutable and const Arrays share the representation in
+[Dense Arrays](dense-arrays.md#representation-contract): the same backing
+`Table *`, logical `lenhint`, key-0 reverse link, and zero-payload proxy with
+two traced user values. Only the proxy metatable and the second user value
+differ:
 
 ```text
 mutable proxy: TITAN_ARRAY_METATABLE
@@ -214,96 +227,72 @@ const proxy: TITAN_CONST_ARRAY_METATABLE
   metatable[TITAN_BRAND] = TITAN_CONST_ARRAY (2)
 ```
 
-`titan_array_metatables` creates or recovers both canonical metatables as one
-pair. The pair table is the publication point, so callbacks cannot observe one
-registered identity while the other is only partly initialized. Both metatables
-carry `TITAN_BRAND` identifying their mutable (`TITAN_ARRAY`) vs const
-(`TITAN_CONST_ARRAY`) kind. The mutable
-metatable has `__index`, `__newindex`, and `__len`; the const metatable has
-`__index` and `__len` only. Each callback captures both identities so nested
-Array boxing/validation accepts exactly either canonical tag and never a
-structurally similar userdata.
+`titan_array_metatables` (`titan-runtime/titan.c`) creates or recovers both
+canonical metatables as one pair. The registry entry
+`"Titan array metatable pair"` is the publication point; the named
+`TITAN_ARRAY_METATABLE` and `TITAN_CONST_ARRAY_METATABLE` registry entries are
+projections repaired from it. Each callback closes over both metatables before
+publication, so no callback can observe one identity while the other is only
+partly initialized. The mutable metatable has `__index`, `__newindex`, and
+`__len`; the const metatable has `__index` and `__len` only
+(`titan_array_initialize_metatable`). Array boxing and validation accept
+exactly the requested canonical tag (or either, for `const? { T }`, through
+`titan_array_try_backing_either`) and never a structurally similar userdata.
 
-`titan_array_new` requires the writer and mutable metatable.
-`titan_const_array_new` requires the const metatable and writes nil to the
-second user value. Both receive an already-live generated result slot, publish
-the backing there before resizing it, temporarily publish the proxy there while
-installing the key-0 reverse link, and leave the backing in the same slot. They
-use `luaH_new`, an exact `luaH_resize`, `luaS_newudata`, direct metatable and
-uservalue stores, and the corresponding GC barriers; they never change
-`L->top` or call the public Lua stack API.
+`titan_array_new` and `titan_const_array_new` are the two inline entry points
+over one constructor; a const call passes no writer. `titan_array_shallow_copy`
+implements copy mode and `titan_array_freeze` implements freeze mode by
+writing the const metatable directly and clearing `uv[1]`. Their stack, root,
+and barrier contracts are in
+[Runtime construction](dense-arrays.md#runtime-construction) and
+[Mutable-to-const lowering](dense-arrays.md#mutable-to-const-lowering).
 
-`titan_array_shallow_copy` requires the mutable source to remain rooted in a
-caller-owned slot distinct from its result slot. It constructs a const
-destination whose array part preallocates the source's physical `asize`
-exactly, copies each present array slot only through the logical length, applies
-a backing barrier for each collectable value, and restores the exact length so
-spare capacity, holes, and trailing semantics are preserved. It is likewise
-stack-neutral.
-
-`titan_array_freeze` is used only after the checker linear proof. It validates
-the canonical mutable proxy with debug assertions, writes the const metatable
-directly with Lua's internal object barrier and finalizer bookkeeping, clears
-the writer user value to nil, and returns the same backing without touching the
-Lua stack. The backing/proxy identity is preserved only on this semantically
-unobservable optimization path.
-
-Every generated module reserves consecutive private cache slots for the
-mutable and const Array metatables. Names, boxing/unboxing, strict guards,
-dynamic conversions, numerics, generic entries, Interface adapters, module
-initialization, and standalone startup select the cache by
-`Type.Array.isconst`. Exact native signatures remain `Table *` for both
-qualifiers; semantic type, never C carrier alone, chooses the tag.
+Every generated module reserves two consecutive private cache slots,
+`array_metatable_upvalue` and `const_array_metatable_upvalue`
+(`coder/module.lua`). Names, boxing/unboxing, strict guards, dynamic
+conversions, numerics, generic entries, Interface adapters, module
+initialization, and standalone startup select the slot by
+`Type.Array.isconst`. Exact native signatures remain `Table *` for every
+qualifier; the semantic type, never the C carrier alone, chooses the tag.
 
 ## Generated storage and Lua writes
 
 Checker-synthesized nil values keep local/module declaration lowering uniform.
-The coder asserts that a rejected const assignment cannot reach a native store.
-Public module and record `__newindex` dispatch retains explicit const-member
-arms that raise a const-write error; merely omitting a setter would risk an
-unknown-member or silent behavior mismatch. Imported metadata drives the same
-generated behavior.
+The coder asserts that a rejected const assignment cannot reach a native store
+(`coder/statements.lua`). Generated Lua write dispatch keeps an explicit arm
+for each const member that raises instead of omitting the setter, which would
+risk an unknown-member or silent behavior mismatch:
 
-Interface wrappers keep method pointers only in their opaque payload. Their
-traced layout is:
+- record `__newindex`: "cannot assign const field '%s' in record '%s'"
+  (`coder/module.lua`; see
+  [`__newindex`](lua-interop-internals.md#__newindex-checked-mutable-writes-and-const-rejection));
+- module `__newindex`: "cannot assign const variable '%s' in Titan module
+  '%s'" (`coder/declarations.lua`).
 
-```text
-payload[0 .. method_count-1]  exact or adjusted method entries
-uv[0]                         concrete owner module Udata
-uv[1]                         concrete record Udata
-uv[2 + field_index]           adjusted Interface field snapshot
-```
-
-Allocation requests `2 + field_count` user values after checking the runtime
-integer bound. Field-only Interfaces use a zero-byte method payload and never
-emit a zero-length C array or `memcpy`. The new wrapper is rooted before a
-field adjustment that may allocate; stack offsets are restored after every
-rebase point, and each collectable snapshot store applies the Udata barrier.
-The same construction body serves static wrappers and dynamic witness calls.
-
-Native Interface field reads unbox the snapshot user value. Lua `__index`
-distinguishes field names from methods and boxes the stored snapshot; the
-wrapper's `__newindex` rejects every write. Validation checks both the exact
-method payload length and exact user-value count.
+Imported metadata drives the same generated behavior. Interface wrappers store
+each field as a target-typed snapshot user value; native field reads unbox it,
+Lua `__index` boxes it, and the wrapper's `__newindex` rejects every write
+([Wrapper representation](interfaces.md#wrapper-representation)).
 
 ## GC and ABI review points
 
-The new edges use stock Lua reachability:
+The const-specific edges use stock Lua reachability:
 
-- const Array proxy `uv[1]` is nil and adds no writer edge;
+- a const Array proxy's `uv[1]` is nil and adds no writer edge;
 - shallow copies barrier each copied collectable into the new backing;
-- in-place freeze uses the metatable API before clearing the old writer edge;
+- in-place freeze writes the proxy metatable directly with
+  `luaC_objbarrier` and `luaC_checkfinalizer` before clearing the old writer
+  edge;
 - Interface wrappers strongly trace every snapshot in addition to concrete
   module/self; and
 - nested field conversions root their sources and destinations across every
   allocation or Lua call.
 
-Forced full and generational collections are required around shallow Array
-copy/freeze and adjusted Interface snapshot construction. The ABI-2 gate
-covers required descriptor booleans, Interface member/schema changes, wrapper
-user-value counts, the two-slot Array-metatable cache, and the second runtime
-tag. Mismatched providers are rejected before metadata decoding or native
-value exchange; earlier installations are not migration sources.
+Run forced full and generational collections around shallow Array copy/freeze
+and adjusted Interface snapshot construction when changing these paths. The
+required descriptor booleans, Interface member schema, wrapper user-value
+count, two-slot Array-metatable cache, and second runtime tag are part of the
+[compiled-module ABI](codegen-overview.md#compiled-module-abi).
 
 ## Focused evidence
 

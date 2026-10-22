@@ -43,6 +43,7 @@ driver.LUA_VERSION = version.LUA_VERSION
 -- It covers semantic AST/source manifests, analysis-owned I/O/checkpoints,
 -- embedded interfaces/target profiles, exact C-header dependencies and
 -- mtime-first observations, and compiler-owned persistent graph payloads.
+-- Implementation notes: doc/implementation/driver.md#language-server-compiler-api
 driver.LANGUAGE_SERVER_API_VERSION = 1
 driver.PROJECT_CACHE_VERSION = projectcache.VERSION
 
@@ -276,6 +277,7 @@ local function normalize_root(root, strategy)
     return normalize_absolute_path(root)
 end
 
+-- Implementation notes: doc/implementation/driver.md#module-names-and-the-search-paths
 function driver.resolve_installation_root(cpath, override)
     if override == "" then override = nil end
     return normalize_root(override or driver.root_from_package_cpath(cpath))
@@ -871,6 +873,7 @@ function driver.new_c_header_analysis()
     return cdriver.new_process_analysis()
 end
 
+-- Implementation notes: doc/implementation/driver.md#drivernew_resolver_contextoptions
 function driver.new_resolver_context(options)
     options = options or {}
     if type(options) ~= "table" then
@@ -1014,6 +1017,7 @@ local function remember_used_compiled_interface(context, modname, modtype)
     used[types.serialize_semantic(modtype)] = true
 end
 
+-- Implementation notes: doc/implementation/source-import-visibility.md#loader-result-and-module-views
 local function check_used_compiled_interface(
         context, modname, source_type, errors)
     if #errors ~= 0 then return end
@@ -1728,6 +1732,7 @@ end
 -- never searches for a different header wholesale: `search` entries are the
 -- exact ordered candidates cdriver consulted, including misses, so a new
 -- earlier shadow changes identity without walking an include tree.
+-- Implementation notes: doc/implementation/driver.md#driverrestat_c_header_dependenciesdependencies-options
 function driver.restat_c_header_dependencies(value, options)
     local context, owns_context =
         resolver_context_from_options(options, 2)
@@ -1886,6 +1891,7 @@ end
 -- A resolved module's logical path is relative to its selected source root.
 -- Folder modules retain their canonical main's repeated final component.
 -- This also handles absolute/external source roots without '..' escapes.
+-- Implementation notes: doc/implementation/output-directory.md#one-source-identity-separate-artifact-locations
 function driver.relocate_source_output(modname, source, output_root)
     if not output_root or source._output_root == output_root then return source end
     if source.kind ~= "generated" then
@@ -1907,6 +1913,7 @@ end
 -- Derive the physical provider for a no-main invocation from the longest
 -- common sequence of complete dotted components. The returned root list is
 -- deduplicated while retaining the CLI's first-occurrence order.
+-- Implementation notes: doc/implementation/multi-module-libraries.md#provider-selection-for-a-library-invocation
 function driver.common_module_provider(names)
     local unique = driver.deduplicate_module_names(names)
     if #unique == 0 then return nil, unique end
@@ -1955,6 +1962,7 @@ function driver.module_compiled_candidates(modname, suffix)
     return candidates
 end
 
+-- Implementation notes: doc/implementation/multi-module-libraries.md#compiled-module-candidate-search
 function driver.module_binary_candidates(modname)
     return driver.module_compiled_candidates(modname, platform.windows and ".dll" or ".so")
 end
@@ -1973,6 +1981,7 @@ local function regular_file(filename, context)
     return lfs.attributes(filename, "mode") == "file"
 end
 
+-- Implementation notes: doc/implementation/folder-modules.md#tagged-source-resolution
 local function source_resolution_in_root(root, modname, context)
     local module_path = modname:gsub("[.]", "/")
     local basename = modname:match("([^.]+)$")
@@ -3491,6 +3500,7 @@ function driver.validate_module_interface(modtype, modname)
     return true
 end
 
+-- Implementation notes: doc/implementation/driver.md#interface-recovery-and-the-closed-validator
 function driver.decode_module_interface(serialized, modname, origin)
     local modtf, load_err =
         load("return " .. serialized, "@" .. (origin or modname), "t", types)
@@ -3652,6 +3662,7 @@ end
 -- is root-major so an earlier local exact module wins over a later installed
 -- shallow bundle. Once a relative candidate exists in one root it shadows the
 -- same relative pathname in all later roots, even when it is a clean nonclaim.
+-- Implementation notes: doc/implementation/multi-module-libraries.md#claim-and-terminal-error-states
 function driver.find_dynamic_interface(paths, modname, context)
     local candidates = driver.module_binary_candidates(modname)
     if #candidates == 0 then return nil end
@@ -3977,6 +3988,7 @@ local function check_source_module(
         modname, ast, input, filename, loader, check_options)
 end
 
+-- Implementation notes: doc/implementation/driver.md#driverdefaultloaderstatic_deps-options
 function driver.defaultloader(static_deps, options)
     static_deps = static_deps or {}
     options = options or {}
@@ -4571,6 +4583,7 @@ function driver.defaultloader(static_deps, options)
         end
     end
 
+    -- Implementation notes: doc/implementation/incremental-compilation.md#resolver-and-cli-boundary
     local function load_source_object(modname, source, loader)
         if not options.incremental or source.contents then return nil end
         local function miss(reason)
@@ -4689,6 +4702,7 @@ function driver.defaultloader(static_deps, options)
         }
     end
 
+    -- Implementation notes: doc/implementation/folder-modules.md#source-descriptors-are-not-ast-nodes
     local function parse_source_inner(modname, source, loader, profile_frame)
         local ast = {}
         local main_input
@@ -5744,6 +5758,7 @@ function driver.required_static_protocol_names(context, used_native_names)
     return names
 end
 
+-- Implementation notes: doc/implementation/driver.md#drivertableloadermodtable-imported-deps-options
 function driver.tableloader(modtable, imported, deps, options)
     deps = deps or {}
     options = options or {}
@@ -6268,6 +6283,7 @@ function driver.write_foreign_header_plan(plan, verbose, pretty_print)
     return driver.write_foreign_header_plans({ plan }, verbose, pretty_print)
 end
 
+-- Implementation notes: doc/implementation/foreign-functions.md#final-planning-ownership-and-stale-cleanup
 function driver.plan_foreign_headers(names, imported)
     local plans = {}
     local by_name = {}
@@ -6614,6 +6630,7 @@ local function publish_compiled_object(prepared, ok, err)
     return ok, err
 end
 
+-- Implementation notes: doc/implementation/driver.md#compiling-one-module-drivercompile
 function driver.compile(modname, ast, sourcef, static_deps, verbose, options, source_entry)
     local prepared, prepare_err = prepare_compile(
         modname, ast, sourcef, static_deps, verbose, options, source_entry)
@@ -7241,6 +7258,7 @@ end
 -- These are actual producer definitions. All post-init native/data lookup
 -- uses the already generated canonical callback; collision inventories also
 -- contain hidden and source-only names and are not PE export inventories.
+-- Implementation notes: doc/implementation/windows-build.md#windows-application-launchers
 function driver.windows_provider_exports(module_names, interfaces, library_name)
     local names, seen = {}, {}
     for _, modname in ipairs(module_names) do
@@ -7613,6 +7631,7 @@ int main(int argc, char** argv) {
 
 ]]
 
+-- Implementation notes: doc/implementation/driver.md#linking-a-standalone-program-drivercompile_program
 function driver.entrypoint_contents(modname, program_name, options)
     options = options or {}
     local values = {
@@ -8312,6 +8331,7 @@ end
 -- Construct one regular, single-architecture archive from an exact ordered
 -- object sequence. Archives are flattened in-process; the configured tools
 -- receive only uniquely staged ordinary objects.
+-- Implementation notes: doc/implementation/static-compiled-modules.md#native-composition
 function driver.build_static_archive(
         output, object_inputs, archive_inputs, target, verbose, ordered_inputs)
     if type(target) ~= "table" then
@@ -8526,6 +8546,7 @@ local function windows_link_interfaces(libnames, extra_objects, ordered_payload)
     return interfaces
 end
 
+-- Implementation notes: doc/implementation/driver.md#drivercompile_library_output
 function driver.compile_library_output(soname, libnames, link, verbose,
                                        extra_objects, static_archives,
                                        ordered_payload, install_name,
@@ -9396,6 +9417,7 @@ function driver.validate_provider_output_paths(
     return true, public_archive
 end
 
+-- Implementation notes: doc/implementation/multi-module-libraries.md#validated-publication-and-generated-shims
 local function validate_generated_shim_destination(filename)
     local parents_ok, parents_err = validate_output_ancestors(filename)
     if not parents_ok then return nil, parents_err end
@@ -9455,6 +9477,7 @@ end
 -- The child validator must have exited before this function is called. Unlike
 -- the Unix pair publisher, this path never opens either provider in this Lua
 -- state. Retiring shims for removed logical modules is currently unsupported.
+-- Implementation notes: doc/implementation/windows-build.md#windows-dll-publication
 function driver.publish_windows_provider(staged, destination, shim_plans, provider)
     local filesystem = compiler_io.new_sync()
     local entries = {}
@@ -9492,6 +9515,7 @@ end
 -- transaction. Shims, dSYM, and archive are committed before the DSO; the DSO
 -- rename is the ordinary dynamic-path commit point. Tests may inject a caught
 -- failure at a named boundary through options.fail_at.
+-- Implementation notes: doc/implementation/static-compiled-modules.md#publication-and-installation
 function driver.publish_provider_bundle(
         staged_dso, staged_archive, public_dso, shim_plans, new_entries, options)
     options = options or {}

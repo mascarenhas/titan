@@ -71,6 +71,7 @@ static inline int titan_posix_getsockname(int descriptor,
 ** Lua-registry lookup on generic calls. */
 #define TITAN_BRAND ((void *)(uintptr_t)UINT64_C(0x649b61b49f68a8b2))
 
+/* Implementation notes: doc/implementation/lua-interop-internals.md#discoverable-runtime-type-information */
 #define TITAN_MT_TYPE ((void *)(uintptr_t)UINT64_C(0xD70BB58499779830))
 #define TITAN_MT_STATICS ((void *)(uintptr_t)UINT64_C(0x83370ABAA56047AE))
 #define TITAN_MT_MEMBERMAP ((void *)(uintptr_t)UINT64_C(0x310D781561E92F6D))
@@ -163,6 +164,7 @@ static inline lua_State *titan_newthread(lua_State *L) {
   return thread;
 }
 
+/* Implementation notes: doc/implementation/ffi-internals.md#header-support-files */
 static inline lua_State *lmacro_thvalue(const TValue *o) { return thvalue(o); }
 
 static inline Udata *lmacro_uvalue(const TValue *o) { return uvalue(o); }

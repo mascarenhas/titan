@@ -92,18 +92,11 @@ payload equality.
 
 The driver checks the ABI before evaluating the serialized type expression,
 evaluates that expression with `types` as the constructor environment, and
-applies the same recursive `Type.Module` schema validation used for DSO
-metadata. That closed validation includes union/variant owner, tag,
-constructor, namespace, callable-name, and value-facing-wrapper invariants;
-`Type.Variant` is legal only in its owning union's variant list. It also
-requires every direct `type_members` Interface to have the module/key-matching
-owner, a canonical nonempty declaration-order Method list/name map, dense
-unique fixed parameter names, and recursively valid value-facing signatures.
-Interface/Method descriptors, error-recovery/no-value markers, nested modules,
-C FFI descriptors, legacy wrappers, and unknown tags are rejected from
-arbitrary value positions. The decoded module name and canonical logical
-`.so` filename must
-match the key. An archive path is never stored in `Type.Module.file`.
+applies the same closed `Type.Module` schema validation used for DSO metadata;
+see [Interface recovery and the closed
+validator](driver.md#interface-recovery-and-the-closed-validator). The decoded
+module name and canonical logical `.so` filename must match the key. An archive
+path is never stored in `Type.Module.file`.
 
 Physical plans reconstruct only exported record prefixes and public variants;
 private C declarations never enter that graph. Native provider and paired
@@ -156,17 +149,17 @@ with x86, x64, or ARM64 machine identities. It bounds the 20-byte header,
 relocation tables (including overflow counts), and legacy line-number tables.
 Long section names use their decimal offsets into the COFF string table.
 Public `.titan.meta`, trusted `.titan.source`, and enum-query `.titan.cprobe`
-retain their existing names and exact payloads. Selected payload sections must
+keep their names and exact payloads. Selected payload sections must
 contain initialized data and no relocations. PE images, short import objects,
 BigObj, and other machine identities are rejected.
 
 The COFF target fingerprint contains machine, word size, and little endianness;
 it does not claim to identify the compiler or CRT configuration. The generic
 archive reader can inspect ordinary COFF members through this same parser.
-The planned Windows port remains DLL-only; this slice adds no static provider
-emission or linking. Native dependency import libraries remain a separate
-linker input contract, and their short import-object members are not accepted
-by this reader.
+Windows remains DLL-only: nothing emits or links a static Titan provider there
+(see [Experimental Windows build](windows-build.md)). Native dependency import
+libraries are a separate linker input, and this reader rejects their short
+import-object members.
 
 ### Mach-O and universal containers
 
@@ -238,7 +231,7 @@ The final direct set is:
 ```text
 all source modules in the invocation
 union
-all logical() keys() physically() carried() by() every() selected() archive()
+all logical keys physically carried by every selected archive
 ```
 
 When the checker walks an exported interface and encounters another module's
@@ -268,47 +261,42 @@ interface guarantees.
 
 ## Generated import paths
 
-The existing three code-generation paths remain:
+The `direct`, `handle`, and `global` bindings and their generated sequences are
+described in [Static vs dynamic dependency
+wiring](codegen-overview.md#static-vs-dynamic-dependency-wiring). For static
+providers the delta is:
 
-* `direct`: `extern` declarations and direct `_init`/function/method calls,
-  checking that the returned module belongs to the exact linked producer;
-* `handle`: select the already initialized logical module, or load the selected
-  `Type.Module.file` only if absent, then check ABI followed by the consumer's
-  selective compatibility requirements before initialization; and
-* `global`: initialize the exposing dependency and recover the transitive
-  owner's logical registry entry, with its own ABI-first compatibility checks.
+* selecting an archive turns the import into `direct`: `extern` declarations
+  and direct `_init`/function/method calls, checking that the returned module
+  belongs to the exact linked producer. There is no runtime archive reader;
+* finalized same-binary provenance skips runtime compatibility verification
+  and keeps provider slot indices constant;
+* `handle` and `global` describe finalized dynamic provenance only. A transitive
+  `global` owner must already exist and is never chosen through
+  `RTLD_DEFAULT`.
 
-The latter two names describe finalized dependency provenance. Both resolve
-native entries and public slot data with `titan_module_symbol`: an initialized
-module supplies its native export callback, while a newly opened provider
-supplies its handle. A transitive owner must already exist and never uses
-`RTLD_DEFAULT`. The callback also supports executable-embedded and locally
-loaded providers that have no Titan runtime handle.
-
-Static archive selection changes an import to `direct`; it does not introduce
-a runtime archive reader. Finalized same-binary provenance also bypasses runtime
-compatibility verification and keeps provider slot indices constant. Separate
-DSO variable/closure slots use exported data symbols, cached alongside native
-function pointers in the importer's per-state module payload. The
-[compatibility projection](binary-compatibility.md)
-does not alter archive metadata or the direct/handle/global ownership rules.
+The [compatibility projection](binary-compatibility.md) does not alter archive
+metadata or these ownership rules.
 
 ## Native composition
 
-Final link order is source objects, selected Titan archives, user `-X`
-payload, Titan runtime/backtrace/Lua inputs, platform libraries, `-l` inputs,
-and final flags. ELF first groups selected providers with each other, leaves
-ordinary `-X` inputs outside that group in their original CLI order, then
-groups `libtitan.a` with the selected providers at the runtime position.
-Selected archives therefore receive an ordinary second search after runtime
-members introduce references to metadata-free provider payload, such as
-bundled libuv, while `-X` archives are never broadly rescanned or force-loaded.
-Backtrace, Lua, platform, `-l`, and final-flag inputs remain outside both
-groups. Darwin uses its continual archive search. `--static` never becomes a
-system `-static` linker option.
+Program and test links (`driver.standalone_native_link_inputs`) order inputs as
+source objects, selected Titan archives, user `-X` payload, Titan
+runtime/backtrace/Lua inputs, platform libraries, `-l` inputs, and final flags.
+ELF first groups selected providers with each other, leaves ordinary `-X`
+inputs outside that group in their original CLI order, then groups
+`libtitan.a` with the selected providers at the runtime position. Selected
+archives therefore receive an ordinary second search after runtime members
+introduce references to metadata-free provider payload, such as bundled libuv,
+while `-X` archives are never broadly rescanned or force-loaded. Backtrace, Lua,
+platform, `-l`, and final-flag inputs remain outside both groups. Darwin uses
+its continual archive search. `--static` never becomes a system `-static`
+linker option.
 
-Library-mode DSO construction force-loads selected-provider and `-X` archives.
-The paired static archive flattens the identical logical/native payload:
+Library-mode DSO construction instead force-loads selected-provider and `-X`
+archives without groups (`driver.force_load_arguments`: GNU
+`--whole-archive`, Darwin `-force_load`). The paired static archive
+(`driver.build_static_archive`) flattens the identical logical/native payload:
 
 1. source objects in bytewise logical-name order;
 2. selected providers in bytewise absolute-path order, preserving member
@@ -319,10 +307,12 @@ The paired static archive flattens the identical logical/native payload:
 Runtime, backtrace, Lua, `-l`, and final flags are not copied into the archive.
 
 The configured `AR` creates a regular archive with order-preserving `qDc`
-operations, batched below `ARG_MAX`; configured `RANLIB -D` indexes it. A
-capability fallback drops only deterministic `D`, never the configured tool.
-Each input member is staged in a unique numbered directory so duplicate leaf
-names remain distinct.
+operations, split into command batches below a 64 KiB command-line ceiling
+(`archive_batches`, `ARCHIVE_SHELL_COMMAND_LIMIT`). The configured `RANLIB`
+indexes it with `-D`. `archive_tool_capabilities` probes both tools and falls
+back to `qc` and plain `ranlib` only when deterministic `D` is unsupported; it
+never substitutes another tool. Each input member is staged in a unique
+numbered directory so duplicate leaf names remain distinct.
 
 Before archiving, the driver records every object's ordinal, byte length,
 target fingerprint, origin, and exact numbered staging file. It then walks the
@@ -330,7 +320,7 @@ regular-archive headers sequentially and compares every non-index member with
 that file in fixed 64 KiB chunks. This bounded verification retains no
 aggregate produced-member payload while requiring the complete sequence to
 match byte-for-byte, so it catches loss or reordering of metadata-free native
-payload that a logical key check cannot see. The existing in-process object
+payload that a logical key check cannot see. The in-process object
 scanner then makes its separate full pass to validate targets and the metadata
 union.
 
@@ -363,14 +353,10 @@ members out of an archive. Selecting the shallow standard `titan.a` also makes
 the probe validate `luaopen_titan` and its `_loadlib`/`_loadlibglobal` support
 table.
 
-The generated entrypoint installs only the main module's loader. During the
-unchanged initialization recursion, every generated module whose `_init`
-succeeds stores its own `luaopen_*` function under its logical name in
-`registry[LUA_PRELOAD_TABLE]`. A private archive dependency therefore becomes
-available through `package.preload` when its importer initializes it, even
-though the public interface metadata does not expose that private edge. An
-unused archive sibling is neither extracted nor initialized and publishes no
-loader.
+A private archive dependency reaches `package.preload` only when its importer
+initializes it; an unused archive sibling is neither extracted nor initialized.
+The self-registering preload mechanism is described in [Linking a standalone
+program](driver.md#linking-a-standalone-program-drivercompile_program).
 
 For Interfaces, the use-site set includes the owner-exported native,
 coercive-Lua, and strict bound-method symbols. Concrete/Interface pair arrays
@@ -379,41 +365,35 @@ conversion and add no archive protocol entry.
 
 ## Publication and installation
 
-A no-main provider bundle stages the DSO, archive, shims, and Darwin dSYM on
-the destination filesystem. After validation, publication backs up current
-owned paths, installs shims/dSYM, publishes the archive, and renames the DSO
-last as the default dynamic-path commit point. Caught and injected failures
-restore all backups. This is recoverable process-level publication, not a
-claim of crash, power-loss, or asynchronous-signal atomicity.
+`driver.publish_provider_bundle` publishes a no-main provider bundle. It stages
+the DSO, archive, shims, and Darwin dSYM on the destination filesystem. After
+validation, publication backs up current owned paths, installs shims/dSYM,
+publishes the archive, and renames the DSO last as the default dynamic-path
+commit point. Caught and injected failures restore all backups. This is
+recoverable process-level publication, not a claim of crash, power-loss, or
+asynchronous-signal atomicity.
 
 Before replacing an existing bundle, publication compares the staged DSO,
-archive, generated shims, and Darwin dSYM tree with their public counterparts.
-The DSO, shims, and dSYM files must be byte-identical with matching modes. A
-regular archive must have the same record names/order/sizes, index and
-long-name bytes, member bytes, padding, and file mode; only the fixed-width
-archive-header timestamp/uid/gid/mode fields are ignored by the equivalence
-comparison, accommodating configured tools that lack deterministic `D`. When
-that complete owned set is unchanged and no stale shim needs retiring, Titan
-removes the staged artifacts and preserves the public bundle and its mtimes.
-Any changed or missing member takes the ordinary transactional path.
+archive, generated shims, and Darwin dSYM tree with their public counterparts
+(`same_file_contents`, `same_regular_archive_contents`). The DSO, shims, and
+dSYM files must be byte-identical with matching modes. A regular archive must
+have the same record names/order/sizes, index and long-name bytes, member bytes,
+padding, and file mode; only the fixed-width archive-header
+timestamp/uid/gid/mode fields are ignored, accommodating configured tools that
+lack deterministic `D`. When that complete owned set is unchanged and no stale
+shim needs retiring, Titan removes the staged artifacts and preserves the public
+bundle and its mtimes. Any changed or missing member takes the ordinary
+transactional path.
 
 When replacing a valid prior self-describing archive with fewer keys, its old
 key set enumerates the exact stale generated shims eligible for transactional
-removal. Titan never scans a directory and never removes an unrecognized Lua
-file.
+removal; see [Validated publication and generated
+shims](multi-module-libraries.md#validated-publication-and-generated-shims).
+Titan never scans a directory and never removes an unrecognized Lua file.
 
-The canonical standard installation places `titan.so` and `titan.a` together
-under `lib/titan/0.6`. Post-install recognizes bootstrap-only and complete-pair
-states within that active library namespace. Earlier Titan installations are
-not migrated, cleaned up, or treated as active-layout predecessors.
-
-The embedded metadata container is independent of the compiled-module ABI,
-but every entry carries `TITAN_ABI_VERSION`. Static validation checks it before schema
-decoding or native linking. This protects the current Array and function
-representations, union and Interface schemas, generic declarations,
-source-private provider identity, callable symbol hierarchy, callback
-ownership, const/member state, wrapper slots, and qualified Array runtime
-state. See [Dense Arrays](dense-arrays.md#abi-boundary).
-
-The pinned, patched libuv archive always enters as shared `-X` provider
-payload and is present in both native forms.
+Every metadata entry carries `TITAN_ABI_VERSION`, independently of the
+container banner version, and static validation checks it before schema
+decoding or native linking; see [Compiled-module
+ABI](codegen-overview.md#compiled-module-abi). Installing the standard
+provider pair is a copy step owned by the build scripts; see [Build and
+installation responsibilities](build-script-audit.md).

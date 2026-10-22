@@ -50,6 +50,7 @@ static inline titan_thread_waiter *titan_thread_channel_waiter(
   return &wait->waiter;
 }
 
+/* Implementation notes: doc/implementation/thread-library.md#channel-state-machine-and-endpoint-transfer */
 struct titan_thread_channel {
   void *mutex;
   size_t active_senders;

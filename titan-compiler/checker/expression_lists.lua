@@ -20,6 +20,7 @@ TITAN_VARARG_MAX = 200
 -- calls use LUA_MULTRET and do not cross the finite-result encoding boundary.
 LUA_VM_MAX_RESULTS = 250
 
+-- Implementation notes: doc/implementation/flexible-returns.md#one-finiteopen-result-demand
 function result_demand(fixed, tail, opts)
     opts = opts or {}
     return {
@@ -255,6 +256,7 @@ end
 -- keeps comma-bearing suffixes as ExpSubset nodes so an ordinary scalar use can
 -- receive a dedicated diagnostic.  A valid spread consumes that wrapper and
 -- publishes its checked subject/bounds directly on the carrier for codegen.
+-- Implementation notes: doc/implementation/spread-expressions.md#checker-planning
 function check_spread_marker(node, st, errors)
     if node._spread_checked then return node._spread_elem end
     local subject = node.exp
@@ -1307,6 +1309,7 @@ function check_computed_map_constructor(
     end
 end
 
+-- Implementation notes: doc/implementation/record-constructors.md#raw-construction-and-generated-only-operations
 function generic_resolve_named_record_constructor_context(
         node, st, errors, context)
     if not context then

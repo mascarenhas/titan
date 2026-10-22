@@ -121,6 +121,7 @@ local function start_cleanup(done: async.Completion<|CleanupWork, nil, integer|>
   return nil
 end
 
+-- Implementation notes: doc/implementation/sqlite3-library.md#cancellation
 local function run_foreign_cleanup(worker: foreign function (*void): void,
                                     packet: owned *TitanSqlitePacket)
   local work = CleanupWork(uv.work_t(), worker, packet, nil, 0)
@@ -257,6 +258,7 @@ end
 -- @return Opaque native pointer bytes; adopt exactly once or recover ownership.
 -- @usage standard-library-sqlite3.md#transferring-connections
 function Connection:to_transfer_payload(): string
+  -- Implementation notes: doc/implementation/sqlite3-library.md#connection-transfer
   self:reserve("to_transfer_payload", false)
   defer self.busy = false
   if self.statements ~= 0 then

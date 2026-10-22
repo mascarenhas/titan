@@ -11,6 +11,7 @@ local util = require 'titan-compiler.util'
 local platform = require 'titan-compiler.platform'
 local coverage = require 'titan-compiler.coverage'
 
+-- Implementation notes: doc/implementation/driver.md#the-titanc-command-line
 local p = argparse('titan', 'Titan compiler')
 p:argument('module', 'Names of the modules to compile.'):args("*")
 p:flag('--print-root', 'Print the selected Titan installation root and exit.')

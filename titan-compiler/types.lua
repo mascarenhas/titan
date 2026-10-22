@@ -2949,6 +2949,7 @@ end
 
 -- Erasure selects only an existing ordinary Titan carrier. Applied nominal
 -- arguments disappear after their dependent members have been rewritten.
+-- Implementation notes: doc/implementation/generics.md#constraint-erasure
 function types.erase(typ)
     return rewrite_type(typ, {
         arguments = {},
@@ -3153,6 +3154,7 @@ end
 -- existing strict projection can recover the closed value. This is an
 -- eligibility predicate only; it never authorizes a coercion or checks an
 -- Interface constraint.
+-- Implementation notes: doc/implementation/generics.md#type-argument-admission-and-the-ffi
 function types.transient_roundtrip(typ)
     local results, offenders = {}, {}
 
@@ -3321,6 +3323,7 @@ local function guard_plan(target, seen)
     return result
 end
 
+-- Implementation notes: doc/implementation/type-relations-and-boundaries.md#strict-gradual-guards
 function types.gradual_guard(target)
     return guard_plan(target, {})
 end
@@ -3388,6 +3391,7 @@ end
 
 local accepts_missing_nil = types.accepts_missing_nil
 
+-- Implementation notes: doc/implementation/type-relations-and-boundaries.md#callable-adjustment-rules
 callable_adjustment_impl = function(source, target, context)
     source, target = normalized_pair(source, target)
     if not source or not target
@@ -3730,6 +3734,7 @@ local function owner_argument_carrier(owner, index, arguments)
     return types.erase_constraint(substituted)
 end
 
+-- Implementation notes: doc/implementation/type-relations-and-boundaries.md#normalization-and-gradual-consistency
 consistent_impl = function(left, right, context)
     left, right = normalized_pair(left, right)
     if not left or not right
@@ -3954,6 +3959,7 @@ end
 -- This is intentionally not a general type relation: descriptor resolution is
 -- owned by the cast-site policy, the scan follows Interface declaration order,
 -- and aligned callable slots admit only exact/gradual component adjustment.
+-- Implementation notes: doc/implementation/interfaces.md#direct-structural-satisfaction
 function types.interface_implementation(concrete, interface, policy)
     if type(concrete) ~= "table"
        or (concrete._tag ~= "Type.Record"
@@ -4182,6 +4188,7 @@ end
 -- Close declaration-local method binders alpha-stably before using the ordinary
 -- Interface matcher. This shared semantic proof is used both by the source
 -- checker and by closed metadata validation/recovery.
+-- Implementation notes: doc/implementation/generics.md#declaration-staging-and-rigid-checking
 function types.generic_interface_implementation(concrete, interface, policy)
     -- Owner-generic applications reach this helper after `types.substitute`
     -- has rewritten the complete Record/Interface descriptor, including both
@@ -4537,6 +4544,7 @@ local function dynamic_plan(target, seen)
     return result
 end
 
+-- Implementation notes: doc/implementation/type-relations-and-boundaries.md#dynamic-coercion
 function types.dynamic_coercion(target)
     return dynamic_plan(target, {})
 end
@@ -4571,6 +4579,7 @@ local function explicit_conversion(source, target)
     }
 end
 
+-- Implementation notes: doc/implementation/type-relations-and-boundaries.md#written-casts
 function types.written_cast(source, target, policy)
     source, target = normalized_pair(source, target)
     if not source or not target
@@ -4596,9 +4605,9 @@ function types.written_cast(source, target, policy)
 
     -- Freezing is the sole relation that crosses Array mutability. A shallow
     -- freeze cannot convert element representations, so the element types
-    -- must be exact or gradually consistent. The checker later refines
-    -- `mode` to `freeze` only after a linear-use proof; the semantic default is
-    -- always a shallow copy. `is` shares this admission plan but consumes only
+    -- must be exact or gradually consistent. `mode` is `freeze` when the source
+    -- type carries the `linear` mark that `checker/linear.lua` sets after its
+    -- linear-use proof, and a shallow `copy` otherwise. `is` shares this admission plan but consumes only
     -- its allocation-free test metadata.
     if source._tag == "Type.Array"
        and target._tag == "Type.Array" then
@@ -4730,6 +4739,7 @@ function types.written_cast(source, target, policy)
     return nil
 end
 
+-- Implementation notes: doc/implementation/type-relations-and-boundaries.md#comparison
 function types.comparable(left, right)
     left, right = normalized_pair(left, right)
     if not left or not right
@@ -4803,6 +4813,7 @@ function types.generic_owner_view(source, target)
     })
 end
 
+-- Implementation notes: doc/implementation/type-relations-and-boundaries.md#direct-coercion-and-assignment
 function types.assignment_adjustment(source, target, policy)
     policy = policy or {}
     source, target = normalized_pair(source, target)
@@ -4815,10 +4826,7 @@ function types.assignment_adjustment(source, target, policy)
     elseif source._tag == "Type.Nominal"
        and target._tag == "Type.Nominal"
        and source.fqtn == target.fqtn then
-        -- Applied owners are invariant for ordinary static assignment. The
-        -- generic lowering pass uses generic_owner_view only at a frozen
-        -- closed/erased boundary where both applications denote the same
-        -- runtime owner.
+        -- Applied owners are invariant for ordinary static assignment.
         return nil
     end
 
@@ -5153,6 +5161,7 @@ end
 -- Build the public view serialized for a source union. Keeping this projection
 -- in one helper lets the checker prove the variant/constructor locality pairs
 -- against the exact view that serialization emits.
+-- Implementation notes: doc/implementation/unions.md#serialized-interfaces-and-abi-boundary
 function types.public_union_projection(union)
     assert(union and union._tag == "Type.Union")
     local variants, functions, methods = {}, {}, {}

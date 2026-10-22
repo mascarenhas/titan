@@ -8,9 +8,10 @@ invalid expression in ordinary compilation.
 
 ## Disposable source and coordinates
 
-`require "titan-compiler.completion"` exports `VERSION = 1` and
-`TRANSFORM_VERSION = 1`. `prepare(filename, text, caret_byte)` accepts a zero-based
-UTF-8 byte boundary and returns a table or `nil, reason` for an excluded token.
+`titan-compiler/completion.lua` exports `VERSION = 1` and
+`TRANSFORM_VERSION = 1`. `completion.prepare(filename, text, caret)` accepts a
+zero-based UTF-8 byte boundary and returns a table or `nil, reason` for invalid
+input, a caret that splits a UTF-8 sequence, or an excluded token.
 The table contains `text`, `request`, `kind`, `prefix`, `replacement_start` and
 `replacement_end`. The replacement is a half-open span in the original text.
 The host converts that span with the captured buffer's UTF-16 index.
@@ -59,7 +60,9 @@ when materializing scalar SQL facts. See [documentation metadata](documentation-
 case-sensitive prefix ranking and limits after compiler visibility and binding
 selection, and qualifies every saved identity with its committed generation.
 
-The observation points precede failed lookup of the dummy and the current-module
+The observation points (`completion_lexical`, `completion_qualified_type`,
+`completion_members`, `completion_foreign`, and `completion_finish` in
+`titan-compiler/checker/completion.lua`) precede failed lookup of the dummy and the current-module
 `M.member` rewrite. Standalone references are checked far enough to capture their
 receiver in completion mode; their ordinary statement error remains. Lexical
 facts observe the symbol table at its actual initializer, loop, repeat, catch,
@@ -77,8 +80,8 @@ nominal member facts use `"nominal:" .. fqtn`; C facts use a separate foreign
 lookup domain. Access modes distinguish `dot`, `static`, `colon` and `type`.
 Public and private declarations remain separate rows.
 
-Project manifest version 5 retains these scalar `completion_facts` alongside the
-existing closed declared owner graph and ordered `.ffi.h` plans. Decoding an
+The project manifest (`projectcache.VERSION`) retains these scalar
+`completion_facts` alongside the closed declared owner graph and ordered `.ffi.h` plans. Decoding an
 entry and describing it does not install a registry or retain a source AST.
 External source modules require the same actual compact entry to preserve
 private/generic capability and generated-header plans. The equality-only
@@ -98,10 +101,10 @@ Use these resolver options together:
 - `cached_binary_interfaces`, mapping names to `{serialized, kind, filename}`;
 - `transient_caches = true` and a private I/O/cache adapter.
 
-Analysis-only checking retains source-level generic expression types and case
-bindings without runtime erasure. It still captures the detached declared
-interface/registry and finishes completion observation after semantic checking.
-Ordinary compilation continues to lower its checked AST for code generation.
+Analysis-only checking keeps source-level generic types and case bindings
+without runtime erasure, while still freezing the declared interface/registry
+and running `completion_finish`
+([Source semantic bindings](checker.md#source-semantic-bindings)).
 
 The binary kind is `embedded`, `dynamic`, or `static`. The closed catalog rejects
 missing dependencies and source-required imports of captured binaries. It never
@@ -133,4 +136,5 @@ original enum expressions and implicit ordinals. The existing target-profile
 integer evaluator proves ordinary target-int enumerators without native probes;
 wide or unevaluable entries are omitted and make the result partial unless normal
 checking has already validated the exact type. Host-Lua enum numeric values are
-never range evidence. Header cache v6 and foreign conversion v7 carry this data.
+never range evidence. The header cache (`cdriver.HEADER_CACHE_VERSION`) carries
+the enum expressions and ordinals.

@@ -2,6 +2,7 @@ local wake_gc = import "gc"
 foreign import "stdlib.h"
 foreign import "external-wake-native.h"
 
+-- Implementation notes: doc/implementation/libuv-extension-guide.md#external-wake-bridge
 -- Native-reference invariant ledger (shared transitions hold core.mutex):
 -- * Each registration owns one target reference; retained producers own the rest.
 -- * PENDING implies registered: the queue borrows that registration reference.

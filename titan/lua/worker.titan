@@ -205,6 +205,7 @@ local foreign function lua_state_push_packet(state: *lua_State,
   return 0
 end
 
+-- Implementation notes: doc/implementation/lua-library.md#cross-state-transfer
 -- This callback contains every remote allocation and error-capable operation.
 -- Returning the complete result run leaves strings rooted in the remote stack
 -- until the caller copies them into its own heap and restores that stack.
@@ -307,6 +308,7 @@ local foreign function lua_state_execute(state: *lua_State): int
   return count
 end
 
+-- Implementation notes: doc/implementation/lua-library.md#protected-execution-and-stack-cleanup
 local foreign function lua_state_run(argument: *void)
   local call = argument as foreign *titan_lua_call
   local state = call.state

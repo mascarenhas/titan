@@ -7,6 +7,7 @@ local record WireReader
   position: integer
 end
 
+-- Implementation notes: doc/implementation/protobuf-library.md#decoding
 local record Message
   const base: foreign const *uint8_t
   const holder: string?

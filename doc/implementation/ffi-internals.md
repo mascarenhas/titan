@@ -2,25 +2,31 @@
 
 `foreign import "stdio.h"` drives a compile-time C pipeline under
 `c-parser/`, converts declarations into the `Type.C*` family in `types.lua`,
-and emits direct C expressions in `coder.lua`. The generated translation unit
-includes the same header, so the host C compiler sees the real prototypes; the
-Lua-side pipeline exists to typecheck Titan source before code generation.
+and emits direct C expressions from the `titan-compiler/coder/` slices. The
+generated translation unit includes the same header, so the host C compiler
+sees the real prototypes; the Lua-side pipeline exists to typecheck Titan
+source before code generation.
 
-Imported C function designators are emitted in parentheses, for example
-`(memchr)(...)`, in both ordinary Titan calls and restricted foreign bodies.
-This preserves the checked declaration when a header also defines a same-name
-function-like macro, such as glibc's const-generic string wrappers. Object-like
-function aliases retain normal preprocessing; no macro-call inference is added.
+`coder._foreign_reference_name` (`coder/names.lua`) spells every foreign
+designator. An imported C declaration is parenthesized, for example
+`(memchr)(...)`, in ordinary Titan calls, restricted foreign bodies, and
+callback conversions; this keeps the checked declaration when a header also
+defines a same-name function-like macro, such as glibc's const-generic string
+wrappers, while object-like aliases still expand normally. A source
+`foreign function` of the same module uses its bare generated name. A public
+source foreign function from another module is read from the importing image's
+hidden binding slot with `__atomic_load_n(&slot, __ATOMIC_ACQUIRE)`; see
+[source collaboration](foreign-functions.md#source-collaboration-and-binary-isolation).
 
 For user-facing behavior see [the C FFI](../language/ffi.md),
 [C FFI declarations and expressions](../language/c-ffi-expressions.md),
 [Foreign functions](../language/foreign-functions.md), and
 [Named arguments](../language/named-arguments.md). The exact tag, declarator,
-probe, contextual-conversion, and C-operator machinery is covered in
+target-profile, probe, contextual-conversion, target-directed allocation,
+recovery-storage, and C-operator machinery is in
 [C FFI declarations and expressions](c-ffi-expressions.md); the restricted
-raw-C checker/lowering, generated source headers, target-directed allocation,
-and current callback ABI boundary are in
-[Foreign-function implementation](foreign-functions.md).
+raw-C checker and lowering, generated source headers, and standard-library
+callbacks are in [Foreign-function implementation](foreign-functions.md).
 
 ## Import Pipeline
 
@@ -74,29 +80,18 @@ identity, and ABI slots retain their existing rules. The compiler does not
 copy an imported module's C namespace table: the consumer parses its own real
 header chain, which may augment the inherited C definitions.
 
-The resolver owns generated checking headers and their dependency graph. Real
-header contents/search observations retain normal analysis invalidation;
-temporary checking paths are not persistent dependencies. Probe source uses
-the stable logical entry and a deterministic generated-bundle digest. The
-resolver stages actual `.ffi.h` files under a private include root for parsing
-and probing. This transport
-does not introduce forwarding wrappers or per-type origin-header collection.
-
-After signature checking, a module with foreign functions gets `.titan.h` for
-their declarations and static-inline bodies, includes its own `.ffi.h`, and includes
-the required source dependencies' `.titan.h` files. A `.ffi.h` never includes
-a `.titan.h`. Generated module C includes its own `.ffi.h` before any
-`.titan.h`; non-inline foreign definitions, module initialization, visibility,
-and callable adapters remain in their established owners.
+The resolver owns generated checking headers and their dependency graph; real
+header contents and search observations keep normal analysis invalidation,
+while temporary checking paths are not persistent dependencies. How checking
+trees are staged and how the final `.ffi.h`/`.titan.h` pair is planned and
+included is in [generated `*.titan.h` planning](foreign-functions.md#generated-titanh-planning).
+A `.ffi.h` never includes a `.titan.h`, and generated module C includes its own
+`.ffi.h` before any `.titan.h`.
 
 `cdeclarator` owns exact shared C spelling and `csemantics` owns target numeric
 policy. The resolver's `cprobe.Service` owns runner execution, baselines,
-temporary artifacts, and source-result memoization. Format 2 stores completed
-compiler acceptance/rejection and typed enum answers under
-`<prefix>/var/cache/titan-probes/2`; identity is SHA256 of complete raw source.
-Authored header/compiler changes require manual clearing or the persistent
-disable switch, while infrastructure and malformed-result failures remain
-retryable. See [semantic-result caching](c-ffi-expressions.md#analysis-local-and-persistent-semantic-results).
+temporary artifacts, and source-result memoization; see
+[semantic-result caching](c-ffi-expressions.md#analysis-local-and-persistent-semantic-results).
 
 Unsupported C declarations are skipped per member. A later reference reports
 the missing member in `ffi`; preprocessing/parsing failures still fail the
@@ -119,12 +114,13 @@ requested typedef name, since C compilers may merely warn about declarations
 such as `typedef long int;` that introduce no name.
 
 `ffiheaders` descriptors retain `typedef_declarations` alongside direct includes
-and dependency descriptors. Their v2 digest covers the final contents and
-dependency digests. Restoration validates the declaration plan and materializes
-actual header files; it never reconstructs typedefs from public Titan metadata.
-Project manifest version 4 includes this schema. Foreign conversion cache
-version 6 retains exact integer macro constants used in allocation selection
-and C declaration origins; older snapshots miss rather than silently losing them.
+and dependency descriptors. Their `titan-module-ffi-v2` digest covers the final
+contents and dependency digests. Restoration validates the declaration plan and
+materializes actual header files; it never reconstructs typedefs from public
+Titan metadata. The project manifest (`projectcache.VERSION`, 5) includes this
+schema. The foreign conversion cache (`foreigncache.lua`, kind
+`ffi-conversion-v8`) retains exact integer macro constants used in allocation
+selection and C declaration origins; payloads of another version are misses.
 
 The C driver maps parsed declaration positions through the preprocessor's
 existing output origins. Runtime identity is nominal: the declaring header and
@@ -161,20 +157,26 @@ for `lua_State`, `TValue`, `Udata`, and `CClosure`. `TValue` remains a distinct
 C type in Titan's FFI type graph. Private runtime helpers can move values across
 that boundary through explicit `value` <-> C `TValue` coercions.
 
-Four typed inline bridges—`lmacro_thvalue`, `lmacro_uvalue`,
-`lmacro_clCvalue`, and `lmacro_pvalue`—evaluate the real Lua function-like
-macros inside C, where the host preprocessor can see them. They are the
-deliberately narrow callback-migration exception to Titan's lack of general
-function-like-macro inference; the uv, HTTP, and coroutine foreign entries use
-them to recover generated callback state. The callback owners are already
-reachable through their traced runtime/parser ownership, so no duplicate stack
-root is needed.
+The header also defines typed `static inline` bridges, `lmacro_*`, that evaluate
+real Lua function-like macros inside C, where the host preprocessor can see
+them: value extractors (`lmacro_thvalue`, `lmacro_uvalue`, `lmacro_clCvalue`,
+`lmacro_pvalue`, `lmacro_fvalue`, `lmacro_ccl_f`, `lmacro_getudatamem`), tag
+tests (`lmacro_ttype`, `lmacro_ttypetag`, `lmacro_ttisLclosure`,
+`lmacro_ttisCclosure`, `lmacro_ttisfulluserdata`, `lmacro_ttislcf`,
+`lmacro_ttislightuserdata`), and writes (`lmacro_sethvalue`,
+`lmacro_luaC_barrierback`). They are the deliberately narrow exception to
+Titan's lack of general function-like-macro inference, used by trusted
+standard-library foreign functions (uv, HTTP, coroutine, transfer, thread) to
+recover generated callback state. Add a bridge here rather than inferring a
+function-like macro.
 
-The same header defines `lua_totvalue`, `lua_pushtvalue`, `lua_togco`, and
-`titan_newthread` as small typed `static inline` functions. Keeping these
-Lua-internal bridges with their FFI declarations avoids exporting runtime
-symbols solely for trusted source modules; `titan_newthread` still reserves the
-initial coroutine stack and installs Titan's shared `errorhandler`.
+The same header defines `lua_totvalue`, `lua_pushtvalue`,
+`lua_pushconstlightuserdata`, `lua_togco`, and `titan_newthread` as small typed
+`static inline` functions, so trusted source modules need no exported runtime
+symbols for them; `titan_newthread` also reserves the initial coroutine stack
+and installs Titan's shared `errorhandler` as the thread's message handler.
+Their stack obligations are in the
+[trusted Lua C API ledger](ffi-lua-api-followup.md#operation-ledger).
 
 Generated C in installed mode compiles with `-I <root>/include` (checkout mode
 uses `-I titan-runtime`), so the emitted `#include <titan/ffi.h>` resolves
@@ -182,7 +184,7 @@ through the same normal compiler path.
 
 ## TypeList Extraction
 
-`ctypes.lua` preserves more C shape than the old prototype:
+`ctypes.lua` preserves this C shape:
 
 * standalone `struct`/`union` declarations nested under `item.spec[1]` are
   registered;
@@ -224,19 +226,8 @@ module `.ffi.h` environment. Thus a tag spelling that a
 later macro invalidates cannot be certified by an earlier producer or alias.
 The query declares that surface once and compares its address type against all
 eligible primitive carrier pointer types with `__builtin_types_compatible_p`.
-Stable IDs 1–11 identify the ordered canonical carriers independently of the
-filtered list. A 12-byte versioned array in ELF/COFF `.titan.cprobe` or Mach-O
-`__DATA,__titancprobe` records the match count and matching-ID sum. It is marked
-`used` and byte-aligned. Under Clang only, the inert serialized array also has
-`no_sanitize("address")`, so ASan cannot pad its exact 12-byte section payload
-with global redzones. This excludes only the object-file answer bytes;
-generated runtime code remains instrumented. After `-c`, the bounded object reader requires one
-initialized, uncompressed, relocation-free section with the exact payload;
-the service extracts it before cleanup. A successful compiler exit without a
-valid answer is infrastructure failure, not a selected carrier. No linking,
-external extractor, or target execution occurs. Typed selected, none, and
-multiple answers survive every cache tier, and the decoder verifies them
-against the exact eligibility question.
+The object-file answer protocol, stable carrier IDs, and cache validation are in
+[enum carrier selection](c-ffi-expressions.md#enum-carrier-selection).
 
 Enum object types are accepted only when that carrier's full range fits
 `lua_Integer`; `__int128` is deliberately not a candidate. Unused enum
@@ -261,43 +252,41 @@ unqualified value type, removing top-level `const`/`volatile` without integer
 promotion. An enum surface without any standalone exact spelling, such as a
 prototype-local tag, fails closed even when reached below a pointer.
 
-`c99.lua` distinguishes a true `(void)` prototype from `()`: both have no
-effective parameter types, but only the former establishes a known empty name
-list. `ctypes.get_params` publishes `paramnames = { ... }` only when every
-effective non-void fixed parameter is named and the names are unique;
-otherwise it publishes `false`. Compatible redeclarations merge that
-declaration metadata after ordinary type equality: unknown can upgrade to
-complete, unknown cannot erase complete, and two differing complete lists
-permanently become `conflicting`/`false`. Parameter spellings therefore do not
-participate in C type identity.
+`c99.lua` distinguishes a true `(void)` prototype from `()`. The resulting
+declaration-only parameter-name metadata (`paramnames`, merged across
+redeclarations, never part of C type identity) is described in
+[C prototype metadata](named-arguments.md#c-prototype-metadata).
 
-The C99 grammar remains non-reentrant because it uses a module-global typedef
-table, reset at the start of each parse. The preprocessor still has the older
-limitations: raw Lua errors for some macro/`#if` cases, ignored `#error` and
-`#pragma`, and best-effort GNU/Clang extension handling.
+The C99 grammar is non-reentrant because it uses a module-global typedef table,
+reset at the start of each parse. Preprocessor limitations are listed under
+[platform constraints](#platform-constraints-and-failure-modes).
 
 ## `Type.C*`
 
-`types.lua` now registers the C FFI vocabulary with `typedecl`:
+`types.lua` registers the C FFI vocabulary with `typedecl`:
 
 ```lua
 CVoid        = {}
+CNamed       = {"tagname"}
 CInteger     = {"spelling", "signed", "rank", "bits"}
 CFloat       = {"spelling"}
 CPointer     = {"pointee", "quals"}
 CArray       = {"elem", "len", "quals"}
 CFunction    = {"params", "ret", "vararg", "abi"}
-CStruct      = {"cname", "tagname", "typedef", "fields", "complete", "has_fam", "origin?"}
-CUnion       = {"cname", "tagname", "typedef", "fields", "complete", "origin?"}
+CStruct      = {"cname", "tagname", "typedef", "fields", "complete", "has_fam"}
+CUnion       = {"cname", "tagname", "typedef", "fields", "complete"}
 CField       = {"owner", "name", "type", "bitfield", "flexible_array"}
-CTypedef     = {"name", "target", "quals", "origin?"}
+CTypedef     = {"name", "target", "quals"}
 COwned       = {"pointee", "count"}
 CModule      = {"name", "members", "type_members"}
 ```
 
-`CFunction` deliberately has no parameter-name field. Callback/function-pointer
-types remain structural; declaration spellings stay on raw CTypes until a
-direct foreign member is built.
+Declaration origins are not constructor fields: conversion sets `origin` on
+named typedefs and aggregates, and `types.c_declaration_origin(typ)` reads
+`typ.origin` or `typ._ffi_scope`. `CNamed` is the serialized backreference used
+for aggregate cycles (below). `CFunction` deliberately has no parameter-name
+field. Callback/function-pointer types remain structural; declaration
+spellings stay on raw CTypes until a direct foreign member is built.
 
 `types.resolve_c_typedef` unwraps `CTypedef` chains. The type predicates keep
 three different questions separate:
@@ -510,7 +499,7 @@ as their authoritative `Type.CFunction`. Its `params`, single `ret`, C
 `vararg` bit, ABI, prototype/old-style state, return qualifiers, typedef
 spellings, and origin header remain on the C graph; there is no projected or
 decorated `Type.Function`. The surrounding `Type.ModuleMember` separately
-carries the raw declaration's `paramnames` table or `false`, so parameter
+carries the raw declaration's `paramnames` table or `nil`, so parameter
 spellings remain outside structural C signature identity.
 
 The checker obtains argument/result reuse from a private `Checker.CallSignature`
@@ -545,8 +534,6 @@ The checker has FFI-specific handling in a few narrow places:
   pointer/array operand selects an eligible payload. `void`, direct functions,
   incomplete aggregates, C array-typedef payloads, and nested owners remain
   invalid; FAM structs use the separate `foreign T.new(count)` allocation path.
-
-
 * `Ast.TypeOption` requires its base to satisfy
   `types.has_tvalue_representation`. This admits `COwned` and other boxable C
   scalars and object/function pointers while rejecting by-value C
@@ -560,8 +547,6 @@ The checker has FFI-specific handling in a few narrow places:
 * `Ast.VarDot` on a `CModule` selects only ordinary C value members.
   `Ast.ExpForeignType` is the dedicated type receiver for `foreign T.new()`,
   `.new_array(n)`, `.sizeof`, and `.alignof`; same-named values do not interfere.
-
-
 * `Ast.VarDot` on a C struct/union, pointer-to-aggregate, or owned aggregate
   resolves a `Type.CField`. A pure dotted field macro is expanded logically
   through physical aggregate fields first, because C preprocessing precedes
@@ -616,22 +601,20 @@ The checker has FFI-specific handling in a few narrow places:
   variadic calls retain their independent explicit-scalar/default-promotion
   path and do not accept a Titan spread as their variadic operands.
 * A brace-delimited call to a direct C module function uses the member's
-  declaration-only `paramnames`. The checker rejects C variadics, unavailable
-  name lists, C function pointers, and allocation pseudo-constructors. For an
-  eligible fixed declaration, it matches/checks explicit fields in lexical
-  order and synthesizes `nil` only for omitted C parameters whose converted
-  Titan-visible type passes `nil_can_adjust_to`. The resulting dense positional
-  list carries `_named_arg_order` and `_named_call_kind = "foreign"`; see
-  [named-argument internals](named-arguments.md).
+  declaration-only `paramnames`; C variadics, unavailable name lists, C
+  function pointers, and allocation pseudo-constructors are rejected. Matching,
+  omission and the resulting `_named_arg_order` are in
+  [named-argument internals](named-arguments.md#checker-elaboration).
 * `Ast.ExpVar` rejects imported and source-defined foreign declarations as
   Titan first-class values, but allows a foreign name in a context whose target
   is an exactly compatible C function pointer type. The checker compares the
   target pointee directly with the authoritative `CFunction`, retaining
   typedefs, qualifiers, ABI, prototype style, and C `...`; it never
-  reconstructs a C signature from a `Type.Function`. The node records
-  `_foreign_function_pointer` so codegen can emit a C cast of the bare function
-  name. Automatic adaptation of an ordinary Titan closure remains unsupported;
-  a top-level source `foreign function` is already the exact C entry.
+  reconstructs a C signature from a `Type.Function`. The coder emits the decay
+  from the node's `_foreign_function_reference` as a C cast of
+  `coder._foreign_reference_name` (`coder/expressions.lua`). Automatic
+  adaptation of an ordinary Titan closure remains unsupported; a top-level
+  source `foreign function` is already the exact C entry.
 * `checkforin` treats generic-for iterator and close slots as C function-pointer
   contexts when a foreign function name appears there. It decays the exact
   declaration into the hidden tuple slot, while an already-materialized pointer
@@ -714,7 +697,7 @@ needs its mutable macro/output context. A fresh provider rescans those forced
 inputs before reusing the extracted header payload; no complete forced
 preprocessor context is written to disk.
 
-The `ffi-conversion-v3` payload retains final `Type.CModule` members and type
+The `ffi-conversion-v8` payload retains final `Type.CModule` members and type
 members, callable parameter spellings, reachable C types/layouts/enum carriers,
 the final C type lookup and file-tag canonical map, numeric profile, and final
 field-macro classifications. It excludes raw-CType conversion memos, old
@@ -749,11 +732,11 @@ pointer.
 
 ### Calls And Variables
 
-`codeforeigncall` requires the callee annotation itself to be the authoritative
-`Type.CFunction` and emits a direct C call of the bare C name. It has no
-`Type.Function` fallback; closure tags, brands, strict relays, and adjustment
-wrappers are therefore unreachable from this path. The Titan foreign module
-name is gone by codegen time. Fixed and C-vararg arguments both flow
+`codeforeigncall` (`coder/calls.lua`) requires the callee annotation itself to
+be the authoritative `Type.CFunction` and emits a direct C call of the
+designator from `coder._foreign_reference_name`. It has no `Type.Function`
+fallback; closure tags, brands, strict relays, and adjustment wrappers are
+therefore unreachable from this path. Fixed and C-vararg arguments both flow
 through `codeforeignexp`, so Titan strings become `getstr(TString*)`, owned C
 objects decay to payload pointers when the target is a C pointer, and most
 `value` arguments consume their checker-attached plan when the target C type
@@ -769,13 +752,11 @@ This path has no flexible-result descriptor. C returns its single ordinary
 result (or `void`) according to `CFunction.ret`; any finite projections used to
 form its fixed arguments have already been made explicit by the checker.
 
-For a checked named direct call, `codeforeigncall` freezes converted explicit
-arguments into target-typed C temporaries in `_named_arg_order`, then freezes
-synthetic omissions. It emits those temporary names in formal order in the C
-call. This prevents C's unspecified argument-evaluation order—and the
-name-to-position mapping itself—from reordering Titan effects. The path retains
-the positional implementation's post-call `mutable_out_anchor` refreshes for
-GC-bearing `TValue` out parameters.
+A checked named direct call freezes its arguments into target-typed C
+temporaries in lexical order and emits them in formal order; see
+[code generation and evaluation order](named-arguments.md#code-generation-and-evaluation-order).
+The positional path's post-call `mutable_out_anchor` refreshes for GC-bearing
+`TValue` out parameters still apply.
 
 `codeforeignvar` emits a bare C variable or public macro name. A C scalar from
 a foreign variable, function result, field, index, macro, or C operator keeps
@@ -790,10 +771,11 @@ the separate contextual address coercion from eligible locals to subobjects.
 
 `codecfunctionptrcall` handles calls through C function pointer values. It
 evaluates the pointer expression once, materializes it into a C temporary,
-raises a Lua error if the temporary is `NULL`, converts arguments through
-`codeforeignexp`, and emits `tmp(args...)`. The expression dispatcher checks this
-path before the direct C-module call path so `ffi.callback_value(...)` is treated
-as an indirect call when `callback_value` has a function pointer type.
+raises `cannot call a NULL C function pointer` if the temporary is `NULL`,
+converts arguments through `codeforeignexp`, and emits `tmp(args...)`. The
+expression dispatcher checks this path before the direct C-module call path so
+`ffi.callback_value(...)` is treated as an indirect call when `callback_value`
+has a function pointer type.
 
 Every direct or function-pointer foreign call is conservatively treated as a
 possible Lua-stack relocation point. The coder materializes a non-`void`
@@ -806,18 +788,9 @@ widen the public FFI safety boundary: arbitrary Lua C API stack effects,
 borrowed-pointer lifetimes, and nonlocal exits still require their existing
 operation-specific contracts.
 
-The shared header plan emits the module environment before checked source
-foreign declarations:
-
-```c
-#include "module.ffi.h"
-#include "module.titan.h"
-```
-
-The `.ffi.h` carries direct source dependency environments followed by authored
-foreign directives. The checker/cdriver determines quote-versus-angle spelling
-at resolution time. The coder does not rediscover source includes from each C
-type it happens to render.
+Include spelling is fixed when the header plan is built (see the import
+pipeline above); the coder never rediscovers includes from the C types it
+renders.
 
 ### Casts And Boundary Values
 
@@ -867,10 +840,10 @@ reachable reference keeps it alive. The `Table *`, `Udata *`, and general
 `GCObject *` identities are internal runtime addresses, not stable public
 layouts or independently managed allocations.
 
-This is the only Titan-union/C boundary added by unions v1. A Titan union may
-be explicitly erased to C `void *` as a GC identity, just like a Titan record;
-it is never structurally converted to a C `union` or `struct`, and no reverse
-aggregate cast is defined.
+This is the only Titan-union/C boundary. A Titan union may be explicitly
+erased to C `void *` as a GC identity, just like a Titan record; it is never
+structurally converted to a C `union` or `struct`, and no reverse aggregate
+cast is defined.
 
 `foreigntonativeexp` handles C-to-Titan conversion for call results and foreign
 variables. C `TValue` results become Titan `value`s directly. C
@@ -917,7 +890,7 @@ arbitrary `value` still requires the written `unsafe_dynamic_c_pointer` plan.
 It checks only lightuserdata/nil, with no runtime C-signature proof. Direct C
 function-pointer/`void *` conversions remain written-only, and function
 pointers do not participate in object-pointer address coercions. By-value C
-structs/unions are deliberately not boxable in v1.
+structs/unions are not boxable.
 
 An Option over a C integer or float uses a native presence/value carrier across
 exact native calls, locals, and nominal storage. Its present arm invokes these
@@ -1016,7 +989,7 @@ checker-only declarations (`Checker.CPseudoNew`) selected by a dedicated
 `Ast.ExpForeignType` receiver; their narrow call descriptors are not `Type.Function` values. At
 a direct initialized local sink the checker may instead record automatic or
 borrowed backing, as detailed in
-[Foreign-function implementation](foreign-functions.md#target-directed-allocation-plans).
+[target-directed automatic aggregates and fixed arrays](c-ffi-expressions.md#target-directed-automatic-aggregates-and-fixed-arrays).
 In an owned plan, `codecpseudonew` allocates Lua userdata directly:
 
 ```c
@@ -1066,15 +1039,12 @@ an attestation of C layout compatibility under different build settings.
 Source-facing `types.tostring` remains unqualified and is not used for these
 runtime keys.
 
-Conversion establishes declaration origins before foreign name lookup or owned
-alias unwrapping. When `owned P` removes P's outer pointer/array layer, the
-selected payload retains its origin through pointer, array, and function-type
-wrappers. Imports and cache restoration preserve those origins; plain
-primitives and the intrinsic `lua_State` remain unscoped.
+Owned payloads keep their declaration origin through owned-alias unwrapping
+(see [authored foreign typedefs](#authored-foreign-typedefs-and-immutable-headers)).
 
-This is deliberately different from adopted/borrowed C pointers. Borrowed
-pointers are raw C pointer values and are not GC-managed; adopted pointers are
-left for a later FFI iteration.
+Owned storage is distinct from borrowed C pointers, which are raw values the GC
+does not manage. Titan has no operation that adopts a foreign-allocated pointer
+as an owner.
 
 ## Platform Constraints And Failure Modes
 
@@ -1086,10 +1056,10 @@ left for a later FFI iteration.
   outside that subset can fail during preprocessing or parsing.
 * Some preprocessor paths still raise raw Lua errors instead of diagnostics
   (`#if` operators outside the implemented set, unterminated function-like
-  macros).
-* Function-like macros are invisible to general Titan FFI inference. The four
-  typed inline callback bridges in `titan/ffi.h` are ordinary C functions whose
-  bodies evaluate the selected Lua macros. An object-like macro is
+  macros). `#error` and `#pragma` are ignored.
+* Function-like macros are invisible to general Titan FFI inference; the
+  `lmacro_*` bridges in `titan/ffi.h` are ordinary C functions whose bodies
+  evaluate selected Lua macros. An object-like macro is
   expression-valued through bounded recognized forms, including supported
   integer-constant expressions, floating numeric expressions and the bounded
   math-header constant builtins, and typed dereferenced accessors, or when it
