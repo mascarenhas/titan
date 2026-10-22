@@ -214,9 +214,17 @@ local foreign function channel_register_send_wait(context: *void, target: *void)
   return 0
 end
 
+-- Implementation notes: doc/implementation/thread-library.md#registration-pins-and-state-close-withdrawal
+-- A withdrawn send never enqueues its packet, so withdrawal disposes it here,
+-- outside ch.mutex because discarding can release endpoints of this channel.
+-- A lua_close withdrawal never unwinds the send's defer; after cancellation
+-- that defer finds the cleared pointer.
 local foreign function channel_unregister_send_wait(context: *void)
   local wait = context as foreign *titan_thread_channel_wait
   channel_unregister_overflow_waiter(wait.channel, ffi.titan_thread_channel_waiter(wait))
+  local message = wait.message
+  wait.message = nil
+  thread_message_discard(message)
 end
 
 local foreign function channel_register_receive_wait(context: *void, target: *void): int

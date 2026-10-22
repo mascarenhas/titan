@@ -214,7 +214,12 @@ queues safe (issue #262):
   `channel_unregister_receive_wait` or `thread_control_unregister_join_wait`.
   After that, no queue links a node on a destroyed stack, so neither a later
   endpoint finalizer of the same state nor another state's or thread's send,
-  close, last release or worker completion can reach one.
+  close, last release or worker completion can reach one. Because the parked
+  Task never unwinds, its `defer` cannot dispose the packet a withdrawn send
+  still holds; `channel_unregister_send_wait` therefore takes `wait.message`
+  and discards it natively after releasing `ch.mutex`, since discarding can
+  release endpoints of the same channel. A cancelled send's `defer` then finds
+  the cleared pointer. A parked receive or join cell owns no packet.
 - **Per-registration pin.** That unregister can run after the state's endpoint
   or `Thread` handle was finalized and released its reference. `waiter_enqueue`
   therefore takes one pin under the domain mutex it already holds:

@@ -1139,7 +1139,9 @@ no cleanup shielding and does not hold back Task publication.
 - **State close.** If the Lua state closes while the Task is still parked,
   `unregister_fn(context)` also runs during `lua_close`, before the Task's
   coroutine stack, and with it any automatic `context`, is released. The Task
-  does not resume and its `defer` blocks do not run. By then `owner` may
+  does not resume and its `defer` blocks do not run, so `unregister_fn` must
+  also dispose of any native data that the context owns and that only the
+  Task's unwinding would otherwise release. By then `owner` may
   already have been finalized, so the native object that `context` refers to
   must not depend on `owner` for its lifetime. From a linked registration
   until `unregister_fn` runs, or until the waiting Task's own next locked

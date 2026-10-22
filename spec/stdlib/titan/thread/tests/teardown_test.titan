@@ -50,6 +50,21 @@ function thread_teardown_park_send()
   end))
 end
 
+-- Public for the packet-disposal variant: the parked send's packet carries a
+-- Sender of a probe channel whose Receiver goes to the host. The probe closes
+-- only when every Sender unit, including that packet attachment, is released.
+function thread_teardown_park_send_carrying_endpoint(host: value)
+  local probe_tx, probe_rx = thread.channel<|boolean|>(1)
+  async.send(host as foreign *void, probe_rx)
+  local tx, rx = thread.channel<|thread.Sender<|boolean|>|>(1)
+  thread_teardown_held[#thread_teardown_held + 1] = rx
+  test.assert(tx:try_send(probe_tx:clone()), "the teardown channel was not empty")
+  thread_teardown_park(async.run<|nil, value|>(function (): nil
+    tx:send(probe_tx)
+    return nil
+  end))
+end
+
 -- Public for the pinned-channel variants: the Task creates the endpoints, so
 -- both finalize before its coroutine and release the channel's last endpoint
 -- references while the waiter is still registered.
@@ -135,6 +150,23 @@ function test_lua_close_withdraws_send_parked_on_older_endpoints(_: test.Context
     package.path, package.cpath = '', ''
     require('thread.tests').thread_teardown_park_send()
   ]], "=thread-teardown-send")
+end
+
+function test_lua_close_disposes_packet_of_withdrawn_send(_: test.Context)
+  runtime_test.run(function ()
+    local inbox = async.receiver()
+    defer inbox:close()
+    local state = lua.new()
+    defer state:close()
+    local probe: thread.Receiver<|boolean|> = thread_teardown_park_shared(
+      state, inbox, "thread_teardown_park_send_carrying_endpoint")
+    defer probe:close()
+    test.assert(not probe:is_closed(), "the probe channel closed before lua_close")
+    state:close()
+    -- The parked send never resumes, so withdrawal must dispose its packet and
+    -- release the probe Sender attached to it.
+    test.assert(probe:is_closed(), "lua_close leaked the withdrawn send's packet")
+  end)
 end
 
 function test_lua_close_pins_channel_released_before_parked_receive(_: test.Context)
