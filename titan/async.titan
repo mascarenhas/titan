@@ -415,6 +415,8 @@ local record ExternalBridge
   waits: {integer: ExternalWait}
   next_identity: integer
   closed: boolean
+  -- Set once lua_close withdrew every parked native wait (issue #262).
+  withdrawn: boolean
 end
 
 record ExternalWait
@@ -1607,6 +1609,50 @@ local function ExternalWait:detach_domain()
   end
 end
 
+-- Implementation notes: doc/implementation/libuv-runtime.md#lua-state-close-of-an-unretired-runtime
+-- titan.coroutine calls this from a suspended coroutine's finalizer, before it
+-- releases the stack. It withdraws the C-ABI ordinary waits of the Task whose
+-- root is that coroutine; Completions are cached per Task, so done.task names
+-- the waiting Task. Only detach_domain runs here: the bridge's wake owner may
+-- already be detached, and retire or native_external_wake_unregister would
+-- then touch a target that the domain unlink may have released.
+--
+-- Rooting invariant: an unfinished Task stays in runtime.tasks until
+-- finish_task, and active_runtime roots its Runtime until loop() retires it or
+-- runtime_finalize runs (registered before every Task, so finalized after
+-- them). Ordinary GC never finalizes such a Task's root. When the matched Task
+-- is still that inventory entry, the state is closing and every parked stack
+-- is about to be released, so one linear sweep withdraws every wait. Otherwise
+-- only the matched Task's waits are withdrawn, which is never wrong.
+local function withdraw_parked_native_waits(finalized: value)
+  local runtime? = active_runtime
+  if runtime == nil then return end
+  local bridge? = runtime.external
+  if bridge == nil or bridge.withdrawn then return end
+  local parked: Task? = nil
+  for _, owner in iteration.pairs(bridge.waits) do
+    local done? = owner.done
+    if done ~= nil then
+      local root: value = done.task.root
+      if root == finalized then
+        parked = done.task
+        break
+      end
+    end
+  end
+  if parked == nil then return end
+  local closing = runtime.tasks[parked.root_index] == parked and
+    parked.phase ~= TASK_FINISHED
+  if closing then bridge.withdrawn = true end
+  for _, owner in iteration.pairs(bridge.waits) do
+    local done? = owner.done
+    if done ~= nil and owner.native.unregister_wait ~= nil and
+        owner.native.retire == nil and (closing or done.task == parked) then
+      owner:detach_domain()
+    end
+  end
+end
+
 local function ExternalWait:retire()
   if self.retired then return end
   if self.native.armed ~= 0 and self.native.ready == 0 then
@@ -1722,7 +1768,7 @@ local function external_bridge(runtime: Runtime): ExternalBridge
   if existing ~= nil then return existing end
   local bridge = ExternalBridge {
     runtime = runtime, wake = uv.external_wake_t.new(), waits = {},
-    next_identity = 1, closed = false
+    next_identity = 1, closed = false, withdrawn = false
   }
   local callback = function (_: uv.external_wake_t) bridge:drain() end
   check_status(uv.external_wake_init(runtime.loop, bridge.wake, callback),
@@ -4936,4 +4982,7 @@ do
   end
   ffi.lua_pushtvalue(L, bootstrap)
   ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_BOOTSTRAP_KEY)
+  -- Private slot read by titan.coroutine's finalizer (same literal there).
+  ffi.lua_pushtvalue(L, withdraw_parked_native_waits)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, "titan.coroutine.teardown")
 end

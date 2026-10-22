@@ -309,6 +309,29 @@ described above.
   ASM and UCONTEXT backends; the Fiber backend remains for Windows and
   Emscripten but cannot be exercised on a native Linux toolchain.
 
+## Suspended-stack teardown hook
+
+`coro_gc` destroys the coroutine's whole C stack. A dead coroutine has no live
+frames, but a suspended one may still own automatic C storage that a native
+domain borrows, such as a thread channel waiter linked into a channel queue.
+Before `mco_destroy` releases a coroutine whose `mco_status` is
+`MCO_SUSPENDED`, `coro_gc` reads the private registry slot
+`"titan.coroutine.teardown"` and, when it holds a function, calls it with the
+coroutine's `Coroutine` record (owner uservalue 6). A `STACKED` inner
+coroutine is not reported: `mco_destroy` refuses it and leaves its stack
+mapped, and its suspended handler, which owns the chain, is reported instead.
+The slot is not public API. `titan/async.titan` installs it when the module
+initializes, and the same literal appears in both modules.
+
+The hook must not raise or yield. If it raises anyway, `coro_gc` catches the
+error and returns without calling `mco_destroy`: a withdrawal that may have
+failed halfway leaks the stack rather than release memory that a native queue
+could still link. The async hook withdraws the waits parked on the finalized
+coroutine, all of them at once when it detects `lua_close`, and otherwise
+returns after a read-only scan; see
+[Lua-state close](libuv-runtime.md#lua-state-close-of-an-unretired-runtime).
+Dead coroutines, the normal case for finished Tasks, skip the registry lookup.
+
 ## Tests
 
 Coroutine behavior tests run against the canonical combined standard provider.

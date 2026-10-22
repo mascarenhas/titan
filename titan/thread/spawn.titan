@@ -28,6 +28,8 @@ end
 
 local foreign function thread_control_destroy_unreferenced(
     ctrl: *titan_thread_control)
+  -- Every linked join node holds a refcount pin; abort on an accounting bug.
+  if ffi.titan_thread_join_queue(ctrl).head ~= nil then ffi.abort() end
   local entry_msg = ctrl.entry_msg
   local cancel_msg = ctrl.cancel_reason_msg
   local result_msg = ctrl.result_msg
@@ -262,29 +264,50 @@ local foreign function thread_control_request_cancel_native(
   return 1
 end
 
-local foreign function thread_control_register_join_waiter(
-    ctrl: *titan_thread_control,
-    waiter: *titan_thread_waiter,
-    wake_target: *void): int
+-- Implementation notes: doc/implementation/thread-library.md#registration-pins-and-state-close-withdrawal
+local foreign function thread_control_register_join_wait(context: *void, target: *void): int
+  local wait = context as foreign *titan_thread_join_wait
+  local ctrl = wait.control
   uv.native_mutex_lock(ctrl.mutex)
   ctrl.observed = 1
   if ctrl.finished ~= 0 then
     uv.native_mutex_unlock(ctrl.mutex)
     return 0
   end
-  waiter_enqueue(ffi.titan_thread_join_queue(ctrl), waiter, wake_target)
+  waiter_enqueue(ffi.titan_thread_join_queue(ctrl), ffi.titan_thread_join_waiter(wait),
+    target, ffi.titan_thread_control_pins(ctrl))
   uv.native_mutex_unlock(ctrl.mutex)
   return 1
 end
 
-local foreign function thread_control_unregister_join_waiter(
-    ctrl: *titan_thread_control, waiter: *titan_thread_waiter)
-  if ctrl == nil then return end
-  if waiter == nil then return end
+-- Completion wakes every join waiter, so withdrawal passes no baton. The pin
+-- keeps ctrl valid here even after the joining state's handle was released;
+-- a lua_close withdrawal can therefore be ctrl's last release.
+local foreign function thread_control_unregister_join_wait(context: *void)
+  local wait = context as foreign *titan_thread_join_wait
+  local ctrl = wait.control
+  local waiter = ffi.titan_thread_join_waiter(wait)
   uv.native_mutex_lock(ctrl.mutex)
+  local pinned = waiter_holds_pin(waiter)
   waiter_unlink(ffi.titan_thread_join_queue(ctrl), waiter)
   waiter.signaled = 0
+  if pinned ~= 0 then ctrl.refcount = ctrl.refcount - (1 as foreign size_t) end
+  local destroy = 0 as foreign int
+  if ctrl.refcount == (0 as foreign size_t) then destroy = 1 end
   uv.native_mutex_unlock(ctrl.mutex)
+  if destroy ~= 0 then thread_control_destroy_unreferenced(ctrl) end
+end
+
+-- The joining Task's recheck after a wait acknowledges its wake under this
+-- lock. That Task holds its Thread, so the unpin can never free ctrl here.
+local foreign function thread_control_poll_join_native(wait: *titan_thread_join_wait): int
+  local ctrl = wait.control
+  uv.native_mutex_lock(ctrl.mutex)
+  waiter_acknowledge(ffi.titan_thread_join_waiter(wait), ffi.titan_thread_control_pins(ctrl))
+  local done = ctrl.finished
+  if done ~= 0 then ctrl.observed = 1 end
+  uv.native_mutex_unlock(ctrl.mutex)
+  return done
 end
 
 -- The traced monitor owner pins ctrl through native retirement; the worker
@@ -782,15 +805,16 @@ local function Thread:wait_until_finished()
   if done then ctrl.observed = 1 end
   uv.native_mutex_unlock(ctrl.mutex)
   if done then return end
-  local waiter_storage = foreign titan_thread_waiter.new()
-  local waiter: foreign *titan_thread_waiter = waiter_storage
-  async.wait_external(
-    function (wake_target: foreign *void): boolean
-      return thread_control_register_join_waiter(ctrl, waiter, wake_target) ~= 0
-    end,
-    function ()
-      thread_control_unregister_join_waiter(ctrl, waiter)
-    end)
+  -- The cell lives in this stackful frame like a channel wait; only the
+  -- pointer is used. Each poll after a wait acknowledges its wake.
+  local wait_storage = foreign titan_thread_join_wait.new()
+  local wait: foreign *titan_thread_join_wait = wait_storage
+  wait.control = ctrl
+  while true do
+    async.wait_external_native(self, wait,
+      thread_control_register_join_wait, thread_control_unregister_join_wait)
+    if thread_control_poll_join_native(wait) ~= 0 then return end
+  end
 end
 
 --- Suspend the current Task until the thread finishes and return its terminal ThreadStatus.

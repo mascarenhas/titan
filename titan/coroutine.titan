@@ -37,6 +37,8 @@ local TITAN_CORO_CALLBACK_USERVALUE = 4
 local TITAN_CORO_TRANSFER_USERVALUE = 5
 local TITAN_CORO_RECORD_USERVALUE = 6
 local runtime = foreign mco_runtime.new()
+-- Private registry slot shared with titan/async.titan (same literal there).
+local const TEARDOWN_HOOK_KEY = "titan.coroutine.teardown"
 
 --- Opaque tagged coroutine created by coroutine.create; use async Tasks for scheduling.
 -- @usage coroutines.md
@@ -282,9 +284,28 @@ function is_yieldable(tag: value): boolean
   return ffi.mco_is_yieldable(runtime.current_co, ctag) ~= 0
 end
 
+-- Implementation notes: doc/implementation/coroutines.md#suspended-stack-teardown-hook
 local function coro_gc(handle: value)
   ffi.lua_pushtvalue(L, handle)
   local co = (ffi.lua_touserdata(L, -1) as foreign *(*mco_coro))[0]
+  if ffi.mco_status(co) == ffi.MCO_SUSPENDED then
+    -- Live frames may hold borrowed native waiter nodes: let the registered
+    -- scheduler withdraw them before mco_destroy releases this stack.
+    ffi.lua_getiuservalue(L, -1, TITAN_CORO_RECORD_USERVALUE)
+    local finalized: value = ffi.lua_totvalue(L, -1)
+    ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, TEARDOWN_HOOK_KEY)
+    local hook: value = ffi.lua_totvalue(L, -1)
+    if hook ~= nil then
+      local teardown = hook as function (value): ()
+      do
+        teardown(finalized)
+      catch
+        -- A failed withdrawal may leave a node linked into a native queue:
+        -- leak this stack instead of releasing it.
+        return
+      end
+    end
+  end
   ffi.mco_destroy(co)
 end
 

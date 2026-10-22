@@ -21,6 +21,11 @@ typedef struct titan_thread_channel titan_thread_channel;
 typedef titan_async_message titan_thread_message;
 typedef titan_thread_message *titan_thread_message_ptr;
 
+/* A registered waiter holds one pin on its domain (channel or thread control
+ * block) from waiter_enqueue while it is linked (active) or woken but not yet
+ * acknowledged by its own Task (signaled). The pin defers domain destruction,
+ * so the stack-resident node can always be withdrawn under the domain mutex,
+ * including during lua_close after the traced endpoint was finalized. */
 typedef struct titan_thread_waiter {
   struct titan_thread_waiter *next;
   struct titan_thread_waiter *prev;
@@ -55,6 +60,8 @@ struct titan_thread_channel {
   void *mutex;
   size_t active_senders;
   size_t active_receivers;
+  /* Registrations pinning this channel; see titan_thread_waiter. */
+  size_t waiter_pins;
   size_t capacity;
   size_t head;
   size_t tail;
@@ -80,6 +87,7 @@ typedef enum titan_thread_cancellation_kind {
 
 typedef struct titan_thread_control {
   void *mutex;
+  /* Handles, the worker and each join registration's pin. */
   size_t refcount;
   void *os_thread;
   int os_joined;
@@ -103,6 +111,25 @@ typedef struct titan_thread_control {
   int abandoned;
   titan_thread_waiter_queue join_waiters;
 } titan_thread_control;
+
+/* One suspended Thread join owns this automatic frame like a channel wait. */
+typedef struct titan_thread_join_wait {
+  titan_thread_control *control;
+  titan_thread_waiter waiter;
+} titan_thread_join_wait;
+
+static inline titan_thread_waiter *titan_thread_join_waiter(
+    titan_thread_join_wait *wait) {
+  return &wait->waiter;
+}
+
+static inline size_t *titan_thread_channel_pins(titan_thread_channel *ch) {
+  return &ch->waiter_pins;
+}
+
+static inline size_t *titan_thread_control_pins(titan_thread_control *ctrl) {
+  return &ctrl->refcount;
+}
 
 static inline titan_thread_waiter_queue *titan_thread_overflow_queue(
     titan_thread_channel *ch) {

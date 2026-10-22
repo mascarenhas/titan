@@ -1011,8 +1011,8 @@ import is required by this adapter.
 Cross-thread subsystems can use the Runtime's shared external wake bridge to
 suspend a Task without creating and closing a fresh `uv.async_t` for each wait.
 This is a generic adapter API. The thread standard library waits through
-`async.wait_external_native` for blocked channel sends and receives and through
-`async.wait_external` for `Thread:join()`, so all of them share one bridge
+`async.wait_external_native` for blocked channel sends and receives and for
+`Thread:join()`, so all of them share one bridge
 ([thread waiter suspension](../implementation/thread-library.md#shared-external-wake-suspension)).
 
 The rules in this section apply to `prepare_external_wait`. Native retirement
@@ -1115,8 +1115,8 @@ no cleanup shielding and does not hold back Task publication.
   yield. NULL callbacks raise `"native external wait callbacks must not be NULL"`
   before any preparation. Both run on the loop thread with no Runtime-held
   domain or wake mutex: `register_fn` after the Task has yielded, and
-  `unregister_fn` synchronously inside `Task:cancel` or during the waiting
-  Task's own unwind.
+  `unregister_fn` synchronously inside `Task:cancel`, during the waiting
+  Task's own unwind, or at state close (see **State close** below).
 - `register_fn(context, target)` rechecks readiness and publishes its waiter
   under the domain's mutex. It returns `0` when the wait is already satisfied
   (no waiter linked, no target reference kept), `1` when it has linked a waiter
@@ -1136,6 +1136,25 @@ no cleanup shielding and does not hold back Task publication.
   valid only because the Task's stack frame lasts for the whole call; a
   producer must not keep it after unlinking. Keeping `owner` reachable does not
   keep native storage alive past Lua-state close.
+- **State close.** If the Lua state closes while the Task is still parked,
+  `unregister_fn(context)` also runs during `lua_close`, before the Task's
+  coroutine stack, and with it any automatic `context`, is released. The Task
+  does not resume and its `defer` blocks do not run. By then `owner` may
+  already have been finalized, so the native object that `context` refers to
+  must not depend on `owner` for its lifetime. From a linked registration
+  until `unregister_fn` runs, or until the waiting Task's own next locked
+  access after a notification, the registration must keep that object alive,
+  for example with a count that defers its destruction. Do not drop that pin
+  when a producer notifies the waiter, because the closing state may be about
+  to withdraw it. Thread channels and `Thread:join()` keep one such pin per
+  registration
+  ([registration pins](../implementation/thread-library.md#registration-pins-and-state-close-withdrawal)).
+  This `unregister_fn` call may be the native object's final release, so the
+  object may be destroyed on the closing thread. The Runtime's wake bridge may
+  already be detached by then: releasing the waiter's retained `target` is
+  still valid, and a notification on it does nothing. Waits made with
+  `prepare_external_wait`, `wait_external` or `wait_external_cleanup` are not
+  withdrawn at state close.
 - The callbacks write `context` through a pointer that Titan does not track. If
   the calling function keeps the context in automatic storage and a `defer` or
   `catch` reads it after an error, declare a pointer local
@@ -1890,16 +1909,21 @@ bootstrap created a `Receiver` and never drove the loop, or after a driver
 raised and was not called again. Closing the state then closes the Runtime's
 remaining handles and its native loop without running any user callback,
 including close callbacks that were already requested. No Task resumes, and
-domain unregister functions and Runtime-close listeners do not run. Accepted
-native requests still complete first, so closing the state can block until
-running worker-pool jobs finish. The low-level operation is
-[`uv.loop_abandon`](standard-library-uv.md#abandoned-loop-retirement).
+Runtime-close listeners and the unregister functions of closure-registered
+waits do not run. Accepted native requests still complete first, so closing the
+state can block until running worker-pool jobs finish. The low-level operation
+is [`uv.loop_abandon`](standard-library-uv.md#abandoned-loop-retirement).
 
-This only reclaims the loop's native memory. It does not replace closing
-receivers and draining the loop, and it does not make abandoning a native wait
-safe: cancel and join Tasks blocked in
-[`thread` channel operations](standard-library-thread.md#sending-and-receiving)
-and drain their Runtime before closing the state.
+Before then, the coroutine stack of each Task still parked in a
+`wait_external_native` wait is released only after that wait's `unregister_fn`
+has withdrawn it (see **State close** under [external waits](#external-waits)).
+Tasks blocked in [`thread` channel operations](standard-library-thread.md#sending-and-receiving)
+or `Thread:join()` are withdrawn this way, so channels and threads shared with
+other states stay usable. The parked Tasks never finish and their `defer`
+blocks do not run.
+
+This only reclaims native memory. It does not replace closing receivers,
+finishing or cancelling Tasks, and draining the loop before closing the state.
 
 Ordinary garbage collection never retires an active Runtime, because the async
 module keeps it reachable. A finalizer that runs during state close must not

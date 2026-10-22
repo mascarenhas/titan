@@ -173,14 +173,16 @@ through the Runtime's shared
 keep running. Cancelling the Task removes its waiter from the channel before
 `Task:cancel` returns.
 
-**Do not close a Lua state while a Task is blocked in a channel operation.** The
-channel links a waiter that lives on the blocked Task's coroutine stack, and
-closing the state destroys that stack without unlinking the waiter. A channel
-endpoint finalized during state close, or a clone held by another state or
-thread, can then reach the destroyed stack. Cancel and join such Tasks and
-drain their Runtime before closing the state;
-[closing a state with an active Runtime](async-io.md#closing-a-lua-state-with-an-active-runtime)
-does not withdraw these waiters.
+The channel links a waiter that lives on the blocked Task's coroutine stack. If
+the Lua state closes while the Task is still blocked, the state withdraws that
+waiter before it releases the stack, and the channel stays alive until then
+even if every endpoint of the closing state is already gone. Clones held by
+other states or threads keep working: the blocked Task never receives or sends,
+and the channel closes as usual once its last sender or receiver is released.
+The blocked Task does not finish and its `defer` blocks do not run, so cancel
+and join such Tasks and drain their Runtime before closing the state when their
+cleanup matters
+([closing a state with an active Runtime](async-io.md#closing-a-lua-state-with-an-active-runtime)).
 
 ### Closing, cloning, and transferring endpoints
 
@@ -350,7 +352,10 @@ Inside the worker OS thread:
   If the OS join fails, `join()` raises `async.OperationError` with operation
   `"thread.join"` instead of returning a status. The thread stays joinable, so
   a later `join()` can retry. A terminal `status()` is never a substitute for
-  joining.
+  joining. If the Lua state closes while a Task is suspended in `join()`, the
+  state withdraws that join before it releases the Task's stack, so a worker
+  that finishes later finds nothing to wake; the suspended `join()` never
+  returns.
 - `Thread:cancel(reason?)` asks the worker's root `Task` to cancel cooperatively
   and wakes the child's event loop; the root's `defer` and cleanup handlers run
   normally. Child Tasks started inside the worker are not cancelled
