@@ -4,6 +4,10 @@ local util = require "titan-compiler.util"
 
 local test_runner = {}
 
+-- Keep generated registration functions small enough that sanitizer compilation
+-- does not have to analyze thousands of temporaries in one native function.
+local REGISTRATION_BATCH_SIZE = 64
+
 test_runner.MODULE_NAME = "titan.test.runner"
 test_runner.CONTEXT_NAME = "titan.test.Context"
 test_runner.TEST_COMPILE_FLAGS = { "-fno-optimize-sibling-calls" }
@@ -133,11 +137,28 @@ function test_runner.render(cases)
             ", " .. wrapper .. ")"
     end
 
+    local batches, calls = {}, {}
+    for first = 1, #registrations, REGISTRATION_BATCH_SIZE do
+        local batch_name = "register_test_batch_" .. tostring(#batches + 1)
+        local body = {}
+        local last = math.min(first + REGISTRATION_BATCH_SIZE - 1, #registrations)
+        for index = first, last do
+            body[#body + 1] = registrations[index]
+        end
+        batches[#batches + 1] = table.concat({
+            "local function " .. batch_name .. "(cases: {test.Case})",
+            table.concat(body, "\n"),
+            "end",
+        }, "\n")
+        calls[#calls + 1] = "  " .. batch_name .. "(cases)"
+    end
+
     return table.concat({
         table.concat(imports),
         table.concat(wrappers, "\n\n"),
+        table.concat(batches, "\n\n"),
         MAIN_PREFIX,
-        table.concat(registrations, "\n"),
+        table.concat(calls, "\n"),
         MAIN_SUFFIX,
     }, "\n")
 end
