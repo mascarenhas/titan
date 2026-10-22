@@ -1,3 +1,6 @@
+local runtime_close_lua = import "lua"
+local runtime_close_gc = import "gc"
+
 function test_runtime_close_listeners_follow_native_cleanup_and_allow_removal(context: test.Context)
   local order: {integer} = {}
   local native_closed = false
@@ -126,4 +129,95 @@ function test_exit_rejects_native_adoption_during_cleanup_and_preserves_payload(
     uv.close(adopted:as_handle_t(), function (_: uv.handle_t) retired = true end)
   end)
   test.assert(retired, "fresh Runtime did not retire the recovered owner")
+end
+
+local foreign function runtime_close_record(cells: *void, slot: int, code: int)
+  local codes = cells as foreign *int
+  codes[slot] = code
+end
+
+-- Observation codes recorded per abandoned Task: 0 unobserved, 1 status()
+-- raised, 2 a status other than the expected cancellation, 3 expected.
+record RuntimeCloseTaskOracle
+  cells: foreign *void
+  tasks: {async.Task}
+  reasons: {string}
+end
+local runtime_close_task_probe: RuntimeCloseTaskOracle? = nil
+
+local function runtime_close_task_oracle(owner: RuntimeCloseTaskOracle)
+  -- Registered before the Runtime, so lua_close runs it after abandonment.
+  for index = 1, #owner.tasks do
+    local code = 1
+    do
+      local status = owner.tasks[index]:status()
+      code = 2
+      if status:has_finished() and support.cancelled_with(status, owner.reasons[index]) then
+        code = 3
+      end
+    catch
+    end
+    runtime_close_record(owner.cells, index - 1, code)
+  end
+end
+
+-- Public only so a fresh independent state can call it; test infrastructure.
+-- Leaves four Tasks of an unretired Runtime for a finalizer registered before
+-- that Runtime: parked waiting, parked with a requested cancellation that the
+-- closing state never delivers, queued and observed ready, and queued and
+-- never observed.
+function runtime_close_abandoned_task_bootstrap(cells_raw: value)
+  local oracle = RuntimeCloseTaskOracle(cells_raw as foreign *void, {}, {})
+  runtime_close_gc.finalizable(oracle, runtime_close_task_oracle)
+  runtime_close_task_probe = oracle
+  local parked_token = async.ResumeToken("abandoned parked Task")
+  local parked = async.run<|value, value|>(function (): value
+    async.suspend(parked_token)
+    return 1
+  end)
+  local cancelled_token = async.ResumeToken("abandoned cancelled Task")
+  local cancelled = async.run<|value, value|>(function (): value
+    async.suspend(cancelled_token)
+    return 2
+  end)
+  uv.run(async.current_loop(), uv.RUN_NOWAIT)
+  test.assert(parked:status():as_string() == "waiting" and
+              cancelled:status():as_string() == "waiting",
+    "abandoned Runtime Tasks did not park")
+  cancelled:cancel(async.CancellationReason.simple("requested before state close"))
+  test.assert(cancelled:status():as_string() == "waiting",
+    "cancellation completed without a driven loop")
+  local observed = async.run<|value, value|>(function (): value return 3 end)
+  test.assert(observed:status():as_string() == "ready", "queued Task did not report ready")
+  local unobserved = async.run<|value, value|>(function (): value return 4 end)
+  local abandoned = "async Runtime abandoned at Lua state close"
+  oracle.tasks = {parked, cancelled, observed, unobserved}
+  oracle.reasons = {abandoned, "requested before state close", abandoned, abandoned}
+end
+
+-- Issue #271: a Task of a Runtime abandoned at lua_close never resumes, but a
+-- later finalizer that still holds it must read a consistent terminal status.
+function test_lua_close_publishes_cancelled_status_for_abandoned_tasks(_: test.Context)
+  local cells: owned int[] = foreign int.new_array(4)
+  cells[0] = 0
+  cells[1] = 0
+  cells[2] = 0
+  cells[3] = 0
+  local state = runtime_close_lua.new()
+  defer state:close()
+  state:run([[
+    package.path, package.cpath = '', ''
+    require('async.tests').runtime_close_abandoned_task_bootstrap(...)
+  ]], "=abandoned-task-bootstrap", async.TransferValue.is_pointer(cells as foreign *void))
+  state:close()
+  local names: {string} = {"parked", "cancel-requested", "observed-ready", "unobserved"}
+  local outcomes: {string} = {"unobserved", "raised", "stale or wrong", "cancelled"}
+  local report = ""
+  local consistent = true
+  for index = 1, 4 do
+    local code = cells[index - 1] as integer
+    consistent = consistent and code == 3
+    report = report .. " " .. names[index] .. "=" .. outcomes[code + 1]
+  end
+  test.assert(consistent, "abandoned Task status after state close:" .. report)
 end

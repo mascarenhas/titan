@@ -1921,8 +1921,17 @@ Before then, the coroutine stack of each Task still parked in a
 has withdrawn it (see **State close** under [external waits](#external-waits)).
 Tasks blocked in [`thread` channel operations](standard-library-thread.md#sending-and-receiving)
 or `Thread:join()` are withdrawn this way, so channels and threads shared with
-other states stay usable. The parked Tasks never finish and their `defer`
+other states stay usable. The parked Tasks never resume and their `defer`
 blocks do not run.
+
+Every unfinished Task of that Runtime still becomes terminal, without resuming
+and without calling its terminal listeners. Lua runs finalizers newest first, so
+a finalizer registered before the Runtime was created runs after this
+retirement. If it holds such a Task, it sees `has_finished()` and a `cancelled`
+status. Its reason is the first cancellation requested before the close, or
+`simple("async Runtime abandoned at Lua state close")` when there was none. A
+body that had already returned or raised while its cleanup or native
+retirement was still pending is reported the same way.
 
 This only reclaims native memory. It does not replace closing receivers,
 finishing or cancelling Tasks, and draining the loop before closing the state.

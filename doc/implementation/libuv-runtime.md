@@ -775,7 +775,14 @@ while a newer Runtime is active, before checking the thread or touching libuv.
 For the active
 Runtime it requires the main thread, sets `closing` and `driving`, unbinds the
 transfer loop, detaches every Task from its Wait and explicit suspension, marks
-it finished, and empties the ready queue. Keeping the Runtime active and closing
+it finished, and empties the ready queue. Each Task gets a terminal `state`
+together with its `phase`, so `Task:status()` stays consistent for a finalizer
+that runs later and still holds the Task (issue #271): `cancelled` with its
+sticky `cancel_value` when a cancellation was requested but never delivered,
+otherwise `cancelled(simple("async Runtime abandoned at Lua state close"))`.
+A pending recorded body outcome is not published, because its cleanup or native
+retirement never finished. Unlike `finish_task`, this calls no terminal
+listener. Keeping the Runtime active and closing
 preserves shutdown admission, and `driving` makes a recursive `async.loop()` fail
 immediately. It never runs `close_handles`, `Receiver:disable`,
 `ExternalBridge:close`, domain unregister functions, or close listeners.

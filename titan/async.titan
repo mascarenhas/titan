@@ -624,13 +624,19 @@ local function runtime_finalize(candidate: value)
   uv.unbind_transfer_loop(runtime.loop)
   -- Coroutines are destroyed. Retire every Task and the ready queue: a late
   -- settlement finds no current Wait and raises, a resume finds no token, and
-  -- no queued continuation remains, so no callback can enter a Task.
+  -- no queued continuation remains, so no callback can enter a Task. A
+  -- finalizer registered before this Runtime may still read a Task's status,
+  -- so publish a terminal state with the phase. A pending body outcome never
+  -- finished its cleanup or native retirement and is not published, and no
+  -- terminal listener runs.
+  local abandoned = CancellationReason.simple("async Runtime abandoned at Lua state close")
   for index = 1, runtime.next_task - 1 do
     local task? = runtime.tasks[index]
     if task ~= nil then
       task.wait = nil
       clear_suspension(task)
       task.phase = TASK_FINISHED
+      task.state = TaskStatus.cancelled(task.cancel_value or abandoned)
     end
   end
   runtime.ready_head = nil
