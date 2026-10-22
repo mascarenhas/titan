@@ -256,12 +256,14 @@ jobs:
     name: stdlib build, tests and coverage (ubuntu-24.04, GCC 14)
     needs: build-compiler
     if: github.event_name == 'push'
-    runs-on: ubicloud-standard-2
+    runs-on: ubicloud-standard-4
     timeout-minutes: 60
     permissions:
       contents: read
       id-token: write
     env:
+      MAKEFLAGS: "-j4"
+      TITAN_JOBS: "4"
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       CC: gcc-14
       LUA_CC: gcc-14
