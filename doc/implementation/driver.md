@@ -121,7 +121,18 @@ Versioned environment variables retain precedence over unversioned variables;
 empty explicit values are still overrides. When all three paths are explicit,
 no probe runs. Lua's existing explicit-path and `;;` expansion is retained.
 Windows also keeps adjacent bundle provider/shim paths after discovered paths,
-so its DLL launcher can find the application's own provider.
+so its DLL launcher can find the application's own provider. Its default Titan
+path is `.;<root>/lib/titan/0.6;<exe-dir>/../lib/titan/0.6`. The chunk stores
+that default under `TITAN_PATH_KEY`. When a Titan path variable is set, it
+stores the selected value instead, with each `;;` replaced by that same default
+through `pushpath`'s two-pass substitution. An override such as
+`<sdk>/lib/titan/0.6;;` therefore still reaches the launcher's own DLL, while a
+value without `;;` replaces the default. When all three paths are explicit, the
+chunk returns early: `pushpath` then expands `;;` against the executable-relative
+root from `titan_win_push_root`, whose default names the same adjacent tree.
+A Unix executable links its main module, so the chunk leaves the Titan path to
+`pushpath`. Its root-only default, `.;<root>/lib/titan/0.6`, is the same for an
+unset variable and for `;;`.
 
 The chunk uses no compiler modules at runtime and embeds no build prefix.
 Ordinary Lua hosts keep the existing `titan_init_paths` behavior.
@@ -1767,11 +1778,15 @@ Generated imports use `titan_check_module_abi` and
 ### `titan.c`: the dynamic loader
 
 * **`pushroot(L)` / `titan_init_paths(L)`** normalize and cache the Titan
-  SDK/rocks-tree root under `TITAN_ROOT_KEY`. After `luaL_openlibs`, a compiled
-  executable scans the inherited
+  SDK/rocks-tree root under `TITAN_ROOT_KEY`. A value already in the registry
+  wins; a generated executable's startup chunk seeds it as described under
+  [standalone startup path discovery](#standalone-startup-path-discovery).
+  Otherwise Unix scans the inherited
   `package.cpath` for the first entry ending in `/lib/titan/0.6/?.so`, then
   `/lib/lua/5.5/?.so` as a bootstrap fallback, falling
-  back to `/usr/local` only when no such entry exists. `titan_init_paths` also
+  back to `/usr/local` only when no such entry exists. Windows uses
+  `titan_win_push_root`, the parent of the executable's directory.
+  `titan_init_paths` also
   prepends the exact `<root>/lib/titan/0.6/?.so` template to `package.cpath`
   when it is absent (`add_titan_package_cpath`) and eagerly initializes the
   Titan loader path. The Titan Lua fork's POSIX default C path lists
@@ -1779,13 +1794,12 @@ Generated imports use `titan_check_module_abi` and
   executables put the Titan template first through the [startup path
   discovery](#standalone-startup-path-discovery) chunk.
 * **`pushpath(L)`** resolves the run-time module search path once per
-  Lua state and caches it in the registry under `TITAN_PATH_KEY`. The
+  Lua state and caches it in the registry under `TITAN_PATH_KEY`. A cached
+  value wins, including the complete path a Windows standalone launcher's
+  startup chunk stores. Otherwise the
   order is: `getenv("TITAN_PATH_0_6")` (the versioned variable,
   `TITAN_PATH_VAR TITAN_LIBRARY_VERSION_SUFFIX`), then `getenv("TITAN_PATH")`,
-  then `".;<root>/lib/titan/0.6"`, where `<root>` is recovered from
-  the first literal `package.cpath` template ending in
-  `/lib/titan/0.6/?.so`, falling back to `/lib/lua/5.5/?.so` and then
-  `/usr/local`. A `;;` in
+  then `".;<root>/lib/titan/0.6"` with `pushroot`'s `<root>`. A `;;` in
   the environment value is replaced by that default path (two
   `luaL_gsub` passes through a `\1` placeholder), so
   `TITAN_PATH="/opt/titan;;"` means "look in `/opt/titan`, then the
