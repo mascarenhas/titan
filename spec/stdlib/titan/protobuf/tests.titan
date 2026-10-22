@@ -2007,6 +2007,40 @@ function test_generated_codecs_raise_reflective_errors(context: test.Context)
   end, "requires an encode scope")
 end
 
+-- A field's expected nominal selects a generated codec only when the
+-- candidate's codec is that nominal's own: a candidate whose generated codec
+-- belongs to another nominal, or to the other kind, raises the reflective
+-- type error instead of encoding as the candidate's own type.
+function test_generated_codecs_reject_a_mismatched_field_type(context: test.Context)
+  local integer_value = IntegerValue(7)
+  local scalars = Scalars(1, 2, true, 0.5, "s", nil)
+  local choice = Choice.pair(3, "three")
+  local native_choice = NativeChoice.empty()
+  test.assert(protobuf.find_generated_codec(integer_value) ~= nil)
+  test.assert(protobuf.find_generated_codec(scalars) ~= nil)
+  test.assert(protobuf.find_generated_codec(choice) ~= nil)
+  test.assert(protobuf.find_generated_codec(native_choice) ~= nil)
+  local record_fields: const {reflect.Type} = {descriptor(integer_value)}
+  local union_fields: const {reflect.Type} = {descriptor(choice)}
+  context:run("matching", function (_: test.Context)
+    local generated = protobuf.serialize_fields(record_fields, integer_value) ..
+        protobuf.serialize_fields(union_fields, choice)
+    local previous = protobuf.use_generated_codecs(false)
+    defer protobuf.use_generated_codecs(previous)
+    test.assert(generated == protobuf.serialize_fields(record_fields, integer_value) ..
+        protobuf.serialize_fields(union_fields, choice))
+  end)
+  check_same_error(context, "record", function ()
+    protobuf.serialize_fields(record_fields, scalars)
+  end, "protobuf: record type mismatch")
+  check_same_error(context, "union", function ()
+    protobuf.serialize_fields(union_fields, native_choice)
+  end, "protobuf: union type mismatch")
+  check_same_error(context, "union_for_record", function ()
+    protobuf.serialize_fields(record_fields, choice)
+  end, "protobuf: expected a record")
+end
+
 function test_generated_codecs_carry_endpoints_in_packets(_context: test.Context)
   local tx, rx = thread.channel<|integer|>(1)
   defer tx:close()

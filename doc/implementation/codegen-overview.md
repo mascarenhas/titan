@@ -718,9 +718,13 @@ inline codec runtime that every module compiles from the SDK's `transfer.h`.
 Every provider, the standard library included, must therefore be built against
 one SDK; a module compiled against another `transfer.h` is not detected when it
 loads. The one cross-module call, from a generated codec into
-`titan.protobuf`'s `codec_handoff`, checks the closure's function-type tag
-against `TITAN_CODEC_HANDOFF_TYPE` before using the native entry, and raises
-otherwise (see
+`titan.protobuf`'s `codec_handoff`, checks only the closure's shape and
+`TITAN_BRAND` on each call. `titan.protobuf`'s initializer, the sole producer
+of the handoff value, checks that closure's function-type tag against its own
+`TITAN_CODEC_HANDOFF_TYPE` once per Lua state and fails initialization
+otherwise. A generated codec compiled against another handoff signature is
+therefore not re-checked on each call; it relies on the same one-SDK rule as
+the codec layouts (see
 [generated nominal codecs](protobuf-library.md#generated-nominal-codecs)).
 
 ### Upgrading the pinned Lua

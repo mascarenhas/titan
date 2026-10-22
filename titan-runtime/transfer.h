@@ -470,32 +470,27 @@ static inline const TitanTransferCodec *titan_codec_for_metatable(
   return (const TitanTransferCodec *)pvalue(&slot);
 }
 
-/* `name` NULL accepts any nominal; `kind` -1 any, 0 record, 1 union. */
-static inline const TitanTransferCodec *titan_codec_match(
-    const TitanTransferCodec *codec, const char *name, int kind) {
-  if (codec == NULL || (kind >= 0 && codec->is_union != kind) ||
-      (name != NULL && strcmp(codec->name, name) != 0)) {
-    return NULL;
-  }
-  return codec;
-}
-
+/* A codec entry is the nominal's identity tag: the declaring module defines
+ * exactly one entry per nominal, and the canonical metatable of every state
+ * binds that entry, so callers compare entry addresses, never names. */
 static inline const TitanTransferCodec *titan_codec_find(lua_State *L,
-    TValue resources, TValue candidate, const char *name, int kind) {
+    TValue resources, TValue candidate) {
   if (!ttisfulluserdata(&candidate)) {
     return NULL;
   }
-  return titan_codec_match(titan_codec_for_metatable(
-      L, &resources, uvalue(&candidate)->metatable), name, kind);
+  return titan_codec_for_metatable(L, &resources, uvalue(&candidate)->metatable);
 }
 
+/* A registry name's metatable binds that nominal's entry; `kind` (0 record,
+ * 1 union) still rejects a descriptor that names a nominal of the other kind. */
 static inline const TitanTransferCodec *titan_codec_find_metatable(lua_State *L,
-    TValue resources, TValue metatable, const char *name, int kind) {
+    TValue resources, TValue metatable, int kind) {
   if (!ttistable(&metatable)) {
     return NULL;
   }
-  return titan_codec_match(titan_codec_for_metatable(
-      L, &resources, hvalue(&metatable)), name, kind);
+  const TitanTransferCodec *codec =
+      titan_codec_for_metatable(L, &resources, hvalue(&metatable));
+  return codec != NULL && codec->is_union == kind ? codec : NULL;
 }
 
 /* The declaring module of a canonical nominal metatable, which generated
@@ -607,16 +602,40 @@ static inline void titan_codec_end(lua_State *L, TitanCodecState *state,
 
 /* titan.protobuf's handoff entry is an ordinary Titan function of exactly
  * this type; titan_codec_call invokes its native entry directly, as a
- * first-class Titan call does, without a Lua call frame. The function-type
- * tag in the closure's upvalue 1 must spell TITAN_CODEC_HANDOFF_TYPE, so a
- * handoff whose Titan signature no longer matches TitanCodecHandoffEntry
- * raises instead of calling through a mismatched pointer.
+ * first-class Titan call does, without a Lua call frame. titan.protobuf's
+ * initializer, the sole producer of every TitanCodecState.handoff, checks
+ * once per Lua state that the function-type tag in the closure's upvalue 1
+ * spells TITAN_CODEC_HANDOFF_TYPE (titan_codec_handoff_valid), so a handoff
+ * whose Titan signature no longer matches TitanCodecHandoffEntry fails
+ * module initialization instead of calling through a mismatched pointer.
+ * Each call rechecks only the closure shape and brand, by pointer.
  * spec/coder/nominal_codec_spec.lua pins both spellings to the compiler's own
  * function-type identity and native-entry signature. */
 #define TITAN_CODEC_HANDOFF_TYPE \
     "Function({Value(),Value(),Value(),Value()},{Value()},false,nil,nil)"
 typedef TValue (*TitanCodecHandoffEntry)(lua_State *L, Udata *_mod,
     CClosure *_fn, TValue, TValue, TValue, TValue);
+
+/* The closure of a branded first-class Titan function value, or NULL. */
+static inline CClosure *titan_codec_handoff_closure(const TValue *handoff) {
+  CClosure *closure = ttisCclosure(handoff) ? clCvalue(handoff) : NULL;
+  if (closure == NULL || closure->nupvalues < 5 ||
+      !ttisfulluserdata(&closure->upvalue[0]) ||
+      !ttislightuserdata(&closure->upvalue[1]) ||
+      !ttislightuserdata(&closure->upvalue[2]) ||
+      !ttislightuserdata(&closure->upvalue[3]) ||
+      pvalue(&closure->upvalue[3]) != TITAN_BRAND) {
+    return NULL;
+  }
+  return closure;
+}
+
+static inline int titan_codec_handoff_valid(TValue handoff) {
+  CClosure *closure = titan_codec_handoff_closure(&handoff);
+  return closure != NULL &&
+      strcmp((const char *)pvalue(&closure->upvalue[1]),
+          TITAN_CODEC_HANDOFF_TYPE) == 0;
+}
 
 /* The reusable object of a request, or nil. */
 static inline TValue titan_codec_kept(lua_State *L,
@@ -640,16 +659,8 @@ static inline void titan_codec_keep(lua_State *L, TitanCodecHandoff *request,
 static inline TValue titan_codec_call(lua_State *L, TitanCodecState *state,
     TitanCodecHandoff *request, const TValue *item) {
   TValue handle;
-  CClosure *closure = ttisCclosure(&state->handoff)
-      ? clCvalue(&state->handoff) : NULL;
-  if (closure == NULL || closure->nupvalues < 5 ||
-      !ttisfulluserdata(&closure->upvalue[0]) ||
-      !ttislightuserdata(&closure->upvalue[1]) ||
-      !ttislightuserdata(&closure->upvalue[2]) ||
-      !ttislightuserdata(&closure->upvalue[3]) ||
-      pvalue(&closure->upvalue[3]) != TITAN_BRAND ||
-      strcmp((const char *)pvalue(&closure->upvalue[1]),
-          TITAN_CODEC_HANDOFF_TYPE) != 0) {
+  CClosure *closure = titan_codec_handoff_closure(&state->handoff);
+  if (closure == NULL) {
     titan_codec_raise(L, "protobuf: invalid codec handoff");
   }
   request->lazy_context = state->lazy_context;
@@ -679,8 +690,10 @@ static inline void titan_codec_encode_handoff(lua_State *L,
 }
 
 /* Encoder:field for a statically typed record or union field. A registered
- * resource capability, a generated codec of exactly that nominal, and
- * otherwise the reflective field encoder, in the reflective order. */
+ * resource capability, the generated codec bound to the field value's
+ * canonical metatable, and otherwise the reflective field encoder, in the
+ * reflective order. The static field type fixes that metatable, so the bound
+ * entry is the field type's own and needs no comparison. */
 static inline void titan_codec_put_nominal(lua_State *L, TitanCodecState *state,
     const TValue *field, const char *name, int is_union, int number,
     const TitanCodecPath *path, int depth, const char *owner, int variant,
@@ -692,9 +705,8 @@ static inline void titan_codec_put_nominal(lua_State *L, TitanCodecState *state,
           0, 0, number, path, depth, field);
       return;
     }
-    const TitanTransferCodec *codec = titan_codec_match(
-        titan_codec_for_metatable(L, &state->resources, metatable), name,
-        is_union);
+    const TitanTransferCodec *codec =
+        titan_codec_for_metatable(L, &state->resources, metatable);
     if (codec != NULL) {
       int64_t mark = titan_codec_begin(L, state, (int64_t)number * 8 + 2);
       codec->encode(L, state, uvalue(field), path, depth);
@@ -1019,7 +1031,8 @@ static inline void titan_codec_decode_field(lua_State *L,
 
 /* decode_field for a present record or union field after its missing check.
  * `metatable` is the declared type's canonical metatable in the decoding
- * module. `data`/`length` are the message holding the field. */
+ * module, so the entry bound to it is the declared type's own codec.
+ * `data`/`length` are the message holding the field. */
 static inline void titan_codec_get_nominal(lua_State *L, TitanCodecState *state,
     const TValue *metatable, const char *name, int is_union,
     const TitanCodecField *field, int number, const uint8_t *data,
@@ -1033,9 +1046,8 @@ static inline void titan_codec_get_nominal(lua_State *L, TitanCodecState *state,
     return;
   }
   if (field->count == 1) {
-    const TitanTransferCodec *codec = titan_codec_match(
-        titan_codec_for_metatable(L, &state->resources, nominal), name,
-        is_union);
+    const TitanTransferCodec *codec =
+        titan_codec_for_metatable(L, &state->resources, nominal);
     Udata *module = codec != NULL ? titan_codec_module(nominal) : NULL;
     if (module != NULL) {
       titan_codec_wire(L, field, 2);
