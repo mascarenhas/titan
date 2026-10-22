@@ -361,14 +361,13 @@ After a caught error, `catch` blocks, deferred statements, and code after a
 handled `catch` see automatic C storage as follows.
 
 **Aggregates and fixed arrays** show the bytes as of Titan's last completed
-write to them or the last call to a C function that wrote them through a
-mutable address and returned normally. A C call that writes the object and
-then raises does not count: its writes are discarded and the earlier bytes come
-back. An ordinary Titan function that writes the object through its mutable
-address does not count either, even when it returns normally, so recovery may
-restore the bytes from before that call. FAM backing follows the same rules for
-its full dynamic extent. Mutation through a raw pointer or another alias that
-Titan does not track, or asynchronously from C, is outside these rules. A
+write to them or the last call that wrote them through a mutable address and
+returned normally. Both C functions and ordinary Titan functions count, when
+the object itself (or its decayed array) is passed directly as the argument. A
+call that writes the object and then raises does not count: its writes are
+discarded and the earlier bytes come back. FAM backing follows the same rules
+for its full dynamic extent. Mutation through a raw pointer or another alias
+that Titan does not track, or asynchronously from C, is outside these rules. A
 borrowed pointer view (`foreign *T` or `foreign T[]`) preserves only the
 pointer value; the bytes it points to are never saved or restored, so storage
 reached only through a pointer local shows its current memory. Keep state that

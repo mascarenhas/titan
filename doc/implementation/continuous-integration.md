@@ -232,5 +232,4 @@ canonical pair, conditional dSYM, and all shims, then restore them
 before bundled/system production smokes. Retain the real x86_64/arm64 universal
 Mach-O archive lookup/repackaging proof; a host-only synthetic check is not a
 replacement. Compiler/language specs must not delete shared runtime state to
-force recompilation; any isolated coroutine fixture exception owns its exact
-restoration boundary.
+force recompilation.

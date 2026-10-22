@@ -168,4 +168,10 @@ end
                 "TITAN_PATH" .. (suffix == "" and "" or "_0_6") .. "=" .. tree .. "/lib/titan/0.6" })
         end
     end)
+    unix_it("inserts the discovered default for ;; in an explicit Titan path", function()
+        stub("titanc", 'printf "%s\\n" ' .. assert(cdriver.shell_quote(tree)))
+        for _, name in ipairs({ "TITAN_PATH", "TITAN_PATH_0_6" }) do
+            launch(nil, { name .. "=" .. workspace .. "/missing;;" })
+        end
+    end)
 end)

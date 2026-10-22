@@ -307,10 +307,6 @@ TITAN_RUNTIME_FUNC void titan_check_module_compatibility(lua_State *L,
     const char *verifier, size_t verifier_size);
 TITAN_RUNTIME_FUNC void titan_check_abi(lua_State *L, void *lib, const char *sym,
                                const char *file);
-TITAN_RUNTIME_FUNC void titan_check_types(lua_State *L, void *lib, const char *sym,
-                                 const char *file, const char *expected);
-TITAN_RUNTIME_FUNC void titan_check_compatibility(lua_State *L, void *lib,
-    const char *sym, const char *file, const char *verifier, size_t verifier_size);
 TITAN_RUNTIME_FUNC void titan_invalidate_backtrace_state(lua_State *L);
 TITAN_RUNTIME_FUNC void titan_init_paths(lua_State *L);
 /* Publish/recover one type-specific canonical pointer. The candidate is an

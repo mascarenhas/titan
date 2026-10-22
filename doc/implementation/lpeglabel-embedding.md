@@ -198,7 +198,7 @@ grammar count is at most 1000 (`MAX_RULES`), argument and capture selectors
 fit signed short (`MAX_SHORT`), and max-stack values fit `1..INT_MAX/100`
 (`MAX_STACK`). Look-behind is the exception: `behind` checks only the
 projected tree size, and the engine enforces the capture-free, fixed-length,
-255-byte rule (`MAX_BEHIND` is declared in `peg.titan` but unused).
+255-byte rule.
 
 Titan's public rule names and labels are strings. It passes their exact bytes
 to the engine without a private prefix or integer encoding. Empty strings,

@@ -400,10 +400,24 @@ function use_generated_codecs(enabled: boolean): boolean
   return previous
 end
 
--- kind: -1 any, 0 record, 1 union.
+-- kind: 0 record, 1 union.
 local function codec_kind(is_union: boolean): integer
   if is_union then return 1 end
   return 0
+end
+
+-- The generated codec bound to a registered nominal name of that kind, and
+-- the name's canonical metatable, or nil for reflection.
+local function find_named_codec(name: string,
+    kind: integer): (foreign const *TitanTransferCodec, value)
+  if not generated_codecs_enabled then return nil, nil end
+  local identity? = resource_nominals[name]
+  if identity == nil then return nil, nil end
+  local metatable: foreign TValue = identity as value
+  local resources: foreign TValue = resource_codecs as value
+  local codec = ffi.titan_codec_find_metatable(L, resources, metatable, kind)
+  if codec == nil then return nil, nil end
+  return codec, identity as value
 end
 
 --- Return the compiler-generated codec bound to this nominal instance's canonical metatable.
@@ -417,29 +431,21 @@ function find_generated_codec(candidate: value): foreign const *void
   if not generated_codecs_enabled then return nil end
   local raw: foreign TValue = candidate
   local resources: foreign TValue = resource_codecs as value
-  return ffi.titan_codec_find(L, resources, raw, nil, -1) as foreign const *void
+  return ffi.titan_codec_find(L, resources, raw) as foreign const *void
 end
 
+-- The codec entry is the nominal's identity tag: the candidate's bound entry
+-- must be the very entry bound to the expected nominal's canonical metatable.
 local function find_field_codec(candidate: value, name: string,
     is_union: boolean): foreign const *TitanTransferCodec
   if not generated_codecs_enabled then return nil end
   local raw: foreign TValue = candidate
   local resources: foreign TValue = resource_codecs as value
-  return ffi.titan_codec_find(L, resources, raw, name, codec_kind(is_union))
-end
-
--- The generated codec bound to a registered nominal name, and the name's
--- canonical metatable, or nil for reflection.
-local function find_named_codec(name: string,
-    kind: integer): (foreign const *TitanTransferCodec, value)
-  if not generated_codecs_enabled then return nil, nil end
-  local identity? = resource_nominals[name]
-  if identity == nil then return nil, nil end
-  local metatable: foreign TValue = identity as value
-  local resources: foreign TValue = resource_codecs as value
-  local codec = ffi.titan_codec_find_metatable(L, resources, metatable, name, kind)
-  if codec == nil then return nil, nil end
-  return codec, identity as value
+  local codec = ffi.titan_codec_find(L, resources, raw)
+  if codec == nil then return nil end
+  local expected, _ = find_named_codec(name, codec_kind(is_union))
+  if codec ~= expected then return nil end
+  return codec
 end
 
 -- Run a generated decoder; `holder` keeps the decoded bytes alive.
@@ -494,7 +500,8 @@ local function encode_resource_field(buf: foreign *titan_protobuf_buffer,
 end
 
 -- The reflective side of generated codecs, called through its native entry
--- with the exact type transfer.h checks (TITAN_CODEC_HANDOFF_TYPE). `item` is
+-- with the exact type the module initializer checks against transfer.h's
+-- TITAN_CODEC_HANDOFF_TYPE. `item` is
 -- the field value when encoding and the root holder when decoding. `kept` is
 -- the reusable object of the request's stack slot: the state's Encoder, shared
 -- by every field handoff so cycles through mixed frames are detected exactly
@@ -597,7 +604,7 @@ function serialize_generated_to_buffer(buf: foreign *void, codec: foreign const 
     candidate: value, context: value): boolean
   local raw: foreign TValue = candidate
   local resources: foreign TValue = resource_codecs as value
-  local bound = ffi.titan_codec_find(L, resources, raw, nil, -1)
+  local bound = ffi.titan_codec_find(L, resources, raw)
   if codec == nil or bound ~= codec as foreign const *TitanTransferCodec then return false end
   encode_generated_root(buf, bound, candidate, context)
   return true
@@ -925,5 +932,12 @@ do
   end
   resource_nominals = ffi.lua_totvalue(L, -1) as value
   gc.ephemeron(active_record_payloads as {value: value})
-  codec_handoff_entry = codec_handoff
+  -- Every TitanCodecState.handoff is this entry, so its exact function type
+  -- is checked once here rather than on each generated-codec handoff.
+  local handoff: value = codec_handoff
+  local raw_handoff: foreign TValue = handoff
+  if ffi.titan_codec_handoff_valid(raw_handoff) == 0 then
+    raise "protobuf: invalid codec handoff"
+  end
+  codec_handoff_entry = handoff
 end

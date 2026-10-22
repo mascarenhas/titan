@@ -57,6 +57,28 @@ local foreign function channel_new_native(
   return ch
 end
 
+-- Callers hold ch.mutex. Only a registrar passes a waiter, linked when full.
+local foreign function channel_enqueue_locked(
+    ch: *titan_thread_channel,
+    msg: *titan_thread_message,
+    waiter: *titan_thread_waiter,
+    wake_target: *void): int
+  if ch.closed ~= 0 then return 2 end
+  if ch.count < ch.capacity then
+    local slot = ch.ring + ch.tail
+    slot[0] = msg
+    ch.tail = (ch.tail + (1 as foreign size_t)) % ch.capacity
+    ch.count = ch.count + (1 as foreign size_t)
+    waiter_wake_one(ffi.titan_thread_underflow_queue(ch))
+    return 0
+  end
+  if waiter ~= nil then
+    waiter_enqueue(ffi.titan_thread_overflow_queue(ch), waiter, wake_target,
+      ffi.titan_thread_channel_pins(ch))
+  end
+  return 1
+end
+
 local foreign function channel_try_enqueue_native(
     ch: *titan_thread_channel,
     msg: *titan_thread_message,
@@ -64,31 +86,34 @@ local foreign function channel_try_enqueue_native(
     wake_target: *void): int
   if ch == nil then return 2 end
   uv.native_mutex_lock(ch.mutex)
-  if ch.closed ~= 0 then
-    uv.native_mutex_unlock(ch.mutex)
-    return 2
-  end
-  if ch.count < ch.capacity then
-    local slot = ch.ring + ch.tail
-    slot[0] = msg
-    ch.tail = (ch.tail + (1 as foreign size_t)) % ch.capacity
-    ch.count = ch.count + (1 as foreign size_t)
-    waiter_wake_one(ffi.titan_thread_underflow_queue(ch))
-    uv.native_mutex_unlock(ch.mutex)
-    return 0
-  end
-  if waiter ~= nil then
-    waiter_enqueue(ffi.titan_thread_overflow_queue(ch), waiter, wake_target)
-  end
+  local status = channel_enqueue_locked(ch, msg, waiter, wake_target)
   uv.native_mutex_unlock(ch.mutex)
-  return 1
+  return status
 end
 
+-- Implementation notes: doc/implementation/thread-library.md#registration-pins-and-state-close-withdrawal
+-- A send's retry after its wait acknowledges the wake under this same lock.
+-- The retrying Task holds its Sender, so the unpin can never free ch here.
+local foreign function channel_retry_enqueue_native(
+    ch: *titan_thread_channel,
+    msg: *titan_thread_message,
+    waiter: *titan_thread_waiter): int
+  if ch == nil then return 2 end
+  uv.native_mutex_lock(ch.mutex)
+  waiter_acknowledge(waiter, ffi.titan_thread_channel_pins(ch))
+  local status = channel_enqueue_locked(ch, msg, nil, nil)
+  uv.native_mutex_unlock(ch.mutex)
+  return status
+end
+
+-- Runs on cancellation, unwind, or lua_close withdrawal, when the endpoint may
+-- already be released: the registration pin keeps ch valid until here.
 local foreign function channel_unregister_overflow_waiter(
     ch: *titan_thread_channel, waiter: *titan_thread_waiter)
   if ch == nil then return end
   if waiter == nil then return end
   uv.native_mutex_lock(ch.mutex)
+  local pinned = waiter_holds_pin(waiter)
   if waiter.active ~= 0 then
     waiter_unlink(ffi.titan_thread_overflow_queue(ch), waiter)
   elseif waiter.signaled ~= 0 then
@@ -99,7 +124,34 @@ local foreign function channel_unregister_overflow_waiter(
     end
   end
   waiter.signaled = 0
+  if pinned ~= 0 then ch.waiter_pins = ch.waiter_pins - (1 as foreign size_t) end
+  local destroy = channel_unreferenced(ch)
   uv.native_mutex_unlock(ch.mutex)
+  if destroy ~= 0 then channel_destroy_unreferenced(ch) end
+end
+
+-- Callers hold ch.mutex. Only a registrar passes a waiter, linked when empty.
+local foreign function channel_dequeue_locked(
+    ch: *titan_thread_channel,
+    waiter: *titan_thread_waiter,
+    wake_target: *void,
+    result: *(*titan_thread_message)): int
+  if ch.closed == 2 then return 2 end
+  if ch.count > (0 as foreign size_t) then
+    local slot = ch.ring + ch.head
+    result[0] = slot[0]
+    slot[0] = nil
+    ch.head = (ch.head + (1 as foreign size_t)) % ch.capacity
+    ch.count = ch.count - (1 as foreign size_t)
+    waiter_wake_one(ffi.titan_thread_overflow_queue(ch))
+    return 0
+  end
+  if ch.closed ~= 0 then return 2 end
+  if waiter ~= nil then
+    waiter_enqueue(ffi.titan_thread_underflow_queue(ch), waiter, wake_target,
+      ffi.titan_thread_channel_pins(ch))
+  end
+  return 1
 end
 
 local foreign function channel_try_dequeue_native(
@@ -110,30 +162,24 @@ local foreign function channel_try_dequeue_native(
   result[0] = nil
   if ch == nil then return 2 end
   uv.native_mutex_lock(ch.mutex)
-  if ch.closed == 2 then
-    uv.native_mutex_unlock(ch.mutex)
-    return 2
-  end
-  if ch.count > (0 as foreign size_t) then
-    local slot = ch.ring + ch.head
-    local msg = slot[0]
-    slot[0] = nil
-    ch.head = (ch.head + (1 as foreign size_t)) % ch.capacity
-    ch.count = ch.count - (1 as foreign size_t)
-    waiter_wake_one(ffi.titan_thread_overflow_queue(ch))
-    uv.native_mutex_unlock(ch.mutex)
-    result[0] = msg
-    return 0
-  end
-  if ch.closed ~= 0 then
-    uv.native_mutex_unlock(ch.mutex)
-    return 2
-  end
-  if waiter ~= nil then
-    waiter_enqueue(ffi.titan_thread_underflow_queue(ch), waiter, wake_target)
-  end
+  local status = channel_dequeue_locked(ch, waiter, wake_target, result)
   uv.native_mutex_unlock(ch.mutex)
-  return 1
+  return status
+end
+
+-- A receive's retry after its wait acknowledges the wake under this same lock.
+-- The retrying Task holds its Receiver, so the unpin can never free ch here.
+local foreign function channel_retry_dequeue_native(
+    ch: *titan_thread_channel,
+    waiter: *titan_thread_waiter,
+    result: *(*titan_thread_message)): int
+  result[0] = nil
+  if ch == nil then return 2 end
+  uv.native_mutex_lock(ch.mutex)
+  waiter_acknowledge(waiter, ffi.titan_thread_channel_pins(ch))
+  local status = channel_dequeue_locked(ch, nil, nil, result)
+  uv.native_mutex_unlock(ch.mutex)
+  return status
 end
 
 local foreign function channel_unregister_underflow_waiter(
@@ -141,6 +187,7 @@ local foreign function channel_unregister_underflow_waiter(
   if ch == nil then return end
   if waiter == nil then return end
   uv.native_mutex_lock(ch.mutex)
+  local pinned = waiter_holds_pin(waiter)
   if waiter.active ~= 0 then
     waiter_unlink(ffi.titan_thread_underflow_queue(ch), waiter)
   elseif waiter.signaled ~= 0 then
@@ -151,7 +198,10 @@ local foreign function channel_unregister_underflow_waiter(
     end
   end
   waiter.signaled = 0
+  if pinned ~= 0 then ch.waiter_pins = ch.waiter_pins - (1 as foreign size_t) end
+  local destroy = channel_unreferenced(ch)
   uv.native_mutex_unlock(ch.mutex)
+  if destroy ~= 0 then channel_destroy_unreferenced(ch) end
 end
 
 -- Implementation notes: doc/implementation/thread-library.md#shared-external-wake-suspension
@@ -164,9 +214,17 @@ local foreign function channel_register_send_wait(context: *void, target: *void)
   return 0
 end
 
+-- Implementation notes: doc/implementation/thread-library.md#registration-pins-and-state-close-withdrawal
+-- A withdrawn send never enqueues its packet, so withdrawal disposes it here,
+-- outside ch.mutex because discarding can release endpoints of this channel.
+-- A lua_close withdrawal never unwinds the send's defer; after cancellation
+-- that defer finds the cleared pointer.
 local foreign function channel_unregister_send_wait(context: *void)
   local wait = context as foreign *titan_thread_channel_wait
   channel_unregister_overflow_waiter(wait.channel, ffi.titan_thread_channel_waiter(wait))
+  local message = wait.message
+  wait.message = nil
+  thread_message_discard(message)
 end
 
 local foreign function channel_register_receive_wait(context: *void, target: *void): int
@@ -288,8 +346,10 @@ function Sender:send(message: T)
   wait.channel = self.native
   wait.message = value_to_thread_message(message as value)
   defer if wait.message ~= nil then thread_message_discard(wait.message) end
+  -- The first attempt is the plain fast check; each retry follows a wake and
+  -- acknowledges it under the channel lock.
+  local fast = channel_try_enqueue_native(wait.channel, wait.message, nil, nil)
   while true do
-    local fast = channel_try_enqueue_native(wait.channel, wait.message, nil, nil)
     if fast == 0 then
       wait.message = nil
       return
@@ -303,6 +363,8 @@ function Sender:send(message: T)
     elseif wait.status == 2 then
       raise "channel is closed"
     end
+    fast = channel_retry_enqueue_native(
+      wait.channel, wait.message, ffi.titan_thread_channel_waiter(wait))
   end
 end
 
@@ -372,26 +434,32 @@ local function Receiver:dequeue_or_wait(): (boolean, foreign *void)
   local wait_storage = foreign titan_thread_channel_wait.new()
   local wait: foreign *titan_thread_channel_wait = wait_storage
   wait.channel = self.native
+  -- The first attempt is the plain fast check; each retry follows a wake and
+  -- acknowledges it under the channel lock.
+  local fast_msg: foreign *titan_thread_message = nil
+  local fast = channel_try_dequeue_native(wait.channel, nil, nil, fast_msg)
   while true do
-    local fast_msg: foreign *titan_thread_message = nil
-    local fast = channel_try_dequeue_native(wait.channel, nil, nil, fast_msg)
     if fast == 0 then
       return true, fast_msg
     elseif fast == 2 then
       return false, nil
     end
-    -- Only a waiting iteration enters this protected boundary. Access through
-    -- the pointer keeps the registrar's committed packet visible on unwind.
-    defer if wait.message ~= nil then thread_message_discard(wait.message) end
-    async.wait_external_native(self, wait,
-      channel_register_receive_wait, channel_unregister_receive_wait)
-    if wait.status == 0 then
-      local msg = wait.message
-      wait.message = nil
-      return true, msg
-    elseif wait.status == 2 then
-      return false, nil
+    do
+      -- Only the waiting step enters this protected boundary. Access through
+      -- the pointer keeps the registrar's committed packet visible on unwind.
+      defer if wait.message ~= nil then thread_message_discard(wait.message) end
+      async.wait_external_native(self, wait,
+        channel_register_receive_wait, channel_unregister_receive_wait)
+      if wait.status == 0 then
+        local msg = wait.message
+        wait.message = nil
+        return true, msg
+      elseif wait.status == 2 then
+        return false, nil
+      end
     end
+    fast = channel_retry_dequeue_native(
+      wait.channel, ffi.titan_thread_channel_waiter(wait), fast_msg)
   end
 end
 

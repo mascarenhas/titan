@@ -96,6 +96,33 @@ describe("standalone path discovery", function()
         assert.matches(";original C path", package.cpath, 1, true)
     end)
 
+    it("expands ;; in an explicit Windows Titan path to the launcher's default", function()
+        local adjacent = "C:/application/../lib/titan/0.6"
+        for _, name in ipairs({ "TITAN_PATH", "TITAN_PATH_0_6" }) do
+            local root, _, _, path = initialize({ [name] = "C:/SDK/lib/titan/0.6;;" },
+                { { "C:/SDK\r\n", true } }, true)
+            assert.equal("C:/SDK", root)
+            assert.equal("C:/SDK/lib/titan/0.6;.;C:/SDK/lib/titan/0.6;" ..
+                adjacent .. ";", path)
+        end
+        -- The default is literal text, the versioned name wins even when empty,
+        -- and a path without ";;" replaces the default.
+        local _, _, _, path = initialize({ TITAN_PATH = ";;" },
+            { { "C:/SDK %1", true } }, true)
+        assert.equal(";.;C:/SDK %1/lib/titan/0.6;" .. adjacent .. ";", path)
+        _, _, _, path = initialize({ TITAN_PATH_0_6 = "", TITAN_PATH = ";;" }, {}, true)
+        assert.equal("", path)
+        _, _, _, path = initialize({ TITAN_PATH = "C:/only" }, {}, true)
+        assert.equal("C:/only", path)
+    end)
+
+    it("leaves Unix ;; expansion to the runtime's root-only default", function()
+        local root, _, _, path = initialize({ TITAN_PATH_0_6 = "/extra;;" },
+            { { "/SDK\n", true } })
+        assert.equal("/SDK", root)
+        assert.is_nil(path)
+    end)
+
     it("discovers Windows trees with native separators and CRLF", function()
         local root, package = initialize({}, { { "", false }, {
             [[C:\SDK 雪\lib\titan\0.6\?.dll]] .. "\r\n", true } }, true)

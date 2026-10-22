@@ -1331,3 +1331,61 @@ function test_scope_reuse_frame_count_neither_grants_nor_drops_authority(
       test.assert(got and item == 128, "adopted Sender delivered the wrong item")
     end)
 end
+
+-- A registered resource whose constructor keeps the decode context it receives.
+record ScopeReuseRetainedContextProbe
+  local cell: foreign *void
+end
+
+local scope_reuse_retained_context: value = nil
+
+local function scope_reuse_register_retained_context_probe(cell: foreign *void)
+  scope_reuse_transfer.register_resource(ScopeReuseRetainedContextProbe(cell),
+    function (candidate: value): (foreign *void)
+      local probe: ScopeReuseRetainedContextProbe = candidate
+      return probe.cell
+    end,
+    scope_reuse_counter_retain, scope_reuse_counter_release,
+    function (context: value, data: foreign const *void, length: integer): (value)
+      scope_reuse_retained_context = context
+      return ScopeReuseRetainedContextProbe(
+        scope_reuse_transfer.claim_registered_resource(
+          context, data, length, scope_reuse_counter_release))
+    end)
+end
+
+function test_scope_reuse_retained_context_rejects_claim_after_decode(
+    _context: test.Context)
+  local counter: owned int[] = foreign int.new_array(1)
+  counter[0] = 1
+  local cell = counter as foreign *void
+  scope_reuse_register_retained_context_probe(cell)
+  defer do scope_reuse_retained_context = nil end
+  local restored: ScopeReuseRetainedContextProbe =
+    scope_reuse_roundtrip(ScopeReuseRetainedContextProbe(cell))
+  test.assert(restored.cell == cell and counter[0] == 2,
+              "registered constructor did not claim the attached counter")
+  scope_reuse_counter_release(restored.cell)
+  test.assert(scope_reuse_retained_context ~= nil,
+              "registered constructor received no decode context")
+
+  -- The retired frame is idle in the pool; its message is gone. Slot 0 was
+  -- valid in the retired packet.
+  local index: owned int[] = foreign int.new_array(1)
+  index[0] = 0
+  local outcome = "no error"
+  do
+    scope_reuse_transfer.claim_registered_resource(scope_reuse_retained_context,
+      index as foreign const *void, 4, scope_reuse_counter_release)
+  catch
+    if error is string then
+      local text: string = error
+      outcome = text
+    else
+      outcome = "a non-string error"
+    end
+  end
+  test.assert(outcome == "transfer: resource claim requires a decode scope",
+              "a retained context used after its decode retired gave: " .. outcome)
+  test.assert(counter[0] == 1, "the rejected stale claim changed the counter")
+end

@@ -35,7 +35,7 @@ The private layers are:
 | `Runtime` | One `uv.loop_t`; the zero-delay `wake` timer; the intrusive ready FIFO (`ready_head`/`ready_tail`/`ready_count`, linked through `Task.ready_next`); sparse `tasks`; `current_task`; `driving`/`closing`; the first `failure`; `exit_code`; close listeners; the lazily created `external` bridge; and `retirement_error`, the native capability whose negative status awaits an explicit retry. |
 | `Task` | Coroutine `root`; scalar `phase` and cached `state` snapshot; checked `epoch`; queued-continuation fields; sticky `cancel_value`; current `wait` and reusable `completion`; terminal listeners; explicit-suspension state; cleanup binding (`cleanup_start`, `cleanup_active`, `cleanup_wait`); and the pending terminal outcome (`terminal_kind`/`terminal_value`/`terminal_trace`, `root_done`). Terminal admission is separate from root and cleanup execution. |
 | `Completion<\|C,T,E\|>` | One reusable cell per Task: context, registrar, Task, captured epoch, policy, phase, outcome kind and payload, and the optional accepted request. `Wait` is the all-`value` type alias for the same record. |
-| `ExternalBridge` | The per-Runtime `uv.external_wake_t`, the `waits` Map from 64-bit identity to `ExternalWait`, the monotonic `next_identity`, and `closed`. |
+| `ExternalBridge` | The per-Runtime `uv.external_wake_t`, the `waits` Map from 64-bit identity to `ExternalWait`, the monotonic `next_identity`, `closed`, and `withdrawn` (set once state close has withdrawn every parked native wait). |
 | `ExternalWait` | Reserved target and identity; closure registrars, or C-ABI registrars and context in its embedded `titan_async_retirement` cell plus a traced `native_owner`; the attached Completion and epoch; the bound cleanup Task; and separate `used`, `awaited`, `close_requested`, `registered`, `notified`, and `retired` state. |
 | Subscription `Core` | Queue with explicit count, terminal state, one reserved waiter, producer actions, and the cleanup drain capability. |
 | Public UV owner | Native request/handle storage and callback roots until its native terminal boundary. |
@@ -564,32 +564,39 @@ follows a remote GC pointer or enters the destination Lua state.
   resource during encoding; see [manual handoff](transfer-library.md#manual-resource-handoff).
 - **Reader state (`ReceiverReader`).** `receiver()` leaves `reader` nil, so a
   notification-only Receiver allocates no reader state. The first `wait()` calls
-  `Receiver:create_reader`, which builds the one `ReceiverReader`: `task`,
-  `notified`, a `ResumeToken("async.Receiver.wait")`, and a `withdraw` action
-  that clears `task`. It is published only once complete, and later waits reuse
-  it without allocating. Clearing `task` on release also drops the reference to a
-  finished reader Task.
+  `Receiver:create_reader`, which builds the one `ReceiverReader`: `task`, a
+  `ResumeToken("async.Receiver.wait")`, and a `withdraw` action that clears
+  `task`. It is published only once complete, and later waits reuse it without
+  allocating. Clearing `task` on release also drops the reference to a finished
+  reader Task.
 - **Wake (`Receiver:wake`).** The `uv.async_t` callback copies and decodes
-  nothing. It returns unless a reader is reserved and not yet notified, then sets
-  `notified` and calls `task:resume(reader.token)`, resetting `notified` if that
-  raises. The packet stays in the native slot, including while the reader's wake
-  is queued, until `wait()` takes it.
+  nothing. It returns unless a reader is reserved **and** that Task is
+  suspended on the reader's token (`task.resume_token == reader.token`, which
+  `start_suspend` publishes and delivery clears), then calls
+  `task:resume(reader.token)`; `Task:resume` coalesces repeated wakes through
+  `resume_pending`, so the reader keeps no notified flag of its own. A running
+  reader is never resumed. In particular, when a decode hook, or a finalizer run
+  at an allocation inside decode, closes the Receiver that is decoding its
+  first-pass packet, `close()`'s wake is a no-op: `wait` returns the value it
+  already took, and its next call raises `"receiver is closed"`. The packet stays
+  in the native slot, including while the reader's wake is queued, until
+  `wait()` takes it.
 - **Wait (`Receiver:wait`, `receiver_take_native`).** `wait()` requires a
   running Task and rejects a second reader with
-  `"receiver already has a waiting reader"`. It reserves `reader.task` and
-  clears `notified` **before** `checkpoint()` or any slot inspection, so a second
-  caller cannot barge ahead while the first reader's wake is queued; its exit
-  `defer` releases the reservation only if it still names this Task. Each loop
-  turn declares a fresh `raw` local and calls `receiver_take_native`, which
-  returns `2` (closed, raising `"receiver is closed"`), `1` (taken), or `0`
-  (empty). On `1` it installs `defer transfer.discard_message(raw)` and returns
+  `"receiver already has a waiting reader"`. It reserves `reader.task`
+  **before** `checkpoint()` or any slot inspection, so a second caller cannot
+  barge ahead while the first reader's wake is queued; its exit `defer` releases
+  the reservation only if it still names this Task. Each loop turn declares a
+  fresh `raw` local and calls `receiver_take_native`, which returns `2` (closed,
+  raising `"receiver is closed"`), `1` (taken), or `0` (empty). On `1` it
+  installs `defer transfer.discard_message(raw)` and returns
   `transfer.decode_message(raw)` under the
   [consuming raw-slot decode contract](transfer-library.md#consuming-raw-slot-decode);
   decode errors consume the packet and raise from `wait()` with no retry, and
-  nil and false are ordinary data. On `0` it clears `notified` and calls
+  nil and false are ordinary data. On `0` it calls
   `suspend(reader.token, reader.withdraw)`. A send between the empty check and
-  `suspend` either sets `notified` on the loop thread or leaves a pending
-  `uv_async_send` for the next loop turn.
+  `suspend` leaves a pending `uv_async_send` whose callback runs only after the
+  reader has yielded with its token published.
 - **Cancellation.** `Task:cancel` runs `withdraw` only while the reserving Task
   is suspended under it, so the reservation it clears is that Task's. An unread
   packet stays in the slot. The cancelled reader unwinds later through its
@@ -760,14 +767,27 @@ the loop's queues.
 `lua_close` runs every finalizer before freeing any object, latest registration
 first, so this finalizer runs after those of the Runtime's later Receivers
 (which disposed of unread packets natively), its external wake owner (which
-detached its core), and its Task coroutines (which destroyed their stacks).
-During ordinary GC an active Runtime cannot become unreachable, because the
-async module roots it through `active_runtime`. The finalizer returns
-immediately for a retired or never-activated Runtime, even while a newer
-Runtime is active, before checking the thread or touching libuv. For the active
+detached its core), and its Task coroutines (which withdrew parked native waits
+and destroyed their stacks). During ordinary GC an active Runtime cannot become
+unreachable, because the async module roots it through `active_runtime`. The
+finalizer returns immediately for a retired or never-activated Runtime, even
+while a newer Runtime is active, before checking the thread or touching libuv.
+For the active
 Runtime it requires the main thread, sets `closing` and `driving`, unbinds the
-transfer loop, detaches every Task from its Wait and explicit suspension, marks
-it finished, and empties the ready queue. Keeping the Runtime active and closing
+transfer loop, detaches every Task from its Wait and explicit suspension, and
+empties the ready queue. Each Task without an armed native-retirement gate is
+marked finished with a terminal `state` together with its `phase`, so
+`Task:status()` stays consistent for a finalizer that runs later and still
+holds the Task: `cancelled` with its
+sticky `cancel_value` when a cancellation was requested but never delivered,
+otherwise `cancelled(simple("async Runtime abandoned at Lua state close"))`.
+A pending recorded body outcome is not published, because its cleanup never
+finished. A Task whose native-retirement gate is still armed stays nonterminal:
+when `cleanup_wait` is present with `native.ready == 0`, the predicate on which
+`finish_task` refuses, the finalizer detaches its Wait and suspension but
+publishes neither phase nor state, so a later finalizer cannot mistake an
+unjoined `Thread:task()` proxy for a retired one. Unlike `finish_task`, this
+calls no terminal listener. Keeping the Runtime active and closing
 preserves shutdown admission, and `driving` makes a recursive `async.loop()` fail
 immediately. It never runs `close_handles`, `Receiver:disable`,
 `ExternalBridge:close`, domain unregister functions, or close listeners.
@@ -793,21 +813,69 @@ internals, not application cleanup semantics. A finalizer that runs later during
 `prepare_native_retirement`, or library operations that start Tasks): Lua no
 longer registers finalizers then, so the new Runtime's loop leaks.
 
-**Known limitation (issue #262): parked stack-backed native waits.** A Task
-parked in a native wait whose `titan_thread_waiter` node lives in its coroutine
-frame can outlive that stack at state close. This covers thread channel
-send/receive (the automatic `titan_thread_channel_wait` cell) and `Thread:join`
-and the `Thread:task` proxy body (`Thread:wait_until_finished` in
-`titan/thread/spawn.titan`). Finalizers run newest first, so when channel
-endpoints are older than the waiting Task's coroutine, the coroutine stack is
-destroyed first and the endpoint finalizer (`titan/thread/channel.titan`
-`receiver_finalize` or `sender_finalize` -> `channel_release_*_native` ->
-`waiter_wake_all`) then walks the freed intrusive node. An endpoint clone
-retained by another state or thread can hit the same node later regardless of
-creation order, and a worker that finishes after the joining state closed wakes
-its freed join node from `thread_control_complete_native`. Loop abandonment does
-not repair these native borrows: cancel and join such Tasks and drain their
-Runtime before closing a state with parked native waits.
+**Parked native waits.** A Task parked in a native wait lends the domain a
+waiter node in its own coroutine frame: thread channel send and receive (the
+automatic `titan_thread_channel_wait` cell), and `Thread:join` and the
+`Thread:task` proxy body (the `titan_thread_join_wait` cell in
+`Thread:wait_until_finished`). The domain queue can outlive the state, because
+another state or thread may hold an endpoint clone, or the joined worker may
+still be running. Finalizers run newest first, so the coroutine can be finalized
+before or after the endpoint or `Thread` handle it waits on. In neither order
+may a queue still link the node once `coro_gc` releases the stack (issue #262).
+
+Before it destroys a suspended stack, `coro_gc` calls the
+[teardown hook](coroutines.md#suspended-stack-teardown-hook) that async
+installs, `withdraw_parked_native_waits`. The hook returns at once if there is
+no active Runtime with an external bridge, or if the bridge was already
+withdrawn. Otherwise it scans `ExternalBridge.waits` for a pending wait whose
+Task root is the coroutine being finalized. Completions are cached per Task, so
+the wait's `done.task` is the waiting Task. Any other call, such as a suspended
+raw coroutine collected while the Runtime runs, ends after this read-only scan.
+The hook adds nothing to the wait path or to Task creation; a weak
+coroutine-to-Task map would instead cost an insertion per Task and an ephemeron
+traversal in every collection cycle.
+
+A match withdraws that Task's registered ordinary waits that have C-ABI
+callbacks (`wait_external_native`): `detach_domain` runs each
+`unregister_fn(context)` while the context is still on a live stack. The match
+is also the state-close test. An unfinished Task stays in `runtime.tasks` until
+`finish_task`, and `active_runtime` roots its Runtime until `loop()` retires it
+or `runtime_finalize` runs, which is registered before every Task and so
+finalizes after them. Ordinary GC therefore never finalizes the root of a Task
+that is still in that inventory. When the matched Task is that inventory entry
+and not finished, every parked stack is about to be released, so the hook sets
+the bridge's `withdrawn` flag and detaches every such wait in one linear sweep;
+later hooks return on the flag. If the invariant were ever broken, only the
+matched Task's waits would be withdrawn, which is still correct. No parked
+stack has been released before the first match: a suspended root finalized
+earlier would have matched its own wait, and a `STACKED` inner coroutine
+holding a wait cell is not released by its own finalizer.
+
+The hook only detaches domains. It never calls `retire` or
+`uv.native_external_wake_unregister` on a target: the bridge's
+`uv.external_wake_t` is created lazily with the first external wait, is
+usually newer than the waiting coroutine, and its finalizer may already have
+detached the core and consumed every registration reference. The domain's own
+retained target stays valid, so releasing it in the unregister function is
+safe, while a notification on the detached core returns `EINVAL` and wakes
+nothing.
+
+Closure-registered waits (`prepare_external_wait`, `wait_external`,
+`wait_external_cleanup`) are not withdrawn, because their unregister functions
+are Titan closures and state close runs no Runtime-owned Titan callbacks.
+Native retirement barriers are not withdrawn either, because their admission
+lives in heap storage, not on a stack.
+
+The unregister function can run after the endpoint or `Thread` handle that the
+wait used was finalized, so thread domains keep a
+[per-registration pin](thread-library.md#registration-pins-and-state-close-withdrawal),
+and the withdrawal may be the domain's final release, destroying it on the
+closing thread. Withdrawing a waiter that a producer already woke passes the
+wake on, so a waiter in another state is not starved. The Runtime finalizer
+later retires these Tasks without resuming them, as described above.
+Withdrawal protects the native queues; it is not cancellation, so no `defer`,
+cleanup body, or terminal listener runs, and the application contract above
+still applies.
 
 `request_exit(code)` obtains the current Task, records only the first code,
 unbinds the Runtime's transfer loop before cancellation can enter cleanup,

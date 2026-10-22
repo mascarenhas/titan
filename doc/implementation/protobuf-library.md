@@ -195,6 +195,28 @@ when the metatable also has a registered resource codec
 (`transfer.h` `titan_codec_for_metatable`), so resource capabilities keep their
 precedence. Erased generic applications share the one metatable and entry.
 
+The entry's address is the nominal's codec identity tag; no codec path
+compares nominal names. The entry is a dedicated `static const` object, not a
+string literal, so the linker cannot merge it with another nominal's entry,
+and each entry also points at its own distinct name. The address is defined
+exactly once in each image that contains the declaring module, and no other
+module names it: consumers learn it only from the canonical metatable binding
+that the declaring module's initializer installs in each Lua state. Every
+comparison therefore happens within one state, between entries that the
+state's single canonical module instance published. This holds unchanged for
+an archive member linked into an executable or DSO, a separately opened DSO,
+and a Windows DLL. There are no cross-image data references, symbol
+interposition, or `dllimport` thunks. Two images that both embed one module
+carry two entries, but a state binds only its canonical instance's entry. A
+generated field encoder or decoder needs no comparison. The static field type,
+or the declared type's canonical metatable that the decoder is passed, fixes
+the metatable whose bound entry it calls. The reflective `Encoder:field`, whose
+descriptor and candidate can disagree (for example under `serialize_fields`),
+uses the candidate's entry only when it is the same address as the entry bound
+to the descriptor name's registered metatable. It also requires the matching
+record or union kind. Otherwise it falls back to reflection, which raises
+`protobuf: record type mismatch` or `protobuf: union type mismatch`.
+
 A generated codec *is* the reflective codec specialized to one storage plan,
 sharing one root state with it (`TitanCodecState`): the buffer, the packet
 context, the reflective `Encoder`'s active Map, a C-stack path of the open
@@ -206,16 +228,20 @@ of `value` fields are encoded natively, nested nominals through their own bound
 codec after the same registered-resource check by expected type. Every other
 field, including a `value` holding a nominal or Array, is handed to the
 reflective field codec through one fixed Titan entry (`codec_handoff`), called
-through its native entry like any first-class Titan call. Before that call the
-runtime checks the closure's function-type tag against
-`TITAN_CODEC_HANDOFF_TYPE`, the exact type
+through its native entry like any first-class Titan call. Each call checks
+only the closure's shape and `TITAN_BRAND` by pointer, with no string
+comparison. `titan.protobuf`'s initializer, the sole producer of
+`TitanCodecState.handoff`, checks once per Lua state that `codec_handoff`'s
+function-type tag spells `TITAN_CODEC_HANDOFF_TYPE`, the exact type
 `function (value, value, value, value): (value)`, and raises
 `protobuf: invalid codec handoff` otherwise, so a changed handoff signature
-fails closed; `spec/coder/nominal_codec_spec.lua` pins that spelling and the
-`TitanCodecHandoffEntry` typedef to the compiler's own function-type identity
-and native-entry signature. A registered resource field runs the reflective
-resource branch with the carried context (resolved from the current execution
-only when the root carried none). Any other field runs `Encoder:field` with the
+fails module initialization. `spec/coder/nominal_codec_spec.lua` pins that
+spelling and the `TitanCodecHandoffEntry` typedef to the compiler's own
+function-type identity and native-entry signature. A generated codec compiled
+against another `transfer.h` relies on the one-SDK rule. A registered resource
+field runs the reflective resource branch with the carried context (resolved
+from the current execution only when the root carried none). Any other field
+runs `Encoder:field` with the
 field's hydrated descriptor on the state's `Encoder`: the enclosing reflective
 `Encoder` when `Encoder:generated` entered the codec, otherwise one created by
 the root's first such handoff and rooted in the state's stack slot until the

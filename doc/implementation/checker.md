@@ -214,8 +214,10 @@ variants are omitted while the owner keeps their absolute tags and its total
 uses to choose between a paired library provider and a standalone executable.
 It looks for a `TopLevelFunc` named `main` with no input vararg, exactly one
 parameter whose checked type has tag `Type.Array` with a `Type.String`
-element, exactly one result with tag `Type.Integer`, and no flexible tail. It
-compares the raw tags of the checked types. Non-generic Titan aliases have no
+element and the mutable (`no`) const qualifier, exactly one result with tag
+`Type.Integer`, and no flexible tail. It compares the raw tags of the checked
+types, so `const { string }` and `const? { string }` parameters leave `main`
+an ordinary function. Non-generic Titan aliases have no
 type descriptor of their own (the checked type is the alias target), so an
 alias-annotated `main` still qualifies. Because it examines the one combined list, `main` may be
 declared in the folder main or in any contributor.

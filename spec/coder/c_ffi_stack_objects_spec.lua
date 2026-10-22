@@ -483,6 +483,220 @@ describe("automatic C object code generation", function()
         end)
     end)
 
+    it("commits aggregate out-arguments after ordinary Titan calls return",
+    function()
+        with_header(declarations, function(header)
+            local source = [[
+                foreign import "]] .. header .. [["
+
+                local function fill_point(target: foreign *ffi_point)
+                    target.x = 21
+                    target.y = 22
+                end
+
+                local function fill_then_raise(target: foreign *ffi_point)
+                    target.x = 31
+                    target.y = 32
+                    raise "callee"
+                end
+
+                local function fill_count(target: foreign *ffi_point): integer
+                    target.y = 40
+                    return 2
+                end
+
+                local function fill_values(values: foreign *ffi_int)
+                    values[0] = 3
+                    values[1] = 4
+                    values[2] = 5
+                end
+
+                record Filler
+                    base: integer
+                end
+
+                function Filler:fill(target: foreign *ffi_point)
+                    target.x = self.base as foreign ffi_int
+                    target.y = (self.base + 1) as foreign ffi_int
+                end
+
+                local function sum(point: foreign *ffi_point): integer
+                    return point.x as integer + point.y as integer
+                end
+
+                function tracked_write(): integer
+                    local point = foreign ffi_point.new()
+                    do
+                        point.x = 1
+                        fill_point(point)
+                        raise "after-call"
+                    catch
+                        return point.x as integer + point.y as integer
+                    end
+                end
+
+                function explicit_address(): integer
+                    local point = foreign ffi_point.new()
+                    do
+                        point.x = 1
+                        fill_point(point as foreign *ffi_point)
+                        raise "after-call"
+                    catch
+                        return point.x as integer + point.y as integer
+                    end
+                end
+
+                function call_only_write(): integer
+                    local point = foreign ffi_point.new()
+                    do
+                        fill_point(point)
+                        raise "after-call"
+                    catch
+                        return point.x as integer + point.y as integer
+                    end
+                end
+
+                function raising_callee(): integer
+                    local point = foreign ffi_point.new()
+                    do
+                        point.x = 1
+                        fill_then_raise(point)
+                        raise "unreachable"
+                    catch
+                        return point.x as integer + point.y as integer
+                    end
+                end
+
+                function expression_call(): integer
+                    local point = foreign ffi_point.new()
+                    do
+                        point.x = 1
+                        if fill_count(point) == 2 then
+                            raise "after-call"
+                        end
+                        raise "wrong count"
+                    catch
+                        return point.x as integer + point.y as integer
+                    end
+                end
+
+                function array_out(): integer
+                    local values = foreign ffi_int.new_array(3)
+                    do
+                        values[0] = 1
+                        fill_values(values)
+                        raise "after-call"
+                    catch
+                        return values[0] as integer + values[1] as integer
+                            + values[2] as integer
+                    end
+                end
+
+                function method_call(): integer
+                    local point = foreign ffi_point.new()
+                    local filler = Filler.new(50)
+                    do
+                        point.x = 1
+                        filler:fill(point)
+                        raise "after-call"
+                    catch
+                        return point.x as integer + point.y as integer
+                    end
+                end
+
+                function value_call(): integer
+                    local point = foreign ffi_point.new()
+                    local fill: function (foreign *ffi_point): () =
+                        fill_point
+                    do
+                        point.x = 1
+                        fill(point)
+                        raise "after-call"
+                    catch
+                        return point.x as integer + point.y as integer
+                    end
+                end
+
+                function named_call(): integer
+                    local point = foreign ffi_point.new()
+                    do
+                        point.x = 1
+                        fill_point { target = point }
+                        raise "after-call"
+                    catch
+                        return point.x as integer + point.y as integer
+                    end
+                end
+
+                function immediate_call(): integer
+                    local point = foreign ffi_point.new()
+                    do
+                        point.x = 1
+                        local status = (function (
+                                target: foreign *ffi_point): integer
+                            target.x = 21
+                            target.y = 22
+                            return 0
+                        end)(point)
+                        raise "after-call"
+                    catch
+                        return point.x as integer + point.y as integer
+                    end
+                end
+
+                function before_region(skip: boolean): integer
+                    local point = foreign ffi_point.new()
+                    fill_point(point)
+                    do
+                        if not skip then point.x = 1 end
+                        raise "before-region"
+                    catch
+                        return point.x as integer + point.y as integer
+                    end
+                end
+
+                function untracked(): integer
+                    local plain = foreign ffi_point.new()
+                    fill_point(plain)
+                    return sum(plain)
+                end
+            ]]
+
+            local csrc = h.compile_and_read_c(source, MODULE)
+            -- An aggregate whose address reaches only calls outside every
+            -- protected region keeps the same generated code: no byte spill.
+            assert.not_match("_spill_local_plain", csrc)
+
+            -- Report every case so a regression names each lost write.
+            local ok, err = h.call(MODULE, [[
+                local m = ffi_stack_objects
+                local cases = {
+                    { "tracked_write", m.tracked_write(), 43 },
+                    { "explicit_address", m.explicit_address(), 43 },
+                    { "call_only_write", m.call_only_write(), 43 },
+                    { "raising_callee", m.raising_callee(), 1 },
+                    { "expression_call", m.expression_call(), 41 },
+                    { "array_out", m.array_out(), 12 },
+                    { "method_call", m.method_call(), 101 },
+                    { "value_call", m.value_call(), 43 },
+                    { "named_call", m.named_call(), 43 },
+                    { "immediate_call", m.immediate_call(), 43 },
+                    { "before_region", m.before_region(true), 43 },
+                    { "untracked", m.untracked(), 43 },
+                }
+                local wrong = {}
+                for _, case in ipairs(cases) do
+                    if case[2] ~= case[3] then
+                        wrong[#wrong + 1] = case[1] .. "=" .. case[2]
+                            .. " (expected " .. case[3] .. ")"
+                    end
+                end
+                assert(#wrong == 0, table.concat(wrong, ", "))
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
     it("builds a nested process-options, stdio-array, and tagged address shape",
     function()
         with_header([[

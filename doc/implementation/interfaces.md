@@ -249,10 +249,12 @@ concrete owner only for a same-module concrete type. This is consistent
 because slot kinds depend on it: an exact slot exists only when the concrete
 owner is that module, and an adapter slot recovers the concrete owner with
 `coder._interface_owner_module_expr` from the emitting module's private import
-slots. The exact-slot rule relies on a precondition: `checker/interfaces.lua`
-`make_interface_adapter` also chooses an exact slot when no `cast_module` is
-given, and the coder does not re-check the owner, but every cast site supplies
-`cast_module` (`interface_relation_policy` sets it to the checking module).
+slots. The exact-slot rule relies on a checker precondition:
+`checker/interfaces.lua` `make_interface_adapter` also chooses an exact slot
+when no `cast_module` is given, but every cast site supplies `cast_module`
+(`interface_relation_policy` sets it to the checking module).
+`coder._interface_pair` asserts that an exact slot's concrete owner is the
+emitting module when it validates the pair's slots.
 For both slot kinds, dispatch passes user value 0 as `_mod` and the concrete
 method receives its own module.
 

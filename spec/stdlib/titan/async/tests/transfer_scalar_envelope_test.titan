@@ -29,11 +29,13 @@ local foreign function tse_resource_release(raw: *void)
   count[0] = count[0] - 1
 end
 
+-- ctrl[0] nonzero raises; ctrl[1] counts every inherited brand lookup.
 local foreign function tse_meta_index_probe(state: *lua_State): int
   local key = (tse_meta_index_probe as foreign function(*lua_State): int) as foreign *void
   ffi.lua_rawgetp(state, 1, key)
   local ctrl = ffi.lua_touserdata(state, -1) as foreign *int
   if ctrl ~= nil then
+    ctrl[1] = ctrl[1] + 1
     if ctrl[0] ~= 0 then
       return ffi.luaL_error(state, "tse-metatable-index-boom")
     end
@@ -308,8 +310,9 @@ function test_transfer_scalar_envelope_userdata_metatable_and_scope_bypass(
 
   context:run("metatable-of-metatable-preserves-pointer-and-propagates-index-errors",
     function (_context: test.Context)
-      local ctrl: owned int[] = foreign int.new_array(1)
+      local ctrl: owned int[] = foreign int.new_array(2)
       ctrl[0] = 0
+      ctrl[1] = 0
       local ud_nested, ptr_nested = tse_make_userdata_with_nested_mt(ctrl)
       case tse_transfer.TransferValue.from_value(ud_nested)
       when is_pointer(p) then
@@ -337,6 +340,27 @@ function test_transfer_scalar_envelope_userdata_metatable_and_scope_bypass(
         tse_transfer.attach_resource(
           counter as foreign *void, tse_resource_retain, tse_resource_release)
       end, "transfer: resource attachment requires an encode scope")
+    end)
+
+  -- Issue #261: encode_message, like TransferValue.from_value, leaves the
+  -- brand lookup of a metatable with its own metatable to reflection alone.
+  context:run("metatable-of-metatable-encode-runs-inherited-index-once",
+    function (_context: test.Context)
+      local ctrl: owned int[] = foreign int.new_array(2)
+      ctrl[0] = 0
+      ctrl[1] = 0
+      local ud_nested, ptr_nested = tse_make_userdata_with_nested_mt(ctrl)
+      case tse_transfer.TransferValue.from_value(ud_nested)
+      when is_pointer(p) then test.assert(p == ptr_nested)
+      else raise "metatable-of-metatable userdata did not produce is_pointer policy"
+      end
+      test.assert(ctrl[1] == 1, "TransferValue.from_value ran the inherited __index "
+                  .. (ctrl[1] as integer) .. " times")
+      ctrl[1] = 0
+      local raw = tse_transfer.encode_message(ud_nested)
+      defer tse_transfer.discard_message(raw)
+      test.assert(ctrl[1] == 1, "encode_message ran the inherited __index "
+                  .. (ctrl[1] as integer) .. " times")
     end)
 
   context:run("nested-scalar-and-policy-roundtrips-preserve-active-scopes",

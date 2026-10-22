@@ -21,9 +21,9 @@ The user-facing contract is in the
 - `group.titan`: `Group`, `group`, membership, admission queues and
   `Group:wait()`.
 - `native.h`: `titan_thread_message` (an alias of `titan_async_message`),
-  `titan_thread_waiter`, the automatic `titan_thread_channel_wait` cell,
-  `titan_thread_waiter_queue`, `titan_thread_channel` and
-  `titan_thread_control`.
+  `titan_thread_waiter`, the automatic `titan_thread_channel_wait` and
+  `titan_thread_join_wait` cells, `titan_thread_waiter_queue`,
+  `titan_thread_channel` and `titan_thread_control`.
 
 ## Layering and cross-thread primitives
 
@@ -98,7 +98,10 @@ original reason or error.
 
 - `mutex`: heap `uv_mutex_t` protecting every field;
 - `active_senders`, `active_receivers`: endpoint reference counts across all
-  states, including units held by in-flight packet entries. When both reach 0,
+  states, including units held by in-flight packet entries;
+- `waiter_pins`: one per waiter registration not yet withdrawn or acknowledged
+  ([registration pins](#registration-pins-and-state-close-withdrawal)). When
+  both endpoint counts and `waiter_pins` reach 0 (`channel_unreferenced`),
   `channel_destroy_unreferenced` frees the ring, mutex and struct;
 - `ring` (pointer to `titan_thread_message *` slots) with `capacity`, `head`,
   `tail`, `count`;
@@ -119,18 +122,17 @@ is allowed.
 
 A send on a full ring, a receive on an empty ring, or a join on an unfinished
 thread first runs the locked fast check (`channel_try_enqueue_native`,
-`channel_try_dequeue_native`, or the `ctrl.finished` test). Inline readiness
-links no waiter and retains no target, and `Sender:try_send` /
+`channel_try_dequeue_native`, or the `ctrl.finished` test). Inline
+readiness links no waiter and retains no target, and `Sender:try_send` /
 `Receiver:try_receive` never prepare a wait. Only the slow path links a
 `titan_thread_waiter` into the channel's `overflow_waiters` /
 `underflow_waiters` or the control block's join queue.
 
 #### Shared external-wake suspension
 
-Channel send/receive suspend through `async.wait_external_native`; `Thread:join`
-and the proxy body's logical-finish wait (`Thread:wait_until_finished`) use
-`async.wait_external`. All of them use the Runtime's one shared
-`uv.external_wake_t`
+Channel send/receive, `Thread:join` and the proxy body's logical-finish wait
+(`Thread:wait_until_finished`) all suspend through `async.wait_external_native`
+with C-ABI registrars, on the Runtime's one shared `uv.external_wake_t`
 ([external wake bridge](libuv-runtime.md#external-wake-bridge)); no path
 creates a per-wait `uv.async_t`. `titan_thread_waiter.wake_target` holds the
 retained target for exactly one registration interval.
@@ -141,10 +143,12 @@ frame, and pass the traced endpoint as the wait's semantic owner. The fast path
 allocates no registrar closure or capture box. Every cancellation and unwind
 path unlinks synchronously before the frame unwinds, and native producers touch
 the waiter only under the channel mutex. `Thread:wait_until_finished` likewise
-keeps its `titan_thread_waiter` in automatic storage. These are call-scoped
-borrows, not state-close protection: closing a state with a Task parked in one of
-these waits is the
-[issue #262 limitation](libuv-runtime.md#lua-state-close-of-an-unretired-runtime).
+borrows an automatic `titan_thread_join_wait` cell (control pointer and
+embedded waiter) with the `Thread` as owner, registered by
+`thread_control_register_join_wait` and withdrawn by
+`thread_control_unregister_join_wait`. These are call-scoped borrows; closing a
+state with a Task parked in one of them relies on
+[state-close withdrawal](#registration-pins-and-state-close-withdrawal).
 
 The registrars `channel_register_send_wait` / `channel_register_receive_wait`
 repeat the locked fast check after the yield. They return `0` for inline-ready
@@ -162,21 +166,31 @@ receive installs it only on a waiting iteration.
 
 Waiter protocol:
 
-- **Publication.** `waiter_enqueue` retains the target under the domain mutex.
-  Lock order is domain mutex, then wake-core mutex.
+- **Publication.** `waiter_enqueue` retains the target and takes the
+  registration pin under the domain mutex. Lock order is domain mutex, then
+  wake-core mutex.
 - **Wake.** `waiter_wake_one` unlinks the node, sets `active = 0` and
   `signaled = 1`, detaches and notifies the exact target, and releases the
-  producer reference, touching no GC object. Normal completion does not call the
-  unregister callback.
+  producer reference, touching no GC object. The pin stays with the woken
+  registration. Normal completion does not call the unregister callback.
 - **No reservation.** A wake reserves no slot or message; the woken Task retries
   the fast check. Stale or duplicate notifications recheck and suspend again,
   so FIFO selection is not FIFO completion.
+- **Acknowledgment.** The first attempt of a send or receive is the plain fast
+  check. Every later attempt follows a wait and goes through
+  `channel_retry_enqueue_native` / `channel_retry_dequeue_native`, and the join
+  loop polls with `thread_control_poll_join_native` after each wait. Under that
+  same lock `waiter_acknowledge` clears `signaled` and drops the pin of the wake
+  that ended the previous wait.
 - **Cancellation.** `channel_unregister_overflow_waiter` /
   `channel_unregister_underflow_waiter` take `ch.mutex`. An active node is
   unlinked in $O(1)$ (`waiter_unlink`) and its target released. A node that was
   already signaled passes the baton to the next waiter with `waiter_wake_one`
   when space, messages or closure can still make progress, then clears
-  `signaled` so a repeated detach cannot pass it twice.
+  `signaled` so a repeated detach cannot pass it twice. Either way the pin is
+  dropped, and a channel left unreferenced is destroyed after unlock.
+  `thread_control_unregister_join_wait` unlinks without a baton, because
+  completion wakes every joiner, and frees `ctrl` at `refcount == 0`.
 
 The proxy **cleanup** join never links a `titan_thread_waiter`. Its
 `final_wait:wait_cleanup()` awaits the prearmed native retirement through
@@ -185,6 +199,63 @@ otherwise suspending on the same bridge.
 `thread_control_register_retirement_native` retains the target in
 `ctrl.proxy_wake_target`, so the retirement capability, not a join waiter, owns
 that reference.
+
+#### Registration pins and state-close withdrawal
+
+A parked waiter is borrowed storage in a suspended coroutine frame, linked into
+a queue whose channel or control block can outlive the frame's Lua state. When
+that state closes with the Task still parked, two mechanisms keep the native
+queues safe (issue #262):
+
+- **Withdrawal before the stack is released.** Before `coro_gc` destroys a
+  suspended stack, async withdraws every parked C-ABI wait of the closing
+  state ([state close](libuv-runtime.md#lua-state-close-of-an-unretired-runtime))
+  through its unregister callback: `channel_unregister_send_wait`,
+  `channel_unregister_receive_wait` or `thread_control_unregister_join_wait`.
+  After that, no queue links a node on a destroyed stack, so neither a later
+  endpoint finalizer of the same state nor another state's or thread's send,
+  close, last release or worker completion can reach one. Because the parked
+  Task never unwinds, its `defer` cannot dispose the packet a withdrawn send
+  still holds; `channel_unregister_send_wait` therefore takes `wait.message`
+  and discards it natively after releasing `ch.mutex`, since discarding can
+  release endpoints of the same channel. A cancelled send's `defer` then finds
+  the cleared pointer. A parked receive or join cell owns no packet.
+- **Per-registration pin.** That unregister can run after the state's endpoint
+  or `Thread` handle was finalized and released its reference. `waiter_enqueue`
+  therefore takes one pin under the domain mutex it already holds:
+  `ch.waiter_pins` for a channel, one `ctrl.refcount` unit for a join. A
+  registration holds its pin while its node is linked (`active`) and, after a
+  wake, until its own Task acknowledges it (`signaled`); `waiter_holds_pin`
+  reports either state. A channel is destroyed only when `channel_unreferenced`
+  finds both endpoint counts and `waiter_pins` at 0, and `ctrl` only at
+  `refcount == 0`.
+- **Only the waiting side drops a pin.** Unregister (cancellation, unwind,
+  failed registration or state-close withdrawal) drops the pin of a linked or
+  signaled node and destroys a channel or control block that it leaves
+  unreferenced. A state-close withdrawal can therefore be the final release:
+  the channel's unread packets are then disposed natively on the closing thread,
+  and a `ctrl` whose handle was dropped unjoined detaches the OS thread token.
+  Its join registration already set `observed`, so no unobserved-failure report
+  is written. After a normal wake, the retry or join poll acknowledges the wake
+  with `waiter_acknowledge`; the Task still holds its endpoint or `Thread`
+  there, so that decrement never frees the domain and needs no destroy check.
+  A waker never drops the pin: a waker on another thread could unlink the node,
+  drop the pin and release the last remote reference while the closing state
+  was about to lock that domain to withdraw the same node.
+- **Destruction check.** `channel_destroy_unreferenced` and
+  `thread_control_destroy_unreferenced` abort if a queue still links a node.
+  Every linked node holds a pin, so this only fires on a pin-accounting bug,
+  and it fails deterministically even in builds without a sanitizer.
+
+Cost: the uncontended path is unchanged, because the first attempt of a send,
+receive or join performs the same locked check as before. A registration adds
+one increment of the pin under the lock it already holds. A retry after a wake
+adds a test of `signaled`, its clear and one decrement under the lock the retry
+takes anyway. Unregister adds one decrement and the `channel_unreferenced`
+test, and a channel release tests `waiter_pins` too. There is no allocation,
+extra lock or GC object on a channel path. A join that suspends takes one
+extra uncontended `ctrl` lock, for the poll after its wake, while the native
+registrars remove the two registrar closures it used to allocate.
 
 ### Endpoint transfer, C-ABI release chain, and last-`Receiver` pin
 
@@ -227,10 +298,10 @@ The thread-specific parts:
   both queues and unlocks **without** decrementing, calls
   `channel_drain_and_discard` (which detaches one packet at a time under the
   mutex and discards it outside), then relocks, decrements to 0 and destroys the
-  channel if no sender remains. Because the count stays 1 during the drain, a
-  discarded packet that releases a `Sender` of the same channel, or recursively
-  drains another channel, cannot free `ch` mid-drain. `Receiver:close()` uses the
-  same drain.
+  channel if no sender or registration pin remains. Because the count stays 1
+  during the drain, a discarded packet that releases a `Sender` of the same
+  channel, or recursively drains another channel, cannot free `ch` mid-drain.
+  `Receiver:close()` uses the same drain.
 - **Cycles need an explicit close.** Packet entries count like wrappers. A ring
   holding its own `Receiver`, or channels holding one another's receivers, keep
   `active_receivers` nonzero after every wrapper is gone, so the last-receiver

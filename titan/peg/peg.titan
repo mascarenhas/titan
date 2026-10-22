@@ -13,7 +13,6 @@ local gc = import "gc"
 -- reserve.  Titan enforces this consistently before entering the native
 -- constructors.
 local MAX_PATTERN_SIZE = 32757
-local MAX_BEHIND = 255
 local MAX_RULES = 1000
 local MAX_SHORT = 32767
 local MAX_STACK = 21474836

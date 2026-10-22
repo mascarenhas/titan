@@ -40,9 +40,12 @@ acquires a `ResourceScope`; the first two leave any enclosing scope intact.
 
 `encode_packet` then tries, in order:
 
-1. **Registered resource root.** A `LUA_TUSERDATA` that
-   `protobuf.find_resource_codec` matches by canonical erased metatable
-   (`thread.Sender`, `thread.Receiver`). The complete one-entry packet size is
+1. **Registered resource root.** A `LUA_TUSERDATA` whose metatable has no
+   metatable and that `protobuf.find_resource_codec` matches by canonical
+   erased metatable (`thread.Sender`, `thread.Receiver`). As in
+   `TransferValue.from_value`, a metatable with its own metatable skips this
+   lookup, so an inherited `__index` runs once, for the reflective brand
+   lookup only. The complete one-entry packet size is
    reserved before `codec.encode(scope, candidate)` attaches the endpoint; the
    four-byte index is written with `protobuf.write_resource_index` and
    `finalize_buf_message` produces a `RECORD_PAYLOAD` packet in place.
@@ -349,8 +352,8 @@ Generated `defer`/`catch` recovery reaches retirement under sustained
   calls `protobuf.register_resource_codec`, keyed by canonical erased metatable
   identity. Everything stays in traced state-local module variables; private
   field offsets never cross modules. The `context` passed to `codec.encode` and
-  `claim_registered_resource` is always the live scope of the current packet
-  call; nil raises the missing-scope error. Public `attach_resource` and
+  `claim_registered_resource` is the current packet's `ResourceScope` frame
+  itself; nil raises the missing-scope error. Public `attach_resource` and
   `claim_resource` resolve the top through `current_resource_scope` on every
   call.
 - **Attachment** (`ResourceScope:attach`). After checking the encode scope and
@@ -369,7 +372,8 @@ Generated `defer`/`catch` recovery reaches retirement under sustained
   commit through `new_nominal_message(..., scope.native)`; scalar and policy
   packets carry an empty table.
 - **Claim** (`ResourceScope:claim`, via `claim_resource` or
-  `claim_registered_resource`), in this order: decode-scope check; `length == 4`;
+  `claim_registered_resource`), in this order: decode-scope check (`message`
+  non-nil); `length == 4`;
   little-endian index `~= 0xffffffff` and `< count` (`"transfer: resource
   attachment index is out of bounds"`); `entry.release == expected_release`
   (`"transfer: resource attachment kind mismatch"`); `entry.resource ~= nil`
@@ -380,6 +384,16 @@ Generated `defer`/`catch` recovery reaches retirement under sustained
   during the claim leaves the unit in the packet; a failure in a later field
   leaves claimed wrappers to the destination GC and releases only the remaining
   entries. Indexes are packet-local, not global anti-replay tokens.
+- **Retained contexts.** Only a live decode frame has a `message`: encode
+  frames never set it and retirement clears it. A context kept past its decode
+  therefore raises `"transfer: resource claim requires a decode scope"` while
+  its frame is idle or serves an encode. Reuse by a later decode is not
+  detected. The context *is* the pooled frame, so a holder reads the frame's
+  current state and carries no older generation to compare; detecting reuse
+  would need a distinct handle per decode, an allocation on every decode. The
+  stale context then claims from the new packet. The kind check keeps that
+  memory-safe, but the claim takes a slot the new packet's own constructor
+  expects.
 
 #### C-only disposal and copy
 

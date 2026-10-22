@@ -1,0 +1,260 @@
+-- Lua-state close with Tasks parked in stack-resident native thread waits
+-- (issue #262): lua_close withdraws each parked waiter before its coroutine
+-- stack is destroyed, and per-registration pins keep the channel or thread
+-- control block alive until that withdrawal.
+
+record ThreadTeardownClones
+  const sender: thread.Sender<|integer|>
+  const receiver: thread.Receiver<|integer|>
+end
+
+record ThreadTeardownJoinProbe
+  const gate: thread.Sender<|boolean|>
+  const done: thread.Receiver<|boolean|>
+end
+
+-- Endpoints an independent state keeps until its lua_close, so the parked
+-- Task is never woken by an earlier last-endpoint release.
+local thread_teardown_held: {value} = {}
+local thread_teardown_worker: thread.Thread<|boolean|>? = nil
+
+-- Start the Task with one nonblocking turn of the state's own loop; nothing
+-- drives that loop again before lua_close.
+local function thread_teardown_park<|T|>(task: async.Task<|T, value|>)
+  uv.run(async.current_loop(), uv.RUN_NOWAIT)
+  test.assert(task:status():as_string() == "waiting",
+    "the independent state did not park a native thread wait")
+end
+
+-- Public so an independent state can run it through require('thread.tests').
+-- The endpoints are older than the parked Task's coroutine, so lua_close
+-- finalizes that coroutine before either endpoint (the issue #262 order).
+function thread_teardown_park_receive(host: value)
+  local tx, rx = thread.channel<|integer|>(1)
+  thread_teardown_held[#thread_teardown_held + 1] = tx
+  if host ~= nil then
+    async.send(host as foreign *void, ThreadTeardownClones(tx:clone(), rx:clone()))
+  end
+  thread_teardown_park(async.run<|integer, value|>(rx:receive))
+end
+
+-- Public for the independent-state send variant: the full channel parks the
+-- sender on the overflow queue, again with endpoints older than the coroutine.
+function thread_teardown_park_send()
+  local tx, rx = thread.channel<|integer|>(1)
+  thread_teardown_held[#thread_teardown_held + 1] = rx
+  test.assert(tx:try_send(1), "the teardown channel was not empty")
+  thread_teardown_park(async.run<|nil, value|>(function (): nil
+    tx:send(2)
+    return nil
+  end))
+end
+
+-- Public for the packet-disposal variant: the parked send's packet carries a
+-- Sender of a probe channel whose Receiver goes to the host. The probe closes
+-- only when every Sender unit, including that packet attachment, is released.
+function thread_teardown_park_send_carrying_endpoint(host: value)
+  local probe_tx, probe_rx = thread.channel<|boolean|>(1)
+  async.send(host as foreign *void, probe_rx)
+  local tx, rx = thread.channel<|thread.Sender<|boolean|>|>(1)
+  thread_teardown_held[#thread_teardown_held + 1] = rx
+  test.assert(tx:try_send(probe_tx:clone()), "the teardown channel was not empty")
+  thread_teardown_park(async.run<|nil, value|>(function (): nil
+    tx:send(probe_tx)
+    return nil
+  end))
+end
+
+-- Public for the pinned-channel variants: the Task creates the endpoints, so
+-- both finalize before its coroutine and release the channel's last endpoint
+-- references while the waiter is still registered.
+function thread_teardown_park_receive_on_newer_endpoints()
+  thread_teardown_park(async.run<|integer, value|>(function (): integer
+    local tx, rx = thread.channel<|integer|>(1)
+    thread_teardown_held[#thread_teardown_held + 1] = tx
+    return rx:receive()
+  end))
+end
+
+function thread_teardown_park_send_on_newer_endpoints()
+  thread_teardown_park(async.run<|nil, value|>(function (): nil
+    local tx, rx = thread.channel<|integer|>(1)
+    thread_teardown_held[#thread_teardown_held + 1] = rx
+    test.assert(tx:try_send(1), "the teardown channel was not empty")
+    tx:send(2)
+    return nil
+  end))
+end
+
+-- Public for the join variants: the worker finishes only after the host
+-- releases its gate.
+function thread_teardown_park_join(host: value)
+  local gate_tx, gate_rx = thread.channel<|boolean|>(1)
+  local done_tx, done_rx = thread.channel<|boolean|>(1)
+  async.send(host as foreign *void, ThreadTeardownJoinProbe(gate_tx, done_rx))
+  local worker = thread.spawn_two(function (gate: thread.Receiver<|boolean|>,
+      done: thread.Sender<|boolean|>): boolean
+    gate:receive_result()
+    return done:is_closed()
+  end, gate_rx, done_tx)
+  thread_teardown_worker = worker
+  thread_teardown_park(async.run<|thread.ThreadStatus<|boolean|>, value|>(worker:join))
+end
+
+-- Public for the woken-join variant. Thread:status() reads the finished flag
+-- that the worker's completion sets in the same locked step that wakes joins.
+function thread_teardown_worker_finished(): boolean
+  return thread_teardown_worker:status():has_finished()
+end
+
+local function thread_teardown_close(code: string, chunk: string)
+  local state = lua.new()
+  defer state:close()
+  state:run(code, chunk)
+  state:close()
+end
+
+-- Run a park entry in an independent state that sends the endpoints it shares
+-- to this state's inbox, and return them.
+local function thread_teardown_park_shared(state: lua.Lua, inbox: async.Receiver,
+    entry: string): value
+  state:run([[
+    package.path, package.cpath = '', ''
+    local entry, host = ...
+    require('thread.tests')[entry](host)
+  ]], "=thread-teardown-shared", async.TransferValue.is_string(entry),
+    async.TransferValue.is_pointer(inbox:handle()))
+  return inbox:wait()
+end
+
+local function thread_teardown_worker_has_finished(state: lua.Lua): boolean
+  local result: async.TransferValue = state:run([[
+    package.path, package.cpath = '', ''
+    return require('thread.tests').thread_teardown_worker_finished()
+  ]], "=thread-teardown-worker-finished")
+  case result
+  when is_boolean(finished) then return finished
+  else raise "the worker probe did not return a boolean"
+  end
+end
+
+function test_lua_close_withdraws_receive_parked_on_older_endpoints(_: test.Context)
+  thread_teardown_close([[
+    package.path, package.cpath = '', ''
+    require('thread.tests').thread_teardown_park_receive()
+  ]], "=thread-teardown-receive")
+end
+
+function test_lua_close_withdraws_send_parked_on_older_endpoints(_: test.Context)
+  thread_teardown_close([[
+    package.path, package.cpath = '', ''
+    require('thread.tests').thread_teardown_park_send()
+  ]], "=thread-teardown-send")
+end
+
+function test_lua_close_disposes_packet_of_withdrawn_send(_: test.Context)
+  runtime_test.run(function ()
+    local inbox = async.receiver()
+    defer inbox:close()
+    local state = lua.new()
+    defer state:close()
+    local probe: thread.Receiver<|boolean|> = thread_teardown_park_shared(
+      state, inbox, "thread_teardown_park_send_carrying_endpoint")
+    defer probe:close()
+    test.assert(not probe:is_closed(), "the probe channel closed before lua_close")
+    state:close()
+    -- The parked send never resumes, so withdrawal must dispose its packet and
+    -- release the probe Sender attached to it.
+    test.assert(probe:is_closed(), "lua_close leaked the withdrawn send's packet")
+  end)
+end
+
+function test_lua_close_pins_channel_released_before_parked_receive(_: test.Context)
+  thread_teardown_close([[
+    package.path, package.cpath = '', ''
+    require('thread.tests').thread_teardown_park_receive_on_newer_endpoints()
+  ]], "=thread-teardown-pinned-receive")
+end
+
+function test_lua_close_pins_channel_released_before_parked_send(_: test.Context)
+  thread_teardown_close([[
+    package.path, package.cpath = '', ''
+    require('thread.tests').thread_teardown_park_send_on_newer_endpoints()
+  ]], "=thread-teardown-pinned-send")
+end
+
+function test_lua_close_withdraws_receive_shared_with_another_state(_: test.Context)
+  runtime_test.run(function ()
+    local inbox = async.receiver()
+    defer inbox:close()
+    local state = lua.new()
+    defer state:close()
+    local clones: ThreadTeardownClones =
+      thread_teardown_park_shared(state, inbox, "thread_teardown_park_receive")
+    defer clones.receiver:close()
+    state:close()
+    -- The closed state's receive stays parked forever. This state's send must
+    -- not find that waiter, whose node lived on a destroyed coroutine stack.
+    test.assert(clones.sender:try_send(7), "the shared channel lost its buffer space")
+    local received, message? = clones.receiver:try_receive()
+    test.assert(received and message == 7, "the shared channel lost its message")
+  end)
+end
+
+function test_lua_close_withdraws_woken_receive_shared_with_another_state(_: test.Context)
+  runtime_test.run(function ()
+    local inbox = async.receiver()
+    defer inbox:close()
+    local state = lua.new()
+    defer state:close()
+    local clones: ThreadTeardownClones =
+      thread_teardown_park_shared(state, inbox, "thread_teardown_park_receive")
+    defer clones.receiver:close()
+    -- Wake the parked receive. Its state never drives its loop again, so the
+    -- wake is still unacknowledged when the state closes and withdraws it.
+    test.assert(clones.sender:try_send(7), "the shared channel lost its buffer space")
+    state:close()
+    local received, message? = clones.receiver:try_receive()
+    test.assert(received and message == 7,
+      "the closed state's withdrawn receive consumed the message")
+  end)
+end
+
+function test_lua_close_withdraws_join_of_running_thread(_: test.Context)
+  runtime_test.run(function ()
+    local inbox = async.receiver()
+    defer inbox:close()
+    local state = lua.new()
+    defer state:close()
+    local probe: ThreadTeardownJoinProbe =
+      thread_teardown_park_shared(state, inbox, "thread_teardown_park_join")
+    defer probe.done:close()
+    defer probe.gate:close()
+    state:close()
+    -- The worker finishes after its joining state closed. Its completion wakes
+    -- the join queue, which must no longer hold that state's waiter.
+    probe.gate:send(true)
+    case probe.done:receive_result()
+    when closed() then
+    else test.assert(false, "the worker sent on its completion probe")
+    end
+  end)
+end
+
+function test_lua_close_withdraws_woken_join(_: test.Context)
+  runtime_test.run(function ()
+    local inbox = async.receiver()
+    defer inbox:close()
+    local state = lua.new()
+    defer state:close()
+    local probe: ThreadTeardownJoinProbe =
+      thread_teardown_park_shared(state, inbox, "thread_teardown_park_join")
+    defer probe.done:close()
+    defer probe.gate:close()
+    -- Let the worker finish and wake the parked join while its state never
+    -- drives its loop, so the wake is unacknowledged when the state closes.
+    probe.gate:send(true)
+    while not thread_teardown_worker_has_finished(state) do timer.sleep(1) end
+    state:close()
+  end)
+end

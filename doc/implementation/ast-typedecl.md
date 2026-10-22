@@ -378,7 +378,6 @@ remain booleans.
 | `_discard_results`, `_voidok` | expressions/calls | checker | checker, coder | evaluate under zero-result demand; calls may legally expose no result |
 | `_npassed_args`, `_open_args` | `ExpCall` | checker | coder | statically passed argument count and a final dynamic run feeding an input-vararg tail |
 | `_contextual_value_call`, `_contextual_function_type` | `ExpCall` | checker | checker, specs | the callee began as `value` and was checked against a function shape synthesized from argument/result demand |
-| `_foreign_function_pointer` | `ExpVar` | checker | no reader | a direct C declaration was contextually decayed to its `CPointer(CFunction)` target |
 | `_c_pointer_call` | `ExpCall` | checker | coder | authoritative `Type.CFunction` pointee for an indirect C call, including synthesized generic-for iterator/close calls |
 | `_implicit_coercion` | checker-synthesized `ExpCast` | checker | coder | distinguishes a demanded sink conversion from a written `as` ([`trycoerce`](checker.md#trycoerce-tryforce-trytostr)) |
 | `_adjustment`, `_assignment_adjustment`, `_callable_adapter`, `_c_conversion`, `_operator_conversion` | `ExpCast` (structural views: the source expression) | checker | coder | the checker's frozen conversion decision ([`trycoerce`](checker.md#trycoerce-tryforce-trytostr)) |
@@ -408,7 +407,6 @@ remain booleans.
 | `_named_arg_order`, `_named_call_kind`, `_surface_named_args` | checked named `ExpCall` | checker | coder (`_surface_named_args`: semantic tooling only; `coder.generate` skips it) | named-call lowering order and the retained written fields ([Named arguments](named-arguments.md#checker-elaboration)) |
 | `_named_omitted` | synthesized nil fill in a named call or record constructor | checker | coder assertions for named calls; specs | distinguishes checked omissions from explicit expressions |
 | `_field` | `Field` (record constructors) | checker | coder | the resolved `Type.Field`, including synthesized omitted fields; `index` is the zero-based logical declaration position |
-| `_omitted_initializer` | mutable `StatDecl` | checker | no reader | the source omitted the expression list; checked nil expressions were synthesized |
 | `_initializerless_const` | const `TopLevelVar` | checker | assignment authorization, coder | the source omitted the module initializer; only the owner root initializer may assign it |
 | `_forcontrol` | `Decl` | checker | checker | numeric and generic `for` control variables are read-only assignment targets |
 | `_tuple_decls`, `_result_decls`, `_init_call`, `_next_call`, `_close_call`, `_visible_stat`, `_has_close`, `_runtime_optional_close` | `StatForIn` | checker | coder | the elaborated iterator protocol ([Generic `for` tuple elaboration](checker.md#generic-for-tuple-elaboration)) |

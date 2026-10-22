@@ -714,9 +714,16 @@ containing the executable; Unix symlink launches use the physical image. The
 working directory does not select that root. Default Lua and Titan library
 paths use that root's `share/lua/5.5`, `lib/lua/5.5`, and `lib/titan/0.6` trees.
 Ordinary `./` module search entries remain available. Explicit variables,
-including empty values, retain their existing precedence and `;;` behavior.
-Windows launchers also retain their adjacent `../lib` and `../share` bundle
-paths. No path from the Titan build environment is embedded in the program.
+including empty values, retain their existing precedence, and a `;;` in an
+explicit Titan path inserts the default described here (on Windows, when the
+Lua paths are also all set explicitly, the default is rooted at the
+executable's parent directory instead). Windows
+launchers also retain their adjacent `../lib` and `../share` bundle paths. A
+Windows launcher loads its own provider from that `../lib` tree, so its default
+Titan path is `.;<root>/lib/titan/0.6;<exe-dir>/../lib/titan/0.6`. An override
+such as `TITAN_PATH_0_6="C:/sdk/lib/titan/0.6;;"` keeps both default entries.
+An override without `;;` must name the launcher's provider directory itself.
+No path from the Titan build environment is embedded in the program.
 
 The standard-library names `coroutine`, `uv`, `async`, `timer`, `io`, `fs`,
 `net`, `ssl`, `url`, `http`, `websocket`, `os`, `path`, `peg`, `string`, `test`, `lua`, `math`, `gc`,
@@ -859,16 +866,12 @@ still initializes its own state and bindings. Any compiled-in module outside
 the entrypoint's initialization closure and an unused archive sibling remain
 absent from its preload table.
 
-After `luaL_openlibs`, the executable parses the
-inherited `package.cpath` for its current `/lib/titan/0.6/?.so` entry
-(with the ordinary `/lib/lua/5.5/?.so` entry as a bootstrap fallback), adds
-`<root>/lib/titan/0.6/?.so` if it is absent, and initializes the Titan module
-path from that same root. Deploy the standard provider and loaders as described
-under [where modules are found](#where-modules-are-found). The linked Lua
-runtime resolves default paths from the executable itself, so a program in
-`<root>/bin` discovers providers under `<root>`. For a program outside that
-layout, configure the path overrides shown under
-[Running with a stock Lua](#running-with-a-stock-lua).
+After `luaL_openlibs`, the executable selects its root as described under
+[where modules are found](#where-modules-are-found), adds
+`<root>/lib/titan/0.6/?.so` to `package.cpath` if it is absent, and
+initializes the Titan module path from that same root. Deploy the standard
+provider and loaders as described there. For another layout, configure the
+path overrides shown under [Running with a stock Lua](#running-with-a-stock-lua).
 `args[1]` onward
 contain only the user-supplied arguments; index 0 is absent and the executable
 name is not stored. Therefore `#args` is the argument count. The integer returned by

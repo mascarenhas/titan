@@ -129,10 +129,13 @@ local foreign function waiter_wake_all(q: *titan_thread_waiter_queue)
   end
 end
 
+-- Implementation notes: doc/implementation/thread-library.md#registration-pins-and-state-close-withdrawal
 local foreign function waiter_enqueue(
     q: *titan_thread_waiter_queue,
     waiter: *titan_thread_waiter,
-    wake_target: *void)
+    wake_target: *void,
+    pins: *size_t)
+  pins[0] = pins[0] + (1 as foreign size_t)
   uv.native_external_wake_retain(wake_target)
   waiter.wake_target = wake_target
   waiter.next = nil
@@ -145,6 +148,20 @@ local foreign function waiter_enqueue(
   q.tail = waiter
   waiter.active = 1
   waiter.signaled = 0
+end
+
+-- The woken Task's own locked retry acknowledges its wake: no extra lock.
+local foreign function waiter_acknowledge(waiter: *titan_thread_waiter, pins: *size_t)
+  if waiter.signaled == 0 then return end
+  waiter.signaled = 0
+  pins[0] = pins[0] - (1 as foreign size_t)
+end
+
+-- Unregister drops the pin of a still linked or unacknowledged woken waiter.
+local foreign function waiter_holds_pin(waiter: *titan_thread_waiter): int
+  if waiter.active ~= 0 then return 1 end
+  if waiter.signaled ~= 0 then return 1 end
+  return 0
 end
 
 local foreign function waiter_unlink(
@@ -188,6 +205,10 @@ local foreign function clear_ring_messages(ch: *titan_thread_channel)
 end
 
 local foreign function channel_destroy_unreferenced(ch: *titan_thread_channel)
+  -- Every linked node holds a pin, so an unreferenced channel has empty
+  -- queues; abort deterministically on a pin-accounting bug.
+  if ffi.titan_thread_overflow_queue(ch).head ~= nil then ffi.abort() end
+  if ffi.titan_thread_underflow_queue(ch).head ~= nil then ffi.abort() end
   clear_ring_messages(ch)
   if ch.ring ~= nil then
     ffi.free(ch.ring)
@@ -198,6 +219,15 @@ local foreign function channel_destroy_unreferenced(ch: *titan_thread_channel)
     ch.mutex = nil
   end
   ffi.free(ch)
+end
+
+-- Callers hold ch.mutex. A pinned channel outlives its last endpoint until the
+-- final registration is withdrawn or acknowledged.
+local foreign function channel_unreferenced(ch: *titan_thread_channel): int
+  if ch.active_senders ~= (0 as foreign size_t) then return 0 end
+  if ch.active_receivers ~= (0 as foreign size_t) then return 0 end
+  if ch.waiter_pins ~= (0 as foreign size_t) then return 0 end
+  return 1
 end
 
 local foreign function channel_drain_and_discard(ch: *titan_thread_channel)
@@ -261,12 +291,7 @@ foreign function channel_release_sender_native(raw: *void): void
       end
     end
   end
-  local destroy = 0 as foreign int
-  if ch.active_senders == (0 as foreign size_t) then
-    if ch.active_receivers == (0 as foreign size_t) then
-      destroy = 1
-    end
-  end
+  local destroy = channel_unreferenced(ch)
   uv.native_mutex_unlock(ch.mutex)
   if destroy ~= 0 then
     channel_destroy_unreferenced(ch)
@@ -295,12 +320,7 @@ foreign function channel_release_receiver_native(raw: *void): void
   channel_drain_and_discard(ch)
   uv.native_mutex_lock(ch.mutex)
   ch.active_receivers = ch.active_receivers - (1 as foreign size_t)
-  local destroy = 0 as foreign int
-  if ch.active_senders == (0 as foreign size_t) then
-    if ch.active_receivers == (0 as foreign size_t) then
-      destroy = 1
-    end
-  end
+  local destroy = channel_unreferenced(ch)
   uv.native_mutex_unlock(ch.mutex)
   if destroy ~= 0 then
     channel_destroy_unreferenced(ch)

@@ -2236,7 +2236,7 @@ function codevaluecall(ctx, node)
     end
 end
 
-function codecall(ctx, node)
+local function lower_call(ctx, node)
     local constructor = node._nominal_constructor
     if constructor then
         local module = constructor.owner.name:match("^(.*)%.[^.]+$")
@@ -2592,6 +2592,22 @@ function codecall(ctx, node)
         return cstats, "((void)0)"
     end
     return cstats, visnames[1]
+end
+
+-- A normally returning ordinary Titan callee may have completed a write
+-- through an aggregate's contextual mutable address. Commit each tracked byte
+-- spill only after the call returns; calls passing no tracked aggregate
+-- address emit nothing extra. Foreign calls commit `_c_mutated_decls` instead.
+-- Implementation notes: doc/implementation/c-ffi-expressions.md#longjmp-safe-aggregate-spills
+function codecall(ctx, node)
+    local cstats, cexp = lower_call(ctx, node)
+    local commits = {}
+    for _, decl in ipairs(coder._titan_call_aggregate_out_decls(node)) do
+        local update = spill_update(decl)
+        if update ~= "" then table.insert(commits, update) end
+    end
+    if #commits == 0 then return cstats, cexp end
+    return cstats .. "\n" .. table.concat(commits, "\n"), cexp
 end
 
 return core.coder

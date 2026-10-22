@@ -206,7 +206,6 @@ function check_forin_callable_exp(exp, st, errors, context, demand)
            and exp.var.exp._type._tag == "Type.CModule"
            and cfunc and cfunc._tag == "Type.CFunction" then
             exp._type = types.CPointer(cfunc, {})
-            exp._foreign_function_pointer = exp.var.name
             return
         end
     end
@@ -825,7 +824,6 @@ end
 checkstat_visitor = util.make_visitor({
     ["Ast.StatDecl"] = function(node, st, errors)
         if #node.exps == 0 then
-            node._omitted_initializer = true
             local nils = {}
             for index, decl in ipairs(node.decls) do
                 local value = ast.ExpNil(decl.loc)
