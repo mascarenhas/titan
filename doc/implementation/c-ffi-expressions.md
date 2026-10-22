@@ -558,10 +558,14 @@ address-exposed scalars are documented in
 [setjmp-sensitive local/parameter spills](error-handling.md#setjmp-sensitive-localparameter-spills).
 This section covers the C-storage specifics.
 
-The write analysis traces C field and index lvalues to their root declaration
-and consumes `_c_mutated_decls` from mutable foreign calls. A marked non-GC
-aggregate or fixed array gets a volatile byte spill
-(`spill_decl_init`/`spill_decl_zero` in `coder/flow.lua`):
+The write analysis traces C field and index lvalues to their root declaration,
+consumes `_c_mutated_decls` from mutable foreign calls, and adds
+`coder._titan_call_aggregate_out_decls` for ordinary Titan calls: every
+automatic aggregate or fixed array whose contextual mutable address (implicit
+or written `as` address cast, or decay to a non-const pointer parameter) is
+passed directly as an argument. A marked non-GC aggregate or fixed array gets
+a volatile byte spill (`spill_decl_init`/`spill_decl_zero` in
+`coder/flow.lua`):
 
 ```c
 unsigned char volatile _spill_local_x[sizeof(_local_x)];
@@ -573,7 +577,10 @@ through `memcpy`. It commits:
 
 - after zero initialization;
 - after whole-object, field, and element writes;
-- after a mutable foreign call returns normally.
+- after a mutable foreign call returns normally;
+- after an ordinary Titan call that received its mutable address returns
+  normally (`codecall` in `coder/calls.lua`). A call that passes no tracked
+  aggregate address emits no commit.
 
 Recovery reloads the last committed bytes before Titan reads the object. An
 automatic FAM's `_c_backing_storage` supplies the address and byte extent of
@@ -599,13 +606,6 @@ Boundaries of the guarantee:
   pointer does not extend the backing's lifetime.
 - Foreign function bodies have no spill protocol, because they cannot
   establish a Titan recovery boundary.
-
-**Known limitation.** A normally returning **ordinary Titan** callee does not
-commit a mutable aggregate out-argument to its byte spill. If that aggregate is
-already spill-tracked because of another protected assignment, recovery can
-restore the pre-call bytes and lose the callee's completed write. The
-mutable-foreign-call commit rule does not extend to ordinary Titan callees, and
-the scalar volatile home does not change this.
 
 ## C operator traits
 

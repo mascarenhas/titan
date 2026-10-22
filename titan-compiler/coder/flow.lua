@@ -241,6 +241,60 @@ function collect_lvalue_write(node, out)
     return out
 end
 
+-- Return the operand whose contextual mutable C address this cast takes, or
+-- nil. An inner exact-address cast below an unsafe pointer reinterpretation
+-- and the fused address-then-reinterpret conversion both qualify.
+local function mutable_address_operand(node)
+    local adjustment = node._adjustment
+    local written = node._written_cast
+        and node._written_cast.tag == "just"
+        and maybe3.get_checked(node._written_cast, "written cast") or nil
+    local coercion = adjustment and adjustment.coercion
+        or written and written.coercion
+    local conversion = node._c_conversion
+    if (coercion and coercion.op == "mutable_c_address")
+       or (conversion
+           and conversion.kind == "address_then_unsafe_object_pointer") then
+        return node.exp
+    end
+    return nil
+end
+
+-- Automatic C aggregates whose mutable address an ordinary Titan call passes
+-- directly as an argument. As with `_c_mutated_decls` on a mutable foreign
+-- call, each counts as a write for spill analysis, and `codecall` commits its
+-- byte spill after the call returns normally. A callee that raises commits
+-- nothing, so recovery restores the bytes from before the call.
+-- Implementation notes: doc/implementation/c-ffi-expressions.md#longjmp-safe-aggregate-spills
+function coder._titan_call_aggregate_out_decls(node)
+    local decls = {}
+    if node._direct_foreign_reference or node._c_pointer_call then
+        return decls
+    end
+    local seen = {}
+    for _, arg in ipairs(node.args.args or {}) do
+        local exp, operand = arg, nil
+        while exp._tag == "Ast.ExpCast" and not operand do
+            operand = mutable_address_operand(exp)
+            exp = exp.exp
+        end
+        -- A fixed array reaches a mutable pointer parameter through ordinary
+        -- C decay rather than an address coercion.
+        local target = types.resolve_c_typedef(arg._type)
+        if not operand and exp ~= arg and types.is_c_array(exp._type)
+           and target and target._tag == "Type.CPointer"
+           and not types.c_pointer_has_qual(target, "const") then
+            operand = exp
+        end
+        local decl = operand and coder._lvalue_root_decl(operand)
+        if decl and not seen[decl] and types.is_c_aggregate(decl._type) then
+            seen[decl] = true
+            table.insert(decls, decl)
+        end
+    end
+    return decls
+end
+
 function collect_reads_block(node, out)
     out = out or {}
     if not node then return out end
@@ -283,6 +337,9 @@ function coder._collect_writes_exp(node, out)
     if not node then return out end
     if node._tag == "Ast.ExpCall" then
         for _, decl in ipairs(node._c_mutated_decls or {}) do
+            set_add(out, decl)
+        end
+        for _, decl in ipairs(coder._titan_call_aggregate_out_decls(node)) do
             set_add(out, decl)
         end
     end

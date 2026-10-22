@@ -447,9 +447,10 @@ Rules for changing this code:
   checked-return callee writes through the scalar's address and then raises,
   and only the catch reads the local.
 
-Ordinary Titan callees do not commit a mutable aggregate out-argument to its
-byte spill, so recovery can lose a completed write; the limitation is
-documented in
+A C aggregate has no such in-call home. Passing its mutable address directly
+to an ordinary Titan call counts as a protected write, and its byte spill is
+committed only after the call returns normally, so a callee that raises
+leaves the pre-call bytes; see
 [longjmp-safe aggregate spills](c-ffi-expressions.md#longjmp-safe-aggregate-spills).
 
 The variadic descriptor structs follow the same rule. Their C-stack records
