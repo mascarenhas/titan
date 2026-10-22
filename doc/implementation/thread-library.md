@@ -21,9 +21,9 @@ The user-facing contract is in the
 - `group.titan`: `Group`, `group`, membership, admission queues and
   `Group:wait()`.
 - `native.h`: `titan_thread_message` (an alias of `titan_async_message`),
-  `titan_thread_waiter`, the automatic `titan_thread_channel_wait` cell,
-  `titan_thread_waiter_queue`, `titan_thread_channel` and
-  `titan_thread_control`.
+  `titan_thread_waiter`, the automatic `titan_thread_channel_wait` and
+  `titan_thread_join_wait` cells, `titan_thread_waiter_queue`,
+  `titan_thread_channel` and `titan_thread_control`.
 
 ## Layering and cross-thread primitives
 
