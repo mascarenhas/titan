@@ -625,6 +625,59 @@ describe("native Titan test runner", function()
         setup(clean)
         teardown(clean)
 
+    it("executes every sorted case across registration batches and discards results",
+       function()
+        local workspace = assert(compiler_io.new_sync():tmpname())
+        assert(os.remove(workspace))
+        assert(lfs.mkdir(workspace))
+        local owner = "test_runner_batches"
+        local source = { [[local test = import "test"
+local gc = import "gc"
+-- This shared counter intentionally verifies generated-runner execution order.
+local executed = 0
+]] }
+        local expected = {}
+        for index = 129, 1, -1 do
+            local name = string.format("test_%03d", index)
+            expected[index] = owner .. "." .. name
+            source[#source + 1] = string.format([[
+function %s(context: test.Context): ({string}, integer)
+  gc.collect()
+  executed = executed + 1
+  test.assert(executed == %d, "generated runner changed case order")
+  test.assert(context:name() == %q, "generated runner changed case name")
+  return {context:name()}, executed
+end
+]], name, index, expected[index])
+        end
+        assert(io.open(workspace .. "/" .. owner .. ".titan", "w")):
+            write(table.concat(source, "\n")):close()
+        local output_root = workspace .. "/output"
+        local argv = working_titanc_arguments()
+        for _, argument in ipairs({ "--test", "--no-uv-bootstrap",
+                "--tree", workspace, "--output", output_root, owner }) do
+            argv[#argv + 1] = argument
+        end
+        local compiled, output = run(argv)
+        local program = platform.windows and
+            assert(driver.windows_program_paths(owner, nil, nil,
+                output_root)).executable or output_root .. "/" .. owner
+        local ran, run_output
+        if compiled then ran, run_output = run_program({ program }) end
+        remove_tree(workspace)
+        assert.truthy(compiled, output)
+        assert.truthy(ran, run_output)
+        local observed = {}
+        for name in run_output:gmatch("%[ RUN      %] ([^\n]+)") do
+            observed[#observed + 1] = name
+        end
+        assert.same(expected, observed)
+        assert.truthy(run_output:find("[==========] 129 tests ran.", 1, true),
+            run_output)
+        assert.truthy(run_output:find("[  PASSED  ] 129 tests.", 1, true),
+            run_output)
+    end)
+
     it("inherits source-owner headers for exported native fields", function()
         local workspace = assert(compiler_io.new_sync():tmpname())
         assert(os.remove(workspace))

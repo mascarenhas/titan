@@ -160,6 +160,85 @@ describe("Titan test-runner source generation", function()
         assert.equal("suite.test_returns", warm[2].full_name)
     end)
 
+    it("bounds registration helpers and preserves every name and callback across batches",
+       function()
+        for _, count in ipairs({ 0, 1, 63, 64, 65, 128, 129 }) do
+            local cases = {}
+            for index = 1, count do
+                local owner = index % 2 == 0 and "example.alpha" or "example.beta"
+                local name = string.format("test_%03d", index)
+                cases[index] = {
+                    modname = owner,
+                    function_name = name,
+                    full_name = owner .. "." .. name,
+                }
+            end
+            local source, render_err = test_runner.render(cases)
+            assert.truthy(source, render_err)
+            local ast, parse_err = parser.parse("batched_runner.titan", source)
+            assert.truthy(ast, parse_err and parser.error_to_string(parse_err,
+                "batched_runner.titan") or "generated runner did not parse")
+            local functions, imports, helpers = {}, {}, {}
+            for _, node in ipairs(ast) do
+                if node._tag == "Ast.TopLevelImport" then
+                    imports[node.localname] = node.modname
+                elseif node._tag == "Ast.TopLevelFunc" then
+                    functions[node.name] = node
+                    local parameter = node.params[1]
+                    local typ = parameter and parameter.type
+                    if typ and typ._tag == "Ast.TypeArray" and
+                       typ.subtype._tag == "Ast.TypeQualName" and
+                       typ.subtype.module == "test" and typ.subtype.name == "Case" then
+                        helpers[node.name] = node
+                        assert.is_true(node.islocal)
+                        assert.equal(1, #node.params)
+                        assert.equal(0, #node.rettypes)
+                        assert.is_true(#node.block.stats >= 1 and
+                            #node.block.stats <= 64)
+                    end
+                end
+            end
+            local expected_batches = math.ceil(count / 64)
+            local helper_count = 0
+            for _ in pairs(helpers) do helper_count = helper_count + 1 end
+            assert.equal(expected_batches, helper_count)
+            local main = assert(functions.main)
+            assert.equal(expected_batches + 2, #main.block.stats)
+            assert.equal("Ast.StatDecl", main.block.stats[1]._tag)
+            assert.equal("Ast.StatReturn", main.block.stats[#main.block.stats]._tag)
+            local visited, registrations = {}, {}
+            for batch = 1, expected_batches do
+                local statement = main.block.stats[batch + 1]
+                assert.equal("Ast.StatCall", statement._tag)
+                local call = statement.callexp
+                local name = call.exp.var.name
+                local helper = assert(helpers[name])
+                assert.is_nil(visited[name])
+                visited[name] = true
+                assert.equal(1, #call.args.args)
+                assert.equal("cases", call.args.args[1].var.name)
+                for _, registration in ipairs(helper.block.stats) do
+                    assert.equal("Ast.StatAssign", registration._tag)
+                    local args = registration.exps[1].args.args
+                    assert.equal(3, #args)
+                    local wrapper = assert(functions[args[3].var.name])
+                    assert.is_true(wrapper.islocal)
+                    assert.equal(0, #wrapper.rettypes)
+                    assert.equal(1, #wrapper.block.stats)
+                    assert.equal("Ast.StatCall", wrapper.block.stats[1]._tag)
+                    local target = wrapper.block.stats[1].callexp.exp.var
+                    registrations[#registrations + 1] = {
+                        full_name = args[1].value,
+                        modname = args[2].value,
+                        function_name = target.name,
+                    }
+                    assert.equal(args[2].value, imports[target.exp.var.name])
+                end
+            end
+            assert.same(cases, registrations)
+        end
+    end)
+
     it("renders a valid zero-test executable and owns adjacent outputs",
        function()
         local source, render_err = test_runner.render({})

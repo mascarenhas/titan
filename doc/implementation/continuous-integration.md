@@ -23,8 +23,9 @@ Preparation has a 30-minute timeout, compiler pairs 45 minutes, native coverage
 60 minutes, and the independent cold sanitizer build 75 minutes.
 
 Linux defaults to `MAKEFLAGS=-j2` and `TITAN_JOBS=2` for its two-vCPU runners.
-The sanitizer uses a four-vCPU runner with 16GB RAM and overrides both limits
-to four; large instrumented test units exceed the smaller runner's 8GB RAM.
+The native coverage and sanitizer jobs each use a four-vCPU runner with 16GB RAM
+and override both limits to four. Large instrumented test units in the sanitizer
+job exceed the smaller runner's 8GB RAM.
 Native Make prerequisites may overlap; each compiler process overlaps only
 generated-C objects. Compiler shards override nested Make/Titan work to one
 slot and run at most two workers per runner. Dedicated parallelism regressions

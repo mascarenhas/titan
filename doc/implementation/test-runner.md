@@ -77,9 +77,16 @@ even when a static provider physically carries other logical keys.
 * an ordinary public import of `titan.test`;
 * one explicit `.titan` import alias per distinct source-backed test owner;
 * one exact `function (test.Context): ()` wrapper per case, discarding results;
-* an Array of public `test.Case.new(full_name, owner_module, body)` descriptors;
-  and
+* private registration helpers, each appending at most 64 public
+  `test.Case.new(full_name, owner_module, body)` descriptors to one Array; and
 * `main(args)`, which returns `test.run(args, cases)`.
+
+`main` owns the descriptor Array and calls the registration helpers in case
+order before entering `test.run`. Bounding each registration function keeps
+native compiler temporary and root state small, especially under sanitizers.
+The helpers reuse the exact callback wrappers and return before execution;
+discovery, case order, and the public test API are unchanged. Empty suites
+need no registration helper.
 
 The reserved logical name `titan.test.runner` is absent from the standard
 provider. Test owners remain subject to ordinary import and native-symbol
