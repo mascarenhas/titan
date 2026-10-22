@@ -5609,7 +5609,11 @@ done
                     "name: sanitizer (ubuntu-24.04, ASan+UBSan)"),
                 sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
-                "runs-on: ubicloud-standard-2"), sanitizer_job)
+                "runs-on: ubicloud-standard-4"), sanitizer_job)
+            assert.equal(1, count_literal(sanitizer_job,
+                'MAKEFLAGS: "-j4"'), sanitizer_job)
+            assert.equal(1, count_literal(sanitizer_job,
+                'TITAN_JOBS: "4"'), sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
                 "timeout-minutes: 75"), sanitizer_job)
             assert.falsy(sanitizer_job:find("id-token: write", 1, true),
