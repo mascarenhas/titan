@@ -564,32 +564,39 @@ follows a remote GC pointer or enters the destination Lua state.
   resource during encoding; see [manual handoff](transfer-library.md#manual-resource-handoff).
 - **Reader state (`ReceiverReader`).** `receiver()` leaves `reader` nil, so a
   notification-only Receiver allocates no reader state. The first `wait()` calls
-  `Receiver:create_reader`, which builds the one `ReceiverReader`: `task`,
-  `notified`, a `ResumeToken("async.Receiver.wait")`, and a `withdraw` action
-  that clears `task`. It is published only once complete, and later waits reuse
-  it without allocating. Clearing `task` on release also drops the reference to a
-  finished reader Task.
+  `Receiver:create_reader`, which builds the one `ReceiverReader`: `task`, a
+  `ResumeToken("async.Receiver.wait")`, and a `withdraw` action that clears
+  `task`. It is published only once complete, and later waits reuse it without
+  allocating. Clearing `task` on release also drops the reference to a finished
+  reader Task.
 - **Wake (`Receiver:wake`).** The `uv.async_t` callback copies and decodes
-  nothing. It returns unless a reader is reserved and not yet notified, then sets
-  `notified` and calls `task:resume(reader.token)`, resetting `notified` if that
-  raises. The packet stays in the native slot, including while the reader's wake
-  is queued, until `wait()` takes it.
+  nothing. It returns unless a reader is reserved **and** that Task is
+  suspended on the reader's token (`task.resume_token == reader.token`, which
+  `start_suspend` publishes and delivery clears), then calls
+  `task:resume(reader.token)`; `Task:resume` coalesces repeated wakes through
+  `resume_pending`, so the reader keeps no notified flag of its own. A running
+  reader is never resumed. In particular, when a decode hook, or a finalizer run
+  at an allocation inside decode, closes the Receiver that is decoding its
+  first-pass packet, `close()`'s wake is a no-op: `wait` returns the value it
+  already took, and its next call raises `"receiver is closed"`. The packet stays
+  in the native slot, including while the reader's wake is queued, until
+  `wait()` takes it.
 - **Wait (`Receiver:wait`, `receiver_take_native`).** `wait()` requires a
   running Task and rejects a second reader with
-  `"receiver already has a waiting reader"`. It reserves `reader.task` and
-  clears `notified` **before** `checkpoint()` or any slot inspection, so a second
-  caller cannot barge ahead while the first reader's wake is queued; its exit
-  `defer` releases the reservation only if it still names this Task. Each loop
-  turn declares a fresh `raw` local and calls `receiver_take_native`, which
-  returns `2` (closed, raising `"receiver is closed"`), `1` (taken), or `0`
-  (empty). On `1` it installs `defer transfer.discard_message(raw)` and returns
+  `"receiver already has a waiting reader"`. It reserves `reader.task`
+  **before** `checkpoint()` or any slot inspection, so a second caller cannot
+  barge ahead while the first reader's wake is queued; its exit `defer` releases
+  the reservation only if it still names this Task. Each loop turn declares a
+  fresh `raw` local and calls `receiver_take_native`, which returns `2` (closed,
+  raising `"receiver is closed"`), `1` (taken), or `0` (empty). On `1` it
+  installs `defer transfer.discard_message(raw)` and returns
   `transfer.decode_message(raw)` under the
   [consuming raw-slot decode contract](transfer-library.md#consuming-raw-slot-decode);
   decode errors consume the packet and raise from `wait()` with no retry, and
-  nil and false are ordinary data. On `0` it clears `notified` and calls
+  nil and false are ordinary data. On `0` it calls
   `suspend(reader.token, reader.withdraw)`. A send between the empty check and
-  `suspend` either sets `notified` on the loop thread or leaves a pending
-  `uv_async_send` for the next loop turn.
+  `suspend` leaves a pending `uv_async_send` whose callback runs only after the
+  reader has yielded with its token published.
 - **Cancellation.** `Task:cancel` runs `withdraw` only while the reserving Task
   is suspended under it, so the reservation it clears is that Task's. An unread
   packet stays in the slot. The cancelled reader unwinds later through its

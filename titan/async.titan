@@ -31,7 +31,6 @@ type TransferValue = transfer.TransferValue
 -- wait: later waits reserve by setting task and reuse the token and action.
 local record ReceiverReader
   task: Task<|value, value|>?
-  notified: boolean
   token: ResumeToken
   withdraw: SuspendCancelAction?
 end
@@ -4789,10 +4788,11 @@ local function Receiver:wake()
   local reader? = self.reader
   if reader == nil then return end
   local task? = reader.task
-  if task == nil or reader.notified then return end
-  reader.notified = true
-  do task:resume(reader.token)
-  catch reader.notified = false; raise end
+  -- Only a reader suspended on its token needs a wake. A running reader, for
+  -- example one whose decode hook or finalizer closes this Receiver, rechecks
+  -- the slot itself; Task:resume coalesces repeated wakes before delivery.
+  if task == nil or task.resume_token ~= reader.token then return end
+  task:resume(reader.token)
 end
 
 -- Runtime shutdown disables admission before its generic native handle close.
@@ -4871,7 +4871,7 @@ end
 -- Notification-only Receivers never allocate reader state. The first wait
 -- publishes it only once complete; every later wait reuses it.
 local function Receiver:create_reader(): ReceiverReader
-  local reader = ReceiverReader(nil, false, ResumeToken("async.Receiver.wait"), nil)
+  local reader = ReceiverReader(nil, ResumeToken("async.Receiver.wait"), nil)
   -- Task:cancel runs this only while the reserving Task is suspended in wait,
   -- so the reservation it withdraws is necessarily that Task's.
   reader.withdraw = function () reader.task = nil end
@@ -4894,7 +4894,6 @@ function Receiver:wait(): value
   -- Reserve before even inspecting the slot, not just before suspension.
   -- Cancellation withdraws only this reservation; it never takes the packet.
   reader.task = task
-  reader.notified = false
   while true do
     checkpoint()
     local raw: foreign *void = nil
@@ -4906,10 +4905,9 @@ function Receiver:wait(): value
       defer transfer.discard_message(raw)
       return transfer.decode_message(raw)
     end
-    -- A stale/coalesced notification may have no packet. Re-arm the same
-    -- reservation and suspend: send between the check and registration leaves
-    -- the UV async notification pending until this Task has yielded.
-    reader.notified = false
+    -- A stale/coalesced notification may have no packet. Suspend under the same
+    -- reservation: send between the check and registration leaves the UV async
+    -- notification pending until this Task has yielded.
     suspend(reader.token, reader.withdraw)
   end
 end

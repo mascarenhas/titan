@@ -606,7 +606,9 @@ receiver closed, disposes of any unread packet with `transfer.discard_message`,
 makes a waiting Task raise `"receiver is closed"`, and starts closing the native
 handle; the owning `async.loop` must still run to complete that close. Runtime
 shutdown and garbage collection of the `Receiver` also close the slot and
-dispose of an unread packet.
+dispose of an unread packet. A decoder hook, or a finalizer that runs while
+`wait` decodes, may close the receiver being waited on: `wait` still returns the
+value it took, and the next `wait` raises `"receiver is closed"`.
 
 **Stop senders and finish every in-flight send before calling `close` or
 letting the owning Runtime shut down.** Concurrent `send` and `close` are

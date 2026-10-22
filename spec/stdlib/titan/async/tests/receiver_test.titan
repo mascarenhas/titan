@@ -1,4 +1,5 @@
 local receiver_string = import "string"
+local receiver_gc = import "gc"
 foreign import "lauxlib.h"
 
 local foreign function receiver_test_callback(state: *lua_State): int
@@ -509,5 +510,83 @@ function test_receiver_copies_closure_snapshots_and_retires_packet_bytes(_contex
     receiver:close()
     receiver_error(function () receiver_send_transient_closure(handle) end, "receiver is closed")
     support.collect_garbage()
+  end)
+end
+
+-- Decode-time close fixture: the hook closes `receiver_closing_target` directly,
+-- or through a finalizer that a forced full collection runs inside decode.
+local receiver_closing_target: async.Receiver? = nil
+local receiver_closing_by_finalizer = false
+local receiver_closing_finalized = false
+local receiver_closing_failure: value = nil
+
+record ReceiverClosingProbe
+  label: string
+end
+
+function ReceiverClosingProbe:to_transfer_payload(): string
+  return self.label
+end
+
+record ReceiverCloseOnCollect
+  receiver: async.Receiver
+end
+
+local function receiver_close_on_collect(item: value)
+  local owner: ReceiverCloseOnCollect = item
+  receiver_closing_finalized = true
+  -- A finalizer error would only become a Lua warning; record it instead.
+  do owner.receiver:close()
+  catch receiver_closing_failure = error end
+end
+
+-- A separate frame, so no stack slot of the decode hook still roots the owner.
+local function receiver_drop_close_on_collect(target: async.Receiver)
+  receiver_gc.finalizable<|value|>(ReceiverCloseOnCollect(target), receiver_close_on_collect)
+end
+
+function ReceiverClosingProbe.from_transfer_payload(payload: string): ReceiverClosingProbe
+  local target = receiver_closing_target
+  receiver_closing_target = nil
+  if receiver_closing_by_finalizer then
+    receiver_drop_close_on_collect(target)
+    receiver_gc.collect()
+  else
+    target:close()
+  end
+  return { label = payload }
+end
+
+local function receiver_close_during_first_pass_decode(by_finalizer: boolean)
+  runtime_test.run(function ()
+    local receiver = async.receiver()
+    defer receiver:close()
+    -- The packet is already in the slot, so wait decodes on its first pass
+    -- while its reader Task is running, never suspended on the reader token.
+    async.send(receiver:handle(), ReceiverClosingProbe("closed-during-decode"))
+    receiver_closing_target = receiver
+    receiver_closing_by_finalizer = by_finalizer
+    receiver_closing_finalized = false
+    receiver_closing_failure = nil
+    -- Before the fix this raised "Task resume token mismatch" from the decode.
+    local item = receiver:wait()
+    test.assert(receiver_closing_target == nil, "the closing decode hook did not run")
+    test.assert(receiver_closing_finalized == by_finalizer,
+      "the closing finalizer did not run inside decode")
+    test.assert(receiver_closing_failure == nil,
+      "closing the Receiver from its reader's decode raised")
+    test.assert(item is ReceiverClosingProbe, "wait lost the message decoded before close")
+    local probe: ReceiverClosingProbe = item
+    test.assert(probe.label == "closed-during-decode", "wait changed the decoded message")
+    receiver_error(function () receiver:wait() end, "receiver is closed")
+  end)
+end
+
+function test_receiver_decode_may_close_its_receiver(context: test.Context)
+  context:run("decode_hook", function (_child: test.Context)
+    receiver_close_during_first_pass_decode(false)
+  end)
+  context:run("finalizer", function (_child: test.Context)
+    receiver_close_during_first_pass_decode(true)
   end)
 end
