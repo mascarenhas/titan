@@ -2108,6 +2108,65 @@ describe("interfaces (end-to-end)", function()
             assert.truthy(called, callerr)
         end)
 
+    it("rejects an exact slot whose concrete owner is another module",
+        function()
+            local checker = require "titan-compiler.checker"
+            local public_coder = require "titan-compiler.coder"
+            h.reset(true)
+            local imported = {}
+            local loader = driver.tableloader({
+                interface_provider = [[
+                record Box
+                    item: integer
+                end
+
+                function Box:add(x: integer): integer
+                    return self.item + x
+                end
+            ]],
+                interface_bridge = [[
+                local provider = import "interface_provider"
+
+                interface Adder
+                    function add(x: integer): integer
+                end
+
+                function wrap(box: provider.Box): Adder
+                    return box
+                end
+            ]],
+            }, imported, {}, { interface = "source" })
+            local ok, err = driver.with_loader(loader, function(load)
+                local typ, errs = checker.checkimport("interface_bridge", load)
+                if not typ then return false, errs end
+                return #errs == 0, table.concat(errs, "\n")
+            end)
+            assert.truthy(ok, err)
+
+            local ast = imported.interface_bridge.ast
+            local wrap
+            for _, node in ipairs(ast) do
+                if node._tag == "Ast.TopLevelFunc" and node.name == "wrap" then
+                    wrap = node
+                end
+            end
+            local mapping = wrap.block.stats[1].exps[1]
+                ._interface_conversion.methods[1]
+            -- The cast-site checker gives a cross-module owner an adapter even
+            -- for an exact signature. Forge the slot the coder must refuse:
+            -- dispatch would hand the bridge's `_mod` to the provider method.
+            assert.is_true(mapping.exact)
+            assert.equal("adapter", mapping.slot_kind)
+            mapping.slot_kind = "exact"
+            mapping.interface_adapter = nil
+
+            local generated, message = pcall(public_coder.generate,
+                "interface_bridge", ast, {}, driver.TITAN_ABI_VERSION)
+            assert.is_false(generated)
+            assert.match("has an exact slot for a concrete owner outside "
+                .. "the emitting module", tostring(message), 1, true)
+        end)
+
     it("initializes exact pair payloads independently in two Lua states",
         function()
             h.compile_and_read_c([[

@@ -2289,6 +2289,12 @@ function coder._interface_pair(ctx, conversion, loc)
             assert(mapping.exact
                    and mapping.interface_adapter == nil,
                 use .. " has a malformed exact mapping")
+            -- Dispatch passes the wrapper's user value 0, the emitting
+            -- module, as `_mod`; only a same-module concrete method may
+            -- receive it directly.
+            assert(concrete.name:match("^(.*)%.[^.]+$") == ctx.module,
+                use .. " has an exact slot for a concrete owner outside "
+                    .. "the emitting module")
         else
             assert(mapping.slot_kind == "adapter"
                    and mapping.interface_adapter,
