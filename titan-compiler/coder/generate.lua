@@ -7,6 +7,7 @@ local _ENV = core
 -- safe because declaration and type annotations contain cycles. Keep this walk
 -- iterative, identity-aware, and bounded so the entry assertion itself cannot
 -- overflow the Lua stack or chase an accidentally unbounded graph.
+-- Implementation notes: doc/implementation/generics.md#coder-boundary-an-ordinary-erased-core
 function coder._assert_erased_boundary(ast)
     local max_tables = 1000000
 
@@ -121,6 +122,7 @@ function coder.prepare_coverage(ast, enabled)
     end
 end
 
+-- Implementation notes: doc/implementation/codegen-overview.md#anatomy-of-a-generated-translation-unit
 function coder.generate(modname, ast, static_deps, abi, emit_line_directives, options)
     -- Omission preserves the historical default. Reset this before any
     -- validation that may fail so a previous invocation's policy never leaks
@@ -294,6 +296,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
             local slot = tlcontext.nominal_namespace_slots[node._type.name]
             local callmeta = ""
             local constructor = node._type.functions.new
+            -- Implementation notes: doc/implementation/record-constructors.md#lua-namespace-calls
             if node._tag == "Ast.TopLevelRecord"
                 and constructor and not constructor.islocal then
                 local callname = coder._nominal_metamethod_name(

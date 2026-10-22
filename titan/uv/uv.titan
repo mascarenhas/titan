@@ -308,6 +308,7 @@ end
 -- @return Zero after native loop closure (also for fresh or already closed storage), or EBUSY if a native callback boundary is active.
 -- @usage standard-library-uv.md#abandoned-loop-retirement
 function loop_abandon(loop: loop_t): integer
+  -- Implementation notes: doc/implementation/libuv-extension-guide.md#final-state-teardown-is-not-ordinary-shutdown
   if not loop.initialized then return 0 end
   if L ~= main_thread then raise "uv.loop_abandon requires the owning main Lua thread" end
   if driving or walking_depth > 0 or inline_dispatch_depth > 0 then return ffi.UV_EBUSY end

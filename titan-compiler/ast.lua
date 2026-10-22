@@ -124,6 +124,7 @@ local ast = typedecl("Ast", {
     },
 })
 
+-- Implementation notes: doc/implementation/ast-typedecl.md#decorations-who-writes-what-who-reads-it
 -- These annotations distinguish an unfinished analysis from a completed
 -- analysis that found no sound plan. Ordinary optional syntax stays nil.
 local function analysis_fields(constructor, fields)

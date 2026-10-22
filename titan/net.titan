@@ -170,6 +170,7 @@ local function notify_input(connection: Connection)
   if failure ~= nil then failure:raise() end
 end
 
+-- Implementation notes: doc/implementation/libuv-networking.md#persistent-reads
 local function wrap_connection(loop: uv.loop_t, tcp: uv.tcp_t,
                                 terminal: integer, failure: value): Connection
   local stream = tcp:as_stream_t()
@@ -285,6 +286,7 @@ local function start_resolve(
   return context.request_view
 end
 
+-- Implementation notes: doc/implementation/libuv-networking.md#one-shot-requests
 local function resolve_addresses(host: string, port: integer): {uv.sockaddr_t}
   if string.find(host, "\0") ~= nil then raise operation_error(uv.EINVAL, "net.resolve") end
   local loop = async.current_loop()
@@ -502,6 +504,7 @@ end
 -- @param address Complete resolved endpoint address.
 -- @usage standard-library-net.md#connecting-and-listening
 function Connection:connect_address(address: uv.sockaddr_t)
+  -- Implementation notes: doc/implementation/libuv-networking.md#dialing-and-listening
   validate(self.handle_view, self.loop, "connect")
   async.checkpoint()
   if self.phase ~= CONNECTION_UNCONNECTED then
@@ -727,6 +730,7 @@ end
 -- @return Native endpoint, copied unread bytes, and receive state; adopt exactly once.
 -- @usage standard-library-net.md#transferring-connections
 function Connection:to_transfer_payload(): string
+  -- Implementation notes: doc/implementation/libuv-networking.md#connection-transfer-ownership
   -- Encoding is synchronous and may run in a transfer callback without a Task.
   if self.loop ~= async.current_loop() then
     raise "TCP resource belongs to a different async Runtime"

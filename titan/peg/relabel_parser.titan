@@ -11,6 +11,7 @@
 -- owns the recursive public titan.peg grammar that joins them into the pinned
 -- relabel language.
 
+-- Implementation notes: doc/implementation/lpeglabel-embedding.md#relabel-translation
 local function _relabel_build_parser(): Pattern
   local lex = _relabel_build_lexical()
   local suffix_operation =

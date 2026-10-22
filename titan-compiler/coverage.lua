@@ -56,6 +56,7 @@ function coverage.matches(build, name, test_functions)
     return false
 end
 
+-- Implementation notes: doc/implementation/native-coverage.md#selection-and-object-ownership
 function coverage.prepare(driver, args, strategy)
     if not driver.EMIT_LINE_DIRECTIVES then
         return nil, "Titan source coverage requires source #line directives"

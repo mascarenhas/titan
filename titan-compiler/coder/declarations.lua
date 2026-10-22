@@ -6,6 +6,7 @@ local _ENV = core
 -- The strict entry is stored as the closure's final LCF upvalue; it receives
 -- the original closure as one hidden first argument and applies gradual tag
 -- guards before calling the same native entry.
+-- Implementation notes: doc/implementation/lua-interop-internals.md#the-two-lua-stack-entries-genluaentry
 function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
                      lua_name, options)
     options = options or {}
@@ -533,6 +534,7 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
     })
 end
 
+-- Implementation notes: doc/implementation/closure-adjustment-wrappers.md#target-native-adapter
 function coder._emit_callable_adapter(tlcontext, site)
     local adapter = coder._validate_callable_adapter_plan(
         site.adapter, site.adapter.source, site.adapter.target,
@@ -670,6 +672,7 @@ function codeboxparam(ctx, param)
     })
 end
 
+-- Implementation notes: doc/implementation/foreign-functions.md#contents-and-inline-classification
 function coder._foreign_function_is_inline(node)
     -- Public callbacks need one provider-owned address, including when their
     -- implementation could otherwise fit in an explicit source-import header.
@@ -721,6 +724,7 @@ function coder._foreign_temp(ctx, typ, prefix)
     return coder._render_c_declaration(coder._c_value_type(typ), name) .. ";", name
 end
 
+-- Implementation notes: doc/implementation/foreign-functions.md#exact-raw-c-lowering-and-sequencing
 function coder._foreign_freeze(ctx, node, target, prefix)
     local stats, exp = coder._foreign_raw_exp(ctx, node)
     local typ = target or node._type
@@ -1127,6 +1131,7 @@ end
 --     directly and writes later results through out parameters. A native caller
 --     roots each GC-bearing result immediately after return, before later work
 --     can collect it; returning itself cannot run the collector.
+-- Implementation notes: doc/implementation/codegen-overview.md#the-titan-native-function-and-its-calling-convention
 function codefuncdec(tlcontext, node)
     local ctx = newcontext(tlcontext)
     ctx._coverage_generated = node._record_constructor or node._union_constructor
@@ -1572,6 +1577,7 @@ end
 -- return the closure value
 -- (anchored in a gc temp). The upvalues are initialized directly while the
 -- closure is white; they never transit through the Lua stack.
+-- Implementation notes: doc/implementation/codegen-overview.md#closures-and-captured-variables
 function codelambda(ctx, node)
     local tlcontext = ctx.tlcontext
     lambda_register(tlcontext, node)
@@ -1653,6 +1659,7 @@ end
 --   upvalue[5] = the bound strict entry (light C function)
 -- The closure's lua_CFunction is the bound Lua trampoline. The result is an
 -- ordinary Type.Function value, callable through both paths and Lua-crossable.
+-- Implementation notes: doc/implementation/codegen-overview.md#bound-method-trampolines
 function codemethodref(ctx, node)
     local tlcontext = ctx.tlcontext
     local is_interface = node._interface_bound == true

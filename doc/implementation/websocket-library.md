@@ -9,7 +9,9 @@ and `gc` imports. It never imports private UV/async/transport state.
 ## Contributor responsibilities
 
 - `websocket.titan` declares public messages, errors and validated option owners,
-  imports dependencies, and initializes the weak runtime registry.
+  the transfer schema and the protocol budgets (`FRAME_BYTES`, `WORK_BYTES`,
+  `FRAME_BUDGET`), imports dependencies, and makes the `openings` registry an
+  ephemeron in its initializer.
 - `handshake.titan` validates opening fields/origins/extensions/subprotocols,
   composes explicit resolved TCP/TLS/HTTP ownership, and serializes pending
   openings by semantic remote address.
@@ -20,9 +22,10 @@ and `gc` imports. It never imports private UV/async/transport state.
   allocation, carries fragmented message state, masks bytes and dispatches
   controls while assembling complete messages.
 - `utf8.titan` validates Unicode scalar prefixes across all chunk/frame splits.
-- `native.titan` uses synchronous OpenSSL EVP digest/base64 operations; random
-  nonces and masks go through public `uv.random`. No new native dependency or
-  SSL/libuv FFI is introduced.
+- `native.titan` uses synchronous OpenSSL EVP digest/base64 operations
+  (`accept_digest`, `base64`); `random_bytes` draws keys, masks and Ping tokens
+  from public synchronous `uv.random`. It adds no native dependency or SSL/libuv
+  FFI.
 
 Portable foreign byte accesses borrow immutable strings only while their
 owning Titan locals remain rooted. Mask output uses a counted native owner;
@@ -38,9 +41,10 @@ http/https validation. WebSocket uses the original normalized authority and
 target for HTTP and original hostname for TLS identity; resolved socket
 addresses are never substituted for either.
 
-The module's ephemeron-keyed runtime buckets hold only pending attempt
-supervisors. Address keys use semantic address bytes, port and effective IPv6
-scope, omit flowinfo, and normalize IPv4-mapped IPv6. Resolve once, reserve only
+`handshake.titan` `openings` maps each Runtime loop (ephemeron key) to buckets
+of pending attempt supervisors. `destination_key` builds the bucket key from
+semantic address bytes, port and effective IPv6 scope, omits flowinfo, and
+normalizes IPv4-mapped IPv6. Resolve once, reserve only
 the current candidate, and release after validated Upgrade or retired failure.
 Contenders join the incumbent without owning/cancelling its result. Empty
 buckets are deleted eagerly. TCP failure alone permits resolver-order fallback;
@@ -77,22 +81,31 @@ surrogates and out-of-range scalars. An impossible prefix fails immediately;
 an incomplete prefix is permitted only until data FIN. Close reasons use the
 same scalar rules. Outgoing text/reasons are checked before emission.
 
-Buffered payload work yields after 64 KiB, and control/empty-fragment loops
-yield after 32 frames. Outgoing data uses 16 KiB fragments and yields between
+Buffered payload work yields after `WORK_BYTES` (64 KiB), and control/empty-fragment
+loops yield after `FRAME_BUDGET` (32) frames (`Connection:read_message`).
+Outgoing data uses `FRAME_BYTES` (16 KiB) fragments and yields between
 fragments. `async.checkpoint` admits cancellation but is not a fairness yield.
 Each client frame has its own unpredictable 4-byte mask, even when empty.
 Synchronous entropy may block; there is no asynchronous mask pool.
 
 One application reader/data writer/Ping/shutdown reservation is admitted at a
-time. Internal output shares a frame reservation: Close first, pending Pong,
-application Ping, then data. No header/payload fragments from different frames
-can interleave. Once closing begins, the next data fragment is refused.
+time. Internal output shares a frame reservation (`Connection:take_frame`):
+Close first, pending Pong, application Ping, then data. No header/payload
+fragments from different frames can interleave. Once closing begins, the next
+data fragment is refused.
+
+These yields are the only fairness mechanism. There is no generic
+buffered-work fairness bound or starvation guarantee: a peer that keeps the
+transport full still competes with other Tasks only at these points. The
+measurements behind this design (archived in
+[benchmark archives](benchmark-archives.md#retired-evidence-records)) were
+Linux-only observations and do not establish macOS or Windows behavior.
 
 ## Operation and terminal lifetime
 
 Each suspending public operation owns an I/O child and a cancellation-aware
-parent. Its exact parent token wakes only the parent's explicit suspension;
-terminal listeners are removed on exit. This does not create a parser Task per
+parent (`new_work`, `Work:execute`). Its exact parent token wakes only the
+parent's explicit suspension; terminal listeners are removed on exit. This does not create a parser Task per
 frame. TLS's own public-write supervision adds a child per transport write;
 measure these nested costs rather than claiming no fragment-proportional Task
 allocations.
@@ -113,7 +126,7 @@ controls until peer Close, yielding after 32 discarded complete messages even
 when each message is empty. Ping never takes receive ownership: applications
 must concurrently read.
 
-Terminal retirement has one independently runnable owner. It stops admission,
+Terminal retirement (`Connection:retire`) has one independently runnable owner. It stops admission,
 wakes reservation waiters, invokes the public upgraded stream abort, then
 awaits captured operation scopes/accepted ownership. It never joins arbitrary
 application Tasks, so callers may catch failures and continue unrelated work.
@@ -121,39 +134,55 @@ Only after children retire are partial-message/input buffers cleared. A valid
 peer Close plus reciprocal output becomes normal message EOF; earlier
 transport loss remains abnormal. Immediate close skips protocol negotiation.
 
+A closed endpoint is not reclaimed by one collection. Each Task's coroutine
+owner userdata (`titan/coroutine.titan`) has a `__gc` metamethod and roots its
+thread, callback and `Coroutine` record in user values, and the callbacks
+capture `Work` and message state or TLS operation results. The first
+collection after release finalizes the owners while the graphs they reference
+survive; a later cycle frees those graphs. Tests and diagnostics that check
+release must run several collections (or check a weak slot after settling)
+rather than assume single-cycle release.
+
 ## Connection transfer ownership
 
-Only open idle WebSocket sessions can produce a transfer policy. The gate
-checks every operation/frame/control reservation, the work list, partial
-message owner and retirement Task before touching HTTP ownership. An idle
-session has no in-flight fragmented-message builder or UTF-8 continuation.
-A private anonymous-root protobuf schema carries role, subprotocol, limit and
-the unread suffix of the input chunk, plus the known HTTP `UpgradedStream` bytes. Reflection unwraps the known I/O
-Interface to that public concrete owner; it never copies an Interface wrapper
-or captured abort closure between states.
+The generic manual-handoff rules (exactly-once adoption, explicit discard,
+lossy carriers, stream eligibility including Windows pending reads) are in
+[manual resource handoff](transfer-library.md#manual-resource-handoff). This
+section covers the WebSocket gate and schema.
 
-A private pending-operation count spans each public read, write, Ping,
+Only an open idle session can be transferred (`Connection:to_transfer_payload`).
+The gate rejects a closed or closing session, a nonzero private
+`pending_operations` count, an active reader, writer or frame reservation, a
+nonempty work list, and a partial message before it touches HTTP ownership. An
+idle session therefore has no in-flight fragmented-message builder or UTF-8
+continuation. `pending_operations` spans each public read, write, Ping,
 shutdown and close call through its final cleanup. Internal Work slots may be
-released earlier to preserve frame fairness and receive takeover; their release
-does not permit transfer while the public caller is still resuming or unwinding.
-The transfer hook checks both the public count and the internal reservations.
+released earlier to preserve frame fairness and receive takeover, so the count
+keeps a caller that is still resuming or unwinding from transferring.
 
-The HTTP wrapper in turn owns its unread prefix and concrete net/SSL transport.
-After it detaches successfully, the source WebSocket facade drops the stream,
-clears input and becomes terminal without protocol output. A lexical guard
-discards the detached HTTP bytes if outer protobuf encoding fails. Destination
-construction allocates its StringWriter, UTF-8 state and empty work list before
-adopting the HTTP wrapper. No operation Tasks, timers or source closures are
-transferred. The transport's strict native-pending restrictions still apply,
-including Windows overlapped reads. Payloads remain manually owned and must be
-adopted once; there are no replay guards or delivery rollback owners.
+`connection_transfer_fields` (`websocket.titan`) is a private anonymous-root
+protobuf schema: the HTTP `UpgradedStream` payload bytes, client role,
+subprotocol, read limit, and the unread suffix of the input chunk. Reflection
+unwraps the known I/O Interface to that concrete owner; no Interface wrapper or
+captured abort closure is copied between states. The `UpgradedStream` owns its
+unread prefix and concrete net/SSL transport
+([cross-state exchange ownership](http-library.md#cross-state-exchange-ownership)).
+After it detaches, the source facade drops the stream, clears input and
+becomes terminal without protocol output. A lexical guard discards the detached
+HTTP bytes if the outer encoding fails. Destination construction allocates its
+StringWriter, UTF-8 state and empty work list before adopting the HTTP wrapper.
+No operation Tasks, timers or source closures are transferred.
+
+## Discarding undelivered handoffs
+
+`Connection.discard_transfer_payload` decodes the first (stream payload) field
+of the same schema and delegates to `http.UpgradedStream.discard_transfer_payload`.
+It does not reconstruct WebSocket state or require a Runtime.
 
 ## Integration and verification
 
 The module belongs to the canonical provider and native test inventory.
-Unix keeps paired providers; Windows remains DLL-only. Standard-library installation
-copies the built provider and generated shims.
-No Titan, ABI, SDK or language-server version marker changes are required.
+Unix keeps paired providers; Windows remains DLL-only.
 
 Native WebSocket tests use installed public APIs and independent raw TCP/TLS
 peers under `spec/stdlib/titan/websocket/tests/`. Prerequisites are tested in
@@ -165,32 +194,15 @@ partial frames and concurrent retirement.
 Autobahn roles and checks exact nonempty selected-case/agent inventories plus
 behavior and close behavior. Compression families 12/13 are explicit
 unnegotiated exclusions; base UTF-8/Close and performance/size families remain
-selected. An ordinary container exit is not conformance evidence. Preserve
-configs, image/executable/provider/source identities and per-case reports.
+selected. An ordinary container exit is not conformance evidence. The harness
+runs the Linux amd64 image only and makes no native Windows, macOS, arm64 or
+verified-WSS conformance claim.
 
 The message cap bounds decoded-message storage. Existing net buffered reads
 have no high-water mark; neither this cap nor 64 KiB processing/scratch storage
-proves a bounded transport queue. Separate WebSocket allocation measurements
-must leave issue 196's frozen benchmark matrix/results unchanged, and separate
-setup, steady message handling, controls, fragmentation and teardown for
-plain/verified TLS sessions.
-
-The [allocation and lifetime results](websocket-allocation-results.md) record
-the measured costs and collector behavior. [Timing and fairness observations](websocket-benchmark-results.md)
-record the finite background-qualified scheduling and paired-body measurements.
-[WebSocket validation](websocket-validation.md)
-identifies the tested sources, providers, platforms and remaining gates.
+proves a bounded transport queue.
 
 Protocol references: [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455.html),
 [case-sensitive subprotocols](https://www.rfc-editor.org/rfc/rfc7936.html),
 [close registry](https://www.iana.org/assignments/websocket/websocket.xhtml),
 and [OpenSSL EVP](https://docs.openssl.org/3.5/man3/EVP_DigestInit/).
-
-## Discarding undelivered handoffs
-
-`Connection.discard_transfer_payload` decodes the existing schema's first
-stream-payload field and delegates to `http.UpgradedStream`'s public discard
-operation. It does not reconstruct WebSocket state or require a Runtime.
-The close attempt consumes the payload even when its returned native status
-reports an error; delivery supervisors must choose exactly one adoption or
-discard path.

@@ -1,5 +1,6 @@
 local core = require "titan-compiler.checker.core"
 local _ENV = core
+-- Implementation notes: doc/implementation/const-values.md#array-relations-and-linear-use-analysis
 
 -- A mutable Array may be frozen in place only when the checker can prove that
 -- the cast consumes the allocation's last mutable reference. Copying remains

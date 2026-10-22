@@ -1,12 +1,12 @@
 # C FFI declarations, conversions, and expressions
 
-This chapter describes the implementation added around the existing
+This chapter covers the C-type and C-expression layer on top of the
 [`foreign import` pipeline](ffi-internals.md): source-visible tag-only
-aggregates, exact C declarators, session-scoped compiler probes, contextual
-object-pointer conversions, automatic C objects, typed object macros, lazy
-macro-field projections, and C-mode operators. It is the implementation
-counterpart of the language chapter
-[C FFI declarations and expressions](../language/c-ffi-expressions.md).
+aggregates, exact C declarators, the target arithmetic profile, session-scoped
+compiler probes, contextual object-pointer conversions, target-directed C
+allocation and its recovery storage, typed object macros, macro-field
+projections, and C-mode operators. It is the implementation counterpart of the
+language chapter [C FFI declarations and expressions](../language/c-ffi-expressions.md).
 
 The central boundary is intentional:
 
@@ -23,12 +23,12 @@ inheritance, lifetime safety, or defined run-time behavior.
 
 ### Raw canonical names
 
-`ctypes.lua` continues to use internal keys such as `struct@Item` and
+`ctypes.lua` uses internal keys such as `struct@Item` and
 `union@Cell` for canonical file-scope aggregates. Those keys are not source
 syntax and are never emitted into C. They distinguish the tag namespace from
 ordinary identifiers and from real typedef spellings.
 
-The complete `TypeList` now carries two pieces of registrar metadata before
+The complete `TypeList` carries two pieces of registrar metadata before
 best-effort declaration conversion:
 
 * `typedef_names[name]` records every syntactic file-scope typedef name,
@@ -49,16 +49,20 @@ synthetic `Type.CModule.type_members` table. It does not create
 ordinary C identifier. `cdeclarator` therefore renders the type as
 `struct Item` or `union Item`, exactly as the header requires.
 
-Anonymous aggregates and enum tags receive no source alias in this iteration.
-An incomplete file-scope tag does receive an alias for pointer-only use; layout
-sinks consult visibility/completeness separately.
+Anonymous aggregates and enum tags receive no source alias. An incomplete
+file-scope tag does receive an alias for pointer-only use; layout sinks consult
+visibility and completeness separately.
 
 Member selectors, named argument labels, and foreign type names use
 `lexer.ANYNAME`, which accepts keyword spellings such as `when`, `repeat`, and
 `type`. The same token serves the ordinary Titan grammar positions that admit
-keyword names. There is no C-only selector token or `_contextual_c_name`
-marker. The checker resolves the receiver or type namespace normally, and the
-coder emits the accepted C member spelling unchanged.
+keyword names. A keyword-spelled member of a qualified type name is marked
+`_contextual_c_name` by `defs.qualifiedtype` (`parser.lua`);
+`checker/type_syntax.lua` rejects that name unless the qualifier is a C module
+("Titan keyword '%s' is only contextual for a C type"), and
+`checker/variables.lua` applies the same rule to dotted access on a non-C
+receiver. Otherwise the checker resolves the receiver or type namespace
+normally, and the coder emits the accepted C member spelling unchanged.
 
 ### One tag namespace per C scope
 
@@ -149,11 +153,12 @@ approximate declaration while the coder emits another.
 `titan-compiler/csemantics.lua` is pure target-C reasoning. It never asks the
 Lua process that runs Titan for its integer sizes or signedness.
 
-The driver builds one profile from the configured compiler's predefined macros
-and the active prefix's `luaconf.h`, then injects it into `cprobe.Service`. The
-direct-checker fallback performs the same acquisition before constructing its
-private service. The service validates and owns a copy for target-C reasoning.
-It records:
+`cdriver.target_profile_inputs` acquires the configured compiler's predefined
+macros and the active prefix's `lua_Integer`, `lua_Number`, `size_t` and
+`ptrdiff_t` spellings; `csemantics.build_profile` turns them into one profile,
+which is injected into `cprobe.Service`. The direct-checker fallback performs
+the same acquisition before constructing its private service. The service
+validates and owns a copy for target-C reasoning. It records:
 
 * `CHAR_BIT`, primitive storage widths, signedness, rank, precision, minima,
   and maxima;
@@ -177,12 +182,12 @@ and exact integer token spellings.
 `csemantics` supplies typedef/qualification-aware classification, integer
 promotion, usual arithmetic conversion, bounded integer object-macro
 expression evaluation, array decay, complete-object checks, and symmetric
-pointer common-type rules. `numeric_trait` and the integer-range containment
-query expose the same target facts to checked numeric lowering. Canonical C
-scalar descriptors retain those traits as checker-local metadata; they do not
-participate in structural type identity or serialized module metadata.
-Unknown extension ranks/precision are rejected where a result type cannot be
-proven.
+pointer common-type rules. `coder._numeric_trait` (`coder/numerics.lua`) and
+the integer-range containment query expose the same target facts to checked
+numeric lowering. Canonical C scalar descriptors retain those traits as
+checker-local metadata; they do not participate in structural type identity
+or serialized module metadata. Unknown extension ranks or precision are
+rejected where a result type cannot be proven.
 
 ## Compile probes and semantic-result caching
 
@@ -280,11 +285,13 @@ individually, so a rejection already belongs to the exact question asked.
 Infrastructure failures, including unavailable or interrupted compilers,
 workspace failures, and cleanup failures, remain retryable.
 
-The persistent directory is `<prefix>/var/cache/titan-probes/2`, selected by a
-nonempty `TITAN_PREFIX` or otherwise the installed prefix recovered from
-`package.cpath`. Format 2 has one bounded record at `<digest>.result` for either
-outcome. An accepted enum-carrier query also stores its typed selection result:
-match count and carrier identifier (the identifier sum when several match).
+The persistent directory is `<prefix>/var/cache/titan-probes/<VERSION>`
+(`cprobe_cache.VERSION`, currently 2; `driver.PROBE_CACHE_DIRECTORY`). The
+prefix is an absolute `TITAN_PREFIX`, otherwise `driver.TITAN_ROOT`, the
+installation recovered from `package.cpath`. Each source has one bounded record
+at `<digest>.result` for either outcome. An accepted enum-carrier query also
+stores its typed selection result: match count and carrier identifier (the
+identifier sum when several match).
 Readers reject malformed, truncated, trailing, oversized, or impossible typed
 results and treat cache I/O failures as misses. Private source/object paths in diagnostics
 are normalized before storing or returning them. Oversized diagnostics may be
@@ -306,12 +313,13 @@ is disabled. Compiler specs that reuse header pathnames for different fixtures
 disable persistent reuse for this reason.
 
 An embedding may give `cprobe.Service` a
-`persistent_cache_trace(stage, hit, key, path)` callback. Titan invokes it once
-for each enabled persistent lookup, before either the cached-semantic
-return or the ordinary probe path. All arguments are scalars, the callback is
-protected, and it is independent of verbose evidence: enabling cache telemetry
-does not retain probe sources or commands and never prints them. The driver
-adapts this to the resolver-level callback documented below.
+`persistent_cache_trace(stage, hit, key, path, module_name)` callback. Titan
+invokes it once for each enabled persistent lookup, before either the
+cached-semantic return or the ordinary probe path. All arguments are scalars,
+the callback is protected, and it is independent of verbose evidence: enabling
+cache telemetry does not retain probe sources or commands and never prints
+them. The driver adapts it to the resolver-level `c_probe_cache_trace`
+callback (`driver.lua`).
 
 Two optional structured observers provide terminal accounting without source
 or command retention. `semantic_trace(event)` emits one logical result per
@@ -323,10 +331,11 @@ outcome, persistent-lookup/publication state, and optional nonnegative child
 wall time supplied by the compiler-I/O strategy. Observer exceptions are
 ignored and neither stream writes to stdout.
 
-The service creates a private `mktemp -d` workspace, writes deterministic
-collision-free sources, and invokes a non-linking compiler mode. Production
-uses `-c source.c -o private.o`; an explicitly configured and separately
-established service may opt into `-fsyntax-only`.
+The default workspace provider (`default_temp_provider` in `cprobe.lua`)
+reserves a private directory through the compiler I/O strategy's `tmpname`,
+writes deterministic collision-free sources, and invokes a non-linking compiler
+mode. Production uses `-c source.c -o private.o`; an explicitly configured and
+separately established service may opt into `-fsyntax-only`.
 Arguments are already parsed and individually shell-quoted; `LANG=C` and
 `LC_ALL=C` make diagnostics stable. Missing/interrupted compilers are
 infrastructure failures. Candidate source/object/diagnostic artifacts are
@@ -416,96 +425,187 @@ try-spill analysis below.
 ## Target-directed automatic aggregates and fixed arrays
 
 `Ast.TypeCArray` represents unsized foreign arrays. At a direct initialized
-local sink, `foreign T[]` becomes the existing uncounted borrowed pointer view.
-There is no written `T[N]` source form. The ordinary local grammar still requires
-an initializer for aggregates/fixed arrays and every const local.
+local sink, `foreign T[]` is an uncounted borrowed pointer view. There is no
+written `T[N]` source form, and aggregates, fixed arrays and const locals still
+require an initializer. Foreign function bodies reject `.new` and `.new_array`
+(`checker._validate_foreign_body_node`) because they have no Lua allocation or
+root context.
 
-During `StatDecl` checking, the result-demand callback identifies a direct
-allocation sink. `_plan_c_allocation` records the storage plan on the call and
-declaration. Eligible inferred/by-value structures select `automatic_object`;
-explicit owners stay owned and raw pointer targets use hidden owner backing.
-A positive integer literal or eligible object-like integer macro array count
-selects `automatic_array` or `automatic_array_borrow`. Dynamic/zero borrowed
-views use hidden owner backing. There is no automatic-allocation size threshold.
-Whole-array assignment, return, and capture remain rejected.
+### Selection at the direct declaration sink
 
-`foreigntypes.convert` retains a successfully evaluated integer macro's exact
-decimal constant alongside its C type. The namespace member stores
-`_c_integer_constant`, and the converted-foreign-cache schema preserves it.
-Allocation selection admits only directly resolved namespace constants whose
-value fits the required integer extent; macros that denote ordinary C variables
-have no constant metadata. No host arithmetic evaluation or general constant
-folder is introduced.
+`Checker.CPseudoNew`, built by `c_pseudo_member` (`checker/c_types.lua`), is a
+syntax-bound callee descriptor, not a `Type.Function`. While `StatDecl` checks
+its expression list, the result-demand callback attaches the destination
+declaration as `allocation_decl` (`checker/statements.lua`).
+`checker._plan_c_allocation` then freezes one `kind = "c_allocation"` plan
+(`payload_type`, `result_type`, `storage`, `array`, `fam`, `count_expression`,
+`array_count_literal` or `fam_count_literal`, `fam_field`) on the call and, for
+automatic or hidden-owner storage, on the declaration as `_c_allocation_plan`.
+An allocation passed directly to a nominal constructor is planned by
+`plan_nominal_c_allocation` instead; see [nominal storage](nominal-storage.md).
 
+Planning happens before inference and sink coercion. Code generation switches
+only on the recorded plan and never rediscovers stack versus owner storage from
+endpoint types. A module initializer, return, argument, assignment to an
+existing variable, nested expression, or discarded call has no direct
+declaration sink and keeps the ordinary owned result.
 
+For a complete, eligible struct or union `T`, `.new()` selects:
 
-The coder consumes only that plan. Automatic declarations emit exact C storage
-with `{0}`; borrowed automatic arrays add a pointer to their separate fixed
-backing. The transitive eligibility walk rejects `TValue`, `Udata *`, and other
-recognized GC-bearing fields because Lua does not trace ordinary C automatic
-storage. The storage has ordinary block lifetime and no escape analysis.
+| Direct local sink | Plan/result |
+| --- | --- |
+| inferred, or explicitly `T` | `automatic_object`, a zeroed C `T` local |
+| `owned *T` | `owned`, a zeroed Lua userdata owner |
+| compatible `foreign *T` | `owned_borrow`, a pointer into a hidden owner rooted for the generated frame |
+| any non-direct-local context | ordinary `owned *T` |
 
-A FAM struct has a separate `automatic_fam` plan for a nonnegative literal
-count and an owned/hidden-owner plan otherwise. Its aligned backing and logical
-count provenance are described in
-[Foreign-function implementation](foreign-functions.md#flexible-array-member-provenance).
-The narrow automatic-to-owned coercions copy a complete aggregate/fixed-array
-representation (or the complete FAM extent) into a freshly rooted owner; they
-are checker-owned operations, not structural subtyping.
+For a non-FAM element type `T`, `.new_array(count)` selects:
+
+| Direct local sink/count | Plan/result |
+| --- | --- |
+| inferred, positive integer literal or eligible integer macro `N` | `automatic_array`, zeroed `T[N]` |
+| written `foreign T[]` or `foreign *T`, positive literal or eligible macro | `automatic_array_borrow`, pointer over zeroed `T[N]` backing |
+| written `foreign T[]` or `foreign *T`, dynamic or zero count | `owned_borrow`, pointer into hidden counted-owner backing |
+| written `owned T[]` | `owned` for every count |
+| inferred dynamic/zero count or non-direct-local context | ordinary `owned T[]` |
+
+Automatic selection is aggregate-specific; a scalar, pointer, or enum
+pseudo-allocation never becomes an automatic scalar. Completeness, nested-owner
+and transitive GC-bearing-storage checks (`types.c_automatic_gc_bearing`) are
+closed eligibility gates: `TValue`, `Udata *` and other recognized GC-bearing
+fields are rejected because Lua does not trace C automatic storage. A C array
+typedef cannot become owned storage or use `.new()`, but positive-literal
+`.new_array(N)` may use it as an element when the sink selects nested fixed
+automatic storage. Whole-array assignment, return and capture remain rejected,
+and there is no automatic-allocation size threshold.
+
+A constant count is an integer literal AST or a proven object-like integer
+macro. `foreigntypes.convert` retains a successfully evaluated macro's exact
+target-profile decimal value as the namespace member's `_c_integer_constant`,
+and the converted-foreign cache preserves it. Values outside the supported
+extent representation are rejected; macros that denote C variables carry no
+constant. There is no host arithmetic evaluation or general constant folder,
+and Titan bindings never qualify.
+
+Lifetimes: automatic storage has ordinary block lifetime and no escape
+analysis, so a pointer to it can dangle after its block. A pointer into a hidden
+owner loses ownership when the generated frame stops rooting the owner. The
+borrowed `foreign T[]` view lowers to a raw pointer, so `#` and counted bounds
+checks are unavailable through it.
+
+`coder._codeautomaticallocationdecl` (`coder/statements.lua`) emits real
+declaration-owned storage rather than an expression temporary: `{0}` for an
+object or fixed array, a separate fixed backing plus one pointer-view
+declaration for `automatic_array_borrow`, and the aligned union backing below
+for a FAM. This keeps address-taking, C out-parameter mutation, block lifetime,
+defer-tail predeclaration, and try-spill analysis attached to the actual
+`Ast.Decl`. For `automatic_array_borrow` the emitter owns both declarations, so
+generic local lowering must not redeclare the view; defer-tail predeclaration
+places backing and view together in the enclosing cleanup scope and suppresses
+both at the original statement.
+
+### Flexible-array-member provenance
+
+For a complete `struct T` whose final field is a flexible array member
+`E field[]`, `c_pseudo_member` gives `.new` a one-count arity and makes
+`.new_array` unavailable. A literal nonnegative count at an inferred or by-value
+direct local selects `automatic_fam`; an explicit owner, explicit `foreign *T`,
+dynamic count, or non-local expression selects one owner (with a borrowed
+pointer for the raw-pointer sink).
+
+The target C compiler remains the layout authority. Both paths use the exact
+extent
+
+```text
+max(sizeof(T), offsetof(T, field) + count * sizeof(E))
+```
+
+and zero all of it. Before recording `automatic_fam`,
+`checker._validate_automatic_fam_extent` asks the configured C probe context to
+prove `count <= (((size_t)-1 - offsetof(T, field)) / sizeof(E))`, so the literal
+bounds provenance and the generated backing extent agree without host layout
+guesses. The automatic form is a union containing `T` for alignment and an
+unsigned-byte member of the complete constant extent. The owned form evaluates
+the count once, rejects a negative value, checks addition and multiplication
+overflow, allocates exactly that many payload bytes, and stores the logical
+count in one private integer user value. `Udata.len` stays the byte extent, so
+padding is never mistaken for an element count.
+
+Field checking attaches `_c_fam_access` (`checker/variables.lua`) only while
+allocation provenance is present. Direct `owner.field[i]` and
+`automatic.field[i]` are 0-based and use the stored or literal count for bounds
+and `#field`. Converting either object to a raw `T *` erases that annotation:
+the unsized field then has no recoverable length or count-aware index path.
+Titan does not model a collection of variably extended `T` objects.
+
+### Copies to owners
+
+`types.coercion` has two narrow directional operations: `c_automatic_to_owned`
+for a matching struct or union and `c_automatic_array_to_owned` for a matching
+fixed array. `coder/values.lua` validates the exact plan; `coder/calls.lua`
+materializes the source once, allocates and stack-roots the owner, copies the
+complete object representation, and only then publishes the owner. A FAM source
+is recognized from its declaration plan, so the copy uses the full extended
+backing and reproduces the logical-count user value. These are allocating
+direct coercions, not structural subtyping or lifted conversions.
 
 ### Longjmp-safe aggregate spills
 
-`try`/`catch` uses C `setjmp`/`longjmp`; an automatic object modified after
-`setjmp` would otherwise be indeterminate after recovery. The write analysis
-traces C field/index lvalues to their root declaration and consumes
-`_c_mutated_decls` from mutable foreign calls.
+`try`/`catch` uses C `setjmp`/`longjmp`, so an automatic object modified after
+`setjmp` is indeterminate after recovery unless it is read from volatile
+storage. The spill analysis, GC-slot reloads and the volatile home for
+address-exposed scalars are documented in
+[setjmp-sensitive local/parameter spills](error-handling.md#setjmp-sensitive-localparameter-spills).
+This section covers the C-storage specifics.
 
-For each live non-GC automatic aggregate crossing such a boundary, the coder
-declares a volatile byte spill:
+The write analysis traces C field and index lvalues to their root declaration
+and consumes `_c_mutated_decls` from mutable foreign calls. A marked non-GC
+aggregate or fixed array gets a volatile byte spill
+(`spill_decl_init`/`spill_decl_zero` in `coder/flow.lua`):
 
 ```c
-volatile unsigned char spill[sizeof object];
+unsigned char volatile _spill_local_x[sizeof(_local_x)];
 ```
 
-It copies object-representation bytes with explicit loops:
+`coder._aggregate_spill_copy` copies the object representation with explicit
+byte loops, preserving volatile accesses rather than casting volatility away
+through `memcpy`. It commits:
 
-* after zero initialization;
-* after whole-object, field, and element writes;
-* after a mutable foreign call returns normally.
+- after zero initialization;
+- after whole-object, field, and element writes;
+- after a mutable foreign call returns normally.
 
-The recovery path reloads the last committed bytes before Titan reads the
-object. The loops preserve volatile accesses; they do not cast volatility away
-through `memcpy`. A call that mutates and then nonlocally exits does not commit
-partial bytes. Mutation through an untracked raw alias or asynchronously from C
-remains outside Titan's guarantee for the spilled object itself. Storage reached
-only through a pointer local is never spilled or restored: the pointer walk
-stops at the first pointer, so reads after recovery observe the storage's current
-memory. Code that lets C commit state during a protected region (for example a
-native registrar writing a wait cell) should therefore hold that cell as automatic
-storage plus a pointer local rather than rolling back its bytes on recovery.
-Address escape alone does not exempt a non-volatile automatic object from
-ISO C's `setjmp` rule.
+Recovery reloads the last committed bytes before Titan reads the object. An
+automatic FAM's `_c_backing_storage` supplies the address and byte extent of
+the complete extended backing.
 
-Known limitation: a normally returning **ordinary Titan** callee does not
-commit a mutable aggregate out-argument to its byte spill. If that aggregate
-was already spill-tracked by another protected assignment, later recovery can
-restore pre-call bytes and lose the callee's completed write. The mutable
-foreign-call commit rule above does not yet extend to ordinary Titan callees.
+Boundaries of the guarantee:
 
-Non-GC **scalar** locals/parameters whose mutable C address is taken and whose
-value is live across recovery use a different home: the actual C object is
-volatile, with a declaration-time compiler escape barrier and no separate
-spill/reload. The write analysis treats a contextual mutable address conversion
-as a possible write even for an ordinary Titan call. The empty GNU extended
-asm keeps the home escaped when that callee is inlined; volatility alone is
-not sufficient to preserve an unqualified indirect store. Writes through the
-address are visible to catch/deferred cleanup even if the callee raises
-instead of returning. Earlier protected assignments do not create a stale
-snapshot. This is a supported GCC/Clang implementation guarantee, with the
-ISO C 6.7.3p6 caveat for unqualified callee access to the volatile object;
-see [recovery storage](error-handling.md#setjmp-sensitive-localparameter-spills)
-for the barrier, opaque-raise and LTO assumptions. It changes neither the
-aggregate limitation above nor untracked raw-alias/asynchronous mutation rules.
+- A call that mutates an aggregate and then exits nonlocally commits no partial
+  bytes.
+- Mutation through an untracked raw alias, or asynchronously from C, is outside
+  the guarantee.
+- Storage reached only through a pointer local is never spilled or restored:
+  the walk stops at the first pointer, so reads after recovery observe current
+  memory. Code that lets C commit state during a protected region (for example a
+  native registrar writing a wait cell) therefore holds that cell as automatic
+  storage plus a pointer local instead of rolling its bytes back.
+- Address escape alone does not exempt a non-volatile automatic object from
+  ISO C's `setjmp` rule.
+- An `automatic_array_borrow` declaration preserves only its pointer value
+  under the scalar rules (an ordinary scalar spill, or the volatile home when
+  its mutable address is exposed); its backing bytes are never snapshotted.
+  Writes through the pointer stay in the live backing, and capturing the
+  pointer does not extend the backing's lifetime.
+- Foreign function bodies have no spill protocol, because they cannot
+  establish a Titan recovery boundary.
+
+**Known limitation.** A normally returning **ordinary Titan** callee does not
+commit a mutable aggregate out-argument to its byte spill. If that aggregate is
+already spill-tracked because of another protected assignment, recovery can
+restore the pre-call bytes and lose the callee's completed write. The
+mutable-foreign-call commit rule does not extend to ordinary Titan callees, and
+the scalar volatile home does not change this.
 
 ## C operator traits
 
@@ -557,7 +657,7 @@ the shared checked numeric conversion to `lua_Integer`.
 
 ## Preprocessor raw arguments
 
-The hand-written preprocessor now maintains raw and prescanned macro arguments
+The hand-written preprocessor maintains raw and prescanned macro arguments
 independently:
 
 * ordinary parameter occurrences use a separately expanded copy;
@@ -574,8 +674,8 @@ preserves whitespace before the invocation but not whitespace consumed inside
 an empty function-like call.
 
 The C99 preprocessing grammar canonicalizes digraphs as one token; the raw
-spelling remains solely in the side metadata. This avoids the earlier
-raw-plus-canonical duplicate-token bug.
+spelling lives only in the side metadata, so a digraph is never duplicated as
+raw and canonical tokens.
 
 ## Typed object macros and field projections
 
@@ -595,8 +695,9 @@ tokens. The generated compiler therefore performs the authoritative expansion
 under the translation unit's real header state.
 
 A separate object-macro form contains only a dotted identifier replacement,
-such as `implementation.member`. `cdriver` classifies every final object macro
-after the combined module header has been preprocessed. Field lookup uses the
+such as `implementation.member`. `cdefines.classify_expanded_field_macro`
+classifies every final object macro after the combined module header has been
+preprocessed and stores the result in `TypeList.field_macro_classes`. Field lookup uses the
 saved pure path or unsupported marker and expanded spelling. A later header
 redefinition or `#undef` has already affected this final classification, so it
 cannot leave a stale projection at an earlier initializer. Empty object macros
@@ -634,8 +735,10 @@ object once and applies `__builtin_types_compatible_p` to its pointer type and
 each eligible primitive pointer type, preserving pointee qualification.
 
 The query emits a used, byte-aligned 12-byte constant payload in `.titan.cprobe`
-(ELF/COFF) or `__DATA,__titancprobe` (Mach-O): eight magic bytes, version, payload
-length, match count, and carrier identifier sum. This is an object-producing
+(ELF/COFF) or `__DATA,__titancprobe` (Mach-O): the eight magic bytes
+`TITENUM\0`, version 1, payload length 12, match count, and carrier identifier
+sum (`render_enum_selection_source` and `decode_enum_selection_object` in
+`cprobe.lua`). This is an object-producing
 compile; it does not link or execute target code. The shared bounded object
 reader locates one initialized, uncompressed, relocation-free section and
 rejects objects larger than 16 MiB before reading them. Invalid or missing
@@ -666,8 +769,8 @@ range validation remains unchanged; `__int128` is not a candidate.
 | `titan-compiler/cpreamble.lua` | fixed generated/probe prefix around the module C environment |
 | `titan-compiler/csemantics.lua` | target profile interpretation, C categories/promotions/result types |
 | `titan-compiler/cprobe.lua` | session/workspace/header contexts, baselines, candidate probes and caches |
-| `titan-compiler/checker.lua` | source eligibility, contextual adjustments, lazy macro-field projection, traits, completeness and mutation analysis |
-| `titan-compiler/coder.lua` | ordered lowering, public macro spelling, and volatile aggregate spills |
+| `titan-compiler/checker/` (`c_types.lua`, `type_syntax.lua`, `variables.lua`, `expressions.lua`) | source eligibility, contextual adjustments, allocation plans, lazy macro-field projection, traits, completeness and mutation analysis |
+| `titan-compiler/coder/` (`calls.lua`, `expressions.lua`, `statements.lua`, `flow.lua`, `numerics.lua`) | ordered lowering, public macro spelling, automatic storage, and volatile aggregate spills |
 
 ## Tests
 

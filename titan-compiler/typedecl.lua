@@ -1,6 +1,7 @@
 -- Create a constructor for each type
 -- See also: ast.lua
 
+-- Implementation notes: doc/implementation/ast-typedecl.md#typedecllua-constructor-generation
 return function(prefix, types)
     local constructors = {}
     for _, conss in pairs(types) do

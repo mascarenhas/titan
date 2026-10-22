@@ -65,6 +65,7 @@ end
 
 -- All offsets are zero-based UTF-8 byte boundaries; the host owns UTF-16 conversion.
 -- Multiword C primitive replacement covers the complete written primitive leaf.
+-- Implementation notes: doc/implementation/completion.md#disposable-source-and-coordinates
 function completion.prepare(filename, text, caret)
     if type(filename)~='string' or type(text)~='string' or math.type(caret)~='integer'
        or caret<0 or caret>#text then return nil,'invalid completion input' end
@@ -268,6 +269,7 @@ local function callable(member,bound)
 end
 completion.callable=callable
 
+-- Implementation notes: doc/implementation/completion.md#detached-saved-descriptors-and-private-preparation
 -- Saved indexing calls this while it owns a compatible declared interface.
 -- Results contain no AST edges, type tables, or process-registry dependencies.
 function completion.describe(entry)

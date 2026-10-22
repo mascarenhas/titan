@@ -1,121 +1,105 @@
 # Values and the garbage collector
 
-This chapter describes how Titan values are represented in the generated
-C — every Titan type's C type, records in full detail, the module
-userdata — and the discipline the code generator follows so that all of
-those values stay safe under Lua's garbage collector. The structure of a
-generated translation unit and the calling convention are covered in the
-[code generator overview](codegen-overview.md); construct-by-construct
-translations are in [code generator: constructs](codegen-constructs.md);
-the Lua-side boundary checks in
-[Lua interop internals](lua-interop-internals.md). Array-specific ownership,
-boxing, length, and resize invariants are centralized in
-[Dense Arrays](dense-arrays.md).
+This chapter describes how Titan values are represented in generated C (every
+Titan type's C type, records, unions, Interface wrappers, and the module
+userdata) and the rules the code generator follows so that those values stay
+safe under Lua's garbage collector. It is the canonical home for rooting,
+stack-slot, polling, and write-barrier rules. The translation-unit structure and
+calling convention are in the [code generator overview](codegen-overview.md);
+construct-by-construct translations are in
+[code generator: constructs](codegen-constructs.md); Lua-side boundary checks
+are in [Lua interop internals](lua-interop-internals.md); Array ownership,
+boxing, length, and resize invariants are in [Dense Arrays](dense-arrays.md).
 
 ## Background: TValue, the Lua stack, and the GC
 
-A **`TValue`** is Lua's boxed value: a small struct holding a value
-union (integer, float, `GCObject*`, …) plus a type tag. Collectable
-objects — strings (`TString`), tables (`Table`), userdata (`Udata`), C
-closures (`CClosure`) — live on the heap, reached through `GCObject*`
-pointers inside `TValue`s. The **Lua stack** is an array of `TValue`
-slots owned by a `lua_State`; `L->top.p` points one past the last live
-slot, and the collector treats every slot below the top as a root. (In
-5.5 a stack slot is an `StkId`; `s2v(slot)` views it as a `TValue*`.)
+A **`TValue`** is Lua's boxed value: a value union (integer, float,
+`GCObject*`, …) plus a type tag. Collectable objects (`TString`, `Table`,
+`Udata`, `CClosure`) live on the heap, reached through `GCObject*` pointers
+inside `TValue`s. The **Lua stack** is an array of slots owned by a
+`lua_State`; `L->top.p` points one past the last live slot, and the collector
+treats every slot below the top as a root. In 5.5 a stack slot is a `StkId`;
+`s2v(slot)` views it as a `TValue *`.
 
 Lua 5.5's collector is **non-moving**: collection never changes the address of
-a string, table, userdata, closure, or other heap object. The Lua stack is a
-separate resizable array. Stack growth or shrinkage may relocate its slots, so a
-raw `StkId`/`TValue *` into that array cannot survive such an operation; Lua
-copies the rooted values to the new stack, however, and their referenced heap
-addresses remain stable. Generated code therefore distinguishes reachability
-roots from stack-position rebasing.
+a heap object. The Lua stack is a separate resizable array. Stack growth or
+shrinkage may relocate its slots, so a raw `StkId`/`TValue *` into that array
+cannot survive such an operation, although the values it held and the heap
+addresses they reference survive. Generated code therefore distinguishes
+reachability roots from stack-position rebasing.
 
-The standalone `lua` 5.5 interpreter switches the collector to
-**generational** mode at startup; freshly created states — including
-Titan standalone executables — run the incremental collector, and
-generated code must be correct for both. Generational mode runs
-frequent *minor* collections that trace only the stack, other roots,
-and old objects explicitly marked as modified — which is what *write
-barriers* are for. Two consequences drive this chapter: every fresh
-allocation must acquire its own traced root immediately (before another
-allocation or poll), and an unbarriered store of a collectable value into an
-older object is not a rare race but a reliably reproducible use-after-free.
-The [GC discipline](#gc-discipline-the-invariants) and barrier discussion below
-specify the current rules for every generated owner.
+The standalone `lua` interpreter switches the collector to **generational**
+mode at startup; other states, including Titan standalone executables, run the
+incremental collector. Generated code must be correct for both. Minor
+generational collections trace only roots and old objects explicitly marked as
+modified, which is what write barriers are for. Two consequences drive this
+chapter: every fresh allocation must acquire its own traced root immediately
+(before another allocation or poll), and an unbarriered store of a collectable
+value into an older object is a reliably reproducible use-after-free.
 
 ## The C type of every Titan value
 
 ### The `ctype` map
 
-`ctype` in `coder.lua` fixes the C type of each Titan type; it is used
-for locals, parameters, return values and temporaries alike:
+`ctype` (`titan-compiler/coder/values.lua`, delegating to `coder._raw_ctype`)
+fixes the C type of each Titan type for locals, parameters, return values and
+temporaries alike:
 
 | Titan type | C type | Notes |
 | --- | --- | --- |
 | `integer` | `lua_Integer` | unboxed |
 | `float` | `lua_Number` | unboxed |
-| `boolean` | `int` | 0/1 — 5.5 booleans carry no payload, truth lives in the tag |
-| `nil` | `int` | always 0 (`getslot` for nil yields the constant `0`) |
+| `boolean` | `int` | 0/1; 5.5 booleans carry no payload, truth lives in the tag |
+| `nil` | `int` | always 0 |
 | `string` | `TString*` | raw pointer to the collectable string object |
-| `{T}` (array) | `Table*` | internal backing Table; the Lua-visible value is its canonical proxy Udata |
-| `{K:V}` (map) | `Table*` | ordinary Lua table in both domains |
+| `{T}` (Array) | `Table*` | internal backing Table; the Lua-visible value is its canonical proxy Udata |
+| `{K:V}` (Map) | `Table*` | ordinary Lua table in both domains |
 | `value` | `TValue` | a full boxed Lua value, held **by value** |
-| function type (`function (P..., ...: I): (R..., ...: O)`) | `TValue` | boxed callable value; input/output tails change the callable type and native entry ABI, not the boxed representation |
-| record or union type (`Type.Nominal`) | `Udata*` | the nominal value *is* this userdata (below) |
-| `T?` (option) | `TValue`, or native presence/value struct for C numeric bases | nil or the exact payload; see [nominal storage](nominal-storage.md) |
-| foreign pointer except Lua `Udata *` | per `foreignctype` | e.g. `void*`, `char*`; ordinary borrowed pointers are not GC objects ([FFI internals](ffi-internals.md)) |
-| Lua-internal `Udata *` | `Udata *` | raw pointer to the full userdata object; GC-bearing |
+| function type | `TValue` | boxed callable; input/output tails change the callable type and native entry ABI, not the boxed representation |
+| record, union, or Interface (`Type.Nominal`) | `Udata*` | the nominal value *is* this userdata |
+| `T?` | `TValue`, or a native presence/value struct for C numeric bases | see [nominal storage](nominal-storage.md#exact-native-options-and-boxing) |
+| `owned` C storage | its rendered C type | GC-bearing userdata |
+| other foreign C types | the C type itself | ordinary pointers are borrowed and not GC objects ([FFI internals](ffi-internals.md)) |
+| Lua-internal `Udata *` | `Udata *` | raw pointer to a full userdata; GC-bearing |
 | Lua-internal `TValue` | `TValue` | boxed value copied by value; GC-bearing |
 
-This is the central performance fact of the backend: Titan locals,
-parameters and return values are ordinary C variables in their native,
-unboxed form. The Lua stack is never the transport for values between
-Titan functions — it is used only as a GC anchor, as described under
-[GC discipline](#gc-discipline-the-invariants). The dynamic types
-`value`, function types and options other than C numeric options are carried as `TValue` *by value*
-(struct copy), still without touching the Lua stack except when the
-function-value generic call path intentionally invokes Lua's call
-machinery. `initval` gives each type its zero value — `{ {0}, 0 }` (a nil
-`TValue`) for boxed values, an absent native carrier for C numeric options, and `0` for scalar/pointer temporaries — so a declared-but-unset temporary is never garbage (it
-initializes `newtmp` temporaries and the Lua entry wrappers' argument
-holders; plain locals are declared bare and assigned immediately).
+This is the central performance fact of the backend: Titan locals, parameters
+and return values are ordinary C variables in their native, unboxed form. The
+Lua stack is not the transport for values between Titan functions; it is used
+only as a GC anchor (see [GC discipline](#gc-discipline-the-invariants)) and as
+the VM calling convention on the generic call paths. `initval` gives each type
+its zero value: `{ {0}, 0 }` (a nil `TValue`) for boxed values, `{0}` for
+native numeric Options (absent) and C structs/unions, and `0` otherwise, so a
+declared-but-unset temporary is never garbage.
 
-Flexible input and output runs use the same element-specific
-`TitanVargInteger`/`TitanVargString`/… descriptor structs: a byte-sized actual
-count and a typed `args` pointer. The descriptor itself lives in generated C
-storage and is not traced. Its C backing is never a root either. A native input
-run borrows each element's existing provenance: a semantic variable/container
-home, an initial allocation root, a prior native-result root, or an actual Lua
-VM argument slot. The native call creates no element roots. Every live
-GC-bearing native output run is copied into a caller-owned parallel traced range
-immediately after return and rebasing, until its sink consumes it. A conversion
-adds a separate destination range only for freshly allocated elements.
+Flexible input and output runs use the element-specific `TitanVargInteger`,
+`TitanVargString`, … descriptors in `titan-runtime/titan.h`: an `lu_byte n_args`
+count and a typed `args` pointer (the input start offset travels as a separate
+`int _start` parameter). The descriptor and its C backing are generated C
+storage and are never roots; see
+[Calls](#calls-c-only-inputs-immediate-result-roots-and-vm-transport) for how
+their elements stay alive.
 
 ### Conversion helpers
 
-Three helper families in `coder.lua` mediate between C variables and
-`TValue` slots; all generated code goes through them:
+Three helper families mediate between C variables and `TValue` slots:
 
-* `getslot(typ, dst, src)` reads a `TValue*` into a C variable —
-  `ivalue`, `fltvalue`, `ttistrue`, `tsvalue`, `hvalue`, `uvalue` (for
-  records, unions, and non-nil `Udata *`), or a struct copy `*($SRC)` for
-  `value`/options. A nil slot becomes NULL for `Udata *`.
-* `setslot(typ, dst, src)` writes a C value into a `TValue*` —
-  `setivalue`, `setfltvalue`, `titan_setbvalue` (a `titan.h` macro; 5.5
-  removed `setbvalue` along with the boolean payload), `setsvalue`,
-  `sethvalue`, `setuvalue` (for nominal values), `setobj2t` for
-  `value`/options. For `Udata *`, it emits `setuvalue` for a non-NULL pointer
-  and nil for NULL rather than boxing the pointer as lightuserdata.
-* `setboxed(ctx, typ, dst, src)` and the corresponding unbox/mixed-read
-  helpers cross a representation domain. Records and unions already are their
-  Lua-visible Udata, but Arrays are not: boxing maps an internal backing
-  `Table*` to its qualifier-exact canonical proxy Udata, while unboxing
-  validates the target qualifier and recovers the backing. Map keys/values,
-  `value`, generic calls, and Lua
-  results use the boxed domain. Typed slots and exact calls retain the
-  internal domain. This split replaces the old representation-blind
-  `setwrapped`/`copyslotwrapped` model; see
+* `getslot(typ, dst, src)` (`coder/names.lua`) reads a `TValue *` into a C
+  variable: `ivalue`, `fltvalue`, `ttistrue`, `tsvalue`, `hvalue`, `uvalue`
+  (records, unions, non-nil `Udata *`), or a struct copy for `value`/Options/
+  functions. A nil slot becomes NULL for `Udata *`.
+* `setslot(typ, dst, src)` (`coder/values.lua`) writes a C value into a
+  `TValue *`: `setivalue`, `setfltvalue`, `titan_setbvalue` (a `titan.h` macro;
+  5.5 removed `setbvalue`), `setsvalue`, `sethvalue`, `setuvalue`, or
+  `setobj2t`. For `Udata *` it emits `setuvalue` for a non-NULL pointer and nil
+  for NULL, never a lightuserdata.
+* `setboxed` and the matching unbox/mixed-read helpers (`coder/values.lua`)
+  cross the representation domain. Records and unions already are their
+  Lua-visible Udata, but an Array is not: boxing maps the internal backing
+  `Table *` to its qualifier-exact canonical proxy (`titan_array_require_proxy`)
+  and unboxing validates the target qualifier and recovers the backing. Map
+  keys/values, `value`, generic calls, and Lua results use the boxed domain;
+  typed slots and exact calls use the internal domain. See
   [Dense Arrays](dense-arrays.md#internal-and-boxed-representations).
 
 C numeric slots are not handled by unchecked casts hidden inside these
@@ -126,191 +110,149 @@ shared boxed predicate, native conversions use the checked numeric cast, and
 `setivalue`/`setfltvalue`. The cast and its non-raising `is` twin consume the
 same target-profile predicate.
 
-These representation helpers do not decide whether a conversion is legal.
-The checker attaches an `AdjustmentPlan`, `GuardPlan`,
-`DynamicCoercionPlan`, or `WrittenCastPlan`; the coder first validates that
-plan and then renders it into native-local, `TValue`-destination, or mixed
-forms. Strict `value` projections, Array/Map reads, and branded generic
-function calls therefore share one tag-check family, while genuine-Lua
-entries/writes and written casts share the separate dynamic family. See
-[Type relations and boundary plans](type-relations-and-boundaries.md).
+These helpers do not decide whether a conversion is legal. The checker attaches
+an `AdjustmentPlan`, `GuardPlan`, `DynamicCoercionPlan`, or `WrittenCastPlan`;
+the coder validates that plan and renders it into native-local,
+`TValue`-destination, or mixed forms. Strict `value` projections, Array/Map
+reads, and branded generic function calls share one tag-check family, while
+genuine-Lua entries/writes and written casts share the separate dynamic family.
+See [Type relations and boundary plans](type-relations-and-boundaries.md).
 
-`types.is_gc` in `types.lua` decides which types the collector can care
-about, and therefore which values require a traced owner for any lifetime that
-crosses allocation: string, value, function, array, map, record/union nominal,
-Interface wrapper, C `TValue`, Lua-internal `Udata *`, owned C userdata, and
-`T?` when `T` is itself GC-able. A borrowed native C copy does not need a
-second root when its existing owner remains live. Integers, floats, booleans,
-nil, and ordinary foreign pointers need none.
+`types.is_gc` (`titan-compiler/types.lua`) decides which types need a traced
+owner for any lifetime that crosses allocation: string, `value`, generic
+parameter, function, Array, Map, record and nominal (record, union, or
+Interface) values, C `TValue`, Lua-internal `Udata *`, `owned` C storage, and
+`T?` when `T` is GC-bearing. A borrowed native C copy does not need a second
+root while its existing owner remains live. Integers, floats, booleans, nil,
+and ordinary foreign pointers need none.
 
 ### Array proxies and function closures
 
-An Array has two simultaneously live objects. Titan's native `Table *` points
-at the backing Table; the backing key 0 points to the exact mutable or const
-canonical proxy Udata. The proxy has exactly two traced user values: `uv[0]`
-points back to the backing Table; mutable `uv[1]` holds the module-cached
-genuine-Lua writer closure, while const `uv[1]` is nil. The mutable closure in
-turn traces its owning module Udata. `titan_array_new` and
-`titan_const_array_new` use one caller-provided traced result slot: it first
-roots the backing, then roots the proxy after the proxy already points back to
-that backing, and finally leaves the completed backing/proxy cycle there. They
-install the metatable and two user values directly with Lua-internal stores and
-barriers, never through the public stack API. No user-value edge is untraced.
+An Array is two stock-Lua objects in a strong cycle: a backing `Table` whose
+array slot 0 holds the canonical proxy `Udata`, and the proxy whose user value
+0 holds the backing (user value 1 holds the mutable writer closure, or nil for
+a const Array). `titan_array_new` and `titan_const_array_new` build the cycle
+with direct Lua-internal stores and barriers into one caller-provided traced
+result slot, never through the public stack API. The complete protocol is in
+[Dense Arrays](dense-arrays.md#representation-contract).
 
-A canonical Titan **source** function is a `CClosure`. Its header is `_mod`,
-canonical function-type tag, native-entry pointer, and opaque closure brand (`TITAN_BRAND`);
-captures begin at upvalue 4; the final upvalue is the declaration's strict
-light C function. The last slot does not move capture indices. Exact dispatch
-first compares the canonical static tag and then trusts this private layout
-without a registry lookup. After an exact-tag mismatch, generic dispatch
-compares the fixed 64-bit brand sentinel (`TITAN_BRAND`) in upvalue 3. Both require the private
-minimum shape and otherwise read trusted raw pointer bits without `ttis*`
-checks. With five structural source upvalues, at most 250 captures fit under
-Lua's 255-upvalue limit.
-
-A realized callable-adjustment wrapper is also a CClosure, but adds one traced
-link. For a source with `n` upvalues it copies header/captures through `n-2`,
-replaces tag/native with target B's tag/adapter, stores the immediate source
-closure at `n-1`, and stores B's consumer-local strict relay at `n`.
-`CClosure.f` remains the source coercive entry. Wrapper chains copy older
-private links and append the new immediate source, so every adapter receives
-the correct `_fn`. Eligibility checks only a non-null CClosure,
-`5 <= n < MAXUPVAL`, the exact lightuserdata tag in slot 1, and the
-lightuserdata brand in slot 3; the rest of the private branded layout is
-trusted. The final closure is allocated with `luaF_newCclosure`, initialized
-fresh-white with `setobj2n`/`setpvalue`/`setclCvalue`/`setfvalue`, and published
-directly to its own traced result slot. If `n == MAXUPVAL`, construction
-preserves the already rooted operand for generic fallback. See
-[Closure adjustment wrappers](closure-adjustment-wrappers.md#wrapper-layout).
+A Titan function value is a branded `CClosure` whose header holds the module
+Udata, the canonical function-type tag, the native-entry pointer, and the
+closure brand; captures follow and the strict entry is the final upvalue. The
+layout and dispatch are in
+[the overview](codegen-overview.md#closures-and-captured-variables); realized
+callable-adjustment wrappers add one traced link to the immediate source
+closure ([wrapper layout](closure-adjustment-wrappers.md#wrapper-layout)).
+For the GC, closures are always filled while fresh-white and published
+immediately; see [rule 3](#3-anchor-fresh-objects-before-the-next-allocation).
 
 ## Records: a single tagged Udata
 
 A Titan record value is one Lua full userdata. Its metatable supplies nominal
 identity; its dense uservalues trace only GC-bearing fields, and its raw C
 payload holds native members. For `Point { x: float, y: float, name: string }`,
-there are two native number members and one traced string slot. Allocation uses
-`luaS_newudata(L, sizeof(PointPayload), 1)`, immediately roots the userdata, and
-then initializes the fields. Native field access uses a generated C member;
-`name` uses UV index 0 with the ordinary back barrier on writes.
+there are two native number members and one traced string slot. The record
+constructor (`coderecord`, `coder/expressions.lua`) allocates with
+`luaS_newudata(L, sizeof(<payload>), <nuv>)`, sets the metatable, and roots the
+userdata in its stack slot before any field expression runs. Native field
+access uses a generated C member; `name` uses UV index 0 with the ordinary back
+barrier on writes.
 
-Logical `Type.Field.index` values remain declaration-order indices. Public native
-members form an actual first prefix subobject, followed by private native members;
-public and private GC fields occupy independently mapped dense UV slots. Exported
-layout metadata supplies public mappings without revealing private C declarations.
-`Type.Record.nfields` remains the total logical field count, not the UV count.
-See [Native nominal storage](nominal-storage.md) for allocation, projections,
-union layouts, fresh tails and binary reconstruction.
+Logical `Type.Field.index` values remain declaration-order indices, and
+`Type.Record.nfields` is the total logical field count, not the UV count. The
+public prefix, private layout, allocation, projections, union layouts, fresh
+tails and binary reconstruction are in
+[Native nominal storage](nominal-storage.md).
 
 ### Type identity: the metatable pointer
 
-A record's type identity is its **metatable pointer**. Every full
-userdata has a `metatable` field in its header, and each record type has
-exactly one metatable (allocated with `luaL_newmetatable`, per Lua
-state), so two userdata carry the same record type exactly when their
-`metatable` fields are equal. There is no separate tag word, no C static,
-and no per-type registry tag entry: the identity already lives in the
-udata header that Lua maintains anyway.
+A nominal type's identity is its **metatable pointer**. Every full userdata has
+a `metatable` field in its header, and each record, union, or Interface type
+has exactly one metatable per Lua state, so two userdata carry the same type
+exactly when their `metatable` fields are equal. There is no tag word, no C
+static, and no per-type registry tag. Reading `_ud->metatable` is in bounds for
+*any* full userdata, including payload-less module values and foreign-library
+userdata, so the check is total; a tag stored in `getudatamem` would read past
+the end of a zero-payload userdata.
 
-This deliberately replaced an earlier scheme that stored a unique
-`void*` "tag" in the udata's raw payload (`luaS_newudata(L, sizeof(void*),
-N)` plus `*((void**)getudatamem(_ud)) = …`) and compared that tag word.
-The problem was **safety**: the check reads `getudatamem(_ud)` only after
-`ttisfulluserdata` passes, but a full userdata with *no* custom storage
-section — a Titan module value (a len-0 userdata), or a foreign-library
-userdata — passes `ttisfulluserdata` while `getudatamem` points *past*
-the object, so reading the tag word is out-of-bounds. The metatable
-pointer is always in bounds: every full userdata has the field, whether
-or not it has a payload, so the check is total.
-
-The metatable, being a per-Lua-state heap object, cannot live in a C
-static: it is cached in a `_mod` user value (`type2metatable` allocates
-the slot lazily; `_init` fills it with `luaL_getmetatable`), and the
-type check reads it per-state from there. In the Lua registry, the
-canonical metatable is registered under its conventional name, mapped by
-its fully qualified type name in the global `TITAN_METATABLES_KEY` table,
-and indexed in reverse by pointer for error messages (with `$TYPE` the fully
+The metatable, being a per-state heap object, cannot live in a C static: it is
+cached in a `_mod` user value (`type2metatable`, `coder/names.lua`, allocates
+the slot lazily; `_init` fills it), and the type check reads it from there.
+`coderecorddec` and its union/Interface counterparts in `coder/module.lua`
+register each metatable in three registry places (with `$TYPE` the fully
 qualified type name):
 
 | Registry key | Value | Used for |
 | --- | --- | --- |
-| `"Titan record $TYPE metatable"` | the metatable (`luaL_newmetatable`) | wiring `_mod` user values; `__metatable` is protected with the string `"Titan record $TYPE"` |
-| `TITAN_METATABLES_KEY` | table mapping `$TYPE` -> metatable | global discovery of nominal metatables across modules |
-| the metatable pointer itself (`lua_rawsetp`) | the FQTN string | the *reverse* map, metatable → name, for error messages |
+| `"Titan record $TYPE metatable"` (`union`/`interface` likewise) | the metatable (`luaL_newmetatable`) | wiring `_mod` user values; `__metatable` is protected with the string `"Titan record $TYPE"` |
+| `TITAN_METATABLES_KEY` | table mapping `$TYPE` to metatable | global discovery of nominal metatables across modules |
+| the metatable pointer itself (`lua_rawsetp`) | the FQTN string | the *reverse* map, metatable to name, for error messages |
 
-In addition, each record metatable embeds discoverable runtime type metadata
-using lightuserdata keys:
-* `TITAN_BRAND`: integer tag `TITAN_RECORD` (3), identifying the metatable kind;
-* `TITAN_MT_TYPE`: serialized type descriptor string (`Record(...)`);
-* `TITAN_MT_MEMBERMAP`: member map table holding field indices and method closures;
-* `TITAN_MT_STATICS`: table holding constructors (`Point.new`) and static methods.
+Each nominal metatable also carries runtime metadata under lightuserdata keys
+defined in `titan-runtime/titan/ffi.h`: `TITAN_BRAND` maps to the kind integer
+(`TITAN_RECORD` 3, `TITAN_UNION` 4, `TITAN_INTERFACE` 5; Arrays use 1/2 and
+owned C storage 6), `TITAN_MT_TYPE` to the serialized type descriptor,
+`TITAN_MT_MEMBERMAP` to the member map, `TITAN_MT_STATICS` to the static
+namespace, and `TITAN_MT_MOD` to the declaring module. Unions add
+`TITAN_MT_PAYLOAD` (see [nominal storage](nominal-storage.md)); reflection and
+generated codecs use `TITAN_MT_PROJECT`, `TITAN_MT_CONSTRUCT`,
+`TITAN_MT_PUBLIC`, and `TITAN_MT_CODEC`.
+
+Metatables that Titan creates on first use and may need to retry are built
+off-registry: the shared Array proxy pair (`titan-runtime/titan.c`,
+`TITAN_ARRAY_METATABLE_PAIR`), generated owned-C metatables
+(`titan-compiler/coder/generate.lua`), and the private `titan.coroutine` owner
+metatable (`titan/coroutine.titan`). Each is fully initialized before it is
+stored in the registry, and a pre-existing non-table entry is an error. Do not
+initialize conditionally on `luaL_newmetatable`'s return value: that call
+publishes a minimally initialized entry first, so an allocation error during
+later setup would leave a partial metatable that a retry trusts. Generated
+record, union and Interface metatables call `luaL_newmetatable`
+unconditionally during the module's first `_init`, so they do not have this
+skip-on-retry hazard; module initialization as a whole is still not
+transactional.
 
 ### Wrap and unwrap at the boundary
 
-Now that a record *is* its userdata, the boundary has nothing to swap:
-Titan and Lua hold the same object. `setboxed` for a record hands Lua the
-udata directly (for `T?` over a record,
-after a nil check). Coming back, the nominal case of `checkandget`
-compares the udata's metatable against the expected record's metatable
-(read per-Lua-state from the `_mod` user value caching it) and uses the
-udata as the value:
+A record *is* its userdata, so the boundary has nothing to swap: Titan and Lua
+hold the same object. `setboxed` for a record hands Lua the udata directly
+(after a nil check for `T?`). Coming back, the nominal case of `checkandget`
+(`coder/values.lua`) compares the udata's metatable against the expected
+metatable cached in `_mod` (`coder._nominal_metatable_expr`) and uses the udata
+as the value:
 
 ```c
 if (TITAN_LIKELY(ttisfulluserdata($EXP))) {
   Udata* _ud = uvalue($EXP);
-  if (TITAN_LIKELY(_ud->metatable == hvalue(&_mod->uv[META].uv))) {
+  if (TITAN_LIKELY(_ud->metatable == $MT)) {
     $VAR = _ud;
   } else {
-    TValue key, name;
-    setpvalue(&key, (void *)_ud->metatable);
-    lu_byte tag = luaH_get(hvalue(&G(L)->l_registry), &key, &name);
-    if (tagisempty(tag) || !ttisstring(&name)) {
-        /* not a named Titan nominal: report static "userdata" */ $THROW...
-    } else {
-        /* another Titan nominal: use getstr(tsvalue(&name)) */ $THROW...
-    }
+    /* luaH_get(hvalue(&G(L)->l_registry), metatable pointer) for the found name */
+    $THROWUNKNOWN or $THROWNAMED
   }
-} else { /* not even a userdata */ $THROW... }
+} else { $THROWPRIM }
 ```
 
-Reading `_ud->metatable` is safe for *any* full userdata — a Titan
-record, a Titan module, or a foreign-library userdata — because the
-field is part of the udata header and exists regardless of payload size;
-the old scheme's `getudatamem` read was out-of-bounds for a payload-less
-userdata. All three failure arms raise the run-time error
-`file:line:col: type error, expected %s but found %s`, with the
-expected name printed as the FQTN and the found name taken from the
-reverse metatable→name registry entry when the value is some *other*
-Titan nominal. The lookup uses `luaH_get` directly on `G(L)->l_registry`, so it
-does not push or pop Lua stack slots. A userdata without a reverse entry reports
-the static name `userdata`; it neither consults `__name` nor invokes
-`__tostring`. The spec
-suite asserts both
-`expected test.Rec but found test.Point` and
-`expected test.Rec but found number` (`spec/coder/coder_spec.lua`), and proves
-that an unknown userdata's `__tostring` is not called.
-
-### Why one object
-
-A record needs to be two things at once and a single full userdata
-serves both in O(1). **Lua needs** a value with identity, a metatable
-and metamethod dispatch — a full userdata; the metatable's
-`__index`/`__newindex` serve field access and methods from Lua
-([Lua interop internals](lua-interop-internals.md)), and the spec
-verifies `type(p) == "userdata"` and that two instances share a
-metatable. **Titan needs** direct native-member and traced-slot access and
-a GC object with barrier support for mutable traced fields. The `Udata` payload
-and its `UValue uv[]` array supply those two storage classes. `setboxed`/`checkandget`
-(Titan↔Lua) need no wrap or unwrap at all: the value crossing the
-boundary is the record itself, leaving only the one-pointer metatable
-compare on the way in.
+All three failure arms raise `file:line:col: type error, expected %s but found
+%s`, with the expected name printed as the FQTN and the found name taken from
+the reverse metatable-to-name registry entry when the value is some *other*
+Titan nominal, or from `lua_typename` for a non-userdata. The lookup uses
+`luaH_get` directly on `G(L)->l_registry`, so it does not push or pop Lua stack
+slots. A userdata without a reverse entry reports the static name `userdata`; it
+neither consults `__name` nor invokes `__tostring`. `spec/coder/coder_spec.lua`
+asserts both `expected test.Rec but found test.Point` and
+`expected test.Rec but found number`, and proves that an unknown userdata's
+`__tostring` is not called. Interface targets use a separate branch that can
+also accept a compiler-witnessed metatable entry; see
+[Interfaces](interfaces.md).
 
 ## Unions: native tag and independently stored parts
 
 A Titan union is one `Udata *`, with a distinct per-union metatable as its
 nominal identity. Each variant has its own generated payload struct and dense
 traced-slot count. Every payload starts with an actual common tag-header
-subobject containing the absolute variant tag. Even an empty variant has this
-native header, but needs no UV slots.
+subobject containing the absolute variant tag, so even an empty variant needs
+no UV slots.
 
 Parts use the same physical classification as record fields. Non-GC scalars,
 eligible fixed aggregates and arrays, and fresh const tails occupy native
@@ -320,127 +262,87 @@ functions remain ineligible, while C function pointers have native scalar
 storage. Storage eligibility is separate from `has_tvalue_representation`;
 embedding an aggregate does not make it generally boxable.
 
-Construction roots the final userdata before initializing its stored fields,
-and traced stores apply `luaC_barrierback`. `case` materializes the union once,
-reads the common tag header, and projects each checked binding through the
-selected variant's storage plan. Logical 1-based part indices are independent
-of native member names and UV indices. No tag or part is exposed as an ordinary
-Lua member. See [Native nominal storage](nominal-storage.md).
-
-Boxing into `value` keeps the same
-userdata, and unboxing compares the exact union metatable just as a record
-check compares the exact record metatable. The reverse metatable map includes
-the protected `"Titan union <fqtn>"` identity for diagnostics.
+Construction (`coder._codeunioninit`) roots the final userdata before
+initializing its stored fields, and traced stores apply `luaC_barrierback`.
+`case` materializes the union once, reads the common tag header, and projects
+each checked binding through the selected variant's storage plan. Logical
+1-based part indices are independent of native member names and UV indices. No
+tag or part is exposed as an ordinary Lua member, and union `__newindex` always
+raises. Boxing into `value` keeps the same userdata, and unboxing compares the
+exact union metatable just as a record check does.
 
 ## Interface wrappers
 
 An Interface value is a full `Udata` whose metatable is the exact nominal
-Interface identity. Its opaque payload is a declaration-order array of
-`TitanInterfaceMethod` function-pointer storage, while its `2 + field_count`
-traced user values retain the concrete owner's module Udata, the concrete
-record/union receiver, and target-typed field snapshots in Interface field
-order. The payload is copied from a nonempty pair array in the emitting module's
-per-state native payload and is
-not a GC graph; every collectable user-value store needs an ordinary Udata
-backward barrier. Field-only wrappers have zero payload bytes and no pair-array
-copy.
+Interface identity. Its payload is a declaration-order array of
+`TitanInterfaceMethod` function pointers, copied from a pair array in the
+emitting module's native payload, and it has `2 + field_count` traced user
+values: the emitting module's Udata, the concrete receiver, and
+target-typed field snapshots. The payload holds no GC graph; every collectable
+user-value store needs an ordinary Udata back barrier. Field-only wrappers have
+zero payload bytes. The complete layout and dispatch contract is in
+[Interfaces](interfaces.md#wrapper-representation).
 
 For every pair whose static wrapper construction is emitted, initialization
 may also store a one-upvalue witness closure in the concrete metatable under
 the target Interface metatable object. Both key and closure are traced table
 entries; the closure retains the emitting module, whose uservalues retain any
-imported concrete owner and cached metatables. Canonical nominal metatables are
-also owned by the registry. This is ordinary stock-Lua reachability, not a new
-root table or untraced cache.
+imported concrete owner and cached metatables. This is ordinary Lua
+reachability, not a new root table or untraced cache.
 
-Wrapper allocation follows the fresh-object rule below: the concrete source is
-frozen once in an untraced C temporary while its ordinary provenance remains
-live, and the new Udata receives its own root immediately before its metatable
-and `2 + field_count` traced edges are published. The lowering conservatively treats
-`luaS_newudata` as a stack-rebase point, saves `_base` as an offset, and restores
-it immediately after allocation. This protects stack-slot addresses; the
-non-moving collector keeps the source and new Udata heap objects stable. A bound
-Interface method closure pushes the receiver as an actual closure upvalue and
-adds a strong edge to the wrapper in upvalue 4; it does not create a preliminary
-receiver root. Adjustment entries likewise keep native inputs in C, root every
-live fixed/open GC result immediately after the native call, and add destination
-roots only for newly allocated converted objects. Raw descriptors and
-allocation-free destination runs receive no parallel root range. See
-[Interfaces](interfaces.md#wrapper-representation) for the complete layout and
-dispatch contract.
-
-When the witness is called, its concrete input already occupies a traced
-argument slot. The new Interface Udata replaces that slot before its metatable
-and owner/receiver uservalues are published; user value 1 then retains the
-input. Field adjustments use traced temporaries and store each snapshot with a
-barrier before publication. `luaS_newudata` may grow the stack, so saved offsets
-are restored before slot access even though Lua heap objects themselves do not
-move.
+Wrapper allocation follows [rule 3](#3-anchor-fresh-objects-before-the-next-allocation):
+the concrete source is frozen once in an untraced C temporary while its ordinary
+provenance remains live, and the new Udata receives its own root before its
+metatable and traced edges are published. The lowering treats `luaS_newudata`
+as a stack-rebase point and restores `_base` from `_base_off` immediately after
+allocation (`coder/interfaces.lua`). When a witness is called, its concrete input
+already occupies a traced argument slot; the new wrapper replaces that slot
+before publication, and user value 1 then retains the input. Field adjustments
+use traced temporaries and store each snapshot with a barrier before
+publication.
 
 ## The module userdata
 
-Module state uses the same representation family as nominal values: each module
-instance is one `Udata`, `_mod`, passed as the second argument to every
-generated function (`Udata *_mod` in every native signature). It is the
-value `require` returns directly — there is **no separate Lua-facing
-module table** — and it is allocated in `_init` with its generated native payload
-and `NUPVALS` user values. For a module named `counter`:
+Each module instance is one `Udata`, `_mod`, passed to every generated native
+function. It is the value `require` returns; there is no Lua-facing module
+table. `_init` allocates it with
+`luaS_newudata(L, sizeof(<prefix>native_data), NUPVALS)`.
 
-```c
-Udata *_mod = luaS_newudata(L, sizeof(counter_native_data), NUPVALS);
-```
-
-The payload begins with `TitanModuleData`, whose immutable export callback
+The payload begins with `TitanModuleData`, whose immutable symbol resolver
 identifies the code supplying this canonical logical module. The remaining
 native fields cache dependency function pointers, public slot numbers,
 canonical callable tags, and Interface implementation arrays for this Lua
-state. They contain no collectable values; dependency modules and metatables
-remain in traced uservalues. Mutable bindings are never shared in file-global
-C storage between Lua states.
+state. They contain no collectable values; dependency modules, metatables,
+canonical closures, Array writers, and variables live in traced uservalues.
+Mutable bindings are never shared in file-global C storage between Lua states.
+The uservalue order is in
+[User-value allocation](codegen-overview.md#user-value-allocation).
 
-There is **no reserved user value**: the module table was removed
-entirely, so member slots are 0-based. The user values hold, in
-allocation order: the importer-reconstructible public prefix (exported module
-variables, ordinary-function canonical closures, then public nominal statics),
-then the consecutive mutable/const Array-metatable cache, one immutable lightuserdata
-physical-provider identity token, and fixed AST-order private slots for
-locals/imports, remaining canonical closures, and nominal namespace tables.
-Every direct importer verifies that token against its exact linked producer
-before using the module; explicit source imports additionally rely on fixed
-source-private slots. The remaining Array-writer,
-nominal/owned-C metatable, transitive-owner module, and error-recovery `TString`
-anchor slots are allocated in inventory/first-use order and may interleave.
-That private order is a coder detail and is not serialized. Error-recovery
-string anchors (`TITAN_BACKTRACE_KEY`, `TITAN_TRACE_PINNED`, and `""`) are
-initialized immediately after `titan_pushmodule(L, _mod)` before dependencies
-or user code; Array writers are initialized before module variable initializers. Callable tags
-are published even earlier than writers, before either writers or any initializer-created
-lambda/bound-method closure can copy them; canonical top-level/static closures
-are initialized later but still before module exposure. Reading a module variable is `getslot` on
-`&_mod->uv[i].uv`; writing a GC-able one is `setslot` plus the **back**
-barrier `luaC_barrierback(L, obj2gco(_mod), slot)` (a userdata owner,
-not a closure). All member access from Lua — functions, variables and
-record namespaces alike — flows through a metatable installed on the
-`Udata` itself ([Lua interop internals](lua-interop-internals.md)); the
-allocation rules and the init protocol are in the
-[code generator overview](codegen-overview.md).
+Reading a module variable is `getslot` on `&_mod->uv[i].uv`; writing a GC-able
+one is `setslot` plus `luaC_barrierback(L, obj2gco(_mod), slot)`. An imported
+module's variable is written through `_imod = uvalue(&_mod->uv[MOD].uv)` with the
+barrier on `_imod`. All member access from Lua flows through a metatable
+installed on the `Udata` itself
+([Lua interop internals](lua-interop-internals.md)).
 
 ## GC discipline: the invariants
 
-Titan shares Lua's collector — there is no Titan heap and no reference
-counting; `luaH_new`, `luaS_new*`, `luaS_createlngstrobj` (long
-concatenation results), `luaF_newCclosure` and `luaS_newudata` are the
-only allocators generated code calls. But
-generated code runs *outside* the Lua VM: it does not pass through
-`luaD_call`, keeps values in C variables the collector cannot see, and
-never hits the VM's own GC polling. The coder therefore maintains five
-invariants: 1–3 keep values *visible*, 4 keeps the collector *running*,
-5 keeps old objects *honest*.
+Titan shares Lua's collector: there is no Titan heap and no reference counting.
+Generated function bodies allocate through Lua internals: `luaH_new` and
+`luaH_resizearray` (Maps), `luaS_new`/`luaS_newlstr`/`luaS_createlngstrobj`
+(strings), `luaF_newCclosure` (closures and wrappers), `luaS_newudata` (records,
+unions, Interface wrappers, module state), `luaC_newobj` (capture boxes), and
+runtime helpers such as `titan_array_new`. Module initialization also uses the
+public API (`lua_pushcclosure`, `luaL_newmetatable`). Generated code runs
+*outside* the Lua VM: it does not pass through `luaD_call`, keeps values in C
+variables the collector cannot see, and never hits the VM's own GC polling. The
+coder therefore maintains five invariants: 1–3 keep values *visible*, 4 keeps
+the collector *running*, 5 keeps old objects *honest*.
 
 ### 1. The function frame: reserved, nil-initialized stack slots
 
 A function whose body needs `nslots > 0` anchor slots gets this preamble
-(`codefuncdec`, `coder.lua`):
+(`codefuncdec`, `coder/declarations.lua`):
 
 ```c
 luaC_checkGC(L);
@@ -453,41 +355,48 @@ for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
 }
 ```
 
-The translation-unit-local `titan_ensure_stack` calls Lua's internal raising
-`luaD_checkstack` path and then extends `L->ci->top.p` (the current call's
-allowed stack ceiling) exactly as the public API would. It does not cross the
-public Lua stack API. Slots are
-nil-initialized through Lua's stack-aware `setnilvalue2s` macro so a
-collection arriving before a slot's first real store sees nil rather than
-stack garbage. Anchor slots are addressed as
-`s2v(_base + k)`: `newslot` hands out indices, `pushd`/`popd` save and
-restore the depth around blocks and loop bodies so sibling scopes reuse
-slots, and `nslots` records the high-water mark that sizes the
-preamble. Every `return` (and the implicit return of a nil-returning
-function) first restores `L->top.p = _base;` (`codereturn`). The module
-`_init`'s variable-initializer section reserves and nil-initializes
-slots the same way, though with an unconditional `titan_ensure_stack`
-and no entry GC poll.
+A function with no slots declares only `StkId _base = L->top.p;`. When the
+whole body is a function-level `catch` (`ctx.entry_try`), the entry
+`luaC_checkGC` moves inside that protected body so an emergency-GC allocation
+failure lands in the Titan catch rather than unwinding across a native caller.
 
-Every other generated path that reserves capacity before raw `L->top.p`
-writes calls the same helper. Internal stack growth raises on failure, so
-generated code never continues to a raw push or slot write without capacity.
+`titan_ensure_stack` (`titan-compiler/cpreamble.lua`) is a translation-unit-local
+helper that calls Lua's internal raising `luaD_checkstack` and then extends
+`L->ci->top.p` as the public API would. Every generated path that reserves
+capacity before raw `L->top.p` writes calls it, so generated code never
+continues to a raw push or slot write without capacity. Slots are
+nil-initialized so a collection arriving before a slot's first real store sees
+nil rather than stack garbage. Every generated stack-slot nil write uses
+`setnilvalue2s`; stores into non-stack `TValue` locals keep `setnilvalue`.
+
+Slots are addressed through the saved stack offset, never through a cached
+pointer: `newslot`/`reserveslot` (`coder/flow.lua`) return
+`s2v(restorestack(L, _base_off) + k)` and mark the function `uses_base_off`.
+`pushd`/`popd` save and restore the depth around blocks and loop bodies so
+sibling scopes reuse slots, and `nslots` records the high-water mark that sizes
+the preamble. A return through the native ABI restores `L->top.p = _base`
+before its C `return` (`codereturn`); a return routed through `finally` reaches
+that reset after the pending action, and an
+[immediate function](immediate-functions.md)'s inline return never resets the
+containing frame. The module `_init`'s variable-initializer section reserves
+and nil-initializes its slots the same way when it needs any, without an entry
+GC poll.
 
 ### 2. Home roots, shadow slots, and borrowed C copies
 
 A GC-bearing value that must live across allocation has a traced **home**: a
 local shadow slot, module/record/container field, native-result slot, or another
-GC object. `newtmp(ctx, typ, true)` creates a C temporary plus a paired stack
-slot (`_tmp_N` + `_tmp_N_slot`) when the temporary itself owns that lifetime;
-`Ast.StatDecl` does the same for locals. Native call sequencing is deliberately
-different: `coder._freeze_code` may copy a callee, receiver, fixed argument, or
-static/open variadic element into an untraced C temporary for lexical order, but
-it never publishes a tracing-only call-activation slot. Fresh allocations and
-native results already acquired their mandatory roots; other inputs retain their
-ordinary semantic or VM homes. For
+GC object. `newtmp(ctx, typ, true)` (`coder/flow.lua`) creates a C temporary
+`_tmp_N` plus a reserved stack slot when the temporary itself owns that
+lifetime; `coder._codeinitializeddecl` does the same for used locals. Native
+call sequencing is deliberately different: `coder._freeze_code` may copy a
+callee, receiver, fixed argument, or variadic element into an untraced C
+temporary for lexical order, but it never publishes a tracing-only
+call-activation slot. Fresh allocations and native results already acquired
+their mandatory roots; other inputs retain their ordinary semantic or VM homes.
+For
 
 ```titan
--- Titan
 function greet(s: string): string
     local t: string = s
     return t
@@ -498,173 +407,125 @@ the generated body contains:
 
 ```c
 TString* _local_t_1;
-TValue *_localslot_t_2 = s2v(_base + 0);
 _local_t_1 = _param_s;
 /* update slot */
-setsvalue(L, _localslot_t_2, _local_t_1);
+setsvalue(L, s2v((restorestack(L, _base_off) + 0)), _local_t_1);
 ```
 
-The slot is refreshed at the declaration and at **every assignment** to
-the local (`codeassignment` emits `$CVAR = $CEXP;` followed by the
-`setslot`), so the slot is never stale while the C variable holds a
-live value. Parameters (including method `self`) get a shadow slot
-(`_paramslot_<name>`) only when the body assigns to them or the checker marks
-them for spill across a catchable call. That is a semantic local/spill home, not
-argument transport. Otherwise the parameter remains only its native C formal
-and its reachability comes from the input's existing provenance. Module
-variables need no shadow: their home, a `_mod` user value, is itself a GC-visible
-location.
+The slot is refreshed at the declaration and at **every assignment** to the
+local, so it is never stale while the C variable holds a live value.
+Parameters (including method `self`) get a slot only when the body assigns to
+them or the checker marks them for spill across a catchable call. That is a
+semantic local/spill home, not argument transport; otherwise the parameter
+remains only its native C formal and its reachability comes from the input's
+existing provenance. Module variables need no shadow: their `_mod` user value is
+itself GC-visible.
 
 ### 3. Anchor fresh objects before the next allocation
 
-An allocation may raise and may invoke emergency collection on allocator
+An allocation may raise and may run an emergency collection on allocator
 failure; later allocations or explicit polls can collect an unpublished object.
 Every successfully created object therefore receives its own traced root
-immediately, before another allocation or poll. The record constructor shown
-earlier is simpler now that it is a single object: one
-`luaS_newudata` returns the udata already nil-filled and white, and the
-generated code anchors it in its stack slot
-(`setuvalue(L, _tmp_1_slot, _ud)`) *before* any field expression runs.
-Each field store then happens with the udata already anchored, and the
-back barrier on each GC-able field store keeps the (possibly old/black)
-udata honest. There is no longer a separate closure-then-udata sequence
-to order, and no forward-barriered cross-link to install.
+immediately, before another allocation or poll:
 
-Container literals preserve the same rooting rule with a different order:
-every Array element expression is first evaluated into an appropriately boxed
-or internal anchored temp. Generated code supplies `titan_array_new` an active
-result slot. The helper roots the backing there before resizing, temporarily
-roots the proxy there after directly installing its metatable/uservalues, and
-then leaves the completed backing in that same slot after building the
-key-0/uservalue cycle. It never changes `L->top` or uses the public Lua stack
-API. Generated code then fills positive array slots from the element temps.
-The constructor records its highest non-nil position in `lenhint`; resizes save
-and restore that authoritative length.
-Map constructors root their ordinary Table plus key and value temps, boxing an
-Array used as a raw-visible key or value. See
-[Dense Arrays](dense-arrays.md#runtime-construction).
-
-Callable adjustment evaluates its operand once and borrows that value's existing
-root. Eligible realization calls `luaF_newCclosure` for the final size, fills the
-fresh-white object directly (`source->f`, `setobj2n`, `setpvalue`,
-`setclCvalue`, `setfvalue`), and publishes it immediately into the assigned
-traced result slot. There is no transient stack assembly, `lua_pushcclosure`,
-construction barrier, local GC poll, construction-only root copy, or
-construction rebase. `luaF_newCclosure` can allocate or raise, including after
-an emergency collection, but it does not ordinarily poll and the emergency
-cycle does not shrink the stack. Nested callable conversion is likewise
-allocating/raising but not stack-relocating; every fresh wrapper still receives
-its own immediate root.
-String results —
-literals (`luaS_new`), concatenation,
-number→string casts — are likewise stored to their temp's slot
-immediately after creation.
+- A record or union constructor roots the fresh udata in its stack slot before
+  any field expression runs; each field store then uses the back barrier.
+- A capture box (`newbox`, `coder/statements.lua`) is anchored in its own slot
+  before its initial value is written, and a GC-bearing box's `uv[0]` is set to
+  nil before anchoring.
+- A string result (literals, concatenation, number-to-string) is stored to its
+  temporary's slot immediately after creation.
+- `titan_array_new` roots the backing in the caller's result slot before
+  allocating the proxy and leaves the completed cycle there
+  ([Dense Arrays](dense-arrays.md#runtime-construction)). Map constructors
+  root their table and each key and value temp.
+- A closure or callable wrapper is allocated with `luaF_newCclosure` at its
+  final size, filled while fresh-white, and published into its traced result
+  slot before anything else can allocate. No barrier is needed during that
+  initialization. Source-closure construction then pays the allocation's debt
+  with `luaC_checkGC` and restores `_base`; wrapper construction adds no local
+  poll ([Closure adjustment wrappers](closure-adjustment-wrappers.md#roots-relocation-and-errors)).
+  `luaF_newCclosure` can raise, including after an emergency collection, but
+  does not shrink or move the stack.
 
 ### 4. `luaC_checkGC` at entry and at allocating loop tails
 
-Because Titan-to-Titan calls never enter `luaD_call`, generated code
-must poll the collector itself. `luaC_checkGC(L)` appears at function entry as
-the first line of a slot-reserving preamble, and at the tail of every
-`while`/`repeat`/numeric-`for` body **iff** the loop's condition-plus-body
-allocated—measured as the delta of `ctx.allocations` across loop generation. A
-synthesized callable or Interface native adapter has no ordinary Titan body, so
-it separately polls at entry iff its frozen action graph can allocate a nested
-wrapper. That poll precedes stack reservation, `_base`, and every raw stack
-pointer; native inputs remain C values whose ordinary provenance already
-protects them.
+Because Titan-to-Titan calls never enter `luaD_call`, generated code polls the
+collector itself:
+
+- at function entry, as the first line of a slot-reserving preamble (see rule
+  1 for the function-level `catch` case);
+- at the tail of every `while`/`repeat`/numeric-`for` body **iff** the loop's
+  condition plus body reserved slots, measured by the change in
+  `ctx.allocations` across loop generation, followed by `_base` restoration;
+- at the tail of every generic `for ... in` iteration, unconditionally;
+- at the entry of a synthesized callable or Interface native adapter iff its
+  frozen action graph can allocate a nested wrapper
+  (`coder._adapter_actions_allocate`), before stack reservation, `_base`, and
+  every raw stack pointer;
+- after publishing a freshly allocated source closure.
 
 A pure-arithmetic loop carries no GC polling; an allocating Titan loop polls
-once per iteration and cannot starve the collector. Direct callable-wrapper
-construction itself adds no local poll: `luaF_newCclosure` links a fresh-white
-object, and no poll is permitted between allocation and immediate publication.
-The containing ordinary entry/loop or allocating-adapter entry remains the
-polling authority. (History: commits
-`eade55d` "add GC checks to loops and function preambles" and `b839f59`
-"be smarter about avoiding calling GC when the loop does not allocate",
-November 2017.)
+once per iteration and cannot starve the collector.
 
 ### 5. Write barriers: back for userdata and tables, forward for closures
 
-Lua's generational collector only re-traces old objects that announce
-they were modified. Generated code announces with the two internal
-barrier macros, chosen by the *owner's* type. The choice turns on a GC
-detail: a `Udata`'s and a `Table`'s traversal call `genlink`, so the
-**back** barrier (re-greying the *container*) is safe for them, whereas a
-`CClosure`'s traversal does not, so a closure store must use the
-**forward** barrier (recolouring the *value*).
+Lua's generational collector only re-traces old objects that announce they were
+modified. The barrier depends on the *owner's* type: `Udata` and `Table`
+traversal calls `genlink`, so the **back** barrier (re-greying the container)
+is valid for them, whereas `CClosure` traversal does not, so a store into an
+existing closure would need the **forward** barrier (recolouring the value).
 
-**Back barrier — `luaC_barrierback(L, obj2gco(o), v)`** when the owner is
-a `Udata` or a `Table`; used for:
+**Back barrier, `luaC_barrierback(L, obj2gco(owner), value)`**, used for:
 
-* record field assignment, and record-literal field initialization (the
-  owner is the record's `Udata`);
-* union payload initialization (the owner is the union's `Udata`);
-* module-variable writes — local
-  (`luaC_barrierback(L, obj2gco(_mod), slot)`) and imported
-  (`luaC_barrierback(L, obj2gco(_imod), _varslot)`), including writes
-  coming from Lua through the module metatable's `__newindex`;
-* record field writes from Lua through the record's `__newindex` (union
-  `__newindex` always rejects);
-* Array backing-slot stores, Map stores, and container-literal fills, each
-  gated on `types.is_gc` of the stored element or value type. Array stores
-  barrier the backing Table, never its proxy; the cycle edges use the barrier
-  appropriate to their actual Table/Udata owners. Array construction installs
-  the backing and writer in the proxy's two traced user values through the Lua
-  userdata API and barriers the backing's key-0 proxy link.
-* mutation of a GC-bearing captured-variable box, whose one traced user value
-  is owned by a `Udata`.
+* record field assignment and record-literal field initialization;
+* union payload initialization;
+* module-variable writes, local (`obj2gco(_mod)`) and imported
+  (`obj2gco(_imod)`), including writes from Lua through the module metatable's
+  `__newindex`;
+* record field writes from Lua through the record's `__newindex`;
+* Array backing-slot stores, Map stores, and container-literal fills, gated on
+  `types.is_gc` of the stored type. Array element stores barrier the backing
+  Table, never its proxy. `titan_array_new` installs the proxy's backing and
+  writer user values with direct stores followed by `luaC_barrierback` on the
+  proxy, and barriers the backing's key-0 proxy link;
+* Interface wrapper user values;
+* mutation of a GC-bearing capture box, whose one traced user value is owned by
+  a `Udata` (`box_write`).
 
-(The argument shape differs from the forward barrier: back takes the
-*value* and an `obj2gco`-wrapped container; forward takes the *slot
-pointer*.) Both `_mod` and record instances are `Udata`, so these stores use
-the back barrier rather than the forward barrier used by the superseded closure
-representation. Moving record type identity from a `getudatamem` tag word to
-the udata metatable pointer did not change its barriers.
+Back-barrier sites pass `obj2gco(owner)`, not the owner's concrete pointer type.
+Map raw stores go through `luaH_set`/`luaH_setint` (`set_table_entry_raw`,
+`coder/statements.lua`): "The GC barrier for the stored value is the caller's
+responsibility; new keys are barriered internally by the insertion code."
 
-**Forward barrier — `luaC_barrier(L, owner, slot)`** remains for the
-owners that are still `CClosure`s — every store of a captured value into
-a function value's upvalue array ([closures and captured
-variables](codegen-overview.md#closures-and-captured-variables)).
-The strict-entry trailer is installed at source-closure construction like the
-header and captures. A callable wrapper is instead initialized directly while
-fresh-white. `setobj2n` copies ordinary upvalues, `setpvalue` installs
-tag/native pointers, `setclCvalue` installs the immediate source, and
-`setfvalue` installs the relay. The completed closure is then published directly
-to its traced result slot.
-Fresh-white construction needs no forward/back barrier. A later store into an
-existing closure would still require the forward barrier. A
-capture *box* is a `Udata`: GC-bearing boxes have one traced user value and use
-the back barrier, while non-GC values use an untraced raw payload and need no
-barrier.
+**Forward barrier, `luaC_barrier(L, owner, value)`.** Generated code never
+stores into an existing closure: captures, the strict trailer, and wrapper links
+are installed while the closure is fresh-white, and captured-and-assigned
+variables live in boxes. The coder therefore emits no forward barrier today. A
+future store into an existing closure's upvalue would need one.
 
-The division of labor with Lua's table internals is spelled out in a
-comment in `coder.lua`: raw stores go through `luaH_set`/`luaH_setint`
-(5.5 removed the writable-slot API), and "The GC barrier for the stored
-value is the caller's responsibility; new keys are barriered internally
-by the insertion code." Under the generational collector, getting any
-of this wrong is promptly fatal: minor collections are frequent, and an
-unbarriered old→young store is a use-after-free on the next one. Back-barrier
-sites must pass `obj2gco(owner)` rather than the owner's concrete pointer type;
-the signatures and owner-specific split above are the current contract.
+Under the generational collector, getting any of this wrong is promptly fatal:
+minor collections are frequent, and an unbarriered old-to-young store is a
+use-after-free on the next one.
 
 ## Calls: C-only inputs, immediate result roots, and VM transport
 
-The [calling convention](codegen-overview.md) separates native C transport from
-GC publication. A native fast call does **not** establish a new tracing lifetime
-for its inputs.
+The [calling convention](codegen-overview.md#the-titan-native-function-and-its-calling-convention)
+separates native C transport from GC publication. A native fast call does
+**not** establish a new tracing lifetime for its inputs.
 
 * **Native inputs.** The caller evaluates left-to-right. Where later setup is
   effectful, it freezes the first-class callee, receiver, fixed arguments, and
-  static/open variadic elements in ordinary C temporaries. Pure trailing reads
-  may remain direct C expressions. Neither form writes a tracing-only Lua-stack
-  slot. Fresh values retain the roots installed at allocation or at an earlier
-  native-result handoff; established values retain their semantic
-  module/record/container/local home or an upstream Lua VM argument slot. A raw
-  `TitanVargX` and its C `args` array merely borrow those values and are never
-  roots. Callable and Interface adapters follow the same rule and have an empty
-  input-source root inventory. A newly allocated argument conversion is the one
-  exception in the *destination*: the fresh wrapper gets its mandatory initial
-  allocation root.
+  variadic elements in ordinary C temporaries (`ordered_call_args`,
+  `coder/calls.lua`). Pure trailing reads may remain direct C expressions.
+  Neither form writes a tracing-only Lua-stack slot. Fresh values retain the
+  roots installed at allocation or at an earlier native-result handoff;
+  established values retain their semantic module/record/container/local home
+  or an upstream Lua VM argument slot. A raw `TitanVargX` and its C `args` array
+  merely borrow those values and are never roots. Callable and Interface
+  adapters follow the same rule and have an empty input-source root inventory.
+  A newly allocated argument conversion is the one exception in the
+  *destination*: the fresh wrapper gets its mandatory initial allocation root.
 
   Consequently the no-copy native protocol does not manufacture a lifetime
   after a program destroys an input's sole traced provenance while retaining
@@ -674,27 +535,24 @@ for its inputs.
 * **Native returns.** The callee returns its first fixed result in C and writes
   later results through out-parameters without rooting them. Merely returning
   cannot run the collector, although the callee may have relocated the Lua
-  stack. The caller therefore rebases first, performs any nonallocating
-  raw-to-visible projection, and then publishes **every live GC-bearing native
-  result immediately** into its caller-owned result slot before any later
-  allocating work. This publication is required even for an identity
-  conversion; a transitive callee's allocation root lies above its restored
-  caller top and no longer owns the handoff. A freshly allocated
-  converted callable/Interface value separately gets its own allocation root.
-  For `two(): integer, string`, lowering schematically separates raw ABI holders
-  from the visible projection and roots the live string immediately after
-  rebasing:
+  stack. The caller therefore rebases first (`_base = restorestack(L,
+  _base_off)`), performs any nonallocating raw-to-visible projection, and then
+  publishes **every live GC-bearing native result immediately** into its
+  caller-owned result slot before any later allocating work. This publication
+  is required even for an identity conversion: a transitive callee's allocation
+  root lies above its restored caller top and no longer owns the handoff. A
+  freshly allocated converted callable/Interface value separately gets its own
+  allocation root. For `two(): (integer, string)`, lowering schematically
+  separates raw ABI holders from the visible projection:
 
 ```c
 lua_Integer _abi_1 = 0;
 TString *_abi_2 = NULL;                 /* raw out-param, not yet a root */
-lua_Integer _visible_1 = 0;
-TString *_visible_2 = NULL;
 _abi_1 = test_\u2133_two_titan(L, _mod, NULL, &_abi_2);
 _base = restorestack(L, _base_off);
 _visible_1 = _abi_1;
 _visible_2 = _abi_2;
-setsvalue(L, s2v(_base + 0), _visible_2); /* immediate result handoff */
+setsvalue(L, s2v(restorestack(L, _base_off) + 0), _visible_2); /* immediate handoff */
 ```
 
 * **Flexible runs.** Native input descriptors borrow the existing provenance
@@ -702,9 +560,10 @@ setsvalue(L, s2v(_base + 0), _visible_2); /* immediate result handoff */
   backing plus a parallel traced range: after rebasing and validating its count,
   the caller copies the complete live prefix into that range and clears it only
   after the sink consumes the run. Adapters do this for every live fixed/open
-  source result, not only when a later action allocates. A converted destination
-  range exists only when conversion allocates fresh callable/Interface values.
-  Neither descriptor nor raw C array ever becomes a root.
+  source result, not only when a later action allocates. A converted
+  destination range exists only when conversion allocates fresh
+  callable/Interface values. Neither descriptor nor raw C array ever becomes a
+  root.
 
 The generic paths are intentionally different. A non-Titan Lua call and a
 branded strict call push the callee/carrier and every actual argument because
@@ -716,10 +575,6 @@ consumer homes or caller-owned result ranges used by the native path. A Lua
 entry calling a native body similarly reserves its result area first and boxes
 every returned value there.
 
-A pending `return` that crosses `finally` is the difficult lifetime case: the
-saved action must retain both the flexible count and every GC-bearing element
-in traced storage while the `finally` body allocates or calls again. Normal
-completion resumes that saved run; a raise from `finally` supersedes it and
-must not leave stale live roots. This is a required invariant of the
-error-handling lowering, not permission to rely on the native descriptor as a
-root.
+A pending `return` that crosses `finally` must keep its flexible count and every
+GC-bearing element in traced storage while the `finally` body allocates; see
+[pending actions](error-handling.md#pending-actions-for-finally).

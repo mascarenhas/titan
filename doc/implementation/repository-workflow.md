@@ -36,59 +36,68 @@ This example prepares a validation SDK. Use a separate prefix and select
 `production` for ordinary release/install work rather than changing the profile
 of this installation in place.
 
-Linux Lua defaults to `linux-readline`, macOS to `macosx`; supply system
-Readline development files or select `LUA_PLATFORM` explicitly. Native
+Lua and LuaRocks preparation, `LUA_PLATFORM` and the Readline requirement are
+described in [build and installation
+responsibilities](build-script-audit.md#lua-and-native-dependencies). Native
 dependency preparation needs CMake, Perl, tar, curl or wget, and sha256sum or
 shasum. `CC`, `AR`, and `RANLIB` may be command strings; pass the same selected
 tools through Make, LuaRocks, installation checks, and consumer builds.
 `clang-format` is needed only for `titanc --pretty-print`.
 
 `PREFIX` owns Lua and LuaRocks; `ROCKS_TREE` owns the Titan rock, SDK, and
-standard provider. The supported developer layout sets them equal. Unix
-supports separate destinations; Windows requires the same physical prefix.
-Make discovers a Titan Lua prefix from `PATH`, with an explicit `PREFIX`
-taking precedence and `/usr/local` as fallback.
+standard provider and defaults to `PREFIX`. The supported developer layout sets
+them equal. Unix supports separate destinations; Windows requires the same
+physical prefix.
 
-Preparation checks installed programs, not source/tool/flag fingerprints.
-A warm `make lua` or `make luarocks` skips work when its installed program
-exists. Clean upstream objects and remove or replace that program when
-intentionally changing native inputs. The fork's source is never patched by
-build recipes. Its executable-relative Lua search paths do not relocate all
-LuaRocks configuration or third-party launchers; replace an old project-tree
-installation rather than trying to migrate it. See
+A warm `make lua` or `make luarocks` checks only for its installed program, not
+source, tool or flag fingerprints. Clean upstream objects and remove or replace
+that program when intentionally changing native inputs. Build recipes never
+patch the fork's source. Its executable-relative Lua search paths do not
+relocate all LuaRocks configuration or third-party launchers; replace an old
+project-tree installation rather than trying to migrate it. See
 [Lua installation](driver.md#lua-installation-and-executable-relative-search-paths).
 
 ## Choose the matching profile and command
 
-Unset ordinary build/install invocations select `production`; repository test
-entry points select `validation`. Keep their prefixes separate. Validation
-uses O0/no LTO for Titan and most native dependencies, while Lua, LPegLabel,
-and Lua filesystem retain O2/no LTO. Sanitizer host/parser components use
-fully instrumented O1/no LTO. Inspect `etc/titan/build-profile` and effective
-compiler argv when recording evidence; the complete policy is in
-[build profiles](../language/build-profiles.md) and the
+Unset ordinary build/install invocations select `production`. The repository
+test goals (`Makefile` `TITAN_TEST_GOALS`, the shared test scripts, and the
+Busted/CI wrappers) select `validation`, and without an explicit `PREFIX` a
+validation invocation uses the checkout's `.lua-validation` prefix instead of
+the prefix discovered on `PATH`. Keep production and validation prefixes
+separate rather than republishing another profile into an active SDK. The
+SDK records its profile in `etc/titan/build-profile`; inspect it and the
+effective compiler argv when recording evidence. Per-component optimization
+levels, including the sanitizer domains, are specified in [build
+profiles](../language/build-profiles.md); test-harness flag overrides are in the
 [test-runner profile contract](test-runner.md#validation-profile-and-isolated-sdks).
+
+Distinct `--output` roots can separate generated Titan objects, but
+repository Make builds default to one `out/` tree, and authored runtime and
+native dependency builds share their checkout locations. Serialize builds that
+share those inputs or use private source copies.
 
 Run full validation without ambient `ROCKS_TREE`, `TITAN_ROCKS_ROOT`,
 `TITAN_EXTRA_CPPFLAGS`, or `TITAN_NO_LINE_DIRECTIVES`. These alter SDK/provider
-selection, fixture preprocessing, or traceback attribution. Make clears
-`LUA_PATH`, `LUA_CPATH`, and their Lua 5.5 variants for its test/compiler
+selection, fixture preprocessing, or traceback attribution. Make unsets
+`LUA_PATH`, `LUA_CPATH`, and their Lua 5.5 variants for its test and compiler
 invocations; clear them for manual prefix-tool invocations too, especially
-after a shell used `luarocks init`. Default-flag tests also clear all
-`TITAN_EXTRA_*FLAGS`; explicit build-policy inputs are otherwise caller-owned.
+after a shell used `luarocks init`. Native test builds use `TITAN_EXTRA_*FLAGS`
+when set and otherwise `TITAN_TEST_EXTRA_*FLAGS` (`Makefile`
+`TITAN_TEST_CFLAGS`); other explicit build-policy inputs are caller-owned.
 
 | Command, from the repository root | Purpose |
 | --- | --- |
-| `make test` | Prepare the selected SDK, reinstall the current compiler/provider, and run the complete mixed suite. |
+| `make test` | Prepare the selected SDK, reinstall the current compiler/provider with `luarocks make --force`, and run the complete mixed suite through `luarocks test`. |
 | `TITAN_JOBS=4 make -j4 test` | Four-way native/generated-C preparation variant. |
 | `luarocks test` | Run against an already current install; its active `bin` on `PATH` is sufficient. It does not build the rock. |
-| `make rock-test` | Complete Busted and native domains; a cold run re-enters full preparation. |
+| `make rock-test` | Both test domains. In validation with no `PREFIX/bin/titanc`, it runs `make test` instead. |
 | `make busted-test BUSTED_FILTER='for loop'` | Busted only. |
-| `make stdlib-test` | Complete retained stdlib/runtime category without coverage. |
+| `make stdlib-test` | Retained runtime/packaging Busted specs, then the native aggregate; no compiler specs and no coverage. |
 | `make titan-stdlib-test` | Build and run the aggregate native suite. |
 | `make titan-stdlib-test-build` | Build all native roots once. |
 | `make titan-stdlib-test-run TITAN_FILTER='^ssl[.]tests[.]'` | Filter a fresh execution of the existing aggregate; never filter compilation. |
 | `make rock-test BUSTED_FILTER='parser' TITAN_FILTER='^http[.]tests[.]'` | Independently filter both domains. Neither filter skips the other domain. |
+| `make titan-native-coverage` | Build and run the source-linked native coverage aggregate; see [native coverage](native-coverage.md#repository-integration-and-verification). |
 | `make stdlib` / `make install-stdlib` | Incremental standard-provider build / build then copy, using the installed compiler/SDK by default. |
 | `make clean-stdlib` | Clear standard-provider outputs before changing tools, flags, profile, or OpenSSL mode. |
 | `make clean` / `make distclean` | Remove owned generated artifacts / also remove downloaded native dependency trees. |
@@ -97,6 +106,18 @@ Leaf build/run targets require a prepared matching SDK. Default Busted,
 `make busted-test`, `luarocks test`, and installed `titanc` use the installed
 compiler snapshot. Reinstall after compiler, runtime, or standard-library
 changes. `make test` owns this refresh; `luarocks test` alone does not.
+The Busted partitioning behind `rock-test` and `luarocks test` is described in
+[test runner](test-runner.md#busted-partitions).
+
+`titanc` accepts dotted module names, not file paths. Use its
+[CLI reference](driver.md#the-titanc-command-line) for provider/standalone
+selection, `--tree`, `--output`, incremental object reuse, `-c`, and test mode.
+Source-rock `all` uses the in-tree compiler and private bootstrap; ordinary
+`stdlib` uses the installed compiler unless `STDLIB_USE_INSTALLED_RUNTIME=0`.
+Packaging, binary rocks, and uninstall are documented in [build and
+installation responsibilities](build-script-audit.md#installation-and-publication).
+
+## Run checkout compiler Lua with Busted
 
 For focused compiler Lua edits, use the explicit checkout profile:
 
@@ -107,20 +128,25 @@ TITAN_ROCKS_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1 \
   busted --run=checkout spec/coder/coder_spec.lua --filter='for loop'
 ```
 
-That profile prepends checkout Lua modules after the LuaRocks launcher's path
-setup and keeps the installed SDK/native inputs. An ambient checkout-first
-`LUA_PATH` alone does not have that precedence. Scope the root override to
-this command; it neither refreshes installed artifacts nor rebuilds the native
-aggregate. The [test-runner chapter](test-runner.md#repository-dogfooding)
-describes its resolver setup and regressions.
+The `.busted` `checkout` profile prepends `./?.lua;./?/init.lua` after the
+LuaRocks launcher has initialized its paths, so edited checkout compiler
+modules load without reinstalling them; an ambient checkout-first `LUA_PATH`
+alone does not have that precedence. The C module path is unchanged. The
+profile's helper, `spec/support/checkout_busted.lua`, rejects a missing
+`TITAN_ROCKS_ROOT`, creates one resolver context to initialize the driver
+layout, calls `driver.configure_foreign_c` so direct checker FFI imports use the
+installed SDK headers, and closes the context. It changes no compiler loader
+or source-identity mechanism. `TITAN_ROCKS_ROOT` separately preserves the
+installed driver layout, headers and runtime libraries; scope it to this
+command.
 
-`titanc` accepts dotted module names, not file paths. Use its
-[CLI reference](driver.md#the-titanc-command-line) for provider/standalone
-selection, `--tree`, `--output`, incremental object reuse, `-c`, and test mode.
-Source-rock `all` uses the in-tree compiler and private bootstrap; ordinary `stdlib` uses
-the installed compiler unless `STDLIB_USE_INSTALLED_RUNTIME=0`. Packaging,
-binary-rock, and uninstall ownership are documented under
-[driver's build and installation contract](driver.md#the-titanc-command-line).
+The profile refreshes neither installed tools, the SDK/provider, nor a compiled
+native aggregate. The real-launcher regression in `spec/libuv_build_spec.lua`
+compares a deliberate checkout compiler edit with the unchanged installed
+module: default Busted stays installed even with `.busted` present, active
+native dependency/SDK paths match, an installed `lua.h` import works through the
+direct checker without checkout Lua headers, and a missing root option or a
+broken local module fails rather than falling back to the install.
 
 ## Route generated output explicitly
 

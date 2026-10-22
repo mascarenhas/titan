@@ -30,11 +30,14 @@ Shared metatables make weakness a shared policy: changing the raw `__mode`
 field for one Map changes what every table using that metatable observes. This
 is part of the public contract rather than an identity workaround.
 
-This is also the sole stdlib weak-Map implementation boundary. PEG's private
-compiled-pattern cache and string's private compiled-regex cache retain their
-precise `{string: Pattern}` and `{string: Regex}` types for ordinary access,
-then pass the same Map through a local `{value: value}` view to `gc.weak` once
-at initialization. Neither module duplicates Lua stack or metatable code.
+This is also the sole stdlib weak-Map implementation boundary. String's
+private compiled-regex cache and PEG's private compiled-pattern cache keep
+their precise `{string: Regex}` and `{string: Pattern}` types for ordinary
+access and pass the same Map through a local `{value: value}` view to
+`gc.weak` when the cache is created: once in the `titan.string` initializer,
+and on each relabel locale refresh for `titan.peg` (see
+[Relabel translation](lpeglabel-embedding.md#relabel-translation)). Neither
+module duplicates Lua stack or metatable code.
 
 ## Finalizer stack ledger
 
@@ -117,9 +120,9 @@ check that every endpoint construction route leaves one shared `__gc` identity.
 
 Collector operations call the public variadic `lua_gc` API directly. These
 calls are stack-neutral and return only C integers, so they need no temporary
-Lua roots or stack restoration. Every result passes through one validator;
-Lua's `-1` result for an operation attempted during an internal stop/finalizer
-becomes a Titan error.
+Lua roots or stack restoration. Every result passes through one validator,
+`require_gc_result`: Lua's negative (`-1`) result for an operation attempted
+during an internal stop/finalizer becomes a Titan error.
 
 The option mapping is direct:
 

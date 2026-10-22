@@ -443,6 +443,7 @@ end
 -- @param v Runtime value to inspect or write.
 -- @usage standard-library-reflect.md#records
 function RecordValue:set(i: integer, v: value)
+  -- Implementation notes: doc/implementation/standard-library-reflect.md#generated-field-accessors
   if i < 1 or i > self.n_fields then
     raise "field index " .. i .. " out of bounds [1, " .. self.n_fields .. "]"
   end
@@ -482,6 +483,7 @@ end
 -- @return Boxed active payload-part value, including nil.
 -- @usage standard-library-reflect.md#unions
 function UnionValue:get(i: integer): value
+  -- Implementation notes: doc/implementation/standard-library-reflect.md#union-payloads
   if i < 1 or i > self.n_parts then
     raise "part index " .. i .. " out of bounds [1, " .. self.n_parts .. "]"
   end
@@ -966,6 +968,7 @@ local function init_hydration_env()
   hydration_env["CModule"] = ignore_fn
 end
 
+-- Implementation notes: doc/implementation/standard-library-reflect.md#descriptor-hydration
 local function hydrate_type(typestr: string, mt: {value: value}?): Type
   local previous_membermap? = active_membermap
   local previous_statics? = active_statics
@@ -1087,6 +1090,7 @@ local function is_titan_closure(cl: foreign *CClosure): boolean
   return ffi.lmacro_pvalue(upvalues[3]) == ffi.TITAN_BRAND
 end
 
+-- Implementation notes: doc/implementation/standard-library-reflect.md#function-inspection
 local function inspect_function(v: value): Value
   local tv: foreign TValue = v
   if ffi.lmacro_ttisLclosure(tv) ~= 0 then

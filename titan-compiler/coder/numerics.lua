@@ -834,6 +834,7 @@ function coder._code_coercion_predicate(
     return render("(void)($SOURCE);", { SOURCE = source }), "1"
 end
 
+-- Implementation notes: doc/implementation/codegen-constructs.md#type-tests-expis
 function coder._codeis(ctx, node)
     if node._interface_downcast then
         return coder._code_interface_downcast(ctx, node, true)

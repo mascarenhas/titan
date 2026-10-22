@@ -13,6 +13,7 @@ foreign import "titan/ffi.h"
 -- @return Next key and value, or nil, nil after exhaustion.
 -- @usage standard-library-iteration.md
 function next<|K, V|>(map: {K: V}, key: K?): (K?, V?)
+  -- Implementation notes: doc/implementation/iteration-library.md#next-as-an-audited-lua-stack-operation
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 3) == 0 then

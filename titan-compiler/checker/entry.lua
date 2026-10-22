@@ -12,6 +12,7 @@ local _ENV = core
 --   returns the module type and a list of type errors found
 --   annotates the AST with the types of its terms in "_type" fields
 --   annotates duplicate top-level declarations with a "_ignore" boolean field
+-- Implementation notes: doc/implementation/checker.md#entry-point-and-contract
 function checker.check(modname, ast, subject, filename, loader, options)
     options = options or {}
     ast._analysis_only = options.analysis_only == true or nil

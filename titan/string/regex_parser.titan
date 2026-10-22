@@ -746,6 +746,7 @@ local function regex_parse_finish(
   }
 end
 
+-- Implementation notes: doc/implementation/string-library.md#regex-parser-and-compiler
 local function build_regex_parser(): peg.Pattern
   local any = peg.any()
   local no_quantifier =

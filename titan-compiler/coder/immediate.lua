@@ -5,6 +5,7 @@ local _ENV = core
 -- C activation. Keep its results outside the block and share the caller's
 -- name/root allocator; only control targets and the input/output contracts
 -- change while emitting its body.
+-- Implementation notes: doc/implementation/immediate-functions.md#logical-functions-in-one-physical-frame
 function codeimmediatecall(ctx, node)
     local lambda = assert(coder._immediate_function(node))
     local ftype = assert(node._callee_type)

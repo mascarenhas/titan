@@ -48,8 +48,9 @@ canonical bodies need no hand-written adapter or `value` forwarding closure.
 ## `next` as an audited Lua-stack operation
 
 Ordinary Titan has no primitive for traversing a Map's hash part. The module
-therefore implements `next` through the same trusted, module-private Lua C API
-boundary used by the PEG and string libraries. Its stack ledger is:
+therefore implements `next` (`titan/iteration.titan`) through the trusted,
+module-private Lua C API boundary recorded in [Lua C API FFI
+follow-up](ffi-lua-api-followup.md). Its stack ledger is:
 
 | Operation | Stack effect and obligation |
 | --- | --- |

@@ -274,6 +274,7 @@ end
 -- spelling for the Host header. RFC 6874's encoded zone separator is decoded
 -- only for the connection address.
 local function normalize_host(raw: string): (string, string)
+  -- Implementation notes: doc/implementation/url-library.md#normalization
   local first = string.byte(raw, 1)
   if first ~= 91 then
     local host = normalize_component(raw, true)
@@ -393,6 +394,7 @@ end
 -- @usage standard-library-url.md#separately-received-request-components
 function parse_request(scheme: string, authority: string,
                        target: string): (Url?, Error?)
+  -- Implementation notes: doc/implementation/url-library.md#request-components
   local scheme_match, scheme_label, scheme_position =
     request_scheme_pattern:match(scheme)
   if scheme_match == nil then

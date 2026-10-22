@@ -101,6 +101,7 @@ function ThreadStatus:has_cancelled(): (boolean, async.CancellationReason<|value
   end
 end
 
+-- Implementation notes: doc/implementation/thread-library.md#waiter-suspension-shared-external-wake-and-o1-cancellation-unlink
 local foreign function waiter_wake_one(q: *titan_thread_waiter_queue)
   local waiter = q.head
   if waiter == nil then return end
@@ -272,6 +273,7 @@ foreign function channel_release_sender_native(raw: *void): void
   end
 end
 
+-- Implementation notes: doc/implementation/thread-library.md#endpoint-transfer-c-abi-release-chain-and-last-receiver-pin
 foreign function channel_release_receiver_native(raw: *void): void
   local ch = raw as foreign *titan_thread_channel
   if ch == nil then return end

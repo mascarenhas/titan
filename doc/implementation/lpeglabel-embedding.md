@@ -79,10 +79,10 @@ cross-engine pattern use fails the owning engine's type check.
 
 ## Opening one private engine per Lua state
 
-The canonical main `titan/peg/peg.titan` owns module state and calls
-`titan_lpeglabel_open(L)` directly from its sole initializer. It expects the
-opener to report one result and leave its module table on top, captures that
-table as a traced module value, and restores the entry stack top.
+The canonical main `titan/peg/peg.titan` owns module state. Its sole
+initializer calls `native.titan` `_initialize_native`, which calls
+`titan_lpeglabel_open(L)`, requires one result with the module table on top,
+captures that table as a traced module value, and restores the entry stack top.
 
 It deliberately does not use `luaL_requiref`, write
 `package.loaded.lpeglabel`, or publish the native table. Lua observes only
@@ -133,26 +133,17 @@ end
 `tree_size` is conservative construction accounting, not a raw native field.
 A pattern `Definition` retains both so the relabel parser can safely rewrap
 the private native pattern without losing the construction bound; a dynamic
-definition records `-1` instead. The contributors expose no top-level public
-declarations. Public constructor, combinator, capture, definition, matching,
+definition records `-1` instead. The contributors `native.titan`,
+`combinators.titan`, `relabel.titan`, and `relabel_parser.titan` declare
+nothing public. Public constructor, combinator, capture, definition, matching,
 and relabel-convenience implementations live directly in the canonical main.
 The contributors retain only module-local native-boundary operations,
 conservative size projections, diagnostics, caches, callbacks, and
-parser/compiler helpers. `relabel_parser.titan` assembles the self-hosted
-expression grammar from operations in that shared module scope.
-
-The folder ensemble is parsed separately and then combined into one AST and
-one checker/code-generator pass. With `--output out`, its generated files are:
-
-```text
-out/titan/peg/peg.c
-out/titan/peg/peg.o
-out/titan/peg/peg.ffi.h
-out/titan/peg.lua
-```
-
-There is one `titan.peg` logical ABI/types protocol and no module, provider,
-or shim per contributor.
+parser/compiler helpers. `relabel_parser.titan` `_relabel_build_parser`
+assembles the self-hosted expression grammar from operations in that shared
+module scope. As with every [folder module](folder-modules.md), the ensemble
+produces one generated object, one `titan.peg` ABI/types protocol, and one
+`titan/peg.lua` shim, with no module, provider, or shim per contributor.
 
 The wrapper keeps public types tighter than the native Lua API:
 
@@ -171,24 +162,22 @@ Lua table cannot cross the grammar or definition-collection boundary. This is
 the same nominal container distinction used by other Titan APIs, rather than a
 module-specific raw-table scan.
 
-Ordinary Titan call adjustment remains authoritative. Nil fills omitted fixed
-slots and evaluated surplus arguments are discarded. A function is variadic
-only where the engine consumes a run, and callback types use variadic inputs
-or flexible outputs only where the native callback protocol is genuinely
-open. Parser- and regex-specific callbacks whose construction guarantees a
-fixed number of capture slots keep fixed parameter lists; directional callable
-adjustment admits those extra `value` slots because its named shape rules can
-nil-fill them and they accept the generic capture tail. LPegLabel always stores the
-internal exact adapter closure required by its raw callback protocol. The
-adapter captures the user-supplied function-typed value and invokes it through
-Titan's ordinary callable machinery: exact Titan sources and realized
-target-tagged adjustment wrappers can use the exact native path; unchanged
-branded mismatches use their strict declaration/relay entry; and Lua functions,
-C functions, and `__call` objects use the ordinary Lua path. There is no `_raw_type` probe or eager raw-function validation of that
-captured value; a noncallable value fails only if the engine actually invokes
-the adapter. The relabel adapters for dynamic definition values remain
-genuinely variadic/flexible because their capture arity and result count are
-open.
+Ordinary Titan call adjustment applies to every public function (see the
+[maintenance rules](standard-library-maintenance.md#model-actual-call-and-result-protocols)).
+A function is variadic only where the engine consumes a run, and callback
+types use variadic inputs or flexible outputs only where the native callback
+protocol is open. Parser- and regex-specific callbacks whose construction
+guarantees a fixed number of capture slots keep fixed parameter lists;
+directional callable adjustment nil-fills their extra `value` slots.
+
+LPegLabel always stores an internal adapter closure with the raw callback
+protocol it requires. The adapter captures the user-supplied function-typed
+value and calls it through Titan's ordinary callable machinery, so exact Titan
+functions, adjustment wrappers, Lua and C functions, and `__call` objects all
+take their normal paths. Nothing validates the captured value eagerly: a
+noncallable value fails only if the engine actually invokes the adapter. The
+relabel adapters for dynamic definition values stay variadic/flexible because
+their capture arity and result count are open.
 
 ## Construction accounting and string labels
 
@@ -205,9 +194,11 @@ handled as empty success so C negation cannot turn `-0` into the native
 zero-or-more operation.
 
 The wrapper also validates the pinned narrow domains before C conversion:
-look-behind is capture-free, fixed-length, and at most 255 bytes; grammar
-count is at most 1000; argument and capture selectors fit signed short; and
-max-stack values fit `1..INT_MAX/100`.
+grammar count is at most 1000 (`MAX_RULES`), argument and capture selectors
+fit signed short (`MAX_SHORT`), and max-stack values fit `1..INT_MAX/100`
+(`MAX_STACK`). Look-behind is the exception: `behind` checks only the
+projected tree size, and the engine enforces the capture-free, fixed-length,
+255-byte rule (`MAX_BEHIND` is declared in `peg.titan` but unused).
 
 Titan's public rule names and labels are strings. It passes their exact bytes
 to the engine without a private prefix or integer encoding. Empty strings,
@@ -281,17 +272,13 @@ negation of Titan's minimum integer.
 
 ## Stack, roots, callbacks, and errors
 
-Raw Lua C API use is confined to opening and validating the private engine and
-reading its registry metatable. Each locale refresh creates its relabel cache
-as a typed `{string: Pattern}` Map, passes that same Map through the public
-`titan.gc.weak` boundary using one local `{value: value}` view, and then assigns
-it directly to module state. Replacing the cache is what prevents
-locale-dependent compiled sources from surviving `update_locale`; PEG no
-longer duplicates the raw metatable setup owned by `titan.gc`. Each remaining
-raw helper snapshots `lua_gettop(L)`, transfers any surviving collectable to a
-traced Titan value, and restores the exact saved top with `defer`. The complete
-narrow allowlist is recorded in [Lua C API FFI
-follow-up](ffi-lua-api-followup.md).
+Raw Lua C API use is confined to `native.titan`: opening and validating the
+private engine and reading its registry metatable. That helper snapshots
+`lua_gettop(L)`, transfers each surviving collectable to a traced Titan value,
+and restores the exact saved top with `defer`. Weak-table configuration of the
+relabel cache goes through `titan.gc` (see [Relabel
+translation](#relabel-translation)). The complete narrow allowlist is recorded
+in [Lua C API FFI follow-up](ffi-lua-api-followup.md).
 
 Pattern construction, matching, and callbacks do not manually manipulate the
 Lua stack. They call precisely typed cached Lua callables through Titan's
@@ -358,8 +345,9 @@ failure path as a directly constructed `throw("fail")`.
 The public `gsub` API is deliberately narrower. Its replacement has exact type
 `function (string): (string)`; `%0` first reduces any candidate captures to the whole
 matched substring, and an exact native-protocol adapter calls the replacement.
-Source candidates reuse the ordinary weak compiled-pattern cache, while each
-call constructs the small replacement wrapper needed to retain its callback.
+Source candidates reuse the definition-free compiled-pattern cache described
+below, while each call constructs the small replacement wrapper needed to
+retain its callback.
 
 The parser retains byte offsets in its internal syntax diagnostics. A labeled
 parse failure is turned into the public:
@@ -375,88 +363,52 @@ and accepts positions through `#subject + 1`. This intentionally repairs the
 pinned Lua helper's inconsistent newline/EOF offsets while the private native
 harness continues to test the unmodified upstream fixture.
 
-One per-state weak-value cache holds definition-free source compilations
-shared by `compile`, module-level `match`, and `gsub`. The cache table itself
-is rooted in module state, but its compiled values remain collectable; a
-traced temporary keeps the selected entry alive during use. `update_locale`
-rebuilds the predefined character classes from a new `locale()` snapshot and
-clears that cache.
+One per-state weak-value cache (`relabel.titan` `_relabel_match_cache`) holds
+definition-free source compilations shared by `compile`, module-level
+`match`, and `gsub`. Relabel state is built lazily on first use
+(`_relabel_ensure_initialized`). `_relabel_refresh_locale`, also called by
+`update_locale`, rebuilds the predefined character classes from a new
+`locale()` snapshot, rebuilds the relabel parser, and replaces the cache with
+a fresh `{string: Pattern}` Map that it passes once through a `{value: value}`
+view to `gc.weak`. Replacing the cache keeps locale-dependent compilations
+from surviving `update_locale`. The cache variable is a module-state root, but
+its compiled values stay collectable; a traced temporary keeps the selected
+entry alive during use.
 
 ## Build and provider integration
 
-`make lpeglabel` compiles, validates, and archives exactly these members in
-upstream rockspec order:
+`make lpeglabel` (`Makefile` `LPEGLABEL_*` variables) compiles the five
+vendored units with `-std=c99 -fPIC -fvisibility=hidden` and archives them,
+in upstream rockspec order, as
 
 ```text
-lplcap.o
-lplcode.o
-lplprint.o
-lpltree.o
-lplvm.o
+lpeglabel-build/libtitan-lpeglabel.a:
+  lplcap.o lplcode.o lplprint.o lpltree.o lplvm.o
 ```
 
-The output is:
+The objects depend on their vendored sources, private headers, and the
+selected public Lua headers; `ar rcs` and `ranlib` build the archive. Make uses
+source and header timestamps only, so clean `lpeglabel-build` before changing
+tools or flags.
 
-```text
-lpeglabel-build/libtitan-lpeglabel.a
-```
+The archive is metadata-free `-X` payload of the standard provider. Its
+position in the payload order, and the rule that it contributes no logical
+key and is never installed in the SDK, are described in [the standard-library
+image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image).
+No `lpeglabel.so`, `relabel.lua`, child DSO, or extra shim is installed for
+`titan.peg`.
 
-The five objects depend on their vendored sources, private headers, and the
-selected public Lua headers. Ordinary `ar rcs` and `ranlib` build the archive.
-Clean the private build directory before changing tools or flags; Make uses
-source and header timestamps without configuration receipts or archive rescans.
+The rockspec's `lpeglabel >= 1.6.2` dependency serves only the compiler's own
+parser. It is independent of the vendored engine: a deployed `titan.peg`
+pattern never dynamically links to or requires the external module.
 
-The standard provider's metadata-free `-X` payload has this order:
+Validation:
 
-```text
-ltitanlib.o
-libtitan-lpeglabel.a
-[bundled libuv.a]
-libtitan-llhttp.a
-libtitan-sqlite3.a
-[bundled OpenSSL libssl.a + libcrypto.a]
-```
-
-The source build invokes one compiler process for the twenty-five logical roots:
-
-```text
-titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs
-titan.net titan.ssl titan.url titan.http titan.websocket titan.os titan.path titan.peg titan.string
-titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json
-titan.protobuf titan.transfer
-```
-
-The paired `titan.so`/`titan.a` has twenty-five logical ABI/types protocols,
-twenty-five archive metadata keys, and twenty-five generated Lua shims. Bare native
-support adds a twenty-sixth DSO opener. LPegLabel contributes no logical key:
-its five members are
-force-carried into both provider forms solely as private native payload.
-
-The archive and headers are not copied into `$ROCKS_TREE/lib` or
-`$ROCKS_TREE/include`. The private embedding installs no `lpeglabel.so`,
-`relabel.lua`, child DSO, or extra Titan shim. An external `lpeglabel.so`
-present as the compiler's LuaRocks dependency remains separately owned and is
-not used by `titan.peg`. The source rock contains the vendored inputs so
-the default `all` build target can build the private archive and link it into the
-standard provider using the in-tree compiler and private bootstrap. The
-install pass stages the completed provider in the retained package payload;
-the copy-only `post_install` helper publishes it. The installed SDK
-does not retain the private archive.
-
-LuaRocks declares `lpeglabel >= 1.6.2` for the compiler's own parser.
-That compiler-owned dependency is independent of the vendored standard
-module: a deployed `titan.peg` pattern never dynamically links to or requires
-the external module.
-
-The generated providers are validated for exact symbols, twenty-five metadata
-keys, all twenty-six Lua openers, and absence of an LPegLabel dynamic
-dependency. Isolation
-tests load private and external engines in both orders, use both pattern
-families, vary their max-stack settings independently, and reject cross-engine
-patterns.
-
-Standard-library installation copies the completed provider pair, generated
-shims, exact `titan.test` compiler source, licenses, and optional macOS dSYM.
-The explicit packaging and dependency-mode gates retain protocol, symbol,
-metadata, and native-dependency checks. Callers clean stale installations and
-use a fresh versioned tree when changing ABI or platform.
+* `spec/lpeglabel_build_spec.lua` checks the pinned revision and namespace
+  patch, the exact five-member archive with only prefixed definitions, the
+  private registry keys, the pinned upstream suites run through the private
+  opener, and the UTF-8 lead-byte guard.
+* `spec/support/ci_dependency_mode_smoke.sh` rejects an exported
+  `luaopen_lpeglabel` or `titan_lpeglabel_*` symbol in `titan.so`, an
+  unprefixed upstream definition in `titan.a`, and any LPegLabel DSO
+  dependency in the provider or linked executables.

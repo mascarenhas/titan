@@ -14,6 +14,7 @@
 make_shell_quote = '$(subst ','"'"',$(1))'
 make_shell_quote_value = '$(subst ','"'"',$(value $(1)))'
 
+# Implementation notes: doc/implementation/repository-workflow.md#choose-the-matching-profile-and-command
 # Validation is an explicit native-toolchain profile, including runtime and
 # provider dependencies. Choose it before Make expands the test graph.
 TITAN_TEST_GOALS := test rock-test busted-test stdlib-test stdlib-busted-test \
@@ -1051,6 +1052,7 @@ stage-titan-bootstrap: $(TITAN_BOOTSTRAP_SO)
 all: lpeglabel libbacktrace libuv openssl llhttp sqlite3 $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) ## Build the runtime and paired standard library (default)
 	$(MAKE) --no-print-directory stdlib STDLIB_USE_INSTALLED_RUNTIME=0 TITAN_ROCKS_ROOT=
 
+# Implementation notes: doc/implementation/build-script-audit.md#installation-and-publication
 # LuaRocks runs this in the same source directory as the build pass. Compiler
 # files and shims enter its ordinary staging directories. The retained payload
 # is published by post_install for both source and binary rocks.
@@ -1216,6 +1218,7 @@ STDLIB_COMPILER_ENV = CC=$(call make_shell_quote,$(CC)) \
 
 stdlib-objects: $(foreach module,$(STDLIB_MODULES),$(call stdlib_outputs,$(module))) ## Compile standard-library objects without linking a provider
 
+# Implementation notes: doc/implementation/build-script-audit.md#standard-library-object-graph
 # A real object target owns its generated C and headers, including the exact
 # source/object pair needed by sanitizer diagnostic snapshots. FORCE runs an
 # inexpensive completeness check; unchanged outputs keep their timestamps.
@@ -1601,6 +1604,7 @@ titan-stdlib-test: titan-stdlib-test-build ## Build and run all native Titan std
 stdlib-test: stdlib-busted-test ## Run all stdlib/runtime tests without coverage
 	$(MAKE) titan-stdlib-test
 
+# Implementation notes: doc/implementation/native-coverage.md#repository-integration-and-verification
 # Coverage is the same native suite with source dependencies selected from this
 # checkout. C and objects stay in .coverage directories inside the output tree.
 # Linux exports the executable's Lua API for the suite's ordinary Lua C helpers.

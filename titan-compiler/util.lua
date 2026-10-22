@@ -49,6 +49,7 @@ end
 -- Barebones string-based template function for generating C/Lua code. Replaces
 -- $VAR and ${VAR} placeholders in the `code` template by the corresponding
 -- strings in the `substs` table.
+-- Implementation notes: doc/implementation/codegen-overview.md#no-c-ast-templates-utilrender-and-clang-format
 function util.render(code, substs, ignore_missing)
     return (string.gsub(code, "%$({?)([A-Za-z_][A-Za-z_0-9]*)(}?)", function(a, k, b)
         if a == "{" and b == "" then
@@ -66,6 +67,7 @@ function util.render(code, substs, ignore_missing)
     end))
 end
 
+-- Implementation notes: doc/implementation/ast-typedecl.md#_tag-dispatch-and-utilmake_visitor
 function util.make_visitor(functions)
     return function(node, ...)
         assert(type(node) == "table")

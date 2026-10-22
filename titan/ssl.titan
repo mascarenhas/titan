@@ -179,6 +179,7 @@ end
 -- the `%zone` suffix, so remove it only for verification while retaining the
 -- original address for net.connect.
 local function verification_host(host: string): string
+  -- Implementation notes: doc/implementation/ssl-library.md#contexts-and-trust
   local colon? = string.find(host, ":")
   local scope? = string.find(host, "%")
   if colon and scope and (colon as integer) < (scope as integer) then
@@ -414,6 +415,7 @@ end
 -- This core never joins an internal Task: its child may be waiting for this
 -- very completion. Only engine-scope retirement is the quiescence condition.
 local function terminate(connection: Connection, graceful: boolean)
+  -- Implementation notes: doc/implementation/ssl-library.md#duplex-admission-cancellation-and-failure
   if connection.state == STATE_CLOSED or connection.state == STATE_FAILED then return end
   if connection.state == STATE_TERMINATING then
     async.await_cleanup_with(connection, start_cleanup)
@@ -852,6 +854,7 @@ local function read_locked(connection: Connection, owner: Operation): string?
 end
 
 local function write_piece_locked(connection: Connection, owner: Operation, piece: string)
+  -- Implementation notes: doc/implementation/ssl-library.md#driving-the-state-machine
   local bytes = piece as foreign const *char
   while true do
     engine_gate(connection, owner)
@@ -1045,6 +1048,7 @@ local function pem_no_start_line(packed: integer): boolean
          reason == (ffi.PEM_R_NO_START_LINE as integer)
 end
 
+-- Implementation notes: doc/implementation/ssl-library.md#pem-decoding
 local function read_pem_block(bio: foreign *BIO,
                               operation: string): PemBlock?
   local names = foreign VoidPointer.new_array(1)
@@ -1613,6 +1617,7 @@ end
 -- @return Same-process engine and transport state, to be adopted exactly once.
 -- @usage standard-library-ssl.md#transferring-connections
 function Connection:to_transfer_payload(): string
+  -- Implementation notes: doc/implementation/ssl-library.md#connection-transfer-ownership
   if not self.handle or self.state == STATE_TERMINATING then
     raise "cannot transfer a closed or terminating TLS Connection"
   end

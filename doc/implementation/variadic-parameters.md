@@ -1,42 +1,37 @@
 # Variadic parameters
 
 A Titan function, lambda, method or record function may end its parameter list
-with a single **variadic parameter** `...: t` — the `name: type` declaration
-style with no name, always the last parameter. Its element type is mandatory on
-top-level functions, methods and function-type annotations; an anonymous
-function may instead write a bare untyped `...` whose element type is inferred
-from context (the [lambda inference](#untyped-lambda-vararg) path). Inside the declaring
-function the parameter is reached through three forms — `#...` (count),
-`...[e]` (1-based element), and a trailing **spread** (`f(a, ...)`,
-`return a, ...`, `{a, ...}`, `{...}`) — and the same `...: t` syntax annotates a
-first-class variadic **function type** (`function (integer, ...: string): (integer)`).
+with one **variadic parameter** `...: t`: a nameless `name: type` declaration
+that is always last. Its element type is mandatory on top-level functions,
+methods and function-type annotations; an anonymous function may write a bare
+untyped `...` whose element type is [inferred from context](#untyped-lambda-vararg-inference).
+Inside the declaring function the parameter is reached through `#...` (count),
+`...[e]` (1-based element), and a trailing spread (`f(a, ...)`, `return a, ...`,
+`{a, ...}`). The same `...: t` syntax annotates a first-class function type
+(`function (integer, ...: string): (integer)`). The language rules are in the
+[variadic parameters chapter](../language/variadic-parameters.md).
 
-The feature is deliberately *lightweight*: there is no slice type. The `...`
-expression/parameter is **not first-class** — it cannot be captured by a
-closure, stored, or escape its declaring function, and it is invisible to inner
-lambdas — but the **function that declares it is** an ordinary first-class
-value. This chapter walks the implementation across all four layers it touches:
-the [parser](#parser-the-t-grammar) (`parser.lua`, `ast.lua`), the
-[checker](#checker-varargtype-scope-and-shared-result-demand) (`checker.lua`,
-`types.lua`), the [code generator](#code-generator-the-seven-structs-and-the-native-abi)
-(`coder.lua`, the seven `TitanVarg*` structs in `titan-runtime/titan.h`), and
-the [GC discipline](#gc-discipline-descriptor-pointers-and-untraced-payloads) the descriptor and
-backing storage must respect. Background on the calling convention is in the
-[code generator overview](codegen-overview.md); value representation and the
-collector invariants in [values and the GC](values-and-gc.md).
+There is no slice type. `...` is **not first-class**: it cannot be captured,
+stored, or escape its declaring function, and it is invisible to inner lambdas.
+The function that declares it is an ordinary first-class value. This chapter
+covers the [parser](#parser-and-ast-encoding), the
+[checker](#checker-varargtype-scope-and-shared-result-demand), the
+[code generator](#code-generator-the-seven-structs-and-the-native-abi), and the
+[GC discipline](#gc-discipline-descriptor-pointers-and-untraced-payloads) for
+the descriptor and its backing storage. The calling convention is in the
+[code generator overview](codegen-overview.md#the-titan-native-function-and-its-calling-convention);
+value representation and collector invariants are in
+[values and the GC](values-and-gc.md). Flexible *output* tails reuse the same
+descriptors; see [flexible-return internals](flexible-returns.md).
 
-Variadic signatures and descriptor layout are part of the compiled-module ABI;
-see [the ABI boundary](#the-abi-boundary).
+## Parser and AST encoding
 
-## Parser: the `...: t` grammar
+`DOTS` (`...`) is an ordinary lexer token
+([Lexer and parser](lexer-parser.md#one-grammar-no-token-stream)).
 
-`lexer.lua` needs no change: `DOTS` (`...`) already lexes (the longest-match
-loop makes `CONCAT`/`DOT` subtract it), and was previously a reserved-but-unused
-token ([Lexer and parser](lexer-parser.md#one-grammar-no-token-stream)).
+### `Exp` nodes and the nameless `Decl`
 
-### Three new `Exp` nodes, and the no-name `Decl`
-
-`ast.lua` adds three constructors to the `Exp` group:
+`ast.lua` has three variadic `Exp` constructors:
 
 ```text
 ExpDots         = {"loc"},          -- bare `...`
@@ -44,272 +39,214 @@ ExpDotsIndex    = {"loc", "exp"},   -- `...[e]`  (checker sets _nilfill, _type)
 ExpDotsLen      = {"loc"}           -- explicit `#...`
 ```
 
-There is **no** new parameter node. A variadic parameter is encoded as an
-ordinary trailing `Ast.Decl` whose `name` field is `nil`
-(`defs.varargdecl(pos, type)` builds `ast.Decl(pos, nil, type, false, false)`),
-so a function is variadic exactly when `params[#params].name == nil`. An
-**untyped** lambda vararg additionally has `type == nil` — the same inverted
-encoding an inferred lambda parameter uses (`name` set / `type == nil`), but
-with `name == nil` too. The absent-name convention threads through the
-checker and coder, which detect and strip that marker. The function-type
-annotation likewise gains no node flag: the new field `varargtype` is appended
-to `Ast.TypeFunction`
-(`{"loc","argtypes","rettypes","varargtype","flexrettype"}`), `nil` when
-absent. The independent final field describes a flexible *output* tail; see
-[flexible-return internals](flexible-returns.md).
+There is no parameter node. A variadic parameter is an ordinary trailing
+`Ast.Decl` whose `name` is `nil` (`parser.lua` `defs.varargdecl`), so a function
+is variadic exactly when `params[#params].name == nil`. An untyped lambda vararg
+additionally has `type == nil`. The checker (`param_types`, the
+`Ast.ExpFunction` visitor) and the coder (`fixed_params`) detect and strip that
+marker. The `foreignvararg` production reuses the same nameless, untyped
+marker for C `...` in a source `foreign function`.
+
+A function-type annotation stores its input tail in
+`Ast.TypeFunction.varargtype` (`{"loc","argtypes","rettypes","varargtype","flexrettype"}`),
+`nil` when absent. The independent `flexrettype` is the output tail.
 
 ### Parameter and function-type lists
 
-Named Titan declarations require `...: T` for an input tail. Lambdas may omit
-that annotation and infer the tail element from an expected function type.
-The fixed-parameter loop stops at a following `...`, so an input tail remains
-last-only. Parameter lists use fold captures and retain the 100-item written-
-parameter guard; this is separate from runtime vararg capacity.
+The `varargparam` production requires `...: T`; `lambdavararg` makes the
+annotation optional. The fixed-parameter loop stops at `...`, so an input tail
+is last-only. Parameter lists keep the 100-item written-parameter guard, which
+is unrelated to the runtime vararg capacity.
 
 Function types begin with `function`. Their `typelist` and `resulttypes`
-productions independently collect fixed types and an optional final `...: T`,
-then `split_types` separates the fixed list from its tail. The resulting
-`Ast.TypeFunction.varargtype` and `.flexrettype` remain independent. Type/result
-lists do not inherit the declaration-parameter count guard: the checker and
-calling convention apply the appropriate result limits at their consumers.
+productions collect fixed types plus an optional final `...: T`, and
+`split_types` separates the fixed list from the tail. Type and result lists do
+not inherit the declaration-parameter count guard; the checker and calling
+convention apply result limits at their consumers.
 
 ### Vararg atoms, spreads, and semantic placement
 
-Bare `...` is now a `baseexp` atom. A following bracket suffix distinguishes
-scalar `...[index]` from the comma-bearing range forms. With another expression
-start after `...`, bounded token dispatch parses one collection-spread subject.
-The dedicated `#...` count form remains separate from `#...[index]`.
-
-The parser preserves markers in every written expression-list position;
-shared checker adjustment rejects unparenthesized varargs or spreads before
-the final expanding position. This applies equally to calls, assignments,
-returns, iterator tuples, and positional constructors. There is no separate
-parser fixed-position predicate rejecting bare dots.
-
-Parentheses request one adjusted value. This includes bare `(...)`, collection
-`(...items)`, and ranged `(...[first, last])` forms. A plain collection subset
-such as `items[first, last]` still needs a spread owner. `ExpSpread` carriers
-and their shared finite projections keep the existing evaluation-once and
-finite/open behavior described in [spread internals](spread-expressions.md).
+Bare `...` is a `baseexp` atom, so `...[index]`, `...[first, last]`, `#...`,
+and collection spreads share one dispatch, described in
+[Spread expressions](spread-expressions.md#parser-and-ast-ownership). The
+parser preserves markers in every expression-list position. Shared checker
+adjustment, not the parser, rejects an unparenthesized vararg or spread before
+the final expanding position. A parenthesized `(...)` requests exactly one
+value.
 
 ## Checker: `varargtype`, scope, and shared result demand
 
-The checker carries the vararg element type on a **new `varargtype` slot** on
-the function-like types, resolves `...` uses through a depth-stamped pseudo-
-symbol, and turns a trailing bare input marker into either synthesized
-`ExpDotsIndex` reads (adjust-up) or a kept `ExpDots` marker (whole-tail).
-Collection and ranged spreads instead use a retained `ExpSpread` carrier plus
-shared finite `ExpSpreadIndex` projections or its open-run descriptor; see
+The checker carries the vararg element type in a `varargtype` slot on the
+function-like types and resolves `...` uses through a depth-stamped
+pseudo-symbol. A trailing bare `...` becomes either synthesized `ExpDotsIndex`
+reads (finite demand) or a kept `ExpDots` marker (open demand). Collection and
+ranged spreads use a retained `ExpSpread` carrier instead; see
 [Spread expressions](spread-expressions.md#checker-planning).
 
 ### `Type.Function.varargtype` vs. `Type.CFunction.vararg`
 
-`types.lua` adds `varargtype` to `Type.Function`
-(`{"params","rettypes","vararg","varargtype","flexrettype"}`) and to
-`Type.Method` / `Type.StaticMethod` (whose declaration descriptors also carry
-`paramnames`). In the current `Type.Function`, the third positional
-`vararg` field is a required **reserved `false` sentinel** retained only to keep
-serialized constructor arity stable; it has no C or Titan variadic meaning. A
-Titan variadic sets `varargtype = T`. A direct foreign declaration instead has
-type `Type.CFunction(params, ret, vararg, abi)`, whose `vararg` boolean alone
-means C `...`; it is never projected to `Type.Function`. Consumers of boxed
-Titan/Lua callables test only `varargtype`, while the checker's private C call
-view exposes the C bit as `c_vararg`. Four type operations change:
+`types.lua` has `varargtype` on `Type.Function`
+(`{"params","rettypes","vararg","varargtype","flexrettype"}`) and on
+`Type.Method` / `Type.StaticMethod`, whose declaration descriptors also carry
+`paramnames`. The third `Type.Function` field `vararg` is a required reserved
+`false` sentinel that keeps the serialized constructor arity stable; it has no
+variadic meaning. A Titan variadic sets `varargtype = T`. A direct foreign
+declaration instead has `Type.CFunction(params, ret, vararg, abi)`, whose
+boolean `vararg` means C `...`; it is never projected to `Type.Function`.
+Consumers of boxed Titan/Lua callables test only `varargtype`; the checker's
+private C call view exposes the C bit as `c_vararg` (`checker/c_types.lua`).
 
-* **`callable_adjustment(source_actual, target_expected)`** plans the directional callable
-  use. Parameter positions may move between the fixed prefix and the actual
-  input tail; an actual function may ignore an expected fixed suffix.
-  Additional actual fixed parameters receive the callable's enumerated
-  missing-nil action; an expected input tail must also be safely observed in
-  every such position. The expected output shape then observes
-  the actual fixed/flexible results covariantly. No numeric, Option, or other
-  automatic coercion is lifted through the callable shape. A missing expected
-  fixed result may use the separate `nil_fill_result` action only under the
-  shared nil-acceptance policy. See
-  [flexible returns](flexible-returns.md#identity-and-callable-adjustment) and
-  [closure adjustment wrappers](closure-adjustment-wrappers.md) for the
-  complete raw/frozen matrix.
-* **`equals`** remains exact structural identity: fixed positions, input-tail
-  presence/type, and output-tail presence/type must all match. Thus
-  `...: integer` and `...: value` are not equal, which gives them different
-runtime tags even if a directional callable adjustment is legal.
-* **`serialize`** emits `varargtype` for Function, Method, and StaticMethod
-  alongside the independent `flexrettype` schema.
-  It emits and validates `false` in the reserved Function position; a hostile
-  non-false value is rejected. The latter tail is not accepted from compiled
-  interfaces until the coordinated flexible-return ABI transition.
-* **`tostring`**: appends `, ...: t` to the parameter list.
+The tail participates in every structural type operation:
 
-`typefromnode`'s `Ast.TypeFunction` handler reads `node.varargtype` and sets the
-resulting `Type.Function.varargtype` (after validating the element type).
+* **`callable_adjustment(source_actual, target_expected)`** may move
+  parameter positions between the fixed prefix and the actual input tail. The
+  directional rules are in
+  [Type relations](type-relations-and-boundaries.md#callable-adjustment-rules);
+  wrapper realization is in
+  [Closure adjustment wrappers](closure-adjustment-wrappers.md).
+* **`equals`** is exact structural identity, including input-tail presence and
+  element. `...: integer` and `...: value` are therefore unequal and get
+  different runtime function tags, even where a directional adjustment is
+  legal.
+* **`serialize`** emits `varargtype` and `flexrettype` for Function, Method,
+  and StaticMethod, and `false` in the reserved Function position. The
+  validator in `driver.lua` rejects a non-false reserved value on recovery.
+  The serialized form is described in
+  [Lua entries and ABI metadata](codegen-overview.md#lua-entries-and-abi-type-and-layout-metadata).
+* **`tostring`** appends `, ...: t` to the parameter list.
+
+`typefromnode`'s `Ast.TypeFunction` handler validates `node.varargtype` and
+sets `Type.Function.varargtype`.
 
 ### The signature pass and the bans
 
-The three signature visitors (`TopLevelFunc`, `TopLevelStatic`,
-`TopLevelMethod`) all route through one helper, `param_types(params, st,
-errors)`: it detects the trailing `name == nil` `Decl`, drops it from the fixed
-`ptypes` list, and returns its validated element type as the second value, which
-the caller passes as `varargtype` to the type constructor. The lambda checker
-(`Ast.ExpFunction`) does the same detection inline rather than calling
-`param_types` (it also needs the `nfixed` count for context-arity matching), but
-shares the same validation. Validation is the role-aware
-`check_varg_elem(typ, loc, errors, "parameter")`, which enforces the two
-**bans** (applied to the inferred/explicit lambda vararg element too):
+The signature visitors for `TopLevelFunc`, `TopLevelStatic` and
+`TopLevelMethod` call `param_types(params, st, errors)` (`checker/common.lua`),
+which returns `ptypes, varargtype, paramnames`: it drops the trailing nameless
+`Decl` from the fixed list and validates its element type. The lambda checker
+(`Ast.ExpFunction`) detects the tail inline because it also needs `nfixed` for
+context matching. Both validate with
+`check_varg_elem(typ, loc, errors, "parameter")` (`checker/common.lua`), which
+rejects, with `types.Invalid()` so checking continues:
 
-* `...: nil` → `a variadic parameter cannot have type nil` (a typed `...: t` cannot
-  hold nil, except where `t` is `value`/an option that already includes nil);
-* a foreign-C-pointer element → `a variadic parameter cannot have a foreign
-  pointer type` (no `TitanVarg*` struct exists for it).
+* `...: nil`: `a variadic parameter cannot have type nil`;
+* a foreign C pointer: `a variadic parameter cannot have a foreign pointer type`;
+* any type with no `TitanVarg*` family:
+  `a variadic parameter cannot use type T because it has no supported
+  variadic-value representation` (`types.valid_varg_element`).
 
-Both return `types.Invalid()` so checking continues. The same helper, with
-role `"return"`, validates flexible result elements; `typefromnode` uses it for
-both tails in a first-class annotation.
+The same helper with role `"return"` validates flexible result elements.
 
-### Untyped lambda vararg inference {#untyped-lambda-vararg}
+### Untyped lambda vararg inference
 
-A lambda's vararg `Decl` may carry `type == nil` (the parser's untyped form).
-The `Ast.ExpFunction` visitor resolves the vararg element type after it has
-computed `nfixed` and the `expected` context type (so the order is: count the
-fixed params, derive `expected` from the context iff it is a `Type.Function`
-whose `#params == nfixed`, then resolve the vararg). The resolution mirrors the
-untyped-fixed-parameter path:
+The `Ast.ExpFunction` visitor (`checker/expressions.lua`) first counts the
+fixed parameters, takes the context as `expected` only when it is a
+`Type.Function` with `#params == nfixed`, and then resolves the vararg:
 
-* explicit `...: t` → `typefromnode(varargdecl.type, …)` (context ignored);
-* untyped `...`, variadic context → take `expected.varargtype` as the element;
-* untyped `...`, context present but **non-variadic** (`expected.varargtype` is
-  `nil`) → `cannot infer the type of '...'; the lambda is variadic but the
-  expected type is not`;
-* untyped `...`, **no usable context** → `cannot infer the type of '...';
-  annotate it or use the lambda where its type is known`.
+* explicit `...: t`: `typefromnode` (context ignored);
+* untyped `...`, variadic context: `expected.varargtype`;
+* untyped `...`, non-variadic context: `cannot infer the type of '...'; the
+  lambda is variadic but the expected type is not`;
+* untyped `...`, no usable context: `cannot infer the type of '...'; annotate
+  it or use the lambda where its type is known`.
 
-The resolved element is then run through `check_varg_elem` (the same `nil` /
-foreign-pointer bans). Top-level functions, methods and function-type
-annotations never reach this path — their `...: t` is mandatory at the parser.
+The result then goes through `check_varg_elem`. Top-level functions, methods
+and function-type annotations never reach this path because the parser
+requires their annotation.
 
 ### Depth-stamped `$vararg` and scope rule 4
 
-`...` is **invisible to inner lambdas**, which is *not* ordinary lexical scoping
-(`find_symbol` walks every enclosing block). `checkfuncbody` installs a
-side-channel symbol for a variadic function:
-
-```lua
-if node._type.varargtype then
-    st:add_symbol("$vararg",
-        { elem = node._type.varargtype, funcdepth = #func_stack })
-end
-```
-
-stamped with the current function-nesting depth (`#func_stack`, mirroring
-`_funcdepth` — see [closures](checker.md#closures-capture-analysis-and-lambda-inference)).
-Every `...`/`#...`/`...[e]` resolves through `resolve_vararg`, which finds the
-symbol but rejects it when `vararg.funcdepth ~= #func_stack`: an inner lambda
-walking the symbol table finds the enclosing `$vararg` but its stamped depth
-differs, so the use is `'...' is not visible inside an inner function`. A use
-with no `$vararg` at all is `'...' can only be used inside a variadic function`.
-A variadic lambda installs its own `$vararg` at its own depth, so its own `...`
-resolves.
+`...` is invisible to inner lambdas, which ordinary lexical scoping would not
+give (`find_symbol` walks every enclosing block). `checkfuncbody`
+(`checker/declarations.lua`) installs a `$vararg` symbol
+`{ elem = varargtype, funcdepth = #func_stack }` for a variadic function. Every
+`...`, `#...` and `...[e]` resolves through `resolve_vararg`
+(`checker/common.lua`), which reports `'...' is not visible inside an inner
+function` when the stamped depth differs from the current `#func_stack`, and
+`'...' can only be used inside a variadic function` when no symbol exists. A
+variadic lambda installs its own `$vararg` at its own depth. The depth matches
+`_funcdepth`; see
+[closures](checker.md#closures-capture-analysis-and-lambda-inference).
 
 ### The variadic expression checker arms
 
-* **`Ast.ExpDots`** is intercepted by a legal tail consumer through
-  `check_dots_marker`, or by `ExpAdjust` for the exact `(...)` form. Its direct
-  visitor is defensive for synthesized/malformed ASTs; source syntax cannot
-  place a bare node in an ordinary scalar expression.
-* **`Ast.ExpDotsLen`** is built directly by the parser for `#...`, resolves
-  `$vararg`, and sets `node._type = Integer`.
-* **`Ast.ExpDotsIndex`** checks the index against `integer` (`trycoerce` +
-  `checkmatch`, term `"variadic index"`), defaults `_nilfill = false`, and types
-  the node `t` — **not `t?`** [OWNER §2.A]. This is the deliberate divergence
-  from array indexing (`a[i]` is `t?` because Lua arrays have holes): the vararg
-  struct is dense, codegen bounds-checks and **raises** on out-of-range, and
-  that raise is what licenses the non-optional element type. Adjust-up synthesis
-  (next) flips `_nilfill = true` / `_type = s?` for an optional target slot.
-* **`Ast.ExpAdjust(ExpDots)`** is rewritten to a nil-filling
-  `ExpDotsIndex(1)`. Its intrinsic type is `optionize(t)`, so an empty input run
-  yields nil, an ordinary required context applies the existing Option force,
-  and the adjusted form always contributes exactly one scalar.
+* **`Ast.ExpDots`** is consumed by a legal tail consumer through
+  `check_dots_marker`, or by `ExpAdjust` for `(...)`. Its direct visitor only
+  diagnoses synthesized or malformed ASTs.
+* **`Ast.ExpDotsLen`** resolves `$vararg` and has type `integer`.
+* **`Ast.ExpDotsIndex`** coerces the index to `integer` (term
+  `"variadic index"`), defaults `_nilfill = false`, and has type `t`, or `t?`
+  when `_nilfill` is set. Unlike `a[i]` on an Array, a source `...[i]` is `t`:
+  the run is dense, and the generated read raises when out of range.
+* **`Ast.ExpAdjust(ExpDots)`** is rewritten to `ExpDotsIndex(1)` with
+  `_nilfill = true`, so `(...)` always contributes one `t?` value and an empty
+  run yields nil.
 
 ### Shared finite/open expression-list demand
 
-Declarations, assignments, returns, calls, positional Array/integer-Map
-constructors, and the generic-for setup tuple all use `result_demand` plus
-`adjust_explist`; there are no longer separate consumer-specific
-expression-list adjustment loops. The adjustment record keeps every written
-expression in lexical order, separates fixed deliveries from scalar/open tail
-deliveries, and marks surplus expressions that must still run only for effect.
+All expression-list consumers use `result_demand` plus `adjust_explist`;
+[Flexible returns](flexible-returns.md#one-finiteopen-result-demand) is the
+canonical description. The `ExpDots`-specific rules are:
 
-For a **finite demand**, a trailing `Ast.ExpDots` is projected into only the
-needed synthesized `Ast.ExpDotsIndex` reads. Each read follows the consuming
-slot: an optional/nil-compatible target can nil-fill and gets an option-shaped
-source, while an ordinary non-nil fixed call argument retains the raising
-bounds check. The generic-for tuple is the deliberate exception: its
-`dots_nilfill = true` option makes missing state/control projections nil, as
-Lua's iterator setup requires. If the finite demand is already full, `...` is
-not read. Explicit surplus expressions are checked, evaluated, and discarded;
-`return ...` in a zero-result function is therefore an effect-free discard,
-not an arity error.
+* **Finite demand.** A trailing `ExpDots` becomes one synthesized
+  `ExpDotsIndex` per still-needed slot. A read nil-fills (type `t?`) when the
+  demand's `dots_nilfill` policy says so or when the target passes
+  `nil_can_adjust_to`; otherwise it keeps the raising bounds check. If the
+  finite demand is already full, `...` is not read, so `return ...` in a
+  zero-result function is a no-op rather than an arity error.
+* **Generic `for`.** The tuple demand sets `dots_nilfill` to a predicate that
+  is true for slots 1–3 (`checker/statements.lua`): missing state and control
+  become nil as Lua requires, while a close function projected into slot 4
+  keeps the raising read. See
+  [Generic `for` tuple elaboration](checker.md#generic-for-tuple-elaboration).
+* **Open demand.** The marker stays the single runtime-sized `open_source`. An
+  input-variadic call receives the remaining run, a function with
+  `flexrettype` can forward it from `return ...`, and a final positional Array
+  or exact integer-Map field appends it.
+* **C variadics.** A runtime-open run cannot reach a C `...`: the C call view's
+  `c_vararg` has no typed descriptor contract. Written finite arguments still
+  use C default promotions.
 
-For an **open demand**, the final marker remains the single runtime-sized
-`open_source`. Input-variadic calls receive the remaining run after any fixed
-borrows; a function with `flexrettype` can forward it from `return ...`; and a
-final positional Array or exact integer-Map field appends it. Static tail
-scalars are coerced to the consumer's element/value type. Codegen can pass an
-equal-representation input run by
-descriptor/start view, or allocate and convert a fresh run when the static
-prefix or element representation changes.
-
-Array/Map and comma-bearing variadic
-[spread expressions](spread-expressions.md) reuse this demand record with a
-shared carrier and non-contiguous element reader. Bare `ExpDots` and scalar
-`ExpDotsIndex` retain the behavior described in this chapter.
-
-Passing a runtime-open Titan run into a C-FFI variadic remains an error: the
-checker-local call view sees `Type.CFunction.vararg` as `c_vararg`, and the
-typed Titan descriptor has no C default-promotion contract. Finite written
-arguments still use ordinary C default promotions.
-
-`...` is always the sole, last trailer; a list ending in both a multi-return
-call and `...` is structurally impossible (`f(g(), ...)` truncates `g()` to one
-value).
+`...` is always the sole, last trailer, so `f(g(), ...)` truncates `g()` to one
+value.
 
 ### Positional `{...}`: backward typing
 
-`ExpInitList` recognizes a trailing key-less `ExpDots` field in an
-all-positional Array or exact integer-keyed Map. The parser rejects
-`{..., 1}` before checking; a trailing `...` field in a computed Map or record
-constructor remains a type error because that distinction depends on the
-target shape. The element/value type is
-**seeded from the vararg element first** — `etype = econtext or
-deoptionize(dots_elem) or ...` — so a no-context `{...}` is `Array(t)`, not
-`Array(t?)`, while an exact `{integer: V}` context selects Map. The kept
-`ExpDots` marker carries through to codegen. A contextual target must accept
-the vararg element type or checking reports the ordinary positional
-initializer coercion error. The shared `_positional_adjustment` can likewise
-name a trailing flexible-result call as its open source.
+`ExpInitList` accepts a trailing key-less `ExpDots` in an all-positional Array
+or exact integer-keyed Map. A non-final `...` field is rejected by the checker
+(`'...' must be the last field in a positional constructor`,
+`checker/expression_lists.lua`); a `...` field in a computed Map or record
+constructor is a type error. The element type is the context element if
+present, else the de-optioned open-source element, else the first tail scalar,
+else `integer` (`generic_positional_constructor_element_type`). A no-context
+`{...}` is therefore `Array(t)`, not `Array(t?)`. A contextual target must
+accept the vararg element type. The kept `ExpDots` reaches the coder as the
+`_positional_adjustment` open source, which can also be a trailing
+flexible-result call.
 
 ### The adjustment guarantee for codegen
 
-After checking, every static element destined for a `TitanVarg*` struct has
-an attached `assignment_adjustment` to the element type, so its store consumes
-the ordinary plan lowering. Runtime run-to-run conversion uses the same
-per-element plan. A strict `value → t` guard can therefore appear in a realized callable
-wrapper's native adapter, the branded generic fallback, a fresh forwarding
-copy, or a flexible result-run consumer; it is never replaced by a
-representation cast. The genuine-Lua entry instead consumes the corresponding
-`DynamicCoercionPlan`.
+After checking, every static element destined for a `TitanVarg*` descriptor
+carries an `assignment_adjustment` to the element type, and run-to-run
+conversion uses the same per-element plan. A strict `value → t` guard can
+therefore appear in a callable wrapper's native adapter, the branded generic
+fallback, a fresh forwarding copy, or a flexible result-run consumer, and is
+never replaced by a representation cast. The genuine-Lua entry consumes the
+corresponding `DynamicCoercionPlan`.
 
-An adjusted Interface method uses this same descriptor ABI for an input tail.
-Its checker-frozen adapter records the run actions, element guard/injection,
-roots, and rebases in advance; the coder validates and renders that closed
-plan without asking consistency or coercion again. In particular, a scalar
-concrete-to-Interface coercion is not lifted into a variadic component.
+An adjusted Interface method uses the same descriptor ABI for an input tail.
+Its checker-frozen adapter records the run actions, element guard or
+injection, roots and rebases in advance; the coder renders that closed plan
+without re-deciding coercions. A scalar concrete-to-Interface coercion is not
+lifted into a variadic component. See
+[Interfaces](interfaces.md#frozen-conversion-and-adapter-plans).
 
 ## Code generator: the seven structs and the native ABI
 
 ### Seven `TitanVarg*` structs, one per `ctype`
 
-`titan-runtime/titan.h` declares seven descriptor structs, one per element
-`ctype`, so `args` has the exact element pointer type (no punning):
+`titan-runtime/titan.h` declares one descriptor struct per element `ctype`, so
+`args` has the exact element pointer type:
 
 ```c
 typedef struct { lu_byte n_args; lua_Integer *args; } TitanVargInteger;
@@ -322,43 +259,33 @@ typedef struct { lu_byte n_args; Udata      **args; } TitanVargNominal;
 #define TITAN_VARARG_MAX 200
 ```
 
-Scalars are unboxed; collectable elements are raw pointers (`TString*`,
-`Table*`); `value`, ordinary Options, and function elements use `TValue`; a
-record (`Type.Nominal`) and an owned C value (`Type.COwned`) use the
-`Udata*`/`TitanVargNominal` family with **no extra boxing**. The coder normally
-picks the struct with `varg_struct_name(elemtype)`, keyed on the
-`ctype(elemtype)` string via `varg_struct_by_ctype` (the Lua-side mirror of the
-seven typedefs). Native foreign numeric Options additionally use generated
-presence/value structs and matching `{ lu_byte n_args; OptionType *args; }`
-descriptors, so exact native calls do not introduce a boxed numeric boundary.
-See [Native nominal storage](nominal-storage.md). `COwned` is selected
-semantically rather than from rendered C
-declarator whitespace. A Pointer element has no entry and would `error`, but
-the checker bans it first. The seven built-in descriptor families live in
-`titan.h`, which every generated unit includes. Only the native numeric Option
-families require additional generated struct definitions.
-The same family serves flexible *output* runs. Ownership distinguishes the
-directions: an input descriptor is a borrowed view of caller arguments, while
-an output descriptor points at capacity supplied by the caller and the callee
-sets `n_args` to the number actually produced.
+Scalars are unboxed; strings and containers are raw object pointers; `value`,
+ordinary Options and functions use `TValue`; nominal values (`Type.Nominal`)
+and owned C values (`Type.COwned`) use `TitanVargNominal`. `varg_struct_name`
+(`coder/flow.lua`) picks the family from `ctype(elemtype)` through
+`varg_struct_by_ctype`, selecting `COwned` semantically. A C pointer element has
+no entry and raises a compiler error, but the checker bans it first. Native
+foreign numeric Options additionally get generated
+`titan_native_option_N_varg` descriptors with the same pair shape
+(`coder/nativeoption.lua`; see [Native nominal storage](nominal-storage.md)).
 
-Two design points [§2.C / §2.G]:
+An input descriptor is a borrowed view of the caller's arguments. A flexible
+output descriptor points at caller-supplied capacity and the callee sets
+`n_args` to the count produced.
 
-* **`n_args` is `lu_byte`**, an *intentional* cap that keeps the struct small
-  and bounds static sizing — `TITAN_VARARG_MAX = 200`. Statically-known counts
-  are bounded by the parser's `LIST_LIMIT = 100`, so they never trip; runtime
-  counts from forwarding/merge and the generic entry are bounds-checked and
-  raise a clean Titan error past 200. Functions needing very large homogeneous
-  arg counts use an explicit `{T}` parameter instead.
-* **`start` is NOT a struct field** — it travels as a separate `int _start`
-  native parameter. `n_args` is the *total backing* count; a callee's logical
-  view is `args[start .. n_args-1]`, length `n_args − start`. Keeping `start`
-  out of the struct makes forwarding mutation-free: a callee just computes and
-  passes a different `_start` against a shared, immutable struct.
+Two layout decisions:
 
-At a static call site where the count `N` is a compile-time constant, the coder
-emits a typed C array for the elements plus a named descriptor that points at
-that array:
+* **`n_args` is `lu_byte`**, capped by `TITAN_VARARG_MAX = 200`. Static counts
+  are bounded by the parser's 100-item list limit; runtime counts from
+  forwarding and the Lua entries are checked and raise past 200. Callers that
+  need more elements use an explicit `{T}` parameter.
+* **`start` is not a field.** It travels as a separate `int _start` parameter;
+  `n_args` is the total backing count and the callee's view is
+  `args[_start .. n_args-1]`. Forwarding therefore passes a different `_start`
+  against the same immutable descriptor.
+
+At a static call site with a compile-time count `N`, the coder emits a typed C
+array and a named descriptor pointing at it:
 
 ```c
 lua_Integer _vargargs_3[N] = { a, b };
@@ -366,84 +293,68 @@ TitanVargInteger _varg_3 = { N, _vargargs_3 };
 f(L, _mod, _fn, /* params... */ &_varg_3, /* _start = */ 0, /* out... */);
 ```
 
-Both locals are ordinary C-stack objects. That is safe because the descriptor
-stores only a count and a pointer to element storage. For collectable element
-types, the elements are pointers to Lua GC objects (`TString*`, `Table*`,
-`Udata*`) or tagged `TValue`s; Lua's GC does not move those objects. The stack
-relocation hazard is pointers to Lua **stack slots**, and the descriptor does
-not store those.
+Both are C-stack locals. The descriptor stores only a count and a pointer to
+element storage, and the elements are values or pointers to Lua heap objects,
+which the GC does not move. An empty static run still emits a one-element
+array with `n_args == 0`.
 
-For an **empty** static vararg the coder still emits a one-element C array with
-`n_args == 0` and `{ 0 }`; the bounds checks guarantee `args` is never read.
+### The native ABI: trailing `_varargs` and `_start`
 
-### The native ABI: trailing `_varargs` + `_start`
-
-A variadic function's native signature gains the two items **after the declared
-params and before the out-params**. If the same function also has a flexible
-result, its `_flexout`/`_flexwant` pair follows every fixed out-parameter:
+A variadic function's native signature gains the pair after the declared
+parameters and before the fixed result out-parameters. A flexible result's
+`_flexout`/`_flexwant` pair comes last:
 
 ```c
 lua_Integer mod_\u2133_f_titan(lua_State *L, Udata *_mod, CClosure *_fn,
                         lua_Integer _param_x,
-                        TitanVargInteger *_varargs, int _start,   /* trailing, before out-params */
+                        TitanVargInteger *_varargs, int _start,
                         lua_Integer *_outparam_2,
-                        TitanVargString *_flexout, int _flexwant); /* output tail is last */
+                        TitanVargString *_flexout, int _flexwant);
 ```
 
-They are not `ftype.params` entries; `ctype` is untouched. Instead all **four**
-signature emitters special-case `ftype.varargtype` and `ftype.flexrettype` and
-must agree byte-for-byte:
-`function_sig` (which also feeds the value-call fast-path typedef and so the
-type-tag), `codefuncdec`'s cparams, `codelambdadec`'s cparams, and
-`codemethodtrampoline` (a variadic method's bound trampoline forwards
-`_varargs` + `_start` verbatim and likewise passes `_flexout` + `_flexwant`).
-`fixed_params` strips the trailing
-`name == nil` marker so the per-name param loop never emits a C parameter for
-it. Each of `codefuncdec` and `codelambdadec` then threads the context:
+The pair is not part of `ftype.params`. Four emitters add it from
+`ftype.varargtype` and must agree byte for byte: `function_sig`
+(`coder/flow.lua`, which also defines the value-call fast-path typedef), and
+the inline `cparams` of `codefuncdec`, `codelambdadec`, and
+`codemethodtrampoline` (`coder/declarations.lua`). A bound-method trampoline
+forwards `_varargs`/`_start` and `_flexout`/`_flexwant` verbatim.
+`fixed_params` strips the nameless marker so no C parameter is emitted for it.
+`codefuncdec` and `codelambdadec` then set
+`ctx.varargs = { cname = "_varargs", start = "_start", elem = varargtype }`
+(immediately called lambdas set it in `coder/immediate.lua`). A lambda's
+context is fresh, so an inner lambda never inherits the enclosing `...`; the
+coder enforces scope rule 4 a second time.
 
-```lua
-ctx.varargs = { cname = "_varargs", start = "_start", elem = ftype.varargtype }
-```
+### Lua-entry vararg collection
 
-A lambda's `ctx` is fresh (`newcontext`), so `ctx.varargs` starts nil and is set
-only for a variadic lambda — an inner lambda **never inherits** the enclosing
-function's `...` (scope rule 4 enforced a second time, in codegen).
+The Lua-stack entries are described in
+[Lua interop internals](lua-interop-internals.md#the-two-lua-stack-entries-genluaentry).
+For a variadic function, `genluaentry` (`coder/declarations.lua`) builds the
+descriptor from every argument beyond `nfixed`, after padding a short fixed
+prefix with nil:
 
-### `genluaentry` builds GC-anchored element storage plus a C-stack descriptor
+1. `_vcount = _nargs − nfixed`; above `TITAN_VARARG_MAX` it raises
+   `too many variadic arguments to Titan function …`.
+2. `titan_ensure_stack` reserves a slot, then the element array is allocated
+   as a zero-user-value `Udata` payload (`luaC_newobj`, `nuvalue = 0`,
+   `metatable = NULL`) and anchored on the Lua stack, because per-element
+   conversion can allocate.
+3. A C-stack `TitanVarg*` descriptor points at `getudatamem` of that payload;
+   `_start = 0`.
+4. Each surplus argument is converted into `args[j]` with the parameter
+   policy of that entry: `DynamicCoercionPlan` in the genuine-Lua entry, strict
+   guards in the strict entry. Every read is addressed from the current
+   `L->ci->func.p` because a conversion (for example an Interface witness
+   call) can relocate the stack between iterations. The strict entry excludes
+   its hidden carrier argument from `_vcount`.
 
-The two Lua-stack entries (`genluaentry`) capture the incoming user-argument
-count *before* the
-error-slot/errorhandler pushes inflate `L->top.p`, pads a short fixed prefix
-with nil, then builds the struct from every argument beyond `nfixed`:
+### Lowering index, count, and constructor forms
 
-1. `_vcount = _nargs − nfixed`; **cap-check** `_vcount <= TITAN_VARARG_MAX`,
-   else raise; `lu_byte _nvarargs = (lu_byte)_vcount`.
-2. Allocate the **element array** as a 0-uservalue `Udata` payload
-   (`sizeudata(0, n * sizeof(elem))`), with `nuvalue = 0` and
-   `metatable = NULL`, and **anchor it on the Lua stack**. The payload is
-   runtime-sized and must survive any GC the per-element coercion triggers.
-3. Build a small `TitanVarg*` descriptor on the C stack:
-   `{ _nvarargs, (ElemCT *)getudatamem(_varargs_ud) }`.
-4. Read each surplus arg `s2v(_vfunc + nfixed + 1 + j)` through the same
-   policy as fixed parameters: `DynamicCoercionPlan` for the genuine-Lua
-   entry, strict `GuardPlan` for the branded Titan adapter. Store it in
-   `_varargs->args[j]` and pass `_start = 0`. The strict adapter excludes its
-   hidden original-closure argument from `_vcount`.
+All three forms read `ctx.varargs`; the callee's view has length
+`n_args − _start`.
 
-The entry first calls `titan_ensure_stack`, which uses Lua's internal raising
-growth path to reserve the payload anchor and extend the active frame limit.
-The arg-base pointer
-(`_vfunc`) is recomputed after that reservation/push because it may have
-relocated the stack.
-
-### Lowering `...[i]`, `#...`, and `{...}`
-
-A callee's view is `args[_start .. n_args-1]`, length `n_args − _start`. All
-three forms read off `ctx.varargs`.
-
-**`...[i]` (`codedotsindex`)** materializes the index into a temp (the bounds
-check and the read both reference it, and the operand may have side effects),
-then bounds-checks `1 <= i <= n_args − _start`:
+**`...[i]`** (`codedotsindex`, `coder/expressions.lua`) materializes the index
+once, then checks `1 <= i <= n_args − _start`:
 
 ```c
 lua_Integer _vi = $INDEX;
@@ -452,188 +363,109 @@ if (TITAN_UNLIKELY(_vi < 1 || _vi > ((lua_Integer)_varargs->n_args - _start)))
 $RESULT = _varargs->args[_start + _vi - 1];
 ```
 
-For `_nilfill == false` (user `...[i]`, non-optional adjust-up) out-of-range
-raises and the result is the unboxed `ctype(t)` value, type `t`. For
-`_nilfill == true` (optional adjust-up) out-of-range yields nil and the result
-uses the exact `t?` carrier: a native presence/value struct for foreign
-numeric Options, otherwise the ordinary boxed representation.
+With `_nilfill == false` an out-of-range index raises and the result is the
+unboxed `t`. With `_nilfill == true` it yields nil in the exact `t?` carrier:
+a native presence/value struct for foreign numeric Options, otherwise the boxed
+representation.
 
-**`#...` (`ExpDotsLen`)** is the bare expression
+**`#...`** (`codeexp`, `Ast.ExpDotsLen`) is
 `((lua_Integer)_varargs->n_args - _start)`.
 
-**`{...}` / `{e1, ..., ...}` (`codearray` or positional `codemap`)** receives
-the trailing `ExpDots` as the adjustment's open source and switches to a
+**`{...}` / `{e1, ...}`** (`codearray`, positional `codemap`) receives the
+trailing `ExpDots` as the adjustment's open source and switches to a
 runtime-sized build. The static prefix is evaluated into reserved roots, then
-the actual run count determines capacity. Array lowering creates the
-backing/proxy pair with `titan_array_new`, stores into positive backing slots,
-barriers collectable elements, and records the highest non-nil position as
-logical length. Positional Map lowering pre-sizes and fills an ordinary Table.
-The driving struct/stride uses the **real** vararg element type `va.elem`;
-when the contextual target differs, each element uses the ordinary typed
-conversion. A final flexible-result call uses the same result-run consumer.
+the run count sizes the container. Array lowering creates the backing/proxy
+pair with `titan_array_new`, stores into positive backing slots, and records
+the highest non-nil position as the length; positional Map lowering pre-sizes
+and fills an ordinary Table. The loop strides by the real element type and
+converts each element when the target element differs.
 
-`return ...` uses finite `ExpDotsIndex` projections for fixed result slots and,
-when the current function has `flexrettype`, preserves the remaining input run
-as the output open source. `codereturn` copies at most the inherited
-`_flexwant`, sets `_flexout->n_args`, and leaves surplus unread when the finite
-budget has already been satisfied.
+`return ...` projects finite result slots through `ExpDotsIndex` and, when the
+function has `flexrettype`, forwards the remaining run as the output open
+source; `codereturn` copies at most the inherited `_flexwant` and sets
+`_flexout->n_args`.
 
 ### Static call sites: three forwarding cases
 
-At a static native call to a variadic callee (`codecall`, factored into
-`emit_vararg_struct`), the `_varargs` + `_start` pair is inserted at the pinned
-ABI slot. There are three cases, all mutation-free now that `start` is a
-parameter:
+At a static native call to a variadic callee, `codecall` inserts the
+`_varargs`/`_start` pair through `emit_vararg_struct` (`coder/calls.lua`).
+When the caller forwards its own `...`:
 
-1. **Pass-through** — caller static count equals the callee's fixed-param count
-   and the element representation matches: pass the current `_varargs` and
-   `_start` unchanged. No allocation.
-2. **Start-adjust** — caller static args are fewer than the callee's fixed
-   params, element types match: synthesize `...[1..delta]` reads for the missing
-   fixed params (bounds-checked, raising if too few), then pass the **same**
-   struct with `_start + delta`. No struct mutation, no save/restore.
-3. **Fresh copy** — element representations differ, or caller static args exceed
-   the callee's fixed params (the prefix grows the tail). Allocate fresh
-   `Udata0` element storage (with `luaC_newobj` + `getudatamem`), build a
-   C-stack descriptor pointing at it, **cap-check** the runtime count against
-   `TITAN_VARARG_MAX`, anchor the freshly allocated `Udata0` on a reserved slot,
-   copy the C-only static prefix and then each incoming `...` element converted
-   to the callee element type (identical ctype → raw copy; a `value` widening →
-   `setboxed`; a `value` narrowing → the checker-attached strict guard), set
-   `n_args`, and pass `_start = 0`. No native input gets a tracing-only element
-   slot; its existing allocation/result/semantic/VM provenance remains live, and
-   a conversion that allocates a fresh wrapper roots that destination. The fresh allocation can
-   relocate the Lua stack, so the function records
-   `ctx.uses_base_off` and `_base` is recomputed from `_base_off` after the
-   call.
+1. **Pass-through.** The caller's static argument count equals the callee's
+   fixed count and the element representation matches: pass the current
+   `_varargs` and `_start` unchanged.
+2. **Start adjust.** Fewer static arguments than callee fixed parameters, same
+   representation: synthesize bounds-checked `...[1..delta]` reads for the
+   missing fixed parameters and pass the same descriptor with `_start + delta`.
+3. **Fresh copy.** The representation differs, or the static arguments exceed
+   the callee's fixed parameters. The coder checks the runtime count against
+   `TITAN_VARARG_MAX` (`too many variadic arguments forwarded`), allocates
+   fresh zero-user-value `Udata` storage anchored in a reserved slot, copies
+   the static prefix and each converted `...` element (same ctype: raw copy;
+   widening to `value`: box; narrowing from `value`: the checker's strict
+   guard), and passes `_start = 0`. The allocation can relocate the stack, so
+   the function sets `ctx.uses_base_off` and recomputes `_base` afterward.
 
-### First-class value calls: dispatch by tag
+### First-class value calls
 
-A variadic function is an ordinary first-class value; `codevaluecall` dispatches
-it exactly like a non-variadic value. The runtime function-type tag is a
-`const void *` published/recovered through the Lua registry and cached in the
-current module's per-state native payload. C-free
-callable shapes use `types.runtime_identity(ftype)` so different modules agree.
-That key preserves the full callable structure and the declaration origins of
-header-dependent C types. The same C declaration shares identity across modules;
-unrelated declarations with matching spellings remain distinct. The tag
-**folds in the vararg
-element** because the full callable shape
-distinguishes `...: integer` from `...: value`. So:
+A variadic function is dispatched by `codevaluecall` exactly like any other
+function value; the three branches, tags, and wrapper construction are in
+[Calling function values](codegen-overview.md#calling-function-values-codevaluecall).
+The variadic deltas are:
 
-Before dispatch, a statically known non-exact callable cast may conditionally
-construct a fresh target-tagged wrapper. It freezes the source once in C while
-borrowing its existing traced provenance, requires an exact branded source tag
-and one free upvalue, and otherwise leaves the carrier unchanged. Only the fresh
-wrapper branch writes the reserved allocation root.
-
-* **Tag matches the static type** → the **native fast path**: build the struct
-  (the same `emit_vararg_struct` cases 1–3, including a forwarded `...`) and
-  call the native pointer through the fast-path typedef (`function_sig`, which
-  includes the trailing `_varargs` + `_start`), with `_fn = _vc_callee`. For a
-  source closure the pointer names its body; for a realized wrapper it names
-  the target adapter, which builds A's fixed/tail view and delegates to the
-  immediate source. The target typed tail is therefore enforced on the exact
-  path. `$VARGSTATS` remains inside the selected native branch.
-* **Tag differs but is branded** (a dynamic Function view or wrapper-ineligible
-  carrier) → the **strict generic Lua-stack path**: push the closure's final
-  strict light C function, the closure as a hidden carrier, every fixed and
-  surplus static argument, and any forwarded `...` elements. An ordinary
-  source uses its declaration entry; a wrapper uses its consumer target relay.
-  The strict shell rebuilds descriptors with `GuardPlan`s before the source or
-  target-adapter native call.
-* **The value is not a branded Titan closure** → the ordinary Lua generic path
-  calls the Lua closure, C function, or `__call` value. A static adjustment
-  never wraps it. It receives arguments already adjusted to the static callable
-  shape and boxed for Lua; results entering Titan use the canonical
-  `DynamicCoercionPlan`, including numeric conversions and truthiness.
-
-`luaD_callnoyield` can relocate the stack, so `codevaluecall` sets
-`ctx.uses_base_off` and recomputes `_base` afterward on every stack path.
-The same exact tag also folds in `flexrettype`. On a matching native path the
-caller supplies the flexible output descriptor directly. On either generic path a
-finite sink requests its exact Lua result count; an open sink for a statically
-flexible producer uses `LUA_MULTRET`, preserves the actual count, and converts
-the suffix into the shared result run with strict guards for branded Titan
-values and dynamic conversion otherwise before resetting the Lua stack.
-Thus input and output tails share descriptor representations without changing
-which branch owns the boundary policy.
+* The function-type tag key (`types.runtime_identity`) includes `varargtype`
+  and `flexrettype`, so `...: integer` and `...: value` callables never share
+  the exact path.
+* On the exact path the caller builds the descriptor with the same
+  `emit_vararg_struct` cases, including a forwarded `...`, and calls through
+  the `function_sig` typedef. For a realized wrapper the pointer is the target
+  adapter, which builds the source's fixed/tail view, so the target's typed
+  tail is enforced there.
+* On the branded strict path the caller pushes every fixed and surplus static
+  argument plus any forwarded `...` elements; the strict entry rebuilds the
+  descriptor with strict guards.
+* On the unbranded Lua path the arguments are already adjusted to the static
+  shape and boxed.
 
 ## The ABI boundary
 
-Two cross-provider surfaces are ABI-visible: a variadic function's native
-signature has the trailing `TitanVargX *` plus `int _start` pair, and
-`<mangled>_types` encodes the `varargtype` element type. Each `TitanVargX` is a
-descriptor (`lu_byte n_args; T *args`), not an inline flexible-array object;
-mixing layouts would misread argument storage.
+Variadic shapes are covered by the compiled-module ABI
+([Compiled-module ABI](codegen-overview.md#compiled-module-abi)) in two places:
+the trailing `TitanVargX *` plus `int _start` native pair, and the
+`varargtype` element in serialized callable types. Each `TitanVargX` is a
+`{ lu_byte n_args; T *args; }` descriptor, not an inline flexible-array
+object. `TitanVargArrayOrMap` is `Table **`: exact Array elements are internal
+backing Tables, while generic or Lua-visible runs box them as proxies (see
+[Dense Arrays](dense-arrays.md#internal-and-boxed-representations)). Closure
+adjustment wrappers reuse the same descriptors and signatures and add only
+private consumer artifacts.
 
-Flexible outputs reuse these descriptors and add `flexrettype` to serialized
-callable shapes plus `_flexout`/`_flexwant` to native signatures.
-`TitanVargArrayOrMap` remains `Table **`: exact Array elements are internal
-backing Tables, while generic or Lua-visible runs box them as proxies. The
-third `Function` constructor position remains the reserved `false` sentinel;
-separating direct `CFunction` declarations is checker-internal and does not
-alter that schema or native convention. Closure adjustment wrappers reuse the same
-descriptor/native signature and add only private
-consumer adapter/relay artifacts, so this optimization does not advance the
-ABI. See [Dense Arrays](dense-arrays.md#internal-and-boxed-representations) and
-[Closure adjustment wrappers](closure-adjustment-wrappers.md#abi-and-ownership-rationale).
-
-Compiled-interface import paths round-trip `varargtype` through the same
-serialization, whether recovered from DSO callables or an archive metadata
-section. The DSO path remains covered by `spec/coder/so_import_spec.lua` and
-`spec/checker/so_rehydration_spec.lua`; static compiled-module suites cover the
-archive path. `spec/abi_spec.lua` pins the current compiler/runtime ABI
-constants.
+Compiled-interface imports round-trip `varargtype` through the same
+serialization from DSO callables or an archive metadata section;
+`spec/coder/so_import_spec.lua` and `spec/checker/so_rehydration_spec.lua`
+cover the DSO path.
 
 ## GC discipline: descriptor pointers and untraced payloads
 
-Runtime-sized element arrays can live in a `Udata` raw payload
-(`getudatamem`), and `traverseudata` marks only a userdata's `metatable` and its
-`uv[0..nuvalue-1]` user values—**never `getudatamem`**. A zero-uservalue Udata
-therefore keeps its byte buffer allocated but does not trace GC pointers copied
-into that buffer. Generated code maintains the stronger provenance invariant:
+The rooting protocol for native calls is in
+[Calls: C-only inputs, immediate result roots, and VM transport](values-and-gc.md#calls-c-only-inputs-immediate-result-roots-and-vm-transport):
+descriptors and their `args` arrays are never roots, and every collectable
+element stays reachable from an independent traced owner (a semantic home, an
+allocation or native-result root, a Lua VM argument slot, or a flexible result
+range) for the descriptor's lifetime. The variadic-specific points are:
 
-> Every collectable element reachable through a live vararg descriptor remains
-> reachable from an independent traced owner for the descriptor's lifetime. The
-> owner may be a semantic variable/container home, an immediate allocation or
-> native-result root, an actual Lua VM argument slot, or an explicit flexible
-> result/destination range. The descriptor and raw backing are never owners.
-
-A Titan native call keeps fixed/static and forwarded open inputs in C and does
-not create per-call element roots. A pass-through input run borrows whatever
-provenance already owns each element. A newly evaluated prefix likewise retains
-its source home, or the immediate root installed by its allocation/native-result
-expression. If element conversion allocates a callable/Interface wrapper, that
-fresh destination receives its own fixed/range allocation root. A Lua-originated
-entry is different only because its incoming stack slots are the actual VM
-arguments.
-
-For flexible outputs the descriptor backing is caller-owned C storage. After a
-native call and rebase, every live GC-bearing result prefix is copied immediately
-into a parallel traced Lua-stack range and cleared only after its sink consumes
-it. This includes identity source runs inside callable/Interface adapters, not
-just runs followed by allocating conversion. Finite projected GC results receive
-their ordinary immediate caller result roots. A pending return crossing
-`finally` separately saves the run count and keeps the saved elements traced
-until the pending action resumes or is superseded by a raise.
-
-The descriptor may be a C-stack local. That is not a moving-GC hazard: Lua's GC
-does not move objects, so a pointer to a `TString`, `Table`, `Udata`, or payload
-buffer remains valid across collection. Only pointers into Lua stack locations
-need rebasing after stack growth/shrink. A case-3 `Udata0` itself is immediately
-rooted so its *buffer* survives copy/call; it has no `__gc`, metatable, or traced
-user values, and therefore does not own collectable elements stored in that
-buffer.
-
-Two more mechanical points:
-
-* **`{...}` uses `luaC_barrierback`** per collectable element, against the
-  Array backing or ordinary positional-Map Table. Scalars skip the barrier.
-* **Stack relocation across struct/container allocation.** A fresh
-  `Udata0` allocation (case-3, `genluaentry`) or `titan_array_new`/Table resize
-  in `{...}` can shrink or grow and thus **relocate** the Lua stack, dangling the
-  raw `_base` pointer. The codegen saves `_base` as an offset
-  (`ctx.uses_base_off` makes the preamble declare `_base_off`) and rebases with
-  `_base = restorestack(L, _base_off);` after the allocation/resize, so the
-  subsequent reserved-slot reads and `obj2arr` stores use the live stack.
+* **Raw payloads are not traced.** `traverseudata` (Lua's `lgc.c`) marks only a
+  userdata's metatable and `uv[0..nuvalue-1]`, never `getudatamem`. A
+  zero-user-value `Udata` used for element storage (Lua entry, case-3 copy) is
+  rooted only so that its *buffer* survives; it has no metatable, `__gc`, or
+  user values and owns none of the elements copied into it.
+* **C-stack descriptors are safe.** Lua's GC does not move heap objects, so
+  pointers to `TString`, `Table`, `Udata` or payload buffers stay valid across
+  collection. Only pointers into the Lua stack need rebasing.
+* **`{...}` uses `luaC_barrierback`** per collectable element against the Array
+  backing or the positional Map Table. Scalars skip the barrier.
+* **Stack relocation.** A fresh `Udata` (case 3, Lua entry) or a
+  `titan_array_new`/Table resize in `{...}` can grow or shrink the Lua stack.
+  The coder saves `_base` as `_base_off` (`ctx.uses_base_off`) and rebases with
+  `_base = restorestack(L, _base_off)` before later reserved-slot reads and
+  stores.

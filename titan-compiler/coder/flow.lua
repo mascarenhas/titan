@@ -566,6 +566,7 @@ analyze_try_spills_block = function(block, after_reads, return_reads)
     end
 end
 
+-- Implementation notes: doc/implementation/error-handling.md#setjmp-sensitive-localparameter-spills
 function analyze_try_spills(block)
     analyze_try_spills_block(block, {})
 end
@@ -688,6 +689,7 @@ function function_sig(fname, ftype, is_pointer)
 end
 
 -- creates a new code generation context for a function
+-- Implementation notes: doc/implementation/codegen-overview.md#per-function-code-generation-contexts
 function newcontext(tlcontext)
     return {
         tmp = 1,    -- next temporary index (for generating temporary names)
@@ -721,6 +723,7 @@ function slotat(depth --[[:number]])
     return "s2v(" .. stackslotat(depth) .. ")"
 end
 
+-- Implementation notes: doc/implementation/values-and-gc.md#1-the-function-frame-reserved-nil-initialized-stack-slots
 function reserveslot(ctx --[[:table]])
     local d = ctx.depth
     ctx.depth = ctx.depth + 1
@@ -734,6 +737,7 @@ function newslot(ctx --[[:table]])
     return slotat(reserveslot(ctx))
 end
 
+-- Implementation notes: doc/implementation/error-handling.md#setjmp-sensitive-localparameter-spills
 function coder._decl_volatile_home(decl)
     return decl and decl._needs_spill and decl._c_address_taken
         and not decl._boxed and not types.is_gc(decl._type)
@@ -767,6 +771,7 @@ function spill_cvar(decl)
     return decl._spill_cvar
 end
 
+-- Implementation notes: doc/implementation/c-ffi-expressions.md#longjmp-safe-aggregate-spills
 function coder._aggregate_spill_copy(decl, to_spill)
     local spill = spill_cvar(decl)
     local cvar = assert(decl._cvar)

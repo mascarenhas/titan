@@ -171,6 +171,7 @@ function generic_interface_downcast_expression(
     return node
 end
 
+-- Implementation notes: doc/implementation/generics.md#focused-cast-and-adapter-insertion
 function generic_erased_boundary_expression(
         exp, target, state, subject)
     local source = types.erase(exp._type)
@@ -1471,6 +1472,7 @@ function generic_freeze_declared_registry(tree, registry, clone_memo)
     tree._declared_registry = clone_declared_interface_graph(registry, clone_memo)
 end
 
+-- Implementation notes: doc/implementation/generics.md#freezing-the-declared-graph
 function generic_lower_erased_core(modname, tree, st, errors)
     local declared, clone_memo = generic_freeze_declared_core(tree)
     local surface_registry = types.registry

@@ -570,6 +570,7 @@ function cdeclarator.render_type_name(typ)
     return render_declarator(typ, "", nil)
 end
 
+-- Implementation notes: doc/implementation/c-ffi-expressions.md#exact-c-declarators
 -- Render a named C object or function declaration. This is deliberately the
 -- only entry point that accepts a direct array type. `quals` carries the
 -- declaration-level qualifiers that the C parser stores separately from the

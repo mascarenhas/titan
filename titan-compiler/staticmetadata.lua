@@ -128,6 +128,7 @@ local function diagnostic_value(value)
     return "<" .. type(value) .. ":" .. tostring(value) .. ">"
 end
 
+-- Implementation notes: doc/implementation/static-compiled-modules.md#canonical-payload
 function staticmetadata.render(modname, abi, serialized_types, serialized_layouts)
     if not valid_module_name(modname) then
         return nil, "invalid logical Titan module name " ..
@@ -1637,6 +1638,7 @@ local function scan_bytes_internal(bytes, origin, options)
     end
 end
 
+-- Implementation notes: doc/implementation/static-compiled-modules.md#bounded-container-reader
 function staticmetadata.scan_bytes(bytes, origin, options)
     options = options or {}
     origin = public_origin(origin)

@@ -463,6 +463,7 @@ function generic_infer_forin_scheme(
     return use.closed, tuple_adjustment
 end
 
+-- Implementation notes: doc/implementation/checker.md#generic-for-tuple-elaboration
 function checkforin(node, st, errors)
     local generic_prechecked = {}
     local inferred_tuple
@@ -740,6 +741,7 @@ end
 --   st: symbol table
 --   errors: list of compile-time errors
 --   returns whether the block cannot fall through to its following statement
+-- Implementation notes: doc/implementation/checker.md#non-fallthrough-analysis
 function checkblock(node, st, errors)
     local ret = false
     for _, stat in ipairs(node.stats) do
@@ -772,6 +774,7 @@ local function const_module_write_authorized(decl, st)
        and decl._module_name == st.modname
 end
 
+-- Implementation notes: doc/implementation/const-values.md#checker-rules-for-declarations
 local function check_const_assignment(var, st, errors)
     local decl = var._decl
     if var._tag == "Ast.VarName" and decl then
@@ -1286,6 +1289,7 @@ checkstat_visitor = util.make_visitor({
         return true
     end,
 
+    -- Implementation notes: doc/implementation/unions.md#case-checking-and-control-flow
     ["Ast.StatCase"] = function(node, st, errors)
         checkexp(node.exp, st, errors)
         node.exp = tryforce(node.exp)

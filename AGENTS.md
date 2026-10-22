@@ -125,7 +125,7 @@ belong in the corresponding compiler layer.
 | Files, metadata, watchers, lexical paths | [Filesystem library](doc/implementation/filesystem-library.md), [path library](doc/implementation/standard-library-path.md) |
 | Child processes, stdio, signals, graceful exit | [OS library](doc/implementation/os-library.md) |
 | DNS/TCP, TLS, shared-port listener binds, URLs, HTTP pooling/framing/deadlines | [DNS/TCP request and stream adapters](doc/implementation/libuv-networking.md), [TLS](doc/implementation/ssl-library.md), [URL](doc/implementation/url-library.md), [HTTP](doc/implementation/http-library.md) |
-| WebSocket framing, controls, byte/ownership handoff, retirement | [WebSocket library](doc/implementation/websocket-library.md), [validation](doc/implementation/websocket-validation.md) |
+| WebSocket framing, controls, byte/ownership handoff, retirement | [WebSocket library](doc/implementation/websocket-library.md) |
 | PEG, relabel, private LPegLabel engine and payload | [LPegLabel embedding](doc/implementation/lpeglabel-embedding.md) |
 | Byte strings, writers, regex, format/pack | [String library](doc/implementation/string-library.md) |
 | Numeric functions, random, number parsing | [Math library](doc/implementation/math-library.md) |

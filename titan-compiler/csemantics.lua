@@ -623,6 +623,7 @@ local function attach_profile_traits(profile)
     end
 end
 
+-- Implementation notes: doc/implementation/c-ffi-expressions.md#target-arithmetic-profile
 -- Build a canonical target profile from injected compiler traits. This is a
 -- pure constructor: callers own acquisition of the macro table and luaconf.h
 -- spellings.

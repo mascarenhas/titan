@@ -405,6 +405,7 @@ local function start_file_close(done: async.Completion<|FileClose, integer, inte
   return nil
 end
 
+-- Implementation notes: doc/implementation/filesystem-library.md#one-shot-requests-and-file-ownership
 local function File:close_with(operation: string)
   self.pending_operations = self.pending_operations + 1
   defer self.pending_operations = self.pending_operations - 1
@@ -441,6 +442,7 @@ end
 -- @return Same-process descriptor and bytes, to be adopted exactly once.
 -- @usage standard-library-fs.md#transferring-files
 function File:to_transfer_payload(): string
+  -- Implementation notes: doc/implementation/filesystem-library.md#file-transfer
   self:require_open()
   if self.pending_operations ~= 0 then
     raise "cannot transfer a File with a pending operation"
@@ -938,6 +940,7 @@ local function WatchRegistration:event_path(
   return self.path .. separator .. filename
 end
 
+-- Implementation notes: doc/implementation/filesystem-library.md#one-to-one-drain-mapping
 local function Watcher:map_notification(
     notification: WatcherNotification): WatcherEvent
   do
@@ -980,6 +983,7 @@ local function Watcher:map_notification(
   end
 end
 
+-- Implementation notes: doc/implementation/filesystem-library.md#one-to-one-drain-mapping
 local function Watcher:drain_notifications(
     notifications: async.SubscriptionBatch<|WatcherNotification|>): {WatcherEvent}
   local events: {WatcherEvent} = {}

@@ -68,6 +68,7 @@ checkvar = util.make_visitor({
                         node.name)
                 end
             end
+            -- Implementation notes: doc/implementation/checker.md#the-capture-flags
             -- Capture detection (single chokepoint). A local/param (`Ast.Decl`,
             -- which excludes top-level functions/vars and module members) used
             -- from a function nested deeper than where it was declared is
@@ -897,6 +898,7 @@ end
 -- producer, and retains at most one runtime-open final run. Those statically
 -- visible scalars then become the synthesized function's fixed parameters;
 -- only the dynamic run remains its input vararg.
+-- Implementation notes: doc/implementation/flexible-returns.md#contextual-calls-through-value
 function synthesize_value_call_inputs(args, loc, st, errors)
     local adjusted = adjust_explist(args,
         result_demand({}, INFER_OPEN, {
@@ -968,6 +970,7 @@ end
 -- projection is optional because its runtime slot may be absent. An open run
 -- exists only when both the sink is open and the static callable type declares
 -- a flexible tail.
+-- Implementation notes: doc/implementation/flexible-returns.md#declared-call-shape-versus-visible-call-shape
 annotate_call_results = function(node, callable, demand, errors)
     demand = demand or default_call_result_demand(node)
     local signature = assert(call_signature(callable),

@@ -572,6 +572,7 @@ function checker._register_nominal_descriptor(typ, trusted_source)
     end
 end
 
+-- Implementation notes: doc/implementation/checker.md#imports-and-the-loader-protocol
 function checker.register_module_interface(
         modname, type_or_error, loader, exposer, interface_seen,
         trusted_source, reference_seen, source_permissions)

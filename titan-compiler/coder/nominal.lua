@@ -56,6 +56,7 @@ local function payload_declaration(slot, member)
     return ctype(slot.type) .. " " .. member .. ";"
 end
 
+-- Implementation notes: doc/implementation/nominal-storage.md#traced-and-native-regions
 function coder._nominal_declarations(tl)
     local declarations = {
         "typedef struct { unsigned int tag; } _titan_union_header;",

@@ -152,6 +152,7 @@ local function HandoffReader:strings(): {string}
   return self:next()
 end
 
+-- Implementation notes: doc/implementation/http-library.md#cross-state-exchange-ownership
 local function parser_handoff_bytes(parser: Parser): string
   local copied = foreign llhttp_t.new()
   ffi.memcpy(copied, parser.native, foreign llhttp_t.sizeof)

@@ -126,6 +126,7 @@ local function Decoder:missing(target: reflect.Type, position: integer,
             path, self.source, position)
 end
 
+-- Implementation notes: doc/implementation/json-library.md#reflection-conversion
 local function Decoder:decode_record(node: Node, descriptor: reflect.RecordType,
                               path: Path): value
   self:require_kind(node, "object", path)

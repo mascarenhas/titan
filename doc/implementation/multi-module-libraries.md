@@ -26,8 +26,8 @@ libraries](../language/multi-module-libraries.md).
 
 After typechecking and exact `main` detection, library mode deduplicates the
 requested CLI roots while preserving their first occurrence and takes their
-longest common sequence of complete dotted components. That prefix is the
-physical provider name:
+longest common sequence of complete dotted components
+(`driver.common_module_provider`). That prefix is the physical provider name:
 
 | Requested roots | Provider | Outputs |
 | --- | --- | --- |
@@ -46,7 +46,7 @@ packaging it as a public Titan binary requires naming it as a compatible
 requested root. Its generated Lua shim can still call the entry known to be in
 this invocation's provider.
 
-Standalone-program mode is unchanged. When exactly one requested root has the
+Standalone-program mode differs. When exactly one requested root has the
 required `main(args: {string}): integer`, all source objects are linked into
 that program, no provider prefix is derived, and no Lua shim is emitted.
 
@@ -60,26 +60,29 @@ a/b.so
 a/b/c.so
 ```
 
-The exact historical location is therefore the final candidate. The compiler
-first expands the selected `TITAN_PATH_0_6`/`TITAN_PATH` with the runtime's
-`;;` default-insertion semantics. It then searches **root-major**: all
-shallow-to-exact candidates in the first path root, then all candidates in the
-second root, and so on.
+The exact location is therefore the final candidate. The compiler first
+expands the selected `TITAN_PATH_0_6`/`TITAN_PATH` with the runtime's `;;`
+default-insertion semantics. It then searches **root-major**
+(`driver.find_dynamic_interface`; `driver.find_static_interface` is the `.a`
+pass described in [Static compiled modules](static-compiled-modules.md#resolver-state-and-format-passes)):
+all shallow-to-exact candidates in the first path root, then all candidates in
+the second root, and so on.
 
 An occupied relative candidate shadows the same relative name in later roots.
 The driver marks it occupied as soon as `lstat` finds any pathname, before
 opening or inspecting metadata. A missing candidate remains available in a
 later root. Consequently a local exact `./a/b/c.so` can still beat a shallow
 installed `a.so`, while an earlier root's unrelated `a.so` prevents a later
-root's `a.so` from being selected. This is the same relative-path precedence
-that generated runtime imports can reproduce without embedding an absolute
-compiler-machine path.
+root's `a.so` from being selected. Generated runtime imports reproduce the same
+relative-path precedence without embedding an absolute compiler-machine path.
 
 ### Claim and terminal-error states
 
 An existing candidate is inspected with `titan._loadlib`, the compiler-only
-`RTLD_LAZY | RTLD_LOCAL` helper. Membership in logical module `a.b.c` is the
-ordinary symbol pair:
+`RTLD_LAZY | RTLD_LOCAL` helper (`titan-runtime/ltitanlib.c` `lazyload`). On
+Windows the ABI marker is first read through the plain-C `_abivalue` query; see
+[Windows loader boundary](windows-build.md#windows-loader-boundary). Membership
+in logical module `a.b.c` is the ordinary symbol pair:
 
 ```text
 a_b_c_abi
@@ -89,7 +92,8 @@ a_b_c_types
 The states are deliberately strict:
 
 * neither symbol present is a clean nonclaim for an **ancestor** candidate;
-* exactly one symbol present is a terminal corrupt-claim error;
+* exactly one symbol present is a terminal corrupt-claim error (`compiled
+  container '…' claims module '…' but is missing metadata symbol '…'`);
 * an open failure is terminal;
 * once both symbols exist, a call failure, result-count/type error, ABI
   mismatch, malformed serialized type, or logical-name mismatch is terminal;
@@ -100,11 +104,13 @@ The states are deliberately strict:
 * an exact candidate with neither symbol retains the markerless-binary error
   instead of falling through to source.
 
-The ABI marker must return exactly one string equal to `TITAN_ABI_VERSION`. The types entry
-must return exactly one serialized `Type.Module` for the requested logical
-name, with a canonical public schema. The loader does not scan later images
-after a claim; visible duplicate providers are resolved by ordinary first
-match, not by ambiguity detection.
+The ABI marker must return exactly one string equal to `TITAN_ABI_VERSION`;
+otherwise the claim fails with `compiled module '…' has no compatible Titan ABI
+marker (expected 2)` before any type decoding. The types entry must return
+exactly one serialized `Type.Module` for the requested logical name, with a
+canonical public schema. The loader does not scan later images after a claim;
+visible duplicate providers are resolved by ordinary first match, not by
+ambiguity detection.
 
 Each logical module still receives its own `driver.imported[M]` entry. The
 entry's `filename` is the normalized absolute candidate used by the compiler,
@@ -122,9 +128,9 @@ property of this lookup, not part of the module's public type interface.
 
 ## Runtime imports reuse canonical logical modules
 
-The coder retains `node._type.file` as the fallback provider filename; it does
-not repeat candidate probing in generated C. An import of `a.b.c` selected
-from `a/b.so` emits:
+The coder uses `node._type.file` (the relative provider selected above) as the
+fallback provider filename; generated C never repeats candidate probing. An
+import of `a.b.c` selected from `a/b.so` emits:
 
 ```c
 TitanModuleProvider a_b_c_provider =
@@ -138,30 +144,18 @@ Generated dynamic imports declare one `TitanModuleProvider` variable per
 logical compiled module, even when several local aliases import it. Only the
 declaration is shared: every alias keeps its own module slot and still elects
 and checks the provider, calls initialization, and rechecks the canonical
-provider afterward. Deduplication is by logical module, not provider filename.
+provider afterward. Deduplication is by logical module, not provider filename,
+so two logical imports from one provider reuse one runtime handle while
+resolving different mangled symbols.
 
-The registry entry for `"Titan module a.b.c"` takes precedence over the filename.
-If it exists, its native payload supplies an export callback, including when
-the module was initialized from an executable, archive, or `package.loadlib`.
-If no canonical module exists, a matching copied native provider descriptor
-supplies its resolver before `loadlib` is considered. Selection does not invoke
-a Lua loader or initialize a dependency; ABI and consumer checks still run
-first. With neither canonical state nor descriptor, `loadlib` walks the runtime
-Titan path, caches by relative provider file, maps with `RTLD_LAZY | RTLD_GLOBAL`,
-and invalidates the backtrace image cache. Two logical imports in one provider
-can reuse one handle while requesting different fully mangled symbols.
-
-After ABI and selective compatibility checks, `titan_module_symbol` resolves
-`a_b_c_init`, used native entries, and required variable/canonical-closure slot
-symbols through the selected callback or handle. The importer caches native
-bindings in its own per-state payload. Transitive nominal owners use their
-logical registry callbacks after explicit dependencies initialize, with their
-own ABI-first compatibility checks. They do not use global symbol selection.
-See [Selective binary dependency verification](binary-compatibility.md).
-
-This separation is important: candidate membership is a compiler concern;
-the selected relative file makes fallback runtime loading exact and relocatable,
-while the logical registry owns initialized module identity.
+Registry-first selection, copied provider descriptors, `loadlib`, and per-state
+bindings are described in [Static vs dynamic dependency
+wiring](codegen-overview.md#static-vs-dynamic-dependency-wiring); the
+compatibility checks are in [Generated exports and runtime
+verification](binary-compatibility.md#generated-exports-and-runtime-verification).
+Candidate membership is a compiler concern. The relative file only makes the
+fallback runtime load exact and relocatable; the logical registry owns
+initialized module identity.
 
 ## One object per logical module
 
@@ -182,23 +176,21 @@ direct during code generation, so those references become ordinary `extern`
 calls rather than self-dlopen attempts.
 
 Selected static-provider archives are ordered bytewise by normalized absolute
-path. User `-X` objects and archives retain command-line order. Library-mode
-DSO construction force-loads selected and `-X` archives, while archive
-construction flattens their object members in the same logical/native order.
-`-l`, the Titan/Lua/backtrace archives, platform libraries, and ordered extra
-linker flags are final-link inputs and are not copied into the produced
-archive.
+path, and user `-X` objects and archives keep command-line order. How the DSO
+force-loads them and how the archive flattens them is in [Native
+composition](static-compiled-modules.md#native-composition).
 
-The compiler preflights the coder's complete externally visible symbol set.
-Distinct logical module names that map to one flattened protocol prefix (for
-example through dot/dash replacement) are rejected by name. Callable names use
-`_\u2133_` and `_\u2131_`, so module `a` function `b_c` and module `a.b`
-function `c` produce distinct `a_\u2133_b_c_titan` and
-`a_b_\u2133_c_titan` entries. The same inventory covers public methods, their
-bound trampolines, record/union functions and constructors, the three exported
-bound trampolines for every public Interface method, each module protocol, and
-cross-family protocol collisions, so every real collision is reported before
-code generation instead of as an opaque duplicate-symbol linker error.
+Before code generation, `titanc` preflights every logical module in the link
+union. It rejects the reserved name `titan`, distinct logical names that map to
+one C prefix (`driver.mangle_module_name`, for example through dot/dash
+replacement: `cannot link logical modules '…' and '…': both use C symbol prefix
+'…'`), and any two modules whose externally visible symbols
+(`coder.external_symbols`, or `coder.interface_external_symbols` for carried
+compiled interfaces) coincide. Real collisions are therefore reported by name
+instead of as an opaque duplicate-symbol linker error. The `ℳ`/`ℱ` separators
+that keep module `a` function `b_c` distinct from module `a.b` function `c` are
+described in [Anatomy of a generated translation
+unit](codegen-overview.md#anatomy-of-a-generated-translation-unit).
 
 Both native provider forms contain independent copies of every logical
 protocol:
@@ -222,39 +214,28 @@ layout rules are in [Native nominal storage](nominal-storage.md).
 ## Validated publication and generated shims
 
 Both native forms go to one sibling staging directory; the contained DSO keeps
-the public basename so its macOS dSYM agrees. Before publication, the driver:
-
-1. calls every physical logical module's ABI/types entries in the staged DSO
-   and resolves its `_init` and `luaopen_*` entries;
-2. scans the complete staged archive and requires the exact intended key set;
-3. compares every embedded ABI/types value with the DSO callables;
-4. force-loads only the staged archive into a private validation DSO with the
-   same final native policy; and
-5. validates that image's protocols in a fresh child process.
-
-The archive builder separately reparses the output and compares every
-non-index object member byte-for-byte with the intended flattened sequence, so
-metadata-free native payload cannot be silently omitted or reordered.
+the public basename so its macOS dSYM agrees. The staged pair is validated
+against itself and against an archive-backed image, then published as one
+recoverable transaction; see [Three-way
+validation](static-compiled-modules.md#three-way-validation) and [Publication
+and installation](static-compiled-modules.md#publication-and-installation).
 
 `titanc` stages one shim per physical logical module at
-`<logical/path>.lua`. Source contributors do not receive shims. Every
-generated file starts with:
+`<logical/path>.lua` (`driver.plan_module_shims`). Source contributors do not
+receive shims. Every generated file starts with `driver.GENERATED_SHIM_BANNER`:
 
 ```lua
 -- Generated by titanc; do not edit.
 ```
 
-Preflight accepts a missing destination or an existing file with that exact
-banner and exact provider/entry template. Any other file is user-owned and
-aborts before code generation. If a valid prior self-describing archive
-advertises keys absent from the replacement, only their exact recognized
-generated shims are eligible for transactional retirement.
-
-Publication backs up all current owned destinations, installs the new
-shims/dSYM, publishes the archive, and renames the DSO last as the default
-dynamic-path commit point. Caught errors and injected archive/DSO failpoints
-restore the predecessor bundle. This is recoverable in-process publication,
-not crash-, power-loss-, or asynchronous-signal-atomic publication.
+The banner is the ownership mark. Before code generation,
+`validate_generated_shim_destination` accepts a missing destination or a regular
+file that begins with the banner; any other file is user-owned and aborts the
+build. Retirement is stricter: when a valid prior self-describing archive
+advertises keys absent from the replacement, `driver.publish_provider_bundle`
+removes an old shim only if its full contents equal
+`generated_shim_contents` for that provider and module, and otherwise refuses
+with `refusing to retire unrecognized old Lua shim`.
 
 The body selects the provider through Lua's independent `package.cpath` and
 calls the exact logical entry:
@@ -270,37 +251,27 @@ if not open then error(open_error, 0) end
 return open()
 ```
 
-`package.searchpath` intentionally follows Lua-path precedence rather than
-the compiler's Titan path. Production installation avoids ambiguity by
-publishing one canonical provider; fixtures prepend their intended provider
-root explicitly.
+The Windows template passes the logical name as a third `_loadlibglobal`
+argument so the helper can return an already initialized canonical module; see
+[Windows loader boundary](windows-build.md#windows-loader-boundary).
+`package.searchpath` intentionally follows Lua-path precedence rather than the
+compiler's Titan path. Production installation avoids ambiguity by publishing
+one canonical provider; fixtures prepend their intended provider root
+explicitly.
 
 ### The lazy/global support helper
 
 Stock Lua's `package.loadlib(path, "*")` is eager/global and shares Lua's own
-pathname cache, so it cannot provide the required lazy promotion contract.
-`ltitanlib.c` therefore exposes a separate internal
-`titan._loadlibglobal(path, symbol)`:
-
-* it canonicalizes an existing pathname with `realpath` and keys its own
-  per-state cache by that canonical absolute name;
-* its first request in a state calls `dlopen(canonical,
-  RTLD_LAZY | RTLD_GLOBAL)` even if Lua or `_loadlib` already opened the image;
-* it resolves the requested Lua C function with `dlsym` and returns the same
-  `nil, message, stage` error shape as `_loadlib`;
-* it keeps handles mapped for process lifetime and preserves the originally
-  requested path in diagnostics.
-
-The global helper, compiler-local helper, Lua C-library cache, and runtime
-`TITAN_LIBS_KEY` cache are separate. A second state performs its own cache
-entry and `dlopen`; the operating-system loader may reuse the process mapping.
-
-Ordinary `require "titan"` first enters through Lua's C searcher, which maps
-the support image eagerly/local and returns only the native support table. A
-standard-module shim then calls `_loadlibglobal` on the same canonical
-`titan.so`, promoting the already mapped combined provider before resolving
-its `luaopen_titan_*` entry. Bare support loading never initializes a standard
-module or installs the async program bootstrap.
+pathname cache, so it cannot promote an image that Lua's C searcher already
+mapped eager/local. Shims therefore call the internal
+`titan._loadlibglobal(path, symbol)` (`titan-runtime/ltitanlib.c`
+`lazyglobalload`), which keeps its own per-state cache and maps with
+`RTLD_LAZY | RTLD_GLOBAL`. For the standard library this promotes the
+`titan.so` image that `require "titan"` already mapped for the support table.
+Bare support loading never initializes a standard module or installs the async
+program bootstrap. The helper's caching, error shape, and promotion rules are
+in [Generated-shim lazy/global loading and
+promotion](lua-interop-internals.md#4-generated-shim-lazyglobal-loading-and-promotion).
 
 ## Reserved `titan` and the standard-library image
 
@@ -308,13 +279,34 @@ The bare logical module name `titan` is reserved in library mode because it
 belongs to the Lua support API and every shim requires it. A **physical**
 provider named `titan` is valid only when its final image also contains
 `ltitanlib.o`'s genuine `luaopen_titan`. The driver checks that entry in a fresh
-Lua process and requires exactly one support table exposing `_loadlib` and
-`_loadlibglobal`; compiler-side `package.loaded` state cannot satisfy the
-proof.
+Lua process (`driver.lua` `support_validation_script`) and requires exactly one
+support table exposing `_loadlib` and `_loadlibglobal`; compiler-side
+`package.loaded` state cannot satisfy the proof.
 
 The production standard library is the canonical example. One compiler
-invocation names all twenty-five logical roots and publishes root `titan.so` and
-`titan.a`. Internal standard imports are direct. `ltitanlib.o` is shared `-X`
+invocation names all twenty-six logical roots (`Makefile` `STDLIB_ROOTS`):
+`titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.io`,
+`titan.fs`, `titan.net`, `titan.ssl`, `titan.url`, `titan.http`,
+`titan.websocket`, `titan.os`, `titan.path`, `titan.peg`, `titan.string`,
+`titan.math`, `titan.lua`, `titan.iteration`, `titan.gc`, `titan.test`,
+`titan.reflect`, `titan.sqlite3`, `titan.json`, `titan.protobuf`,
+`titan.transfer`, and `titan.thread`. `titan.uv`, `titan.http`,
+`titan.websocket`, `titan.peg`, `titan.string`, `titan.sqlite3`,
+`titan.json`, `titan.lua`, `titan.protobuf`, and `titan.thread` are folder
+ensembles; the others are flat `titan/<name>.titan` sources. The root order is
+not topological (`titan.async` precedes `titan.string`, which it imports);
+recursive import loading resolves dependencies while the roots are processed.
+The invocation publishes root `titan.so` and `titan.a`:
+
+```sh
+titanc --output out --source-first --incremental <STDLIB_ROOTS> \
+  -X titan-runtime/ltitanlib.o lpeglabel-build/libtitan-lpeglabel.a \
+     libuv-build/libuv.a llhttp-build/libtitan-llhttp.a \
+     sqlite3-build/libtitan-sqlite3.a \
+     openssl-build/libssl.a openssl-build/libcrypto.a  # OPENSSL_MODE=bundled
+```
+
+Internal standard imports are direct. `ltitanlib.o` is shared `-X`
 payload and supplies bare `luaopen_titan` without adding a logical metadata
 key. The private namespaced five-member LPegLabel archive follows it as
 metadata-free payload. The pinned libuv payload follows it, then the private
@@ -322,89 +314,54 @@ llhttp and SQLite archives, and finally any bundled OpenSSL payload used directl
 `titan.ssl`. The eight HTTP callback definitions already live in the generated
 `titan.http` object; there is no adapter object. Bundled archives are
 force-carried into the DSO and flattened into the archive; system OpenSSL settings remain final-link inputs
-and are never copied into `titan.a`. The DSO exports twenty-six Lua entries
-(`luaopen_titan` plus the twenty-five logical entries); both forms define the
-twenty-five logical protocols, and the archive advertises exactly twenty-five
+and are never copied into `titan.a`. The DSO exports twenty-seven Lua entries
+(`luaopen_titan` plus the twenty-six logical entries); both forms define the
+twenty-six logical protocols, and the archive advertises exactly twenty-six
 metadata keys.
+`OPENSSL_MODE` defaults to `system`. Static consumers then pass the ordered
+`pkg-config --libs openssl` result through `TITAN_EXTRA_LDFLAGS`; both the
+executable-context archive probe and the final program link append those
+inputs after the consumer and provider objects. Foreign headers provide
+declarations, not link directives, so a direct application FFI call such as
+`SHA256` needs the same system inputs even when no TLS operation makes an
+OpenSSL reference reachable from `titan.ssl`.
 The private LPegLabel archive and its headers remain source-build inputs; they
-are not installed in the compiler/runtime SDK. The callback-bearing
-`titan/coroutine.titan.h`, `titan/uv/uv.titan.h`,
-`titan/http/http.titan.h`, and `titan/sqlite3/sqlite3.titan.h` companions are
+are not installed in the compiler/runtime SDK. The generated `.titan.h`
+companions of `titan.coroutine`, `titan.uv`, `titan.async`, `titan.http`,
+`titan.sqlite3`, `titan.lua`, `titan.protobuf`, `titan.transfer`, and
+`titan.thread` (`Makefile` `STDLIB_GENERATED_FOREIGN_HEADERS`) are
 likewise generated source-build intermediates: they are available before the
 standard objects compile but never become provider members, publication-stage
 artifacts, or installed headers.
 
-`make` (or `make all`) builds a distinct private bootstrap at
-`titan-runtime/bootstrap/titan.so`, linked only from `ltitanlib.o`. The
-source-rock build uses that image with the in-tree compiler Lua sources and
-matching Lua SDK to build the standard library before installation. It needs
-no installed Titan compiler and does not seed the canonical provider with the
-bootstrap. The shared Make object graph
-retains generated C, headers, and objects below `out/` with `--output out`. One final link carries
-`ltitanlib.o`, private LPegLabel, libuv, llhttp, SQLite, and optional bundled
-OpenSSL into the paired provider. TLS uses the selected OpenSSL library directly.
-LuaRocks' Make install pass stages compiler Lua modules and generated shims in
-`INST_LUADIR`, plus `titanc` and `titan-uninstall` in `INST_BINDIR`. The prebuilt
-native SDK, provider pair, licenses, and optional macOS dSYM are retained in
-`<rock-prefix>/titan-sdk`, with the helper at
-`<rock-prefix>/installer/titan_install.lua`. The `post_install` hook invokes
-that copier by absolute path to publish canonical SDK/provider files. Neither
-install nor the hook compiles anything. Binary rocks retain the same payload
-and helper. `publish-stdlib` copies an
-already built `STDLIB_INSTALL_STAGE` without rebuilding it. Explicit packaging
-tests own the provider protocol, symbol, metadata, and layout checks.
-
 The canonical installed files are the provider pair (plus the DSO's macOS
-dSYM) and twenty-five Lua shims:
+dSYM) and twenty-six Lua shims:
 
 ```text
 <root>/lib/titan/0.6/titan.so
 <root>/lib/titan/0.6/titan.a
 <root>/lib/titan/0.6/titan.so.dSYM          # macOS only
-<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,websocket,os,path,peg,string,math,lua,iteration,gc,test,reflect,sqlite3,json,protobuf,transfer}.lua
+<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,websocket,os,path,peg,string,math,lua,iteration,gc,test,reflect,sqlite3,json,protobuf,transfer,thread}.lua
 ```
 
-Canonical SDK/providers remain outside LuaRocks' manifest; compiler scripts,
-Lua modules, and generated shims use ordinary LuaRocks ownership. The
-`titan-uninstall` command removes all installed Titan rock versions in its
-selected tree through LuaRocks first, then removes exact external Titan files
-only after success. It preserves Lua and shared dependency artifacts. Cleanup
-cannot target one rock version because these canonical paths are shared.
-`make binary-rock` packs the installed private payload and gives the output
-its native platform suffix; stock LuaRocks 3.13 would label the same payload
-`.all.rock`.
-
-The checkout Make graph has one provider-pair completion marker. The twenty-five
-flat/folder source sets, selected compiler/SDK, native headers, and imported
-generated outputs are prerequisites. The DSO, archive, conditional dSYM, and
-every shim must exist; warm invocations preserve their mtimes. Callers run
-`make clean-stdlib` before changing tools, flags, profile, or OpenSSL mode, and
-clean affected native build directories or use separate source copies and SDKs.
-`make clean` removes the known generated outputs. Production
-library tests treat the combined set as read-only. CI snapshots and restores
-the checkout runtime archive plus the installed DSO/archive/dSYM/shims
-around compiler groups; its system-OpenSSL smoke replaces the whole
-paired generation rather than one logical child, while the prepared artifact retains the
-bundled generation.
+The Make object graph, private support bootstrap, LuaRocks install and
+`post_install` copy, uninstall, and binary rock are described in [Build and
+installation responsibilities](build-script-audit.md). Production library tests
+treat the installed set as read-only; CI snapshots and restores it around
+compiler groups (see [Continuous integration](continuous-integration.md)).
+Windows builds a DLL-only form of the same image; see [Standard-provider build
+and publication](windows-build.md#standard-provider-build-and-publication).
 
 ## ABI and test-only exact providers
 
-The current provider contract covers shallow prefix-container discovery, the
-paired dynamic and self-describing static formats, canonical Array proxies,
-union and Interface metadata, callable branding, generic declarations,
-source-private provider identity, source-defined callback symbols, and
-const-qualified descriptors and wrappers. The dynamic and static forms carry
-the same ABI and logical type manifests. Exact-path test providers remain valid
-as the final candidate in each format, but a mismatched marker is terminal
-before metadata decoding or native linking.
+The dynamic and static forms carry the same ABI marker and logical type
+manifests, and a mismatched marker is terminal before metadata decoding or
+native linking. What the ABI covers, and how `TITAN_PATH_0_6` and
+`lib/titan/0.6` derive from `TITAN_VERSION`, is in [Compiled-module
+ABI](codegen-overview.md#compiled-module-abi). Exact-path test providers remain
+valid as the final candidate in each format.
 
-Current lookup uses `TITAN_PATH_0_6` and `lib/titan/0.6`; those paths derive
-from `TITAN_VERSION` `0.6.0`, independently of `TITAN_ABI_VERSION`. Earlier Titan
-installations are not migrated, cleaned up, or used as compatibility inputs.
-See [Dense Arrays](dense-arrays.md#abi-boundary).
-
-Production, installed, and native standard-library behavior tests use the
-combined image; the uv redesign has no delayed-callback source variant,
-alternate exact-provider graph, or serial source-rewritten coroutine image.
-Implementation mechanics remain owned by compiler/native harness coverage
-rather than an alternate production packaging model.
+Production, installed, and native standard-library behavior tests all use the
+combined image. There is no alternate exact-provider graph or source-rewritten
+standard image; implementation mechanics are covered by the compiler and native
+harness specs.

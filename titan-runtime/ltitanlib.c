@@ -181,6 +181,7 @@ static int lazyload(lua_State *L) {
 ** first request in each Lua state therefore always performs a lazy/global
 ** dlopen, which can promote an image that was mapped locally beforehand.
 ** Handles are stored as light userdata and are deliberately never closed. */
+/* Implementation notes: doc/implementation/lua-interop-internals.md#4-generated-shim-lazyglobal-loading-and-promotion */
 static int lazyglobalload(lua_State *L) {
 #if defined(_WIN32)
   const char *symbol = titan_win_loader_string(L, 2);

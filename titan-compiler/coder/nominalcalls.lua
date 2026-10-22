@@ -4,6 +4,7 @@ local _ENV = core
 -- A direct constructor is a storage destination. Evaluate every argument at
 -- its lexical position, retaining fixed-array snapshots and checked fresh
 -- allocation counts until the one final userdata can be allocated.
+-- Implementation notes: doc/implementation/nominal-storage.md#direct-fresh-constructor-storage
 function coder._codenominalcall(ctx, node)
     local constructor = assert(node._nominal_constructor)
     local plan = coder._nominal_plan(ctx, constructor.owner,

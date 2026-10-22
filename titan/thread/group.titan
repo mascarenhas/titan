@@ -149,6 +149,7 @@ local function Group:acquire_slot(): boolean
   return false
 end
 
+-- Implementation notes: doc/implementation/thread-library.md#group-ownership-and-retry-boundaries
 -- Listener registration can fail after it has already installed its callback.
 -- Membership, not the observed flag, therefore owns the one terminal release.
 local function Group:finish_thread(spawned: Thread<|nil|>,

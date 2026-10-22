@@ -387,6 +387,7 @@ local foreign function sqlite_rollback_worker(argument: *void)
   if packet.autocommit == 0 then sqlite_transaction(packet, "ROLLBACK") end
 end
 
+-- Implementation notes: doc/implementation/sqlite3-library.md#reservations-and-lifetime
 -- Called through cancellation-insensitive foreign cleanup when publication
 -- fails or accepted work completes with cancellation pending. No operation is
 -- repeated: this retires only the native ownership still held by the packet.

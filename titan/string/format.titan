@@ -590,6 +590,7 @@ local function format_conversion(
     form, peg.constant(factory), peg.constant(maximum))
 end
 
+-- Implementation notes: doc/implementation/string-library.md#format-translation
 local function build_format_pattern(): peg.Pattern
   local escaped_percent =
     peg.template_capture(peg.literal("%%"), "%%")

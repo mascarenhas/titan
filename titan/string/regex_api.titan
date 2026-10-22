@@ -19,6 +19,7 @@ local function cached_regex(expression: string): Regex
   return compiled
 end
 
+-- Implementation notes: doc/implementation/string-library.md#match-records-and-result-projection
 local function regex_normalized_init(subject: string,
                                      supplied: integer?):
                                      (integer, boolean)

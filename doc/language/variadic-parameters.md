@@ -53,7 +53,7 @@ parameter of the function. On a top-level function, a concrete method, or an
 Interface method signature the element type is **mandatory** (there is no
 inference for it, just as for any parameter); an
 [anonymous function](closures.md) may instead write a bare `...` whose element
-type is [inferred from context](#untyped-lambda-vararg). The same form works on
+type is [inferred from context](#untyped-variadic-in-an-anonymous-function). The same form works on
 top-level functions, anonymous functions, concrete methods, and
 [Interface signatures](interfaces.md#declaring-an-interface):
 
@@ -93,7 +93,7 @@ The element type may be almost any Titan type — a scalar, a `string`, an
 array, a map, a record, `value`, or an option type — with two exceptions
 (`nil` and foreign C pointers) described under [Limits and bans](#limits-and-bans).
 
-### Untyped variadic in an anonymous function {#untyped-lambda-vararg}
+### Untyped variadic in an anonymous function
 
 An [anonymous function](closures.md) may write a bare `...` with **no** element
 type, exactly as it may write an untyped parameter `a`. The element type is then

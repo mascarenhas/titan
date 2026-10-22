@@ -201,6 +201,7 @@ local function directive_prefix(line, initial_mode)
     end
 end
 
+-- Implementation notes: doc/implementation/native-coverage.md#source-attribution
 -- A pass over physical lines, with lexical state across them. Source regions
 -- freeze one Titan anchor; authored C regions advance by their original
 -- physical lines. The initial/generated region always names the final C file.

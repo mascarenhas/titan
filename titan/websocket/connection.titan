@@ -146,6 +146,7 @@ local function Connection:release(work: Work)
   self.works = retained
   self:wake_waiters()
 end
+-- Implementation notes: doc/implementation/websocket-library.md#operation-and-terminal-lifetime
 local function Connection:retire(cause: value, source_trace: string?)
   if not self.terminal and self.failure == nil and cause ~= nil then
     if source_trace ~= nil then
@@ -287,6 +288,7 @@ function Connection:close()
   self:retire(nil)
 end
 
+-- Implementation notes: doc/implementation/websocket-library.md#protocol-state-and-fairness
 local function Connection:take_frame(work: Work, opcode: integer): boolean
   while true do
     if opcode == 8 and self.close_sent then return false end
@@ -461,6 +463,7 @@ end
 -- @return Same-process payload that must be adopted exactly once.
 -- @usage standard-library-websocket.md#transferring-connections
 function Connection:to_transfer_payload(): string
+  -- Implementation notes: doc/implementation/websocket-library.md#connection-transfer-ownership
   if self.terminal or self.closing or self.stream == nil then
     raise "cannot transfer a closed or closing WebSocket Connection"
   end

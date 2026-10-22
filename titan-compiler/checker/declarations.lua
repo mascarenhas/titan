@@ -314,6 +314,7 @@ function checker._valid_foreign_local_type(typ)
        and resolved._tag ~= "Type.CVoid"
 end
 
+-- Implementation notes: doc/implementation/foreign-functions.md#one-checker-a-restricted-context
 function checker._validate_foreign_body_node(node, errors, seen)
     if type(node) ~= "table" or seen[node] then return end
     seen[node] = true
@@ -888,6 +889,7 @@ toplevel_visitor = util.make_visitor({
         resolve_foreign_type_alias(node, st, errors)
     end,
 
+    -- Implementation notes: doc/implementation/interfaces.md#declaration-staging-and-publication
     ["Ast.TopLevelInterface"] = function(node, st, errors)
         return generic_with_owner_bindings(node, st, function()
             local fqtn = st.modname .. "." .. node.name
@@ -1098,6 +1100,7 @@ toplevel_visitor = util.make_visitor({
         end)
     end,
 
+    -- Implementation notes: doc/implementation/unions.md#declaration-checking-and-visibility
     ["Ast.TopLevelUnion"] = function(node, st, errors)
         return generic_with_owner_bindings(node, st, function()
             local variants = {}
@@ -1553,6 +1556,7 @@ function generic_validate_pending_generic_constraints(st, errors)
     end
 end
 
+-- Implementation notes: doc/implementation/record-constructors.md#declaration-staging-and-call-lowering
 function collect_nominal_constructors(ast)
     local constructors = {}
     local custom_records = {}
@@ -1677,6 +1681,7 @@ end
 -- callable signatures follow; module variables are checked last, one by one.
 -- During that last pass the symbol table hides later imports and the current or
 -- later module variables, preserving the only sequential declaration boundary.
+-- Implementation notes: doc/implementation/checker.md#staged-top-level-collection-and-body-checking
 function checktoplevel(ast, st, errors, loader)
     reserve_toplevel_names(ast, st)
     local constructors = collect_nominal_constructors(ast)

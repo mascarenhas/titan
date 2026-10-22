@@ -255,6 +255,7 @@ function generic_bare_forwarding_alias_target(node, st, errors)
     return nil, nil, false
 end
 
+-- Implementation notes: doc/implementation/type-aliases.md#frontend-and-resolution
 resolve_type_alias = function(node, st, errors)
     if node._alias_state == "resolved" then
         return node._type
@@ -336,6 +337,7 @@ local function foreign_alias_has_owned(typ, seen)
     return false
 end
 
+-- Implementation notes: doc/implementation/type-aliases.md#foreign-aliases-are-a-separate-c-declaration
 function resolve_foreign_type_alias(node, st, errors)
     if node._alias_state == "resolved" then return node._type end
     if node._alias_state == "resolving" then
@@ -587,6 +589,7 @@ end
 -- a use from an inner lambda (a deeper `#func_stack`) finds the symbol but is
 -- rejected — `...` is invisible across a function boundary, unlike ordinary
 -- lexical scoping.
+-- Implementation notes: doc/implementation/variadic-parameters.md#depth-stamped-vararg-and-scope-rule-4
 function resolve_vararg(st, loc, errors)
     local vararg = st:find_symbol("$vararg")
     if not vararg then

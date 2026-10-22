@@ -73,6 +73,7 @@ unsigned titan_array_growth(lua_State *L, lua_Unsigned index) {
     return capacity;
 }
 
+/* Implementation notes: doc/implementation/dense-arrays.md#authoritative-lenhint-and-resizing */
 void titan_array_resize(lua_State *L, Table *backing,
                         lua_Unsigned capacity) {
     lua_Unsigned length;
@@ -171,6 +172,7 @@ static int titan_array_lua_index(lua_State *L) {
     return 1;
 }
 
+/* Implementation notes: doc/implementation/dense-arrays.md#array-writes */
 static int titan_array_lua_newindex(lua_State *L) {
     TValue receiver = lua_totvalue(L, 1);
     Table *backing = titan_array_require_backing(&receiver);
@@ -275,6 +277,7 @@ static void titan_array_publish_registry_entry(lua_State *L,
     }
 }
 
+/* Implementation notes: doc/implementation/const-values.md#runtime-array-pair */
 void titan_array_metatables(lua_State *L, Table **mutable_out,
                             Table **const_out) {
     int base;
@@ -410,6 +413,7 @@ Table *titan_array_metatable(lua_State *L) {
     return mutable_metatable;
 }
 
+/* Implementation notes: doc/implementation/dense-arrays.md#runtime-construction */
 Table *titan_array_new_impl(lua_State *L, Table *metatable,
                             lua_Unsigned capacity,
                             const TValue *writer, int mutable,
@@ -459,6 +463,7 @@ Table *titan_array_new_impl(lua_State *L, Table *metatable,
     return backing;
 }
 
+/* Implementation notes: doc/implementation/dense-arrays.md#mutable-to-const-lowering */
 Table *titan_array_shallow_copy(lua_State *L, Table *source,
                                 Table *mutable_metatable,
                                 Table *const_metatable,
@@ -618,6 +623,7 @@ static struct backtrace_state *titan_backtrace_state(lua_State *L) {
 /* Reset after a slow-path provider load or a Lua require that mapped a provider.
 ** Every titan.o copy clears the same per-state registry slot. The next capture
 ** recreates it with the now-complete process image snapshot. */
+/* Implementation notes: doc/implementation/error-handling.md#backtrace-state-invalidation */
 void titan_invalidate_backtrace_state(lua_State *L) {
     int top = lua_gettop(L);
     lua_pushliteral(L, TITAN_BT_STATE_KEY);
@@ -693,6 +699,7 @@ typedef struct {
     int cap;
 } titan_native_stack;
 
+/* Implementation notes: doc/implementation/error-handling.md#libbacktrace-and-frame-merging */
 static int titan_bt_collect_cb(void *data, uintptr_t pc, const char *filename,
                                int lineno, const char *function) {
     titan_native_stack *st = (titan_native_stack *)data;
@@ -1636,6 +1643,7 @@ void titan_check_compatibility(lua_State *L, void *lib, const char *sym,
         verifier_size, error);
 }
 
+/* Implementation notes: doc/implementation/binary-compatibility.md#generated-exports-and-runtime-verification */
 void titan_check_module_compatibility(lua_State *L, TitanModuleProvider provider,
     const char *sym, const char *file, const char *verifier,
     size_t verifier_size) {
@@ -1662,6 +1670,7 @@ static int titan_trace_pinned(lua_State *L) {
   return pinned;
 }
 
+/* Implementation notes: doc/implementation/error-handling.md#runtime-trace-model */
 int errorhandler(lua_State *L) {
   int top = lua_gettop(L);
   /* Pin discipline (A.5): a pinned slot belongs to a pending re-raise and must

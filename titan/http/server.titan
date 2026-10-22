@@ -458,6 +458,7 @@ local function await_terminal_cleanup<|A, B|>(task: async.Task<|A, B|>)
     context, start_terminal_cleanup)
 end
 
+-- Implementation notes: doc/implementation/http-library.md#serial-keep-alive-and-idle-timeout-composition
 local function read_request_with_idle_timeout(
     parser: Parser, encrypted: boolean, transport: Transport,
     timeout: integer): Request?

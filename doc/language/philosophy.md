@@ -156,8 +156,8 @@ array access compiles to an array access), at a known cost: each Titan
 release is tied to a specific minor version of Lua, and tracking a new
 Lua release means re-deriving the generated code against the new
 internals. The current [value representation and GC invariants](../implementation/values-and-gc.md)
-document that coupling, and the [Lua 5.5.1 update audit](../implementation/lua-5.5.1-update.md)
-shows how an interpreter upgrade is checked against the generated code.
+document that coupling, and [upgrading the pinned Lua](../implementation/codegen-overview.md#upgrading-the-pinned-lua)
+describes how an interpreter upgrade is checked against the generated code.
 
 ## A short history
 

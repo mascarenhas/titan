@@ -1,21 +1,25 @@
 # Lua interop internals
 
-This chapter describes the machinery at the Lua↔Titan boundary: the
-coercive source entry used by genuine Lua calls, the strict Lua-stack entries
-used after branded exact-tag mismatches, the target adapter/consumer relay used
-by realized callable wrappers, the shared per-type lowering plans, the
-metatables that serve records and module variables to Lua, the qualified Array
-proxy pair and mutable writer, the registry entries holding it all together,
-the dynamic loader, the error handler, the standalone-executable
-entrypoint, and the safety argument. Value representations (records and
-the module state `_mod` as a single tagged `Udata` each) are in
-[values and the GC](values-and-gc.md); the `_init`/`luaopen` protocol
-and dependency linking are in the
-[code generator overview](codegen-overview.md); the user-facing view is
-[the language chapter on interoperability](../language/lua-interop.md).
+This chapter describes the machinery at the Lua↔Titan boundary: the coercive
+entry used by genuine Lua calls and the strict Lua-stack entry used after a
+branded exact-tag mismatch, the dynamic conversion plans, the metatables that
+serve records, unions, Interfaces, Arrays and module members to Lua, the
+registry footprint, the shared-library loading paths, and the safety argument.
+Related material lives elsewhere:
 
-All generated-C excerpts are real output of `coder.generate` for this
-module:
+* value representations: [values and the GC](values-and-gc.md);
+* the `_init`/`luaopen` protocol and dependency wiring:
+  [code generator overview](codegen-overview.md#the-module-protocol);
+* the conversion policy itself:
+  [Type relations and boundary plans](type-relations-and-boundaries.md); this
+  chapter only shows how generated C represents it;
+* the error handler, `titan.backtrace()` and trace pinning:
+  [error handling](error-handling.md#runtime-trace-model);
+* the standalone executable entrypoint:
+  [driver](driver.md#linking-a-standalone-program-drivercompile_program);
+* the user-facing view: [the language chapter](../language/lua-interop.md).
+
+Generated-C excerpts are abridged output of `coder.generate` for this module:
 
 ```titan
 -- interop.titan
@@ -36,51 +40,39 @@ function fmod(a: float, b: integer): (float, string)
 end
 ```
 
-Lua-internals background used throughout: when Lua calls a C function,
-`L->ci->func.p` points at the stack slot holding the function object,
-the arguments sit in the slots after it (`func + 1 … func + n`), and
-`L->top.p` points one past the last argument; `s2v(slot)` views a stack
-slot as a `TValue*`. `L->errfunc` is the `lua_State` field holding the
-stack position of the current *message handler* — the function that gets
-to inspect an error before the stack unwinds (what `lua_pcall`'s fourth
-argument normally installs).
-
-The normative policy matrix is
-[Type relations and boundary plans](type-relations-and-boundaries.md). This
-chapter describes how that policy is represented in generated C; it does not
-define a second conversion relation.
+Lua-internals background: when Lua calls a C function, `L->ci->func.p` points
+at the stack slot holding the function object, the arguments follow it
+(`func + 1 … func + n`), and `L->top.p` points one past the last argument;
+`s2v(slot)` views a stack slot as a `TValue*`. `L->errfunc` holds the stack
+position of the current message handler (what `lua_pcall`'s fourth argument
+normally installs).
 
 ## The two Lua-stack entries (`genluaentry`)
 
-Every first-class Titan function has [three entry roles](codegen-overview.md):
-the native-convention entry used by exact-tag Titan→Titan calls, a coercive
+Every first-class Titan function has
+[three entry roles](codegen-overview.md#three-entry-roles-per-first-class-titan-function):
+the native entry used by exact-tag Titan→Titan calls, a coercive
 `lua_CFunction` used by genuine Lua calls, and a strict Lua-stack entry used
-after a branded exact-tag mismatch. A realized callable wrapper fills those
-same roles with its target adapter, copied source `CClosure.f`, and
-consumer-local target relay. `genluaentry` in `coder.lua` emits the two
-stack-convention entries for every non-`local` top-level function
-(`<mod>_\u2133_<name>_titanentry_lua` and `…_strict` in C source, with the
-UCN separator becoming UTF-8 at linkage) and every static (`…_titanentry_luastatic` and `…_strictstatic`).
-A method has its ordinary `…_titanentry_luamethod`; each method's
-self-removed first-class bound value has separate `…_boundlua` and
-`…_boundstrict` trampolines. Static, method, bound, and Interface entries use
-`<module>_\u2133_<owner>_\u2131_<member><role>`; their object linkage names
-contain UTF-8 `ℳ` and `ℱ`. A local declaration that is never used as a value
-needs neither stack entry; a first-class local value needs both even though it
-is not exported to Lua. For methods, the parameter list is prefixed with
-the record's nominal type, so `self` is checked like any record-typed
-argument.
+after a branded exact-tag mismatch. `genluaentry`
+(`titan-compiler/coder/declarations.lua`) emits the two stack-convention
+entries for every top-level function (`…_titanentry_lua` and
+`…_titanentry_strict`) and every static (`…_titanentry_luastatic` and
+`…_titanentry_strictstatic`). Local top-level functions and statics also get
+both entries and a canonical closure in a source-private module slot
+(`allocate_upvalues`, `coder/module.lua`), but are not exported through the
+module member map. A method has its `…_titanentry_luamethod`, with the record's
+nominal type prepended to the parameter list so `self` is checked like any
+record argument; each bound method value has separate `…_boundlua` and
+`…_boundstrict` trampolines. Name construction is in `coder/names.lua`; the
+naming scheme is described in
+[the translation-unit anatomy](codegen-overview.md#anatomy-of-a-generated-translation-unit).
 
-Named arguments do not change `genluaentry`. A Titan named call has already
-been matched and lowered to positions by the checker, while a Lua table passed
-with `f { x = 1 }` is just one ordinary positional value and is never inspected
-for labels. Declaration `paramnames` exist only in Titan's compiled interface,
-not in the Lua wrapper or a run-time map; see
-[named-argument internals](named-arguments.md).
+Named arguments do not affect these entries: a Titan named call is lowered to
+positions by the checker, and a Lua table passed as `f { x = 1 }` is one
+ordinary positional value. See [named-argument internals](named-arguments.md).
 
-The following abridged canonical-closure entry for `fmod` omits adapter-source
-traversal and the two
-argument conversions:
+The abridged coercive entry for `fmod`, without adapter-source traversal and
+the two argument conversions:
 
 ```c
 static int interop_\u2133_fmod_titanentry_lua(lua_State *L) {
@@ -131,172 +123,122 @@ static int interop_\u2133_fmod_titanentry_lua(lua_State *L) {
 
 Walking through it:
 
-* **Argument count adjustment.** Too few arguments are padded by writing nils to fresh Lua stack slots before any
-  parameter is read; the later `checkandget` calls then accept or reject
-  those nils according to the declared parameter types.
-  `titan_ensure_stack` uses Lua's internal raising growth path and extends the
-  active frame limit; a successful reservation can relocate the stack, so the wrapper reloads
-  `func = L->ci->func.p` before filling the new slots. A fixed-parameter
-  wrapper deliberately ignores surplus Lua arguments. An input-variadic
-  wrapper converts the surplus into an element-typed `TitanVargX` descriptor,
-  capped by `TITAN_VARARG_MAX`, and passes that descriptor plus `_start = 0`
-  to the native entry.
-* **Error handler.** The wrapper saves `L->errfunc` and checks whether it
-  already points at Titan's runtime `errorhandler`
-  ([below](#the-error-handler-and-titanbacktrace)). If not, it pushes the
-  handler, points `L->errfunc` at it, and restores the old value before
-  returning. If an outer Titan entry or standalone bootstrap already
-  installed the same handler, the wrapper reuses it instead of pushing a
-  duplicate light C function. The handler is always pushed with
-  `lua_pushcfunction`, because it has no upvalues and does not need a
-  full C closure. Every error raised during the call passes
-  through the active Titan handler first.
-* **The error slot.** With parameters present, the three-line juggle
-  makes stack index 1 nil: a copy of argument 1 is pushed on top —
-  keeping it anchored for the GC, since `checkandget` has already
-  extracted a raw pointer into a C local (arguments 2..n stay anchored
-  in their original slots) — and a nil is written over slot 1. With zero
-  parameters the wrapper just does `lua_pushnil(L);`. The slot was
-  reserved by commit `11a2109` ("add basic error handler function to
-  validate approach", upstream PR #257 — "reserve first stack slot for
-  error value"), but **nothing in the current tree reads or writes it
-  after reservation**: all Titan run-time errors go through `codethrow`
-  → `luaL_error`. It is leftover groundwork from that experiment.
-* **Module recovery.** The canonical source closure is built with the module
-  `Udata` in upvalue 0, followed by its type tag, native entry pointer, fixed
-  closure brand, any captures, and the declaration strict-entry trailer. A
-  realized adjustment wrapper keeps the source captures and Lua entry but uses
-  the adapting module in upvalue 0, replaces the tag/native pointer, and appends
-  the immediate source plus target relay. The ordinary Lua entry follows those
-  guarded source links before recovering `_fn` and its owning `_mod`. Native
-  adapters and strict relays retain the adapting module; genuine Lua calls use
-  the original provider's module data and captures.
+* **Argument count adjustment.** Missing arguments are padded with nil in
+  fresh stack slots before any parameter is read; the conversions then accept
+  or reject those nils by parameter type. `titan_ensure_stack` uses Lua's
+  internal raising growth path and can relocate the stack, so the entry reloads
+  `func = L->ci->func.p` afterward. A fixed-parameter entry ignores surplus
+  arguments; an input-variadic entry collects them into a descriptor (see
+  [Lua-entry vararg collection](variadic-parameters.md#lua-entry-vararg-collection)).
+* **Error handler.** The entry checks whether `L->errfunc` already points at
+  Titan's runtime `errorhandler`. If not, it pushes the handler with
+  `lua_pushcfunction` (it has no upvalues), points `L->errfunc` at it, and
+  restores the old value before returning. Nested Titan entries and the
+  standalone bootstrap therefore share one handler. Its behavior is in
+  [error handling](error-handling.md#runtime-trace-model).
+* **The error slot.** With parameters present, the three-line juggle makes
+  stack index 1 nil while a copy of argument 1 stays anchored on top (the
+  conversion has already extracted a raw pointer into a C local); with zero
+  parameters the entry pushes one nil. Nothing reads or writes this slot after
+  reservation: run-time errors go through `codethrow` → `luaL_error`.
+* **Module recovery.** The canonical source closure holds the module `Udata`
+  in upvalue 0, then its type tag, native entry pointer, fixed brand, captures,
+  and the declaration strict-entry trailer
+  ([closures](codegen-overview.md#closures-and-captured-variables)). A
+  realized adjustment wrapper copies the source's `f`, so its Lua entry follows
+  the guarded immediate-source links back to the original closure and uses the
+  original provider's `_mod` and captures; see
+  [Closure adjustment wrappers](closure-adjustment-wrappers.md#source-lua-entry-and-target-strict-relay).
 * **Arguments.** Each parameter is a C local of its native
-  [`ctype`](values-and-gc.md), filled by the checker-attached
-  `DynamicCoercionPlan` from `s2v(func + i)`. The location baked into boundary error messages is
-  the **function declaration's** — errors point at the declaration, not
-  the call site.
-* **Results.** For a fixed result shape, the wrapper reserves one stack slot per declared return
-  value, saves the first return slot as a stack offset, calls the native
-  function (extra returns come back through out-parameters), restores the
-  slot pointer from the offset in case the native callee relocated the
-  Lua stack with `titan_ensure_stack`, and writes each result into its slot with
-  `setboxed` — records and unions remain their Udata, while Arrays become their canonical
-  proxy Udata. `return NRET;` makes multiple Titan returns multiple
-  Lua returns (`local x, y = titan_test.f(2)` works).
-  For a flexible result shape it reads the caller's requested count through
-  `get_nresults(L->ci->callstatus)`, subtracts the fixed prefix to derive
-  `_flexwant`, allocates bounded typed backing, and calls the native entry with
-  `_flexout`. It then reserves/restores the destination stack by offset, wraps
-  the fixed prefix plus `_flexdesc.n_args` actual tail elements, and returns
-  that actual combined count. `LUA_MULTRET` therefore requests the open tail;
-  a finite Lua caller pays only for the requested tail capacity.
+  [`ctype`](values-and-gc.md#the-ctype-map), filled from `s2v(func + i)` by the
+  checker-attached `DynamicCoercionPlan`. Boundary errors carry the function
+  declaration's location, not the call site.
+* **Results.** For a fixed result shape, the entry reserves one stack slot per
+  declared result, saves the first slot as an offset, calls the native
+  function (later results come back through out-parameters), restores the slot
+  pointer because the callee may have relocated the stack, and boxes each
+  result with `setboxed` (records and unions stay their `Udata`; Arrays become
+  their proxy). `return NRET;` makes multiple Titan results multiple Lua
+  results. Flexible result shapes derive `_flexwant` from the caller's result
+  request; see [flexible-return internals](flexible-returns.md#lua-stack-entries).
 
-The strict entry shares all of that arity, error-frame, tail, result-request,
-and stack-relocation machinery, but has one hidden first argument: the Titan
-closure selected by dispatch. An ordinary declaration entry verifies that the
-hidden value is a C closure and that its coercive entry, private header, final
-strict-entry trailer, and source function tag match the declaration exactly.
-The dispatch site has already established the fixed brand, so the entry does
-not repeat that comparison. It roots and passes the source closure as `_fn`,
-excluding the hidden argument from every user-visible arity calculation,
-consumes strict `GuardPlan`s for formals/tail, and boxes results under the
-source type before caller-attached strict result actions run.
+The strict entry shares the arity, error-frame, tail, result-request and
+relocation machinery, but takes one hidden first argument: the Titan closure
+selected by dispatch. The declaration strict entry verifies that the hidden
+value is a C closure whose coercive entry, private header, final strict-entry
+trailer and source function tag match the declaration. The dispatch site has
+already checked the brand, so the entry does not repeat it. It roots and
+passes the source closure as `_fn`, excludes the hidden argument from every
+arity calculation, consumes strict `GuardPlan`s for formals and tail, and boxes
+results under the source type before the caller's strict result actions run.
+Numeric conversion and Lua truthiness are unavailable on this path. A realized
+wrapper cannot reuse the declaration strict entry because its target tag would
+fail the source-tag check; it uses a consumer-local target relay built from the
+same shell, described in
+[Closure adjustment wrappers](closure-adjustment-wrappers.md#source-lua-entry-and-target-strict-relay).
 
-A realized wrapper cannot copy this declaration entry: its target tag would
-fail the baked source-tag check, while its `CClosure.f` must remain the source
-entry. Its consumer-local relay uses the same shell but validates the target
-tag, target native adapter/header shapes, and its own final trailer. It then
-calls the target adapter with the wrapper as `_fn`; the adapter follows the
-penultimate immediate-source link and executes the frozen B→A/A→B actions.
-Numeric conversion and Lua truthiness are unavailable on either strict path.
-
-The canonical source closure's `f` remains the coercive entry, and every
-adjustment wrapper copies its immediate source's `f`. Source closures store a
-declaration strict light C function last; wrappers store their target relay.
-`codevaluecall` first performs the likely exact static-tag comparison; an exact
-match uses the native pointer (ordinary body or wrapper adapter) without a Lua
-registry lookup. Only after a mismatch does it compare fixed `upvalue[3]`
-against `TITAN_BRAND`. Both predicates require the minimum
-private shape and otherwise compare trusted raw pointer bits. A branded
-mismatch pushes the closure's trailer plus the closure; non-Titan callable
-values use Lua's ordinary call machinery, receive the already adjusted and
-boxed static arguments, and dynamically coerce results as they enter Titan.
-
-The guarded construction/layout/rooting details are in
-[Closure adjustment wrappers](closure-adjustment-wrappers.md).
+How `codevaluecall` chooses between the native pointer, the strict trailer,
+and Lua's ordinary call machinery is described in
+[Calling function values](codegen-overview.md#calling-function-values-codevaluecall).
 
 ## Dynamic boundary conversion
 
-The historical `checkandget`/`checkandset` split is now only a destination
-detail. Both consume the same checker-built `DynamicCoercionPlan`; a native C
-local and a `TValue` slot cannot disagree about which sources a target type
-accepts. This common path serves genuine-Lua function arguments,
-mutable module-variable and record-field writes from Lua, non-nil mutable Array writes,
-written `value as/is T`, and non-Titan callable results.
+`checkandget` (C-local destination) and `checkandset` (`TValue` destination)
+in `coder/values.lua`, through `coder._dynamiccheckandget` and
+`coder._dynamiccheckandset`, render the same checker-built
+`DynamicCoercionPlan`, so a native local and a `TValue` slot cannot disagree
+about which sources a type accepts. This path serves genuine-Lua function
+arguments, mutable module-variable and record-field writes from Lua, non-nil
+mutable Array writes, written `value as/is T`, and results of non-Titan
+callables. Which sources each type accepts is defined in
+[Dynamic coercion](type-relations-and-boundaries.md#dynamic-coercion). The
+generated failures, raised with `luaL_error` and prefixed `%s:%d:%d: ` (the
+declaration, write, or cast location), are:
 
-The generated helper family renders the plan into either a C local or a
-`TValue` destination. Per type, with
-messages prefixed `%s:%d:%d: ` (file:line:col of the relevant
-declaration, write, or cast expression),
-raised as run-time errors via `luaL_error`:
+| Titan type | On failure |
+| --- | --- |
+| `integer` | non-integral or out-of-range float: `type error, number '%f' has no integer representation`; otherwise `type error, expected integer but found %s` |
+| `float` | `type error, expected float but found %s` |
+| `boolean` | never fails (Lua truthiness: `l_isfalse(exp) ? 0 : 1`) |
+| `nil` | `type error, expected nil but found %s` |
+| `string` | `type error, expected string but found %s` (no number→string coercion) |
+| `{T}`, `const { T }` | `type error, expected array but found %s` (outer proxy and qualifier only; elements unchecked) |
+| `{K:V}` | `type error, expected table but found %s` (any table; elements unchecked) |
+| `value`, function | never fails; the value is copied unchanged |
+| `T?` | nil passes; otherwise the base type's message |
+| record or union | `type error, expected %s but found %s`, three arms below |
+| Interface | `type error, expected <interface> but found %s` when no exact wrapper or witness exists |
+| C integer / C float | expected-tag, integer-representation, or target-range error |
 
-| Titan type | Accepts | On failure |
-| --- | --- | --- |
-| `integer` | Lua integers; floats with integral value are converted | non-integral float: `type error, number '%f' has no integer representation`; otherwise `type error, expected integer but found %s` |
-| `float` | Lua floats; integers converted via `(lua_Number)ivalue` | `type error, expected float but found %s` |
-| `boolean` | **anything**, by Lua truthiness: `l_isfalse(exp) ? 0 : 1` | never fails |
-| `nil` | only nil (`ttisnil`) | `type error, expected nil but found %s` |
-| `string` | only strings (`ttisstring`); no number→string coercion | `type error, expected string but found %s` |
-| `{T}` | a structurally valid canonical mutable Array proxy Udata; elements are *not* checked here | `type error, expected array but found %s` |
-| `const { T }` | a structurally valid canonical const Array proxy Udata; elements are *not* checked here | `type error, expected array but found %s` |
-| `{K:V}` | **any table** (`ttistable`); elements are *not* checked here | `type error, expected table but found %s` |
-| `value` | anything, copied with `setobj2t` | never fails |
-| `T?` | nil, otherwise the same dynamic plan as `T`; in particular `boolean?` uses Lua truthiness for every non-nil value | the base type's message |
-| record or union | a full userdata whose metatable equals the nominal owner's metatable | three-way message, below |
-| Interface | an existing exact wrapper, or bare full userdata whose metatable has a non-nil compiler-witnessed entry under the target Interface metatable; the entry is called for one trusted result | missing witness: `type error, expected <interface> but found %s`; forged non-callable entries raise Lua's ordinary call error |
-| function | any Lua value, copied unchanged; exact/strict/Lua dispatch checks it when Titan later calls it | the later call either dispatches or raises Lua's ordinary non-callable error |
-| C integer | strict: integer tag; dynamic: integer or exactly integral float that first fits `lua_Integer`; both then check the C target interval and `_Bool` admits only 0/1 | expected-tag, integer-representation, or target-range error |
-| C float | strict: float tag; dynamic: either numeric tag; both then check the C target range | expected-tag or target-range error |
+The checked C scalar rules, including NaN and infinity handling and `_Bool`,
+are in
+[Checked C scalar conversions](type-relations-and-boundaries.md#checked-c-scalar-conversions).
+Written `is` consumes the same predicate without performing the cast.
 
-C scalar locals remain native C values, while boxed destinations store through
-the same checked predicate. Same-or-wider floating conversion preserves NaNs
-and infinities; narrowing rejects non-finite or out-of-range values while
-allowing rounding and underflow. Written `is` consumes this identical
-predicate without performing the cast, including when the C scalar plan is
-nested beneath an Option. The complete policy and its C-expression exceptions
-are normative in
-[Type relations and boundary plans](type-relations-and-boundaries.md#checked-c-scalar-conversions).
+The record/union case compares the userdata's metatable with the owner's
+canonical metatable (cached in a `_mod` user value) and on a match uses the
+userdata itself as the value; see
+[values and the GC](values-and-gc.md#wrap-and-unwrap-at-the-boundary). The
+found part of the failure message has three arms: another Titan record or
+union reports its FQTN from the registry's reverse metatable→name entry
+(read directly with `luaH_get` on `G(L)->l_registry`), giving
+`expected test.Rec but found test.Point`; an unknown full userdata reports
+`userdata` without consulting `__name` or `__tostring`; anything else reports
+`lua_typename` (`expected test.Rec but found number`).
 
-The record/union nominal case compares the userdata's metatable against the
-owner's metatable (read per-Lua-state from the `_mod` user value caching it) and,
-on match, uses the userdata directly as the record value (there is no
-wrapper to unwrap) — full excerpt and identity mechanism in
-[values and the GC](values-and-gc.md#wrap-and-unwrap-at-the-boundary).
-The failure message is always `type error, expected %s but found %s`,
-with three arms for the found part: another Titan record or union reports its
-FQTN, found through the registry's reverse metatable→name entry
-(`expected test.Rec but found test.Point`). The generated native path reads
-that entry directly with `luaH_get` from `G(L)->l_registry`; an unknown full
-userdata reports the static name `userdata`, without consulting `__name` or
-invoking `__tostring`. Anything else reports
-`lua_typename` (`expected test.Rec but found number`). The coder spec asserts
-the named, primitive, and unknown-userdata shapes.
-
-The Interface leaf keeps that exact metatable comparison as its fast path.
-After a mismatch it requires full userdata with a metatable and performs an
-internal raw table lookup keyed by the canonical target Interface metatable.
-A present entry and the original userdata are placed in traced VM slots and
-called through `luaD_callnoyield` for one result. No record-kind, callability,
-or returned-wrapper validation is added. Stack positions are saved as offsets
-and reacquired after the call can grow the stack; a native `_base` is restored,
-while a Lua-stack entry reloads from `L->ci->func.p`. The argument/result slots
-already provide the required reachability, so discovery adds no parallel GC
-root range.
+The Interface case keeps the exact metatable comparison as its fast path.
+After a miss it requires full userdata with a metatable and does a raw lookup
+keyed by the canonical target Interface metatable. A present entry and the
+original userdata are placed in traced VM slots and called through
+`luaD_callnoyield` for one result, with no further record-kind, callability, or
+result validation. Stack positions are saved as offsets and reacquired after
+the call (a native `_base` is restored; a Lua-stack entry reloads from
+`L->ci->func.p`). The argument and result slots already provide reachability,
+so discovery adds no root range.
 
 ### The integer check
 
-The integer branch as generated for `fmod`'s second parameter:
+The integer branch generated for `fmod`'s second parameter:
 
 ```c
 if (TITAN_LIKELY(ttisinteger(s2v(func + 2)))) {
@@ -314,126 +256,60 @@ if (TITAN_LIKELY(ttisinteger(s2v(func + 2)))) {
 }
 ```
 
-The temporaries are `lua_Number` (a double), so the integrality test
-runs at full double precision: an integral-valued float is accepted and
-its exact value handed to `lua_numbertointeger`, which range-checks the
-conversion and raises `number '%f' has no integer representation` when
-the value has a fractional part *or* falls outside the integer range.
-The written `value as integer` cast inside Titan uses the same
-double-precision, range-checked conversion. An implicit gradual observation
+The temporaries are `lua_Number`, so the integrality test runs at full double
+precision and `lua_numbertointeger` range-checks the conversion. A written
+`value as integer` uses the same conversion. An implicit gradual observation
 does not: its strict integer guard accepts only a Lua integer tag.
 
 ### Native-local and `TValue` destinations
 
-The `TValue`-destination renderer serves mutable module-variable writes from
-Lua, mutable record-field writes from Lua, mutable Array writers, and Option payloads. It has the
-same dynamic matrix as the native-local renderer:
+The `TValue`-destination renderer serves mutable module-variable writes,
+mutable record-field writes, mutable Array writers, and Option payloads, with
+the same matrix as the native-local renderer:
 
 * **Booleans use truthiness everywhere on a dynamic boundary.**
   `mod.flag = 42`, `rec.flag = 42`, an Array write to `{boolean}`, and a
-  genuine-Lua call parameter all store or pass `true`. An Option first
-  preserves nil, then applies truthiness to a non-nil payload.
-* **Integers match everywhere.** The renderer performs the same
-  integral-float coercion as the integer entry check: an integral float
-  is accepted (`mod.x = 2.0` stores `2`), a non-integral or out-of-range
-  one raises `number '%f' has no integer representation`, and a
-  non-number raises `type error, expected integer but found %s` — so an
-  `integer?` slot or parameter behaves exactly like a plain `integer` at
+  genuine-Lua call parameter all store or pass `true`. An Option preserves nil
+  first, then applies truthiness to a non-nil payload.
+* **Integers match everywhere.** An integral float is accepted
+  (`mod.x = 2.0` stores `2`), so an `integer?` slot behaves like `integer` at
   the boundary.
 * **Failure is transactional.** Conversion completes into a temporary before
   a field, module slot, or Array backing table is mutated.
 
-Strict Titan observations use the separate `GuardPlan` renderer: implicit
-`value` projections, Array reads, Map reads, realized callable-adapter
-components, and branded exact-tag-mismatch arguments/results accept the
-runtime representation required by the static target and otherwise raise. They
-never use the broad dynamic numeric/truthiness policy. Compiler-witnessed
-Interface discovery is the named shared-leaf exception: an exact-wrapper miss
-may perform the same raw lookup and witness call under either plan.
+Strict Titan observations use the separate `GuardPlan` renderer
+(`coder._checked_gradual_guard`): implicit `value` projections, Array and Map
+reads, realized callable-adapter components, and branded exact-tag-mismatch
+arguments and results accept only the runtime representation the static target
+requires. Compiler-witnessed Interface discovery is the one shared leaf: an
+exact-wrapper miss may perform the same raw lookup and witness call under
+either plan.
 
 ## Records from Lua
 
-Lua holds the record's `Udata` (which is the record itself); field access
-and method dispatch go through a metatable built once per Lua state in the
-module's `_init`:
+Lua holds the record's `Udata`, which is the record itself. Field access and
+method dispatch go through a metatable built once per Lua state in the
+module's `_init`; the template is the `initrecs` block of `coderecorddec`
+(`coder/module.lua`). It:
 
-```c
-luaL_newmetatable(L, "Titan record interop.Point metatable");
-const void *_mtp = lua_topointer(L, -1);
-lua_pushinteger(L, TITAN_RECORD);
-lua_rawsetp(L, -2, TITAN_BRAND);
-lua_pushliteral(L, "__metatable");
-lua_pushliteral(L, "Titan record interop.Point");
-lua_rawset(L, -3);
-lua_pushliteral(L, "Record('interop.Point', ...)");
-lua_rawsetp(L, -2, TITAN_MT_TYPE);
-titan_pushmodule(L, _mod);
-lua_rawsetp(L, -2, TITAN_MT_MOD);
-lua_newtable(L);                 /* the membermap / fieldmap */
-lua_pushliteral(L, "x");
-lua_pushlightuserdata(L, (void *)interop_ℳ_Point_ℱ_x_fieldaccessor);
-lua_rawset(L, -3);
-/* ... "y" -> its generated typed accessor likewise ... */
-lua_pushliteral(L, "move");
-/* Module is upvalue of Lua entry point of method */
-titan_pushmodule(L, _mod);
-lua_pushcclosure(L, interop_ℳ_Point_ℱ_move_titanentry_luamethod, 1);
-lua_rawset(L, -3);
-lua_pushvalue(L, -1);            /* membermap */
-lua_rawsetp(L, -3, TITAN_MT_MEMBERMAP); /* metatable[TITAN_MT_MEMBERMAP] = membermap */
-lua_pushliteral(L, "__index");
-lua_pushvalue(L, -2);            /* membermap */
-titan_pushmodule(L, _mod);       /* _mod as upvalue[1] */
-lua_pushcclosure(L, interop_ℳ_Point_ℱ_meta_index, 2);
-lua_rawset(L, -4);
-/* ... __newindex wired the same way ... */
-// Set _titan_metatables[type] = metatable
-TString *_type = luaS_new(L, "interop.Point");
-int _hres = luaH_psetstr(_titan_metatables, _type, s2v(L->top.p-2));
-if (_hres == HOK) {
-  luaC_barrierback(L, obj2gco(_titan_metatables), s2v(L->top.p - 2));
-} else {
-  setsvalue2s(L, L->top.p - 1, _type);
-  luaH_finishset(L, _titan_metatables, s2v(L->top.p - 1), s2v(L->top.p - 2), _hres);
-  luaC_barrierback(L, obj2gco(_titan_metatables), s2v(L->top.p - 2));
-}
-lua_pop(L, 2);                   /* pop membermap and metatable */
-/* Index from metatable pointer to typename for error messages */
-lua_pushliteral(L, "interop.Point");
-lua_rawsetp(L, LUA_REGISTRYINDEX, _mtp);
-```
+1. creates `"Titan record <fqtn> metatable"` with `luaL_newmetatable`;
+2. sets `__metatable` to the string `"Titan record <fqtn>"`, so `getmetatable`
+   returns that string and `setmetatable` raises (`debug.getmetatable` still
+   sees the real table);
+3. stores the lightuserdata-keyed metadata listed in
+   [Discoverable runtime type information](#discoverable-runtime-type-information);
+4. builds the **membermap**: each public field name maps to the lightuserdata
+   address of its generated typed accessor, and each public method name to its
+   Lua-entry C closure (closed over the module). Local fields and methods are
+   absent. The map is stored under `TITAN_MT_MEMBERMAP` and is upvalue 0 of the
+   `__index`/`__newindex` closures, whose upvalue 1 is the module;
+5. registers the metatable in `_titan_metatables[<fqtn>]` and the reverse
+   entry `registry[metatable pointer] = "<fqtn>"`.
 
-`__metatable` is the **string** `"Titan record interop.Point"`, so
-`getmetatable(p)` returns that string — the metatable is protected — and
-`setmetatable` on a record raises, as it does on any userdata
-(`debug.getmetatable` still sees the real table; the cross-module
-identity spec compares metatables that way). The **membermap** (fieldmap) table is
-the first upvalue shared by the
-`<module>_ℳ_<rec>_ℱ_meta_index` and `..._meta_newindex` closures;
-the second is the module. The membermap is also stored directly in the
-metatable at lightuserdata key `TITAN_MT_MEMBERMAP` for runtime reflection.
-It maps each public field name to the lightuserdata address of its generated
-typed accessor and each public method name to the method's Lua-entry C
-closure, itself closed over the module. Local fields and local methods are
-absent. The accessor maps its logical field through the separate native/UV
-storage plan. Reads use checked boxing; writes use the field's dynamic
-conversion plan and apply a GC barrier only to traced stores.
-Reflection caches that same accessor with the module owner stored
-under `TITAN_MT_MOD`; it does not inspect the metamethod closure's upvalues.
-
-The record metatable also records:
-* `TITAN_BRAND`: lightuserdata key set to integer constant `TITAN_RECORD` (3),
-  distinguishing record metatables from arrays, unions, interfaces, and owned C types;
-* `TITAN_MT_TYPE`: lightuserdata key set to the serialized type descriptor
-  string (`types.serialize(...)`), providing discoverable runtime type schema;
-* `TITAN_MT_MEMBERMAP`: lightuserdata key set to the member map table (field
-  accessor addresses and method closures);
-* `TITAN_MT_MOD`: lightuserdata key retaining the declaring module userdata;
-* `TITAN_MT_STATICS`: lightuserdata key set to the record's static-namespace
-  table containing constructors (`Point.new`) and static functions (attached during
-  function/static initialization);
-* `_titan_metatables["interop.Point"] = metatable`: registered in the global
-  metatables table (keyed in the Lua registry by `TITAN_METATABLES_KEY`).
+A field accessor maps its logical field through the native/user-value storage
+plan ([Native nominal storage](nominal-storage.md)). Reads use checked boxing;
+writes use the field's dynamic conversion plan and apply a barrier only to
+traced stores.
 
 ### `__index`: fields and methods
 
@@ -468,32 +344,26 @@ static int interop_\u2133_Point_\u2131_meta_index(lua_State *L) {
 }
 ```
 
-The receiver is re-validated with the full nominal `checkandget` even
-though dispatch already went through the right metatable — so extracting
-the raw metamethod with the `debug` library and calling it on a bogus
-receiver still errors safely. A fieldmap hit that is a C closure is a
-method, returned as-is (this is how `p:move(2, 3)` from Lua reaches the
-`genluaentry` wrapper, with `p` then checked as argument 1). A non-NULL
-lightuserdata hit selects the typed accessor in read mode. It loads the native
-member or traced slot and boxes the result; an exact wide C number may fail
-this conversion without changing storage. A record-typed field is already
-its own Udata, handed out directly. Unknown keys raise
-`field '%s' not found in record '%s'`, located at the record
+The receiver is re-validated with the full nominal check even though dispatch
+went through the right metatable, so a metamethod extracted with the `debug`
+library and called on a bogus receiver still fails safely. A C-closure hit is a
+method, returned as-is (`p:move(2, 3)` from Lua then reaches the method's Lua
+entry with `p` checked as argument 1). A lightuserdata hit runs the typed
+accessor in read mode, which boxes the native member or traced slot; an exact
+wide C number may fail this conversion without changing storage. Unknown keys
+raise `field '%s' not found in record '%s'`, located at the record
 declaration.
 
 ### `__newindex`: checked mutable writes and const rejection
 
-`<module>_\u2133_<rec>_\u2131_meta_newindex` does the same receiver re-validation and fieldmap
-lookup, but additionally requires a non-NULL **lightuserdata accessor** — so
-assigning to a method name (`p.move = 2`) raises the same "not found"
-error; methods are not assignable. The accessor runs in write mode and checks
-the descriptor's required `isconst` boolean. A const accessor raises the const-field
-write error without conversion or mutation. A mutable accessor consumes the field's
-`DynamicCoercionPlan` into a temporary and, only after conversion succeeds,
-stores that value in its selected native member or UV slot. A traced-slot write
-also applies a GC
-[write barrier](values-and-gc.md#5-write-barriers-back-for-userdata-and-tables-forward-for-closures).
-For example, the traced-store portion is:
+`…_meta_newindex` performs the same receiver re-validation and lookup, but
+requires a non-NULL lightuserdata accessor, so assigning to a method name
+(`p.move = 2`) raises the same "not found" error. The accessor runs in write
+mode and checks the field's `isconst` flag: a const field raises the const-write
+error without conversion or mutation. A mutable field converts through its
+`DynamicCoercionPlan` into a temporary and only then stores into the native
+member or user-value slot. A traced store applies the
+[back barrier](values-and-gc.md#5-write-barriers-back-for-userdata-and-tables-forward-for-closures):
 
 ```c
 TValue _converted;
@@ -502,186 +372,133 @@ setobj2t(L, _dst, &_converted);
 luaC_barrierback(L, obj2gco(_rec), _dst);
 ```
 
-The barrier is the **back** barrier now that `_rec` is a `Udata`, not the forward
-barrier the old `CClosure` record used. Mutable record-field writes from Lua
-are thus **coerced and type-enforced by the same matrix as function
-arguments**, while const fields remain readable but cannot be replaced.
+Mutable record-field writes from Lua are thus coerced by the same matrix as
+function arguments.
 
-Each record name becomes a Lua
-**static-namespace table** with its public record functions inserted, held in a dedicated
-`_mod` user-value slot and served by the module metatable's `__index`
-(read-only) under the record's name. So `mod.Point.new(2, 3)` resolves
-`mod.Point` through the module `Udata`'s `__index` to that table, then
-does an ordinary table lookup plus a wrapped call. The parser supplies the
-default `new`; an explicit override replaces it during declaration staging.
-When `new` is public, the namespace table also gets a `__call` metatable. Its
-C bridge replaces the namespace receiver with the `new` member and invokes it
-with the remaining arguments and all results, using `lua_callk` to preserve
-Lua yielding. This is separate from the instance metatable; see
-[record constructors](record-constructors.md#lua-namespace-calls).
-To make these constructors and static methods discoverable from instance values
-at runtime without going through the module table, generated initialization also
-attaches this static-namespace table directly to the record metatable under the
-lightuserdata key `TITAN_MT_STATICS` (`metatable[TITAN_MT_STATICS] = <statics table>`).
-Local records are not entered in the module member map. Public records with a
-local `new` still allocate their namespace table for Titan-internal use, but
-local record functions are not inserted into the Lua-visible table and no
-`__call` is installed for a private `new`.
+### Static namespaces
+
+Each record name becomes a read-only Lua **static-namespace table** holding its
+public record functions, stored in a dedicated `_mod` user-value slot and served
+by the module metatable's `__index` under the record's name. `mod.Point.new(2, 3)`
+resolves `mod.Point` through the module `Udata`, then performs an ordinary table
+lookup and call. When `new` is public, the namespace table also gets a `__call`
+metatable whose C bridge replaces the namespace receiver with `new` and calls it
+with `lua_callk`, preserving Lua yields; see
+[record constructors](record-constructors.md#lua-namespace-calls). The same
+table is attached to the instance metatable under `TITAN_MT_STATICS`. Local
+records are not in the module member map. A public record with a local `new`
+still allocates its namespace table for Titan-internal use, but local record
+functions are not inserted and no `__call` is installed.
 
 ## Arrays from Lua
 
-Every Array proxy uses one of the canonical mutable/const per-state metatable
-pair, so an outer guard remains a direct qualifier-exact metatable comparison
-even for nested Arrays. Both metatables are branded under lightuserdata key
-`TITAN_BRAND`: `TITAN_ARRAY` (1) for mutable arrays and `TITAN_CONST_ARRAY` (2)
-for const arrays. The proxy has exactly two traced user values: user
-value 1 is the private backing Table; mutable user value 2 is the Lua writer
-closure chosen from the final constructed element type, while const user value
-2 is nil. The backing Table retains its key-0 reverse link to the proxy.
+Array representation, construction, barriers and nested-Array rules are in
+[Dense Arrays](dense-arrays.md#representation-contract). The Lua-facing
+behavior is:
 
-Mutable `__newindex` handles nil first: nil deletes the backing entry
-without invoking an element conversion, which is essential for
-`{boolean}` because Lua truthiness would otherwise turn deletion into
-`true`. For a non-nil source it calls the carried writer while holding stable
-heap pointers to the proxy and backing, and receives one converted `TValue`
-rooted on the Lua stack. Only then does `titan_array_set_stack` update
-length/capacity/content and perform the table barrier, refreshing the converted
-result from its stack index after a resize that may move the stack. A failing
-conversion therefore leaves the Array unchanged.
-
-The const metatable has `__index` and `__len` but no `__newindex`. Lua
-assignment and mutating `table.*` paths therefore fail without invoking a
-writer or modifying the backing. Nested read callbacks recognize either tag,
-but strict/dynamic recovery still requires the qualifier named by the target
-type.
-
-Each generated module emits and caches one writer closure per constructed
-mutable element type. The closure captures the owning `_mod` needed by nominal and C
-conversions; it is behavior, not an Array type tag, and is never interned or
-registered globally. Views such as `{integer}` observed as `{value}` keep the
-same proxy and therefore the construction writer. Titan writes already have a
-statically checked source and mutate the backing Table directly; only genuine
-Lua writes enter `__newindex`.
-
-Titan Array reads of either qualifier ignore the writer slot and use the strict element `GuardPlan`.
-Map values are likewise checked strictly on every typed read, regardless of
-whether Lua might have written the raw Table. See
-[Dense Arrays](dense-arrays.md) for construction, GC, and nested-Array
-details.
+* Every proxy uses one of the canonical per-state mutable/const metatables
+  (`TITAN_BRAND` = `TITAN_ARRAY` or `TITAN_CONST_ARRAY`), so an outer guard is a
+  qualifier-exact metatable comparison even for nested Arrays.
+* Mutable `__newindex` handles nil first: nil deletes the backing entry
+  without calling the writer, which matters for `{boolean}` because truthiness
+  would otherwise turn deletion into `true`. A non-nil source goes through the
+  proxy's writer closure (user value 2), which returns one converted `TValue`
+  rooted on the Lua stack; only then does `titan_array_set_stack` update
+  length, capacity and contents and apply the table barrier. A failed
+  conversion leaves the Array unchanged.
+* The const metatable has `__index` and `__len` but no `__newindex`, so Lua
+  assignment and mutating `table.*` calls fail without touching the backing.
+  Strict and dynamic recovery still require the qualifier named by the target
+  type.
+* Each module emits and caches one writer per constructed mutable element type,
+  capturing the owning `_mod`. The writer is behavior, not a type tag: a view
+  such as `{integer}` observed as `{value}` keeps the same proxy and writer.
+  Titan writes are statically checked and mutate the backing directly; only
+  genuine Lua writes enter `__newindex`.
+* Titan reads of either qualifier ignore the writer and apply the strict
+  element `GuardPlan`. Map values are likewise checked strictly on every typed
+  read.
 
 ## Unions from Lua
 
-Each exported union name is served by the module metatable as the same kind of
-read-only static-namespace table. It contains public variant constructors and
-public user-declared union functions. Generated constructors are canonical
-`CClosure`s from the ABI-visible public prefix, with one positional Lua
-argument per payload part. Titan named calls use their declared part names at
-compile time; Lua calls still pass positional arguments through the ordinary
-entry wrapper.
+Each exported union name is served by the module metatable as a read-only
+static-namespace table containing public variant constructors and public union
+functions. Constructors are canonical `CClosure`s that take one positional Lua
+argument per payload part; Titan named calls use the declared part names at
+compile time only.
 
-The value returned by a constructor is the union's `Udata` itself. Its
-metatable is protected as `"Titan union <fqtn>"`; `__index` exposes only
-public methods, and `__newindex` rejects every write. Variant names, the
-native tag, and all payload parts are deliberately absent from
-the instance map. Both metamethods re-check the exact union metatable before
-dispatch, so a method extracted with `debug` cannot be borrowed onto another
-record or union. Plain Lua can construct and pass union values but cannot
-inspect or mutate their representation.
-
-The backing userdata contains the active variant's native payload, starting
-with a real common tag-header subobject, plus dense UV slots only for traced
-parts. Generated construction and case projection follow the separate physical
-plan; logical part ordinals never stand in for UV indices. Native access uses
-payload members and traced access uses `Udata.uv` directly, without Lua's
-uservalue getter/setter API. Collectable stores retain normal rooting and write
-barriers. The producer's `TITAN_MT_PAYLOAD` reader gives reflection the tag,
-logical arity, and checked boxed part values; see
-[Native nominal storage](nominal-storage.md).
-
-Like record metatables, union metatables carry discoverable runtime metadata:
-* `TITAN_BRAND`: lightuserdata key set to integer constant `TITAN_UNION` (4);
-* `TITAN_MT_TYPE`: lightuserdata key set to the serialized union type descriptor (`Union(...)`);
-* `TITAN_MT_MEMBERMAP`: lightuserdata key holding the public method map table (also used as `__index`);
-* `TITAN_MT_STATICS`: lightuserdata key holding the union's static-namespace table containing variant constructors and static functions;
-* Registered in the global metatables table `_titan_metatables[<fqtn>]` (`TITAN_METATABLES_KEY`) and in the reverse pointer registry map `registry[metatable_pointer] = <fqtn>`.
+A constructor returns the union's `Udata` itself. Its metatable is protected
+as `"Titan union <fqtn>"`; `__index` exposes only public methods and
+`__newindex` rejects every write. Variant names, the native tag and payload
+parts are absent from the instance map. Both metamethods re-check the exact
+union metatable before dispatch, so a method extracted with `debug` cannot be
+borrowed onto another nominal. Plain Lua can construct and pass union values
+but cannot inspect or mutate their representation; reflection reads parts
+through `TITAN_MT_PAYLOAD`. The payload layout is in
+[Native nominal storage](nominal-storage.md) and case dispatch in
+[Unions](unions.md#generated-case-dispatch). The metatable is built by
+`coder._codeuniondec` (`coder/module.lua`).
 
 ## Interfaces from Lua
 
-An Interface wrapper is a protected full userdata whose `__index` map exposes
-its read-only field snapshots and public methods and whose `__newindex` rejects
-every write. A field name boxes user value `2 + field_index`; a method closure
-first applies the exact-or-witnessed Interface conversion to its
-receiver, applies the Interface signature's dynamic argument plans, and then
-loads the declaration-order payload entry. It invokes that entry with wrapper
-user value 0 as the concrete owner's `_mod` and user value 1 as the concrete
-receiver.
+An Interface wrapper is a protected full userdata (layout in
+[Interfaces](interfaces.md#wrapper-representation)) whose `__index` map exposes
+its read-only field snapshots and public methods and whose `__newindex`
+rejects every write. A field name boxes the corresponding snapshot user value.
+A method closure applies the exact-or-witnessed Interface conversion to its
+receiver and the signature's dynamic argument plans, then invokes the
+declaration-order payload entry with the wrapper's user value 0 (its emitting
+module) and receiver. The metatable is built by `coder._codeinterfacedec`
+(`coder/module.lua`).
 
-Interface metatables also carry discoverable runtime metadata:
-* `TITAN_BRAND`: lightuserdata key set to integer constant `TITAN_INTERFACE` (5);
-* `TITAN_MT_TYPE`: lightuserdata key set to the serialized interface type descriptor (`Interface(...)`);
-* `TITAN_MT_MEMBERMAP`: lightuserdata key holding the member map table (used as `__index`);
-* Registered in the global metatables table `_titan_metatables[<fqtn>]` (`TITAN_METATABLES_KEY`) and in the reverse pointer registry map `registry[metatable_pointer] = <fqtn>`.
-
-Lua can retain and call a wrapper produced by Titan, pass it back through a
-sink expecting the same nominal Interface, or pass bare full userdata whose
-metatable advertises a compiler-witnessed pair. The generated witness recovers
-the already checked field and method mappings rather than rediscovering
-members, applies each field adjustment once in declaration order, and stores
-the snapshots before publishing the wrapper. A bare
-record/union with no initialized witness still fails.
-Bound Interface methods use the same three-role closure split as other Titan
-functions, with the wrapper captured before the strict trailer. See
+Lua can retain and call a wrapper produced by Titan, pass it back to a sink
+expecting the same Interface, or pass bare full userdata whose metatable
+advertises a compiler-witnessed pair. The witness recovers the already checked
+field and method mappings, applies each field adjustment once in declaration
+order, and stores the snapshots before publishing the wrapper. A bare
+record or union with no initialized witness still fails. Bound Interface
+methods use the same three-role closure split as other functions; see
 [Interfaces](interfaces.md#four-dispatch-paths).
 
 ### Identity and tag security
 
-From Lua, a record is a full userdata with stable identity: the same
-instance always crosses out as the same Udata, two fresh instances are
-`~=` (there is no `__eq`), and all instances of a type share one
-metatable per state. That metatable pointer **is** the record's type
-identity: the nominal guard reads the candidate `Udata*` and compares
-`uvalue(v)->metatable` against the canonical metatable for the fully
-qualified record type.
+From Lua, a record is a full userdata with stable identity: the same instance
+always crosses out as the same `Udata`, two fresh instances are `~=` (there is
+no `__eq`), and all instances of a type share one metatable per state. That
+metatable pointer **is** the type identity: the nominal guard compares
+`uvalue(v)->metatable` with the canonical metatable for the fully qualified
+type. Same-named records from different modules have different FQTNs and hence
+different metatables, and reject each other with both names in the message.
+Because canonical metatables are shared through the registry, records built by
+any copy of a module's code in a state are accepted by every other copy.
 
-Same-named records from different modules have different FQTNs, hence
-different metatables, and reject each other with both names in the error
-message. Conversely, the registry synchronization of record metatables
-means records built by any copy of a module's code in the state are
-accepted by every other.
-
-The trust boundary is therefore Lua code that cannot manufacture or
-retag full userdata. Plain Lua cannot create full userdata at all, so
-pure-Lua forgery is impossible. Debug-library or C-capable code is
-outside that boundary: it can put a record metatable on foreign userdata,
-which is enough to satisfy the nominal check, and an undersized or
-malformed userdata may still become unsafe when later record field slots
-are accessed. The current metatable check avoids the old raw-payload tag
-read, but it is not a sandbox boundary against privileged Lua/C code.
+The trust boundary is Lua code that cannot manufacture or retag full userdata.
+Plain Lua cannot create full userdata, so pure-Lua forgery is impossible.
+Debug-library or C-capable code is outside that boundary: it can put a record
+metatable on foreign userdata, which satisfies the nominal check, and an
+undersized or malformed userdata may then become unsafe when record slots are
+accessed. The metatable check is not a sandbox against privileged Lua or C.
 
 ## The module metatable and its members
 
-`require` of a Titan module returns the module `Udata` itself —
-`luaopen_<mangled>` calls `_init` and pushes it; there is **no separate
-module table**. After `_init` completes successfully, generated module code
-stores that same `luaopen_<mangled>` function under the logical module name in
-`registry[LUA_PRELOAD_TABLE]`. `package.preload` aliases this registry table.
-The same `titan_module_preload` call registers a native-only descriptor in
-`TITAN_MODULE_PRELOADS_KEY` with matching loader and symbol-resolver pointers.
-Independent states copy these code capabilities without sharing module state.
-This self-publication does not write `package.loaded`; a later Lua `require`
-calls the loader, receives the canonical registry `Udata`, and performs the
-ordinary loaded-table update. A failed initialization does not publish its
-module loader.
+`require` of a Titan module returns the module `Udata` itself:
+`luaopen_<mangled>` calls `_init` and pushes it, and there is no separate module
+table. After a successful `_init`, the module publishes its `luaopen_<mangled>`
+in `registry[LUA_PRELOAD_TABLE]` and a native descriptor in
+`TITAN_MODULE_PRELOADS_KEY` (`titan_module_preload`, `titan-runtime/titan.c`);
+this does not write `package.loaded`. How standalone programs and static
+providers rely on that self-publication is in
+[driver](driver.md#linking-a-standalone-program-drivercompile_program) and
+[Static compiled modules](static-compiled-modules.md#three-way-validation).
 
-Every member access — exported functions, exported
-variables, and per-nominal static-namespace tables — flows through a
-metatable installed on the `Udata`, driven by a single **member map**
-(name→slot) shared by `__index`/`__newindex`. Functions and nominal
-namespaces live in their own `_mod` user-value slots and are served read-only;
-exported variables also live in `_mod` slots (so Titan reads them as direct
-slot accesses) and are boxed on reads. Mutable variables are dynamically
-coerced on Lua writes; const-variable arms explicitly reject replacement. The generated
-`__index` for exported `x` (slot 1):
+Every member access (exported functions, exported variables, and per-nominal
+static-namespace tables) goes through a metatable on the `Udata`, driven by one
+**member map** (name → slot) shared by `__index` and `__newindex`, both C
+closures over the module and the map. Functions and namespaces live in their
+own `_mod` user-value slots and are served read-only; exported variables also
+live in `_mod` slots (Titan reads them directly) and are boxed on read. Local
+variables and owners are not in the map. The generated `__index` (built in
+`coder.generate`, `coder/generate.lua`) for exported `x` (slot 1):
 
 ```c
 static int __index(lua_State *L) {
@@ -709,134 +526,125 @@ static int __index(lua_State *L) {
 }
 ```
 
-Both metamethods are C closures closed over the module `Udata` and a
-*member map* table mapping each exported name to its slot (variables,
-functions, and public nominal namespaces; local variables and owners are not
-entered). A
-name miss raises `member '%s' does not exist in Titan module '%s'` —
-generalized from the old "global variable ..." message now that
-functions and nominal owners route through the same metamethods. A hit switches
-on the slot index: variable reads go through `copyboxed` (a record-typed
-variable remains its Udata; an Array backing becomes its canonical proxy),
-while
-functions and nominal namespaces are pushed read-only from their slots.
-`__newindex` allows only mutable-variable writes, through the variable's
-`DynamicCoercionPlan` plus the
-**back** barrier `luaC_barrierback(L, obj2gco(_mod), slot)` for GC-able
-types (a userdata owner) — so mutable module-variable writes from Lua are
-coerced and type-checked exactly like genuine-Lua function arguments, located
-at the variable's declaration. A public const variable remains readable but
-its generated arm raises a const-write error before conversion; assigning to a
-function or nominal namespace also errors. The metatable (registry name
-`"Titan module interop metatable"`, `__metatable` protected with the
-string `"Titan module interop"`) is created whenever the module exports
-**any** member — functions now route through it too, so essentially every
-real module has one. Without the metatable (a module that exports
-nothing) the `Udata` has no members to reach and any attribute read on it
-fails the userdata-has-no-`__index` way.
+A miss raises `member '%s' does not exist in Titan module '%s'`. Variable reads
+go through `copyboxed` (a record stays its `Udata`; an Array backing becomes its
+proxy). `__newindex` accepts only mutable-variable writes, converted by the
+variable's `DynamicCoercionPlan` and followed by
+`luaC_barrierback(L, obj2gco(_mod), slot)` for collectable types; errors are
+located at the variable's declaration. A public const variable's arm raises a
+const-write error before conversion, and assigning to a function or namespace
+also fails. The metatable (registry name `"Titan module <modname> metatable"`,
+`__metatable` set to `"Titan module <modname>"`) exists whenever the module
+exports any member; a module that exports nothing has none, and any attribute
+read fails as on any userdata without `__index`.
 
 ## The registry footprint
 
-Everything per-Lua-state that generated code and runtime must find again
-lives in the Lua registry or in GC-traced objects reachable from it. Semantic
+Everything per-Lua-state that generated code and the runtime must find again
+lives in the Lua registry or in traced objects reachable from it. Semantic
 module state and native caches never live in mutable shared or per-image C
-globals. Translation-unit statics hold immutable candidates and generated code;
-state-dependent pointers and Interface arrays belong to the module native
-payload. The complete key inventory:
+globals. Translation-unit statics hold immutable candidates and generated
+code; state-dependent pointers and Interface arrays belong to the module native
+payload. String keys are defined in `titan-runtime/titan.h`,
+`titan-runtime/titan/ffi.h`, `titan-runtime/titan.c`
+(`TITAN_ARRAY_METATABLE_PAIR`), and `titan-runtime/ltitanlib.c` (the two
+loader caches). The complete inventory:
 
 | Registry key | Value |
 | --- | --- |
 | `"Titan module <modname>"` | canonical module `Udata`, including its native export descriptor and per-state binding caches |
 | `TITAN_MODULE_PRELOADS_KEY` (`"Titan module preload providers"`) | native preload descriptors keyed by logical module name; each holds only matching loader and symbol-resolver pointers, without module state |
 | `"Titan module <modname> metatable"` | the module `Udata`'s member metatable (only if the module exports anything) |
-| `"Titan record <fqtn> metatable"` | the record metatable (`luaL_newmetatable`) — also the record's type identity (a type check compares `uvalue(v)->metatable`) |
-| `"Titan union <fqtn> metatable"` | the union metatable and exact nominal identity; its `__index` exposes only methods and its `__newindex` rejects writes |
-| `"Titan interface <fqtn> metatable"` | the interface metatable and nominal wrapper identity; its `__index` exposes member snapshots/methods and its `__newindex` rejects writes |
-| `"Titan owned C <display> metatable"` | the owned C metatable; stamped with `TITAN_BRAND` = `TITAN_OWNED` and `TITAN_MT_TYPE` |
-| `TITAN_METATABLES_KEY` (`"9db55616-03e8-4dec-8077-618025b1bb69"`) | the global metatables table mapping each nominal fully qualified type name (`<fqtn>`) to its canonical metatable |
-| `TITAN_ARRAY_METATABLE_PAIR` (`"Titan array metatable pair"`) | the canonical pair table containing the mutable and const proxy metatables; generated modules cache both Table pointers in consecutive `_mod` slots |
-| `TITAN_ARRAY_METATABLE` / `TITAN_CONST_ARRAY_METATABLE` | named mutable/const projections repaired from the canonical pair for ordinary registry lookup |
-| the metatable pointer itself (via `lua_rawsetp`) | the FQTN string — the reverse map, metatable → name, used only in error messages |
-| `TITAN_ROOT_KEY` (`"9efb91a8-4a1b-4bdb-aa6b-b84d9ed1dd77"`) | the normalized Titan SDK/rocks-tree root cached by `titan_init_paths`/`pushroot`; current supported installs discover it through the equal Lua `PREFIX` |
-| `TITAN_PATH_KEY` (`"ec10e486-d8fd-11e7-87f4-e7e9581a929c"`) | the resolved Titan search path (cached by `pushpath`) |
-| `TITAN_LIBS_KEY` (`"ecfc9174-d8fd-11e7-8be2-abbaa3ded45f"`) | the dlopen-handle cache table (below) |
-| `TITAN_MAIN_BOOTSTRAP_KEY` (`"41c48a97-55a5-4514-a76f-79ab028ae6e0"`) | an optional standalone hook installed by the canonical `titan.async` module |
-| `TITAN_MAIN_ARGC_KEY` (`"fd9c8d85-f521-4052-92e6-8af5c349e5bb"`) | the original process argument count published by a generated standalone entrypoint before module initialization |
-| `TITAN_MAIN_ARGV_KEY` (`"fc1376f3-2cb7-48d4-969c-c02df930cf68"`) | the original process argument vector, replaced with the pointer returned by `uv_setup_args` when public `uv.setup_process_args()` runs; `titan.async` initialization invokes that helper |
-| `TITAN_BT_STATE_KEY` (`"a222927d-0e7b-4f7a-93d9-1a6ce7111a5c"`) | registry-owned userdata containing the shared per-state `backtrace_state *`; invalidation clears the slot so the next capture resnapshots loaded objects without mutable per-DSO C globals |
+| `"Titan record <fqtn> metatable"` | the record metatable, which is also the record's type identity |
+| `"Titan union <fqtn> metatable"` | the union metatable and exact nominal identity |
+| `"Titan interface <fqtn> metatable"` | the Interface metatable and wrapper identity |
+| `"Titan owned C <display> metatable"` | the owned C metatable |
+| `TITAN_METATABLES_KEY` (`"9db55616-03e8-4dec-8077-618025b1bb69"`) | table mapping each nominal FQTN to its canonical metatable |
+| `TITAN_ARRAY_METATABLE_PAIR` (`"Titan array metatable pair"`) | the canonical table holding the mutable and const proxy metatables; generated modules cache both Table pointers in consecutive `_mod` slots |
+| `TITAN_ARRAY_METATABLE` / `TITAN_CONST_ARRAY_METATABLE` (`"Titan array metatable"`, `"Titan const array metatable"`) | named projections repaired from the canonical pair for ordinary registry lookup |
+| the metatable pointer itself (via `lua_rawsetp`) | the FQTN string: the reverse map used only in error messages |
+| `TITAN_ROOT_KEY` (`"9efb91a8-4a1b-4bdb-aa6b-b84d9ed1dd77"`) | the normalized Titan SDK/rocks-tree root cached by `titan_init_paths`/`pushroot` |
+| `TITAN_PATH_KEY` (`"ec10e486-d8fd-11e7-87f4-e7e9581a929c"`) | the resolved Titan search path, cached by `pushpath` |
+| `TITAN_LIBS_KEY` (`"ecfc9174-d8fd-11e7-8be2-abbaa3ded45f"`) | the runtime `loadlib` handle cache (path 3 below) |
+| `TITAN_MAIN_BOOTSTRAP_KEY` (`"41c48a97-55a5-4514-a76f-79ab028ae6e0"`) | an optional standalone hook installed by `titan.async` |
+| `TITAN_MAIN_ARGC_KEY` (`"fd9c8d85-f521-4052-92e6-8af5c349e5bb"`) | the process argument count published by a standalone entrypoint |
+| `TITAN_MAIN_ARGV_KEY` (`"fc1376f3-2cb7-48d4-969c-c02df930cf68"`) | the process argument vector, replaced by the pointer `uv_setup_args` returns when `uv.setup_process_args()` runs |
+| `TITAN_BT_STATE_KEY` (`"a222927d-0e7b-4f7a-93d9-1a6ce7111a5c"`) | userdata holding the per-state `backtrace_state *`; invalidation clears it so the next capture resnapshots loaded objects |
 | `TITAN_BACKTRACE_KEY` (`"57d80578-2534-4856-ad3b-bde8cba4c445"`) | the last error's raw merged backtrace string |
-| `TITAN_TRACE_APPEND_KEY` (`"4f895b66-bae0-4e97-afb3-83a31f2f9e96"`) | temporary coroutine trace handoff slot used before appending resume/error propagation frames |
-| `TITAN_NAMES_KEY` (`"a7c4e2f0-1d6b-4e3a-9c5f-8b2d7e0a4f16"`) | the native-symbol display-name table used by unified trace formatting |
-| `TITAN_TRACE_PINNED` (`"5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"`) | the one-shot flag that preserves an existing traceback for bare re-raise |
-| `TITAN_LAZY_LIBS_KEY` (private to `ltitanlib.c`) | compiler `_loadlib`'s per-state lazy/local handle cache |
-| `TITAN_LAZY_GLOBAL_LIBS_KEY` (private to `ltitanlib.c`) | generated-shim `_loadlibglobal`'s per-state canonical-path lazy/global handle cache |
-| `"Titan function type <runtime identity> tag"` | a shared light-userdata identity tag for each first-class function type, using `types.runtime_identity` with named C scopes |
+| `TITAN_TRACE_APPEND_KEY` (`"4f895b66-bae0-4e97-afb3-83a31f2f9e96"`) | coroutine trace handoff slot |
+| `TITAN_NAMES_KEY` (`"a7c4e2f0-1d6b-4e3a-9c5f-8b2d7e0a4f16"`) | native-symbol display names for trace formatting |
+| `TITAN_TRACE_PINNED` (`"5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"`) | the one-shot flag that preserves an existing traceback for a bare re-raise |
+| `TITAN_LAZY_LIBS_KEY` (`"b03f87d2-aea4-407c-87df-054d5be15ef2"`) | `titan._loadlib`'s lazy/local handle cache (path 2) |
+| `TITAN_LAZY_GLOBAL_LIBS_KEY` (`"3f6cae7b-8aeb-42eb-9f72-a978cfe96f7c"`) | `titan._loadlibglobal`'s canonical-path lazy/global handle cache (path 4) |
+| `"Titan function type <runtime identity> tag"` | a shared light-userdata identity tag per first-class function type, keyed by `types.runtime_identity` (`coder/generate.lua`) |
 
-The UUID-string constants are defined in `titan-runtime/titan.h` and `titan-runtime/titan/ffi.h`.
+The trace keys are used as described in
+[error handling](error-handling.md#runtime-trace-model).
 
 ### Discoverable runtime type information
 
-Beyond string-keyed registry entries, Titan embeds discoverable runtime type
-information directly in Titan metatables and function closures using
-lightuserdata keys:
+Titan metatables and function closures also carry metadata under private
+lightuserdata keys, defined in `titan-runtime/titan/ffi.h`. `TITAN_BRAND` is
+also stored in `upvalue[3]` of every Titan function closure, where generic
+dispatch compares it as raw pointer bits.
 
-* **`TITAN_BRAND`** (`0x649b61b49f68a8b2`):
-  - In every Titan function closure, stored in `upvalue[3]` to distinguish Titan
-    closures from foreign closures on generic calls.
-  - In every Titan metatable, stored as a key mapped to an integer enum distinguishing
-    the type kind:
-    - `TITAN_ARRAY` (1): mutable dense array
-    - `TITAN_CONST_ARRAY` (2): const dense array
-    - `TITAN_RECORD` (3): record
-    - `TITAN_UNION` (4): union
-    - `TITAN_INTERFACE` (5): interface
-    - `TITAN_OWNED` (6): owned C type (`COwned`)
-* **`TITAN_MT_TYPE`** (`0xD70BB58499779830`): lightuserdata key stored on
-  nominal metatables (records, unions, interfaces) and owned C metatables
-  mapping to the serialized type descriptor string (`types.serialize(...)`).
-* **`TITAN_MT_MEMBERMAP`** (`0x310D781561E92F6D`): lightuserdata key stored on
-  nominal metatables mapping to the member map table (field indices and method
-  closures for records; method closures for unions; member map for interfaces).
-* **`TITAN_MT_STATICS`** (`0x83370ABAA56047AE`): lightuserdata key stored on
-  record and union metatables mapping to the nominal type's static table
-  (containing constructors like `Point.new` and user-declared static functions).
+| Key | Value | Record | Union | Interface | Owned C | Array |
+| --- | --- | --- | --- | --- | --- | --- |
+| `TITAN_BRAND` | kind: `TITAN_ARRAY` 1, `TITAN_CONST_ARRAY` 2, `TITAN_RECORD` 3, `TITAN_UNION` 4, `TITAN_INTERFACE` 5, `TITAN_OWNED` 6 | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `TITAN_MT_TYPE` | serialized type string (`types.serialize_semantic` for nominals) | ✓ | ✓ | ✓ | ✓ | |
+| `TITAN_MT_PUBLIC` | whether the declaration is public | ✓ | ✓ | | | |
+| `TITAN_MT_PROJECT` | generated typed field/part storage projector | ✓ | ✓ | | | |
+| `TITAN_MT_CONSTRUCT` | generated default-storage construction callback | ✓ | ✓ | | | |
+| `TITAN_MT_CODEC` | generated transfer codec entry, only when the module emits one | ✓ | ✓ | | | |
+| `TITAN_MT_MOD` | declaring module `Udata` | ✓ | ✓ | ✓ | | |
+| `TITAN_MT_MEMBERMAP` | member map: field accessors and methods (records, Interfaces), methods only (unions) | ✓ | ✓ | ✓ | | |
+| `TITAN_MT_STATICS` | static-namespace table (constructors, static functions) | ✓ | ✓ | | | |
+| `TITAN_MT_PAYLOAD` | generated typed payload reader | | ✓ | | | |
 
-In compiler test builds (`#ifdef TITAN_COMPILER_TESTS`),
-`titan_ensure_metatables_table` additionally publishes these lightuserdata keys
-into the Lua registry under their string names (`"TITAN_BRAND"`, `"TITAN_MT_TYPE"`,
-`"TITAN_MT_MEMBERMAP"`, `"TITAN_MT_STATICS"`) for test inspection.
+Record and union keys are set in `coderecorddec` and `coder._codeuniondec`,
+Interface keys in `coder._codeinterfacedec` (all `coder/module.lua`),
+`TITAN_MT_STATICS` and the owned C keys in `coder.generate`, and
+`TITAN_MT_CODEC` by `coder._codec_binding` (`coder/nominal_codec.lua`). How
+reflection consumes each key is in
+[Reflection: metadata ownership](standard-library-reflect.md#metadata-ownership).
 
-Interface witnesses add no registry key. They are ordinary traced entries at
-raw `concrete_metatable[target_Interface_metatable]`; the value is the first
+In compiler test builds (`TITAN_COMPILER_TESTS`),
+`titan_ensure_metatables_table` (`titan.h`) also publishes `TITAN_BRAND`,
+`TITAN_MT_TYPE`, `TITAN_MT_STATICS`, `TITAN_MT_MEMBERMAP`, `TITAN_MT_MOD` and
+`TITAN_MT_PAYLOAD` in the registry under their string names for test
+inspection.
+
+Interface witnesses add no registry key. They are traced entries at raw
+`concrete_metatable[target_Interface_metatable]`; the value is the first
 registered one-upvalue wrapper closure for that compiler-observed pair. The
-registry roots both canonical metatables through their existing keys, and the
-entry itself roots the closure and its emitting-module upvalue.
+registry roots both metatables, and the entry roots the closure and its
+emitting-module upvalue.
 
 ## Four shared-library loading paths
 
-The current provider layout has four deliberately separate loading paths. They
-share the ordinary
-per-logical-module symbols but differ in selection, flags, cache, and whether
-module initialization runs.
+Four separate loading paths share the per-logical-module symbols but differ in
+selection, `dlopen` flags, cache, and whether module initialization runs. The
+helpers are registered by `titan-runtime/ltitanlib.c` (`_loadlib`,
+`_loadlibglobal`) and `titan-runtime/titan.c` (`loadlib`).
 
 ### 1. Lua's eager/local support bootstrap
 
-The first `require "titan"` uses Lua's ordinary C searcher. It finds
-`titan.so`, maps it with Lua's eager/local policy, calls `luaopen_titan`, and
-returns only the native support table. The private source-install bootstrap
-and the full combined standard image both satisfy that entry. Bare support
-loading does not call a `titan.*_init`, create a standard module `Udata`, or
-install the async program hook.
+The first `require "titan"` uses Lua's ordinary C searcher: it maps `titan.so`
+with Lua's eager/local policy, calls `luaopen_titan`, and returns only the
+native support table. The private source-install bootstrap and the combined
+standard image both provide that entry. Bare support loading does not run any
+`titan.*_init`, create a standard module `Udata`, or install the async program
+hook.
 
 ### 2. Compiler lazy/local interface inspection
 
-`driver.find_compiled_interface` searches shallow-to-exact providers and uses
-`titan._loadlib(path, symbol)` to inspect each existing candidate with
-`RTLD_LAZY | RTLD_LOCAL`. It probes the requested `<mangled>_abi` and
-`<mangled>_types` pair, calls only those metadata functions, and never runs
-`_init` or globalizes the image. Handles live in an internal per-state cache.
-The selected relative provider is attached transiently as `Type.Module.file`;
-it is not serialized.
+`driver.find_compiled_interface` searches shallow-to-exact providers and calls
+`titan._loadlib(path, symbol)` to inspect each candidate with
+`RTLD_LAZY | RTLD_LOCAL`. It probes the `<mangled>_abi` and `<mangled>_types`
+pair, calls only those metadata functions, and never runs `_init` or
+globalizes the image. Handles are cached per state under
+`TITAN_LAZY_LIBS_KEY`. The selected relative provider is attached transiently
+as the module type's `file` field; it is not serialized.
 
 ### 3. Canonical Titan runtime imports
 
@@ -855,292 +663,123 @@ Udata* (*some_dep_init)(lua_State *L) =
 
 `titan_module_provider` looks up `"Titan module some.dep"` before loading any
 file. An initialized module must have a native payload beginning with
-`TitanModuleData` and a non-null symbol callback. That callback supplies this
-canonical provider's metadata, native entries, and public slot symbols even if
-it came from a linked executable, archive, or local `package.loadlib` call.
-Returning the canonical module does not initialize a second image's caches.
+`TitanModuleData` and a non-null symbol callback, which supplies the canonical
+provider's metadata, native entries and public slot symbols whether it came
+from a linked executable, an archive, or a local `package.loadlib`. Returning
+the canonical module does not initialize a second image's caches.
 
-When the logical module is absent, selection first checks for a matching copied
-native provider descriptor. Its resolver supplies symbols without invoking a
-Lua preload loader or initializing the dependency. Only when that descriptor
-is also absent does selection call `loadlib` for the compile-selected relative
-filename. `loadlib` consults `TITAN_LIBS_KEY`, then
-walks `TITAN_PATH_0_6`, `TITAN_PATH`, or `".;<root>/lib/titan/0.6"`, with `;;`
-splicing the ordinary default. It maps `dir/file` with
-`RTLD_LAZY | RTLD_GLOBAL`, caches the handle by relative provider for the state,
+When the logical module is absent, selection first looks for a matching copied
+native preload descriptor, whose resolver supplies symbols without running a
+Lua loader or initializing the dependency. Only when that is also absent does
+it call `loadlib` for the compile-selected relative filename. `loadlib`
+consults `TITAN_LIBS_KEY`, then walks the versioned `TITAN_PATH` variable,
+`TITAN_PATH`, or `".;<root>/lib/titan/<version>"` (`;;` splices the default),
+maps `dir/file` with `RTLD_LAZY | RTLD_GLOBAL`, caches the handle per state,
 invalidates native backtrace state, and never calls `dlclose`. Two logical
-modules in one image can reuse that handle and resolve different mangled entries.
+modules in one image can share the handle and resolve different mangled
+entries. The path variables are described in
+[driver](driver.md#module-names-and-the-search-paths).
 
-The ABI check precedes the consumer's required erased-signature and nominal-shape
-checks, both before copied-provider or newly loaded dependency initialization. Compilation still
-validates semantic types and physical layouts through their own protocols.
-`titan_module_symbol` uses the canonical/copied callback or newly opened handle;
-required variable and canonical callable slots are provider-owned data symbols.
-Resolved pointers and indices stay in the importer's per-state native payload.
-Function-tag caches and Interface pair arrays also belong there, so another Lua
-state cannot overwrite these bindings.
+The ABI check precedes the consumer's erased-signature and nominal-shape
+checks, all before the dependency initializes. `titan_module_symbol` resolves
+through the canonical/copied callback or the new handle; variable and callable
+slots are provider-owned data symbols. Resolved pointers, function-tag caches
+and Interface pair arrays stay in the importer's per-state native payload, so
+another Lua state cannot overwrite them.
 
 After explicit imports initialize, transitive nominal owners use the same
-logical lookup with a null filename. They must already exist; an uninitialized
-copied descriptor cannot satisfy this lookup. They receive their own ABI-first
-compatibility checks; no global symbol lookup chooses their code.
-Same-binary dependencies keep direct, constant-slot access and check the exact
-linked producer's physical identity. See [Selective binary dependency
-verification](binary-compatibility.md).
+logical lookup with a null filename. They must already exist (an uninitialized
+copied descriptor does not count) and receive their own ABI-first
+compatibility checks; no global symbol lookup chooses their code. Same-binary
+dependencies keep direct constant-slot access and check the linked producer's
+physical identity; see
+[Selective binary dependency verification](binary-compatibility.md). The full
+wiring is in the
+[code generator overview](codegen-overview.md#static-vs-dynamic-dependency-wiring)
+and the candidate search in
+[Multi-module libraries](multi-module-libraries.md#compiled-module-candidate-search).
 
-Lazy binding still permits an imported extension to initialize a provider
-before its ordinary unresolved C function calls bind. Global visibility lets
-that provider satisfy those calls. This native-linker behavior does not choose
-Titan's logical provider. Native constructors, imported data, and taken
-function-address relocations are eager and remain outside the initializer
-ordering contract.
+Lazy binding lets an imported extension initialize a provider before its own
+unresolved C calls bind, and global visibility lets that provider satisfy them.
+This linker behavior does not choose Titan's logical provider. Native
+constructors, imported data and taken function-address relocations are eager
+and stay outside the initializer-ordering contract.
 
 ### 4. Generated-shim lazy/global loading and promotion
 
-Every linked source module has a generated `<logical/path>.lua` shim. It uses
-`package.searchpath(provider, package.cpath)`, requires the bare support table,
-and calls `titan._loadlibglobal(path, "luaopen_<logical>")`. That helper
-canonicalizes the path with `realpath`, keeps a separate per-state canonical
-handle cache, performs `dlopen(canonical, RTLD_LAZY | RTLD_GLOBAL)` on its
-first request in that cache, and resolves the exact Lua entry. It returns
-`nil, message, stage` rather than raising directly and preserves the requested
-pathname in errors.
+Every linked source module has a generated `<logical/path>.lua` shim. It
+locates the provider with `package.searchpath(provider, package.cpath)`,
+requires the bare support table, and calls
+`titan._loadlibglobal(path, "luaopen_<logical>")`. That helper canonicalizes
+the path with `realpath`, keeps its own per-state cache
+(`TITAN_LAZY_GLOBAL_LIBS_KEY`), calls `dlopen(canonical, RTLD_LAZY | RTLD_GLOBAL)`
+on the first request, and resolves the Lua entry. It returns
+`nil, message, stage` instead of raising and reports the requested pathname.
 
-The helper deliberately does not consult Lua's C-library cache or
-`_loadlib`'s local cache. For an unrelated provider this is its first
-lazy/global mapping. For the combined standard library, Lua's support bootstrap
-has just mapped the same `titan.so` eager/local; the second `dlopen` promotes
-that process image globally before the shim invokes `luaopen_titan_uv` (or
-another logical entry). It cannot undo eager relocations already performed by
-Lua, so both the private bootstrap and full `titan.so` are link-complete under
-eager load. A second Lua state repeats its own cache insertion and promotion
-request while the operating-system loader may reuse the mapped image.
+The helper deliberately bypasses Lua's C-library cache and `_loadlib`'s cache.
+For an unrelated provider this is its first lazy/global mapping. For the
+combined standard library, Lua's support bootstrap has already mapped the same
+`titan.so` eager/local; the second `dlopen` promotes that image to global
+before the shim calls `luaopen_titan_uv` (or another logical entry). It cannot
+undo eager relocations Lua already performed, so both the private bootstrap
+and the full `titan.so` must be link-complete under eager loading. A second Lua
+state repeats its own cache insertion and promotion while the OS loader may
+reuse the mapped image.
 
-The installed standard layout has paired providers at
-`<root>/lib/titan/0.6/{titan.so,titan.a}` and twenty-five generated shims below
-`<root>/share/lua/5.5/titan/`; the shims use the DSO form. Ordinary clients use
-the compiled public `uv` API without `uv.h`. The native loader fixture in
-`spec/rockspec_spec.lua` instead links a C `provider_probe.c` which includes
-`uv.h` and calls `uv_random`; its Titan module imports only the probe's narrow
-`provider_probe.h` plus public `uv`. Runtime initialization loads the combined
-provider before that probe's lazy native call binds. Its Lua variant loads
-`titan.uv` first through the generated shim, globalizing the provider before
-the probe DSO is mapped and satisfying eager relocations or constructors too.
-This fixture tests native linkage; neither route adds libuv-specific metadata
-or a provider-specific runtime loader.
-
-Dynamic imports resolve native function addresses through the canonical logical
-provider and retain them in the importing module's per-state native payload.
-Static dependencies use `extern` declarations and direct calls with a provider
-identity check. Returning an existing canonical module does not overwrite its
-native bindings or initialize another image's caches. The complete wiring is in the [code generator
-overview](codegen-overview.md#static-vs-dynamic-dependency-wiring), and the
-provider claim/search rules are in [Multi-module
-libraries](multi-module-libraries.md#compiled-module-candidate-search).
-
-## The error handler and `titan.backtrace()`
-
-`errorhandler` (`titan-runtime/titan.c`) is the message handler every
-wrapper ensures is active in `L->errfunc`. When an error is raised during
-the call, it builds **one unified, intermingled, innermost→outer stack
-trace** mixing pure-Lua and Titan frames in call order, stores it in the
-registry under `TITAN_BACKTRACE_KEY`, then restores the stack top and
-returns the **original** error object unchanged. Lua 5.5 then normalizes a nil
-error object to `"<no error object>"` before throwing; a Lua-side `pcall` sees
-that caught Lua error value. The backtrace is retrieved out of band.
-
-The stored trace is the raw frame list only: one line per frame, with no
-error message, no `stack traceback:` header, and no presentation tabs.
-Consumers that print a report add that formatting themselves.
-
-The trace is built from **two stacks walked innermost→outer in
-lockstep**:
-
-* The **CallInfo chain** (via `lua_getstack`+`lua_getinfo`, exactly as
-  `luaL_traceback` does) is the backbone — it enumerates every Lua
-  activation, so a single native `luaV_execute` correctly expands into
-  the *multiple* Lua frames it ran (the point of the merge: a
-  `Lua→Titan→Lua→Titan→…` chain yields several pure-Lua frames per
-  `luaV_execute`). Lua closures become `source:line: in <name>`; genuine
-  Lua C-functions (`pcall`, `string.format`, …) become `[C]: in <name>`.
-* The **native libbacktrace stack** (`backtrace_full`, symbolized to
-  `#line`-attributed `.titan` file/line via DWARF; on macOS this needs
-  the `dsymutil`-produced `.dSYM` bundle) is used **only** to recover the
-  **Titan native frames** — those whose DWARF filename ends in `.titan`,
-  plus the **entry-wrapper boundaries** (recognized by the C symbol
-  substring `titanentry`, which `coder.lua` stamps into every Lua
-  entry-wrapper name). These native runs are **spliced** at the
-  entry-wrapper boundaries. Everything else on the native side is
-  dropped: interpreter and standard-library frames (matched against a
-  maintained list of Lua 5.5 source filenames — dropping the *library*
-  files specifically prevents double-counting a Lua C-function that
-  already appears once as a CallInfo `[C]` frame), `titan-runtime/*`, and
-  unsymbolized frames.
-
-Alignment is greedy: at each C-level CallInfo the next sentinel-
-terminated native Titan run is drained (a Titan entry wrapper appears as
-a C function and is represented by its rich native frames, so no extra
-`[C]` line is emitted for it). In the strictly-alternating Lua↔Titan
-case this is exact; in the rarer `Titan→LuaC(e.g. pcall)→Titan` case an
-inner Titan native run may splice one C-frame too early, but **no frame
-is ever dropped** (every Lua frame and every Titan frame appears) and the
-trace remains a single innermost→outer section. When libbacktrace is
-unavailable (`TITAN_NO_LIBBACKTRACE`, e.g. musl/Alpine) it falls back to
-raw Lua traceback lines plus raw `execinfo` C frames.
-
-The retrieval side is the bare `titan` Lua support entry: Make compiles
-`titan-runtime/ltitanlib.c` into `ltitanlib.o`, links that object alone into the
-private bootstrap, and carries it once into each form of the full standard
-`titan.so`/`titan.a` provider pair.
-`titan.backtrace()` rawgets that
-registry key. The same test-support module exposes internal `pin` and `clear`
-helpers; none of these functions is part of `libtitan.a`.
-Regeneration follows the **pin discipline**
-(`TITAN_TRACE_PINNED`): a pinned slot (a pending re-raise) is preserved
-verbatim and the pin cleared; an unpinned (fresh) error regenerates.
-Coroutines use `TITAN_TRACE_APPEND_KEY` before setting the pin: an
-uncaught dead-coroutine trace is staged there, then the resume/error side
-captures a propagation trace, appends it, stores the combined trace under
-`TITAN_BACKTRACE_KEY`, and pins that combined trace for the final
-re-raise. See also the [language error-handling
-chapter](../language/error-handling.md).
-
-## The standalone entrypoint
-
-When exactly one requested module defines `main(args: {string}):
-integer`, `driver.compile_program` emits a srlua-derived C entrypoint
-(`entrypoint_template` in `driver.lua`) and links it with all source module
-objects, selected static providers, caller `-X` inputs, and the active runtime
-SDK. Installed mode uses `lib/titan/0.6/libtitan.a`, the separate
-`lib/libbacktrace.a`, and the matching `lib/liblua.a` from the Titan
-SDK/rocks-tree root; checkout mode uses the same archive contract with local
-`libtitan.a`, separate local
-`libbacktrace.a`, and local `liblua.a`. Generic links do not receive libuv
-merely from the SDK, but selecting standard `titan.a` carries its
-private libuv payload into an executable. The combined standard build receives
-that private archive as payload in both `titan.so` and `titan.a`. The private
-archive is not installed in the SDK; extension DSOs leave their `uv_*` calls unresolved:
-
-* **Preload registration, not eager loading.** The C `main` creates a
-  state and runs `luaL_openlibs`. `titan_init_paths` then parses the inherited
-  `package.cpath` for the first current `/lib/titan/0.6/?.so` entry,
-  falls back to `/lib/lua/5.5/?.so` during bootstrap, and initializes the
-  Titan module-path default from that root, and ensures
-  `<root>/lib/titan/0.6/?.so` is present in `package.cpath`. The
-  executable-relative Titan-owned Lua already places that template before its
-  `lib/lua` entries; `<root>/bin/program` uses `<root>` unless Lua path
-  environment overrides select another tree. It then registers only the main
-  module's `luaopen_` function in `package.preload`; this registration
-  initializes nothing.
-* **`pmain`** publishes the original `argc` and `argv` under
-  `TITAN_MAIN_ARGC_KEY` and `TITAN_MAIN_ARGV_KEY`, then calls
-  `require("<modname>")` and retrieves and retains its `main` callable. A
-  transitive `titan.async` initialization calls public
-  `uv.setup_process_args()`. That idempotent helper uses the original
-  entrypoint arguments, calls `uv_setup_args`, and stores its possibly replaced
-  `argv` pointer back in the registry. Importing `titan.uv` alone does not call
-  it or install a Task bootstrap.
-  `pmain` rereads that pointer, creates the standalone
-  `DynamicCoercionPlan(string)` writer closure, then builds an Array with that
-  writer and capacity `argc - 1` and stores `argv[i]` at logical index `i` for
-  `i = 1 .. argc-1`. The program name is not inserted, so `args[0]` is nil,
-  `args[1]` is the first user argument, and `#args == argc - 1`.
-  Requiring first initializes transitive imports, which may install an async
-  hook under
-  `TITAN_MAIN_BOOTSTRAP_KEY`. After retaining the exact `main`, `pmain` calls
-  `main(arg)` when the key is nil or `hook(main, arg)` when it is present. Both
-  paths remain inside the one outer protected call, and the hook cannot replace
-  the program's entry callable. As each transitive import finishes `_init`, its
-  generated code self-registers its `luaopen_` entry in
-  `registry[LUA_PRELOAD_TABLE]`. A later Lua require calls that entry, which
-  returns the canonical initialized module value and lets ordinary
-  `package.loaded` cache it. This includes private static imports reached by the
-  initialization recursion. A linked module outside the initialized closure
-  has no preload entry.
-* **Top-level error handler.** The standalone bootstrap installs Titan's
-  own `errorhandler` as the message handler for the `lua_pcall` of
-  `pmain`. On failure, `errorhandler` captures the raw unified trace into
-  `TITAN_BACKTRACE_KEY` and returns the original raised object unchanged,
-  so the error object is still on the stack after `lua_pcall` returns.
-* **Top-level reporting.** On `lua_pcall != 0`, `main` reads
-  `registry[TITAN_BACKTRACE_KEY]`: if it is a string (the usual case for
-  a Titan error), it converts the original error object with the same
-  string/number, `__tostring`, or typed-placeholder policy as `lua.c`,
-  then prints `<progname>: <error message>`, `stack traceback:`, and the
-  raw unified trace with a tab prepended to each frame line through the
-  Titan `main` frame. The standalone report removes the synthetic
-  bootstrap chunk prefix from the headline and does not print the
-  bootstrap Lua/C frames beyond `main`. If no trace slot exists, it
-  reports only the converted error message. Either way the process exits
-  non-zero.
-* **Exit-code protocol.** An error reaching the top prints the report
-  (`<progname>: <report>`) to stderr and exits with `EXIT_FAILURE`;
-  otherwise the process exit status is `lua_tointeger(L, -1)` — the
-  integer returned by Titan `main`. The spec verifies statuses 0
-  and 42, and that an uncaught deep `Lua↔Titan` error prints a trace
-  carrying both Lua and Titan frames.
+The installed standard layout pairs `<root>/lib/titan/<version>/{titan.so,titan.a}`
+with one generated DSO-form shim per standard root (Makefile `STDLIB_SHIMS`)
+below `<root>/share/lua/5.5/titan/`; the root list is in
+[Multi-module libraries](multi-module-libraries.md#reserved-titan-and-the-standard-library-image). The `provider_probe` loader
+fixture that exercises this path is described in
+[Linking a provider pair](driver.md#linking-a-provider-pair).
 
 ## Safety summary
 
 The model distinguishes **dynamic boundary conversion** from **strict gradual
 observation**. Genuine-Lua function arguments, record and module writes,
-non-nil Array writes, written `value as/is T`, and results returned to Titan
-by a non-Titan callable consume one canonical `DynamicCoercionPlan`. Results
-returned from Titan to Lua are only boxed. Implicit `value`
-projections and Array/Map reads consume strict `GuardPlan`s. Callable strict
-operations run either in a realized wrapper's frozen native adapter or through
-the branded exact-tag-mismatch stack path. Direct numeric/Option coercions
-inserted by the checker do not become structural callable consistency.
+non-nil Array writes, written `value as/is T`, and results of non-Titan
+callables consume one canonical `DynamicCoercionPlan`. Results returned from
+Titan to Lua are only boxed. Implicit `value` projections and Array/Map reads
+consume strict `GuardPlan`s. Callable strict operations run either in a
+realized wrapper's frozen native adapter or through the branded
+exact-tag-mismatch stack path. Direct numeric/Option coercions inserted by the
+checker never become structural callable consistency.
 
-On the way **out**, every value has one canonical Lua representation:
-numbers, strings, booleans and nil as-is; Maps as their ordinary Tables;
-Arrays as their proxy Udata; records/unions as their stable `Udata`; and
-Interfaces as their nominal wrapper Udata. Identity is preserved and no
-container is copied. An exactly tagged Titan source closure uses its native body; an exactly tagged
-adjustment wrapper uses its target-native adapter. A branded mismatch uses the
-closure's declaration entry or target relay; a Lua closure/C function or
-`__call` object uses Lua's internal call machinery and the dynamic boundary
-plan. Wrapper identity is deliberately fresh when construction is realized,
-but its boxed Lua representation remains that same CClosure object and its
-`CClosure.f` remains the source coercive entry. Finite calls use a concrete result request;
-every statically open generic producer uses
-`luaD_callnoyield(..., LUA_MULTRET)` and keeps the complete run rooted on the
-Lua stack. On normal return, the outer Titan caller measures, trims, validates,
-and copies it under the policy selected by the callable brand.
-See [flexible-return internals](flexible-returns.md) for the exact/generic
-result-demand split.
+On the way **out**, every value has one canonical Lua representation: numbers,
+strings, booleans and nil as-is; Maps as their Tables; Arrays as their proxy
+`Udata`; records and unions as their stable `Udata`; Interfaces as their wrapper
+`Udata`. Identity is preserved and no container is copied. A realized callable
+wrapper is a fresh `CClosure` whose `f` remains the source's coercive entry.
+Finite generic calls use a concrete result request; statically open generic
+producers use `LUA_MULTRET` and keep the run rooted on the Lua stack (see
+[flexible-return internals](flexible-returns.md#choosing-the-lua-vm-result-request)).
 
-The deliberate deferral is that a container boundary validates the outer
-representation, not every element. A `{K:V}` argument must be a Table; a
-`{T}` argument must be a structurally valid canonical proxy with two user
-values and the key-0 reverse link. Lua can still mutate a Map directly; every
-Titan Map read therefore applies a strict key/value guard. Array writes from
-ordinary Lua are intercepted and dynamically converted by the carried writer,
-but every Titan Array read still applies the strict element guard. The writer
-is not evidence about the current contents. The complete conversion matrix
-and nested-Array rule are in [Dense Arrays](dense-arrays.md).
+A container boundary validates the outer representation, not every element. A
+`{K:V}` argument must be a Table; a `{T}` argument must be a structurally valid
+canonical proxy with two user values and the key-0 reverse link. Lua can still
+mutate a Map directly, so every Titan Map read applies a strict key/value
+guard. Array writes from Lua go through the carried writer, but every Titan
+Array read still applies the strict element guard; the writer is not evidence
+about the current contents.
 
-**Stock Lua 5.5 table-library reality.** `table.*` accepts the proxy through
-its `__index`, `__newindex`, and `__len` callbacks and therefore operates
-through the maintained Array protocol. `rawget`, `rawset`, and `rawlen` require
-a real Table and reject the Udata. No patched Lua or alternate Array
-representation is involved.
+**Stock Lua 5.5 table library.** `table.*` accepts the proxy through its
+`__index`, `__newindex` and `__len` callbacks and therefore uses the maintained
+Array protocol. `rawget`, `rawset` and `rawlen` require a real Table and reject
+the `Udata`.
 
 The remaining trust boundary is explicit:
 
-1. **Container aliasing** can leave a Map or Array with a value that does not
-   satisfy a later strict read. The read raises a well-behaved type error
-   before typed code uses the value.
+1. **Container aliasing** can leave a Map or Array with a value that fails a
+   later strict read. The read raises a type error before typed code uses the
+   value.
 2. **`value` is pass-through by design.** A later implicit observation is
-   strict; a written cast is intentionally dynamic and records programmer
-   intent.
+   strict; a written cast is intentionally dynamic.
 3. **The debug API and native extensions are privileged.** Exact dispatch and
    wrapper construction trust Titan's private closure slots only after the
-   existing tag/brand/header predicate; arbitrary Lua callables stay on generic
-   dispatch. Debug/C code can nevertheless mutate private Array/Interface user
-   values, function upvalues, or nominal metatables and thereby violate Titan
-   invariants. Ordinary untrusted Lua cannot do so; the debug library remains
-   forbidden there.
-4. **Raw C pointers are outside gradual safety.** No strict or dynamic
-   `value` guard fabricates one. Only the deliberately unsafe written cast can
-   extract raw pointer bits.
+   tag/brand/header predicate; arbitrary Lua callables stay on generic
+   dispatch. Debug or C code can still mutate private Array/Interface user
+   values, function upvalues, or nominal metatables and break Titan's
+   invariants. Untrusted Lua must not have the debug library.
+4. **Raw C pointers are outside gradual safety.** No strict or dynamic `value`
+   guard fabricates one; only the deliberately unsafe written cast extracts raw
+   pointer bits.

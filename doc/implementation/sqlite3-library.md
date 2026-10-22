@@ -9,31 +9,25 @@ declares native carriers only.
 
 ## Provider and dependency
 
-The Makefile pins the official SQLite 3.53.4 autoconf source archive, which
-contains its matching amalgamated `sqlite3.c` and `sqlite3.h`, and verifies its
-SHA-256 before extraction. The archive pin was checked against SQLite's
-published SHA3-256 when selected. `make sqlite3` uses the effective CC, AR,
-RANLIB, optimization/sanitizer inputs and `SQLITE_THREADSAFE=1` to build the
-private PIC/hidden archive `sqlite3-build/libtitan-sqlite3.a`.
+The Makefile pins the official SQLite 3.53.4 autoconf source archive
+(`SQLITE3_VERSION`, `SQLITE3_SHA256`), which contains the matching amalgamated
+`sqlite3.c` and `sqlite3.h`, and verifies its SHA-256 before extraction.
+`make sqlite3` uses the effective CC, AR, RANLIB, optimization/sanitizer inputs
+and `SQLITE_THREADSAFE=1` (`SQLITE3_CFLAGS`) to build the private PIC/hidden
+archive `sqlite3-build/libtitan-sqlite3.a`.
 
-This payload follows private llhttp in the shared provider link and is carried
-into both `titan.so` and `titan.a`, in both OpenSSL modes. There is no system
-SQLite mode, SQLite child DSO, or independently installed private archive.
-The matching public `sqlite3.h` is staged in the compiler SDK. Private symbol
-visibility follows the existing bundled native payload policy.
-
-SQLite is one logical standard module in the combined provider, which has
-twenty-five module protocols,
-twenty-five archive metadata keys/shims, and twenty-six Lua openers including bare
-support `luaopen_titan`. Source, provider validation, ordinary installation,
-snapshot, native aggregate, production smoke, and CI cache manifests include
-it explicitly. Native dependency cache identities include the version,
+The archive is carried into both `titan.so` and `titan.a` in both OpenSSL
+modes; its place in the `-X` payload order and the rest of the image are in
+[the standard-library image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image).
+There is no system SQLite mode, SQLite child DSO, or independently installed
+private archive. The matching public `sqlite3.h` is installed in the compiler
+SDK include directory. Native dependency cache identities include the version,
 checksum, native toolchain and build policy; sanitizer SQLite is built with
 the same instrumented dependency policy as the other native libraries.
 
 ## Native packet boundary
 
-Each operation allocates a zeroed `owned *TitanSqlitePacket` before submission.
+Each operation allocates a zeroed `owned *TitanSqlitePacket` (`native.h`) before submission.
 The packet contains only C scalars, SQLite handles, pointers, lengths, and
 ownership flags. Inputs are malloc-backed copies. Parameters use an explicit
 argument count and native Cell array; varargs are inspected through `#...`
@@ -50,7 +44,7 @@ memcpy/free, UTF-8 validation, reflection and Titan-value construction run on
 the loop thread.
 
 Each operation uses its own exact `foreign function (*void): void` entry. There is no
-second operation dispatcher or actor. `sqlite_copy_bytes` always allocates
+second operation dispatcher or actor. `sqlite_copy_bytes` (`worker.titan`) always allocates
 one extra terminator byte, including for an empty BLOB; binding lengths remain
 explicit and use `SQLITE_TRANSIENT`.
 
@@ -91,7 +85,7 @@ Column/Row/Cursor values while the packet still owns execution; failed
 publication resets it before releasing its buffers and Connection reservation.
 Fetch failure similarly retires the active execution and closes the Cursor.
 
-`sqlite_retire_worker` finalizes an unpublished Statement or resets an
+`sqlite_retire_worker` (`worker.titan`) finalizes an unpublished Statement or resets an
 unpublished execution, then closes an unpublished Connection. Flags clear only
 at their corresponding native retirement/transfer point. Finalize clears its
 handle even when it reports a prior execution error; a failed sqlite3_close
@@ -103,16 +97,23 @@ process-global shutdown.
 ## Connection transfer
 
 Connection's custom record hooks move the existing `sqlite3 *` under the
-[manual handoff contract](../language/standard-library-sqlite3.md#transferring-connections).
-The encoding hook reserves the Connection with the same closed/busy/active
+[manual handoff contract](../language/standard-library-sqlite3.md#transferring-connections);
+the generic rules (exactly-once adoption, no packet-discard cleanup, lossy
+carriers) are in
+[manual resource handoff](transfer-library.md#manual-resource-handoff). SQLite
+has no `discard_transfer_payload` helper. This section covers the SQLite gate
+and schema.
+
+The encoding hook (`Connection:to_transfer_payload`) reserves the Connection with the same closed/busy/active
 Cursor checks as close, then rejects any remaining Statement. The reservation
 also covers result publication and cancellation cleanup, so a completed
 worker whose continuation has not retired is still ineligible. Even an idle
 Statement owns a `sqlite3_stmt *` and retains the original Connection; it
 cannot follow a detached connection implicitly.
 
-The hook serializes its raw pointer as a protobuf fixed64 field before clearing
-`handle`. Its private field schema is reused for decoding. The source then has
+The hook serializes its raw pointer through `connection_transfer_fields`, a
+foreign-pointer field that protobuf writes as fixed64, before clearing
+`handle`. The same schema is reused for decoding. The source then has
 no close authority, and the reservation is released by its ordinary defer.
 Decoding validates the wire message and nonnull address,
 then allocates a fresh Connection with zero Statements and no active operation.
@@ -121,19 +122,18 @@ The existing FULLMUTEX database already supports successive worker threads;
 the receiving state's ordinary worker submission can use it directly.
 Transaction/savepoint state stays on the native handle.
 
-The carrier is not a reference-counted ticket. Repeated adoption, abandoned
-payloads, arbitrary pointer injection and failure after detachment retain the
-public programmer-owned lifetime rules; the transfer carrier neither closes nor
-rolls back native ownership. A retained packet can be adopted locally after a
-rejected send. No GC callback performs database I/O.
+The payload is a bare pointer, not a reference-counted ticket: repeated
+adoption, abandoned payloads and arbitrary pointer injection are the
+programmer's responsibility, and no GC callback performs database I/O.
 
 ## Cancellation
 
-Public ordinary work goes through `async.run_foreign`. A local cleanup adapter
-uses public `uv.work_t` and `uv.queue_work` inside `async.await_cleanup_with`.
-Its `CleanupWork` context records the completion and operation number, while
-the explicit `argument_owner` retains the owned packet through worker completion
-and the entire after-work callback frame. The named callback saves that exact
+Public ordinary work goes through `async.run_foreign`. The local cleanup
+adapter `run_foreign_cleanup` (`sqlite3.titan`) uses public `uv.work_t` and
+`uv.queue_work` inside `async.await_cleanup_with`. Its `CleanupWork` context
+records the completion and operation number, and passes the owned packet as
+`uv.queue_work`'s `argument_owner`, which retains it through worker completion
+and the entire after-work callback frame. The callback `cleanup_completed` saves that exact
 completion and number, clears the old request association, and settles the
 saved operation, rejecting with the raw native status on failure. After the
 cleanup await returns, the adapter translates a rejected status using the

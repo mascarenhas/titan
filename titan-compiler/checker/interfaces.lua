@@ -1147,6 +1147,7 @@ freeze_callable_adapter_plan = function(raw, source, target, loc, context)
     return frozen
 end
 
+-- Implementation notes: doc/implementation/interfaces.md#frozen-conversion-and-adapter-plans
 local function make_interface_adapter(
         concrete, interface, mapping, cast_module)
     interface_adapter_assert(

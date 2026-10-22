@@ -190,6 +190,7 @@ end
 --   -- "src/main.titan" on POSIX; [[src\main.titan]] on Windows.
 -- @usage standard-library-path.md#api
 function normalize(subject: string): string
+  -- Implementation notes: doc/implementation/standard-library-path.md#normalization-and-join
   local length = volume_length(subject)
   local prefix = string.sub(subject, 1, length)
   local tail = string.sub(subject, length + 1)

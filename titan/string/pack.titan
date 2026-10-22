@@ -18,6 +18,7 @@ local PACK_PADDING = 9
 local PACK_ALIGN = 10
 local PACK_NONE = 11
 
+-- Implementation notes: doc/implementation/string-library.md#pack-translation
 local record PackState
   local format_string: string
   local cursor: integer

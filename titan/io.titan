@@ -232,6 +232,7 @@ end
 --- Close streams and terminate and wait for the shell process if still running.
 -- @usage standard-library-io.md
 function InputOutputStream:close()
+  -- Implementation notes: doc/implementation/io-library.md#shell-process-stream
   self.pending_operations = self.pending_operations + 1
   defer self.pending_operations = self.pending_operations - 1
   if self.closed then return end
@@ -258,6 +259,7 @@ end
 -- @return Opaque bytes owning both process streams, to adopt exactly once.
 -- @usage standard-library-io.md#transferring-shell-streams
 function InputOutputStream:to_transfer_payload(): string
+  -- Implementation notes: doc/implementation/io-library.md#shell-stream-transfer
   if self.closed or self.output == nil then
     raise "cannot transfer closed or detached InputOutputStream pipes"
   end

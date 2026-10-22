@@ -7,10 +7,10 @@ callback bridge, streaming parser ownership, and high-level server composition.
 
 ## Folder-module structure and layering
 
-The canonical `titan/http/http.titan` main uses the short `net`, `ssl`, `url`,
-`io`, `async`, `math`, `reflect`, and `string` imports. The parser
-resolves every short spelling to its ordinary `titan.*` logical identity before
-checking. Its immediate contributors share one module-private scope:
+The `titan/http/http.titan` main imports `async`, `io`, `math`, `net`,
+`protobuf`, `reflect`, `ssl`, `string`, `timer` and `url`; `server.titan` adds
+`uv`. The contributors (`Makefile` `STDLIB_HTTP_SOURCES`) share one
+module-private scope:
 
 ```text
 titan/http/http.titan       imports and initialization
@@ -24,8 +24,8 @@ titan/http/upgrade.titan    owned upgrade stream, opening supervisor, handoff
 ```
 
 The only HTTP-owned native boundary is the eight synchronous source
-`foreign function` callbacks in `titan/http/native.titan`. They have no network
-or Task operation.
+`foreign function` callbacks in `titan/http/native.titan` (`llhttp_url_cb`
+through `llhttp_message_complete_cb`). They have no network or Task operation.
 HTTP obtains every byte from the public `io.ReaderWriterCloser` view of either
 a `net.Connection` or an `ssl.Connection`, and writes through that same view.
 URL parsing calls the independent public `titan.url` module without an
@@ -41,7 +41,7 @@ llhttp invokes callbacks synchronously inside `llhttp_execute` and
 the same callback-owner protocol without introducing an asynchronous boundary.
 
 The Titan `Parser` record embeds its `llhttp_t` and `llhttp_settings_t` in
-its own native payload. Construction precedes settings/llhttp initialization,
+its own native payload (`new_parser`). Construction precedes settings/llhttp initialization,
 so native self-pointers target the final stored objects. Its fields also hold the Lua state active for
 the current synchronous parse and one exact Titan closure for each registered
 llhttp callback: URL, status, header field, header value, header-value complete,
@@ -63,8 +63,8 @@ before returning and appends a typed `Event` to the Parser's GC-owned `{Event}`
 Array. The headers-complete and message-complete callbacks snapshot the llhttp
 metadata that belongs to their boundaries and select the documented llhttp
 return codes. Callback code catches every Titan error before returning through
-llhttp, stores the failure on the Parser, and returns `HPE_USER`; it never
-unwinds through the C parser.
+llhttp, stores the failure on the Parser, and returns `HPE_USER`
+(`callback_failure`); it never unwinds through the C parser.
 After the synchronous call returns, Titan either re-raises that stored failure
 or drains the typed events into the high-level parser state.
 
@@ -78,23 +78,24 @@ callback frame.
 
 ## Pausing and streaming ownership
 
-Each parser pauses after headers and after message completion. A pause may
-occur before the end of the supplied network chunk, so Titan subtracts
+Each parser pauses after headers and after message completion
+(`headers_complete_callback`, `message_complete_callback`). A pause may
+occur before the end of the supplied network chunk, so `execute_input` subtracts
 `llhttp_get_error_pos` from the still-rooted input pointer and retains the
-unconsumed suffix. Resuming first consumes that suffix before another
+unconsumed suffix in `Parser.input_excess`. Resuming first consumes that suffix before another
 high-level connection read. This is how a handler can begin before the request
 body is buffered and how bytes already read for a later request survive one
 message boundary.
 
 A header pause at the exact end of a transport chunk can leave llhttp on an
 epsilon transition to message completion. After resuming with no retained
-suffix, Titan executes one empty input before attempting another socket read.
+suffix, `advance_parser` executes one empty input before attempting another socket read.
 That lets a bodyless message reach its message-complete pause instead of
 deadlocking with a peer that is waiting for the response.
 
-Body callbacks are copied into a Titan Array of chunks. `read` consumes that
+Body callbacks are copied into a Titan Array of chunks. `parser_read` consumes that
 array incrementally and clears it once drained; new network input is requested
-only when no buffered body event remains. `read_until` composes over those
+only when no buffered body event remains. `parser_read_until` composes over those
 logical body chunks and retains only the bytes following its delimiter.
 llhttp itself removes Content-Length and chunked framing. The parser reaches
 the high-level Reader only after strict message-shape validation.
@@ -102,7 +103,7 @@ the high-level Reader only after strict message-shape validation.
 Request parsing pauses at headers, constructs the public `Request`, and hands
 the same private parser owner to its Reader methods. On handler return, the
 connection Task closes the Response and drains any unread request body before
-resetting llhttp. Reset clears per-message Titan fields but preserves the
+resetting llhttp. Reset (`parser_reset_message`) clears per-message Titan fields but preserves the
 already retained network suffix and the response-to-HEAD policy where
 applicable.
 
@@ -122,8 +123,8 @@ key length-prefixes scheme, normalized host, port, effective Host, and HTTPS
 trust path (with default trust distinct from a file); HTTP ignores the CA path.
 There is no DNS-address coalescing, native socket access, or private net/SSL import.
 
-The first request binds a Client to `async.current_loop()` and installs one
-`async.add_close_listener`. Explicit close detaches the listener, marks the
+Acquisition binds a Client to `async.current_loop()` and installs one
+`async.add_close_listener` (`pool.titan` `Client:bind`). Explicit close detaches the listener, marks the
 Client closed, detaches idle leases and drains before any suspension, then
 retires them. Runtime notification runs only after every Task and raw handle
 has retired, when idle TCP close and TLS abort are synchronous. The default
@@ -134,12 +135,14 @@ Acquisition removes the newest matching lease before I/O. Pool mutation and
 selection finish before closing expired or dirty connections, because abort
 may yield. Release admits only complete, persistent, non-EOF messages with no
 parser suffix or transport input. A fresh parser is allocated per exchange.
-The caps are 100 idle leases overall, two per key, and 90 seconds idle age;
+The caps are 100 idle leases overall, two per key, and 90 seconds idle age
+(`CLIENT_MAX_IDLE`, `CLIENT_MAX_IDLE_PER_KEY`, `CLIENT_IDLE_NS`);
 age checks happen on pool activity without a keepalive timer Task. Active
 responses and drains are never in the idle Array. Input is checked on release,
 on acquisition, and again inside the supervised exchange before output, so
 bytes delivered while that child is queued cannot become the next response.
-While idle, a lease also registers the concrete public input observer. An
+While idle, a lease also registers the concrete public input observer
+(`Client:watch_idle`). An
 arrival removes the observer, roots a `ClientRetirement`, schedules its abort
 Task, and removes the idle lease before that Task can run. Scheduling failure
 leaves the original idle root available to Runtime cleanup. The retirement
@@ -152,7 +155,8 @@ own final cleanup. This implements the no-unsolicited-response requirement of
 [RFC 9112 section 9.2](https://www.rfc-editor.org/rfc/rfc9112.html#section-9.2).
 
 Healthy TLS eviction and fully framed nonpersistent response retirement run
-ordinary `ssl.close` in a supervised child with a 50 ms timer. Timeout, failure,
+ordinary `ssl.close` in a supervised child with a 50 ms timer
+(`ClientConnection:close_idle`, `CLIENT_CLOSE_MS`). Timeout, failure,
 or cancellation aborts before draining that child. All watchers are detached
 before close may suspend; a selected lease stays lexically guarded across
 expiration cleanup, followed by a Client rebind/check before transfer. Dirty
@@ -163,7 +167,7 @@ retry-after-failure behavior.
 
 A stale reused connection gets one fresh attempt only for exact GET/HEAD with
 nil body, no received response byte (including interim responses), and selected
-EOF/reset errors. `Parser.input_received` is sticky across interim resets;
+EOF/reset errors (`Client:request`, `stale_client_failure`). `Parser.input_received` is sticky across interim resets;
 `input_seen` remains message-local. A cancellation checkpoint precedes retry.
 Other failures propagate with their original error and traceback. Detecting
 dirty idle input before output instead discards the lease and fresh-dials any
@@ -172,9 +176,10 @@ abort-before-child-drain supervisor as protocol takeover.
 
 Response close relinquishes reader ownership immediately. A complete eligible
 message releases directly; an incomplete eligible body transfers its parser
-and lease to one supervised drain. The worker measures an absolute 50 ms
-budget from close with `uv.hrtime`, races an owned reader against the remaining
-time, and limits unread decoded bytes to 256 KiB. Known larger Content-Length
+and lease to one supervised drain (`ClientResponse:close`, `ClientDrain:run`).
+The worker measures an absolute 50 ms budget from close with `uv.hrtime`, races
+an owned reader against the remaining time, and limits unread decoded bytes to
+256 KiB (`CLIENT_DRAIN_NS`, `CLIENT_DRAIN_BYTES`). Known larger Content-Length
 remainders, nonpersistent messages, EOF framing, errors, and upgrades skip the
 drain. The response captures wire framing/persistence at header completion;
 mutating public headers later cannot change reuse eligibility.
@@ -195,8 +200,9 @@ bounds follow [Go's connection-reuse design](https://go.dev/blog/http-connection
 
 Each server request snapshots `Server.header_limit_bytes`, defaulting to
 65536. The explicit upgrade client uses the same bound per response header
-block. Ordinary client response parsing retains its prior policy. Before
-`llhttp_execute`, HTTP limits the native span to the remaining raw header
+block. Ordinary client response parsers have no header-byte limit
+(`new_parser` defaults `header_limit` to `math.maxinteger`). Before
+`llhttp_execute`, `execute_input` limits the native span to the remaining raw header
 budget, then counts the actual consumed offset. This bounds callback event
 copies before they allocate attacker-controlled text and counts all raw bytes,
 including leading lines, the start line, punctuation, and line endings. The
@@ -239,7 +245,7 @@ its opaque suffix is never parsed as HTTP.
 `reject_upgrade` validates the same live pair even for malformed openings that
 llhttp did not classify as upgrades. It accepts a 400..599 status and copied
 headers without supplied framing, adds Content-Length zero and Connection
-close, and writes one bounded rejection. It marks the exchange rejected,
+close, and writes one bounded rejection through `Response:write_upgrade_output`. It marks the exchange rejected,
 closes the parser, retires transport, and tells the connection loop to skip
 body drain. Both success and rejection output blocks have a 64 KiB cap.
 Both paths start from copied unsent Response fields and append copied supplied
@@ -247,7 +253,7 @@ fields, preserving handler header customization before controlling framing and
 Connection/Upgrade.
 
 Suspending upgrade I/O runs in an owned child with a cancellation-sensitive
-parent join. The parent's lexical cleanup remains independently runnable while
+parent join (`upgrade.titan` `supervised_http_io`). The parent's lexical cleanup remains independently runnable while
 the child awaits accepted transport output. On interruption it invokes the
 captured abort action before requesting child cancellation and draining the
 child with `await_terminal_cleanup`. This order lets cancellation retire
@@ -272,7 +278,7 @@ native socket bypass.
 
 Headers use an Array of public `Header` records. Lookup performs ASCII folding
 without normalizing stored spelling, so duplicate order remains available to
-protocol checks and applications. The folding uses `string.gsub` over
+protocol checks and applications. The folding (`headers.titan` `lower_header_name`) uses `string.gsub` over
 `[A-Z]`, rather than locale-sensitive `string.lower`, because HTTP field-name
 case is ASCII-defined even after an application changes the process C locale.
 Cached `string` regex matching validates token names and rejects field values
@@ -317,14 +323,13 @@ received target, while `Request.url` provides the normalized routing view.
 
 The client copies supplied headers, validates Content-Length, rejects request
 Transfer-Encoding and Expect fields, and preserves supplied Connection fields.
-An explicit close token disables reuse; HTTP/1.1 is otherwise persistent. Rejecting
-Expect is deliberate: the initial client assembles the optional body with the
-preamble in one write and must not advertise a `100-continue` handshake that
-it does not honor. A supplied singleton Host is parsed by the URL module's
-separate-input request entry; this enforces authority boundaries, host,
-bracketed IP-literal, and optional-port syntax before opening the connection.
-Its optional body is assembled with the request preamble as one high-level
-write. Response bodies alone are streaming.
+An explicit close token disables reuse; HTTP/1.1 is otherwise persistent. The
+optional request body is assembled with the preamble as one high-level write;
+only response bodies stream. Rejecting Expect is therefore deliberate: the
+client must not advertise a `100-continue` handshake that it does not honor. A
+supplied singleton Host is parsed by the URL module's separate-input request
+entry; this enforces authority boundaries, host, bracketed IP-literal, and
+optional-port syntax before opening the connection.
 
 The server derives response framing at first header send. A declared
 Content-Length is counted exactly; explicit Transfer-Encoding must be one
@@ -337,7 +342,7 @@ decision and an explicit Connection close token decide whether the
 per-connection loop resets the parser.
 
 Immediately after header parsing, the per-connection loop resolves `Expect`
-before it can call a handler that waits in `Request:read`. An OWS-trimmed,
+(`server.titan` `accept_request_expectation`) before it can call a handler that waits in `Request:read`. An OWS-trimmed,
 case-insensitive `100-continue` is accepted only as one complete singleton
 field and writes the exact interim response synchronously. Every other value,
 comma-combined value, or repeated field produces a framed zero-length 417 and
@@ -359,8 +364,8 @@ cover both normal entry and termination before entry. Failed scheduling or
 registration leaves fallback cancellation, terminal draining, and close with
 the accept loop. No yield count proves ownership transfer.
 
-A private handoff context holds the connection, Server, child, transfer flag,
-notification flag, and listener remover. Its named registrar captures the
+A private `ConnectionHandoff` context (`start_connection_handoff`) holds the
+connection, Server, child, transfer flag, notification flag, and listener remover. Its named registrar captures the
 Completion and exact suspension number in the acknowledgment callbacks; those
 callbacks keep using that number even if settlement starts another wait on
 the parent Task. Connection-close fallback is installed before allocating the
@@ -378,13 +383,11 @@ plain `listen` takes host and handler before optional port, backlog, idle
 timeout, and `reuse_port`, while `listen_tls` takes host, certificate, and
 handler before optional private-key path, port, backlog, idle timeout, and
 `reuse_port`. The plain/TLS port defaults are 80/443. Both pass the optional
-backlog and reuse flag to `net.listen` (directly or through `ssl.listen`), where
-they default to 128 and false. True reaches the native bind as
-`uv.TCP_REUSEPORT`; errors such as `UV_ENOTSUP` retain the ordinary net error
-path. This changes neither Server/Task ownership nor accepted connection
-scheduling. TLS likewise delegates the omitted-key PEM-bundle behavior to
-`ssl.listen`. Idle timeout defaults to zero
-and is validated before listener creation or TLS PEM reads.
+backlog and reuse flag unchanged to `net.listen` (directly or through
+`ssl.listen`), which owns their defaults and the `uv.TCP_REUSEPORT` bind; TLS
+likewise delegates the omitted-key PEM-bundle behavior to `ssl.listen`. Idle
+timeout defaults to zero and is validated before listener creation or TLS PEM
+reads.
 
 The Server record deliberately stores separate optional `net.Server` and
 `ssl.Server` fields and branches while accepting. A tempting common Interface
@@ -435,11 +438,9 @@ resource contract, not an HTTP queue or scheduler.
 The server implements one serial request/response cycle per connection Task.
 It does not expose a pipelining API or schedule concurrent handlers for one
 connection. A handler finishes its response and the server drains any unread
-request body before resetting the parser for the next keep-alive request. If a
-transport read happened to include bytes beyond the current message, the
-parser retains that unconsumed suffix so the next ordinary serial iteration
-does not lose input. That byte-preservation invariant is not a separate
-pipelining queue or a promise of concurrent pipeline processing.
+request body before resetting the parser for the next keep-alive request.
+The retained parser suffix ([pausing](#pausing-and-streaming-ownership)) only
+preserves bytes a read happened to include; it is not a pipelining queue.
 
 After a keep-alive reset, header acquisition treats EOF with no next request as
 a normal idle peer disconnect. `llhttp_finish` also succeeds after some
@@ -453,35 +454,31 @@ a real request remain accepted. The server maps only the idle outcome to normal
 connection-Task return; a client awaiting its first or final response maps the
 same outcome back to an incomplete-message error.
 
-At the start of each serial request iteration, the connection Task snapshots
-the Server's `idle_timeout_ms`. The shared header-acquisition helper takes the
-encryption mode and timeout as explicit values, preserving this per-request
-snapshot when called by either serving loop. Zero reads directly. A positive
-value starts a header-reader Task and timer Task and uses `async.race_two`.
-Reader success
-requests cancellation of the timer-only deadline. Its unconditional cancellation
-defer remains installed for every exit; cancellation is idempotent. The timer's
-native close can finish in the background because it owns no parser or
-transport state, so no terminal join is added. The reader is always owned by a cancel-and-terminal-cleanup defer, including
-when parent cancellation interrupts the race or creation of the deadline fails.
-Before draining an unfinished reader, the parent calls the
-captured public transport abort. A reader may own malformed-upgrade rejection
-output whose accepted native write cannot detach; abort lets that output retire
-before the shared parser and connection are released.
-Its terminal wait uses `async.await_cleanup_with` plus a removable public terminal
-listener, so pending parent cancellation cannot release shared parser/connection
-state before the child has finished. Deadline success requests reader
-cancellation with the timeout reason; the same defer drains its completion.
-A small context holds the child and listener remover for a named registrar.
-The retained terminal-listener closure captures its Completion and suspension
-number directly, and lexical cleanup removes it on every exit.
-An SSL read retains its directional operation scope until that cleanup
-finishes. The timer-only child has unconditional cancellation cleanup but is
-not joined: it owns no shared parser/transport state, and waiting for it would
-change observable successful-reader ordering. Reader success supplies the `Request?`; timer success is an
-ordinary silent connection return. A failed child has already emitted its
-Task-local error and traceback, so the parent applies the same ownership rule
-to its peer and returns instead of raising the same failure a second time.
+At the start of each serial request iteration, the connection Task reads the
+Server's `idle_timeout_ms`; the shared header-acquisition helper
+(`server.titan` `read_request_with_idle_timeout`) takes the encryption mode and
+timeout as explicit values, so either serving loop passes its own per-request
+snapshot. Zero reads directly. A positive value starts a header-reader Task and
+a timer Task and uses `async.race_two`:
+
+- **Reader.** Always owned by a cancel-and-terminal-cleanup defer, including
+  when parent cancellation interrupts the race or deadline creation fails.
+  Before draining an unfinished reader, the parent calls the captured public
+  transport abort: the reader may own malformed-upgrade rejection output whose
+  accepted native write cannot detach. The terminal wait uses
+  `async.await_cleanup_with` plus a removable terminal listener
+  (`TerminalCleanup`, `start_terminal_cleanup`), so pending parent cancellation
+  cannot release the shared parser or connection before the child finishes. An
+  SSL read retains its directional operation scope until that cleanup finishes.
+- **Timer.** Has unconditional, idempotent cancellation cleanup but is never
+  joined: its native close owns no parser or transport state, and waiting would
+  change observable successful-reader ordering.
+
+Reader success supplies the `Request?` and cancels the timer. Timer success
+cancels the reader with the timeout reason and is an ordinary silent connection
+return. A failed child has already emitted its Task-local error and traceback,
+so the parent applies the same ownership rule to its peer and returns instead
+of raising the same failure a second time.
 
 On HTTPS, cancelling the child read follows `ssl.Connection`'s existing
 terminal cancellation path: it frees the TLS engine and closes the transport
@@ -500,84 +497,89 @@ there is no connection-local watchdog or generation protocol.
 
 ## Cross-state exchange ownership
 
+The generic manual-handoff rules (exactly-once adoption, explicit discard,
+lossy carriers, buffered-input snapshots, stream eligibility including Windows
+pending reads) are in
+[manual resource handoff](transfer-library.md#manual-resource-handoff). This
+section covers the HTTP gate and schema.
+
 `Server:read_ahead(enabled?)` stores a listener policy, defaulting to true.
 `accept_connection` applies it through the public TCP/TLS Connection method
 before parser or lazy TLS handshake input. It affects future accepted sockets
 only. Demand mode stops each native read before publication, allowing Windows
 header classification followed by an explicit callback-retirement yield and
-ordinary Exchange handoff. The existing native pending-request gate remains
-authoritative.
+ordinary Exchange handoff.
 
-`ExchangeState` remains the shared private owner of the parser, captured transport,
-and admission flags. Public `Exchange` bundles its matching `Request` and
-`Response`; its custom hook detaches that shared owner once. Request reads,
-response output/close, and supervised upgrade output hold `pending` across their
-entire operation, including queued native completion. The serving-owner flag
-rejects nested or competing `Exchange:serve` loops while permitting an idle
-handler to transfer the pair. Destination reconstruction starts without a serving
-owner and registers one when `serve` starts.
+`ExchangeState` (`upgrade.titan`) remains the shared private owner of the
+parser, captured transport, and admission flags. Public `Exchange`
+(`transfer.titan`) bundles its matching `Request` and `Response`; its custom
+hook detaches that shared owner once. Request reads, response output/close, and
+supervised upgrade output hold `pending` across their entire operation,
+including queued native completion. The `serving` flag rejects nested or
+competing `Exchange:serve` loops while permitting an idle handler to transfer
+the pair. Destination reconstruction starts without a serving owner and
+registers one when `serve` starts.
 
-The encoder validates state, snapshots metadata and buffers, then delegates the
-transport move to the concrete public TCP/TLS hook. Only after successful
-detachment does it mark the source exchange transferred/inactive and close its
-old parser. A private anonymous-root protobuf schema contains copied scalar,
-header-array, URL and parser fields plus the known transport kind and child
-bytes. If that final encoding raises, a lexical guard discards the detached
-transport; the source stays inactive. The original server's defer therefore
-cannot close an adopted transport. `Exchange:serve` follows the same serial request/framing loop with a
-destination-supplied handler; subsequent transfers/upgrades retain the same
-ownership guard. Its optional non-negative `idle_timeout` defaults to zero and
-uses the shared header-acquisition helper only after the current handler,
-response closing, body draining, and keep-alive reset. The current exchange was
-already parsed before adoption; its handler and response are never covered by
-this deadline. Each later header wait gets the supplied absolute deadline,
-independent of the originating Server. Negative values are rejected before any
-serving ownership changes. A single-exchange consumer uses `Exchange:close`
-to finish its response and retire the transport.
+`Exchange:to_transfer_payload` validates state, snapshots metadata and buffers,
+then delegates the transport move to the concrete public TCP/TLS hook
+(`transfer_transport`). Only after successful detachment does it mark the
+source exchange transferred/inactive and close its old parser. The private
+anonymous-root protobuf schema (`exchange_transfer_fields`) contains copied
+scalar, header-array, URL and parser fields plus the known transport kind and
+child bytes. If that final encoding raises, a lexical guard discards the
+detached transport; the source stays inactive, so the original server's defer
+cannot close an adopted transport. `Exchange:serve` follows the same serial
+request/framing loop with a destination-supplied handler; subsequent
+transfers/upgrades retain the same ownership guard. Its optional non-negative
+`idle_timeout` defaults to zero and uses the shared header-acquisition helper
+only after the current handler, response closing, body draining, and keep-alive
+reset. The current exchange was already parsed before adoption; its handler and
+response are never covered by this deadline. Each later header wait gets the
+supplied absolute deadline, independent of the originating Server. Negative
+values are rejected before any serving ownership changes. A single-exchange
+consumer uses `Exchange:close` to finish its response and retire the transport.
 
-The pinned llhttp state is copied as process-local bytes. Its `_current` is an
-integer state selector represented as a pointer; `_span_cb0` names immutable
-native parser code. Source `data`, settings, input span, error position, and reason
-pointers are cleared. The decoder constructs fresh Parser settings, callbacks,
-and Lua-state ownership, then installs its local data/settings pointers. A live
-span is restored with a local nonnil marker: llhttp restarts every live span at
-the next input before reading it. Copied semantic fields preserve partial body
-and trailer state, delimiter excess, and buffered next-request input. The usual
-Request.headers/Parser.parsed_headers alias is restored so later trailers remain
-visible through the request.
+`parser_handoff_bytes` copies the pinned llhttp state as process-local bytes
+and clears the source `data`, `settings`, `_span_pos0`, `error_pos` and
+`reason` pointers. The remaining pointer-typed fields are safe to copy: llhttp's
+`_current` is an integer state selector represented as a pointer, and
+`_span_cb0` names immutable native parser code. The decoder constructs fresh
+Parser settings, callbacks, and Lua-state ownership, then installs its local
+`data`/`settings` pointers. A live span is restored with a local nonnil
+`_span_pos0` marker: llhttp restarts every live span at the next input before
+reading it. Copied semantic fields preserve partial body and trailer state,
+delimiter excess, and buffered next-request input. The usual
+`Request.headers`/`Parser.parsed_headers` alias is restored so later trailers
+remain visible through the request.
 
-`UpgradedStream` is public with private fields so it can participate in the custom
-record protocol. It transfers the native transport plus its unread prefix and
-rejects active reads/writes. Ordinary upgrade retirement continues to use the
-captured abort capability. Handoff explicitly unwraps only supported TCP/TLS
-owners and rebuilds that capability in the destination; arbitrary supplied
-Interface implementations are rejected before ownership changes. Its private
-protobuf schema carries prefix, transport kind and child bytes. Its public
-`discard_transfer_payload` decodes those bytes and directly retires the known
-TCP/TLS child without a Runtime; WebSocket uses this method for failed outer
-serialization. A native close attempt consumes the packet even on an error.
+`UpgradedStream` is public with private fields so it can participate in the
+custom record protocol. It transfers the native transport plus its unread prefix
+and rejects active reads/writes. Ordinary upgrade retirement continues to use
+the captured abort capability. Handoff explicitly unwraps only `net.Connection`
+and `ssl.Connection` owners and rebuilds that capability in the destination;
+other Interface implementations are rejected before ownership changes. Its
+private schema carries prefix, transport kind and child bytes.
 
-`Exchange.discard_transfer_payload` validates the same anonymous schema,
-selects its final transport kind/bytes, and delegates directly to the concrete
-TCP/TLS discard operation. It never reconstructs a parser or adopts a handle,
-so failed delivery can retire a known packet without a live Runtime.
+`UpgradedStream.discard_transfer_payload` and
+`Exchange.discard_transfer_payload` decode their schema and delegate to
+`discard_transfer_transport`, which retires the known TCP/TLS child directly.
+Neither reconstructs a parser or adopts a handle, so failed delivery can retire
+a packet without a live Runtime. WebSocket uses the `UpgradedStream` form.
 
 ## Native build and provider composition
 
-The build pins llhttp 9.4.3 and verifies its source tarball. The three generated
-sources `llhttp.c`, `http.c`, and `api.c` compile as hidden PIC objects in a
-private deterministic `libtitan-llhttp.a`. Its three objects are the complete
-metadata-free llhttp payload force-carried into the DSO and flattened into the
-static provider; there is no adapter object. There is no
-system-llhttp mode, and neither the private archive nor headers are installed
-as runtime-SDK files.
+The Makefile pins llhttp 9.4.3 (`LLHTTP_VERSION`) and verifies its source
+tarball. The three generated sources `llhttp.c`, `http.c`, and `api.c`
+(`LLHTTP_SOURCE_NAMES`) compile as hidden PIC objects in the private
+deterministic `llhttp-build/libtitan-llhttp.a`. Those three objects are the
+complete metadata-free llhttp payload; there is no adapter object, because the
+eight callback definitions live in the generated `titan.http` object. There is
+no system-llhttp mode, and neither the private archive nor its headers are
+installed as runtime-SDK files. Its position in the `-X` payload order and the
+rest of the standard-library image are described in
+[the standard-library image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image).
 
-The HTTP root adds one logical protocol, archive key, generated shim, and
-`luaopen_titan_http`. The current provider has twenty-five logical modules
-and shims, with twenty-six DSO openers including bare `luaopen_titan` support.
-The complete image
-lives in the `0.6` library namespace; earlier installations are not publication
-predecessors.
+## Verification
 
 Focused standard-library tests run outside LuaCov. They fragment protocol
 input down to individual bytes, exercise fixed/chunked/EOF bodies, duplicate

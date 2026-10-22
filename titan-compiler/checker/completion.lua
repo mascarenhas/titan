@@ -90,6 +90,7 @@ local function type_declarations(result,st,errors,depth,current_module)
     end
 end
 
+-- Implementation notes: doc/implementation/completion.md#context-and-candidates
 function completion_lexical(node,st,errors,kind,current_module)
     if not completion_matches(node,st) then return false end
     local result=begin(st,kind)

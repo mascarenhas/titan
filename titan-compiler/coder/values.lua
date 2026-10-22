@@ -20,6 +20,7 @@ checkandset = nil
 -- C99 abort fallback makes this branch terminal for the native optimizer too;
 -- otherwise it can join a failed Option force with a zero-initialized result
 -- and diagnose the following nominal field access as an out-of-bounds read.
+-- Implementation notes: doc/implementation/codegen-constructs.md#run-time-errors-codethrow-and-message-conventions
 function codethrow(loc, template, params)
     local line = loc and emitline({ loc = loc }) or ""
     return render([[
@@ -60,6 +61,7 @@ function coder._rebase_after_interface_discovery(ctx, typ)
     return "_base = restorestack(L, _base_off);"
 end
 
+-- Implementation notes: doc/implementation/values-and-gc.md#wrap-and-unwrap-at-the-boundary
 function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:string]], loc --[[:table]], retain_interface_result --[[:boolean?]])
     local tag
     if typ._tag == "Type.Integer" then
@@ -646,6 +648,7 @@ function foreigncast(exp, typ --[[:table]])
     })
 end
 
+-- Implementation notes: doc/implementation/values-and-gc.md#the-ctype-map
 function coder._raw_ctype(typ --[[:table]])
     if typ._tag == "Type.Integer" then return "lua_Integer"
     elseif typ._tag == "Type.Float" then return "lua_Number"
@@ -737,6 +740,7 @@ end
 -- The per-type emitter below is deliberately not an authorization oracle: the
 -- plan operation is validated first, Option recursion consumes `inner`, and a
 -- checked unavailable marker emits a well-behaved boundary error.
+-- Implementation notes: doc/implementation/lua-interop-internals.md#dynamic-boundary-conversion
 function coder._dynamiccheckandget(
         ctx, plan, typ, cvar, exp, loc, use,
         retain_interface_result)
@@ -1381,6 +1385,7 @@ function coder._checked_callable_plan_impl(
     return callable
 end
 
+-- Implementation notes: doc/implementation/type-relations-and-boundaries.md#coder-plan-validation
 function coder._checked_adjustment_plan_impl(
         adjustment, source_type, target_type, use, seen)
     use = use or "assignment adjustment"
@@ -2011,6 +2016,7 @@ end
 -- Emit the generated dynamic-boundary writer and initialize its module-local
 -- cached CClosure for each Array element type constructed by this module.
 -- These closures are carried by proxies; they are never published as tags.
+-- Implementation notes: doc/implementation/dense-arrays.md#stock-gc-ownership-and-barriers
 function coder._emit_array_writers(tlcontext, sigs, code, initfuncs)
     for _, entry in ipairs(tlcontext.array_writer_list) do
         local loc = {

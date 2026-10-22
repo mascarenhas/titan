@@ -241,6 +241,7 @@ function coder._transfer_emit_sources(tlcontext, code)
     end
 end
 
+-- Implementation notes: doc/implementation/codegen-overview.md#cross-state-closure-transfer-metadata
 function coder._transfer_emit_manifest(tlcontext, sigs, code)
     local entries = tlcontext.transfer_entries or {}
     local initializers = {}

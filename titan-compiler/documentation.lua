@@ -86,6 +86,7 @@ local function has_tag(doc, name)
     return false
 end
 
+-- Implementation notes: doc/implementation/documentation-comments.md#attachment-rules
 -- Only lexical comment tokens count. Quoted/long strings are skipped by the
 -- ordinary lexer, so a doc-looking string can never attach to a declaration.
 function documentation.attach(tree, source)
@@ -204,6 +205,7 @@ local function constructor_documentation(node)
     return doc
 end
 
+-- Implementation notes: doc/implementation/documentation-comments.md#binding-to-declarations
 function documentation.bind_declaration(node)
     if not node._documentation and (node._record_constructor or node._union_constructor) then
         node._documentation = constructor_documentation(node)

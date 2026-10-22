@@ -289,6 +289,7 @@ STDLIB_MODULES := coroutine uv async timer io fs net ssl url http websocket os p
 STDLIB_ROOTS := $(addprefix titan.,$(STDLIB_MODULES))
 
 .PHONY: stdlib stdlib-check install-stdlib publish-stdlib compiler-publication-check
+# Implementation notes: doc/implementation/windows-build.md#standard-provider-build-and-publication
 # Use the installed compiler and an already prepared native/runtime SDK.
 stdlib: titan/transfer_native.h titan/async_receiver_native.h titan/uv/external-wake-native.h
 	CC=$(call quote,$(CC)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB)) \

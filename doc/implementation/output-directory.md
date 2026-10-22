@@ -1,66 +1,74 @@
 # Compiler output-directory routing
 
-The CLI's `-o/--output` argument is a directory. It is normalized to an absolute
-path and created recursively before compilation. The source resolver and output
-routing remain separate: the logical module path and source form determine
-the source-root-relative native output stem beneath the destination. No
-absolute source prefix or `..` component is carried into an
+The CLI's `-o/--output` argument is a directory.
+`titanc` normalizes it to an absolute path and creates it recursively before
+compilation (`titan-compiler/driver.lua` `driver.prepare_output_root`). Source
+resolution and output routing are separate: the logical module name and source
+form determine the source-root-relative native output stem beneath the
+destination. No absolute source prefix or `..` component enters an
 output-relative stem.
 
 The [language chapter](../language/output-directory.md) defines paths and
-compatibility. The implementation touches `titanc`, `driver.lua`, and
+compatibility. The implementation lives in `titanc`, `driver.lua`, and
 `coverage.lua`.
 
 ## One source identity, separate artifact locations
 
-The selected flat or folder source retains its original filenames and
-constituent list. Those identities continue to drive diagnostics, `#line`,
-source timestamps, quoted authored-header resolution, coverage source lines,
-and source-private import permissions. Only native output and program output
-paths change. Folder contributors still form one translation unit owned by
-the canonical main.
+The selected flat or folder source keeps its original filenames and constituent
+list. Those identities drive diagnostics, `#line`, source timestamps, quoted
+authored-header resolution, coverage source lines, and source-private import
+permissions. Only native output and program output paths move. Folder
+contributors still form one translation unit owned by the canonical main.
 
-The resolver's output-root option maps the canonical main's source-root-relative
-path to `native_output`. Incremental object lookup and missing-header restoration
-consume that mapped stem, so they cannot silently use source-adjacent objects
-from another configuration. Without an output root the existing resolver paths
-remain unchanged. This routing changes neither serialized interface contracts
-nor the generated-code ABI.
+The resolver's `output_root` option maps the canonical main's
+source-root-relative path to `native_output` and `program_output`
+(`driver.relocate_source_output`; other generated files use
+`driver.generated_output_path`). The stem is the logical name with dots
+replaced by slashes, plus the repeated final component for a folder module.
+Incremental object lookup and missing-header restoration consume that mapped
+stem, so they never pick up source-adjacent objects from another configuration.
+Without an output root the resolver keeps source-adjacent paths. Routing changes
+neither serialized interfaces nor the generated-code ABI.
 
-Final providers retain common-prefix naming below the output root. Generated
-Lua shims preserve their logical module paths there. Unix programs and test
-runners use mapped program stems. Windows program linking receives the output
-root for its existing `bin/` launcher and `lib/titan/0.6/` provider layout.
-Output routing does not mutate the source or binary search paths.
+Final providers keep common-prefix naming below the output root, and generated
+Lua shims keep their logical module paths there. Unix programs and test runners
+use mapped program stems. Windows program linking receives the output root for
+its `bin/` launcher and `lib/titan/0.6/` provider layout
+(`driver.windows_program_paths`). Output routing never changes the source or
+binary search paths.
 
 ## Headers, temporary files, and coverage
 
 Generated FFI and foreign-function headers follow `native_output`. Checking FFI
-bundles and compiler-owned temporary diagnostic, child-notification, and native
-validation files use the output root as well and retain their normal cleanup.
-Provider and archive publication stages stay beside their mapped final paths.
-Probe service storage retains its existing cache ownership.
+bundles and compiler-owned temporary files (diagnostics, child notifications,
+native validation) are created under the output root: the resolver context wraps
+`io:tmpname` into `<output_root>/.titan-temporary-*`, and `driver.OUTPUT_ROOT`
+places the compile-log temporaries. Both keep their normal cleanup. Provider and
+archive publication stages sit beside their mapped final paths. The C probe
+cache keeps its own storage root.
 
-Coverage applies its `.coverage` path transformation after ordinary output
-mapping. This preserves the same source-relative hierarchy while keeping
-coverage and ordinary incremental objects separate. Unless explicitly
-overridden, report output is `<output-root>/.coverage/report`. Source and
-counter inventories retain their ordinary absolute-path contract.
+Coverage applies its `.coverage` transform after ordinary output mapping
+(`titan-compiler/coverage.lua` `coverage.output_path`). This keeps the same
+source-relative hierarchy while separating coverage objects from ordinary
+incremental objects. Unless `--coverage-output` overrides it, the report goes
+to `<output-root>/.coverage/report` (`coverage.prepare`). Source and counter
+inventories keep absolute paths.
 
-The repository Makefiles pass one output root consistently through separate
-object recipes and final links. Publication reads the completed provider pair
-and shims from that stage. Native test and coverage configurations use separate
-subtrees below `out/`. Windows native scripts retain their private source,
-SDK, fixture, and launcher ownership boundaries inside their selected build
-root. Authored runtime C objects and native dependency archives remain governed
-by their existing build targets.
+The repository Makefiles pass one output root through separate object recipes
+and final links; see [Build and installation
+responsibilities](build-script-audit.md) for the object graph. Native test and
+coverage configurations use separate subtrees below `out/`. The Windows scripts
+keep their private source, SDK, fixture, and launcher trees inside the selected
+build root; see [Experimental Windows build](windows-build.md).
 
 ## Validation boundaries
 
-Driver tests cover mapping and directory preparation; CLI integration tests
-compile and execute external source trees, libraries, folder modules, and test
-runners with output paths containing spaces. Incremental cases verify reuse and
-header restoration in the selected tree. Coverage cases verify the relocated
-`.coverage` artifacts and default report directory. Build and packaging tests
-check that publication, invalidation, and snapshots consume the new stage.
-Native Linux, macOS, and Windows gates exercise actual toolchain paths.
+`spec/driver_spec.lua` covers mapping and directory preparation. CLI
+integration specs (`spec/coder/incremental_compilation_spec.lua`,
+`spec/coder/test_runner_spec.lua`, `spec/coder/standalone_paths_spec.lua`)
+compile and run external source trees, libraries, folder modules, and test
+runners with output paths that contain spaces. Incremental cases verify reuse
+and header restoration in the selected tree, and coverage cases verify the
+relocated `.coverage` artifacts and default report directory. Packaging specs
+check that publication and invalidation consume the output stage. The native
+Linux, macOS, and Windows gates exercise real toolchain paths.
