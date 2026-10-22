@@ -254,7 +254,7 @@ slots. The exact-slot rule relies on a checker precondition:
 when no `cast_module` is given, but every cast site supplies `cast_module`
 (`interface_relation_policy` sets it to the checking module).
 `coder._interface_pair` asserts that an exact slot's concrete owner is the
-emitting module before registering the pair.
+emitting module when it validates the pair's slots.
 For both slot kinds, dispatch passes user value 0 as `_mod` and the concrete
 method receives its own module.
 
