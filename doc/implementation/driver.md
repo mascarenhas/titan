@@ -125,7 +125,7 @@ so its DLL launcher can find the application's own provider. Its default Titan
 path is `.;<root>/lib/titan/0.6;<exe-dir>/../lib/titan/0.6`. The chunk stores
 that default under `TITAN_PATH_KEY`. When a Titan path variable is set, it
 stores the selected value instead, with each `;;` replaced by that same default
-through `pushpath`'s two-pass substitution. An override such as
+the way `pushpath` substitutes it. An override such as
 `<sdk>/lib/titan/0.6;;` therefore still reaches the launcher's own DLL, while a
 value without `;;` replaces the default. When all three paths are explicit, the
 chunk returns early: `pushpath` then expands `;;` against the executable-relative

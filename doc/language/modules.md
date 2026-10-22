@@ -715,7 +715,9 @@ working directory does not select that root. Default Lua and Titan library
 paths use that root's `share/lua/5.5`, `lib/lua/5.5`, and `lib/titan/0.6` trees.
 Ordinary `./` module search entries remain available. Explicit variables,
 including empty values, retain their existing precedence, and a `;;` in an
-explicit Titan path inserts the same default an unset variable gets. Windows
+explicit Titan path inserts the default described here (on Windows, when the
+Lua paths are also all set explicitly, the default is rooted at the
+executable's parent directory instead). Windows
 launchers also retain their adjacent `../lib` and `../share` bundle paths. A
 Windows launcher loads its own provider from that `../lib` tree, so its default
 Titan path is `.;<root>/lib/titan/0.6;<exe-dir>/../lib/titan/0.6`. An override
