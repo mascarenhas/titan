@@ -306,7 +306,9 @@ end
 -- Implementation notes: doc/implementation/transfer-library.md#registration-attachment-and-claim
 local function ResourceScope:claim(data: foreign const *void, length: integer,
     expected_release: foreign function(*void): void): foreign *void
-  if self.encoding then raise "transfer: resource claim requires a decode scope" end
+  -- Only a live decode frame has a message: encode frames never do, and
+  -- retirement clears it, so a context kept past its decode raises here.
+  if self.message == nil then raise "transfer: resource claim requires a decode scope" end
   if length ~= 4 then raise "transfer: invalid resource attachment index width" end
   -- Inverse of protobuf.write_resource_index_bytes; the width check above
   -- precedes every read, and the slice is always inside the owned packet.

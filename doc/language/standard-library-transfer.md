@@ -355,10 +355,11 @@ whatever its unfinished packet still owns.
   order and claim with `claim_registered_resource(context, data, length,
   expected_release)`, passing on the `context` it received. That `context` is
   valid only until `construct` returns: do not store it or pass it to a later
-  call. Using it afterwards is outside the contract and is not reliably
-  detected; it can crash or claim from an unrelated packet. A `nil` context
-  raises `"transfer: resource claim requires a decode scope"`; the other checks
-  are those of `claim_resource`.
+  call. A stored context used after its decode has finished raises
+  `"transfer: resource claim requires a decode scope"`, as does a `nil`
+  context. A stored context used while a later decode is running is not
+  detected: it can claim from that unrelated packet, and that packet's own
+  claim then fails. The other checks are those of `claim_resource`.
 - **Packet-local index guarantee**: The four-byte slot index is meaningful only
   against the active packet's resource table; it is **not** a global
   anti-replay token across different packets (where slot `0` may name a valid
