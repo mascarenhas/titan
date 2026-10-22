@@ -105,7 +105,7 @@ This is root discovery, not the previous policy of adding every
 find that exact suffix becomes `driver.INSTALLATION_ERROR` and stops
 compiler/toolchain use instead of silently mixing installations.
 
-The CLI's `--print-prefix` query calls the same
+The CLI's `--print-root` query calls the same
 `driver.resolve_installation_root(package.cpath, TITAN_ROCKS_ROOT)` function
 before creating a resolver or checking build options. It therefore reports the
 normalized SDK root without a C toolchain or any C-probe/cache work, including
@@ -113,8 +113,35 @@ when compilation flags or `TITAN_JOBS` are invalid. Windows ordinary drive and
 UNC paths retain the driver's normalized forward-separator spelling; explicit
 extended paths retain their namespace and literal semantics. No installation
 prefix is embedded in the query, compiler, Lua, or native provider. Its only
-successful stdout is the prefix and one newline. Module names are rejected;
+successful stdout is the root and one newline. Module names are rejected;
 without the query the CLI still requires at least one module name.
+
+### Standalone startup path discovery
+
+`driver.entrypoint_contents` embeds `titan-compiler/standalone_paths.lua` as a
+built-in-only Lua chunk. After `luaL_openlibs` and before `titan_init_paths` or
+any module initialization, the launcher supplies its executable
+directory, library version, and registry keys. Linux uses `/proc/self/exe`,
+macOS uses `_NSGetExecutablePath` plus `realpath`, and Windows uses
+`GetModuleFileNameW` with UTF-8 conversion. None uses CWD or `argv[0]`.
+
+For unset paths, the chunk probes `titanc --print-root`, then
+`lua -e "io.write(package.cpath)"`, suppressing probe stderr and requiring a
+successful exit. A root query must return one absolute root; the Lua fallback
+scans exact current-Titan templates before Lua 5.5 templates. Missing commands,
+failed queries, and unusable output fall back to the executable directory.
+The selected root replaces only unset Lua package paths and seeds
+`TITAN_ROOT_KEY` before ordinary runtime path initialization. An explicit
+Lua C path with a recognized anchor remains the runtime root source.
+Versioned environment variables retain precedence over unversioned variables;
+empty explicit values are still overrides. When all three paths are explicit,
+no probe runs. Lua's existing explicit-path and `;;` expansion is retained.
+Windows also keeps adjacent bundle provider/shim paths after discovered paths,
+so its DLL launcher can find the application's own provider.
+
+The chunk uses no compiler modules at runtime and embeds no build prefix.
+Ordinary Lua hosts keep the existing `titan_init_paths` behavior. This changes
+only generated executable startup, with no compiled-module ABI change.
 
 Both Unix and Windows SDK installation also publish Titan's own `LICENSE` at
 `<root>/share/titan/LICENSE`, so SDK consumers can redistribute the license
@@ -1987,7 +2014,7 @@ the explicit public-header input for its native helper builds.
 | installed link set | `driver.installed_link_inputs` / `append_runtime_libraries` | Unix: `<root>/lib/titan/0.6/libtitan.a` + separate `<root>/lib/libbacktrace.a` + `<root>/lib/liblua.a` + platform libraries; Windows: `libtitan.a` + `<root>/lib/libbacktrace.a` + `<root>/lib/liblua55.a` + `-static-libgcc` | Used by provider DSOs and programs; Linux adds `-ldl`, and Linux/macOS add `-lm`. These common final inputs are not copied into Unix package archives. The Unix standard build always supplies pinned libuv as `-X` payload to both `titan.so` and `titan.a`; system OpenSSL keeps explicit pkg-config link flags at final link. |
 | checkout link set | `driver.source_link_inputs` / `append_runtime_libraries` | local `libtitan.a` + separate local `libbacktrace.a` + matching `liblua.a` + `-ldl -lm` | Uses `<prefix>/lib/liblua.a` when `LUA_SOURCE_PATH` physically matches the active installed Lua SDK's `src/lua-5.5.1`; other source trees use their local archive. Preserves the writable source-development path and never links `titan.o` directly. |
 | `TITAN_ROOT_DEFAULT` / `TITAN_LUA_CPATH_SUFFIX` | `titan.h`/`titan.c` | `/usr/local` / `/lib/lua/5.5/?.so` | Legacy run-time root fallback and exact template suffix used for root discovery. |
-| `titan_init_paths` | generated standalone entrypoint / `titan.c` | root parsed from inherited `package.cpath` | Caches the root and Titan module path and ensures `<root>/lib/titan/0.6/?.so` is in `package.cpath`; Titan-owned Lua has it first by default, with `<root>` inferred from the running executable. |
+| `titan_init_paths` | generated standalone entrypoint / `titan.c` | standalone discovery above; otherwise root parsed from inherited `package.cpath` | Caches the root and Titan module path and ensures `<root>/lib/titan/0.6/?.so` is in `package.cpath`; Titan-owned Lua has it first by default, with `<root>` inferred from the running executable. |
 | registry keys | `titan.h` | `TITAN_ROOT_KEY`, `TITAN_PATH_KEY`, `TITAN_LIBS_KEY`, `TITAN_MAIN_BOOTSTRAP_KEY`, `TITAN_MAIN_ARGC_KEY`, `TITAN_MAIN_ARGV_KEY`, `TITAN_BT_STATE_KEY`, `TITAN_BACKTRACE_KEY`, `TITAN_NAMES_KEY`, `TITAN_TRACE_PINNED`, `TITAN_TRACE_APPEND_KEY` (UUID strings) | Per-state caches and hooks: Titan SDK/rocks-tree root, module path, dlopen handles, optional standalone bootstrap, original process arguments and libuv's possibly replaced `argv`, registry-owned libbacktrace state, last raw backtrace, native-frame display names, re-raise traceback pin, and coroutine traceback append handoff. |
 | generated ABI symbol | `coder.lua` | `<mangled>_abi` returning `TITAN_ABI_VERSION` | Checked before DSO type rehydration and before run-time dynamic-import `dlsym`; the same value is embedded in static metadata and compared during paired validation. Markerless compiled modules are incompatible. |
 

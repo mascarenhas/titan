@@ -84,7 +84,7 @@ tar zxf luarocks-3.13.0.tar.gz
 
 export PATH="$PREFIX/bin:$PATH"
 luarocks install titan
-titanc --print-prefix    # prints $PREFIX if the install worked
+titanc --print-root    # prints $PREFIX if the install worked
 ```
 
 Keep `$PREFIX/bin` first on `PATH` so that `lua`, `luarocks`, and `titanc` all

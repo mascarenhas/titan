@@ -115,6 +115,7 @@
 3 spec/coder/so_trace_names_spec.lua 6.051
 4 spec/coder/source_import_local_visibility_spec.lua 76.086
 1 spec/coder/spread_expressions_spec.lua 11.918
+1 spec/coder/standalone_paths_spec.lua 1.000
 2 spec/coder/stack_capacity_spec.lua 4.596
 3 spec/coder/stack_relocation_spec.lua 6.715
 1 spec/coder/static_compiled_modules_spec.lua 4.249
@@ -151,11 +152,12 @@
 4 spec/path_spec.lua 0.165
 1 spec/projectcache_spec.lua 473.778
 4 spec/sha256_spec.lua 0.009
+1 spec/standalone_paths_spec.lua 0.010
 3 spec/staticmetadata_spec.lua 0.606
 3 spec/symtab_spec.lua 0.024
 3 spec/test_runner_spec.lua 0.112
 1 spec/titanc_parallel_spec.lua 0.029
-1 spec/titanc_prefix_spec.lua 0.050
+1 spec/titanc_root_spec.lua 0.050
 4 spec/typedecl_spec.lua 0.005
 3 spec/types_spec.lua 0.185
 4 spec/union_interface_spec.lua 0.590

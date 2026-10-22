@@ -465,8 +465,8 @@ titanc [--print-ast] [--pretty-print] [-v] [-j jobs] [--static] [--test] \
   [--tree <srcroot>] [-o|--output <directory>] [-l lib1,lib2] [-X object...] <module>...
 ```
 
-`titanc --print-prefix` is a separate query: it prints the selected installation
-prefix followed by a newline and exits without compiling, probing C tools, or
+`titanc --print-root` is a separate query: it prints the selected installation
+root followed by a newline and exits without compiling, probing C tools, or
 creating a probe cache. Do not pass module names with the query. It uses the
 compiler's ordinary `package.cpath` discovery, including Windows installations
 and relocated SDKs, with `TITAN_ROCKS_ROOT` retaining its internal installation
@@ -703,6 +703,20 @@ executable's location. Environment path overrides retain their ordinary Lua
 precedence. LuaRocks configuration and installed command wrappers may still
 contain absolute paths, so this module-path behavior alone does not make an
 entire installed toolchain relocatable.
+
+Standalone Titan executables select defaults separately from their build
+installation. For each unset `LUA_PATH`, `LUA_CPATH`, or `TITAN_PATH` (including
+its versioned form), startup first tries `titanc --print-root` on `PATH`, then
+asks `lua` on `PATH` for `package.cpath`. Lua discovery prefers the current
+`/lib/titan/0.6/?.so` template, then `/lib/lua/5.5/?.so` (`?.dll` on Windows).
+If neither command provides a root, the root is the physical directory
+containing the executable; Unix symlink launches use the physical image. The
+working directory does not select that root. Default Lua and Titan library
+paths use that root's `share/lua/5.5`, `lib/lua/5.5`, and `lib/titan/0.6` trees.
+Ordinary `./` module search entries remain available. Explicit variables,
+including empty values, retain their existing precedence and `;;` behavior.
+Windows launchers also retain their adjacent `../lib` and `../share` bundle
+paths. No path from the Titan build environment is embedded in the program.
 
 The standard-library names `coroutine`, `uv`, `async`, `timer`, `io`, `fs`,
 `net`, `ssl`, `url`, `http`, `websocket`, `os`, `path`, `peg`, `string`, `test`, `lua`, `math`, `gc`,

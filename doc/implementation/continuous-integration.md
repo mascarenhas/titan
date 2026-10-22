@@ -22,11 +22,14 @@ two `test-linux-compiler` shard pairs and `native-coverage` start in parallel.
 Preparation has a 30-minute timeout, compiler pairs 45 minutes, native coverage
 60 minutes, and the independent cold sanitizer build 75 minutes.
 
-Linux sets `MAKEFLAGS=-j2` and `TITAN_JOBS=2` for its two-CPU runners. Native
-Make prerequisites may overlap; each compiler process overlaps only generated-C
-objects. Compiler shards override nested Make/Titan work to one slot and run
-at most two workers per runner. Dedicated parallelism regressions retain their
-explicit bounds. Recursive LuaRocks/CMake recipes preserve the Make jobserver;
+Linux defaults to `MAKEFLAGS=-j2` and `TITAN_JOBS=2` for its two-vCPU runners.
+The sanitizer uses a four-vCPU runner with 16GB RAM and overrides both limits
+to four; large instrumented test units exceed the smaller runner's 8GB RAM.
+Native Make prerequisites may overlap; each compiler process overlaps only
+generated-C objects. Compiler shards override nested Make/Titan work to one
+slot and run at most two workers per runner. Dedicated parallelism regressions
+retain their explicit bounds. Recursive LuaRocks/CMake recipes preserve the Make
+jobserver;
 `ltitanlib.o` waits for the selected Lua installation's public headers.
 
 Generated-C scheduling launches larger units first and receives actual child
@@ -144,7 +147,7 @@ OpenSSL, and Titan tree; it never consumes the ordinary compiler artifact.
 Before LuaRocks/Titan installation, restore native dependencies keyed by pinned
 identities, libbacktrace revision, sanitizer flags, Readline/toolchain identity,
 OS/architecture, and recipe schema. Always rerun the native targets as one
-two-slot jobserver DAG to validate or repair restored outputs, then save a miss
+four-slot jobserver DAG to validate or repair restored outputs, then save a miss
 at the clean boundary. That cache contains neither LuaRocks/Titan state nor
 C-probe records.
 

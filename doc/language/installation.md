@@ -71,7 +71,7 @@ Keep `$PREFIX/bin` first on `PATH` so that `lua`, `luarocks`, and `titanc` all c
 from this installation. To check the result:
 
 ```sh
-titanc --print-prefix    # prints the installation root
+titanc --print-root    # prints the installation root
 ```
 
 ### Why a Lua fork, and what stock LuaRocks means here
@@ -431,13 +431,15 @@ For the interpreter at `$PREFIX/bin/lua`:
 
 For an installed `titanc`, the SDK root comes from the first `/lib/titan/0.6/?.so`
 template in `package.cpath`, falling back to an ordinary `/lib/lua/5.5/?.so` template.
-`titanc --print-prefix` prints that root. It compiles nothing and reads the current
-`package.cpath`.
+`titanc --print-root` prints that root.
+It compiles nothing and reads the current `package.cpath`.
 
-A compiled executable at `<root>/bin/program` uses the same executable-relative paths
-and finds providers and loaders under `<root>`. It recovers the runtime root from
-`package.cpath` and makes sure `<root>/lib/titan/0.6/?.so` is present. A program
-installed elsewhere can select providers with the overrides below.
+A compiled executable discovers default library paths at startup: it tries
+`titanc --print-root` on `PATH`, then derives a root from the `package.cpath`
+printed by `lua` on `PATH`. Without either, it uses the physical directory
+containing the executable. It never uses the working directory as the root.
+Each explicit Lua or Titan path variable keeps its precedence; see
+[standalone module search](modules.md#where-modules-are-found) for the search order.
 
 An unmodified Lua 5.5 can use the same paths through environment variables:
 

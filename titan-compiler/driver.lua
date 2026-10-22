@@ -7331,6 +7331,9 @@ static int titan_open_main(lua_State *L) {
 
 local entrypoint_template = [[
 
+#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -7339,6 +7342,16 @@ local entrypoint_template = [[
 #include "lualib.h"
 #include "lauxlib.h"
 #include "titan.h"
+#if defined(_WIN32)
+#include <windows.h>
+#include <wchar.h>
+#else
+#include <unistd.h>
+#include <limits.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+#endif
 
 $PLATFORM_ALERTS
 
@@ -7407,6 +7420,63 @@ static void report_titan_error(const char *message, const char *trace) {
     fputs("stack traceback:", stderr);
     write_tabbed_trace(trace);
     exit(EXIT_FAILURE);
+}
+
+/* Resolve the process image, independently of argv[0], PATH and CWD. */
+static void titan_push_executable_directory(lua_State *L) {
+#if defined(_WIN32)
+    DWORD length;
+    int bytes;
+    WCHAR *wide = (WCHAR *)lua_newuserdatauv(L, 32768 * sizeof(WCHAR), 0);
+    char *utf8;
+    WCHAR *last;
+    length = GetModuleFileNameW(NULL, wide, 32768);
+    if (length == 0 || length >= 32768) fatal("cannot locate executable");
+    last = wcsrchr(wide, L'\\');
+    if (last == NULL) fatal("cannot locate executable directory");
+    if (last == wide + 2 && wide[1] == L':') last++;
+    *last = L'\0';
+    bytes = WideCharToMultiByte(CP_UTF8, 0, wide, -1, NULL, 0, NULL, NULL);
+    if (bytes == 0) fatal("cannot encode executable directory");
+    utf8 = (char *)lua_newuserdatauv(L, (size_t)bytes, 0);
+    if (!WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, bytes, NULL, NULL))
+        fatal("cannot encode executable directory");
+    lua_pushstring(L, utf8);
+    lua_replace(L, -3);
+    lua_pop(L, 1);
+#else
+    char image[PATH_MAX + 1], resolved[PATH_MAX + 1];
+    char *last;
+#if defined(__APPLE__)
+    uint32_t size = sizeof(image);
+    if (_NSGetExecutablePath(image, &size) != 0)
+        fatal("cannot locate executable");
+#else
+    ssize_t length = readlink("/proc/self/exe", image, sizeof(image));
+    if (length < 0 || (size_t)length >= sizeof(image))
+        fatal("cannot locate executable");
+    image[length] = '\0';
+#endif
+    if (realpath(image, resolved) == NULL) fatal("cannot resolve executable");
+    last = strrchr(resolved, '/');
+    if (last == NULL) fatal("cannot locate executable directory");
+    if (last == resolved) last++;
+    *last = '\0';
+    lua_pushstring(L, resolved);
+#endif
+}
+
+static void titan_init_standalone_paths(lua_State *L) {
+    static const unsigned char source[] = $PATH_INITIALIZER;
+    if (luaL_loadbuffer(L, (const char *)source, sizeof(source),
+                        "@titan.standalone_paths") != LUA_OK)
+        fatal(lua_tostring(L, -1));
+    titan_push_executable_directory(L);
+    lua_pushliteral(L, TITAN_LIBRARY_VERSION);
+    lua_pushliteral(L, TITAN_ROOT_KEY);
+    lua_pushliteral(L, TITAN_PATH_KEY);
+    if (lua_pcall(L, 4, 0, 0) != LUA_OK) fatal(lua_tostring(L, -1));
+    titan_init_paths(L);
 }
 
 static char titan_main_array_writer_key;
@@ -7509,7 +7579,7 @@ int main(int argc, char** argv) {
         fatal("not enough memory for state");
     }
     luaL_openlibs(L);
-    titan_init_paths(L);
+    titan_init_standalone_paths(L);
     $COVERAGE_PREPARE
     lua_getglobal(L, "package");
     lua_getfield(L, -1, "preload");
@@ -7546,6 +7616,8 @@ int main(int argc, char** argv) {
 function driver.entrypoint_contents(modname, program_name, options)
     options = options or {}
     local values = {
+        PATH_INITIALIZER = assert(staticmetadata.c_initializer(
+            require("titan-compiler.standalone_paths"))),
         PROGNAME = program_name or modname:gsub(".*[.]", ""),
         LUAOPEN_FN = "luaopen_" .. modname:gsub("[.]", "_"),
         MODNAME = modname,
