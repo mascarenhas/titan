@@ -4796,23 +4796,6 @@ function types.comparable(left, right)
     return nil
 end
 
-function types.generic_owner_view(source, target)
-    source, target = normalized_pair(source, target)
-    if not source or not target
-       or source._tag ~= "Type.Nominal"
-       or target._tag ~= "Type.Nominal"
-       or source.fqtn ~= target.fqtn
-       or not relation_consistent(source, target) then
-        return nil
-    end
-    return plan("generic_owner_view", {
-        source = source,
-        target = target,
-        erased_source = types.erase(source),
-        erased_target = types.erase(target),
-    })
-end
-
 -- Implementation notes: doc/implementation/type-relations-and-boundaries.md#direct-coercion-and-assignment
 function types.assignment_adjustment(source, target, policy)
     policy = policy or {}

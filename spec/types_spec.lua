@@ -3103,7 +3103,6 @@ describe("Titan types", function()
             assert.is_true(types.consistent(nested, erased))
             assert.is_nil(types.assignment_adjustment(precise, wrong))
             assert.is_nil(types.assignment_adjustment(precise, erased))
-            assert.is_truthy(types.generic_owner_view(precise, erased))
 
             local box_scope = types.GenericScope(
                 "sample", "sample.Box", nil, "owner", "record")
@@ -3603,9 +3602,6 @@ describe("Titan types", function()
             assert.is_false(types.consistent(types.Value(), constrained))
             assert.is_true(types.consistent(
                 types.Nominal("sample.Show"), constrained))
-            assert.is_nil(types.generic_owner_view(
-                types.Nominal("sample.Left", {types.Integer()}),
-                types.Nominal("sample.Right", {types.Integer()})))
         end)
 
         it("alpha-closes generic methods for Interface matching", function()

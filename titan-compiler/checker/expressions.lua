@@ -290,9 +290,6 @@ checkexp = util.make_visitor({
                and c_function_pointer_accepts_declaration(context, cfunc) then
                 node._type = context
                 node._foreign_function_reference = reference
-                if not reference.source then
-                    node._foreign_function_pointer = reference.name
-                end
             else
                 node._type = invalid(errors, node.loc,
                     "a foreign (C) function cannot be used as a first-class value")

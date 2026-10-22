@@ -98,12 +98,11 @@ initializer-less.
 For a mutable `StatDecl` with no expression list
 (`checker/statements.lua`, the `Ast.StatDecl` visitor), the checker:
 
-1. marks the node `_omitted_initializer`;
-2. requires every declaration to have a written type;
-3. resolves and validates each type;
-4. requires `accepts_missing_nil` for each slot;
-5. synthesizes one `Ast.ExpNil` per declaration; and
-6. runs the ordinary finite expression-list adjustment so the coder sees the
+1. requires every declaration to have a written type;
+2. resolves and validates each type;
+3. requires `accepts_missing_nil` for each slot;
+4. synthesizes one `Ast.ExpNil` per declaration; and
+5. runs the ordinary finite expression-list adjustment so the coder sees the
    same normalized shape as an explicit nil list.
 
 Const locals arrive only with an expression list. Their `Decl.isconst` flag is

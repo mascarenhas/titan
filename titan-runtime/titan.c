@@ -1517,49 +1517,6 @@ void titan_check_module_abi(lua_State *L, TitanModuleProvider provider,
 #endif
 }
 
-void titan_check_types(lua_State *L, void *lib, const char *sym,
-                       const char *file, const char *expected) {
-    typedef int (*titan_types_fn)(lua_State *);
-    void *raw;
-    titan_types_fn fn;
-    int top = lua_gettop(L);
-    int nresults;
-    const char *actual;
-#if defined(_WIN32)
-    TitanModuleProvider provider = { lib, NULL };
-    const char *err;
-    raw = titan_find_module_symbol(provider, sym, &err);
-#else
-    dlerror();  /* clear stale error */
-    raw = dlsym(lib, sym);
-#endif
-    if (raw == NULL) {
-#if !defined(_WIN32)
-        const char *err = dlerror();
-#endif
-        luaL_error(L,
-            "Titan compiled module '%s' is missing types symbol '%s': %s",
-            file, sym, err ? err : "symbol not found");
-    }
-    fn = titan_cast_func(titan_types_fn, raw);
-    nresults = fn(L);
-    if (nresults != 1 || !lua_isstring(L, -1)) {
-        lua_settop(L, top);
-        luaL_error(L,
-            "Titan compiled module '%s' has an invalid types marker '%s'",
-            file, sym);
-    }
-    actual = lua_tostring(L, -1);
-    if (strcmp(actual, expected) != 0) {
-        luaL_error(L,
-            "Titan compiled module '%s' type manifest mismatch: "
-            "the loaded provider '%s' has a different module interface "
-            "than the one this module was compiled against",
-            file, sym);
-    }
-    lua_settop(L, top);
-}
-
 /* The generated verifier uses only these three primitives. Do not resolve
 ** them through mutable Lua globals: ordinary Lua code may replace error/next
 ** without changing the checks needed before entering native Titan code. */
@@ -1624,23 +1581,6 @@ static void titan_check_compatibility_entry(lua_State *L, void *raw,
     lua_insert(L, -2); /* verifier function, provider metadata */
     lua_call(L, 1, 0);
     lua_settop(L, top);
-}
-
-void titan_check_compatibility(lua_State *L, void *lib, const char *sym,
-                              const char *file, const char *verifier,
-                              size_t verifier_size) {
-    void *raw;
-    const char *error;
-#if defined(_WIN32)
-    TitanModuleProvider provider = { lib, NULL };
-    raw = titan_find_module_symbol(provider, sym, &error);
-#else
-    dlerror();
-    raw = dlsym(lib != NULL ? lib : RTLD_DEFAULT, sym);
-    error = raw == NULL ? dlerror() : NULL;
-#endif
-    titan_check_compatibility_entry(L, raw, sym, file, verifier,
-        verifier_size, error);
 }
 
 /* Implementation notes: doc/implementation/binary-compatibility.md#generated-exports-and-runtime-verification */
