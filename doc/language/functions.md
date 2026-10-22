@@ -604,10 +604,11 @@ The rules:
 
 * **The resolved signature must match exactly**: one fixed parameter of type
   `{string}`, no input-variadic tail, one fixed return of type `integer`, and no
-  flexible return tail. Transparent aliases of either type are accepted. A
-  top-level function named `main` with any other
-  signature is an ordinary function, and the module compiles to a shared
-  library as usual.
+  flexible return tail. Transparent aliases of either type are accepted. The
+  parameter must be the mutable Array: `const { string }` and
+  `const? { string }` are different types. A top-level function named `main`
+  with any other signature is an ordinary function, and the module compiles to
+  a shared library as usual.
 * **Only one `main` per program.** If more than one module given on the
   `titanc` command line has a qualifying `main`, compilation fails with
   `<module>: multiple main functions found (already declared in

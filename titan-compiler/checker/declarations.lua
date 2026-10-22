@@ -1800,6 +1800,7 @@ function checker.has_main(ast)
            and not node._type.varargtype
            and #node.params == 1
            and node.params[1]._type._tag == "Type.Array"
+           and node.params[1]._type.isconst.tag == "no"
            and node.params[1]._type.elem._tag == "Type.String"
            and #node._type.rettypes == 1
            and not node._type.flexrettype

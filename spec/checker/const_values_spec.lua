@@ -1,4 +1,5 @@
 local h = require "spec.support.helpers"
+local checker = require "titan-compiler.checker"
 local types = require "titan-compiler.types"
 
 local run_checker = h.run_checker
@@ -465,5 +466,26 @@ describe("const values (typechecker)", function()
 
         local linear = find_function(tree, "linear_call").block.stats[1]
         assert.equal("freeze", linear.exps[1]._written_cast.value.mode)
+    end)
+
+    it("does not recognize a const string Array main as the executable entry",
+    function()
+        for _, annotation in ipairs({ "const { string }", "const? { string }" }) do
+            local ok, err, tree = run_checker([[
+                function main(args: ]] .. annotation .. [[): integer
+                    return #args
+                end
+            ]])
+            assert.truthy(ok, err)
+            assert.falsy(checker.has_main(tree), annotation)
+        end
+
+        local ok, err, tree = run_checker([[
+            function main(args: { string }): integer
+                return #args
+            end
+        ]])
+        assert.truthy(ok, err)
+        assert.truthy(checker.has_main(tree))
     end)
 end)

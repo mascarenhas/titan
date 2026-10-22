@@ -1596,7 +1596,8 @@ The `titanc` flow:
    status 1 **before any code generation**.
 2. **`main` detection.** For each successfully checked module,
    `checker.has_main(ast)` looks for a top-level function named `main`
-   with exactly one fixed parameter of checked type `{string}`, no input tail,
+   with exactly one fixed parameter of checked type `{string}` (mutable;
+   `const { string }` and `const? { string }` do not qualify), no input tail,
    exactly one checked return type of `integer`, and no flexible result tail.
    Transparent aliases may spell either type; omitting the return annotation
    means zero declared results and therefore is not a `main`. At most
@@ -1761,9 +1762,7 @@ It also declares the dynamic-loading and error functions exported by
 `titan.c`: `loadlib`, `loadsym`, `loadglobalsym`, `titan_module_provider`,
 `titan_module_symbol`, the ABI/compatibility check helpers, and `errorhandler`.
 Generated imports use `titan_check_module_abi` and
-`titan_check_module_compatibility` with the selected logical provider. The
-exported `titan_check_types` helper implements exact serialized comparison
-but has no generated-code callers.
+`titan_check_module_compatibility` with the selected logical provider.
 
 ### `titan.c`: the dynamic loader
 
