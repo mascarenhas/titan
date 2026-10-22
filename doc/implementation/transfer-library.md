@@ -40,9 +40,12 @@ acquires a `ResourceScope`; the first two leave any enclosing scope intact.
 
 `encode_packet` then tries, in order:
 
-1. **Registered resource root.** A `LUA_TUSERDATA` that
-   `protobuf.find_resource_codec` matches by canonical erased metatable
-   (`thread.Sender`, `thread.Receiver`). The complete one-entry packet size is
+1. **Registered resource root.** A `LUA_TUSERDATA` whose metatable has no
+   metatable and that `protobuf.find_resource_codec` matches by canonical
+   erased metatable (`thread.Sender`, `thread.Receiver`). As in
+   `TransferValue.from_value`, a metatable with its own metatable skips this
+   lookup, so an inherited `__index` runs once, for the reflective brand
+   lookup only. The complete one-entry packet size is
    reserved before `codec.encode(scope, candidate)` attaches the endpoint; the
    four-byte index is written with `protobuf.write_resource_index` and
    `finalize_buf_message` produces a `RECORD_PAYLOAD` packet in place.

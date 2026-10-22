@@ -1182,7 +1182,13 @@ end
 local function encode_packet(candidate: value, scope: ResourceScope): foreign *void
   local raw: foreign TValue = candidate
   if ffi.lmacro_ttype(raw) == ffi.LUA_TUSERDATA then
-    local codec? = protobuf.find_resource_codec(candidate)
+    -- Like TransferValue.from_value: a metatable with its own metatable can
+    -- run __index for the brand key, so leave that one lookup to reflection.
+    local mt = ffi.lmacro_uvalue(raw).metatable
+    local codec: protobuf.ResourceCodec? = nil
+    if mt ~= nil and mt.metatable == nil then
+      codec = protobuf.find_resource_codec(candidate)
+    end
     if codec ~= nil then
       local module = nominal_module(candidate)
       local name = codec.descriptor.name
