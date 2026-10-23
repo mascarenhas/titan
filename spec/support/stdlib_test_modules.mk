@@ -117,6 +117,7 @@ TITAN_TEST_IMPORTS_fs.test_support := support.common
 
 TITAN_TEST_SOURCES_fs.tests := spec/stdlib/titan/fs/tests.titan
 TITAN_TEST_IMPORTS_fs.tests := fs.test_support support.async support.common support.runtime
+TITAN_TEST_FOREIGN_fs.tests := 1
 
 TITAN_TEST_SOURCES_gc.tests := spec/stdlib/titan/gc/tests.titan
 TITAN_TEST_IMPORTS_gc.tests := support.common
@@ -254,6 +255,7 @@ TITAN_TEST_SOURCES_sqlite3.tests := spec/stdlib/titan/sqlite3/tests/tests.titan 
 	spec/stdlib/titan/sqlite3/tests/state_close_test.titan \
 	spec/stdlib/titan/sqlite3/tests/worker_test.titan
 TITAN_TEST_IMPORTS_sqlite3.tests := support.async support.command support.runtime
+TITAN_TEST_FOREIGN_sqlite3.tests := 1
 
 TITAN_TEST_SOURCES_ssl.backpressure_support := spec/stdlib/titan/ssl/backpressure_support.titan
 TITAN_TEST_IMPORTS_ssl.backpressure_support := support.async
@@ -270,6 +272,7 @@ TITAN_TEST_SOURCES_ssl.tests := spec/stdlib/titan/ssl/tests/tests.titan \
 	spec/stdlib/titan/ssl/tests/transfer_test.titan \
 	spec/stdlib/titan/ssl/tests/state_close_test.titan
 TITAN_TEST_IMPORTS_ssl.tests := support.command net.test_support ssl.backpressure_support ssl.test_support support.async support.common support.runtime
+TITAN_TEST_FOREIGN_ssl.tests := 1
 
 TITAN_TEST_SOURCES_string.core_test := spec/stdlib/titan/string/core_test.titan
 TITAN_TEST_IMPORTS_string.core_test := string.test_support
