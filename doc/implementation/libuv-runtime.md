@@ -142,8 +142,11 @@ the settled state with nonallocating field writes; if scheduling fails, the Wait
 stays pending so retry or shutdown can still address it. Settlement from a
 finalizer (`ffi.titan_in_finalizer(L)`) takes the same deferred path, because
 `Coroutine:resume` raises there and an inline delivery would publish the Task
-as failed with its root still suspended. `fatal` likewise queues
-`READY_UNWIND` from a finalizer instead of advancing the Task inline. Delivery
+as failed with its root still suspended. `fatal` from a finalizer records the
+Runtime failure, accepts a `READY_DELIVER` wake for the exact Wait, and then
+commits `OUTCOME_FATAL` with the supplied error, detaching the consumed
+request; delivery retires and releases the Wait, so the Task gets its own
+operation's error rather than `runtime.failure`. Delivery
 checks that the Wait is SETTLED, is still exactly `task.wait`, and has the
 current epoch; it clears the request, Wait, token, and explicit-suspension
 state before entering the continuation. Duplicate settlement raises rather than

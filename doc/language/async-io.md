@@ -1593,8 +1593,10 @@ can enter its Task continuation directly, while settlement from another running
 Task is deferred. Settlement from inside a finalizer, including the cleanup of
 an [abandoned coroutine](coroutines.md#abandoned-coroutines), is deferred the
 same way, because a finalizer cannot resume the waiting Task. A
-`Completion:fatal` made there likewise queues the delivery of its error to the
-Task instead of raising it there at once.
+`Completion:fatal` made there likewise records the Runtime failure at once and
+queues its own operation's error for the waiting Task, which raises it at its
+`await` after the finalizer; the driver still reports the Runtime's first
+error.
 CPU-heavy code that neither finishes nor yields blocks the event loop.
 
 Persistent sources publish into coalescing or buffered subscriptions. A queued

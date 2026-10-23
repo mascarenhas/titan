@@ -1030,6 +1030,20 @@ local function fatal(wait: Wait, error: value, trace: string)
     fail_runtime(runtime, error, trace)
     return
   end
+  -- A finalizer cannot resume the Task (coroutine resumes raise there).
+  -- Queue delivery of this exact operation's fatal outcome, like a peer
+  -- Task's settlement: the wake is accepted before the nonallocating commit,
+  -- and the Wait is retired and released at delivery.
+  if ffi.titan_in_finalizer(L) ~= 0 then
+    fail_runtime(runtime, error, trace)
+    enqueue_ready(task, READY_DELIVER, wait)
+    wait.request = nil
+    wait.kind = OUTCOME_FATAL
+    wait.payload = error
+    wait.phase = WAIT_SETTLED
+    cancel_shutdown_tasks(runtime, task)
+    return
+  end
   -- Its native completion has already been consumed. Retire the exact old
   -- capability before cancellation or lexical cleanup can create a new wait.
   wait.phase = WAIT_RETIRED
@@ -1039,12 +1053,6 @@ local function fatal(wait: Wait, error: value, trace: string)
   release_completion(wait)
   fail_runtime(runtime, error, trace)
   cancel_shutdown_tasks(runtime, task)
-  -- A finalizer cannot resume the Task (coroutine resumes raise there):
-  -- unwind it later from the ready queue, like a peer Task's wake.
-  if ffi.titan_in_finalizer(L) ~= 0 then
-    enqueue_ready(task, READY_UNWIND, nil)
-    return
-  end
   do advance_task(task, true, error)
   catch
     -- The original callback failure remains authoritative. If advancement

@@ -399,6 +399,63 @@ function test_unwind_finalizer_settles_completion_after_finalizer(_: test.Contex
     "the finalizer's settlement gave " .. task:status():as_string())
 end
 
+-- A finalizer that reports the fatal failure of two pending waits while no
+-- Task is current queues each delivery: every Task receives its own
+-- operation's error after the finalizer, and the driver reports the first.
+record RuntimeCloseFatals
+  first: (function (value, string): ())?
+  second: (function (value, string): ())?
+end
+
+local function runtime_close_fatal_in_finalizer(candidate: value)
+  local holder: RuntimeCloseFatals = candidate
+  holder.first("first-operation-error", "first-trace")
+  holder.second("second-operation-error", "second-trace")
+end
+
+local function runtime_close_drop_fatals(holder: RuntimeCloseFatals)
+  local finalized = RuntimeCloseFatals(holder.first, holder.second)
+  runtime_close_gc.finalizable<|value|>(finalized, runtime_close_fatal_in_finalizer)
+end
+
+local function runtime_close_await_fatal(observed: {string}, index: integer,
+                                         store: function (function (value, string): ()): ())
+  async.run<|nil, value|>(function (): nil
+    do
+      async.await_cleanup<|nil, value|>(function (_resolve, _reject, fatal)
+        store(fatal)
+      end)
+      observed[index] = "success"
+    catch
+      observed[index] = error as string
+    end
+    return nil
+  end)
+end
+
+function test_unwind_finalizer_fatal_delivers_each_operation_error(_: test.Context)
+  local holder = RuntimeCloseFatals(nil, nil)
+  local observed: {string} = {"pending", "pending"}
+  runtime_close_await_fatal(observed, 1, function (fatal: function (value, string): ())
+    holder.first = fatal
+  end)
+  runtime_close_await_fatal(observed, 2, function (fatal: function (value, string): ())
+    holder.second = fatal
+  end)
+  uv.run(async.current_loop(), uv.RUN_NOWAIT)
+  test.assert(holder.first ~= nil and holder.second ~= nil, "the Tasks did not await")
+  runtime_close_drop_fatals(holder)
+  for _ = 1, 4 do runtime_close_gc.collect() end
+  local loop_error: value = nil
+  do async.loop()
+  catch loop_error = error
+  end
+  test.assert(loop_error == "first-operation-error", "the driver reported another error")
+  test.assert(observed[1] == "first-operation-error", "first wait: " .. observed[1])
+  test.assert(observed[2] == "second-operation-error", "second wait: " .. observed[2])
+  runtime_test.run(function () async.yield() end)
+end
+
 -- Outside state close, a defer of an abandoned coroutine may hand disposal to
 -- a Task of the active Runtime; that Task runs after the unwind.
 local function runtime_close_abandon_generator(log: {string})
