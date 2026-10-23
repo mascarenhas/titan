@@ -1851,3 +1851,149 @@ describe("catch", function()
     end)
 
 end)
+
+-- Abandoned-coroutine unwinding (doc/implementation/error-handling.md
+-- #unwinding-through-finally): only finally-bearing boundaries are marked and
+-- get unwind landings.
+describe("unwind boundaries", function()
+    after_each(clean)
+
+    local ast = require 'titan-compiler.ast'
+    local checker = require 'titan-compiler.checker'
+
+    it("marks finally boundaries and leaves catch-only boundaries unmarked", function()
+        local csrc = compile_and_read_c([[
+            local function cleanup() end
+
+            local function step(limit: integer, n: integer): integer?
+                if n >= limit then return nil end
+                return n + 1
+            end
+
+            local function close_loop(_: integer) end
+
+            function deferred(): integer
+                defer cleanup()
+                return 1
+            end
+
+            function caught(): integer
+                do
+                    cleanup()
+                catch
+                    return 2
+                end
+                return 1
+            end
+
+            function looped(): integer
+                local total = 0
+                for x: integer in step, 3, 0, close_loop do
+                    total = total + x
+                end
+                return total
+            end
+        ]])
+        for _, name in ipairs({ "deferred", "looped" }) do
+            local body = native_body(csrc, name)
+            for _, fragment in ipairs({
+                "_lj_1.status = TITAN_STATUS_FINALLY;",
+                "if (_lj_1.status != TITAN_STATUS_FINALLY) {",
+                -- the ordinary-error close runs under the re-armed boundary
+                "volatile TStatus _errst_1 = _lj_1.status;",
+                "_lj_1.status = luaD_closeprotected(L, _oldtop_1, _errst_1);",
+                "if (_lj_1.status == TITAN_STATUS_UNWIND) {",
+                "titan_unwind_close(L, _oldtop_1);",
+                "_pa_1 = 4;",
+                "titan_unwind_guard_failed(L, &_lj_1,",
+                "} else if (_pa_1 == 4) {",
+                "titan_unwind(L);",
+            }) do
+                assert.truthy(body:find(fragment, 1, true), name .. " lacks " .. fragment)
+            end
+        end
+        local caught = native_body(csrc, "caught")
+        assert.truthy(caught:find("_lj_1.status = LUA_OK;", 1, true), caught)
+        assert.truthy(caught:find("if (_lj_1.status != LUA_OK) {", 1, true), caught)
+        for _, fragment in ipairs({ "TITAN_STATUS_", "titan_unwind", "_errst_", "_pa_1" }) do
+            assert.falsy(caught:find(fragment, 1, true), "catch-only try has " .. fragment)
+        end
+    end)
+
+    -- The surface language has no try with both catch and finally; codetry
+    -- supports it, so graft a finally onto a parsed catch try.
+    local function graft_finally(node)
+        if type(node) ~= "table" then return false end
+        if node.stats then
+            for index, stat in ipairs(node.stats) do
+                if stat._tag == "Ast.StatTry" and stat.catchblock and
+                        not stat.finallyblock then
+                    local after = table.remove(node.stats, index + 1)
+                    stat.finallyblock = ast.StatBlock(after.loc, { after })
+                    return true
+                end
+            end
+        end
+        for _, child in pairs(node) do
+            if graft_finally(child) then return true end
+        end
+        return false
+    end
+
+    it("unwinds a try with both catch and finally through its catch boundary", function()
+        local source = [[
+            log: string = ""
+
+            function add(text: string)
+                log = log .. text
+            end
+
+            function reset()
+                log = ""
+            end
+
+            function run(pause: function (): ()): string
+                do
+                    add("body;")
+                    raise "boom"
+                catch
+                    add("catch;")
+                    pause()
+                    add("after-pause;")
+                end
+                add("finally;")
+                return log
+            end
+        ]]
+        h.reset()
+        local tree, perr = h.parse(source, "test.titan")
+        assert.truthy(tree, perr)
+        assert.truthy(graft_finally(tree), "no catch try to graft onto")
+        local _, errs = checker.check("test", tree, source, "test.titan")
+        assert.equal(0, #errs, table.concat(errs, "\n"))
+        local ok, err = h.compile("test", tree)
+        assert.truthy(ok, err)
+        local file = assert(io.open("test.c", "r"))
+        local body = native_body(file:read("*a"), "run")
+        file:close()
+        -- The catch boundary is marked too; both landings guard the finally
+        -- with the try-scope body boundary.
+        assert.truthy(body:find("_lj_1c.status = TITAN_STATUS_FINALLY;", 1, true), body)
+        local _, guards = body:gsub("titan_unwind_guard_failed%(L, &_lj_1,", "")
+        assert.equal(2, guards)
+        local called, out = h.call("test", [==[
+            assert(test.run(function() end) == "body;catch;after-pause;finally;")
+            test.reset()
+            local coroutine = require "titan.coroutine"
+            local co = coroutine.create(function(_)
+                return test.run(function() coroutine.yield("paused", "tag") end)
+            end, "tag")
+            assert(co:resume(nil) == "paused")
+            co = nil
+            collectgarbage("collect")
+            collectgarbage("collect")
+            assert(test.log == "body;catch;finally;", test.log)
+        ]==])
+        assert.truthy(called, out)
+    end)
+end)

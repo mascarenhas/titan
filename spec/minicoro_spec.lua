@@ -711,4 +711,164 @@ int main(void) {
         })
         assert.match("ok", out)
     end)
+
+    -- The unwind floor that titan_coroutine_enter (titan-runtime/minicoro.c)
+    -- installs below every Titan coroutine entry. No Titan-level program can
+    -- make an error escape coro_entry's catch, so a C entry drives it here.
+    it("delivers escaped errors and lands unwinds on the Titan coroutine floor", function()
+        local driver = require "titan-compiler.driver"
+        local prefix = require("spec.support.installed_prefix").active()
+        local stem = temporary.name()
+        os.remove(stem)
+        local harness = stem .. ".c"
+        local executable = stem .. (platform.windows and ".exe" or "")
+        write_file(harness, [[
+#undef NDEBUG
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+#include "lua.h"
+#include "lauxlib.h"
+#include "titan.h"
+#include "minicoro.h"
+
+enum { RAISE, UNWIND, RAISE_THEN_SUSPEND_IN_CLOSE };
+
+static mco_runtime runtime;
+static lua_State *thread;
+static TValue tag;
+static int scenario;
+static int closed_with_error;
+static int closed_without_error;
+static int suspended_in_close;
+
+/* A __close method. In the third scenario the first call (made by the
+** floor's real-error close) suspends the coroutine; it is then resumed as an
+** abandoned coroutine is, and continues the unwind from there. */
+static int close_method(lua_State *L) {
+  if (lua_isnoneornil(L, 2)) closed_without_error++;
+  else closed_with_error++;
+  if (scenario == RAISE_THEN_SUSPEND_IN_CLOSE && !suspended_in_close) {
+    suspended_in_close = 1;
+    assert(mco_yield(runtime.current_co, &tag) == MCO_SUCCESS);
+    titan_unwind(L);
+  }
+  return 0;
+}
+
+static void push_to_be_closed(lua_State *L) {
+  lua_newtable(L);
+  lua_newtable(L);
+  lua_pushcfunction(L, close_method);
+  lua_setfield(L, -2, "__close");
+  lua_setmetatable(L, -2);
+  lua_toclose(L, -1);
+}
+
+static void entry(lua_State *L, Udata *module, CClosure *closure, TValue func,
+                  struct mco_coro *co) {
+  (void)module; (void)closure; (void)func; (void)co;
+  push_to_be_closed(L);
+  push_to_be_closed(L);
+  if (scenario == UNWIND) titan_unwind(L);
+  lua_pushliteral(L, "escaped entry error");
+  lua_error(L);
+}
+
+static void trampoline(mco_coro *co) {
+  TValue func;
+  setnilvalue(&func);
+  titan_coroutine_enter(thread, NULL, func, co, entry);
+}
+
+static void run(lua_State *L, int which, int expected_ok, int with_error,
+                int without_error) {
+  mco_desc desc = mco_desc_init(trampoline, 256 * 1024);
+  mco_coro *co = NULL;
+  int ok = -1;
+  TValue payload;
+  int top = lua_gettop(L);
+  scenario = which;
+  closed_with_error = closed_without_error = suspended_in_close = 0;
+  thread = lua_newthread(L);
+  lua_newuserdatauv(L, sizeof(void *), 6);
+  desc.runtime = &runtime;
+  desc.user_data = uvalue(s2v(L->top.p - 1));
+  assert(mco_create(&co, &desc) == MCO_SUCCESS);
+  assert(mco_resume(co, &tag) == MCO_SUCCESS);
+  if (which == RAISE_THEN_SUSPEND_IN_CLOSE) {
+    /* Abandon it while it is suspended inside the error-recovery close. */
+    assert(suspended_in_close && mco_status(co) == MCO_SUSPENDED);
+    assert(mco_resume(co, &tag) == MCO_SUCCESS);
+  }
+  assert(mco_status(co) == MCO_DEAD);
+  assert(mco_pop(co, &ok, sizeof ok) == MCO_SUCCESS);
+  assert(mco_pop(co, &payload, sizeof payload) == MCO_SUCCESS);
+  assert(ok == expected_ok);
+  if (expected_ok == 0) {
+    assert(ttisstring(&payload));
+    assert(strstr(getstr(tsvalue(&payload)), "escaped entry error") != NULL);
+  } else {
+    assert(ttisnil(&payload));
+  }
+  assert(closed_with_error == with_error);
+  assert(closed_without_error == without_error);
+  assert(thread->errorJmp == NULL);
+  assert(mco_destroy(co) == MCO_SUCCESS);
+  lua_settop(L, top);
+}
+
+int main(void) {
+  lua_State *L = luaL_newstate();
+  assert(L != NULL);
+  setivalue(&tag, 7);
+  /* A real error escapes: both variables close with it, and the resumer
+  ** receives it as an error transfer. */
+  run(L, RAISE, 0, 2, 0);
+  /* An unwind reaches the floor: both close with no error value, and the
+  ** coroutine ends with an unwind transfer. */
+  run(L, UNWIND, 2, 0, 2);
+  /* An unwind lands on the re-armed floor: the error is dropped, and the
+  ** remaining variable closes with no error value. */
+  run(L, RAISE_THEN_SUSPEND_IN_CLOSE, 2, 1, 1);
+  lua_close(L);
+  puts("ok");
+  return 0;
+}
+]])
+        local compiler = assert(cdriver.split_shell_words(driver.CC))
+        local arguments = {
+            "--std=c99", "-O0", "-g", "-Wall", "-Wextra",
+            "-Ititan-runtime", "-I" .. prefix .. "/src/lua-5.5.1",
+            harness, "titan-runtime/libtitan.a",
+            "libbacktrace/.libs/libbacktrace.a",
+            prefix .. "/lib/liblua.a", "-o", executable,
+            "-lm", "-pthread",
+        }
+        if platform.windows then
+            arguments = {
+                "--std=c99", "-O0", "-g", "-Wall", "-Wextra",
+                "-I" .. prefix .. "/include", "-I" .. prefix .. "/src/lua-5.5.1",
+                harness, prefix .. "/lib/titan/0.6/libtitan.a",
+                prefix .. "/lib/libbacktrace.a", prefix .. "/lib/liblua55.a",
+                "-static-libgcc", "-lbcrypt", "-o", executable,
+            }
+        end
+        for _, argument in ipairs(arguments) do
+            compiler[#compiler + 1] = argument
+        end
+        for _, flag in ipairs(driver.EXTRA_CPPFLAGS or {}) do
+            compiler[#compiler + 1] = flag
+        end
+        if not platform.windows and not driver.IS_DARWIN then
+            compiler[#compiler + 1] = "-ldl"
+        end
+        local linked, link_out = run_command(compiler)
+        os.remove(harness)
+        assert.truthy(linked, link_out)
+        local ran, out = run_command({ executable })
+        os.remove(executable)
+        assert.truthy(ran, out)
+        assert.match("ok", out)
+    end)
 end)

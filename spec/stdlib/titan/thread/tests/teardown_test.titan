@@ -258,3 +258,70 @@ function test_lua_close_withdraws_woken_join(_: test.Context)
     state:close()
   end)
 end
+
+-- Created before the Thread handle it holds, so the handle's finalizer runs
+-- first; this finalizer then resurrects the finalized handle (issue #283:
+-- cleanup that unwinds at Lua-state close can reach such a handle).
+record ThreadTeardownFinalizedHolder
+  kept: {thread.Thread<|integer|>}
+  handle: thread.Thread<|integer|>?
+end
+
+local function thread_teardown_resurrect(candidate: value)
+  local holder: ThreadTeardownFinalizedHolder = candidate
+  holder.kept[#holder.kept + 1] = holder.handle as thread.Thread<|integer|>
+end
+
+local function thread_teardown_drop_handle(kept: {thread.Thread<|integer|>}, joined: boolean)
+  local holder = ThreadTeardownFinalizedHolder(kept, nil)
+  gc.finalizable<|value|>(holder, thread_teardown_resurrect)
+  local done_tx, done_rx = thread.channel<|boolean|>(1)
+  defer done_rx:close()
+  local worker = thread.spawn_one(function (done: thread.Sender<|boolean|>): integer
+    done:send(true)
+    return 1
+  end, done_tx)
+  holder.handle = worker
+  if joined then
+    case worker:join()
+    when succeeded(result) then test.assert(result == 1, "the worker returned another value")
+    else test.assert(false, "the worker did not succeed")
+    end
+  else
+    -- Wait for the worker without observing (and caching) its outcome.
+    test.assert(done_rx:receive(), "the worker did not report")
+  end
+end
+
+local function thread_teardown_finalized_handle(joined: boolean): thread.Thread<|integer|>
+  local kept: {thread.Thread<|integer|>} = {}
+  thread_teardown_drop_handle(kept, joined)
+  for _ = 1, 4 do gc.collect() end
+  test.assert(#kept == 1, "the holder did not resurrect the finalized handle")
+  return kept[1]
+end
+
+function test_finalized_thread_handle_raises(context: test.Context)
+  context:run("joined", function (_: test.Context)
+    runtime_test.run(function ()
+      local handle = thread_teardown_finalized_handle(true)
+      -- The cached terminal status survives finalization.
+      test.assert(handle:status():has_finished(), "the cached status was lost")
+      thread_fault_common.assert_raises_contains(function () handle:join() end,
+        "thread handle was finalized")
+      thread_fault_common.assert_raises_contains(function () handle:cancel() end,
+        "thread handle was finalized")
+    end)
+  end)
+  context:run("unobserved", function (_: test.Context)
+    runtime_test.run(function ()
+      local handle = thread_teardown_finalized_handle(false)
+      thread_fault_common.assert_raises_contains(function () handle:status() end,
+        "thread handle was finalized")
+      thread_fault_common.assert_raises_contains(function () handle:join() end,
+        "thread handle was finalized")
+      thread_fault_common.assert_raises_contains(function () handle:cancel() end,
+        "thread handle was finalized")
+    end)
+  end)
+end
