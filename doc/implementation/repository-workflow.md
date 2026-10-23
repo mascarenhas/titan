@@ -89,6 +89,14 @@ after a shell used `luarocks init`. Native test builds use `TITAN_EXTRA_*FLAGS`
 when set and otherwise `TITAN_TEST_EXTRA_*FLAGS` (`Makefile`
 `TITAN_TEST_CFLAGS`); other explicit build-policy inputs are caller-owned.
 
+Lua's internal assertions are a diagnostic configuration: build the Lua core
+with `LUA_MYCFLAGS="-fPIC -O2 -DLUAI_ASSERT"` and, to check Titan's own uses of
+Lua internals too, the runtime, standard library, and tests with
+`TITAN_EXTRA_CPPFLAGS=-DLUAI_ASSERT`, in a separate source copy and prefix.
+The runtime headers and generated code compile in that configuration; Lua's
+`api_check` then also becomes an assertion, so it reports any C path that
+pushes past its frame's reserved stack top.
+
 | Command, from the repository root | Purpose |
 | --- | --- |
 | `make test` | Prepare the selected SDK, reinstall the current compiler/provider with `luarocks make --force`, and run the complete mixed suite through `luarocks test`. |
