@@ -590,3 +590,44 @@ function test_receiver_decode_may_close_its_receiver(context: test.Context)
     receiver_close_during_first_pass_decode(true)
   end)
 end
+
+-- A finalizer wake of a Receiver reader at every safepoint of its suspension
+-- window (task_support.each_wake_offset): in the reader before it parks, or in
+-- the driver before its suspension registers.
+local function receiver_wake_window(driver: boolean, wake: function (async.Receiver): (),
+    expected: value)
+  runtime_test.run(function ()
+    task_support.each_wake_offset(driver, nil, function (): task_support.WakeCase
+      local receiver = async.receiver()
+      runtime_test.cleanup(function () receiver:close() end)
+      return task_support.WakeCase(function (): value
+        return receiver:wait()
+      catch
+        return error
+      end, function (_: async.Task) wake(receiver) end, nil,
+      function (reader: async.Task, offset: integer)
+        local finished, result? = reader:status():has_succeeded()
+        test.assert(finished and result == expected, "offset " .. offset ..
+          ": the Receiver wake left the reader " .. reader:status():as_string())
+      end)
+    end)
+  end)
+end
+
+function test_receiver_wake_before_reader_suspends(context: test.Context)
+  context:run("close_in_reader", function (_: test.Context)
+    receiver_wake_window(false, function (receiver: async.Receiver)
+      receiver:close()
+    end, "receiver is closed")
+  end)
+  context:run("close_in_driver", function (_: test.Context)
+    receiver_wake_window(true, function (receiver: async.Receiver)
+      receiver:close()
+    end, "receiver is closed")
+  end)
+  context:run("send_in_reader", function (_: test.Context)
+    receiver_wake_window(false, function (receiver: async.Receiver)
+      async.send(receiver:handle(), async.TransferValue.is_integer(5))
+    end, 5)
+  end)
+end

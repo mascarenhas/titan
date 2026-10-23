@@ -464,11 +464,25 @@ an admitted child; the same `Thread` and slot persist across setup failures.
 - **Admission.** `Group:spawn_raw_entry` calls `spawn_raw` with the membership
   Map, which inserts the handle as `false` before `uv.create_native_thread` and
   rolls it back on pre-start failure. Such a failure raises from `Group:spawn*`,
-  starts no worker and returns the slot.
+  starts no worker and returns the slot. A spawn that finds the group full
+  queues a waiter with a fresh token, then rechecks the group abort and the
+  running count before it suspends: a finalizer that runs before the waiter is
+  queued finds no waiter, so a `Group:cancel` wakes nobody and a cancelled
+  granted admission frees its slot instead of passing it on. Once the waiter is
+  queued, both wakes latch on its token
+  ([explicit suspension](libuv-runtime.md#explicit-suspend-task-status-listeners-and-combinators)).
+  The waiter's withdrawal is the suspension's cancel action. A `defer` runs it
+  again on every exit that did not take the slot, because a cancellation that
+  rejects the suspension before the driver accepts it runs no cancel action.
+  The withdrawal deactivates a queued waiter, or passes on a slot already
+  granted to it, so a later `release_slot` never grants a finished Task.
 - **Observation.** `Group:wait()` makes one pass over the membership Map before
   suspending. `observe_thread` takes the memoized monitor and checks its status
   first: a finished monitor retires inline; otherwise it forwards a pending
   group abort, installs one terminal listener, and marks the member `true`.
+  Each completion waiter is withdrawn the same way and rechecks the running
+  count after it is queued, because cancelling a granted admission from a
+  finalizer releases its slot synchronously.
 - **Retirement.** `finish_thread` runs only after the proxy's native gate. It
   checks membership, deletes it, registers `defer self:release_slot()`, and only
   then projects `spawned:status()` with the monitor's error as fallback. Retiring

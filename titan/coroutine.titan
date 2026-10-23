@@ -175,8 +175,9 @@ local function transfer_source(co: foreign *mco_coro): foreign *mco_coro
   return co
 end
 
-local function pop_transfer_or_raise(co: foreign *mco_coro,
-                                     append_trace: boolean): value
+-- Pop the pending transfer of `co`: true and the payload for an error, false
+-- and the payload for a value.
+local function pop_transfer(co: foreign *mco_coro): (boolean, value)
   local ok: foreign int = 0 as foreign int
   local payload: foreign TValue = nil
   local ok_result = ffi.mco_pop(co, ok, foreign int.sizeof)
@@ -184,36 +185,49 @@ local function pop_transfer_or_raise(co: foreign *mco_coro,
   local payload_result = ffi.mco_pop(co, payload, foreign TValue.sizeof)
   check_mco_result(payload_result)
   clear_transfer(co)
+  if ok == TRANSFER_ERROR then return true, payload end
   if ok ~= TRANSFER_VALUE then
-    if ok == TRANSFER_ERROR then
-      if append_trace then
-        raise_with_appended_trace(payload)
-      else
-        raise payload
-      end
-    end
     -- TRANSFER_UNWIND: this coroutine is being collected while suspended
     -- here, or the coroutine it resumed finished unwinding. Continue the
     -- unwind from this frame; titan_unwind never returns.
     ffi.titan_unwind(L)
   end
+  return false, payload
+end
+
+local function pop_transfer_or_raise(co: foreign *mco_coro,
+                                     append_trace: boolean): value
+  local failed, payload = pop_transfer(co)
+  if failed then
+    if append_trace then
+      raise_with_appended_trace(payload)
+    else
+      raise payload
+    end
+  end
   return payload
 end
 
-local function resume_result_or_raise(co: foreign *mco_coro,
-                                      source: foreign *mco_coro,
-                                      tag: value): value
+-- Switch into `co` and return the coroutine whose transfer holds the result:
+-- a tagged nested yield leaves it in the deepest stacked coroutine.
+local function resume_switch(co: foreign *mco_coro, source: foreign *mco_coro,
+                             tag: value): foreign *mco_coro
   local ctag: foreign TValue = tag
   local result = ffi.mco_resume(co, ctag)
   if result ~= ffi.MCO_SUCCESS then
     discard_transfer(source)
     check_mco_result(result)
   end
-  local result_source = co
   if co and co.stacked_co then
-    result_source = co.stacked_co
+    return co.stacked_co
   end
-  return pop_transfer_or_raise(result_source, true)
+  return co
+end
+
+local function resume_result_or_raise(co: foreign *mco_coro,
+                                      source: foreign *mco_coro,
+                                      tag: value): value
+  return pop_transfer_or_raise(resume_switch(co, source, tag), true)
 end
 
 local function yield_result_or_raise(co: foreign *mco_coro, tag: value): value
@@ -265,6 +279,30 @@ function Coroutine:error(err: value, tag: value): value
   local result = resume_result_or_raise(co, source, effective)
   resumed = nil
   return result
+end
+
+-- The async driver's resume: resume, or inject `payload` as an
+-- error when `failed`, but return true and the uncaught error of the now dead
+-- coroutine instead of raising it; otherwise false and the yielded or
+-- returned value. The coroutine's own trace stays staged: the caller appends
+-- its propagation trace with raise_with_appended_trace only for a failure it
+-- reports, and otherwise drops it with pop_trace_for_append.
+-- Implementation notes: doc/implementation/coroutines.md#entry-function
+local function Coroutine:transfer_outcome(payload: value, tag: value,
+                                          failed: boolean): (boolean, value)
+  if ffi.titan_in_finalizer(L) ~= 0 then resume_from_finalizer() end
+  local effective = effective_tag(self.default_tag, tag)
+  local resumed: Coroutine? = self -- see Coroutine:resume
+  local co = self.handle
+  local source = transfer_source(co)
+  if failed then
+    push_transfer(source, TRANSFER_ERROR, payload)
+  else
+    push_transfer(source, TRANSFER_VALUE, payload)
+  end
+  local dead, result = pop_transfer(resume_switch(co, source, effective))
+  resumed = nil
+  return dead, result
 end
 
 --- Query the current low-level coroutine state.

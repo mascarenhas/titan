@@ -240,18 +240,66 @@ every foreign-callback mistake or memory failure.
 
 ## Explicit suspend, Task status, listeners, and combinators
 
-`SuspendCancelAction` is `function (): ()`. `suspend` uses its `ResumeToken` as
-Completion context and the named registrar `start_suspend`. It stages the
-cancel action first; `start_suspend` publishes the token only after admission,
-so even a GC finalizer during cell setup sees a wrong-time resume as a
-mismatch. A `defer` clears the staged state if construction or admission fails.
-`Task:resume` checks token identity before any finished/pending shortcut, so
-equal source strings never authorize a different token. Matching pending wakes
-coalesce through `resume_pending`, which is set only after `enqueue_ready`
-succeeds. Completion retires the old token before a new wait can be installed.
+`SuspendCancelAction` is `function (): ()`. `suspend` uses its `ResumeToken`
+as Completion context and the named registrar `start_suspend`. It stages the
+cancel action first; `start_suspend` publishes the token (`suspended`,
+`resume_token`) only after admission. A `defer` clears the staged state if
+construction or admission fails.
 
-Cancelling an explicit suspension runs its cancel action and schedules the
-ordinary token wake; it never enters the target Task inline. Terminal
+The interval before publication contains GC safepoints, in the suspending Task
+and in the driver, so a finalizer can wake or cancel a waiter that cannot yet
+be resumed. One protocol covers it:
+
+- **Wake.** `Task:resume` checks the Task's state before the token. While the
+  Task is `TASK_RUNNING`, or its current Wait is still `WAIT_REGISTERING`, it
+  stores any token in `latched_token` (the latest call wins) and never
+  enqueues, so a registration keeps one settlement owner. Otherwise a different
+  token raises the mismatch, a pending wake coalesces through `resume_pending`,
+  and an exact token of a parked explicit suspension enqueues `READY_RESUME`
+  once. A ready Task, a pending native wait, a queued yield or delivery, and a
+  finished Task therefore raise.
+- **Latch lifetime.** Only `start_suspend` reads the latch: after `done:context`,
+  its last safepoint, it publishes the token and settles inline when
+  `latched_token` equals it. `advance_task` clears the latch at the top of each
+  run and `finish_task` clears it at termination, so a latch that the next
+  suspension did not consume (another token, a native or external wait, a
+  yield) is discarded. `clear_suspension` leaves it alone: the lexical defer of
+  a delivered `suspend` runs after the Task is running again and must not erase
+  a latch accepted since then.
+- **Cancellation.** `Task:cancel` stores the sticky reason and acts only on an
+  accepted, parked Wait (`WAIT_PENDING`): it cancels a cancellable request, and
+  for a published explicit suspension it runs the cancel action and resumes the
+  token. A running or ready Task meets the reason at its next admission check.
+  A Task whose Wait is registering meets it at the acceptance boundary in the
+  trampoline: once registration returns, with no safepoint before the
+  `WAIT_PENDING` commit, a published non-cleanup suspension with a reason runs
+  its cancel action and settles the Wait, so the cancellation is injected as
+  for one delivered later. This covers `start_suspend` and `start_external_wait`
+  alike, and the cancel action runs once.
+- **Delivery.** `deliver_wait` and the trampoline's inline delivery set
+  `TASK_RUNNING` right after `clear_suspension`, so a wake at the Result
+  allocation latches and is discarded instead of raising.
+
+The Runtime cannot tell "about to suspend" from "running past a delivered
+wait", so every waker follows the caller rule of the
+[public contract](../language/async-io.md#scheduling-and-driving-tasks): make the
+waiter discoverable before the last condition check, then either consume the
+registration before `resume` or recheck the condition after every return from
+`suspend`, and do not suspend on anything else in between. `async.channel` keeps
+one token and a waiter slot per side, so its blocking send and receive publish
+the slot and then loop while the buffer is still full or empty and the channel
+is open; a stale latch therefore costs one extra suspension. Subscriptions use
+a fresh token and a `notified` flag per wait, and `Core:wait` rechecks the
+queue and terminal state after publishing its waiter. `Receiver:wait` reserves
+before its take and loops. Their wakers call `Task:resume` directly.
+Combinator listeners run only from terminal publication, which never runs in a
+finalizer, because settlement and `fatal` from a finalizer are queued and
+`runtime_finalize` calls no listener.
+
+`Task:resume` checks token identity before any pending shortcut, so equal
+source strings never authorize a different token. Completion retires the old
+token before a new wait can be installed. Cancelling an explicit suspension
+never enters the target Task inline. Terminal
 publication (`finish_task`) clears the suspension, marks every listener entry
 non-live, and then delivers them in order. Removal before that snapshot is
 idempotent; removal during delivery cannot suppress a captured listener. Each
@@ -270,6 +318,21 @@ an `Error` with the caught Lua error value and raw trace; it does not by itself
 fail the Runtime. Raised nil follows the ordinary
 [Lua error normalization](error-handling.md#runtime-trace-model).
 
+`advance_task` resumes the root through `resume_root`, which calls the private
+non-raising `Coroutine:transfer_outcome` (see
+[coroutine entry](coroutines.md#entry-function)). A root that dies with an
+uncaught error returns that error instead of raising it. `resume_root` then
+appends the driver's propagation trace to the root's own trace, by raising
+through `raise_with_appended_trace`, only when the failure will be reported:
+when the Task has no cancellation reason and has not already recorded a
+failure. A cancellation is sticky and takes precedence at publication, and a
+`run_with_cleanup` wrapper has already recorded its body's failure with the
+body's trace, so neither ever reports a propagation trace. Both drop the
+staged trace. A cancelled root's failure is recorded without a trace, and a
+`run_with_cleanup` root keeps the failure and trace that its wrapper recorded.
+This saves one traceback capture of the scheduler stack per cancelled parked
+Task. `advance_task` treats a raised and a returned root failure alike.
+
 The 17 combinators (`join`, `join_two`..`join_five`, and
 `any_`/`race_`/`all_` at arities two through five) keep independent
 result/cancellation positions per operand. Fast paths inspect already terminal
@@ -280,8 +343,13 @@ unwinds.
 
 `async.channel` keeps a bounded circular buffer with an explicit count, at most
 one blocked sender and one blocked receiver (a second raises), and discards
-buffered items on close. Writer close is not automatic clean reader EOF; see
-the [language chapter](../language/async-io.md#bounded-channels).
+buffered items on close. A blocking operation occupies its waiter slot and then
+suspends in a loop while the buffer is still full or empty and the channel is
+open, so a wake before the slot was published is seen by the check and a stale
+latched wake costs one extra suspension
+([explicit suspension](#explicit-suspend-task-status-listeners-and-combinators)).
+Writer close is not automatic clean reader EOF; see the
+[language chapter](../language/async-io.md#bounded-channels).
 
 ## Persistent subscriptions
 
@@ -302,7 +370,12 @@ the producer. Error/end terminal changes roll back on wake failure the same way.
 
 One waiter reserves a Task/token pair and records whether it requests a batch.
 Reads check competing waiters and pending cancellation before transferring any
-item. Suspension uses the nonyielding exact detacher. A notification keeps the
+item. Suspension uses the nonyielding exact detacher. After publishing its
+waiter, `Core:wait` rechecks the queue and the terminal state, so a
+notification before publication is seen there and one after it is latched
+through `Task:resume` with the wait's fresh token
+([explicit suspension](#explicit-suspend-task-status-listeners-and-combinators)).
+A notification keeps the
 reservation until that reader resumes or unwinds, so another reader cannot
 steal its delivery. Cancellation only detaches that waiter; it does not stop the
 source or discard its events. Both `has_waiter()` methods report this
@@ -577,33 +650,37 @@ follows a remote GC pointer or enters the destination Lua state.
   allocating. Clearing `task` on release also drops the reference to a finished
   reader Task.
 - **Wake (`Receiver:wake`).** The `uv.async_t` callback copies and decodes
-  nothing. It returns unless a reader is reserved **and** that Task is
-  suspended on the reader's token (`task.resume_token == reader.token`, which
-  `start_suspend` publishes and delivery clears), then calls
-  `task:resume(reader.token)`; `Task:resume` coalesces repeated wakes through
-  `resume_pending`, so the reader keeps no notified flag of its own. A running
-  reader is never resumed. In particular, when a decode hook, or a finalizer run
-  at an allocation inside decode, closes the Receiver that is decoding its
-  first-pass packet, `close()`'s wake is a no-op: `wait` returns the value it
-  already took, and its next call raises `"receiver is closed"`. The packet stays
-  in the native slot, including while the reader's wake is queued, until
-  `wait()` takes it.
+  nothing. When a reader is reserved it calls `task:resume(reader.token)`: a
+  reader suspended on the token is resumed, and `Task:resume` coalesces
+  repeated wakes through `resume_pending`, so the reader keeps no notified flag
+  of its own. A running reader, including one about to suspend, gets the wake
+  latched ([explicit suspension](#explicit-suspend-task-status-listeners-and-combinators)).
+  In particular, when a decode hook, or a finalizer run at an allocation inside
+  decode, closes the Receiver that is decoding its first-pass packet, `wait`
+  returns the value it already took and its next call raises
+  `"receiver is closed"`; the latch is discarded at the reader's next
+  suspension. The packet stays in the native slot, including while the
+  reader's wake is queued, until `wait()` takes it.
 - **Wait (`Receiver:wait`, `receiver_take_native`).** `wait()` requires a
   running Task and rejects a second reader with
   `"receiver already has a waiting reader"`. It reserves `reader.task`
   **before** `checkpoint()` or any slot inspection, so a second caller cannot
   barge ahead while the first reader's wake is queued; its exit `defer` releases
   the reservation only if it still names this Task. Each loop turn declares a
-  fresh `raw` local and calls `receiver_take_native`, which returns `2` (closed,
-  raising `"receiver is closed"`), `1` (taken), or `0` (empty). On `1` it
-  installs `defer transfer.discard_message(raw)` and returns
+  fresh `raw` local and calls
+  `receiver_take_native`, which returns `2` (closed, raising
+  `"receiver is closed"`), `1` (taken), or `0` (empty). On `1` it installs
+  `defer transfer.discard_message(raw)` and returns
   `transfer.decode_message(raw)` under the
   [consuming raw-slot decode contract](transfer-library.md#consuming-raw-slot-decode);
   decode errors consume the packet and raise from `wait()` with no retry, and
   nil and false are ordinary data. On `0` it calls
-  `suspend(reader.token, reader.withdraw)`. A send between the empty check and
-  `suspend` leaves a pending `uv_async_send` whose callback runs only after the
-  reader has yielded with its token published.
+  `suspend(reader.token, reader.withdraw)` and loops. Because the reservation
+  precedes the take, a close between an empty take and the registration, from
+  a finalizer in the reader or in the driver, latches its wake, and the next
+  turn raises `"receiver is closed"`. A send in that interval leaves a pending
+  `uv_async_send` whose callback runs only after the reader has yielded with
+  its token published.
 - **Cancellation.** `Task:cancel` runs `withdraw` only while the reserving Task
   is suspended under it, so the reservation it clears is that Task's. An unread
   packet stays in the slot. The cancelled reader unwinds later through its

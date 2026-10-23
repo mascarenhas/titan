@@ -1,6 +1,10 @@
 -- Shared Task ownership protocol for native standard-library tests.
 local async = import "async"
 local uv = import "uv"
+local gc = import "gc"
+local string = import "string"
+local test = import "test"
+local timer = import "timer"
 local runtime_test = import "support.runtime.titan"
 
 local function active(task: async.Task): boolean
@@ -35,4 +39,127 @@ local function drive_until(task: async.Task, ready: function (): boolean)
     uv.run(async.current_loop(), uv.RUN_NOWAIT)
     if not ready() then uv.sleep(1) end
   end
+end
+
+-- Wake windows: a wake from a finalizer between a waiter's registration in its
+-- domain and the Runtime's registration of its suspension must not be lost.
+-- In generational mode with a zero minor multiplier and no major collections,
+-- every GC safepoint runs a young collection and all pending finalizers, so a
+-- self-renewing sentinel finalizer runs at each one. While the window is open
+-- the probe counts the target Task's safepoints and runs the wake at the
+-- `offset`-th one: in target mode while the target is the running Task, in
+-- driver mode while no Task runs, the target has run and has not finished,
+-- and, when `phase` is given, the target's status is `phase`.
+local record WakeWindow
+  driver: boolean
+  phase: string?
+  open: boolean
+  offset: integer
+  visits: integer
+  target: async.Task?
+  target_ran: boolean
+  fired: boolean
+  failure: value
+  wake: function (async.Task): ()
+end
+
+-- One enumerated case: the target body, the wake, an optional supervisor
+-- routine that drives the target (the default yields once and, in driver
+-- mode, then closes the window), and the check of a run whose wake ran.
+local record WakeCase
+  body: function (): (value)
+  wake: function (async.Task): ()
+  drive: (function (WakeWindow, async.Task): ())?
+  verify: function (async.Task, integer): ()
+end
+
+local wake_window_probe: WakeWindow? = nil
+
+local function wake_window_fire(_: value)
+  local window? = wake_window_probe
+  if window == nil or window.fired then return end
+  local target? = window.target
+  if target ~= nil then
+    local current: async.Task? = nil
+    do current = async.running() catch end
+    if current == target then window.target_ran = true end
+    local eligible = false
+    if window.open then
+      if window.driver then
+        local phase? = window.phase
+        eligible = current == nil and window.target_ran and
+          not target:status():has_finished() and
+          (phase == nil or target:status():as_string() == phase)
+      else
+        eligible = current == target
+      end
+    end
+    if eligible then
+      if window.visits == window.offset then
+        window.fired = true
+        -- A finalizer error would only become a Lua warning; record it.
+        do window.wake(target) catch window.failure = error end
+        return
+      end
+      window.visits = window.visits + 1
+    end
+  end
+  local sentinel: {string: value} = {}
+  gc.finalizable<|value|>(sentinel, wake_window_fire)
+end
+
+-- Run one case with its wake at `offset`. Returns the target and the window.
+local function run_wake_case(driver: boolean, phase: string?, offset: integer,
+    wake_case: WakeCase): (async.Task, WakeWindow)
+  local window = WakeWindow(driver, phase, true, offset, 0, nil, false, false, nil, wake_case.wake)
+  wake_window_probe = window
+  defer wake_window_probe = nil
+  local target = async.run<|value, value|>(wake_case.body)
+  cleanup_task(target, "wake window cleanup")
+  window.target = target
+  -- Arm the first sentinel before the target starts, and run one young
+  -- collection so that the zero minor debt takes effect.
+  wake_window_fire(nil)
+  gc.step(0)
+  local drive? = wake_case.drive
+  if drive ~= nil then
+    drive(window, target)
+  else
+    timer.yield()
+    if driver then window.open = false end
+  end
+  for _ = 1, 50 do
+    if target:status():has_finished() then break end
+    timer.yield()
+  end
+  return target, window
+end
+
+-- Run `make()`'s case with its wake at offsets 0, 1, ... until a run in which
+-- the wake never ran, so every safepoint of the window is enumerated. Each
+-- wake must not raise, and each run whose wake ran must pass `verify`.
+-- Returns the number of offsets in the window.
+local function each_wake_offset(driver: boolean, phase: string?,
+    make: function (): (WakeCase)): integer
+  local was_generational = gc.generational()
+  local minormul = gc.minormul(0)
+  local minormajor = gc.minormajor(0)
+  defer do
+    gc.minormul(minormul)
+    gc.minormajor(minormajor)
+    if not was_generational then gc.incremental() end
+  end
+  for offset = 0, 256 do
+    local wake_case = make()
+    local target, window = run_wake_case(driver, phase, offset, wake_case)
+    if not window.fired then
+      test.assert(offset > 0, "the wake window was empty")
+      return offset
+    end
+    test.assert(window.failure == nil, "offset " .. offset .. ": the wake raised: " ..
+      string.tostring(window.failure))
+    wake_case.verify(target, offset)
+  end
+  test.assert(false, "the wake window did not end within 257 safepoints")
+  return 0
 end

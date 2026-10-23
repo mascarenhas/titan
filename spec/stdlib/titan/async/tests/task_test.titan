@@ -464,10 +464,10 @@ function test_retired_resume_token_cannot_wake_next_native_wait(
     support.wait_until_waiting(target)
     target:resume(token)
     while phase < 2 do timer.yield() end
-    test.assert(resumed_mismatch ==
-          "Task resume token mismatch (expected source: unknown source)",
-          "resume token was not cleared before resumed user code ran: " ..
-          resumed_mismatch)
+    -- A running Task latches the resume; its next wait is native, which
+    -- discards the latch instead of being woken by it.
+    test.assert(resumed_mismatch == "",
+          "a running Task's resume raised instead of latching: " .. resumed_mismatch)
     test.assert(target:status():as_string() == "waiting",
           "resumed Task did not enter its native wait")
 
@@ -654,5 +654,427 @@ function test_cancelled_combinator_listener_is_not_retained(context: test.Contex
           "cancelled combinator remained retained by its operand listener")
     operand:cancel(async.CancellationReason.simple("operand cleanup"))
     async.join(operand)
+  end)
+end
+
+-- Issue #289: a Lua call/return hook counts fresh trace captures. The error
+-- handler that luaG_errormsg calls is a C function which, while the trace pin
+-- is clear, stores a new traceback string in registry[TITAN_BACKTRACE_KEY]
+-- before it returns; a pinned re-raise keeps the saved string. Every provider
+-- links its own errorhandler, so the hook recognizes a capture by its effect:
+-- an outermost C call entered with the pin clear whose own return finds
+-- another trace string. Calls nested in that pending call are ignored. Its
+-- CallInfo and the trace seen at its call stay in the registry until it
+-- returns. Cell 0 counts the captures.
+local foreign function task_trace_capture_hook(state: *lua_State, ar: *lua_Debug)
+  ffi.lua_getfield(state, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_cells")
+  local cells = ffi.lua_touserdata(state, -1) as foreign *int
+  ffi.lua_settop(state, -2)
+  if cells == nil then return end
+  local call = ar.i_ci as foreign *void
+  ffi.lua_getfield(state, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_call")
+  local pending = ffi.lua_touserdata(state, -1)
+  ffi.lua_settop(state, -2)
+  if ar.event == ffi.LUA_HOOKRET then
+    if pending == nil then return end
+    if pending ~= call then return end
+    ffi.lua_pushlightuserdata(state, nil)
+    ffi.lua_setfield(state, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_call")
+    ffi.lua_getfield(state, ffi.LUA_REGISTRYINDEX, ffi.TITAN_BACKTRACE_KEY)
+    ffi.lua_getfield(state, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_before")
+    local trace = ffi.lua_topointer(state, -2)
+    local before = ffi.lua_topointer(state, -1)
+    ffi.lua_settop(state, -3)
+    if trace == nil then return end
+    if trace ~= before then cells[0] = cells[0] + 1 end
+    return
+  end
+  if pending ~= nil then return end
+  if ffi.lua_getinfo(state, "S", ar) == 0 then return end
+  if ffi.strcmp(ar.what, "C") ~= 0 then return end
+  ffi.lua_getfield(state, ffi.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_PINNED)
+  local pinned = ffi.lua_toboolean(state, -1)
+  ffi.lua_settop(state, -2)
+  if pinned ~= 0 then return end
+  -- Store false for an absent trace, so that this existing key is only updated.
+  if ffi.lua_getfield(state, ffi.LUA_REGISTRYINDEX, ffi.TITAN_BACKTRACE_KEY) == ffi.LUA_TNIL then
+    ffi.lua_settop(state, -2)
+    ffi.lua_pushboolean(state, 0)
+  end
+  ffi.lua_setfield(state, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_before")
+  ffi.lua_pushlightuserdata(state, call)
+  ffi.lua_setfield(state, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_call")
+end
+
+-- Count from zero with no pending call.
+local function task_trace_reset(cells: owned int[])
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 1) ~= 0, "cannot reserve Lua stack for the trace hook")
+  ffi.lua_pushlightuserdata(L, nil)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_call")
+  cells[0] = 0
+end
+
+-- Hook the current thread, whose later Tasks inherit the hook, and the main
+-- thread, where the driver resumes Task roots.
+local function task_trace_hook_install(cells: owned int[])
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 2) ~= 0, "cannot reserve Lua stack for the trace hook")
+  task_trace_reset(cells)
+  ffi.lua_pushboolean(L, 0)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_before")
+  ffi.lua_pushlightuserdata(L, cells as foreign *void)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_cells")
+  ffi.lua_rawgeti(L, ffi.LUA_REGISTRYINDEX, ffi.LUA_RIDX_MAINTHREAD as foreign lua_Integer)
+  local main = ffi.lua_tothread(L, -1)
+  local mask = ffi.LUA_MASKCALL | ffi.LUA_MASKRET
+  ffi.lua_sethook(L, task_trace_capture_hook, mask, 0)
+  ffi.lua_sethook(main, task_trace_capture_hook, mask, 0)
+end
+
+local function task_trace_hook_remove()
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 2) ~= 0, "cannot reserve Lua stack for the trace hook")
+  ffi.lua_sethook(L, nil, 0, 0)
+  ffi.lua_rawgeti(L, ffi.LUA_REGISTRYINDEX, ffi.LUA_RIDX_MAINTHREAD as foreign lua_Integer)
+  ffi.lua_sethook(ffi.lua_tothread(L, -1), nil, 0, 0)
+  ffi.lua_pushnil(L)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_cells")
+  ffi.lua_pushnil(L)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_call")
+  ffi.lua_pushnil(L)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_before")
+end
+
+local function task_trace_failing_body(): value
+  raise "trace capture probe failure"
+end
+
+local function task_trace_cancelled_parked_task()
+  runtime_test.run(function ()
+    local cells: owned int[] = foreign int.new_array(1)
+    task_trace_hook_install(cells)
+    defer task_trace_hook_remove()
+    local token = async.ResumeToken("trace capture probe")
+    local parked = async.run<|value, value|>(function (): value
+      async.suspend(token)
+      return nil
+    end)
+    task_support.cleanup_task(parked, "trace capture probe cleanup")
+    support.wait_until_waiting(parked)
+    task_trace_reset(cells)
+    parked:cancel(async.CancellationReason.simple("trace capture probe"))
+    local status = async.join(parked)
+    local count = cells[0] as integer
+    test.assert(support.cancelled_with(status, "trace capture probe"),
+      "the parked Task was not cancelled")
+    -- Only the cancellation raised at the Task's yield point builds a trace,
+    -- the one that the Task's own catch blocks can observe.
+    test.assert(count == 1, "cancelling a parked Task captured " .. count .. " traces")
+  end)
+end
+
+local function task_trace_reported_failure(context: test.Context, with_cleanup: boolean)
+  runtime_test.run(function ()
+    local cells: owned int[] = foreign int.new_array(1)
+    task_trace_hook_install(cells)
+    defer task_trace_hook_remove()
+    local failing: async.Task? = nil
+    if with_cleanup then
+      failing = async.run_with_cleanup<|value, value|>(task_trace_failing_body,
+        function (_: async.CancellationReason<|value|>?) end)
+    else
+      failing = async.run<|value, value|>(task_trace_failing_body)
+    end
+    task_support.cleanup_task(failing, "trace capture probe cleanup")
+    task_trace_reset(cells)
+    context:log("BEGIN expected uncaught async Task diagnostics")
+    local status = async.join(failing)
+    context:log("END expected uncaught async Task diagnostics")
+    local count = cells[0] as integer
+    local failed, failure? = status:has_failed()
+    test.assert(failed and failure.error == "trace capture probe failure",
+      "the failing Task reported " .. status:as_string())
+    test.assert(support.contains(failure.traceback, "task_trace_failing_body"),
+      "the reported trace lost the raising frame")
+    -- The body's raise builds a trace. An ordinary Task also appends the
+    -- driver's propagation trace, which run_with_cleanup never reports: it
+    -- reports the trace that its body recorded.
+    local expected = 2
+    if with_cleanup then expected = 1 end
+    test.assert(count == expected,
+      "the failing Task captured " .. count .. " traces, expected " .. expected)
+  end)
+end
+
+function test_task_trace_captures_follow_reported_failures(context: test.Context)
+  context:run("cancelled_parked_task", function (_: test.Context)
+    task_trace_cancelled_parked_task()
+  end)
+  context:run("reported_failure", function (child: test.Context)
+    task_trace_reported_failure(child, false)
+  end)
+  context:run("cleanup_body_failure", function (child: test.Context)
+    task_trace_reported_failure(child, true)
+  end)
+end
+
+-- A self-latched suspend settles during its registration. A repeated resume
+-- with the same token at every driver safepoint of that registration
+-- (task_support.each_wake_offset) latches again instead of queuing a second
+-- continuation, so the Task's later yield and suspension still work.
+function test_repeated_resume_during_registration_keeps_one_continuation(_: test.Context)
+  runtime_test.run(function ()
+    task_support.each_wake_offset(true, nil, function (): task_support.WakeCase
+      local first = async.ResumeToken("latched registration")
+      local second = async.ResumeToken("after the yield")
+      local returns = 0
+      local consumed = false
+      local parked = false
+      local body = function (): value
+        async.running():resume(first)
+        async.suspend(first)
+        consumed = true
+        returns = returns + 1
+        async.yield()
+        parked = true
+        async.suspend(second)
+        return returns
+      end
+      local drive = function (window: task_support.WakeWindow, target: async.Task)
+        timer.yield()
+        window.open = false
+        for _ = 1, 50 do
+          if parked or target:status():has_finished() then break end
+          timer.yield()
+        end
+        if parked then target:resume(second) end
+      end
+      return task_support.WakeCase(body, function (target: async.Task)
+        if not consumed then target:resume(first) end
+      end, drive, function (target: async.Task, offset: integer)
+        local finished, result? = target:status():has_succeeded()
+        test.assert(finished and result == 1, "offset " .. offset ..
+          ": a repeated resume during registration left the Task " .. target:status():as_string())
+      end)
+    end)
+  end)
+end
+
+-- Task:cancel at every safepoint of a suspend's window, in the Task or in the
+-- driver: the Task is cancelled, never left parked, and runs its cancel action
+-- at most once.
+local function task_cancel_window(driver: boolean)
+  runtime_test.run(function ()
+    task_support.each_wake_offset(driver, nil, function (): task_support.WakeCase
+      local token = async.ResumeToken("cancelled in its window")
+      local actions = 0
+      return task_support.WakeCase(function (): value
+        async.suspend(token, function () actions = actions + 1 end)
+        return "resumed"
+      end, function (target: async.Task)
+        target:cancel(async.CancellationReason.simple("cancelled in its window"))
+      end, nil, function (target: async.Task, offset: integer)
+        test.assert(support.cancelled_with(target:status(), "cancelled in its window") and
+          actions <= 1, "offset " .. offset .. ": a cancellation in the window left the Task " ..
+          target:status():as_string() .. " after " .. actions .. " cancel actions")
+      end)
+    end)
+  end)
+end
+
+function test_cancel_in_suspend_window_is_delivered_once(context: test.Context)
+  context:run("in_task", function (_: test.Context) task_cancel_window(false) end)
+  context:run("in_driver", function (_: test.Context) task_cancel_window(true) end)
+end
+
+-- A resume for the next suspension at every safepoint while the Task returns
+-- from its delivered suspension, including the old suspend's own cleanup, is
+-- latched and consumed by that next suspension.
+function test_resume_after_delivered_suspension_latches_the_next(_: test.Context)
+  runtime_test.run(function ()
+    task_support.each_wake_offset(false, nil, function (): task_support.WakeCase
+      local first = async.ResumeToken("delivered first")
+      local second = async.ResumeToken("latched second")
+      local drive = function (window: task_support.WakeWindow, target: async.Task)
+        window.open = false
+        timer.yield()
+        window.open = true
+        target:resume(first)
+      end
+      return task_support.WakeCase(function (): value
+        async.suspend(first)
+        async.suspend(second)
+        return "second"
+      end, function (target: async.Task) target:resume(second) end, drive,
+      function (target: async.Task, offset: integer)
+        local finished, result? = target:status():has_succeeded()
+        test.assert(finished and result == "second", "offset " .. offset ..
+          ": a latched resume for the next suspension was lost: " .. target:status():as_string())
+      end)
+    end)
+  end)
+end
+
+-- The latch belongs to the Task's immediately next suspension.
+local function task_latch_scope(latch: function (async.Task): (),
+    suspend_token: async.ResumeToken, returns_at_once: boolean)
+  runtime_test.run(function ()
+    local reached = false
+    local returned = false
+    local target = async.run<|value, value|>(function (): value
+      latch(async.running())
+      reached = true
+      async.suspend(suspend_token)
+      returned = true
+      return nil
+    end)
+    task_support.cleanup_task(target, "latch scope cleanup")
+    -- Sleep rather than yield: the native-wait variant sleeps first.
+    for _ = 1, 100 do
+      if target:status():has_finished() or
+          (reached and target:status():as_string() == "waiting") then break end
+      timer.sleep(1)
+    end
+    if returns_at_once then
+      test.assert(returned, "the latched suspension did not return at once")
+    else
+      test.assert(reached and not returned and target:status():as_string() == "waiting",
+        "a discarded latch woke the suspension")
+      target:resume(suspend_token)
+      async.join(target)
+      test.assert(returned, "the parked suspension did not take its own wake")
+    end
+  end)
+end
+
+function test_running_task_latch_scope(context: test.Context)
+  local first = async.ResumeToken("first latch")
+  local second = async.ResumeToken("second latch")
+  context:run("yield_discards", function (_: test.Context)
+    task_latch_scope(function (task: async.Task)
+      task:resume(first)
+      async.yield()
+    end, first, false)
+  end)
+  context:run("native_wait_discards", function (_: test.Context)
+    task_latch_scope(function (task: async.Task)
+      task:resume(first)
+      timer.sleep(1)
+    end, first, false)
+  end)
+  context:run("latest_wins", function (_: test.Context)
+    task_latch_scope(function (task: async.Task)
+      task:resume(first)
+      task:resume(second)
+    end, second, true)
+  end)
+  context:run("replaced_latch_is_dropped", function (_: test.Context)
+    task_latch_scope(function (task: async.Task)
+      task:resume(second)
+      task:resume(first)
+    end, second, false)
+  end)
+end
+
+-- A Task cannot tell a stale wake from an early one: a stale resume of its own
+-- token after a delivered suspension makes its next suspend with that token
+-- return at once, while a fresh token per wait makes it unmatchable.
+function test_stale_resume_after_delivery_follows_token_reuse(context: test.Context)
+  context:run("reused_token_returns_at_once", function (_: test.Context)
+    runtime_test.run(function ()
+      local token = async.ResumeToken("reused")
+      local target = async.run<|value, value|>(function (): value
+        async.suspend(token)
+        async.running():resume(token)
+        async.suspend(token)
+        return "returned"
+      end)
+      task_support.cleanup_task(target, "reused token cleanup")
+      support.wait_until_waiting(target)
+      target:resume(token)
+      local finished, result? = async.join(target):has_succeeded()
+      test.assert(finished and result == "returned",
+        "a stale latch of the reused token did not settle the next suspend")
+    end)
+  end)
+  context:run("fresh_token_parks", function (_: test.Context)
+    runtime_test.run(function ()
+      local first = async.ResumeToken("first wait")
+      local second = async.ResumeToken("second wait")
+      local reached = false
+      local target = async.run<|value, value|>(function (): value
+        async.suspend(first)
+        async.running():resume(first)
+        reached = true
+        async.suspend(second)
+        return "returned"
+      end)
+      task_support.cleanup_task(target, "fresh token cleanup")
+      support.wait_until_waiting(target)
+      target:resume(first)
+      for _ = 1, 50 do
+        if reached and target:status():as_string() == "waiting" then break end
+        timer.yield()
+      end
+      test.assert(reached and not target:status():has_finished(),
+        "a stale latch of another token settled the next suspend")
+      target:resume(second)
+      test.assert(async.join(target):has_succeeded(), "the fresh-token wait lost its wake")
+    end)
+  end)
+end
+
+-- A resume of the same token at every driver safepoint of the delivery of a
+-- woken suspend latches and is discarded instead of raising. Once the body
+-- has returned the Task is terminating, where a resume raises, so the wake
+-- stops there.
+function test_resume_during_delivery_is_discarded(_: test.Context)
+  runtime_test.run(function ()
+    task_support.each_wake_offset(true, nil, function (): task_support.WakeCase
+      local token = async.ResumeToken("delivered")
+      local returned = false
+      local drive = function (window: task_support.WakeWindow, target: async.Task)
+        window.open = false
+        timer.yield()
+        window.open = true
+        target:resume(token)
+      end
+      return task_support.WakeCase(function (): value
+        async.suspend(token)
+        returned = true
+        return "resumed"
+      end, function (target: async.Task)
+        if not returned then target:resume(token) end
+      end, drive,
+      function (target: async.Task, offset: integer)
+        local finished, result? = target:status():has_succeeded()
+        test.assert(finished and result == "resumed", "offset " .. offset ..
+          ": a resume during delivery changed the Task " .. target:status():as_string())
+      end)
+    end)
+  end)
+end
+
+-- A Task whose yield is queued is not running: a resume still raises.
+function test_resume_raises_while_yield_is_queued(_: test.Context)
+  runtime_test.run(function ()
+    local spinning = true
+    local target = async.run<|value, value|>(function (): value
+      while spinning do async.yield() end
+      return nil
+    end)
+    task_support.cleanup_task(target, "queued yield cleanup")
+    timer.yield()
+    local mismatch = ""
+    do target:resume(async.ResumeToken("queued yield"))
+    catch mismatch = error as string end
+    spinning = false
+    test.assert(mismatch == "Task resume token mismatch (expected source: unknown source)",
+      "a resume of a Task with a queued yield did not raise: " .. mismatch)
+    test.assert(async.join(target):has_succeeded(), "the yielding Task did not finish")
   end)
 end

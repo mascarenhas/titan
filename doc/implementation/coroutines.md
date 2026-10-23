@@ -95,13 +95,14 @@ coroutine from the module-local `mco_runtime` object (see
 4. After control returns, the same helper selects the transfer source again,
    because tagged nested yield can change it from the resumed coroutine to the
    deepest stacked coroutine.
-5. The helper (`pop_transfer_or_raise`) pops `ok` and then `payload`. Generated
-   FFI code refreshes the payload's Lua stack anchor immediately after the
-   payload pop; only then does the helper clear the source owner's fifth
-   uservalue. For `resume`/`error`, `ok=false` means the source coroutine died;
-   the helper performs the [traceback handoff](#entry-function) and re-raises
-   `payload`. For `yield`, `ok=false` is an injected error at a live yield
-   site, and the helper raises `payload` directly.
+5. The helper (`pop_transfer`) pops `ok` and then `payload`. Generated FFI code
+   refreshes the payload's Lua stack anchor immediately after the payload pop;
+   only then does the helper clear the source owner's fifth uservalue. Its
+   caller `pop_transfer_or_raise` raises for `ok=false`. For `resume`/`error`,
+   `ok=false` means the source coroutine died; the caller performs the
+   [traceback handoff](#entry-function) and re-raises `payload`. For `yield`,
+   `ok=false` is an injected error at a live yield site, and the caller raises
+   `payload` directly.
 
 ## TValue FFI boundary
 
@@ -238,6 +239,16 @@ the propagation-side trace, combines it with the staged coroutine trace, pins
 it, and re-raises the same payload. The registry protocol is canonical in
 [Error handling](error-handling.md#trace-pinning).
 
+The async driver resumes Task roots through the private
+`Coroutine:transfer_outcome` instead, which `titan/async.titan` reaches through
+`import "coroutine.titan"`. It performs `resume` or `error` but returns `true`
+and the payload for `ok=false`, leaving the staged trace in place. The driver's
+`resume_root` calls `raise_with_appended_trace` only for a failure that the
+Task will report. For a cancelled Task, or a `run_with_cleanup` Task that has
+already recorded its body's failure, it drops the staged trace with
+`pop_trace_for_append` and captures no propagation trace. See
+[Task status](libuv-runtime.md#explicit-suspend-task-status-listeners-and-combinators).
+
 `Coroutine:error` before the first `resume` is handled without calling the
 callback: the entry sees the preloaded `ok=false` transfer, returns it as the
 final payload, and leaves the value in the owner's pending-transfer root until
@@ -340,14 +351,14 @@ below stays linked while the entry runs.
 `transfer_source(handler)` and resumes the handler with a nil tag.
 
 Minicoro switches into the deepest stacked coroutine. Its
-`pop_transfer_or_raise` sees flag 2 and calls `titan_unwind(L)`. Each coroutine
+`pop_transfer` sees flag 2 and calls `titan_unwind(L)`. Each coroutine
 then:
 
 1. runs its finallies, innermost first;
 2. reaches its floor, which pushes `(nil, 2)` and returns, so `_mco_main` marks
    it `MCO_DEAD` and jumps out to its resumer;
-3. leaves its resumer's `resume_result_or_raise` to pop that flag and unwind
-   its own stack in turn.
+3. leaves its resumer's `pop_transfer` to pop that flag and unwind its own
+   stack in turn.
 
 When the handler finishes, `coro_gc` discards the handler's final transfer,
 destroys the finalized coroutine, and clears both the payload slot and

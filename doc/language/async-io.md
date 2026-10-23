@@ -296,22 +296,98 @@ general wake for a Task waiting on a native operation or persistent source.
 Passing any other token raises synchronously in the caller of `resume`:
 `Task resume token mismatch (expected source: <source>)`. The message uses the
 stored expected token's source, never the supplied token's; a missing stored
-token or nil expected source is shown as `unknown source`. The check is
-unconditional whenever the Task has no current explicit suspension—including
-before suspension, after wake delivery until another suspension, or after
-terminal completion—so a wrong-time call raises with expected source
-`unknown source`; it is not a no-op.
+token or nil expected source is shown as `unknown source`.
+
+A running Task is the exception. `Task:resume(token)` on a Task that is
+running, or whose next wait the Runtime is still registering, latches `token`
+instead of raising; the latest call wins and the same token coalesces. The
+latch is consumed by the Task's immediately next suspension if that is
+`async.suspend` with the identical token, which then returns at once. Any other
+next suspension (another token, a native or external wait, `async.yield`), or
+the Task finishing, discards the latch. Only the Task's own code, or a
+finalizer that runs while it runs, can resume a running Task. A typical case is
+a finalizer that closes a coordination primitive just before its waiter parks.
+
+Because a running Task cannot tell an early wake from a stale one, a waker must
+hold a live registration: clear its registration before calling `resume`, so
+that each wait receives at most one `resume`, or make the waiter recheck its
+condition after every return from `suspend`. Reusing one token across waits is
+safe only under one of these two disciplines; a fresh token per wait makes a
+stale latch unmatchable. Make the waiter discoverable before the last check of
+its condition, so that a wake before that point is seen by the check and a wake
+after it is latched, and do not yield, await or suspend on anything else
+between that check and its `suspend`. An early wake meant for a later
+suspension is dropped silently: if a resume with token `B` is latched and the
+Task's next suspension is `suspend(A)`, that suspension parks and the latch is
+discarded.
+
+This one-waiter gate follows the first discipline, with a fresh token per wait:
+
+```titan
+local async = import "async"
+
+record Gate
+  local opened: boolean
+  local waiter: async.Task?
+  local token: async.ResumeToken?
+end
+
+function gate(): Gate
+  return Gate(false, nil, nil)
+end
+
+function Gate:wait()
+  if self.waiter ~= nil then raise "Gate already has a waiting Task" end
+  local current = async.running()
+  local token = async.ResumeToken.new("Gate.wait")
+  -- Publish the registration before the last check of the condition.
+  self.waiter = current
+  self.token = token
+  local detach = function ()
+    if self.waiter == current then
+      self.waiter = nil
+      self.token = nil
+    end
+  end
+  defer detach()
+  if self.opened then return end
+  async.suspend(token, detach)
+end
+
+function Gate:open()
+  self.opened = true
+  local waiter? = self.waiter
+  local token? = self.token
+  if waiter ~= nil and token ~= nil then
+    -- Consume the registration before resuming: each wait gets one resume.
+    self.waiter = nil
+    self.token = nil
+    waiter:resume(token)
+  end
+end
+```
+
+Every other wrong-time call still raises, with expected source
+`unknown source`: before the Task first runs, while it waits in a native
+operation or `async.yield`, and after terminal completion. It is not a no-op.
 
 With the correct token, `resume` does not enter the target Task inline. It
 synchronously requests a callback-deferred wake without yielding its caller,
 so it is valid from a terminal listener's main-thread context or another
 running Task. Repeated correct-token requests before the wake coalesce.
 
-The optional zero-argument cancellation action runs synchronously in the
+The optional zero-argument cancellation action runs at most once per
+suspension. When the Task is already suspended, it runs synchronously in the
 caller that requests cancellation, before the suspended Task's correct-token
-wake is scheduled. It is for nonyielding, nonraising detachment of an exact
-waiter or similar ownership state; an ordinary correct-token `resume` does not
-call it. Omitting the second argument is equivalent to passing nil.
+wake is scheduled. When the cancellation arrives while the Runtime is still
+registering the suspension, the action runs as the Runtime accepts it, and the
+suspension then raises the cancellation at once. A cancellation that arrives
+earlier, while the Task still runs, makes `suspend` raise without running the
+action. It is for
+nonyielding, nonraising detachment of an exact waiter or similar ownership
+state; an ordinary correct-token `resume` does not call it, and scope cleanup
+must still detach the waiter. Omitting the second argument is equivalent to
+passing nil.
 
 `ResumeToken`, `SuspendCancelAction`, the required token parameters, and the
 nil-accepting cancellation-action parameter are part of the public compiled-
@@ -614,7 +690,9 @@ handle; the owning `async.loop` must still run to complete that close. Runtime
 shutdown and garbage collection of the `Receiver` also close the slot and
 dispose of an unread packet. A decoder hook, or a finalizer that runs while
 `wait` decodes, may close the receiver being waited on: `wait` still returns the
-value it took, and the next `wait` raises `"receiver is closed"`.
+value it took, and the next `wait` raises `"receiver is closed"`. A finalizer
+that closes it while `wait` is about to suspend makes that `wait` raise
+`"receiver is closed"` too.
 
 **Stop senders and finish every in-flight send before calling `close` or
 letting the owning Runtime shut down.** Concurrent `send` and `close` are
@@ -1344,10 +1422,11 @@ Each channel owns one private token shared by all of its blocking and wake
 paths. These calls use that token with `Task:resume(token)`, so repeated wake
 requests coalesce and never enter the other Task inline; code holding only the
 Task cannot wake the channel with a different token. A blocking operation
-suspends once. Its authorized normal wake comes only after the opposite
-operation has established buffer progress or `close` has committed terminal
-state, and the occupied waiter slot prevents another same-direction operation
-from stealing that progress before delivery. Cancellation instead injects the
+occupies its waiter slot and then waits until the opposite operation has
+established buffer progress or `close` has committed terminal state; it
+rechecks after every wake, so a stale wake on the shared token costs only
+another suspension. The occupied waiter slot prevents another same-direction
+operation from stealing that progress before delivery. Cancellation instead injects the
 Task's reason and unwinds; deferred cleanup removes its waiter registration.
 
 `close()` is synchronous and idempotent. Its first call marks the channel
@@ -1602,7 +1681,12 @@ same way, because a finalizer cannot resume the waiting Task. A
 `Completion:fatal` made there likewise records the Runtime failure at once and
 queues its own operation's error for the waiting Task, which raises it at its
 `await` after the finalizer; the driver still reports the Runtime's first
-error.
+error. A finalizer may also run while a Task
+is about to suspend, after it began waiting and before the Runtime registered
+its suspension. Closing, sending on or receiving from an `async.channel`, any
+subscription notification (publish, fail, finish, stop), closing a `Receiver`,
+or cancelling the Task there still ends that wait (see
+[explicit suspension](#scheduling-and-driving-tasks)).
 CPU-heavy code that neither finishes nor yields blocks the event loop.
 
 Persistent sources publish into coalescing or buffered subscriptions. A queued
