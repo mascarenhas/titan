@@ -352,8 +352,10 @@ Both build commands use the installed compiler and its SDK. Make tracks installe
 compiler and SDK updates, source imports, and native headers as prerequisites. Run
 `make clean-stdlib` before changing flags, toolchain, profile, or OpenSSL mode. Also
 clean the matching native dependency build directories when their inputs change
-(`make clean-libuv`, `clean-llhttp`, `clean-sqlite3`, `clean-openssl`), or use a
-separate source copy and SDK prefix. To exercise edits to the checkout compiler,
+(`make clean-llhttp`, `clean-sqlite3`, `clean-openssl`), or use a separate source
+copy and SDK prefix. Libbacktrace and libuv record their profile, compiler, and
+flags and rebuild once when those change ([configuration
+stamps](../implementation/build-script-audit.md#native-dependency-configuration-stamps)). To exercise edits to the checkout compiler,
 reinstall with `luarocks make`, or select the checkout compiler and runtime with
 `make stdlib STDLIB_USE_INSTALLED_RUNTIME=0`. `STDLIB_USE_INSTALLED_RUNTIME` defaults to
 1 when `bin/titanc` is already installed in the selected tree, and to 0 otherwise. For

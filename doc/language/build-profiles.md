@@ -79,8 +79,13 @@ pinned OpenSSL source with the selected native profile.
 An installed SDK records its selected profile in `etc/titan/build-profile`.
 On Unix, run `make clean-stdlib` before changing the standard provider's flags,
 tools, profile, or OpenSSL mode. On Windows, clean the selected private build
-directory and generated provider outputs. Clean the corresponding native build directory when
-changing native dependency inputs; Make does not save or reconcile those settings.
+directory and generated provider outputs. On Unix, the bundled libbacktrace and
+libuv builds record their profile, compiler, and flags and rebuild once when
+they change ([configuration
+stamps](../implementation/build-script-audit.md#native-dependency-configuration-stamps)).
+Clean the other native build directories (llhttp, SQLite, OpenSSL, and every
+Windows native build) when changing their inputs; Make does not save or
+reconcile those settings.
 Native outputs remain adjacent to their sources, so builds using the same
 checkout must run sequentially even when their installed prefixes differ. Use
 separate source copies for concurrent builds.

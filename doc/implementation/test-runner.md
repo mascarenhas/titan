@@ -361,12 +361,14 @@ produces it.
 
 ### Concurrent filtered runs
 
-Each `titan-stdlib-test-run` tees the merged output to `TITAN_TEST_RUN_LOG`
-(default `out/tests/stdout.log`) and writes the root inventory that
-`check_stdlib_test_output.lua` audits it against (default
-`out/tests/roots.txt`; `<log>.roots` beside an explicitly selected log). The
-built executable and fixture objects are only read, so several filtered runs
-can share one build at once when each selects its own log and `TMPDIR`:
+The Unix `Makefile` `titan-stdlib-test-run` tees the merged output to
+`TITAN_TEST_RUN_LOG` (default `$(TITAN_TEST_BUILD_DIR)/stdout.log`, with
+`TITAN_TEST_BUILD_DIR` defaulting to `out/tests`) and writes the root inventory
+that `check_stdlib_test_output.lua` audits it against (default
+`$(TITAN_TEST_BUILD_DIR)/roots.txt`; `<log>.roots` beside an explicitly
+selected log). The built executable and fixture objects are only read, so
+several filtered runs can share one build at once when each selects its own
+log and `TMPDIR`:
 
 ```sh
 mkdir -p /tmp/run-a /tmp/run-b
@@ -380,8 +382,11 @@ wait "$protobuf_run"; protobuf_status=$?
 
 Each run audits only its own log and keeps its own exit status. Cases still
 share the host, so timing-bound cases see more load and loopback port scans
-more contention. The CI sanitizer job keeps its focused gates serial: several
-of them carry timing oracles, such as the 15-second Runtime shutdown check.
+more contention. The CI sanitizer gates stay serial
+([continuous integration](continuous-integration.md#sanitizer-ownership-and-failure-diagnostics)).
+`Makefile.win` does not take `TITAN_TEST_RUN_LOG`: its runner writes fixed
+logs, root lists, and scratch paths inside the one workspace, so Windows runs
+of one workspace must stay sequential.
 
 ### Busted partitions
 

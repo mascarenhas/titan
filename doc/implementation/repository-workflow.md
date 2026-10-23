@@ -89,13 +89,14 @@ after a shell used `luarocks init`. Native test builds use `TITAN_EXTRA_*FLAGS`
 when set and otherwise `TITAN_TEST_EXTRA_*FLAGS` (`Makefile`
 `TITAN_TEST_CFLAGS`); other explicit build-policy inputs are caller-owned.
 
-Lua's internal assertions are a diagnostic configuration: build the Lua core
-with `LUA_MYCFLAGS="-fPIC -O2 -DLUAI_ASSERT"` and, to check Titan's own uses of
-Lua internals too, the runtime, standard library, and tests with
-`TITAN_EXTRA_CPPFLAGS=-DLUAI_ASSERT`, in a separate source copy and prefix.
-The runtime headers and generated code compile in that configuration; Lua's
-`api_check` then also becomes an assertion, so it reports any C path that
-pushes past its frame's reserved stack top.
+Lua's internal assertions are a diagnostic configuration. In a separate source
+copy and prefix, add `-DLUAI_ASSERT` to `LUA_MYCFLAGS` (keeping the profile's
+`-fPIC` and host flags, for example `-fPIC -O2 -fno-lto -DLUAI_ASSERT` under
+validation) and, to check Titan's own uses of Lua internals too, build the
+runtime, standard library, and tests with `TITAN_EXTRA_CPPFLAGS=-DLUAI_ASSERT`.
+Lua's `api_check` then also becomes an assertion, so it reports any public Lua
+C API call that pushes past its frame's reserved stack top; generated and
+runtime code that writes the stack through Lua internals is not checked.
 
 | Command, from the repository root | Purpose |
 | --- | --- |
@@ -108,7 +109,7 @@ pushes past its frame's reserved stack top.
 | `make titan-stdlib-test` | Build and run the aggregate native suite. |
 | `make titan-stdlib-test-build` | Build all native roots once. |
 | `make titan-stdlib-test-run TITAN_FILTER='^ssl[.]tests[.]'` | Filter a fresh execution of the existing aggregate; never filter compilation. |
-| `TMPDIR=/tmp/run-a make titan-stdlib-test-run TITAN_FILTER='^uv[.]' TITAN_TEST_RUN_LOG=/tmp/run-a/stdout.log` | One of several concurrent filtered executions of the same built aggregate; give each its own log and `TMPDIR` ([concurrent runs](test-runner.md#concurrent-filtered-runs)). |
+| `TMPDIR=/tmp/run-a make titan-stdlib-test-run TITAN_FILTER='^uv[.]' TITAN_TEST_RUN_LOG=/tmp/run-a/stdout.log` | Unix: one of several concurrent filtered executions of the same built aggregate; give each its own log and `TMPDIR` ([concurrent runs](test-runner.md#concurrent-filtered-runs)). |
 | `make rock-test BUSTED_FILTER='parser' TITAN_FILTER='^http[.]tests[.]'` | Independently filter both domains. Neither filter skips the other domain. |
 | `make titan-native-coverage` | Build and run the source-linked native coverage aggregate; see [native coverage](native-coverage.md#repository-integration-and-verification). |
 | `make stdlib` / `make install-stdlib` | Incremental standard-provider build / build then copy, using the installed compiler/SDK by default. |

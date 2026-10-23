@@ -216,9 +216,11 @@ selects a generated codec (`find_field_codec`) only when the candidate's
 metatable is the canonical metatable registered under the descriptor's name:
 one Map read and one pointer comparison, since that metatable binds the
 nominal's sole entry. It then reads that entry once and requires the matching
-record or union kind. Otherwise it falls back to reflection, which raises
-`protobuf: record type mismatch`, `protobuf: union type mismatch`, or
-`protobuf: expected a record`/`a union`.
+record or union kind. Otherwise, including a matching nominal without a
+generated codec or with a registered resource capability, it falls back to
+reflection, which encodes a matching nominal and raises `protobuf: record type
+mismatch`, `protobuf: union type mismatch`, `protobuf: expected a record`, or
+`protobuf: expected a union` for a mismatch.
 
 A generated codec *is* the reflective codec specialized to one storage plan,
 sharing one root state with it (`TitanCodecState`): the buffer, the packet

@@ -282,8 +282,9 @@ program](driver.md#linking-a-standalone-program-drivercompile_program).
 `llvm-rc` (or the parsed `RC` command) embeds an `asInvoker`, UTF-8,
 long-path-aware manifest; no machine setting or global DLL search path changes.
 The manifest, resource source, and compiled resource are named after the
-generated entrypoint C file (`<module>__entrypoint.c.manifest`, `.c.rc`, and
-`.c.res`, listed by `driver.windows_program_auxiliary_paths`) and live beside
+generated entrypoint C file, keeping the module's slash hierarchy (for
+`foo.bar`, `foo/bar__entrypoint.c.manifest`, `.c.rc`, and `.c.res`, among the
+paths returned by `driver.windows_program_auxiliary_paths`), and live beside
 it, so they follow `--output` exactly as the entrypoint does.
 
 `spec/support/generate_windows_launcher_fixture.lua` emits the actual driver C,

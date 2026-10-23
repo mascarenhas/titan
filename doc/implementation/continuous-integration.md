@@ -164,17 +164,20 @@ unwinding, async/libuv owners and callbacks, TLS/HTTP, WebSocket ownership,
 SQLite, JSON, reflection, PEG/regex, and the net/OS production smokes. Full
 library behavior belongs to native coverage. The 15-second Runtime shutdown
 check runs here because this aggregate carries no coverage-reporting overhead.
-Host Lua/parser dependencies use instrumented O1; libbacktrace, libuv,
-generated images, and disposable fixtures use instrumented O0; LTO stays
-disabled throughout.
+The gates run serially: several carry timing oracles, such as that shutdown
+check, which concurrent filtered runs would load. Host Lua/parser dependencies
+use instrumented O1; libbacktrace, libuv, generated images, and disposable
+fixtures use instrumented O0; LTO stays disabled throughout.
 
-Gates whose cases pass on a plain build by design, and are diagnosed only by
-ASan/LSan or a destroy-time `abort()`, fail when their filter selects no case:
-the step greps each log for the runner's `[==========] N tests ran.` summary
-with N at least one. These are the TLS/HTTP and WebSocket ownership gates and
-the teardown gate, which runs every `test_lua_close_` case (Lua-state close of
-parked Tasks, external waits, and thread endpoints) and every `test_unwind_`
-case (abandoned-coroutine unwinding, [coroutines](coroutines.md)).
+A gate whose filter could silently select nothing, for example after a case
+rename, also greps each log for the runner's `[==========] N test(s) ran.`
+summary with N at least one; the `ci.yml` steps show which gates do. The
+teardown gate is one of them. It runs every `test_lua_close_` case
+([Lua-state close of an unretired
+Runtime](libuv-runtime.md#lua-state-close-of-an-unretired-runtime), parked
+external waits, and thread endpoints) and every `test_unwind_` case
+([abandoned-coroutine
+unwinding](coroutines.md#unwinding-an-abandoned-coroutine)).
 
 Keep ordinary per-node `#line` attribution during the run: traceback gates
 require exact user and standard-provider frames. `TITAN_NO_LINE_DIRECTIVES=1`
