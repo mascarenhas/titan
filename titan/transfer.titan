@@ -247,10 +247,9 @@ end
 
 local function finalize_resource_scope(scope: ResourceScope)
   -- At Lua-state close this can run before an abandoned suspended stack is
-  -- unwound: dispose the native owners now, and forget the discarded packet
-  -- so the decode defer and any claim made before it see no message.
+  -- unwound: dispose the native owners now. The decode defer that runs later
+  -- during the unwind finds them already disposed.
   dispose_scope(scope.native)
-  scope.message = nil
 end
 
 local function acquire_resource_scope(): ResourceScope

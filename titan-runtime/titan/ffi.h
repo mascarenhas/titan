@@ -141,7 +141,7 @@ static inline int titan_state_closing(lua_State *L) {
 /* Continue an abandoned-coroutine unwind from the current frame: jump to the
 ** next finally boundary or coroutine floor on L's error-recovery chain,
 ** closing exhausted Lua coroutines on the way. Never returns. */
-TITAN_RUNTIME_FUNC void titan_unwind(lua_State *L);
+TITAN_RUNTIME_FUNC l_noret titan_unwind(lua_State *L);
 
 struct mco_coro;
 typedef void (*titan_coroutine_entry)(lua_State *, Udata *, CClosure *, TValue,

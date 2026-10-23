@@ -110,7 +110,7 @@ TITAN_RUNTIME_FUNC void titan_unwind_close(lua_State *L, ptrdiff_t level);
 /* An error escaped a finally body that runs during an unwind: unlink the
 ** guard, restore the boundary state, report the error, close the Lua frames
 ** above `level` and continue the unwind. Never returns. */
-TITAN_RUNTIME_FUNC void titan_unwind_guard_failed(lua_State *L,
+TITAN_RUNTIME_FUNC l_noret titan_unwind_guard_failed(lua_State *L,
     lua_longjmp *guard, l_uint32 oldnC, CallInfo *oldci, lu_byte oldah,
     ptrdiff_t olderrfunc, ptrdiff_t level);
 

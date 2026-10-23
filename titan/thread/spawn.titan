@@ -898,8 +898,14 @@ function Thread:task(): async.Task<|R, value|>
       raise "unreachable running status after native thread completion"
     end
   end, function (reason: async.CancellationReason<|value|>?)
-    defer final_wait:close()
-    defer final_wait:wait_cleanup()
+    -- While the Lua state closes this cleanup runs outside any Task, so it
+    -- cannot await the barrier; runtime_finalize leaves the armed gate
+    -- nonterminal instead.
+    -- Implementation notes: doc/implementation/libuv-runtime.md#lua-state-close-of-an-unretired-runtime
+    defer if ffi.titan_state_closing(L) == 0 then
+      defer final_wait:close()
+      final_wait:wait_cleanup()
+    end
     if not finished then self:cancel(reason) end
   end, final_wait)
   published = true

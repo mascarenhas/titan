@@ -16,8 +16,9 @@ static int minicoro_tag_equal(void *t1, void *t2) {
 }
 
 /* Matches titan/coroutine.titan: TITAN_CORO_TRANSFER_USERVALUE (1-based 5)
-** and the transfer flag of an unwound coroutine. */
+** and the transfer flags of a returned and of an unwound coroutine. */
 #define TITAN_CORO_TRANSFER_UV_INDEX 4
+#define TITAN_CORO_TRANSFER_VALUE 1
 #define TITAN_CORO_TRANSFER_UNWIND 2
 
 static void titan_coroutine_abort(const char *why) {
@@ -63,13 +64,15 @@ void titan_coroutine_enter(lua_State *T, Udata *module, TValue func,
   if (TITAN_SETJMP(floor.lj.b) == 0) {
     entry(T, module, NULL, func, co);
   } else {
-    /* The jump removed every native frame above the floor: restore the saved
-    ** call state, C-call count included, before running any close method. */
+    /* The jump removed every native frame above the floor: unlink the frames'
+    ** boundaries and restore the saved call state, C-call count included,
+    ** before running any close method. */
+    T->errorJmp = floor.lj.previous;
     T->nCcalls = oldnC;
     T->ci = oldci;
     T->allowhook = oldah;
     T->errfunc = olderrfunc;
-    if (floor.lj.status != TITAN_STATUS_UNWIND) {
+    if (floor.lj.status != TITAN_STATUS_UNWIND && floor.lj.status != LUA_OK) {
       /* A real error escaped the entry's catch. Close the Lua frames above
       ** with it, as luaD_pcall does, under the floor re-armed: a __close that
       ** suspends this coroutine leaves it abandonable, and an unwind then
@@ -86,12 +89,19 @@ void titan_coroutine_enter(lua_State *T, Udata *module, TValue func,
         T->allowhook = oldah;
         T->errfunc = olderrfunc;
       }
+      T->errorJmp = floor.lj.previous;
     }
     if (floor.lj.status == TITAN_STATUS_UNWIND) {
       /* Every Titan finally on T has run: close the remaining Lua frames and
       ** finish the coroutine as unwound. */
       titan_unwind_close(T, oldtop);
       titan_coroutine_push_final(T, co, NULL, TITAN_CORO_TRANSFER_UNWIND);
+    } else if (floor.lj.status == LUA_OK) {
+      /* Lua code on T closed its own thread (coroutine.close() with no
+      ** argument): lua_closethread already closed every variable, and
+      ** luaD_throwbaselevel jumped here. Finish as dead with no result, like
+      ** a Lua coroutine that closes itself. */
+      titan_coroutine_push_final(T, co, NULL, TITAN_CORO_TRANSFER_VALUE);
     } else {
       /* Deliver the real error to the resumer. */
       luaD_seterrorobj(T, floor.lj.status, restorestack(T, oldtop));

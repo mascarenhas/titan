@@ -1784,7 +1784,7 @@ void titan_unwind_close(lua_State *L, ptrdiff_t level) {
   L->top.p = restorestack(L, level);
 }
 
-void titan_unwind_guard_failed(lua_State *L, lua_longjmp *guard,
+l_noret titan_unwind_guard_failed(lua_State *L, lua_longjmp *guard,
                                l_uint32 oldnC, CallInfo *oldci, lu_byte oldah,
                                ptrdiff_t olderrfunc, ptrdiff_t level) {
   TStatus status = guard->status;
@@ -1870,7 +1870,7 @@ static lua_State *titan_unwind_cross(lua_State *L, lua_longjmp *outermost) {
   return resumer;
 }
 
-void titan_unwind(lua_State *L) {
+l_noret titan_unwind(lua_State *L) {
   for (;;) {
     lua_longjmp *outermost = NULL;
     lua_longjmp *lj;

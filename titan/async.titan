@@ -654,6 +654,12 @@ local function runtime_finalize(candidate: value)
 end
 
 local function new_runtime(): Runtime
+  -- Lua ignores finalizer registrations during lua_close, so this Runtime's
+  -- loop could never be retired.
+  -- Implementation notes: doc/implementation/libuv-runtime.md#lua-state-close-of-an-unretired-runtime
+  if ffi.titan_state_closing(L) ~= 0 then
+    raise "cannot create an async Runtime during Lua state close"
+  end
   local runtime = Runtime {loop = uv.loop_t.new(), wake = uv.timer_t.new(),
     ready_head = nil, ready_tail = nil, ready_count = 0, wake_armed = false,
     tasks = {}, next_task = 1,
@@ -990,7 +996,9 @@ local function settle(wait: Wait, kind: integer, payload: value)
     raise "stale async operation settlement"
   end
   local registering = wait.phase == WAIT_REGISTERING
-  local deferred = not registering and wait.task.runtime.current_task ~= nil
+  -- A finalizer cannot resume the waiting Task either: queue its delivery.
+  local deferred = not registering and (wait.task.runtime.current_task ~= nil or
+    ffi.titan_in_finalizer(L) ~= 0)
   -- A peer Task cannot advance this Task inline. Accept its deferred wake
   -- before committing settlement: synchronous scheduling failure leaves the
   -- exact pending wait available for retry or shutdown. The wake cannot run
@@ -1031,6 +1039,12 @@ local function fatal(wait: Wait, error: value, trace: string)
   release_completion(wait)
   fail_runtime(runtime, error, trace)
   cancel_shutdown_tasks(runtime, task)
+  -- A finalizer cannot resume the Task (coroutine resumes raise there):
+  -- unwind it later from the ready queue, like a peer Task's wake.
+  if ffi.titan_in_finalizer(L) ~= 0 then
+    enqueue_ready(task, READY_UNWIND, nil)
+    return
+  end
   do advance_task(task, true, error)
   catch
     -- The original callback failure remains authoritative. If advancement
@@ -1521,11 +1535,11 @@ function run_with_cleanup<|A, B|>(
     local task = running() as Task<|A, B|>
     defer do
       task.cleanup_active = true
-      -- Task code runs inside a finalizer only while its abandoned coroutine
-      -- is unwound at Lua-state close; give cleanup the reason the Task will
-      -- report (runtime_finalize publishes the same one).
+      -- At Lua-state close an abandoned Task is unwound without a reason;
+      -- give cleanup the one runtime_finalize publishes. Outside close a
+      -- collected root (published FAILED earlier) keeps its own reason.
       -- Implementation notes: doc/implementation/libuv-runtime.md#lua-state-close-of-an-unretired-runtime
-      if task.cancel_value == nil and ffi.titan_in_finalizer(L) ~= 0 then
+      if task.cancel_value == nil and ffi.titan_state_closing(L) ~= 0 then
         task.cancel_value = CancellationReason<|B|>.simple(ABANDONED_AT_CLOSE)
       end
       cleanup(task.cancel_value)
