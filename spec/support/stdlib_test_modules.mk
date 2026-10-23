@@ -188,7 +188,7 @@ TITAN_TEST_SOURCES_lua.tests := spec/stdlib/titan/lua/tests/tests.titan \
 	spec/stdlib/titan/lua/tests/require_test.titan \
 	spec/stdlib/titan/lua/tests/source_require_test.titan \
 	spec/stdlib/titan/lua/tests/state_close_test.titan
-TITAN_TEST_IMPORTS_lua.tests := lua.handle_transfer_fixture lua.preload_fixture lua.receiver_fixture lua.test_support lua.transfer_fixture support.async support.common support.runtime
+TITAN_TEST_IMPORTS_lua.tests := lua.handle_transfer_fixture lua.preload_fixture lua.receiver_fixture lua.test_support lua.transfer_fixture support.async support.command support.common support.runtime
 TITAN_TEST_SOURCES_lua.transfer_fixture := spec/stdlib/titan/lua/transfer_fixture.titan
 TITAN_TEST_IMPORTS_lua.transfer_fixture :=
 TITAN_TEST_FOREIGN_lua.transfer_fixture := 1

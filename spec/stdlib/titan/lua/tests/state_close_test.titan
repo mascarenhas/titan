@@ -1,5 +1,6 @@
 local lua_close_gc = import "gc"
 local lua_close_uv = import "uv"
+local lua_close_command = import "support.command.titan"
 
 local foreign function lua_close_record(cells: *void, slot: int, code: int)
   local codes = cells as foreign *int
@@ -111,4 +112,35 @@ function test_lua_close_closes_independent_state_after_its_run_async_worker(
   lua_close_worker_case(context, "wrapper_newer_than_task", false, false)
   lua_close_worker_case(context, "wrapper_older_than_task", true, false)
   lua_close_worker_case(context, "worker_finished", true, true)
+end
+
+-- Four Tasks abandoned in run_async occupy every default pool thread, and
+-- each independent state has queued pool work. Releasing those states must
+-- not wait for the pool from a pool thread. The child's SIGALRM watchdog
+-- turns a deadlock into a failure instead of a hang.
+function test_lua_close_releases_run_async_states_with_an_exhausted_pool(
+    context: test.Context)
+  if common.is_windows() then
+    test.skip("platform: the deadlock watchdog uses POSIX alarm")
+  end
+  local workspace = ""
+  runtime_test.run(function ()
+    workspace = fs.tmpname()
+    fs.unlink(workspace)
+    fs.mkdir(workspace)
+    context:cleanup(function () lua_close_command.remove_tree(workspace) end)
+    fs.write_file(workspace .. "/lua_close_worker_pool.h",
+      fs.read_file("spec/fixtures/stdlib/native/lua_close_worker_pool.h"))
+    fs.write_file(workspace .. "/lua_close_worker_pool_app.titan",
+      fs.read_file("spec/fixtures/stdlib/titan/lua_close_worker_pool_app.titan"))
+    local output, why, code = lua_close_command.compile(workspace,
+      "lua_close_worker_pool_app", nil, true)
+    test.assert(why == "exit" and code == 0,
+                "could not compile the worker-pool close child: " .. output)
+  end)
+  local output, why, code = lua_close_command.capture({
+    lua_close_command.program(workspace, "lua_close_worker_pool_app"),
+  }, workspace, {["UV_THREADPOOL_SIZE"] = "4"})
+  test.assert(why == "exit" and code == 0 and output == "LUA_CLOSE_POOL_OK\n",
+              "worker-pool close child ended by " .. why .. " " .. code .. ": " .. output)
 end

@@ -445,21 +445,20 @@ end
 
 -- Implementation notes: doc/implementation/lua-library.md#host-state-close-during-run_async
 -- Lua state close unwinds a Task parked here without completing the wait, and
--- catch never runs during that unwind, so `pending` stays set. The independent
--- state then belongs to whichever of the unwind and the worker finishes last;
--- the wrapper behaves as closed and its finalizer leaves the state alone.
+-- catch never runs during that unwind, so `pending` stays set. run_foreign
+-- then hands the independent state to lua_state_release_abandoned, which the
+-- host Runtime runs after its worker returns; the wrapper behaves as closed.
 local function LuaCall:abandon_if_pending()
   if not self.pending then return end
   self.owner.handle = nil
   self.owner.busy = false
-  lua_state_abandon_call(self.packet)
 end
 
 local function LuaCall:run_worker()
   self.pending = true
   defer self:abandon_if_pending()
   do
-    async.run_foreign(lua_state_run_async, self.packet)
+    async.run_foreign(lua_state_run, self.packet, lua_state_release_abandoned)
   catch
     self.pending = false
     raise

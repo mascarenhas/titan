@@ -654,14 +654,22 @@ returns; the job finishes only later, in `runtime_finalize`'s drain. The wait's
 own cleanup releases nothing that the job uses, and `start_foreign_work`
 passes no `argument_owner`, so the argument's lifetime stays the caller's. An
 `owned` argument is safe, because `lua_close` frees no object before the drain.
-A caller that releases native state lexically must not do so in a `defer` that
-runs during that unwind. The standard library's callers (SQLite operations and
-`lua.Lua:run_async`) set a `pending` flag that only a normal return or `catch`
-clears. A `defer` that finds it set hands the native state to whichever of the
-unwind and the job finishes last, through an atomic exchange in the job's
-packet ([SQLite](sqlite3-library.md#lua-state-close),
-[independent states](lua-library.md#host-state-close-during-run_async)). The
-public contract is in
+For other native state the caller passes `run_foreign`'s optional `abandoned`
+release. `run_foreign` keeps a `waiting` flag that a normal return or `catch`
+clears. Its `defer` finds it still set only when an unwind abandoned the wait,
+and then, while the state closes, calls `ForeignWork:abandon`. That appends the
+work to the active Runtime's `abandoned_work`, or releases at once when no
+Runtime is active any more, because `runtime_finalize` has already drained.
+`runtime_finalize` calls each queued release after `uv.loop_abandon` returns,
+on the closing thread, when every accepted job has returned. A release may
+therefore block on the worker pool, as closing an independent Lua state with
+queued pool work does: no abandoned job holds a pool thread then, whatever the
+pool size. Releasing on the job's own worker thread instead could deadlock
+once abandoned jobs occupy every pool thread
+([independent states](lua-library.md#host-state-close-during-run_async)).
+SQLite's [abandoned operations](sqlite3-library.md#lua-state-close) still
+release on the worker, because that release calls only SQLite. The public
+contract is in
 [foreign work at state close](../language/async-io.md#foreign-work-at-state-close).
 
 The UV `work_t` owner embeds a `uv_work_t` and a separate `titan_uv_work_data`
@@ -845,7 +853,8 @@ not protect against that native use. UV's abandonment sweep and its internal
 terminal handlers are described in the
 [extension guide](libuv-extension-guide.md#final-state-teardown-is-not-ordinary-shutdown).
 `active_runtime` is cleared only after `uv.loop_abandon` returns a successful
-`uv.loop_close`.
+`uv.loop_close`. The finalizer then calls the
+[abandoned `run_foreign` releases](#foreign-workers) queued by unwound waits.
 
 The application contract still applies: withdraw handles, finish sends, and
 drain the ordinary loop before closing the state. Abandonment reclaims libuv's

@@ -46,7 +46,8 @@ function run_with_cleanup<|A, B|>(
     body: function (): (A),
     cleanup: function (CancellationReason<|B|>?): (),
     final_wait: ExternalWait?): Task<|A, B|>
-function run_foreign(f: foreign function (*void): void, arg: foreign *void)
+function run_foreign(f: foreign function (*void): void, arg: foreign *void,
+                     abandoned: foreign function (*void): void)
 function loop()
 function add_close_listener(listener: function (): ()): function (): ()
 function yield()
@@ -1895,8 +1896,9 @@ for, or reap the child. Code that owns the child's lifecycle must use the domain
 process kill/wait operations as required before its Tasks finish. A File owns
 an operating-system descriptor, not a loop handle. The Runtime does not close
 such descriptors through `uv.walk`; application code owns explicit File close.
-Only a [Lua state close](standard-library-fs.md#closing-the-lua-state) closes
-a forgotten File.
+Besides process exit, only a
+[Lua state close](standard-library-fs.md#closing-the-lua-state) closes a
+forgotten File.
 
 Async maintains the sparse live-Task inventory needed for scheduling lifetime,
 exit, and shutdown. Public UV separately roots live native requests/handles for
@@ -1982,9 +1984,19 @@ module keeps it reachable.
 A Task waiting in `async.run_foreign` when its state closes is unwound before
 `f(arg)` returns. Its `defer` statements therefore run while `f` may still be
 using `arg`, and the state close waits for the job only afterwards, when the
-Runtime drains accepted work. An `owned` argument is safe, because the
-collector frees it only after that drain. Native memory or resources that the
-caller releases itself must not be released in a `defer` around
-`run_foreign`. Release them after the call returns, or in a `catch`, which an
-unwind never runs. The standard library's own worker-pool owners hand such
-native state to the job instead, so it is released when the job returns.
+Runtime drains accepted work. Native memory or resources that the caller
+releases itself must not be released in a `defer` around `run_foreign`.
+
+An `owned` argument is safe, because the collector frees it only after that
+drain. For other native state, pass the optional third argument: a C-only
+`abandoned` function, which takes `arg` like `f`. When a Lua state close
+abandons the wait, the Runtime calls `abandoned(arg)` on the closing thread
+once every accepted job, including `f(arg)`, has returned. It must not enter
+Lua or Titan code of the closing state. It may block, for example to close an
+independent Lua state; no abandoned job occupies a pool thread by then. In
+every other case `abandoned` is never called, and the caller releases its state
+after the call returns or in a `catch`, which an unwind never runs. The
+caller's own `defer` must then skip that release: a flag that is set before
+the call and cleared after it returns and in `catch` is still set only after
+an abandoned wait. `lua.Lua:run_async` releases its independent state this
+way.
