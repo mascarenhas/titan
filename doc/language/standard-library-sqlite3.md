@@ -109,7 +109,27 @@ close and remains usable. Statement finalization closes the Statement even if
 SQLite reports a delayed execution error. Early Cursor close resets and
 clears its Statement; it does not roll back a transaction. Cleanup may raise.
 Forgetting explicit close is outside the prompt resource-release guarantee;
-GC does not perform asynchronous database I/O.
+ordinary garbage collection does not perform database I/O, but closing the
+Lua state does.
+
+### Closing the Lua state
+
+Closing the Lua state closes every Connection that is still open, whether or
+not code was going to close it: SQLite finalizes its Statements, including an
+active Cursor's execution, and rolls back an open transaction. Its database
+file, descriptor and locks are released before the state's close returns. This
+release runs synchronously on the closing thread, so it can briefly block it.
+
+A suspended Task's `defer` that closes a Cursor, Statement or Connection
+completes during the close instead of raising, although it cannot
+[await](coroutines.md#cleanup-that-needs-asynchronous-io). Closing a Statement
+or Cursor whose Connection the state close already released does nothing.
+
+A Task can be waiting for a database operation when the state closes. That
+operation's worker may still be running, so its Connection is never released
+under it: the Connection is released when the operation returns, which the
+state close waits for. The Task never sees the result. As with cancellation, a
+COMMIT may or may not have taken effect.
 
 ## Transferring connections
 
@@ -293,8 +313,9 @@ cancelled. Prompt SQLite interruption is not provided.
 
 Close/reset/finalize and retirement of unpublished handles use the private
 ownership-cleanup path and complete despite pending cancellation. They never
-perform blocking SQLite work on the event-loop thread. Native packets and all
-referenced buffers remain owned until their accepted callbacks finish.
+perform blocking SQLite work on the event-loop thread, except while the
+[Lua state closes](#closing-the-lua-state). Native packets and all referenced
+buffers remain owned until their accepted callbacks finish.
 Submission failure remains an `async.OperationError`, and cancellation retains
 its original async reason instead of becoming a SQLite Error.
 

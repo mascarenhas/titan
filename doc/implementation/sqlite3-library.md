@@ -44,7 +44,9 @@ memcpy/free, UTF-8 validation, reflection and Titan-value construction run on
 the loop thread.
 
 Each operation uses its own exact `foreign function (*void): void` entry. There is no
-second operation dispatcher or actor. `sqlite_copy_bytes` (`worker.titan`) always allocates
+second operation dispatcher or actor. Every submission calls that entry through
+the `sqlite_run_worker` trampoline, which adds only the
+[state-close handoff](#lua-state-close). `sqlite_copy_bytes` (`worker.titan`) always allocates
 one extra terminator byte, including for an empty BLOB; binding lengths remain
 explicit and use `SQLITE_TRANSIENT`.
 
@@ -124,13 +126,15 @@ Transaction/savepoint state stays on the native handle.
 
 The payload is a bare pointer, not a reference-counted ticket: repeated
 adoption, abandoned payloads and arbitrary pointer injection are the
-programmer's responsibility, and no GC callback performs database I/O.
+programmer's responsibility, and ordinary collection performs no database I/O.
+A detached source has no handle, so its state-close finalizer releases nothing.
 
 ## Cancellation
 
-Public ordinary work goes through `async.run_foreign`. The local cleanup
-adapter `run_foreign_cleanup` (`sqlite3.titan`) uses public `uv.work_t` and
-`uv.queue_work` inside `async.await_cleanup_with`. Its `CleanupWork` context
+Public ordinary work goes through `async.run_foreign`, submitted by
+`Connection:run_worker`. The local cleanup adapter `Connection:run_cleanup`
+(`sqlite3.titan`) uses public `uv.work_t` and `uv.queue_work` inside
+`async.await_cleanup_with`. Its `CleanupWork` context
 records the completion and operation number, and passes the owned packet as
 `uv.queue_work`'s `argument_owner`, which retains it through worker completion
 and the entire after-work callback frame. The callback `cleanup_completed` saves that exact
@@ -147,8 +151,10 @@ flags or accessing a source-private UV scheduler.
 Cleanup can submit and receive ordinary completion during cancellation unwind.
 This is not general Task shielding: ordinary operations still receive the
 sticky cancellation reason, and the Task's final status stays cancelled.
-There are no Task-flag mutations, detached cleanup Tasks, native destructors in
-GC callbacks, or blocking SQLite calls on the loop thread.
+There are no Task-flag mutations, detached cleanup Tasks, or blocking SQLite
+calls on the loop thread. The only GC callback is the
+[state-close finalizer](#lua-state-close), which ordinary collection leaves
+inert.
 
 As with existing async close operations, submission needs runtime allocation
 and an accepting worker queue. Persistent allocation exhaustion or failure to
@@ -156,6 +162,52 @@ submit native cleanup is not an allocation-infallible destruction guarantee.
 The implementation retains ownership through accepted work and handles
 cancellation and recoverable result-publication failure; it does not claim
 that arbitrary process-wide resource exhaustion can be repaired by a finalizer.
+
+## Lua-state close
+
+Lua state close cannot await the worker pool, so the closing state releases
+SQLite resources itself. This is the only place where the module calls
+SQLite on the loop thread: finalize, reset, and close, which also rolls back an
+open transaction.
+
+Every Connection registers `finalize_connection` with `gc.finalizable` before
+it holds a handle, in `connect` and `from_transfer_payload`. The finalizer
+returns at once unless `titan_state_closing` is set, so ordinary collection
+still performs no database I/O. During close it releases an open Connection
+that is not busy with `sqlite_release_connection` (`worker.titan`): it
+finalizes every statement that `sqlite3_next_stmt` still reports, including an
+active execution, then calls `sqlite3_close`. Statement and Cursor shells keep
+their dangling handles. `Statement:close` and `Cursor:close` return without a
+native call once their Connection has no handle, and every other operation
+rejects that Connection in `reserve` before it reads a handle.
+
+`Connection:run_cleanup`, which serves Connection, Statement and Cursor close
+and the retirement of unpublished results, calls its C entry synchronously
+while the state closes. A `defer db:close()` in an unwinding Task therefore
+completes instead of raising. The busy reservation guarantees that no worker
+uses the connection at that moment. Finalizers run newest first, and a
+Connection can be newer or older than the Task that uses it. Either the
+finalizer releases first and the unwinding closes become no-ops, or the
+unwinding closes release synchronously and leave the finalizer nothing.
+
+**Abandoned worker waits.** A Task parked in a worker wait is unwound before
+the Runtime finalizer drains accepted work, so its worker may still use the
+packet and the connection. `run_worker` and `run_cleanup` set the packet's
+`pending` before submission and clear it when the wait returns or raises.
+`catch` never runs during an unwind, so only an abandoned wait leaves it set.
+The submission's `defer` then clears the Connection's handle and calls
+`sqlite_abandon_worker`. The `sqlite_run_worker` trampoline and that call each
+exchange their mark into the packet's `handoff` atomically
+(`titan_sqlite_handoff`, `native.h`). Whichever finds the other's mark calls
+`sqlite_release_abandoned`. It releases the packet's connection as above
+(the Connection's handle, or the one an abandoned `connect` opened) and frees
+every native buffer. The release therefore runs on the loop thread if the
+worker had already returned, and on the worker thread right after the
+operation otherwise. The frame's own cleanup (`retire_packet`,
+`sqlite_free_packet` and the close-result checks) skips a pending packet, and
+the finalizer skips the busy Connection. The packet's GC owner outlives the
+worker: `lua_close` runs every finalizer, including the Runtime's drain of
+accepted work, before it frees any object.
 
 ## Worker operations and errors
 
@@ -220,7 +272,10 @@ Transfer cases cover source invalidation, synchronous hooks, transaction and
 savepoint preservation, invalid payloads, rejected-send recovery, and round
 trips through an independent state followed by source-state collection. The
 existing worker gates also reject transfer during prepare and close, including
-when no Statement has been published yet.
+when no Statement has been published yet. State-close cases close independent
+states that hold a parked Task's Connection, Statement and active Cursor in
+both finalizer orders, or an abandoned worker wait that is still running or
+already finished, then take an exclusive lock on the same database file.
 Deterministic worker gates use SQLite's supported native extension hooks in a
 normal installed static-consumer child, with no rewritten provider or callback
 interposition. Focused ASan/UBSan runs use the instrumented bundled SQLite.
