@@ -1240,7 +1240,11 @@ describe("raw userdata allocation under Lua internal assertions (end-to-end)", f
     -- makes that drift Lua's byte count reliably; a capture box's orphan often
     -- reuses an earlier box's header and frees with the right size by luck.
     -- So the run measures the drift for both, and the generated C pins every
-    -- raw userdata site to the single-evaluation allocator.
+    -- raw userdata site to the single-evaluation allocator. The forwarded
+    -- fresh-payload site in `emit_vararg_struct` (`_vargud_`) is not covered:
+    -- forwarding `0, ...` or converting `...` from a public variadic entry,
+    -- statically or through a function value, lowers to a C-stack open-argument
+    -- array instead, so no source form found here reaches that allocation.
     it("keeps Lua's byte accounting balanced for capture boxes and vararg payloads", function()
         local saved = driver.EXTRA_CPPFLAGS
         local flags = { "-DLUAI_ASSERT" }
