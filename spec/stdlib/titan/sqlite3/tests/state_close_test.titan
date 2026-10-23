@@ -1,0 +1,193 @@
+local sqlite_close_lua = import "lua"
+local sqlite_close_uv = import "uv"
+
+local foreign function sqlite_close_record(cells: *void, slot: int, code: int)
+  local codes = cells as foreign *int
+  codes[slot] = code
+end
+
+-- Slot codes: 0 the cleanup never ran, 1 it returned, 2 it raised.
+local function sqlite_close_attempt(cells: foreign *void, slot: integer,
+                                    close: function (): ())
+  do
+    close()
+    sqlite_close_record(cells, slot, 1)
+  catch
+    sqlite_close_record(cells, slot, 2)
+  end
+end
+
+local sqlite_close_parked = false
+local sqlite_close_shared: sqlite3.Connection? = nil
+
+-- Hold a RESERVED lock with an uncommitted row, an idle Statement and an
+-- active Cursor, then park with the documented lexical closes still pending.
+local function sqlite_close_hold(db: sqlite3.Connection, cells: foreign *void)
+  defer sqlite_close_attempt(cells, 0, db:close)
+  execute_sql(db, "BEGIN IMMEDIATE")
+  local insert = db:prepare("INSERT INTO item VALUES (2)")
+  defer sqlite_close_attempt(cells, 1, insert:close)
+  insert:execute()
+  local select = db:prepare("SELECT value FROM item")
+  defer sqlite_close_attempt(cells, 2, select:close)
+  local cursor = select:query()
+  defer sqlite_close_attempt(cells, 3, cursor:close)
+  sqlite_close_parked = true
+  async.suspend(async.ResumeToken("SQLite connection parked at Lua state close"))
+end
+
+-- Public only so a fresh independent state can call it; test infrastructure.
+-- The Connection is newer than its parked Task, so its finalizer runs first.
+function sqlite_close_park_with_new_connection(path: string, cells_raw: value)
+  local cells = cells_raw as foreign *void
+  local task = async.run<|nil, value|>(function (): nil
+    sqlite_close_hold(sqlite3.connect(path), cells)
+    return nil
+  end)
+  task_support.drive_until(task, function (): boolean return sqlite_close_parked end)
+end
+
+-- Public only so a fresh independent state can call it; test infrastructure.
+-- The Connection is older than the parked Task, so the Task unwinds first.
+-- The opener stays parked too: a Runtime whose last Task finished is closing.
+function sqlite_close_park_with_older_connection(path: string, cells_raw: value)
+  local cells = cells_raw as foreign *void
+  local opener = async.run<|nil, value|>(function (): nil
+    sqlite_close_shared = sqlite3.connect(path)
+    async.suspend(async.ResumeToken("SQLite connection opener"))
+    return nil
+  end)
+  task_support.drive_until(opener, function (): boolean
+    return sqlite_close_shared ~= nil
+  end)
+  local task = async.run<|nil, value|>(function (): nil
+    sqlite_close_hold(sqlite_close_shared as sqlite3.Connection, cells)
+    return nil
+  end)
+  task_support.drive_until(task, function (): boolean return sqlite_close_parked end)
+end
+
+-- Public only so a fresh independent state can call it; test infrastructure.
+-- Leaves an operation's worker request accepted but undelivered when the
+-- state closes. With `finish_first`, the INSERT worker completes before the
+-- close; otherwise COMMIT waits in SQLite's busy handler behind the host's
+-- reader. Either way the abandoned Connection holds the RESERVED lock.
+function sqlite_close_park_in_worker(path: string, finish_first: boolean)
+  local task = async.run<|nil, value|>(function (): nil
+    local db = sqlite3.connect(path)
+    defer db:close()
+    local timeout = db:prepare("PRAGMA busy_timeout = 300")
+    defer timeout:close()
+    timeout:query():close()
+    db:set_autocommit(false)
+    local insert = db:prepare("INSERT INTO item VALUES (2)")
+    defer insert:close()
+    if finish_first then
+      sqlite_close_parked = true
+      insert:execute()
+    else
+      insert:execute()
+      sqlite_close_parked = true
+      db:commit()
+    end
+    return nil
+  end)
+  task_support.drive_until(task, function (): boolean return sqlite_close_parked end)
+  if finish_first then sqlite_close_uv.sleep(100) end
+end
+
+local function sqlite_close_database(): string
+  local path = fs.tmpname()
+  local setup = sqlite3.connect(path)
+  defer setup:close()
+  execute_sql(setup, "CREATE TABLE item (value INTEGER)")
+  execute_sql(setup, "INSERT INTO item VALUES (1)")
+  return path
+end
+
+local function sqlite_close_remove(path: string)
+  remove_if_present(path .. "-journal")
+  remove_if_present(path)
+end
+
+local function sqlite_close_child(entry: string, ...: async.TransferValue)
+  local state = sqlite_close_lua.new()
+  defer state:close()
+  state:run([[
+    package.path, package.cpath = '', ''
+    local entry = ...
+    require('sqlite3.tests')[entry](select(2, ...))
+  ]], "=sqlite-state-close", async.TransferValue.is_string(entry), ...)
+  state:close()
+end
+
+-- After the abandoned Connection is gone, no lock survives and its
+-- uncommitted row was rolled back.
+local function sqlite_close_assert_released(path: string)
+  local db = sqlite3.connect(path)
+  defer db:close()
+  execute_sql(db, "BEGIN EXCLUSIVE")
+  test.assert(scalar_integer(db, "SELECT count(*) FROM item") == 1,
+              "Lua state close kept the abandoned connection's uncommitted row")
+  db:rollback()
+end
+
+local function sqlite_close_parked_case(context: test.Context, name: string,
+                                        entry: string)
+  context:run(name, function (_: test.Context)
+    runtime_test.run(function ()
+      local path = sqlite_close_database()
+      defer sqlite_close_remove(path)
+      local cells: owned int[] = foreign int.new_array(4)
+      for index = 0, 3 do cells[index] = 0 end
+      sqlite_close_child(entry, async.TransferValue.is_string(path),
+                         async.TransferValue.is_pointer(cells as foreign *void))
+      local owners: {string} = {"Connection", "INSERT Statement",
+                                "SELECT Statement", "Cursor"}
+      for index = 1, 4 do
+        local code = cells[index - 1] as integer
+        test.assert(code == 1, owners[index] .. " close during Lua state close gave code " .. code)
+      end
+      sqlite_close_assert_released(path)
+    end)
+  end)
+end
+
+-- A Task parked with its lexical closes pending: closing the Lua state must
+-- release the Connection whichever of the Connection and the Task is older.
+function test_lua_close_releases_sqlite_connection_of_parked_task(context: test.Context)
+  sqlite_close_parked_case(context, "connection_newer_than_task",
+                           "sqlite_close_park_with_new_connection")
+  sqlite_close_parked_case(context, "connection_older_than_task",
+                           "sqlite_close_park_with_older_connection")
+end
+
+local function sqlite_close_worker_case(context: test.Context, name: string,
+                                        finish_first: boolean)
+  context:run(name, function (_: test.Context)
+    runtime_test.run(function ()
+      local path = sqlite_close_database()
+      defer sqlite_close_remove(path)
+      local reader = sqlite3.connect(path)
+      defer reader:close()
+      local select = reader:prepare("SELECT value FROM item")
+      defer select:close()
+      -- An active Cursor holds SHARED, so the child's COMMIT cannot finish.
+      local cursor: sqlite3.Cursor? = nil
+      defer if cursor ~= nil then cursor:close() end
+      if not finish_first then cursor = select:query() end
+      sqlite_close_child("sqlite_close_park_in_worker",
+                         async.TransferValue.is_string(path),
+                         async.TransferValue.is_boolean(finish_first))
+      if cursor ~= nil then cursor:close() end
+      sqlite_close_assert_released(path)
+    end)
+  end)
+end
+
+-- Issue #283 unwinds a Task parked in a worker wait while the worker may
+-- still use its packet and Connection. Neither may be released under it.
+function test_lua_close_releases_sqlite_connection_after_its_worker(context: test.Context)
+  sqlite_close_worker_case(context, "worker_running", false)
+  sqlite_close_worker_case(context, "worker_finished", true)
+end

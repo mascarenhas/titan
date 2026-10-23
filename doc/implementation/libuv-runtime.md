@@ -636,12 +636,13 @@ bootstrap used by independent states is described in the
 
 ## Foreign workers
 
-`run_foreign(f, arg)` is an ordinary await over public `uv.queue_work`
+`run_foreign(f, arg, abandoned)` is an ordinary await over public `uv.queue_work`
 (`start_foreign_work`). It rejects a NULL `f` before submission. The worker runs
 only `f(arg)` on raw native state; the loop-thread completion callback resolves
 nil or rejects an `OperationError` labelled `async.run_foreign`, and protects
 unexpected failures with fatal plus bare rethrow. The argument's owned storage
-stays in the suspended caller through completion.
+stays in the suspended caller through completion. The optional `abandoned`
+release is used only at Lua state close, as described below.
 
 Worker code must not inspect host Titan/Lua owners, call the Lua API on the
 hosting state, raise into its frames, or resume its Tasks. The
@@ -651,6 +652,29 @@ Titan modules there; that collector never receives a host GC object. Shared
 native bytes are synchronized by the caller. The libuv worker pool is shared with
 other native work, and async adds no queue or thread policy. Cancellation never
 detaches an accepted job.
+
+A Lua state close unwinds a Task parked in `run_foreign` before its job
+returns; the job finishes only later, in `runtime_finalize`'s drain. The wait's
+own cleanup releases nothing that the job uses, and `start_foreign_work`
+passes no `argument_owner`, so the argument's lifetime stays the caller's. An
+`owned` argument is safe, because `lua_close` frees no object before the drain.
+For other native state the caller passes `run_foreign`'s optional `abandoned`
+release. `run_foreign` keeps a `waiting` flag that a normal return or `catch`
+clears. Its `defer` finds it still set only when an unwind abandoned the wait,
+and then, while the state closes, calls `ForeignWork:abandon`. That appends the
+work to the active Runtime's `abandoned_work`, or releases at once when no
+Runtime is active any more, because `runtime_finalize` has already drained.
+`runtime_finalize` calls each queued release after `uv.loop_abandon` returns,
+on the closing thread, when every accepted job has returned. A release may
+therefore block on the worker pool, as closing an independent Lua state with
+queued pool work does: no abandoned job holds a pool thread then, whatever the
+pool size. Releasing on the job's own worker thread instead could deadlock
+once abandoned jobs occupy every pool thread
+([independent states](lua-library.md#host-state-close-during-run_async)).
+SQLite's [abandoned operations](sqlite3-library.md#lua-state-close) still
+release on the worker, because that release calls only SQLite. The public
+contract is in
+[foreign work at state close](../language/async-io.md#foreign-work-at-state-close).
 
 The UV `work_t` owner embeds a `uv_work_t` and a separate `titan_uv_work_data`
 (`titan/uv/work-data.h`) holding the C worker, argument, and owner address.
@@ -833,13 +857,21 @@ not protect against that native use. UV's abandonment sweep and its internal
 terminal handlers are described in the
 [extension guide](libuv-extension-guide.md#final-state-teardown-is-not-ordinary-shutdown).
 `active_runtime` is cleared only after `uv.loop_abandon` returns a successful
-`uv.loop_close`.
+`uv.loop_close`. The finalizer then calls the
+[abandoned `run_foreign` releases](#foreign-workers) queued by unwound waits.
 
 The application contract still applies: withdraw handles, finish sends, and
 drain the ordinary loop before closing the state. Abandonment reclaims libuv's
 loop internals and closes their handles, not application cleanup semantics such
 as a graceful protocol shutdown; the public guidance is
 [cleanup that needs asynchronous I/O](../language/coroutines.md#cleanup-that-needs-asynchronous-io).
+Domain owners whose ordinary close awaits release their own native state
+synchronously at state close, from their finalizers or from a close that tests
+`titan_state_closing`:
+[Files](filesystem-library.md#lua-state-close),
+[SQLite connections](sqlite3-library.md#lua-state-close) and
+[TLS engines and contexts](ssl-library.md#lua-state-close). Their finalizers
+need no Runtime, so they work in either order with this one.
 
 **Parked native waits.** A Task parked in a native wait lends the domain a
 waiter node in its own coroutine frame: thread channel send and receive (the

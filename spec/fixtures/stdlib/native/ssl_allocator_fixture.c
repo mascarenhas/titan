@@ -2,6 +2,8 @@
  * Install OpenSSL's public paired allocation callbacks before module startup;
  * all allocations pass through until a public operation explicitly arms one
  * failure. The one-shot gate clears before error reporting or cleanup runs.
+ * The callbacks also count OpenSSL's live blocks, so a scenario can check
+ * that a native owner released everything it allocated.
  */
 #include <openssl/crypto.h>
 #include <openssl/ssl.h>
@@ -12,6 +14,7 @@
 
 static pthread_mutex_t gate = PTHREAD_MUTEX_INITIALIZER;
 static int installed, armed, requested, matched, fired;
+static long live;
 static const char *wanted_file;
 static int wanted_line;
 
@@ -34,16 +37,30 @@ static int fail_requested(const char *file, int line) {
     pthread_mutex_unlock(&gate);
     return fail;
 }
+static void count_live(long change) {
+    pthread_mutex_lock(&gate);
+    live += change;
+    pthread_mutex_unlock(&gate);
+}
 static void *probe_malloc(size_t bytes, const char *file, int line) {
+    void *result;
     if (fail_requested(file, line)) return NULL;
-    return malloc(bytes);
+    result = malloc(bytes);
+    if (result) count_live(1);
+    return result;
 }
 static void *probe_realloc(void *pointer, size_t bytes, const char *file, int line) {
+    void *result;
     if (fail_requested(file, line)) return NULL;
-    return realloc(pointer, bytes);
+    result = realloc(pointer, bytes);
+    if (!pointer && result) count_live(1);
+    /* A zero-byte realloc may free the block and return NULL. */
+    else if (pointer && !result && bytes == 0) count_live(-1);
+    return result;
 }
 static void probe_free(void *pointer, const char *file, int line) {
     (void)file; (void)line;
+    if (pointer) count_live(-1);
     free(pointer);
 }
 __attribute__((constructor)) static void install_probe(void) {
@@ -98,6 +115,13 @@ int titan_ssl_allocator_fired(void) {
     int result;
     pthread_mutex_lock(&gate);
     result = fired;
+    pthread_mutex_unlock(&gate);
+    return result;
+}
+long titan_ssl_allocator_live(void) {
+    long result;
+    pthread_mutex_lock(&gate);
+    result = live;
     pthread_mutex_unlock(&gate);
     return result;
 }

@@ -362,7 +362,9 @@ Ordinary blocking work can use `async.run_foreign`. A domain cleanup worker uses
 public `uv.work_t` and `uv.queue_work` inside `await_cleanup`, retaining its
 argument graph until after-work completion; SQLite's reset/finalize/close
 adapter is one example. Cleanup policy never lets C workers touch Titan or free
-an argument still in native use.
+an argument still in native use, including when a Lua state close unwinds the
+waiting Task before the job returns
+([foreign workers](libuv-runtime.md#foreign-workers)).
 
 `uv.setup_process_args()` (`titan/uv/startup.titan`) configures only the
 original argc/argv published by a generated executable entrypoint; it is
@@ -401,6 +403,9 @@ independently allocated request result needs abandonment-only cleanup. Do not
 add an abandonment branch to ordinary operation paths. Native work still
 finishes before its borrowed storage is released. Resources owned by arbitrary
 workers or domains, and results already delivered, are not UV's to dispose.
+A domain whose ordinary close awaits releases its own native state
+synchronously, from a finalizer or a close that tests `titan_state_closing`
+(see [the owners](libuv-runtime.md#lua-state-close-of-an-unretired-runtime)).
 Successful `uv.loop_close`, not suppressed callback counts, is the retirement
 oracle. See the [public contract](../language/standard-library-uv.md#abandoned-loop-retirement).
 

@@ -304,10 +304,24 @@ ordinary collection and raises while the state closes.
 Unwinding is last-resort cleanup for resources tied to a scope. It cannot
 await, so it cannot finish anything that needs another round trip.
 
-Native resources are still released when the state closes: the Runtime's
-finalizer closes the loop's remaining handles, and with them their sockets and
-connections (see
+Native resources are still released when the state closes. The Runtime's
+finalizer closes the loop's remaining handles: sockets, pipes, timers,
+watchers and process handles (see
 [closing a Lua state with an active Runtime](async-io.md#closing-a-lua-state-with-an-active-runtime)).
+Standard-library owners whose ordinary close needs a Task or the worker pool
+release their native state synchronously instead:
+[Files](standard-library-fs.md#closing-the-lua-state),
+[SQLite connections](standard-library-sqlite3.md#closing-the-lua-state),
+[TLS connections and servers](standard-library-ssl.md#closing-the-lua-state),
+and [independent Lua states running `run_async`](standard-library-lua.md#asynchronous-execution).
+A `defer` that closes one of them completes during the unwind instead of
+raising. Native work that a worker is still running finishes first. What it
+uses is then released, still during the state close, except that a File
+whose read, write or flush was in flight keeps its descriptor until the
+process exits ([details](standard-library-fs.md#closing-the-lua-state)).
+Native memory that application code manages itself through the C FFI needs
+the same care; see [`async.run_foreign`](async-io.md#foreign-work-at-state-close).
+
 What is lost is graceful protocol shutdown that needs awaits, such as a TLS
 `close_notify`, a WebSocket Close handshake, or draining an HTTP response.
 

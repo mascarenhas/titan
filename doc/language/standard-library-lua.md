@@ -248,6 +248,12 @@ after cleanup it can be used again or closed. A Lua chunk that never returns
 therefore also prevents that Task's cancellation from completing. Long jobs
 share worker capacity with filesystem and DNS operations.
 
+If the hosting Lua state closes while a Task waits in `run_async`, that Task is
+[unwound](coroutines.md#abandoned-coroutines) before the chunk returns. The
+independent state is never closed under its running chunk. It is closed, and
+the call's results discarded, once the worker returns; the host's close waits
+for that. From the unwind on, the `Lua` wrapper behaves as closed.
+
 ### Two-phase receiver bootstrap
 
 A first `run_async` call can create a receiver before its independent state's

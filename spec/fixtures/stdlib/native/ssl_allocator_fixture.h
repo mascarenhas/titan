@@ -6,4 +6,5 @@ int titan_ssl_allocator_pem_bio_ordinal(void);
 void titan_ssl_allocator_arm(const char *file, int line, int ordinal);
 void titan_ssl_allocator_disarm(void);
 int titan_ssl_allocator_fired(void);
+long titan_ssl_allocator_live(void);
 #endif

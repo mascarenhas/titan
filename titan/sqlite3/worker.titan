@@ -403,7 +403,7 @@ end
 
 -- Pure malloc/free ownership may retire synchronously on the loop thread.
 -- SQLite handles and execution have already been retired or transferred.
-local foreign function sqlite_free_packet(packet: *TitanSqlitePacket)
+local foreign function sqlite_free_buffers(packet: *TitanSqlitePacket)
   ffi.free(packet.input)
   packet.input = nil
   local index: foreign int = 0
@@ -438,4 +438,58 @@ local foreign function sqlite_free_packet(packet: *TitanSqlitePacket)
   packet.message = nil
   ffi.free(packet.cleanup_message)
   packet.cleanup_message = nil
+end
+
+-- A packet whose wait a Lua-state-close unwind abandoned is released by the
+-- handoff in sqlite_abandon_worker or sqlite_run_worker, never here.
+local foreign function sqlite_free_packet(packet: *TitanSqlitePacket)
+  if packet.pending ~= 0 then return end
+  sqlite_free_buffers(packet)
+end
+
+-- Implementation notes: doc/implementation/sqlite3-library.md#lua-state-close
+-- Lua-state-close release without a worker: finalize every Statement of the
+-- connection, including an active execution, then close it, which rolls back
+-- an open transaction. A failed close leaves nothing else to retry.
+local foreign function sqlite_release_connection(db: *sqlite3)
+  local statement = ffi.sqlite3_next_stmt(db, nil)
+  while statement ~= nil do
+    ffi.sqlite3_finalize(statement)
+    statement = ffi.sqlite3_next_stmt(db, nil)
+  end
+  ffi.sqlite3_close(db)
+end
+
+-- The packet's connection (its own, or the Connection's detached handle)
+-- belongs to the closing state, so release it with every native buffer.
+local foreign function sqlite_release_abandoned(packet: *TitanSqlitePacket)
+  if packet.db ~= nil then sqlite_release_connection(packet.db) end
+  packet.db = nil
+  packet.stmt = nil
+  packet.owns_db = 0
+  packet.owns_stmt = 0
+  packet.needs_reset = 0
+  sqlite_free_buffers(packet)
+end
+
+-- Every submission runs its operation through this trampoline, which then
+-- completes the state-close handoff. The packet's GC owner outlives this
+-- call: Lua state close drains accepted work before freeing any object.
+local foreign function sqlite_run_worker(argument: *void)
+  local packet = argument as foreign *TitanSqlitePacket
+  local entry = packet.worker
+  entry(argument)
+  if ffi.titan_sqlite_handoff(packet, ffi.TITAN_SQLITE_WORKER_FINISHED) ==
+      ffi.TITAN_SQLITE_WORKER_ABANDONED then
+    sqlite_release_abandoned(packet)
+  end
+end
+
+-- A Lua-state-close unwind abandoned the packet's wait. Release now if its
+-- worker already returned; otherwise the trampoline releases it on return.
+local foreign function sqlite_abandon_worker(packet: *TitanSqlitePacket)
+  if ffi.titan_sqlite_handoff(packet, ffi.TITAN_SQLITE_WORKER_ABANDONED) ==
+      ffi.TITAN_SQLITE_WORKER_FINISHED then
+    sqlite_release_abandoned(packet)
+  end
 end

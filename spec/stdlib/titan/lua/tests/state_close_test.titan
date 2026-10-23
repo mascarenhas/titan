@@ -1,0 +1,146 @@
+local lua_close_gc = import "gc"
+local lua_close_uv = import "uv"
+local lua_close_command = import "support.command.titan"
+
+local foreign function lua_close_record(cells: *void, slot: int, code: int)
+  local codes = cells as foreign *int
+  codes[slot] = code
+end
+
+local function lua_close_code(cells: foreign *void, slot: integer): integer
+  local codes = cells as foreign *int
+  return codes[slot] as integer
+end
+
+-- Cell 0: 1 once the abandoned worker's chunk finished. Cell 1: the nested
+-- state closed after that chunk finished (1) or under it (2).
+local record LuaCloseWatch
+  cells: foreign *void
+end
+
+local lua_close_watch: LuaCloseWatch? = nil
+local lua_close_submitted = false
+
+local function lua_close_watched(candidate: value)
+  local watch: LuaCloseWatch = candidate
+  if lua_close_code(watch.cells, 0) == 1 then
+    lua_close_record(watch.cells, 1, 1)
+  else
+    lua_close_record(watch.cells, 1, 2)
+  end
+end
+
+-- Public only so a fresh independent state can call it; test infrastructure.
+function lua_close_watch_state(cells_raw: value)
+  local watch = LuaCloseWatch(cells_raw as foreign *void)
+  lua_close_gc.finalizable<|value|>(watch, lua_close_watched)
+  lua_close_watch = watch
+end
+
+-- Public only so a fresh independent state can call it; test infrastructure.
+function lua_close_worker_chunk(cells_raw: value, finish_first: boolean)
+  if not finish_first then lua_close_uv.sleep(200) end
+  lua_close_record(cells_raw as foreign *void, 0, 1)
+end
+
+local function lua_close_new_inner(cells: foreign *void): tlua.Lua
+  local inner = tlua.new()
+  inner:run([[
+    package.path, package.cpath = '', ''
+    require('lua.tests').lua_close_watch_state(...)
+  ]], "=lua-close-watch", async.TransferValue.is_pointer(cells))
+  return inner
+end
+
+local lua_close_anchor: async.Receiver? = nil
+
+-- Public only so a fresh independent state can call it; test infrastructure.
+-- Parks a Task in run_async on a nested state. Finalizers run newest first:
+-- with `inner_first` the nested state's wrapper sits between the Task and the
+-- Runtime, so it is finalized after the Task unwinds and before the Runtime
+-- drains the worker; otherwise the wrapper is newer than the Task. Without
+-- `finish_first` the worker still sleeps when this state closes; with it, the
+-- worker returned but its completion was never delivered.
+function lua_close_park_in_run_async(cells_raw: value, inner_first: boolean,
+                                     finish_first: boolean)
+  local cells = cells_raw as foreign *void
+  local held: tlua.Lua? = nil
+  if inner_first then
+    lua_close_anchor = async.receiver()
+    held = lua_close_new_inner(cells)
+  end
+  local task = async.run<|nil, value|>(function (): nil
+    local inner = held or lua_close_new_inner(cells)
+    lua_close_submitted = true
+    inner:run_async([[
+      require('lua.tests').lua_close_worker_chunk(...)
+    ]], "=lua-close-worker", async.TransferValue.is_pointer(cells),
+        async.TransferValue.is_boolean(finish_first))
+    return nil
+  end)
+  task_support.drive_until(task, function (): boolean return lua_close_submitted end)
+  if finish_first then lua_close_uv.sleep(100) end
+end
+
+local function lua_close_worker_case(context: test.Context, name: string,
+                                     inner_first: boolean, finish_first: boolean)
+  context:run(name, function (_: test.Context)
+    local cells: owned int[] = foreign int.new_array(2)
+    cells[0] = 0
+    cells[1] = 0
+    local state = tlua.new()
+    defer state:close()
+    state:run([[
+      package.path, package.cpath = '', ''
+      require('lua.tests').lua_close_park_in_run_async(...)
+    ]], "=lua-close-run-async", async.TransferValue.is_pointer(cells as foreign *void),
+        async.TransferValue.is_boolean(inner_first),
+        async.TransferValue.is_boolean(finish_first))
+    state:close()
+    test.assert((cells[0] as integer) == 1,
+                "the abandoned run_async worker did not finish its chunk")
+    test.assert((cells[1] as integer) == 1,
+                "the busy independent state closed with code " .. (cells[1] as integer))
+  end)
+end
+
+-- Closing a state unwinds a Task parked in run_async while the worker still
+-- runs the nested state. That state must close only after the worker returns,
+-- and must not leak. Code 0: never closed; 2: closed under the worker.
+function test_lua_close_closes_independent_state_after_its_run_async_worker(
+    context: test.Context)
+  lua_close_worker_case(context, "wrapper_newer_than_task", false, false)
+  lua_close_worker_case(context, "wrapper_older_than_task", true, false)
+  lua_close_worker_case(context, "worker_finished", true, true)
+end
+
+-- Four Tasks abandoned in run_async occupy every default pool thread, and
+-- each independent state has queued pool work. Releasing those states must
+-- not wait for the pool from a pool thread. The child's SIGALRM watchdog
+-- turns a deadlock into a failure instead of a hang.
+function test_lua_close_releases_run_async_states_with_an_exhausted_pool(
+    context: test.Context)
+  if common.is_windows() then
+    test.skip("platform: the deadlock watchdog uses POSIX alarm")
+  end
+  local workspace = ""
+  runtime_test.run(function ()
+    workspace = fs.tmpname()
+    fs.unlink(workspace)
+    fs.mkdir(workspace)
+    context:cleanup(function () lua_close_command.remove_tree(workspace) end)
+    fs.write_file(workspace .. "/lua_close_worker_pool.h",
+      fs.read_file("spec/fixtures/stdlib/native/lua_close_worker_pool.h"))
+    fs.write_file(workspace .. "/lua_close_worker_pool_app.titan",
+      fs.read_file("spec/fixtures/stdlib/titan/lua_close_worker_pool_app.titan"))
+    local output, why, code = lua_close_command.compile(workspace,
+      "lua_close_worker_pool_app", nil, true)
+    test.assert(why == "exit" and code == 0,
+                "could not compile the worker-pool close child: " .. output)
+  end)
+  local output, why, code = lua_close_command.capture({
+    lua_close_command.program(workspace, "lua_close_worker_pool_app"),
+  }, workspace, {["UV_THREADPOOL_SIZE"] = "4"})
+  test.assert(why == "exit" and code == 0 and output == "LUA_CLOSE_POOL_OK\n",
+              "worker-pool close child ended by " .. why .. " " .. code .. ": " .. output)
+end

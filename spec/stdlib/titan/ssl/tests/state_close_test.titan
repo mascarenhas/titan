@@ -1,0 +1,110 @@
+local foreign function ssl_close_record(cells: *void, slot: int, code: int)
+  local codes = cells as foreign *int
+  codes[slot] = code
+end
+
+-- Slot codes: 0 the cleanup never ran, 1 it returned, 2 it raised.
+local function ssl_close_attempt(cells: foreign *void, slot: integer,
+                                 cleanup: function (): ())
+  do
+    cleanup()
+    ssl_close_record(cells, slot, 1)
+  catch
+    ssl_close_record(cells, slot, 2)
+  end
+end
+
+local ssl_close_parked = false
+local ssl_close_server: ssl.Server? = nil
+local ssl_close_shared: ssl.Connection? = nil
+
+-- Park in a handshake the plain TCP peer never answers, with the documented
+-- lexical close (slot 0) or abort (slot 1) still pending.
+local function ssl_close_hold(connection: ssl.Connection, cells: foreign *void,
+                              slot: integer)
+  local cleanup = connection:close
+  if slot == 1 then cleanup = connection:abort end
+  defer ssl_close_attempt(cells, slot, cleanup)
+  ssl_close_parked = true
+  connection:handshake()
+end
+
+-- An unclosed listener: only the state close can release its SSL_CTX.
+local function ssl_close_listen(port: integer)
+  local server, _ = support.listen_available(port + 1, support.CERTIFICATE,
+                                             support.PRIVATE_KEY)
+  ssl_close_server = server
+end
+
+-- Public only so a fresh independent state can call it; test infrastructure.
+-- The Connection is newer than its parked Task, so its finalizer runs first.
+function ssl_close_park_with_new_connection(port: integer, cells_raw: value)
+  local cells = cells_raw as foreign *void
+  local task = async.run<|nil, value|>(function (): nil
+    ssl_close_listen(port)
+    ssl_close_hold(ssl.client(net.connect("127.0.0.1", port), "localhost",
+                              support.TRUST_ROOT), cells, 0)
+    return nil
+  end)
+  task_support.drive_until(task, function (): boolean return ssl_close_parked end)
+end
+
+-- Public only so a fresh independent state can call it; test infrastructure.
+-- The Connection is older than the parked Task, so the Task unwinds first.
+-- The opener stays parked too: a Runtime whose last Task finished is closing.
+function ssl_close_park_with_older_connection(port: integer, cells_raw: value)
+  local cells = cells_raw as foreign *void
+  local opener = async.run<|nil, value|>(function (): nil
+    ssl_close_listen(port)
+    ssl_close_shared = ssl.client(net.connect("127.0.0.1", port), "localhost",
+                                  support.TRUST_ROOT)
+    async.suspend(async.ResumeToken("TLS connection opener"))
+    return nil
+  end)
+  task_support.drive_until(opener, function (): boolean
+    return ssl_close_shared ~= nil
+  end)
+  local task = async.run<|nil, value|>(function (): nil
+    ssl_close_hold(ssl_close_shared as ssl.Connection, cells, 1)
+    return nil
+  end)
+  task_support.drive_until(task, function (): boolean return ssl_close_parked end)
+end
+
+local function ssl_close_case(context: test.Context, name: string, entry: string,
+                              slot: integer, cleanup: string)
+  context:run(name, function (_: test.Context)
+    runtime_test.run(function ()
+      -- The kernel completes the child's TCP connect from the backlog; this
+      -- peer never accepts, so the TLS handshake cannot progress.
+      local listener, port = net_support.listen_available(46100)
+      defer listener:close()
+      local cells: owned int[] = foreign int.new_array(2)
+      cells[0] = 0
+      cells[1] = 0
+      local state = transfer_lua.new()
+      defer state:close()
+      state:run([[
+        package.path, package.cpath = '', ''
+        local entry = ...
+        require('ssl.tests')[entry](select(2, ...))
+      ]], "=ssl-state-close", async.TransferValue.is_string(entry),
+          async.TransferValue.is_integer(port),
+          async.TransferValue.is_pointer(cells as foreign *void))
+      state:close()
+      test.assert((cells[slot] as integer) == 1,
+                  "TLS " .. cleanup .. " during Lua state close gave code " ..
+                  (cells[slot] as integer))
+    end)
+  end)
+end
+
+-- Closing the Lua state releases the TLS engine and the listener's SSL_CTX
+-- synchronously. The allocator fixture's state_close scenario checks the
+-- OpenSSL allocation balance; here the lexical cleanup must not raise.
+function test_lua_close_releases_tls_connection_and_server(context: test.Context)
+  ssl_close_case(context, "close_with_connection_newer_than_task",
+                 "ssl_close_park_with_new_connection", 0, "close")
+  ssl_close_case(context, "abort_with_connection_older_than_task",
+                 "ssl_close_park_with_older_connection", 1, "abort")
+end

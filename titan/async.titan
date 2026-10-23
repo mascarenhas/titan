@@ -409,6 +409,8 @@ local record Runtime
   local close_registrations: {CloseRegistration}
   local external: ExternalBridge?
   local retirement_error: ExternalWait?
+  -- Releases of run_foreign jobs whose wait a Lua state close abandoned.
+  local abandoned_work: {ForeignWork}
 end
 
 local record ExternalBridge
@@ -652,6 +654,14 @@ local function runtime_finalize(candidate: value)
   runtime.wake_armed = false
   check_status(uv.loop_abandon(runtime.loop), "runtime.loop.abandon")
   active_runtime = nil
+  -- Every accepted job has returned. Release what abandoned run_foreign
+  -- waits handed over, here on the closing thread: such a release may itself
+  -- wait for the worker pool, which no abandoned job occupies any more.
+  local abandoned_work = runtime.abandoned_work
+  runtime.abandoned_work = {}
+  for index = 1, #abandoned_work do
+    abandoned_work[index]:release_abandoned()
+  end
 end
 
 local function new_runtime(): Runtime
@@ -664,7 +674,8 @@ local function new_runtime(): Runtime
   local runtime = Runtime {loop = uv.loop_t.new(), wake = uv.timer_t.new(),
     ready_head = nil, ready_tail = nil, ready_count = 0, wake_armed = false,
     tasks = {}, next_task = 1,
-    current_task = nil, driving = false, closing = false, failure = nil, shutdown_cancelled = false, exit_code = nil, close_registrations = {}, external = nil, retirement_error = nil}
+    current_task = nil, driving = false, closing = false, failure = nil, shutdown_cancelled = false, exit_code = nil, close_registrations = {}, external = nil, retirement_error = nil,
+    abandoned_work = {}}
   -- Register before native acquisition so lua_close can retire this loop.
   gc.finalizable<|value|>(runtime, runtime_finalize)
   check_status(uv.loop_init(runtime.loop), "runtime.loop.init")
@@ -2262,6 +2273,26 @@ local record ForeignWork
   local argument: foreign *void
   local done: Completion<|ForeignWork, value, OperationError|>?
   local number: integer
+  local abandoned: foreign function (*void): void
+end
+
+local function ForeignWork:release_abandoned()
+  local release = self.abandoned
+  release(self.argument)
+end
+
+-- Implementation notes: doc/implementation/libuv-runtime.md#foreign-workers
+-- A Lua state close unwound the wait before the job returned. The Runtime
+-- finalizer releases after its drain, when the job has returned; a Runtime
+-- already finalized has drained, so release at once.
+local function ForeignWork:abandon()
+  if not self.abandoned then return end
+  local runtime? = active_runtime
+  if runtime == nil then
+    self:release_abandoned()
+    return
+  end
+  runtime.abandoned_work[#runtime.abandoned_work + 1] = self
 end
 
 local function foreign_work_completed(request: uv.work_t, status: integer)
@@ -2294,11 +2325,24 @@ end
 --- Run one blocking C function-pointer call in the shared worker pool and wait for completion.
 -- @param f C-only entry; it must never enter the calling Lua/Titan state. Separately owned states follow the titan.lua isolation protocol.
 -- @param arg Native pointer whose owner remains live until after-work completion, including cancellation.
+-- @param abandoned Optional C-only release for arg, called on the closing thread after f returns if a Lua state close abandons the wait.
 -- @usage async-io.md
-function run_foreign(f: foreign function (*void): void, arg: foreign *void)
+function run_foreign(f: foreign function (*void): void, arg: foreign *void,
+                     abandoned: foreign function (*void): void)
   if not f then raise "async.run_foreign callback must not be NULL" end
-  local work = ForeignWork(uv.work_t.new(), f, arg, nil, 0)
-  local result = await_with<|ForeignWork, value, OperationError|>(work, start_foreign_work)
+  local work = ForeignWork(uv.work_t.new(), f, arg, nil, 0, abandoned)
+  -- catch never runs during an unwind, so `waiting` stays set only when a
+  -- Lua state close abandons the wait.
+  local waiting = true
+  defer if waiting and ffi.titan_state_closing(L) ~= 0 then work:abandon() end
+  local result: Result<|value, OperationError|>? = nil
+  do
+    result = await_with<|ForeignWork, value, OperationError|>(work, start_foreign_work)
+  catch
+    waiting = false
+    raise
+  end
+  waiting = false
   case result
   when error(failure) then raise failure
   else
