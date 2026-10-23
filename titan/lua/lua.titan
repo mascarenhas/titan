@@ -307,6 +307,7 @@ local record LuaCall
   local const inputs: owned titan_lua_value[]
   local packet: foreign titan_lua_call
   local stack_top: foreign int
+  local pending: boolean
 end
 
 local function copy_state_bytes(bytes: foreign const *char,
@@ -416,7 +417,11 @@ end
 -- @usage standard-library-lua.md#independent-lua-states
 function new(): Lua
   local state = Lua(nil, false)
-  gc.finalizable(state, function (owner) owner:close() end)
+  -- Only a Lua state close can finalize a busy wrapper: the run_async call
+  -- that the close unwinds closes that state after its worker.
+  gc.finalizable(state, function (owner)
+    if not owner.busy then owner:close() end
+  end)
   state:initialize()
   return state
 end
@@ -429,11 +434,37 @@ end
 
 local function LuaCall:finish()
   -- run_foreign does not unwind its caller before accepted work completes,
-  -- including on cancellation. This is the only release of the reservation.
+  -- including on cancellation. A Lua state close can: its abandoned call
+  -- (see run_worker) no longer owns the reservation, results, or stack.
+  if self.pending then return end
   ffi.free(self.packet.results)
   self.packet.results = nil
   ffi.lua_settop(self.owner.handle, self.stack_top)
   self.owner.busy = false
+end
+
+-- Implementation notes: doc/implementation/lua-library.md#host-state-close-during-run_async
+-- Lua state close unwinds a Task parked here without completing the wait, and
+-- catch never runs during that unwind, so `pending` stays set. The independent
+-- state then belongs to whichever of the unwind and the worker finishes last;
+-- the wrapper behaves as closed and its finalizer leaves the state alone.
+local function LuaCall:abandon_if_pending()
+  if not self.pending then return end
+  self.owner.handle = nil
+  self.owner.busy = false
+  lua_state_abandon_call(self.packet)
+end
+
+local function LuaCall:run_worker()
+  self.pending = true
+  defer self:abandon_if_pending()
+  do
+    async.run_foreign(lua_state_run_async, self.packet)
+  catch
+    self.pending = false
+    raise
+  end
+  self.pending = false
 end
 
 local function LuaCall:prepare()
@@ -566,7 +597,8 @@ local function Lua:prepare_call(chunk: string, name: string?,
     arguments = arguments,
     inputs = foreign titan_lua_value.new_array(#arguments),
     packet = foreign titan_lua_call.new(),
-    stack_top = 0
+    stack_top = 0,
+    pending = false
   }
 end
 
@@ -592,7 +624,7 @@ function Lua:run_async(chunk: string, name: string?, ...: async.TransferValue):
   call.stack_top = ffi.lua_gettop(self.handle)
   defer call:finish()
   call:prepare()
-  async.run_foreign(lua_state_run, call.packet)
+  call:run_worker()
   return ...call:values()
 end
 

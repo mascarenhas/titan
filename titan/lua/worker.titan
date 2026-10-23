@@ -338,3 +338,33 @@ local foreign function lua_state_run(argument: *void)
     end
   end
 end
+
+-- Implementation notes: doc/implementation/lua-library.md#host-state-close-during-run_async
+-- The closing host state abandoned this call: no Titan owner retains the
+-- independent state, so release its results and close it here.
+local foreign function lua_state_release_abandoned(call: *titan_lua_call)
+  ffi.free(call.results)
+  call.results = nil
+  ffi.lua_close(call.state)
+  call.state = nil
+end
+
+-- run_async's worker entry. The host call's GC owner outlives this function:
+-- Lua state close drains accepted work before it frees any object.
+local foreign function lua_state_run_async(argument: *void)
+  local call = argument as foreign *titan_lua_call
+  lua_state_run(argument)
+  if ffi.titan_lua_call_handoff(call, ffi.TITAN_LUA_WORKER_FINISHED) ==
+      ffi.TITAN_LUA_WORKER_ABANDONED then
+    lua_state_release_abandoned(call)
+  end
+end
+
+-- A host-state-close unwind abandoned the run_async wait. Release now if the
+-- worker already returned; otherwise lua_state_run_async releases on return.
+local foreign function lua_state_abandon_call(call: *titan_lua_call)
+  if ffi.titan_lua_call_handoff(call, ffi.TITAN_LUA_WORKER_ABANDONED) ==
+      ffi.TITAN_LUA_WORKER_FINISHED then
+    lua_state_release_abandoned(call)
+  end
+end

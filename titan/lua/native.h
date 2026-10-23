@@ -65,6 +65,19 @@ typedef struct titan_lua_call {
   titan_lua_value *results;
   const char *message;
   size_t message_length;
+  /* An asynchronous run's worker and an abandoning host-state close each
+   * exchange their side in; whichever finds the other's mark releases the
+   * results and closes the independent state. */
+  int handoff;
 } titan_lua_call;
+
+#define TITAN_LUA_WORKER_FINISHED 1
+#define TITAN_LUA_WORKER_ABANDONED 2
+
+/* Implementation notes: doc/implementation/lua-library.md#host-state-close-during-run_async */
+/* Titan's FFI cannot spell the compiler's generic atomic builtin. */
+static inline int titan_lua_call_handoff(titan_lua_call *call, int side) {
+  return __atomic_exchange_n(&call->handoff, side, __ATOMIC_ACQ_REL);
+}
 
 #endif
