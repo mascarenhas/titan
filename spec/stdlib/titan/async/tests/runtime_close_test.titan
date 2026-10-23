@@ -179,14 +179,18 @@ local function runtime_close_task_oracle(owner: RuntimeCloseTaskOracle)
 end
 
 -- Public only so a fresh independent state can call it; test infrastructure.
--- Leaves five Tasks of an unretired Runtime for a finalizer registered before
+-- Leaves seven Tasks of an unretired Runtime for a finalizer registered before
 -- that Runtime: parked waiting, parked with a requested cancellation that the
 -- closing state never delivers, queued and observed ready, queued and never
--- observed, and parked behind a still-armed native retirement gate. A sixth,
--- parked run_with_cleanup Task records into cells 5 and 6 whether its body
--- defer ran and which reason its cleanup received when lua_close unwinds it.
+-- observed, two run_with_cleanup Tasks whose body returned or raised while
+-- their cleanup is still parked, and one parked behind a still-armed native
+-- retirement gate (cells 0-6). An eighth, parked run_with_cleanup Task records
+-- into cells 7 and 8 whether its body defer ran and which reason its cleanup
+-- received when lua_close unwinds it. A terminal listener on every Task
+-- records into cell 9 if it ever runs.
 function runtime_close_abandoned_task_bootstrap(cells_raw: value)
-  local oracle = RuntimeCloseTaskOracle(cells_raw as foreign *void, {}, {}, nil, nil)
+  local cells = cells_raw as foreign *void
+  local oracle = RuntimeCloseTaskOracle(cells, {}, {}, nil, nil)
   runtime_close_gc.finalizable(oracle, runtime_close_task_oracle)
   runtime_close_task_probe = oracle
   local parked_token = async.ResumeToken("abandoned parked Task")
@@ -199,22 +203,34 @@ function runtime_close_abandoned_task_bootstrap(cells_raw: value)
     async.suspend(cancelled_token)
     return 2
   end)
+  local returned_token = async.ResumeToken("abandoned cleanup after a returned body")
+  local returned = async.run_with_cleanup<|value, value|>(function (): value
+    return 5
+  end, function (_: async.CancellationReason?)
+    async.suspend(returned_token)
+  end)
+  local raised_token = async.ResumeToken("abandoned cleanup after a raised body")
+  local raised = async.run_with_cleanup<|value, value|>(function (): value
+    raise "abandoned body failure"
+    return 6
+  end, function (_: async.CancellationReason?)
+    async.suspend(raised_token)
+  end)
   local gate, gate_fixture = external_wait_prepare_retirement(false)
   local gated_token = async.ResumeToken("abandoned gated Task")
   local gated = async.run_with_cleanup<|value, value|>(function (): value
     async.suspend(gated_token)
-    return 5
+    return 7
   end, function (_: async.CancellationReason?)
     gate:wait_cleanup()
   end, gate)
   oracle.gated = gated
   oracle.gate_context = gate_fixture as foreign *void
-  local cells = cells_raw as foreign *void
   local unwound_token = async.ResumeToken("abandoned Task with cleanup")
   local unwound = async.run_with_cleanup<|value, value|>(function (): value
-    defer runtime_close_record(cells, 5, 3)
+    defer runtime_close_record(cells, 7, 3)
     async.suspend(unwound_token)
-    return 6
+    return 8
   end, function (reason: async.CancellationReason<|value|>?)
     local code = 1
     if reason ~= nil then
@@ -225,11 +241,14 @@ function runtime_close_abandoned_task_bootstrap(cells_raw: value)
       else
       end
     end
-    runtime_close_record(cells, 6, code)
+    runtime_close_record(cells, 8, code)
   end)
   uv.run(async.current_loop(), uv.RUN_NOWAIT)
   test.assert(unwound:status():as_string() == "waiting",
     "the abandoned Task with cleanup did not park")
+  test.assert(returned:status():as_string() == "waiting" and
+              raised:status():as_string() == "waiting",
+    "a finished body with a parked cleanup did not leave its Task waiting")
   test.assert(parked:status():as_string() == "waiting" and
               cancelled:status():as_string() == "waiting" and
               gated:status():as_string() == "waiting",
@@ -241,16 +260,24 @@ function runtime_close_abandoned_task_bootstrap(cells_raw: value)
   test.assert(observed:status():as_string() == "ready", "queued Task did not report ready")
   local unobserved = async.run<|value, value|>(function (): value return 4 end)
   local abandoned = "async Runtime abandoned at Lua state close"
-  oracle.tasks = {parked, cancelled, observed, unobserved}
-  oracle.reasons = {abandoned, "requested before state close", abandoned, abandoned}
+  oracle.tasks = {parked, cancelled, observed, unobserved, returned, raised}
+  oracle.reasons = {abandoned, "requested before state close", abandoned, abandoned,
+                    abandoned, abandoned}
+  local listener = function (_: async.TaskStatus) runtime_close_record(cells, 9, 1) end
+  local all: {async.Task} = {parked, cancelled, observed, unobserved, returned, raised,
+                             gated, unwound}
+  for index = 1, #all do all[index]:add_terminal_listener(listener) end
 end
 
 -- Issue #271: a Task of a Runtime abandoned at lua_close never resumes, but a
 -- later finalizer that still holds it must read a consistent status: cancelled,
--- unless its native retirement gate is still armed (then nonterminal).
+-- unless its native retirement gate is still armed (then nonterminal). Issue
+-- #290: that includes a body that finished while its cleanup was pending, and
+-- no terminal listener runs. Only a failed publication reports a Task error,
+-- so a cancelled status also shows that its raised body was never reported.
 function test_lua_close_publishes_consistent_status_for_abandoned_tasks(context: test.Context)
-  local cells: owned int[] = foreign int.new_array(7)
-  for index = 0, 6 do cells[index] = 0 end
+  local cells: owned int[] = foreign int.new_array(10)
+  for index = 0, 9 do cells[index] = 0 end
   local state = runtime_close_lua.new()
   defer state:close()
   state:run([[
@@ -261,21 +288,26 @@ function test_lua_close_publishes_consistent_status_for_abandoned_tasks(context:
   state:close()
   context:log("END expected coroutine cleanup warning")
   local names: {string} = {"parked", "cancel-requested", "observed-ready", "unobserved",
+                           "body-returned-cleanup-pending", "body-raised-cleanup-pending",
                            "armed-retirement-gate"}
   local outcomes: {string} = {"unobserved", "raised", "stale or wrong", "expected"}
   local report = ""
   local consistent = true
-  for index = 1, 5 do
+  for index = 1, #names do
     local code = cells[index - 1] as integer
     consistent = consistent and code == 3
     report = report .. " " .. names[index] .. "=" .. outcomes[code + 1]
   end
+  if (cells[9] as integer) ~= 0 then
+    consistent = false
+    report = report .. " terminal-listener=ran"
+  end
   test.assert(consistent, "abandoned Task status after state close:" .. report)
   -- Issue #283: the parked Task unwinds; its cleanup receives the abandonment
   -- reason (codes: 0 cleanup not run, 1 nil reason, 2 another reason).
-  test.assert((cells[5] as integer) == 3, "the abandoned Task's body defer did not run")
-  test.assert((cells[6] as integer) == 3,
-    "abandoned Task cleanup reason code: " .. (cells[6] as integer))
+  test.assert((cells[7] as integer) == 3, "the abandoned Task's body defer did not run")
+  test.assert((cells[8] as integer) == 3,
+    "abandoned Task cleanup reason code: " .. (cells[8] as integer))
 end
 
 -- Public only so a fresh independent state can call it; test infrastructure.
