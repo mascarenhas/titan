@@ -128,8 +128,11 @@ local function Group:acquire_slot(): boolean
     active = true,
     granted = false
   }
-  self.admission_waiters[#self.admission_waiters + 1] = waiter
-  local cancel_action = function ()
+  -- Withdraw this registration, or pass on a slot granted to it. It is the
+  -- suspension's cancel action and also runs on every exit that has not taken
+  -- the slot: a cancellation that rejects the suspension runs no cancel
+  -- action. Running it twice is harmless.
+  local withdraw = function ()
     if waiter.active then
       waiter.active = false
     elseif waiter.granted then
@@ -137,20 +140,24 @@ local function Group:acquire_slot(): boolean
       self:release_slot()
     end
   end
-  -- Recheck after publishing the waiter: a Group:cancel from a finalizer
-  -- before publication found no waiter to wake, and one after it already
-  -- latched this waiter's fresh token.
+  self.admission_waiters[#self.admission_waiters + 1] = waiter
+  defer withdraw()
+  -- Recheck after publishing the waiter. A finalizer before publication
+  -- found no waiter: a Group:cancel woke nobody, and a cancelled granted
+  -- admission freed its slot instead of passing it on. After publication a
+  -- Group:cancel latches this waiter's fresh token.
   if self.abort_reason ~= nil then
-    waiter.active = false
     return false
   end
-  async.suspend(token, cancel_action)
-  if waiter.granted then
-    if self.abort_reason ~= nil then
-      waiter.granted = false
-      self:release_slot()
-      return false
-    end
+  if self.running_count < lim then
+    waiter.active = false
+    self.running_count = self.running_count + 1
+    return true
+  end
+  async.suspend(token, withdraw)
+  if waiter.granted and self.abort_reason == nil then
+    -- Take the slot, so that the deferred withdraw does not release it.
+    waiter.granted = false
     return true
   end
   return false
@@ -298,11 +305,16 @@ function Group:wait(): {Error}
       active = true,
       granted = false
     }
-    self.completion_waiters[#self.completion_waiters + 1] = waiter
-    local cancel_action = function ()
+    local withdraw = function ()
       waiter.active = false
     end
-    async.suspend(token, cancel_action)
+    self.completion_waiters[#self.completion_waiters + 1] = waiter
+    defer withdraw()
+    -- Recheck after publishing the waiter: a finalizer that cancels a granted
+    -- admission releases its slot at once, and the last release before
+    -- publication found no waiter to wake.
+    if self.running_count == 0 then break end
+    async.suspend(token, withdraw)
   end
   local result: {Error} = {}
   for index = 1, #self.errors do

@@ -470,7 +470,9 @@ dynamic set of worker threads:
   admission queue until a running worker finishes and releases its slot or the
   group is cancelled. Once `Group:cancel` has been called, directly or through
   `propagate_errors`, queued and later `spawn*` calls return immediately without
-  starting a thread.
+  starting a thread. Cancelling a Task while its `spawn*` call waits in the
+  queue withdraws the call, which starts no thread. A slot already granted to
+  it passes to the next queued call, or is released.
 - A worker keeps its slot until it has fully retired. The slot is released when
   the member's `Thread:task()` proxy becomes terminal, which includes the
   actual OS join. A group member is exactly one memoized `Thread:task()` proxy
