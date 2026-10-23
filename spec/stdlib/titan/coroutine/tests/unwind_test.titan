@@ -1,0 +1,192 @@
+local unwind_gc = import "gc"
+
+-- Collecting an abandoned suspended coroutine unwinds it: defers run innermost
+-- first, catch blocks do not run, and nothing after the suspension point runs.
+
+local function unwind_log_text(log: {string}): string
+  local text = ""
+  for index = 1, #log do
+    if index > 1 then text = text .. " " end
+    text = text .. log[index]
+  end
+  return text
+end
+
+local function unwind_collect()
+  for _ = 1, 4 do unwind_gc.collect() end
+end
+
+local function unwind_abandon_nested_defers(log: {string})
+  local tag: value = {}
+  local co = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "outer"
+    do
+      defer log[#log + 1] = "inner"
+      coroutine.yield("parked", tag)
+      log[#log + 1] = "after-yield"
+    catch
+      log[#log + 1] = "catch"
+    end
+    log[#log + 1] = "after-try"
+    return nil
+  end, tag)
+  test.assert(co:resume(nil, tag) == "parked")
+end
+
+function test_unwind_runs_suspended_defers_innermost_first(_context: test.Context)
+  local log: {string} = {}
+  unwind_abandon_nested_defers(log)
+  unwind_collect()
+  local text = unwind_log_text(log)
+  test.assert(text == "inner outer", "unwind log: " .. text)
+end
+
+local function unwind_abandon_stacked_chain(log: {string})
+  local tag_main: value = {}
+  local tag_b: value = {}
+  local tag_c: value = {}
+  local a = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "a"
+    local b = coroutine.create(function (_: value): value
+      defer log[#log + 1] = "b"
+      local c = coroutine.create(function (_: value): value
+        defer log[#log + 1] = "c"
+        return coroutine.yield("from-c", tag_main)
+      end, tag_c)
+      return c:resume(nil, tag_c)
+    end, tag_b)
+    return b:resume(nil, tag_b)
+  end, tag_main)
+  test.assert(a:resume(nil, tag_main) == "from-c")
+end
+
+function test_unwind_stacked_chain_from_innermost(_context: test.Context)
+  local log: {string} = {}
+  unwind_abandon_stacked_chain(log)
+  unwind_collect()
+  local text = unwind_log_text(log)
+  test.assert(text == "c b a", "unwind log: " .. text)
+end
+
+local function unwind_abandon_failing_cleanup(log: {string})
+  local tag: value = {}
+  local co = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "outer"
+    defer raise "cleanup failure"
+    defer log[#log + 1] = "inner"
+    return coroutine.yield("parked", tag)
+  end, tag)
+  test.assert(co:resume(nil, tag) == "parked")
+end
+
+function test_unwind_continues_after_cleanup_error(_context: test.Context)
+  local log: {string} = {}
+  unwind_abandon_failing_cleanup(log)
+  unwind_collect()
+  local text = unwind_log_text(log)
+  test.assert(text == "inner outer", "unwind log: " .. text)
+end
+
+local function unwind_abandon_yielding_cleanup(log: {string})
+  local tag: value = {}
+  local co = coroutine.create(function (_: value): value
+    defer do
+      coroutine.yield("from-cleanup", tag)
+    catch
+      log[#log + 1] = error as string
+    end
+    return coroutine.yield("parked", tag)
+  end, tag)
+  test.assert(co:resume(nil, tag) == "parked")
+end
+
+function test_unwind_cleanup_cannot_yield(_context: test.Context)
+  local log: {string} = {}
+  unwind_abandon_yielding_cleanup(log)
+  unwind_collect()
+  test.assert(#log == 1 and support.contains(log[1], "cannot yield from a finalizer"),
+              "unwind log: " .. unwind_log_text(log))
+end
+
+record UnwindFinalizerProbe
+  log: {string}
+  target: coroutine.Coroutine
+end
+
+local function unwind_probe_finalize(candidate: value)
+  local probe: UnwindFinalizerProbe = candidate
+  do
+    coroutine.yield(nil, "unwind-probe")
+  catch
+    probe.log[#probe.log + 1] = error as string
+  end
+  do
+    probe.target:resume(nil, "unwind-probe")
+  catch
+    probe.log[#probe.log + 1] = error as string
+  end
+  if coroutine.is_yieldable("unwind-probe") then
+    probe.log[#probe.log + 1] = "yieldable"
+  end
+end
+
+local function unwind_register_probe(log: {string})
+  local target = coroutine.create(function (_: value): value return nil end, "unwind-probe")
+  local probe = UnwindFinalizerProbe(log, target)
+  unwind_gc.finalizable<|value|>(probe, unwind_probe_finalize)
+end
+
+function test_unwind_finalizer_cannot_yield_or_resume(_context: test.Context)
+  local log: {string} = {}
+  unwind_register_probe(log)
+  unwind_collect()
+  test.assert(#log == 2 and support.contains(log[1], "cannot yield from a finalizer") and
+              support.contains(log[2], "cannot resume a coroutine from a finalizer"),
+              "finalizer log: " .. unwind_log_text(log))
+end
+
+local function unwind_abandon_lua_chain(log: {string})
+  local append = function (name: string) log[#log + 1] = name end
+  local with_defer = function (name: string, body: function (): ())
+    defer log[#log + 1] = name
+    body()
+  end
+  local run = common.lua_helper([==[
+    return function(titan_coroutine, append, with_defer, tag)
+      local function closer(name)
+        return setmetatable({}, { __close = function() append(name) end })
+      end
+      local co = titan_coroutine.create(function()
+        local c0 <close> = closer("c0")
+        with_defer("d0", function()
+          local l1 = coroutine.wrap(function()
+            local c1 <close> = closer("c1")
+            with_defer("d1", function()
+              local l2 = coroutine.create(function()
+                local c2 <close> = closer("c2")
+                with_defer("d2", function()
+                  titan_coroutine.yield("parked", tag)
+                  append("after-yield")
+                end)
+              end)
+              assert(coroutine.resume(l2))
+              append("after-resume")
+            end)
+          end)
+          l1()
+          append("after-wrap")
+        end)
+      end, tag)
+      assert(co:resume(nil, tag) == "parked")
+    end
+  ]==]) as function (value, value, value, value): ()
+  run(common.lua_helper("return require 'titan.coroutine'"), append, with_defer, "unwind-lua")
+end
+
+function test_unwind_crosses_nested_lua_coroutines(_context: test.Context)
+  local log: {string} = {}
+  unwind_abandon_lua_chain(log)
+  unwind_collect()
+  local text = unwind_log_text(log)
+  test.assert(text == "d2 c2 d1 c1 d0 c0", "unwind log: " .. text)
+end
