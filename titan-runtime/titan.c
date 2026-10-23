@@ -1743,7 +1743,7 @@ static void titan_unwind_warn(lua_State *L, void *ud) {
 ** the open upvalues and pending to-be-closed slots of a failed __close stay
 ** below it. A failure while reporting is ignored; the reporter restores `ci`,
 ** `allowhook` and `errfunc` on every path. */
-static void titan_unwind_report(lua_State *L, TStatus status) {
+void titan_unwind_report(lua_State *L, TStatus status) {
   ptrdiff_t top = savestack(L, L->top.p);
   CallInfo *ci = L->ci;
   lu_byte allowhook = L->allowhook;

@@ -219,13 +219,14 @@ Lua code running inside a Titan coroutine can still close its own Lua thread
 with Lua's `coroutine.close()` and no argument. Lua then closes that thread's
 to-be-closed variables and abandons the rest of the coroutine without running
 its Titan `defer` statements. The coroutine ends `"dead"`, and the `resume` or
-`error` call that was running it returns nil. If the coroutine was being
-[unwound](#abandoned-coroutines) when its cleanup closed the thread, the
-unwind continues instead: the coroutine still ends `"dead"`, and its resumer
-does not return but unwinds in turn. Cleanup that runs during an unwind must
-not close a genuine Lua coroutine it runs in: Lua then returns from that
-coroutine's `coroutine.resume` or `coroutine.wrap` call, and ordinary code
-after it runs inside the finalizer.
+`error` call that was running it returns nil, or raises the error of a failing
+`__close`. If the coroutine was being [unwound](#abandoned-coroutines) when its
+cleanup closed the thread, the unwind continues instead: the coroutine still
+ends `"dead"`, an error from a `__close` becomes a cleanup warning, and its
+resumer neither returns nor raises but unwinds in turn. Cleanup that runs
+during an unwind must not close a genuine Lua coroutine it runs in: Lua then
+returns from that coroutine's `coroutine.resume` or `coroutine.wrap` call, and
+ordinary code after it runs inside the finalizer.
 
 Coroutine stacks are finite. The current implementation uses large
 virtual-memory-backed stacks, but deeply recursive coroutine bodies can

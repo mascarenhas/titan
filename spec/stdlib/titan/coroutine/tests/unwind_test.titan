@@ -1165,15 +1165,19 @@ end
 
 -- A <- B, B yields past A. While the chain unwinds, B's cleanup closes B's
 -- own thread with coroutine.close(), which jumps straight to B's floor. The
--- floor must keep unwinding: A's resume must not return normally, so only the
--- two cleanups run.
-local UNWIND_SELF_CLOSE_SCENARIO = [==[
+-- floor must keep unwinding: A's resume must neither return nor raise into
+-- A's protected call, so only the cleanups run. `closer` is Lua code run in
+-- B's cleanup before the close; the failing variant holds a <close> whose
+-- error must become a cleanup warning instead of reaching A.
+local function unwind_self_close_scenario(closer: string): string
+  return [==[
   local inner_tag = {}
   local a = titan_coroutine.create(function()
     support.unwind_with_cleanup(function() append("a-cleanup") end, function()
       local b = titan_coroutine.create(function()
         support.unwind_with_cleanup(function()
           append("b-cleanup")
+          ]==] .. closer .. [==[
           coroutine.close()
           append("b-after-close")
         end, function()
@@ -1182,14 +1186,24 @@ local UNWIND_SELF_CLOSE_SCENARIO = [==[
         end)
         append("b-after-guard")
       end, inner_tag)
-      b:resume(nil, inner_tag)
-      append("a-after-resume")
+      local ok, err = pcall(function() return b:resume(nil, inner_tag) end)
+      append("a-after-resume:" .. tostring(ok) .. ":" .. tostring(err))
     end)
     append("a-after-guard")
   end, tag)
   assert(a:resume(nil, tag) == "parked")
 ]==]
+end
 
 function test_unwind_self_close_in_cleanup_keeps_unwinding(context: test.Context)
-  unwind_lua_case(context, UNWIND_SELF_CLOSE_SCENARIO, "b-cleanup a-cleanup", {})
+  unwind_lua_case(context, unwind_self_close_scenario(""), "b-cleanup a-cleanup", {})
+end
+
+function test_unwind_failing_self_close_in_cleanup_keeps_unwinding(context: test.Context)
+  unwind_lua_case(context, unwind_self_close_scenario([==[
+          local failing <close> = setmetatable({}, { __close = function()
+            append("b-close")
+            error("self-close-closer-failure")
+          end })]==]),
+    "b-cleanup b-close a-cleanup", {"self-close-closer-failure"})
 end

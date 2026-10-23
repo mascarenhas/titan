@@ -73,6 +73,15 @@ void titan_coroutine_enter(lua_State *T, Udata *module, TValue func,
     T->ci = oldci;
     T->allowhook = oldah;
     T->errfunc = olderrfunc;
+    if (floor.unwinding && floor.lj.status != TITAN_STATUS_UNWIND) {
+      /* T is being abandoned, but a cleanup closed T's own thread
+      ** (coroutine.close() with no argument), and luaD_throwbaselevel jumped
+      ** here past every guard. The unwind dominates: an error from a __close
+      ** of that self-close becomes a cleanup warning and is dropped, so the
+      ** resumer keeps unwinding and can never catch it. */
+      if (floor.lj.status != LUA_OK) titan_unwind_report(T, floor.lj.status);
+      floor.lj.status = TITAN_STATUS_UNWIND;
+    }
     if (floor.lj.status != TITAN_STATUS_UNWIND && floor.lj.status != LUA_OK) {
       /* A real error escaped the entry's catch. Close the Lua frames above
       ** with it, as luaD_pcall does, under the floor re-armed: a __close that
@@ -92,12 +101,10 @@ void titan_coroutine_enter(lua_State *T, Udata *module, TValue func,
       }
       T->errorJmp = floor.lj.previous;
     }
-    if (floor.lj.status == TITAN_STATUS_UNWIND ||
-        (floor.lj.status == LUA_OK && floor.unwinding)) {
-      /* Every Titan finally on T has run, or a cleanup closed T's own thread
-      ** (coroutine.close() with no argument) while T was being abandoned:
-      ** close the remaining Lua frames and finish the coroutine as unwound,
-      ** so its resumer keeps unwinding instead of returning. */
+    if (floor.lj.status == TITAN_STATUS_UNWIND) {
+      /* Every Titan finally on T has run, or T's abandonment ended in a
+      ** self-close: close the remaining Lua frames and finish the coroutine
+      ** as unwound, so its resumer keeps unwinding instead of returning. */
       titan_unwind_close(T, oldtop);
       titan_coroutine_push_final(T, co, NULL, TITAN_CORO_TRANSFER_UNWIND);
     } else if (floor.lj.status == LUA_OK) {
