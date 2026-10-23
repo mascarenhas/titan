@@ -1282,3 +1282,42 @@ function test_group_admission_suspension_and_active_sibling_cancellation(context
   end)
   context:log("END expected Group child proxy failure diagnostics")
 end
+
+-- A finalizer Group:cancel at every safepoint of a Task's queued admission
+-- (task_support.each_wake_offset), including between the admission waiter's
+-- append and its suspension: the spawn returns without starting its thread,
+-- with no token mismatch and no parked Task.
+function test_group_cancel_in_admission_window(_: test.Context)
+  runtime_test.run(function ()
+    task_support.each_wake_offset(false, nil, function (): task_support.WakeCase
+      local group = thread.group(1, false)
+      local block_tx, block_rx = thread.channel<|integer|>(1)
+      local unexpected_tx, unexpected_rx = thread.channel<|string|>(1)
+      local retire = function ()
+        block_tx:close()
+        group:cancel()
+        group:wait()
+        unexpected_tx:close()
+      end
+      runtime_test.cleanup(retire)
+      group:spawn_one(function (rx: thread.Receiver<|integer|>)
+        rx:receive_result()
+      end, block_rx)
+      return task_support.WakeCase(function (): value
+        group:spawn_one(function (tx: thread.Sender<|string|>)
+          tx:send("queued")
+        end, unexpected_tx)
+        return "returned"
+      end, function (_: async.Task)
+        group:cancel(async.CancellationReason.simple("group cancelled in admission"))
+      end, nil, function (spawner: async.Task, offset: integer)
+        local finished, result? = spawner:status():has_succeeded()
+        test.assert(finished and result == "returned", "offset " .. offset ..
+          ": a Group:cancel during admission left the spawner " .. spawner:status():as_string())
+        retire()
+        local received, _message? = unexpected_rx:try_receive()
+        test.assert(not received, "offset " .. offset .. ": the cancelled admission started its thread")
+      end)
+    end)
+  end)
+end

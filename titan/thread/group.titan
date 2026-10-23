@@ -137,6 +137,13 @@ local function Group:acquire_slot(): boolean
       self:release_slot()
     end
   end
+  -- Recheck after publishing the waiter: a Group:cancel from a finalizer
+  -- before publication found no waiter to wake, and one after it already
+  -- latched this waiter's fresh token.
+  if self.abort_reason ~= nil then
+    waiter.active = false
+    return false
+  end
   async.suspend(token, cancel_action)
   if waiter.granted then
     if self.abort_reason ~= nil then
