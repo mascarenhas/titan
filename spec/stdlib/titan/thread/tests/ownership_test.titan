@@ -1267,7 +1267,11 @@ local function build_abandoned_thread_probe(mode: string): AbandonedThreadProbe
   end
   test.assert(started_rx:receive())
   if mode == "finished" then
-    while not worker:status():has_finished() do async.yield() end
+    local deadline = poll_deadline()
+    while not worker:status():has_finished() do
+      check_poll_deadline(deadline, "the probed worker finishing")
+      async.yield()
+    end
   elseif mode == "cancelled" then
     worker:cancel(async.CancellationReason.complex(
       RetiringEndpointPair(tx, rx, retired_tx) as value))
@@ -1576,7 +1580,10 @@ function test_channel_and_thread_endpoint_lifecycle_matrix(context: test.Context
         cancel_with_endpoint_race_probe(worker2, function ()
           test.assert(gate2_tx:try_send(42))
           -- Hooks are synchronous: poll the independent worker's actual finish.
-          while not worker2:status():has_finished() do end
+          local deadline = poll_deadline()
+          while not worker2:status():has_finished() do
+            check_poll_deadline(deadline, "the gated worker finishing")
+          end
         end, "losing post-finish cancel")
       defer c_peer_rx2:close()
       defer c_peer_tx2:close()

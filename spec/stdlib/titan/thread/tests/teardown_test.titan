@@ -256,7 +256,11 @@ function test_lua_close_withdraws_woken_join(_: test.Context)
     -- Let the worker finish and wake the parked join while its state never
     -- drives its loop, so the wake is unacknowledged when the state closes.
     probe.gate:send(true)
-    while not thread_teardown_worker_has_finished(state) do timer.sleep(1) end
+    local deadline = poll_deadline()
+    while not thread_teardown_worker_has_finished(state) do
+      check_poll_deadline(deadline, "the joined worker finishing")
+      timer.sleep(1)
+    end
     state:close()
   end)
 end

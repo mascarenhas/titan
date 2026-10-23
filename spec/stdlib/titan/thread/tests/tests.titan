@@ -47,9 +47,28 @@ local function await_task<|T|>(task: async.Task<|T, value|>): T
   end
 end
 
+-- A poll for progress that another Task, thread or Lua state must make fails
+-- after this deadline instead of hanging until the runner's timeout (#279).
+local const POLL_DEADLINE_SECONDS = 5
+
+-- Start the deadline of one poll loop, in uv.hrtime nanoseconds.
+local function poll_deadline(): integer
+  return uv.hrtime() + POLL_DEADLINE_SECONDS * 1000000000
+end
+
+-- Fail the test once the poll for `progress` has passed its deadline.
+local function check_poll_deadline(deadline: integer, progress: string)
+  if uv.hrtime() > deadline then
+    test.assert(false, progress .. " did not happen within " ..
+                POLL_DEADLINE_SECONDS .. " s")
+  end
+end
+
 local function wait_until_waiting<|T|>(task: async.Task<|T, value|>)
+  local deadline = poll_deadline()
   while task:status():as_string() ~= "waiting" and
         not task:status():has_finished() do
+    check_poll_deadline(deadline, "the Task reaching waiting")
     async.yield()
   end
   test.assert(task:status():as_string() == "waiting", "expected task to reach waiting status")
@@ -901,7 +920,11 @@ local function spawn_abandoned_thread_returning_sender_after_finish(): thread.Re
     return PipeEnvelope.sender_end(inner_tx, "abandoned-result-after-finish")
   end, tx, done_tx)
   test.assert(done_rx:receive())
-  while not _worker:status():has_finished() do async.yield() end
+  local deadline = poll_deadline()
+  while not _worker:status():has_finished() do
+    check_poll_deadline(deadline, "the abandoned worker finishing")
+    async.yield()
+  end
   return rx
 end
 
