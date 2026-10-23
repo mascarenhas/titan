@@ -331,6 +331,7 @@ function gate(): Gate
 end
 
 function Gate:wait()
+  if self.waiter ~= nil then raise "Gate already has a waiting Task" end
   local current = async.running()
   local token = async.ResumeToken.new("Gate.wait")
   -- Publish the registration before the last check of the condition.
