@@ -464,7 +464,11 @@ an admitted child; the same `Thread` and slot persist across setup failures.
 - **Admission.** `Group:spawn_raw_entry` calls `spawn_raw` with the membership
   Map, which inserts the handle as `false` before `uv.create_native_thread` and
   rolls it back on pre-start failure. Such a failure raises from `Group:spawn*`,
-  starts no worker and returns the slot.
+  starts no worker and returns the slot. A spawn that finds the group full
+  queues a waiter with a fresh token, then rechecks the group abort before it
+  suspends, so a `Group:cancel` from a finalizer before the waiter was queued
+  is not lost; one after it latches the waiter's wake
+  ([explicit suspension](libuv-runtime.md#explicit-suspend-task-status-listeners-and-combinators)).
 - **Observation.** `Group:wait()` makes one pass over the membership Map before
   suspending. `observe_thread` takes the memoized monitor and checks its status
   first: a finished monitor retires inline; otherwise it forwards a pending
