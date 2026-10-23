@@ -98,14 +98,13 @@ static TITAN_UNUSED inline void titan_ensure_stack(lua_State *L, int slots) {
 
 /*
  * Allocate a raw full-userdata object whose header the caller initializes.
- * Keep luaC_newobj out of gco2u's operand: under LUAI_ASSERT check_exp
- * evaluates that operand twice and would allocate a second, never
- * initialized object.
+ * This is gco2u(luaC_newobj(...)) without check_exp: under LUAI_ASSERT
+ * check_exp evaluates its operand twice and would allocate a second, never
+ * initialized object. Without LUAI_ASSERT the expansion is exactly gco2u's,
+ * so ordinary builds generate the same code at every optimization level.
 */
-static TITAN_UNUSED inline Udata *titan_new_udata_object(lua_State *L, size_t size) {
-    GCObject *o = luaC_newobj(L, LUA_VUSERDATA, size);
-    return gco2u(o);
-}]]
+#define titan_new_udata_object(L, size) \
+    cast(Udata *, luaC_newobj((L), LUA_VUSERDATA, (size)))]]
 
 cpreamble.after_foreign_imports = [[#if defined(__GNUC__) || defined(__clang__)
 #define TITAN_SOURCE_LOCAL __attribute__((visibility("hidden")))
