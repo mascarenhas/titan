@@ -1162,3 +1162,34 @@ function test_unwind_runs_defers_of_module_initializer_suspended_in_require(
   unwind_lua_mode(context, "close", UNWIND_MODULE_INIT_SCENARIO,
     "init-defer caller-defer lua-close", {})
 end
+
+-- A <- B, B yields past A. While the chain unwinds, B's cleanup closes B's
+-- own thread with coroutine.close(), which jumps straight to B's floor. The
+-- floor must keep unwinding: A's resume must not return normally, so only the
+-- two cleanups run.
+local UNWIND_SELF_CLOSE_SCENARIO = [==[
+  local inner_tag = {}
+  local a = titan_coroutine.create(function()
+    support.unwind_with_cleanup(function() append("a-cleanup") end, function()
+      local b = titan_coroutine.create(function()
+        support.unwind_with_cleanup(function()
+          append("b-cleanup")
+          coroutine.close()
+          append("b-after-close")
+        end, function()
+          titan_coroutine.yield("parked", tag)
+          append("b-after-yield")
+        end)
+        append("b-after-guard")
+      end, inner_tag)
+      b:resume(nil, inner_tag)
+      append("a-after-resume")
+    end)
+    append("a-after-guard")
+  end, tag)
+  assert(a:resume(nil, tag) == "parked")
+]==]
+
+function test_unwind_self_close_in_cleanup_keeps_unwinding(context: test.Context)
+  unwind_lua_case(context, UNWIND_SELF_CLOSE_SCENARIO, "b-cleanup a-cleanup", {})
+end

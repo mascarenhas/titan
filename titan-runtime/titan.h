@@ -97,11 +97,15 @@ typedef struct lua_longjmp {
 
 /* The bottom boundary of a Titan coroutine's Lua thread. `lj` is the first
 ** member, so the boundary pointer is also the record pointer. The bounds are
-** integer addresses of the real coroutine stack, never of this object. */
+** integer addresses of the real coroutine stack, never of this object.
+** `unwinding` is set by the walker before it lands on any boundary of the
+** thread, so the floor still knows the coroutine is being abandoned when a
+** cleanup's self-close (luaD_throwbaselevel) jumps here past every guard. */
 typedef struct titan_unwind_floor {
   lua_longjmp lj;
   uintptr_t stack_low;
   uintptr_t stack_high;
+  volatile int unwinding;
 } titan_unwind_floor;
 
 /* Close every to-be-closed variable at or above `level` (a savestack offset)

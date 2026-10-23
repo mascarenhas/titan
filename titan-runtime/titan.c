@@ -1870,6 +1870,15 @@ static lua_State *titan_unwind_cross(lua_State *L, lua_longjmp *outermost) {
   return resumer;
 }
 
+/* Mark the floor at the bottom of the chain that holds `lj`, if that chain
+** belongs to a Titan coroutine, as abandoned: a cleanup that then closes its
+** own thread reaches the floor with LUA_OK and must still finish unwinding. */
+static void titan_unwind_mark_floor(lua_longjmp *lj) {
+  while (lj->previous != NULL) lj = lj->previous;
+  if (lj->status == TITAN_STATUS_FLOOR)
+    ((titan_unwind_floor *)lj)->unwinding = 1;
+}
+
 l_noret titan_unwind(lua_State *L) {
   for (;;) {
     lua_longjmp *outermost = NULL;
@@ -1877,6 +1886,7 @@ l_noret titan_unwind(lua_State *L) {
     for (lj = L->errorJmp; lj != NULL; lj = lj->previous) {
       if (lj->status == TITAN_STATUS_FINALLY ||
           lj->status == TITAN_STATUS_FLOOR) {
+        titan_unwind_mark_floor(lj);
         lj->status = TITAN_STATUS_UNWIND;
         TITAN_LONGJMP(lj->b);
       }

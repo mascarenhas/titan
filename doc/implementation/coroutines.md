@@ -378,9 +378,20 @@ native frame above the floor; cleanup must not inherit their C-call count.
 - On `LUA_OK`, Lua code on the thread closed it with `coroutine.close()` and no
   argument (`luaB_close` with `COS_RUN`). `lua_closethread` has already closed
   every to-be-closed variable, and `luaD_throwbaselevel` jumped straight to the
-  floor, skipping the Titan finallies in between. The floor pushes `(nil, 1)`,
-  so the coroutine ends dead and its resumer receives nil, as for a Lua
-  coroutine that closes itself.
+  floor, skipping the Titan finallies and any unwind guard in between. Outside
+  an unwind the floor pushes `(nil, 1)`, so the coroutine ends dead and its
+  resumer receives nil, as for a Lua coroutine that closes itself. During an
+  unwind it takes the unwind branch and pushes `(nil, 2)`, so the resumer keeps
+  unwinding instead of running its ordinary code. The mode cannot come from a
+  guard, which the jump bypasses: before every landing, `titan_unwind` follows
+  the landing boundary's chain to its bottom and, when that is a floor, sets
+  `titan_unwind_floor.unwinding` (`titan_unwind_mark_floor`). The flag lives in
+  the floor record on the coroutine's own stack, is set again at each landing,
+  and is `volatile` because it is read after the `longjmp`. A genuine Lua
+  coroutine has no floor: if cleanup that runs on such a thread during a
+  crossing closes that thread, `luaD_throwbaselevel` returns through its
+  `lua_resume` to the Lua resumer's ordinary code, which Titan cannot
+  intercept, so the language manual forbids it.
 - On any other status, a real error escaped `coro_entry`'s catch. The floor
   closes the frames with that error and delivers it to the resumer as
   `(error, 0)`. It runs that close with itself re-armed as

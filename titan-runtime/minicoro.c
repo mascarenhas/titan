@@ -58,6 +58,7 @@ void titan_coroutine_enter(lua_State *T, Udata *module, TValue func,
   titan_unwind_floor floor;
   floor.stack_low = (uintptr_t)co->stack_base;
   floor.stack_high = floor.stack_low + (uintptr_t)co->stack_size;
+  floor.unwinding = 0;
   floor.lj.status = TITAN_STATUS_FLOOR;
   floor.lj.previous = T->errorJmp;
   T->errorJmp = &floor.lj;
@@ -91,9 +92,12 @@ void titan_coroutine_enter(lua_State *T, Udata *module, TValue func,
       }
       T->errorJmp = floor.lj.previous;
     }
-    if (floor.lj.status == TITAN_STATUS_UNWIND) {
-      /* Every Titan finally on T has run: close the remaining Lua frames and
-      ** finish the coroutine as unwound. */
+    if (floor.lj.status == TITAN_STATUS_UNWIND ||
+        (floor.lj.status == LUA_OK && floor.unwinding)) {
+      /* Every Titan finally on T has run, or a cleanup closed T's own thread
+      ** (coroutine.close() with no argument) while T was being abandoned:
+      ** close the remaining Lua frames and finish the coroutine as unwound,
+      ** so its resumer keeps unwinding instead of returning. */
       titan_unwind_close(T, oldtop);
       titan_coroutine_push_final(T, co, NULL, TITAN_CORO_TRANSFER_UNWIND);
     } else if (floor.lj.status == LUA_OK) {
