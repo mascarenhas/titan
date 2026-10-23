@@ -184,12 +184,15 @@ transition return the same snapshot; a later transition gets a fresh snapshot,
 even if its tag is again `running` or `waiting`. Retained snapshots never
 change. Unobserved nonterminal transitions do not construct public snapshots.
 
-`async.run_foreign(f, arg)` submits the C function pointer and argument to
-libuv's process-wide worker pool and suspends the current Task until the
-after-work callback runs on the event-loop thread. It is intended for blocking
-calls into an external C library. A restricted source `foreign function` is
-permitted because the compiler emits it as an exact C callback; its body must
-remain within the raw-C restrictions below.
+`async.run_foreign(f, arg, abandoned)` submits the C function pointer and
+argument to libuv's process-wide worker pool and suspends the current Task
+until the after-work callback runs on the event-loop thread. It is intended
+for blocking calls into an external C library. A restricted source
+`foreign function` is permitted because the compiler emits it as an exact C
+callback; its body must remain within the raw-C restrictions below. The
+optional `abandoned` is a C-only release for `arg`, called only when a Lua
+state close abandons the wait; see
+[foreign work at state close](#foreign-work-at-state-close).
 
 The worker performs exactly `f(arg)`. It must not inspect or mutate the
 hosting Lua state's Titan/Lua objects, call the Lua API on that state, invoke

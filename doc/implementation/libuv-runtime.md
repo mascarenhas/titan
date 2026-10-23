@@ -633,12 +633,13 @@ bootstrap used by independent states is described in the
 
 ## Foreign workers
 
-`run_foreign(f, arg)` is an ordinary await over public `uv.queue_work`
+`run_foreign(f, arg, abandoned)` is an ordinary await over public `uv.queue_work`
 (`start_foreign_work`). It rejects a NULL `f` before submission. The worker runs
 only `f(arg)` on raw native state; the loop-thread completion callback resolves
 nil or rejects an `OperationError` labelled `async.run_foreign`, and protects
 unexpected failures with fatal plus bare rethrow. The argument's owned storage
-stays in the suspended caller through completion.
+stays in the suspended caller through completion. The optional `abandoned`
+release is used only at Lua state close, as described below.
 
 Worker code must not inspect host Titan/Lua owners, call the Lua API on the
 hosting state, raise into its frames, or resume its Tasks. The
