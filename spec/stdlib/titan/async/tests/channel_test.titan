@@ -495,3 +495,35 @@ function test_reader_writer_channel_adapters(context: test.Context)
     cancelled_reader:close()
   end)
 end
+
+-- Issue #280 for async.channel: a finalizer that closes or sends while the
+-- receiver is about to suspend (run_wake_in_suspend_window) wakes it.
+local function channel_wake_before_receiver_suspends(
+    wake: function (function (integer): (), function (): ()): (), expected: value)
+  runtime_test.run(function ()
+    local send, receive, close = async.channel<|integer|>()
+    defer close()
+    local receiver = run_wake_in_suspend_window("running", function (): value
+      return receive()
+    catch
+      return error
+    end, function (_: async.Task) wake(send, close) end)
+    local finished, result? = receiver:status():has_succeeded()
+    test.assert(finished and result == expected,
+      "a channel wake before its receiver's registration left the receiver " ..
+      receiver:status():as_string())
+  end)
+end
+
+function test_channel_wake_before_receiver_suspends(context: test.Context)
+  context:run("close", function (_: test.Context)
+    channel_wake_before_receiver_suspends(function (_: function (integer): (), close: function (): ())
+      close()
+    end, "channel is closed")
+  end)
+  context:run("send", function (_: test.Context)
+    channel_wake_before_receiver_suspends(function (send: function (integer): (), _: function (): ())
+      send(17)
+    end, 17)
+  end)
+end

@@ -1596,7 +1596,11 @@ Task is deferred. Settlement from inside a finalizer, including the cleanup of
 an [abandoned coroutine](coroutines.md#abandoned-coroutines), is deferred the
 same way, because a finalizer cannot resume the waiting Task. A
 `Completion:fatal` made there likewise queues the delivery of its error to the
-Task instead of raising it there at once.
+Task instead of raising it there at once. A finalizer may also run while a Task
+is about to suspend, after it began waiting and before the Runtime registered
+its suspension. Closing, sending on or receiving from an `async.channel`,
+stopping or publishing to a subscription, closing a `Receiver`, or cancelling
+the Task there still wakes it at registration.
 CPU-heavy code that neither finishes nor yields blocks the event loop.
 
 Persistent sources publish into coalescing or buffered subscriptions. A queued

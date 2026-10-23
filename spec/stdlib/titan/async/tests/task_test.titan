@@ -821,3 +821,21 @@ function test_task_trace_captures_follow_reported_failures(context: test.Context
     task_trace_reported_failure(child, true)
   end)
 end
+
+-- A finalizer that cancels a Task while its explicit suspension registers,
+-- after the driver's admission check (run_wake_in_suspend_window), must still
+-- deliver the cancellation.
+function test_cancel_during_suspend_registration_is_delivered(_: test.Context)
+  runtime_test.run(function ()
+    local token = async.ResumeToken("cancelled while registering")
+    local target = run_wake_in_suspend_window("waiting", function (): value
+      async.suspend(token)
+      return "resumed"
+    end, function (task: async.Task)
+      task:cancel(async.CancellationReason.simple("cancelled while registering"))
+    end)
+    test.assert(support.cancelled_with(target:status(), "cancelled while registering"),
+      "a cancellation during suspend registration left the Task " ..
+      target:status():as_string())
+  end)
+end

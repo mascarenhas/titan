@@ -556,3 +556,24 @@ function test_buffered_subscription_snapshot_preserves_queue_and_terminal(_: tes
     subscription_ended(outcome)
   end)
 end
+
+-- Issue #280 for subscriptions: a finalizer that stops the subscription while
+-- its reader is about to suspend (run_wake_in_suspend_window) wakes it.
+function test_subscription_stop_before_reader_suspends_wakes_reader(_: test.Context)
+  runtime_test.run(function ()
+    local stream = async.BufferedSubscription<|value, value|>(function (_publish: function (value): (boolean), _fail: function (value): (boolean), _finish: function (): (boolean)): async.SubscriptionActions<|value|>
+      return subscription_actions()
+    end)
+    defer stream:close()
+    local reader = run_wake_in_suspend_window("running", function (): value
+      case stream:next()
+      when ended() then return "ended"
+      else return "another outcome"
+      end
+    end, function (_: async.Task) stream:stop() end)
+    local finished, result? = reader:status():has_succeeded()
+    test.assert(finished and result == "ended",
+      "a stop before its reader's registration left the reader " ..
+      reader:status():as_string())
+  end)
+end

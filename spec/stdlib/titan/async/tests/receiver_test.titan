@@ -591,74 +591,88 @@ function test_receiver_decode_may_close_its_receiver(context: test.Context)
   end)
 end
 
--- Issue #280: a finalizer closes the Receiver after the reader's empty slot
--- take and before registration publishes its token, so close finds no
--- suspended reader to wake. In generational mode with a zero minor multiplier
--- and no major collections, every GC safepoint runs a young collection and
--- all pending finalizers, so this self-renewing probe runs at each one. Once
--- the reader Task has run, the probe closes the Receiver at the first
--- safepoint where that Task is still `running` but not current: the driver
--- after the reader yielded its suspension and before registration.
-record ReceiverSuspendCloseProbe
-  receiver: async.Receiver
-  reader: async.Task?
-  reader_ran: boolean
+-- Issue #280: a finalizer that wakes a Task after its domain registered the
+-- waiter and before registration publishes the suspension's token must not
+-- lose that wake. In generational mode with a zero minor multiplier and no
+-- major collections, every GC safepoint runs a young collection and all
+-- pending finalizers, so this self-renewing probe runs at each one. Once the
+-- target Task has run, the probe runs its wake at the first safepoint where
+-- the target is in `phase` but not current: in the driver after the target
+-- yielded its suspension ("running"), or in its registration ("waiting").
+-- Shared by the channel, subscription and cancellation variants.
+record SuspendWindowProbe
+  target: async.Task?
+  phase: string
+  wake: function (async.Task): ()
+  target_ran: boolean
   fired: boolean
+  failure: value
 end
 
-local receiver_suspend_close_probe: ReceiverSuspendCloseProbe? = nil
+local suspend_window_probe: SuspendWindowProbe? = nil
 
-local function receiver_suspend_close_fire(_: value)
-  local probe? = receiver_suspend_close_probe
+local function suspend_window_fire(_: value)
+  local probe? = suspend_window_probe
   if probe == nil or probe.fired then return end
-  local reader? = probe.reader
-  if reader ~= nil then
+  local target? = probe.target
+  if target ~= nil then
     local current: async.Task? = nil
     do current = async.running() catch end
-    if current == reader then
-      probe.reader_ran = true
-    elseif current == nil and probe.reader_ran and
-        reader:status():as_string() == "running" then
+    if current == target then
+      probe.target_ran = true
+    elseif current == nil and probe.target_ran and
+        target:status():as_string() == probe.phase then
       probe.fired = true
-      probe.receiver:close()
+      -- A finalizer error would only become a Lua warning; record it instead.
+      do probe.wake(target) catch probe.failure = error end
       return
     end
   end
   local sentinel: {string: value} = {}
-  receiver_gc.finalizable<|value|>(sentinel, receiver_suspend_close_fire)
+  receiver_gc.finalizable<|value|>(sentinel, suspend_window_fire)
+end
+
+-- Run `body` as a Task, run `wake` in its suspension window, and return the
+-- Task once it has finished, or after a bounded number of turns.
+local function run_wake_in_suspend_window(phase: string, body: function (): (value),
+    wake: function (async.Task): ()): async.Task
+  local probe = SuspendWindowProbe(nil, phase, wake, false, false, nil)
+  local was_generational = receiver_gc.generational()
+  local minormul = receiver_gc.minormul(0)
+  local minormajor = receiver_gc.minormajor(0)
+  defer do
+    receiver_gc.minormul(minormul)
+    receiver_gc.minormajor(minormajor)
+    if not was_generational then receiver_gc.incremental() end
+  end
+  suspend_window_probe = probe
+  defer suspend_window_probe = nil
+  local target = async.run<|value, value|>(body)
+  task_support.cleanup_task(target, "suspension window probe cleanup")
+  probe.target = target
+  -- Arm the first sentinel, while the target has not started yet, and run one
+  -- young collection so that the zero minor debt takes effect.
+  suspend_window_fire(nil)
+  receiver_gc.step(0)
+  for _ = 1, 100 do
+    if target:status():has_finished() then break end
+    timer.yield()
+  end
+  test.assert(probe.fired, "the probe never ran its wake in the suspension window")
+  test.assert(probe.failure == nil,
+    "the wake raised: " .. receiver_string.tostring(probe.failure))
+  return target
 end
 
 function test_receiver_close_before_reader_suspends_wakes_reader(_: test.Context)
   runtime_test.run(function ()
     local receiver = async.receiver()
     defer receiver:close()
-    local probe = ReceiverSuspendCloseProbe(receiver, nil, false, false)
-    local was_generational = receiver_gc.generational()
-    local minormul = receiver_gc.minormul(0)
-    local minormajor = receiver_gc.minormajor(0)
-    defer do
-      receiver_gc.minormul(minormul)
-      receiver_gc.minormajor(minormajor)
-      if not was_generational then receiver_gc.incremental() end
-    end
-    receiver_suspend_close_probe = probe
-    defer receiver_suspend_close_probe = nil
-    local reader = async.run<|value, value|>(function (): value
+    local reader = run_wake_in_suspend_window("running", function (): value
       return receiver:wait()
     catch
       return error
-    end)
-    task_support.cleanup_task(reader, "Receiver reader closed before suspension cleanup")
-    probe.reader = reader
-    -- Arm the first sentinel, while the reader Task has not started yet, and
-    -- run one young collection so that the zero minor debt takes effect.
-    receiver_suspend_close_fire(nil)
-    receiver_gc.step(0)
-    for _ = 1, 100 do
-      if reader:status():has_finished() then break end
-      timer.yield()
-    end
-    test.assert(probe.fired, "the probe never closed the Receiver before registration")
+    end, function (_: async.Task) receiver:close() end)
     local finished, result? = reader:status():has_succeeded()
     test.assert(finished and result == "receiver is closed",
       "a Receiver closed before its reader's registration left the reader " ..

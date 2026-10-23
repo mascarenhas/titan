@@ -237,18 +237,31 @@ every foreign-callback mistake or memory failure.
 
 ## Explicit suspend, Task status, listeners, and combinators
 
-`SuspendCancelAction` is `function (): ()`. `suspend` runs the private
-`suspend_with` with its `ResumeToken` as Completion context and the named
-registrar `start_suspend`. `suspend_with` stages the cancel action first; the
-registrar publishes the token (`publish_suspension`) only after admission, so
-even a GC finalizer during cell setup sees a wrong-time resume as a mismatch.
-A `defer` clears the staged state if construction or admission fails. The
-interval before publication contains GC safepoints, in the suspending Task
-and in the driver, so a finalizer can close a domain while its waiter cannot
-yet be resumed. A domain that finalizers may close therefore passes its own
-context and registrar to `suspend_with`. After publishing, that registrar
-rechecks the domain's condition and settles inline when it already holds, as
-the [Receiver](#cross-state-receiver-ownership) does for close.
+`SuspendCancelAction` is `function (): ()`. `suspend` uses its `ResumeToken`
+as Completion context and the named registrar `start_suspend`. It stages the
+cancel action first; `start_suspend` publishes the token only after
+admission, so even a GC finalizer during cell setup sees a wrong-time resume
+as a mismatch. A `defer` clears the staged state if construction or admission
+fails.
+
+The interval before publication contains GC safepoints, in the suspending Task
+and in the driver, so a finalizer can wake a waiter that cannot yet be
+resumed. The domains in `titan/async.titan` whose wakers finalizers can reach
+(`async.channel`, subscriptions, `Receiver`) therefore call
+`stage_suspension(task, token)` before they publish the waiter where their
+wakers find it. Their wakers call `wake_waiter(task, token)`, which resumes a
+Task suspended on that token, records `wake_latched` while that token is
+staged, and otherwise does nothing, because the waiter is running and rechecks
+the domain itself. After publishing, `start_suspend` settles the suspension
+inline when it finds a latched wake for its token. It also settles inline when
+the Task already has a cancellation reason. Such a reason arrived after the
+driver's admission check, and its `Task:cancel` found no suspended Task to
+wake. `clear_suspension` clears the staged token at delivery and at every exit
+of `suspend`, so a later wake finds a running waiter. Combinator listeners need
+no staging: they run only from terminal publication, which never runs in a
+finalizer, because settlement and `fatal` from a finalizer are queued and
+`runtime_finalize` calls no listener.
+
 `Task:resume` checks token identity before any finished/pending shortcut, so
 equal source strings never authorize a different token. Matching pending wakes
 coalesce through `resume_pending`, which is set only after `enqueue_ready`
@@ -298,8 +311,10 @@ unwinds.
 
 `async.channel` keeps a bounded circular buffer with an explicit count, at most
 one blocked sender and one blocked receiver (a second raises), and discards
-buffered items on close. Writer close is not automatic clean reader EOF; see
-the [language chapter](../language/async-io.md#bounded-channels).
+buffered items on close. A blocking operation stages its suspension before it
+occupies its waiter slot, and send, receive and close wake through
+`wake_waiter`. Writer close is not automatic clean reader EOF; see the
+[language chapter](../language/async-io.md#bounded-channels).
 
 ## Persistent subscriptions
 
@@ -320,7 +335,11 @@ the producer. Error/end terminal changes roll back on wake failure the same way.
 
 One waiter reserves a Task/token pair and records whether it requests a batch.
 Reads check competing waiters and pending cancellation before transferring any
-item. Suspension uses the nonyielding exact detacher. A notification keeps the
+item. Suspension uses the nonyielding exact detacher. The waiter stages its
+suspension before it becomes the reservation, and `Core:wake` wakes it through
+`wake_waiter`, so a wake from a finalizer before registration is latched
+([staged suspension](#explicit-suspend-task-status-listeners-and-combinators)).
+A notification keeps the
 reservation until that reader resumes or unwinds, so another reader cannot
 steal its delivery. Cancellation only detaches that waiter; it does not stop the
 source or discard its events. Both `has_waiter()` methods report this
@@ -595,40 +614,37 @@ follows a remote GC pointer or enters the destination Lua state.
   allocating. Clearing `task` on release also drops the reference to a finished
   reader Task.
 - **Wake (`Receiver:wake`).** The `uv.async_t` callback copies and decodes
-  nothing. It returns unless a reader is reserved **and** that Task is
-  suspended on the reader's token (`task.resume_token == reader.token`, which
-  `start_reader_suspend` publishes and delivery clears), then calls
-  `task:resume(reader.token)`; `Task:resume` coalesces repeated wakes through
-  `resume_pending`, so the reader keeps no notified flag of its own. A running
-  reader is never resumed. In particular, when a decode hook, or a finalizer run
-  at an allocation inside decode, closes the Receiver that is decoding its
-  first-pass packet, `close()`'s wake is a no-op: `wait` returns the value it
-  already took, and its next call raises `"receiver is closed"`. The packet stays
-  in the native slot, including while the reader's wake is queued, until
-  `wait()` takes it. A close between an empty take and the publication of the
-  token, from a finalizer in the reader or in the driver, finds no suspended
-  reader either; the registration below catches it.
+  nothing. When a reader is reserved it calls `wake_waiter(task, reader.token)`
+  ([staged suspension](#explicit-suspend-task-status-listeners-and-combinators)):
+  a reader suspended on the token is resumed, and `Task:resume` coalesces
+  repeated wakes through `resume_pending`, so the reader keeps no notified flag
+  of its own. A reader between its staging and the publication of its token
+  gets its wake latched. A running reader is never resumed. In particular, when
+  a decode hook, or a finalizer run at an allocation inside decode, closes the
+  Receiver that is decoding its first-pass packet, `close()`'s wake resumes
+  nothing: `wait` returns the value it already took, and its next call raises
+  `"receiver is closed"`. The packet stays in the native slot, including while
+  the reader's wake is queued, until `wait()` takes it.
 - **Wait (`Receiver:wait`, `receiver_take_native`).** `wait()` requires a
   running Task and rejects a second reader with
   `"receiver already has a waiting reader"`. It reserves `reader.task`
   **before** `checkpoint()` or any slot inspection, so a second caller cannot
   barge ahead while the first reader's wake is queued; its exit `defer` releases
-  the reservation only if it still names this Task. Each loop turn declares a
-  fresh `raw` local and calls `receiver_take_native`, which returns `2` (closed,
-  raising `"receiver is closed"`), `1` (taken), or `0` (empty). On `1` it
-  installs `defer transfer.discard_message(raw)` and returns
+  the reservation only if it still names this Task. Each loop turn stages the
+  reader's token, declares a fresh `raw` local and calls
+  `receiver_take_native`, which returns `2` (closed, raising
+  `"receiver is closed"`), `1` (taken), or `0` (empty). On `1` it installs
+  `defer transfer.discard_message(raw)` and returns
   `transfer.decode_message(raw)` under the
   [consuming raw-slot decode contract](transfer-library.md#consuming-raw-slot-decode);
   decode errors consume the packet and raise from `wait()` with no retry, and
-  nil and false are ordinary data. On `0` it suspends through
-  `suspend_with(self, reader.withdraw, start_reader_suspend)`. That registrar
-  publishes the reader's token and then rechecks the native `closed` flag,
-  which `close()` and Runtime shutdown set before waking: if it is set, the
-  registrar resolves the suspension inline and the next turn raises
-  `"receiver is closed"`, so a close before publication still ends the wait.
-  A send between the empty check and the registration leaves a pending
-  `uv_async_send` whose callback runs only after the reader has yielded with
-  its token published.
+  nil and false are ordinary data. On `0` it calls
+  `suspend(reader.token, reader.withdraw)`. Staging before the take means that a
+  close between an empty take and the registration, from a finalizer in the
+  reader or in the driver, latches its wake, so the registration settles inline
+  and the next turn raises `"receiver is closed"`. A send in that interval
+  leaves a pending `uv_async_send` whose callback runs only after the reader
+  has yielded with its token published.
 - **Cancellation.** `Task:cancel` runs `withdraw` only while the reserving Task
   is suspended under it, so the reservation it clears is that Task's. An unread
   packet stays in the slot. The cancelled reader unwinds later through its
