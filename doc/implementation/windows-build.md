@@ -85,10 +85,22 @@ and the compiler/language partitions in private NTFS checkout copies. Windows
 defaults to two concurrent partition workers under native Job Objects; see
 [Busted partitions](test-runner.md#busted-partitions).
 
+## Native build parallelism
+
 The compiler honors `titanc --jobs N` and `TITAN_JOBS=N`. Parallel object
 commands launch through the stock LuaRocks `luv` dependency, whose exit
 callbacks report actual completion to the common scheduler; see [driver process
 transports](driver.md#experimental-windows-process-transports).
+
+`TITAN_JOBS` (default 1) is the only native build-parallelism setting on
+Windows, so set it to the CPU count for validation. It bounds the native
+dependency CMake build (`scripts/build_windows_native.sh`), generated-C
+compilation of the standard provider, and the shared native test build
+(`spec/support/windows_stdlib_tests.sh`). `MAKEFLAGS=-jN` has no effect:
+`Makefile.win` is `.NOTPARALLEL`, and LuaRocks starts its nested Make without
+the jobserver. The Lua, libbacktrace, and bundled OpenSSL builds stay at `-j1`.
+Busted compiler workers each use `TITAN_JOBS=1` under their own
+`TITAN_ROCK_TEST_JOBS` bound.
 
 ## One controlled Lua DLL and its SDK
 

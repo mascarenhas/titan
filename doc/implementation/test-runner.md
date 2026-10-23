@@ -427,7 +427,8 @@ Busted restores `package.loaded` between files.
 ### Platform portability and complete execution
 
 `Makefile.win` provides the same build/run leaf targets through
-`spec/support/windows_stdlib_tests.sh`. It compiles every root serially with the
+`spec/support/windows_stdlib_tests.sh`. It compiles every root, with up to
+`TITAN_JOBS` (default 1) concurrent generated-C object compilations, using the
 native CLANG64/UCRT SDK in a marked, disposable local NTFS workspace. The
 workspace contains a private SDK copy, test sources, authored child fixtures,
 generated objects, logs, and scratch paths. Test sources retain their

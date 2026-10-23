@@ -122,6 +122,11 @@ standard-library suite, retained runtime/packaging specs, and compiler/language
 specs. Ordinary compiler tests run in private checkout copies with two workers
 by default; `TITAN_ROCK_TEST_JOBS=1` through `4` sets the bound.
 
+Set `TITAN_JOBS` to the number of CPUs for these runs; it bounds native C
+compilation in the dependency, standard-library, and test builds and defaults
+to 1. `MAKEFLAGS=-jN` has no effect on Windows, because `Makefile.win` runs its
+recipes serially; see [native build parallelism](../implementation/windows-build.md#native-build-parallelism).
+
 For the shared suite's separate build/run targets, filtering, and evidence
 requirements, see [native Windows tests](../implementation/windows-build.md#shared-native-standard-library-tests).
 Component checks and a VM boot do not establish a complete Windows port test.

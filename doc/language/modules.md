@@ -626,10 +626,9 @@ Windows Lua build. See [Windows loading and launchers](binary-compatibility.md#e
 for output names and runtime layout, and the [Windows build guide](../implementation/windows-build.md)
 for the SDK and native dependency link requirements.
 
-The experimental Windows compiler invokes the selected native C toolchain
-serially. A larger `--jobs` or `TITAN_JOBS` value still compiles one generated
-module at a time; verbose mode reports this restriction. Linux and macOS retain
-their existing concurrent compilation behavior.
+The Windows compiler honors `--jobs` and `TITAN_JOBS` like Linux and macOS:
+independent generated-C object compilations run concurrently up to that bound;
+see [Windows native build parallelism](../implementation/windows-build.md#native-build-parallelism).
 The Windows default C command is `clang.exe`; `CC` overrides it.
 
 Configured tool commands and flags keep Titan's small shell-word grammar:
