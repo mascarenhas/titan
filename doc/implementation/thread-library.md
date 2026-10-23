@@ -429,13 +429,17 @@ The proxy body awaits **logical finish only** (`wait_until_finished`) and
 projects success, failure or cancellation. It does not call `Thread:join`: a
 body join failure followed by cleanup would retry the join within one driver
 invocation, so only the prearmed barrier attempts the proxy's OS join. The
-cleanup registers `defer final_wait:close()` then
-`defer final_wait:wait_cleanup()`, and forwards its `reason` with
-`self:cancel(reason)` while `finished` is false. That reason is nil when the body
-failed without cancellation, so `Thread:cancel(nil)` sends the default
-`simple("cancelled")`. The generic driver gates terminal status, listeners and
-the result on native retirement, so a cancelled proxy cannot publish before the
-child's cleanup and OS join. Cancellation admission at the cleanup wait,
+cleanup forwards its `reason` with `self:cancel(reason)` while `finished` is
+false. Outside Lua-state close it first registers a `defer` that runs
+`final_wait:wait_cleanup()` and then `final_wait:close()`. That reason is nil
+when the body failed without cancellation, so `Thread:cancel(nil)` sends the
+default `simple("cancelled")`. At state close the cleanup runs outside any
+Task, so it skips the barrier and only forwards cancellation, and the armed
+gate stays nonterminal
+([state close](libuv-runtime.md#lua-state-close-of-an-unretired-runtime)). The
+generic driver gates terminal status, listeners and the result on native
+retirement, so a cancelled proxy cannot publish before the child's cleanup and
+OS join. Cancellation admission at the cleanup wait,
 reason precedence, negative-status retry and logical close are the generic
 [native-retirement contract](../language/async-io.md#native-retirement-capabilities)
 ([implementation](libuv-runtime.md#native-retirement-barriers)); this module

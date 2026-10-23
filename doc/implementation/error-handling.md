@@ -353,7 +353,7 @@ When the walker lands with `TITAN_STATUS_UNWIND`, the recovery arm:
 4. skips any catch and sets `PA_UNWIND`.
 
 The finally body then runs under a guard. The guard reuses the try-scope
-`_lj_<id>`, which is already unlinked, through a second `TITAN_SETJMP` call
+`_lj_<id>`, which is already unlinked, through another `TITAN_SETJMP` call
 site. If an error escapes the body, `titan_unwind_guard_failed` restores the
 boundary state, reports the error, closes the frames the body entered, and
 continues the unwind. After a normal finish, the dispatch arm for `PA_UNWIND`
@@ -385,8 +385,9 @@ guard must outlive `$CFINALLY` and `$DISPATCH`. The guard's close level is the
 reserved top the landing established, `_base_off + TITAN_RESERVED_NSLOTS`
 slots. `_base_off` is written once at function entry, so it is well defined
 after the jump. The landings and the re-armed close read only what an error
-landing reads, and no Titan code runs between the re-arming `TITAN_SETJMP` and
-a jump to it, so the setjmp spill analysis below needs no change.
+landing reads, and no code of the enclosing function runs between the
+re-arming `TITAN_SETJMP` and a jump to it (only `__close` methods do), so the
+setjmp spill analysis below needs no change.
 
 ### Boundary restoration on generated `goto`
 
@@ -539,11 +540,12 @@ from silently loading stale build artifacts.
   sustained-OOM catch/defer recovery across functions, closures, and module
   initializers, GC-valued pending returns (including flexible tails),
   standalone uncaught-error reporting, and the generated unwind boundaries
-  (markers, landings, re-armed recovery close, a grafted catch-plus-finally
-  try unwound through its catch boundary).
+  (the finally marker, no unwind code in a catch-only try, and a grafted
+  catch-plus-finally try unwound through its catch boundary).
 * `spec/stdlib/titan/coroutine/tests/unwind_test.titan` (`test_unwind_*`):
   unwinding behavior, including a coroutine abandoned while suspended in an
-  error-recovery `__close`.
+  error-recovery `__close`, a failing finally inside an immediately invoked
+  lambda, and a module initializer suspended inside `require`.
 * `spec/coder/stack_relocation_spec.lua`: stack relocation through protected
   recovery.
 * `spec/abi_spec.lua`: runtime/compiler ABI constants.

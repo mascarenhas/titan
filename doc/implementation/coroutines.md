@@ -354,10 +354,12 @@ destroys the finalized coroutine, and clears both the payload slot and
 `Coroutine.handle` (owner uservalue 6). A resurrected handle then reports
 `"dead"`, and `resume` raises `Invalid coroutine`.
 
-`coro_gc` leaves a coroutine mapped, which leaks it, in two cases: when it is
+`coro_gc` leaves a coroutine mapped, which leaks it, in three cases: when it is
 still `RUNNING` or `NORMAL` because the state is closed from inside a
-coroutine, and when the request could not be delivered. That is safer than
-freeing live frames.
+coroutine; when pushing the request raises, for example on allocation failure,
+in which case the error leaves `coro_gc` and GCTM reports it as
+`error in __gc (...)`; and when the request could not be delivered because the
+resume failed. That is safer than freeing live frames.
 
 **Floor.** The restricted trampoline calls `titan_coroutine_enter`
 (`titan-runtime/minicoro.c`), a narrow C shim. It links a
@@ -365,12 +367,20 @@ freeing live frames.
 coroutine's thread. The floor has status `TITAN_STATUS_FLOOR` and records the
 real bounds of the minicoro stack. Then the shim calls the generated entry.
 
-The landing first restores the saved `nCcalls`, `ci`, `allowhook` and
-`errfunc`, because the jump removed every native frame above the floor; cleanup
-must not inherit their C-call count.
+The landing first unlinks the floor and every abandoned boundary above it
+(`T->errorJmp = floor.lj.previous`), so a close method that raises or closes
+its own thread cannot follow a dangling chain. It then restores the saved
+`nCcalls`, `ci`, `allowhook` and `errfunc`, because the jump removed every
+native frame above the floor; cleanup must not inherit their C-call count.
 
 - On an unwind landing, the floor closes the thread's remaining Lua
   to-be-closed variables and pushes `(nil, 2)`.
+- On `LUA_OK`, Lua code on the thread closed it with `coroutine.close()` and no
+  argument (`luaB_close` with `COS_RUN`). `lua_closethread` has already closed
+  every to-be-closed variable, and `luaD_throwbaselevel` jumped straight to the
+  floor, skipping the Titan finallies in between. The floor pushes `(nil, 1)`,
+  so the coroutine ends dead and its resumer receives nil, as for a Lua
+  coroutine that closes itself.
 - On any other status, a real error escaped `coro_entry`'s catch. The floor
   closes the frames with that error and delivers it to the resumer as
   `(error, 0)`. It runs that close with itself re-armed as
@@ -387,6 +397,14 @@ skips everything else: catch-only Titan boundaries, Lua `pcall`/`load`, and
 jumping, so the marker is never overwritten while the boundary is live. The
 generated landing is described under
 [unwinding through finally](error-handling.md#unwinding-through-finally).
+
+A generated module initializer is an ordinary frame for the walker: its
+`defer`s land like any other, and a Lua `require` between it and the caller is
+only unprotected C frames (`ll_require` uses `lua_call`). `<prefix>_init`
+publishes the module under `"Titan module <modname>"` before it runs the
+initializer ([the module protocol](codegen-overview.md#the-module-protocol)),
+so a module abandoned there stays partially initialized, as after an
+initializer error: a later `require` takes the registry hit and returns it.
 
 **Crossings.** A thread whose chain holds no landing point is a genuine Lua
 coroutine resumed on this stack. `titan_unwind_cross` handles it in four steps:
@@ -448,23 +466,30 @@ set exactly while GCTM runs a `__gc`, during ordinary collections and during
 - `coroutine.yield` raises `cannot yield from a finalizer`;
 - `Coroutine:resume` and `Coroutine:error` raise
   `cannot resume a coroutine from a finalizer`;
-- `is_yieldable` returns false.
+- `is_yieldable(tag)` returns false.
 
-`coro_gc` itself resumes with `ffi.mco_resume` directly.
+These checks hold during the unwind too. `coro_gc` itself resumes with
+`ffi.mco_resume` directly.
 
-The collector is stopped (`gcstp != 0`) for the whole finalizer, so an unwind
-allocates without collecting, and a collection request fails: `gc.collect`
-raises ([direct collector control](gc-library.md#direct-collector-control)) and
-Lua's `collectgarbage` returns fail (`nil`). Under ordinary collection, GCTM
-runs at an allocation point of whatever code is running, so an unwind can start
-inside unrelated code and must not assume any program state. That is the
-general Lua finalizer contract, which cleanup inherits.
+GCTM sets `GCSTPGC` for the whole finalizer, so an unwind takes no ordinary
+collector step, and every `lua_gc` request fails: `gc.collect` raises
+([direct collector control](gc-library.md#direct-collector-control)) and Lua's
+`collectgarbage` returns fail (`nil`). Emergency collections stay enabled:
+`GCScallfin` clears `gcstopem` before it calls finalizers, so an allocation
+failure during an unwind can run an emergency full collection. Such a cycle
+runs no finalizer and shrinks no stack. Under ordinary collection, GCTM runs at
+an allocation point of whatever code is running, so an unwind can start inside
+unrelated code and must not assume any program state. That is the general Lua
+finalizer contract, which cleanup inherits.
 
-Async uses the same test in `run_with_cleanup`. Task code runs in a finalizer
-only while it is unwound at Lua-state close; see
+Async tests `titan_in_finalizer` in `settle` and `fatal`: settlement from a
+finalizer queues delivery instead of resuming the waiting Task (see
+[completion waits](libuv-runtime.md#driver-and-registration-trampoline)).
+`titan_state_closing` (`G(L)->gcstp & GCSTPCLS`) marks the state-close case:
+`run_with_cleanup` gives its cleanup the abandonment reason only then,
+`async.run` and `run_with_cleanup` refuse to start a Task, and `new_runtime`
+refuses to create a Runtime; see
 [Lua-state close](libuv-runtime.md#lua-state-close-of-an-unretired-runtime).
-There, `titan_state_closing` (`G(L)->gcstp & GCSTPCLS`) also makes
-`async.run` and `run_with_cleanup` refuse to start a Task.
 
 ## Tests
 
@@ -481,14 +506,21 @@ Unwinding has three layers:
   state, once with collections and once with `state:close()`. The log and the
   child's Lua warnings go to host-owned buffers through
   `coroutine.test_support`, and a Lua `__gc` observer created before the
-  abandoned coroutine records thread statuses after the unwind.
-- `spec/coder/error_handling_spec.lua` ("unwind boundaries") checks the
-  generated markers, landings, re-armed recovery close and dispatch, and unwinds
-  a try that has both a catch and a finally.
+  abandoned coroutine records thread statuses after the unwind. The fixture
+  module `coroutine.unwind_init_fixture` suspends its initializer when a child
+  state requires it inside a coroutine, which covers an initializer abandoned
+  inside `require`.
+- `spec/coder/error_handling_spec.lua` ("unwind boundaries") checks that a
+  finally boundary is initialized with `TITAN_STATUS_FINALLY`, that a
+  catch-only try emits no unwind code, and unwinds a try that has both a catch
+  and a finally.
 - `spec/minicoro_spec.lua` drives `titan_coroutine_enter` from a C entry: an
   escaped error, an unwind, and an unwind of a coroutine suspended in the
-  floor's error-recovery close. No Titan program can make an error escape
-  `coro_entry`'s catch.
+  floor's error-recovery close. Titan code reaches the escaped-error branch
+  only when an error is raised inside `coro_entry`'s own catch, for example on
+  allocation failure while pushing the error transfer, so the C harness owns
+  it. The `LUA_OK` branch is reached from Lua and has the native case
+  `test_unwind_floor_ends_self_closed_coroutine`.
 
 Async, thread and transfer consequences are covered by `test_lua_close_*` and
 `test_unwind_*` cases in their own owners.

@@ -1590,7 +1590,11 @@ at most 64 entries that were present when it began; it detaches each old entry
 before advancing the Task. New work waits for a later callback. This promises
 deferred delivery, not an exact libuv iteration. Ordinary callback settlement
 can enter its Task continuation directly, while settlement from another running
-Task is deferred.
+Task is deferred. Settlement from inside a finalizer, including the cleanup of
+an [abandoned coroutine](coroutines.md#abandoned-coroutines), is deferred the
+same way, because a finalizer cannot resume the waiting Task. A
+`Completion:fatal` made there likewise queues the delivery of its error to the
+Task instead of raising it there at once.
 CPU-heavy code that neither finishes nor yields blocks the event loop.
 
 Persistent sources publish into coalescing or buffered subscriptions. A queued
@@ -1927,17 +1931,26 @@ is withdrawn by its own cleanup before the stack is released (see
 or `Thread:join()` are withdrawn this way, so channels and threads shared with
 other states stay usable. The cleanup of `run_with_cleanup` then runs with the
 Task's cancellation reason, or
-`simple("async Runtime abandoned at Lua state close")` when there was none. In
-that context an `await`, a yield, or a resume raises, and the error is reported
-as a Lua warning, as is any other error a cleanup raises.
+`simple("async Runtime abandoned at Lua state close")` when there was none.
+
+That unwind runs outside the scheduler. `async.running()` and every operation
+that needs the current Task, including each `await`, raise
+`asynchronous operation must be called from an async Task`; a direct yield or
+resume raises as in any [finalizer](standard-library-gc.md#finalizers). Each
+such error, like any other error a cleanup raises, is reported as a Lua warning
+and the unwind continues.
 
 Cleanup cannot start Tasks during state close: `async.run` and
-`run_with_cleanup` raise `cannot start a Task during Lua state close`, which
-the unwind reports as a warning before it continues. Disposal that must
-survive state close has to be synchronous. Handing disposal to `async.run` from
-a `defer` works only while an ordinary collection unwinds an abandoned
-coroutine and a Runtime is active; that Task runs after the rest of the
-unwind.
+`run_with_cleanup` raise `cannot start a Task during Lua state close`. Nor can
+any code create a Runtime while the state closes: when no Runtime is active,
+`async.receiver`, `async.prepare_external_wait`,
+`async.prepare_native_retirement`, and library operations that would create
+one raise `cannot create an async Runtime during Lua state close`, because Lua
+registers no new finalizers then and that Runtime's loop would leak. Disposal
+that must survive state close has to be synchronous. Handing disposal to
+`async.run` from a `defer` works only while an ordinary collection unwinds an
+abandoned coroutine and a Runtime is active; that Task runs after the rest of
+the unwind.
 
 The unfinished Tasks of that Runtime do not resume and do not call their
 terminal listeners, but most of them still become terminal. Lua runs finalizers
@@ -1952,13 +1965,10 @@ nonterminal, because its terminal status follows native retirement: for
 example, a `Thread:task()` proxy whose OS thread was not joined reports
 `ready` or `waiting`, never a terminal status.
 
-This only reclaims native memory. It does not replace closing receivers,
-finishing or cancelling Tasks, and draining the loop before closing the state.
+This only reclaims native memory and releases native handles. It does not
+replace closing receivers, finishing or cancelling Tasks, and draining the loop
+before closing the state, and it cannot perform a graceful protocol shutdown;
+see [cleanup that needs asynchronous I/O](coroutines.md#cleanup-that-needs-asynchronous-io).
 
 Ordinary garbage collection never retires an active Runtime, because the async
-module keeps it reachable. A finalizer that runs during state close must not
-call anything that creates a Runtime, such as `async.run`,
-`async.run_with_cleanup`, `async.receiver`, `async.prepare_external_wait`,
-`async.prepare_native_retirement`, or a library operation that starts a Task:
-Lua registers no new finalizers while a state is closing, so that Runtime's
-loop would leak.
+module keeps it reachable.

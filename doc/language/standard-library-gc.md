@@ -130,20 +130,22 @@ ordinary boundary check may then reject a peer during finalization. A finalizer
 should be idempotent: clear its owned pointer or state before releasing the
 underlying resource so a partially completed cleanup cannot free it twice.
 
-Lua finalizers cannot yield or run the garbage collector. An error from the
-callback produces a Lua warning and is not propagated to the code which
-triggered collection. Keep finalizers to the minimum required to release their
-resource; use explicit operations such as `close` when cleanup must be prompt
-or its failure must be handled directly.
+Lua finalizers cannot yield or run the garbage collector: inside a finalizer,
+the `gc` collector operations raise
+`garbage collector operation is unavailable`, and Lua's `collectgarbage`
+returns fail. An error from the callback produces a Lua warning and is not
+propagated to the code which triggered collection. Keep finalizers to the
+minimum required to release their resource; use explicit operations such as
+`close` when cleanup must be prompt or its failure must be handled directly.
 
 Inside a finalizer, Titan coroutines cannot switch either:
 `coroutine.yield` raises `cannot yield from a finalizer`, `Coroutine:resume`
 and `Coroutine:error` raise `cannot resume a coroutine from a finalizer`, and
-`coroutine.is_yieldable` returns `false`. The same rules apply to the `defer`
-cleanup of a suspended coroutine that is collected, because its finalizer runs
-that cleanup; see
-[abandoned coroutines](coroutines.md#abandoned-coroutines). While a Lua state
-closes, `finalizable` registrations are ignored.
+`coroutine.is_yieldable(tag)` returns `false`. An `async` wait therefore
+raises too. While a Lua state closes, `finalizable` registrations are ignored.
+These rules also govern the `defer` cleanup of a suspended coroutine that is
+collected or still suspended at state close, because its finalizer runs that
+cleanup; see [abandoned coroutines](coroutines.md#abandoned-coroutines).
 
 ## Collector actions and queries
 

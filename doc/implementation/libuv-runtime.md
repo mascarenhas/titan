@@ -139,11 +139,15 @@ responsibility.
 Terminal settlement outside a Task can deliver immediately. Settlement from a
 different running Task first accepts a deferred queued wake and then commits
 the settled state with nonallocating field writes; if scheduling fails, the Wait
-stays pending so retry or shutdown can still address it. Delivery checks that
-the Wait is SETTLED, is still exactly `task.wait`, and has the current epoch; it
-clears the request, Wait, token, and explicit-suspension state before entering
-the continuation. Duplicate settlement raises rather than mutating an unrelated
-wait.
+stays pending so retry or shutdown can still address it. Settlement from a
+finalizer (`ffi.titan_in_finalizer(L)`) takes the same deferred path, because
+`Coroutine:resume` raises there and an inline delivery would publish the Task
+as failed with its root still suspended. `fatal` likewise queues
+`READY_UNWIND` from a finalizer instead of advancing the Task inline. Delivery
+checks that the Wait is SETTLED, is still exactly `task.wait`, and has the
+current epoch; it clears the request, Wait, token, and explicit-suspension
+state before entering the continuation. Duplicate settlement raises rather than
+mutating an unrelated wait.
 
 Completion reuse checks both owner and epoch. Preparation temporarily sets
 epoch zero, which no public method accepts, and registration publishes the new
@@ -798,12 +802,22 @@ Task, before `ensure_runtime` and before creating the root coroutine. They test
 `cannot start a Task during Lua state close`. Such a Task could never run:
 the loop is never driven again, and `runtime_finalize` would only report it
 cancelled. Lua also ignores finalizer registrations during close, so the new
-root coroutine's `coro_gc` would never run and its stack mapping would leak,
-and `ensure_runtime` could create a Runtime. An unwinding `defer` that tries it
-gets the error, which is reported as `error in coroutine cleanup (...)`. During
-an ordinary collection, a finalizer, including the unwind of an abandoned
-coroutine, may still start a Task on the active Runtime. That Task runs after
-the finalizer returns.
+root coroutine's `coro_gc` would never run and its stack mapping would leak.
+
+`new_runtime` makes the same test and raises
+`cannot create an async Runtime during Lua state close`. Every
+Runtime-creating path reaches it through `ensure_runtime` when no Runtime is
+active: `receiver()`, `prepare_wait` (behind `prepare_external_wait` and
+`prepare_native_retirement`), and the Task constructors. A Runtime created then
+would have no `runtime_finalize`, so its `uv` loop would leak. That happens to a
+finalizer that runs after `runtime_finalize` cleared `active_runtime`, or in a
+state that never had a Runtime. The refusal does not cover operations on a
+Runtime that is still active during the close.
+
+An unwinding `defer` that hits either refusal gets the error, which is reported
+as `error in coroutine cleanup (...)`. During an ordinary collection, a
+finalizer, including the unwind of an abandoned coroutine, may still start a
+Task on the active Runtime. That Task runs after the finalizer returns.
 
 The finalizer calls public `uv.loop_abandon`, not the ordinary driver. UV clears
 all user callback slots before driving libuv, including callbacks on
@@ -818,13 +832,11 @@ terminal handlers are described in the
 `active_runtime` is cleared only after `uv.loop_abandon` returns a successful
 `uv.loop_close`.
 
-The application contract is unchanged: withdraw handles, finish sends, and drain
-the ordinary loop before closing the state. Abandonment reclaims libuv's loop
-internals, not application cleanup semantics. A finalizer that runs later during
-`lua_close` must not call anything that creates a Runtime (`async.run`,
-`async.run_with_cleanup`, `async.receiver`, `prepare_external_wait`,
-`prepare_native_retirement`, or library operations that start Tasks): Lua no
-longer registers finalizers then, so the new Runtime's loop leaks.
+The application contract still applies: withdraw handles, finish sends, and
+drain the ordinary loop before closing the state. Abandonment reclaims libuv's
+loop internals and closes their handles, not application cleanup semantics such
+as a graceful protocol shutdown; the public guidance is
+[cleanup that needs asynchronous I/O](../language/coroutines.md#cleanup-that-needs-asynchronous-io).
 
 **Parked native waits.** A Task parked in a native wait lends the domain a
 waiter node in its own coroutine frame: thread channel send and receive (the
@@ -843,20 +855,23 @@ root is newer than its Runtime, so it is finalized before `runtime_finalize`. A
 coroutine stacked under a Task root unwinds as part of the root's chain. The
 unwind of one Task runs, innermost first:
 
-1. the user `defer` and `finally` blocks of the body;
-2. the wait cleanup: `ExternalWait:await`'s `defer` calls `detach_domain()`,
+1. the wait cleanup: `ExternalWait:await`'s `defer` calls `detach_domain()`,
    which runs the native `unregister_wait(context)` or the Titan closure
    `unregister`, then `retire()`, then clears the suspension;
    `wait_external_native`'s `wait:close()` and the channel `defer`s that
    discard a held `wait.message` run in the same pass;
+2. the body's `defer`s and generic-`for` closes;
 3. `run_with_cleanup`'s cleanup;
 4. the coroutine floor, which ends the coroutine as dead.
 
 Ordinary GC never finalizes the root of a Task that is still in the inventory:
 an unfinished Task stays in `runtime.tasks` until `finish_task`, and
 `active_runtime` roots its Runtime until `loop()` retires it or
-`runtime_finalize` runs. In practice, ordinary-GC unwinding reaches only plain
-coroutines such as generators.
+`runtime_finalize` runs. Ordinary-GC unwinding therefore reaches plain
+coroutines such as generators, and a Task root only when `resume_root` failed
+before switching into it (for example on allocation failure in
+`root_transfer`): `advance_task` then publishes the Task as failed and
+`finish_task` drops it from the inventory while its root is still suspended.
 
 `retire()` releases the bridge target through the owner method
 `bridge.wake:unregister(target)`. The bridge's `uv.external_wake_t` is created
@@ -874,14 +889,25 @@ after the Task having already been finalized. Native retirement barriers are
 not withdrawn, because their admission lives in heap storage, not on a stack.
 Armed gates stay nonterminal.
 
-If `run_with_cleanup`'s cleanup runs inside a finalizer
-(`ffi.titan_in_finalizer(L)`) while the Task has no cancellation reason, it
-first records `"async Runtime abandoned at Lua state close"`, the reason that
-`runtime_finalize` publishes. Task code runs inside a finalizer only while it
-is unwound at close: resume raises in finalizers, and the scheduler never runs
-in one. A cleanup's first await therefore raises, and that error is reported as
-a warning. A cleanup that was itself suspended, because the body had already
-finished, is unwound rather than run again.
+When the Task has no cancellation reason, `run_with_cleanup`'s cleanup first
+records `"async Runtime abandoned at Lua state close"`, the reason that
+`runtime_finalize` publishes, but only while `ffi.titan_state_closing(L)` is
+set. It does not test `titan_in_finalizer`: the failed Task above is unwound
+inside an ordinary finalizer, and its cleanup receives the Task's actual
+reason, nil for a failed body. During the close the unwind runs outside the
+scheduler with `runtime.current_task == nil`, so `running()` and every
+Task-context operation raise
+`asynchronous operation must be called from an async Task`, and yields and
+resumes raise as in any finalizer. A cleanup's first await therefore raises,
+and that error is reported as a warning. A cleanup that was itself suspended,
+because the body had already finished, is unwound rather than run again.
+
+The `Thread:task` proxy's cleanup (`titan/thread/spawn.titan`) awaits the
+native-retirement barrier through `final_wait:wait_cleanup()` and then closes
+it. At state close it skips both, since they would raise outside a Task, and
+only forwards its reason to `Thread:cancel` when the thread has not finished.
+`runtime_finalize` then leaves the armed gate, and with it the proxy,
+nonterminal.
 
 The unregister function can run after the endpoint or `Thread` handle that the
 wait used was finalized. Thread domains therefore keep a

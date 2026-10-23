@@ -367,7 +367,10 @@ end
 through the FFI. It cannot be assigned to, and parameters or locals named `L`
 are rejected so the built-in remains unambiguous. The pointer is not a Titan
 value you should store for later use; pass it only to C APIs that use it during
-the call.
+the call. C code that calls back into Lua must not enter another thread of the
+state without a resume or re-enter an active ancestor thread, and its own
+frames are skipped when an abandoned coroutine is unwound; see
+[unwinding limits](coroutines.md#unwinding-limits).
 
 `M` is the other readonly ordinary-function builtin. It selects current-module
 members, including local or keyword-named members, as `M.member`, and an

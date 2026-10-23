@@ -355,7 +355,7 @@ Inside the worker OS thread:
   joining. If the Lua state closes while a Task is suspended in `join()`, the
   state withdraws that join before it releases the Task's stack, so a worker
   that finishes later finds nothing to wake; the suspended `join()` never
-  returns.
+  returns. Withdrawing the join does not cancel the thread.
 - `Thread:cancel(reason?)` asks the worker's root `Task` to cancel cooperatively
   and wakes the child's event loop; the root's `defer` and cleanup handlers run
   normally. Child Tasks started inside the worker are not cancelled
@@ -423,10 +423,22 @@ Inside the worker OS thread:
     child had already finished but the immediate attempt to join it did not
     complete, the failure leaves a finished worker whose OS thread is still
     unjoined.
+  - **State close.** If the owning Lua state closes while the proxy is
+    unfinished, the proxy is [unwound](async-io.md#closing-a-lua-state-with-an-active-runtime)
+    and its cleanup forwards its first cancellation reason, or
+    `CancellationReason.simple("async Runtime abandoned at Lua state close")`,
+    to `Thread:cancel`. Closing a state therefore cancels the threads of its
+    unfinished proxies, including every running member of a `thread.Group`.
+    The cleanup cannot wait for the join during the close, so the proxy stays
+    nonterminal.
 
   See the
   [implementation wiring](../implementation/thread-library.md#join-proxy-retirement-and-the-native-terminal-barrier)
   for the mechanism.
+- A `Thread` handle can be reached after its finalizer has run, by cleanup that
+  runs at state close or by a finalizer that resurrects it. On such a handle,
+  `join()` and `cancel()` raise `thread handle was finalized`, and `status()`
+  returns a status it cached earlier or otherwise raises the same error.
 - If a standalone `Thread` fails with an uncaught error and nobody observes it
   (through `status()` after completion, `join()`, or `task()`) before its handle
   is garbage-collected, the formatted error and traceback are written to

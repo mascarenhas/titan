@@ -728,7 +728,7 @@ the codec layouts (see
 [generated nominal codecs](protobuf-library.md#generated-nominal-codecs)).
 
 The abandoned-coroutine unwind protocol is also generated-code ABI that no
-load-time check covers, and it kept `TITAN_ABI_VERSION` unchanged: the
+load-time check covers, and it is not reflected in `TITAN_ABI_VERSION`: the
 `TITAN_STATUS_FINALLY`, `TITAN_STATUS_UNWIND` and `TITAN_STATUS_FLOOR` boundary
 markers, the `PA_UNWIND` landing and guard, and the `titan_unwind_floor` record
 ([unwinding through finally](error-handling.md#unwinding-through-finally)).
@@ -771,6 +771,7 @@ These sites mirror Lua internals and must be rechecked on every upgrade:
 |Off-registry metatable construction|`lauxlib.c` publication rule|[Values and GC](values-and-gc.md#type-identity-the-metatable-pointer)|
 |`titan_unwind_close_thread` reset of an exhausted Lua coroutine|`lstate.c` `resetCI` (static) and `luaE_resetthread`|[Coroutines](coroutines.md#unwinding-an-abandoned-coroutine)|
 |`titan_unwind_close`, `titan_coroutine_enter`, and the generated unwind landing and re-armed recovery close|`luaD_closeprotected`'s retry loop, `luaF_close`, `luaD_rawrunprotected`, `luaD_seterrorobj`, `luaE_warnerror`, and the `G(L)->gcstp` bits `GCSTPGC`/`GCSTPCLS`|[Error handling](error-handling.md#unwinding-through-finally)|
+|`titan_unwind` walker, `titan_unwind_cross` floor and resumer search, and the floor's self-close branch|only `luaD_throw` writes `lua_longjmp.status`; `G(L)->allgc` links the main thread and threads are never in `finobj`; `lua_resume` and `precover` install a `previous == NULL` base boundary on the resumed thread; a self-closing `lua_closethread` ends in `luaD_throwbaselevel`, which jumps to the thread's outermost boundary (the floor on a Titan coroutine) with the reset status, `LUA_OK` when every close succeeded; `luaC_checkfinalizer` ignores registrations under `GCSTPCLS`|[Coroutines](coroutines.md#unwinding-an-abandoned-coroutine)|
 
 Gate an upgrade on all of these:
 
