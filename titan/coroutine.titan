@@ -347,7 +347,8 @@ end
 
 -- Implementation notes: doc/implementation/coroutines.md#unwinding-an-abandoned-coroutine
 local function coro_gc(handle: value)
-  if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve Lua stack for a coroutine" end
+  -- The owner stays pushed while lua_getiuservalue pushes the record.
+  if ffi.lua_checkstack(L, 2) == 0 then raise "cannot reserve Lua stack for a coroutine" end
   ffi.lua_pushtvalue(L, handle)
   local slot = ffi.lua_touserdata(L, -1) as foreign *(*mco_coro)
   local co = slot[0]
