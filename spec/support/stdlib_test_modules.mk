@@ -347,7 +347,8 @@ TITAN_TEST_C_INPUTS_reflect.tests := spec/stdlib/titan/reflect/reflection_recurs
 TITAN_TEST_C_INPUTS_protobuf.tests := spec/stdlib/titan/protobuf/protobuf_fixture.h
 TITAN_TEST_C_INPUTS_async.tests = $(TITAN_TEST_BUILD_DIR)/async_foreign_work.h \
 	spec/stdlib/titan/async/tests/async_stack_probe.h \
-	spec/stdlib/titan/async/tests/receiver_probe.h
+	spec/stdlib/titan/async/tests/receiver_probe.h \
+	spec/stdlib/titan/io/print_capture.h
 TITAN_TEST_C_INPUTS_uv.runtime_tests = $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h
 TITAN_TEST_C_INPUTS_uv.public_tests = $(TITAN_TEST_BUILD_DIR)/uv_coverage_threads.h $(TITAN_TEST_BUILD_DIR)/uv_coverage_pty.h \
 	spec/stdlib/titan/uv/public_tests/abandon_process_probe.h

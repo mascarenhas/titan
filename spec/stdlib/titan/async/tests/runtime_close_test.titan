@@ -1,6 +1,9 @@
 local runtime_close_lua = import "lua"
 local runtime_close_gc = import "gc"
 local runtime_close_coroutine = import "coroutine"
+foreign import "stdio.h"
+-- Descriptor capture shared with the io tests.
+foreign import "../../io/print_capture.h"
 
 function test_runtime_close_listeners_follow_native_cleanup_and_allow_removal(context: test.Context)
   local order: {integer} = {}
@@ -269,13 +272,47 @@ function runtime_close_abandoned_task_bootstrap(cells_raw: value)
   for index = 1, #all do all[index]:add_terminal_listener(listener) end
 end
 
--- Issue #271: a Task of a Runtime abandoned at lua_close never resumes, but a
--- later finalizer that still holds it must read a consistent status: cancelled,
--- unless its native retirement gate is still armed (then nonterminal). Issue
--- #290: that includes a body that finished while its cleanup was pending, and
--- no terminal listener runs. Only a failed publication reports a Task error,
--- so a cancelled status also shows that its raised body was never reported.
-function test_lua_close_publishes_consistent_status_for_abandoned_tasks(context: test.Context)
+-- Run `action` with descriptor 2 redirected into a pipe, and return what it
+-- wrote there. The action must write less than a pipe buffer.
+local function runtime_close_capture_stderr(action: function (): ()): string
+  local descriptors: owned int[] = foreign int.new_array(2)
+  test.assert((ffi.titan_spec_capture_pipe(descriptors as foreign *int) as integer) == 0,
+    "could not create a stderr capture pipe")
+  local read_descriptor = descriptors[0]
+  defer ffi.titan_spec_capture_close(read_descriptor)
+  local saved = ffi.titan_spec_capture_duplicate(2)
+  test.assert((saved as integer) >= 0, "could not duplicate stderr")
+  defer ffi.titan_spec_capture_close(saved)
+  ffi.fflush(nil)
+  local redirected = (ffi.titan_spec_capture_replace(descriptors[1], 2) as integer) == 2
+  ffi.titan_spec_capture_close(descriptors[1])
+  test.assert(redirected, "could not redirect stderr")
+  do
+    defer do
+      ffi.fflush(nil)
+      ffi.titan_spec_capture_replace(saved, 2)
+    end
+    action()
+  end
+  local capacity = 65536
+  local storage: owned char[] = foreign char.new_array(capacity)
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 1) ~= 0, "cannot reserve Lua stack for captured stderr")
+  local count = ffi.titan_spec_capture_read(read_descriptor, storage as foreign *char,
+    capacity as foreign titan_spec_size) as integer
+  if count < 0 then count = 0 end
+  ffi.lua_pushlstring(L, storage as foreign *char, count as foreign size_t)
+  local captured: value = ffi.lua_totvalue(L, -1)
+  return captured as string
+end
+
+-- A Task of a Runtime abandoned at lua_close never resumes, but a later
+-- finalizer that still holds it must read a consistent status: cancelled,
+-- unless its native retirement gate is still armed (then nonterminal). That
+-- includes a body that finished while its cleanup was pending, no terminal
+-- listener runs, and no Task error is reported, not even the raised body's.
+function test_lua_close_publishes_consistent_status_for_abandoned_tasks(_: test.Context)
   local cells: owned int[] = foreign int.new_array(10)
   for index = 0, 9 do cells[index] = 0 end
   local state = runtime_close_lua.new()
@@ -284,9 +321,10 @@ function test_lua_close_publishes_consistent_status_for_abandoned_tasks(context:
     package.path, package.cpath = '', ''
     require('async.tests').runtime_close_abandoned_task_bootstrap(...)
   ]], "=abandoned-task-bootstrap", async.TransferValue.is_pointer(cells as foreign *void))
-  context:log("BEGIN expected coroutine cleanup warning")
-  state:close()
-  context:log("END expected coroutine cleanup warning")
+  -- The expected coroutine cleanup warning goes to the captured stderr too.
+  local diagnostics = runtime_close_capture_stderr(function () state:close() end)
+  test.assert(not support.contains(diagnostics, "uncaught error in async Task:"),
+    "lua_close reported an abandoned Task's error: " .. diagnostics)
   local names: {string} = {"parked", "cancel-requested", "observed-ready", "unobserved",
                            "body-returned-cleanup-pending", "body-raised-cleanup-pending",
                            "armed-retirement-gate"}
@@ -303,8 +341,8 @@ function test_lua_close_publishes_consistent_status_for_abandoned_tasks(context:
     report = report .. " terminal-listener=ran"
   end
   test.assert(consistent, "abandoned Task status after state close:" .. report)
-  -- Issue #283: the parked Task unwinds; its cleanup receives the abandonment
-  -- reason (codes: 0 cleanup not run, 1 nil reason, 2 another reason).
+  -- The parked Task unwinds; its cleanup receives the abandonment reason
+  -- (codes: 0 cleanup not run, 1 nil reason, 2 another reason).
   test.assert((cells[7] as integer) == 3, "the abandoned Task's body defer did not run")
   test.assert((cells[8] as integer) == 3,
     "abandoned Task cleanup reason code: " .. (cells[8] as integer))
