@@ -4246,12 +4246,31 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
             local mkdir_ok, mkdir_output = run_argv({
                 "mkdir", "-p", support, bin, temporary_base, state,
                 workspace .. "/.git", workspace .. "/.lua",
+                workspace .. "/.sdk-local/bin",
+                workspace .. "/.sdk-local-sibling",
+                workspace .. "/sdk[1]", workspace .. "/sdk*",
+                workspace .. "/sdk1",
             })
             assert.truthy(mkdir_ok, mkdir_output)
             write_file(workspace .. "/Makefile", "all:\n\t@true\n")
             write_file(workspace .. "/ordinary", "original\n")
             write_file(workspace .. "/.git/excluded", "git\n")
             write_file(workspace .. "/.lua/excluded", "lua\n")
+            -- The selected SDK lives inside the checkout under an arbitrary
+            -- name and is spelled through a symbolic link; workers still use
+            -- it in place, so the snapshot must omit exactly that tree.
+            write_file(workspace .. "/.sdk-local/bin/excluded", "sdk\n")
+            write_file(workspace .. "/.sdk-local-sibling/kept", "kept\n")
+            -- Selected SDKs named sdk[1] or sdk* would be tar patterns that
+            -- also match sdk1, so such a prefix is copied and nothing is lost.
+            for _, kept in ipairs({ "sdk[1]", "sdk*", "sdk1" }) do
+                write_file(workspace .. "/" .. kept .. "/kept", "kept\n")
+            end
+            local prefix_link = root .. "/sdk-link"
+            local link_ok, link_output = run_argv({
+                "ln", "-s", workspace .. "/.sdk-local", prefix_link,
+            })
+            assert.truthy(link_ok, link_output)
             write_file(support .. "/run_parallel_compiler_tests.sh",
                 read_file("spec/support/run_parallel_compiler_tests.sh"))
 
@@ -4272,6 +4291,10 @@ esac
 
 [[ $PWD != "$TITAN_FIXTURE_ORIGINAL" ]] || exit 72
 [[ ! -e .git && ! -e .lua ]] || exit 73
+[[ -z ${TITAN_FIXTURE_OMITTED:-} || ! -e $TITAN_FIXTURE_OMITTED ]] || exit 73
+for kept in .sdk-local-sibling 'sdk[1]' 'sdk*' sdk1; do
+    [[ $(cat "$kept/kept" 2>/dev/null) == kept ]] || exit 82
+done
 [[ $(cat ordinary) == original ]] || exit 74
 [[ $MAKEFLAGS == -j1 && $TITAN_JOBS == 1 ]] || exit 75
 case "$BUSTED" in /*) ;; *) exit 76 ;; esac
@@ -4383,6 +4406,8 @@ if [[ ${TITAN_FIXTURE_FAIL_SHARD:-} == "$shard" ]]; then exit 23; fi
                     "-u", "TITAN_FIXTURE_HANG_SHARD",
                     "PATH=" .. bin .. ":" .. assert(os.getenv("PATH")),
                     "BUSTED=busted",
+                    "PREFIX=" .. prefix_link,
+                    "TITAN_FIXTURE_OMITTED=.sdk-local",
                     "TMPDIR=" .. temporary_base,
                     "TITAN_FIXTURE_STATE=" .. state,
                     "TITAN_FIXTURE_ORIGINAL=" .. workspace,
@@ -4480,9 +4505,12 @@ workspace=$1
 state=$2
 temporary_base=$3
 bin=$4
+prefix=$5
 cd "$workspace" || exit 90
 env PATH="$bin:$PATH" \
     BUSTED=busted \
+    PREFIX="$prefix" \
+    TITAN_FIXTURE_OMITTED=.sdk-local \
     TMPDIR="$temporary_base" \
     TITAN_ROCK_TEST_JOBS=1 \
     TITAN_FIXTURE_STATE="$state" \
@@ -4524,7 +4552,7 @@ while kill -0 "$descendant" 2>/dev/null; do
     sleep 0.01
 done
 ]==], "titan-parallel-interruption", workspace, state,
-                    temporary_base, bin,
+                    temporary_base, bin, prefix_link,
                 })
             end
 
@@ -4537,6 +4565,15 @@ done
             ok, output = run_case(2)
             assert.truthy(ok, output)
             assert_complete_run(2, output)
+
+            for _, patterned in ipairs({ "sdk[1]", "sdk*" }) do
+                ok, output = run_case(nil, nil, {
+                    "PREFIX=" .. workspace .. "/" .. patterned,
+                    "TITAN_FIXTURE_OMITTED=",
+                })
+                assert.truthy(ok, output)
+                assert_complete_run(4, output)
+            end
 
             local why, code
             ok, output, why, code = run_case(nil, 2)
@@ -4587,6 +4624,88 @@ done
         remove_tree(root)
         if not tested then error(test_error, 0) end
     end)
+
+    it("launches the Windows exclusive compiler shard first and alone",
+        function()
+            -- The real Windows route needs CLANG64, cygpath, and the native
+            -- Job Object supervisor. Drive the launcher's own launch-order
+            -- and admission code with stub workers that finish oldest-first.
+            local launcher = read_file(
+                "spec/support/run_parallel_compiler_tests.sh")
+            local order_start = assert(launcher:find(
+                "\nlaunch_order=(1 2 3 4)\n", 1, true))
+            local _, order_finish = assert(launcher:find(
+                "\nfi\n", order_start, true))
+            local admission_start = assert(launcher:find(
+                "\n    while (( launched < 4 && active < jobs )); do\n",
+                order_finish, true))
+            local _, admission_finish = assert(launcher:find(
+                "\n    done\n", admission_start, true))
+            local harness = table.concat({ [==[
+set -u
+windows=$1
+exclusive_shard=$2
+jobs=$3
+worker_pids=()
+running=()
+schedule=()
+launched=0
+active=0
+completed=0
+launch_worker() {
+    worker_pids[$1]=1
+    running+=("$1")
+    schedule+=("start $1")
+}
+]==], launcher:sub(order_start + 1, order_finish), [==[
+while (( completed < 4 )); do
+]==], launcher:sub(admission_start + 1, admission_finish), [==[
+    if (( ${#running[@]} == 0 )); then
+        echo "scheduler admitted no shard" >&2
+        exit 1
+    fi
+    finished=${running[0]}
+    running=("${running[@]:1}")
+    unset 'worker_pids[$finished]'
+    schedule+=("finish $finished")
+    active=$((active - 1))
+    completed=$((completed + 1))
+done
+printf '%s\n' "${schedule[@]}"
+]==] })
+
+            local function schedule(windows, exclusive, jobs)
+                local ok, output, why, code = run_argv({
+                    "bash", "-c", harness, "titan-launch-order",
+                    tostring(windows), exclusive, tostring(jobs),
+                })
+                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                    tostring(code) .. ")")
+                local events = {}
+                for line in output:gmatch("[^\n]+") do
+                    events[#events + 1] = line
+                end
+                return table.concat(events, ", ")
+            end
+
+            -- Unix keeps manifest order and fills every permitted slot.
+            assert.equal("start 1, start 2, start 3, start 4, " ..
+                "finish 1, finish 2, finish 3, finish 4", schedule(0, "", 4))
+            assert.equal("start 1, start 2, finish 1, start 3, " ..
+                "finish 2, start 4, finish 3, finish 4", schedule(0, "", 2))
+            -- Windows runs the exclusive shard alone, then the other three
+            -- together under the default three workers.
+            assert.equal("start 3, finish 3, start 1, start 2, start 4, " ..
+                "finish 1, finish 2, finish 4", schedule(1, "3", 3))
+            assert.equal("start 3, finish 3, start 1, start 2, start 4, " ..
+                "finish 1, finish 2, finish 4", schedule(1, "3", 4))
+            assert.equal("start 1, finish 1, start 2, start 3, start 4, " ..
+                "finish 2, finish 3, finish 4", schedule(1, "1", 3))
+            assert.equal("start 4, finish 4, start 1, start 2, finish 1, " ..
+                "start 3, finish 2, finish 3", schedule(1, "4", 2))
+            assert.equal("start 2, finish 2, start 1, finish 1, start 3, " ..
+                "finish 3, start 4, finish 4", schedule(1, "2", 1))
+        end)
 
     it("bounds TERM-ignoring descendants for every command exit path",
         function()
@@ -5490,9 +5609,12 @@ done
                 "spec/support/run_parallel_compiler_tests.sh")
             for _, required in ipairs({
                 "jobs=${TITAN_ROCK_TEST_JOBS:-4}",
+                "jobs=${TITAN_ROCK_TEST_JOBS:-3}",
                 "[[ ! $jobs =~ ^[1-4]$ ]]",
                 "tar --exclude='./.git'",
                 "--exclude='./.lua'",
+                -- Bash 3.2 rejects an empty "${array[@]}" under set -u.
+                '${prefix_excludes[@]+"${prefix_excludes[@]}"}',
                 'mkfifo "$completion_fifo"',
                 'MAKEFLAGS=-j1',
                 'TITAN_JOBS=1',

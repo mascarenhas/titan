@@ -160,7 +160,7 @@ if [[ $mode == build ]]; then
     "${compiler[@]}" -std=c99 -Wall -Wextra -Werror "${cppflags[@]}" "${cflags[@]}" "${ldflags[@]}" -municode \
       "$(cygpath -m "$work/cwd/spec/fixtures/stdlib/native/windows_test_supervisor.c")" \
       -o "$winprefix/bin/windows-test-supervisor.exe"
-    export TITAN_ROCKS_ROOT="$winprefix" TITAN_RUNTIME_PREBUILT=1 TITAN_JOBS=1
+    export TITAN_ROCKS_ROOT="$winprefix" TITAN_RUNTIME_PREBUILT=1 TITAN_JOBS="${TITAN_JOBS:-1}"
     export TITAN_PROBE_CACHE_DISABLE=1 TITAN_PATH_0_6="$winprefix/lib/titan/0.6"
     unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 LUA_INIT LUA_INIT_5_5 ROCKS_TREE
     export PATH="$work/sdk/bin:$PATH"
@@ -195,7 +195,7 @@ if [[ $mode == build ]]; then
       export TITAN_EXTRA_LDFLAGS="$TITAN_EXTRA_LDFLAGS -lws2_32"
     fi
     cd "$work/sdk"
-    "$work/sdk/bin/lua.exe" "$winprefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" --output "$winprefix" --test --no-uv-bootstrap -j 1 \
+    "$work/sdk/bin/lua.exe" "$winprefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" --output "$winprefix" --test --no-uv-bootstrap -j "$TITAN_JOBS" \
       --launcher-name titan-stdlib-tests --tree "$test_tree" "${coverage_args[@]}" \
       "${roots[@]}" -X "${payload[@]}"
   ) 2>&1 | tee "$work/build.log"

@@ -49,7 +49,7 @@ use the chapters below for the normative language reference.
 | --- | --- |
 | [Native build profiles](build-profiles.md) | Production optimization defaults and isolated O0/no-LTO validation SDKs. |
 | [Installing Titan on Linux and macOS](installation.md) | Build and install steps, the `PREFIX` and `ROCKS_TREE` directories, what the installation contains, how Titan finds it, bundled libuv and OpenSSL, building the standard library during development, uninstalling, and cleaning. |
-| [Installing and using Titan on Windows](windows-build.md) | Experimental CLANG64 installation, standalone LuaRocks configuration, DLL programs, packaging, cleanup, and native test entrypoints. |
+| [Installing and using Titan on Windows](windows-build.md) | Experimental CLANG64 installation, standalone LuaRocks configuration, DLL programs, packaging, cleanup, native test entrypoints, and build parallelism. |
 | [Documentation comments](documentation-comments.md) | LDoc-style summaries and tags retained for editor hover and completion. |
 | [Design philosophy and history](philosophy.md) | Why Titan exists, its core commitments, the project's history and design principles. |
 | [The type system](types.md) | All Titan types; equality, symmetric non-transitive consistency, direct coercions, gradual views, callable adjustment, the normative boundary matrix, inference, and `value`. |

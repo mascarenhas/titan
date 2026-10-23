@@ -119,8 +119,11 @@ With `LUAROCKS_CONFIG` selecting an already prepared SDK, plain
 `luarocks.exe test titan-0.6.0-1.rockspec` tests that installed compiler/provider
 without rebuilding the rock. The workflow runs the complete shared native
 standard-library suite, retained runtime/packaging specs, and compiler/language
-specs. Ordinary compiler tests run in private checkout copies with two workers
+specs. Ordinary compiler tests run in private checkout copies with three workers
 by default; `TITAN_ROCK_TEST_JOBS=1` through `4` sets the bound.
+
+Set `TITAN_JOBS` to the number of CPUs for these runs; `MAKEFLAGS` is ignored.
+See [native build parallelism](../implementation/windows-build.md#native-build-parallelism).
 
 For the shared suite's separate build/run targets, filtering, and evidence
 requirements, see [native Windows tests](../implementation/windows-build.md#shared-native-standard-library-tests).

@@ -23,7 +23,7 @@ CFLAGS="$NATIVE_CPPFLAGS" LDFLAGS="$NATIVE_LDFLAGS" \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS_RELEASE="$NATIVE_CFLAGS -DNDEBUG" \
     -DCMAKE_INSTALL_PREFIX="$prefix" \
     -DTITAN_SOURCE_ROOT="$sources" -DCMAKE_AR="$AR" -DCMAKE_RANLIB="$RANLIB"
-cmake --build "$work/cmake" --target titan-native-libraries --parallel 1
+cmake --build "$work/cmake" --target titan-native-libraries --parallel "${TITAN_JOBS:-1}"
 cmake --install "$work/cmake" --component TitanNativeSDK
 case "$OPENSSL_MODE" in
   bundled)
