@@ -84,6 +84,8 @@ end
 local ASYNC_TAG: value = {}
 local YIELD_TAG: value = {}
 local active_runtime: Runtime? = nil
+-- Cancellation reason of a Task abandoned at Lua-state close.
+local const ABANDONED_AT_CLOSE = "async Runtime abandoned at Lua state close"
 local const WAIT_ORDINARY = 0
 local const WAIT_CANCELLABLE = 1
 local const WAIT_CLEANUP = 2
@@ -415,8 +417,6 @@ local record ExternalBridge
   waits: {integer: ExternalWait}
   next_identity: integer
   closed: boolean
-  -- Set once lua_close withdrew every parked native wait (issue #262).
-  withdrawn: boolean
 end
 
 record ExternalWait
@@ -622,7 +622,8 @@ local function runtime_finalize(candidate: value)
   -- Keep shutdown admission and recursive driver entry closed throughout
   -- native retirement, even though UV suppresses every user callback.
   uv.unbind_transfer_loop(runtime.loop)
-  -- Coroutines are destroyed. Retire every Task and the ready queue: a late
+  -- Task coroutines were unwound (their defers and cleanup ran inside their
+  -- finalizers) and destroyed. Retire every Task and the ready queue: a late
   -- settlement finds no current Wait and raises, a resume finds no token, and
   -- no queued continuation remains, so no callback can enter a Task. A
   -- finalizer registered before this Runtime may still read a Task's status,
@@ -631,7 +632,7 @@ local function runtime_finalize(candidate: value)
   -- terminal listener runs. Terminal status follows native retirement, so a
   -- Task whose retirement gate is still armed (the gate finish_task refuses
   -- on) stays nonterminal.
-  local abandoned = CancellationReason.simple("async Runtime abandoned at Lua state close")
+  local abandoned = CancellationReason.simple(ABANDONED_AT_CLOSE)
   for index = 1, runtime.next_task - 1 do
     local task? = runtime.tasks[index]
     if task ~= nil then
@@ -909,7 +910,7 @@ local function publish_terminal(task: Task)
     barrier.target = nil
     barrier.bridge.waits[barrier.identity] = nil
     barrier.registered = false
-    if target ~= nil then uv.native_external_wake_unregister(target) end
+    if target ~= nil then barrier.bridge.wake:unregister(target) end
     barrier:retire()
   end
   local kind = task.terminal_kind
@@ -1511,6 +1512,13 @@ function run_with_cleanup<|A, B|>(
     local task = running() as Task<|A, B|>
     defer do
       task.cleanup_active = true
+      -- Task code runs inside a finalizer only while its abandoned coroutine
+      -- is unwound at Lua-state close; give cleanup the reason the Task will
+      -- report (runtime_finalize publishes the same one).
+      -- Implementation notes: doc/implementation/libuv-runtime.md#lua-state-close-of-an-unretired-runtime
+      if task.cancel_value == nil and ffi.titan_in_finalizer(L) ~= 0 then
+        task.cancel_value = CancellationReason<|B|>.simple(ABANDONED_AT_CLOSE)
+      end
       cleanup(task.cancel_value)
     end
     do
@@ -1577,7 +1585,7 @@ function run_with_cleanup<|A, B|>(
         local target = final_wait.target
         final_wait.target = nil
         final_wait.bridge.waits[final_wait.identity] = nil
-        uv.native_external_wake_unregister(target)
+        final_wait.bridge.wake:unregister(target)
       end
     end
     enqueue_ready(erased, READY_START, nil)
@@ -1592,7 +1600,7 @@ function run_with_cleanup<|A, B|>(
       local target = final_wait.target
       final_wait.target = nil
       final_wait.bridge.waits[final_wait.identity] = nil
-      if target ~= nil then uv.native_external_wake_unregister(target) end
+      if target ~= nil then final_wait.bridge.wake:unregister(target) end
       final_wait.native.armed = 0
       final_wait.retired = true
       final_wait.cleanup_task = nil
@@ -1620,50 +1628,6 @@ local function ExternalWait:detach_domain()
   end
 end
 
--- Implementation notes: doc/implementation/libuv-runtime.md#lua-state-close-of-an-unretired-runtime
--- titan.coroutine calls this from a suspended coroutine's finalizer, before it
--- releases the stack. It withdraws the C-ABI ordinary waits of the Task whose
--- root is that coroutine; Completions are cached per Task, so done.task names
--- the waiting Task. Only detach_domain runs here: the bridge's wake owner may
--- already be detached, and retire or native_external_wake_unregister would
--- then touch a target that the domain unlink may have released.
---
--- Rooting invariant: an unfinished Task stays in runtime.tasks until
--- finish_task, and active_runtime roots its Runtime until loop() retires it or
--- runtime_finalize runs (registered before every Task, so finalized after
--- them). Ordinary GC never finalizes such a Task's root. When the matched Task
--- is still that inventory entry, the state is closing and every parked stack
--- is about to be released, so one linear sweep withdraws every wait. Otherwise
--- only the matched Task's waits are withdrawn, which is never wrong.
-local function withdraw_parked_native_waits(finalized: value)
-  local runtime? = active_runtime
-  if runtime == nil then return end
-  local bridge? = runtime.external
-  if bridge == nil or bridge.withdrawn then return end
-  local parked: Task? = nil
-  for _, owner in iteration.pairs(bridge.waits) do
-    local done? = owner.done
-    if done ~= nil then
-      local root: value = done.task.root
-      if root == finalized then
-        parked = done.task
-        break
-      end
-    end
-  end
-  if parked == nil then return end
-  local closing = runtime.tasks[parked.root_index] == parked and
-    parked.phase ~= TASK_FINISHED
-  if closing then bridge.withdrawn = true end
-  for _, owner in iteration.pairs(bridge.waits) do
-    local done? = owner.done
-    if done ~= nil and owner.native.unregister_wait ~= nil and
-        owner.native.retire == nil and (closing or done.task == parked) then
-      owner:detach_domain()
-    end
-  end
-end
-
 local function ExternalWait:retire()
   if self.retired then return end
   if self.native.armed ~= 0 and self.native.ready == 0 then
@@ -1677,7 +1641,11 @@ local function ExternalWait:retire()
   self.target = nil
   self.bridge.waits[self.identity] = nil
   -- No target borrow survives unregister: it consumes the registration ref.
-  if target ~= nil then uv.native_external_wake_unregister(target) end
+  -- The owner method, not the borrow-only native entry: at Lua-state close an
+  -- abandoned Task's cleanup can run after the wake owner's finalizer detached
+  -- the core and dropped this borrow, and then the owner returns EINVAL.
+  -- Implementation notes: doc/implementation/libuv-runtime.md#lua-state-close-of-an-unretired-runtime
+  if target ~= nil then self.bridge.wake:unregister(target) end
   self.done = nil
   self.cancel_action = nil
   self.register_fn = nil
@@ -1754,7 +1722,7 @@ local function ExternalBridge:drain()
           owner.target = nil
           self.waits[owner.identity] = nil
           owner.registered = false
-          if target ~= nil then uv.native_external_wake_unregister(target) end
+          if target ~= nil then self.wake:unregister(target) end
         elseif retired < 0 then
           if self.runtime.retirement_error == nil then self.runtime.retirement_error = owner end
           uv.stop(self.runtime.loop)
@@ -1779,7 +1747,7 @@ local function external_bridge(runtime: Runtime): ExternalBridge
   if existing ~= nil then return existing end
   local bridge = ExternalBridge {
     runtime = runtime, wake = uv.external_wake_t.new(), waits = {},
-    next_identity = 1, closed = false, withdrawn = false
+    next_identity = 1, closed = false
   }
   local callback = function (_: uv.external_wake_t) bridge:drain() end
   check_status(uv.external_wake_init(runtime.loop, bridge.wake, callback),
@@ -1934,7 +1902,7 @@ local function ExternalWait:await(policy: integer)
       self.target = nil
       self.bridge.waits[self.identity] = nil
       self.registered = false
-      if target ~= nil then uv.native_external_wake_unregister(target) end
+      if target ~= nil then self.bridge.wake:unregister(target) end
       return
     end
     if status < 0 then
@@ -1989,6 +1957,9 @@ end
 
 --- Await one ordinary external wait through C-only registrars, rooting owner.
 -- Context is borrowed until return, including synchronous cancellation unlink.
+-- unregister_fn also runs while the waiting Task unwinds at Lua-state close,
+-- possibly after owner was finalized: the linked registration must keep its
+-- native object alive (async-io.md, external waits, "State close").
 -- register_fn returns 0 (ready), 1 (linked), or a negative status with no link.
 -- This is not a native retirement capability and cannot gate Task publication.
 function wait_external_native(owner: value, context: foreign *void,
@@ -2126,7 +2097,7 @@ function loop()
                 barrier.target = nil
                 barrier.bridge.waits[barrier.identity] = nil
                 barrier.registered = false
-                if target ~= nil then uv.native_external_wake_unregister(target) end
+                if target ~= nil then barrier.bridge.wake:unregister(target) end
               elseif status < 0 then
                 if runtime.retirement_error == nil then runtime.retirement_error = barrier end
               end
@@ -4993,7 +4964,4 @@ do
   end
   ffi.lua_pushtvalue(L, bootstrap)
   ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_BOOTSTRAP_KEY)
-  -- Private slot read by titan.coroutine's finalizer (same literal there).
-  ffi.lua_pushtvalue(L, withdraw_parked_native_waits)
-  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, "titan.coroutine.teardown")
 end

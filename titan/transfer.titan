@@ -246,9 +246,11 @@ local function current_resource_scope(): ResourceScope?
 end
 
 local function finalize_resource_scope(scope: ResourceScope)
-  -- An abandoned suspended stack may never execute its lexical defer.
-  -- Its native owners still have one nonyielding cleanup path.
+  -- At Lua-state close this can run before an abandoned suspended stack is
+  -- unwound: dispose the native owners now, and forget the discarded packet
+  -- so the decode defer and any claim made before it see no message.
   dispose_scope(scope.native)
+  scope.message = nil
 end
 
 local function acquire_resource_scope(): ResourceScope
