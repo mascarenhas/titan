@@ -198,14 +198,51 @@ local function unwind_abandon_failing_cleanup(log: {string})
   test.assert(co:resume(nil, tag) == "parked")
 end
 
-function test_unwind_continues_after_cleanup_error(context: test.Context)
+function test_unwind_continues_after_cleanup_error(_context: test.Context)
   local log: {string} = {}
   unwind_abandon_failing_cleanup(log)
-  context:log("BEGIN expected coroutine cleanup warning")
   unwind_collect()
-  context:log("END expected coroutine cleanup warning")
   local text = unwind_log_text(log)
   test.assert(text == "inner outer", "unwind log: " .. text)
+end
+
+function test_unwind_runs_suspended_defers_in_generational_mode(_context: test.Context)
+  local was_generational = unwind_gc.generational()
+  defer do
+    if not was_generational then unwind_gc.incremental() end
+  end
+  local log: {string} = {}
+  unwind_abandon_nested_defers(log)
+  unwind_abandon_chain_stacked_first(log)
+  unwind_collect()
+  local text = unwind_log_text(log)
+  test.assert(text == "c b a inner for-close frame3 frame2 frame1" or
+              text == "inner for-close frame3 frame2 frame1 c b a", "unwind log: " .. text)
+end
+
+-- Lua code on a Titan coroutine's own thread closes that thread
+-- (coroutine.close() with no argument): Lua closes its variables and jumps to
+-- the coroutine floor, which ends the coroutine as returning nil.
+function test_unwind_floor_ends_self_closed_coroutine(_context: test.Context)
+  local log: {string} = {}
+  local close_self = common.lua_helper([==[
+    return function(append)
+      local c <close> = setmetatable({}, { __close = function(_, err)
+        append("closed:" .. tostring(err))
+      end })
+      coroutine.close()
+      append("after-close")
+    end
+  ]==]) as function (function (string): ()): ()
+  local co = coroutine.create(function (_: value): value
+    close_self(function (entry: string) log[#log + 1] = entry end)
+    log[#log + 1] = "after-call"
+    return "returned"
+  end, "self-close")
+  test.assert(co:resume(nil) == nil, "a self-closed coroutine returned a value")
+  test.assert(co:status() == "dead", "status: " .. co:status())
+  local text = unwind_log_text(log)
+  test.assert(text == "closed:nil", "log: " .. text)
 end
 
 local function unwind_abandon_yielding_cleanup(log: {string})
@@ -520,6 +557,7 @@ local UNWIND_CHAIN_SCENARIO = [==[
     append("l2=" .. coroutine.status(kept.l2))
     append("wrap=" .. refused(pcall(kept.wrap)))
     append("resume=" .. refused(coroutine.resume(kept.l2)))
+    append("co=" .. kept.co:status())
   end)
   local co = titan_coroutine.create(function()
     local c0 <close> = closer("c0")
@@ -545,11 +583,12 @@ local UNWIND_CHAIN_SCENARIO = [==[
       append("after-wrap")
     end)
   end, tag)
+  kept.co = co
   assert(co:resume(nil, tag) == "parked")
 ]==]
 
 local UNWIND_CHAIN_LOG =
-  "d2 c2 d1 c1 d0 c0 l1=dead l2=dead wrap=refused resume=refused"
+  "d2 c2 d1 c1 d0 c0 l1=dead l2=dead wrap=refused resume=refused co=dead"
 
 function test_unwind_crosses_nested_lua_coroutines(context: test.Context)
   unwind_lua_case(context, UNWIND_CHAIN_SCENARIO, UNWIND_CHAIN_LOG, {})
@@ -1051,4 +1090,28 @@ function test_unwind_child_state_chain_closed_from_task(_context: test.Context)
   end)
   test.assert(log == UNWIND_CHAIN_LOG, "log: " .. log)
   unwind_assert_warnings("close", warnings, {})
+end
+
+-- A Titan defer body fails during the unwind after entering a Lua function
+-- that holds a <close>: the guard reports the error once, closes that frame
+-- with no error value, and the enclosing cleanup continues.
+local UNWIND_GUARD_FAILURE_SCENARIO = [==[
+  local co = titan_coroutine.create(function()
+    with_defer("outer", function()
+      support.unwind_with_cleanup(function()
+        local pending <close> = closer("cleanup-close")
+        error("cleanup-failure")
+      end, function()
+        titan_coroutine.yield("parked", tag)
+        append("after-yield")
+      end)
+      append("after-cleanup")
+    end)
+  end, tag)
+  assert(co:resume(nil, tag) == "parked")
+]==]
+
+function test_unwind_reports_failing_defer_and_closes_its_frames(context: test.Context)
+  unwind_lua_case(context, UNWIND_GUARD_FAILURE_SCENARIO, "cleanup-close outer",
+    {"cleanup-failure"})
 end

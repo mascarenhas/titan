@@ -277,11 +277,30 @@ function test_lua_close_publishes_consistent_status_for_abandoned_tasks(_: test.
 end
 
 -- Public only so a fresh independent state can call it; test infrastructure.
--- A parked Task whose defers start Tasks when lua_close unwinds it. Cells:
--- 0 the caught start (1 started, 2 another error, 3 refused), 1 the outermost
--- defer ran after an uncaught refused start, 2 a started Task body ran.
+-- A parked Task whose defers start Tasks when lua_close unwinds it, and an
+-- older plain coroutine whose defer, unwound after runtime_finalize, would
+-- create a new Runtime. Cells: 0 the caught async.run (1 started, 2 another
+-- error, 3 refused), 1 the outermost defer ran after an uncaught refused
+-- start, 2 a started Task body ran, 3 the caught run_with_cleanup, 4 the
+-- caught Runtime creation (async.receiver; 3 refused).
 function runtime_close_start_refused_bootstrap(cells_raw: value)
   local cells = cells_raw as foreign *void
+  local older = runtime_close_coroutine.create(function (_: value): value
+    defer do
+      local code = 1
+      do
+        async.receiver()
+      catch
+        code = 2
+        if error == "cannot create an async Runtime during Lua state close" then code = 3 end
+      end
+      runtime_close_record(cells, 4, code)
+    end
+    runtime_close_coroutine.yield(nil, "older")
+    return nil
+  end, "older")
+  older:resume(nil)
+  runtime_close_held = older
   local started = function (): nil
     runtime_close_record(cells, 2, 3)
     return nil
@@ -299,6 +318,15 @@ function runtime_close_start_refused_bootstrap(cells_raw: value)
         if error == "cannot start a Task during Lua state close" then code = 3 end
       end
       runtime_close_record(cells, 0, code)
+      code = 1
+      do
+        async.run_with_cleanup<|nil, value|>(started,
+          function (_: async.CancellationReason<|value|>?) end)
+      catch
+        code = 2
+        if error == "cannot start a Task during Lua state close" then code = 3 end
+      end
+      runtime_close_record(cells, 3, code)
     end
     async.suspend(token)
     return nil
@@ -307,9 +335,11 @@ function runtime_close_start_refused_bootstrap(cells_raw: value)
   test.assert(parked:status():as_string() == "waiting", "the Task did not park")
 end
 
+local runtime_close_held: value = nil
+
 function test_lua_close_refuses_task_start_from_unwinding_task(_: test.Context)
-  local cells: owned int[] = foreign int.new_array(3)
-  for index = 0, 2 do cells[index] = 0 end
+  local cells: owned int[] = foreign int.new_array(5)
+  for index = 0, 4 do cells[index] = 0 end
   local state = runtime_close_lua.new()
   defer state:close()
   state:run([[
@@ -321,6 +351,48 @@ function test_lua_close_refuses_task_start_from_unwinding_task(_: test.Context)
     "a Task start during state close gave code " .. (cells[0] as integer))
   test.assert((cells[1] as integer) == 3, "the unwind stopped at the refused start")
   test.assert((cells[2] as integer) == 0, "a Task started during state close ran")
+  test.assert((cells[3] as integer) == 3,
+    "a run_with_cleanup start during state close gave code " .. (cells[3] as integer))
+  test.assert((cells[4] as integer) == 3,
+    "a Runtime creation during state close gave code " .. (cells[4] as integer))
+end
+
+-- A finalizer that settles an await Completion while no Task is current
+-- queues the delivery: the Task resumes after the finalizer.
+record RuntimeCloseResolver
+  resolve: (function (string): ())?
+end
+
+local function runtime_close_resolve_in_finalizer(candidate: value)
+  local holder: RuntimeCloseResolver = candidate
+  local resolve = holder.resolve as function (string): ()
+  resolve("from-finalizer")
+end
+
+local function runtime_close_drop_resolver(holder: RuntimeCloseResolver)
+  local finalized = RuntimeCloseResolver(holder.resolve)
+  runtime_close_gc.finalizable<|value|>(finalized, runtime_close_resolve_in_finalizer)
+end
+
+function test_unwind_finalizer_settles_completion_after_finalizer(_: test.Context)
+  local holder = RuntimeCloseResolver(nil)
+  local task = async.run<|string, value|>(function (): string
+    local result = async.await<|string, value|>(function (resolve, _reject, _fatal)
+      holder.resolve = resolve
+    end)
+    case result
+    when success(text) then return text
+    else raise "the await failed"
+    end
+  end)
+  uv.run(async.current_loop(), uv.RUN_NOWAIT)
+  test.assert(holder.resolve ~= nil, "the Task did not await")
+  runtime_close_drop_resolver(holder)
+  for _ = 1, 4 do runtime_close_gc.collect() end
+  async.loop()
+  local succeeded, result? = task:status():has_succeeded()
+  test.assert(succeeded and result == "from-finalizer",
+    "the finalizer's settlement gave " .. task:status():as_string())
 end
 
 -- Outside state close, a defer of an abandoned coroutine may hand disposal to

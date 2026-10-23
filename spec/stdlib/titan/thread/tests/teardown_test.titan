@@ -1,3 +1,5 @@
+local thread_teardown_coroutine = import "coroutine"
+
 -- Lua-state close with Tasks parked in stack-resident native thread waits
 -- (issue #262): lua_close withdraws each parked waiter before its coroutine
 -- stack is destroyed, and per-registration pins keep the channel or thread
@@ -323,5 +325,51 @@ function test_finalized_thread_handle_raises(context: test.Context)
       thread_fault_common.assert_raises_contains(function () handle:cancel() end,
         "thread handle was finalized")
     end)
+  end)
+end
+
+-- Issue #283: a Task resumes a user coroutine, which then parks in a channel
+-- receive. The root is suspended, the generator stacked, and the wait cell
+-- lives on the generator's stack.
+record ThreadTeardownStackedProbe
+  const sender: thread.Sender<|integer|>
+  const receiver: thread.Receiver<|integer|>
+  const unwound: thread.Receiver<|boolean|>
+end
+
+-- Public so an independent state can run it through require('thread.tests').
+function thread_teardown_park_stacked_receive(host: value)
+  local tx, rx = thread.channel<|integer|>(1)
+  local unwound_tx, unwound_rx = thread.channel<|boolean|>(1)
+  thread_teardown_held[#thread_teardown_held + 1] = tx
+  async.send(host as foreign *void,
+    ThreadTeardownStackedProbe(tx:clone(), rx:clone(), unwound_rx))
+  thread_teardown_park(async.run<|integer, value|>(function (): integer
+    local generator = thread_teardown_coroutine.create(function (_: value): value
+      defer unwound_tx:try_send(true)
+      return rx:receive()
+    end, "thread-teardown-generator")
+    return generator:resume(nil) as integer
+  end))
+end
+
+function test_lua_close_withdraws_wait_parked_on_stacked_coroutine(_: test.Context)
+  runtime_test.run(function ()
+    local inbox = async.receiver()
+    defer inbox:close()
+    local state = lua.new()
+    defer state:close()
+    local probe: ThreadTeardownStackedProbe =
+      thread_teardown_park_shared(state, inbox, "thread_teardown_park_stacked_receive")
+    defer probe.receiver:close()
+    defer probe.unwound:close()
+    state:close()
+    -- The stacked generator's receive was withdrawn while it unwound, so this
+    -- send reaches this state's Receiver instead of a dead waiter.
+    test.assert(probe.sender:try_send(7), "the shared channel lost its buffer space")
+    local received, message? = probe.receiver:try_receive()
+    test.assert(received and message == 7, "the closed state's withdrawn receive took the message")
+    local ran, flag? = probe.unwound:try_receive()
+    test.assert(ran and flag == true, "the stacked generator's defer did not run")
   end)
 end

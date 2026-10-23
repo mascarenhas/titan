@@ -67,3 +67,9 @@ end
 function unwind_fail(message: string)
   raise message
 end
+
+-- Run `body` under a Titan defer that calls the Lua function `cleanup`.
+function unwind_with_cleanup(cleanup: function (): (), body: function (): ())
+  defer cleanup()
+  body()
+end
