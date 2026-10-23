@@ -130,6 +130,14 @@ static inline int titan_in_finalizer(lua_State *L) {
   return (G(L)->gcstp & GCSTPGC) != 0;
 }
 
+/* True while lua_close runs: luaC_freeallobjects sets GCSTPCLS before calling
+** the pending finalizers. Lua ignores new finalizer registrations from then on,
+** and no async Runtime loop runs again. */
+/* Implementation notes: doc/implementation/libuv-runtime.md#lua-state-close-of-an-unretired-runtime */
+static inline int titan_state_closing(lua_State *L) {
+  return (G(L)->gcstp & GCSTPCLS) != 0;
+}
+
 /* Continue an abandoned-coroutine unwind from the current frame: jump to the
 ** next finally boundary or coroutine floor on L's error-recovery chain,
 ** closing exhausted Lua coroutines on the way. Never returns. */

@@ -1456,11 +1456,19 @@ function suspend(token: ResumeToken, cancel_action: (function (): ())?)
   end
 end
 
+-- During lua_close no Task can ever run, and the new coroutine's finalizer
+-- would never be registered, so starting one is refused.
+-- Implementation notes: doc/implementation/libuv-runtime.md#lua-state-close-of-an-unretired-runtime
+local function refuse_start_at_close()
+  raise "cannot start a Task during Lua state close"
+end
+
 --- Schedule a new Task and return before its function starts.
 -- @param func Task body producing one success payload.
 -- @return Initially ready Task; supply both success and cancellation type arguments or neither.
 -- @usage async-io.md
 function run<|A, B|>(func: function (): (A)): Task<|A, B|>
+  if ffi.titan_state_closing(L) ~= 0 then refuse_start_at_close() end
   local runtime = ensure_runtime()
   if runtime.closing or runtime.exit_code ~= nil then raise "cannot start a Task while async Runtime is shutting down" end
   local root = coroutine.create(function (_: value): value return func() end, ASYNC_TAG)
@@ -1503,6 +1511,7 @@ function run_with_cleanup<|A, B|>(
     body: function (): (A),
     cleanup: function (CancellationReason<|B|>?): (),
     final_wait: ExternalWait?): Task<|A, B|>
+  if ffi.titan_state_closing(L) ~= 0 then refuse_start_at_close() end
   local runtime = ensure_runtime()
   if runtime.closing or runtime.exit_code ~= nil then
     raise "cannot start a Task while async Runtime is shutting down"
