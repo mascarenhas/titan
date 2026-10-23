@@ -98,6 +98,8 @@ void titan_coroutine_enter(lua_State *T, Udata *module, TValue func,
         T->ci = oldci;
         T->allowhook = oldah;
         T->errfunc = olderrfunc;
+        /* The unwind drops the escaped error: clear its trace and pin. */
+        titan_unwind_clear_trace(T);
       }
       T->errorJmp = floor.lj.previous;
     }

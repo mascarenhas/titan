@@ -1022,6 +1022,17 @@ function test_unwind_runs_defer_pending_in_error_recovery(context: test.Context)
                 "resumed log: " .. log)
     unwind_assert_warnings("resumed", warnings, {})
   end)
+  -- The dropped body error's trace must not stay visible to titan.backtrace().
+  context:run("trace_cleared", function (_: test.Context)
+    local log, warnings = unwind_run_lua(
+      "local resume_again = false\n" .. UNWIND_RECOVERY_CLOSE_SCENARIO .. [==[
+        function after_collect()
+          append("trace:" .. tostring(support.unwind_has_backtrace()))
+        end
+      ]==], "collect")
+    test.assert(log == "close:error titan-defer trace:false", "trace log: " .. log)
+    unwind_assert_warnings("trace_cleared", warnings, {})
+  end)
 end
 
 -- The first close method fails inside a Titan call, whose Lua-entry wrapper

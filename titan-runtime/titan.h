@@ -115,6 +115,9 @@ TITAN_RUNTIME_FUNC TITAN_COLD void titan_unwind_close(lua_State *L, ptrdiff_t le
 ** runtime error, as one "error in coroutine cleanup (...)" warning and drop
 ** it; never raises. */
 TITAN_RUNTIME_FUNC TITAN_COLD void titan_unwind_report(lua_State *L, TStatus status);
+/* Clear the registry trace and pin of an error that an unwind dropped, as a
+** catch recovery does; never raises. */
+TITAN_RUNTIME_FUNC TITAN_COLD void titan_unwind_clear_trace(lua_State *L);
 /* An error escaped a finally body that runs during an unwind: unlink the
 ** guard, restore the boundary state, report the error, close the Lua frames
 ** above `level` and continue the unwind. Never returns. */

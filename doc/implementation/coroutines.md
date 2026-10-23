@@ -417,6 +417,9 @@ native frame above the floor; cleanup must not inherit their C-call count.
   [error-recovery close](error-handling.md#unwinding-through-finally): if a
   `__close` suspends the coroutine and it is then abandoned, the unwind lands
   on the floor again, the error is dropped, and the coroutine ends unwound.
+  That landing also clears the dropped error's registry trace and pin through
+  the cold `titan_unwind_clear_trace`, which runs the clears protected because
+  `luaS_new` can allocate.
 
 **Walker.** `titan_unwind` (`titan-runtime/titan.c`) follows `L->errorJmp`.
 When it finds a boundary whose status is `TITAN_STATUS_FINALLY` or

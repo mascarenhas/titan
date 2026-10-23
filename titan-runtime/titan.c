@@ -1738,6 +1738,27 @@ static void titan_unwind_warn(lua_State *L, void *ud) {
   titan_unwind_clear_registry_string(L, TITAN_TRACE_PINNED);
 }
 
+static void titan_unwind_clear_trace_aux(lua_State *L, void *ud) {
+  (void)ud;
+  titan_unwind_clear_registry_string(L, TITAN_BACKTRACE_KEY);
+  titan_unwind_clear_registry_string(L, TITAN_TRACE_PINNED);
+}
+
+/* An unwind dropped an error whose trace the error handler had stored: clear
+** the trace and its pin, as a catch recovery does. luaS_new can allocate on a
+** string-cache miss, so the clears run protected; a failure leaves them. */
+void titan_unwind_clear_trace(lua_State *L) {
+  CallInfo *ci = L->ci;
+  lu_byte allowhook = L->allowhook;
+  ptrdiff_t errfunc = L->errfunc;
+  ptrdiff_t top = savestack(L, L->top.p);
+  (void)luaD_rawrunprotected(L, titan_unwind_clear_trace_aux, NULL);
+  L->ci = ci;
+  L->allowhook = allowhook;
+  L->errfunc = errfunc;
+  L->top.p = restorestack(L, top);
+}
+
 /* Report one cleanup error as a Lua warning and drop it. The error object is
 ** materialized above the current top; the reporting-time top is restored, so
 ** the open upvalues and pending to-be-closed slots of a failed __close stay

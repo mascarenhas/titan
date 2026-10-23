@@ -1,6 +1,7 @@
 local test = import "test"
 foreign import "string.h"
 foreign import "lua.h"
+foreign import "titan/ffi.h"
 
 local function contains(subject: string, fragment: string): boolean
   return ffi.strstr(subject, fragment) ~= nil
@@ -94,4 +95,14 @@ end
 
 function unwind_init_append(entry: string)
   if init_log ~= nil then unwind_append(init_log, entry) end
+end
+
+-- Whether the registry slot behind titan.backtrace() holds a trace in this
+-- state.
+function unwind_has_backtrace(): boolean
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve Lua stack" end
+  ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_BACKTRACE_KEY)
+  return ffi.lua_type(L, -1) ~= ffi.LUA_TNIL
 end

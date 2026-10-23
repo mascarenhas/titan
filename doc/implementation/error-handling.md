@@ -363,11 +363,10 @@ continues the unwind. After a normal finish, the dispatch arm for `PA_UNWIND`
 unlinks the guard and calls `titan_unwind`, which never returns.
 
 `titan_unwind`, `titan_unwind_close`, `titan_unwind_report` and
-`titan_unwind_guard_failed` are declared `TITAN_COLD`. The compiler therefore
-predicts that the unwind arm of the recovery, the guard failure and the
-`PA_UNWIND` dispatch never run. GCC moves them into the function's `.cold` part
-in `.text.unlikely`, so the unwind support adds little to the instruction-cache
-footprint of the normal path.
+`titan_unwind_guard_failed` are declared `TITAN_COLD`. This marks the unwind arm
+of the recovery, the guard failure and the `PA_UNWIND` dispatch unlikely. An
+optimized build may then place them outside the normal path's hot instruction
+stream; GCC can split them into the function's `.cold` part in `.text.unlikely`.
 
 **Suspension during error recovery.** A `__close` metamethod that the ordinary
 error recovery calls may suspend the coroutine with a Titan `yield`: Lua's
@@ -385,7 +384,10 @@ the walker can jump to the re-armed boundary. That happens when the coroutine
 is abandoned while suspended in the close. The jump arrives with
 `TITAN_STATUS_UNWIND` and takes the landing above: the caught error is dropped,
 the rest of the close method and the catch never run, and the pending finally
-runs exactly once. If the coroutine is resumed instead, the close finishes and
+runs exactly once. Only on that jump, the re-arm's `TITAN_SETJMP` arm stores nil
+into the registry trace and pin (`TITAN_BACKTRACE_KEY`, `TITAN_TRACE_PINNED`),
+as a catch recovery does, so `titan.backtrace()` does not keep the dropped
+error's trace; the module-rooted keys make the stores allocation-free. If the coroutine is resumed instead, the close finishes and
 the ordinary recovery continues. The coroutine floor re-arms itself the same way
 around the close of an error that escaped the entry
 ([Coroutines](coroutines.md#unwinding-an-abandoned-coroutine)).
