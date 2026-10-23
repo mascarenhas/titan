@@ -3,6 +3,7 @@ local unwind_lua = import "lua"
 local unwind_async = import "async"
 local unwind_string = import "string"
 local unwind_runtime = import "support.runtime.titan"
+local unwind_init_fixture = import "coroutine.unwind_init_fixture"
 
 -- Collecting an abandoned suspended coroutine, or closing its Lua state,
 -- unwinds it: defers run innermost first, catch blocks do not run, and nothing
@@ -198,10 +199,14 @@ local function unwind_abandon_failing_cleanup(log: {string})
   test.assert(co:resume(nil, tag) == "parked")
 end
 
-function test_unwind_continues_after_cleanup_error(_context: test.Context)
+-- The host state comes from luaL_newstate, whose warnings are on, so the
+-- cleanup error appears on standard error as a Lua warning.
+function test_unwind_continues_after_cleanup_error(context: test.Context)
   local log: {string} = {}
   unwind_abandon_failing_cleanup(log)
+  context:log("BEGIN expected coroutine cleanup warning")
   unwind_collect()
+  context:log("END expected coroutine cleanup warning")
   local text = unwind_log_text(log)
   test.assert(text == "inner outer", "unwind log: " .. text)
 end
@@ -1094,11 +1099,13 @@ end
 
 -- A Titan defer body fails during the unwind after entering a Lua function
 -- that holds a <close>: the guard reports the error once, closes that frame
--- with no error value, and the enclosing cleanup continues.
-local UNWIND_GUARD_FAILURE_SCENARIO = [==[
+-- with no error value, and the enclosing cleanup continues. `runner` is the
+-- coroutine.test_support function that holds the failing defer.
+local function unwind_guard_failure_scenario(runner: string): string
+  return [==[
   local co = titan_coroutine.create(function()
     with_defer("outer", function()
-      support.unwind_with_cleanup(function()
+      support.]==] .. runner .. [==[(function()
         local pending <close> = closer("cleanup-close")
         error("cleanup-failure")
       end, function()
@@ -1110,8 +1117,48 @@ local UNWIND_GUARD_FAILURE_SCENARIO = [==[
   end, tag)
   assert(co:resume(nil, tag) == "parked")
 ]==]
+end
 
 function test_unwind_reports_failing_defer_and_closes_its_frames(context: test.Context)
-  unwind_lua_case(context, UNWIND_GUARD_FAILURE_SCENARIO, "cleanup-close outer",
-    {"cleanup-failure"})
+  unwind_lua_case(context, unwind_guard_failure_scenario("unwind_with_cleanup"),
+    "cleanup-close outer", {"cleanup-failure"})
+end
+
+-- The same failing defer inside an immediately invoked lambda in expression
+-- position, whose boundaries the compiler emits inline in the host frame.
+function test_unwind_reports_failing_defer_in_immediate_lambda(context: test.Context)
+  unwind_lua_case(context, unwind_guard_failure_scenario("unwind_with_inline_cleanup"),
+    "cleanup-close outer", {"cleanup-failure"})
+end
+
+-- A module initializer suspended inside require. The coroutine.tests import
+-- initialized the host instance outside any coroutine. The child state
+-- requires the fixture inside a coroutine whose resumer accepts its tag, so
+-- the initializer suspends inside require and is abandoned there. The unwind
+-- runs the initializer's defer, crosses require's C frames into the caller's
+-- defer and <close>, and leaves the module partially initialized: a later
+-- require returns it without running the initializer again.
+local UNWIND_MODULE_INIT_SCENARIO = [==[
+  support.unwind_bind_init_log(log_buffer)
+  local co = titan_coroutine.create(function()
+    local outer <close> = closer("lua-close")
+    with_defer("caller-defer", function()
+      local fixture = require 'coroutine.unwind_init_fixture'
+      append("required:" .. fixture.stage)
+    end)
+  end, "unwind-init")
+  assert(co:resume(nil, "unwind-init") == "parked-in-init")
+  function after_collect()
+    append("stage:" .. require('coroutine.unwind_init_fixture').stage)
+  end
+]==]
+
+function test_unwind_runs_defers_of_module_initializer_suspended_in_require(
+    context: test.Context)
+  test.assert(unwind_init_fixture.stage == "initialized",
+              "host fixture stage: " .. unwind_init_fixture.stage)
+  unwind_lua_mode(context, "collect", UNWIND_MODULE_INIT_SCENARIO,
+    "init-defer caller-defer lua-close stage:loading", {})
+  unwind_lua_mode(context, "close", UNWIND_MODULE_INIT_SCENARIO,
+    "init-defer caller-defer lua-close", {})
 end

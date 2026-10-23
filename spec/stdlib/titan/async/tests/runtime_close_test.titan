@@ -248,7 +248,7 @@ end
 -- Issue #271: a Task of a Runtime abandoned at lua_close never resumes, but a
 -- later finalizer that still holds it must read a consistent status: cancelled,
 -- unless its native retirement gate is still armed (then nonterminal).
-function test_lua_close_publishes_consistent_status_for_abandoned_tasks(_: test.Context)
+function test_lua_close_publishes_consistent_status_for_abandoned_tasks(context: test.Context)
   local cells: owned int[] = foreign int.new_array(7)
   for index = 0, 6 do cells[index] = 0 end
   local state = runtime_close_lua.new()
@@ -257,7 +257,9 @@ function test_lua_close_publishes_consistent_status_for_abandoned_tasks(_: test.
     package.path, package.cpath = '', ''
     require('async.tests').runtime_close_abandoned_task_bootstrap(...)
   ]], "=abandoned-task-bootstrap", async.TransferValue.is_pointer(cells as foreign *void))
+  context:log("BEGIN expected coroutine cleanup warning")
   state:close()
+  context:log("END expected coroutine cleanup warning")
   local names: {string} = {"parked", "cancel-requested", "observed-ready", "unobserved",
                            "armed-retirement-gate"}
   local outcomes: {string} = {"unobserved", "raised", "stale or wrong", "expected"}
@@ -337,7 +339,7 @@ end
 
 local runtime_close_held: value = nil
 
-function test_lua_close_refuses_task_start_from_unwinding_task(_: test.Context)
+function test_lua_close_refuses_task_start_from_unwinding_task(context: test.Context)
   local cells: owned int[] = foreign int.new_array(5)
   for index = 0, 4 do cells[index] = 0 end
   local state = runtime_close_lua.new()
@@ -346,7 +348,9 @@ function test_lua_close_refuses_task_start_from_unwinding_task(_: test.Context)
     package.path, package.cpath = '', ''
     require('async.tests').runtime_close_start_refused_bootstrap(...)
   ]], "=start-refused-bootstrap", async.TransferValue.is_pointer(cells as foreign *void))
+  context:log("BEGIN expected coroutine cleanup warning")
   state:close()
+  context:log("END expected coroutine cleanup warning")
   test.assert((cells[0] as integer) == 3,
     "a Task start during state close gave code " .. (cells[0] as integer))
   test.assert((cells[1] as integer) == 3, "the unwind stopped at the refused start")

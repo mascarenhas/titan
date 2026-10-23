@@ -1,0 +1,16 @@
+-- Linked into the native test executable for the unwind tests. Required inside
+-- a Titan coroutine whose resumer accepts the tag "unwind-init", its
+-- initializer suspends inside require. The coroutine.tests import initializes
+-- the host instance outside any coroutine, so that one runs to completion.
+local coroutine = import "coroutine"
+local support = import "coroutine.test_support"
+
+stage: string = "loading"
+
+do
+  defer support.unwind_init_append("init-defer")
+  if coroutine.is_yieldable("unwind-init") then
+    coroutine.yield("parked-in-init", "unwind-init")
+  end
+  stage = "initialized"
+end

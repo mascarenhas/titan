@@ -20,6 +20,7 @@ TITAN_TEST_MODULES := async.test_support \
 	async.tests \
 	coroutine.test_support \
 	coroutine.tests \
+	coroutine.unwind_init_fixture \
 	fs.test_support \
 	fs.tests \
 	gc.tests \
@@ -106,7 +107,10 @@ TITAN_TEST_SOURCES_coroutine.tests := spec/stdlib/titan/coroutine/tests/tests.ti
 	spec/stdlib/titan/coroutine/tests/nested_test.titan \
 	spec/stdlib/titan/coroutine/tests/running_test.titan \
 	spec/stdlib/titan/coroutine/tests/unwind_test.titan
-TITAN_TEST_IMPORTS_coroutine.tests := coroutine.test_support support.command support.common support.runtime
+TITAN_TEST_IMPORTS_coroutine.tests := coroutine.test_support coroutine.unwind_init_fixture support.command support.common support.runtime
+
+TITAN_TEST_SOURCES_coroutine.unwind_init_fixture := spec/stdlib/titan/coroutine/unwind_init_fixture.titan
+TITAN_TEST_IMPORTS_coroutine.unwind_init_fixture := coroutine.test_support
 
 TITAN_TEST_SOURCES_fs.test_support := spec/stdlib/titan/fs/test_support.titan
 TITAN_TEST_IMPORTS_fs.test_support := support.common
