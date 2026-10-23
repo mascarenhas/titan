@@ -359,6 +359,30 @@ diagnostics` around the operation. Those prefixed brackets make a successful
 aggregate log readable and keep the expectation owned by the case that
 produces it.
 
+### Concurrent filtered runs
+
+Each `titan-stdlib-test-run` tees the merged output to `TITAN_TEST_RUN_LOG`
+(default `out/tests/stdout.log`) and writes the root inventory that
+`check_stdlib_test_output.lua` audits it against (default
+`out/tests/roots.txt`; `<log>.roots` beside an explicitly selected log). The
+built executable and fixture objects are only read, so several filtered runs
+can share one build at once when each selects its own log and `TMPDIR`:
+
+```sh
+mkdir -p /tmp/run-a /tmp/run-b
+TMPDIR=/tmp/run-a make titan-stdlib-test-run TITAN_FILTER='^uv[.]' \
+  TITAN_TEST_RUN_LOG=/tmp/run-a/stdout.log & uv_run=$!
+TMPDIR=/tmp/run-b make titan-stdlib-test-run TITAN_FILTER='^protobuf[.]' \
+  TITAN_TEST_RUN_LOG=/tmp/run-b/stdout.log & protobuf_run=$!
+wait "$uv_run"; uv_status=$?
+wait "$protobuf_run"; protobuf_status=$?
+```
+
+Each run audits only its own log and keeps its own exit status. Cases still
+share the host, so timing-bound cases see more load and loopback port scans
+more contention. The CI sanitizer job keeps its focused gates serial: several
+of them carry timing oracles, such as the 15-second Runtime shutdown check.
+
 ### Busted partitions
 
 `make busted-test`, `luarocks test` (the rockspec `test` command) and Windows

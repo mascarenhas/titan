@@ -1374,6 +1374,16 @@ TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/$(TITAN_STDLIB_TEST_PROGRAM_OUT
 # native profile across all 29 test roots, including fresh child compilers.
 # Focused gates may set a lower bound.
 TITAN_TEST_TIMEOUT ?= 600
+# One run's merged output, audited afterwards against the root inventory
+# written beside it. Concurrent filtered runs of one built executable need
+# distinct logs (and their own TMPDIR); the defaults are the shared
+# out/tests/stdout.log and out/tests/roots.txt.
+TITAN_TEST_RUN_LOG ?= $(TITAN_TEST_BUILD_DIR)/stdout.log
+ifeq ($(origin TITAN_TEST_RUN_LOG),file)
+TITAN_TEST_RUN_ROOTS := $(TITAN_TEST_BUILD_DIR)/roots.txt
+else
+TITAN_TEST_RUN_ROOTS = $(TITAN_TEST_RUN_LOG).roots
+endif
 TEST_TITANC ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(call make_shell_quote,$(PREFIX)/bin/titanc),titanc)
 TEST_LUA ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(PREFIX)/bin/lua,lua)
 ifeq ($(origin BUSTED),undefined)
@@ -1600,11 +1610,13 @@ titan-stdlib-test-build: $(TITAN_TEST_EXECUTABLE) ## Build every native Titan st
 
 # The aggregate and its children run outside <prefix>/bin. Give them the
 # selected installation's Lua paths instead of their executable-relative defaults.
-titan-stdlib-test-run: ## Run the built native suite, optionally with TITAN_FILTER
+titan-stdlib-test-run: ## Run the built native suite, optionally with TITAN_FILTER and a private TITAN_TEST_RUN_LOG
 	@test -x $(call make_shell_quote,$(TITAN_TEST_EXECUTABLE)) || { \
 	  echo "ERROR: run 'make titan-stdlib-test-build' first" >&2; exit 1; \
 	}
-	@printf '%s\n' $(TITAN_STDLIB_TEST_ROOTS) > $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)/roots.txt)
+	@mkdir -p "$$(dirname $(call make_shell_quote,$(TITAN_TEST_RUN_LOG)))" \
+	  "$$(dirname $(call make_shell_quote,$(TITAN_TEST_RUN_ROOTS)))"
+	@printf '%s\n' $(TITAN_STDLIB_TEST_ROOTS) > $(call make_shell_quote,$(TITAN_TEST_RUN_ROOTS))
 	@status=0; \
 	$(TITAN_TEST_COMPILER_ENV) \
 	LUA_PATH_5_5="$$( $(TEST_LUA) -E -e 'io.write(package.path)' )" \
@@ -1620,12 +1632,12 @@ titan-stdlib-test-run: ## Run the built native suite, optionally with TITAN_FILT
 	    set -- "$$@" "--filter=$$TITAN_FILTER"; \
 	  fi; \
 	  bash spec/support/run_with_timeout.sh "$$@" 2>&1 | tee "$$log"' -- \
-	  $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)/stdout.log) \
+	  $(call make_shell_quote,$(TITAN_TEST_RUN_LOG)) \
 	  $(call make_shell_quote,$(TITAN_TEST_TIMEOUT)) \
 	  $(call make_shell_quote,$(TITAN_TEST_EXECUTABLE)) || status=$$?; \
 	$(TEST_LUA) -E spec/support/check_stdlib_test_output.lua \
-	  $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)/stdout.log) \
-	  $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)/roots.txt) \
+	  $(call make_shell_quote,$(TITAN_TEST_RUN_LOG)) \
+	  $(call make_shell_quote,$(TITAN_TEST_RUN_ROOTS)) \
 	  $(call make_shell_quote_value,TITAN_FILTER); \
 	audit=$$?; test "$$status" = 0 || exit "$$status"; exit "$$audit"
 
