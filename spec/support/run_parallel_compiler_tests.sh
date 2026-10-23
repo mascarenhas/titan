@@ -307,12 +307,25 @@ SH
 fi
 
 echo "Snapshotting the prepared checkout for four isolated compiler shards"
+# Workers use the selected SDK read-only at its own path, so a prefix inside
+# the checkout is never copied into the worker snapshots.
+prefix_excludes=()
+if prefix_physical=$(cd "${PREFIX:-/nonexistent}" 2>/dev/null && pwd -P); then
+    case "$prefix_physical" in
+        "$workspace"/?*)
+            prefix_relative=${prefix_physical#"$workspace"/}
+            prefix_excludes=(--exclude="./$prefix_relative"
+                             --exclude="./$prefix_relative/*")
+            ;;
+    esac
+fi
 if ! (
     cd "$workspace" || exit 1
     tar --exclude='./.git' --exclude='./.git/*' \
         --exclude='./libbacktrace/.git' \
         --exclude='./libbacktrace/.git/*' \
         --exclude='./.lua' --exclude='./.lua/*' \
+        ${prefix_excludes[@]+"${prefix_excludes[@]}"} \
         -cf "$archive" .
 ); then
     echo "could not snapshot the prepared checkout" >&2

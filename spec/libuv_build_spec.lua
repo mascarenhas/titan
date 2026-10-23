@@ -4246,12 +4246,24 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
             local mkdir_ok, mkdir_output = run_argv({
                 "mkdir", "-p", support, bin, temporary_base, state,
                 workspace .. "/.git", workspace .. "/.lua",
+                workspace .. "/.sdk-local/bin",
+                workspace .. "/.sdk-local-sibling",
             })
             assert.truthy(mkdir_ok, mkdir_output)
             write_file(workspace .. "/Makefile", "all:\n\t@true\n")
             write_file(workspace .. "/ordinary", "original\n")
             write_file(workspace .. "/.git/excluded", "git\n")
             write_file(workspace .. "/.lua/excluded", "lua\n")
+            -- The selected SDK lives inside the checkout under an arbitrary
+            -- name and is spelled through a symbolic link; workers still use
+            -- it in place, so the snapshot must omit exactly that tree.
+            write_file(workspace .. "/.sdk-local/bin/excluded", "sdk\n")
+            write_file(workspace .. "/.sdk-local-sibling/kept", "kept\n")
+            local prefix_link = root .. "/sdk-link"
+            local link_ok, link_output = run_argv({
+                "ln", "-s", workspace .. "/.sdk-local", prefix_link,
+            })
+            assert.truthy(link_ok, link_output)
             write_file(support .. "/run_parallel_compiler_tests.sh",
                 read_file("spec/support/run_parallel_compiler_tests.sh"))
 
@@ -4271,7 +4283,8 @@ case "$group" in
 esac
 
 [[ $PWD != "$TITAN_FIXTURE_ORIGINAL" ]] || exit 72
-[[ ! -e .git && ! -e .lua ]] || exit 73
+[[ ! -e .git && ! -e .lua && ! -e .sdk-local ]] || exit 73
+[[ $(cat .sdk-local-sibling/kept) == kept ]] || exit 82
 [[ $(cat ordinary) == original ]] || exit 74
 [[ $MAKEFLAGS == -j1 && $TITAN_JOBS == 1 ]] || exit 75
 case "$BUSTED" in /*) ;; *) exit 76 ;; esac
@@ -4383,6 +4396,7 @@ if [[ ${TITAN_FIXTURE_FAIL_SHARD:-} == "$shard" ]]; then exit 23; fi
                     "-u", "TITAN_FIXTURE_HANG_SHARD",
                     "PATH=" .. bin .. ":" .. assert(os.getenv("PATH")),
                     "BUSTED=busted",
+                    "PREFIX=" .. prefix_link,
                     "TMPDIR=" .. temporary_base,
                     "TITAN_FIXTURE_STATE=" .. state,
                     "TITAN_FIXTURE_ORIGINAL=" .. workspace,
@@ -4480,9 +4494,11 @@ workspace=$1
 state=$2
 temporary_base=$3
 bin=$4
+prefix=$5
 cd "$workspace" || exit 90
 env PATH="$bin:$PATH" \
     BUSTED=busted \
+    PREFIX="$prefix" \
     TMPDIR="$temporary_base" \
     TITAN_ROCK_TEST_JOBS=1 \
     TITAN_FIXTURE_STATE="$state" \
@@ -4524,7 +4540,7 @@ while kill -0 "$descendant" 2>/dev/null; do
     sleep 0.01
 done
 ]==], "titan-parallel-interruption", workspace, state,
-                    temporary_base, bin,
+                    temporary_base, bin, prefix_link,
                 })
             end
 
@@ -5576,6 +5592,8 @@ printf '%s\n' "${schedule[@]}"
                 "[[ ! $jobs =~ ^[1-4]$ ]]",
                 "tar --exclude='./.git'",
                 "--exclude='./.lua'",
+                -- Bash 3.2 rejects an empty "${array[@]}" under set -u.
+                '${prefix_excludes[@]+"${prefix_excludes[@]}"}',
                 'mkfifo "$completion_fifo"',
                 'MAKEFLAGS=-j1',
                 'TITAN_JOBS=1',

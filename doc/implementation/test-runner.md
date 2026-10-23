@@ -407,8 +407,10 @@ least-loaded shard; rebalance it when costs change materially. Busted 2.3 has no
 native sharding. `TITAN_ROCK_TEST_JOBS=1` through `4` selects the number of
 concurrent workers, defaulting to four on Unix and three on Windows. Each worker
 gets `MAKEFLAGS=-j1`, `TITAN_JOBS=1`, and a private `TMPDIR` and ccache scratch,
-and uses the installed SDK read-only. Unix workers base their scratch on the
-caller's `TMPDIR`; Windows
+and uses the installed SDK read-only in place. The worker copies come from one
+snapshot of the prepared checkout that omits `.git`, `libbacktrace/.git`,
+`.lua`, and the selected `PREFIX` when that directory resolves inside the
+checkout. Unix workers base their scratch on the caller's `TMPDIR`; Windows
 workers also get private TEMP/TMP below MSYS2's short `/tmp`, so nested fixture
 paths fit ordinary Win32 filename limits, and run under the native Job Object
 supervisor. Unix launches the shards in manifest order. On Windows the shard
