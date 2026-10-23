@@ -212,10 +212,13 @@ generated field encoder or decoder needs no comparison. The static field type,
 or the declared type's canonical metatable that the decoder is passed, fixes
 the metatable whose bound entry it calls. The reflective `Encoder:field`, whose
 descriptor and candidate can disagree (for example under `serialize_fields`),
-uses the candidate's entry only when it is the same address as the entry bound
-to the descriptor name's registered metatable. It also requires the matching
+selects a generated codec (`find_field_codec`) only when the candidate's
+metatable is the canonical metatable registered under the descriptor's name:
+one Map read and one pointer comparison, since that metatable binds the
+nominal's sole entry. It then reads that entry once and requires the matching
 record or union kind. Otherwise it falls back to reflection, which raises
-`protobuf: record type mismatch` or `protobuf: union type mismatch`.
+`protobuf: record type mismatch`, `protobuf: union type mismatch`, or
+`protobuf: expected a record`/`a union`.
 
 A generated codec *is* the reflective codec specialized to one storage plan,
 sharing one root state with it (`TitanCodecState`): the buffer, the packet

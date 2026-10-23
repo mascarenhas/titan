@@ -434,18 +434,26 @@ function find_generated_codec(candidate: value): foreign const *void
   return ffi.titan_codec_find(L, resources, raw) as foreign const *void
 end
 
--- The codec entry is the nominal's identity tag: the candidate's bound entry
--- must be the very entry bound to the expected nominal's canonical metatable.
+-- The codec entry is the nominal's identity tag, bound to exactly one
+-- canonical metatable per state: the candidate must carry the expected
+-- nominal's canonical metatable, which also selects that nominal's entry.
+-- No stack effects or allocation, and one codec lookup.
 local function find_field_codec(candidate: value, name: string,
     is_union: boolean): foreign const *TitanTransferCodec
   if not generated_codecs_enabled then return nil end
+  local identity? = resource_nominals[name]
+  if identity == nil then return nil end
   local raw: foreign TValue = candidate
+  if ffi.lmacro_ttype(raw) ~= ffi.LUA_TUSERDATA then return nil end
+  local mt = ffi.lmacro_uvalue(raw).metatable
+  if mt == nil then return nil end
+  local actual: foreign TValue = nil
+  ffi.lmacro_sethvalue(L, actual, mt)
+  local expected: value = identity
+  if (actual as value) ~= expected then return nil end
+  local metatable: foreign TValue = expected
   local resources: foreign TValue = resource_codecs as value
-  local codec = ffi.titan_codec_find(L, resources, raw)
-  if codec == nil then return nil end
-  local expected, _ = find_named_codec(name, codec_kind(is_union))
-  if codec ~= expected then return nil end
-  return codec
+  return ffi.titan_codec_find_metatable(L, resources, metatable, codec_kind(is_union))
 end
 
 -- Run a generated decoder; `holder` keeps the decoded bytes alive.
