@@ -1204,3 +1204,97 @@ function test_fs_file_transfer_crosses_states_and_survives_source_shutdown(
                 "cross-state File transfer lost its native owner or bytes")
   end)
 end
+
+local foreign function fs_close_record(cells: *void, slot: int, code: int)
+  local codes = cells as foreign *int
+  codes[slot] = code
+end
+
+local fs_close_parked = false
+local fs_close_unclosed: fs.File? = nil
+
+-- Public only so a fresh independent state can call it; test infrastructure.
+-- Parks a Task whose lexical File close is still pending. Cell codes: 0 the
+-- close never ran, 1 it returned, 2 it raised.
+function fs_close_park_with_open_file(path: string, cells_raw: value)
+  local cells = cells_raw as foreign *void
+  local task = async.run<|nil, value|>(function (): nil
+    local file = fs.open(path, "w")
+    defer do
+      do
+        file:close()
+        fs_close_record(cells, 0, 1)
+      catch
+        fs_close_record(cells, 0, 2)
+      end
+    end
+    file:write("abandoned")
+    fs_close_parked = true
+    async.suspend(async.ResumeToken("File parked at Lua state close"))
+    return nil
+  end)
+  task_support.drive_until(task, function (): boolean return fs_close_parked end)
+end
+
+-- Public only so a fresh independent state can call it; test infrastructure.
+-- Leaves a File that no code closes.
+function fs_close_leave_open_file(path: string)
+  local task = async.run<|nil, value|>(function (): nil
+    fs_close_unclosed = fs.open(path, "w")
+    return nil
+  end)
+  task_support.drive_until(task, function (): boolean return fs_close_unclosed ~= nil end)
+end
+
+-- Linux and macOS list the process's open descriptors in /dev/fd.
+local function fs_close_open_descriptors(): integer?
+  if common.is_windows() then return nil end
+  return #fs.list("/dev/fd")
+end
+
+local function fs_close_child(entry: string, ...: async.TransferValue)
+  local state = transfer_lua.new()
+  defer state:close()
+  state:run([[
+    package.path, package.cpath = '', ''
+    local entry = ...
+    require('fs.tests')[entry](select(2, ...))
+  ]], "=fs-state-close", async.TransferValue.is_string(entry), ...)
+  state:close()
+end
+
+-- A File closes through a libuv request, which a Lua state close cannot await.
+-- Closing the state must still close its descriptor.
+function test_lua_close_closes_open_files(context: test.Context)
+  context:run("parked_task", function (_: test.Context)
+    runtime_test.run(function ()
+      local path = fs.tmpname()
+      support.cleanup_path(context, path)
+      local before? = fs_close_open_descriptors()
+      local cells: owned int[] = foreign int.new_array(1)
+      cells[0] = 0
+      fs_close_child("fs_close_park_with_open_file", async.TransferValue.is_string(path),
+                     async.TransferValue.is_pointer(cells as foreign *void))
+      test.assert((cells[0] as integer) == 1,
+                  "File close during Lua state close gave code " .. (cells[0] as integer))
+      if before ~= nil then
+        test.assert(fs_close_open_descriptors() == before,
+                    "Lua state close leaked the parked Task's File descriptor")
+      end
+      test.assert(fs.read_file(path) == "abandoned", "the abandoned File lost its write")
+    end)
+  end)
+  context:run("unclosed_file", function (_: test.Context)
+    if common.is_windows() then
+      test.skip("platform: open descriptor accounting uses /dev/fd")
+    end
+    runtime_test.run(function ()
+      local path = fs.tmpname()
+      support.cleanup_path(context, path)
+      local before? = fs_close_open_descriptors()
+      fs_close_child("fs_close_leave_open_file", async.TransferValue.is_string(path))
+      test.assert(fs_close_open_descriptors() == before,
+                  "Lua state close leaked an unclosed File descriptor")
+    end)
+  end)
+end

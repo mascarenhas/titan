@@ -186,7 +186,8 @@ TITAN_TEST_SOURCES_lua.tests := spec/stdlib/titan/lua/tests/tests.titan \
 	spec/stdlib/titan/lua/tests/independent_state_transfer_test.titan \
 	spec/stdlib/titan/lua/tests/record_payload_test.titan \
 	spec/stdlib/titan/lua/tests/require_test.titan \
-	spec/stdlib/titan/lua/tests/source_require_test.titan
+	spec/stdlib/titan/lua/tests/source_require_test.titan \
+	spec/stdlib/titan/lua/tests/state_close_test.titan
 TITAN_TEST_IMPORTS_lua.tests := lua.handle_transfer_fixture lua.preload_fixture lua.receiver_fixture lua.test_support lua.transfer_fixture support.async support.common support.runtime
 TITAN_TEST_SOURCES_lua.transfer_fixture := spec/stdlib/titan/lua/transfer_fixture.titan
 TITAN_TEST_IMPORTS_lua.transfer_fixture :=
@@ -250,6 +251,7 @@ TITAN_TEST_SOURCES_sqlite3.tests := spec/stdlib/titan/sqlite3/tests/tests.titan 
 	spec/stdlib/titan/sqlite3/tests/mapping_test.titan \
 	spec/stdlib/titan/sqlite3/tests/query_test.titan \
 	spec/stdlib/titan/sqlite3/tests/transaction_test.titan \
+	spec/stdlib/titan/sqlite3/tests/state_close_test.titan \
 	spec/stdlib/titan/sqlite3/tests/worker_test.titan
 TITAN_TEST_IMPORTS_sqlite3.tests := support.async support.command support.runtime
 
@@ -265,7 +267,8 @@ TITAN_TEST_SOURCES_ssl.tests := spec/stdlib/titan/ssl/tests/tests.titan \
 	spec/stdlib/titan/ssl/tests/error_strings_test.titan \
 	spec/stdlib/titan/ssl/tests/late_write_test.titan \
 	spec/stdlib/titan/ssl/tests/drain_failure_test.titan \
-	spec/stdlib/titan/ssl/tests/transfer_test.titan
+	spec/stdlib/titan/ssl/tests/transfer_test.titan \
+	spec/stdlib/titan/ssl/tests/state_close_test.titan
 TITAN_TEST_IMPORTS_ssl.tests := support.command net.test_support ssl.backpressure_support ssl.test_support support.async support.common support.runtime
 
 TITAN_TEST_SOURCES_string.core_test := spec/stdlib/titan/string/core_test.titan
