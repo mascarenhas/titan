@@ -99,8 +99,8 @@ compilation of the standard provider, and the shared native test build
 (`spec/support/windows_stdlib_tests.sh`). `MAKEFLAGS=-jN` has no effect:
 `Makefile.win` is `.NOTPARALLEL`, and LuaRocks starts its nested Make without
 the jobserver. The Lua, libbacktrace, and bundled OpenSSL builds stay at `-j1`.
-Busted compiler workers each use `TITAN_JOBS=1` under their own
-`TITAN_ROCK_TEST_JOBS` bound.
+Busted compiler workers set their own bounds; see
+[Busted partitions](test-runner.md#busted-partitions).
 
 ## One controlled Lua DLL and its SDK
 

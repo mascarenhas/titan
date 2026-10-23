@@ -4248,6 +4248,8 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
                 workspace .. "/.git", workspace .. "/.lua",
                 workspace .. "/.sdk-local/bin",
                 workspace .. "/.sdk-local-sibling",
+                workspace .. "/sdk[1]", workspace .. "/sdk*",
+                workspace .. "/sdk1",
             })
             assert.truthy(mkdir_ok, mkdir_output)
             write_file(workspace .. "/Makefile", "all:\n\t@true\n")
@@ -4259,6 +4261,11 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
             -- it in place, so the snapshot must omit exactly that tree.
             write_file(workspace .. "/.sdk-local/bin/excluded", "sdk\n")
             write_file(workspace .. "/.sdk-local-sibling/kept", "kept\n")
+            -- Selected SDKs named sdk[1] or sdk* would be tar patterns that
+            -- also match sdk1, so such a prefix is copied and nothing is lost.
+            for _, kept in ipairs({ "sdk[1]", "sdk*", "sdk1" }) do
+                write_file(workspace .. "/" .. kept .. "/kept", "kept\n")
+            end
             local prefix_link = root .. "/sdk-link"
             local link_ok, link_output = run_argv({
                 "ln", "-s", workspace .. "/.sdk-local", prefix_link,
@@ -4283,8 +4290,11 @@ case "$group" in
 esac
 
 [[ $PWD != "$TITAN_FIXTURE_ORIGINAL" ]] || exit 72
-[[ ! -e .git && ! -e .lua && ! -e .sdk-local ]] || exit 73
-[[ $(cat .sdk-local-sibling/kept) == kept ]] || exit 82
+[[ ! -e .git && ! -e .lua ]] || exit 73
+[[ -z ${TITAN_FIXTURE_OMITTED:-} || ! -e $TITAN_FIXTURE_OMITTED ]] || exit 73
+for kept in .sdk-local-sibling 'sdk[1]' 'sdk*' sdk1; do
+    [[ $(cat "$kept/kept" 2>/dev/null) == kept ]] || exit 82
+done
 [[ $(cat ordinary) == original ]] || exit 74
 [[ $MAKEFLAGS == -j1 && $TITAN_JOBS == 1 ]] || exit 75
 case "$BUSTED" in /*) ;; *) exit 76 ;; esac
@@ -4397,6 +4407,7 @@ if [[ ${TITAN_FIXTURE_FAIL_SHARD:-} == "$shard" ]]; then exit 23; fi
                     "PATH=" .. bin .. ":" .. assert(os.getenv("PATH")),
                     "BUSTED=busted",
                     "PREFIX=" .. prefix_link,
+                    "TITAN_FIXTURE_OMITTED=.sdk-local",
                     "TMPDIR=" .. temporary_base,
                     "TITAN_FIXTURE_STATE=" .. state,
                     "TITAN_FIXTURE_ORIGINAL=" .. workspace,
@@ -4499,6 +4510,7 @@ cd "$workspace" || exit 90
 env PATH="$bin:$PATH" \
     BUSTED=busted \
     PREFIX="$prefix" \
+    TITAN_FIXTURE_OMITTED=.sdk-local \
     TMPDIR="$temporary_base" \
     TITAN_ROCK_TEST_JOBS=1 \
     TITAN_FIXTURE_STATE="$state" \
@@ -4553,6 +4565,15 @@ done
             ok, output = run_case(2)
             assert.truthy(ok, output)
             assert_complete_run(2, output)
+
+            for _, patterned in ipairs({ "sdk[1]", "sdk*" }) do
+                ok, output = run_case(nil, nil, {
+                    "PREFIX=" .. workspace .. "/" .. patterned,
+                    "TITAN_FIXTURE_OMITTED=",
+                })
+                assert.truthy(ok, output)
+                assert_complete_run(4, output)
+            end
 
             local why, code
             ok, output, why, code = run_case(nil, 2)

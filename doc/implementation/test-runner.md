@@ -410,8 +410,10 @@ gets `MAKEFLAGS=-j1`, `TITAN_JOBS=1`, and a private `TMPDIR` and ccache scratch,
 and uses the installed SDK read-only in place. The worker copies come from one
 snapshot of the prepared checkout that omits `.git`, `libbacktrace/.git`,
 `.lua`, and the selected `PREFIX` when that directory resolves inside the
-checkout. Unix workers base their scratch on the caller's `TMPDIR`; Windows
-workers also get private TEMP/TMP below MSYS2's short `/tmp`, so nested fixture
+checkout. Tar reads exclusions as patterns, so a prefix whose checkout-relative
+name contains `*`, `?`, `[`, or a backslash is copied instead. Unix workers
+base their scratch on the caller's `TMPDIR`; Windows workers also get private
+TEMP/TMP below MSYS2's short `/tmp`, so nested fixture
 paths fit ordinary Win32 filename limits, and run under the native Job Object
 supervisor. Unix launches the shards in manifest order. On Windows the shard
 containing `spec/coder/parallel_compilation_spec.lua` runs first and alone, so

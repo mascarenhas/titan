@@ -308,14 +308,21 @@ fi
 
 echo "Snapshotting the prepared checkout for four isolated compiler shards"
 # Workers use the selected SDK read-only at its own path, so a prefix inside
-# the checkout is never copied into the worker snapshots.
+# the checkout need not be copied into the worker snapshots. Tar reads an
+# exclusion as a pattern; copy a prefix whose name contains pattern syntax
+# rather than risk omitting some other checkout path.
 prefix_excludes=()
 if prefix_physical=$(cd "${PREFIX:-/nonexistent}" 2>/dev/null && pwd -P); then
     case "$prefix_physical" in
         "$workspace"/?*)
             prefix_relative=${prefix_physical#"$workspace"/}
-            prefix_excludes=(--exclude="./$prefix_relative"
-                             --exclude="./$prefix_relative/*")
+            case "$prefix_relative" in
+                *'*'* | *'?'* | *'['* | *'\'*) ;;
+                *)
+                    prefix_excludes=(--exclude="./$prefix_relative"
+                                     --exclude="./$prefix_relative/*")
+                    ;;
+            esac
             ;;
     esac
 fi
