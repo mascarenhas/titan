@@ -190,8 +190,8 @@ until the after-work callback runs on the event-loop thread. It is intended
 for blocking calls into an external C library. A restricted source
 `foreign function` is permitted because the compiler emits it as an exact C
 callback; its body must remain within the raw-C restrictions below. The
-optional `abandoned` is a C-only release for `arg`, called only when a Lua
-state close abandons the wait; see
+optional `abandoned` (omit it or pass nil) is a C-only release for `arg`,
+called only when a Lua state close abandons the wait; see
 [foreign work at state close](#foreign-work-at-state-close).
 
 The worker performs exactly `f(arg)`. It must not inspect or mutate the
@@ -1991,8 +1991,8 @@ Runtime drains accepted work. Native memory or resources that the caller
 releases itself must not be released in a `defer` around `run_foreign`.
 
 An `owned` argument is safe, because the collector frees it only after that
-drain. For other native state, pass the optional third argument: a C-only
-`abandoned` function, which takes `arg` like `f`. When a Lua state close
+drain. For other native state, pass the optional third argument (omit it or
+pass nil otherwise): a C-only `abandoned` function, which takes `arg` like `f`. When a Lua state close
 abandons the wait, the Runtime calls `abandoned(arg)` on the closing thread
 once every accepted job, including `f(arg)`, has returned. It must not enter
 Lua or Titan code of the closing state. It may block, for example to close an

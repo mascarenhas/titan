@@ -258,7 +258,7 @@ the closing host thread, after the host Runtime's drain has seen the worker
 return. It must not run on the worker. Closing the independent state drains
 that state's own Runtime, which can wait for pool work the state queued, and
 abandoned `run_async` jobs can occupy every pool thread: closing on each
-worker deadlocked with four abandoned jobs and the default pool of four. After
+worker would deadlock once four abandoned jobs occupy the default pool of four. After
 the drain, no abandoned job holds a pool thread. The `LuaCall` that embeds the
 packet, and the strings its packet borrows, outlive the worker and the release:
 `lua_close` frees no object before every finalizer, including the Runtime's,

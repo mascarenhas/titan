@@ -158,10 +158,12 @@ local function Connection:run_cleanup(worker: foreign function (*void): void,
     return
   end
   packet.worker = worker
+  -- Allocate before marking the packet pending: a failure between the mark
+  -- and submission would abandon a packet that no worker owns.
+  local work = CleanupWork(uv.work_t(), packet, nil, 0)
   packet.handoff = 0
   packet.pending = 1
   defer self:abandon_if_pending(packet)
-  local work = CleanupWork(uv.work_t(), packet, nil, 0)
   do
     local result = async.await_cleanup_with<|CleanupWork, nil, integer|>(work, start_cleanup)
     packet.pending = 0
