@@ -103,6 +103,12 @@ Deferred cleanup participates in the same setjmp liveness analysis as any
 finally; see
 [recovery storage](error-handling.md#setjmp-sensitive-localparameter-spills).
 
+Because a defer is a finally, its boundary is marked for abandoned-coroutine
+unwinding: when a suspended coroutine is collected or its state closes, the
+walker lands on it and the deferred statement runs under the unwind guard. See
+[unwinding through finally](error-handling.md#unwinding-through-finally) and
+[unwinding an abandoned coroutine](coroutines.md#unwinding-an-abandoned-coroutine).
+
 ## Tests
 
 * `spec/lexer_spec.lua` and `spec/parser_spec.lua` pin the reserved word, the

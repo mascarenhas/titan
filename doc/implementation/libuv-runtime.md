@@ -792,6 +792,19 @@ preserves shutdown admission, and `driving` makes a recursive `async.loop()` fai
 immediately. It never runs `close_handles`, `Receiver:disable`,
 `ExternalBridge:close`, domain unregister functions, or close listeners.
 
+While `lua_close` runs, `async.run` and `run_with_cleanup` refuse to start a
+Task, before `ensure_runtime` and before creating the root coroutine. They test
+`titan_state_closing` (`titan/ffi.h`, `G(L)->gcstp & GCSTPCLS`) and raise
+`cannot start a Task during Lua state close`. Such a Task could never run:
+the loop is never driven again, and `runtime_finalize` would only report it
+cancelled. Lua also ignores finalizer registrations during close, so the new
+root coroutine's `coro_gc` would never run and its stack mapping would leak,
+and `ensure_runtime` could create a Runtime. An unwinding `defer` that tries it
+gets the error, which is reported as `error in coroutine cleanup (...)`. During
+an ordinary collection, a finalizer, including the unwind of an abandoned
+coroutine, may still start a Task on the active Runtime. That Task runs after
+the finalizer returns.
+
 The finalizer calls public `uv.loop_abandon`, not the ordinary driver. UV clears
 all user callback slots before driving libuv, including callbacks on
 already-closing handles and accepted requests, so no user Lua/Titan callback,

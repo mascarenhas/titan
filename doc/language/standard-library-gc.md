@@ -136,6 +136,15 @@ triggered collection. Keep finalizers to the minimum required to release their
 resource; use explicit operations such as `close` when cleanup must be prompt
 or its failure must be handled directly.
 
+Inside a finalizer, Titan coroutines cannot switch either:
+`coroutine.yield` raises `cannot yield from a finalizer`, `Coroutine:resume`
+and `Coroutine:error` raise `cannot resume a coroutine from a finalizer`, and
+`coroutine.is_yieldable` returns `false`. The same rules apply to the `defer`
+cleanup of a suspended coroutine that is collected, because its finalizer runs
+that cleanup; see
+[abandoned coroutines](coroutines.md#abandoned-coroutines). While a Lua state
+closes, `finalizable` registrations are ignored.
+
 ## Collector actions and queries
 
 ```text

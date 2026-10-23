@@ -148,6 +148,11 @@ earlier error left recorded. If recording the trace of a re-raised or
 propagating error runs out of memory, enclosing `defer` and `catch` blocks
 still run.
 
+A suspended coroutine that is collected, or whose Lua state closes, is
+unwound as if by an error that no `catch` can handle: its `defer` statements
+run, its `catch` blocks do not, and errors raised by that cleanup become Lua
+warnings. See [abandoned coroutines](coroutines.md#abandoned-coroutines).
+
 ## Interacting with Lua
 
 Lua sees Titan errors as normal Lua errors:

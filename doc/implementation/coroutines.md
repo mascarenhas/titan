@@ -365,11 +365,19 @@ freeing live frames.
 coroutine's thread. The floor has status `TITAN_STATUS_FLOOR` and records the
 real bounds of the minicoro stack. Then the shim calls the generated entry.
 
+The landing first restores the saved `nCcalls`, `ci`, `allowhook` and
+`errfunc`, because the jump removed every native frame above the floor; cleanup
+must not inherit their C-call count.
+
 - On an unwind landing, the floor closes the thread's remaining Lua
   to-be-closed variables and pushes `(nil, 2)`.
 - On any other status, a real error escaped `coro_entry`'s catch. The floor
   closes the frames with that error and delivers it to the resumer as
-  `(error, 0)`.
+  `(error, 0)`. It runs that close with itself re-armed as
+  `TITAN_STATUS_FLOOR`, like a finally boundary's
+  [error-recovery close](error-handling.md#unwinding-through-finally): if a
+  `__close` suspends the coroutine and it is then abandoned, the unwind lands
+  on the floor again, the error is dropped, and the coroutine ends unwound.
 
 **Walker.** `titan_unwind` (`titan-runtime/titan.c`) follows `L->errorJmp`.
 When it finds a boundary whose status is `TITAN_STATUS_FINALLY` or
@@ -398,9 +406,15 @@ innermost first.
 Keys are `uintptr_t` addresses, never compared C pointers. Under ASan they are
 normalized with `__asan_addr_is_in_fake_stack`, because GCC can place frames
 that call `setjmp` on the use-after-return fake stack. A missing boundary, a
-missing floor, or a missing resumer aborts with a diagnostic. That can only
-happen when C code breaks the structured-entry invariant, for example by
-re-entering an active ancestor's `lua_State` without `lua_resume`.
+missing floor, or a missing resumer aborts with a diagnostic.
+
+That can only happen when C code breaks the **structured-entry invariant**:
+threads of one state enter one another only through `lua_resume` (Lua's
+`coroutine.resume` and `coroutine.wrap`, or C) or through protected calls on
+their own `lua_State`. C code that re-enters an active ancestor's `lua_State`
+with `lua_call` or `lua_pcall`, or runs another thread's code without a resume
+boundary, is outside the contract, like other unsafe FFI misuse. Independent
+`lua.Lua` states and other OS threads never share a chain.
 
 The crossing assumes downward-growing stacks with contiguous, disjoint
 coroutine mappings. The supported builds select minicoro's ASM backend, or
@@ -420,6 +434,10 @@ error reported before the retry: one Lua warning,
 `error in coroutine cleanup (<msg>)`, and the error is then dropped.
 `L->top` drops to the close level only after the loop succeeds, so the open
 upvalues and pending `<close>` slots of a failed handler stay below the top.
+After every failure, and on return, the loop and the reporter restore
+`L->errfunc` as `luaD_pcall` does: a failed `__close` may have jumped over a
+Titan Lua-entry wrapper that had installed its own message handler in a stack
+slot that the next close method reuses.
 
 ### Finalizer context
 
@@ -434,9 +452,19 @@ set exactly while GCTM runs a `__gc`, during ordinary collections and during
 
 `coro_gc` itself resumes with `ffi.mco_resume` directly.
 
+The collector is stopped (`gcstp != 0`) for the whole finalizer, so an unwind
+allocates without collecting, and a collection request fails: `gc.collect`
+raises ([direct collector control](gc-library.md#direct-collector-control)) and
+Lua's `collectgarbage` returns fail (`nil`). Under ordinary collection, GCTM
+runs at an allocation point of whatever code is running, so an unwind can start
+inside unrelated code and must not assume any program state. That is the
+general Lua finalizer contract, which cleanup inherits.
+
 Async uses the same test in `run_with_cleanup`. Task code runs in a finalizer
 only while it is unwound at Lua-state close; see
 [Lua-state close](libuv-runtime.md#lua-state-close-of-an-unretired-runtime).
+There, `titan_state_closing` (`G(L)->gcstp & GCSTPCLS`) also makes
+`async.run` and `run_with_cleanup` refuse to start a Task.
 
 ## Tests
 
@@ -444,3 +472,23 @@ Coroutine behavior tests run against the canonical combined standard provider.
 Observable Lua-host GC and API-error behavior is in the module-owned native
 suite; generated-C, transfer-rooting, and Lua-API mechanics stay with the
 compiler and native harness specs.
+
+Unwinding has three layers:
+
+- `spec/stdlib/titan/coroutine/tests/unwind_test.titan` holds the native
+  `test_unwind_*` cases. Native-only cases collect with `gc.collect()`. Lua
+  interleaving and crossing cases run their Lua code in a child `lua.Lua`
+  state, once with collections and once with `state:close()`. The log and the
+  child's Lua warnings go to host-owned buffers through
+  `coroutine.test_support`, and a Lua `__gc` observer created before the
+  abandoned coroutine records thread statuses after the unwind.
+- `spec/coder/error_handling_spec.lua` ("unwind boundaries") checks the
+  generated markers, landings, re-armed recovery close and dispatch, and unwinds
+  a try that has both a catch and a finally.
+- `spec/minicoro_spec.lua` drives `titan_coroutine_enter` from a C entry: an
+  escaped error, an unwind, and an unwind of a coroutine suspended in the
+  floor's error-recovery close. No Titan program can make an error escape
+  `coro_entry`'s catch.
+
+Async, thread and transfer consequences are covered by `test_lua_close_*` and
+`test_unwind_*` cases in their own owners.

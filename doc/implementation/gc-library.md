@@ -116,6 +116,15 @@ wrappers do this. The gc native tests check that a `value` registration
 installs the passed closure itself as `__gc`, and the thread ownership tests
 check that every endpoint construction route leaves one shared `__gc` identity.
 
+A finalizer runs with `GCSTPGC` set in `G(L)->gcstp`, and that bit is what
+Titan coroutine operations test: inside any finalizer, `yield`, `resume` and
+`error` raise and `is_yieldable` returns false. A suspended coroutine's own
+finalizer unwinds its stack, so `defer` cleanup in an abandoned coroutine runs
+under these rules too ([finalizer context](coroutines.md#finalizer-context)).
+During `lua_close`, `GCSTPCLS` is also set: Lua then ignores new finalizer
+registrations, so a `finalizable` call made by cleanup at state close installs a
+`__gc` that never runs.
+
 ## Direct collector control
 
 Collector operations call the public variadic `lua_gc` API directly. These

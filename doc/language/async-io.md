@@ -1920,8 +1920,8 @@ The low-level operation is
 
 Before then, every unfinished Task is
 [unwound](coroutines.md#abandoned-coroutines) where it is suspended. Its
-`defer` and `finally` blocks run innermost first, inside a finalizer, and a
-parked wait is withdrawn by its own cleanup before the stack is released (see
+`defer` statements run innermost first, inside a finalizer, and a parked wait
+is withdrawn by its own cleanup before the stack is released (see
 **State close** under [external waits](#external-waits)). Tasks blocked in
 [`thread` channel operations](standard-library-thread.md#sending-and-receiving)
 or `Thread:join()` are withdrawn this way, so channels and threads shared with
@@ -1929,8 +1929,15 @@ other states stay usable. The cleanup of `run_with_cleanup` then runs with the
 Task's cancellation reason, or
 `simple("async Runtime abandoned at Lua state close")` when there was none. In
 that context an `await`, a yield, or a resume raises, and the error is reported
-as a Lua warning, as is any other error a cleanup raises. Cleanup must not
-start Tasks or Runtimes.
+as a Lua warning, as is any other error a cleanup raises.
+
+Cleanup cannot start Tasks during state close: `async.run` and
+`run_with_cleanup` raise `cannot start a Task during Lua state close`, which
+the unwind reports as a warning before it continues. Disposal that must
+survive state close has to be synchronous. Handing disposal to `async.run` from
+a `defer` works only while an ordinary collection unwinds an abandoned
+coroutine and a Runtime is active; that Task runs after the rest of the
+unwind.
 
 The unfinished Tasks of that Runtime do not resume and do not call their
 terminal listeners, but most of them still become terminal. Lua runs finalizers

@@ -231,26 +231,53 @@ suspended coroutine.
 Unwinding behaves like an error that nothing can catch, raised at the point
 where the coroutine stopped:
 
-- `defer` and `finally` blocks run innermost first, across every coroutine of
-  a stacked chain;
-- Lua to-be-closed variables (`local x <close>`) in Lua frames on those stacks
-  are closed, with no error value;
-- `catch` blocks and Lua `pcall` do not intercept it.
+- `defer` statements and generic-`for` close functions run, innermost first;
+- Lua to-be-closed variables (`local x <close>`) in Lua frames on the stack
+  are closed, and their `__close` receives no error value;
+- `catch` blocks do not run, and Lua `pcall`, `xpcall` and `coroutine.resume`
+  do not return;
+- the rest of a `defer` body that was itself suspended is skipped.
 
-The unwound coroutine then reports `"dead"`. A coroutine that never started has
-no frames, so nothing runs.
+The coroutine then reports `"dead"`. Further rules:
+
+- A tagged-yield chain is unwound from its innermost coroutine outward, and
+  every member becomes `"dead"`.
+- Genuine Lua coroutines running inside the coroutine (resumed with
+  `coroutine.resume` or `coroutine.wrap`) are closed after their own cleanup
+  and become `"dead"`.
+- A coroutine that suspended inside a Lua `__close` method called while an
+  error was being handled still runs the `defer` statements that were waiting
+  for that error, and the error is dropped.
+- A coroutine that never started has no frames, so nothing runs. A coroutine
+  that is running when its Lua state closes (the state was closed from inside
+  it) is not unwound.
 
 Cleanup that runs during unwinding runs inside a Lua finalizer, so:
 
 - `coroutine.yield` raises `cannot yield from a finalizer`;
 - `resume` and `error` raise `cannot resume a coroutine from a finalizer`;
-- `is_yieldable()` returns `false`.
+- `is_yieldable()` returns `false`;
+- the collector is stopped: `gc.collect` raises and `collectgarbage` returns
+  fail;
+- under ordinary collection, cleanup runs at whatever allocation triggered the
+  collection, inside unrelated code, so it must not assume any program state;
+- at state close, objects created after the coroutine may already be
+  finalized, and `gc.finalizable` registrations are ignored.
 
-An error raised by a `defer` or `finally` block, or by a `__close` metamethod,
-is reported as a Lua warning, `error in coroutine cleanup (<message>)`. The
-rest of the unwind continues. Lua's general finalizer rules apply: cleanup may
-observe objects that were already finalized, and it must not resurrect the
-coroutine for further use. A resurrected handle reports `"dead"`.
+An error raised by a `defer` statement or by a `__close` metamethod is reported
+as a Lua warning, `error in coroutine cleanup (<message>)`, and dropped. The
+rest of the unwind continues, and later `__close` methods still receive no
+error value. Warnings are off by default in the stand-alone `lua`
+interpreter; enable them with `-W` or `warn("@on")`. Lua's general finalizer
+rules apply: cleanup must not resurrect the coroutine for further use. A
+resurrected handle reports `"dead"`.
+
+Cleanup that must also run at state close has to be synchronous. A `defer` can
+hand slower disposal to `async.run` only while an ordinary collection unwinds
+the coroutine and an `async` Runtime is active; the new Task then runs after
+the rest of the unwind. While the Lua state closes, `async.run` raises
+`cannot start a Task during Lua state close`, which the unwind reports as a
+cleanup warning.
 
 When an `async` Runtime's Lua state closes, its unfinished Tasks are unwound
 the same way; see

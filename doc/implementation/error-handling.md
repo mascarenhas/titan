@@ -279,11 +279,12 @@ vendored into `titan-runtime/titan.h` from `ldo.c`. `boundary_save` and
 4. restore `L->errorJmp` and `L->nCcalls` on every exit from the protected
    block;
 5. on error, restore `ci` and `allowhook`, restore the saved `errfunc`, run
-   `luaD_closeprotected`, move the error object to the saved top with
-   `luaD_seterrorobj`, recompute `_base` from `_base_off`, snapshot the error
-   and trace into reserved slots, clear the registry trace and pin, restore
-   `L->top.p` to `_base + TITAN_RESERVED_NSLOTS`, and reload setjmp-sensitive
-   spills.
+   `luaD_closeprotected` (for a try with a finally, under the re-armed boundary
+   of [suspension during error recovery](#unwinding-through-finally)), move the
+   error object to the saved top with `luaD_seterrorobj`, recompute `_base`
+   from `_base_off`, snapshot the error and trace into reserved slots, clear the
+   registry trace and pin, restore `L->top.p` to
+   `_base + TITAN_RESERVED_NSLOTS`, and reload setjmp-sensitive spills.
 
 The saved `errfunc` is restored before `luaD_closeprotected` because the
 longjmp may have skipped an inner Titan Lua-entry wrapper before that wrapper
@@ -306,8 +307,9 @@ body allocates, calls, or raises.
 ### Pending actions for finally
 
 A try with finally has a discriminator whose values are the Lua string
-constants `PA_NONE`, `PA_RETURN`, `PA_BREAK`, and `PA_RAISE` (`"0"`..`"3"`) in
-`coder/statements.lua`, emitted as C integer literals.
+constants `PA_NONE`, `PA_RETURN`, `PA_BREAK`, `PA_RAISE`, and `PA_UNWIND`
+(`"0"`..`"4"`) in `coder/statements.lua`, emitted as C integer literals.
+`PA_UNWIND` belongs to [unwinding through finally](#unwinding-through-finally).
 
 Body or catch fallthrough leaves `PA_NONE`. A `return` or `break` inside a
 finally-protected body or catch does not use `longjmp`; it saves any return
@@ -357,12 +359,34 @@ boundary state, reports the error, closes the frames the body entered, and
 continues the unwind. After a normal finish, the dispatch arm for `PA_UNWIND`
 unlinks the guard and calls `titan_unwind`, which never returns.
 
+**Suspension during error recovery.** A `__close` metamethod that the ordinary
+error recovery calls may suspend the coroutine with a Titan `yield`: Lua's
+`luaD_closeprotected` calls it through `luaD_callnoyield`, which refuses only a
+Lua yield. While that close runs, the try's finally has not started yet. So for
+a boundary of a try with a finally, the recovery re-arms the boundary first:
+
+1. it keeps the caught status in a `volatile` local and relinks `_lj_<id>` with
+   `TITAN_STATUS_FINALLY`;
+2. it runs `luaD_closeprotected` under another `TITAN_SETJMP` call site on the
+   same buffer, then unlinks the boundary again.
+
+`luaD_closeprotected` catches every error raised by a `__close` itself, so only
+the walker can jump to the re-armed boundary. That happens when the coroutine
+is abandoned while suspended in the close. The jump arrives with
+`TITAN_STATUS_UNWIND` and takes the landing above: the caught error is dropped,
+the rest of the close method and the catch never run, and the pending finally
+runs exactly once. If the coroutine is resumed instead, the close finishes and
+the ordinary recovery continues. The coroutine floor re-arms itself the same way
+around the close of an error that escaped the entry
+([Coroutines](coroutines.md#unwinding-an-abandoned-coroutine)).
+
 Every try with a finally declares its boundary locals at try scope, because the
 guard must outlive `$CFINALLY` and `$DISPATCH`. The guard's close level is the
 reserved top the landing established, `_base_off + TITAN_RESERVED_NSLOTS`
 slots. `_base_off` is written once at function entry, so it is well defined
-after the jump. The landing reads only what an error landing reads, so the
-setjmp spill analysis below needs no change.
+after the jump. The landings and the re-armed close read only what an error
+landing reads, and no Titan code runs between the re-arming `TITAN_SETJMP` and
+a jump to it, so the setjmp spill analysis below needs no change.
 
 ### Boundary restoration on generated `goto`
 
@@ -513,8 +537,13 @@ from silently loading stale build artifacts.
 * `spec/coder/error_handling_spec.lua`: catch, fresh raise versus re-raise,
   trace clearing, pending actions, finally override, nested finally order,
   sustained-OOM catch/defer recovery across functions, closures, and module
-  initializers, GC-valued pending returns (including flexible tails), and
-  standalone uncaught-error reporting.
+  initializers, GC-valued pending returns (including flexible tails),
+  standalone uncaught-error reporting, and the generated unwind boundaries
+  (markers, landings, re-armed recovery close, a grafted catch-plus-finally
+  try unwound through its catch boundary).
+* `spec/stdlib/titan/coroutine/tests/unwind_test.titan` (`test_unwind_*`):
+  unwinding behavior, including a coroutine abandoned while suspended in an
+  error-recovery `__close`.
 * `spec/coder/stack_relocation_spec.lua`: stack relocation through protected
   recovery.
 * `spec/abi_spec.lua`: runtime/compiler ABI constants.
