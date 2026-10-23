@@ -1443,13 +1443,34 @@ function yield()
   coroutine.yield(YIELD_TAG, ASYNC_TAG)
 end
 
-local function start_suspend(done: Completion<|ResumeToken, value, value|>, number: integer): uv.req_t?
-  local token = done:context(number)
-  local task = done.task
+-- Registration accepted this explicit suspension: only now does its token
+-- authorize a wake.
+local function publish_suspension(task: Task, token: ResumeToken)
   task.suspended = true
   task.resume_token = token
   task.resume_pending = false
+end
+
+local function start_suspend(done: Completion<|ResumeToken, value, value|>, number: integer): uv.req_t?
+  publish_suspension(done.task, done:context(number))
   return nil
+end
+
+-- One explicit suspension whose registrar `start` publishes its token through
+-- publish_suspension. The token remains unpublished until registration accepts
+-- this suspension: even a finalizer during Completion construction must see a
+-- wrong-time resume as a mismatch. Rejection and setup errors clear the
+-- staged action.
+local function suspend_with<|C|>(context: C, cancel_action: SuspendCancelAction?,
+    start: function (Completion<|C, value, value|>, integer): (uv.req_t?))
+  local task = running()
+  task.suspend_cancel = cancel_action
+  defer clear_suspension(task)
+  local result = await_with<|C, value, value|>(context, start)
+  case result
+  when error(failure) then raise failure
+  else
+  end
 end
 
 --- Suspend the current Task for explicit token-authorized coordination.
@@ -1457,17 +1478,7 @@ end
 -- @param cancel_action Optional nonyielding, nonraising action detaching the exact waiter on cancellation.
 -- @usage async-io.md
 function suspend(token: ResumeToken, cancel_action: (function (): ())?)
-  local task = running()
-  -- The token remains unpublished until registration accepts this suspension.
-  -- Even a finalizer during Completion construction must see a wrong-time
-  -- resume as a mismatch. Rejection and setup errors clear the staged action.
-  task.suspend_cancel = cancel_action
-  defer clear_suspension(task)
-  local result = await_with<|ResumeToken, value, value|>(token, start_suspend)
-  case result
-  when error(failure) then raise failure
-  else
-  end
+  suspend_with<|ResumeToken|>(token, cancel_action, start_suspend)
 end
 
 -- During lua_close no Task can ever run, and the new coroutine's finalizer
@@ -4841,7 +4852,8 @@ local function Receiver:wake()
   local task? = reader.task
   -- Only a reader suspended on its token needs a wake. A running reader, for
   -- example one whose decode hook or finalizer closes this Receiver, rechecks
-  -- the slot itself; Task:resume coalesces repeated wakes before delivery.
+  -- the slot itself, and the registration of its next suspension rechecks a
+  -- close (start_reader_suspend); Task:resume coalesces repeated wakes.
   if task == nil or task.resume_token ~= reader.token then return end
   task:resume(reader.token)
 end
@@ -4930,6 +4942,18 @@ local function Receiver:create_reader(): ReceiverReader
   return reader
 end
 
+-- Publish the reader's token, then recheck close (issue #280). A finalizer
+-- that ran after the empty take and before publication, in the reader or in
+-- the driver, may already have closed this Receiver while its wake found no
+-- suspended reader. Settle at once; the reader's next turn raises.
+-- Implementation notes: doc/implementation/libuv-runtime.md#cross-state-receiver-ownership
+local function start_reader_suspend(done: Completion<|Receiver, value, value|>, number: integer): uv.req_t?
+  local receiver = done:context(number)
+  publish_suspension(done.task, receiver.reader.token)
+  if receiver.native.closed ~= 0 then done:resolve(number, nil) end
+  return nil
+end
+
 --- Reserve the sole reader and consume/decode the latest value, waiting if needed.
 -- Cancellation withdraws only the reservation, leaving an unread packet intact.
 -- Decode failures consume the packet and raise here; no lazy retry is possible.
@@ -4959,7 +4983,7 @@ function Receiver:wait(): value
     -- A stale/coalesced notification may have no packet. Suspend under the same
     -- reservation: send between the check and registration leaves the UV async
     -- notification pending until this Task has yielded.
-    suspend(reader.token, reader.withdraw)
+    suspend_with<|Receiver|>(self, reader.withdraw, start_reader_suspend)
   end
 end
 

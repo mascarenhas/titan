@@ -237,11 +237,18 @@ every foreign-callback mistake or memory failure.
 
 ## Explicit suspend, Task status, listeners, and combinators
 
-`SuspendCancelAction` is `function (): ()`. `suspend` uses its `ResumeToken` as
-Completion context and the named registrar `start_suspend`. It stages the
-cancel action first; `start_suspend` publishes the token only after admission,
-so even a GC finalizer during cell setup sees a wrong-time resume as a
-mismatch. A `defer` clears the staged state if construction or admission fails.
+`SuspendCancelAction` is `function (): ()`. `suspend` runs the private
+`suspend_with` with its `ResumeToken` as Completion context and the named
+registrar `start_suspend`. `suspend_with` stages the cancel action first; the
+registrar publishes the token (`publish_suspension`) only after admission, so
+even a GC finalizer during cell setup sees a wrong-time resume as a mismatch.
+A `defer` clears the staged state if construction or admission fails. The
+interval before publication contains GC safepoints, in the suspending Task
+and in the driver, so a finalizer can close a domain while its waiter cannot
+yet be resumed. A domain that finalizers may close therefore passes its own
+context and registrar to `suspend_with`. After publishing, that registrar
+rechecks the domain's condition and settles inline when it already holds, as
+the [Receiver](#cross-state-receiver-ownership) does for close.
 `Task:resume` checks token identity before any finished/pending shortcut, so
 equal source strings never authorize a different token. Matching pending wakes
 coalesce through `resume_pending`, which is set only after `enqueue_ready`
@@ -576,7 +583,7 @@ follows a remote GC pointer or enters the destination Lua state.
 - **Wake (`Receiver:wake`).** The `uv.async_t` callback copies and decodes
   nothing. It returns unless a reader is reserved **and** that Task is
   suspended on the reader's token (`task.resume_token == reader.token`, which
-  `start_suspend` publishes and delivery clears), then calls
+  `start_reader_suspend` publishes and delivery clears), then calls
   `task:resume(reader.token)`; `Task:resume` coalesces repeated wakes through
   `resume_pending`, so the reader keeps no notified flag of its own. A running
   reader is never resumed. In particular, when a decode hook, or a finalizer run
@@ -584,7 +591,9 @@ follows a remote GC pointer or enters the destination Lua state.
   first-pass packet, `close()`'s wake is a no-op: `wait` returns the value it
   already took, and its next call raises `"receiver is closed"`. The packet stays
   in the native slot, including while the reader's wake is queued, until
-  `wait()` takes it.
+  `wait()` takes it. A close between an empty take and the publication of the
+  token, from a finalizer in the reader or in the driver, finds no suspended
+  reader either; the registration below catches it.
 - **Wait (`Receiver:wait`, `receiver_take_native`).** `wait()` requires a
   running Task and rejects a second reader with
   `"receiver already has a waiting reader"`. It reserves `reader.task`
@@ -597,10 +606,15 @@ follows a remote GC pointer or enters the destination Lua state.
   `transfer.decode_message(raw)` under the
   [consuming raw-slot decode contract](transfer-library.md#consuming-raw-slot-decode);
   decode errors consume the packet and raise from `wait()` with no retry, and
-  nil and false are ordinary data. On `0` it calls
-  `suspend(reader.token, reader.withdraw)`. A send between the empty check and
-  `suspend` leaves a pending `uv_async_send` whose callback runs only after the
-  reader has yielded with its token published.
+  nil and false are ordinary data. On `0` it suspends through
+  `suspend_with(self, reader.withdraw, start_reader_suspend)`. That registrar
+  publishes the reader's token and then rechecks the native `closed` flag,
+  which `close()` and Runtime shutdown set before waking: if it is set, the
+  registrar resolves the suspension inline and the next turn raises
+  `"receiver is closed"`, so a close before publication still ends the wait.
+  A send between the empty check and the registration leaves a pending
+  `uv_async_send` whose callback runs only after the reader has yielded with
+  its token published.
 - **Cancellation.** `Task:cancel` runs `withdraw` only while the reserving Task
   is suspended under it, so the reservation it clears is that Task's. An unread
   packet stays in the slot. The cancelled reader unwinds later through its

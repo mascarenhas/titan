@@ -590,3 +590,78 @@ function test_receiver_decode_may_close_its_receiver(context: test.Context)
     receiver_close_during_first_pass_decode(true)
   end)
 end
+
+-- Issue #280: a finalizer closes the Receiver after the reader's empty slot
+-- take and before registration publishes its token, so close finds no
+-- suspended reader to wake. In generational mode with a zero minor multiplier
+-- and no major collections, every GC safepoint runs a young collection and
+-- all pending finalizers, so this self-renewing probe runs at each one. Once
+-- the reader Task has run, the probe closes the Receiver at the first
+-- safepoint where that Task is still `running` but not current: the driver
+-- after the reader yielded its suspension and before registration.
+record ReceiverSuspendCloseProbe
+  receiver: async.Receiver
+  reader: async.Task?
+  reader_ran: boolean
+  fired: boolean
+end
+
+local receiver_suspend_close_probe: ReceiverSuspendCloseProbe? = nil
+
+local function receiver_suspend_close_fire(_: value)
+  local probe? = receiver_suspend_close_probe
+  if probe == nil or probe.fired then return end
+  local reader? = probe.reader
+  if reader ~= nil then
+    local current: async.Task? = nil
+    do current = async.running() catch end
+    if current == reader then
+      probe.reader_ran = true
+    elseif current == nil and probe.reader_ran and
+        reader:status():as_string() == "running" then
+      probe.fired = true
+      probe.receiver:close()
+      return
+    end
+  end
+  local sentinel: {string: value} = {}
+  receiver_gc.finalizable<|value|>(sentinel, receiver_suspend_close_fire)
+end
+
+function test_receiver_close_before_reader_suspends_wakes_reader(_: test.Context)
+  runtime_test.run(function ()
+    local receiver = async.receiver()
+    defer receiver:close()
+    local probe = ReceiverSuspendCloseProbe(receiver, nil, false, false)
+    local was_generational = receiver_gc.generational()
+    local minormul = receiver_gc.minormul(0)
+    local minormajor = receiver_gc.minormajor(0)
+    defer do
+      receiver_gc.minormul(minormul)
+      receiver_gc.minormajor(minormajor)
+      if not was_generational then receiver_gc.incremental() end
+    end
+    receiver_suspend_close_probe = probe
+    defer receiver_suspend_close_probe = nil
+    local reader = async.run<|value, value|>(function (): value
+      return receiver:wait()
+    catch
+      return error
+    end)
+    task_support.cleanup_task(reader, "Receiver reader closed before suspension cleanup")
+    probe.reader = reader
+    -- Arm the first sentinel, while the reader Task has not started yet, and
+    -- run one young collection so that the zero minor debt takes effect.
+    receiver_suspend_close_fire(nil)
+    receiver_gc.step(0)
+    for _ = 1, 100 do
+      if reader:status():has_finished() then break end
+      timer.yield()
+    end
+    test.assert(probe.fired, "the probe never closed the Receiver before registration")
+    local finished, result? = reader:status():has_succeeded()
+    test.assert(finished and result == "receiver is closed",
+      "a Receiver closed before its reader's registration left the reader " ..
+      reader:status():as_string())
+  end)
+end
