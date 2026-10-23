@@ -332,6 +332,38 @@ raise from the finally abandons it. The flexible-tail frame owns bounded typed
 backing and, for GC-bearing elements, a parallel traced stack range that stays
 live throughout the finally body and any inside-out frame copy.
 
+### Unwinding through finally
+
+An abandoned suspended coroutine is unwound by its finalizer
+([Coroutines](coroutines.md#unwinding-an-abandoned-coroutine)). For that walk,
+`boundary_save` initializes the `lua_longjmp.status` of each boundary of a try
+with a finally to `TITAN_STATUS_FINALLY` instead of `LUA_OK`. Those are the body
+boundary and the catch boundary `<id>c`. Catch-only boundaries keep `LUA_OK`, and
+the walker skips them. On the normal path the only change is the constant, which
+`boundary_recover_open` also compares against.
+
+When the walker lands with `TITAN_STATUS_UNWIND`, the recovery arm:
+
+1. restores `ci`, `allowhook` and `errfunc`;
+2. closes the Lua frames above the boundary with `titan_unwind_close`, so each
+   `__close` gets no error value and each failure becomes one warning;
+3. restores `_base`, the reserved top and the setjmp spills;
+4. skips any catch and sets `PA_UNWIND`.
+
+The finally body then runs under a guard. The guard reuses the try-scope
+`_lj_<id>`, which is already unlinked, through a second `TITAN_SETJMP` call
+site. If an error escapes the body, `titan_unwind_guard_failed` restores the
+boundary state, reports the error, closes the frames the body entered, and
+continues the unwind. After a normal finish, the dispatch arm for `PA_UNWIND`
+unlinks the guard and calls `titan_unwind`, which never returns.
+
+Every try with a finally declares its boundary locals at try scope, because the
+guard must outlive `$CFINALLY` and `$DISPATCH`. The guard's close level is the
+reserved top the landing established, `_base_off + TITAN_RESERVED_NSLOTS`
+slots. `_base_off` is written once at function entry, so it is well defined
+after the jump. The landing reads only what an error landing reads, so the
+setjmp spill analysis below needs no change.
+
 ### Boundary restoration on generated `goto`
 
 The main footgun is a `goto` to a finally label that exits the C lexical scope

@@ -157,16 +157,32 @@ The live values are held in ordinary Lua roots:
   the Titan formal parameters whose C stack frames minicoro suspends.
 
 There is no registry pin for coroutine handles. A reachable coroutine stays
-alive through ordinary reachability: the `Coroutine` record roots the owner,
-the owner roots the child thread and callback, and nested `resume`/`yield`
-chains keep their outer frames suspended instead of unwinding them.
+alive through ordinary reachability. The `Coroutine` record roots the owner, and
+the owner roots the child thread and callback. Nested `resume`/`yield` chains
+keep their outer frames suspended instead of unwinding them.
 
-If the suspended handler of a stacked tagged-yield chain becomes unreachable,
-its finalizer calls `mco_destroy`. Minicoro then abandons the skipped chain
-without running user code: it clears the handler's `stacked_co`, marks the
-stacked inner coroutines dead, and unlinks their raw `prev_co` pointers so
-their later finalizers can destroy them safely. This is cleanup for unreachable
-coroutines, not cancellation for reachable ones.
+### Reachability of a stacked chain
+
+`Coroutine:resume` and `Coroutine:error` copy `self` into a GC-typed local
+(`resumed`) before the switch and clear it afterwards. That local occupies a
+reserved slot of the resuming frame. `self` itself is an unanchored native
+formal ([values and GC](values-and-gc.md#2-home-roots-shadow-slots-and-borrowed-c-copies)).
+Without the local, a receiver read from a mutable field or captured local
+could be cleared by other code while the resumer is suspended in a stacked
+chain, and the stacked member's Lua thread would then be freed under its
+suspended frames.
+
+With the local, the handler's thread roots its resume frame. That frame roots
+the next member, and so on down the chain, including through a resume made on
+a Lua coroutine thread, because that thread is itself rooted by its resumer's
+frame. A stacked member is therefore unreachable only when its handler's owner
+is unreachable too.
+
+An unreachable suspended coroutine is unwound by its finalizer, as described
+under [Unwinding an abandoned coroutine](#unwinding-an-abandoned-coroutine).
+This is cleanup for unreachable coroutines, not cancellation for reachable ones.
+
+### Transfer storage
 
 Transfer uses minicoro storage. `push_transfer` pushes the payload `TValue` and
 then the `ok` flag with `mco_push`, spelling the `value -> TValue` copy
@@ -309,28 +325,118 @@ described above.
   ASM and UCONTEXT backends; the Fiber backend remains for Windows and
   Emscripten but cannot be exercised on a native Linux toolchain.
 
-## Suspended-stack teardown hook
+## Unwinding an abandoned coroutine
 
-`coro_gc` destroys the coroutine's whole C stack. A dead coroutine has no live
-frames, but a suspended one may still own automatic C storage that a native
-domain borrows, such as a thread channel waiter linked into a channel queue.
-Before `mco_destroy` releases a coroutine whose `mco_status` is
-`MCO_SUSPENDED`, `coro_gc` reads the private registry slot
-`"titan.coroutine.teardown"` and, when it holds a function, calls it with the
-coroutine's `Coroutine` record (owner uservalue 6). A `STACKED` inner
-coroutine is not reported: `mco_destroy` refuses it and leaves its stack
-mapped, and its suspended handler, which owns the chain, is reported instead.
-The slot is not public API. `titan/async.titan` installs it when the module
-initializes, and the same literal appears in both modules.
+`coro_gc` (`titan/coroutine.titan`) is the coroutine owner's `__gc`. A dead
+coroutine, or one that never started, is destroyed at once. A started coroutine
+whose status is `MCO_SUSPENDED` or `MCO_STACKED` is first **unwound**, as if an
+error that nothing can catch were raised where it stopped. "Started" means the
+coroutine's Lua thread still has an error-recovery boundary, because the floor
+below stays linked while the entry runs.
 
-The hook must not raise or yield. If it raises anyway, `coro_gc` catches the
-error and returns without calling `mco_destroy`: a withdrawal that may have
-failed halfway leaks the stack rather than release memory that a native queue
-could still link. The async hook withdraws the waits parked on the finalized
-coroutine, all of them at once when it detects `lua_close`, and otherwise
-returns after a read-only scan; see
+**Driving a chain.** The handler is the coroutine itself when it is
+`SUSPENDED`. Otherwise it is the first `prev_co` ancestor that is `SUSPENDED`.
+`coro_gc` pushes the transfer `(nil, TRANSFER_UNWIND)` onto
+`transfer_source(handler)` and resumes the handler with a nil tag.
+
+Minicoro switches into the deepest stacked coroutine. Its
+`pop_transfer_or_raise` sees flag 2 and calls `titan_unwind(L)`. Each coroutine
+then:
+
+1. runs its finallies, innermost first;
+2. reaches its floor, which pushes `(nil, 2)` and returns, so `_mco_main` marks
+   it `MCO_DEAD` and jumps out to its resumer;
+3. leaves its resumer's `resume_result_or_raise` to pop that flag and unwind
+   its own stack in turn.
+
+When the handler finishes, `coro_gc` discards the handler's final transfer,
+destroys the finalized coroutine, and clears both the payload slot and
+`Coroutine.handle` (owner uservalue 6). A resurrected handle then reports
+`"dead"`, and `resume` raises `Invalid coroutine`.
+
+`coro_gc` leaves a coroutine mapped, which leaks it, in two cases: when it is
+still `RUNNING` or `NORMAL` because the state is closed from inside a
+coroutine, and when the request could not be delivered. That is safer than
+freeing live frames.
+
+**Floor.** The restricted trampoline calls `titan_coroutine_enter`
+(`titan-runtime/minicoro.c`), a narrow C shim. It links a
+`titan_unwind_floor` (`titan-runtime/titan.h`) as the first boundary of the
+coroutine's thread. The floor has status `TITAN_STATUS_FLOOR` and records the
+real bounds of the minicoro stack. Then the shim calls the generated entry.
+
+- On an unwind landing, the floor closes the thread's remaining Lua
+  to-be-closed variables and pushes `(nil, 2)`.
+- On any other status, a real error escaped `coro_entry`'s catch. The floor
+  closes the frames with that error and delivers it to the resumer as
+  `(error, 0)`.
+
+**Walker.** `titan_unwind` (`titan-runtime/titan.c`) follows `L->errorJmp`.
+When it finds a boundary whose status is `TITAN_STATUS_FINALLY` or
+`TITAN_STATUS_FLOOR`, it sets `TITAN_STATUS_UNWIND` and `longjmp`s there. It
+skips everything else: catch-only Titan boundaries, Lua `pcall`/`load`, and
+`lua_resume`. Lua writes a boundary's status only in `luaD_throw`, right before
+jumping, so the marker is never overwritten while the boundary is live. The
+generated landing is described under
+[unwinding through finally](error-handling.md#unwinding-through-finally).
+
+**Crossings.** A thread whose chain holds no landing point is a genuine Lua
+coroutine resumed on this stack. `titan_unwind_cross` handles it in four steps:
+
+1. Select the floor whose recorded range contains the real-stack key of the
+   thread's outermost boundary. It scans `G(L)->allgc`, which also links the
+   main thread.
+2. Choose the resumer: the thread whose head has the nearest key above that
+   position, inside the floor's range.
+3. Close the exhausted thread as dead. This mirrors `resetCI`, closes every
+   remaining `<close>` variable, empties the stack, and resets `nCcalls`.
+4. Continue walking the resumer's chain.
+
+Each crossing repeats this, so any chain of nested `lua_resume` calls unwinds
+innermost first.
+
+Keys are `uintptr_t` addresses, never compared C pointers. Under ASan they are
+normalized with `__asan_addr_is_in_fake_stack`, because GCC can place frames
+that call `setjmp` on the use-after-return fake stack. A missing boundary, a
+missing floor, or a missing resumer aborts with a diagnostic. That can only
+happen when C code breaks the structured-entry invariant, for example by
+re-entering an active ancestor's `lua_State` without `lua_resume`.
+
+The crossing assumes downward-growing stacks with contiguous, disjoint
+coroutine mappings. The supported builds select minicoro's ASM backend, or
+UCONTEXT on request. With `MCO_USE_FIBERS`, the recorded bounds come from
+minicoro's reverse-engineered Fiber layout and from the requested stack size.
+That backend is not validated.
+
+**Errors.** Every unwind close site uses `titan_unwind_close`:
+
+- landings;
+- the floor;
+- crossings;
+- the guard of a finally body.
+
+It is `luaD_closeprotected`'s loop, with the status kept at `LUA_OK` and each
+error reported before the retry: one Lua warning,
+`error in coroutine cleanup (<msg>)`, and the error is then dropped.
+`L->top` drops to the close level only after the loop succeeds, so the open
+upvalues and pending `<close>` slots of a failed handler stay below the top.
+
+### Finalizer context
+
+`titan_in_finalizer` (`titan/ffi.h`) tests `G(L)->gcstp & GCSTPGC`. That bit is
+set exactly while GCTM runs a `__gc`, during ordinary collections and during
+`lua_close`. Inside a finalizer, including every cleanup an unwind runs:
+
+- `coroutine.yield` raises `cannot yield from a finalizer`;
+- `Coroutine:resume` and `Coroutine:error` raise
+  `cannot resume a coroutine from a finalizer`;
+- `is_yieldable` returns false.
+
+`coro_gc` itself resumes with `ffi.mco_resume` directly.
+
+Async uses the same test in `run_with_cleanup`. Task code runs in a finalizer
+only while it is unwound at Lua-state close; see
 [Lua-state close](libuv-runtime.md#lua-state-close-of-an-unretired-runtime).
-Dead coroutines, the normal case for finished Tasks, skip the registry lookup.
 
 ## Tests
 

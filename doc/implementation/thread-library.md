@@ -207,19 +207,21 @@ a queue whose channel or control block can outlive the frame's Lua state. When
 that state closes with the Task still parked, two mechanisms keep the native
 queues safe (issue #262):
 
-- **Withdrawal before the stack is released.** Before `coro_gc` destroys a
-  suspended stack, async withdraws every parked C-ABI wait of the closing
-  state ([state close](libuv-runtime.md#lua-state-close-of-an-unretired-runtime))
+- **Withdrawal before the stack is released.** `coro_gc`
+  [unwinds](coroutines.md#unwinding-an-abandoned-coroutine) a suspended stack
+  before destroying it, so each parked C-ABI wait is withdrawn by its own
+  cleanup ([state close](libuv-runtime.md#lua-state-close-of-an-unretired-runtime))
   through its unregister callback: `channel_unregister_send_wait`,
   `channel_unregister_receive_wait` or `thread_control_unregister_join_wait`.
   After that, no queue links a node on a destroyed stack, so neither a later
   endpoint finalizer of the same state nor another state's or thread's send,
-  close, last release or worker completion can reach one. Because the parked
-  Task never unwinds, its `defer` cannot dispose the packet a withdrawn send
-  still holds; `channel_unregister_send_wait` therefore takes `wait.message`
-  and discards it natively after releasing `ch.mutex`, since discarding can
-  release endpoints of the same channel. A cancelled send's `defer` then finds
-  the cleared pointer. A parked receive or join cell owns no packet.
+  close, last release or worker completion can reach one.
+  `channel_unregister_send_wait` takes the packet a withdrawn send still holds
+  in `wait.message` and discards it natively after releasing `ch.mutex`, since
+  discarding can release endpoints of the same channel. The send's `defer`,
+  which runs afterwards on cancellation and on unwinding, finds the cleared
+  pointer. A parked receive or join cell owns no packet when it is withdrawn;
+  a packet already dequeued for it is disposed by the receive's `defer`.
 - **Per-registration pin.** That unregister can run after the state's endpoint
   or `Thread` handle was finalized and released its reference. `waiter_enqueue`
   therefore takes one pin under the domain mutex it already holds:

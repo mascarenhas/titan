@@ -1139,9 +1139,10 @@ no cleanup shielding and does not hold back Task publication.
 - **State close.** If the Lua state closes while the Task is still parked,
   `unregister_fn(context)` also runs during `lua_close`, before the Task's
   coroutine stack, and with it any automatic `context`, is released. The Task
-  does not resume and its `defer` blocks do not run, so `unregister_fn` must
-  also dispose of any native data that the context owns and that only the
-  Task's unwinding would otherwise release. By then `owner` may
+  does not resume, but its stack is
+  [unwound](coroutines.md#abandoned-coroutines): `unregister_fn` runs from the
+  wait's own cleanup, and the Task's `defer` blocks run afterwards inside a
+  finalizer. By then `owner` may
   already have been finalized, so the native object that `context` refers to
   must not depend on `owner` for its lifetime. From a linked registration
   until `unregister_fn` runs, or until the waiting Task's own next locked
@@ -1155,8 +1156,9 @@ no cleanup shielding and does not hold back Task publication.
   object may be destroyed on the closing thread. The Runtime's wake bridge may
   already be detached by then: releasing the waiter's retained `target` is
   still valid, and a notification on it does nothing. Waits made with
-  `prepare_external_wait`, `wait_external` or `wait_external_cleanup` are not
-  withdrawn at state close.
+  `prepare_external_wait`, `wait_external` or `wait_external_cleanup` are
+  withdrawn the same way: their `unregister` function runs inside a finalizer,
+  so it must not yield.
 - The callbacks write `context` through a pointer that Titan does not track. If
   the calling function keeps the context in automatic storage and a `defer` or
   `catch` reads it after an error, declare a pointer local
@@ -1911,18 +1913,24 @@ bootstrap created a `Receiver` and never drove the loop, or after a driver
 raised and was not called again. Closing the state then closes the Runtime's
 remaining handles and its native loop without running any user callback,
 including close callbacks that were already requested. No Task resumes, and
-Runtime-close listeners and the unregister functions of closure-registered
-waits do not run. Accepted native requests still complete first, so closing the
-state can block until running worker-pool jobs finish. The low-level operation
-is [`uv.loop_abandon`](standard-library-uv.md#abandoned-loop-retirement).
+Runtime-close listeners do not run. Accepted native requests still complete
+first, so closing the state can block until running worker-pool jobs finish.
+The low-level operation is
+[`uv.loop_abandon`](standard-library-uv.md#abandoned-loop-retirement).
 
-Before then, the coroutine stack of each Task still parked in a
-`wait_external_native` wait is released only after that wait's `unregister_fn`
-has withdrawn it (see **State close** under [external waits](#external-waits)).
-Tasks blocked in [`thread` channel operations](standard-library-thread.md#sending-and-receiving)
+Before then, every unfinished Task is
+[unwound](coroutines.md#abandoned-coroutines) where it is suspended. Its
+`defer` and `finally` blocks run innermost first, inside a finalizer, and a
+parked wait is withdrawn by its own cleanup before the stack is released (see
+**State close** under [external waits](#external-waits)). Tasks blocked in
+[`thread` channel operations](standard-library-thread.md#sending-and-receiving)
 or `Thread:join()` are withdrawn this way, so channels and threads shared with
-other states stay usable. The parked Tasks never resume and their `defer`
-blocks do not run.
+other states stay usable. The cleanup of `run_with_cleanup` then runs with the
+Task's cancellation reason, or
+`simple("async Runtime abandoned at Lua state close")` when there was none. In
+that context an `await`, a yield, or a resume raises, and the error is reported
+as a Lua warning, as is any other error a cleanup raises. Cleanup must not
+start Tasks or Runtimes.
 
 The unfinished Tasks of that Runtime do not resume and do not call their
 terminal listeners, but most of them still become terminal. Lua runs finalizers

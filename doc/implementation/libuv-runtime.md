@@ -35,7 +35,7 @@ The private layers are:
 | `Runtime` | One `uv.loop_t`; the zero-delay `wake` timer; the intrusive ready FIFO (`ready_head`/`ready_tail`/`ready_count`, linked through `Task.ready_next`); sparse `tasks`; `current_task`; `driving`/`closing`; the first `failure`; `exit_code`; close listeners; the lazily created `external` bridge; and `retirement_error`, the native capability whose negative status awaits an explicit retry. |
 | `Task` | Coroutine `root`; scalar `phase` and cached `state` snapshot; checked `epoch`; queued-continuation fields; sticky `cancel_value`; current `wait` and reusable `completion`; terminal listeners; explicit-suspension state; cleanup binding (`cleanup_start`, `cleanup_active`, `cleanup_wait`); and the pending terminal outcome (`terminal_kind`/`terminal_value`/`terminal_trace`, `root_done`). Terminal admission is separate from root and cleanup execution. |
 | `Completion<\|C,T,E\|>` | One reusable cell per Task: context, registrar, Task, captured epoch, policy, phase, outcome kind and payload, and the optional accepted request. `Wait` is the all-`value` type alias for the same record. |
-| `ExternalBridge` | The per-Runtime `uv.external_wake_t`, the `waits` Map from 64-bit identity to `ExternalWait`, the monotonic `next_identity`, `closed`, and `withdrawn` (set once state close has withdrawn every parked native wait). |
+| `ExternalBridge` | The per-Runtime `uv.external_wake_t`, the `waits` Map from 64-bit identity to `ExternalWait`, the monotonic `next_identity`, and `closed`. |
 | `ExternalWait` | Reserved target and identity; closure registrars, or C-ABI registrars and context in its embedded `titan_async_retirement` cell plus a traced `native_owner`; the attached Completion and epoch; the bound cleanup Task; and separate `used`, `awaited`, `close_requested`, `registered`, `notified`, and `retired` state. |
 | Subscription `Core` | Queue with explicit count, terminal state, one reserved waiter, producer actions, and the cleanup drain capability. |
 | Public UV owner | Native request/handle storage and callback roots until its native terminal boundary. |
@@ -823,59 +823,65 @@ still be running. Finalizers run newest first, so the coroutine can be finalized
 before or after the endpoint or `Thread` handle it waits on. In neither order
 may a queue still link the node once `coro_gc` releases the stack (issue #262).
 
-Before it destroys a suspended stack, `coro_gc` calls the
-[teardown hook](coroutines.md#suspended-stack-teardown-hook) that async
-installs, `withdraw_parked_native_waits`. The hook returns at once if there is
-no active Runtime with an external bridge, or if the bridge was already
-withdrawn. Otherwise it scans `ExternalBridge.waits` for a pending wait whose
-Task root is the coroutine being finalized. Completions are cached per Task, so
-the wait's `done.task` is the waiting Task. Any other call, such as a suspended
-raw coroutine collected while the Runtime runs, ends after this read-only scan.
-The hook adds nothing to the wait path or to Task creation; a weak
-coroutine-to-Task map would instead cost an insertion per Task and an ephemeron
-traversal in every collection cycle.
+State close [unwinds](coroutines.md#unwinding-an-abandoned-coroutine) every
+suspended coroutine before it releases the stack, so each parked wait is
+withdrawn by its own lexical cleanup while its node is still live. Every Task
+root is newer than its Runtime, so it is finalized before `runtime_finalize`. A
+coroutine stacked under a Task root unwinds as part of the root's chain. The
+unwind of one Task runs, innermost first:
 
-A match withdraws that Task's registered ordinary waits that have C-ABI
-callbacks (`wait_external_native`): `detach_domain` runs each
-`unregister_fn(context)` while the context is still on a live stack. The match
-is also the state-close test. An unfinished Task stays in `runtime.tasks` until
-`finish_task`, and `active_runtime` roots its Runtime until `loop()` retires it
-or `runtime_finalize` runs, which is registered before every Task and so
-finalizes after them. Ordinary GC therefore never finalizes the root of a Task
-that is still in that inventory. When the matched Task is that inventory entry
-and not finished, every parked stack is about to be released, so the hook sets
-the bridge's `withdrawn` flag and detaches every such wait in one linear sweep;
-later hooks return on the flag. If the invariant were ever broken, only the
-matched Task's waits would be withdrawn, which is still correct. No parked
-stack has been released before the first match: a suspended root finalized
-earlier would have matched its own wait, and a `STACKED` inner coroutine
-holding a wait cell is not released by its own finalizer.
+1. the user `defer` and `finally` blocks of the body;
+2. the wait cleanup: `ExternalWait:await`'s `defer` calls `detach_domain()`,
+   which runs the native `unregister_wait(context)` or the Titan closure
+   `unregister`, then `retire()`, then clears the suspension;
+   `wait_external_native`'s `wait:close()` and the channel `defer`s that
+   discard a held `wait.message` run in the same pass;
+3. `run_with_cleanup`'s cleanup;
+4. the coroutine floor, which ends the coroutine as dead.
 
-The hook only detaches domains. It never calls `retire` or
-`uv.native_external_wake_unregister` on a target: the bridge's
-`uv.external_wake_t` is created lazily with the first external wait, is
-usually newer than the waiting coroutine, and its finalizer may already have
-detached the core and consumed every registration reference. The domain's own
-retained target stays valid, so releasing it in the unregister function is
-safe, while a notification on the detached core returns `EINVAL` and wakes
-nothing.
+Ordinary GC never finalizes the root of a Task that is still in the inventory:
+an unfinished Task stays in `runtime.tasks` until `finish_task`, and
+`active_runtime` roots its Runtime until `loop()` retires it or
+`runtime_finalize` runs. In practice, ordinary-GC unwinding reaches only plain
+coroutines such as generators.
+
+`retire()` releases the bridge target through the owner method
+`bridge.wake:unregister(target)`. The bridge's `uv.external_wake_t` is created
+lazily with the first external wait. It is usually newer than the waiting
+coroutine, so its finalizer may already have detached the core and consumed
+every registration reference. The owner method then returns `EINVAL` instead of
+dereferencing the consumed borrow. The domain's own retained target stays
+valid, so releasing it in the unregister function is safe, while a
+notification on the detached core returns `EINVAL` and wakes nothing.
 
 Closure-registered waits (`prepare_external_wait`, `wait_external`,
-`wait_external_cleanup`) are not withdrawn, because their unregister functions
-are Titan closures and state close runs no Runtime-owned Titan callbacks.
-Native retirement barriers are not withdrawn either, because their admission
-lives in heap storage, not on a stack.
+`wait_external_cleanup`) are withdrawn too. Their Titan `unregister` closure runs
+inside a finalizer and must not yield. It must also tolerate objects created
+after the Task having already been finalized. Native retirement barriers are
+not withdrawn, because their admission lives in heap storage, not on a stack.
+Armed gates stay nonterminal.
+
+If `run_with_cleanup`'s cleanup runs inside a finalizer
+(`ffi.titan_in_finalizer(L)`) while the Task has no cancellation reason, it
+first records `"async Runtime abandoned at Lua state close"`, the reason that
+`runtime_finalize` publishes. Task code runs inside a finalizer only while it
+is unwound at close: resume raises in finalizers, and the scheduler never runs
+in one. A cleanup's first await therefore raises, and that error is reported as
+a warning. A cleanup that was itself suspended, because the body had already
+finished, is unwound rather than run again.
 
 The unregister function can run after the endpoint or `Thread` handle that the
-wait used was finalized, so thread domains keep a
+wait used was finalized. Thread domains therefore keep a
 [per-registration pin](thread-library.md#registration-pins-and-state-close-withdrawal),
 and the withdrawal may be the domain's final release, destroying it on the
 closing thread. Withdrawing a waiter that a producer already woke passes the
-wake on, so a waiter in another state is not starved. The Runtime finalizer
-later retires these Tasks without resuming them, as described above.
-Withdrawal protects the native queues; it is not cancellation, so no `defer`,
-cleanup body, or terminal listener runs, and the application contract above
-still applies.
+wake on, so a waiter in another state is not starved. A `Thread` method called
+on a handle whose finalizer already ran raises `thread handle was finalized`.
+
+The unwind calls neither `finish_task` nor the scheduler. `runtime_finalize`
+then retires these Tasks without resuming them, as described above: no Task
+resumes and no terminal listener runs. The application contract above still
+applies.
 
 `request_exit(code)` obtains the current Task, records only the first code,
 unbinds the Runtime's transfer loop before cancellation can enter cleanup,

@@ -179,9 +179,9 @@ waiter before it releases the stack, and the channel stays alive until then
 even if every endpoint of the closing state is already gone. Clones held by
 other states or threads keep working: the blocked Task never receives or sends,
 and the channel closes as usual once its last sender or receiver is released.
-The blocked Task does not finish and its `defer` blocks do not run, so cancel
-and join such Tasks and drain their Runtime before closing the state when their
-cleanup matters
+The blocked Task does not finish, but it is unwound: its `defer` blocks run
+inside a finalizer, where they cannot await. Cancel and join such Tasks and
+drain their Runtime before closing the state when their cleanup needs to wait
 ([closing a state with an active Runtime](async-io.md#closing-a-lua-state-with-an-active-runtime)).
 
 ### Closing, cloning, and transferring endpoints

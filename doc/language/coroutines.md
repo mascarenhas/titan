@@ -220,3 +220,38 @@ virtual-memory-backed stacks, but deeply recursive coroutine bodies can
 still overflow them. The `coroutine` module is a low-level
 control-transfer primitive, not a scheduler or an async I/O policy by
 itself.
+
+## Abandoned Coroutines
+
+A coroutine that is never resumed again does not leak its cleanup. When a
+suspended or stacked coroutine becomes unreachable, the collector **unwinds**
+it before its stack is released. Closing the Lua state does the same for every
+suspended coroutine.
+
+Unwinding behaves like an error that nothing can catch, raised at the point
+where the coroutine stopped:
+
+- `defer` and `finally` blocks run innermost first, across every coroutine of
+  a stacked chain;
+- Lua to-be-closed variables (`local x <close>`) in Lua frames on those stacks
+  are closed, with no error value;
+- `catch` blocks and Lua `pcall` do not intercept it.
+
+The unwound coroutine then reports `"dead"`. A coroutine that never started has
+no frames, so nothing runs.
+
+Cleanup that runs during unwinding runs inside a Lua finalizer, so:
+
+- `coroutine.yield` raises `cannot yield from a finalizer`;
+- `resume` and `error` raise `cannot resume a coroutine from a finalizer`;
+- `is_yieldable()` returns `false`.
+
+An error raised by a `defer` or `finally` block, or by a `__close` metamethod,
+is reported as a Lua warning, `error in coroutine cleanup (<message>)`. The
+rest of the unwind continues. Lua's general finalizer rules apply: cleanup may
+observe objects that were already finalized, and it must not resurrect the
+coroutine for further use. A resurrected handle reports `"dead"`.
+
+When an `async` Runtime's Lua state closes, its unfinished Tasks are unwound
+the same way; see
+[closing a Lua state with an active Runtime](async-io.md#closing-a-lua-state-with-an-active-runtime).
