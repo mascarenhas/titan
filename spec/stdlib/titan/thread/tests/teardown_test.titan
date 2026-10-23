@@ -109,6 +109,40 @@ function thread_teardown_worker_finished(): boolean
   return thread_teardown_worker:status():has_finished()
 end
 
+record ThreadTeardownProxyProbe
+  const gate: thread.Sender<|boolean|>
+  const report: thread.Receiver<|string|>
+end
+
+-- Public for the proxy variant: the worker reports "started", waits on a gate
+-- the host keeps open, and reports the cancellation reason it receives, while
+-- a Thread:task() proxy in this state is parked waiting for the worker.
+function thread_teardown_park_proxy(host: value)
+  local gate_tx, gate_rx = thread.channel<|boolean|>(1)
+  local report_tx, report_rx = thread.channel<|string|>(1)
+  async.send(host as foreign *void, ThreadTeardownProxyProbe(gate_tx, report_rx))
+  local worker = thread.spawn_two(function (gate: thread.Receiver<|boolean|>,
+      report: thread.Sender<|string|>): boolean
+    report:try_send("started")
+    local reason = "not cancelled"
+    do
+      gate:receive_result()
+    catch
+      reason = "unexpected error: " .. strings.tostring(error)
+      if error is async.CancellationReason<|value|> then
+        case error as async.CancellationReason<|value|>
+        when simple(text) then reason = text
+        else reason = "complex cancellation"
+        end
+      end
+    end
+    report:try_send(reason)
+    return true
+  end, gate_rx, report_tx)
+  thread_teardown_held[#thread_teardown_held + 1] = worker
+  thread_teardown_park(worker:task())
+end
+
 local function thread_teardown_close(code: string, chunk: string)
   local state = lua.new()
   defer state:close()
@@ -258,6 +292,44 @@ function test_lua_close_withdraws_woken_join(_: test.Context)
     probe.gate:send(true)
     while not thread_teardown_worker_has_finished(state) do timer.sleep(1) end
     state:close()
+  end)
+end
+
+-- Closing the state of an unfinished Thread:task() proxy forwards the
+-- abandonment reason to its thread. Without that cancellation the worker
+-- would wait for the gate, which the host releases only after a bounded wait.
+function test_lua_close_cancels_thread_of_unfinished_proxy(_: test.Context)
+  runtime_test.run(function ()
+    local inbox = async.receiver()
+    defer inbox:close()
+    local state = lua.new()
+    defer state:close()
+    local probe: ThreadTeardownProxyProbe =
+      thread_teardown_park_shared(state, inbox, "thread_teardown_park_proxy")
+    defer probe.report:close()
+    defer probe.gate:close()
+    -- A cancellation accepted before the worker's body starts would skip it.
+    test.assert(probe.report:receive() == "started", "the worker did not start")
+    state:close()
+    local reported = ""
+    for _ = 1, 5000 do
+      local received, text? = probe.report:try_receive()
+      if received then
+        reported = text or ""
+        break
+      end
+      timer.sleep(1)
+    end
+    if reported == "" then
+      -- No cancellation arrived: release the worker if it still waits.
+      do probe.gate:try_send(true) catch end
+      case probe.report:receive_result()
+      when message(text) then reported = text
+      else reported = "nothing (the worker exited without reporting)"
+      end
+    end
+    test.assert(reported == "async Runtime abandoned at Lua state close",
+      "the worker reported: " .. reported)
   end)
 end
 
