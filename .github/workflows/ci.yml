@@ -873,8 +873,9 @@ jobs:
           bash spec/support/ci_sanitizer_capture.sh asan-fake-stack-probe \
             "$probe"
 
-      # State-close teardown and abandoned-coroutine unwinding cases pass on a
-      # plain build by design; only ASan/LSan diagnoses their leaks and misuse.
+      # The state-close teardown cases pass on a plain build; only ASan/LSan
+      # diagnoses their leaks and misuse. The unwinding cases assert cleanup order
+      # on every build; here they add memory-safety coverage of the crossings.
       - name: Run native teardown and unwinding sanitizer gate
         run: |
           bash spec/support/ci_sanitizer_capture.sh lua-close-teardown \

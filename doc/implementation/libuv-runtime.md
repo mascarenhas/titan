@@ -277,8 +277,8 @@ be resumed. One protocol covers it:
   for one delivered later. This covers `start_suspend` and `start_external_wait`
   alike, and the cancel action runs once.
 - **Delivery.** `deliver_wait` and the trampoline's inline delivery set
-  `TASK_RUNNING` right after `clear_suspension`, so a wake at the Result
-  allocation latches and is discarded instead of raising.
+  `TASK_RUNNING` before `clear_suspension` and the Result allocation, so a wake
+  at that allocation latches and is discarded instead of raising.
 
 The Runtime cannot tell "about to suspend" from "running past a delivered
 wait", so every waker follows the caller rule of the
