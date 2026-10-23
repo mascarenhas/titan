@@ -1225,3 +1225,58 @@ describe("closures over foreign-typed boxes (end-to-end)", function()
         assert.truthy(rok, out)
     end)
 end)
+
+describe("raw userdata allocation under Lua internal assertions (end-to-end)", function()
+    local driver = require "titan-compiler.driver"
+    after_each(function ()
+        os.execute("rm -rf *.o *.so *.dSYM")
+        if not h.verbose then os.execute("rm -f *.c") end
+    end)
+
+    -- Under -DLUAI_ASSERT, check_exp evaluates gco2u's operand twice. A
+    -- generated `gco2u(luaC_newobj(...))` therefore allocated a second,
+    -- never initialized userdata that Lua later freed with a smaller size,
+    -- driving Lua's byte count down on every capture box and vararg payload.
+    it("keeps Lua's byte accounting balanced for capture boxes and vararg payloads", function()
+        local saved = driver.EXTRA_CPPFLAGS
+        local flags = { "-DLUAI_ASSERT" }
+        for _, flag in ipairs(saved or {}) do flags[#flags + 1] = flag end
+        driver.EXTRA_CPPFLAGS = flags
+        local ok, failure = pcall(h.run_coder, [[
+            local function count(...: integer): integer
+                local total = 0
+                for i = 1, select_count(...) do total = total + i end
+                return total
+            end
+            local function select_count(...: integer): integer
+                return #{...}
+            end
+            function churn(rounds: integer): integer
+                local sum = 0
+                for round = 1, rounds do
+                    local boxed = round
+                    local label = "r"
+                    local bump = function()
+                        boxed = boxed + 1
+                        label = label .. "."
+                    end
+                    bump()
+                    sum = sum + boxed + count(1, 2, 3, 4, 5, 6, 7, 8)
+                end
+                return sum
+            end
+        ]], [[
+            collectgarbage("collect")
+            collectgarbage("collect")
+            local before = collectgarbage("count")
+            assert(test.churn(20000) > 0)
+            collectgarbage("collect")
+            collectgarbage("collect")
+            local drift = collectgarbage("count") - before
+            -- One lost header per box/payload would drift by megabytes.
+            assert(drift > -64, "Lua byte count drifted by " .. drift .. " KiB")
+        ]])
+        driver.EXTRA_CPPFLAGS = saved
+        if not ok then error(failure, 0) end
+    end)
+end)
