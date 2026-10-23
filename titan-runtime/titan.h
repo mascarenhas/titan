@@ -82,8 +82,14 @@ typedef struct lua_longjmp {
 #define TITAN_STATUS_UNWIND ((TStatus)0x55)
 #define TITAN_STATUS_FLOOR ((TStatus)0x56)
 
-/* The jump paired with TITAN_SETJMP, mirroring LUAI_THROW's selection. */
-#if defined(LUA_USE_POSIX)
+/* The jump paired with TITAN_SETJMP, mirroring LUAI_THROW's selection: it must
+** not restore a signal mask that TITAN_SETJMP did not save. glibc declares
+** _longjmp only for __USE_MISC/__USE_XOPEN, unlike _setjmp, so a strict-ISO
+** compile of this header cannot name it. There longjmp is the same routine
+** (glibc aliases longjmp, _longjmp and siglongjmp), and it restores a mask
+** only when the buffer recorded one, which _setjmp never does. Other POSIX C
+** libraries (macOS, BSDs, musl) declare _setjmp and _longjmp together. */
+#if defined(LUA_USE_POSIX) && !defined(__GLIBC__)
 #define TITAN_LONGJMP(buf) _longjmp(buf, 1)
 #else
 #define TITAN_LONGJMP(buf) longjmp(buf, 1)
