@@ -12,7 +12,7 @@ foreign import "stdlib.h"
 foreign import "string.h"
 foreign import "async_receiver_native.h"
 local uv = import "uv"
-local coroutine = import "coroutine"
+local coroutine = import "coroutine.titan"
 local gc = import "gc"
 local string = import "string"
 local transfer = import "transfer"
@@ -943,11 +943,22 @@ local function finish_failure(task: Task, error: value, trace: string)
   publish_terminal(task)
 end
 
-local function resume_root(task: Task, failed: boolean, payload: value): value
+-- Resume the root and return whether it died with an uncaught error, and the
+-- yielded, returned or raised value. Only a failure that publish_terminal
+-- reports gets the driver's propagation trace appended (issue #289): a first
+-- cancellation is sticky and wins publication, and run_with_cleanup already
+-- recorded its body's failure with that body's trace.
+local function resume_root(task: Task, failed: boolean, payload: value): (boolean, value)
   task.runtime.current_task = task
   defer task.runtime.current_task = nil
-  if failed then return task.root:error(payload, ASYNC_TAG) end
-  return task.root:resume(payload, ASYNC_TAG)
+  local dead, result = task.root:transfer_outcome(payload, ASYNC_TAG, failed)
+  if dead then
+    if task.cancel_value == nil and task.terminal_kind ~= TERMINAL_FAILED then
+      coroutine.raise_with_appended_trace(result)
+    end
+    coroutine.pop_trace_for_append()
+  end
+  return dead, result
 end
 
 local function wait_result(wait: Wait): (boolean, value)
@@ -1058,14 +1069,22 @@ local function advance_task(task: Task, failed: boolean, payload: value)
   local next_payload = payload
   while true do
     set_phase(task, TASK_RUNNING)
+    local dead = false
     local yielded: value = nil
-    do yielded = resume_root(task, next_failed, next_payload)
+    local trace: string? = nil
+    do dead, yielded = resume_root(task, next_failed, next_payload)
     catch
+      dead = true
+      yielded = error
+      trace = traceback
+    end
+    if dead then
       -- Trace the terminal candidate before entering any fallible publisher.
+      -- Without a trace the root is cancelled or recorded its own failure.
       if task.terminal_kind ~= TERMINAL_FAILED then
         task.terminal_kind = TERMINAL_FAILED
-        task.terminal_value = error
-        task.terminal_trace = traceback
+        task.terminal_value = yielded
+        task.terminal_trace = trace
       end
       task.root_done = true
       task.phase = TASK_WAITING

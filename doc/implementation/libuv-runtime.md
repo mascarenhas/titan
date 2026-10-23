@@ -274,6 +274,20 @@ an `Error` with the caught Lua error value and raw trace; it does not by itself
 fail the Runtime. Raised nil follows the ordinary
 [Lua error normalization](error-handling.md#runtime-trace-model).
 
+`advance_task` resumes the root through `resume_root`, which calls the private
+non-raising `Coroutine:transfer_outcome` (see
+[coroutine entry](coroutines.md#entry-function)). A root that dies with an
+uncaught error returns that error instead of raising it. `resume_root` then
+appends the driver's propagation trace to the root's own trace, by raising
+through `raise_with_appended_trace`, only when the failure will be reported:
+when the Task has no cancellation reason and has not already recorded a
+failure. A cancellation is sticky and takes precedence at publication, and a
+`run_with_cleanup` wrapper has already recorded its body's failure with the
+body's trace, so neither ever reports a propagation trace. Both drop the staged
+trace and record the failure without one, which saves the unwinding of the
+whole scheduler stack when a parked Task is cancelled. `advance_task` treats a
+raised and a returned root failure alike.
+
 The 17 combinators (`join`, `join_two`..`join_five`, and
 `any_`/`race_`/`all_` at arities two through five) keep independent
 result/cancellation positions per operand. Fast paths inspect already terminal

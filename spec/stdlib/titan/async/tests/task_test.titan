@@ -656,3 +656,168 @@ function test_cancelled_combinator_listener_is_not_retained(context: test.Contex
     async.join(operand)
   end)
 end
+
+-- Issue #289: a Lua call/return hook counts fresh trace captures. The error
+-- handler that luaG_errormsg calls is a C function which, while the trace pin
+-- is clear, stores a new traceback string in registry[TITAN_BACKTRACE_KEY]
+-- before it returns; a pinned re-raise keeps the saved string. Every provider
+-- links its own errorhandler, so the hook recognizes a capture by its effect:
+-- an outermost C call entered with the pin clear whose own return finds
+-- another trace string. Calls nested in that pending call are ignored. Its
+-- CallInfo and the trace seen at its call stay in the registry until it
+-- returns. Cell 0 counts the captures.
+local foreign function task_trace_capture_hook(state: *lua_State, ar: *lua_Debug)
+  ffi.lua_getfield(state, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_cells")
+  local cells = ffi.lua_touserdata(state, -1) as foreign *int
+  ffi.lua_settop(state, -2)
+  if cells == nil then return end
+  local call = ar.i_ci as foreign *void
+  ffi.lua_getfield(state, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_call")
+  local pending = ffi.lua_touserdata(state, -1)
+  ffi.lua_settop(state, -2)
+  if ar.event == ffi.LUA_HOOKRET then
+    if pending == nil then return end
+    if pending ~= call then return end
+    ffi.lua_pushlightuserdata(state, nil)
+    ffi.lua_setfield(state, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_call")
+    ffi.lua_getfield(state, ffi.LUA_REGISTRYINDEX, ffi.TITAN_BACKTRACE_KEY)
+    ffi.lua_getfield(state, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_before")
+    local trace = ffi.lua_topointer(state, -2)
+    local before = ffi.lua_topointer(state, -1)
+    ffi.lua_settop(state, -3)
+    if trace == nil then return end
+    if trace ~= before then cells[0] = cells[0] + 1 end
+    return
+  end
+  if pending ~= nil then return end
+  if ffi.lua_getinfo(state, "S", ar) == 0 then return end
+  if ffi.strcmp(ar.what, "C") ~= 0 then return end
+  ffi.lua_getfield(state, ffi.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_PINNED)
+  local pinned = ffi.lua_toboolean(state, -1)
+  ffi.lua_settop(state, -2)
+  if pinned ~= 0 then return end
+  -- Store false for an absent trace, so that this existing key is only updated.
+  if ffi.lua_getfield(state, ffi.LUA_REGISTRYINDEX, ffi.TITAN_BACKTRACE_KEY) == ffi.LUA_TNIL then
+    ffi.lua_settop(state, -2)
+    ffi.lua_pushboolean(state, 0)
+  end
+  ffi.lua_setfield(state, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_before")
+  ffi.lua_pushlightuserdata(state, call)
+  ffi.lua_setfield(state, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_call")
+end
+
+-- Count from zero with no pending call.
+local function task_trace_reset(cells: owned int[])
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 1) ~= 0, "cannot reserve Lua stack for the trace hook")
+  ffi.lua_pushlightuserdata(L, nil)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_call")
+  cells[0] = 0
+end
+
+-- Hook the current thread, whose later Tasks inherit the hook, and the main
+-- thread, where the driver resumes Task roots.
+local function task_trace_hook_install(cells: owned int[])
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 2) ~= 0, "cannot reserve Lua stack for the trace hook")
+  task_trace_reset(cells)
+  ffi.lua_pushboolean(L, 0)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_before")
+  ffi.lua_pushlightuserdata(L, cells as foreign *void)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_cells")
+  ffi.lua_rawgeti(L, ffi.LUA_REGISTRYINDEX, ffi.LUA_RIDX_MAINTHREAD as foreign lua_Integer)
+  local main = ffi.lua_tothread(L, -1)
+  local mask = ffi.LUA_MASKCALL | ffi.LUA_MASKRET
+  ffi.lua_sethook(L, task_trace_capture_hook, mask, 0)
+  ffi.lua_sethook(main, task_trace_capture_hook, mask, 0)
+end
+
+local function task_trace_hook_remove()
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 2) ~= 0, "cannot reserve Lua stack for the trace hook")
+  ffi.lua_sethook(L, nil, 0, 0)
+  ffi.lua_rawgeti(L, ffi.LUA_REGISTRYINDEX, ffi.LUA_RIDX_MAINTHREAD as foreign lua_Integer)
+  ffi.lua_sethook(ffi.lua_tothread(L, -1), nil, 0, 0)
+  ffi.lua_pushnil(L)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_cells")
+  ffi.lua_pushnil(L)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_call")
+  ffi.lua_pushnil(L)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_before")
+end
+
+local function task_trace_failing_body(): value
+  raise "trace capture probe failure"
+end
+
+local function task_trace_cancelled_parked_task()
+  runtime_test.run(function ()
+    local cells: owned int[] = foreign int.new_array(1)
+    task_trace_hook_install(cells)
+    defer task_trace_hook_remove()
+    local token = async.ResumeToken("trace capture probe")
+    local parked = async.run<|value, value|>(function (): value
+      async.suspend(token)
+      return nil
+    end)
+    task_support.cleanup_task(parked, "trace capture probe cleanup")
+    support.wait_until_waiting(parked)
+    task_trace_reset(cells)
+    parked:cancel(async.CancellationReason.simple("trace capture probe"))
+    local status = async.join(parked)
+    local count = cells[0] as integer
+    test.assert(support.cancelled_with(status, "trace capture probe"),
+      "the parked Task was not cancelled")
+    -- Only the cancellation raised at the Task's yield point builds a trace,
+    -- the one that the Task's own catch blocks can observe.
+    test.assert(count == 1, "cancelling a parked Task captured " .. count .. " traces")
+  end)
+end
+
+local function task_trace_reported_failure(context: test.Context, with_cleanup: boolean)
+  runtime_test.run(function ()
+    local cells: owned int[] = foreign int.new_array(1)
+    task_trace_hook_install(cells)
+    defer task_trace_hook_remove()
+    local failing: async.Task? = nil
+    if with_cleanup then
+      failing = async.run_with_cleanup<|value, value|>(task_trace_failing_body,
+        function (_: async.CancellationReason<|value|>?) end)
+    else
+      failing = async.run<|value, value|>(task_trace_failing_body)
+    end
+    task_support.cleanup_task(failing, "trace capture probe cleanup")
+    task_trace_reset(cells)
+    context:log("BEGIN expected uncaught async Task diagnostics")
+    local status = async.join(failing)
+    context:log("END expected uncaught async Task diagnostics")
+    local count = cells[0] as integer
+    local failed, failure? = status:has_failed()
+    test.assert(failed and failure.error == "trace capture probe failure",
+      "the failing Task reported " .. status:as_string())
+    test.assert(support.contains(failure.traceback, "task_trace_failing_body"),
+      "the reported trace lost the raising frame")
+    -- The body's raise builds a trace. An ordinary Task also appends the
+    -- driver's propagation trace, which run_with_cleanup never reports: it
+    -- reports the trace that its body recorded.
+    local expected = 2
+    if with_cleanup then expected = 1 end
+    test.assert(count == expected,
+      "the failing Task captured " .. count .. " traces, expected " .. expected)
+  end)
+end
+
+function test_task_trace_captures_follow_reported_failures(context: test.Context)
+  context:run("cancelled_parked_task", function (_: test.Context)
+    task_trace_cancelled_parked_task()
+  end)
+  context:run("reported_failure", function (child: test.Context)
+    task_trace_reported_failure(child, false)
+  end)
+  context:run("cleanup_body_failure", function (child: test.Context)
+    task_trace_reported_failure(child, true)
+  end)
+end
