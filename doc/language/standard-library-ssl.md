@@ -312,7 +312,12 @@ suspended Task's `defer connection:close()` releases the engine instead of
 raising. `Server:close()` likewise frees its context and leaves the listener to
 the state close. A graceful TLS shutdown that the application needs belongs
 [before the state closes](coroutines.md#cleanup-that-needs-asynchronous-io).
-HTTP connections and WebSocket sessions over TLS are released the same way.
+The TLS engines under HTTP connections and WebSocket sessions are released by
+the same finalizers, and their sockets by the abandoned loop. Their own close
+methods still need a Task, though: `websocket.Connection:close` starts a
+retirement Task, so a `defer ws:close()` in an unwinding Task raises
+`cannot start a Task during Lua state close`, which the unwind reports as a
+cleanup warning.
 
 ## Errors
 

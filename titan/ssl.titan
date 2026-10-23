@@ -418,9 +418,10 @@ end
 local function terminate(connection: Connection, graceful: boolean)
   -- Implementation notes: doc/implementation/ssl-library.md#duplex-admission-cancellation-and-failure
   if connection.state == STATE_CLOSED or connection.state == STATE_FAILED then return end
+  -- Implementation notes: doc/implementation/ssl-library.md#lua-state-close
   -- Lua state close can neither close TCP nor await scope retirement. No
   -- unwinding frame touches the engine, so free it now as an abort would;
-  -- the abandoned loop closes TCP. See ssl-library.md#lua-state-close.
+  -- the abandoned loop closes TCP.
   if ffi.titan_state_closing(L) ~= 0 then
     free_engine(connection)
     connection.state = STATE_FAILED

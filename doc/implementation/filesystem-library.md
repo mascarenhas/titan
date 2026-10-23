@@ -216,5 +216,7 @@ cancellation, Runtime ownership, close acceptance, accepted-open abandonment,
 preaccept-close restoration, accepted close errors, and File transfer (shared
 position, source invalidation, malformed and closed payloads, hooks outside a
 Task, use after source-state shutdown, and rejection while concurrent reads
-are pending). Schema fixtures keep the File, Stat and Watcher declarations and
+are pending). `test_lua_close_closes_open_files` closes independent states
+holding a parked Task's File and an unclosed File and counts the process's
+open descriptors. Schema fixtures keep the File, Stat and Watcher declarations and
 the canonical `async.OperationError` owner.

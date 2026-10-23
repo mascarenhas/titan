@@ -443,6 +443,7 @@ local function File:close_with(operation: string)
   defer self.pending_operations = self.pending_operations - 1
   self.excess = ""
   if self.handle < 0 then return end
+  -- Implementation notes: doc/implementation/filesystem-library.md#lua-state-close
   -- Lua state close cannot await the worker pool: close synchronously on the
   -- loop thread. A request may still use the descriptor when its wait was
   -- abandoned, or when the finalizer runs before the waiting Task unwinds and

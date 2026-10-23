@@ -306,12 +306,14 @@ release their native state synchronously instead:
 [Files](standard-library-fs.md#closing-the-lua-state),
 [SQLite connections](standard-library-sqlite3.md#closing-the-lua-state),
 [TLS connections and servers](standard-library-ssl.md#closing-the-lua-state),
-and [independent Lua states](standard-library-lua.md#asynchronous-execution).
+and [independent Lua states running `run_async`](standard-library-lua.md#asynchronous-execution).
 A `defer` that closes one of them completes during the unwind instead of
-raising. Native work that a worker is still running finishes first, and what
-it uses is released afterwards, still during the state close. Native memory
-that application code manages itself through the C FFI needs the same care;
-see [`async.run_foreign`](async-io.md#foreign-work-at-state-close).
+raising. Native work that a worker is still running finishes first. What it
+uses is then released, still during the state close, except that a File
+whose read, write or flush was in flight keeps its descriptor until the
+process exits ([details](standard-library-fs.md#closing-the-lua-state)).
+Native memory that application code manages itself through the C FFI needs
+the same care; see [`async.run_foreign`](async-io.md#foreign-work-at-state-close).
 
 What is lost is graceful protocol shutdown that needs awaits, such as a TLS
 `close_notify`, a WebSocket Close handshake, or draining an HTTP response.

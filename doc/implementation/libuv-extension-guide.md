@@ -403,9 +403,9 @@ independently allocated request result needs abandonment-only cleanup. Do not
 add an abandonment branch to ordinary operation paths. Native work still
 finishes before its borrowed storage is released. Resources owned by arbitrary
 workers or domains, and results already delivered, are not UV's to dispose.
-A domain whose ordinary close awaits releases them synchronously from a
-finalizer, or from a close, that tests `titan_state_closing`
-([examples](libuv-runtime.md#lua-state-close-of-an-unretired-runtime)).
+A domain whose ordinary close awaits releases its own native state
+synchronously, from a finalizer or a close that tests `titan_state_closing`
+(see [the owners](libuv-runtime.md#lua-state-close-of-an-unretired-runtime)).
 Successful `uv.loop_close`, not suppressed callback counts, is the retirement
 oracle. See the [public contract](../language/standard-library-uv.md#abandoned-loop-retirement).
 

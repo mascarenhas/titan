@@ -39,7 +39,8 @@ buffers and output arrays remain malloc-owned until `sqlite_free_packet` runs.
 Passing a raw pointer to `run_foreign` alone does not root its pointee. No
 worker reads a Titan/Lua record, TValue, Udata, closure, Array, or Lua state.
 Every SQLite API access, including reset/finalize/close, metadata, binding,
-error status, and autocommit, is inside a worker batch. Pure allocation,
+error status, and autocommit, is inside a worker batch, except at
+[Lua-state close](#lua-state-close). Pure allocation,
 memcpy/free, UTF-8 validation, reflection and Titan-value construction run on
 the loop thread.
 
@@ -152,7 +153,7 @@ Cleanup can submit and receive ordinary completion during cancellation unwind.
 This is not general Task shielding: ordinary operations still receive the
 sticky cancellation reason, and the Task's final status stays cancelled.
 There are no Task-flag mutations, detached cleanup Tasks, or blocking SQLite
-calls on the loop thread. The only GC callback is the
+calls on the loop thread, except at [Lua-state close](#lua-state-close). The only GC callback is the
 [state-close finalizer](#lua-state-close), which ordinary collection leaves
 inert.
 
@@ -173,8 +174,8 @@ open transaction.
 Every Connection registers `finalize_connection` with `gc.finalizable` before
 it holds a handle, in `connect` and `from_transfer_payload`. The finalizer
 returns at once unless `titan_state_closing` is set, so ordinary collection
-still performs no database I/O. During close it releases an open Connection
-that is not busy with `sqlite_release_connection` (`worker.titan`): it
+still performs no database I/O. During close it releases an open, non-busy
+Connection with `sqlite_release_connection` (`worker.titan`): it
 finalizes every statement that `sqlite3_next_stmt` still reports, including an
 active execution, then calls `sqlite3_close`. Statement and Cursor shells keep
 their dangling handles. `Statement:close` and `Cursor:close` return without a
@@ -189,6 +190,9 @@ uses the connection at that moment. Finalizers run newest first, and a
 Connection can be newer or older than the Task that uses it. Either the
 finalizer releases first and the unwinding closes become no-ops, or the
 unwinding closes release synchronously and leave the finalizer nothing.
+Ordinary misuse checks still run first: `close` of a Connection that owns
+Statements, or of a Statement with an active Cursor, raises, and the
+finalizer then releases the Connection.
 
 **Abandoned worker waits.** A Task parked in a worker wait is unwound before
 the Runtime finalizer drains accepted work, so its worker may still use the
@@ -207,7 +211,10 @@ operation otherwise. The frame's own cleanup (`retire_packet`,
 `sqlite_free_packet` and the close-result checks) skips a pending packet, and
 the finalizer skips the busy Connection. The packet's GC owner outlives the
 worker: `lua_close` runs every finalizer, including the Runtime's drain of
-accepted work, before it frees any object.
+accepted work, before it frees any object. Unlike an independent Lua state's
+[abandoned-work release](libuv-runtime.md#foreign-workers), this release may
+run on the worker because it calls only SQLite on a connection that no other
+thread uses; it never waits for the worker pool or a loop.
 
 ## Worker operations and errors
 

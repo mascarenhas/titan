@@ -114,16 +114,19 @@ Lua state does.
 
 ### Closing the Lua state
 
-Closing the Lua state closes every Connection that is still open, whether or
-not code was going to close it: SQLite finalizes its Statements, including an
-active Cursor's execution, and rolls back an open transaction. Its database
+Closing the Lua state closes every Connection that is still open: SQLite
+finalizes its Statements, including an active Cursor's execution, and rolls
+back an open transaction. Its database
 file, descriptor and locks are released before the state's close returns. This
 release runs synchronously on the closing thread, so it can briefly block it.
 
-A suspended Task's `defer` that closes a Cursor, Statement or Connection
-completes during the close instead of raising, although it cannot
-[await](coroutines.md#cleanup-that-needs-asynchronous-io). Closing a Statement
-or Cursor whose Connection the state close already released does nothing.
+A suspended Task's `defer` close made in the documented Cursor, Statement,
+Connection order completes during the close instead of raising, although it
+cannot [await](coroutines.md#cleanup-that-needs-asynchronous-io). Ordinary
+misuse errors, such as closing a Connection that still owns Statements, still
+raise, and the state close then releases the Connection anyway. Closing a
+Statement or Cursor whose Connection the state close already released does
+nothing.
 
 A Task can be waiting for a database operation when the state closes. That
 operation's worker may still be running, so its Connection is never released
