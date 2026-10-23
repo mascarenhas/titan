@@ -130,7 +130,12 @@ Never restore probe evidence from a less-trusted writer.
 Regular probe keys retain the `test-linux-stdlib` namespace and include
 OS/architecture/profile, an immutable commit key, and stable restore prefix.
 Save after bundled tests/smoke and before the system-OpenSSL canary. Every
-profile-bearing native/configuration cache includes profile identity.
+profile-bearing native/configuration cache includes profile identity. Cached
+libbacktrace and libuv trees carry their [configuration
+stamps](build-script-audit.md#native-dependency-configuration-stamps), so a
+restored tree whose configuration matches is not rebuilt; change the cache key
+(`LIBUV_BUILD_PROFILE`, `SANITIZER_NATIVE_CACHE_SCHEMA`) whenever a recipe
+changes what the cached tree must contain.
 
 ## Sanitizer ownership and failure diagnostics
 
@@ -154,13 +159,25 @@ through repeated `make titan-stdlib-test-run TITAN_FILTER=...` processes, each
 wrapped by `spec/support/ci_sanitizer_capture.sh`. Filters never recompile or
 select native groups. The `sanitizer` job's step list in `ci.yml` is the gate
 inventory: Runtime shutdown, dense Array and value transfer, immediate
-functions, nominal storage, coroutine GC, async/libuv owners and callbacks,
-TLS/HTTP, WebSocket ownership, SQLite, JSON, reflection, PEG/regex, and the
-net/OS production smokes. Full library behavior belongs to native coverage. The
-15-second Runtime shutdown check runs here because this aggregate carries no
-coverage-reporting overhead. Host Lua/parser dependencies use instrumented
-O1; libbacktrace, libuv, generated images, and disposable fixtures use
-instrumented O0; LTO stays disabled throughout.
+functions, nominal storage, coroutine GC, state-close teardown and coroutine
+unwinding, async/libuv owners and callbacks, TLS/HTTP, WebSocket ownership,
+SQLite, JSON, reflection, PEG/regex, and the net/OS production smokes. Full
+library behavior belongs to native coverage. The 15-second Runtime shutdown
+check runs here because this aggregate carries no coverage-reporting overhead.
+The gates run serially: several carry timing oracles, such as that shutdown
+check, which concurrent filtered runs would load. Host Lua/parser dependencies
+use instrumented O1; libbacktrace, libuv, generated images, and disposable
+fixtures use instrumented O0; LTO stays disabled throughout.
+
+A gate whose filter could silently select nothing, for example after a case
+rename, also greps each log for the runner's `[==========] N test(s) ran.`
+summary with N at least one; the `ci.yml` steps show which gates do. The
+teardown gate is one of them. It runs every `test_lua_close_` case
+([Lua-state close of an unretired
+Runtime](libuv-runtime.md#lua-state-close-of-an-unretired-runtime), parked
+external waits, and thread endpoints) and every `test_unwind_` case
+([abandoned-coroutine
+unwinding](coroutines.md#unwinding-an-abandoned-coroutine)).
 
 Keep ordinary per-node `#line` attribution during the run: traceback gates
 require exact user and standard-provider frames. `TITAN_NO_LINE_DIRECTIVES=1`
@@ -206,6 +223,23 @@ Missing module offsets, a required BuildId that is absent or different, symbol
 mismatches, overlapping or aliased functions, changed target bytes, and any
 other incomplete evidence make that frame's context unavailable rather than
 producing a speculative mapping.
+
+### Fake-stack probe
+
+The job compiles with the runner's `cc` (GCC) and sets
+`detect_stack_use_after_return=1`. GCC then places a frame that calls `setjmp`,
+and its `jmp_buf`, on ASan's fake stack; Clang never does. The coroutine
+crossing keys of [abandoned-coroutine
+unwinding](coroutines.md#unwinding-an-abandoned-coroutine) normalize such
+fake-stack addresses, and only a lane with that placement exercises the
+normalization. Before the teardown gate, the job builds
+`spec/support/asan_fake_stack_probe.c` with the job's `$CC` and
+`$SANITIZER_FLAGS` and runs it under the job's `ASAN_OPTIONS`. The probe calls
+`setjmp` on a local `jmp_buf` and exits nonzero unless
+`__asan_addr_is_in_fake_stack` finds that buffer on the current thread's fake
+stack, so a runner-image or compiler change that stops the placement fails the
+job instead of silently removing that coverage from the `test_unwind_` gate.
+Local Clang sanitizer lanes do not exercise the normalization.
 
 ## macOS pre-merge gate
 

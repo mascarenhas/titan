@@ -152,10 +152,11 @@ describe("incremental and separate compilation (CLI)", function()
                 remove(root .. ".dll.def")
                 local paths = assert(driver.windows_program_paths(root))
                 remove(paths.executable)
-                remove(paths.provider)
-                remove(paths.provider .. ".def")
-                for _, suffix in ipairs({ ".c", ".o", ".manifest", ".rc", ".res" }) do
-                    remove(root .. "__entrypoint" .. suffix)
+                -- A launcher's resources are named after its entrypoint C file
+                -- (`<root>__entrypoint.c.rc`), never after the module root.
+                for _, path in ipairs(driver.windows_program_auxiliary_paths(
+                        root .. "__entrypoint.c", paths.provider)) do
+                    remove(path)
                 end
             end
         end
@@ -202,6 +203,13 @@ describe("incremental and separate compilation (CLI)", function()
         assert.is_false(ok)
         assert.is_true(exists(output .. "/" .. APP .. "__entrypoint.c"))
         assert.is_false(exists(APP .. "__entrypoint.c"))
+        if platform.windows then
+            -- Launcher resources follow the entrypoint C file into the output tree.
+            for _, suffix in ipairs({ ".manifest", ".rc", ".res" }) do
+                assert.is_true(exists(output .. "/" .. APP .. "__entrypoint.c" .. suffix))
+                assert.is_false(exists(APP .. "__entrypoint.c" .. suffix))
+            end
+        end
     end)
 
     it("puts library providers and Lua shims beside the redirected module hierarchy", function()

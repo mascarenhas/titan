@@ -112,8 +112,7 @@ function codeimmediatecall(ctx, node)
             end
         end
         local pair = {}
-        emit_vararg_struct(ctx, node, ftype, tails, false,
-            #adjusted.fixed + #tails, pair, body)
+        emit_vararg_struct(ctx, ftype, tails, pair, body)
         varargs = { cname = "(" .. pair[1] .. ")",
             start = pair[2], elem = ftype.varargtype }
     else

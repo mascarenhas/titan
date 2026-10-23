@@ -359,6 +359,35 @@ diagnostics` around the operation. Those prefixed brackets make a successful
 aggregate log readable and keep the expectation owned by the case that
 produces it.
 
+### Concurrent filtered runs
+
+The Unix `Makefile` `titan-stdlib-test-run` tees the merged output to
+`TITAN_TEST_RUN_LOG` (default `$(TITAN_TEST_BUILD_DIR)/stdout.log`, with
+`TITAN_TEST_BUILD_DIR` defaulting to `out/tests`) and writes the root inventory
+that `check_stdlib_test_output.lua` audits it against (default
+`$(TITAN_TEST_BUILD_DIR)/roots.txt`; `<log>.roots` beside an explicitly
+selected log). The built executable and fixture objects are only read, so
+several filtered runs can share one build at once when each selects its own
+log and `TMPDIR`:
+
+```sh
+mkdir -p /tmp/run-a /tmp/run-b
+TMPDIR=/tmp/run-a make titan-stdlib-test-run TITAN_FILTER='^uv[.]' \
+  TITAN_TEST_RUN_LOG=/tmp/run-a/stdout.log & uv_run=$!
+TMPDIR=/tmp/run-b make titan-stdlib-test-run TITAN_FILTER='^protobuf[.]' \
+  TITAN_TEST_RUN_LOG=/tmp/run-b/stdout.log & protobuf_run=$!
+wait "$uv_run"; uv_status=$?
+wait "$protobuf_run"; protobuf_status=$?
+```
+
+Each run audits only its own log and keeps its own exit status. Cases still
+share the host, so timing-bound cases see more load and loopback port scans
+more contention. The CI sanitizer gates stay serial
+([continuous integration](continuous-integration.md#sanitizer-ownership-and-failure-diagnostics)).
+`Makefile.win` does not take `TITAN_TEST_RUN_LOG`: its runner writes fixed
+logs, root lists, and scratch paths inside the one workspace, so Windows runs
+of one workspace must stay sequential.
+
 ### Busted partitions
 
 `make busted-test`, `luarocks test` (the rockspec `test` command) and Windows

@@ -233,9 +233,11 @@ static inline void *lmacro_ccl_f(const CClosure *cl) {
   return titan_cast_func(void *, cl->f);
 }
 
+/* `o` is an untyped collectable object; cast it directly, because `obj2gco`
+ * reads its tag under LUAI_ASSERT and `void *` has none. */
 static inline void lmacro_luaC_barrierback(lua_State *L, void *o,
                                            const TValue *v) {
-  luaC_barrierback(L, obj2gco(o), v);
+  luaC_barrierback(L, (GCObject *)o, v);
 }
 
 typedef void (*generic_func_ptr)(void);

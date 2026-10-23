@@ -86,7 +86,7 @@ end
 function newbox(ctx, typ, boxvar, slot)
     if is_rawbox(typ) then
         return render([[
-            Udata *$BOXVAR = gco2u(luaC_newobj(L, LUA_VUSERDATA, sizeudata(0, sizeof($CT))));
+            Udata *$BOXVAR = titan_new_udata_object(L, sizeudata(0, sizeof($CT)));
             $BOXVAR->len = sizeof($CT); $BOXVAR->nuvalue = 0; $BOXVAR->metatable = NULL;
             setuvalue(L, $SLOT, $BOXVAR);
         ]], {
@@ -96,7 +96,7 @@ function newbox(ctx, typ, boxvar, slot)
         })
     else
         return render([[
-            Udata *$BOXVAR = gco2u(luaC_newobj(L, LUA_VUSERDATA, sizeudata(1, 0)));
+            Udata *$BOXVAR = titan_new_udata_object(L, sizeudata(1, 0));
             $BOXVAR->len = 0; $BOXVAR->nuvalue = 1; $BOXVAR->metatable = NULL;
             setnilvalue(&$BOXVAR->uv[0].uv);
             setuvalue(L, $SLOT, $BOXVAR);

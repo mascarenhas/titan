@@ -132,6 +132,7 @@ local function discard_transfer(source: foreign *mco_coro)
 end
 
 local function reinstall_trace(trace: string)
+  if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve Lua stack for a trace" end
   ffi.lua_pushtvalue(L, trace)
   ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_BACKTRACE_KEY)
   ffi.lua_pushboolean(L, 1)
@@ -139,6 +140,7 @@ local function reinstall_trace(trace: string)
 end
 
 local function stash_trace_for_append(trace: string)
+  if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve Lua stack for a trace" end
   ffi.lua_pushtvalue(L, trace)
   ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
 end
@@ -146,6 +148,7 @@ end
 local function pop_trace_for_append(): value
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 2) == 0 then raise "cannot reserve Lua stack for a trace" end
   ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
   local trace = ffi.lua_totvalue(L, -1)
   ffi.lua_pushnil(L)
@@ -344,6 +347,8 @@ end
 
 -- Implementation notes: doc/implementation/coroutines.md#unwinding-an-abandoned-coroutine
 local function coro_gc(handle: value)
+  -- The owner stays pushed while lua_getiuservalue pushes the record.
+  if ffi.lua_checkstack(L, 2) == 0 then raise "cannot reserve Lua stack for a coroutine" end
   ffi.lua_pushtvalue(L, handle)
   local slot = ffi.lua_touserdata(L, -1) as foreign *(*mco_coro)
   local co = slot[0]

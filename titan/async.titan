@@ -582,6 +582,7 @@ end
 
 local function require_main_thread()
   local top = ffi.lua_gettop(L)
+  if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve Lua stack" end
   ffi.lua_rawgeti(L, ffi.LUA_REGISTRYINDEX, ffi.LUA_RIDX_MAINTHREAD as foreign lua_Integer)
   local main = ffi.lua_tothread(L, -1)
   ffi.lua_settop(L, top)

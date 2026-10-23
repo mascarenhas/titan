@@ -37,6 +37,31 @@ installed OpenSSL SDK. The Windows runtime build compiles its eight inputs
 directly. Versioned source acquisition retains checksums and the required
 upstream corrections.
 
+### Native dependency configuration stamps
+
+Without a configuration record, an existing archive is never rebuilt for new settings:
+Make would not rerun either build, libbacktrace's configure does not rebuild
+existing objects, and a reused libuv CMake cache keeps the earlier compiler
+and, when `LIBUV_BUILD_CFLAGS` becomes empty, the earlier C flags. The Unix
+`Makefile` therefore records each archive's configuration in a stamp that only
+that archive depends on. `libbacktrace/.titan-build.config` holds
+`TITAN_BUILD_PROFILE`, `CC`, `AR`, `RANLIB`, and `LIBBT_CFLAGS`;
+`libuv-build/.titan-build.config` holds `CC`, `LIBUV_CMAKE_FLAGS` (with
+`LIBUV_BUILD_TYPE`), and `LIBUV_BUILD_CFLAGS`. Each stamp depends on `FORCE`:
+its recipe writes the current configuration to a temporary file and replaces
+the stamp only when the content differs (`cmp`, then `mv`). An unchanged
+configuration therefore keeps the stamp's timestamp, and a second `make`
+rebuilds neither archive nor anything that depends on them: the runtime SDK,
+the checkout-runtime standard-library objects (libbacktrace is in
+`STDLIB_TOOL_PREREQS`), and the provider link (libuv is in
+`STDLIB_NATIVE_PREREQS`). A changed configuration rebuilds exactly the affected
+archive once, from a clean `make clean` libbacktrace tree or a discarded libuv
+CMake cache, and then its ordinary dependents. A tree without a stamp, for
+example a cache restored from an older recipe, rebuilds that archive once.
+`make -n` cannot evaluate a stamp without running its recipe, so a dry run
+conservatively lists the archive rebuilds, as it does for the native test
+configuration stamp.
+
 ## Standard-library object graph
 
 Make owns one object target per standard module, including one per folder
@@ -66,8 +91,10 @@ final link. `all` and `STDLIB_USE_INSTALLED_RUNTIME=0` select the checkout
 compiler, checkout runtime and private bootstrap instead.
 
 `make clean-stdlib` clears the graph and provider outputs. Run it before
-changing tools, flags, profile, or OpenSSL mode, clean the affected native build
-directories too, or use separate source copies and SDKs.
+changing tools, flags, profile, or OpenSSL mode. Also clean the affected native
+build directories other than libbacktrace and libuv, which follow their
+[configuration stamps](#native-dependency-configuration-stamps), or use
+separate source copies and SDKs.
 
 ## Installation and publication
 

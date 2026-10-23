@@ -1225,3 +1225,79 @@ describe("closures over foreign-typed boxes (end-to-end)", function()
         assert.truthy(rok, out)
     end)
 end)
+
+describe("raw userdata allocation under Lua internal assertions (end-to-end)", function()
+    local driver = require "titan-compiler.driver"
+    after_each(function ()
+        os.execute("rm -rf *.o *.so *.dSYM")
+        if not h.verbose then os.execute("rm -f *.c") end
+    end)
+
+    -- Under -DLUAI_ASSERT, check_exp evaluates gco2u's operand twice. A
+    -- generated `gco2u(luaC_newobj(...))` therefore allocated a second,
+    -- never initialized userdata that Lua later freed with whatever size its
+    -- recycled header bytes implied. The vararg entry payload's block size
+    -- makes that drift Lua's byte count reliably; a capture box's orphan often
+    -- reuses an earlier box's header and frees with the right size by luck.
+    -- So the run measures the drift for both, and the generated C pins every
+    -- raw userdata site to the single-evaluation allocator. A forwarded `...`
+    -- allocates nothing: it lowers to a C-stack open-argument array.
+    it("keeps Lua's byte accounting balanced for capture boxes and vararg payloads", function()
+        local saved = driver.EXTRA_CPPFLAGS
+        local flags = { "-DLUAI_ASSERT" }
+        for _, flag in ipairs(saved or {}) do flags[#flags + 1] = flag end
+        driver.EXTRA_CPPFLAGS = flags
+        local ok, failure = pcall(h.run_coder, [[
+            function entry(...: integer): integer
+                return #{...}
+            end
+            function churn_boxes(rounds: integer): integer
+                local sum = 0
+                for round = 1, rounds do
+                    local boxed = round
+                    local label = "r"
+                    local bump = function()
+                        boxed = boxed + 1
+                        label = label .. "."
+                    end
+                    bump()
+                    sum = sum + boxed + #label
+                end
+                return sum
+            end
+        ]], [[
+            local rounds = 20000
+            local failures = {}
+            local function measure(label, work)
+                collectgarbage("collect")
+                collectgarbage("collect")
+                local before = collectgarbage("count")
+                work()
+                collectgarbage("collect")
+                collectgarbage("collect")
+                local drift = collectgarbage("count") - before
+                if drift <= -64 then
+                    failures[#failures + 1] = label .. " drifted by " .. drift .. " KiB"
+                end
+            end
+            measure("capture boxes", function()
+                assert(test.churn_boxes(rounds) > 0)
+            end)
+            measure("Lua-called variadic entry", function()
+                for _ = 1, rounds do assert(test.entry(1, 2, 3, 4, 5, 6, 7, 8) == 8) end
+            end)
+            assert(#failures == 0, table.concat(failures, "; "))
+        ]])
+        driver.EXTRA_CPPFLAGS = saved
+        if not ok then error(failure, 0) end
+        local file = assert(io.open("test.c", "rb"))
+        local code = file:read("a")
+        file:close()
+        assert.falsy(code:find("= gco2u(luaC_newobj", 1, true))
+        local _, raw_boxes = code:gsub("titan_new_udata_object%(L, sizeudata%(0, sizeof", "")
+        local _, gc_boxes = code:gsub("titan_new_udata_object%(L, sizeudata%(1, 0%)%)", "")
+        local _, payloads = code:gsub("_varargs_ud = titan_new_udata_object%(L,", "")
+        assert.is_true(raw_boxes > 0 and gc_boxes > 0 and payloads > 0,
+            raw_boxes .. " raw boxes, " .. gc_boxes .. " GC boxes, " .. payloads .. " payloads")
+    end)
+end)

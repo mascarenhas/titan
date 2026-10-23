@@ -8,8 +8,13 @@ local function _initialize_native()
   -- Implementation notes: doc/implementation/lpeglabel-embedding.md#opening-one-private-engine-per-lua-state
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
-  if ffi.titan_lpeglabel_open(L) ~= 1 or
-      ffi.lua_type(L, -1) ~= ffi.LUA_TTABLE then
+  -- The opener is a lua_CFunction: call it through Lua so it gets its own
+  -- frame with LUA_MINSTACK free slots, as every C function may assume.
+  -- Reserve the function slot and its one result.
+  if ffi.lua_checkstack(L, 2) == 0 then raise "cannot reserve Lua stack for LPegLabel" end
+  ffi.lua_pushcclosure(L, ffi.titan_lpeglabel_open, 0)
+  ffi.lua_callk(L, 0, 1, 0 as foreign lua_KContext, nil)
+  if ffi.lua_type(L, -1) ~= ffi.LUA_TTABLE then
     raise "embedded LPegLabel opener did not return its module table"
   end
   local raw_engine: value = ffi.lua_totvalue(L, -1)

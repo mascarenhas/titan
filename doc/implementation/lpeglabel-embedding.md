@@ -80,9 +80,15 @@ cross-engine pattern use fails the owning engine's type check.
 ## Opening one private engine per Lua state
 
 The canonical main `titan/peg/peg.titan` owns module state. Its sole
-initializer calls `native.titan` `_initialize_native`, which calls
-`titan_lpeglabel_open(L)`, requires one result with the module table on top,
-captures that table as a traced module value, and restores the entry stack top.
+initializer calls `native.titan` `_initialize_native`, which reserves two
+stack slots with `lua_checkstack`, pushes `titan_lpeglabel_open` as a C
+closure, and calls it through `lua_callk` with one result. The opener is a
+`lua_CFunction` that pushes freely on the assumption every C function may
+make: its own Lua frame with `LUA_MINSTACK` free slots. Calling it directly
+from the initializer's frame would push past that frame's reserved top,
+which Lua's `api_check` reports under `-DLUAI_ASSERT`. `_initialize_native`
+then requires a table result on top, captures it as a traced module value,
+and restores the entry stack top.
 
 It deliberately does not use `luaL_requiref`, write
 `package.loaded.lpeglabel`, or publish the native table. Lua observes only

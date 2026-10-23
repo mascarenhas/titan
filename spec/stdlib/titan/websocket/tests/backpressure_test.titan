@@ -430,9 +430,19 @@ function test_stopped_socket_output_aborts_before_native_drain(context: test.Con
   end
 end
 
+-- Wall-clock bounds in this case are liveness guards, never the oracle. Each
+-- watchdog only turns a broken production path into a failure instead of a
+-- hang, so its budget is generous enough for sanitizer builds and loaded
+-- hosts. The oracle is ordering: the pending 101 is observed, then the
+-- trigger (opening deadline or cancellation) retires it while the peer stays
+-- stopped, before any watchdog has to abort that peer. The cancellation
+-- variant's opening deadline lies beyond the watchdog, so only cancellation
+-- can end it; the timeout variant's short deadline is the trigger under test.
+local OPENING_LIVENESS_MS = 30000
+
 local function blocked_server_opening_case(secure: boolean, cancel: boolean)
-  local opening_timeout = 1000
-  if cancel then opening_timeout = 4000 end
+  local opening_timeout = 3000
+  if cancel then opening_timeout = 4 * OPENING_LIVENESS_MS end
   local handler_task: async.Task? = nil
   local priming = false
   local stop_priming = false
@@ -513,7 +523,7 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
   local setup_fired = false
   local setup_started = fixture_time_ms()
   local setup_watchdog = async.run<|value, value|>(function (): value
-    timer.sleep(8000)
+    timer.sleep(OPENING_LIVENESS_MS)
     setup_fired = true
     abort()
     listener:close()
@@ -636,7 +646,7 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
   test.assert(stopped_sockets >= 3, "stopped opening runtime lost owned TCP handles; " .. stopped_profile)
   local watchdog_fired = false
   local watchdog = async.run<|value, value|>(function (): value
-    timer.sleep(5000)
+    timer.sleep(OPENING_LIVENESS_MS)
     watchdog_fired = true
     -- Closing this public peer forces native accepted output to retire before
     -- any fixture joins, even if production cancellation/deadline is broken.
