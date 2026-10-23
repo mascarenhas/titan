@@ -1680,3 +1680,199 @@ int errorhandler(lua_State *L) {
   lua_settop(L, top);
   return 1;
 }
+
+/*
+** ===========================================================================
+** Abandoned-coroutine unwinding
+** ===========================================================================
+*/
+
+/* Implementation notes: doc/implementation/coroutines.md#unwinding-an-abandoned-coroutine */
+
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define TITAN_UNWIND_ASAN 1
+#endif
+#endif
+#if defined(__SANITIZE_ADDRESS__) && !defined(TITAN_UNWIND_ASAN)
+#define TITAN_UNWIND_ASAN 1
+#endif
+#if defined(TITAN_UNWIND_ASAN)
+#include <sanitizer/asan_interface.h>
+#endif
+
+static void titan_unwind_abort(const char *why) {
+  fprintf(stderr, "titan: abandoned coroutine unwind: %s\n", why);
+  fflush(stderr);
+  abort();
+}
+
+/* Integer key of an automatic object's real native-stack location. GCC's ASan
+** may place frames that call setjmp (and their lua_longjmp) on the
+** use-after-return fake stack; map such an address to the real-stack frame
+** it stands for. The current fake stack is the running coroutine's, because
+** minicoro saves and restores it per fiber. */
+static uintptr_t titan_unwind_key(const void *address) {
+#if defined(TITAN_UNWIND_ASAN)
+  void *real = __asan_addr_is_in_fake_stack(__asan_get_current_fake_stack(),
+                                            (void *)address, NULL, NULL);
+  if (real != NULL) return (uintptr_t)real;
+#endif
+  return (uintptr_t)address;
+}
+
+static void titan_unwind_clear_registry_string(lua_State *L, const char *key) {
+  TValue nil;
+  setnilvalue(&nil);
+  /* Storing nil into an existing slot never allocates; an absent key has
+  ** nothing to clear. */
+  (void)luaH_psetstr(hvalue(&G(L)->l_registry), luaS_new(L, key), &nil);
+}
+
+static void titan_unwind_warn(lua_State *L, void *ud) {
+  (void)ud;
+  luaE_warnerror(L, "coroutine cleanup");
+  /* A reported error is handled: keep a later titan.backtrace() from seeing
+  ** its trace, as a catch recovery does. */
+  titan_unwind_clear_registry_string(L, TITAN_BACKTRACE_KEY);
+  titan_unwind_clear_registry_string(L, TITAN_TRACE_PINNED);
+}
+
+/* Report one cleanup error as a Lua warning and drop it. The error object is
+** materialized above the current top; the reporting-time top is restored, so
+** the open upvalues and pending to-be-closed slots of a failed __close stay
+** below it. A failure while reporting is ignored. */
+static void titan_unwind_report(lua_State *L, TStatus status) {
+  ptrdiff_t top = savestack(L, L->top.p);
+  CallInfo *ci = L->ci;
+  lu_byte allowhook = L->allowhook;
+  luaD_seterrorobj(L, status, L->top.p);
+  (void)luaD_rawrunprotected(L, titan_unwind_warn, NULL);
+  L->ci = ci;
+  L->allowhook = allowhook;
+  L->top.p = restorestack(L, top);
+}
+
+static void titan_unwind_close_aux(lua_State *L, void *ud) {
+  ptrdiff_t level = *(ptrdiff_t *)ud;
+  luaF_close(L, restorestack(L, level), LUA_OK, 0);
+}
+
+/* luaD_closeprotected's loop with the unwind policy: every retry keeps
+** LUA_OK, so each __close receives no error value, and each error is reported
+** before the retry. luaF_close pops an entry before calling it, so the loop
+** always progresses. `top` drops to `level` only once everything is closed. */
+void titan_unwind_close(lua_State *L, ptrdiff_t level) {
+  CallInfo *ci = L->ci;
+  lu_byte allowhook = L->allowhook;
+  for (;;) {
+    TStatus status = luaD_rawrunprotected(L, titan_unwind_close_aux, &level);
+    if (status == LUA_OK) break;
+    titan_unwind_report(L, status);
+    L->ci = ci;
+    L->allowhook = allowhook;
+  }
+  L->top.p = restorestack(L, level);
+}
+
+void titan_unwind_guard_failed(lua_State *L, lua_longjmp *guard,
+                               l_uint32 oldnC, CallInfo *oldci, lu_byte oldah,
+                               ptrdiff_t olderrfunc, ptrdiff_t level) {
+  TStatus status = guard->status;
+  L->errorJmp = guard->previous;
+  L->nCcalls = oldnC;
+  L->ci = oldci;
+  L->allowhook = oldah;
+  L->errfunc = olderrfunc;
+  titan_unwind_report(L, status);
+  titan_unwind_close(L, level);
+  titan_unwind(L);
+}
+
+/* Close an exhausted Lua coroutine as dead, after all of its Titan cleanup and
+** before any of its resumer's. Mirrors lstate.c resetCI (static there), then
+** closes every remaining to-be-closed variable with the unwind policy. */
+static void titan_unwind_close_thread(lua_State *L, lua_State *resumer) {
+  CallInfo *ci;
+  L->errorJmp = NULL;
+  L->nCcalls = getCcalls(resumer);
+  ci = L->ci = &L->base_ci;
+  ci->func.p = L->stack.p;
+  setnilvalue2s(ci->func.p);
+  ci->top.p = ci->func.p + 1 + LUA_MINSTACK;
+  ci->u.c.k = NULL;
+  ci->callstatus = CIST_C;
+  L->status = LUA_OK;
+  L->errfunc = 0;
+  titan_unwind_close(L, savestack(L, L->stack.p + 1));
+  L->top.p = L->stack.p + 1;
+  luaD_shrinkstack(L);
+  L->nCcalls = 0;
+}
+
+/* The thread `L` holds no landing point: it is a Lua coroutine resumed on the
+** coroutine stack being unwound. Find its resumer, close it, and return the
+** resumer. Every compared address is an integer real-stack key. */
+static lua_State *titan_unwind_cross(lua_State *L, lua_longjmp *outermost) {
+  global_State *g = G(L);
+  const titan_unwind_floor *floor = NULL;
+  lua_State *resumer = NULL;
+  uintptr_t position, best = 0;
+  GCObject *o;
+  if (outermost == NULL)
+    titan_unwind_abort("an exhausted Lua thread has no protected boundary");
+  position = titan_unwind_key(outermost);
+  /* The armed floor whose recorded stack contains the position owns it. The
+  ** main thread is linked into allgc, like every other thread. */
+  for (o = g->allgc; o != NULL && floor == NULL; o = o->next) {
+    lua_State *th;
+    lua_longjmp *last;
+    if (o->tt != LUA_VTHREAD) continue;
+    th = gco2th(o);
+    last = th->errorJmp;
+    if (last == NULL) continue;
+    while (last->previous != NULL) last = last->previous;
+    if (last->status == TITAN_STATUS_FLOOR) {
+      const titan_unwind_floor *candidate = (const titan_unwind_floor *)last;
+      if (candidate->stack_low <= position && position < candidate->stack_high)
+        floor = candidate;
+    }
+  }
+  if (floor == NULL)
+    titan_unwind_abort("no coroutine floor contains the exhausted Lua thread");
+  /* The resumer is blocked in lua_resume(L): its innermost boundary is the
+  ** nearest head above the exhausted thread's outermost boundary. */
+  for (o = g->allgc; o != NULL; o = o->next) {
+    lua_State *th;
+    uintptr_t key;
+    if (o->tt != LUA_VTHREAD) continue;
+    th = gco2th(o);
+    if (th == L || th->errorJmp == NULL) continue;
+    key = titan_unwind_key(th->errorJmp);
+    if (position < key && key < floor->stack_high &&
+        (resumer == NULL || key < best)) {
+      resumer = th;
+      best = key;
+    }
+  }
+  if (resumer == NULL)
+    titan_unwind_abort("no resumer found for an exhausted Lua thread");
+  titan_unwind_close_thread(L, resumer);
+  return resumer;
+}
+
+void titan_unwind(lua_State *L) {
+  for (;;) {
+    lua_longjmp *outermost = NULL;
+    lua_longjmp *lj;
+    for (lj = L->errorJmp; lj != NULL; lj = lj->previous) {
+      if (lj->status == TITAN_STATUS_FINALLY ||
+          lj->status == TITAN_STATUS_FLOOR) {
+        lj->status = TITAN_STATUS_UNWIND;
+        TITAN_LONGJMP(lj->b);
+      }
+      outermost = lj;
+    }
+    L = titan_unwind_cross(L, outermost);
+  }
+}

@@ -123,6 +123,28 @@ static inline int titan_posix_getsockname(int descriptor,
 
 int errorhandler(lua_State *L);
 
+/* True while a __gc finalizer runs (ordinary collection or lua_close). GCTM
+** sets GCSTPGC around every finalizer call; no other running code sees it. */
+/* Implementation notes: doc/implementation/coroutines.md#finalizer-context */
+static inline int titan_in_finalizer(lua_State *L) {
+  return (G(L)->gcstp & GCSTPGC) != 0;
+}
+
+/* Continue an abandoned-coroutine unwind from the current frame: jump to the
+** next finally boundary or coroutine floor on L's error-recovery chain,
+** closing exhausted Lua coroutines on the way. Never returns. */
+TITAN_RUNTIME_FUNC void titan_unwind(lua_State *L);
+
+struct mco_coro;
+typedef void (*titan_coroutine_entry)(lua_State *, Udata *, CClosure *, TValue,
+                                      struct mco_coro *);
+/* Run a coroutine entry above an unwind floor on its thread T. An unwind that
+** reaches the floor closes T's remaining Lua frames and finishes the
+** coroutine with an unwind transfer; a real error that escapes the entry is
+** delivered to the resumer as an error transfer. */
+TITAN_RUNTIME_FUNC void titan_coroutine_enter(lua_State *T, Udata *module,
+    TValue func, struct mco_coro *co, titan_coroutine_entry entry);
+
 static inline TValue lua_totvalue(lua_State *L, int idx) {
   if (TITAN_UNLIKELY(idx > 0)) {
     return *s2v(L->ci->func.p + idx);

@@ -1013,7 +1013,8 @@ $(RUNTIME_O): titan-runtime/titan.c titan-runtime/titan.h titan-runtime/transfer
 		-I $(LIBBT_DIR) -o $@
 
 $(MINICORO_O): titan-runtime/minicoro.c \
-		titan-runtime/minicoro.h titan-runtime/titan/ffi.h \
+		titan-runtime/minicoro.h titan-runtime/titan.h titan-runtime/transfer.h \
+		titan-runtime/titan/ffi.h \
 		$(TITAN_RUNTIME_LUA_HEADERS) | $(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB)
 	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(CFLAGS) $(TITAN_EXTRA_CFLAGS) \
 		-c titan-runtime/minicoro.c -I titan-runtime -I $(TITAN_RUNTIME_LUA_SOURCE_PATH) \

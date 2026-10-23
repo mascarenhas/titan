@@ -25,7 +25,8 @@ local foreign function coro_entry_trampoline(co: *mco_coro)
   local callback = ffi.lmacro_clCvalue(owner.uv[ENTRY_UV_INDEX].uv)
   local func = owner.uv[CALLBACK_UV_INDEX].uv
   local entry = ffi.lmacro_pvalue(callback.upvalue[2]) as foreign coro_entry_func
-  entry(T, module, nil, func, co)
+  -- The C shim installs the unwind floor below the entry on T.
+  ffi.titan_coroutine_enter(T, module, func, co, entry)
 end
 
 local STACK_SIZE = 2 * 1024 * 1024
@@ -37,8 +38,12 @@ local TITAN_CORO_CALLBACK_USERVALUE = 4
 local TITAN_CORO_TRANSFER_USERVALUE = 5
 local TITAN_CORO_RECORD_USERVALUE = 6
 local runtime = foreign mco_runtime.new()
--- Private registry slot shared with titan/async.titan (same literal there).
-local const TEARDOWN_HOOK_KEY = "titan.coroutine.teardown"
+-- Transfer flags popped by pop_transfer_or_raise. TRANSFER_UNWIND is both the
+-- request coro_gc pushes into an abandoned chain and the final transfer of an
+-- unwound coroutine (pushed by titan_coroutine_enter in minicoro.c).
+local const TRANSFER_ERROR = 0
+local const TRANSFER_VALUE = 1
+local const TRANSFER_UNWIND = 2
 
 --- Opaque tagged coroutine created by coroutine.create; use async Tasks for scheduling.
 -- @usage coroutines.md
@@ -176,12 +181,18 @@ local function pop_transfer_or_raise(co: foreign *mco_coro,
   local payload_result = ffi.mco_pop(co, payload, foreign TValue.sizeof)
   check_mco_result(payload_result)
   clear_transfer(co)
-  if ok == 0 then
-    if append_trace then
-      raise_with_appended_trace(payload)
-    else
-      raise payload
+  if ok ~= TRANSFER_VALUE then
+    if ok == TRANSFER_ERROR then
+      if append_trace then
+        raise_with_appended_trace(payload)
+      else
+        raise payload
+      end
     end
+    -- TRANSFER_UNWIND: this coroutine is being collected while suspended
+    -- here, or the coroutine it resumed finished unwinding. Continue the
+    -- unwind from this frame; titan_unwind never returns.
+    ffi.titan_unwind(L)
   end
   return payload
 end
@@ -212,17 +223,28 @@ local function yield_result_or_raise(co: foreign *mco_coro, tag: value): value
   return pop_transfer_or_raise(co, false)
 end
 
+local function resume_from_finalizer()
+  raise "cannot resume a coroutine from a finalizer"
+end
+
 --- Resume a suspended coroutine and return its yielded or final value.
 -- @param arg Value delivered to the coroutine.
 -- @param tag Resumer tag; nil uses the stored default tag.
 -- @return Yielded or returned value.
 -- @usage coroutines.md
 function Coroutine:resume(arg: value, tag: value): value
+  if ffi.titan_in_finalizer(L) ~= 0 then resume_from_finalizer() end
   local effective = effective_tag(self.default_tag, tag)
+  -- Implementation notes: doc/implementation/coroutines.md#reachability-of-a-stacked-chain
+  -- `self` is an unanchored formal: this frame roots the resumed coroutine
+  -- for the whole switch, whatever home the caller read it from.
+  local resumed: Coroutine? = self
   local co = self.handle
   local source = transfer_source(co)
-  push_transfer(source, 1, arg)
-  return resume_result_or_raise(co, source, effective)
+  push_transfer(source, TRANSFER_VALUE, arg)
+  local result = resume_result_or_raise(co, source, effective)
+  resumed = nil
+  return result
 end
 
 --- Resume a suspended coroutine by raising a value at its yield point.
@@ -231,11 +253,15 @@ end
 -- @return Next yielded or returned value if the coroutine handles the error.
 -- @usage coroutines.md
 function Coroutine:error(err: value, tag: value): value
+  if ffi.titan_in_finalizer(L) ~= 0 then resume_from_finalizer() end
   local effective = effective_tag(self.default_tag, tag)
+  local resumed: Coroutine? = self -- see Coroutine:resume
   local co = self.handle
   local source = transfer_source(co)
-  push_transfer(source, 0, err)
-  return resume_result_or_raise(co, source, effective)
+  push_transfer(source, TRANSFER_ERROR, err)
+  local result = resume_result_or_raise(co, source, effective)
+  resumed = nil
+  return result
 end
 
 --- Query the current low-level coroutine state.
@@ -267,8 +293,11 @@ function yield(arg: value, tag: value): value
   if tag == nil then
     missing_yield_tag()
   end
+  if ffi.titan_in_finalizer(L) ~= 0 then
+    raise "cannot yield from a finalizer"
+  end
   local co = runtime.current_co
-  push_transfer(co, 1, arg)
+  push_transfer(co, TRANSFER_VALUE, arg)
   return yield_result_or_raise(co, tag)
 end
 
@@ -280,33 +309,75 @@ function is_yieldable(tag: value): boolean
   if tag == nil then
     missing_yield_tag()
   end
+  if ffi.titan_in_finalizer(L) ~= 0 then
+    return false
+  end
   local ctag: foreign TValue = tag
   return ffi.mco_is_yieldable(runtime.current_co, ctag) ~= 0
 end
 
--- Implementation notes: doc/implementation/coroutines.md#suspended-stack-teardown-hook
+-- The coroutine floor stays linked on the coroutine's own Lua thread from the
+-- entry's first instruction until it returns.
+local function coroutine_started(co: foreign *mco_coro): boolean
+  local owner = ffi.mco_get_user_data(co) as foreign *Udata
+  local thread = ffi.lmacro_thvalue(owner.uv[TITAN_CORO_THREAD_USERVALUE - 1].uv)
+  return thread.errorJmp ~= nil
+end
+
+-- Resume the suspended handler of an abandoned chain with an unwind request.
+-- Minicoro switches into the deepest stacked coroutine; each member unwinds,
+-- finishes dead and returns to its resumer, which unwinds in turn.
+local function unwind_chain(handler: foreign *mco_coro)
+  local source = transfer_source(handler)
+  push_transfer(source, TRANSFER_UNWIND, nil)
+  -- No yield can compare this tag: yields raise inside finalizers.
+  local nil_tag: foreign TValue = nil
+  local result = ffi.mco_resume(handler, nil_tag)
+  if result ~= ffi.MCO_SUCCESS then
+    discard_transfer(source)
+    return
+  end
+  if ffi.mco_status(handler) == ffi.MCO_DEAD then
+    discard_transfer(handler)
+  end
+end
+
+-- Implementation notes: doc/implementation/coroutines.md#unwinding-an-abandoned-coroutine
 local function coro_gc(handle: value)
   ffi.lua_pushtvalue(L, handle)
-  local co = (ffi.lua_touserdata(L, -1) as foreign *(*mco_coro))[0]
-  if ffi.mco_status(co) == ffi.MCO_SUSPENDED then
-    -- Live frames may hold borrowed native waiter nodes: let the registered
-    -- scheduler withdraw them before mco_destroy releases this stack.
-    ffi.lua_getiuservalue(L, -1, TITAN_CORO_RECORD_USERVALUE)
-    local finalized: value = ffi.lua_totvalue(L, -1)
-    ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, TEARDOWN_HOOK_KEY)
-    local hook: value = ffi.lua_totvalue(L, -1)
-    if hook ~= nil then
-      local teardown = hook as function (value): ()
-      do
-        teardown(finalized)
-      catch
-        -- A failed withdrawal may leave a node linked into a native queue:
-        -- leak this stack instead of releasing it.
-        return
-      end
-    end
+  local slot = ffi.lua_touserdata(L, -1) as foreign *(*mco_coro)
+  local co = slot[0]
+  if not co then
+    -- Already destroyed: this handle was resurrected and finalized again.
+    return
   end
+  local status = ffi.mco_status(co)
+  if status == ffi.MCO_SUSPENDED or status == ffi.MCO_STACKED then
+    -- A stacked member's chain is owned by its first suspended ancestor.
+    local handler = co
+    while handler and ffi.mco_status(handler) == ffi.MCO_STACKED do
+      handler = handler.prev_co
+    end
+    if handler and ffi.mco_status(handler) == ffi.MCO_SUSPENDED and
+        coroutine_started(handler) then
+      unwind_chain(handler)
+    end
+    status = ffi.mco_status(co)
+  end
+  if status ~= ffi.MCO_DEAD and
+      not (status == ffi.MCO_SUSPENDED and not coroutine_started(co)) then
+    -- A running coroutine (state closed from inside it) or an undeliverable
+    -- request: leave the stack mapped rather than free live frames.
+    return
+  end
+  ffi.lua_getiuservalue(L, -1, TITAN_CORO_RECORD_USERVALUE)
+  local handle_record: value = ffi.lua_totvalue(L, -1)
   ffi.mco_destroy(co)
+  slot[0] = nil
+  if handle_record ~= nil then
+    local finalized = handle_record as Coroutine
+    finalized.handle = nil
+  end
 end
 
 local function coro_entry(func: function (value): (value), co: foreign *mco_coro)
