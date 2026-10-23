@@ -239,28 +239,41 @@ every foreign-callback mistake or memory failure.
 
 `SuspendCancelAction` is `function (): ()`. `suspend` uses its `ResumeToken`
 as Completion context and the named registrar `start_suspend`. It stages the
-cancel action first; `start_suspend` publishes the token only after
-admission, so even a GC finalizer during cell setup sees a wrong-time resume
-as a mismatch. A `defer` clears the staged state if construction or admission
-fails.
+cancel action first; `start_suspend` publishes the token only after admission.
+A `defer` clears the staged state if construction or admission fails.
 
 The interval before publication contains GC safepoints, in the suspending Task
-and in the driver, so a finalizer can wake a waiter that cannot yet be
-resumed. The domains in `titan/async.titan` whose wakers finalizers can reach
-(`async.channel`, subscriptions, `Receiver`) therefore call
-`stage_suspension(task, token)` before they publish the waiter where their
-wakers find it. Their wakers call `wake_waiter(task, token)`, which resumes a
-Task suspended on that token, records `wake_latched` while that token is
-staged, and otherwise does nothing, because the waiter is running and rechecks
-the domain itself. After publishing, `start_suspend` settles the suspension
-inline when it finds a latched wake for its token. It also settles inline when
-the Task already has a cancellation reason. Such a reason arrived after the
-driver's admission check, and its `Task:cancel` found no suspended Task to
-wake. `clear_suspension` clears the staged token at delivery and at every exit
-of `suspend`, so a later wake finds a running waiter. Combinator listeners need
-no staging: they run only from terminal publication, which never runs in a
-finalizer, because settlement and `fatal` from a finalizer are queued and
-`runtime_finalize` calls no listener.
+and in the driver, so a finalizer can wake a waiter that cannot yet be resumed.
+`Task:resume` therefore latches a mismatching token instead of raising while
+the Task is `TASK_RUNNING`, or while its current Wait is still
+`WAIT_REGISTERING`. It stores the token in `latched_token`, so the latest call
+wins. After publishing, `start_suspend` settles the suspension inline when
+`latched_token` equals its token. `advance_task` clears the latch whenever it
+runs the Task again, so a latch that the next suspension did not match, for
+example a native wait, a yield or another token, is discarded, and so does
+`clear_suspension`, at delivery and at every exit of `suspend`. A resume in
+any other state still raises the mismatch: a ready Task, a published
+suspension with another token, a pending native wait, a queued yield, or a
+finished Task. Public consumers such as `thread.Group` admission waiters need
+nothing else.
+
+`start_suspend` also settles inline when the Task already has a cancellation
+reason. Such a reason arrived after the driver's admission check, and its
+`Task:cancel` found no suspended Task to wake.
+
+A running Task also latches a wake that arrives after its delivered
+suspension, before it observes its domain. Internal domains in
+`titan/async.titan` whose wakers finalizers can reach (`async.channel`,
+subscriptions, `Receiver`) share one token across waits, or keep a waiter
+registered past delivery, so such a latch would settle a later wait on the
+same token. They call `stage_suspension(task, token)` before they publish the
+waiter where their wakers find it, and wake through `wake_waiter(task, token)`.
+That helper calls `Task:resume` only while the token is published or still
+staged. A delivered waiter has its staged token cleared, so it gets no latch
+and rechecks the domain itself. Combinator listeners need no staging: they run
+only from terminal publication, which never runs in a finalizer, because
+settlement and `fatal` from a finalizer are queued and `runtime_finalize` calls
+no listener.
 
 `Task:resume` checks token identity before any finished/pending shortcut, so
 equal source strings never authorize a different token. Matching pending wakes

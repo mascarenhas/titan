@@ -464,10 +464,10 @@ function test_retired_resume_token_cannot_wake_next_native_wait(
     support.wait_until_waiting(target)
     target:resume(token)
     while phase < 2 do timer.yield() end
-    test.assert(resumed_mismatch ==
-          "Task resume token mismatch (expected source: unknown source)",
-          "resume token was not cleared before resumed user code ran: " ..
-          resumed_mismatch)
+    -- A running Task latches the resume; its next wait is native, which
+    -- discards the latch instead of being woken by it.
+    test.assert(resumed_mismatch == "",
+          "a running Task's resume raised instead of latching: " .. resumed_mismatch)
     test.assert(target:status():as_string() == "waiting",
           "resumed Task did not enter its native wait")
 
@@ -837,5 +837,53 @@ function test_cancel_during_suspend_registration_is_delivered(_: test.Context)
     test.assert(support.cancelled_with(target:status(), "cancelled while registering"),
       "a cancellation during suspend registration left the Task " ..
       target:status():as_string())
+  end)
+end
+
+-- The public-API path of issue #280: a finalizer that resumes a Task with its
+-- token while the Task is about to suspend (run_wake_in_suspend_window), as
+-- thread.Group:cancel does for its admission waiters, latches the wake.
+function test_resume_before_suspend_registration_is_latched(_: test.Context)
+  runtime_test.run(function ()
+    local token = async.ResumeToken("resumed before registration")
+    local target = run_wake_in_suspend_window("running", function (): value
+      async.suspend(token)
+      return "resumed"
+    end, function (task: async.Task) task:resume(token) end)
+    local finished, result? = target:status():has_succeeded()
+    test.assert(finished and result == "resumed",
+      "a resume before suspend registration left the Task " .. target:status():as_string())
+  end)
+end
+
+-- A running Task latches Task:resume for its next explicit suspension: a
+-- matching suspend settles at once, the latest call wins, and a mismatching
+-- suspension discards the latch.
+function test_running_task_resume_latches_next_suspension(_: test.Context)
+  runtime_test.run(function ()
+    local first = async.ResumeToken("first latched suspension")
+    local second = async.ResumeToken("second latched suspension")
+    local log = ""
+    local target = async.run<|value, value|>(function (): value
+      local current = async.running()
+      current:resume(first)
+      async.suspend(first)
+      log = log .. "first;"
+      current:resume(first)
+      current:resume(second)
+      async.suspend(second)
+      log = log .. "second;"
+      current:resume(first)
+      async.suspend(second)
+      log = log .. "third;"
+      return nil
+    end)
+    task_support.cleanup_task(target, "latched resume cleanup")
+    support.wait_until_waiting(target)
+    test.assert(log == "first;second;",
+      "latched resumes did not settle exactly the matching suspensions: " .. log)
+    target:resume(second)
+    test.assert(async.join(target):has_succeeded() and log == "first;second;third;",
+      "the suspension that discarded its latch was not resumable: " .. log)
   end)
 end

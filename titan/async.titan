@@ -462,11 +462,11 @@ record Task<|A, B|>
   local resume_token: ResumeToken?
   local resume_pending: boolean
   local suspend_cancel: (function (): ())?
-  -- Token of an explicit suspension whose waiter a domain has registered but
-  -- registration has not yet published; wake_latched records a wake in that
-  -- window (stage_suspension, wake_waiter).
+  -- Token of the next explicit suspension latched by Task:resume while this
+  -- Task runs or registers that suspension (the latest call wins), and the
+  -- token a domain staged before publishing its waiter (stage_suspension).
+  local latched_token: ResumeToken?
   local staged_token: ResumeToken?
-  local wake_latched: boolean
   local cleanup_start: boolean
   local cleanup_active: boolean
   local cleanup_wait: ExternalWait?
@@ -785,7 +785,7 @@ local function clear_suspension(task: Task)
   task.resume_pending = false
   task.suspend_cancel = nil
   task.staged_token = nil
-  task.wake_latched = false
+  task.latched_token = nil
 end
 
 local function set_phase(task: Task, phase: integer)
@@ -1076,6 +1076,9 @@ local function advance_task(task: Task, failed: boolean, payload: value)
   local next_payload = payload
   while true do
     set_phase(task, TASK_RUNNING)
+    -- A latch belongs to the suspension that the Task's previous run
+    -- registered, which has consumed or discarded it.
+    task.latched_token = nil
     local dead = false
     local yielded: value = nil
     local trace: string? = nil
@@ -1308,10 +1311,22 @@ function Task:cancel(reason: CancellationReason<|B|>?)
 end
 
 --- Schedule a deferred wake for the exact token authorizing the current explicit suspension.
--- @param token Exact ResumeToken passed to suspend; a mismatch raises in the caller.
+-- A running Task latches the token instead; its next suspend with that token settles at once.
+-- @param token Exact ResumeToken passed to suspend; any other mismatch raises in the caller.
 -- @usage async-io.md
 function Task:resume(token: ResumeToken)
   if token ~= self.resume_token then
+    -- A running Task, or one registering its next wait, has no published
+    -- token yet: latch this wake for that suspension, the latest call winning.
+    -- start_suspend settles a matching suspension and the driver discards the
+    -- latch when the Task runs again.
+    -- Implementation notes: doc/implementation/libuv-runtime.md#explicit-suspend-task-status-listeners-and-combinators
+    local registering? = self.wait
+    if self.phase == TASK_RUNNING or (not self.suspended and registering ~= nil and
+        registering.phase == WAIT_REGISTERING) then
+      self.latched_token = token
+      return
+    end
     local source = "unknown source"
     local expected? = self.resume_token
     if expected ~= nil then source = expected.source or source end
@@ -1469,38 +1484,31 @@ function yield()
   coroutine.yield(YIELD_TAG, ASYNC_TAG)
 end
 
--- A domain stages its waiter's token before publishing the waiter where its
--- wakers find it (issue #280). Until registration publishes the token, GC
--- safepoints in the Task and in the driver can run a finalizer that wakes the
--- waiter: wake_waiter latches that wake, and start_suspend settles at once.
+-- Internal domains stage their waiter's token before publishing the waiter
+-- where their wakers find it (issue #280), and wake through wake_waiter.
 -- Implementation notes: doc/implementation/libuv-runtime.md#explicit-suspend-task-status-listeners-and-combinators
 local function stage_suspension(task: Task, token: ResumeToken)
   task.staged_token = token
-  task.wake_latched = false
 end
 
 -- Wake a domain's registered waiter: resume it when suspended on `token`,
--- latch the wake while that suspension is staged, and otherwise leave it, as
--- it is running and rechecks the domain itself.
+-- or latch it through Task:resume while that suspension is staged. Otherwise
+-- the waiter is running past its delivered suspension and rechecks the domain
+-- itself, so a latch would wrongly settle its next suspension on a shared token.
 local function wake_waiter(task: Task, token: ResumeToken)
-  if task.resume_token == token then
-    task:resume(token)
-  elseif task.staged_token == token then
-    task.wake_latched = true
-  end
+  if task.resume_token == token or task.staged_token == token then task:resume(token) end
 end
 
--- Publish the token only once registration accepts this suspension; before
--- that a resume mismatches. Settle at once for a wake latched while staged,
--- or for a cancellation requested after the driver's admission check, whose
--- Task:cancel found no suspended Task to wake.
+-- Publish the token only once registration accepts this suspension. Settle at
+-- once for a wake latched before that, or for a cancellation requested after
+-- the driver's admission check, whose Task:cancel found no suspended Task.
 local function start_suspend(done: Completion<|ResumeToken, value, value|>, number: integer): uv.req_t?
   local token = done:context(number)
   local task = done.task
   task.suspended = true
   task.resume_token = token
   task.resume_pending = false
-  if task.cancel_value ~= nil or (task.wake_latched and task.staged_token == token) then
+  if task.cancel_value ~= nil or task.latched_token == token then
     done:resolve(number, nil)
   end
   return nil
@@ -1545,8 +1553,8 @@ function run<|A, B|>(func: function (): (A)): Task<|A, B|>
     ready_epoch = 0, ready_wait = nil,
     cancel_value = nil, wait = nil, completion = nil, root_index = runtime.next_task,
     terminal_registrations = {}, suspended = false, resume_token = nil,
-    resume_pending = false, suspend_cancel = nil, staged_token = nil,
-    wake_latched = false, cleanup_start = false,
+    resume_pending = false, suspend_cancel = nil, latched_token = nil,
+    staged_token = nil, cleanup_start = false,
     cleanup_active = false, cleanup_wait = nil, terminal_kind = TERMINAL_NONE,
     terminal_value = nil, terminal_trace = nil, root_done = false}
   local erased = task as Task<|value, value|>
@@ -1618,7 +1626,7 @@ function run_with_cleanup<|A, B|>(
     ready_epoch = 0, ready_wait = nil, cancel_value = nil, wait = nil,
     completion = nil, root_index = runtime.next_task, terminal_registrations = {},
     suspended = false, resume_token = nil, resume_pending = false,
-    suspend_cancel = nil, staged_token = nil, wake_latched = false,
+    suspend_cancel = nil, latched_token = nil, staged_token = nil,
     cleanup_start = true, cleanup_active = false,
     cleanup_wait = final_wait, terminal_kind = TERMINAL_NONE,
     terminal_value = nil, terminal_trace = nil, root_done = false

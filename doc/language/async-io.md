@@ -290,11 +290,22 @@ general wake for a Task waiting on a native operation or persistent source.
 Passing any other token raises synchronously in the caller of `resume`:
 `Task resume token mismatch (expected source: <source>)`. The message uses the
 stored expected token's source, never the supplied token's; a missing stored
-token or nil expected source is shown as `unknown source`. The check is
-unconditional whenever the Task has no current explicit suspension—including
-before suspension, after wake delivery until another suspension, or after
-terminal completion—so a wrong-time call raises with expected source
-`unknown source`; it is not a no-op.
+token or nil expected source is shown as `unknown source`.
+
+A running Task is the exception. This includes a Task that is about to suspend,
+whose suspension the Runtime has not registered yet. Such a Task has no current
+explicit suspension, so `resume` latches the supplied token instead of raising.
+The Task's next suspension consumes the latch: a `suspend` with that token
+returns at once, and any other suspension discards it, including a `suspend`
+with another token, a native wait, or `async.yield`. When several calls arrive
+first, the latest token wins, and calls with the same token coalesce. Only the
+Task's own code, or a finalizer that runs while it runs, can resume a running
+Task. A typical case is a finalizer that closes a coordination primitive just
+before its waiter parks.
+
+Every other wrong-time call still raises, with expected source
+`unknown source`: before the Task first runs, while it waits in a native
+operation or `async.yield`, and after terminal completion. It is not a no-op.
 
 With the correct token, `resume` does not enter the target Task inline. It
 synchronously requests a callback-deferred wake without yielding its caller,

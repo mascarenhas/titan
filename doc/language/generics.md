@@ -844,8 +844,10 @@ monomorphic: bare `Task` is exactly `Task<|value, value|>`.
 owner, and only the exact record passed to `suspend` can resume that explicit
 suspension. Its optional `source` is diagnostic rather than type or equality
 evidence; it adds no run-time type argument or generic witness.
-A wrong token raises in the caller with the stored expected source, and a
-wrong-time call reports `unknown source`; neither check depends on `A` or `B`.
+A wrong token raises in the caller with the stored expected source, a running
+Task latches it instead, and any other wrong-time call reports `unknown source`
+(see [explicit suspension](async-io.md#scheduling-and-driving-tasks)); none of
+these checks depends on `A` or `B`.
 
 `B` is result-only in `run<|A, B|>`. An expected `Task<|A, B|>` infers it;
 without that evidence it closes to `value`. A complete explicit list remains
