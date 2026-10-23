@@ -11,7 +11,7 @@ jobs=${TITAN_ROCK_TEST_JOBS:-4}
 windows=0
 if [[ ${MSYSTEM:-} == CLANG64 ]]; then
     windows=1
-    jobs=${TITAN_ROCK_TEST_JOBS:-2}
+    jobs=${TITAN_ROCK_TEST_JOBS:-3}
 fi
 if [[ ! $jobs =~ ^[1-4]$ ]]; then
     echo "TITAN_ROCK_TEST_JOBS must be an integer from 1 through 4" >&2
@@ -471,16 +471,26 @@ launched=0
 active=0
 completed=0
 scheduler_status=0
+# Unix launches shards in manifest order. On Windows the exclusive shard runs
+# first and alone; the other three then share the worker slots instead of
+# each queueing behind it.
+launch_order=(1 2 3 4)
+if (( windows != 0 )); then
+    launch_order=("$exclusive_shard")
+    for shard in 1 2 3 4; do
+        if [[ $shard != "$exclusive_shard" ]]; then launch_order+=("$shard"); fi
+    done
+fi
 while (( completed < 4 )); do
     while (( launched < 4 && active < jobs )); do
-        shard=$((launched + 1))
+        shard=${launch_order[$launched]}
         if (( windows != 0 && active != 0 )) &&
            [[ $shard == "$exclusive_shard" ||
               -n ${worker_pids[$exclusive_shard]-} ]]; then
             break
         fi
         launch_worker "$shard"
-        launched=$shard
+        launched=$((launched + 1))
         active=$((active + 1))
     done
 

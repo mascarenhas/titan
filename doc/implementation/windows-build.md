@@ -82,7 +82,7 @@ build uses CMake and a bundled libuv independently of Titan's stdlib libuv.
 Plain `luarocks test` runs the complete native stdlib suite first, then the
 retained runtime/packaging specs, the stdlib-dependent compiler integrations,
 and the compiler/language partitions in private NTFS checkout copies. Windows
-defaults to two concurrent partition workers under native Job Objects; see
+defaults to three concurrent partition workers under native Job Objects; see
 [Busted partitions](test-runner.md#busted-partitions).
 
 ## Native build parallelism

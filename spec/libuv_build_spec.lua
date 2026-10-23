@@ -4588,6 +4588,88 @@ done
         if not tested then error(test_error, 0) end
     end)
 
+    it("launches the Windows exclusive compiler shard first and alone",
+        function()
+            -- The real Windows route needs CLANG64, cygpath, and the native
+            -- Job Object supervisor. Drive the launcher's own launch-order
+            -- and admission code with stub workers that finish oldest-first.
+            local launcher = read_file(
+                "spec/support/run_parallel_compiler_tests.sh")
+            local order_start = assert(launcher:find(
+                "\nlaunch_order=(1 2 3 4)\n", 1, true))
+            local _, order_finish = assert(launcher:find(
+                "\nfi\n", order_start, true))
+            local admission_start = assert(launcher:find(
+                "\n    while (( launched < 4 && active < jobs )); do\n",
+                order_finish, true))
+            local _, admission_finish = assert(launcher:find(
+                "\n    done\n", admission_start, true))
+            local harness = table.concat({ [==[
+set -u
+windows=$1
+exclusive_shard=$2
+jobs=$3
+worker_pids=()
+running=()
+schedule=()
+launched=0
+active=0
+completed=0
+launch_worker() {
+    worker_pids[$1]=1
+    running+=("$1")
+    schedule+=("start $1")
+}
+]==], launcher:sub(order_start + 1, order_finish), [==[
+while (( completed < 4 )); do
+]==], launcher:sub(admission_start + 1, admission_finish), [==[
+    if (( ${#running[@]} == 0 )); then
+        echo "scheduler admitted no shard" >&2
+        exit 1
+    fi
+    finished=${running[0]}
+    running=("${running[@]:1}")
+    unset 'worker_pids[$finished]'
+    schedule+=("finish $finished")
+    active=$((active - 1))
+    completed=$((completed + 1))
+done
+printf '%s\n' "${schedule[@]}"
+]==] })
+
+            local function schedule(windows, exclusive, jobs)
+                local ok, output, why, code = run_argv({
+                    "bash", "-c", harness, "titan-launch-order",
+                    tostring(windows), exclusive, tostring(jobs),
+                })
+                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                    tostring(code) .. ")")
+                local events = {}
+                for line in output:gmatch("[^\n]+") do
+                    events[#events + 1] = line
+                end
+                return table.concat(events, ", ")
+            end
+
+            -- Unix keeps manifest order and fills every permitted slot.
+            assert.equal("start 1, start 2, start 3, start 4, " ..
+                "finish 1, finish 2, finish 3, finish 4", schedule(0, "", 4))
+            assert.equal("start 1, start 2, finish 1, start 3, " ..
+                "finish 2, start 4, finish 3, finish 4", schedule(0, "", 2))
+            -- Windows runs the exclusive shard alone, then the other three
+            -- together under the default three workers.
+            assert.equal("start 3, finish 3, start 1, start 2, start 4, " ..
+                "finish 1, finish 2, finish 4", schedule(1, "3", 3))
+            assert.equal("start 3, finish 3, start 1, start 2, start 4, " ..
+                "finish 1, finish 2, finish 4", schedule(1, "3", 4))
+            assert.equal("start 1, finish 1, start 2, start 3, start 4, " ..
+                "finish 2, finish 3, finish 4", schedule(1, "1", 3))
+            assert.equal("start 4, finish 4, start 1, start 2, finish 1, " ..
+                "start 3, finish 2, finish 3", schedule(1, "4", 2))
+            assert.equal("start 2, finish 2, start 1, finish 1, start 3, " ..
+                "finish 3, start 4, finish 4", schedule(1, "2", 1))
+        end)
+
     it("bounds TERM-ignoring descendants for every command exit path",
         function()
             if platform.windows then
@@ -5490,6 +5572,7 @@ done
                 "spec/support/run_parallel_compiler_tests.sh")
             for _, required in ipairs({
                 "jobs=${TITAN_ROCK_TEST_JOBS:-4}",
+                "jobs=${TITAN_ROCK_TEST_JOBS:-3}",
                 "[[ ! $jobs =~ ^[1-4]$ ]]",
                 "tar --exclude='./.git'",
                 "--exclude='./.lua'",
