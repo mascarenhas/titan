@@ -328,21 +328,6 @@ describe("closure adjustment wrappers (end-to-end)", function()
         local csrc = coder.generate("test", tree, {}, driver.TITAN_ABI_VERSION)
         assert_branch_publication(
             native_body(csrc, "forwarded"), "_open_vargs_")
-
-        -- Pin the older case-3 template directly as a separate lowering unit:
-        -- preserve the checker-frozen per-open plan while bypassing the newer
-        -- aggregate expression-list route that normally owns this source form.
-        local legacy_tree = checked(source)
-        local func = find_function(legacy_tree, "forwarded_value")
-        local call = func.block.stats[2].exps[1]
-        assert.are.equal("Ast.ExpCall", call._tag)
-        assert.truthy(call._arg_adjustment.open_source)
-        assert.truthy(call._open_args)
-        call._arg_adjustment = nil
-        local legacy_csrc = coder.generate(
-            "test", legacy_tree, {}, driver.TITAN_ABI_VERSION)
-        assert_branch_publication(
-            native_body(legacy_csrc, "forwarded_value"), "_varg_")
     end)
 
     it("allocates and initializes wrapper CClosures without API stack assembly",

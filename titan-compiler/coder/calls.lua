@@ -795,224 +795,45 @@ function is_static_callee(node)
 end
 
 -- Build and append the backing-struct argument (`_varargs` + `_start`) for a
--- native call to a variadic callee. Appends the two C expressions to `caexps`
--- and any setup statements to `castats`. `vargexps` holds the already-coerced
--- surplus static args (those beyond the callee's fixed params); `dots_tail` is
--- true when the call forwards the current function's own `...` (a trailing
--- `Ast.ExpDots` marker); `nstatic` is the static-prefix arg count.
+-- native call that passes a static argument list to a variadic callee.
+-- Appends the two C expressions to `caexps` and the setup statements to
+-- `castats`. `vargexps` holds the already-coerced surplus static args (those
+-- beyond the callee's fixed params). A call whose arguments end in `...`
+-- never reaches here: the checker gives it an open-input plan, which both
+-- callers lower through their open-run path instead.
 -- Shared by codecall (static call site) and codevaluecall (first-class value
 -- fast path) -- both build the struct identically (§5.7).
--- Implementation notes: doc/implementation/variadic-parameters.md#static-call-sites-three-forwarding-cases
-function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
-                            dots_tail, nstatic, caexps, castats)
+-- Implementation notes: doc/implementation/variadic-parameters.md#static-call-sites
+function emit_vararg_struct(ctx, callee_ftype, vargexps, caexps, castats)
     local callee_vararg = callee_ftype.varargtype
-    if not dots_tail then
-        -- Static arg list into a variadic callee. Keep the elements on the C
-        -- stack and point an exact, named TitanVarg descriptor at them. This
-        -- avoids both heap allocation and the old incompatible-struct cast.
-        assert(#vargexps <= 200, "static variadic arg count exceeds TITAN_VARARG_MAX")
-        local n = #vargexps
-        local struct = varg_struct_name(callee_vararg)
-        local elem_ct = ctype(callee_vararg)
-        local suffix = tostring(ctx.tmp)
-        ctx.tmp = ctx.tmp + 1
-        local argsname = "_vargargs_" .. suffix
-        local vname = "_varg_" .. suffix
-        local arrlen = math.max(n, 1)
-        local inits = n > 0 and ("{ " .. table.concat(vargexps, ", ") .. " }")
-            or "{ 0 }"
-        table.insert(castats, render([[
-            $ELEM_CT $ARGS[$ARRLEN] = $INITS;
-            $STRUCT $VARG = { $N, $ARGS };
-        ]], {
-            STRUCT = struct,
-            ELEM_CT = elem_ct,
-            ARGS = argsname,
-            ARRLEN = c_integer_literal(arrlen),
-            N = c_integer_literal(n),
-            VARG = vname,
-            INITS = inits,
-        }))
-        table.insert(caexps, "&" .. vname)
-        table.insert(caexps, "0")
-    else
-        -- FORWARDING the current `...` into a variadic callee. `vargexps` holds the
-        -- over-supplied static args (those beyond the callee's fixed params), all
-        -- already coerced to the callee element type by the checker.
-        local va = assert(ctx.varargs, "forwarding '...' outside a variadic function")
-        local eg = callee_vararg -- callee element type
-        local ef = va.elem       -- this function's `...` element type
-        -- C representation alone is not enough: Array and Map share Table*,
-        -- while Option(Array), Option(Map), value, and Function share TValue.
-        -- Only an equal semantic element type is representation-equivalent
-        -- across this exact descriptor edge.
-        local same_representation = types.equals(ef, eg)
-        local k = nstatic              -- static-prefix arg count
-        local m = #callee_ftype.params -- callee fixed-param count
-        local tail_start = va.start
-        if node._open_args then
-            -- The checker has already projected any borrowed fixed arguments
-            -- into `args` and records the first still-open element explicitly.
-            -- Advance the descriptor view past those projections instead of
-            -- inferring borrowing again from the elaborated argument count.
-            tail_start = render("($START + $DELTA)", {
-                START = va.start,
-                DELTA = c_integer_literal(node._open_args.start - 1),
-            })
-        elseif k < m then
-            error("checker failed to materialize fixed arguments borrowed from '...'")
-        end
-        -- The logical projection can lie past an empty/short physical backing
-        -- run. Clamp the descriptor start once and use that same physical view
-        -- in both pass-through and fresh-copy cases; otherwise `#...` in the
-        -- callee can become negative and CASE 3 can index beyond `args[]`.
-        tail_start = render([[
-            (((int)$SRC->n_args < ($LOGICAL))
-                ? (int)$SRC->n_args : ($LOGICAL))
-        ]], { SRC = va.cname, LOGICAL = tail_start })
-        if same_representation and k <= m then
-            -- CASE 1 (pass-through): static prefix exactly fills the callee fixed
-            -- params, or the missing fixed params were borrowed above, and the
-            -- element representation matches; pass the current backing struct and
-            -- adjusted start unchanged. No allocation, no copy.
-            table.insert(caexps, render("($STRUCT *)$NAME",
-                { STRUCT = varg_struct_name(eg), NAME = va.cname }))
-            table.insert(caexps, tail_start)
-        else
-            -- CASE 3 (fresh copy): k > m (the static prefix grows the tail) OR the
-            -- element type differs and each element requires conversion (including
-            -- same-C-representation callable views). Build a fresh Udata0 backing
-            -- struct of element type eg
-            -- holding [ surplus static args (only when k > m), then each current
-            -- `...` element converted to eg ], sized at RUNTIME, cap-checked
-            -- against TITAN_VARARG_MAX, anchored per §2.D, and passed with
-            -- _start = 0.
-            -- The Udata0 holding the fresh struct is anchored on a RESERVED stack
-            -- slot (newslot -> s2v(restorestack(...) + depth)), which persists
-            -- for the whole function -- not a lexical C block. The struct-pointer C local is
-            -- declared at statement scope (unique _varg_N name) so it stays visible
-            -- at the call. Calls are materialized before any tail `L->top.p =
-            -- _base` reset, keeping the anchor live across the call.
-            -- The fresh Udata0 allocation can trigger a GC that shrinks/relocates
-            -- the Lua stack (luaD_shrinkstack), dangling the raw `_base` pointer;
-            -- and the forwarded call itself may grow the stack. Save `_base` as an
-            -- offset (uses_base_off) and recompute it after the call so the tail
-            -- `L->top.p = _base` reset is valid.
-            ctx.uses_base_off = true
-            local struct = varg_struct_name(eg)
-            local elem_ct = ctype(eg)
-            local nprefix = #vargexps -- static-prefix elements (only k > m)
-            local suffix = tostring(ctx.tmp)
-            ctx.tmp = ctx.tmp + 1
-            local udname = "_vargud_" .. suffix
-            local slotdepth = reserveslot(ctx)
-            local argsname = "_vargargs_" .. suffix
-            local descname = "_vargdesc_" .. suffix
-            local vname = "_varg_" .. suffix
-            local cntname = "_vcount_" .. suffix
-            local nname = "_nvarargs_" .. suffix
-            local tailcount = "_vtail_" .. suffix
-            -- Static-prefix expressions are stable C values whose fresh
-            -- allocations/call results already own their ordinary roots. The raw
-            -- TitanVargX payload borrows them and is never itself a root.
-            local prefix_inits = {}
-            for j, cexp in ipairs(vargexps) do
-                table.insert(prefix_inits, render([[
-                    $VNAME->args[$IDX] = $PEXP;
-                ]], {
-                    VNAME = vname,
-                    IDX = c_integer_literal(j - 1),
-                    PEXP = cexp,
-                }))
-            end
-            -- Per-element conversion of the incoming `...` into the callee element
-            -- type. The checker has proven ef/eg compatible, so this is the
-            -- standard coercion: identical ctype -> raw copy; integer->value (and
-            -- other gradual `value` widenings) -> setwrapped into a TValue;
-            -- value->integer (and similar narrowings) -> checkandget runtime check.
-            -- An allocating conversion receives a distinct destination slot for
-            -- each element and publishes it only in the branch that actually
-            -- creates the fresh object; an identity fallback remains C-only.
-            local convbody
-            if same_representation then
-                convbody = render("$VNAME->args[$NPREFIX + _vj] = $SRC;", {
-                    VNAME = vname,
-                    NPREFIX = c_integer_literal(nprefix),
-                    SRC = render("$SRC->args[$START + _vj]",
-                        { SRC = va.cname, START = tail_start }),
-                })
-            else
-                local src = render("$SRC->args[$START + _vj]",
-                    { SRC = va.cname, START = tail_start })
-                local dst = render("$VNAME->args[$NPREFIX + _vj]",
-                    { VNAME = vname, NPREFIX = c_integer_literal(nprefix) })
-                local adjustment = assert(node._open_args
-                    and node._open_args.adjustment,
-                    "open variadic forwarding lacks checker adjustment")
-                local result_root
-                if coder._adjustment_allocates_gc(adjustment) then
-                    local root_depth = ctx.depth
-                    for _ = 1, 200 do reserveslot(ctx) end
-                    result_root = "s2v(" .. stackslotat(root_depth)
-                        .. " + " .. c_integer_literal(nprefix) .. " + _vj)"
-                end
-                local convstats, convexp =
-                    coder._code_adjustment_value(
-                        ctx, adjustment, ef, eg, src, node.loc,
-                        node._open_args.callable_adapter, result_root)
-                convbody = render([[
-                    $CONVSTATS
-                    $DST = $CONVEXP;
-                ]], {
-                    CONVSTATS = convstats,
-                    DST = dst,
-                    CONVEXP = convexp,
-                })
-            end
-            table.insert(castats, render([[
-                ptrdiff_t $TAIL = (ptrdiff_t)$SRC->n_args - $START;
-                if ($TAIL < 0) $TAIL = 0;
-                ptrdiff_t $CNT = (ptrdiff_t)$NPREFIX + $TAIL;
-                if (TITAN_UNLIKELY($CNT > TITAN_VARARG_MAX)) {
-                    luaL_error(L, "%s:%d:%d: too many variadic arguments forwarded (%d, max %d)", $FILE, $LINE, $COL, (int)$CNT, (int)TITAN_VARARG_MAX);
-                }
-                lu_byte $NN = (lu_byte)$CNT;
-                Udata *$UDNAME = titan_new_udata_object(L,
-                    sizeudata(0, (size_t)$NN * sizeof($ELEM_CT)));
-                $UDNAME->len = (size_t)$NN * sizeof($ELEM_CT);
-                $UDNAME->nuvalue = 0; $UDNAME->metatable = NULL;
-                setuvalue(L, $SLOT, $UDNAME);
-                $ELEM_CT *$ARGSNAME = ($ELEM_CT *)getudatamem($UDNAME);
-                $STRUCT $DESCNAME = { $NN, $ARGSNAME };
-                $STRUCT *$VNAME = &$DESCNAME;
-                $PREFIX_INITS
-                for (int _vj = 0; _vj < (int)$TAIL; _vj++) {
-                    $CONVBODY
-                }
-            ]], {
-                CNT = cntname,
-                TAIL = tailcount,
-                NN = nname,
-                NPREFIX = c_integer_literal(nprefix),
-                SRC = va.cname,
-                START = tail_start,
-                FILE = c_string_literal(node.loc.filename),
-                LINE = c_integer_literal(node.loc.line),
-                COL = c_integer_literal(node.loc.col),
-                UDNAME = udname,
-                SLOT = slotat(slotdepth),
-                STRUCT = struct,
-                ELEM_CT = elem_ct,
-                ARGSNAME = argsname,
-                DESCNAME = descname,
-                VNAME = vname,
-                PREFIX_INITS = table.concat(prefix_inits, "\n"),
-                CONVBODY = convbody,
-            }))
-            table.insert(caexps, vname)
-            table.insert(caexps, "0")
-        end
-    end
+    -- Keep the elements on the C stack and point an exact, named TitanVarg
+    -- descriptor at them. This avoids both heap allocation and an
+    -- incompatible-struct cast.
+    assert(#vargexps <= 200, "static variadic arg count exceeds TITAN_VARARG_MAX")
+    local n = #vargexps
+    local struct = varg_struct_name(callee_vararg)
+    local elem_ct = ctype(callee_vararg)
+    local suffix = tostring(ctx.tmp)
+    ctx.tmp = ctx.tmp + 1
+    local argsname = "_vargargs_" .. suffix
+    local vname = "_varg_" .. suffix
+    local arrlen = math.max(n, 1)
+    local inits = n > 0 and ("{ " .. table.concat(vargexps, ", ") .. " }")
+        or "{ 0 }"
+    table.insert(castats, render([[
+        $ELEM_CT $ARGS[$ARRLEN] = $INITS;
+        $STRUCT $VARG = { $N, $ARGS };
+    ]], {
+        STRUCT = struct,
+        ELEM_CT = elem_ct,
+        ARGS = argsname,
+        ARRLEN = c_integer_literal(arrlen),
+        N = c_integer_literal(n),
+        VARG = vname,
+        INITS = inits,
+    }))
+    table.insert(caexps, "&" .. vname)
+    table.insert(caexps, "0")
 end
 
 -- Allocate the caller-owned typed backing for one flexible-result call.  A
@@ -1799,27 +1620,20 @@ function codevaluecall(ctx, node)
         end
     end
 
-    -- Build the backing struct (`_varargs`, `_start`) when the callee is variadic.
+    -- Build the backing struct (`_varargs`, `_start`) when the callee is variadic
+    -- and its arguments are a static list (a trailing `...` selects `inputrun`).
     -- The two struct C exprs go into `vargca` (consumed by `fastargs`); the setup
     -- statements go into a FRESH local list `vargstats` -- NOT the shared `stats`
     -- prelude -- and are spliced into the FAST branch only (the `$VARGSTATS` slot,
     -- right before `$FASTCALL`). The struct is therefore built ONLY on the fast
-    -- path (exact tag match): the generic `else` path neither allocates the struct
-    -- nor narrows (its case-3 `checkandget` could raise spuriously on a gradual
-    -- `value` mismatch, before the generic path -- which must dispatch to the real
-    -- runtime function -- ever ran). The generic path re-pushes elements directly
-    -- from `vargexps`/`ctx.varargs` and does not read the struct.
-    --
-    -- Because the build and native call both live in the fast branch, a case-3
-    -- fresh Udata0 is allocated and rooted only on that branch. The descriptor's
-    -- native elements remain C arguments and receive no tracing-only copies.
-    -- The common `_base = restorestack(L, _base_off);` after the if/else runs on
-    -- both paths (a case-3 allocation may have relocated the stack).
+    -- path (exact tag match). The generic path re-pushes elements directly from
+    -- `vargexps` and does not read the struct. The descriptor's native elements
+    -- remain C arguments and receive no tracing-only copies.
     local vargca = {}    -- the two struct C exprs (_varargs ptr, _start)
     local vargstats = {} -- the struct-build setup statements (fast path only)
     if callee_vararg and not inputrun then
-        emit_vararg_struct(ctx, node, ftype, vargexps, dots_tail, npassed,
-            vargca, vargstats)
+        assert(not dots_tail, "a trailing '...' must use the open-input run")
+        emit_vararg_struct(ctx, ftype, vargexps, vargca, vargstats)
     end
 
     -- 4a. fast path: the value is a Titan closure whose exact type tag matches
@@ -2500,11 +2314,11 @@ local function lower_call(ctx, node)
         end
     end
     -- Build + append the backing struct (`_varargs`, `_start`) for a variadic
-    -- callee. Its C payload borrows the already evaluated native values; only a
-    -- case-3 backing allocation acquires a new traced root.
+    -- callee with a static argument list (a trailing `...` selects
+    -- `inputrun`). Its C payload borrows the already evaluated native values.
     if callee_vararg and not inputrun then
-        emit_vararg_struct(ctx, node, callee_ftype, vargexps, dots_tail,
-            npassed, caexps, castats)
+        assert(not dots_tail, "a trailing '...' must use the open-input run")
+        emit_vararg_struct(ctx, callee_ftype, vargexps, caexps, castats)
     end
     -- Keep the complete fixed ABI prefix in native temporaries even when this
     -- consumer hides some or all of it. Consumer-visible results get separate

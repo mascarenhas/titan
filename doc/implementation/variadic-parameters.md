@@ -385,26 +385,22 @@ function has `flexrettype`, forwards the remaining run as the output open
 source; `codereturn` copies at most the inherited `_flexwant` and sets
 `_flexout->n_args`.
 
-### Static call sites: three forwarding cases
+### Static call sites
 
-At a static native call to a variadic callee, `codecall` inserts the
-`_varargs`/`_start` pair through `emit_vararg_struct` (`coder/calls.lua`).
-When the caller forwards its own `...`:
+At a static native call to a variadic callee whose arguments are a static
+list, `codecall` inserts the `_varargs`/`_start` pair through
+`emit_vararg_struct` (`coder/calls.lua`): the surplus arguments, already
+adjusted to the callee's element type, go into a C-stack array with an exact
+`TitanVarg*` descriptor, and `_start` is 0. No allocation is involved.
 
-1. **Pass-through.** The caller's static argument count equals the callee's
-   fixed count and the element representation matches: pass the current
-   `_varargs` and `_start` unchanged.
-2. **Start adjust.** Fewer static arguments than callee fixed parameters, same
-   representation: synthesize bounds-checked `...[1..delta]` reads for the
-   missing fixed parameters and pass the same descriptor with `_start + delta`.
-3. **Fresh copy.** The representation differs, or the static arguments exceed
-   the callee's fixed parameters. The coder checks the runtime count against
-   `TITAN_VARARG_MAX` (`too many variadic arguments forwarded`), allocates
-   fresh zero-user-value `Udata` storage anchored in a reserved slot, copies
-   the static prefix and each converted `...` element (same ctype: raw copy;
-   widening to `value`: box; narrowing from `value`: the checker's strict
-   guard), and passes `_start = 0`. The allocation can relocate the stack, so
-   the function sets `ctx.uses_base_off` and recomputes `_base` afterward.
+A call whose argument list ends in `...` never reaches that emitter. The
+checker gives it an open-input plan (`open_source`, see [shared finite/open
+expression-list demand](#shared-finiteopen-expression-list-demand)), and the
+call lowers through the open-run path (`inputrun`, `coder._code_open_source`):
+any static prefix and each remaining `...` element, converted by the
+checker-frozen per-element adjustment, are copied into a bounded C-stack
+`_open_vargs` array of the callee's element type, whose descriptor the callee
+receives with `_start = 0`. Both call paths assert that invariant.
 
 ### First-class value calls
 
@@ -416,8 +412,8 @@ The variadic deltas are:
 * The function-type tag key (`types.runtime_identity`) includes `varargtype`
   and `flexrettype`, so `...: integer` and `...: value` callables never share
   the exact path.
-* On the exact path the caller builds the descriptor with the same
-  `emit_vararg_struct` cases, including a forwarded `...`, and calls through
+* On the exact path the caller builds the descriptor as a static call site
+  does (`emit_vararg_struct`, or the open-run array for a forwarded `...`) and calls through
   the `function_sig` typedef. For a realized wrapper the pointer is the target
   adapter, which builds the source's fixed/tail view, so the target's typed
   tail is enforced there.
@@ -456,7 +452,7 @@ range) for the descriptor's lifetime. The variadic-specific points are:
 
 * **Raw payloads are not traced.** `traverseudata` (Lua's `lgc.c`) marks only a
   userdata's metatable and `uv[0..nuvalue-1]`, never `getudatamem`. A
-  zero-user-value `Udata` used for element storage (Lua entry, case-3 copy) is
+  zero-user-value `Udata` used for element storage (the Lua entry) is
   rooted only so that its *buffer* survives; it has no metatable, `__gc`, or
   user values and owns none of the elements copied into it.
 * **C-stack descriptors are safe.** Lua's GC does not move heap objects, so
@@ -464,7 +460,7 @@ range) for the descriptor's lifetime. The variadic-specific points are:
   collection. Only pointers into the Lua stack need rebasing.
 * **`{...}` uses `luaC_barrierback`** per collectable element against the Array
   backing or the positional Map Table. Scalars skip the barrier.
-* **Stack relocation.** A fresh `Udata` (case 3, Lua entry) or a
+* **Stack relocation.** A fresh `Udata` (the Lua entry) or a
   `titan_array_new`/Table resize in `{...}` can grow or shrink the Lua stack.
   The coder saves `_base` as `_base_off` (`ctx.uses_base_off`) and rebases with
   `_base = restorestack(L, _base_off)` before later reserved-slot reads and
