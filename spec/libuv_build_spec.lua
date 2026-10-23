@@ -5638,7 +5638,7 @@ done
                 'LUA_MYCFLAGS: "-fPIC -O1 -fno-lto -g ' ..
                 '-fsanitize=address,undefined'), sanitizer_job)
             for _, contract in ipairs({
-                'SANITIZER_NATIVE_CACHE_SCHEMA: "v3"',
+                'SANITIZER_NATIVE_CACHE_SCHEMA: "v4"',
                 "CC: cc", "AR: ar", "RANLIB: ranlib",
                 'SANITIZER_LUA_VERSION: "5.5.1"',
                 'SANITIZER_LIBUV_VERSION: "1.53.0"',

@@ -273,7 +273,7 @@ jobs:
       TITAN_PREFIX: ${{ github.workspace }}/.lua
       LIBUV_VERSION: "1.53.0"
       # Bump when any CMake option that affects the cached archive changes.
-      LIBUV_BUILD_PROFILE: "static-pic-validation-tests-off-v2"
+      LIBUV_BUILD_PROFILE: "static-pic-validation-tests-off-v3"
       LLHTTP_VERSION: "9.4.3"
       LLHTTP_SHA256: "1eb813c7437b31a87496a1cd3ed79f00746720f5e7e29c79b42c02cb69f36c39"
       LLHTTP_BUILD_PROFILE: "static-pic-hidden-c99-v1"
@@ -540,7 +540,7 @@ jobs:
       TITAN_PREFIX: ${{ github.workspace }}/.lua
       # Native dependency caches stop at the pre-LuaRocks boundary. Bump the
       # schema when their build recipes or cached layout change.
-      SANITIZER_NATIVE_CACHE_SCHEMA: "v3"
+      SANITIZER_NATIVE_CACHE_SCHEMA: "v4"
       CC: cc
       AR: ar
       RANLIB: ranlib
@@ -720,7 +720,9 @@ jobs:
           test "$(git -C libbacktrace rev-parse HEAD)" = \
             "$SANITIZER_LIBBACKTRACE_REV"
           test -f libbacktrace/.libs/libbacktrace.a
+          test -f libbacktrace/.titan-build.config
           test -f libuv-build/libuv.a
+          test -f libuv-build/.titan-build.config
           test -f llhttp-build/libtitan-llhttp.a
           test -f sqlite3-build/libtitan-sqlite3.a
           test -f openssl-build/libssl.a

@@ -85,6 +85,7 @@ LIBUV_TARBALL     := $(LIBUV_SRC_DIR).tar.gz
 LIBUV_URL         := https://dist.libuv.org/dist/v$(LIBUV_VERSION)/$(LIBUV_TARBALL)
 LIBUV_SHA256      := cb0d6dd2128d5a95bd242c6cc982a24fe608fa93da57b6b4ec763b0018c53e64
 LIBUV_BUNDLED_LIB := $(LIBUV_BUILD_DIR)/libuv.a
+LIBUV_BUILD_CONFIG := $(LIBUV_BUILD_DIR)/.titan-build.config
 LIBUV_PATCH_FILE  := vendor/libuv/libuv-1.53.0-spawn-close.patch
 LIBUV_EXTRACTED   := $(LIBUV_SRC_DIR)/.titan-extracted-spawn-close-v1
 LIBUV_BUILD_TYPE  ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),Debug,Release)
@@ -515,6 +516,7 @@ LIBBT_DIR := libbacktrace
 LIBBT_URL ?= https://github.com/ianlancetaylor/libbacktrace.git
 LIBBT_LIB := $(LIBBT_DIR)/.libs/libbacktrace.a
 LIBBT_CLONE_STAMP := $(LIBBT_DIR)/.titan-cloned
+LIBBT_CONFIG_STAMP := $(LIBBT_DIR)/.titan-build.config
 STDLIB_COMPLETION_STAMP := $(TITAN_OUTPUT_DIR)/.titan-stdlib-complete
 
 # These wrappers indirectly launch recursive Make processes. The `+` recipe
@@ -616,8 +618,23 @@ $(LIBBT_CLONE_STAMP):
 	}
 	@touch "$@"
 
-$(LIBBT_LIB): $(LIBBT_CLONE_STAMP)
+# Implementation notes: doc/implementation/build-script-audit.md#native-dependency-configuration-stamps
+# FORCE recomputes the recorded configuration on every run, but the stamp is
+# replaced only when its content changes, so an unchanged build keeps its
+# timestamp and nothing rebuilds. Only the archive below depends on it.
+$(LIBBT_CONFIG_STAMP): FORCE | $(LIBBT_CLONE_STAMP)
+	@set -e; tmp="$@.tmp"; \
+	printf '%s\n' $(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
+	  $(call make_shell_quote,CC=$(CC)) $(call make_shell_quote,AR=$(AR)) \
+	  $(call make_shell_quote,RANLIB=$(RANLIB)) \
+	  $(call make_shell_quote,LIBBT_CFLAGS=$(LIBBT_CFLAGS)) > "$$tmp"; \
+	if test -r "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv -f "$$tmp" "$@"; fi
+
+# Configure does not rebuild existing objects for new flags, so a rebuild
+# starts from a clean tree.
+$(LIBBT_LIB): $(LIBBT_CLONE_STAMP) $(LIBBT_CONFIG_STAMP)
 	@echo "==> Building libbacktrace (configure + make, $(LIBBT_CFLAGS))"
+	@if test -f "$(LIBBT_DIR)/Makefile"; then $(MAKE) -C "$(LIBBT_DIR)" clean; fi
 	cd "$(LIBBT_DIR)" && \
 		./configure CC=$(call make_shell_quote,$(CC)) \
 			AR=$(call make_shell_quote,$(AR)) \
@@ -699,9 +716,22 @@ $(LIBUV_EXTRACTED): $(LIBUV_TARBALL) $(LIBUV_PATCH_FILE)
 	git apply --directory="$(LIBUV_SRC_DIR)" "$(LIBUV_PATCH_FILE)"
 	@touch "$@"
 
-$(LIBUV_LIB): $(LIBUV_EXTRACTED)
+# Implementation notes: doc/implementation/build-script-audit.md#native-dependency-configuration-stamps
+# As for libbacktrace: rewritten only when the configuration changes, and
+# only the archive depends on it.
+$(LIBUV_BUILD_CONFIG): FORCE
+	@set -e; mkdir -p "$(LIBUV_BUILD_DIR)"; tmp="$@.tmp"; \
+	printf '%s\n' $(call make_shell_quote,CC=$(CC)) \
+	  $(call make_shell_quote,LIBUV_CMAKE_FLAGS=$(LIBUV_CMAKE_FLAGS)) \
+	  $(call make_shell_quote,LIBUV_BUILD_CFLAGS=$(LIBUV_BUILD_CFLAGS)) > "$$tmp"; \
+	if test -r "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv -f "$$tmp" "$@"; fi
+
+# A rebuild discards the CMake cache: it would keep an earlier compiler and,
+# when LIBUV_BUILD_CFLAGS becomes empty, earlier C flags.
+$(LIBUV_LIB): $(LIBUV_EXTRACTED) $(LIBUV_BUILD_CONFIG)
 	@$(MAKE) --no-print-directory check-libuv-tools
 	@echo "==> Configuring libuv $(LIBUV_VERSION) (static, PIC, $(LIBUV_BUILD_TYPE))"
+	rm -rf "$(LIBUV_BUILD_DIR)/CMakeCache.txt" "$(LIBUV_BUILD_DIR)/CMakeFiles"
 	cmake -S "$(LIBUV_SRC_DIR)" -B "$(LIBUV_BUILD_DIR)" \
 		$(LIBUV_CMAKE_FLAGS) \
 		$(if $(strip $(LIBUV_BUILD_CFLAGS)),-DCMAKE_C_FLAGS=$(call make_shell_quote,$(LIBUV_BUILD_CFLAGS)))

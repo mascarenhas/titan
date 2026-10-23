@@ -130,7 +130,12 @@ Never restore probe evidence from a less-trusted writer.
 Regular probe keys retain the `test-linux-stdlib` namespace and include
 OS/architecture/profile, an immutable commit key, and stable restore prefix.
 Save after bundled tests/smoke and before the system-OpenSSL canary. Every
-profile-bearing native/configuration cache includes profile identity.
+profile-bearing native/configuration cache includes profile identity. Cached
+libbacktrace and libuv trees carry their [configuration
+stamps](build-script-audit.md#native-dependency-configuration-stamps), so a
+restored tree whose configuration matches is not rebuilt; change the cache key
+(`LIBUV_BUILD_PROFILE`, `SANITIZER_NATIVE_CACHE_SCHEMA`) whenever a recipe
+changes what the cached tree must contain.
 
 ## Sanitizer ownership and failure diagnostics
 

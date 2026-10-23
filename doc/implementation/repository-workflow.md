@@ -74,7 +74,11 @@ profiles](../language/build-profiles.md); test-harness flag overrides are in the
 Distinct `--output` roots can separate generated Titan objects, but
 repository Make builds default to one `out/` tree, and authored runtime and
 native dependency builds share their checkout locations. Serialize builds that
-share those inputs or use private source copies.
+share those inputs or use private source copies. Within one checkout,
+libbacktrace and libuv rebuild once when the profile, compiler, or their flags
+change ([configuration
+stamps](build-script-audit.md#native-dependency-configuration-stamps)); the
+other native trees and the standard library still need the clean steps below.
 
 Run full validation without ambient `ROCKS_TREE`, `TITAN_ROCKS_ROOT`,
 `TITAN_EXTRA_CPPFLAGS`, or `TITAN_NO_LINE_DIRECTIVES`. These alter SDK/provider

@@ -37,6 +37,26 @@ installed OpenSSL SDK. The Windows runtime build compiles its eight inputs
 directly. Versioned source acquisition retains checksums and the required
 upstream corrections.
 
+### Native dependency configuration stamps
+
+Neither upstream build notices changed flags in an existing build tree, so the
+Unix `Makefile` records each archive's configuration in a stamp that only that
+archive depends on. `libbacktrace/.titan-build.config` holds
+`TITAN_BUILD_PROFILE`, `CC`, `AR`, `RANLIB`, and `LIBBT_CFLAGS`;
+`libuv-build/.titan-build.config` holds `CC`, `LIBUV_CMAKE_FLAGS` (with
+`LIBUV_BUILD_TYPE`), and `LIBUV_BUILD_CFLAGS`. Each stamp depends on `FORCE`:
+its recipe writes the current configuration to a temporary file and replaces
+the stamp only when the content differs (`cmp`, then `mv`). An unchanged
+configuration therefore keeps the stamp's timestamp, and a second `make`
+rebuilds neither archive nor anything that depends on them, such as the runtime
+SDK and the standard-library objects (`STDLIB_TOOL_PREREQS`). A changed
+configuration rebuilds exactly the affected archive once, from a clean
+`make clean` libbacktrace tree or a discarded libuv CMake cache, and then its
+ordinary dependents. A tree built before these stamps existed rebuilds both
+archives once. `make -n` cannot evaluate a stamp without running its recipe,
+so a dry run conservatively lists the archive rebuilds, as it does for the
+native test configuration stamp.
+
 ## Standard-library object graph
 
 Make owns one object target per standard module, including one per folder
@@ -67,7 +87,9 @@ compiler, checkout runtime and private bootstrap instead.
 
 `make clean-stdlib` clears the graph and provider outputs. Run it before
 changing tools, flags, profile, or OpenSSL mode, clean the affected native build
-directories too, or use separate source copies and SDKs.
+directories other than libbacktrace and libuv (which follow their
+[configuration stamps](#native-dependency-configuration-stamps)) too, or use
+separate source copies and SDKs.
 
 ## Installation and publication
 
