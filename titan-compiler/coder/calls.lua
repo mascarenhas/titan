@@ -977,8 +977,8 @@ function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
                     luaL_error(L, "%s:%d:%d: too many variadic arguments forwarded (%d, max %d)", $FILE, $LINE, $COL, (int)$CNT, (int)TITAN_VARARG_MAX);
                 }
                 lu_byte $NN = (lu_byte)$CNT;
-                Udata *$UDNAME = gco2u(luaC_newobj(L, LUA_VUSERDATA,
-                    sizeudata(0, (size_t)$NN * sizeof($ELEM_CT))));
+                Udata *$UDNAME = titan_new_udata_object(L,
+                    sizeudata(0, (size_t)$NN * sizeof($ELEM_CT)));
                 $UDNAME->len = (size_t)$NN * sizeof($ELEM_CT);
                 $UDNAME->nuvalue = 0; $UDNAME->metatable = NULL;
                 setuvalue(L, $SLOT, $UDNAME);

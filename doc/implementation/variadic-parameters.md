@@ -336,7 +336,7 @@ prefix with nil:
 1. `_vcount = _nargs − nfixed`; above `TITAN_VARARG_MAX` it raises
    `too many variadic arguments to Titan function …`.
 2. `titan_ensure_stack` reserves a slot, then the element array is allocated
-   as a zero-user-value `Udata` payload (`luaC_newobj`, `nuvalue = 0`,
+   as a zero-user-value `Udata` payload (`titan_new_udata_object`, `nuvalue = 0`,
    `metatable = NULL`) and anchored on the Lua stack, because per-element
    conversion can allocate.
 3. A C-stack `TitanVarg*` descriptor points at `getudatamem` of that payload;

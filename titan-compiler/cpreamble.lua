@@ -94,6 +94,17 @@ static TITAN_UNUSED inline void titan_ensure_stack(lua_State *L, int slots) {
     luaD_checkstack(L, slots);
     if (L->ci->top.p < L->top.p + slots)
         L->ci->top.p = L->top.p + slots;
+}
+
+/*
+ * Allocate a raw full-userdata object whose header the caller initializes.
+ * Keep luaC_newobj out of gco2u's operand: under LUAI_ASSERT check_exp
+ * evaluates that operand twice and would allocate a second, never
+ * initialized object.
+*/
+static TITAN_UNUSED inline Udata *titan_new_udata_object(lua_State *L, size_t size) {
+    GCObject *o = luaC_newobj(L, LUA_VUSERDATA, size);
+    return gco2u(o);
 }]]
 
 cpreamble.after_foreign_imports = [[#if defined(__GNUC__) || defined(__clang__)
