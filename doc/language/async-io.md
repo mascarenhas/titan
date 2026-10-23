@@ -217,6 +217,8 @@ worker pool is shared with libuv filesystem and name-resolution work, so
 long-running or numerous jobs can delay unrelated operations. A long-lived
 independent-state loop continues occupying its worker slot; leave pool capacity
 for work that its Tasks need. See the [pool-capacity discussion](standard-library-lua.md#two-phase-receiver-bootstrap).
+A Lua state close instead unwinds a waiting Task before its job returns; see
+[foreign work at state close](#foreign-work-at-state-close).
 
 Raw pointers and foreign function pointers have no dynamic Lua coercion. The
 serialized signature lets statically compiled Titan modules call
@@ -1893,6 +1895,8 @@ for, or reap the child. Code that owns the child's lifecycle must use the domain
 process kill/wait operations as required before its Tasks finish. A File owns
 an operating-system descriptor, not a loop handle. The Runtime does not close
 such descriptors through `uv.walk`; application code owns explicit File close.
+Only a [Lua state close](standard-library-fs.md#closing-the-lua-state) closes
+a forgotten File.
 
 Async maintains the sparse live-Task inventory needed for scheduling lifetime,
 exit, and shutdown. Public UV separately roots live native requests/handles for
@@ -1972,3 +1976,15 @@ see [cleanup that needs asynchronous I/O](coroutines.md#cleanup-that-needs-async
 
 Ordinary garbage collection never retires an active Runtime, because the async
 module keeps it reachable.
+
+#### Foreign work at state close
+
+A Task waiting in `async.run_foreign` when its state closes is unwound before
+`f(arg)` returns. Its `defer` statements therefore run while `f` may still be
+using `arg`, and the state close waits for the job only afterwards, when the
+Runtime drains accepted work. An `owned` argument is safe, because the
+collector frees it only after that drain. Native memory or resources that the
+caller releases itself must not be released in a `defer` around
+`run_foreign`. Release them after the call returns, or in a `catch`, which an
+unwind never runs. The standard library's own worker-pool owners hand such
+native state to the job instead, so it is released when the job returns.

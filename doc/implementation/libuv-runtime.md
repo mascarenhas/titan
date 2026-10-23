@@ -649,6 +649,21 @@ native bytes are synchronized by the caller. The libuv worker pool is shared wit
 other native work, and async adds no queue or thread policy. Cancellation never
 detaches an accepted job.
 
+A Lua state close unwinds a Task parked in `run_foreign` before its job
+returns; the job finishes only later, in `runtime_finalize`'s drain. The wait's
+own cleanup releases nothing that the job uses, and `start_foreign_work`
+passes no `argument_owner`, so the argument's lifetime stays the caller's. An
+`owned` argument is safe, because `lua_close` frees no object before the drain.
+A caller that releases native state lexically must not do so in a `defer` that
+runs during that unwind. The standard library's callers (SQLite operations and
+`lua.Lua:run_async`) set a `pending` flag that only a normal return or `catch`
+clears. A `defer` that finds it set hands the native state to whichever of the
+unwind and the job finishes last, through an atomic exchange in the job's
+packet ([SQLite](sqlite3-library.md#lua-state-close),
+[independent states](lua-library.md#host-state-close-during-run_async)). The
+public contract is in
+[foreign work at state close](../language/async-io.md#foreign-work-at-state-close).
+
 The UV `work_t` owner embeds a `uv_work_t` and a separate `titan_uv_work_data`
 (`titan/uv/work-data.h`) holding the C worker, argument, and owner address.
 Before queueing, `uv_work_t.data` points at that struct. The worker reads only
@@ -837,6 +852,13 @@ drain the ordinary loop before closing the state. Abandonment reclaims libuv's
 loop internals and closes their handles, not application cleanup semantics such
 as a graceful protocol shutdown; the public guidance is
 [cleanup that needs asynchronous I/O](../language/coroutines.md#cleanup-that-needs-asynchronous-io).
+Domain owners whose ordinary close awaits release their own native state
+synchronously at state close, from their finalizers or from a close that tests
+`titan_state_closing`:
+[Files](filesystem-library.md#lua-state-close),
+[SQLite connections](sqlite3-library.md#lua-state-close) and
+[TLS engines and contexts](ssl-library.md#lua-state-close). Their finalizers
+need no Runtime, so they work in either order with this one.
 
 **Parked native waits.** A Task parked in a native wait lends the domain a
 waiter node in its own coroutine frame: thread channel send and receive (the
