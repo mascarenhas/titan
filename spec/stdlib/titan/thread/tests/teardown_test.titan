@@ -1,4 +1,6 @@
 local thread_teardown_coroutine = import "coroutine"
+-- Records an independent state's Lua warnings into a host-owned buffer.
+local thread_teardown_unwind = import "coroutine.test_support.titan"
 
 -- Lua-state close with Tasks parked in stack-resident native thread waits
 -- (issue #262): lua_close withdraws each parked waiter before its coroutine
@@ -447,5 +449,188 @@ function test_lua_close_withdraws_wait_parked_on_stacked_coroutine(_: test.Conte
     test.assert(received and message == 7, "the closed state's withdrawn receive took the message")
     local ran, flag? = probe.unwound:try_receive()
     test.assert(ran and flag == true, "the stacked generator's defer did not run")
+  end)
+end
+
+-- The endpoints a closing state's Group shares with the host. The host keeps
+-- the running member's gate, so only cancellation ends that member; `done`
+-- closes once its thread has exited. A withdrawn admission's thread would
+-- report on `started`.
+record ThreadTeardownGroupProbe
+  const gate: thread.Sender<|boolean|>
+  const done: thread.Receiver<|boolean|>
+  const started: thread.Receiver<|string|>
+end
+
+-- The independent state's spawner whose spawn fails after it was granted a
+-- slot, and the Group waiters it leaves for the state close.
+local thread_teardown_group_spawner: async.Task? = nil
+local thread_teardown_group_waiters: {async.Task} = {}
+
+-- Run nonblocking turns of the state's own loop until `ready` holds.
+local function thread_teardown_turn_until(ready: function (): (boolean), progress: string)
+  for _ = 1, 16 do
+    if ready() then return end
+    uv.run(async.current_loop(), uv.RUN_NOWAIT)
+  end
+  test.assert(ready(), progress .. " did not happen")
+end
+
+local function thread_teardown_all_waiting(tasks: {async.Task}): boolean
+  for index = 1, #tasks do
+    if tasks[index]:status():as_string() ~= "waiting" then return false end
+  end
+  return true
+end
+
+-- Public for the Group state-close test. The incumbent holds a slot until
+-- this function closes its release channel. With `running_member`, a second
+-- member holds another slot until it is cancelled. Then a spawner whose
+-- entry cannot be encoded, a granted admission and a queued admission wait
+-- in that order, and a completion waiter waits for the Group.
+function thread_teardown_park_group(host: value, running_member: boolean)
+  local limit = 1
+  if running_member then limit = 2 end
+  local group = thread.group(limit, false)
+  local release_tx, release_rx = thread.channel<|boolean|>(1)
+  local started_tx, started_rx = thread.channel<|string|>(1)
+  local gate_tx, gate_rx = thread.channel<|boolean|>(1)
+  local done_tx, done_rx = thread.channel<|boolean|>(1)
+  async.send(host as foreign *void, ThreadTeardownGroupProbe(gate_tx, done_rx, started_rx))
+  local admit = async.run<|value, value|>(function (): value
+    group:spawn_one(function (release: thread.Receiver<|boolean|>)
+      release:receive_result()
+    end, release_rx)
+    if running_member then
+      group:spawn_two(function (gate: thread.Receiver<|boolean|>, done: thread.Sender<|boolean|>)
+        gate:receive_result()
+        -- Reached only when the member was not cancelled.
+        done:try_send(false)
+      end, gate_rx, done_tx)
+    end
+    return true
+  end)
+  thread_teardown_turn_until(function (): boolean return admit:status():has_finished() end,
+    "admitting the Group members")
+  local admitted, result? = admit:status():has_succeeded()
+  test.assert(admitted and result == true, "admitting the members ended " .. admit:status():as_string())
+  -- Lua-state close unwinds the newest Task first, so the Tasks are created
+  -- in the reverse of the order they should withdraw: the granted admission,
+  -- then the queued one, then the completion waiter. Yields put the
+  -- admissions in the queue after the spawner in the opposite order.
+  local completion = async.run<|value, value|>(function (): value
+    group:wait()
+    return nil
+  end)
+  local queued = async.run<|value, value|>(function (): value
+    async.yield()
+    async.yield()
+    group:spawn_one(function (started: thread.Sender<|string|>)
+      started:send("queued")
+    end, started_tx)
+    return nil
+  end)
+  local granted = async.run<|value, value|>(function (): value
+    async.yield()
+    group:spawn_one(function (started: thread.Sender<|string|>)
+      started:send("granted")
+    end, started_tx)
+    return nil
+  end)
+  local spawner = async.run<|value, value|>(function (): value
+    expect_error(function ()
+      group:spawn_one(function (_x: PrivateNonTransferable) end, PrivateNonTransferable(7))
+    end, "record must be public with only public fields")
+    return true
+  end)
+  thread_teardown_group_spawner = spawner
+  thread_teardown_group_waiters = {granted, queued, completion}
+  thread_teardown_turn_until(function (): boolean
+    return thread_teardown_all_waiting({completion, queued, granted, spawner})
+  end, "queueing the Group waiters")
+  -- The incumbent's retirement grants its slot to the spawner.
+  release_tx:close()
+end
+
+-- Public: one nonblocking turn of the state's loop. True once the spawner
+-- has finished: its failed spawn passed its slot to the granted admission,
+-- whose wake stays queued because nothing drives the loop again.
+function thread_teardown_step_group(): boolean
+  uv.run(async.current_loop(), uv.RUN_NOWAIT)
+  local spawner = thread_teardown_group_spawner
+  if not spawner:status():has_finished() then return false end
+  local succeeded, result? = spawner:status():has_succeeded()
+  test.assert(succeeded and result == true, "the failing spawner ended " .. spawner:status():as_string())
+  test.assert(thread_teardown_all_waiting(thread_teardown_group_waiters),
+    "a Group waiter finished before the state closed")
+  return true
+end
+
+local function thread_teardown_group_step(state: lua.Lua): boolean
+  local result: async.TransferValue = state:run([[
+    package.path, package.cpath = '', ''
+    return require('thread.tests').thread_teardown_step_group()
+  ]], "=thread-teardown-group-step")
+  case result
+  when is_boolean(finished) then return finished
+  else raise "the Group step did not return a boolean"
+  end
+end
+
+-- Close a state while its Group has a granted admission whose wake is still
+-- queued, a queued admission and a completion waiter. The close unwinds the
+-- granted admission first: its withdrawal passes the slot to the queued one,
+-- whose withdrawal releases it and, when no member runs, wakes the completion
+-- waiter. None of these cleanups may raise, which would be a Lua warning. No
+-- withdrawn admission starts a thread, and the running member's proxy cancels
+-- its thread, which exits although its OS thread is not joined.
+local function thread_teardown_close_group(running_member: boolean)
+  runtime_test.run(function ()
+    local inbox = async.receiver()
+    defer inbox:close()
+    local warnings: owned char[] = foreign char.new_array(thread_teardown_unwind.UNWIND_BUFFER_SIZE)
+    local state = lua.new()
+    defer state:close()
+    state:run([[
+      package.path, package.cpath = '', ''
+      local host, warnings, running_member = ...
+      require('coroutine.test_support').unwind_capture_warnings(warnings)
+      require('thread.tests').thread_teardown_park_group(host, running_member)
+    ]], "=thread-teardown-group", async.TransferValue.is_pointer(inbox:handle()),
+      async.TransferValue.is_pointer(warnings as foreign *void),
+      async.TransferValue.is_boolean(running_member))
+    local probe: ThreadTeardownGroupProbe = inbox:wait()
+    defer probe.started:close()
+    defer probe.done:close()
+    defer probe.gate:close()
+    local deadline = poll_deadline()
+    while not thread_teardown_group_step(state) do
+      check_poll_deadline(deadline, "the failed spawn passing its slot on")
+      timer.sleep(1)
+    end
+    state:close()
+    local recorded = (warnings as foreign *char) as string
+    test.assert(recorded == "", "closing the state reported cleanup errors:\n" .. recorded)
+    case probe.started:receive_result()
+    when closed() then
+    when message(name) then
+      test.assert(false, "the withdrawn " .. name .. " admission started its thread")
+    end
+    deadline = poll_deadline()
+    while not probe.done:is_closed() do
+      check_poll_deadline(deadline, "the running member exiting")
+      timer.sleep(1)
+    end
+    local reported, _flag? = probe.done:try_receive()
+    test.assert(not reported, "the running member was not cancelled")
+  end)
+end
+
+function test_lua_close_withdraws_group_waiters(context: test.Context)
+  context:run("without_running_member", function (_: test.Context)
+    thread_teardown_close_group(false)
+  end)
+  context:run("with_running_member", function (_: test.Context)
+    thread_teardown_close_group(true)
   end)
 end
