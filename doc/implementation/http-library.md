@@ -129,7 +129,9 @@ Client closed, detaches idle leases and drains before any suspension, then
 retires them. Runtime notification runs only after every Task and raw handle
 has retired, when idle TCP close and TLS abort are synchronous. The default
 Client reference is cleared on exact owner identity. Caller-owned active
-responses retain their existing explicit-close responsibility.
+responses retain their existing explicit-close responsibility. A Lua state
+close runs no close listener; the abandoned loop closes idle sockets and the
+[TLS state-close finalizer](ssl-library.md#lua-state-close) frees idle engines.
 
 Acquisition removes the newest matching lease before I/O. Pool mutation and
 selection finish before closing expired or dirty connections, because abort

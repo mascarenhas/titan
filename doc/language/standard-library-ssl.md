@@ -300,6 +300,20 @@ callers share the same cleanup completion; subsequent aborts are no-ops. Native
 writes and their immutable bytes remain owned through their callbacks. A sibling
 operation interrupted by abort raises `ssl.Error` named `TLS_INTERRUPTED`.
 
+### Closing the Lua state
+
+Closing the Lua state frees the TLS engine of every Connection that is still
+open and the certificate context of every Server that was never closed. The
+state close also closes their TCP sockets, through the
+[Runtime it abandons](async-io.md#closing-a-lua-state-with-an-active-runtime).
+No `close_notify` is sent, and nothing waits for the peer: during the close,
+`close()` and `abort()` both behave like an abort that completes at once, so a
+suspended Task's `defer connection:close()` releases the engine instead of
+raising. `Server:close()` likewise frees its context and leaves the listener to
+the state close. A graceful TLS shutdown that the application needs belongs
+[before the state closes](coroutines.md#cleanup-that-needs-asynchronous-io).
+HTTP connections and WebSocket sessions over TLS are released the same way.
+
 ## Errors
 
 TLS and certificate failures raise `ssl.Error`, whose `operation` names the

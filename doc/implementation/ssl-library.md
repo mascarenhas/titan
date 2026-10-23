@@ -245,6 +245,33 @@ reader's reciprocal alert after an authenticated peer `close_notify`. It means
 the peer won the close race. Explicit `shutdown` and every other failure stay
 observable.
 
+## Lua-state close
+
+Graceful close and abort both need Tasks: `close` runs a supervised child, and
+termination awaits TCP close and engine-scope retirement. Nothing can run or
+await while the Lua state closes, so `terminate` tests `titan_state_closing`
+right after its terminal-state check. During close it frees the engine with
+`free_engine` and publishes `failed`, as an abort would, and leaves the TCP
+handle to `uv.loop_abandon` in the Runtime finalizer. `close` and `abort` take
+that branch before operation admission and child draining, so a lexical
+`defer connection:close()` in an unwinding Task completes. Freeing the engine is
+safe whatever the unwinding Tasks were doing: engine calls never span a
+suspension, no unwinding `defer` touches the SSL object or its BIOs, and the
+ciphertext batches handed to `net` are GC-owned copies that outlive the drain.
+
+`new_connection` registers `finalize_connection` with `gc.finalizable` before
+`SSL_new`, and `from_transfer_payload` registers it before adopting the engine.
+`listen` registers `finalize_server` before the Server holds its `SSL_CTX`.
+Both finalizers return at once unless the state is closing, so ordinary
+collection never frees TLS state. During close they call `close`. For a
+Connection that frees the engine, together with the last reference to a
+private trust context. For a Server, `Server:close` frees the `SSL_CTX` and,
+during close, leaves the listener to the abandoned loop. A transferred-out
+Connection has no engine, so its finalizer releases nothing. Idle pooled HTTP
+connections and WebSocket transports are `ssl.Connection` owners, so the same
+finalizer releases them. The Runtime-close listener that normally retires idle
+pooled connections does not run at state close.
+
 ## Connection transfer ownership
 
 The generic rules are in
@@ -302,4 +329,9 @@ moved out of an independent Lua state, source shutdown before decoding,
 plaintext preservation, and rejection during handshake, reads and
 backpressured output). Sanitizer coverage runs the high-level HTTPS path with
 `SSL_CERT_FILE` selecting the checked-in CA, so one fresh Lua process exercises
-default-trust connection and shutdown finalization.
+default-trust connection and shutdown finalization. State-close cases close an
+independent state holding a Task parked in a handshake and an unclosed Server.
+In the aggregate they check that `close` and `abort` complete during the close.
+The allocator child's `state_close` scenario counts OpenSSL's live allocations
+through its `CRYPTO_set_mem_functions` hooks and requires a second such close
+to return to the balance after the first.
