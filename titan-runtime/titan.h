@@ -110,15 +110,15 @@ typedef struct titan_unwind_floor {
 
 /* Close every to-be-closed variable at or above `level` (a savestack offset)
 ** with no error value, reporting and dropping each error; never raises. */
-TITAN_RUNTIME_FUNC void titan_unwind_close(lua_State *L, ptrdiff_t level);
+TITAN_RUNTIME_FUNC TITAN_COLD void titan_unwind_close(lua_State *L, ptrdiff_t level);
 /* Report the error of `status`, whose object is on top of the stack for a
 ** runtime error, as one "error in coroutine cleanup (...)" warning and drop
 ** it; never raises. */
-TITAN_RUNTIME_FUNC void titan_unwind_report(lua_State *L, TStatus status);
+TITAN_RUNTIME_FUNC TITAN_COLD void titan_unwind_report(lua_State *L, TStatus status);
 /* An error escaped a finally body that runs during an unwind: unlink the
 ** guard, restore the boundary state, report the error, close the Lua frames
 ** above `level` and continue the unwind. Never returns. */
-TITAN_RUNTIME_FUNC l_noret titan_unwind_guard_failed(lua_State *L,
+TITAN_RUNTIME_FUNC TITAN_COLD l_noret titan_unwind_guard_failed(lua_State *L,
     lua_longjmp *guard, l_uint32 oldnC, CallInfo *oldci, lu_byte oldah,
     ptrdiff_t olderrfunc, ptrdiff_t level);
 

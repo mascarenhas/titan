@@ -114,11 +114,13 @@ static inline int titan_posix_getsockname(int descriptor,
 #define TITAN_UNLIKELY(x) __builtin_expect((x), 0)
 #define TITAN_UNUSED __attribute__((unused))
 #define TITAN_NOINLINE __attribute__((noinline))
+#define TITAN_COLD __attribute__((cold))
 #else
 #define TITAN_LIKELY(x) (x)
 #define TITAN_UNLIKELY(x) (x)
 #define TITAN_UNUSED
 #define TITAN_NOINLINE
+#define TITAN_COLD
 #endif
 
 int errorhandler(lua_State *L);
@@ -141,7 +143,7 @@ static inline int titan_state_closing(lua_State *L) {
 /* Continue an abandoned-coroutine unwind from the current frame: jump to the
 ** next finally boundary or coroutine floor on L's error-recovery chain,
 ** closing exhausted Lua coroutines on the way. Never returns. */
-TITAN_RUNTIME_FUNC l_noret titan_unwind(lua_State *L);
+TITAN_RUNTIME_FUNC TITAN_COLD l_noret titan_unwind(lua_State *L);
 
 struct mco_coro;
 typedef void (*titan_coroutine_entry)(lua_State *, Udata *, CClosure *, TValue,

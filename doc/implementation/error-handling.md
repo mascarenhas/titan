@@ -362,6 +362,13 @@ boundary state, reports the error, closes the frames the body entered, and
 continues the unwind. After a normal finish, the dispatch arm for `PA_UNWIND`
 unlinks the guard and calls `titan_unwind`, which never returns.
 
+`titan_unwind`, `titan_unwind_close`, `titan_unwind_report` and
+`titan_unwind_guard_failed` are declared `TITAN_COLD`. The compiler therefore
+predicts that the unwind arm of the recovery, the guard failure and the
+`PA_UNWIND` dispatch never run. GCC moves them into the function's `.cold` part
+in `.text.unlikely`, so the unwind support adds little to the instruction-cache
+footprint of the normal path.
+
 **Suspension during error recovery.** A `__close` metamethod that the ordinary
 error recovery calls may suspend the coroutine with a Titan `yield`: Lua's
 `luaD_closeprotected` calls it through `luaD_callnoyield`, which refuses only a
