@@ -299,7 +299,7 @@ TITAN_TEST_SOURCES_thread.tests := spec/stdlib/titan/thread/tests/tests.titan \
 	spec/stdlib/titan/thread/tests/ownership_test.titan \
 	spec/stdlib/titan/thread/tests/teardown_test.titan \
 	spec/stdlib/titan/thread/tests/wake_test.titan
-TITAN_TEST_IMPORTS_thread.tests := support.async support.command support.common support.runtime
+TITAN_TEST_IMPORTS_thread.tests := coroutine.test_support support.async support.command support.common support.runtime
 
 TITAN_TEST_SOURCES_timer.tests := spec/stdlib/titan/timer/tests.titan
 TITAN_TEST_IMPORTS_timer.tests := support.async support.runtime

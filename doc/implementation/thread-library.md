@@ -494,6 +494,15 @@ an admitted child; the same `Thread` and slot persist across setup failures.
 - **Shutdown.** Runtime shutdown cancels each member proxy as an ordinary Task;
   the cleanup forwards to the worker, and membership removal and slot release
   still wait for the OS join.
+- **State close.** Closing the Lua state unwinds each waiting `spawn*` and
+  `Group:wait()` Task, newest first, and its withdrawal runs inside a
+  finalizer. A granted slot passes to the next queued admission, and the last
+  release wakes the completion waiters. Each wake only queues a continuation
+  that never runs, and nothing awaits. No withdrawn admission starts a thread.
+  Member proxies forward cancellation to their threads and stay nonterminal
+  ([proxy retirement](#join-proxy-retirement-and-the-native-terminal-barrier)).
+  `test_lua_close_withdraws_group_waiters` covers both cases: with and without
+  a running member.
 - **Retry boundaries.**
   - A live member whose OS join fails escapes `async.loop()` as the driver
     `OperationError`; Task, control, token, Runtime and slot survive, and a later
