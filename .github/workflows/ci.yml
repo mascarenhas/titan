@@ -857,6 +857,36 @@ jobs:
             make titan-stdlib-test-run \
               TITAN_FILTER='test_lua_host_roots_coroutine_payloads_and_tags_across_gc$'
 
+      # Implementation notes: doc/implementation/continuous-integration.md#fake-stack-probe
+      - name: Check ASan fake-stack placement of setjmp frames
+        run: |
+          # GCC places a frame that calls setjmp on ASan's fake stack under
+          # detect_stack_use_after_return=1; Clang never does. Only such a lane
+          # exercises the coroutine crossing's fake-stack address normalization.
+          # If a runner image or compiler change stopped that placement, the
+          # test_unwind_ gate below would silently stop exercising it.
+          probe="$RUNNER_TEMP/asan-fake-stack-probe"
+          bash spec/support/ci_sanitizer_capture.sh asan-fake-stack-probe-build \
+            "$CC" $SANITIZER_FLAGS spec/support/asan_fake_stack_probe.c -o "$probe"
+          bash spec/support/ci_sanitizer_capture.sh asan-fake-stack-probe \
+            "$probe"
+
+      # State-close teardown and abandoned-coroutine unwinding cases pass on a
+      # plain build by design; only ASan/LSan diagnoses their leaks and misuse.
+      - name: Run native teardown and unwinding sanitizer gate
+        run: |
+          bash spec/support/ci_sanitizer_capture.sh lua-close-teardown \
+            make titan-stdlib-test-run TITAN_FILTER='test_lua_close_'
+          bash spec/support/ci_sanitizer_capture.sh coroutine-unwind \
+            make titan-stdlib-test-run TITAN_FILTER='test_unwind_'
+          for teardown_log in lua-close-teardown coroutine-unwind; do
+            if ! grep -Eq '^\[==========\] [1-9][0-9]* tests? ran\.$' \
+                "$TITAN_SANITIZER_LOG_DIR/$teardown_log.log"; then
+              echo "Teardown sanitizer filter ran no tests: $teardown_log" >&2
+              exit 1
+            fi
+          done
+
       - name: Run native async sanitizer gate (timer-fs)
         run: |
           bash spec/support/ci_sanitizer_capture.sh timer-tests \

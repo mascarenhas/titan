@@ -5771,12 +5771,14 @@ done
 
             assert.equal(1, count_literal(sanitizer_job,
                 "make titan-stdlib-test-build"), sanitizer_job)
-            assert.equal(41, count_literal(sanitizer_job,
+            assert.equal(43, count_literal(sanitizer_job,
                 "make titan-stdlib-test-run"), sanitizer_job)
             for _, filter in ipairs({
                 "TITAN_FILTER='test_lua_host_roots_coroutine_" ..
                 "payloads_and_tags_across_gc$'",
                 "TITAN_FILTER='test_timer_'",
+                "TITAN_FILTER='test_lua_close_'",
+                "TITAN_FILTER='test_unwind_'",
                 "TITAN_FILTER='test_fs_'",
                 "TITAN_FILTER='^uv%.task_tests%.'",
                 "TITAN_FILTER='^uv%.runtime_tests%.'",
@@ -5873,6 +5875,41 @@ done
                     1, true), step)
                 assert.truthy(step:find("exit 1", 1, true), step)
             end
+            local teardown_step = named_step(sanitizer_job,
+                "Run native teardown and unwinding sanitizer gate")
+            for _, label in ipairs({ "lua-close-teardown", "coroutine-unwind" }) do
+                assert.equal(1, count_literal(teardown_step,
+                    "ci_sanitizer_capture.sh " .. label .. " "), label)
+                assert.equal(2, count_literal(teardown_step, label), label)
+            end
+            for _, required in ipairs({
+                "grep -Eq '^\\[==========\\] [1-9][0-9]* tests? ran\\.$'",
+                '"$TITAN_SANITIZER_LOG_DIR/$teardown_log.log"',
+                "Teardown sanitizer filter ran no tests:",
+                "exit 1",
+            }) do
+                assert.truthy(teardown_step:find(required, 1, true), required)
+            end
+            local probe_step = named_step(sanitizer_job,
+                "Check ASan fake-stack placement of setjmp frames")
+            assert.equal(2, count_literal(probe_step,
+                "bash spec/support/ci_sanitizer_capture.sh"), probe_step)
+            for _, required in ipairs({
+                'ci_sanitizer_capture.sh asan-fake-stack-probe-build \\\n' ..
+                '            "$CC" $SANITIZER_FLAGS spec/support/asan_fake_stack_probe.c',
+                'ci_sanitizer_capture.sh asan-fake-stack-probe \\\n' ..
+                '            "$probe"',
+            }) do
+                assert.equal(1, count_literal(probe_step, required), required)
+            end
+            assert.truthy(read_file("spec/support/asan_fake_stack_probe.c"):find(
+                "__asan_addr_is_in_fake_stack(fake_stack, &buffer", 1, true))
+            assert.is_true(assert(sanitizer_job:find(
+                    "- name: Check ASan fake-stack placement of setjmp frames", 1, true)) <
+                assert(sanitizer_job:find(
+                    "- name: Run native teardown and unwinding sanitizer gate", 1, true)))
+            assert.truthy(sanitizer_job:find(
+                "detect_stack_use_after_return=1", 1, true), sanitizer_job)
             for _, removed in ipairs({
                 "spec/stdlib/uv_native_handles_spec.lua",
                 "spec/stdlib/uv_tasks_spec.lua",
