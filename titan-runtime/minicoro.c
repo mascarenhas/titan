@@ -63,18 +63,38 @@ void titan_coroutine_enter(lua_State *T, Udata *module, TValue func,
   if (TITAN_SETJMP(floor.lj.b) == 0) {
     entry(T, module, NULL, func, co);
   } else {
+    /* The jump removed every native frame above the floor: restore the saved
+    ** call state, C-call count included, before running any close method. */
+    T->nCcalls = oldnC;
     T->ci = oldci;
     T->allowhook = oldah;
     T->errfunc = olderrfunc;
+    if (floor.lj.status != TITAN_STATUS_UNWIND) {
+      /* A real error escaped the entry's catch. Close the Lua frames above
+      ** with it, as luaD_pcall does, under the floor re-armed: a __close that
+      ** suspends this coroutine leaves it abandonable, and an unwind then
+      ** lands here again with TITAN_STATUS_UNWIND and drops the error.
+      ** luaD_closeprotected catches every error of a __close itself. */
+      volatile TStatus error_status = floor.lj.status;
+      floor.lj.status = TITAN_STATUS_FLOOR;
+      T->errorJmp = &floor.lj;
+      if (TITAN_SETJMP(floor.lj.b) == 0) {
+        floor.lj.status = luaD_closeprotected(T, oldtop, error_status);
+      } else {
+        T->nCcalls = oldnC;
+        T->ci = oldci;
+        T->allowhook = oldah;
+        T->errfunc = olderrfunc;
+      }
+    }
     if (floor.lj.status == TITAN_STATUS_UNWIND) {
       /* Every Titan finally on T has run: close the remaining Lua frames and
       ** finish the coroutine as unwound. */
       titan_unwind_close(T, oldtop);
       titan_coroutine_push_final(T, co, NULL, TITAN_CORO_TRANSFER_UNWIND);
     } else {
-      /* A real error escaped the entry's catch: deliver it to the resumer. */
-      TStatus status = luaD_closeprotected(T, oldtop, floor.lj.status);
-      luaD_seterrorobj(T, status, restorestack(T, oldtop));
+      /* Deliver the real error to the resumer. */
+      luaD_seterrorobj(T, floor.lj.status, restorestack(T, oldtop));
       titan_coroutine_push_final(T, co, s2v(T->top.p - 1), 0);
     }
     T->top.p = restorestack(T, oldtop);

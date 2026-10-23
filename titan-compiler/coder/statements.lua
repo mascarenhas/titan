@@ -2200,12 +2200,46 @@ end
 -- it is `{ pa = <pending-action var>, guard = <tag of the try's body boundary> }`:
 -- an unwind landing restores the boundary state, closes the Lua frames above it
 -- with the unwind policy, skips any catch, sets PA_UNWIND, and runs the finally
--- under a guard that reuses the try-scope `_lj_<guard>`.
+-- under a guard that reuses the try-scope `_lj_<guard>`. The ordinary-error
+-- close of the Lua frames above a marked boundary runs with that boundary
+-- re-armed: a `__close` method can suspend the coroutine there, before the
+-- finally has started, and abandoning it then must still land on this try.
 -- Implementation notes: doc/implementation/error-handling.md#unwinding-through-finally
 function boundary_recover_open(ctx, tag, d_err, d_tb, unwind)
     local landing = ""
+    local close_frames = render([[
+            L->ci = _oldci_$T;
+            L->allowhook = _oldah_$T;
+            /* A longjmp can skip an inner Titan Lua-entry wrapper before that
+             * wrapper restores L->errfunc. Put the boundary-entry message
+             * handler back before closing Lua frames, so any __close error is
+             * handled by a valid Titan errorhandler instead of a stale stack
+             * slot from the skipped inner entry. */
+            L->errfunc = _olderrfunc_$T;
+            _lj_$T.status = luaD_closeprotected(L, _oldtop_$T, _lj_$T.status);
+    ]], { T = tag })
     if unwind then
         landing = render([[
+            if (_lj_$T.status != TITAN_STATUS_UNWIND) {
+                /* An ordinary error: close the Lua frames above with the error,
+                 * as luaD_pcall does, under this boundary re-armed as a finally
+                 * landing. luaD_closeprotected catches every error of a __close
+                 * itself, so only an abandoned-coroutine unwind (a __close that
+                 * suspended the coroutine) can jump here, with
+                 * TITAN_STATUS_UNWIND. errfunc: see the unmarked recovery. */
+                volatile TStatus _errst_$T = _lj_$T.status;
+                L->ci = _oldci_$T;
+                L->allowhook = _oldah_$T;
+                L->errfunc = _olderrfunc_$T;
+                _lj_$T.status = TITAN_STATUS_FINALLY;
+                _lj_$T.previous = L->errorJmp;
+                L->errorJmp = &_lj_$T;
+                if (TITAN_SETJMP(_lj_$T.b) == 0) {
+                    _lj_$T.status = luaD_closeprotected(L, _oldtop_$T, _errst_$T);
+                }
+                L->errorJmp = _lj_$T.previous;
+                L->nCcalls = _oldnC_$T;
+            }
             if (_lj_$T.status == TITAN_STATUS_UNWIND) {
                 /* abandoned-coroutine unwind: close Lua frames above with no
                  * error value, skip any catch, run the finally under a guard */
@@ -2234,6 +2268,7 @@ function boundary_recover_open(ctx, tag, d_err, d_tb, unwind)
             PAUNWIND = PA_UNWIND,
             SPILLRELOAD = spill_reload(ctx),
         })
+        close_frames = "/* the Lua frames above were closed under the re-armed boundary */"
     end
     return render([[
         }
@@ -2245,15 +2280,7 @@ function boundary_recover_open(ctx, tag, d_err, d_tb, unwind)
             /* raised; errorhandler already filled the trace slot. Mirror
              * luaD_pcall's recovery: restore ci/allowhook, close any to-be-
              * closed vars from called Lua, materialize the error object. */
-            L->ci = _oldci_$T;
-            L->allowhook = _oldah_$T;
-            /* A longjmp can skip an inner Titan Lua-entry wrapper before that
-             * wrapper restores L->errfunc. Put the boundary-entry message
-             * handler back before closing Lua frames, so any __close error is
-             * handled by a valid Titan errorhandler instead of a stale stack
-             * slot from the skipped inner entry. */
-            L->errfunc = _olderrfunc_$T;
-            _lj_$T.status = luaD_closeprotected(L, _oldtop_$T, _lj_$T.status);
+            $CLOSEFRAMES
             luaD_seterrorobj(L, _lj_$T.status, restorestack(L, _oldtop_$T));
             /* a value-call or another stack-growing operation inside the protected
              * region may have reallocated the stack; recompute _base before
@@ -2294,6 +2321,7 @@ function boundary_recover_open(ctx, tag, d_err, d_tb, unwind)
         T = tag,
         INIT = unwind and "TITAN_STATUS_FINALLY" or "LUA_OK",
         LANDING = landing,
+        CLOSEFRAMES = close_frames,
         ERRSTACK = stackslotat(d_err),
         TBSTACK = stackslotat(d_tb),
         SPILLRELOAD = spill_reload(ctx),

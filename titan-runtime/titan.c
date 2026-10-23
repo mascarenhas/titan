@@ -1741,15 +1741,18 @@ static void titan_unwind_warn(lua_State *L, void *ud) {
 /* Report one cleanup error as a Lua warning and drop it. The error object is
 ** materialized above the current top; the reporting-time top is restored, so
 ** the open upvalues and pending to-be-closed slots of a failed __close stay
-** below it. A failure while reporting is ignored. */
+** below it. A failure while reporting is ignored; the reporter restores `ci`,
+** `allowhook` and `errfunc` on every path. */
 static void titan_unwind_report(lua_State *L, TStatus status) {
   ptrdiff_t top = savestack(L, L->top.p);
   CallInfo *ci = L->ci;
   lu_byte allowhook = L->allowhook;
+  ptrdiff_t errfunc = L->errfunc;
   luaD_seterrorobj(L, status, L->top.p);
   (void)luaD_rawrunprotected(L, titan_unwind_warn, NULL);
   L->ci = ci;
   L->allowhook = allowhook;
+  L->errfunc = errfunc;
   L->top.p = restorestack(L, top);
 }
 
@@ -1761,17 +1764,23 @@ static void titan_unwind_close_aux(lua_State *L, void *ud) {
 /* luaD_closeprotected's loop with the unwind policy: every retry keeps
 ** LUA_OK, so each __close receives no error value, and each error is reported
 ** before the retry. luaF_close pops an entry before calling it, so the loop
-** always progresses. `top` drops to `level` only once everything is closed. */
+** always progresses. `top` drops to `level` only once everything is closed.
+** A failed __close may have jumped over a Titan Lua-entry wrapper that had
+** installed its own message handler, so `errfunc` is restored after every
+** failure, as luaD_pcall does, and holds its entry value on return. */
 void titan_unwind_close(lua_State *L, ptrdiff_t level) {
   CallInfo *ci = L->ci;
   lu_byte allowhook = L->allowhook;
+  ptrdiff_t errfunc = L->errfunc;
   for (;;) {
     TStatus status = luaD_rawrunprotected(L, titan_unwind_close_aux, &level);
     if (status == LUA_OK) break;
+    L->errfunc = errfunc;
     titan_unwind_report(L, status);
     L->ci = ci;
     L->allowhook = allowhook;
   }
+  L->errfunc = errfunc;
   L->top.p = restorestack(L, level);
 }
 
