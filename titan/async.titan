@@ -952,9 +952,9 @@ end
 
 -- Resume the root and return whether it died with an uncaught error, and the
 -- yielded, returned or raised value. Only a failure that publish_terminal
--- reports gets the driver's propagation trace appended (issue #289): a first
--- cancellation is sticky and wins publication, and run_with_cleanup already
--- recorded its body's failure with that body's trace.
+-- reports gets the driver's propagation trace appended: a first cancellation
+-- is sticky and wins publication, and run_with_cleanup already recorded its
+-- body's failure with that body's trace.
 local function resume_root(task: Task, failed: boolean, payload: value): (boolean, value)
   task.runtime.current_task = task
   defer task.runtime.current_task = nil

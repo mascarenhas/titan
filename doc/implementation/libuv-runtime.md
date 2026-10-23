@@ -309,10 +309,11 @@ through `raise_with_appended_trace`, only when the failure will be reported:
 when the Task has no cancellation reason and has not already recorded a
 failure. A cancellation is sticky and takes precedence at publication, and a
 `run_with_cleanup` wrapper has already recorded its body's failure with the
-body's trace, so neither ever reports a propagation trace. Both drop the staged
-trace and record the failure without one, which saves the unwinding of the
-whole scheduler stack when a parked Task is cancelled. `advance_task` treats a
-raised and a returned root failure alike.
+body's trace, so neither ever reports a propagation trace. Both drop the
+staged trace. A cancelled root's failure is recorded without a trace, and a
+`run_with_cleanup` root keeps the failure and trace that its wrapper recorded.
+This saves one traceback capture of the scheduler stack per cancelled parked
+Task. `advance_task` treats a raised and a returned root failure alike.
 
 The 17 combinators (`join`, `join_two`..`join_five`, and
 `any_`/`race_`/`all_` at arities two through five) keep independent

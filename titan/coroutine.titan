@@ -278,7 +278,7 @@ function Coroutine:error(err: value, tag: value): value
   return result
 end
 
--- The async driver's resume (issue #289): resume, or inject `payload` as an
+-- The async driver's resume: resume, or inject `payload` as an
 -- error when `failed`, but return true and the uncaught error of the now dead
 -- coroutine instead of raising it; otherwise false and the yielded or
 -- returned value. The coroutine's own trace stays staged: the caller appends

@@ -247,7 +247,7 @@ and the payload for `ok=false`, leaving the staged trace in place. The driver's
 Task will report. For a cancelled Task, or a `run_with_cleanup` Task that has
 already recorded its body's failure, it drops the staged trace with
 `pop_trace_for_append` and captures no propagation trace. See
-[the driver](libuv-runtime.md#driver-and-registration-trampoline).
+[Task status](libuv-runtime.md#explicit-suspend-task-status-listeners-and-combinators).
 
 `Coroutine:error` before the first `resume` is handled without calling the
 callback: the entry sees the preloaded `ok=false` transfer, returns it as the
