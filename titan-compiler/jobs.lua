@@ -176,6 +176,8 @@ Slots.__index = Slots
 
 -- `local_cap` is the already-resolved local bound (--jobs > TITAN_JOBS > 4).
 -- `options.makeflags` overrides the inherited MAKEFLAGS (for tests).
+-- `options.guard` installs the cancellation guard even with one slot, for a
+-- caller whose single job still runs as an asynchronous child.
 function jobs.open_slots(local_cap, options)
     assert(math.type(local_cap) == "integer" and local_cap >= 1,
         "the local job cap must be a positive integer")
@@ -211,7 +213,7 @@ function jobs.open_slots(local_cap, options)
     elseif policy.serial then
         slots.limit = 1
     end
-    if slots.limit > 1 then
+    if slots.limit > 1 or options.guard then
         local guard, guard_err = support._signal_guard()
         if not guard then
             if slots.client then slots.client:close() end

@@ -44,6 +44,15 @@ nominal record/union/Interface identities. A folder module still produces one
 logical object and therefore one metadata entry; contributor filenames are not
 modules.
 
+Before either file changes, `titanc` links a private archive-backed copy of the
+provider and validates both images. Both links count against the native job
+budget. Under a parent GNU Make jobserver (`make -jN` with a `+` recipe), the
+validation link may run beside the provider link in its own job slot.
+Otherwise the two links run one after the other, and `--jobs 1` keeps the
+whole sequence serial. A failure in either link or any validation leaves the
+previously published files untouched; see [Provider link
+pipeline](../implementation/static-compiled-modules.md#provider-link-pipeline).
+
 When exactly one requested source root declares
 `main(args: {string}): integer`, `titanc` retains executable-only behavior. It
 does not publish a provider pair beside the executable.

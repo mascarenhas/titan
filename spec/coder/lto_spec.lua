@@ -1,4 +1,5 @@
 local assert = require "luassert"
+local cdriver = require "c-parser.cdriver"
 local compiler_io = require "titan-compiler.io"
 local lfs = require "lfs"
 local objectmetadata = require "titan-compiler.objectmetadata"
@@ -77,7 +78,7 @@ describe("Titan link-time optimization", function()
         if workspace then remove(workspace) end
     end)
 
-    local function titanc(extra_compile, extra_link, ...)
+    local function titanc_arguments(extra_compile, extra_link, ...)
         -- GCC also uses MAKE for parallel LTO; skip only Titan's runtime build.
         local arguments = {
             "env", "-u", "TITAN_BUILD_PROFILE", "CC=" .. CC, "CCACHE_DISABLE=1", "TITAN_RUNTIME_PREBUILT=1",
@@ -89,7 +90,11 @@ describe("Titan link-time optimization", function()
             REPOSITORY .. "/titanc", "--tree", source_root,
         }
         for _, argument in ipairs({ ... }) do arguments[#arguments + 1] = argument end
-        return run(arguments)
+        return arguments
+    end
+
+    local function titanc(extra_compile, extra_link, ...)
+        return run(titanc_arguments(extra_compile, extra_link, ...))
     end
 
     local function compiled(...)
@@ -147,6 +152,31 @@ describe("Titan link-time optimization", function()
         assert.is_true(ok, output)
 
         compiled("--incremental", "lto_fixture.base", "lto_fixture.facade")
+        nm_ok, unresolved = run({ "nm", "-u", "lto_fixture.so" })
+        assert.is_true(nm_ok, unresolved)
+        assert.falsy(unresolved:find(SENTINEL, 1, true), unresolved)
+        ok, output = run({ LUA, "-E", "-e",
+            [[package.path = "./?.lua;" .. package.path; assert(require("lto_fixture.facade").answer() == 42)]] })
+        assert.is_true(ok, output)
+
+        -- Repeat the pair under a real shared jobserver. The archive-backed
+        -- LTO link may then borrow its own slot alongside the DSO link, and
+        -- GCC's LTRANS jobs join the same pool; both images must still be
+        -- optimized and validated before publication.
+        local quoted = {}
+        for index, argument in ipairs(titanc_arguments(nil, nil,
+                "--incremental", "--jobs", "3", "lto_fixture.base", "lto_fixture.facade")) do
+            quoted[index] = assert(cdriver.shell_quote(argument))
+        end
+        write(workspace .. "/provider.sh",
+            "exec " .. table.concat(quoted, " ") .. "\n")
+        write(workspace .. "/parent.mk", "all:\n\t+@sh provider.sh\n")
+        assert(os.remove("lto_fixture.so"))
+        assert(os.remove("lto_fixture.a"))
+        ok, output = run({ "env", "-u", "MAKEFLAGS", "-u", "MFLAGS",
+            "-u", "MAKELEVEL", "make", "--no-print-directory", "-j3",
+            "-f", "parent.mk" })
+        assert.is_true(ok, output)
         nm_ok, unresolved = run({ "nm", "-u", "lto_fixture.so" })
         assert.is_true(nm_ok, unresolved)
         assert.falsy(unresolved:find(SENTINEL, 1, true), unresolved)

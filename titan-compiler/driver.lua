@@ -9180,11 +9180,17 @@ local function windows_link_interfaces(libnames, extra_objects, ordered_payload)
     return interfaces
 end
 
--- Implementation notes: doc/implementation/driver.md#drivercompile_library_output
-function driver.compile_library_output(soname, libnames, link, verbose,
-                                       extra_objects, static_archives,
-                                       ordered_payload, install_name,
-                                       module_names)
+-- Provider link helpers stay block-scoped because the main chunk is near Lua's
+-- 200-active-local limit; only driver fields escape.
+do
+
+-- Build one provider-shaped DSO link without running it. The record owns the
+-- argv plus the Windows `.def` and Darwin dSYM obligations that
+-- finish_library_link completes after the native command.
+local function prepare_library_link(soname, libnames, link, verbose,
+                                    extra_objects, static_archives,
+                                    ordered_payload, install_name,
+                                    module_names)
     if platform.windows and (not module_names or #module_names == 0) then
         return nil, "Windows DLL linking requires its logical module inventory"
     end
@@ -9258,20 +9264,314 @@ function driver.compile_library_output(soname, libnames, link, verbose,
         end
     end
     append_argv(args, driver.EXTRA_LDFLAGS)
+    return {
+        argv = args,
+        soname = soname,
+        export_file = export_file,
+        install_name = install_name,
+    }
+end
 
-    local ok, term, code = run_argv(args, verbose)
-    if export_file then os.remove(export_file) end
+local function finish_library_link(prepared, verbose, ok, term, code)
+    if prepared.export_file then os.remove(prepared.export_file) end
     if ok then
-        local dsym_ok, dsym_term, dsym_code =
-            run_dsymutil(soname, verbose, install_name ~= nil)
+        local dsym_ok, dsym_term, dsym_code = run_dsymutil(
+            prepared.soname, verbose, prepared.install_name ~= nil)
         if not dsym_ok then
-            os.remove(soname)
-            remove_path(soname .. ".dSYM")
+            os.remove(prepared.soname)
+            remove_path(prepared.soname .. ".dSYM")
             return nil, dsym_term, dsym_code
         end
     end
     return ok, term, code
 end
+
+-- Implementation notes: doc/implementation/driver.md#drivercompile_library_output
+function driver.compile_library_output(soname, libnames, link, verbose,
+                                       extra_objects, static_archives,
+                                       ordered_payload, install_name,
+                                       module_names)
+    local prepared, err = prepare_library_link(soname, libnames, link,
+        verbose, extra_objects, static_archives, ordered_payload,
+        install_name, module_names)
+    if not prepared then return nil, err end
+    return finish_library_link(prepared, verbose,
+        run_argv(prepared.argv, verbose))
+end
+
+function driver.link_failure_message(kind, name, term, code)
+    return string.format("failed to link %s '%s' (%s%s)",
+        kind, name, tostring(term), code and (", " .. tostring(code)) or "")
+end
+
+-- Implementation notes: doc/implementation/static-compiled-modules.md#provider-link-pipeline
+-- Link, archive, and validate one Unix provider pair in a private sibling
+-- stage. The DSO link runs as a native child while the archive is built. The
+-- archive-backed validation link joins it only with its own jobserver-granted
+-- slot; otherwise the two links run in sequence. The first failure in serial
+-- pipeline order is reported. Any failure or interruption drains running
+-- links, discards their output, and removes the whole stage.
+function driver.link_provider_pair(request)
+    assert(not platform.windows, "Windows DLL providers have no paired archive")
+    local provider, verbose = request.provider, request.verbose
+    local module_names = request.module_names
+    local link_failure = driver.link_failure_message
+    local dso, directory = driver.staged_library_output(request.public_dso)
+    if not dso then
+        return nil, "failed to stage library '" .. provider .. "': " ..
+            tostring(directory)
+    end
+    local archive = dso:gsub("[.]so$", ".a")
+    local image = directory .. "/archive-validation.so"
+    -- Even one slot runs its links as background children, so the
+    -- cancellation guard must own INT/TERM/HUP for the whole transaction.
+    local slots, slots_err = jobs.open_slots(request.parallelism,
+        { guard = true })
+    if not slots then
+        remove_path(directory)
+        return nil, slots_err
+    end
+
+    local interrupted = {}
+    local notification, archive_result
+    local links = {} -- [1] staged DSO, [2] archive-backed validation image
+
+    local function check_interrupt()
+        if slots:cancelled() then error(interrupted, 0) end
+    end
+
+    local function reap(index)
+        compile_batch.reap(links[index].process)
+        links[index].reaped = true
+        return slots:release()
+    end
+
+    -- Reap the next completed link, or report a readable token when
+    -- want_slot is set. Only this function consumes completion lines.
+    local function await(want_slot)
+        local event, detail = slots:wait(notification.file, want_slot)
+        if event == "signal" then error(interrupted, 0) end
+        if event ~= "completion" then return event, detail end
+        local called, line, read_err =
+            pcall(notification.file.read, notification.file, "*l")
+        local index = called and tonumber(line)
+        if not index or not links[index] or links[index].reaped then
+            return nil, "failed to receive provider link completion: " ..
+                tostring(called and (read_err or line) or line)
+        end
+        local released, release_err = reap(index)
+        if not released then return nil, release_err end
+        return event
+    end
+
+    local function wait_for(index)
+        while not links[index].reaped do
+            local event, err = await(false)
+            if not event then return nil, err end
+        end
+        return true
+    end
+
+    -- The caller holds the slot; a failed launch returns it.
+    local function launch(index, prepared, show)
+        local called, process, launch_err = pcall(compile_batch.launch,
+            prepared, show, notification, index)
+        if not called then launch_err, process = process, nil end
+        if not process then
+            slots:release()
+            return nil, launch_err
+        end
+        links[index] = { prepared = prepared, process = process }
+        return true
+    end
+
+    local function launch_now(index, prepared, show)
+        local acquired, acquire_err = slots:acquire_nowait()
+        if not acquired then
+            return nil, acquire_err or "no native job slot is available"
+        end
+        return launch(index, prepared, show)
+    end
+
+    -- Replay the captured output, then complete dSYM/.def obligations.
+    local function finish(index)
+        links[index].finished = true
+        return finish_library_link(links[index].prepared, verbose,
+            compile_batch.finish(links[index].process))
+    end
+
+    local function validate_image(filename, subject)
+        local valid, err = driver.validate_library_image(filename, module_names)
+        if valid and provider == "titan" then
+            valid, err = driver.validate_titan_support(filename, verbose)
+        end
+        if valid then
+            valid, err = driver.validate_archive_library_equality(
+                archive_result.archive, filename, module_names, subject)
+        end
+        if valid then
+            valid, err = driver.validate_library_image_fresh(
+                filename, archive_result.entries, module_names, verbose)
+        end
+        return valid, err
+    end
+
+    -- Returns the first failure in serial pipeline order, or nil.
+    local function run()
+        local created, opened, open_err =
+            pcall(compile_batch.create_notification)
+        if not created then open_err, opened = opened, nil end
+        if not opened then return open_err end
+        notification = opened
+        -- One native slot keeps the historical fully serial order.
+        local overlap = slots.limit > 1
+
+        local dso_link, dso_err = prepare_library_link(dso, request.libnames,
+            request.link, verbose, nil, request.static_archives,
+            request.ordered_payload, request.public_dso)
+        local launched = dso_link
+        if dso_link then launched, dso_err = launch_now(1, dso_link, verbose) end
+        if not launched then return link_failure("library", provider, dso_err) end
+
+        local archive_err
+        local function build_archive()
+            archive_result, archive_err = driver.build_static_archive(
+                archive, nil, nil, request.target, verbose,
+                request.archive_inputs)
+            check_interrupt()
+        end
+        if overlap then build_archive() end
+
+        -- Same link policy as compile_archive_validation_image.
+        local image_link, image_err
+        local function prepare_image()
+            image_link, image_err = prepare_library_link(
+                image, {}, request.link, verbose, nil, { archive })
+            if not image_link then
+                image_err = link_failure(
+                    "archive validation image", provider, image_err)
+            end
+            return image_link
+        end
+        local function start_image(held)
+            local started, start_err = (held and launch or launch_now)(
+                2, image_link, false)
+            if not started then
+                image_err = link_failure(
+                    "archive validation image", provider, start_err)
+            end
+        end
+        -- Only a usable shared jobserver can grant the image link its own
+        -- slot while the DSO link still occupies the recipe's slot.
+        if overlap and slots.shared and archive_result and prepare_image() then
+            while not links[1].reaped do
+                local granted, grant_err = slots:acquire_nowait()
+                if granted == nil then
+                    -- Reported after the DSO link and validations it follows.
+                    image_err = link_failure(
+                        "archive validation image", provider, grant_err)
+                    break
+                end
+                if granted then
+                    start_image(true)
+                    break
+                end
+                local event, err = await(true)
+                if not event then return err end
+            end
+        end
+
+        local waited, wait_err = wait_for(1)
+        if not waited then return wait_err end
+        local linked, term, code = finish(1)
+        check_interrupt()
+        if not linked then return link_failure("library", provider, term, code) end
+        if not overlap then build_archive() end
+        if not archive_result then
+            return "failed to build static provider '" .. provider .. "': " ..
+                tostring(archive_err)
+        end
+
+        -- The image command is shown at a fixed point in the pipeline,
+        -- however early its slot was granted.
+        local function announce_image()
+            if not links[2] and not image_err and
+               (image_link or prepare_image()) then
+                start_image(false)
+            end
+            if links[2] and verbose then
+                return compile_batch.show_command(
+                    assert(command_argv(image_link.argv)))
+            end
+            return true
+        end
+        local shown, show_err = true, nil
+        if overlap then shown, show_err = announce_image() end
+        if not shown then return show_err end
+
+        local valid, validation_err = validate_image(
+            dso, "staged provider pair for '" .. provider .. "'")
+        check_interrupt()
+        if not valid then return validation_err end
+        if not overlap then shown, show_err = announce_image() end
+        if not shown then return show_err end
+        if image_err then return image_err end
+
+        waited, wait_err = wait_for(2)
+        if not waited then return wait_err end
+        linked, term, code = finish(2)
+        check_interrupt()
+        if not linked then
+            return link_failure("archive validation image", provider, term, code)
+        end
+        valid, validation_err = validate_image(
+            image, "archive-backed provider for '" .. provider .. "'")
+        remove_path(image)
+        remove_path(image .. ".dSYM")
+        check_interrupt()
+        if not valid then return validation_err end
+    end
+
+    local completed, failure = pcall(run)
+    if not completed then
+        failure = failure ~= interrupted and tostring(failure) or nil
+    end
+    -- Only failure paths still own running or unreplayed links.
+    for index = 1, 2 do
+        local link = links[index]
+        if link and not link.finished then
+            if not link.reaped then reap(index) end
+            os.remove(link.process.stdout_path)
+            os.remove(link.process.stderr_path)
+        end
+    end
+    if notification then
+        local closed, close_err = compile_batch.close_notification(notification)
+        if not closed then failure = failure or close_err end
+    end
+    local closed, close_err = slots:close()
+    if not closed then failure = failure or close_err end
+    -- Closing records a signal that arrived after run's last check.
+    local signal = slots:cancelled()
+    if signal or failure then
+        remove_path(directory)
+        if signal then
+            -- The caller releases its own resources, then calls
+            -- jobs.propagate(signal) under the restored signal action.
+            return nil, "provider link interrupted by signal " ..
+                tostring(signal), signal
+        end
+        return nil, failure
+    end
+    return {
+        dso = dso,
+        archive = archive,
+        directory = directory,
+        entries = archive_result.entries,
+    }
+end
+
+end -- provider link helpers
 
 function driver.compile_library(modname, libnames, link, verbose, extra_objects,
                                 static_archives)

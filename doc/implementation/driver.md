@@ -1242,12 +1242,12 @@ link while preserving feature macros for the generated entrypoint.
 
 ## Linking a provider pair
 
-Library mode uses `driver.compile_library_output` for the staged DSO and the
-archive helpers described in [Static compiled
-modules](static-compiled-modules.md#native-composition) for the matching
-self-describing `.a`. Both artifacts contain the same logical source/archive
-membership; the archive additionally preserves metadata-free native `-X`
-payload byte-for-byte.
+Library mode links the staged DSO with the same argv as
+`driver.compile_library_output` and builds the matching self-describing `.a`
+with the archive helpers described in [Static compiled
+modules](static-compiled-modules.md#native-composition). Both artifacts contain
+the same logical source/archive membership; the archive additionally preserves
+metadata-free native `-X` payload byte-for-byte.
 
 ### `driver.compile_library_output`
 
@@ -1278,9 +1278,19 @@ exact-output wrapper for programmatic and test-only callers. The paired
 archive builder flattens the same source, selected-provider, and ordered
 payload members without copying those common final libraries.
 
-`titanc` derives the public provider from the requested roots, links the DSO
-under the public basename in a sibling staging directory, builds the staged
-regular archive, and performs embedded/DSO/archive-backed protocol validation.
+On Linux and macOS, `titanc` derives the public provider from the requested
+roots and calls `driver.link_provider_pair`. That function links the DSO under
+the public basename in a sibling staging directory, builds the staged regular
+archive, and performs embedded/DSO/archive-backed protocol validation. Its step
+order, job-slot use, and failure cleanup are described in [Provider link
+pipeline](static-compiled-modules.md#provider-link-pipeline). A block-local
+preparation step builds the link argv. It also records the post-link
+obligations: removing the Windows `.def` file and running Darwin `dsymutil`.
+`compile_library_output` runs that argv synchronously. The pipeline runs it as
+a background native job and completes the same obligations after reaping.
+`driver.link_failure_message` formats every link-failure diagnostic that
+`titanc` and the pipeline report.
+
 `driver.shared_library_flags` supplies `-shared`, plus `-undefined
 dynamic_lookup` on Darwin and `-Wl,--exclude-all-symbols` on Windows. Windows
 links also pass `-Xlinker --no-insert-timestamp` and a generated `.def` export
