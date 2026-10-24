@@ -451,6 +451,7 @@ describe("parallel generated-C compilation", function()
     it("handles serial cache hits and preparation failures", function()
         local cached_request = checked_requests()[1]
         cached_request.mod.compiled = source_root .. "/cached.o"
+        cached_request.mod.compiled_objects = { cached_request.mod.compiled }
         cached_request.mod.native_references = { dependency = true }
         local cached = driver.compile_modules({ cached_request }, 1, false)
         assert.truthy(cached[1].ok, cached[1].err)
@@ -781,7 +782,7 @@ test "$3" = 0 || exit "$3"
             "share object output", 1, true), tostring(failure))
     end)
 
-    it("bounds a self-referential object-output symlink", function()
+    it("rejects a self-referential object-output symlink without replacing it", function()
         local available, message = filesystem.symlink_capability()
         if not available then
             pending(message)
@@ -792,8 +793,10 @@ test "$3" = 0 || exit "$3"
         assert(lfs.link("./loop.o", source_root .. "/loop.o", true))
 
         local results = driver.compile_modules({ request }, JOBS, false)
-        assert.truthy(results[1].ok, results[1].err)
-        assert.truthy(file_exists(source_root .. "/loop.o"))
+        assert.is_nil(results[1].ok)
+        assert.matches("regular nonlink file", results[1].err, 1, true)
+        assert.equal("link", lfs.symlinkattributes(source_root .. "/loop.o", "mode"))
+        assert.equal("./loop.o", lfs.symlinkattributes(source_root .. "/loop.o", "target"))
     end)
 
     it("reports completion channel creation failures without launching", function()

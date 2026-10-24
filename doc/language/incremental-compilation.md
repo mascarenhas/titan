@@ -29,8 +29,9 @@ Pass `-o out` consistently in the object and final-link invocations to keep
 objects and generated headers in the [output tree](output-directory.md).
 Incremental lookup and missing-header restoration use that same tree. Without
 `--output`, they stay beside each flat source or folder main,
-including when `--tree` points elsewhere. A folder module has one object for
-the entire module, not one object per contributor.
+including when `--tree` points elsewhere. A folder module's objects belong to
+the entire module, never to one contributor: one object, or one object per
+part when the module is [split](build-profiles.md#split-modules).
 
 Use `--source-first` in every phase when source dependencies should take
 precedence over installed `.so` or `.a` providers. This option still allows
@@ -45,15 +46,23 @@ cannot be combined with `--print-ast`, which requires freshly checked ASTs.
 
 ## What object reuse promises
 
-After normal source resolution, `--incremental` looks for the companion object
-and requires it to be no older than every currently discovered source
-constituent. Equal timestamps count as current. The object supplies the
-module's declarations, source-private view, import and native-link facts, and
-generated header information. Reusing it skips parsing, checking, C generation,
-and C compilation for that module. `-v` reports reuse and fallback reasons.
+After normal source resolution, `--incremental` looks for the module's companion
+object (`<stem>.o`) and requires it to be no older than every currently
+discovered source constituent. Equal timestamps count as current. The object
+supplies the module's declarations, source-private view, import and native-link
+facts, and generated header information. For a split module it also lists the
+other part objects (`<stem>.part1.o`, `<stem>.part2.o`, and so on). Each listed
+part must be a regular file that is no older than the sources and that was
+compiled for the same target. The `.parts` inventory beside the object is not
+consulted. Reuse covers all of a module's objects or none: a missing, stale, or
+mismatched part makes Titan compile the whole module from source. Reusing a
+module skips parsing, checking, C generation, and C compilation for it. `-v`
+reports reuse and fallback reasons.
 
 Missing or older objects, absent source metadata, failed metadata loading or
 execution, and incompatible Titan ABI metadata fall back to source compilation.
+So does an object compiled with a different `--c-parts` or `TITAN_C_PARTS`
+value, even when its module was not split.
 Metadata emitted by the compiler is trusted. Explicit roots and direct `.titan`
 imports still require actual source files; an orphan object, archive, or DSO
 does not substitute for source-private access.
@@ -81,9 +90,9 @@ unless the build graph already invalidates the affected objects.
 
 Missing generated headers needed by a newly compiled importer can be restored
 from a current producer object without rechecking its source. Existing complete
-companions are left untouched. Source-foreign headers include eligible inline
-function bodies, so consumer rebuild rules must include these headers or the
-producer object.
+companions are left untouched. Source-foreign headers include the direct-call
+helpers of local foreign functions, some with copied bodies, so consumer
+rebuild rules must include these headers or the producer object.
 
 ## Optimization and toolchain settings
 

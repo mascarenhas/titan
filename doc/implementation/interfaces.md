@@ -204,7 +204,7 @@ discarded tail values are never inspected by a gradual guard; `LUA_MULTRET`
 forwards an open demand unchanged.
 
 `coder._interface_pair` (`coder/interfaces.lua`) records one pair obligation
-per concrete/Interface pair that a translation unit actually constructs, keyed
+per concrete/Interface pair that a generated module actually constructs, keyed
 by `concrete .. "\0" .. interface`. `coder.generate` (`coder/generate.lua`)
 drains `interface_pair_list` as a growing worklist, preparing each pair's
 wrapper with `coder._prepare_interface_pair_wrapper`; a field snapshot may add
@@ -513,7 +513,7 @@ each recovered Interface method in addition to ordinary module and nominal
 symbols. They follow the native hierarchy
 `<module>_\u2133_<owner>_\u2131_<member><role>` used by record and union
 callables. Pair arrays, adapters, allocators, witnesses, and the per-state
-witness entry are private to the translation unit that needs the conversion
+witness entry are private to the generated module that needs the conversion
 and add no serialized metadata or public symbols. Because concrete and
 Interface owners recover canonical metatables per state, a witness registered
 by one DSO or archive can be discovered by an unrelated consumer that does not

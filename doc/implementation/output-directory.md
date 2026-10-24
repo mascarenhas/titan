@@ -18,7 +18,10 @@ The selected flat or folder source keeps its original filenames and constituent
 list. Those identities drive diagnostics, `#line`, source timestamps, quoted
 authored-header resolution, coverage source lines, and source-private import
 permissions. Only native output and program output paths move. Folder
-contributors still form one translation unit owned by the canonical main.
+contributors still form one generated module owned by the canonical main. Its
+part files (`<stem>.part<k>.c`/`.o`), `<stem>.priv.h`, and `<stem>.parts` derive
+from the same mapped stem
+([split parts](codegen-overview.md#translation-unit-parts)).
 
 The resolver's `output_root` option maps the canonical main's
 source-root-relative path to `native_output` and `program_output`

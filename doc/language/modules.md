@@ -497,6 +497,12 @@ installation layout from the compiler launcher filename.
   job slots; see [Compiler jobs and GNU Make](build-profiles.md#compiler-jobs-and-gnu-make).
   Parsing, checking, C generation, and generated-header work remain ordered in
   the compiler process.
+* `--c-parts <n>` sets the maximum number of C translation units into which a
+  module with at least 2 MiB of generated C definitions is split, so its parts
+  can compile in parallel. It defaults to the positive integer in
+  `TITAN_C_PARTS`, or to 4 on Linux and 1 elsewhere; `1` disables splitting.
+  It is independent of `--jobs`. See [Native build
+  profiles](build-profiles.md#split-modules).
 * `--static` prefers self-describing Titan `.a` providers over `.so`
   providers for ordinary dependencies. It still permits DSO/source fallback
   and does not request a fully static system executable. Windows rejects this

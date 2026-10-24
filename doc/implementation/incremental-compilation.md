@@ -57,10 +57,42 @@ is available. Compile-only mode skips main selection and common provider-name
 derivation, emits the selected source closure's objects/headers, closes the
 resolver, and returns before target/provider validation and final linking.
 Normal incremental linking uses the same publication and target checks as a
-cold build. Reused objects are never rewritten. A fresh object is compiled to a
-sibling temporary and renamed into place only on success
-(`publish_compiled_object`), so a failed compilation never leaves an object a
-later invocation could mistake for a hit.
+cold build. Reused objects are never rewritten. A freshly compiled module is
+published as a group, with the primary `<stem>.o` renamed into place last as
+its commit marker; see
+[Compiling one module](driver.md#compiling-one-module-drivercompile).
+
+### Split modules
+
+A [split module](codegen-overview.md#translation-unit-parts) is reused as a
+whole or not at all. The authoritative inventory is the `parts` list in the
+primary object's `.titan.source` record, never the `<stem>.parts` companion,
+which exists only for Make. `load_source_object` applies these checks in order
+and misses on the first failure:
+
+1. `<stem>.o` is a regular file no older than every source constituent, and
+   its record loads.
+2. `objectmetadata.validate_parts` accepts the record: `parts_version` is 1,
+   `parts` is a dense list whose entry `i` has `index = i - 1` and exactly the
+   `.c`/`.o` or `.part<k>.c`/`.part<k>.o` suffixes, a split record names the
+   `.priv.h` suffix and an unsplit one names none, and any recorded `c_parts`
+   and `split_threshold` are well-formed integers. Objects written before part
+   records existed therefore always miss.
+3. The recorded `c_parts` and `split_threshold` equal the current effective
+   values (`driver.effective_c_parts` and the generator threshold); otherwise
+   the miss reason is `split generation policy changed`. The record stores the
+   requested part count, not the actual one, so changing `--c-parts` or
+   `TITAN_C_PARTS` invalidates unsplit modules as well.
+4. For each recorded part after part 0: `<stem>.part<k>.o` is a regular file
+   no older than every source constituent; it scans as a native object for the
+   current ABI; it carries no Titan metadata or source record; and its target
+   fingerprint matches the primary object's.
+5. In coverage mode, the recorded coverage file list has one entry per part,
+   and every part's `.c` and `.gcno` are regular files.
+
+A hit returns the complete ordered object list, part 0 first. The loader does
+not look for part files beyond the record; a stale higher-numbered part left on
+disk is never linked.
 
 ## Trusted source record
 
@@ -68,9 +100,11 @@ Each generated relocatable module carries its public `.titan.meta` (ELF/COFF)
 or `__TEXT,__titanmeta` (Mach-O) section and callable ABI/type/layout protocol.
 A second `.titan.source` / `__TEXT,__titansrc` section holds a Lua
 reconstruction chunk (`titan-compiler/objectmetadata.lua` `encode`/`render`,
-symbol `titan_object_source_<mangled>`). `driver.compile` appends it to the
-generated C; with coverage enabled it is appended after line conversion so the
-record carries the coverage anchors. The same in-process section reader
+symbol `titan_object_source_<mangled>`). `driver.compile` appends it to part
+0's generated C; with coverage enabled it is appended after line conversion so
+the record carries the coverage anchors. Both sections exist only in the
+primary object; split part objects carry neither. The same in-process section
+reader
 locates these bytes. Emission uses the same byte alignment, `used` retention,
 relocation-free representation, and Clang address-sanitizer exclusion as the
 public metadata.
@@ -133,8 +167,8 @@ flags or successful runtime results.
 ## Headers without an AST
 
 An object stores both the `.ffi.h` declaration environment and, when present,
-the generated `.titan.h` interface including eligible inline source-foreign
-bodies. Types alone cannot reproduce those inline implementations. Header
+the generated `.titan.h` interface including the local direct-call helpers
+and their copied foreign bodies. Types alone cannot reproduce those inline implementations. Header
 planning accepts these records alongside freshly checked ASTs.
 
 Compiler-owned include references identify logical module dependencies and are
@@ -142,24 +176,25 @@ rendered through the current output mapping. For example, the checking-tree
 name `titan/http.ffi.h` differs from the folder module's native companion
 `titan/http/http.ffi.h`. Replaying a logical header verbatim at the latter path
 would change relative include resolution. Header materialization must preserve
-inline bodies while resolving those owned references correctly; temporary
+helper bodies while resolving those owned references correctly; temporary
 resolver paths are not persistent metadata.
 
 Complete existing companions are not rewritten on a hit. Missing required
 headers can be restored from the record without parsing/checking its producer.
 Their semantic invalidation remains Make's responsibility, including changed
-foreign inline bodies and C header inputs.
+foreign helper bodies and C header inputs.
 
 ## Build and validation ownership
 
-Titan checks only source existence, source/object timestamp eligibility, and
-metadata load/ABI compatibility for reuse. Make owns imported objects/headers,
-folder membership, compiler/toolchain/SDK settings, flags, provider choice, and
-other dependencies. No dependency hashes or configuration inventory are used
-to certify a hit.
+Titan checks only source existence, source/object timestamp eligibility,
+metadata load/ABI compatibility, the split-part checks above, and the recorded
+split policy for reuse. Make owns imported objects/headers, folder membership,
+compiler/toolchain/SDK settings, other flags, provider choice, and other
+dependencies. No dependency hashes or configuration inventory are used to
+certify a hit.
 
-The standard-library object graph keeps one object per logical module and the
-explicit folder inventories, then publishes the provider pair from the
+The standard-library object graph keeps one object target per logical module
+and the explicit folder inventories, then publishes the provider pair from the
 persistent objects in the selected output tree (`TITAN_OUTPUT_DIR`, default
 `out/`); see [Build and installation responsibilities](build-script-audit.md)
 and [output-directory routing](output-directory.md). The native stdlib test

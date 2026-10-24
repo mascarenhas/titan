@@ -804,7 +804,7 @@ function coder._foreign_raw_call(ctx, node)
     local callee
     if node._direct_foreign_reference then
         signature = node.exp._type
-        callee = coder._foreign_reference_name(node._direct_foreign_reference, ctx)
+        callee = coder._foreign_reference_name(node._direct_foreign_reference, ctx, true)
     elseif node._c_pointer_call then
         signature = node._c_pointer_call
         callee_stats, callee = coder._foreign_freeze(
@@ -1095,7 +1095,7 @@ function coder._foreign_raw_stat(ctx, node)
     return coverage_region(node, code, ctx)
 end
 
-function coder._foreign_function_signature(node)
+function coder._foreign_function_signature(node, name)
     local params = {}
     local fixed_index = 1
     for _, param in ipairs(node.params) do
@@ -1111,20 +1111,38 @@ function coder._foreign_function_signature(node)
     local ret = types.resolve_c_typedef(node._type.ret)
     local rettype = ret._tag == "Type.CVoid" and nil or node._type.ret
     return cfunctiondecl(rettype,
-        coder._foreign_func_name(node._foreign_module, node.name),
+        name or coder._foreign_func_name(node._foreign_module, node.name),
         #params == 0 and "void" or table.concat(params, ", "), false)
 end
 
-function coder._code_foreign_function(tlcontext, node, inline)
+function coder._code_foreign_function(tlcontext, node, inline, name)
     local ctx = coder._new_foreign_context(tlcontext)
     -- Header generation also runs outside generate's policy reset. Ordinary
     -- inline interfaces must never inherit a previous coverage invocation.
     ctx._coverage_generated = not node._coverage_foreign_outline
-    local signature = coder._foreign_function_signature(node)
+    local signature = coder._foreign_function_signature(node, name)
     local body = coder._foreign_raw_block(ctx, node.block, false)
     local storage = inline and "static inline"
         or node.islocal and "TITAN_SOURCE_LOCAL" or ""
     return storage .. " " .. signature .. " {\n" .. body .. "\n}"
+end
+
+-- Address-producing uses always name the one canonical hidden definition.
+-- Only direct calls name this TU-local helper, so copied bodies never create
+-- distinct observable callback addresses (including in source importers).
+function coder._code_foreign_inline(tlcontext, node)
+    local name = coder._foreign_inline_name(node._foreign_module, node.name)
+    if coder._foreign_function_is_inline(node) then
+        return coder._code_foreign_function(tlcontext, node, true, name)
+    end
+    local signature = coder._foreign_function_signature(node, name)
+    local args = {}
+    for _, param in ipairs(node.params) do args[#args + 1] = param._foreign_cname end
+    local prefix = types.resolve_c_typedef(node._type.ret)._tag == "Type.CVoid"
+        and "" or "return "
+    return "static inline " .. signature .. " {\n    " .. prefix
+        .. coder._foreign_func_name(node._foreign_module, node.name)
+        .. "(" .. table.concat(args, ", ") .. ");\n}"
 end
 
 -- Titan calling convention:

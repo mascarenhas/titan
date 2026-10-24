@@ -826,8 +826,9 @@ installed erased registry and rejects:
   `_nominal_typeargs` list that lowering failed to consume.
 
 Apart from this assertion and metadata selection, coder is generic-unaware. It
-enumerates public/private slots from erased `ast._type`, generates one
-translation unit per logical module, chooses native types from ordinary
+enumerates public/private slots from erased `ast._type`, generates one module's
+C (one translation unit or several size-partitioned parts) per logical module,
+chooses native types from ordinary
 `Type.*` tags, and emits the ordinary function/closure/record/union/Interface,
 vararg, flex, Array-writer, Lua-entry, and GC templates.
 

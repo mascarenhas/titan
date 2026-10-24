@@ -7,9 +7,9 @@ Titan libraries have two native forms:
   executable.
 
 Both forms describe the same logical Titan modules and export the same native
-module protocols. A static provider is self-describing: each Titan-generated
-object in the archive carries the logical module's ABI and serialized public
-type interface. No metadata sidecar is needed.
+module protocols. A static provider is self-describing: each Titan module's
+primary generated object in the archive carries the logical module's ABI and
+serialized public type interface. No metadata sidecar is needed.
 
 This is an artifact and dependency-resolution feature. It adds no new Titan
 syntax and does not change the meaning of `import`.
@@ -40,9 +40,18 @@ Lua-loader rules.
 
 Each logical module remains independent inside the two physical providers. It
 keeps its own module state, initializer, ABI entry, type entry, Lua entry, and
-nominal record/union/Interface identities. A folder module still produces one
-logical object and therefore one metadata entry; contributor filenames are not
-modules.
+nominal record/union/Interface identities. A folder module still has one
+metadata entry; contributor filenames are not modules.
+
+A module large enough to be
+[split](build-profiles.md#split-modules) contributes
+several objects to each provider: its primary object (`shape.o`), which alone
+carries the metadata, and numbered part objects (`shape.part1.o`, ...) without
+metadata. Every part becomes a member of the `.a`, directly after its primary
+object. A program that links the archive pulls in the primary member through
+the module's entry points. The module's objects refer to one another's
+private code, and those references pull in the part members, so no extra link
+flags are needed.
 
 Before either file changes, `titanc` links a private archive-backed copy of the
 provider and validates both images. Both links count against the native job
@@ -118,7 +127,8 @@ dependencies.
 
 ## What a static provider contains
 
-Every generated Titan module object contains one canonical metadata section:
+Every generated Titan module's primary object contains one canonical metadata
+section:
 
 ```text
 ELF:    .titan.meta

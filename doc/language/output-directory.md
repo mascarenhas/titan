@@ -36,7 +36,7 @@ titanc --tree /projects/demo/src -o out app.main
 This reads `/projects/demo/src/app/main.titan` and writes `out/app/main.c` and
 `out/app/main.o`. It does not write into `/projects/demo/src` or reproduce the
 absolute `/projects/demo/src` prefix. A folder module's canonical main owns
-its single translation unit, just as in a build without `--output`.
+its generated C and objects, just as in a build without `--output`.
 
 For Linux and macOS, these examples show the paths relative to `out/`:
 
@@ -49,6 +49,16 @@ The library columns apply when no requested root defines the program's exact
 `main` signature. Multiple library roots still share the provider named from
 their longest common dotted prefix: `titanc -o out app.left app.right` emits
 `out/app.so`, `out/app.a`, and the logical loaders under `out/app/`.
+
+Each compiled module also writes a small `.parts` inventory beside its object,
+such as `out/app/main.parts`. A large module may be split into several C
+translation units ([split modules](build-profiles.md#split-modules)).
+Its first unit keeps the `app/main.c` and `app/main.o` names shown above. The
+others are numbered from 1, as `app/main.part1.c` and `app/main.part1.o`, and
+every unit of that module includes a shared generated `app/main.priv.h`. All
+of these files stay in the module's directory, and providers, archives, and
+programs link every object of the module. Modules that are not split have no
+`.part` files or `.priv.h`.
 
 The same destination contains generated `.ffi.h` and `.titan.h` companions,
 entrypoints, native test runners, platform debug information, and temporary
@@ -84,6 +94,9 @@ Object reuse and generated-header restoration use the selected output tree.
 Objects left beside sources do not satisfy reuse in another output directory.
 The build system still owns dependency and configuration invalidation; changing
 flags or tools does not automatically invalidate an otherwise current object.
+A changed `--c-parts` or `TITAN_C_PARTS` value is the exception: an object
+compiled under a different part count is not reused, even if its module was
+not split.
 See [Incremental and separate compilation](incremental-compilation.md).
 
 Coverage keeps its `.coverage` directories inside this tree. For example,

@@ -27,12 +27,12 @@ typed & elaborated ASTs        (decorated with _type/_decl… and checker-owned
    │                            companions are prepared before any object)
    │  coder.generate           (coder.lua facade + coder/* template slices)
    ▼
-one C translation unit per logical module
+one or more C translation units per logical module (plus `<stem>.priv.h` when split)
    │  clang-format             (opt-in --pretty-print; fixed explicit style)
    │  #line normalization      (ordinary mode; coverage uses final lexical
    │                            marker conversion instead)
-   │  driver.compile           (driver.lua — writes .c at the canonical output
-   │                            path, then invokes cc)
+   │  driver.compile           (driver.lua — writes part .c/.priv.h/.parts files
+   │                            and invokes cc per part)
    ▼
 object files ──► one common-prefix provider.so/provider.a + generated Lua shims
              └─► driver.compile_program → executable (when a main() exists)
@@ -81,7 +81,7 @@ Two facts shape everything downstream of the checker:
 | [Record constructors](record-constructors.md) | Read before changing record construction; covers call desugaring and `new` overrides, raw construction authority, semantic metadata across providers, Lua namespace calls, and standard-library use. |
 | [Type aliases](type-aliases.md) | Read before changing type aliases; covers lazy resolution in the type namespace, foreign aliases, serialized `type_members`, and nominal member lookup across providers. |
 | [Union implementation](unions.md) | Read before changing unions; covers parser lowering, descriptors, visibility, payload eligibility, `case` checking and non-fallthrough, run-time layout, generated dispatch, Lua exposure, and serialized schemas. |
-| [Code generator: overview](codegen-overview.md) | Read before changing generated-C structure; covers templates, names, entry roles and the native calling convention, closures, the module protocol and ABI, pinned-Lua upgrades, dependency wiring, and user-value slots. |
+| [Code generator: overview](codegen-overview.md) | Read before changing generated-C structure; covers templates, names, translation-unit parts and module-private storage, entry roles and the native calling convention, closures, the module protocol and ABI, pinned-Lua upgrades, dependency wiring, and user-value slots. |
 | [Values and the GC](values-and-gc.md) | Read before touching GC-visible generated code; covers `TValue` and stack background, the C type of each Titan value, record/union/Interface/module userdata, the GC invariants, and call-result rooting. |
 | [Native nominal storage](nominal-storage.md) | Read before changing record/union layout; covers traced and native regions, fixed objects and borrowed projections, fresh constructor storage, exact native options, ABI, and native-owner callback access. |
 | [Dense Arrays](dense-arrays.md) | Read before changing Array representation or lowering; covers the backing/proxy pair, `lenhint` length, writers, reads and writes, const copy/freeze, and barriers. |
@@ -128,7 +128,7 @@ Two facts shape everything downstream of the checker:
 | [Output-directory routing](output-directory.md) | Read before changing `-o`/`--output`; covers source-relative artifact locations, `native_output`/`program_output` mapping, headers and temporary files, coverage paths, and validation. |
 | [Experimental Windows build](windows-build.md) | Read before changing Windows support; covers the controlled Lua DLL and SDKs, native build parallelism, UTF-8 relocation and loading, the loader boundary, launchers, DLL publication, NTFS tests, coverage, and experimental limits. |
 | [Build and installation responsibilities](build-script-audit.md) | Read before changing Make or LuaRocks; covers Lua and native dependency preparation, the stdlib object graph, install and publish targets, the private bootstrap, the LuaRocks install pass, and checks. |
-| [Object-backed source modules](incremental-compilation.md) | Read before changing `--incremental` or `-c`; covers `load_source_object` reuse, the trusted `.titan.source` record, LTO objects, headers without an AST, and Make-owned invalidation. |
+| [Object-backed source modules](incremental-compilation.md) | Read before changing `--incremental` or `-c`; covers `load_source_object` reuse and split-part checks, the trusted `.titan.source` record, LTO objects, headers without an AST, and Make-owned invalidation. |
 | [Folder modules](folder-modules.md) | Read before changing folder modules; covers resolver order and blocked contributors, single-AST assembly, one checker and code-generation pass, output and program paths, and stdlib ensembles. |
 | [Multi-module libraries](multi-module-libraries.md) | Read before changing provider bundles; covers provider prefix selection, candidate search and claims, canonical runtime imports, shims and validated publication, and the canonical stdlib root list and image. |
 | [Static compiled modules](static-compiled-modules.md) | Read before changing archive providers; covers the metadata section and payload, bounded container readers, target selection, import paths, native composition, three-way validation, the job-budgeted provider link pipeline, and publication. |
@@ -171,7 +171,7 @@ Each row links the chapter section that documents the limitation.
 | [LPegLabel embedding](lpeglabel-embedding.md#construction-accounting-and-string-labels) | `behind` checks only the projected tree size; the engine alone enforces the capture-free, fixed-length, 255-byte look-behind rule. |
 | [Driver and toolchain](driver.md#module-names-and-the-search-paths) | Header-cache reuse misses same-file edits that keep the observed mtime; LuaFileSystem exposes no useful Windows file identities; `dlerror` reports only the last load attempt; compiler and flag strings use a small shell-word parser. |
 | [Driver and toolchain](driver.md#gnu-make-jobserver-participation) | A `titanc` recipe without `+` under a pipe jobserver, or any recipe under macOS's stock GNU Make 3.81, compiles with one job; Windows ignores parent jobservers; a SIGKILLed `titanc` cannot return the tokens it borrowed. |
-| [Object-backed source modules](incremental-compilation.md#build-and-validation-ownership) | Reuse checks only source mtimes and metadata/ABI compatibility; Make owns invalidation after compiler, flag, or imported-object changes. |
+| [Object-backed source modules](incremental-compilation.md#build-and-validation-ownership) | Reuse checks only source mtimes, metadata/ABI compatibility, split-part integrity, and the recorded split policy; Make owns invalidation after compiler, flag, or imported-object changes. |
 | [Multi-module libraries](multi-module-libraries.md#validated-publication-and-generated-shims) | Generated Lua shims select providers through Lua's `package.cpath`, not the Titan search path. |
 | [Static compiled modules](static-compiled-modules.md#publication-and-installation) | Publication is recoverable within the process, not crash- or power-loss-atomic. |
 | [Binary compatibility](binary-compatibility.md#generated-exports-and-runtime-verification) | Verification is a protocol between generated providers, not a sandbox for untrusted DSOs. |

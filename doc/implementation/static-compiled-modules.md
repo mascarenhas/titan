@@ -23,7 +23,8 @@ rejects a raw metadata member, and Darwin's `libtool -static` and universal
 tooling require valid native objects.
 
 Titan instead emits one metadata section in each already-generated logical
-module object:
+module's primary object (part 0 of a
+[split module](codegen-overview.md#translation-unit-parts)):
 
 ```c
 #if defined(__APPLE__)
@@ -55,8 +56,10 @@ with the object that defines the module's `_abi`, `_types`, `_layouts`, `_init`,
 metadata member to regenerate and no archive leaf name used as logical
 identity.
 
-The standalone entrypoint, runtime objects, `ltitanlib.o`, and ordinary native
-payload do not carry logical metadata.
+The standalone entrypoint, runtime objects, `ltitanlib.o`, ordinary native
+payload, and the part objects of split modules do not carry logical metadata.
+A part object is a metadata-free member like other native payload; it adds no
+logical key, and only the primary object identifies the module.
 
 ## Canonical payload
 
@@ -298,7 +301,8 @@ archives without groups (`driver.force_load_arguments`: GNU
 `--whole-archive`, Darwin `-force_load`). The paired static archive
 (`driver.build_static_archive`) flattens the identical logical/native payload:
 
-1. source objects in bytewise logical-name order;
+1. source modules in bytewise logical-name order, each as its primary object
+   immediately followed by its part objects in part order;
 2. selected providers in bytewise absolute-path order, preserving member
    order;
 3. every `-X` input in CLI order, inserting one object directly or each
@@ -360,8 +364,14 @@ program](driver.md#linking-a-standalone-program-drivercompile_program).
 
 For Interfaces, the use-site set includes the owner-exported native,
 coercive-Lua, and strict bound-method symbols. Concrete/Interface pair arrays
-and adjustment entries remain private to the source object that needs the
+and adjustment entries remain private to the generated module that needs the
 conversion and add no archive protocol entry.
+
+Ordinary archive extraction also completes a split module. The protocol entry
+points pull in its primary member, and the parts' module-private definitions
+are hidden but still global symbols in the archive index, so the primary's
+references to them, and the parts' references to each other, pull in the part
+members. No whole-archive option or extra input is needed.
 
 ## Provider link pipeline
 

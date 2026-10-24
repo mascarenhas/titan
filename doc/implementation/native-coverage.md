@@ -83,10 +83,24 @@ link combines partials (`coverage.inventory`) and serializes the complete Lua
 table into the test executable. This uses compiler-known outputs and does not
 hash or attest the build.
 
+A [split module](codegen-overview.md#translation-unit-parts) is converted part
+by part: `driver.compile` runs `coverage_lines.convert` independently on each
+part's C file and passes the list to `coverage.partial`, so `files` holds every
+part's absolute C path in part order and `anchors` is keyed by each of those
+paths. The `.titan.source` record is appended to part 0 after conversion. The
+shared `<stem>.priv.h` is retained for diagnostics but is not converted and
+owns no source lines. Because every part is inventoried, the runtime reset
+removes each part's `.gcda` and `coverage.finish` reads each part's notes.
+Incremental reuse in coverage mode additionally requires one recorded file per
+part and a regular `.c` and `.gcno` for every part
+([split reuse checks](incremental-compilation.md#split-modules)).
+
 `coverage.compile_flags` gives every source object `-O0 -fno-lto`. Selected
 objects add `--coverage -fprofile-update=atomic`. The GCC backend adds
 `-fkeep-static-functions` and `-dumpbase`/`-dumpbase-ext` so the compiler's
-temporary object name cannot rename the notes; the LLVM backend adds `-dumpdir`
+temporary object name cannot rename the notes; for a nonzero part the driver
+replaces the `-dumpbase` value with that part's C basename, so its notes are
+`<leaf>.part<k>.gcno`. The LLVM backend adds `-dumpdir`
 and marks selected source-owned native lambdas `__attribute__((used))`
 (`coder._coverage_keep_native_lambdas`) without emitting every unrelated inline
 header body. Native dependencies remain unmeasured. Final image links receive

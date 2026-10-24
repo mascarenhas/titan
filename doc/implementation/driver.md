@@ -1053,11 +1053,16 @@ synchronous default.
 ## Compiling one module: `driver.compile`
 
 `driver.compile(modname, ast, sourcef, static_deps, verbose, options,
-source_entry)` turns one checked logical-module AST into an object file. For a
-folder module, `sourcef` is its canonical main and `ast` is the combined dense
-list; there is still one call. `options` carries `nominal_layouts`,
-`pretty_print`, `coverage`, `coverage_backend`, and per-request
-`extra_compile_flags`; `source_entry` receives coverage metadata.
+source_entry)` turns one checked logical-module AST into its ordered object
+files: `<stem>.o` and, for a [split module](codegen-overview.md#translation-unit-parts),
+`<stem>.part1.o` and so on. For a folder module, `sourcef` is its canonical main
+and `ast` is the combined dense list; there is still one call. `options`
+carries `nominal_layouts`, `pretty_print`, `coverage`, `coverage_backend`,
+per-request `extra_compile_flags`, an optional `c_parts` override, the
+test-only `split_threshold`, and `native_inputs` for alias preflight.
+`source_entry` receives coverage metadata, `private_symbols`, and the ordered
+`compiled_objects`. On success the call returns `true, nil, primary_object,
+native_references, objects`.
 
 1. **Select the runtime SDK.** Installed mode is read-only: it uses headers
    from `<root>/include` and the already-built
@@ -1089,34 +1094,83 @@ list; there is still one call. `options` carries `nominal_layouts`,
    programmatic callers still work. Folder headers
    live beside the canonical main, with no contributor-specific outputs. See
    [Foreign-function implementation](foreign-functions.md#generated-titanh-planning).
-3. `coder.generate(modname, ast, static_deps, abi, emit_line_directives,
-   options)` produces one raw C translation unit as a string plus its
-   direct-native-reference set, native bindings, and encoded nominal layouts.
-   The qualified `modname` controls the native prefix, registry identity,
-   `_init`, `_abi`, `_types`, and `luaopen_*` symbols consistently.
-4. The raw translation unit is written **next to the flat source or folder
-   main** as `sourcef:gsub("[.]titan$", "") .. ".c"` (if `sourcef` is not
-   given it defaults to the dots-to-slashes path), or, with `titanc --output`,
-   at the matching path below the output root (`driver.relocate_source_output`;
-   see [Output directory](output-directory.md)). It is then normalized in
-   place. `--pretty-print` additionally formats it before compilation.
-   Formatting failure aborts before its object is compiled but retains the raw
-   or partially formatted `.c` as a diagnostic artifact. Contributors never
-   receive generated C or object files.
-5. The object is compiled with the parsed `driver.CC`, then
+3. **Generate.** `coder.generate(modname, ast, static_deps, abi,
+   emit_line_directives, options)` returns the
+   [generated-module table](codegen-overview.md#translation-unit-parts):
+   dense `parts` (part `i` has `index = i - 1`), an optional `private_header`,
+   `private_symbols`, `direct_native_modules`, `native_bindings`, and
+   `encoded_layouts`. The driver passes the effective part cap
+   (`driver.effective_c_parts`: `options.c_parts`, then `driver.C_PARTS`, then
+   `TITAN_C_PARTS`, then `driver.default_c_parts`, which is 4 on Linux and 1
+   elsewhere), the threshold (`coder.DEFAULT_SPLIT_THRESHOLD` unless
+   overridden), and the absolute `<stem>.priv.h` path for the parts'
+   `#include`. The qualified `modname` controls the native prefix, registry
+   identity, `_init`, `_abi`, `_types`, `luaopen_*`, and module-private `ℙ`
+   symbols consistently. The `.titan.source` record stores `parts_version = 1`,
+   the relative `parts` suffixes, the effective `c_parts`, `split_threshold`,
+   the `.priv.h` suffix when split, and `private_symbols`.
+4. **Plan outputs without writing** (`prepare_compile`). The stem is
+   `sourcef:gsub("[.]titan$", "")`, **next to the flat source or folder main**,
+   or the matching path below the output root with `titanc --output`
+   (`driver.relocate_source_output`; see
+   [Output directory](output-directory.md)). Part 0 is `<stem>.c`/`<stem>.o`,
+   part `k` is `<stem>.part<k>.c`/`.o`, a split module adds `<stem>.priv.h`, and
+   every module gets the `<stem>.parts` companion. Contributors never receive
+   generated C or object files. Planning checks ownership: an existing
+   `<stem>.parts` must be a regular file starting with `titan-parts-v1 `, and,
+   when the module splits, an existing `<stem>.priv.h` must be a regular file
+   starting with `coder.PRIVATE_HEADER_MARKER`; otherwise the compile refuses to
+   overwrite the user-owned path. An unrelated `<stem>.priv.h` is ignored when
+   the module does not split.
+
+   The prior inventory names the only stale files that may be deleted. It is
+   read from the existing primary object's validated `parts` record and from an
+   existing companion that `driver.parse_parts_companion` accepts exactly: for
+   each prior part `k >= 1`, `<stem>.part<k>.c`, `.o`, `.gcno`, and `.gcda`, plus
+   an existing marker-owned `<stem>.priv.h`. No directory is scanned, so a file
+   such as `<stem>.part99.c` that no record lists is never touched. The plan's
+   outputs are the companion and its stage, the header, every new part's C,
+   object, `.gcno`, `.gcda`, and compile temporary, every prior-inventory path,
+   and the module's generated headers and their staging files. Its inputs are
+   the source constituents, C header dependencies, and `native_inputs`.
+5. **Preflight.** Before any invalidation or write, `driver.compile`
+   validates the plan with `driver.validate_provider_output_paths`: an
+   existing output must be a regular non-link file, and no output may alias
+   another output or an input (normalized path, symlink-resolved path,
+   case-folded path, or the same existing file through a hard link) or nest
+   below one. It then records the module's public `external_symbols` and its
+   `private_symbols` with `driver.record_module_symbols`. The CLI does the same
+   for the whole link set first; see
+   [batch planning](#batch-planning-drivercompile_modules).
+6. **Materialize** (`plan.materialize`). This writes the module's generated
+   headers when `driver.compile` planned them, then invalidates: it removes
+   `<stem>.o` (the commit marker), `<stem>.parts`, `<stem>.c`, `<stem>.gcda`,
+   `<stem>.gcno`, and every prior-inventory path. It writes `<stem>.priv.h` for a
+   split module and each part's C file, unlinking the old file first and
+   appending the `.titan.source` record to part 0. Each file is normalized in
+   place and optionally formatted with `--pretty-print`. Formatting failure
+   aborts before its object is compiled but retains the raw or partially
+   formatted `.c` as a diagnostic artifact. Coverage mode converts each part's
+   markers and then appends the record to part 0
+   ([native coverage](native-coverage.md#selection-and-object-ownership)).
+7. **Compile.** Each part's C is compiled with the parsed `driver.CC`, then
    `TITAN_EXTRA_CPPFLAGS`, Titan's fixed `driver.CFLAGS`,
    `TITAN_EXTRA_CFLAGS`, the `-I` include roots, and per-request extra flags,
    in that order (`driver.generated_compile_prefix`). When the resulting
-   command enables LTO and names no seed, the driver appends
-   `-frandom-seed=<modname>` so archive bytes stay reproducible. The output
-   goes to a sibling temporary that is renamed into place only after success.
-   A direct `driver.compile` call runs this command immediately. With
-   `--jobs 1` the CLI preserves that same generate/format/compile sequence for
-   each logical module. With the default four jobs or any larger bound, it
-   prepares every source module through step 4 in logical-name order, then
-   `driver.compile_modules` runs only these independent object commands
-   concurrently, as described in [Parallel generated-C
-   compilation](#parallel-generated-c-compilation):
+   command enables LTO and names no seed, the driver appends a stable seed so
+   archive bytes stay reproducible: `-frandom-seed=<modname>` for an unsplit
+   module, and `-frandom-seed=<modname>.part<k>` for every part of a split
+   module, part 0 included. Each object goes to a sibling temporary that is
+   renamed into place only at publication. A direct `driver.compile` call runs
+   every part command in part order, even after one fails, so all diagnostics
+   appear. `titanc` instead plans and materializes every source module first
+   ([batch planning](#batch-planning-drivercompile_modules)); then
+   `driver.compile_modules` runs only these independent object commands, in
+   order with `--jobs 1` and concurrently with the default four jobs or any
+   larger bound, as described in [Parallel generated-C
+   compilation](#parallel-generated-c-compilation).
+
+   A representative part command:
 
    ```sh
    cc --std=c99 -O3 -Wall -Wno-unused-but-set-variable -Wno-unused-function \
@@ -1150,6 +1204,79 @@ list; there is still one call. `options` carries `nominal_layouts`,
    `-fno-optimize-sibling-calls` to retain their tail frames. Sanitizer CI
    explicitly disables LTO so saved object functions can be compared with
    the generated-C diagnostic shadow.
+8. **Publish** (`publish_compiled_object`). Only when every part compiled, the
+   driver renames the nonzero part objects into place from the highest index
+   down, writes the companion to a stage and renames it, and renames
+   `<stem>.o` last, so the primary object is the module's commit marker. Any
+   failure removes the staged companion, the companion, the primary object,
+   and every part temporary and part object. The companion
+   (`driver.render_parts_companion`) lists leaf names only, one per line, with
+   a trailing newline:
+
+   ```text
+   titan-parts-v1 4
+   bar.priv.h
+   bar.c
+   bar.o
+   bar.part1.c
+   bar.part1.o
+   bar.part2.c
+   bar.part2.o
+   bar.part3.c
+   bar.part3.o
+   ```
+
+   An unsplit module's companion is `titan-parts-v1 1`, `bar.c`, and `bar.o`.
+   It exists for build tools. The incremental loader never reads it; reuse
+   trusts only the `.titan.source` record
+   ([split reuse checks](incremental-compilation.md#split-modules)).
+
+### Batch planning: `driver.compile_modules`
+
+`driver.compile_module(modname, mod, static_deps, verbose, options)` remains the
+single-module wrapper around `driver.compile` for programmatic callers. It
+skips a module whose cache entry says `compiled` and records the produced
+object list. `titanc` instead passes its ordered, logical-module/output-
+deduplicated source set to `driver.plan_compile_requests` and then to
+`driver.compile_modules`; planning asserts that same ownership invariant. Object
+identity compares normalized absolute paths, physical spellings resolved from
+the longest existing ancestor, portable case-folded spellings, and existing
+device/inode pairs, so lexical, symlink, case, and hard-link aliases between
+requests' primary objects are rejected before preparation.
+
+`driver.plan_compile_requests(requests, verbose, native_inputs, symbol_owners,
+header_plans)` runs steps 3–5 for every source request without writing
+anything. A request whose module is already compiled contributes its recorded
+object list as inputs and its recorded symbols. All modules' public and
+private symbols are recorded into a copy of `symbol_owners`, the inventory the
+CLI has already filled from every carried or reused module, so two modules
+that would define the same C symbol fail with `cannot link C symbol ...` before
+any output changes. The generated and restored headers in `header_plans`, and
+their staging files, join the outputs, and the whole set is checked once with
+`driver.validate_provider_output_paths`. The returned plans carry the complete
+`outputs` and `inputs`. The CLI checks those exact outputs again together with
+its program outputs (`driver.validate_program_output_paths`, whose sixth
+`planned_outputs` argument replaces the per-module estimate) or with its
+provider and shim outputs. This applies to compile-only, library, and program
+invocations alike. Only then does it write headers and call
+`driver.compile_modules(requests, parallelism, verbose, plans)`, which plans
+the batch itself when no plans are given.
+
+`driver.compile_modules` materializes every source plan in request order
+before compiling anything; only the native object commands that follow ever
+overlap. With a bound of one it runs each module's part commands in request
+and part order. A larger bound flattens all prepared part jobs across all
+modules into one worklist that launches the largest part first, by its
+`code_bytes` cost estimate, with stable ties by module request index and then
+part index ([Parallel generated-C
+compilation](#parallel-generated-c-compilation)). Afterwards each module is
+published separately (`publish_compiled_object`), with the same cache
+mutation and per-module result order for every bound; a successful module's
+cache entry records its primary object (`compiled`), the ordered
+`compiled_objects`, its `private_symbols`, and native references. Every later
+consumer, including program, provider, archive, validation, and coverage
+links, receives each module's objects as part 0 followed by its other parts
+(`driver.module_compiled_objects`).
 
 The native-tool strings, and `CLANG_FORMAT` when `--pretty-print` actually
 selects it, are parsed into dense argument arrays with a small shell-word grammar
@@ -1164,26 +1291,12 @@ A malformed `CLANG_FORMAT` is therefore inert in the default mode. `-v` prints
 the same safely quoted compiler/linker commands—and any opted-in formatter
 command—that are executed.
 
-`driver.compile_module(modname, mod, static_deps, verbose, options)` remains the
-single-module wrapper for programmatic callers. It skips a module whose cache
-entry says `compiled` and records the produced object filename. `titanc` instead
-passes its ordered, logical-module/output-deduplicated source set to
-`driver.compile_modules`; the batch API asserts that same ownership invariant.
-Object identity compares normalized absolute paths, physical spellings resolved
-from the longest existing ancestor, portable case-folded spellings, and existing
-device/inode pairs. Lexical, symlink, case, and hard-link aliases are therefore
-rejected before preparation. The CLI's earlier program/provider preflight uses
-the same portable identity for generated C, objects, foreign headers, final
-artifacts, and native inputs, so it rejects those collisions before publishing
-a header. A one-job batch uses the single-module wrapper in order, while a
-larger batch preserves the same cache mutation and per-module result order and
-overlaps only the final C object commands.
-
 ### Parallel generated-C compilation
 
-Preparation (`prepare_compile` in `driver.lua`) returns one record per logical
-module. Its ordered `jobs` array holds the module's native compile commands,
-part 0 first. Each job records its owning `module_index` (the module's request
+Materialization (the `materialize` function of the plan that `prepare_compile`
+in `driver.lua` returns) yields one record per logical module. Its ordered
+`jobs` array holds the module's native compile commands, part 0 first. Each
+job records its owning `module_index` (the module's request
 index), `part_index`, C and object paths, sibling temporary object, argument
 array, and `cost_bytes`, the generated byte count used as a deterministic
 compile-cost estimate. `driver.run_prepared_compiles(prepared, parallelism,
@@ -1308,7 +1421,6 @@ publication cleanup, so SIGINT surfaces as Lua's `interrupted!` error and
 SIGTERM or SIGHUP terminates the process by its default action without the
 CLI's remaining cleanup. A SIGKILL cannot be intercepted, and the tokens a
 killed process held are not returned.
-
 ### Shared C preprocessor, compiler, and linker inputs
 
 At driver initialization, `CC` defaults to `cc` and the three
@@ -1539,7 +1651,8 @@ error alerts):
 
   The entrypoint registers no dependency itself. Generated module code takes
   over during initialization: after a module's `_init` completes successfully,
-  its generated `<prefix>register_preload` helper calls `titan_module_preload`,
+  its generated `<prefix>\u2119_register_preload` helper (`<prefix>ℙ_register_preload`
+  in linkage spelling) calls `titan_module_preload`,
   which stores the module's `luaopen_<mangled>` function under its logical
   name in `registry[LUA_PRELOAD_TABLE]`, the table exposed as
   `package.preload`. Requiring the main module recursively initializes its
@@ -2134,6 +2247,7 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `--pretty-print` | Format generated C and headers with `CLANG_FORMAT`. | |
 | `-v`, `--verbose` | Print native-tool and formatter commands. | |
 | `-j`, `--jobs <n>` | Local cap on concurrent generated-C compilations; overrides `TITAN_JOBS`, default 4. | Positive integer. |
+| `--c-parts <n>` | Maximum generated C translation units per module whose generated code reaches 2 MiB; overrides `TITAN_C_PARTS` (default 4 on Linux, otherwise 1); `1` disables splitting; independent of `--jobs`. See [Translation-unit parts](codegen-overview.md#translation-unit-parts). | Positive integer. |
 | `--launcher-name <name>` | Windows standalone/test launcher filename in `bin` (default: logical module name). | Windows only; requires a standalone or test main; not with `-c`. |
 | `--static` | Run the archive pass before the DSO pass. | Not on Windows. |
 | `--source-first` | Prefer source to compiled providers for every dependency. | |
@@ -2172,6 +2286,7 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `TITAN_NO_LINE_DIRECTIVES` | `driver.lua` | unset | Exact value `1` disables generated `#line` directives, like `--no-line-directives`. |
 | `TITAN_JOBS` | `titanc` | `4` | Local job cap when `--jobs` is absent. |
 | `MAKEFLAGS` | `jobs.lua` `open_slots` (Unix) | unset | A parent GNU Make's jobserver authorization and `-j1`; see [GNU Make jobserver participation](#gnu-make-jobserver-participation). |
+| `TITAN_C_PARTS` | `titanc`, `driver.lua` (`driver.effective_c_parts`) | `4` on Linux; `1` on Windows, macOS, and other platforms (`driver.default_c_parts`) | Maximum generated C translation units per module when `--c-parts` is absent; `1` disables splitting. A changed value makes reused objects miss. |
 | `TITAN_PATH_0_6`, `TITAN_PATH` | `driver.lua`, `titan.c` `pushpath`, `standalone_paths.lua` | unset | Compiled-module search path; the versioned name wins, and `;;` expands to the default. |
 | `TITAN_ROCKS_ROOT` | `driver.lua`, `titanc --print-root`, installed-compiler Make invocations | unset (empty means unset) | Internal `ROCKS_TREE` override for installation-root discovery; not a public deployment setting. |
 | `TITAN_PREFIX` | `driver.lua` | installation root | Root of the persistent C-probe cache `var/cache/titan-probes/2`. |

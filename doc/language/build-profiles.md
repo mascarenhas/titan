@@ -118,3 +118,18 @@ every recipe under macOS's stock GNU Make 3.81; mark each `titanc` recipe with
 inside Make on macOS.
 Windows applies only the `--jobs`/`TITAN_JOBS` bound. See [GNU Make jobserver
 participation](../implementation/driver.md#gnu-make-jobserver-participation).
+
+## Split modules
+
+A module whose generated C definitions reach 2 MiB can be split into
+several C translation units, which then compile as independent jobs under the
+same bound. `titanc --c-parts N` or `TITAN_C_PARTS=N` sets the maximum number
+of units per module; the command-line option wins, and the value must be a
+positive integer. `1` disables splitting. The default is 4 on Linux and 1 on
+macOS, Windows, and other platforms, so splitting is opt-in there. Smaller
+modules always stay in one unit. The part count is independent of `--jobs`:
+changing the job bound never changes generated files, while changing the part
+count changes them and makes previously compiled objects stale
+([incremental compilation](incremental-compilation.md#what-object-reuse-promises)).
+The extra generated files are listed in [Output
+directories](output-directory.md#source-hierarchy-and-final-outputs).

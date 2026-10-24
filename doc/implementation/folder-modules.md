@@ -158,7 +158,9 @@ therefore supplies the order but no new visibility mechanism.
 
 ## One code-generation pass
 
-`coder.generate` receives the same AST shape and emits one translation unit.
+`coder.generate` receives the same AST shape and emits one generated module:
+one translation unit, or several [parts](codegen-overview.md#translation-unit-parts)
+partitioned by size, never one unit per contributor.
 Whole-root-list allocation and emission passes use `ipairs`, making the
 declared composition order explicit. Internal maps and sets whose order is
 immaterial may use `pairs`.
@@ -174,8 +176,9 @@ from logical name `M`, never a contributor basename. Public declarations from
 contributors therefore occupy the same module member space and module
 `Udata` as declarations from the main source.
 
-Because statements from several files are interleaved in one C file, per-node
-`#line` directives name each contributor's own file; see [Mixed-source `#line`
+Because statements from several files are interleaved in the module's
+generated C, per-node `#line` directives name each contributor's own file; see
+[Mixed-source `#line`
 attribution](codegen-overview.md#mixed-source-line-attribution).
 
 ## C, library, and program paths

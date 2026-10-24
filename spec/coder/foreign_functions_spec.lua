@@ -335,7 +335,7 @@ describe("source-defined foreign functions", function()
             local add = coder_names._foreign_func_name("test", "add_one")
             local accumulate = coder_names._foreign_func_name("test", "accumulate")
             assert.truthy(add:find("\\u2133", 1, true))
-            assert.truthy(generated:find("static inline ffi_int " .. add, 1, true))
+            assert.truthy(generated:find("TITAN_SOURCE_LOCAL ffi_int " .. add, 1, true))
             assert.truthy(generated:find("TITAN_SOURCE_LOCAL ffi_int " .. accumulate,
                 1, true))
             assert.truthy(csrc:find('/test.titan.h"', 1, true))

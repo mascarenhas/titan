@@ -6034,7 +6034,7 @@ function driver.compile_module(modname, mod, static_deps, verbose, options)
         static_deps, verbose, options, mod)
     if not ok then return nil, err end
     mod.compiled = libname
-    mod.compiled_objects = objects or { libname }
+    mod.compiled_objects = assert(objects)
     mod.native_references = native_references or {}
     return true, nil, libname
 end
@@ -6399,45 +6399,11 @@ function driver.effective_c_parts(override)
     return driver.default_c_parts()
 end
 
-function driver.expand_part_objects(libnames)
-    if not libnames then return {} end
-    local expanded = {}
-    local index = 1
-    while index <= #libnames do
-        local item = libnames[index]
-        expanded[#expanded + 1] = item
-        if type(item) == "string" and item:match("[.]o$")
-           and not item:match("[.]part[1-9][0-9]*[.]o$") then
-            local bytes = util.get_file_contents(item)
-            local entry = bytes and objectmetadata.read(bytes, item) or nil
-            local native = entry and entry.object_metadata or nil
-            if native and native.parts and objectmetadata.validate_parts(native)
-               and #native.parts > 1 then
-                local stem = item:gsub("[.]o$", "")
-                local first_part = stem .. native.parts[2].object_suffix
-                if libnames[index + 1] ~= first_part then
-                    for part_idx = 2, #native.parts do
-                        expanded[#expanded + 1] =
-                            stem .. native.parts[part_idx].object_suffix
-                    end
-                end
-            end
-        end
-        index = index + 1
-    end
-    return expanded
-end
 
-function driver.module_compiled_objects(mod, fallback_primary)
-    if mod and type(mod.compiled_objects) == "table"
-       and #mod.compiled_objects > 0 then
-        return mod.compiled_objects
-    end
-    local primary = fallback_primary or (mod and mod.compiled)
-    if type(primary) == "string" then
-        return driver.expand_part_objects({ primary })
-    end
-    return {}
+function driver.module_compiled_objects(mod)
+    assert(mod and type(mod.compiled_objects) == "table"
+        and #mod.compiled_objects > 0, "module needs an explicit ordered object list")
+    return mod.compiled_objects
 end
 
 function driver.record_module_symbols(symbol_owners, modname, symbols, errors)
@@ -6525,6 +6491,13 @@ function driver.validate_foreign_header_plan(plan)
     for _, entry in ipairs(generated_header_entries(plan)) do
         local ok, err = validate_generated_header_entry(entry)
         if not ok then return nil, err end
+        if entry.contents and not entry.preserve and not entry.temporary then
+            local temporary, reserve_err = driver.sibling_temporary_path(
+                entry.filename .. ".format")
+            if not temporary then return nil, reserve_err end
+            -- Preserve C language inference across the random suffix.
+            entry.temporary = temporary .. ".h"
+        end
     end
     return true
 end
@@ -6690,10 +6663,7 @@ function driver.write_foreign_header_plans(plans, verbose, pretty_print)
         if entry.contents and not entry.preserve then
             local ok, err = ensure_output_parent(entry.filename)
             if not ok then return abandon(err) end
-            local temporary, reserve_err = driver.sibling_temporary_path(
-                entry.filename .. ".format")
-            if not temporary then return abandon(reserve_err) end
-            temporary = temporary .. ".h" -- Preserve C language inference across random temporary suffixes.
+            local temporary = assert(entry.temporary)
             staged[entry] = temporary
             ok, err = util.set_file_contents(temporary, entry.contents)
             if not ok then return abandon(err) end
@@ -6760,11 +6730,12 @@ local function prepare_compile(
     local parts_companion_path = stem .. ".parts"
     coder.prepare_coverage(ast, options and
         (options.coverage == true or options.coverage_backend ~= nil))
+    local header_plan
     if not ast._foreign_header_prepared or not ast._ffi_header_prepared then
-        local header_plan = driver.plan_foreign_header(modname, ast, sourcef)
-        local header_ok, header_err = driver.write_foreign_header_plan(
-            header_plan, verbose, options and options.pretty_print)
-        if not header_ok then return nil, header_err end
+        header_plan = driver.plan_foreign_header(modname, ast, sourcef)
+        local valid, err = driver.validate_foreign_header_plan(header_plan)
+        if not valid then return nil, err end
+        ast._foreign_header_recipe = header_plan.recipe
     end
     local imported_layouts = options and options.nominal_layouts
     if not imported_layouts then
@@ -6807,7 +6778,8 @@ local function prepare_compile(
         kind = "source", ast = ast,
         type = ast._declared_type or ast._type,
         filename = source_entry and source_entry.filename or sourcef,
-        source_files = source_entry and source_entry.source_files or { sourcef }, deps = deps,
+        source_files = source_entry and source_entry.source_files
+            or { source_entry and source_entry.filename or sourcef }, deps = deps,
         c_header_dependencies = ast._c_header_dependencies or {},
     }
     local recorded_parts = {}
@@ -6848,13 +6820,16 @@ local function prepare_compile(
         return "\n" .. objectmetadata.render(payload,
             "titan_object_source_" .. driver.mangle_module_name(modname))
     end
-    local output_ok, output_err = ensure_output_parent(filename)
-    if not output_ok then return nil, output_err end
-
     -- Preflight existing private header and .parts companion before any
     -- invalidation or file write.
     local priv_attr = lfs.symlinkattributes(priv_header_path)
-    if priv_attr then
+    local priv_owned = false
+    if priv_attr and priv_attr.mode == "file" then
+        local existing = util.get_file_contents(priv_header_path)
+        priv_owned = existing and existing:sub(1, #driver.PRIVATE_HEADER_MARKER)
+            == driver.PRIVATE_HEADER_MARKER or false
+    end
+    if generated.private_header and priv_attr then
         local existing = priv_attr.mode == "file"
             and util.get_file_contents(priv_header_path) or nil
         local owned = existing and
@@ -6881,15 +6856,14 @@ local function prepare_compile(
     -- Discover prior compiler-owned outputs before invalidating the primary
     -- object and companion so stale higher parts are removed even with holes.
     local prior_inventory = {}
-    if priv_attr then prior_inventory[priv_header_path] = true end
+    if priv_owned then prior_inventory[priv_header_path] = true end
     if lfs.symlinkattributes(libname, "mode") == "file" then
         local old_bytes = util.get_file_contents(libname)
         local old_entry = old_bytes and objectmetadata.read(old_bytes, libname) or nil
         local old_native = old_entry and old_entry.object_metadata or nil
-        if old_native and type(old_native.parts) == "table" then
+        if old_native and old_native.parts and objectmetadata.validate_parts(old_native) then
             for _, old_part in ipairs(old_native.parts) do
-                if type(old_part) == "table" and type(old_part.index) == "number"
-                   and old_part.index >= 1 and old_part.index % 1 == 0 then
+                if old_part.index >= 1 then
                     prior_inventory[driver.part_c_filename(stem, old_part.index)] = true
                     prior_inventory[driver.part_object_filename(stem, old_part.index)] = true
                     prior_inventory[stem .. ".part" .. tostring(old_part.index) .. ".gcno"] = true
@@ -6903,7 +6877,7 @@ local function prepare_compile(
         local old_count = old_companion and
             driver.parse_parts_companion(old_companion, stem) or nil
         if old_count and old_count > 1 then
-            prior_inventory[priv_header_path] = true
+            if priv_owned then prior_inventory[priv_header_path] = true end
             for k = 1, old_count - 1 do
                 prior_inventory[driver.part_c_filename(stem, k)] = true
                 prior_inventory[driver.part_object_filename(stem, k)] = true
@@ -6911,94 +6885,6 @@ local function prepare_compile(
                 prior_inventory[stem .. ".part" .. tostring(k) .. ".gcda"] = true
             end
         end
-    end
-    local parent_dir = stem:match("^(.*)[/\\][^/\\]+$") or "."
-    local stem_leaf = stem:match("([^/\\]+)$") or stem
-    if lfs.attributes(parent_dir, "mode") == "directory" then
-        for entry_name in lfs.dir(parent_dir) do
-            local part_num, ext = entry_name:match(
-                "^" .. stem_leaf:gsub("(%W)", "%%%1")
-                .. "[.]part([1-9][0-9]*)[.](.+)$")
-            if part_num and (ext == "c" or ext == "o"
-                    or ext == "gcno" or ext == "gcda") then
-                local candidate = parent_dir == "." and entry_name
-                    or (parent_dir .. "/" .. entry_name)
-                if lfs.symlinkattributes(candidate, "mode") == "file" then
-                    prior_inventory[candidate] = true
-                end
-            end
-        end
-    end
-
-    -- Invalidate primary commit marker and companion first, then remove prior
-    -- sibling outputs.
-    os.remove(libname)
-    os.remove(parts_companion_path)
-    os.remove(filename)
-    os.remove(stem .. ".gcda")
-    os.remove(stem .. ".gcno")
-    for prior_path in pairs(prior_inventory) do
-        os.remove(prior_path)
-    end
-
-    if generated.private_header then
-        local ok, err = util.set_file_contents(
-            priv_header_path, generated.private_header)
-        if not ok then return nil, err end
-        local format_ok, format_err = driver.format_generated_file(
-            priv_header_path, verbose, options and options.pretty_print, nil, false)
-        if not format_ok then
-            os.remove(priv_header_path)
-            return nil, format_err
-        end
-    end
-
-    for _, part in ipairs(generated_parts) do
-        local part_c = driver.part_c_filename(stem, part.index)
-        local part_code = part.code
-        if not (options and options.coverage) and part.index == 0 then
-            local metadata, metadata_error = metadata_code()
-            if not metadata then return nil, metadata_error end
-            part_code = part_code .. metadata
-        end
-        local ok, err = util.set_file_contents(part_c, part_code)
-        if not ok then return nil, err end
-        local format_ok, format_err = driver.format_generated_file(
-            part_c, verbose, options and options.pretty_print, nil,
-            options and options.coverage)
-        if not format_ok then return nil, format_err end
-    end
-
-    if options and options.coverage then
-        local coverage_parts = {}
-        local converted_codes = {}
-        for i, part in ipairs(generated_parts) do
-            local part_c = driver.part_c_filename(stem, part.index)
-            local contents, read_error = util.get_file_contents(part_c)
-            if not contents then return nil, read_error end
-            local converted, conversion_error, anchors =
-                require("titan-compiler.coverage_lines").convert(contents, part_c)
-            if not converted then return nil, conversion_error end
-            coverage_parts[i] = { filename = part_c, anchors = anchors }
-            converted_codes[i] = { filename = part_c, code = converted }
-        end
-        native.coverage = coverage.partial(
-            #coverage_parts == 1 and coverage_parts[1].filename or coverage_parts,
-            entry.source_files,
-            #coverage_parts == 1 and coverage_parts[1].anchors or nil,
-            options.coverage_backend)
-        local metadata, metadata_error = metadata_code()
-        if not metadata then return nil, metadata_error end
-        converted_codes[1].code = converted_codes[1].code .. metadata
-        for _, item in ipairs(converted_codes) do
-            local written, write_error =
-                util.set_file_contents(item.filename, item.code)
-            if not written then return nil, write_error end
-        end
-    end
-    if source_entry then
-        source_entry.coverage = native.coverage
-        source_entry.private_symbols = private_symbols
     end
 
     local base_args, flags_err = driver.generated_compile_prefix()
@@ -7051,6 +6937,122 @@ local function prepare_compile(
             cost_bytes = part.code_bytes,
         }
     end
+    local outputs, output_paths = {}, {}
+    local function output(path)
+        if not output_paths[path] then
+            output_paths[path] = true
+            outputs[#outputs + 1] = {
+                path = path, owner = "logical module '" .. modname .. "'",
+            }
+        end
+    end
+    output(parts_companion_path)
+    if generated.private_header then output(priv_header_path) end
+    for _, part in ipairs(generated_parts) do
+        output(driver.part_c_filename(stem, part.index))
+        output(driver.part_object_filename(stem, part.index))
+        local part_stem = driver.part_object_filename(stem, part.index):gsub("[.]o$", "")
+        output(part_stem .. ".gcno")
+        output(part_stem .. ".gcda")
+    end
+    for _, job in ipairs(prepared_jobs) do output(job.temporary_object) end
+    output(prepared_jobs[1].temporary_object .. ".parts")
+    for prior_path in pairs(prior_inventory) do output(prior_path) end
+    if header_plan then
+        for _, header in ipairs(generated_header_entries(header_plan)) do
+            if header.contents or header.managed then output(header.filename) end
+            if header.temporary then output(header.temporary) end
+        end
+    end
+    local inputs = {}
+    for _, input in ipairs(entry.source_files) do inputs[#inputs + 1] = input end
+    for _, dependency in ipairs(entry.c_header_dependencies) do
+        inputs[#inputs + 1] = dependency.filename or dependency.path
+    end
+    for _, input in ipairs(options and options.native_inputs or {}) do
+        inputs[#inputs + 1] = input
+    end
+    local function materialize()
+    local output_ok, output_err = ensure_output_parent(filename)
+    if not output_ok then return nil, output_err end
+    if header_plan then
+        local ok, err = driver.write_foreign_header_plan(
+            header_plan, verbose, options and options.pretty_print)
+        if not ok then return nil, err end
+    end
+
+    -- Invalidate primary commit marker and companion first, then remove prior
+    -- sibling outputs.
+    os.remove(libname)
+    os.remove(parts_companion_path)
+    os.remove(filename)
+    os.remove(stem .. ".gcda")
+    os.remove(stem .. ".gcno")
+    for prior_path in pairs(prior_inventory) do
+        os.remove(prior_path)
+    end
+
+    if generated.private_header then
+        local ok, err = util.set_file_contents(
+            priv_header_path, generated.private_header)
+        if not ok then return nil, err end
+        local format_ok, format_err = driver.format_generated_file(
+            priv_header_path, verbose, options and options.pretty_print, nil, false)
+        if not format_ok then
+            os.remove(priv_header_path)
+            return nil, format_err
+        end
+    end
+
+    for _, part in ipairs(generated_parts) do
+        local part_c = driver.part_c_filename(stem, part.index)
+        local part_code = part.code
+        if not (options and options.coverage) and part.index == 0 then
+            local metadata, metadata_error = metadata_code()
+            if not metadata then return nil, metadata_error end
+            part_code = part_code .. metadata
+        end
+        os.remove(part_c)
+        local ok, err = util.set_file_contents(part_c, part_code)
+        if not ok then return nil, err end
+        local format_ok, format_err = driver.format_generated_file(
+            part_c, verbose, options and options.pretty_print, nil,
+            options and options.coverage)
+        if not format_ok then return nil, format_err end
+    end
+
+    if options and options.coverage then
+        local coverage_parts = {}
+        local converted_codes = {}
+        for i, part in ipairs(generated_parts) do
+            local part_c = driver.part_c_filename(stem, part.index)
+            local contents, read_error = util.get_file_contents(part_c)
+            if not contents then return nil, read_error end
+            local converted, conversion_error, anchors =
+                require("titan-compiler.coverage_lines").convert(contents, part_c)
+            if not converted then return nil, conversion_error end
+            coverage_parts[i] = { filename = part_c, anchors = anchors }
+            converted_codes[i] = { filename = part_c, code = converted }
+        end
+        native.coverage = coverage.partial(
+            #coverage_parts == 1 and coverage_parts[1].filename or coverage_parts,
+            entry.source_files,
+            #coverage_parts == 1 and coverage_parts[1].anchors or nil,
+            options.coverage_backend)
+        local metadata, metadata_error = metadata_code()
+        if not metadata then return nil, metadata_error end
+        converted_codes[1].code = converted_codes[1].code .. metadata
+        for _, item in ipairs(converted_codes) do
+            local written, write_error =
+                util.set_file_contents(item.filename, item.code)
+            if not written then return nil, write_error end
+        end
+    end
+    if source_entry then
+        source_entry.coverage = native.coverage
+        source_entry.private_symbols = private_symbols
+    end
+
 
     return {
         modname = modname,
@@ -7065,6 +7067,12 @@ local function prepare_compile(
         prior_inventory = prior_inventory,
         native_references = native_references,
         private_symbols = private_symbols,
+    }
+    end
+    return {
+        modname = modname, outputs = outputs, inputs = inputs,
+        private_symbols = private_symbols, source_record = native,
+        part_count = #generated_parts, materialize = materialize,
     }
 end
 
@@ -7106,9 +7114,18 @@ end
 
 -- Implementation notes: doc/implementation/driver.md#compiling-one-module-drivercompile
 function driver.compile(modname, ast, sourcef, static_deps, verbose, options, source_entry)
-    local prepared, prepare_err = prepare_compile(
+    local plan, prepare_err = prepare_compile(
         modname, ast, sourcef, static_deps, verbose, options, source_entry)
-    if not prepared then return nil, prepare_err end
+    if not plan then return nil, prepare_err end
+    local valid, preflight_err = driver.validate_provider_output_paths(
+        nil, plan.inputs, plan.outputs)
+    if not valid then return nil, preflight_err end
+    local symbols, errors = {}, {}
+    driver.record_module_symbols(symbols, modname, plan.source_record.external_symbols, errors)
+    driver.record_module_symbols(symbols, modname, plan.private_symbols, errors)
+    if #errors > 0 then return nil, table.concat(errors, "\n") end
+    local prepared, materialize_err = plan.materialize()
+    if not prepared then return nil, materialize_err end
     -- Serial compilation runs every part in order, as the batch does, so a
     -- failing part does not hide another part's diagnostics.
     local ok, err = true, nil
@@ -7710,44 +7727,76 @@ local function validate_compile_requests(requests)
     end
 end
 
--- With a bound above one, generate module C serially, then launch the
--- flattened native jobs of every module larger first, keeping at most
--- `parallelism` compiler processes busy by consuming actual completion
--- notifications. The one-job path retains the historical per-module phase
--- order. Only native object compilations ever overlap.
-function driver.compile_modules(requests, parallelism, verbose)
+-- Generation and ownership discovery do not mutate any output. The caller may
+-- extend this plan with provider/entrypoint outputs before materialization.
+function driver.plan_compile_requests(
+        requests, verbose, native_inputs, symbol_owners, header_plans)
+    validate_compile_requests(requests)
+    local plans, outputs, inputs, symbols, errors = {}, {}, {}, {}, {}
+    for symbol, owner in pairs(symbol_owners or {}) do symbols[symbol] = owner end
+    for _, input in ipairs(native_inputs or {}) do inputs[#inputs + 1] = input end
+    for index, request in ipairs(requests) do
+        local mod = request.mod
+        local native = mod.object_metadata
+        if not mod.compiled then
+            local plan, err = prepare_compile(request.modname, mod.ast,
+                mod.native_output or mod.filename, request.static_deps,
+                verbose, request.options, mod)
+            if not plan then return nil, err end
+            plans[index] = plan
+            native = plan.source_record
+            for _, output in ipairs(plan.outputs) do outputs[#outputs + 1] = output end
+            for _, input in ipairs(plan.inputs) do inputs[#inputs + 1] = input end
+        else
+            plans[index] = false
+            for _, object in ipairs(driver.module_compiled_objects(mod)) do
+                inputs[#inputs + 1] = object
+            end
+        end
+        driver.record_module_symbols(symbols, request.modname,
+            native and native.external_symbols or mod.external_symbols, errors)
+        driver.record_module_symbols(symbols, request.modname,
+            native and native.private_symbols or mod.private_symbols, errors)
+    end
+    if #errors > 0 then return nil, table.concat(errors, "\n") end
+    local planned_paths = {}
+    for _, output in ipairs(outputs) do planned_paths[output.path] = true end
+    for _, plan in ipairs(header_plans or {}) do
+        for _, header in ipairs(generated_header_entries(plan)) do
+            if not header.preserve and (header.contents or header.managed)
+                and not planned_paths[header.filename] then
+                outputs[#outputs + 1] = {
+                    path = header.filename,
+                    owner = "generated header for logical module '" .. plan.modname .. "'",
+                }
+                planned_paths[header.filename] = true
+            end
+            if header.temporary and not planned_paths[header.temporary] then
+                outputs[#outputs + 1] = {
+                    path = header.temporary,
+                    owner = "staged header for logical module '" .. plan.modname .. "'",
+                }
+                planned_paths[header.temporary] = true
+            end
+        end
+    end
+    local ok, err = driver.validate_provider_output_paths(nil, inputs, outputs)
+    if not ok then return nil, err end
+    plans.outputs, plans.inputs = outputs, inputs
+    return plans
+end
+
+-- Generate and preflight the whole batch before invalidating any primary.
+-- Only native object compilations ever overlap; diagnostics retain request
+-- and part order even though larger jobs launch first.
+function driver.compile_modules(requests, parallelism, verbose, plans)
     assert(type(requests) == "table", "requests must be a table")
     assert(type(parallelism) == "number" and parallelism >= 1 and
         parallelism % 1 == 0, "parallelism must be a positive integer")
-    validate_compile_requests(requests)
-
-    local results = {}
-    if parallelism == 1 then
-        for index, request in ipairs(requests) do
-            local mod = assert(request.mod)
-            if mod.compiled then
-                results[index] = {
-                    ok = true,
-                    libname = mod.compiled,
-                    objects = mod.compiled_objects or { mod.compiled },
-                    native_references = mod.native_references or {},
-                }
-            else
-                local ok, err, libname = driver.compile_module(
-                    request.modname, mod, request.static_deps,
-                    verbose, request.options)
-                if ok then
-                    results[index] = {
-                        ok = true,
-                        libname = libname,
-                        objects = mod.compiled_objects or { libname },
-                        native_references = mod.native_references or {},
-                    }
-                else
-                    results[index] = { err = err }
-                end
-            end
-        end
+    local results, plan_err = {}
+    if not plans then plans, plan_err = driver.plan_compile_requests(requests, verbose) end
+    if not plans then
+        for index in ipairs(requests) do results[index] = { err = plan_err } end
         return results
     end
 
@@ -7758,13 +7807,11 @@ function driver.compile_modules(requests, parallelism, verbose)
             results[index] = {
                 ok = true,
                 libname = mod.compiled,
-                objects = mod.compiled_objects or { mod.compiled },
+                objects = driver.module_compiled_objects(mod),
                 native_references = mod.native_references or {},
             }
         else
-            local compilation, prepare_err = prepare_compile(
-                request.modname, mod.ast, mod.native_output or mod.filename,
-                request.static_deps, verbose, request.options, mod)
+            local compilation, prepare_err = plans[index].materialize()
             if not compilation then
                 results[index] = { err = prepare_err }
             else
@@ -7774,7 +7821,20 @@ function driver.compile_modules(requests, parallelism, verbose)
         end
     end
 
-    local compiled, cancelled = run_prepared_compiles(prepared, parallelism, verbose)
+    local compiled, cancelled
+    if parallelism == 1 then
+        compiled = {}
+        for index, compilation in ipairs(prepared) do
+            local result = { ok = true }
+            for _, job in ipairs(compilation.jobs) do
+                local ok, err = run_argv(job.argv, verbose)
+                if result.ok and not ok then result = { err = err } end
+            end
+            compiled[index] = result
+        end
+    else
+        compiled, cancelled = run_prepared_compiles(prepared, parallelism, verbose)
+    end
     for prepared_index, compilation in ipairs(prepared) do
         local result = compiled[prepared_index]
         result.ok, result.err = publish_compiled_object(compilation, result.ok, result.err)
@@ -8994,32 +9054,8 @@ function driver.build_static_archive(
         return true
     end
 
-    local consumed_part_paths = {}
-    local function stage_part_object(part_path, ordinal)
-        local part_parsed, part_err = scan_native_file(part_path, target, false)
-        if not part_parsed then return abort(part_err) end
-        local selected = selected_native_view(part_parsed)
-        if not selected or selected.kind ~= "object" then
-            return abort("native object input '" .. tostring(part_path) ..
-                "' is not a relocatable object")
-        end
-        if selected.metadata ~= nil
-            or objectmetadata.read(selected.bytes, part_path) ~= nil then
-            return abort("generated module part object '" .. tostring(part_path) ..
-                "' unexpectedly contains module metadata")
-        end
-        local leaf = part_path:match("([^/\\]+)$") or "object.o"
-        local staged, stage_err = stage_object(
-            selected, part_path, leaf, ordinal)
-        if not staged then return abort(stage_err) end
-        return true
-    end
 
     local function add_object(input, ordinal)
-        if type(input) == "string" and consumed_part_paths[input] then
-            consumed_part_paths[input] = nil
-            return true
-        end
         local parsed, parse_err = parsed_object_input(input, target)
         if not parsed then return abort(parse_err) end
         local path = parsed.path
@@ -9027,24 +9063,6 @@ function driver.build_static_archive(
         local staged, stage_err = stage_object(
             parsed.object, parsed.origin, leaf, ordinal)
         if not staged then return abort(stage_err) end
-        if type(path) == "string" and parsed.object and parsed.object.bytes then
-            local source_entry = objectmetadata.read(parsed.object.bytes, path)
-            local native = source_entry and source_entry.object_metadata or nil
-            if native and native.parts ~= nil then
-                local valid_parts, parts_err = objectmetadata.validate_parts(native)
-                if not valid_parts then return abort(parts_err) end
-                if #native.parts > 1 then
-                    local stem = path:gsub("[.]o$", "")
-                    for part_idx = 2, #native.parts do
-                        local part_path = stem .. native.parts[part_idx].object_suffix
-                        consumed_part_paths[part_path] = true
-                        local part_ok, part_stage_err =
-                            stage_part_object(part_path, ordinal)
-                        if not part_ok then return nil, part_stage_err end
-                    end
-                end
-            end
-        end
         return true
     end
     local function add_archive(input, archive_ordinal)
@@ -9601,7 +9619,7 @@ function driver.compile_library(modname, libnames, link, verbose, extra_objects,
                                 static_archives)
     local soname = modname:gsub("[.]", "/") .. (platform.windows and ".dll" or ".so")
     return driver.compile_library_output(
-        soname, driver.expand_part_objects(libnames), link, verbose,
+        soname, libnames, link, verbose,
         extra_objects, static_archives,
         nil, nil, platform.windows and { modname } or nil)
 end
@@ -10100,7 +10118,8 @@ local function same_file_tree(left, right)
 end
 
 function driver.validate_program_output_paths(
-        source_outputs, executable, entrypoint_c, native_inputs, extra_outputs)
+        source_outputs, executable, entrypoint_c, native_inputs, extra_outputs,
+        planned_outputs)
     if type(executable) ~= "string" or executable == "" then
         return nil, "standalone executable path must be a nonempty string"
     end
@@ -10162,6 +10181,12 @@ function driver.validate_program_output_paths(
         return true
     end
 
+    if planned_outputs then
+        for _, output in ipairs(planned_outputs) do
+            local ok, err = add_output(output.path, output.owner, output.mode or "file")
+            if not ok then return nil, err end
+        end
+    else
     for _, source in ipairs(source_outputs or {}) do
         local stem = assert(source.output):gsub("[.]titan$", "")
         local owner = "logical module '" .. source.modname .. "'"
@@ -10184,7 +10209,7 @@ function driver.validate_program_output_paths(
         end
         local max_parts = tonumber(source.c_parts) or 1
         local priv_path = stem .. ".priv.h"
-        if max_parts > 1 or lfs.symlinkattributes(priv_path) then
+        if max_parts > 1 then
             ok, err = add_output(priv_path,
                 "generated private header for " .. owner, "file")
             if not ok then return nil, err end
@@ -10216,6 +10241,7 @@ function driver.validate_program_output_paths(
                     source.modname .. "'", "file")
             if not ok then return nil, err end
         end
+    end
     end
     local ok, err = add_output(
         entrypoint_c, "standalone entrypoint", "file")
@@ -10270,10 +10296,10 @@ end
 
 function driver.validate_provider_output_paths(
         public_dso, native_inputs, generated_outputs)
-    local public_archive = not platform.windows and public_dso:gsub("[.]so$", ".a")
-    if platform.windows and not public_dso:match("[.]dll$") then
+    local public_archive = public_dso and not platform.windows and public_dso:gsub("[.]so$", ".a")
+    if public_dso and platform.windows and not public_dso:match("[.]dll$") then
         return nil, "Windows provider path must end in .dll"
-    elseif public_archive == public_dso then
+    elseif public_dso and public_archive == public_dso then
         return nil, "provider DSO path '" .. tostring(public_dso) ..
             "' does not end in .so"
     end
@@ -10327,13 +10353,16 @@ function driver.validate_provider_output_paths(
         return true
     end
 
-    local ok, err = add_output(public_dso, "provider DSO", "file")
-    if not ok then return nil, err end
+    local ok, err
+    if public_dso then
+        ok, err = add_output(public_dso, "provider DSO", "file")
+        if not ok then return nil, err end
+    end
     if public_archive then
         ok, err = add_output(public_archive, "provider archive", "file")
         if not ok then return nil, err end
     end
-    if driver.IS_DARWIN then
+    if public_dso and driver.IS_DARWIN then
         ok, err = add_output(
             public_dso .. ".dSYM", "provider dSYM", "directory")
         if not ok then return nil, err end
@@ -10879,7 +10908,7 @@ function driver.run_standalone_archive_probe(
         return nil, flags_err
     end
     append_argv(args, { "-o", executable, object })
-    append_argv(args, driver.expand_part_objects(libnames))
+    append_argv(args, libnames)
     local runtime = runtime_link_inputs()
     append_argv(args, driver.standalone_native_link_inputs(
         static_archives, extra_objects, runtime))
@@ -11003,7 +11032,6 @@ function driver.compile_program(modname, libnames, link, verbose, extra_objects,
                                 program_output, static_archives,
                                 entrypoint_output, program_name, options)
     options = options or {}
-    libnames = driver.expand_part_objects(libnames)
     local runtime_ok, runtime_err = check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
     if platform.windows then
