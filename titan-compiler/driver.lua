@@ -8926,6 +8926,9 @@ function driver.link_provider_pair(request)
             return image_link
         end
         local function start_image(held)
+            -- A pending interrupt must not start another child; closing the
+            -- ledger returns a slot already held for it.
+            check_interrupt()
             local started, start_err = (held and launch or launch_now)(
                 2, image_link, false)
             if not started then
