@@ -43,12 +43,22 @@ end
 
 -- One complete check of `roots` from in-memory sources under a fresh
 -- resolver whose probe compiler is the deterministic fixture compiler.
+-- The Busted runners execute ordinary files under a nested serial Make
+-- policy (MAKEFLAGS=-j1), which correctly keeps titanc synchronous; each
+-- check here models a titanc run without a parent Make instead.
 local function check(modules, roots, jobs, options)
     options = options or {}
     types.registry = {}
     driver.imported = {}
     local previous_cc = driver.CC
     driver.CC = probe_compiler()
+    local previous_getenv = platform.getenv
+    platform.getenv = function(name)
+        if name == "MAKEFLAGS" or name == "MFLAGS" or name == "MAKELEVEL" then
+            return nil
+        end
+        return previous_getenv(name)
+    end
     local executions, semantics = {}, {}
     local context = driver.new_resolver_context({
         jobs = jobs,
@@ -79,6 +89,7 @@ local function check(modules, roots, jobs, options)
     end) }
     driver.PROBE_CACHE_DIRECTORY = previous_cache
     driver.CC = previous_cc
+    platform.getenv = previous_getenv
     local bundle = context.source_ffi_header_bundle
     local outcome = {
         executions = executions,
