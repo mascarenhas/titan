@@ -9,10 +9,23 @@ local function coverage_fs_remove(path: string, directory: boolean)
   if status ~= uv.ENOENT then success(status) end
 end
 
+-- Scratch belongs below the runner's private TITAN_TEST_ROOT, or the platform
+-- temporary directory when a run supplies none, never the shared checkout CWD.
+local function coverage_fs_scratch_root(): string
+  local status, root?, _size = uv.os_getenv("TITAN_TEST_ROOT", 4096)
+  if status == 0 and root ~= nil and root ~= "" then return root end
+  test.assert(status == 0 or status == uv.ENOENT,
+              "reading TITAN_TEST_ROOT failed: " .. status)
+  local tmp_status, tmpdir?, _tmp_size = uv.os_tmpdir(4096)
+  success(tmp_status)
+  return tmpdir
+end
+
 local function coverage_fs_directory(): string
   local request = uv.fs_t()
   defer uv.fs_req_cleanup(request)
-  success(uv.fs_mkdtemp(nil, request, "uv-public-fs-XXXXXX"))
+  success(uv.fs_mkdtemp(nil, request,
+                        coverage_fs_scratch_root() .. "/uv-public-fs-XXXXXX"))
   case uv.fs_get_type(request)
   when mkdtemp() then
   else test.assert(false, "mkdtemp lost its request kind")

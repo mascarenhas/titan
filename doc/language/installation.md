@@ -294,8 +294,10 @@ executes at once. It defaults to four; on Linux and macOS values above one need 
 standard POSIX `mkfifo` utility. Inside a GNU Make recipe `titanc` also shares Make's
 job slots ([Compiler jobs and GNU Make](build-profiles.md#compiler-jobs-and-gnu-make)).
 In a checkout, `make stdlib` and `luarocks make` share one Make job pool of `TITAN_JOBS`
-slots unless you pass `make -jN`; with macOS's stock Make, use `TITAN_JOBS=1` for a
-serial build ([Build and test parallelism](build-profiles.md#build-and-test-parallelism)).
+slots unless you pass `make -jN`. GNU Make before 4.2, including macOS's stock 3.81,
+builds serially unless `TITAN_JOBS` is set; put GNU Make 4.2 or later first on `PATH`,
+or set `TITAN_JOBS=4`, for the four-job pool
+([Build and test parallelism](build-profiles.md#build-and-test-parallelism)).
 
 ### A separate rocks tree
 

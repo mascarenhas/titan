@@ -38,7 +38,10 @@ if [[ ! $jobs =~ ^[1-9][0-9]*$ || ${#jobs} -gt 9 ]]; then
     echo "TITAN_ROCK_TEST_JOBS must be a positive integer" >&2
     exit 2
 fi
-pool_jobs=${TITAN_JOBS:-4}
+# Without TITAN_JOBS (the Makefile omits it on GNU Make before 4.2, which
+# cannot show an explicit -j1), a seeded pool has one slot per worker and one
+# for the native build, so the workers never wait for each other.
+pool_jobs=${TITAN_JOBS:-$((jobs + (build_native != 0 ? 1 : 0)))}
 if [[ ! $pool_jobs =~ ^[1-9][0-9]*$ || ${#pool_jobs} -gt 9 ]]; then
     echo "TITAN_JOBS must be a positive integer" >&2
     exit 2

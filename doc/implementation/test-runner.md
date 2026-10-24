@@ -452,7 +452,11 @@ On Unix the ordinary workers are the targets of an ephemeral GNU Make
 worker drains after a failure. The workers share one job pool with the
 optional native-aggregate build target. The launcher joins an inherited usable
 jobserver; otherwise it keeps an explicit `-j` word from `MAKEFLAGS`, including
-`-j1`; otherwise it seeds a fresh pool of `TITAN_JOBS` slots (default four).
+`-j1`; otherwise it seeds a fresh pool of `TITAN_JOBS` slots. The Makefile
+passes its four-slot default, except on GNU Make before 4.2, which cannot show
+`make -j1` ([Make job pool](build-script-audit.md#make-job-pool-and-titanc-recipes)):
+there it passes no `TITAN_JOBS` unless the user set one, and the launcher
+sizes the pool with one slot per worker plus one for the native build.
 Each Busted worker holds one slot. The native build target is ordered first;
 its `titan-stdlib-test-build` sub-make and `titanc` processes borrow the
 remaining slots. A four-slot budget therefore runs four units in total, not
@@ -499,7 +503,12 @@ assigned by the same longest-processing-time rule to `TITAN_TEST_JOBS` groups
 same binary from the repository root with one `--filter=^<owner>[.]test_` per
 owner (Lua patterns, never regex alternation), its own `TMPDIR` and
 `TITAN_TEST_ROOT`, its own log and process group, and the `TITAN_TEST_TIMEOUT`
-supervisor. A failing group does not stop the others.
+supervisor. A failing group does not stop the others. A group's status is the
+supervised executable's exit status (124 after a timeout), never that of the
+log pipeline, so a nonzero exit after a complete passing report still fails
+the run. The `fs.tests` workspaces and `uv.public_tests` filesystem scratch
+live below `TITAN_TEST_ROOT`, or the platform temporary directory when a run
+sets none, so the launcher's removal of its scratch tree also covers them.
 
 The guarded owners then run alone in one group, with no other group, Busted
 worker, or native build running. They are `timer.tests` (millisecond ticker
@@ -592,12 +601,17 @@ cleanup helper (`spec/support/clean_generated_test_artifacts.sh`) prunes `out/`
 while inspecting synthetic fixtures and, unless `--keep-output` is selected,
 removes the owned `out/tests` and legacy `.titan-tests` directories
 recursively. Under `spec/`, legacy compiler outputs still use the bounded
-cleanup rules: remove every generated `.o`, and a `.c` only when a same-stem
+cleanup rules: remove every generated `.o`, and a `.c`, `.parts` companion,
+`.priv.h` private header, or nonzero part C file only when a same-stem
 `.titan` source exists. Generated headers require their exact compiler banner;
 synthetic test suffixes and root `test_runner_*` identify other owned
 fixtures. This does not consult Git, so it also works in a source rock while
 preserving author-written C/header fixtures and the ordinary `out/` provider
-stage.
+stage. Outside `spec/`, `make clean` removes every C file, object, `.parts`
+companion, `.priv.h` header, and nonzero part C file and object that a
+compilation without `--output` leaves beside root, `titan/`, and `titan/uv/`
+modules or beside a standard folder module's main stem
+(`TITAN_LEGACY_SOURCE_OUTPUTS`), keeping authored sources and headers.
 
 CI runs this aggregate twice: once source-linked with native coverage in the
 `native-coverage` job, and once as an independent ASan+UBSan build in the

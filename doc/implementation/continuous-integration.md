@@ -277,7 +277,10 @@ gh workflow run macos.yml --ref <branch>
 The hosted job sets all three concurrency bounds to three (`MAKEFLAGS=-j3`,
 `TITAN_JOBS=3`, and `TITAN_TEST_JOBS=3`), so its `make stdlib-test` runs the
 native aggregate as three ordinary owner groups followed by the timing-guarded
-owners alone. It retries only dependency acquisition within the same prefix;
+owners alone. Its `libuv_build_spec.lua` checks Apple Make 3.81's serial
+default through `/usr/bin/make`; the GNU Make 4.2 pool-seeding case stays
+pending there, and `TITAN_TEST_LEGACY_MAKE` names an older GNU Make for that
+check on other hosts. It retries only dependency acquisition within the same prefix;
 build and complete test execution remain single-shot. Run all uncovered
 stdlib/runtime/packaging work and the aggregate before
 `ci_test_groups.sh compiler-uncovered`. Before compiler

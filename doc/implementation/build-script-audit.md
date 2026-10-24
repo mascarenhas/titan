@@ -121,23 +121,26 @@ separate source copies and SDKs.
 
 ## Make job pool and titanc recipes
 
-`TITAN_JOBS` (Make default `TITAN_JOBS ?= 4`) is the local job cap that every
-recipe launching `titanc` passes as `-j$(TITAN_JOBS)`: standard-library
-objects, the provider link, native test objects, the native test executable,
-and the native coverage build. `TITAN_JOBS_CHECK` rejects a value that is not a
-positive integer before any work starts. Each of these recipes is marked `+`,
-so `titanc` receives Make's jobserver and can borrow job slots for further
-concurrent compilations or links beyond its recipe's own slot; the protocol is
-owned by the [driver](driver.md). The `+` marker also keeps a pipe jobserver's
+`TITAN_JOBS` (Make default `TITAN_JOBS ?= 4`, or one on GNU Make before 4.2;
+see below) is the local job cap that every recipe launching `titanc` passes as
+`-j$(TITAN_JOBS)`: standard-library objects, the provider link, native test
+objects, the native test executable, and the native coverage build.
+`TITAN_JOBS_CHECK` rejects a value that is not a positive integer before any
+work starts. Each of these recipes is marked `+`, so `titanc` receives Make's
+jobserver and can borrow job slots for further concurrent compilations or
+links beyond its recipe's own slot; the protocol is owned by the
+[driver](driver.md). The `+` marker also keeps a pipe jobserver's
 descriptors open through the wrapper layers, which GCC's `-flto=auto` link
 steps need as well. Before launching anything, the object recipes run the
 `.parts` completeness guard described in the [standard-library object
 graph](#standard-library-object-graph).
 
 `+` makes Make run a recipe even under `make -n`, `-q`, or `-t`, so each of
-these recipes starts with `RECURSIVE_WRAPPER_GUARD`. The guard scans
-`MAKEFLAGS` up to a standalone `--`: under `q` it exits 1 (out of date), under
-`n` or `t` it exits 0, and in both cases nothing is launched. The mode letters
+these recipes starts with `RECURSIVE_WRAPPER_GUARD`, before any other command
+such as the coverage build's `cd` into an output directory that a dry run has
+not created. The guard scans `MAKEFLAGS` up to a standalone `--`: under `q` it
+exits 1 (out of date), under `n` or `t` it exits 0, and in both cases nothing
+is launched. The mode letters
 appear in GNU Make 4's leading flag word (`kn`) and, when a long option is
 present, in GNU Make 3.81's dash words (`-nk`). Only words consisting entirely
 of Make's no-argument flag letters count. GNU Make 3.81 passes command-line
@@ -149,7 +152,8 @@ The graph entries `stdlib`, `stdlib-objects`, `titan-stdlib-test-objects`, and
 `titan-stdlib-test-build` each build an internal `<entry>-graph` target and
 enter at most one job pool for the whole graph:
 
-1. When the `MAKEFLAGS` visible while Make parses the file already show a job
+1. When GNU Make before 4.2 keeps its serial `TITAN_JOBS` default (below), or
+   the `MAKEFLAGS` visible while Make parses the file already show a job
    policy (`-jN`, unlimited `-j`, `--jobserver-auth=`, or `--jobserver-fds=`)
    or a dry-run, query, or touch mode, the entry depends on its graph directly
    (`TITAN_MAKE_GRAPH_RECURSE` is empty).
@@ -165,25 +169,47 @@ jobserver while parsing: its recipes see ` --jobserver-fds=R,W -j` under
 `make -jN`, and nothing under `make -j1`. GNU Make 4 shows `-jN` while parsing
 and adds `--jobserver-auth=` in recipes.
 
+GNU Make before 4.2, including macOS's stock 3.81, never shows a job count in
+`MAKEFLAGS`, so even a recipe cannot tell `make -j1` from plain `make`. The
+Makefile recognizes these versions from `MAKE_VERSION`
+(`TITAN_MAKE_HIDES_JOBS`). When `TITAN_JOBS` there comes only from the
+Makefile default, that is, its `$(origin)` is `file`
+(`TITAN_JOBS_SERIAL_DEFAULT`), the Makefile sets it to one: no graph entry
+seeds a pool, and every `titanc` recipe compiles one C unit at a time, so
+`make` and `make -j1` both build serially. A `TITAN_JOBS` from the
+environment or the command line seeds its pool exactly as on newer Make,
+including under `make -j1`, which this Make cannot show. An explicit
+`make -jN` keeps the caller's pool either way.
+
 The resulting policy:
 
 | Invocation | Pool |
 | --- | --- |
-| `make stdlib`, `make titan-stdlib-test-build` | One seeded pool of `TITAN_JOBS` (four) slots. |
-| `luarocks make`, `luarocks install` from source | The rock's `all` target runs `$(MAKE) stdlib` without `-j`, so the same seeded four-slot pool. |
+| `make stdlib`, `make titan-stdlib-test-build` | GNU Make 4.2 or later: one seeded pool of `TITAN_JOBS` (four) slots. Earlier GNU Make: serial, with one job per `titanc`, unless `TITAN_JOBS` is set. |
+| `luarocks make`, `luarocks install` from source | The rock's `all` target runs `$(MAKE) stdlib` without `-j`, so the same policy as `make stdlib`. |
 | `make -j8 stdlib` | The caller's eight slots; each `titanc` remains capped at `TITAN_JOBS`. |
 | A recipe of a parent `make -jN` | The parent's pool; nested graph entries never seed or reset a pool, so budgets do not multiply. |
-| GNU Make 4 `make -j1 stdlib` | Serial: one recipe at a time, and `titanc` sees `-j1` without a jobserver and compiles serially. |
-| GNU Make 3.81 `make -j1 stdlib` | Indistinguishable from plain `make`, so a seeded `TITAN_JOBS` pool. Use `TITAN_JOBS=1 make stdlib` for a serial build. |
+| GNU Make 4.2 or later, `make -j1 stdlib` | Serial: one recipe at a time, and `titanc` sees `-j1` without a jobserver and compiles serially. |
+| GNU Make before 4.2, `make stdlib` or `make -j1 stdlib` | Serial: no pool, one recipe at a time, and each `titanc` runs with `-j1`. |
+| GNU Make before 4.2, `TITAN_JOBS=4 make stdlib` | One seeded pool of four slots, with or without `-j1`. |
 | `make -n`, `-q`, or `-t` | No recursion, no pool, and no `titanc` launch. |
 | `make out/titan/uv/uv.o` | That object's recipe alone, with no graph entry; with no jobserver, `titanc` uses its own `TITAN_JOBS` cap. |
 
-Under macOS's stock GNU Make 3.81 pipe jobserver, `titanc` cannot reopen the
-pipe and compiles each module with one job, but Make still runs independent
-module recipes concurrently from the pool. GNU Make 4.4 or later provides
-parallel parts inside a module as well. The Busted launcher applies the same
-rule to its workers and the native build it overlaps; the parallel native run
-that follows uses its own `TITAN_TEST_JOBS` processes; see [Busted
+macOS users therefore get the four-job default either with GNU Make 4.2 or
+later first on `PATH` (Homebrew's `make` formula installs it as `gmake`, and
+as `make` in the formula's `libexec/gnubin` directory) or by setting
+`TITAN_JOBS`. Under a macOS pipe jobserver (GNU Make before 4.4), `titanc`
+cannot reopen the pipe and compiles each module with one job, but Make still
+runs independent module recipes concurrently from the pool. GNU Make 4.4 or
+later provides parallel parts inside a module as well.
+
+The Busted launcher applies the same rule to its workers and the native build
+it overlaps. On GNU Make before 4.2 with the serial default, `rock-test` and
+`busted-test` pass the launcher no `TITAN_JOBS`; it then seeds a private pool
+with one slot per Busted worker plus one for the native build (four at the
+defaults), so the workers never wait for each other, while the native build's
+`titanc` recipes stay at one job. The parallel native run that follows uses
+its own `TITAN_TEST_JOBS` processes; see [Busted
 partitions](test-runner.md#busted-partitions). CI keeps explicit caps
 (`MAKEFLAGS=-j2` and `TITAN_JOBS=2` on two-vCPU Linux runners, four on the
 four-vCPU lanes, three on hosted macOS); see [continuous

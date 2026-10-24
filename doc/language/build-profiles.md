@@ -139,18 +139,22 @@ directories](output-directory.md#source-hierarchy-and-final-outputs).
 In a Titan checkout, the Make targets that compile many modules (`make stdlib`,
 `make stdlib-objects`, `make titan-stdlib-test-objects`, and
 `make titan-stdlib-test-build`) and the build that `luarocks make` runs share
-one GNU Make job pool. Without a `-j` option they create one pool of
-`TITAN_JOBS` slots, four by default, so independent modules and the parts of
-large modules compile side by side within that budget. An explicit `make -jN`,
-or the pool of a parent Make, takes precedence: `make -j8 stdlib` runs at most
-eight jobs in total, and `TITAN_JOBS` then only caps each `titanc` run inside
-it. `make -j1` builds serially.
+one GNU Make job pool. Without a `-j` option, GNU Make 4.2 or later creates
+one pool of `TITAN_JOBS` slots, four by default, so independent modules and
+the parts of large modules compile side by side within that budget. An
+explicit `make -jN`, or the pool of a parent Make, takes precedence:
+`make -j8 stdlib` runs at most eight jobs in total, and `TITAN_JOBS` then only
+caps each `titanc` run inside it. `make -j1` builds serially.
 
-macOS's stock GNU Make 3.81 cannot tell `make -j1` from plain `make`, so it
-still creates a `TITAN_JOBS` pool; use `TITAN_JOBS=1 make stdlib` for a serial
-build with that Make. Its pool still runs several modules at once, but each
-`titanc` inside it compiles with one job. GNU Make 4.4 or later (Homebrew
-`gmake`) also compiles a large module's parts in parallel.
+GNU Make before 4.2, including macOS's stock 3.81, cannot tell `make -j1` from
+plain `make`. With such a Make, `make` and `make -j1` both build serially, and
+each `titanc` compiles with one job, unless you set `TITAN_JOBS` in the
+environment or on the command line: `TITAN_JOBS=4 make stdlib` creates the
+four-slot pool. `make -jN` still runs `N` modules at once. macOS users get the
+four-job default either with GNU Make 4.2 or later first on `PATH` (Homebrew's
+`make` formula installs it as `gmake`) or by setting `TITAN_JOBS`. On macOS,
+each `titanc` in a pool still compiles with one job until GNU Make 4.4 or
+later, which also compiles a large module's parts in parallel.
 
 The repository's test commands use the same budget:
 
@@ -162,7 +166,9 @@ The repository's test commands use the same budget:
   defaults to four. A four-slot budget therefore runs four jobs in total.
   Workers beyond the pool's slots wait for a free one, so raise both settings
   together on a larger machine, for example
-  `TITAN_JOBS=8 TITAN_ROCK_TEST_JOBS=7 make rock-test`.
+  `TITAN_JOBS=8 TITAN_ROCK_TEST_JOBS=7 make rock-test`. With GNU Make before
+  4.2 and no `TITAN_JOBS`, the workers instead share a pool with one slot per
+  worker plus one for the native build, whose `titanc` runs use one job each.
 * `make titan-stdlib-test` and the native phase of `make rock-test` run the
   built native test executable as `TITAN_TEST_JOBS` groups of test owners at
   once (default four; `1` runs them one group at a time), then run the
