@@ -648,7 +648,10 @@ settings, quoted forward-slash spelling avoids ambiguity: set `CC` to the value
 unsupported as implicit tool commands. Bare names use Windows `SearchPathW`
 lookup; explicit paths select that exact native image. A native executable wrapper may precede
 the compiler. Windows command arguments must be valid UTF-8 without line breaks, and the
-initial shell transport has a conservative 8191-byte rendered-command limit.
+initial shell transport has a conservative 8191-byte rendered-command limit. Native links
+pass their compiler and linker arguments in a temporary response file (`@file`) beside the
+output, so the number or length of object paths does not count against this limit; the
+configured `CC` command and the response-file path stay on the command line.
 Explicit `\\?\` executable paths are unsupported by this transport; use an
 ordinary fully qualified executable path. Filesystem metadata operations retain
 their separate support for extended paths.
