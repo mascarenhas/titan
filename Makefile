@@ -533,6 +533,7 @@ LIBBT_LIB := $(LIBBT_DIR)/.libs/libbacktrace.a
 LIBBT_CLONE_STAMP := $(LIBBT_DIR)/.titan-cloned
 LIBBT_CONFIG_STAMP := $(LIBBT_DIR)/.titan-build.config
 STDLIB_COMPLETION_STAMP := $(TITAN_OUTPUT_DIR)/.titan-stdlib-complete
+STDLIB_C_PARTS_STAMP := $(TITAN_OUTPUT_DIR)/.titan-c-parts.config
 
 # These wrappers indirectly launch recursive Make processes or titanc. The `+`
 # recipe marker preserves the parent jobserver; this guard keeps that marker
@@ -1350,12 +1351,13 @@ stdlib-objects-graph: $(foreach module,$(STDLIB_MODULES),$(call stdlib_outputs,$
 # A real object target owns its generated C and headers, including the exact
 # source/object pair needed by sanitizer diagnostic snapshots. FORCE runs an
 # inexpensive completeness check; unchanged outputs keep their timestamps.
+# STDLIB_C_PARTS_STAMP recompiles every object after TITAN_C_PARTS changes.
 # This also works with the GNU Make shipped by macOS, without grouped targets.
 define stdlib_object_rule
 $(call stdlib_stem,$(1)).o: FORCE $(filter titan/$(1).titan titan/$(1)/%.titan,$(STDLIB_TITAN_SOURCES)) \
 	$(foreach dependency,$(STDLIB_IMPORTS_$(1)),$(call stdlib_outputs,$(dependency))) \
 	$(STDLIB_C_INPUTS_$(1)) $(STDLIB_COMPILER_PREREQS) \
-	$(STDLIB_TOOL_PREREQS) | $(STDLIB_NATIVE_PREREQS) $(STDLIB_BOOTSTRAP_PREREQ) \
+	$(STDLIB_TOOL_PREREQS) $(STDLIB_C_PARTS_STAMP) | $(STDLIB_NATIVE_PREREQS) $(STDLIB_BOOTSTRAP_PREREQ) \
 	$(STDLIB_RUNTIME_ARCHIVE_PREREQ) $(STDLIB_PLATFORM_PREREQS)
 	+@$$(RECURSIVE_WRAPPER_GUARD) set -e; \
 	$$(CHECK_TITAN_PARTS_COMPANION) \
@@ -1517,6 +1519,7 @@ ifeq ($(HOST_OS),Linux)
 TITAN_TEST_FIXTURE_OUTPUTS += $(TITAN_TEST_LINUX_FAULT_OUTPUTS)
 endif
 TITAN_TEST_CONFIG_STAMP := $(TITAN_TEST_BUILD_DIR)/build.config
+TITAN_TEST_C_PARTS_STAMP := $(TITAN_TEST_BUILD_DIR)/c-parts.config
 # TEST_LUA selects the installed SDK, just as it does for the compiler and the
 # native fixtures. A cold non-test Make invocation need not have one installed.
 TITAN_TEST_INSTALL_ROOT := $(shell $(TEST_LUA) -E -e 'io.write(assert(require("titan-compiler.driver").TITAN_ROOT))' 2>/dev/null)
@@ -1574,6 +1577,18 @@ stdlib-busted-test: ## Run retained stdlib/runtime Busted specs without coverage
 		bash spec/support/run_rock_tests.sh \
 		$(STDLIB_BUSTED_TESTS) $(EXTRA_TEST_FLAGS)
 
+# Implementation notes: doc/implementation/build-script-audit.md#split-policy-stamps
+# titanc compares an object's recorded C-part split policy only when a recipe
+# runs it. Each object graph therefore records TITAN_C_PARTS as the caller set
+# it, or `default`, in a stamp its module objects depend on. FORCE recomputes
+# the record on every run, but the stamp is replaced only when its content
+# changes. TITAN_JOBS and -j never change objects and are not recorded.
+TITAN_C_PARTS_POLICY = TITAN_C_PARTS=$(if $(TITAN_C_PARTS),$(TITAN_C_PARTS),default)
+$(STDLIB_C_PARTS_STAMP) $(TITAN_TEST_C_PARTS_STAMP): FORCE
+	@set -e; mkdir -p $(call make_shell_quote,$(@D)); tmp="$@.tmp"; \
+	printf '%s\n' $(call make_shell_quote,$(TITAN_C_PARTS_POLICY)) > "$$tmp"; \
+	if test -r "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv -f "$$tmp" "$@"; fi
+
 $(TITAN_TEST_CONFIG_STAMP): FORCE
 	@mkdir -p $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR))
 	@set -e; \
@@ -1609,7 +1624,8 @@ $(TITAN_TEST_CONFIG_STAMP): FORCE
 define titan_test_object_rule
 $(call titan_test_stem,$(1)).o: FORCE $(TITAN_TEST_SOURCES_$(1)) $(TITAN_TEST_C_INPUTS_$(1)) \
 	$(foreach dependency,$(TITAN_TEST_IMPORTS_$(1)),$(call titan_test_outputs,$(dependency))) \
-	$(TITAN_TEST_COMPILER_PREREQS) $(TITAN_TEST_PROVIDER_PREREQS) $(TITAN_TEST_CONFIG_STAMP)
+	$(TITAN_TEST_COMPILER_PREREQS) $(TITAN_TEST_PROVIDER_PREREQS) $(TITAN_TEST_CONFIG_STAMP) \
+	$(TITAN_TEST_C_PARTS_STAMP)
 	+@$$(RECURSIVE_WRAPPER_GUARD) set -e; stale=0; \
 	$$(CHECK_TITAN_PARTS_COMPANION) \
 	newer=$$(call make_shell_quote,$$(filter-out FORCE,$$?)); \

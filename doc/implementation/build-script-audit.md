@@ -60,7 +60,8 @@ CMake cache, and then its ordinary dependents. A tree without a stamp, for
 example a cache restored from an older recipe, rebuilds that archive once.
 `make -n` cannot evaluate a stamp without running its recipe, so a dry run
 conservatively lists the archive rebuilds, as it does for the native test
-configuration stamp.
+configuration stamp. The module object graphs record their C-part split policy
+the same way ([split-policy stamps](#split-policy-stamps)).
 
 ## Standard-library object graph
 
@@ -118,6 +119,38 @@ changing tools, flags, profile, or OpenSSL mode. Also clean the affected native
 build directories other than libbacktrace and libuv, which follow their
 [configuration stamps](#native-dependency-configuration-stamps), or use
 separate source copies and SDKs.
+
+### Split-policy stamps
+
+Every module object records the C-part split policy that produced it, and the
+compiler's incremental loader rejects an object whose recorded policy differs
+from the current one ([split reuse
+checks](incremental-compilation.md#split-modules)). That check runs only when a
+recipe launches `titanc`; the object rules otherwise decide from timestamps and
+the companion check. Make therefore records the policy itself.
+`TITAN_C_PARTS_POLICY` is `TITAN_C_PARTS=<value>`, with the value exactly as
+the caller set it in the environment or on the command line, or
+`TITAN_C_PARTS=default` when the variable is unset or empty. These recipes never
+pass `--c-parts`. Each object graph keeps one stamp beside the objects it
+guards: `$(TITAN_OUTPUT_DIR)/.titan-c-parts.config` (`STDLIB_C_PARTS_STAMP`)
+for `stdlib_object_rule`, and `$(TITAN_TEST_BUILD_DIR)/c-parts.config`
+(`TITAN_TEST_C_PARTS_STAMP`) for `titan_test_object_rule`, so cleaning one
+graph's directory does not invalidate the other. Like the [native dependency
+configuration stamps](#native-dependency-configuration-stamps), each stamp
+depends on `FORCE` and is replaced only when its content differs (`cmp`, then
+`mv`). A no-op build reads one short file per graph and opens no object.
+
+A changed value makes the stamp newer than every module object of its graph.
+Each object recipe then runs once: it removes the primary object and its
+`.parts` companion and recompiles the module under the new policy, and the
+provider link or test executable relinks because its objects changed. An
+unchanged policy keeps the stamp's timestamp and rebuilds nothing. `TITAN_JOBS`
+and `-j` never change generated files and are not recorded, so changing only
+them rebuilds nothing. Make compares spellings, not effective counts: switching
+between an unset `TITAN_C_PARTS` and the platform default written explicitly
+(`4` on Linux) recompiles every module once. Native fixture objects and the
+dependency archives do not depend on the stamps. `Makefile.win` builds the
+provider with one non-incremental `titanc` run and needs no stamp.
 
 ## Make job pool and titanc recipes
 

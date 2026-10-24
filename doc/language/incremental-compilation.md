@@ -53,16 +53,20 @@ supplies the module's declarations, source-private view, import and native-link
 facts, and generated header information. For a split module it also lists the
 other part objects (`<stem>.part1.o`, `<stem>.part2.o`, and so on). Each listed
 part must be a regular file that is no older than the sources and that was
-compiled for the same target. The `.parts` inventory beside the object is not
-consulted. Reuse covers all of a module's objects or none: a missing, stale, or
-mismatched part makes Titan compile the whole module from source. Reusing a
-module skips parsing, checking, C generation, and C compilation for it. `-v`
-reports reuse and fallback reasons.
+compiled for the same target. It must also be a plain native object: only the
+primary object carries Titan metadata. The `.parts` inventory beside the
+object is not consulted. Reuse covers all of a module's objects or none: a
+missing, stale, or mismatched part makes Titan compile the whole module from
+source. Reusing a module skips parsing, checking, C generation, and C
+compilation for it. `-v` reports reuse and fallback reasons.
 
 Missing or older objects, absent source metadata, failed metadata loading or
 execution, and incompatible Titan ABI metadata fall back to source compilation.
 So does an object compiled with a different `--c-parts` or `TITAN_C_PARTS`
-value, even when its module was not split.
+value, even when its module was not split. Titan applies this check only when
+it runs, so a build tool that skips `titanc` for up-to-date objects must treat
+the part count as an input too; the Titan checkout's Make targets do ([split
+modules](build-profiles.md#split-modules)).
 Metadata emitted by the compiler is trusted. Explicit roots and direct `.titan`
 imports still require actual source files; an orphan object, archive, or DSO
 does not substitute for source-private access.

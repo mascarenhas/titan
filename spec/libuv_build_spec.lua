@@ -1147,6 +1147,8 @@ esac
                 for _, source in ipairs(inputs) do
                     assert(lfs.touch(root .. "/" .. source, old, old))
                 end
+                -- The recorded split policy is an object input too.
+                assert(lfs.touch(root .. "/out/.titan-c-parts.config", old, old))
                 for _, output in ipairs(outputs) do
                     assert(lfs.touch(root .. "/" .. output, old + 1, old + 1))
                 end
@@ -1416,6 +1418,7 @@ esac
                 for _, path in ipairs(inputs) do
                     assert(lfs.touch(root .. "/" .. path, old, old))
                 end
+                assert(lfs.touch(root .. "/out/.titan-c-parts.config", old, old))
                 for _, path in ipairs(outputs) do
                     assert(lfs.touch(root .. "/" .. path, old + 1, old + 1))
                 end
@@ -1665,8 +1668,9 @@ printf '%s\n' "$module" >> ../../build.log
 ]])
             -- The internal graph target runs this -j4 DAG directly on every
             -- GNU Make; the entry's pool recursion (MAKE=false here) has its
-            -- own job-pool regressions.
-            local argv = { "make", "--no-print-directory", "-s", "-j4", "-C", root,
+            -- own job-pool regressions. The caller's split policy starts unset.
+            local argv = { "env", "-u", "TITAN_C_PARTS",
+                "make", "--no-print-directory", "-s", "-j4", "-C", root,
                 "MAKE=false", "TEST_LUA=true", "TEST_TITANC=sh ../../fake-titanc",
                 "TITAN_TEST_INSTALL_ROOT=" .. root,
                 "TITAN_TEST_COMPILER_PREREQS=prepared",
@@ -1695,6 +1699,7 @@ printf '%s\n' "$module" >> ../../build.log
             local old = os.time() - 30
             assert(lfs.touch(root .. "/prepared", old, old))
             assert(lfs.touch(root .. "/out/tests/build.config", old, old))
+            assert(lfs.touch(root .. "/out/tests/c-parts.config", old, old))
             for _, path in ipairs(sources) do
                 assert(lfs.touch(root .. "/" .. path, old, old))
                 for _, suffix in ipairs({ "o", "c", "ffi.h", "parts" }) do
@@ -1709,6 +1714,44 @@ printf '%s\n' "$module" >> ../../build.log
                 ["test.tests"] = true, link = true }, build())
             assert.same({}, build())
             argv[#argv + 1] = "TITAN_FILTER=arbitrary-runtime-filter"
+            assert.same({}, build())
+
+            -- The recorded TITAN_C_PARTS recompiles every module object once
+            -- and relinks when it changes. An unchanged policy keeps its
+            -- stamp, and job settings are not recorded. Settling every output
+            -- after all fixture inputs lets a whole-second Make clock see a
+            -- replaced stamp as newer.
+            local policy = root .. "/out/tests/c-parts.config"
+            assert.equal("TITAN_C_PARTS=default\n", read_file(policy))
+            local function settle(directory)
+                for name in lfs.dir(directory) do
+                    local entry = directory .. "/" .. name
+                    if name ~= "." and name ~= ".." then
+                        if lfs.attributes(entry, "mode") == "directory" then
+                            settle(entry)
+                        else
+                            assert(lfs.touch(entry, old + 5, old + 5))
+                        end
+                    end
+                end
+            end
+            local function build_with(words)
+                local count = #argv
+                for _, word in ipairs(words) do argv[#argv + 1] = word end
+                local built = build()
+                for index = #argv, count + 1, -1 do argv[index] = nil end
+                return built
+            end
+            settle(root .. "/out/tests")
+            assert.same({}, build())
+            assert.same({}, build_with({ "-j2", "TITAN_JOBS=2" }))
+            assert.equal(old + 5, lfs.attributes(policy, "modification"))
+            assert.same(all, build_with({ "TITAN_C_PARTS=8" }))
+            assert.equal("TITAN_C_PARTS=8\n", read_file(policy))
+            assert.same({}, build_with({ "TITAN_C_PARTS=8" }))
+            settle(root .. "/out/tests")
+            assert.same(all, build())
+            assert.equal("TITAN_C_PARTS=default\n", read_file(policy))
             assert.same({}, build())
 
             -- Model a filesystem whose timestamp precision cannot separate
@@ -7226,7 +7269,7 @@ done
             end
             local clean_environment = {
                 "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKELEVEL",
-                "-u", "TITAN_JOBS",
+                "-u", "TITAN_JOBS", "-u", "TITAN_C_PARTS",
                 "TITAN_FIXTURE_STATE=" .. state,
             }
             local function make_argv(environment, flags, goal)
@@ -7293,7 +7336,8 @@ printf '%s\n' "$active" > "$state/active"
 if (( active > $(cat "$state/maximum") )); then
     printf '%s\n' "$active" > "$state/maximum"
 fi
-printf '%s %s %s\n' "$module" "$jobs" "$pool" >> "$state/invocations"
+printf '%s %s %s %s\n' "$module" "$jobs" "$pool" "${TITAN_C_PARTS:-default}" \
+    >> "$state/invocations"
 release
 deadline=$((SECONDS + 5))
 while (( $(cat "$state/maximum") < ${TITAN_FIXTURE_EXPECTED_MAX:-1} )); do
@@ -7340,8 +7384,11 @@ release
                 local result = {}
                 local file = io.open(state .. "/invocations", "rb")
                 if not file then return result end
-                for module, jobs, pool in file:read("a"):gmatch("(%S+) (%S+) (%S+)\n") do
-                    result[#result + 1] = { module = module, jobs = jobs, pool = pool }
+                for module, jobs, pool, parts in
+                        file:read("a"):gmatch("(%S+) (%S+) (%S+) (%S+)\n") do
+                    result[#result + 1] = {
+                        module = module, jobs = jobs, pool = pool, parts = parts,
+                    }
                 end
                 file:close()
                 return result
@@ -7624,6 +7671,77 @@ release
                     assert.equal(case[2], passes, busted_command)
                 end
             end)
+        end)
+
+    it("recompiles every stdlib object once after TITAN_C_PARTS changes and never for job settings",
+        function()
+            if platform.windows then
+                pending("Unix GNU Make object graph")
+                return
+            end
+            local programs = { "make" }
+            local legacy = legacy_gnu_make()
+            if legacy then programs[#programs + 1] = legacy end
+            for _, program in ipairs(programs) do
+                with_stdlib_pool_fixture(program, function(fixture)
+                    local stamp = fixture.root .. "/out/.titan-c-parts.config"
+                    local function rebuild(label, environment, flags)
+                        fixture.reset(false)
+                        local full = {
+                            "TITAN_FIXTURE_SPLIT_MODULE=" .. fixture.split_module,
+                        }
+                        for _, word in ipairs(environment) do full[#full + 1] = word end
+                        local ok, output = run_argv(fixture.make_argv(full, flags,
+                            "stdlib-objects"))
+                        assert.truthy(ok, program .. " " .. label .. ": " .. output)
+                        return fixture.invocations(), output
+                    end
+                    local function assert_recompiled(label, parts, environment, flags)
+                        -- A whole-second Make clock must still see the replaced
+                        -- stamp as newer than every object.
+                        assert.truthy(run_argv({ "sleep", "1" }))
+                        local calls, output = rebuild(label, environment, flags)
+                        label = program .. " " .. label
+                        local seen = {}
+                        for _, call in ipairs(calls) do
+                            assert.falsy(seen[call.module], label .. ": " .. call.module)
+                            seen[call.module] = true
+                            assert.equal(parts, call.parts, label)
+                        end
+                        assert.equal(#STDLIB_MODULES, #calls, label .. ": " .. output)
+                        assert.equal("TITAN_C_PARTS=" .. parts .. "\n", read_file(stamp), label)
+                    end
+
+                    for _, call in pairs(fixture.build(1, {}, { "-j1" })) do
+                        assert.equal("default", call.parts, program)
+                    end
+                    assert.equal("TITAN_C_PARTS=default\n", read_file(stamp), program)
+                    -- An unchanged policy and job settings leave the stamp, and
+                    -- therefore every object, untouched.
+                    local old = os.time() - 60
+                    assert(lfs.touch(stamp, old, old))
+                    for _, case in ipairs({
+                        { "unchanged", {}, {} },
+                        { "-j3", {}, { "-j3" } },
+                        { "environment TITAN_JOBS=2", { "TITAN_JOBS=2" }, {} },
+                        { "command-line TITAN_JOBS=8", {}, { "TITAN_JOBS=8" } },
+                    }) do
+                        local calls, output = rebuild(case[1], case[2], case[3])
+                        assert.equal(0, #calls, program .. " " .. case[1] .. ": " .. output)
+                        assert.equal(old, lfs.attributes(stamp, "modification"),
+                            program .. " " .. case[1])
+                    end
+                    assert_recompiled("command-line 8", "8", {}, { "TITAN_C_PARTS=8" })
+                    -- The environment and the command line spell the same policy.
+                    local calls, output = rebuild("environment 8", { "TITAN_C_PARTS=8" },
+                        { "-j3" })
+                    assert.equal(0, #calls, program .. ": " .. output)
+                    assert_recompiled("environment 1", "1", { "TITAN_C_PARTS=1" }, {})
+                    assert_recompiled("unset", "default", {}, {})
+                    calls, output = rebuild("unset again", {}, {})
+                    assert.equal(0, #calls, program .. ": " .. output)
+                end)
+            end
         end)
 
     it("keeps Make recipes portable to GNU Make 3.81 and guards every titanc launch",

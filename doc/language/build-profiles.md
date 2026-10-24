@@ -131,6 +131,9 @@ modules always stay in one unit. The part count is independent of `--jobs`:
 changing the job bound never changes generated files, while changing the part
 count changes them and makes previously compiled objects stale
 ([incremental compilation](incremental-compilation.md#what-object-reuse-promises)).
+In a Titan checkout, the Make targets that compile the standard library and
+the native tests record `TITAN_C_PARTS` and recompile every module object once
+after it changes; changing only `TITAN_JOBS` or `make -j` recompiles nothing.
 The extra generated files are listed in [Output
 directories](output-directory.md#source-hierarchy-and-final-outputs).
 

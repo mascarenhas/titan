@@ -205,6 +205,10 @@ completeness check and rebuild the whole module when it or a listed part is
 missing or malformed. Make reads the companion; the incremental loader never
 does, and the `.titan.source` record remains the reuse authority
 ([standard-library object graph](build-script-audit.md#standard-library-object-graph)).
+Because the loader's split-policy check runs only inside a `titanc` recipe,
+both object rules also depend on a stamp recording `TITAN_C_PARTS`, so a
+changed part count recompiles their modules
+([split-policy stamps](build-script-audit.md#split-policy-stamps)).
 
 Root driver/metadata specs cover object lookup, fallback, replay, and skipped
 compiler phases. `spec/coder/incremental_compilation_spec.lua` owns CLI and
