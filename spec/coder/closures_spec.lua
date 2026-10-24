@@ -807,7 +807,7 @@ describe("closures (end-to-end)", function()
             local first = assert(csrc:find(
                 signature, declaration + 1, true))
             local last = assert(csrc:find(
-                "static int test_\\u2133_" .. name .. "_titanentry_lua",
+                "TITAN_MODULE_PRIVATE int test_\\u2133_" .. name .. "_titanentry_lua",
                 first, true))
             return csrc:sub(first, last - 1)
         end
@@ -865,7 +865,7 @@ describe("closures (end-to-end)", function()
         local lambda_body = native_body("capture")
         local lambda_closure, lambda_allocation, lambda_root =
             direct_closure(lambda_body,
-                "test_lambda_0_titanentry_lua")
+                "test_\\u2119_lambda_0_titanentry_lua")
         local capture = assert(lambda_body:find(
             "setivalue(&" .. lambda_closure .. "->upvalue[4]",
             lambda_allocation, true))
@@ -878,7 +878,7 @@ describe("closures (end-to-end)", function()
             "lua_Integer test_\\u2133_call_titan(",
             call_declaration + 1, true))
         local call_last = assert(csrc:find(
-            "static int test_\\u2133_call_titanentry_lua", call_first, true))
+            "TITAN_MODULE_PRIVATE int test_\\u2133_call_titanentry_lua", call_first, true))
         local call_body = csrc:sub(call_first, call_last - 1)
         local freeze = assert(call_body:find(
             "= _param_value_;", 1, true))

@@ -40,7 +40,7 @@ end
 local function generate(options, policy, source)
     local ast = checked(source or SOURCE)
     return coder.generate(MODULE, ast, {}, driver.TITAN_ABI_VERSION,
-        policy, options)
+        policy, options).parts[1].code
 end
 
 local function locations(code)
@@ -84,14 +84,14 @@ describe("coverage source ownership in generated C", function()
     it("retains only selected LLVM coverage native lambda definitions", function()
         local before = generate()
         local llvm = generate({ coverage = true, coverage_backend = "llvm-gcov" })
-        assert.matches("static __attribute__((used))", llvm, 1, true)
+        assert.matches("TITAN_MODULE_PRIVATE __attribute__((used))", llvm, 1, true)
         assert.is_nil(generate({ coverage = true }):find("__attribute__((used))", 1, true))
         assert.is_nil(generate({ coverage = false, coverage_backend = "llvm-gcov" }):find("__attribute__((used))", 1, true))
         assert.equal(before, generate())
         -- Entry adapters and declaration prototypes are generated machinery;
         -- only the native body that owns Titan source regions is retained.
         local count = 0
-        for signature in llvm:gmatch("static __attribute__%(%(used%)%)[^\n]+") do
+        for signature in llvm:gmatch("TITAN_MODULE_PRIVATE __attribute__%(%(used%)%)[^\n]+") do
             assert.matches("_lambda_", signature, 1, true)
             assert.is_nil(signature:find("_lua", 1, true))
             assert.is_nil(signature:find("_strict", 1, true))
@@ -115,7 +115,7 @@ end
 ]]
         local llvm = generate({ coverage = true, coverage_backend = "llvm-gcov" }, nil, source)
         local retained = 0
-        for _ in llvm:gmatch("static __attribute__%(%(used%)%)") do retained = retained + 1 end
+        for _ in llvm:gmatch("TITAN_MODULE_PRIVATE __attribute__%(%(used%)%)") do retained = retained + 1 end
         assert.equal(3, retained)
         local converted, err, anchors = lines.convert(llvm, "coverage_attribution.c")
         assert.truthy(converted, err)
@@ -152,8 +152,9 @@ end
             if location.text:find("StkId _base = L->top.p;", 1, true) then
                 assert.equal("coverage_attribution.c", location.filename)
                 prologues = prologues + 1
-            elseif location.text:find("static int", 1, true)
-                and location.text:find("lua_State *L", 1, true) then
+            elseif location.text:find("TITAN_MODULE_PRIVATE int", 1, true)
+                and location.text:find("lua_State *L", 1, true)
+                and location.text:find("{", 1, true) then
                 assert.equal("coverage_attribution.c", location.filename)
                 wrappers = wrappers + 1
             elseif location.text:match("= 99;") then
@@ -216,7 +217,7 @@ end
         assert.is_nil(header:find("static inline", 1, true))
         assert.is_nil(header:find("TITAN_COVERAGE_", 1, true))
         local generated = coder.generate(MODULE, ast, {}, driver.TITAN_ABI_VERSION,
-            true, { coverage = true })
+            true, { coverage = true }).parts[1].code
         local code, err, anchors = lines.convert(generated, "coverage_attribution.c")
         assert.truthy(code, err)
         assert.is_true(anchors[FILENAME][2])
@@ -288,7 +289,7 @@ end
         local _, errors = checker.check(MODULE, ast, source, "folder/folder.titan")
         assert.equal(0, #errors, table.concat(errors, "\n"))
         local generated = coder.generate(MODULE, ast, {}, driver.TITAN_ABI_VERSION,
-            true, { coverage = true })
+            true, { coverage = true }).parts[1].code
         local code, err, anchors = lines.convert(generated, "coverage_attribution.c")
         assert.truthy(code, err)
         assert.same({ [2] = true }, anchors["folder/folder.titan"])

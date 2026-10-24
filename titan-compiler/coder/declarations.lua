@@ -27,7 +27,7 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
         assert(type(strict_plans) == "table",
             "strict Titan function entry lacks checker guard plans")
     end
-    local storage = options.storage or "static"
+    local storage = options.storage or "TITAN_MODULE_PRIVATE"
     local unavailable_result
     for index, result in ipairs(typ.rettypes) do
         if not types.has_tvalue_representation(result) then
@@ -604,10 +604,14 @@ function coder._emit_callable_adapter(tlcontext, site)
             ptrdiff_t _base_off = savestack(L, _base);
         ]]
     end
+    coder._record_private_symbol(tlcontext, site.native,
+        "callable adapter " .. tostring(site.index))
+    coder._record_private_symbol(tlcontext, site.strict,
+        "callable adapter " .. tostring(site.index) .. " strict entry")
     local native_signature = coder._callable_adapter_signature(
         site.native, adapter.target, false)
     local native_body = render([[
-        static TITAN_NOINLINE $SIGNATURE {
+        TITAN_MODULE_PRIVATE TITAN_NOINLINE $SIGNATURE {
             $LINE$GC_POLL
             $ROOT_PREAMBLE
             $ARGUMENT_SOURCES
@@ -648,10 +652,10 @@ function coder._emit_callable_adapter(tlcontext, site)
                 and adapter.strict_relay.vararg.guard or nil,
         })
     local declarations = table.concat({
-        "static TITAN_NOINLINE "
+        "TITAN_MODULE_PRIVATE TITAN_NOINLINE "
         .. coder._callable_adapter_signature(
             site.native, adapter.target, false) .. ";",
-        "static int " .. site.strict .. "(lua_State *L);",
+        "TITAN_MODULE_PRIVATE int " .. site.strict .. "(lua_State *L);",
     }, "\n")
     return declarations, native_body .. "\n" .. strict_body
 end
@@ -1164,8 +1168,8 @@ function codefuncdec(tlcontext, node)
         fname = method_name(node._type)
         luaname = method_luaname(node._type)
         -- fqtn is "<module>.<record>"; a method is "<module>.<record>:<method>".
-        register_trace_name(tlcontext, fname,
-            node._type.fqtn .. ":" .. node._type.name)
+        tracename = node._type.fqtn .. ":" .. node._type.name
+        register_trace_name(tlcontext, fname, tracename)
     end
     -- Detect a `StatTry` in this function's body up front. Nested
     -- function/lambda bodies have their own contexts and are not scanned.
@@ -1313,7 +1317,15 @@ function codefuncdec(tlcontext, node)
             dynamic_plans = node._lua_dynamic_plans,
             dynamic_vararg_plan = node._lua_vararg_dynamic_plan,
         })
+    if has_function_value then
+        coder._record_private_symbol(tlcontext, luaname,
+            "function '" .. tracename .. "' Lua entry")
+        node._sig = node._sig .. "\n    TITAN_MODULE_PRIVATE int " .. luaname
+            .. "(lua_State *L);"
+    end
     if strictname and has_function_value then
+        coder._record_private_symbol(tlcontext, strictname,
+            "function '" .. tracename .. "' strict entry")
         node._strictbody = genluaentry(
             tlcontext, node.name, fname, node._type, node.loc, strictname, {
                 strict = true,
@@ -1322,7 +1334,7 @@ function codefuncdec(tlcontext, node)
                 strict_plans = node._strict_guard_plans,
                 strict_vararg_plan = node._strict_vararg_guard_plan,
             })
-        node._sig = node._sig .. "\n    static int " .. strictname
+        node._sig = node._sig .. "\n    TITAN_MODULE_PRIVATE int " .. strictname
             .. "(lua_State *L);"
         coder._transfer_register_source(tlcontext,
             types.Function(node._type.params, node._type.rettypes, false,
@@ -1374,15 +1386,17 @@ function codeinitializerdec(tlcontext, node)
     table.insert(stats, [[
             L->top.p = _base;
             return;]])
+    coder._record_private_symbol(tlcontext, fname,
+        "module initializer body")
     node._body = render([[
-    static void $NAME(lua_State *L, Udata *_mod, CClosure *_fn) {
+    TITAN_MODULE_PRIVATE void $NAME(lua_State *L, Udata *_mod, CClosure *_fn) {
         $BODY
     }]], {
         NAME = fname,
         BODY = table.concat(stats, "\n")
     })
     node._sig = render([[
-        static void $NAME(lua_State *L, Udata *_mod, CClosure *_fn);
+        TITAN_MODULE_PRIVATE void $NAME(lua_State *L, Udata *_mod, CClosure *_fn);
     ]], {
         NAME = fname,
     })
@@ -1532,12 +1546,11 @@ function lambda_register(tlcontext, node)
     if not node._lambda_native then
         local n = tlcontext.lambda_count
         tlcontext.lambda_count = n + 1
-        node._lambda_native = tlcontext.prefix .. "lambda_" .. n
-        node._lambda_lua = tlcontext.prefix .. "lambda_" .. n .. "_" .. TITAN_ENTRY_TAG .. "_lua"
-        node._lambda_strict =
-            tlcontext.prefix .. "lambda_" .. n .. "_" ..
-            TITAN_ENTRY_TAG .. "_strict"
-        -- An anonymous function shows as "anonymous function at <file>:<defline>"
+        local stem = coder._private_symbol(tlcontext.module, "lambda", n)
+        node._lambda_index = n
+        node._lambda_native = stem
+        node._lambda_lua = stem .. "_" .. TITAN_ENTRY_TAG .. "_lua"
+        node._lambda_strict = stem .. "_" .. TITAN_ENTRY_TAG .. "_strict"
         -- (the lambda's DEFINITION loc), formatted into the name table here.
         register_trace_name(tlcontext, node._lambda_native, anon_qualname(node.loc))
         register_trace_name(tlcontext, node._lambda_strict,
@@ -1872,10 +1885,16 @@ function codelambdadec(tlcontext, node)
         local ur = unreachable_return(rettype, node.block)
         if ur then table.insert(stats, ur) end
     end
+    coder._record_private_symbol(tlcontext, fname,
+        "anonymous function " .. tostring(node._lambda_index))
+    coder._record_private_symbol(tlcontext, luaname,
+        "anonymous function " .. tostring(node._lambda_index) .. " Lua entry")
+    coder._record_private_symbol(tlcontext, node._lambda_strict,
+        "anonymous function " .. tostring(node._lambda_index) .. " strict entry")
     local nativesig = cfunctiondecl(
         rettype, fname, table.concat(cparams, ", "), false)
     node._body = render([[
-    static $RETENTION$SIGNATURE {
+    TITAN_MODULE_PRIVATE $RETENTION$SIGNATURE {
         $BODY
     }]], {
         SIGNATURE = nativesig,
@@ -1883,9 +1902,9 @@ function codelambdadec(tlcontext, node)
         BODY = table.concat(stats, "\n")
     })
     node._sig = render([[
-        static $SIGNATURE;
-        static int $LUANAME(lua_State *L);
-        static int $STRICTNAME(lua_State *L);
+        TITAN_MODULE_PRIVATE $SIGNATURE;
+        TITAN_MODULE_PRIVATE int $LUANAME(lua_State *L);
+        TITAN_MODULE_PRIVATE int $STRICTNAME(lua_State *L);
     ]], {
         SIGNATURE = nativesig,
         LUANAME = luaname,

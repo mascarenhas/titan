@@ -52,7 +52,7 @@ describe("generated nominal codecs", function()
                 return Hooked(#payload)
             end
         ]])
-        local _, tables = c:gsub("static const TitanTransferCodec ", "")
+        local _, tables = c:gsub("TITAN_MODULE_PRIVATE const TitanTransferCodec ", "")
         assert.equal(1, tables)
         for _, name in ipairs({ "test.Point", "test.Chain", "test.Listed",
                                 "test.UsesListed", "test.Dynamic" }) do
@@ -83,7 +83,7 @@ describe("generated nominal codecs", function()
                 return 42
             end
         ]])
-        assert.is_nil(c:find("static const TitanTransferCodec ", 1, true))
+        assert.is_nil(c:find("TITAN_MODULE_PRIVATE const TitanTransferCodec ", 1, true))
         assert.is_nil(c:find("TITAN_MT_CODEC", 1, true))
     end)
 

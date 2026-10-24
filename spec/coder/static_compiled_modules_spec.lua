@@ -469,7 +469,7 @@ describe("static compiled-module native containers", function()
             'titan_module_preload(L, "fixture.target", sizeof("fixture.target") - 1,',
             generated, 1, true)
         assert.match(
-            'luaopen_fixture_target, fixture_target_native_symbol);',
+            'luaopen_fixture_target, fixture_target_\\u2119_native_symbol);',
             generated, 1, true)
 
         local wrong, err = driver.derive_target_fingerprint(

@@ -965,8 +965,8 @@ function coder._callable_adapter_site(tlcontext, adapter)
     if prior then return prior end
     local index = tlcontext.callable_adapter_count
     tlcontext.callable_adapter_count = index + 1
-    local stem = tlcontext.prefix
-        .. "callable_adapter_" .. tostring(index)
+    local stem = coder._private_symbol(tlcontext.module,
+        "callable_adapter", index)
     local site = {
         adapter = adapter,
         index = index,

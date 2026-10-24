@@ -1948,11 +1948,13 @@ function coder._emit_interface_adapter(
             return _ia_interface_result_1;
         ]]
     end
+    coder._record_private_symbol(tlcontext, name,
+        "interface adapter '" .. pair.concrete.name .. "' -> '"
+            .. pair.interface.name .. "' slot " .. tostring(index - 1))
     register_trace_name(tlcontext, name, adapter.trace_name)
     local signature =
         coder._interface_adapter_signature(
             name, adapter.native_signature, false)
-    local root_preamble
     if ctx.nslots > 0 then
         root_preamble = render([[
             /* Rooted scratch occupies NSLOTS entries. */
@@ -1974,7 +1976,7 @@ function coder._emit_interface_adapter(
         ]]
     end
     local body = render([[
-        static TITAN_NOINLINE $SIGNATURE {
+        TITAN_MODULE_PRIVATE TITAN_NOINLINE $SIGNATURE {
             (void)_fn;
             $GC_POLL
             $ROOT_PREAMBLE
@@ -1999,7 +2001,7 @@ function coder._emit_interface_adapter(
         HANDOFF = table.concat(handoff, "\n"),
         FINISH = finish,
     })
-    return "static TITAN_NOINLINE "
+    return "TITAN_MODULE_PRIVATE TITAN_NOINLINE "
         .. coder._interface_adapter_signature(
             name, adapter.native_signature, false)
         .. ";", body
@@ -2299,8 +2301,12 @@ function coder._interface_pair(ctx, conversion, loc)
             assert(mapping.slot_kind == "adapter"
                    and mapping.interface_adapter,
                 use .. " has an adjusted mapping without a frozen adapter")
-            entry.adapter_ids[index] =
-                entry.id .. "_adapter_" .. tostring(index - 1)
+            entry.adapter_ids[index] = coder._private_symbol(
+                tlcontext.module,
+                "interface_pair_" .. coder._interface_symbol_fragment(concrete.name)
+                    .. "_to_" .. coder._interface_symbol_fragment(interface.name)
+                    .. "_adapter",
+                index - 1)
             coder._validate_interface_adapter(
                 mapping.interface_adapter,
                 concrete, interface, mapping,
@@ -2346,6 +2352,9 @@ function coder._prepare_interface_pair_wrapper(tlcontext, pair)
 
     -- Preserve the established method-only witness exactly: it needs no
     -- snapshot conversion helper or private stack frame.
+    coder._record_private_symbol(tlcontext, pair.wrapper_id,
+        "interface wrapper '" .. pair.concrete.name .. "' -> '"
+            .. pair.interface.name .. "'")
     if #pair.fields == 0 then
         local allocation = coder._render_interface_wrapper_allocation({
             wrapper_decl =
@@ -2363,11 +2372,11 @@ function coder._prepare_interface_pair_wrapper(tlcontext, pair)
             vtable = coder._module_native_ref(tlcontext, pair.id),
         })
         pair.wrapper_sig = render(
-            "static int $NAME(lua_State *L);", {
+            "TITAN_MODULE_PRIVATE int $NAME(lua_State *L);", {
                 NAME = pair.wrapper_id,
             })
         pair.wrapper_body = render([[
-            static int $NAME(lua_State *L) {
+            TITAN_MODULE_PRIVATE int $NAME(lua_State *L) {
                 StkId _titan_interface_func = L->ci->func.p;
                 CClosure *_titan_interface_witness =
                     clCvalue(s2v(_titan_interface_func));
@@ -2426,17 +2435,20 @@ function coder._prepare_interface_pair_wrapper(tlcontext, pair)
     else
         reserve = "StkId _base = L->top.p;"
     end
+    coder._record_private_symbol(tlcontext, pair.allocator_id,
+        "interface allocator '" .. pair.concrete.name .. "' -> '"
+            .. pair.interface.name .. "'")
     pair.wrapper_sig = render([[
-        static Udata *$ALLOCATOR(
+        TITAN_MODULE_PRIVATE Udata *$ALLOCATOR(
             lua_State *L, Udata *_mod,
             Udata *_titan_interface_concrete);
-        static int $WRAPPER(lua_State *L);
+        TITAN_MODULE_PRIVATE int $WRAPPER(lua_State *L);
     ]], {
         ALLOCATOR = pair.allocator_id,
         WRAPPER = pair.wrapper_id,
     })
     pair.wrapper_body = render([[
-        static Udata *$ALLOCATOR(
+        TITAN_MODULE_PRIVATE Udata *$ALLOCATOR(
                 lua_State *L, Udata *_mod,
                 Udata *_titan_interface_concrete) {
             $RESERVE
@@ -2448,7 +2460,7 @@ function coder._prepare_interface_pair_wrapper(tlcontext, pair)
             return _titan_interface_result_value;
         }
 
-        static int $WRAPPER(lua_State *L) {
+        TITAN_MODULE_PRIVATE int $WRAPPER(lua_State *L) {
             StkId _titan_interface_func = L->ci->func.p;
             CClosure *_titan_interface_witness =
                 clCvalue(s2v(_titan_interface_func));

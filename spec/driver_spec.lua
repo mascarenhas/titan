@@ -3724,6 +3724,10 @@ describe("compiler module loader", function()
                 external_symbols = {},
                 layouts = empty_layouts(entry.type.name),
                 foreign_header = entry.ast and entry.ast._foreign_header_recipe,
+                parts_version = 1,
+                parts = {
+                    { index = 0, c_suffix = ".c", object_suffix = ".o" },
+                },
             }
             if payload == nil then payload = assert(objectmetadata.encode(entry, native)) end
             local code = payload == false and "int ordinary_object;\n"
@@ -3852,9 +3856,10 @@ describe("compiler module loader", function()
             assert(driver.prepare_foreign_headers({ name }, driver.imported, false, false))
             local generate = coder.generate
             coder.generate = function(...)
-                local results = table.pack(generate(...))
-                results[1] = results[1] .. "\n#error TITAN_INTENTIONAL_REPLACEMENT_FAILURE\n"
-                return table.unpack(results, 1, results.n)
+                local generated = generate(...)
+                generated.parts[1].code = generated.parts[1].code ..
+                    "\n#error TITAN_INTENTIONAL_REPLACEMENT_FAILURE\n"
+                return generated
             end
             local called, failure = xpcall(function()
                 ok, err = driver.compile_module(name, entry, dependencies, false)

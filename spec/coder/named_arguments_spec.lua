@@ -153,7 +153,7 @@ describe("named arguments (code generation)", function()
         local first = assert(csrc:find(
             "lua_Integer test_\\u2133_named_titan(", declaration + 1, true))
         local last = assert(csrc:find(
-            "static int test_\\u2133_named_titanentry_lua", first, true))
+            "TITAN_MODULE_PRIVATE int test_\\u2133_named_titanentry_lua", first, true))
         local body = csrc:sub(first, last - 1)
         local second_freeze = assert(body:find(
             "_tmp_1 = _param_second;", 1, true))

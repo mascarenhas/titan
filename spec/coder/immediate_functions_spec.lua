@@ -12,7 +12,7 @@ local function generate(source)
     assert.truthy(ast, parse_error)
     local _, errors = checker.check("test", ast, source, "test.titan")
     assert.equal(0, #errors, table.concat(errors, "\n"))
-    return coder.generate("test", ast, {}, driver.TITAN_ABI_VERSION)
+    return coder.generate("test", ast, {}, driver.TITAN_ABI_VERSION).parts[1].code
 end
 
 local function native_body(csrc, name)

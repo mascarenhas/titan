@@ -7,9 +7,11 @@
 *.exe
 *.dSYM/
 
-# Compiler-generated module C declaration environments and foreign interfaces
+# Compiler-generated module C declaration environments, foreign interfaces, and companions
 *.ffi.h
 *.titan.h
+*.priv.h
+*.parts
 
 # Retired Lua release archives; Lua source is a tracked submodule.
 /lua-5.*.tar.gz
