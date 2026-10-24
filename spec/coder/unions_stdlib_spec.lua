@@ -12,7 +12,8 @@ describe("unions with the standard provider", function()
                                   ".titan.h", ".priv.h", ".parts" }) do
             os.remove("test" .. suffix)
         end
-        assert(driver.remove_path("test.so.dSYM"))
+        local removed, remove_error = driver.remove_path("test.so.dSYM")
+        assert.truthy(removed, remove_error)
     end)
 
     it("publishes a boxed payload reader including private Array variants", function()

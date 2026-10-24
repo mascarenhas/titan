@@ -451,14 +451,20 @@ local function build_one_so(name, src, names)
         local _, errs = checker.check(
             name, ast, src, name .. ".titan", loader)
         if #errs ~= 0 then return nil, name .. ": " .. table.concat(errs, "\n") end
-        for dep in pairs(static_deps) do
+        local dependencies = {}
+        for dep in pairs(static_deps) do dependencies[#dependencies + 1] = dep end
+        table.sort(dependencies)
+        for _, dep in ipairs(dependencies) do
             if names[dep] and dep ~= name then
                 return nil, name .. " linked '" .. dep .. "' statically, not via .so"
             end
-            return nil, name .. ": dependency '" .. dep ..
-                "' resolved from source or a static archive; build_so_chain links " ..
-                "only the root module; place tests that import standard-library " ..
-                "modules in the installed-stdlib group"
+        end
+        if #dependencies > 0 then
+            return nil, name .. ": dependency '" .. dependencies[1] ..
+                "' resolved from source or a static archive; build_so_chain and " ..
+                "check_against_so link only the root module; list tests importing " ..
+                "standard-library modules in spec/support/ci_stdlib_compiler_test_files.txt " ..
+                "with a matching stdlib row in spec/support/ci_compiler_test_groups.txt"
         end
         local ok, err, _, _, objects =
             driver.compile(name, ast, nil, static_deps, verbose())

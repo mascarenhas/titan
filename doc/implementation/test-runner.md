@@ -289,7 +289,7 @@ The following existing splits avoid duplicated provider/build scaffolding:
 | Contract | Existing regression homes |
 | --- | --- |
 | Type-relation laws / checker plans / generated boundary parity | `spec/types_spec.lua`, then the topical checker/coder `type_relations_soundness_spec.lua`. |
-| Union syntax / checker frontiers / generated representation / hostile metadata | Lexer/parser specs, checker/coder `unions_spec.lua`, and `spec/union_interface_spec.lua`; extend compiled-module suites for source/DSO/archive composition. |
+| Union syntax / checker frontiers / generated representation / hostile metadata | Lexer/parser specs, checker/coder `unions_spec.lua`, and `spec/union_interface_spec.lua`; reflected payload readers in `spec/coder/unions_stdlib_spec.lua`; extend compiled-module suites for source/DSO/archive composition. |
 | Folder resolution and diagnostics / public artifacts and mixed-file traces | Filesystem cases in `spec/driver_spec.lua`, then `spec/coder/folder_modules_spec.lua`. |
 | Root-major metadata claims and provider lookup | `spec/driver_spec.lua`. |
 | Prefix-container compilation, generated shims, promotion, paired publication, rollback, real macOS universal archives | `spec/coder/multi_module_libraries_spec.lua`, with packaging in `rockspec_spec.lua`. |
@@ -418,6 +418,9 @@ installed-stdlib domain and consume the installed provider. For example,
 `spec/coder/split_units_spec.lua` uses transfer, protobuf, and reflection, and
 `spec/coder/unions_stdlib_spec.lua` tests generated payload readers through
 reflection. Compiler-only union cases remain in `spec/coder/unions_spec.lua`.
+The shared-provider helpers `helpers.build_so_chain` and `check_against_so`
+link only the root module and reject dependencies resolved from source or
+static archives.
 CI runs the installed-stdlib files only after installing the standard provider;
 local Unix and Windows unfiltered runs still schedule each file exactly once
 through the same per-file inventory.
