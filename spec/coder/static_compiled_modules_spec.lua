@@ -6,6 +6,7 @@ local driver = require "titan-compiler.driver"
 local lfs = require "lfs"
 local parser = require "titan-compiler.parser"
 local staticmetadata = require "titan-compiler.staticmetadata"
+local sha256 = require "titan-compiler.sha256"
 local types = require "titan-compiler.types"
 local compiler_io = require "titan-compiler.io"
 local platform = require "titan-compiler.platform"
@@ -376,6 +377,8 @@ describe("static compiled-module native containers", function()
         driver.AR = original_ar
         driver.RANLIB = original_ranlib
         driver.TITAN_BIN_PATH = original_titan_bin_path
+        local removed, err = driver.remove_path(workspace .. "/generated sidecar.o")
+        assert.truthy(removed, err)
     end)
 
     it("calls public foreign entries from an archive without source or a DSO", function()
@@ -481,30 +484,32 @@ describe("static compiled-module native containers", function()
     it("rejects damaged, metadata-bearing and wrong-target generated sidecar objects", function()
         local part = workspace .. "/generated sidecar.o"
         local valid_bytes = read_file(plain_object)
+        local valid_digest = sha256.hex(valid_bytes)
         local generated = { {
             modname = "fixture.target", filename = target_object,
             objects = { target_object, part },
         } }
         local cases = {
-            { "missing" },
-            { "truncated", valid_bytes:sub(1, 8) },
-            { "archive", read_file(input_archive) },
-            { "module metadata", read_file(target_object) },
-            { "different target", patch_target_fingerprint(valid_bytes, target) },
+            { "missing", nil, "cannot read native input" },
+            { "truncated", valid_bytes:sub(1, 8), "is outside the input" },
+            { "archive", read_file(input_archive), "not a single-architecture relocatable object" },
+            { "module metadata", read_file(target_object), "unexpectedly contains Titan module metadata" },
+            { "different target", patch_target_fingerprint(valid_bytes, target), "target mismatch" },
         }
         for _, case in ipairs(cases) do
             if case[2] then write_file(part, case[2])
             else os.remove(part) end
             local ok, err = driver.validate_generated_objects(generated, target)
             assert.is_nil(ok, case[1])
-            assert.is_string(err, case[1])
+            assert.matches(case[3], err, 1, true)
 
             write_file(part, valid_bytes)
             ok, err = driver.validate_generated_objects(generated, target)
             assert.truthy(ok, err)
-            assert.equal(valid_bytes, read_file(part))
+            local restored = read_file(part)
+            assert.equal(#valid_bytes, #restored)
+            assert.equal(valid_digest, sha256.hex(restored))
         end
-        assert(os.remove(part))
     end)
 
     it("publishes preload state before the package library opens", function()

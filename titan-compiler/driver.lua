@@ -10447,18 +10447,6 @@ function driver.validate_provider_output_paths(
         ok, err = add_output(path,
             assert(generated.owner), generated.mode or "file")
         if not ok then return nil, err end
-        if generated.marker then
-            local attr = lfs.symlinkattributes(path)
-            if attr and attr.mode == "file" then
-                local existing = util.get_file_contents(path)
-                if not existing or existing:sub(1, #generated.marker)
-                   ~= generated.marker then
-                    return nil, "refusing to overwrite user-owned "
-                        .. (generated.marker_kind or "generated")
-                        .. " path '" .. path .. "'"
-                end
-            end
-        end
     end
     for _, input in ipairs(native_inputs or {}) do
         local path = archive_input_path(input)
