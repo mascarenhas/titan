@@ -613,10 +613,11 @@ end
     end)
 
     -- A deferred rejection changes later checking of the consumer: the
-    -- abandoned pass types a pointer and reads an enum field that the
-    -- synchronous check never reaches. Imported graphs (including the
-    -- dependency's enum carrier state), interfaces and a later root's
-    -- generated C must still be the synchronous ones.
+    -- abandoned pass types a pointer and reads a field of dep's untagged
+    -- paint struct, which selects the carrier of dep's own enum in place.
+    -- The synchronous check never reaches that read. The recheck restores
+    -- the journaled carrier, so imported graphs, interfaces and a later
+    -- root's generated C are the synchronous ones.
     it("leave a source-imported dependency's graph as the synchronous check does",
     function()
         local modules = {
@@ -702,8 +703,8 @@ end
         assert.truthy(count(batched.executions, function(event)
             return event.batch_kind == "speculative" and event.module == "consumer"
         end) > 0)
-        -- The synchronous check never selects that enum's carrier, and the
-        -- abandoned pass leaves it unselected too.
+        -- The synchronous check never selects that enum's carrier; the
+        -- abandoned pass did, and the journal restored it.
         assert.is_nil(color_state(sync).validated)
         assert.same(color_state(sync), color_state(batched))
         for _, name in ipairs({ "dep", "later" }) do

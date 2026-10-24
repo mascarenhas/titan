@@ -825,10 +825,13 @@ describe("synchronous compiler I/O batches", function()
 
     it("runs a single command or a single granted slot in order through run",
     function()
+        -- Windows batches apply only the local cap, so a serial parent Make
+        -- does not reduce them to one slot there; the two commands then take
+        -- the native batch.
         for _, case in ipairs({
-            { makeflags = nil, jobs = 1, count = 2 },
-            { makeflags = "-j1", jobs = 4, count = 2 },
-            { makeflags = nil, jobs = 4, count = 1 },
+            { makeflags = nil, jobs = 1, count = 2, serial = true },
+            { makeflags = "-j1", jobs = 4, count = 2, serial = not platform.windows },
+            { makeflags = nil, jobs = 4, count = 1, serial = true },
         }) do
             under_make(case.makeflags, function()
                 local strategy = compiler_io.new_sync()
@@ -842,9 +845,9 @@ describe("synchronous compiler I/O batches", function()
                     commands[index] = script("printf " .. index)
                 end
                 local results = strategy:run_batch(commands, { jobs = case.jobs })
-                assert.equal(case.count, #ran)
+                assert.equal(case.serial and case.count or 0, #ran)
                 for index = 1, case.count do
-                    assert.equal("printf " .. index, ran[index])
+                    if case.serial then assert.equal("printf " .. index, ran[index]) end
                     assert.is_true(results[index].ok)
                     assert.equal(tostring(index), results[index].output)
                 end

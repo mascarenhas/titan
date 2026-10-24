@@ -34,7 +34,9 @@ typedef enum spec_wide_enum {
 
 typedef int speculative_flaky_t;
 
-typedef struct speculative_reject_paint { spec_color color; } speculative_reject_paint;
+/* Untagged, so an importer reads its fields through the producer's own
+   declaration rather than rebinding them to a file-scope tag it declares. */
+typedef struct { spec_color color; } speculative_reject_paint;
 
 static spec_ok_t spec_three(void) { return 3; }
 static speculative_flaky_t spec_flaky_value(void) { return 2; }
