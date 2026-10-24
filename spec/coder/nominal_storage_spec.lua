@@ -257,7 +257,7 @@ describe("native nominal storage", function()
     end)
 
     it("fuses fresh const arrays with lexical checks and distinct empty tails", function()
-        local csrc = h.compile_and_read_c([[
+        local _, ast = h.compile_and_read_c([[
             foreign import "spec/fixtures/nominal_allocation_probe.h"
             record NativeIntArray
                 const length: integer
@@ -308,11 +308,11 @@ describe("native nominal storage", function()
         ]])
         -- The named make body contains exactly its final userdata allocation;
         -- no owned-array allocator or automatic backing buffer is present.
-        local signature = "test_\\u2133_NativeIntArray_\\u2131_make_titanstatic("
-        local start = assert(csrc:find(signature, 1, true))
-        start = assert(csrc:find(signature, start + 1, true))
-        local stop = assert(csrc:find("static int ", start, true))
-        local body = csrc:sub(start, stop - 1)
+        local body
+        for _, node in ipairs(ast) do
+            if node.name == "make" then body = node._body end
+        end
+        assert.truthy(body)
         local _, allocations = body:gsub("luaS_newudata", "")
         assert.equal(1, allocations)
         assert.falsy(body:find("_backing", 1, true))

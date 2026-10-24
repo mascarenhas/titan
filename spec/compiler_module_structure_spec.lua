@@ -24,6 +24,8 @@ describe("compiler module facades", function()
 
     it("exports only the production coder API", function()
         assert.same({
+            "DEFAULT_SPLIT_THRESHOLD",
+            "PRIVATE_HEADER_MARKER",
             "external_symbols",
             "foreign_external_symbols",
             "generate",
@@ -32,7 +34,13 @@ describe("compiler module facades", function()
             "interface_external_symbols",
             "prepare_coverage",
         }, sorted_keys(coder))
-        for _, value in pairs(coder) do assert.is_function(value) end
+        assert.is_number(coder.DEFAULT_SPLIT_THRESHOLD)
+        assert.is_string(coder.PRIVATE_HEADER_MARKER)
+        for name, value in pairs(coder) do
+            if name ~= "DEFAULT_SPLIT_THRESHOLD" and name ~= "PRIVATE_HEADER_MARKER" then
+                assert.is_function(value, name)
+            end
+        end
     end)
 
     it("keeps implementation helpers out of the Lua global namespace",

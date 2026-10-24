@@ -168,6 +168,7 @@ local function remove_artifact(path)
     if stem then
         os.remove(stem .. ".ffi.h")
         os.remove(stem .. ".titan.h")
+        os.remove(stem .. ".parts")
         if platform.windows then
             os.remove(path .. ".manifest")
             os.remove(path .. ".rc")
@@ -229,6 +230,10 @@ local function source_lua_arguments(argv)
         table.insert(argv, 2, "TITAN_ROCKS_ROOT=" ..
             require("spec.support.installed_prefix").active())
     else
+        -- The checkout profile's SDK override belongs to this Busted process,
+        -- not these source-layout CLI probes, which deliberately pass --lua.
+        table.insert(argv, 2, "-u")
+        table.insert(argv, 3, "TITAN_ROCKS_ROOT")
         -- Source-checkout compilers need the matching installed Lua SDK, even
         -- when the checkout itself has never built Lua.
         lua_workspace = lua_workspace or async_stdlib.workspace("test-runner")
@@ -846,7 +851,9 @@ end
         argv[#argv + 1] = colliding
         local ok, output = run(argv)
         assert.falsy(ok, output)
-        assert.truthy(output:find("aliases output", 1, true), output)
+        assert.truthy(output:find("shared by source modules", 1, true), output)
+        assert.truthy(output:find(colliding, 1, true), output)
+        assert.truthy(output:find("titan.test.runner", 1, true), output)
         assert.is_false(file_exists(suite .. ".c"))
         assert.is_false(file_exists(colliding .. ".c"))
         assert.is_false(file_exists(suite .. suffix .. ".o"))

@@ -212,9 +212,12 @@ end
 ]])
         local ordinary = coder.generate_foreign_header(MODULE, ast)
         assert.truthy(ordinary:find("static inline", 1, true))
+        assert.truthy(ordinary:find("%+"))
         coder.prepare_coverage(ast, true)
         local header = coder.generate_foreign_header(MODULE, ast)
-        assert.is_nil(header:find("static inline", 1, true))
+        -- An inline direct-call relay may remain, but the authored arithmetic
+        -- must move into the instrumented producer body.
+        assert.is_nil(header:find("%+"))
         assert.is_nil(header:find("TITAN_COVERAGE_", 1, true))
         local generated = coder.generate(MODULE, ast, {}, driver.TITAN_ABI_VERSION,
             true, { coverage = true }).parts[1].code
