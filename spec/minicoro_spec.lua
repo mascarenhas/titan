@@ -857,8 +857,13 @@ int main(void) {
         for _, argument in ipairs(arguments) do
             compiler[#compiler + 1] = argument
         end
-        for _, flag in ipairs(driver.EXTRA_CPPFLAGS or {}) do
-            compiler[#compiler + 1] = flag
+        -- The harness links the instrumented runtime archive, so it needs the
+        -- same extra compile and link flags (for example sanitizer runtimes).
+        for _, flags in ipairs({ driver.EXTRA_CPPFLAGS or {}, driver.EXTRA_CFLAGS or {},
+                                 driver.EXTRA_LDFLAGS or {} }) do
+            for _, flag in ipairs(flags) do
+                compiler[#compiler + 1] = flag
+            end
         end
         if not platform.windows and not driver.IS_DARWIN then
             compiler[#compiler + 1] = "-ldl"
