@@ -143,7 +143,7 @@ local function generate_with_profile(source, profile)
     local close_ok, close_error = service:close()
     assert.truthy(close_ok, close_error)
     assert.equal(0, #errors, table.concat(errors, "\n"))
-    return coder.generate(MODULE, ast, {}, driver.TITAN_ABI_VERSION)
+    return coder.generate(MODULE, ast, {}, driver.TITAN_ABI_VERSION).parts[1].code
 end
 
 describe("C FFI operator code generation", function()

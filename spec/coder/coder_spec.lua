@@ -58,7 +58,7 @@ local function clean()
     for name in pairs(generated_modules) do
         local stem = name:gsub("[.]", "/")
         for _, suffix in ipairs({ ".o", ".so", ".a", ".dll", ".def",
-                ".dll.def", ".so.dSYM", ".ffi.h", ".titan.h", ".c" }) do
+                ".dll.def", ".so.dSYM", ".ffi.h", ".titan.h", ".priv.h", ".parts", ".c" }) do
             local path = stem .. suffix
             if (suffix ~= ".c" or not h.verbose) and lfs.symlinkattributes(path) then
                 remove_generated(path)
@@ -72,7 +72,7 @@ local function generated_native_function(csrc, name)
     local native = "test_\\u2133_" .. name .. "_titan(lua_State *L"
     local declaration = assert(csrc:find(native, 1, true), native)
     local definition = assert(csrc:find(native, declaration + 1, true), native)
-    local lua_entry = "static int test_\\u2133_" .. name
+    local lua_entry = "TITAN_MODULE_PRIVATE int test_\\u2133_" .. name
         .. "_titanentry_lua"
     local boundary = assert(csrc:find(lua_entry, definition, true), lua_entry)
     return csrc:sub(definition, boundary - 1)
@@ -234,7 +234,7 @@ describe("call sequencing regressions", function()
             "lua_Integer test_\\u2133_native_call_titan(",
             declaration + 1, true))
         local last = assert(csrc:find(
-            "static int test_\\u2133_native_call_titanentry_lua", first, true))
+            "TITAN_MODULE_PRIVATE int test_\\u2133_native_call_titanentry_lua", first, true))
         local body = csrc:sub(first, last - 1)
         local copy = assert(body:find("_tmp_1 = _param_text;", 1, true))
         local call = assert(body:find(", NULL, _tmp_1", copy, true), body)
@@ -2292,7 +2292,7 @@ describe("Titan code generator", function()
             local companion = assert(util.get_file_contents(stem .. ".titan.h"))
             assert.match('#include "' .. stem .. '.ffi.h"', companion, 1, true)
         end)
-        for _, extension in ipairs({ ".titan", ".c", ".o", ".ffi.h", ".titan.h" }) do
+        for _, extension in ipairs({ ".titan", ".c", ".o", ".parts", ".priv.h", ".ffi.h", ".titan.h" }) do
             os.remove(stem .. extension)
         end
         assert(lfs.rmdir(root))

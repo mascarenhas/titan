@@ -149,7 +149,7 @@ describe("numeric operator semantics (Lua 5.5 parity)", function()
         local ast = parse(code)
         local _, errs = checker.check("test", ast, code, "test.titan")
         assert.equal(0, #errs, table.concat(errs, "\n"))
-        local c = coder.generate("test", ast, {}, driver.TITAN_ABI_VERSION)
+        local c = coder.generate("test", ast, {}, driver.TITAN_ABI_VERSION).parts[1].code
         assert.truthy(c:find("LUA_MININTEGER", 1, true),
             "expected LUA_MININTEGER in the generated C")
         assert.falsy(c:find("9223372036854775808", 1, true),

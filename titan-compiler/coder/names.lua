@@ -322,7 +322,27 @@ function coder._linkage_symbol_name(c_spelling)
     -- and native symbol tools expose the corresponding UTF-8 linkage name.
     return (c_spelling
         :gsub("\\u2133", "\226\132\179")
-        :gsub("\\u2131", "\226\132\177"))
+        :gsub("\\u2131", "\226\132\177")
+        :gsub("\\u2119", "\226\132\153"))
+end
+
+function coder._private_symbol(modname, family, id)
+    local base = modprefix(modname) .. "\\u2119_" .. family
+    if id ~= nil then
+        return base .. "_" .. tostring(id)
+    end
+    return base
+end
+
+function coder._record_private_symbol(tlcontext, symbol, owner)
+    if not tlcontext or not tlcontext.private_symbols then return end
+    local linkage = coder._linkage_symbol_name(symbol)
+    if tlcontext.private_symbol_seen[linkage] then return end
+    tlcontext.private_symbol_seen[linkage] = true
+    tlcontext.private_symbols[#tlcontext.private_symbols + 1] = {
+        symbol = linkage,
+        owner = owner,
+    }
 end
 
 function func_name(modname, name, _)
@@ -388,7 +408,8 @@ function coder._static_strictname(typ)
 end
 
 function module_initializer_name(tlcontext)
-    return tlcontext.prefix .. TITAN_ENTRY_TAG .. "_module_initializer"
+    return coder._private_symbol(tlcontext.module,
+        TITAN_ENTRY_TAG .. "_module_initializer")
 end
 
 local function add_binary_slot_symbols(symbols, modname, modtype)
@@ -680,8 +701,9 @@ function coder._array_writer(ctx, elem, plan)
         elem = elem,
         plan = plan,
         slot = nextupvalue(tlcontext),
-        name = tlcontext.prefix .. "array_writer_"
-            .. tostring(tlcontext.array_writer_count),
+        index = tlcontext.array_writer_count,
+        name = coder._private_symbol(tlcontext.module,
+            "array_writer", tlcontext.array_writer_count),
     }
     tlcontext.array_writer_count = tlcontext.array_writer_count + 1
     table.insert(tlcontext.array_writer_list, entry)
@@ -728,6 +750,9 @@ function function_type_tag(tlcontext, ftype --[[:table]])
         tlcontext.functag_count = n + 1
         entry = {
             id = tlcontext.prefix .. "functag_" .. n,
+            tag_symbol = coder._private_symbol(tlcontext.module,
+                "functag", tostring(n) .. "_tag"),
+            index = n,
             key = key,
             tag = types.serialize_semantic(ftype),
         }

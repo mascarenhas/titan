@@ -35,7 +35,7 @@ describe("first-class function values (end-to-end)", function()
         local declaration = assert(csrc:find(signature))
         local first = assert(csrc:find(signature, declaration + 1))
         local last = assert(csrc:find(
-            "static int test_\\u2133_invoke_titanentry_lua", first, true))
+            "TITAN_MODULE_PRIVATE int test_\\u2133_invoke_titanentry_lua", first, true))
         local body = csrc:sub(first, last - 1)
         local dispatch = assert(body:find(
             "CClosure *_vc_callee =", 1, true))

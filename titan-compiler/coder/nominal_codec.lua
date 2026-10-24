@@ -429,7 +429,7 @@ local function emit_record(ctx, node, encode, decode)
     }
     local rooted = encodes_reflectively(owner.fields)
     return render([[
-        static void $ENCODE(lua_State *L, TitanCodecState *_st, Udata *_rec,
+        TITAN_MODULE_PRIVATE void $ENCODE(lua_State *L, TitanCodecState *_st, Udata *_rec,
             const TitanCodecPath *_path, int _depth) {
             TitanCodecPath _self;
             titan_codec_depth(L, _depth);
@@ -441,7 +441,7 @@ local function emit_record(ctx, node, encode, decode)
             $ENCODE_FIELDS
             $UNROOT
         }
-        static void $DECODE(lua_State *L, TitanCodecState *_st, Udata *_mod,
+        TITAN_MODULE_PRIVATE void $DECODE(lua_State *L, TitanCodecState *_st, Udata *_mod,
             const uint8_t *_data, size_t _length, int _depth) {
             TitanCodecField _fields[$CAPACITY];
             Udata *_rec;
@@ -511,7 +511,7 @@ local function emit_union(ctx, node, encode, decode)
         })
     end
     return render([[
-        static void $ENCODE(lua_State *L, TitanCodecState *_st, Udata *_rec,
+        TITAN_MODULE_PRIVATE void $ENCODE(lua_State *L, TitanCodecState *_st, Udata *_rec,
             const TitanCodecPath *_path, int _depth) {
             TitanCodecPath _self;
             titan_codec_depth(L, _depth);
@@ -526,7 +526,7 @@ local function emit_union(ctx, node, encode, decode)
                     return;
             }
         }
-        static void $DECODE(lua_State *L, TitanCodecState *_st, Udata *_mod,
+        TITAN_MODULE_PRIVATE void $DECODE(lua_State *L, TitanCodecState *_st, Udata *_mod,
             const uint8_t *_data, size_t _length, int _depth) {
             TitanCodecField _variant;
             TitanCodecField _parts[$PART_CAPACITY];
@@ -563,7 +563,7 @@ end
 -- Implementation notes: doc/implementation/protobuf-library.md#generated-nominal-codecs
 -- Emit the codec pair for one source nominal declaration and register its
 -- manifest entry. Ineligible nominals stay entirely reflective.
-function coder._codec_emit(ctx, code, node)
+function coder._codec_emit(ctx, sigs, code, node)
     if not eligible(node) then return end
     local owner = node._type
     local tlcontext = ctx.tlcontext or ctx
@@ -578,6 +578,19 @@ function coder._codec_emit(ctx, code, node)
     }
     tlcontext.transfer_codecs[#tlcontext.transfer_codecs + 1] = entry
     tlcontext.transfer_codec_index[owner.name] = entry
+    coder._record_private_symbol(tlcontext, entry.encode,
+        "nominal codec '" .. owner.name .. "' encode")
+    coder._record_private_symbol(tlcontext, entry.decode,
+        "nominal codec '" .. owner.name .. "' decode")
+    sigs[#sigs + 1] = render([[
+        TITAN_MODULE_PRIVATE void $ENCODE(lua_State *L, TitanCodecState *_st, Udata *_rec,
+            const TitanCodecPath *_path, int _depth);
+        TITAN_MODULE_PRIVATE void $DECODE(lua_State *L, TitanCodecState *_st, Udata *_mod,
+            const uint8_t *_data, size_t _length, int _depth);
+    ]], {
+        ENCODE = entry.encode,
+        DECODE = entry.decode,
+    })
     local emit = entry.is_union and emit_union or emit_record
     code[#code + 1] = emit(ctx, node, entry.encode, entry.decode)
 end
@@ -589,10 +602,10 @@ function coder._codec_binding(ctx, node)
         and tlcontext.transfer_codec_index[node._type.name]
     if not entry then return "" end
     return render([[
-        lua_pushconstlightuserdata(L, &${PREFIX}transfer_codecs[$INDEX]);
+        lua_pushconstlightuserdata(L, &$ARRAY[$INDEX]);
         lua_rawsetp(L, -2, TITAN_MT_CODEC);
     ]], {
-        PREFIX = tlcontext.prefix,
+        ARRAY = coder._private_symbol(tlcontext.module, "transfer_codecs"),
         INDEX = c_integer_literal(entry.index),
     })
 end
@@ -612,8 +625,9 @@ function coder._codec_emit_table(tlcontext, code)
             DECODE = entry.decode,
         })
     end
-    local array = tlcontext.prefix .. "transfer_codecs"
-    code[#code + 1] = "static const TitanTransferCodec " .. array
+    local array = coder._private_symbol(tlcontext.module, "transfer_codecs")
+    coder._record_private_symbol(tlcontext, array, "nominal codec table")
+    code[#code + 1] = "TITAN_MODULE_PRIVATE const TitanTransferCodec " .. array
         .. "[] = {\n" .. table.concat(initializers, ",\n") .. "\n};"
     return array, #entries
 end

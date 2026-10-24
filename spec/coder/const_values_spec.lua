@@ -20,7 +20,7 @@ local function generate(source)
     local _, errors = checker.check(
         "test", tree, source, "test.titan")
     assert.equal(0, #errors, table.concat(errors, "\n"))
-    return coder.generate("test", tree, {}, driver.TITAN_ABI_VERSION)
+    return coder.generate("test", tree, {}, driver.TITAN_ABI_VERSION).parts[1].code
 end
 
 local function generated_function(c_source, marker)

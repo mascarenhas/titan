@@ -3,7 +3,7 @@ local temporary = require "spec.support.temporary"
 
 describe("closure transfer metadata generation", function()
     after_each(function()
-        for _, suffix in ipairs({ ".c", ".o", ".so", ".a", ".lua" }) do
+        for _, suffix in ipairs({ ".c", ".o", ".so", ".a", ".lua", ".ffi.h", ".priv.h", ".parts" }) do
             os.remove("test" .. suffix)
         end
     end)
@@ -20,7 +20,7 @@ describe("closure transfer metadata generation", function()
                 end
             end
         ]])
-        local _, manifests = c:gsub("static const TitanTransferModule ", "")
+        local _, manifests = c:gsub("TITAN_MODULE_PRIVATE const TitanTransferModule ", "")
         assert.equal(1, manifests)
         assert.truthy(c:find("TITAN_TRANSFER_MANIFEST_SYMBOL", 1, true))
         assert.truthy(c:find("TValue _value = lua_totvalue(L, _capture_base + 0)", 1, true))
