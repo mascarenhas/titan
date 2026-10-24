@@ -2024,21 +2024,26 @@ function ProbeBatch:_answer(key)
     return answers[position]
 end
 
--- Raised errors keep their identity: a strategy cancellation from
--- preparation or `run_batch` unwinds after every prepared probe's artifacts
--- are removed. A result container that is not a table answers no command,
--- so each prepared probe finishes as an infrastructure failure. A caught
--- INT/TERM/HUP is recorded on the service and unwinds the check as an error
--- after per-probe cleanup; `Service:close` delivers it once the workspaces
--- are gone (a resolver closes its header bundle before its service).
+-- One cleanup boundary owns preparation, dispatch, finishing and
+-- publication. A caught INT/TERM/HUP returned by `run_batch` is recorded on
+-- the service at once, so `Service:close` delivers it once the workspaces
+-- are gone (a resolver closes its header bundle before its service) even if
+-- a later step raises. Every prepared probe is finished, removing its
+-- artifacts, before any verdict is published. A raised error (a strategy
+-- cancellation) first retries the finishing of every unfinished prepared
+-- probe; a probe whose cleanup raises again stays in the service workspace
+-- for its close. The original error object is then rethrown. A result
+-- container that is not a table, or whose entry cannot be read, answers no
+-- command, so that probe finishes as an infrastructure failure.
 function ProbeBatch:flush()
     self.deferring = false
     local pending, requests = self.pending, self.requests
     self.pending, self.pending_by_key, self.requests = {}, {}, {}
     if #pending == 0 then return true end
     local service = self.service
-    local prepared, commands = {}, {}
-    local called, results, cancelled = pcall(function()
+    local prepared = {}
+    local called, accepted, cancelled = pcall(function()
+        local commands = {}
         for index, request in ipairs(pending) do
             local job, failed = service:_prepare_execution(request.stage,
                 request.source, request.key, (request.kind:gsub("_", "-")), nil,
@@ -2049,50 +2054,72 @@ function ProbeBatch:flush()
             end
             prepared[index] = job or { failed = failed }
         end
-        if #commands == 0 then return {} end
-        -- A strategy method, called directly like the synchronous runner.
-        return service.io:run_batch(commands, { jobs = service.jobs })
+        local results, signal = {}, nil
+        if #commands > 0 then
+            -- A strategy method, called directly like the synchronous runner.
+            results, signal = service.io:run_batch(commands, { jobs = service.jobs })
+        end
+        -- Never continue checking under a returning signal handler: the
+        -- service's owner delivers this after closing it.
+        if signal then service.cancelled_signal = signal end
+        local malformed = type(results) ~= "table" and
+            ("C probe batch runner returned a " .. type(results) ..
+                " instead of a result table") or nil
+        local executions = {}
+        for index, job in ipairs(prepared) do
+            local execution = job.failed
+            if not execution then
+                local result, unreadable = nil, malformed
+                if not malformed then
+                    local readable, value = pcall(function()
+                        return results[job.command_index]
+                    end)
+                    if readable then result = value else
+                        unreadable = "C probe batch result could not be read: " ..
+                            protected_tostring(value, "unprintable error")
+                    end
+                end
+                execution = service:_finish_execution(job, true, result, unreadable)
+                job.finished = true
+            end
+            executions[index] = execution
+        end
+        local all_accepted = true
+        for index, request in ipairs(pending) do
+            local execution = executions[index]
+            self:_observe(request.key, execution)
+            local run, publication = service:_publish_result(
+                request.key, request.path, execution)
+            request.run, request.publication = run, publication
+            service:_trace_execution(request.key, request.kind, request.context,
+                execution, request.lookup, publication, "speculative")
+            if execution.classification ~= "success" then all_accepted = false end
+        end
+        for _, entry in ipairs(requests) do
+            local request = entry.request
+            if entry.duplicate then
+                service:_trace_semantic(request.key, entry.kind, entry.context, {
+                    classification = request.run.classification,
+                    cache_tier = publishable(request.run) and "service" or nil,
+                })
+            else
+                service:_trace_semantic(request.key, entry.kind, entry.context,
+                    request.run, request.publication)
+            end
+        end
+        return all_accepted, signal
     end)
     if not called then
         for _, job in ipairs(prepared) do
-            if not job.failed then
-                pcall(service._finish_execution, service, job, false, results)
+            if not job.failed and not job.finished then
+                local finished = pcall(service._finish_execution, service, job,
+                    false, accepted)
+                job.finished = finished
             end
         end
-        error(results, 0)
-    end
-    local malformed = type(results) ~= "table" and
-        ("C probe batch runner returned a " .. type(results) ..
-            " instead of a result table") or nil
-    local accepted = true
-    for index, request in ipairs(pending) do
-        local job = prepared[index]
-        local execution = job.failed or service:_finish_execution(job, true,
-            not malformed and results[job.command_index] or nil, malformed)
-        self:_observe(request.key, execution)
-        local run, publication = service:_publish_result(
-            request.key, request.path, execution)
-        request.run, request.publication = run, publication
-        service:_trace_execution(request.key, request.kind, request.context,
-            execution, request.lookup, publication, "speculative")
-        if execution.classification ~= "success" then accepted = false end
-    end
-    for _, entry in ipairs(requests) do
-        local request = entry.request
-        if entry.duplicate then
-            service:_trace_semantic(request.key, entry.kind, entry.context, {
-                classification = request.run.classification,
-                cache_tier = publishable(request.run) and "service" or nil,
-            })
-        else
-            service:_trace_semantic(request.key, entry.kind, entry.context,
-                request.run, request.publication)
-        end
+        error(accepted, 0)
     end
     if cancelled then
-        -- Never continue checking under a returning signal handler: unwind
-        -- to the service's owner, which closes it and then delivers.
-        service.cancelled_signal = cancelled
         error("C probe batch interrupted by signal " .. tostring(cancelled), 0)
     end
     return accepted

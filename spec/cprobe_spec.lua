@@ -3764,6 +3764,113 @@ describe("speculative acceptance batches", function()
         assert.is_true(service:close())
     end)
 
+    it("finishes every prepared probe when finishing or publication raises",
+    function()
+        local jobs = require "titan-compiler.jobs"
+        local cancellation = setmetatable({}, {
+            __tostring = function() return "injected strategy cancellation" end,
+        })
+        -- A strategy-owned workspace (its methods are called directly, so a
+        -- cancellation unwinds) whose first removal after `armed` raises.
+        local function raising_removal()
+            local state, _, base_provider = fake_environment()
+            local control = { armed = false, raised = 0 }
+            local function provider(...)
+                local workspace = base_provider(...)
+                workspace._compiler_io_strategy_owned = true
+                local remove = workspace.remove
+                function workspace:remove(name)
+                    if control.armed and control.raised == 0 then
+                        control.raised = 1
+                        error(cancellation)
+                    end
+                    return remove(self, name)
+                end
+                return workspace
+            end
+            return state, control, provider
+        end
+        local function deferred_pair(service)
+            local module, batch = deferring_context(service)
+            local source = cpointer("source_s")
+            local first = module:probe_unsafe_object_pointer(source, cpointer("first_s"))
+            local second = module:probe_unsafe_object_pointer(source, cpointer("second_s"))
+            return batch, first, second
+        end
+
+        -- Cancellation in the first result's artifact removal.
+        local state, control, provider = raising_removal()
+        local service = batching_service(accept, { temp_provider = provider })
+        local batch, first, second = deferred_pair(service)
+        control.armed = true
+        local called, raised = pcall(batch.flush, batch)
+        assert.is_false(called)
+        assert.equal(cancellation, raised)
+        assert.equal(1, control.raised)
+        -- Both prepared probes were finished before the error unwound.
+        assert.same({}, state.files)
+        assert.is_nil(service.result_cache[first.key])
+        assert.is_nil(service.result_cache[second.key])
+        assert.is_true(service:close())
+
+        -- Cancellation while publishing the first verdict to the disk tier.
+        local directory = temporary_directory()
+        local ok, err = pcall(function()
+            local published, _, publish_state = batching_service(accept, {
+                cache_directory = directory,
+            })
+            local publish_batch = deferred_pair(published)
+            published.io.write_file = function() error(cancellation) end
+            local publish_called, publish_raised = pcall(publish_batch.flush, publish_batch)
+            assert.is_false(publish_called)
+            assert.equal(cancellation, publish_raised)
+            assert.same({}, publish_state.files)
+            assert.is_true(published:close())
+        end)
+        remove_directory(directory)
+        assert(ok, err)
+
+        -- A caught signal returned with the results survives the raise and
+        -- is delivered once, by the owner's close, after cleanup.
+        local delivered = {}
+        local previous = jobs.propagate
+        jobs.propagate = function(signal)
+            if signal then
+                delivered[#delivered + 1] = { signal = signal, files = next(state.files) }
+            end
+        end
+        ok, err = pcall(function()
+            local signal_state, signal_control, signal_provider = raising_removal()
+            local signalled, log = batching_service(accept, { temp_provider = signal_provider })
+            local signal_batch = deferred_pair(signalled)
+            log.cancel = 15
+            signal_control.armed = true
+            local signal_called, signal_raised = pcall(signal_batch.flush, signal_batch)
+            assert.is_false(signal_called)
+            assert.equal(cancellation, signal_raised)
+            assert.equal(15, signalled.cancelled_signal)
+            assert.same({}, delivered)
+            assert.same({}, signal_state.files)
+            assert.is_true(signalled:close())
+            assert.same({ { signal = 15 } }, delivered)
+        end)
+        jobs.propagate = previous
+        assert(ok, err)
+
+        -- An indexed result container that raises answers no command.
+        local proxied, _, proxy_state = batching_service(accept)
+        proxied.io.run_batch = function()
+            return setmetatable({}, { __index = function() error("proxy failure") end })
+        end
+        local proxy_batch, proxy_first = deferred_pair(proxied)
+        assert.is_false(proxy_batch:flush())
+        assert.same({}, proxy_state.files)
+        local outcome = proxy_batch.outcomes[proxy_first.key][1]
+        assert.equal("infrastructure_failure", outcome.classification)
+        assert.matches("proxy failure", outcome.diagnostic, 1, true)
+        assert.is_true(proxied:close())
+    end)
+
     it("reports preparation failures and delivers a caught signal after close",
     function()
         local jobs = require "titan-compiler.jobs"
