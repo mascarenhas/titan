@@ -429,10 +429,11 @@ trees, so all workers share the installed SDK read-only.
 `TITAN_ROCK_TEST_JOBS` (any positive integer) sets the number of ordinary
 workers, capped at the number of ordinary files. It defaults to four, or to
 three when the native build shares the pool (Unix `rock-test`): a fourth
-worker would wait for a slot while the build holds one. Measured on a 24-thread
-Linux host with a cold native build, `rock-test` took 492 s with three workers
-and 560 s with four, while `busted-test` alone took 300 s with four and 324 s
-with three. Each worker owns a private copy of the prepared checkout,
+worker would wait for a slot while the build holds one. In calibration runs on
+a 24-thread Linux host with a cold native build, taken while seven spec files
+still failed (so only the comparison is meaningful), three workers finished
+`rock-test` about 12% sooner than four, while `busted-test` alone was about 7%
+faster with four. Each worker owns a private copy of the prepared checkout,
 `TMPDIR`, ccache scratch, and tagged log. It runs one Busted process per file
 with `MAKEFLAGS=-j1` and
 `TITAN_JOBS=1`, removes checkout-root generated artifacts between files,
