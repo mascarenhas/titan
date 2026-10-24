@@ -6008,7 +6008,7 @@ printf '%s\n' "${schedule[@]}"
                 assert.truthy(inventory.metadata[meta_key], meta_key)
             end
             assert.equal(7, #inventory.retained)
-            assert.equal(9, #inventory.stdlib)
+            assert.equal(10, #inventory.stdlib)
             assert.equal(#inventory.items,
                 #inventory.retained + #inventory.stdlib + #inventory.compiler)
             local assigned = {}
@@ -6020,6 +6020,14 @@ printf '%s\n' "${schedule[@]}"
             end
             assert.is_true(assigned["spec/coder/jobserver_spec.lua"])
             assert.is_true(assigned["spec/coder/split_units_spec.lua"])
+            assert.equal("stdlib",
+                inventory.by_path["spec/coder/split_units_spec.lua"].domain)
+            local compiler_plan = assert(groups_helper.plan_ci(inventory))
+            for _, shard in ipairs(compiler_plan) do
+                for _, item in ipairs(shard.items) do
+                    assert.not_equal("spec/coder/split_units_spec.lua", item.path)
+                end
+            end
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")
             local stress_assigned = {}

@@ -953,26 +953,32 @@ end
             write_file(src_dir .. "/pkg/main.titan", main_src)
 
             local context = driver.new_resolver_context({
-                source_first = true,
                 output_root = out_dir,
             })
             assert(driver.configure_foreign_c(context))
             local prev_src = driver.TITAN_SOURCE_PATH
             local prev_out = driver.OUTPUT_ROOT
-            driver.TITAN_SOURCE_PATH = src_dir
+            driver.TITAN_SOURCE_PATH = src_dir .. ";" .. prev_src
             driver.OUTPUT_ROOT = assert(driver.prepare_output_root(out_dir))
             local loader = driver.defaultloader({}, {
                 source_roots = { ["pkg.dep"] = true, ["pkg.main"] = true },
-                source_first = true,
                 context = context,
                 output_root = driver.OUTPUT_ROOT,
                 c_parts = c_parts,
                 split_threshold = threshold,
             })
-            assert(checker.checkimport("pkg.dep", loader))
-            assert(checker.checkimport("pkg.main", loader))
-            assert(driver.finalize_resolver_context(context))
-            local linked_names = { "pkg.dep", "pkg.main" }
+            for _, name in ipairs({ "pkg.dep", "pkg.main" }) do
+                local modtype, errors = checker.checkimport(name, loader)
+                assert.truthy(modtype, errors)
+                assert.equal(0, #errors, table.concat(errors, "\n"))
+            end
+            local finalized, errors = driver.finalize_resolver_context(context)
+            assert.truthy(finalized, errors and table.concat(errors, "\n"))
+            local linked_names = {}
+            for name in pairs(context.source_names) do
+                linked_names[#linked_names + 1] = name
+            end
+            table.sort(linked_names)
             local plans = assert(driver.plan_foreign_headers(linked_names, driver.imported))
             assert(driver.write_foreign_header_plans(plans, false, false))
 
@@ -1044,8 +1050,9 @@ end
                 out_dir = out_dir,
                 dso = dso_path,
                 archive = archive_path,
-                dep_objects = results[1].objects,
-                main_objects = results[2].objects,
+                dep_objects = driver.module_compiled_objects(driver.imported["pkg.dep"]),
+                main_objects = driver.module_compiled_objects(driver.imported["pkg.main"]),
+                module_names = linked_names,
                 private_symbols = driver.imported["pkg.main"].private_symbols,
             }
         end
@@ -1086,10 +1093,12 @@ print("VARIANT_OK")
         end
 
         if platform.windows then
-            local _, expected = driver.windows_provider_exports({ "pkg.dep", "pkg.main" }, {
-                ["pkg.dep"] = driver.imported["pkg.dep"].type,
-                ["pkg.main"] = driver.imported["pkg.main"].type,
-            }, "pkg.dll")
+            local interfaces = {}
+            for _, name in ipairs(split.module_names) do
+                interfaces[name] = driver.imported[name].type
+            end
+            local _, expected = driver.windows_provider_exports(
+                split.module_names, interfaces, "pkg.dll")
             table.sort(expected)
             for _, variant in ipairs({ unsplit, split }) do
                 local ok, output = run_cmd({ "llvm-readobj", "--coff-exports", variant.dso })

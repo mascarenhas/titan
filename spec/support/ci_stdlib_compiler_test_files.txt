@@ -6,6 +6,7 @@ spec/coder/incremental_compilation_spec.lua
 spec/coder/multi_module_grouping_spec.lua
 spec/coder/multi_module_libraries_spec.lua
 spec/coder/native_coverage_spec.lua
+spec/coder/split_units_spec.lua
 spec/coder/test_runner_spec.lua
 spec/coder/unwind_stdlib_spec.lua
 spec/stdlib_compiler_spec.lua

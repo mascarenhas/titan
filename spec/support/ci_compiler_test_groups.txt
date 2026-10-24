@@ -127,7 +127,7 @@ compiler spec/coder/reflection_projection_spec.lua 1.628 0.000
 compiler spec/coder/so_import_spec.lua 8.934 16.910
 compiler spec/coder/so_trace_names_spec.lua 1.334 6.051
 compiler spec/coder/source_import_local_visibility_spec.lua 8.831 76.086
-compiler spec/coder/split_units_spec.lua 13.160 -
+stdlib spec/coder/split_units_spec.lua 13.160 -
 compiler spec/coder/spread_expressions_spec.lua 5.039 11.918
 compiler spec/coder/stack_capacity_spec.lua 0.744 4.596
 compiler spec/coder/stack_relocation_spec.lua 1.034 6.715

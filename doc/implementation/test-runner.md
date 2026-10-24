@@ -413,6 +413,12 @@ file first, ties by path, to the least-loaded worker); each worker runs its
 files in path order. No shard identity is stored. Add a measured row with every
 new spec file and remeasure rows when costs change materially.
 
+The installed-stdlib domain includes `spec/coder/split_units_spec.lua`, whose
+cross-part metadata checks consume the transfer, protobuf, and reflection
+modules. CI runs it only after installing the standard provider. Local Unix
+and Windows unfiltered runs still schedule it exactly once through the same
+per-file inventory; it is not also assigned to a compiler-only CI shard.
+
 `EXCLUSIVE_SPECS` names the genuinely exclusive files:
 `spec/coder/parallel_compilation_spec.lua` and `spec/coder/jobserver_spec.lua`
 count overlapping real compiler processes against their own caps, drive real

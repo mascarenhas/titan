@@ -96,9 +96,14 @@ gates. Immediately before installation, remove only the restored unregistered
 `share/lua/5.5/c-parser/` preparation copies. Otherwise LuaRocks preserves them
 as `~` backups. Preserve dependencies and SDK/runtime files.
 
-Run `make stdlib-busted-test`, then the eight integrations through
-`ci_test_groups.sh stdlib-compiler` with LuaCov. Snapshot and restore the
-canonical provider pair, shims, and checkout runtime around compiler fixtures.
+Run `make stdlib-busted-test`, then the installed-stdlib integrations listed in
+`spec/support/ci_stdlib_compiler_test_files.txt` through
+`ci_test_groups.sh stdlib-compiler` with LuaCov. This includes
+`spec/coder/split_units_spec.lua`: its cross-part metadata checks import
+transfer, protobuf, and reflection from the installed provider, whose native
+dependencies are intentionally absent from the compiler SDK. Snapshot and
+restore the canonical provider pair, shims, and checkout runtime around
+compiler fixtures.
 The `rockspec_spec.lua` publication gate stages the already validated installed
 pair/shims and passes the exact `STDLIB_INSTALL_STAGE` to `publish-stdlib`;
 calling build-dependent `install-stdlib` here would rebuild all roots. Keep
