@@ -381,14 +381,18 @@ success result carrying the real key.
 numbered names, written source, argv), passes all argv arrays to the I/O
 strategy's optional `run_batch(commands, { jobs = N })`, and finishes each with
 `_finish_execution`: runner-result normalization, private-path diagnostic
-normalization and per-probe artifact removal. `_publish_result` then stores
-only real success and compiler rejection in memory, analysis and disk tiers.
+normalization and per-probe artifact removal. Every prepared probe is
+finished before `_publish_result` stores any verdict, and it stores only real
+success and compiler rejection in memory, analysis and disk tiers.
 Assumed success, infrastructure failures, malformed results and
-cancellation are never published. A result container that is not a table
-answers no command: every prepared probe still finishes, as an
-infrastructure failure. An error raised during preparation or by
-`run_batch` itself, such as a strategy cancellation, removes every prepared
-probe's artifacts and is then rethrown unchanged. Staged generated headers
+cancellation are never published. A result container that is not a table, or
+an entry that raises when read, answers no command: that probe still
+finishes, as an infrastructure failure. One cleanup boundary covers
+preparation, `run_batch`, finishing and publication. An error raised anywhere
+in it, such as a strategy cancellation during dispatch, artifact removal or
+cache publication, first retries the finishing of every unfinished prepared
+probe (a probe whose cleanup raises again stays in the service workspace for
+`Service:close`) and is then rethrown unchanged. Staged generated headers
 belong to the service until `Service:close`, so they outlive every reaped
 child.
 
@@ -420,10 +424,12 @@ calling the runner synchronously. No API-1 strategy method is required.
 
 `run_batch` reaps every launched child and returns its borrowed tokens on
 every exit ([Driver](driver.md#parallel-generated-c-compilation)). A caught
-INT/TERM/HUP comes back to `flush` as a signal number. After per-probe cleanup
-the flush records it on the service and raises
-`C probe batch interrupted by signal N`, so checking never continues under a
-returning signal handler. The check unwinds to the service's owner:
+INT/TERM/HUP comes back to `flush` as a signal number, which it records on the
+service at once, so the signal survives even if finishing or publication then
+raises. After per-probe cleanup the flush raises
+`C probe batch interrupted by signal N` (or the strategy's own error), so
+checking never continues under a returning signal handler. The check unwinds
+to the service's owner:
 `driver.close_resolver_context` closes the resolver's C header bundle and
 then the service, whose `Service:close` removes its workspaces and staged
 headers and only then delivers the signal with `jobs.propagate`. `titanc`
