@@ -3329,6 +3329,95 @@ describe("standalone output ownership", function()
 
         if not entries then remove_tree(root) end
     end)
+
+    describe("split artifact destinations", function()
+        local root
+        before_each(function()
+            root = temporary.name()
+            assert(os.remove(root))
+            assert(lfs.mkdir(root))
+        end)
+        after_each(function() remove_tree(root) end)
+
+        it("preserves authored companions and private headers but accepts compiler-owned ones", function()
+            local stem = root .. "/module"
+            local sources = { { modname = "module", output = stem .. ".titan",
+                                c_parts = 3 } }
+            for _, suffix in ipairs({ ".parts", ".priv.h" }) do
+                local filename = stem .. suffix
+                local contents = "authored " .. suffix .. "\n"
+                write_file(filename, contents)
+                local ok = driver.validate_program_output_paths(
+                    sources, root .. "/program", root .. "/entrypoint.c", {})
+                assert.is_nil(ok, suffix)
+                assert.equal(contents, assert(util.get_file_contents(filename, "rb")))
+                assert.is_nil(lfs.attributes(stem .. ".c"))
+                assert.is_nil(lfs.attributes(stem .. ".o"))
+                assert(os.remove(filename))
+            end
+
+            local companion = driver.render_parts_companion(stem, 3)
+            local header = driver.PRIVATE_HEADER_MARKER .. "\n/* declarations */\n"
+            write_file(stem .. ".parts", companion)
+            write_file(stem .. ".priv.h", header)
+            local ok, err = driver.validate_program_output_paths(
+                sources, root .. "/program", root .. "/entrypoint.c", {})
+            assert.truthy(ok, err)
+            assert.equal(companion, assert(util.get_file_contents(stem .. ".parts", "rb")))
+            assert.equal(header, assert(util.get_file_contents(stem .. ".priv.h")))
+        end)
+
+        it("rejects every sidecar collision with a native input or another module's output", function()
+            local stem = root .. "/module"
+            local split = { modname = "module", output = stem .. ".titan", c_parts = 3 }
+            for part = 1, 2 do
+                for _, suffix in ipairs({ ".c", ".o" }) do
+                    local filename = stem .. ".part" .. part .. suffix
+                    local contents = "native input " .. filename .. "\n"
+                    write_file(filename, contents)
+                    local ok = driver.validate_program_output_paths(
+                        { split }, root .. "/program", root .. "/entrypoint.c",
+                        { filename })
+                    assert.is_nil(ok, filename)
+
+                    ok = driver.validate_program_output_paths({
+                        { modname = "other", output = root .. "/other.titan",
+                          foreign_header = filename },
+                        split,
+                    }, root .. "/program", root .. "/entrypoint.c", {})
+                    assert.is_nil(ok, filename)
+                    assert.equal(contents, assert(util.get_file_contents(filename)))
+                    assert(os.remove(filename))
+                end
+            end
+        end)
+
+        it("protects authored marker-guarded provider outputs and accepts owned replacements", function()
+            for _, artifact in ipairs({
+                { ".parts", driver.PARTS_COMPANION_HEADER_PREFIX },
+                { ".priv.h", driver.PRIVATE_HEADER_MARKER },
+                { ".ffi.h", driver.FFI_HEADER_MARKER },
+            }) do
+                local filename = root .. "/module" .. artifact[1]
+                local outputs = { { path = filename, owner = "module artifact",
+                                    marker = artifact[2] } }
+                local contents = "authored " .. artifact[1] .. "\n"
+                write_file(filename, contents)
+                local ok = driver.validate_provider_output_paths(
+                    root .. "/provider.so", {}, outputs)
+                assert.is_nil(ok, artifact[1])
+                assert.equal(contents, assert(util.get_file_contents(filename)))
+
+                contents = artifact[2] .. "\n/* compiler-owned contents */\n"
+                write_file(filename, contents)
+                local err
+                ok, err = driver.validate_provider_output_paths(
+                    root .. "/provider.so", {}, outputs)
+                assert.truthy(ok, err)
+                assert.equal(contents, assert(util.get_file_contents(filename)))
+            end
+        end)
+    end)
 end)
 
 describe("compiler module loader", function()

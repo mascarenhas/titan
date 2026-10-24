@@ -478,6 +478,35 @@ describe("static compiled-module native containers", function()
         assert.match("has no Titan metadata section", err, 1, true)
     end)
 
+    it("rejects damaged, metadata-bearing and wrong-target generated sidecar objects", function()
+        local part = workspace .. "/generated sidecar.o"
+        local valid_bytes = read_file(plain_object)
+        local generated = { {
+            modname = "fixture.target", filename = target_object,
+            objects = { target_object, part },
+        } }
+        local cases = {
+            { "missing" },
+            { "truncated", valid_bytes:sub(1, 8) },
+            { "archive", read_file(input_archive) },
+            { "module metadata", read_file(target_object) },
+            { "different target", patch_target_fingerprint(valid_bytes, target) },
+        }
+        for _, case in ipairs(cases) do
+            if case[2] then write_file(part, case[2])
+            else os.remove(part) end
+            local ok, err = driver.validate_generated_objects(generated, target)
+            assert.is_nil(ok, case[1])
+            assert.is_string(err, case[1])
+
+            write_file(part, valid_bytes)
+            ok, err = driver.validate_generated_objects(generated, target)
+            assert.truthy(ok, err)
+            assert.equal(valid_bytes, read_file(part))
+        end
+        assert(os.remove(part))
+    end)
+
     it("publishes preload state before the package library opens", function()
         local harness = workspace .. "/preload-before-package.c"
         local executable = workspace .. "/preload-before-package" ..
