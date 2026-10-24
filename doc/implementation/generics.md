@@ -519,9 +519,25 @@ layouts as non-generic code.
 reaches `Type.GenericScope`, `Type.TypeParameter`, `Type.Parameter`,
 `Type.FunctionScheme`, `Type.GenericAlias`, an applied `Type.Nominal`, or a
 record, union, Interface, method, or static method that still carries a scope
-or binders. It walks every table field except `_tag`, with a per-call `seen`
-set, so it also traverses plans and source-navigation edges and can be costly
-on a large module graph. Callers therefore test cheap shapes first:
+or binders. It walks every table field except `_tag` and `_c_origin_header`,
+with a per-call `seen` set, so it also traverses plans and source-navigation
+edges and can be costly on a large module graph.
+
+`_c_origin_header` is header provenance, not type structure. A C declaration
+node, or a foreign module member, records the include that spelled it
+(`types.mark_c_ffi_include`, `checker/declarations.lua`). That include record,
+its generated header, the dependency headers, the search inputs and their file
+observations are closed plain data: strings, integers, string lists and the
+other records in that list (`declarationschemas.lua` `include`, `header`,
+`input` and `observation`; `ffiheaders.lua` asserts that the include and
+typedef lists hold strings). No type table is reachable through the edge, so
+skipping it cannot change an answer. Following it, every query that reached a
+C type walked the whole header dependency graph again: about 89% of the tables
+visited while compiling `titan.uv`, and about 87% for `titan.ssl`. Every other
+field of a C node, such as its pointee, fields, parameters, qualifiers and
+numeric descriptors, is still walked.
+
+Callers also test cheap shapes first:
 `checker_assignment_adjustment` (`checker/interfaces.lua`) walks a source or
 target only when the other side is `value` or a C `TValue`, and
 `generic_erased_descriptor` (`checker/lowering.lua`) walks only descriptors
@@ -538,7 +554,11 @@ batch shares a memo: the end of `generic_lower_erased_core`, after the erased
 module descriptor, the erased registry, the refreshed annotations, and the
 frozen declared registry are complete. It asserts `ast._type` and then every
 erased registry owner with one local memo and no intervening mutation, and
-discards the memo when it returns. Every other caller passes none.
+discards the memo when it returns. Every other caller passes none. Queries made
+while lowering cannot share a memo: lowering rewrites the AST annotations and
+adjustment plans that those queries reach, in the middle of the pass. The
+provenance skip above is not a cache. Each query is still a fresh, exact walk
+of the current graph.
 
 ## Constraint erasure
 
