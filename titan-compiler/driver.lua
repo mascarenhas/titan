@@ -1119,6 +1119,50 @@ local function run_argv(argv, verbose)
     return os.execute(cmd)
 end
 
+-- Keep the configured compiler/wrapper prefix outside the response file.
+-- Only Windows links need this transport; ordinary compile/tool commands and
+-- every POSIX command retain their existing execution and diagnostics.
+function driver.run_link_command(argv, verbose, output)
+    if not platform.windows then return run_argv(argv, verbose) end
+    local command, err = parsed_words(driver.CC, "CC")
+    if not command then return nil, err end
+    if #command == 0 then return nil, "CC command is empty" end
+    local arguments = { table.unpack(argv, #command + 1) }
+    local contents
+    contents, err = platform.windows_response_contents(arguments)
+    if not contents then return nil, err end
+    local response
+    response, err = driver.sibling_temporary_path(output .. ".link.rsp")
+    if not response then return nil, err end
+    local file
+    file, err = io.open(response, "wb")
+    if not file then return nil, "failed to open link response file: " .. tostring(err) end
+    local wrote, write_error = file:write(contents)
+    local closed, close_error = file:close()
+    if not wrote or not closed then
+        os.remove(response)
+        return nil, "failed to write link response file: " ..
+            tostring(write_error or close_error)
+    end
+    command[#command + 1] = "@" .. response
+    local called, ok, term, code = pcall(function()
+        if verbose then
+            local shown, show_error = command_argv(argv)
+            if not shown then return nil, show_error end
+            print(shown)
+        end
+        return run_argv(command, verbose)
+    end)
+    local removed, remove_error = os.remove(response)
+    if not called then ok, term, code = nil, ok, nil end
+    if not removed then
+        return nil, (ok and "" or (tostring(term) .. "; ")) ..
+            "failed to remove link response file '" .. response .. "': " ..
+            tostring(remove_error), code
+    end
+    return ok, term, code
+end
+
 function driver.format_generated_file(
         filename, verbose, pretty_print, strategy, coverage_mode)
     local label = "generated file '" .. tostring(filename) .. "'"
@@ -9347,7 +9391,7 @@ function driver.compile_library_output(soname, libnames, link, verbose,
         install_name, module_names)
     if not prepared then return nil, err end
     return finish_library_link(prepared, verbose,
-        run_argv(prepared.argv, verbose))
+        driver.run_link_command(prepared.argv, verbose, prepared.soname))
 end
 
 function driver.link_failure_message(kind, name, term, code)
@@ -10930,7 +10974,7 @@ function driver.run_standalone_archive_probe(
         end
     end
     append_argv(args, driver.EXTRA_LDFLAGS)
-    local linked, link_term, link_code = run_argv(args, verbose)
+    local linked, link_term, link_code = driver.run_link_command(args, verbose, executable)
     if not linked then
         cleanup()
         return nil, "selected static provider failed executable-context " ..
@@ -11037,7 +11081,7 @@ __declspec(dllexport) int _titan_coverage_dump(lua_State *L) {
     append_argv(args, { "-o", paths.executable, entrypoint_o, resource })
     append_runtime_libraries(args)
     append_argv(args, driver.EXTRA_LDFLAGS)
-    return run_argv(args, verbose)
+    return driver.run_link_command(args, verbose, paths.executable)
 end
 
 function driver.compile_program(modname, libnames, link, verbose, extra_objects,
@@ -11093,7 +11137,7 @@ function driver.compile_program(modname, libnames, link, verbose, extra_objects,
         end
     end
     append_argv(args, driver.EXTRA_LDFLAGS)
-    local ok, term, code = run_argv(args, verbose)
+    local ok, term, code = driver.run_link_command(args, verbose, execname)
     if ok then run_dsymutil(execname, verbose) end
     return ok, term, code
 end

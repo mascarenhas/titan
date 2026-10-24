@@ -9132,6 +9132,170 @@ end
     end)
 end)
 
+describe("Windows link response files", function()
+    local previous, response
+
+    before_each(function()
+        response = temporary.name("-native-link.rsp")
+        os.remove(response)
+        previous = {
+            windows = platform.windows, cc = driver.CC,
+            reserve = driver.sibling_temporary_path,
+            execute = os.execute, print = _G.print,
+        }
+        platform.windows = true
+        driver.CC = 'ccache "C:/compiler tools/clang.exe"'
+        driver.sibling_temporary_path = function() return response end
+    end)
+
+    after_each(function()
+        platform.windows = previous.windows
+        driver.CC = previous.cc
+        driver.sibling_temporary_path = previous.reserve
+        os.execute = previous.execute
+        _G.print = previous.print
+        os.remove(response)
+    end)
+
+    it("renders CRT quotes rather than cmd escapes with exact LF bytes", function()
+        local contents = assert(platform.windows_response_contents({
+            "", "plain.o", [=[C:\long path\file.o]=], [=[quote"inside.o]=],
+            [=[trailing\]=], [=[a\"b]=], "%!^&|; ℙ.o",
+        }))
+        assert.equal([=[""
+"plain.o"
+"C:\long path\file.o"
+"quote\"inside.o"
+"trailing\\"
+"a\\\"b"
+"%!^&|; ℙ.o"
+]=], contents)
+    end)
+
+    it("rejects malformed arrays and command bytes before publication", function()
+        for _, arguments in ipairs({
+            {}, { "nul\0.o" }, { "line\nbreak.o" }, { "carriage\rreturn.o" },
+            { "\255.o" }, { "valid.o", extra = "not an argument" },
+        }) do
+            local contents, err = platform.windows_response_contents(arguments)
+            assert.is_nil(contents)
+            assert.is_string(err)
+        end
+    end)
+
+    for _, case in ipairs({ { "successful", true, 0 }, { "failed", false, 23 } }) do
+        it("bounds the shell command and cleans a " .. case[1] .. " link", function()
+            local argv = { "ccache", "C:/compiler tools/clang.exe", "-shared", "-o", "result.dll" }
+            for index = 1, 300 do
+                argv[#argv + 1] = "C:/a long generated output directory/module" .. index .. ".o"
+            end
+            local contents = assert(platform.windows_response_contents({ table.unpack(argv, 3) }))
+            assert.is_true(#contents > 8191)
+            local printed = {}
+            _G.print = function(line) printed[#printed + 1] = line end
+            os.execute = function(command)
+                assert.is_true(#command < 1024)
+                assert.truthy(command:find("@", 1, true))
+                assert.truthy(command:find("compiler", 1, true))
+                assert.falsy(command:find("module300.o", 1, true))
+                local file = assert(io.open(response, "rb"))
+                local bytes = file:read("a")
+                assert(file:close())
+                assert.equal(contents, bytes)
+                return case[2] or nil, "exit", case[3]
+            end
+            local ok, term, code = driver.run_link_command(argv, true, "result.dll")
+            assert.equal(case[2] or nil, ok)
+            assert.equal("exit", term)
+            assert.equal(case[3], code)
+            assert.equal(2, #printed)
+            assert.truthy(printed[1]:find("module300.o", 1, true))
+            assert.truthy(printed[2]:find("@", 1, true))
+            assert.is_nil(lfs.attributes(response))
+        end)
+    end
+
+    it("removes the response file when execution throws", function()
+        os.execute = function() error("injected link launch error") end
+        local ok, err = driver.run_link_command({
+            "ccache", "C:/compiler tools/clang.exe", "input.o",
+        }, false, "result.dll")
+        assert.is_nil(ok)
+        assert.matches("injected link launch error", err, 1, true)
+        assert.is_nil(lfs.attributes(response))
+    end)
+
+    it("reports response publication failure before launching", function()
+        driver.sibling_temporary_path = function() return response .. "/missing.rsp" end
+        os.execute = function() error("link must not launch") end
+        local ok, err = driver.run_link_command({
+            "ccache", "C:/compiler tools/clang.exe", "input.o",
+        }, false, "result.dll")
+        assert.is_nil(ok)
+        assert.matches("failed to open link response file", err, 1, true)
+    end)
+
+    it("links many long native Windows object paths", function()
+        if not previous.windows then
+            pending("native Windows Clang response-file transport")
+            return
+        end
+        driver.CC = previous.cc
+        local root = temporary.name("-long link paths"):gsub("\\", "/")
+        os.remove(root)
+        assert(lfs.mkdir(root))
+        local files = {}
+        local function write(path, contents)
+            files[#files + 1] = path
+            assert(util.set_file_contents(path, contents, "wb"))
+        end
+        local tested, test_error = xpcall(function()
+            local source, object = root .. "/empty.c", root .. "/empty.o"
+            write(source, "/* A valid object with no duplicate external definitions. */\n")
+            local command = assert(cdriver.split_shell_words(driver.CC))
+            for _, argument in ipairs({ "-x", "c", "-c", source, "-o", object }) do
+                command[#command + 1] = argument
+            end
+            files[#files + 1] = object
+            local result = compiler_io.new_sync():run(command, { stderr_to_stdout = true })
+            assert.is_true(result.ok, result.output or result.diagnostic)
+            local bytes = assert(util.get_file_contents(object, "rb"))
+            local output = root .. "/linked.dll"
+            files[#files + 1] = output
+            command = assert(cdriver.split_shell_words(driver.CC))
+            for _, argument in ipairs({ "-shared", "-o", output }) do
+                command[#command + 1] = argument
+            end
+            for index = 1, 100 do
+                local name = root .. "/" .. string.rep("long_object_", 7) .. index .. ".o"
+                write(name, bytes)
+                command[#command + 1] = name
+            end
+            assert.is_true(#assert(platform.windows_command(command, false)) > 8191)
+            local ok, term, code = driver.run_link_command(command, false, output)
+            assert.is_true(ok, tostring(term) .. ", exit " .. tostring(code))
+            assert.equal("file", lfs.attributes(output, "mode"))
+            assert.is_nil(lfs.attributes(response))
+        end, debug.traceback)
+        for _, file in ipairs(files) do os.remove(file) end
+        assert(lfs.rmdir(root))
+        if not tested then error(test_error, 0) end
+    end)
+
+    it("leaves POSIX link execution unchanged", function()
+        platform.windows = false
+        driver.sibling_temporary_path = function() error("POSIX response file") end
+        local argv = { "cc", "an object.o", "-o", "result" }
+        local expected = {}
+        for _, word in ipairs(argv) do expected[#expected + 1] = assert(cdriver.shell_quote(word)) end
+        os.execute = function(command)
+            assert.equal(table.concat(expected, " "), command)
+            return true, "exit", 0
+        end
+        assert.is_true(driver.run_link_command(argv, false, "result"))
+    end)
+end)
+
 describe("Windows driver dispatch", function()
     local platform = require "titan-compiler.platform"
     local previous
