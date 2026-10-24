@@ -222,8 +222,9 @@ exactly `titan`, including a transitive source dependency, and never generates
 a top-level `titan.lua`.
 
 A *physical* provider named `titan` is valid. Its DSO must also contain the
-native support entry `luaopen_titan` with both internal loading functions; the
-compiler validates that contract before publishing `titan.so` or any loaders.
+native support entry `luaopen_titan` with both internal loading functions and
+the compiler's native SHA-256 digest; the compiler validates that contract
+before publishing `titan.so` or any loaders.
 The standard library is the canonical provider with this name.
 
 ## Compiled compatibility

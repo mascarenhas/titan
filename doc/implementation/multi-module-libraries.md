@@ -282,8 +282,10 @@ belongs to the Lua support API and every shim requires it. A **physical**
 provider named `titan` is valid only when its final image also contains
 `ltitanlib.o`'s genuine `luaopen_titan`. The driver checks that entry in a fresh
 Lua process (`driver.lua` `support_validation_script`) and requires exactly one
-support table exposing `_loadlib` and `_loadlibglobal`; compiler-side
-`package.loaded` state cannot satisfy the proof.
+support table exposing `_loadlib`, `_loadlibglobal`, and the compiler digest
+`_sha256_binary`. A stale support object without the digest fails as stale
+before publication. Compiler-side `package.loaded` state cannot satisfy the
+proof.
 
 The production standard library is the canonical example. One compiler
 invocation names all twenty-six logical roots (`Makefile` `STDLIB_ROOTS`):

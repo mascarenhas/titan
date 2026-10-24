@@ -201,6 +201,32 @@ describe("jobserver slots", function()
         assert.same(sorted_bytes("\0\255"), sorted_bytes(drain(2)))
     end)
 
+    it("wait again when another client takes a token that polled readable", function()
+        pool("!")
+        local completion_path = workspace .. "/completion"
+        assert(shell("mkfifo -m 600 " .. quote(completion_path)))
+        local completion = assert(io.open(completion_path, "r+"))
+        assert(completion:setvbuf("no"))
+        local slots = assert(jobs.open_slots(2,
+            { makeflags = "-j2 --jobserver-auth=fifo:" .. fifo }))
+        finally(function()
+            slots:close()
+            completion:close()
+        end)
+        assert.is_true(slots:acquire_nowait())   -- implicit slot
+        local event = slots:wait(completion, true)
+        assert.equal("slot", event)               -- the token polls readable
+        local rival = assert(support._jobserver_open("fifo", fifo))
+        assert.is_true(rival:acquire())           -- another recipe wins it
+        assert.is_false(slots:acquire_nowait())   -- EAGAIN: wait, not an error
+        assert(rival:close())
+        assert.is_true(slots:acquire_nowait())    -- the returned token
+        assert(slots:release())
+        assert(slots:release())
+        assert(slots:close())
+        assert.same(sorted_bytes("!"), sorted_bytes(drain(1)))
+    end)
+
     it("stay within the local cap under a larger pool", function()
         pool("+++++++")
         local slots = assert(jobs.open_slots(2,
@@ -329,11 +355,11 @@ describe("generated-C batches under a parent Make", function()
     local workspace, state
     local holder
 
-    local function launcher()
-        local path = workspace .. "/titanc.sh"
+    local function launcher(name, compiler)
+        local path = workspace .. "/" .. (name or "titanc.sh")
         write_file(path, table.concat({
             "#!/bin/sh",
-            "exec env -u TITAN_JOBS CC=" .. quote(WRAPPER) ..
+            "exec env -u TITAN_JOBS CC=" .. quote(compiler or WRAPPER) ..
                 " TITAN_EXTRA_CPPFLAGS= TITAN_EXTRA_CFLAGS= TITAN_EXTRA_LDFLAGS=" ..
                 " TITAN_PARALLEL_TEST_STATE=" .. quote(state) ..
                 ' TITAN_PARALLEL_TEST_DELAY="${DELAY:-0.5}"' ..
@@ -592,6 +618,114 @@ describe("generated-C batches under a parent Make", function()
         assert.truthy(output:find("interrupted!", 1, true), output)
         assert.truthy(output:find("status=1\n", 1, true), output)
     end)
+
+    -- A supervisor, a timeout or a terminal signals titanc's whole process
+    -- group. Each compiler stand-in traps the signal and finishes a slow
+    -- cleanup, so a wrapper killed before its compiler could not pass for a
+    -- completed job.
+    local function group_cancel(signal)
+        local fifo = pool("+-=")
+        local compiler = workspace .. "/cleanup_cc.sh"
+        write_file(compiler, [[
+#!/bin/sh
+state=${TITAN_PARALLEL_TEST_STATE:?}
+leaf=
+for argument in "$@"; do
+    case "$argument" in */batch/*.c) leaf=${argument##*/}; leaf=${leaf%.c} ;; esac
+done
+# Compiler identification and other probes use the real compiler.
+test -n "$leaf" || exec cc "$@"
+cleanup() {
+    kill "$sleeper" 2>/dev/null
+    sleep 1
+    : > "$state/cleaned.$leaf"
+    exit 1
+}
+trap cleanup INT TERM HUP
+sleep 60 &
+sleeper=$!
+: > "$state/started.$leaf"
+wait "$sleeper"
+exit 1
+]])
+        assert(shell("chmod +x " .. quote(compiler)))
+        launcher("titanc-cleanup.sh", compiler)
+        local arguments = tree("a", LEAVES)
+        local pid_file = workspace .. "/titanc.pid"
+        -- Job control gives titanc its own process group. The harness counts
+        -- finished cleanups the moment titanc exits.
+        local script = table.concat({
+            "cd " .. quote(workspace) .. " || exit 1",
+            "set -m",
+            "MAKEFLAGS=" .. quote("-j4 --jobserver-auth=fifo:" .. fifo) ..
+                " ./titanc-cleanup.sh " .. arguments .. " &",
+            "pid=$!",
+            "set +m",
+            "echo $pid > " .. quote(pid_file),
+            "wait $pid",
+            "status=$?",
+            "cleaned=0",
+            "for marker in state/cleaned.*; do",
+            "    if [ -e \"$marker\" ]; then cleaned=$((cleaned + 1)); fi",
+            "done",
+            "echo \"status=$status cleaned=$cleaned\"",
+        }, "\n")
+        local pipe = assert(io.popen(CLEAN_MAKE_ENV .. " " .. quote(TIMEOUT) ..
+            " 30 bash -c " .. quote(script) .. " 2>&1", "r"))
+        local function started()
+            local count = 0
+            for _, leaf in ipairs(LEAVES) do
+                if exists(state .. "/started." .. leaf) then count = count + 1 end
+            end
+            return count
+        end
+        for _ = 1, 600 do
+            if started() >= 4 and exists(pid_file) then break end
+            os.execute("sleep 0.05")
+        end
+        local pid = exists(pid_file) and tonumber(read_file(pid_file))
+        if started() ~= 4 then
+            -- Do not leave the stalled batch running behind a failed test.
+            if pid then os.execute("bash -c " .. quote("kill -KILL -- -" .. pid)) end
+            pipe:close()
+        end
+        assert.equal(4, started())
+        assert(os.execute("bash -c " ..
+            quote("kill -" .. signal .. " -- -" .. assert(pid))))
+        local output = pipe:read("a")
+        pipe:close()
+        -- titanc outlived every compiler's cleanup, launched nothing after
+        -- the signal, published nothing, and returned the exact pool bytes.
+        assert.truthy(output:find(" cleaned=4\n", 1, true), output)
+        assert.equal(4, started(), output)
+        for _, leaf in ipairs(LEAVES) do
+            assert.falsy(exists(workspace .. "/out-a/batch/" .. leaf .. ".o"), leaf)
+        end
+        for _, directory in ipairs({ "/out-a", "/out-a/batch" }) do
+            for entry in lfs.dir(workspace .. directory) do
+                assert.falsy(entry:find(".tmp.", 1, true), directory .. "/" .. entry)
+            end
+        end
+        assert.equal(3, available(fifo), output)
+        assert.same(sorted_bytes("+-="), sorted_bytes(holder:read(3)))
+        return output
+    end
+
+    it("outlast compiler cleanup after a process-group SIGTERM", function()
+        local output = group_cancel("TERM")
+        assert.truthy(output:find("status=143 ", 1, true), output)
+    end)
+
+    it("outlast compiler cleanup after a process-group SIGHUP", function()
+        local output = group_cancel("HUP")
+        assert.truthy(output:find("status=129 ", 1, true), output)
+    end)
+
+    it("outlast compiler cleanup after a process-group SIGINT", function()
+        local output = group_cancel("INT")
+        assert.truthy(output:find("interrupted!", 1, true), output)
+        assert.truthy(output:find("status=1 ", 1, true), output)
+    end)
 end)
 
 describe("in-process batches under a parent pool", function()
@@ -677,5 +811,139 @@ describe("in-process batches under a parent pool", function()
         assert.equal(3, count_lines(state .. "/commands"))
         assert.equal(3, tonumber(read_file(state .. "/maximum")))
         assert.same(sorted_bytes("\1\2"), sorted_bytes(holder:read(2)))
+    end)
+
+    -- One module whose jobs run `sh -c COMMAND`, launched in the given order.
+    local function prepared_jobs(commands)
+        local list = {}
+        for index, command in ipairs(commands) do
+            list[index] = {
+                module_index = 1,
+                part_index = index - 1,
+                argv = { "sh", "-c", command },
+                cost_bytes = #commands - index + 1,
+            }
+        end
+        return { { modname = "batch.one", request_index = 1, jobs = list } }
+    end
+
+    for _, signal in ipairs({ { "HUP", 1 }, { "INT", 2 }, { "TERM", 15 } }) do
+        for _, failure in ipairs({ "returned", "thrown" }) do
+            it("return a " .. signal[1] .. " caught before a " .. failure ..
+               " completion-channel failure", function()
+                local support = require "titan"
+                local previous_open = io.open
+                finally(function() io.open = previous_open end)
+                local launches, fifo_path = 0, nil
+                io.popen = function(command, mode)
+                    launches = launches + 1
+                    return previous_popen(command, mode)
+                end
+                io.open = function(path, mode)
+                    if mode ~= "r+" then return previous_open(path, mode) end
+                    fifo_path = path
+                    assert(support._signal_raise(signal[2]))
+                    if failure == "thrown" then
+                        error("injected completion open failure", 0)
+                    end
+                    return nil, "injected completion open failure"
+                end
+                local results, cancelled = driver.run_prepared_compiles(
+                    prepared_jobs({ "exit 0", "exit 0" }), 2, false)
+                io.open = previous_open
+                assert.equal(signal[2], cancelled)
+                assert.equal(0, launches)
+                assert.is_nil(results[1].ok)
+                assert.truthy(tostring(results[1].err):find(
+                    "injected completion open failure", 1, true), tostring(results[1].err))
+                assert.is_nil(support._signal_pending())
+                assert.truthy(fifo_path)
+                assert.falsy(exists(fifo_path))
+                -- The guard was released with the previous actions restored.
+                local slots = assert(jobs.open_slots(2, { makeflags = false }))
+                assert(slots:close())
+                assert.same(sorted_bytes("\1\2"), sorted_bytes(holder:read(2)))
+            end)
+        end
+    end
+
+    it("launch nothing after a signal that arrives with a completion", function()
+        local support = require "titan"
+        local open_slots = jobs.open_slots
+        finally(function() jobs.open_slots = open_slots end)
+        local launches, raised = 0, false
+        io.popen = function(command, mode)
+            launches = launches + 1
+            return previous_popen(command, mode)
+        end
+        -- The signal lands after the native wait already reported the first
+        -- completion, while the pool still has a token for the third job.
+        jobs.open_slots = function(...)
+            local slots, err = open_slots(...)
+            if not slots then return nil, err end
+            local wait = slots.wait
+            slots.wait = function(self, ...)
+                local event, value = wait(self, ...)
+                if event == "completion" and not raised then
+                    raised = true
+                    assert(support._signal_raise(15))
+                end
+                return event, value
+            end
+            return slots
+        end
+        local results, cancelled = driver.run_prepared_compiles(
+            prepared_jobs({ "exit 0", "sleep 0.3", "exit 0" }), 2, false)
+        assert.is_true(raised)
+        assert.equal(15, cancelled)
+        assert.equal(2, launches)
+        assert.is_nil(results[1].ok)
+        assert.truthy(tostring(results[1].jobs[3].err):find(
+            "interrupted by signal 15", 1, true), tostring(results[1].jobs[3].err))
+        assert.is_nil(support._signal_pending())
+        assert.same(sorted_bytes("\1\2"), sorted_bytes(holder:read(2)))
+    end)
+
+    it("drain a cancelled batch whose wrappers never report completion", function()
+        -- A child process bounds the run: waiting on the completion FIFO
+        -- after the signal would block until the timeout kills it.
+        local script = workspace .. "/silent-drain.lua"
+        write_file(script, [==[
+local lua_path, lua_cpath = ...
+package.path, package.cpath = lua_path, lua_cpath
+local driver = require "titan-compiler.driver"
+local platform = require "titan-compiler.platform"
+local support = require "titan"
+local getenv = platform.getenv
+platform.getenv = function(name)
+    if name == "MAKEFLAGS" then return nil end
+    return getenv(name)
+end
+local popen, launches = io.popen, 0
+io.popen = function(command, mode)
+    launches = launches + 1
+    local silent, count = command:gsub("printf '%%s\\n' '?%d+'? >[^;]+; ", "")
+    assert(count == 1, command)
+    local pipe = popen(silent, mode)
+    if launches == 2 then assert(support._signal_raise(15)) end
+    return pipe
+end
+local function job(part, command, cost)
+    return { module_index = 1, part_index = part, argv = { "sh", "-c", command },
+        cost_bytes = cost }
+end
+local results, cancelled = driver.run_prepared_compiles({ { modname = "batch.one",
+    request_index = 1, jobs = {
+        job(0, "sleep 0.3", 3), job(1, "sleep 0.3", 2), job(2, "exit 0", 1),
+    } } }, 2, false)
+print("cancelled=" .. tostring(cancelled) .. " launches=" .. launches ..
+    " ok=" .. tostring(results[1].ok) .. " pending=" .. tostring(support._signal_pending()))
+]==])
+        local ok, output = shell(quote(TIMEOUT) .. " 20 " .. quote(LUA) .. " " ..
+            quote(script) .. " " .. quote(ROOT .. "/?.lua;" .. ROOT .. "/?/init.lua;" ..
+                package.path) .. " " .. quote(package.cpath))
+        assert.truthy(ok, output)
+        assert.truthy(output:find("cancelled=15 launches=2 ok=nil pending=nil", 1, true),
+            output)
     end)
 end)

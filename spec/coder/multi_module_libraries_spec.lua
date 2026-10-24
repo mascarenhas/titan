@@ -2754,6 +2754,60 @@ function probe(): integer return other.probe() end
         assert.is_nil(lfs.attributes(workspace .. "/titan/two.lua", "mode"))
     end)
 
+    it("rejects stale native support that lacks the native digest entry",
+       function()
+        write_file(source_root .. "/titan/one.titan",
+            "function probe(): integer return 1 end\n")
+        write_file(source_root .. "/titan/two.titan",
+            "function probe(): integer return 2 end\n")
+        -- A support object from before the native digest: the loader entries
+        -- the older gate required are present, _sha256_binary is not.
+        write_file(workspace .. "/stale-support.c", [[
+#include "lua.h"
+#include "lauxlib.h"
+static int stale_loader(lua_State *L) {
+    lua_pushnil(L);
+    return 1;
+}
+#ifdef _WIN32
+__declspec(dllexport)
+#endif
+int luaopen_titan(lua_State *L) {
+    lua_createtable(L, 0, 2);
+    lua_pushcfunction(L, stale_loader);
+    lua_setfield(L, -2, "_loadlib");
+    lua_pushcfunction(L, stale_loader);
+    lua_setfield(L, -2, "_loadlibglobal");
+    return 1;
+}
+]])
+        local compiler = { "env", "CCACHE_DISABLE=1" }
+        for _, word in ipairs(configured_words(driver.CC)) do
+            compiler[#compiler + 1] = word
+        end
+        for _, word in ipairs({
+            "-std=c99", "-fPIC", "-I", LUA_INCLUDE,
+            "-c", "stale-support.c", "-o", "stale-support.o",
+        }) do
+            compiler[#compiler + 1] = word
+        end
+        local compiled, compile_output = run(compiler, workspace)
+        assert.truthy(compiled, compile_output)
+
+        local ok, output = compile(workspace, source_root,
+            "titan.one", "titan.two", "-X", workspace .. "/stale-support.o")
+        assert.falsy(ok)
+        assert.truthy(output:find(
+            "linked provider 'titan' has an invalid native support entry: " ..
+            "luaopen_titan support table lacks _sha256_binary", 1, true), output)
+        assert.truthy(output:find("native support object is stale", 1, true),
+            output)
+        assert.is_nil(lfs.attributes(shared_path(workspace, "titan"), "mode"))
+        assert.is_nil(lfs.attributes(workspace .. "/titan.a", "mode"))
+        assert.is_nil(lfs.attributes(workspace .. "/titan/one.lua", "mode"))
+        assert.is_nil(lfs.attributes(workspace .. "/titan/two.lua", "mode"))
+    end)
+
     it("accepts the reviewed native support object and leaves bare support inert",
        function()
         write_file(source_root .. "/titan/one.titan", [[

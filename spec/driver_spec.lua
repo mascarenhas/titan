@@ -2314,6 +2314,8 @@ describe("loader resolver ownership", function()
             },
             ["titan-compiler.test_runner"] = {},
             ["titan-compiler.util"] = {},
+            -- titanc requires the native digest before creating its resolver.
+            titan = { _sha256_binary = function() return string.rep("\0", 32) end },
         }
         local environment = setmetatable({
             arg = {},
