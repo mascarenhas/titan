@@ -427,6 +427,9 @@ end
 for _, static_provider in ipairs(resolver_context.selected_static_providers) do
     native_inputs[#native_inputs + 1] = static_provider.archive
 end
+for _, archive in ipairs(selected_static_archives) do
+    native_inputs[#native_inputs + 1] = archive
+end
 for _, input in ipairs(args.extra_object or {}) do
     native_inputs[#native_inputs + 1] = input
 end
@@ -461,6 +464,7 @@ if #errors == 0 then
     if not compile_plans then table.insert(errors, plan_error) end
 end
 if #errors > 0 then exit(table.concat(errors, "\n")) end
+native_inputs = compile_plans.inputs
 if main_module then
     local source_outputs = {}
     for index, name in ipairs(linked_names) do
@@ -481,24 +485,6 @@ if main_module then
         main_module:gsub("[.]", "/")
     local entrypoint_output = test_entrypoint_output or
         driver.generated_output_path(main_module:gsub("[.]", "/") .. "__entrypoint.c", args.output)
-    local program_inputs = {}
-    for name in pairs(resolver_context.source_names) do
-        local mod = driver.imported[name]
-        for _, filename in ipairs(mod.source_files or { mod.filename }) do
-            program_inputs[#program_inputs + 1] = filename
-        end
-    end
-    for _, mod in pairs(resolver_context.dynamic_names) do
-        if mod.filename then
-            program_inputs[#program_inputs + 1] = mod.filename
-        end
-    end
-    for _, archive in ipairs(selected_static_archives) do
-        program_inputs[#program_inputs + 1] = archive
-    end
-    for _, input in ipairs(args.extra_object or {}) do
-        program_inputs[#program_inputs + 1] = input
-    end
     local extra_outputs
     if platform.windows then
         local paths, path_error = driver.windows_program_paths(main_module,
@@ -511,7 +497,7 @@ if main_module then
             entrypoint_output, paths.provider)
     end
     local outputs_ok, outputs_err = driver.validate_program_output_paths(
-        source_outputs, program_output, entrypoint_output, program_inputs,
+        source_outputs, program_output, entrypoint_output, native_inputs,
         extra_outputs, compile_plans.outputs)
     if not outputs_ok then table.insert(errors, outputs_err) end
 end

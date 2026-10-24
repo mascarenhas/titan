@@ -24,13 +24,13 @@ function M.collect(primary, run, nm)
         local object = stem .. part.object_suffix
         assert(lfs.symlinkattributes(object, "mode") == "file", object)
         objects[#objects + 1] = object
-        for _, query in ipairs({ { "--defined-only", defined }, { "-u", undefined } }) do
+        for _, query in ipairs({ { "-U", defined }, { "-u", undefined } }) do
             local argv = { table.unpack(nm) }
             argv[#argv + 1], argv[#argv + 2] = query[1], object
             local ok, output = run(argv)
             assert(ok, output)
             for line in output:gmatch("[^\r\n]+") do
-                local symbol = line:match("%s[A-Za-z?]%s+(%S+)%s*$")
+                local symbol = line:match("(%S+)%s*$")
                 if symbol then query[2][symbol] = true end
             end
         end

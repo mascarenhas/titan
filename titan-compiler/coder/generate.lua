@@ -1239,10 +1239,15 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         end
     end
 
-    local foreign_header = ast._foreign_header_contents
-    if not ast._foreign_header_prepared then
-        foreign_header = coder.generate_foreign_header(
-            modname, ast, tlcontext)
+    local foreign_header
+    if options.foreign_header_plan then
+        foreign_header = options.foreign_header_plan.contents
+    else
+        foreign_header = ast._foreign_header_contents
+        if not ast._foreign_header_prepared then
+            foreign_header = coder.generate_foreign_header(
+                modname, ast, tlcontext)
+        end
     end
     local private_header
     local parts = {}

@@ -10,6 +10,7 @@ local driver = require "titan-compiler.driver"
 local h = require "spec.support.helpers"
 local installed_prefix = require "spec.support.installed_prefix"
 local lfs = require "lfs"
+local module_symbols = require "spec.support.module_symbols"
 local asan_mapper = require "spec.support.asan_generated_c_context"
 local objectmetadata = require "titan-compiler.objectmetadata"
 local parser = require "titan-compiler.parser"
@@ -23,13 +24,14 @@ local LUA = PREFIX .. (platform.windows and "/bin/lua.exe" or "/bin/lua")
 local io_strategy = compiler_io.new_sync()
 local ROOT = assert(lfs.currentdir())
 
-local function cli_frontend(filename)
+local function cli_frontend(filename, bootstrap)
     local file = assert(io.open(filename, "wb"))
     assert(file:write(string.format([[
 package.path = %q .. "/?.lua;" .. package.path
 require("titan-compiler.coder").DEFAULT_SPLIT_THRESHOLD = 1
+%s
 dofile(%q .. "/titanc")
-]], ROOT, ROOT)))
+]], ROOT, bootstrap or "", ROOT)))
     assert(file:close())
     return filename
 end
@@ -436,6 +438,202 @@ assert(module.exercise())
         assert.is_nil(results[1].ok)
         assert.matches("aliases output", results[1].err, 1, true)
         assert.equal(old_o, read_file(stem .. ".o"))
+    end)
+
+    it("preserves authored headers that alias final program, provider or shim outputs", function()
+        local frontend = cli_frontend(workspace .. "/reject_frontend.lua", [[
+require("titan-compiler.driver").compile_modules = function()
+    error("generated compilation must not start after a preflight collision")
+end
+]])
+        for index, kind in ipairs({ "entrypoint", "executable", "provider", "shim" }) do
+            local src, out = workspace .. "/final-src" .. index, workspace .. "/final-out" .. index
+            local is_program = kind == "entrypoint" or kind == "executable"
+            local name = is_program and "app" or "library"
+            local shims, provider = assert(driver.plan_module_shims(name, { name }, out))
+            local header
+            if kind == "entrypoint" then header = out .. "/app__entrypoint.c"
+            elseif kind == "executable" then
+                header = platform.windows
+                    and assert(driver.windows_program_paths("app", nil, nil, out)).executable
+                    or out .. "/app"
+            elseif kind == "provider" then header = provider
+            else header = shims[1].filename end
+            local contents = "#define R2_HEADER_VALUE 7\n"
+            write_file(header, contents)
+            local declaration = is_program
+                and "function main(args: {string}): integer return ffi.R2_HEADER_VALUE - 7 end\n"
+                or "function result(): integer return ffi.R2_HEADER_VALUE end\n"
+            write_file(src .. "/" .. name .. ".titan",
+                string.format("foreign import %q\n", header) .. declaration)
+            write_file(out .. "/" .. name .. ".c", "previous generated C")
+            write_file(out .. "/" .. name .. ".o", "previous object")
+            local ok, output = run_cmd({ LUA, "-E", frontend, "--tree", src,
+                "-o", out, "--c-parts", "4", name })
+            assert.is_false(ok, output)
+            local expected = kind == "shim" and "refusing to overwrite unrecognized Lua file" or "aliases input"
+            assert.truthy(output:find(expected, 1, true), output)
+            assert.equal(contents, read_file(header))
+            assert.equal("previous generated C", read_file(out .. "/" .. name .. ".c"))
+            assert.equal("previous object", read_file(out .. "/" .. name .. ".o"))
+            assert.is_false(file_exists(out .. "/" .. name .. ".ffi.h"))
+        end
+    end)
+
+    it("protects a cached module's authored header from a fresh module's split output", function()
+        local src, out = workspace .. "/cached-src", workspace .. "/cached-out"
+        local header = out .. "/b.part1.c"
+        local contents = "#define R2_CACHED_VALUE 7\n"
+        write_file(header, contents)
+        write_file(src .. "/a.titan", string.format([[
+foreign import %q
+function read_value(): integer return ffi.R2_CACHED_VALUE end
+]], header))
+        local frontend = cli_frontend(workspace .. "/cache_frontend.lua")
+        local ok, output = run_cmd({ LUA, "-E", frontend, "--tree", src,
+            "-o", out, "--c-parts", "4", "-c", "a" })
+        assert.truthy(ok, output)
+        local inventory = assert(objectmetadata.read(read_file(out .. "/a.o"), out .. "/a.o"))
+        local snapshots = { [header] = contents }
+        for _, part in ipairs(inventory.object_metadata.parts) do
+            for _, suffix in ipairs({ part.c_suffix, part.object_suffix }) do
+                local path = out .. "/a" .. suffix
+                snapshots[path] = read_file(path)
+            end
+        end
+        for _, suffix in ipairs({ ".ffi.h", ".parts" }) do
+            snapshots[out .. "/a" .. suffix] = read_file(out .. "/a" .. suffix)
+        end
+        write_file(src .. "/b.titan", 'local a = import "a"\n'
+            .. MULTI_CONSTRUCT_SOURCE:gsub("do\n%s+base_offset = 10\nend", [[
+function main(args: {string}): integer return a.read_value() - 7 end
+do base_offset = 10 end
+]]))
+        for _, suffix in ipairs({ ".c", ".o" }) do
+            local path = out .. "/b" .. suffix
+            snapshots[path] = "previous b" .. suffix
+            write_file(path, snapshots[path])
+        end
+        local hit_log = workspace .. "/cached-observed"
+        frontend = cli_frontend(workspace .. "/cached_reject_frontend.lua", string.format([[
+local driver = require("titan-compiler.driver")
+local plan = driver.plan_compile_requests
+driver.plan_compile_requests = function(requests, ...)
+    local cached = false
+    for _, request in ipairs(requests) do
+        if request.modname == "a" then
+            assert(request.mod.compiled, "module a must be reused from its object")
+            cached = true
+        end
+    end
+    assert(cached, "module a must be part of the source link set")
+    local file = assert(io.open(%q, "wb"))
+    assert(file:write("cached"))
+    assert(file:close())
+    return plan(requests, ...)
+end
+driver.compile_modules = function() error("generated compilation must not start") end
+]], hit_log))
+        ok, output = run_cmd({ LUA, "-E", frontend, "--tree", src, "-o", out,
+            "--c-parts", "4", "--incremental", "b" })
+        assert.is_false(ok, output)
+        assert.truthy(output:find("aliases input", 1, true), output)
+        assert.equal("cached", read_file(hit_log))
+        for path, previous in pairs(snapshots) do assert.equal(previous, read_file(path), path) end
+        assert.is_false(file_exists(out .. "/b.ffi.h"))
+    end)
+
+    it("renders, writes and formats each CLI header once and releases materialized C", function()
+        local log_path, format_log = workspace .. "/header_calls", workspace .. "/header_formats"
+        local formatter = workspace .. "/header_formatter.sh"
+        write_file(formatter, string.format([[
+#!/bin/sh
+for file do :; done
+printf '%%s\n' "$file" >> %q
+]], format_log))
+        local frontend = cli_frontend(workspace .. "/header_frontend.lua", string.format([[
+local driver = require("titan-compiler.driver")
+local coder = require("titan-compiler.coder")
+local function record(name)
+    local file = assert(io.open(%q, "ab"))
+    assert(file:write(name, "\n"))
+    assert(file:close())
+end
+for _, name in ipairs({ "generate_ffi_header", "generate_foreign_header" }) do
+    local generate = coder[name]
+    coder[name] = function(...)
+        -- The checker owns a separate relative-include probe header. Count it
+        -- separately from the final output-tree header whose plan is shared.
+        record(name == "generate_foreign_header" and select(4, ...) ~= nil
+            and "checking_foreign_header" or name)
+        return generate(...)
+    end
+end
+local write_headers = driver.write_foreign_header_plans
+driver.write_foreign_header_plans = function(...)
+    record("write_headers")
+    return write_headers(...)
+end
+local generated = setmetatable({}, { __mode = "v" })
+local generate, serial = coder.generate, 0
+coder.generate = function(...)
+    local result = generate(...)
+    serial = serial + 1
+    generated[serial] = result
+    return result
+end
+local compile = driver.compile_modules
+driver.compile_modules = function(...)
+    local results = compile(...)
+    collectgarbage("collect")
+    assert(next(generated) == nil, "materialized plans retain generated C")
+    return results
+end
+driver.CLANG_FORMAT = %q
+]], log_path, "bash " .. assert(cdriver.shell_quote(formatter))))
+        local src, out = workspace .. "/once-src", workspace .. "/once-out"
+        write_file(src .. "/once.titan", [[
+foreign function plus_one(input: int): int return input + 1 end
+function call(input: integer): integer return plus_one(input) end
+]])
+        local ok, output = run_cmd({ LUA, "-E", frontend, "--tree", src,
+            "-o", out, "--c-parts", "4", "--pretty-print", "-c", "once" })
+        assert.truthy(ok, output)
+        local counts = {}
+        for name in read_file(log_path):gmatch("[^\n]+") do counts[name] = (counts[name] or 0) + 1 end
+        assert.same({
+            generate_ffi_header = 1, generate_foreign_header = 1,
+            checking_foreign_header = 1, write_headers = 1,
+        }, counts)
+        local ffi_count, foreign_count = 0, 0
+        for path in read_file(format_log):gmatch("[^\n]+") do
+            if path:find(".ffi.h.format.", 1, true) then ffi_count = ffi_count + 1 end
+            if path:find(".titan.h.format.", 1, true) then foreign_count = foreign_count + 1 end
+        end
+        assert.equal(1, ffi_count)
+        assert.equal(1, foreign_count)
+    end)
+
+    it("aggregates typed and Mach-O bare nm names and subtracts cross-part definitions", function()
+        local path = workspace .. "/symbols.titan"
+        write_file(path, MULTI_CONSTRUCT_SOURCE)
+        local ast = check_module("symbols", MULTI_CONSTRUCT_SOURCE, path)
+        local ok, err, primary = driver.compile("symbols", ast, path, {}, false,
+            { c_parts = 2, split_threshold = 1 })
+        assert.truthy(ok, err)
+        local symbols = module_symbols.collect(primary, function(argv)
+            assert.equal("fixture-nm", argv[1])
+            local side = argv[3]:find(".part1.o", 1, true) ~= nil
+            if argv[2] == "-U" then
+                return true, side and "00000000 T _internal\n" or "00000000 T _entry\n"
+            end
+            assert.equal("-u", argv[2])
+            return true, side and "    U _entry\n_external_bare\n"
+                or "    U _internal\n    U _external_typed\n"
+        end, { "fixture-nm" })
+        assert.equal(2, #symbols.objects)
+        assert.same({ _entry = true, _internal = true }, symbols.defined)
+        assert.same({ _external_bare = true, _external_typed = true }, symbols.undefined)
     end)
 
     it("rejects private inventory collisions without writing or launching a compiler", function()
