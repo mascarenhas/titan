@@ -1518,12 +1518,13 @@ function checker_assignment_adjustment(source, target, st, options)
        and (target._tag == "Type.Value" or types.is_c_tvalue(target)) then
         return checker_assignment_adjustment(
             source_carrier, target, st, options)
-    elseif types.contains_generic(source)
-       and (target._tag == "Type.Value" or types.is_c_tvalue(target)) then
+    -- Check the cheap target/source shape before walking a type graph.
+    elseif (target._tag == "Type.Value" or types.is_c_tvalue(target))
+       and types.contains_generic(source) then
         return checker_assignment_adjustment(
             types.erase(source), target, st, options)
-    elseif types.contains_generic(target)
-       and (source._tag == "Type.Value" or types.is_c_tvalue(source)) then
+    elseif (source._tag == "Type.Value" or types.is_c_tvalue(source))
+       and types.contains_generic(target) then
         return checker_assignment_adjustment(
             source, types.erase(target), st, options)
     end

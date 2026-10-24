@@ -3814,3 +3814,87 @@ describe("Titan types", function()
     end)
 
 end)
+
+describe("contains_generic batch memo", function()
+    local function parameter()
+        local scope = types.GenericScope("sample", "sample.Box", nil,
+            "owner", "record")
+        return types.Parameter(scope, 1, "T", nil)
+    end
+
+    it("records every table of a complete negative query", function()
+        local shared = types.Array(types.Integer(), { tag = "no" })
+        local left = types.Map(types.String(), shared)
+        local right = types.Function({ shared }, { types.Boolean() }, false, nil, nil)
+        local memo = {}
+        assert.is_false(types.contains_generic(left, memo))
+        assert.is_false(memo[left])
+        assert.is_false(memo[shared])
+        -- The shared negative subgraph now answers from the memo.
+        assert.is_false(types.contains_generic(right, memo))
+        assert.is_false(memo[right])
+    end)
+
+    it("never publishes an incomplete answer from a positive cycle", function()
+        local negative = { _tag = "Type.Array" }
+        negative.elem = negative
+        local memo = {}
+        assert.is_false(types.contains_generic(negative, memo))
+        assert.is_false(memo[negative])
+
+        local root = { _tag = "Type.Map" }
+        local inner = { _tag = "Type.Array", elem = root }
+        root.keys, root.values = inner, parameter()
+        assert.is_true(types.contains_generic(root, memo))
+        assert.is_true(memo[root])
+        -- `inner` may have answered false through its back-edge to `root`.
+        assert.is_nil(memo[inner])
+        assert.is_true(types.contains_generic(inner, memo))
+        assert.is_true(memo[inner])
+    end)
+
+    it("keeps uncached callers exact across mutation", function()
+        local holder = types.Array(types.Integer(), { tag = "no" })
+        local stale = {}
+        assert.is_false(types.contains_generic(holder))
+        assert.is_false(types.contains_generic(holder, stale))
+        holder.elem = parameter()
+        assert.is_true(types.contains_generic(holder))
+        -- A memo belongs to one read-only batch; a fresh batch sees the edit.
+        assert.is_true(types.contains_generic(holder, {}))
+        assert.has_error(function() types.assert_erased(holder, {}) end,
+            "generic type reached erased core")
+    end)
+
+    it("agrees with unmemoized queries for shared cyclic graphs in any order", function()
+        local seed = 2953
+        local function random(limit)
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            return seed % limit + 1
+        end
+        for _ = 1, 40 do
+            local nodes = {}
+            for index = 1, 24 do
+                nodes[index] = random(9) == 1 and parameter() or { _tag = "Type.Array" }
+            end
+            for _, node in ipairs(nodes) do
+                if node._tag == "Type.Array" then
+                    node.elem = nodes[random(#nodes)]
+                    if random(2) == 1 then node.extra = nodes[random(#nodes)] end
+                end
+            end
+            local expected = {}
+            for index, node in ipairs(nodes) do
+                expected[index] = types.contains_generic(node)
+            end
+            local memo = {}
+            for _ = 1, #nodes * 2 do
+                local index = random(#nodes)
+                assert.equal(expected[index], types.contains_generic(nodes[index], memo))
+            end
+            for index, node in ipairs(nodes) do
+                if memo[node] ~= nil then assert.equal(expected[index], memo[node]) end
+            end
+        end
+    end)
+end)
