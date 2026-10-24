@@ -1386,10 +1386,21 @@ strategy's optional `run_batch(commands, { jobs = N })` capability
 and error merged into one log, the same `env LANG=C LC_ALL=C` command text as
 `Sync:run`, and returns results with `run`'s shape in input order. One ledger
 (`jobs.open_slots(N, { guard = true })`) bounds each flush; a single granted
-slot runs the commands in order through `run`. Unlaunched commands report a
-start failure after a channel or ledger failure, while every reaped child
-keeps its real status and output. The caller re-raises a caught signal after
-its own cleanup ([C FFI](c-ffi-expressions.md#speculative-batched-acceptance-probes)).
+slot or a single command runs in order through `run`. Every exit, returned or
+raised, reaps each launched child before its slot is released, closes the
+ledger (returning every borrowed token and restoring the signal actions), and
+removes the completion channel and every log. An error raised by the
+strategy's own `run`, `tmpname` or `read_file`, such as an injected
+cancellation, stops further launches (`jobs.drive` returns it instead of
+recording a launch failure) and is rethrown unchanged after that teardown;
+the generated-C launcher keeps converting its own unexpected launch errors
+into that job's failure. As for generated-C batches, a token-return, ledger,
+completion-channel or log-removal failure, including one reported only while
+tearing down, fails every command of the flush even when every child already
+launched: a launched command keeps `started` and its captured output but no
+exit status, so its result is non-semantic and is never published. The
+caller re-raises a caught signal only after the service and header cleanup
+([C FFI](c-ffi-expressions.md#speculative-batched-acceptance-probes)).
 
 ### GNU Make jobserver participation
 
@@ -1795,8 +1806,13 @@ formatter command, `--print-ast` dumps each module's AST after checking, and
 `-j`/`--jobs` sets the positive local job cap. The command-line value overrides
 `TITAN_JOBS`, and the cap is four when neither is set; a parent GNU Make
 jobserver can lower but never raise it ([GNU Make jobserver
-participation](#gnu-make-jobserver-participation)). Checking, code generation
-and formatting stay serial. A Unix provider pair builds its archive while the
+participation](#gnu-make-jobserver-participation)). The cap bounds every native
+compiler child: generated-C compilations, the second provider link, and each
+module's batch of body-phase C acceptance probes
+([C FFI](c-ffi-expressions.md#speculative-batched-acceptance-probes)). Checker
+traversal, code generation and formatting stay ordered in the compiler
+process; `-j1`, `TITAN_JOBS=1` and an explicit serial `make -j1` also run every
+C probe synchronously where it is reached. A Unix provider pair builds its archive while the
 DSO links and starts the archive-backed validation link concurrently only with
 its own jobserver slot; see [Provider link
 pipeline](static-compiled-modules.md#provider-link-pipeline). `--static` swaps the compiled-provider passes

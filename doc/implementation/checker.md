@@ -93,7 +93,8 @@ exactly the fields a real success gives its consumer, so the pass executed
 the synchronous operation sequence.
 
 If any verdict rejects or fails, the pass stops at the barrier after its
-ordinary cleanup, and the check runs again authoritatively:
+ordinary cleanup. `checker.check` first restores the pass's write journal
+(below), then runs the check again authoritatively:
 
 1. `options.reparse()` assembles a fresh root from the same inputs; the
    caller's root table is refilled so its reference stays valid.
@@ -106,22 +107,56 @@ ordinary cleanup, and the check runs again authoritatively:
    once, as on the synchronous path. A diverging import sequence is an
    internal compiler error.
 3. At the end of the import phase (`checker._finish_import_phase`) the
-   rerun asserts that every unit was replayed and restores `types.registry`
-   in place to the speculative pass's snapshot taken at that same point.
-   Every deferral follows the import phase, so that snapshot is the
-   synchronous registry; all later writes of the abandoned pass are discarded.
-4. Probes answer from completed results: published verdicts from memory,
-   nonpublishable runs from the batch's answers. The rerun never defers.
+   rerun asserts that every unit was replayed and restores the entries of
+   `types.registry` in place to the speculative pass's snapshot taken at that
+   same point. Every deferral follows the import phase, so that snapshot is
+   the synchronous registry.
+4. Probes answer from completed results: published verdicts from memory, and
+   each nonpublishable run of the speculative pass once, in its order, before
+   any later cache entry for the same source; further requests retry like
+   the synchronous path
+   ([C FFI](c-ffi-expressions.md#speculative-batched-acceptance-probes)).
+   The rerun never defers.
+
+The speculative pass and the synchronous check run the same operations until
+the first deferred request whose real verdict is not success; afterwards the
+abandoned pass can reach code the synchronous check never reaches. A
+rejected pass's effects on state that outlives it are therefore either
+restored or proven replay-invariant:
+
+- **Restored.** Registry entries (step 3). After its import phase a
+  speculative pass also journals, in `speculation.journal`
+  (`checker._journal_write`), the two in-place writes it can make to a type
+  object that an imported module may own: the compiler-selected carrier that
+  `checker._ensure_c_enum_supported` stores on an enum (`spelling`, `signed`,
+  `rank`, `bits`, `_c_numeric`, `_c_numeric_carriers`, `_c_enum_validated`)
+  and the fallback `_ffi_scope` of a C declaration. Each field's value from
+  before its first write is put back before the rerun, which then makes
+  exactly the synchronous writes.
+- **Not reachable after the import phase.** Imported-owner registration,
+  `_source_complete`, portable C numeric normalization and module prefix slots
+  are written only by `register_module_interface`: by the import phase, whose
+  units are recorded and replayed rather than rerun, or after the barrier,
+  which an abandoned pass never reaches. Loader state likewise.
+- **Per-pass objects.** The module's AST, symbol table, converted C
+  declarations and tag records, interface implementations and adjustment
+  plans (computed per use; a frozen callable adapter is bound to one use
+  site), and generic inference entries are created by the pass itself and
+  dropped with it.
+- **Replay-invariant.** Published probe verdicts are keyed by the exact source
+  and answer any later request of it, which is the probe cache's own
+  contract. Header bundle files, header and preprocessing caches, the
+  foreign-declaration cache and the C numeric memo are idempotent
+  normalizations or content-keyed memos, which the rerun repeats with the same
+  bytes and values. Probe workspaces, staged headers and probe sequence
+  numbers are private temporaries removed at close and normalized out of
+  diagnostics. Cache and trace counters are telemetry. Checker globals are
+  reset at the start of each pass.
 
 The rerun is the synchronous check from the synchronous state, so its AST,
-diagnostics (text, location, order) and generated C are the synchronous
-path's. The remaining shared objects touched after the import phase are
-imported type graphs, which importer checks only normalize or memoize
-deterministically (portable C numeric metadata, owner prefix slots, enum
-carrier metadata from synchronous probes); this is the same invariant that
-lets several importers, and analysis followed by compilation, reuse one
-imported interface graph. An exception from the speculative pass propagates
-unchanged.
+diagnostics (text, location, order), imported graphs and generated C, and a
+later root's, are the synchronous path's. An exception from the speculative
+pass propagates unchanged, without a rerun.
 
 ## The symbol table (`symtab.lua`)
 

@@ -384,25 +384,52 @@ strategy's optional `run_batch(commands, { jobs = N })`, and finishes each with
 normalization and per-probe artifact removal. `_publish_result` then stores
 only real success and compiler rejection in memory, analysis and disk tiers.
 Assumed success, infrastructure failures, malformed results and
-cancellation are never published. Staged generated headers belong to the
-service until `Service:close`, so they outlive every reaped child.
+cancellation are never published. A result container that is not a table
+answers no command: every prepared probe still finishes, as an
+infrastructure failure. An error raised during preparation or by
+`run_batch` itself, such as a strategy cancellation, removes every prepared
+probe's artifacts and is then rethrown unchanged. Staged generated headers
+belong to the service until `Service:close`, so they outlive every reaped
+child.
 
 Every executed run that was not published, including synchronous baselines
-and enum queries of the same pass, is retained in `ProbeBatch.outcomes`.
-When a flush reports a failure the checker rechecks with a batch whose
-`answers` are those outcomes. Its `_run_source` consults them only where the
-synchronous path would launch the compiler, after the memory lookup and
-baseline gate; repeated requests reuse the last answer. A completed verdict
-is therefore never compiled twice.
+and enum queries of the same pass, is retained in `ProbeBatch.outcomes` in the
+order the pass observed it. When a flush reports a failure the checker
+rechecks with a batch whose `answers` are those outcomes. The recheck's
+`_run_source` replays them before any cache lookup: each recorded run of a
+source answers exactly one request of that source, in the recorded order,
+and needs no new baseline because it had already passed one. Once a source's
+recorded runs are used up the request looks up memory and disk and, on a
+miss, launches the compiler, exactly as the synchronous path retries a
+failed run. A failed run that preceded a success the speculative pass
+published later therefore still reports its failure at its own use; a use
+that pending deduplication folded into one deferred run retries like its
+synchronous counterpart; and a completed verdict is never compiled twice.
 
 Batching requires `Service:batching()`: the runner is the I/O strategy
-itself, the service `jobs` cap is above one, and the strategy has the
-optional `run_batch` method. `compiler_io.new_sync()` implements it over the
-shared native scheduler in `jobs.lua`. Strategies without it, injected
-custom runners, `jobs = 1`, analysis and completion checks keep calling the
-runner synchronously. `run_batch` reaps every child before it returns; a
-caught INT/TERM/HUP is re-raised with `jobs.propagate` after per-probe
-cleanup, before any recheck.
+itself, the service `jobs` cap is above one, and the strategy provides
+`run_batch`. The stock `run_batch` of `compiler_io.new_sync()`, implemented
+over the shared native scheduler in `jobs.lua`, launches its own processes,
+so it counts only while the strategy's resolved `run` is the stock one too.
+The driver's output-root wrapper, which overrides only `tmpname`, therefore
+still batches, while a strategy that overrides `run` on its instance or
+behind its metatable keeps its synchronous runner calls, cancellation and
+answers unless it also supplies its own `run_batch`. Strategies without it,
+injected custom runners, `jobs = 1`, analysis and completion checks keep
+calling the runner synchronously. No API-1 strategy method is required.
+
+`run_batch` reaps every launched child and returns its borrowed tokens on
+every exit ([Driver](driver.md#parallel-generated-c-compilation)). A caught
+INT/TERM/HUP comes back to `flush` as a signal number. After per-probe cleanup
+the flush records it on the service and raises
+`C probe batch interrupted by signal N`, so checking never continues under a
+returning signal handler. The check unwinds to the service's owner:
+`driver.close_resolver_context` closes the resolver's C header bundle and
+then the service, whose `Service:close` removes its workspaces and staged
+headers and only then delivers the signal with `jobs.propagate`. `titanc`
+closes its resolver from a to-be-closed variable on that unwinding error, so
+a terminating signal ends the process only after its probe and header
+temporaries are gone.
 
 ## Contextual object-pointer conversion
 
