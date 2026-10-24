@@ -54,19 +54,23 @@ function process.new_batch()
     return setmetatable({ children = {}, ready = {}, pending = 0 }, Batch)
 end
 
+-- Equal paths share one descriptor, so the child's merged output keeps its
+-- write order (the C probe batch captures diagnostics this way).
 function Batch:spawn(argv, stdout_path, stderr_path, completion_index)
     local stdout, err = uv.fs_open(stdout_path, "w", 420)
     if not stdout then return nil, err end
-    local stderr
-    stderr, err = uv.fs_open(stderr_path, "w", 420)
-    if not stderr then uv.fs_close(stdout); return nil, err end
+    local stderr = stdout
+    if stderr_path ~= stdout_path then
+        stderr, err = uv.fs_open(stderr_path, "w", 420)
+        if not stderr then uv.fs_close(stdout); return nil, err end
+    end
     local child
     child, err = spawn(argv, { nil, stdout, stderr }, nil, function()
         self.pending = self.pending - 1
         self.ready[#self.ready + 1] = completion_index
     end)
     uv.fs_close(stdout)
-    uv.fs_close(stderr)
+    if stderr ~= stdout then uv.fs_close(stderr) end
     if not child then return nil, err end
     self.children[#self.children + 1] = child
     self.pending = self.pending + 1

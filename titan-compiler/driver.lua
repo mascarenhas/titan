@@ -932,6 +932,13 @@ function driver.new_resolver_context(options)
        type(c_probe_execution_trace) ~= "function" then
         error("c_probe_execution_trace must be a function", 2)
     end
+    -- The invocation's local native job cap (titanc's resolved --jobs). It
+    -- bounds the speculative C probe batches of this resolver's checks; an
+    -- absent cap or 1 keeps every probe synchronous.
+    local jobs_cap = options.jobs
+    if jobs_cap ~= nil and (math.type(jobs_cap) ~= "integer" or jobs_cap < 1) then
+        error("jobs must be a positive integer", 2)
+    end
     local source_profile_stack = {}
     local client_header_trace = options.c_header_process_trace
     if client_header_trace ~= nil and
@@ -998,6 +1005,7 @@ function driver.new_resolver_context(options)
         _source_profile_stack = source_profile_stack,
         extra_ffi_include_dirs = extra_ffi_include_dirs,
         output_root = options.output_root,
+        jobs = jobs_cap,
     }
     local initialized, layout_error = driver.initialize_layout(context)
     if not initialized then
@@ -1462,6 +1470,20 @@ function driver.completion_binary_catalog(context)
     return result
 end
 
+-- The local cap of this resolver's speculative C probe batches: titanc's
+-- resolved job cap, except 1 for an explicit serial parent Make (`make -j1`)
+-- and for analysis/completion resolvers. A parent jobserver is joined later
+-- by each batch's job-slot ledger, exactly as generated-C compilation does.
+-- Implementation notes: doc/implementation/c-ffi-expressions.md#speculative-batched-acceptance-probes
+function driver.probe_batch_jobs(context)
+    local cap = context.jobs
+    if not cap or cap <= 1 or context.analysis_only or context.completion then
+        return 1
+    end
+    if jobs.make_policy(platform.getenv("MAKEFLAGS")).serial then return 1 end
+    return cap
+end
+
 function driver.get_probe_service(context)
     if context.foreign_c_configuration_id ~=
        driver.FOREIGN_C_CONFIGURATION_ID then
@@ -1557,6 +1579,7 @@ function driver.get_probe_service(context)
         toolchain = toolchain,
         verbose = context.probe_verbose,
         cache_directory = context.transient_caches and "" or driver.PROBE_CACHE_DIRECTORY,
+        jobs = driver.probe_batch_jobs(context),
     })
     if not service then
         context.probe_service_error = err
@@ -4021,8 +4044,11 @@ local function prepare_source_checking_header(context, modname, ast)
     return filename
 end
 
+-- `reparse()` returns a fresh root parsed from the same source inputs; with a
+-- probe batch cap above one it lets the checker defer body-phase acceptance
+-- probes and recheck a fresh parse when a deferred verdict fails.
 local function check_source_module(
-        context, modname, ast, input, filename, loader, source_output)
+        context, modname, ast, input, filename, loader, source_output, reparse)
     local completion_request
     if context.completion then
         for _, node in ipairs(ast) do
@@ -4047,6 +4073,7 @@ local function check_source_module(
             return driver.prepare_source_ffi_header(
                 context, modname, checked_ast, source_output or filename)
         end,
+        reparse = driver.probe_batch_jobs(context) > 1 and reparse or nil,
     }
     return checker.check(
         modname, ast, input, filename, loader, check_options)
@@ -4845,54 +4872,64 @@ function driver.defaultloader(static_deps, options)
 
     -- Implementation notes: doc/implementation/folder-modules.md#source-descriptors-are-not-ast-nodes
     local function parse_source_inner(modname, source, loader, profile_frame)
-        local ast = {}
-        local main_input
-        local main_initializer
-
-        for index, filename in ipairs(source.files) do
-            local input, err
-            if source.contents then
-                input = source.contents[filename]
+        -- Each input is read once. The checker's authoritative recheck after
+        -- a failed speculative probe batch assembles a fresh root from the
+        -- same strings.
+        local inputs = {}
+        local function assemble(frame)
+            local ast = {}
+            local main_initializer
+            for index, filename in ipairs(source.files) do
+                local input = inputs[index]
                 if input == nil then
-                    return false, "generated source has no contents for '" ..
-                        filename .. "'"
+                    local err
+                    if source.contents then
+                        input = source.contents[filename]
+                        if input == nil then
+                            return nil, "generated source has no contents for '" ..
+                                filename .. "'"
+                        end
+                    else
+                        input, err = context.io:read_file(filename)
+                        if not input then return nil, err end
+                    end
+                    inputs[index] = input
                 end
-            else
-                input, err = context.io:read_file(filename)
-                if not input then return false, err end
-            end
-            local parse_started = profile_frame and os.clock() or nil
-            local nodes, perr = parser.parse(filename, input)
-            if profile_frame then
-                local parse_cpu_ms = (os.clock() - parse_started) * 1000
-                if parse_cpu_ms < 0 then parse_cpu_ms = 0 end
-                profile_frame.parse_cpu_ms =
-                    profile_frame.parse_cpu_ms + parse_cpu_ms
-            end
-            if not nodes then
-                return false, parser.error_to_string(perr, filename)
-            end
+                local parse_started = frame and os.clock() or nil
+                local nodes, perr = parser.parse(filename, input)
+                if frame then
+                    local parse_cpu_ms = (os.clock() - parse_started) * 1000
+                    if parse_cpu_ms < 0 then parse_cpu_ms = 0 end
+                    frame.parse_cpu_ms = frame.parse_cpu_ms + parse_cpu_ms
+                end
+                if not nodes then
+                    return nil, parser.error_to_string(perr, filename)
+                end
 
-            if index == 1 then
-                main_input = input
-                ast._documentation = nodes._documentation
-                if nodes[#nodes] and
-                   nodes[#nodes]._module_initializer then
-                    main_initializer = table.remove(nodes)
-                end
-            else
-                for _, node in ipairs(nodes) do
-                    if node._module_initializer then
-                        return false, location.format_error(node.loc,
-                            "module initializer is only allowed in the " ..
-                            "folder main source '%s'", source.main)
+                if index == 1 then
+                    ast._documentation = nodes._documentation
+                    if nodes[#nodes] and
+                       nodes[#nodes]._module_initializer then
+                        main_initializer = table.remove(nodes)
+                    end
+                else
+                    for _, node in ipairs(nodes) do
+                        if node._module_initializer then
+                            return nil, location.format_error(node.loc,
+                                "module initializer is only allowed in the " ..
+                                "folder main source '%s'", source.main)
+                        end
                     end
                 end
-            end
 
-            for _, node in ipairs(nodes) do table.insert(ast, node) end
+                for _, node in ipairs(nodes) do table.insert(ast, node) end
+            end
+            if main_initializer then table.insert(ast, main_initializer) end
+            return ast
         end
-        if main_initializer then table.insert(ast, main_initializer) end
+        local ast, parse_error = assemble(profile_frame)
+        if not ast then return false, parse_error end
+        local main_input = inputs[1]
 
         driver.imported[modname] = CIRCULAR_MARK
         local direct_deps = {}
@@ -4902,7 +4939,8 @@ function driver.defaultloader(static_deps, options)
             and profile_frame.child_cpu_ms or 0
         local modt, errors = check_source_module(
             context, modname, ast, main_input, source.main, loader,
-            source.native_output or source.main)
+            source.native_output or source.main,
+            function() return assemble(nil) end)
         if profile_frame then
             local inclusive_check_cpu_ms =
                 (os.clock() - check_started) * 1000
@@ -5994,7 +6032,11 @@ function driver.tableloader(modtable, imported, deps, options)
         if not ast then return false, parser.error_to_string(err, modf) end
         imported[modname] = CIRCULAR_MARK
         local source_type, errors = check_source_module(
-            context, modname, ast, input, modf, loader)
+            context, modname, ast, input, modf, loader, nil, function()
+                local fresh, parse_err = parser.parse(modf, input)
+                if not fresh then return nil, parser.error_to_string(parse_err, modf) end
+                return fresh
+            end)
         check_used_compiled_interface(
             context, modname, source_type, errors)
         local checking_foreign_header
@@ -7283,89 +7325,10 @@ local function replay_compile_output(filename, stream)
 end
 
 local function create_compile_notification()
-    if platform.windows then
-        local batch, err = require("titan-compiler.process").new_batch()
-        if not batch then return nil, err end
-        return {
-            batch = batch,
-            file = {
-                read = function() return batch:wait() end,
-                close = function() return batch:close() end,
-            },
-        }
-    end
-    local path, path_err = create_compile_log()
-    if not path then return nil, path_err end
-    local removed, remove_err = protected_remove(path)
-    if not removed then
-        return nil, "failed to prepare parallel compiler completion FIFO: " ..
-            tostring(remove_err)
-    end
-    local made, term, code = run_argv({ "mkfifo", "-m", "600", path }, false)
-    if not made then
-        protected_remove(path)
-        return nil, "failed to create parallel compiler completion FIFO" ..
-            (code ~= nil and " (" .. tostring(term) .. ", exit " ..
-                tostring(code) .. ")" or ": " .. tostring(term))
-    end
-    -- Linux and Darwin both define a read/write FIFO open to return without a
-    -- peer. Keeping that descriptor's writer alive avoids blocking before the
-    -- first worker and prevents a transient EOF while a slot is refilled.
-    local open_called, file, open_err = pcall(io.open, path, "r+")
-    if not open_called then
-        protected_remove(path)
-        return nil, file
-    end
-    if not file then
-        protected_remove(path)
-        return nil, open_err
-    end
-    -- The batch polls this descriptor before each read, so stdio read-ahead
-    -- must never hold a completion line the kernel no longer reports.
-    local unbuffered_called, unbuffered, unbuffered_err =
-        pcall(file.setvbuf, file, "no")
-    if not unbuffered_called or not unbuffered then
-        pcall(file.close, file)
-        protected_remove(path)
-        return nil, "failed to make the parallel compiler completion FIFO " ..
-            "unbuffered: " .. tostring(unbuffered_called and unbuffered_err or
-                unbuffered)
-    end
-    local quoted_path, quote_err = cdriver.shell_quote(path)
-    if not quoted_path then
-        pcall(file.close, file)
-        protected_remove(path)
-        return nil, quote_err
-    end
-    return {
-        file = file,
-        path = path,
-        quoted_path = quoted_path,
-    }
+    return jobs.open_channel(create_compile_log)
 end
 
-local function close_compile_notification(notification)
-    local errors = {}
-    local close_called, closed, close_err =
-        pcall(notification.file.close, notification.file)
-    if not close_called then
-        errors[#errors + 1] = "close: " .. tostring(closed)
-    elseif not closed then
-        errors[#errors + 1] = "close: " .. tostring(close_err)
-    end
-    if notification.path then
-        local removed, remove_err = protected_remove(notification.path)
-        if not removed then
-            errors[#errors + 1] = "remove: " .. tostring(remove_err)
-        end
-    end
-    if #errors ~= 0 then
-        return nil, "failed to clean parallel compiler completion " ..
-            (platform.windows and "batch (" or "FIFO (") ..
-            table.concat(errors, "; ") .. ")"
-    end
-    return true
-end
+local close_compile_notification = jobs.close_channel
 
 local function show_parallel_command(command)
     local write_called, written, write_err =
@@ -7397,83 +7360,16 @@ local function launch_prepared_compile(
         protected_remove(stdout_path)
         return nil, stderr_err
     end
-    if platform.windows then
-        if verbose then
-            local shown, show_err = show_parallel_command(command)
-            if not shown then
-                protected_remove(stdout_path)
-                protected_remove(stderr_path)
-                return nil, show_err
-            end
-        end
-        local called, launched, err = pcall(notification.batch.spawn,
-            notification.batch, job.argv, stdout_path, stderr_path, completion_index)
-        if not called or not launched then
-            protected_remove(stdout_path)
-            protected_remove(stderr_path)
-            return nil, called and err or launched
-        end
-        return {
-            pipe = launched,
-            stdout_path = stdout_path,
-            stderr_path = stderr_path,
-        }
-    end
-    local quoted_stdout, quote_err = cdriver.shell_quote(stdout_path)
-    if not quoted_stdout then
+    local process, launch_err = jobs.launch(notification, job.argv, command,
+        stdout_path, stderr_path, completion_index,
+        verbose and function() return show_parallel_command(command) end)
+    if not process then
         protected_remove(stdout_path)
         protected_remove(stderr_path)
-        return nil, quote_err
+        return nil, launch_err
     end
-    local quoted_stderr
-    quoted_stderr, quote_err = cdriver.shell_quote(stderr_path)
-    if not quoted_stderr then
-        protected_remove(stdout_path)
-        protected_remove(stderr_path)
-        return nil, quote_err
-    end
-    local quoted_index
-    quoted_index, quote_err = cdriver.shell_quote(tostring(completion_index))
-    if not quoted_index then
-        protected_remove(stdout_path)
-        protected_remove(stderr_path)
-        return nil, quote_err
-    end
-    if verbose then
-        local shown, show_err = show_parallel_command(command)
-        if not shown then
-            protected_remove(stdout_path)
-            protected_remove(stderr_path)
-            return nil, show_err
-        end
-    end
-    -- Both shells catch INT/TERM/HUP (exec resets caught signals, so the
-    -- compiler keeps its default actions). A process-group signal therefore
-    -- cannot end the wrapper before its compiler exits: reaping the wrapper
-    -- proves the compiler's lifetime ended, and the completion is still sent.
-    local notified_command = "trap : INT TERM HUP; " ..
-        "(trap : INT TERM HUP; " .. command .. ") >" .. quoted_stdout ..
-        " 2>" .. quoted_stderr ..
-        "; _titan_compile_status=$?; printf '%s\\n' " .. quoted_index ..
-        " >" .. notification.quoted_path ..
-        "; exit $_titan_compile_status"
-    local popen_called, pipe, popen_err =
-        pcall(io.popen, notified_command, "r")
-    if not popen_called then
-        protected_remove(stdout_path)
-        protected_remove(stderr_path)
-        return nil, pipe
-    end
-    if not pipe then
-        protected_remove(stdout_path)
-        protected_remove(stderr_path)
-        return nil, popen_err
-    end
-    return {
-        pipe = pipe,
-        stdout_path = stdout_path,
-        stderr_path = stderr_path,
-    }
+    process.stdout_path, process.stderr_path = stdout_path, stderr_path
+    return process
 end
 
 local function protected_replay_compile_output(filename, stream)
@@ -7485,35 +7381,10 @@ local function protected_replay_compile_output(filename, stream)
     return ok, err
 end
 
-local function reap_prepared_compile(process)
-    process.finish_errors = {}
-    local close_called, ok, term, code =
-        pcall(process.pipe.close, process.pipe)
-    if not close_called then
-        process.finish_errors[#process.finish_errors + 1] =
-            "reap: " .. tostring(ok)
-        pcall(process.pipe.close, process.pipe)
-        ok, term, code = nil, nil, nil
-    end
-    process.ok = ok
-    process.term = term
-    process.code = code
-    process.reaped = true
-end
-
-local function reap_prepared_compile_without_throw(process)
-    local called, err = pcall(reap_prepared_compile, process)
-    if called then return end
-    pcall(process.pipe.close, process.pipe)
-    process.finish_errors = {
-        "reap: failed to finish parallel C compiler: " .. tostring(err),
-    }
-    process.ok, process.term, process.code = nil, nil, nil
-    process.reaped = true
-end
+local reap_prepared_compile_without_throw = jobs.reap
 
 local function finish_prepared_compile(process)
-    if not process.reaped then reap_prepared_compile(process) end
+    if not process.reaped then jobs.reap(process) end
     local finish_errors = process.finish_errors
 
     local stdout_ok, stdout_err = protected_replay_compile_output(
@@ -7545,12 +7416,6 @@ local function finish_prepared_compile_without_throw(process)
     protected_remove(process.stdout_path)
     protected_remove(process.stderr_path)
     return nil, "failed to finish parallel C compiler: " .. tostring(ok)
-end
-
-local function oldest_pending_process(pending, count)
-    for index = 1, count do
-        if pending[index] then return index, pending[index] end
-    end
 end
 
 -- Returns per-module results and the INT/TERM/HUP signal that cancelled the
@@ -7593,99 +7458,23 @@ function run_prepared_compiles(prepared, parallelism, verbose)
         return jobs.summarize(results), slots:cancelled()
     end
 
+    -- The shared native loop launches larger units first, refills a slot as
+    -- soon as any compiler finishes and reaps each child before its slot is
+    -- released. A schedule position is also the completion index.
     local schedule = jobs.launch_order(entries)
-    local pending = {}
-    local pending_count = 0
-    local next_schedule = 1
-    local completion_err, cancelled
+    local next_schedule, completion_err, cancelled = jobs.drive(
+        slots, notification, #schedule, function(position)
+            local entry = schedule[position]
+            local process, launch_err = launch_prepared_compile(
+                entry.job, verbose, notification, position)
+            entry.process = process
+            return process, launch_err
+        end, function(position, launch_err)
+            jobs.record(schedule[position], nil, launch_err)
+        end, "parallel C compiler")
     local function batch_failure(message)
         completion_err = completion_err and (completion_err .. "; " .. message) or
             message
-    end
-    local function release_slot()
-        local released, release_err = slots:release()
-        if not released then
-            batch_failure("failed to return a jobserver token: " ..
-                tostring(release_err))
-        end
-    end
-    while (not completion_err and not cancelled and next_schedule <= #schedule) or
-            pending_count ~= 0 do
-        -- Acquire immediately before each launch: the first active job uses
-        -- this process's implicit slot, later ones borrow a token.
-        local want_slot = false
-        while not completion_err and not cancelled and
-                next_schedule <= #schedule do
-            -- A pending signal wins over a simultaneous slot or completion
-            -- event: check it before every acquisition and launch.
-            cancelled = slots:cancelled()
-            if cancelled then break end
-            local granted, slot_err = slots:acquire_nowait()
-            if granted == nil then
-                batch_failure("failed to acquire a jobserver token: " ..
-                    tostring(slot_err))
-                break
-            elseif not granted then
-                want_slot = true
-                break
-            end
-            local entry = schedule[next_schedule]
-            local launch_called, process, launch_err = pcall(
-                launch_prepared_compile, entry.job, verbose,
-                notification, entry.ordinal)
-            if not launch_called then
-                launch_err, process = process, nil
-            end
-            if process then
-                entry.process = process
-                pending[entry.ordinal] = process
-                pending_count = pending_count + 1
-            else
-                jobs.record(entry, nil, launch_err)
-                release_slot()
-            end
-            next_schedule = next_schedule + 1
-        end
-        if pending_count ~= 0 then
-            local completed_index, process
-            if not completion_err and not cancelled then
-                local wait_called, event, value = pcall(
-                    slots.wait, slots, notification.file, want_slot)
-                if not wait_called then event, value = nil, event end
-                if event == "signal" then
-                    cancelled = value
-                elseif event == "completion" then
-                    local read_called, line, read_err =
-                        pcall(notification.file.read, notification.file, "*l")
-                    if read_called then
-                        completed_index = tonumber(line)
-                        process = completed_index and pending[completed_index]
-                    end
-                    if not process then
-                        batch_failure("failed to receive parallel C compiler " ..
-                            "completion: " .. tostring(read_called and
-                                (read_err or line) or line))
-                    end
-                elseif event ~= "slot" then
-                    batch_failure("failed to wait for parallel C compiler " ..
-                        "completion: " .. tostring(value))
-                end
-            end
-            -- After a completion-channel failure or a cancellation, reap
-            -- tracked children directly instead of waiting for messages that
-            -- may never arrive. Each wrapper exits only after its compiler.
-            if (completion_err or cancelled) and not process then
-                completed_index, process =
-                    oldest_pending_process(pending, #entries)
-            end
-            if process then
-                pending[completed_index] = nil
-                pending_count = pending_count - 1
-                -- Return the slot only after the child is reaped.
-                reap_prepared_compile_without_throw(process)
-                release_slot()
-            end
-        end
     end
 
     local slots_ok, slots_err = slots:close()

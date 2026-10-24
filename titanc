@@ -19,7 +19,7 @@ p:flag('--print-ast', 'Print the AST.')
 p:flag('--pretty-print', 'Format generated C and headers with clang-format.')
 p:flag('-v --verbose', 'Be verbose about compiler invocations.')
 p:option('-j --jobs',
-    'Maximum concurrent generated-C compilations (default: TITAN_JOBS or 4).')
+    'Maximum concurrent native compiler jobs: generated-C compilations and batched C probes (default: TITAN_JOBS or 4).')
 p:option('--c-parts',
     'Maximum generated-C translation units per module above the split threshold (default: TITAN_C_PARTS, 4 on Linux, or 1 on macOS/Windows).')
 p:option('--launcher-name', 'Windows standalone/test launcher filename in bin (default: logical module name).')
@@ -174,6 +174,7 @@ resolver_context = driver.new_resolver_context({
     pretty_print = args.pretty_print,
     output_root = args.output,
     cache_adapter = { sha256_binary = support._sha256_binary },
+    jobs = jobs,
 })
 if driver.TOOLCHAIN_ERROR then exit(driver.TOOLCHAIN_ERROR) end
 if args.lua and driver.INSTALLED then

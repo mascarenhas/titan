@@ -241,11 +241,24 @@ function ensure_module_probe(st)
         st.module_probe_error_includes_version = includes_version
         return nil, err
     end
+    -- A speculative pass defers through one batch shared by all of its
+    -- contexts; its authoritative recheck uses one answering completed runs.
+    local speculation = st.probe_speculation
+    if speculation and not speculation.batch and
+       type(service.new_probe_batch) == "function" then
+        if speculation.answers then
+            speculation.batch = service:new_probe_batch(speculation.answers)
+        elseif speculation.imports and service:batching() then
+            speculation.batch = service:new_probe_batch()
+            speculation.batch.deferring = speculation.deferring == true
+        end
+    end
     local module_probe
     module_probe, err = service:module_context({
         module = st.modname,
         source_dir = st.source_dir or ".",
         includes = st.foreign_includes or {},
+        batch = speculation and speculation.batch,
     })
     if not module_probe then
         st.module_probe_error = err or
@@ -1220,10 +1233,11 @@ function checker._validate_automatic_fam_extent(plan, st, loc, errors)
         tostring(count), cdeclarator.render_type_name(plan.payload_type),
         field.name, cdeclarator.render_type_name(array.elem))
     local sentinel = types.CArray(array.elem, predicate .. " ? 1 : -1")
+    -- Acceptance only: a body-phase verdict may arrive at the module barrier.
     local result = probe:validate_declaration_compatibilities({ {
         left_type = sentinel,
         right_type = sentinel,
-    } })[1]
+    } }, { deferrable = true })[1]
     if not result or result.status == "infrastructure_failure" then
         checker.typeerror(errors, loc,
             "cannot validate automatic C allocation extent for flexible-array "
@@ -1353,10 +1367,11 @@ local function nominal_fixed_array_extent(target, payload, count, st, loc, error
             "cannot validate fixed nominal C array extent: %s", tostring(probe_error))
         return false
     end
+    -- Acceptance only: a body-phase verdict may arrive at the module barrier.
     local result = probe:validate_declaration_compatibilities({ {
         left_type = target,
         right_type = types.CArray(payload, count),
-    } })[1]
+    } }, { deferrable = true })[1]
     if not result or result.status == "infrastructure_failure" then
         checker.typeerror(errors, loc,
             "cannot validate fixed nominal C array extent: %s",

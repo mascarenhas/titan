@@ -2,23 +2,9 @@ local core = require "titan-compiler.checker.core"
 local platform = require "titan-compiler.platform"
 local _ENV = core
 
--- Entry point for the typechecker
---   ast: AST for the whole module
---   subject: the string that generated the AST
---   filename: the file name that contains the subject
---   loader: the module loader, a function from module name to its AST, code,
---   and filename or nil and an error
---
---   returns the module type and a list of type errors found
---   annotates the AST with the types of its terms in "_type" fields
---   annotates duplicate top-level declarations with a "_ignore" boolean field
--- Implementation notes: doc/implementation/checker.md#entry-point-and-contract
-function checker.check(modname, ast, subject, filename, loader, options)
-    options = options or {}
+local function check_pass(modname, ast, subject, filename, loader, options,
+                          speculation)
     ast._analysis_only = options.analysis_only == true or nil
-    loader = loader or function ()
-        return nil, "you must pass a loader to import modules"
-    end
     func_stack = {}
     checker._foreign_function_depth = 0
     catch_depth = 0
@@ -32,6 +18,7 @@ function checker.check(modname, ast, subject, filename, loader, options)
     st.cache_adapter = options.cache_adapter
     st.prepare_ffi_header = options.prepare_ffi_header
     st.filename = filename
+    st.probe_speculation = speculation
     local previous_check_state = active_check_state
     active_check_state = st
     st.c_profile = nil
@@ -51,7 +38,22 @@ function checker.check(modname, ast, subject, filename, loader, options)
         mark_toplevel_duplicates(ast, errors)
         collect_type_aliases(ast, st, errors)
         checktoplevel(ast, st, errors, loader)
+        if speculation and speculation.imports then
+            speculation.deferring = true
+            if speculation.batch then speculation.batch.deferring = true end
+        end
         checkbodies(ast, st, errors)
+        -- The speculative barrier: nothing below may publish a fact derived
+        -- from an assumed probe verdict.
+        if speculation and speculation.imports then
+            speculation.deferring = false
+            local batch = speculation.batch
+            if batch and not batch:flush() then
+                speculation.rejected = true
+                speculation.answers = batch.outcomes
+                return nil, errors
+            end
+        end
         local header_inputs, header_error =
             collect_foreign_header_inputs(
                 st.foreign_includes, st.supplemental_foreign_includes)
@@ -151,6 +153,127 @@ function checker.check(modname, ast, subject, filename, loader, options)
         error(closed, 0)
     end
     return result_or_error, result_errors
+end
+
+-- A top-level import during a speculative pass is recorded as one unit: the
+-- returned module type, errors and provenance, plus the importer-side facts
+-- the unit added to this checker state. The authoritative recheck replays the
+-- units in order instead of calling the loader again, so nested checks,
+-- driver import-cache entries, dependency frames and registry writes made by
+-- the loader happen exactly once, as on the synchronous path.
+-- Implementation notes: doc/implementation/checker.md#speculative-probe-barrier-and-authoritative-recheck
+function checker._checkimport_for(st, modname, loader, request)
+    local speculation = st.probe_speculation
+    local kind = request and request.kind
+    local replay = speculation and speculation.replay
+    if replay then
+        speculation.position = speculation.position + 1
+        local unit = replay[speculation.position]
+        if not unit or unit.modname ~= modname or unit.kind ~= kind then
+            error("internal compiler error: the authoritative recheck of " ..
+                "module '" .. st.modname .. "' diverged from its speculative " ..
+                "import of '" .. modname .. "'", 0)
+        end
+        for name, module in pairs(unit.binary_modules) do
+            st.binary_modules[name] = module
+        end
+        if unit.c_profile then ensure_c_profile(st) end
+        return unit.module, unit.errors, unit.info
+    end
+    local units = speculation and speculation.imports
+    if not units then return checker.checkimport(modname, loader, request) end
+    local known_modules = {}
+    for name, module in pairs(st.binary_modules) do known_modules[name] = module end
+    local had_profile = st.c_profile ~= nil or st.c_profile_error ~= nil
+    local module, errors, info = checker.checkimport(modname, loader, request)
+    local added = {}
+    for name, value in pairs(st.binary_modules) do
+        if known_modules[name] ~= value then added[name] = value end
+    end
+    units[#units + 1] = {
+        modname = modname, kind = kind,
+        module = module, errors = errors, info = info,
+        binary_modules = added,
+        c_profile = not had_profile and
+            (st.c_profile ~= nil or st.c_profile_error ~= nil),
+    }
+    return module, errors, info
+end
+
+-- Every deferral happens after the import phase, whose loader effects and
+-- registry state are therefore exactly the synchronous path's. A speculative
+-- pass snapshots `types.registry` here; its recheck asserts that it replayed
+-- every recorded unit and restores that snapshot in place, discarding every
+-- registry write of the abandoned pass.
+function checker._finish_import_phase(st)
+    local speculation = st.probe_speculation
+    if not speculation then return end
+    if speculation.replay then
+        if speculation.position ~= #speculation.replay then
+            error("internal compiler error: the authoritative recheck of " ..
+                "module '" .. st.modname .. "' replayed " ..
+                speculation.position .. " of " .. #speculation.replay ..
+                " speculative imports", 0)
+        end
+        local snapshot = speculation.registry
+        local registry = snapshot.object
+        for name in pairs(registry) do
+            if snapshot.entries[name] == nil then registry[name] = nil end
+        end
+        for name, owner in pairs(snapshot.entries) do registry[name] = owner end
+        types.registry = registry
+    elseif speculation.imports then
+        local entries = {}
+        for name, owner in pairs(types.registry) do entries[name] = owner end
+        speculation.registry = { object = types.registry, entries = entries }
+    end
+end
+
+-- Entry point for the typechecker
+--   ast: AST for the whole module
+--   subject: the string that generated the AST
+--   filename: the file name that contains the subject
+--   loader: the module loader, a function from module name to its AST, code,
+--   and filename or nil and an error
+--
+--   returns the module type and a list of type errors found
+--   annotates the AST with the types of its terms in "_type" fields
+--   annotates duplicate top-level declarations with a "_ignore" boolean field
+-- Implementation notes: doc/implementation/checker.md#entry-point-and-contract
+function checker.check(modname, ast, subject, filename, loader, options)
+    options = options or {}
+    loader = loader or function ()
+        return nil, "you must pass a loader to import modules"
+    end
+    -- Only a resolver-owned probe service that can batch, a driver-supplied
+    -- fresh parse, and an ordinary (not analysis or completion) check may
+    -- defer acceptance probes; everything else stays synchronous.
+    if type(options.reparse) ~= "function"
+       or options.probe_service_provider == nil
+       or options.analysis_only or options.completion ~= nil then
+        return check_pass(modname, ast, subject, filename, loader, options, nil)
+    end
+    local speculation = { imports = {} }
+    local module_type, errors = check_pass(
+        modname, ast, subject, filename, loader, options, speculation)
+    if not speculation.rejected then return module_type, errors end
+
+    -- A deferred probe failed: discard the speculative pass and check a
+    -- fresh parse authoritatively. Refill the caller's root so its reference
+    -- stays valid while every node is new.
+    local fresh, parse_error = options.reparse()
+    if type(fresh) ~= "table" then
+        error("internal compiler error: cannot reparse module '" .. modname ..
+            "' for its authoritative recheck: " .. tostring(parse_error), 0)
+    end
+    for key in pairs(ast) do ast[key] = nil end
+    for key, value in pairs(fresh) do ast[key] = value end
+    return check_pass(modname, ast, subject, filename, loader, options, {
+        replay = speculation.imports,
+        position = 0,
+        registry = speculation.registry,
+        answers = speculation.answers,
+    })
 end
 
 return core.checker

@@ -15,6 +15,7 @@ local staticmetadata = require "titan-compiler.staticmetadata"
 local cdriver = require "c-parser.cdriver"
 local compiler_io = require "titan-compiler.io"
 local ffiheaders = require "titan-compiler.ffiheaders"
+local jobs = require "titan-compiler.jobs"
 
 local default_io = compiler_io.new_sync()
 
@@ -1443,10 +1444,14 @@ local function normalize_private_diagnostic(
     return diagnostic, persistent_safe
 end
 
-function Service:_execute_source(
+-- Prepare one compiler invocation: workspace (or staged generated-header
+-- workspace), numbered source/object names, the written source, argv, the
+-- command and verbose evidence. Returns the job, or nil and a completed
+-- infrastructure run when preparation failed.
+function Service:_prepare_execution(
         stage, source, key, probe_label, question, generated_header)
     if self.closed then
-        return infrastructure_run(stage, "closed", {
+        return nil, infrastructure_run(stage, "closed", {
             diagnostic = "probe service is closed",
             source = source,
         })
@@ -1458,7 +1463,7 @@ function Service:_execute_source(
         workspace, workspace_error = self:_ensure_workspace()
     end
     if not workspace then
-        return infrastructure_run(stage, "workspace",
+        return nil, infrastructure_run(stage, "workspace",
             { diagnostic = workspace_error, source = source })
     end
     local diagnostic_aliases
@@ -1492,7 +1497,7 @@ function Service:_execute_source(
         -- Best-effort removal here keeps per-probe cleanup independent of the
         -- later session close.
         call_workspace(workspace, "remove", source_name)
-        return infrastructure_run(stage, "workspace", {
+        return nil, infrastructure_run(stage, "workspace", {
             diagnostic = normalize_private_diagnostic(
                 "could not write probe source: " .. write_error,
                 source_path, object_path, workspace.root,
@@ -1507,7 +1512,7 @@ function Service:_execute_source(
     local command, command_error = command_string(argv)
     if not command then
         call_workspace(workspace, "remove", source_name)
-        return infrastructure_run(stage, "command", {
+        return nil, infrastructure_run(stage, "command", {
             diagnostic = normalize_private_diagnostic(
                 "could not construct probe command: " .. command_error,
                 source_path, object_path, workspace.root,
@@ -1534,25 +1539,41 @@ function Service:_execute_source(
         command = command,
     })
 
-    local metadata = {
+    return {
         stage = stage,
         key = key,
-        argv = copy_array(argv),
-        command = command,
         source = source,
+        question = question,
+        workspace = workspace,
+        source_name = source_name,
+        object_name = object_name,
         source_path = source_path,
-        object_path = reported_object_path,
+        object_path = object_path,
+        reported_object_path = reported_object_path,
+        syntax_only = syntax_only,
+        diagnostic_aliases = diagnostic_aliases,
+        argv = argv,
+        command = command,
+        metadata = {
+            stage = stage,
+            key = key,
+            argv = copy_array(argv),
+            command = command,
+            source = source,
+            source_path = source_path,
+            object_path = reported_object_path,
+        },
     }
-    local execution_digest = key
+end
+
+-- Normalize one prepared invocation's runner result, extract an enum
+-- selection, normalize private diagnostic paths and remove its artifacts.
+-- `call_ok` is false when a custom runner raised `raw_result`.
+function Service:_finish_execution(job, call_ok, raw_result, secondary)
+    local question, workspace = job.question, job.workspace
+    local source_path, object_path = job.source_path, job.object_path
+    local diagnostic_aliases = job.diagnostic_aliases
     local run
-    local call_ok, raw_result, secondary
-    if self.runner_is_strategy then
-        raw_result, secondary = self.runner(copy_array(argv), metadata)
-        call_ok = true
-    else
-        call_ok, raw_result, secondary =
-            pcall(self.runner, copy_array(argv), metadata)
-    end
     if not call_ok then
         run = {
             started = false,
@@ -1600,17 +1621,17 @@ function Service:_execute_source(
         run.diagnostic, source_path, object_path, workspace.root,
         diagnostic_aliases)
     run.diagnostic_persistent_safe = diagnostic_persistent_safe
-    run.execution_digest = execution_digest
-    run.argv = copy_array(argv)
-    run.command = command
-    run.source = source
+    run.execution_digest = job.key
+    run.argv = copy_array(job.argv)
+    run.command = job.command
+    run.source = job.source
     run.source_path = source_path
-    run.object_path = reported_object_path
+    run.object_path = job.reported_object_path
 
     self:_emit({
         kind = "result",
-        stage = stage,
-        key = key,
+        stage = job.stage,
+        key = job.key,
         started = run.started,
         ok = run.ok,
         interrupted = run.interrupted,
@@ -1620,22 +1641,22 @@ function Service:_execute_source(
 
     local cleanup_errors = {}
     local source_removed, source_remove_error =
-        call_workspace(workspace, "remove", source_name)
+        call_workspace(workspace, "remove", job.source_name)
     if not source_removed then
         cleanup_errors[#cleanup_errors + 1] =
-            source_name .. ": " .. source_remove_error
+            job.source_name .. ": " .. source_remove_error
     end
-    if not syntax_only then
+    if not job.syntax_only then
         local object_removed, object_remove_error =
-            call_workspace(workspace, "remove", object_name)
+            call_workspace(workspace, "remove", job.object_name)
         if not object_removed then
             cleanup_errors[#cleanup_errors + 1] =
-                object_name .. ": " .. object_remove_error
+                job.object_name .. ": " .. object_remove_error
         end
     end
     self:_emit({
         kind = "cleanup",
-        scope = stage .. " artifacts",
+        scope = job.stage .. " artifacts",
         ok = #cleanup_errors == 0,
         error = #cleanup_errors > 0 and table.concat(cleanup_errors, "; ")
             or nil,
@@ -1658,6 +1679,22 @@ function Service:_execute_source(
             cleanup_diagnostic_safe
     end
     return run
+end
+
+function Service:_execute_source(
+        stage, source, key, probe_label, question, generated_header)
+    local job, failed = self:_prepare_execution(
+        stage, source, key, probe_label, question, generated_header)
+    if not job then return failed end
+    local call_ok, raw_result, secondary
+    if self.runner_is_strategy then
+        raw_result, secondary = self.runner(copy_array(job.argv), job.metadata)
+        call_ok = true
+    else
+        call_ok, raw_result, secondary =
+            pcall(self.runner, copy_array(job.argv), job.metadata)
+    end
+    return self:_finish_execution(job, call_ok, raw_result, secondary)
 end
 
 -- All memory and disk reuse answers the same question: has this exact raw C
@@ -1802,13 +1839,16 @@ function Service:_trace_semantic(key, kind, context, run, publication)
     })
 end
 
-function Service:_trace_execution(key, kind, context, run, lookup, publication)
+-- `batch_kind` is "single" for a synchronous launch and "speculative" for a
+-- launch from a flushed speculative acceptance batch.
+function Service:_trace_execution(key, kind, context, run, lookup, publication,
+                                  batch_kind)
     if not self.execution_trace or not run.execution_digest then return end
     pcall(self.execution_trace, {
         event = "compiler_execution",
         key = key,
         probe_kind = kind,
-        batch_kind = "single",
+        batch_kind = batch_kind or "single",
         header_identity = context and context.baseline_key or "",
         header_label = context and context.header_label or "",
         module = context and context.module_name or "",
@@ -1822,7 +1862,9 @@ end
 
 -- One source, one lookup, one compiler invocation, one result. Candidate
 -- misses first establish whether the shared header preamble itself compiles.
-function Service:_run_source(stage, source, kind, context, question)
+-- A `deferrable` acceptance candidate whose context batch is deferring is
+-- recorded there after its lookup and baseline instead of being compiled.
+function Service:_run_source(stage, source, kind, context, question, deferrable)
     kind = kind or "raw_source"
     local path, key = self:_cache_location(source)
     if self.closed then
@@ -1832,6 +1874,13 @@ function Service:_run_source(stage, source, kind, context, question)
         run.key = key
         self:_trace_semantic(key, kind, context, run)
         return run
+    end
+    local batch = context and context.batch
+    local pending = batch and not question and batch.pending_by_key[key]
+    if pending then
+        -- The synchronous path's repeated request is a memory hit.
+        self:_emit({ kind = "cache", cache = stage, hit = true, key = key })
+        return batch:_defer_duplicate(pending, kind, context)
     end
     local semantic, tier, lookup = self:_lookup_result(
         key, path, stage, context and context.module_name, question)
@@ -1868,14 +1917,169 @@ function Service:_run_source(stage, source, kind, context, question)
             return run
         end
     end
-    local execution = self:_execute_source(stage, source, key,
-        kind:gsub("_", "-"), question, context and context.generated_header)
+    if deferrable and batch and batch.deferring and not question then
+        return batch:_defer(stage, source, key, path, kind, context, lookup,
+            baseline and baseline.cached)
+    end
+    local execution = batch and batch:_answer(key)
+    local answered = execution ~= nil
+    if not answered then
+        execution = self:_execute_source(stage, source, key,
+            kind:gsub("_", "-"), question, context and context.generated_header)
+        if batch then batch:_observe(key, execution) end
+    end
     local run, publication = self:_publish_result(key, path, execution, question)
     run.key = key
     if baseline then run.baseline_cached = baseline.cached end
-    self:_trace_execution(key, kind, context, execution, lookup, publication)
+    if not answered then
+        self:_trace_execution(key, kind, context, execution, lookup, publication)
+    end
     self:_trace_semantic(key, kind, context, run, publication)
     return run
+end
+
+-- A checker invocation's speculative acceptance batch. While `deferring`,
+-- an eligible cache miss whose baseline passed is recorded with its already
+-- rendered source, digest, cache path and immutable module context, and the
+-- call receives an assumed success carrying the real key. `flush` compiles
+-- the unique requests through the I/O strategy's `run_batch`, publishes only
+-- real verdicts, and reports whether every request was accepted. Every
+-- executed run that was not published (infrastructure failures, including
+-- synchronous ones such as baselines) is kept in `outcomes`; an authoritative
+-- recheck receives them as `answers`, consumed at the point where the
+-- synchronous path would launch the compiler, so a completed verdict is
+-- never compiled twice.
+-- Implementation notes: doc/implementation/c-ffi-expressions.md#speculative-batched-acceptance-probes
+local ProbeBatch = {}
+ProbeBatch.__index = ProbeBatch
+
+local function publishable(run)
+    return run.classification == "success" or
+        run.classification == "compiler_rejection"
+end
+
+local function assumed_run(request)
+    return {
+        started = true, ok = true, interrupted = false, status = 0,
+        classification = "success", diagnostic = "", deferred = true,
+        source = request.source, key = request.key,
+        cache_path = request.path, baseline_cached = request.baseline_cached,
+    }
+end
+
+function ProbeBatch:_defer(stage, source, key, path, kind, context, lookup,
+                           baseline_cached)
+    local request = {
+        stage = stage, source = source, key = key, path = path, kind = kind,
+        context = context, lookup = lookup, baseline_cached = baseline_cached,
+    }
+    self.pending[#self.pending + 1] = request
+    self.pending_by_key[key] = request
+    self.requests[#self.requests + 1] = {
+        request = request, kind = kind, context = context,
+    }
+    return assumed_run(request)
+end
+
+function ProbeBatch:_defer_duplicate(request, kind, context)
+    self.requests[#self.requests + 1] = {
+        request = request, kind = kind, context = context, duplicate = true,
+    }
+    return assumed_run(request)
+end
+
+function ProbeBatch:_observe(key, execution)
+    if publishable(execution) then return end
+    local outcomes = self.outcomes[key]
+    if not outcomes then
+        outcomes = {}
+        self.outcomes[key] = outcomes
+    end
+    outcomes[#outcomes + 1] = execution
+end
+
+-- Completed nonpublishable runs of the speculative pass, in the order it
+-- observed them; the last one keeps answering any further request.
+function ProbeBatch:_answer(key)
+    local answers = self.answers and self.answers[key]
+    if not answers then return nil end
+    local position = math.min((self.answer_positions[key] or 0) + 1, #answers)
+    self.answer_positions[key] = position
+    return answers[position]
+end
+
+function ProbeBatch:flush()
+    self.deferring = false
+    local pending, requests = self.pending, self.requests
+    self.pending, self.pending_by_key, self.requests = {}, {}, {}
+    if #pending == 0 then return true end
+    local service = self.service
+    local prepared, commands = {}, {}
+    for index, request in ipairs(pending) do
+        local job, failed = service:_prepare_execution(request.stage,
+            request.source, request.key, (request.kind:gsub("_", "-")), nil,
+            request.context.generated_header)
+        if job then
+            commands[#commands + 1] = copy_array(job.argv)
+            job.command_index = #commands
+        end
+        prepared[index] = job or { failed = failed }
+    end
+    local results, cancelled = {}, nil
+    if #commands > 0 then
+        -- A strategy method, called directly like the synchronous runner so
+        -- strategy-owned cancellation keeps unwinding.
+        results, cancelled = service.io:run_batch(commands, { jobs = service.jobs })
+    end
+    local accepted = true
+    for index, request in ipairs(pending) do
+        local job = prepared[index]
+        local execution = job.failed or service:_finish_execution(
+            job, true, results[job.command_index])
+        self:_observe(request.key, execution)
+        local run, publication = service:_publish_result(
+            request.key, request.path, execution)
+        request.run, request.publication = run, publication
+        service:_trace_execution(request.key, request.kind, request.context,
+            execution, request.lookup, publication, "speculative")
+        if execution.classification ~= "success" then accepted = false end
+    end
+    for _, entry in ipairs(requests) do
+        local request = entry.request
+        if entry.duplicate then
+            service:_trace_semantic(request.key, entry.kind, entry.context, {
+                classification = request.run.classification,
+                cache_tier = publishable(request.run) and "service" or nil,
+            })
+        else
+            service:_trace_semantic(request.key, entry.kind, entry.context,
+                request.run, request.publication)
+        end
+    end
+    -- Every child was reaped and every probe artifact removed; deliver a
+    -- caught INT/TERM/HUP under the restored action before any recheck.
+    jobs.propagate(cancelled)
+    return accepted
+end
+
+function Service:batching()
+    if not self.runner_is_strategy or self.jobs <= 1 then return false end
+    local readable, method = pcall(function() return self.io.run_batch end)
+    return readable and type(method) == "function"
+end
+
+-- `answers` are a speculative pass's `outcomes`, for its authoritative recheck.
+function Service:new_probe_batch(answers)
+    return setmetatable({
+        service = self,
+        deferring = false,
+        pending = {},
+        pending_by_key = {},
+        requests = {},
+        outcomes = {},
+        answers = answers,
+        answer_positions = {},
+    }, ProbeBatch)
 end
 
 local function probe_result(context, kind, stage, source, run, rejection)
@@ -1938,7 +2142,18 @@ function ModuleContext:validate_baseline()
         "the final ordered foreign header context")
 end
 
+-- Acceptance-only kinds whose success the checker consumes only as
+-- acceptance plus the source key. A declaration-compatibility caller opts in
+-- per call (`{ deferrable = true }`); enum-range and enum-carrier questions
+-- choose checker state and are never deferred.
+local DEFERRABLE_KINDS = { c_operator = true, unsafe_object_pointer = true }
+
 function ModuleContext:_candidate(kind, render_source, ...)
+    return self:_run_candidate(kind, DEFERRABLE_KINDS[kind] == true,
+        render_source, ...)
+end
+
+function ModuleContext:_run_candidate(kind, deferrable, render_source, ...)
     if self.service.closed then
         local run = { classification = "infrastructure_failure", stage = "service",
             reason = "closed", diagnostic = "probe service is closed" }
@@ -1970,7 +2185,8 @@ function ModuleContext:_candidate(kind, render_source, ...)
         and "conversion from '" .. rendered.source_type .. "' to '"
             .. rendered.target_type .. "'"
         or rendered.kind .. " operator expression '" .. rendered.expression .. "'"
-    local run = self.service:_run_source("candidate", source, kind, self)
+    local run = self.service:_run_source(
+        "candidate", source, kind, self, nil, deferrable)
     local result = probe_result(self, kind, "candidate", source, run, rejection)
     for name, value in pairs(rendered) do result[name] = value end
     if kind == "c_operator" then
@@ -1983,18 +2199,19 @@ function ModuleContext:_candidate(kind, render_source, ...)
 end
 
 function ModuleContext:validate_declaration_compatibility(
-        left_type, right_type, left_declaration, right_declaration)
-    return self:_candidate("declaration_compatibility",
+        left_type, right_type, left_declaration, right_declaration, options)
+    return self:_run_candidate("declaration_compatibility",
+        type(options) == "table" and options.deferrable == true,
         render_declaration_compatibility_source,
         left_type, right_type, left_declaration, right_declaration)
 end
 
-function ModuleContext:validate_declaration_compatibilities(candidates)
+function ModuleContext:validate_declaration_compatibilities(candidates, options)
     local results = {}
     for index, candidate in ipairs(candidates) do
         results[index] = self:validate_declaration_compatibility(
             candidate.left_type, candidate.right_type,
-            candidate.left_declaration, candidate.right_declaration)
+            candidate.left_declaration, candidate.right_declaration, options)
     end
     return results
 end
@@ -2088,6 +2305,12 @@ function Service:module_context(options)
             generated_header = include.generated_header
         end
     end
+    -- One checker invocation shares its batch across every context it builds
+    -- as foreign includes grow.
+    local batch = options.batch
+    if batch ~= nil and (getmetatable(batch) ~= ProbeBatch or batch.service ~= self) then
+        return nil, "module probe batch must belong to this probe service"
+    end
     local context = setmetatable({
         service = self,
         module_name = module_name,
@@ -2096,6 +2319,7 @@ function Service:module_context(options)
         header_preamble = render_header_preamble(includes),
         generated_header = generated_header,
         header_label = trace_header_label(includes),
+        batch = batch,
     }, ModuleContext)
     context.baseline_source = render_baseline_source(context)
     context.baseline_key = self:_digest(context.baseline_source)
@@ -2366,6 +2590,14 @@ function cprobe.new_service(options)
     if type(syntax_only) ~= "boolean" then
         return nil, "syntax_only must be a boolean"
     end
+    -- The resolver's local native job cap. Greater than one lets a checker
+    -- defer acceptance candidates into a batch run through the strategy's
+    -- optional `run_batch`; the default keeps every probe synchronous.
+    local jobs_cap = options.jobs
+    if jobs_cap == nil then jobs_cap = 1 end
+    if math.type(jobs_cap) ~= "integer" or jobs_cap < 1 then
+        return nil, "jobs must be a positive integer"
+    end
 
     local cache_directory = option(
         options, toolchain, "cache_directory", nil)
@@ -2447,6 +2679,7 @@ function cprobe.new_service(options)
         profile = profile,
         profile_identity = profile_identity,
         syntax_only = syntax_only,
+        jobs = jobs_cap,
         runner = runner,
         runner_is_strategy = runner_is_strategy,
         temp_provider = temp_provider,

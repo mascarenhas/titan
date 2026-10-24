@@ -514,6 +514,43 @@ local function shell_command(argv)
     return table.concat(quoted, " ")
 end
 
+-- The normalized result of one completed captured POSIX shell command.
+-- Status 129..192 is the shell's report of a signal-terminated child, and
+-- 126/127 mean the command could not be executed.
+local function shell_result(command, output, succeeded, why, status)
+    local shell_status = not succeeded and why == "exit" and
+        type(status) == "number" and status >= 129 and status <= 192 and
+        status or nil
+    local signal = not succeeded and (
+        why == "signal" and status or
+        shell_status and (shell_status - 128)
+    ) or nil
+    local interrupted = signal ~= nil
+    if interrupted then
+        why = "signal"
+        status = signal
+    end
+    local missing = not succeeded and why == "exit" and
+        (status == 126 or status == 127)
+
+    return {
+        started = not missing,
+        ok = succeeded == true,
+        status = succeeded and 0 or status,
+        shell_status = shell_status,
+        signal = signal,
+        why = why,
+        interrupted = interrupted,
+        command = command,
+        diagnostic = output,
+        output = output,
+    }
+end
+
+local function captured_command(argv)
+    return "env LANG=C LC_ALL=C " .. shell_command(argv)
+end
+
 -- Preserve the normalized result contract historically supplied by
 -- c-parser.cpp.capture_command. The default implementation uses one POSIX
 -- shell only as the io.popen transport; argv remains parsed and losslessly
@@ -554,7 +591,7 @@ function Sync:run(argv, options)
         return { started = false, ok = false,
             diagnostic = "could not start captured command: " .. tostring(result) }
     end
-    local command = "env LANG=C LC_ALL=C " .. shell_command(normalized)
+    local command = captured_command(normalized)
     if options.stderr_to_stdout ~= false then command = command .. " 2>&1" end
 
     local opened, pipe, popen_err = pcall(lua_io.popen, command,
@@ -597,33 +634,139 @@ function Sync:run(argv, options)
         }
     end
 
-    local shell_status = not succeeded and why == "exit" and
-        type(status) == "number" and status >= 129 and status <= 192 and
-        status or nil
-    local signal = not succeeded and (
-        why == "signal" and status or
-        shell_status and (shell_status - 128)
-    ) or nil
-    local interrupted = signal ~= nil
-    if interrupted then
-        why = "signal"
-        status = signal
-    end
-    local missing = not succeeded and why == "exit" and
-        (status == 126 or status == 127)
+    return shell_result(command, output, succeeded, why, status)
+end
 
-    return {
-        started = not missing,
-        ok = succeeded == true,
-        status = succeeded and 0 or status,
-        shell_status = shell_status,
-        signal = signal,
-        why = why,
-        interrupted = interrupted,
-        command = command,
-        diagnostic = output,
-        output = output,
-    }
+local function batch_failure_result(command, diagnostic)
+    return { started = false, ok = false, command = command,
+        diagnostic = "could not start captured command: " .. diagnostic }
+end
+
+-- Optional batching capability; it is not a required strategy method, and a
+-- caller without it runs each command through `run`. Runs independent argv
+-- arrays concurrently, each capturing combined standard output and error with
+-- the same command text and result shape as `run(argv)`. One
+-- `jobs.open_slots(options.jobs, { guard = true })` ledger bounds the batch:
+-- the implicit process slot, exact parent-jobserver tokens, the local cap,
+-- the unusable-server fallback, and reaping before a slot is released.
+-- Returns the results in input order and the INT/TERM/HUP signal that
+-- cancelled the batch, if any; every launched child has been reaped and its
+-- log removed, and the caller re-raises the signal with `jobs.propagate`
+-- after its own cleanup. A ledger or completion-channel failure stops further
+-- launches; each unlaunched command reports a start failure, while a reaped
+-- child keeps the exit status and output it actually produced.
+-- Implementation notes: doc/implementation/c-ffi-expressions.md#speculative-batched-acceptance-probes
+function Sync:run_batch(commands, options)
+    local jobs = require "titan-compiler.jobs"
+    local cap = type(options) == "table" and options.jobs or nil
+    if math.type(cap) ~= "integer" or cap < 1 then
+        error("run_batch requires a positive integer jobs bound", 2)
+    end
+    local results, launchable = {}, {}
+    for index, argv in ipairs(commands) do
+        local normalized, normalize_err = normalize_argv(argv)
+        if not normalized then
+            results[index] = { started = false, ok = false, diagnostic = normalize_err }
+        elseif #normalized == 0 then
+            results[index] = { started = false, ok = false, diagnostic = "command is empty" }
+        else
+            launchable[#launchable + 1] = {
+                index = index, argv = normalized,
+                command = platform.windows
+                    and platform.windows_process_command(normalized)
+                    or captured_command(normalized),
+            }
+        end
+    end
+    if #launchable == 0 then return results end
+    local slots, slots_err = jobs.open_slots(cap, { guard = true })
+    if not slots then
+        for _, item in ipairs(launchable) do
+            results[item.index] = batch_failure_result(item.command, tostring(slots_err))
+        end
+        return results
+    end
+    local function interrupted(item, signal)
+        results[item.index] = batch_failure_result(item.command,
+            "the batch was interrupted by signal " .. tostring(signal))
+    end
+    -- One granted slot (explicit `make -j1`, an unusable parent server, or a
+    -- single command): run in order under the guard, without a channel.
+    if slots.limit == 1 or #launchable == 1 then
+        for _, item in ipairs(launchable) do
+            local signal = slots:cancelled()
+            if signal then interrupted(item, signal)
+            else results[item.index] = self:run(item.argv) end
+        end
+        slots:close()
+        return results, slots:cancelled()
+    end
+
+    local channel_called, channel, channel_err = pcall(jobs.open_channel,
+        function() return self:tmpname() end)
+    if not channel_called then channel, channel_err = nil, channel end
+    if not channel then
+        local closed, close_err = slots:close()
+        if not closed then channel_err = tostring(channel_err) .. "; " .. tostring(close_err) end
+        for _, item in ipairs(launchable) do
+            results[item.index] = batch_failure_result(item.command, tostring(channel_err))
+        end
+        return results, slots:cancelled()
+    end
+    local launched = {}
+    local next_position, failure, cancelled = jobs.drive(
+        slots, channel, #launchable, function(position)
+            local item = launchable[position]
+            local log, log_err = self:tmpname()
+            if not log then return nil, log_err end
+            local process, launch_err = jobs.launch(channel, item.argv,
+                item.command, log, log, position)
+            if not process then
+                jobs.protected_remove(log)
+                return nil, launch_err
+            end
+            process.log = log
+            launched[position] = process
+            return process
+        end, function(position, launch_err)
+            local item = launchable[position]
+            results[item.index] = batch_failure_result(item.command, tostring(launch_err))
+        end, "C probe compiler")
+    local function batch_failure(message)
+        failure = failure and (failure .. "; " .. message) or message
+    end
+    local slots_ok, slots_close_err = slots:close()
+    if not slots_ok then batch_failure(tostring(slots_close_err)) end
+    cancelled = cancelled or slots:cancelled()
+    local channel_ok, channel_close_err = jobs.close_channel(channel)
+    if not channel_ok then batch_failure(channel_close_err) end
+    for position = next_position, #launchable do
+        local item = launchable[position]
+        if cancelled then interrupted(item, cancelled)
+        else results[item.index] = batch_failure_result(item.command, tostring(failure)) end
+    end
+    for position, process in pairs(launched) do
+        local item = launchable[position]
+        local output, read_err = self:read_file(process.log)
+        jobs.protected_remove(process.log)
+        local result
+        if not output or #process.finish_errors ~= 0 then
+            result = { started = true, ok = false, command = item.command,
+                diagnostic = (output or "") .. "\ncould not capture command output: " ..
+                    tostring(read_err or table.concat(process.finish_errors, "; ")) }
+        elseif platform.windows then
+            local signal = process.term == "signal" and process.code or nil
+            result = { started = true, ok = process.ok == true,
+                status = process.code, why = process.term, signal = signal,
+                interrupted = signal ~= nil, command = item.command,
+                diagnostic = output, output = output }
+        else
+            result = shell_result(item.command, output,
+                process.ok, process.term, process.code)
+        end
+        results[item.index] = result
+    end
+    return results, cancelled
 end
 
 function Sync:yield(_module_name)
