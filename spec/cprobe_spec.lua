@@ -3831,16 +3831,20 @@ describe("speculative acceptance batches", function()
         assert(ok, err)
 
         -- A caught signal returned with the results survives the raise and
-        -- is delivered once, by the owner's close, after cleanup.
+        -- is delivered once, by the owner's close, after the signalled
+        -- fixture's cleanup.
+        local signal_state, signal_control, signal_provider = raising_removal()
         local delivered = {}
         local previous = jobs.propagate
         jobs.propagate = function(signal)
             if signal then
-                delivered[#delivered + 1] = { signal = signal, files = next(state.files) }
+                delivered[#delivered + 1] = {
+                    signal = signal, files = next(signal_state.files),
+                    cleaned = signal_state.cleaned,
+                }
             end
         end
         ok, err = pcall(function()
-            local signal_state, signal_control, signal_provider = raising_removal()
             local signalled, log = batching_service(accept, { temp_provider = signal_provider })
             local signal_batch = deferred_pair(signalled)
             log.cancel = 15
@@ -3851,8 +3855,9 @@ describe("speculative acceptance batches", function()
             assert.equal(15, signalled.cancelled_signal)
             assert.same({}, delivered)
             assert.same({}, signal_state.files)
+            assert.equal(0, signal_state.cleaned)
             assert.is_true(signalled:close())
-            assert.same({ { signal = 15 } }, delivered)
+            assert.same({ { signal = 15, cleaned = 1 } }, delivered)
         end)
         jobs.propagate = previous
         assert(ok, err)
