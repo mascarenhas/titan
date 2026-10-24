@@ -35,7 +35,7 @@ The private layers are:
 | `Runtime` | One `uv.loop_t`; the zero-delay `wake` timer; the intrusive ready FIFO (`ready_head`/`ready_tail`/`ready_count`, linked through `Task.ready_next`); sparse `tasks`; `current_task`; `driving`/`closing`; the first `failure`; `exit_code`; close listeners; the lazily created `external` bridge; and `retirement_error`, the native capability whose negative status awaits an explicit retry. |
 | `Task` | Coroutine `root`; scalar `phase` and cached `state` snapshot; checked `epoch`; queued-continuation fields; sticky `cancel_value`; current `wait` and reusable `completion`; terminal listeners; explicit-suspension state; cleanup binding (`cleanup_start`, `cleanup_active`, `cleanup_wait`); and the pending terminal outcome (`terminal_kind`/`terminal_value`/`terminal_trace`, `root_done`). Terminal admission is separate from root and cleanup execution. |
 | `Completion<\|C,T,E\|>` | One reusable cell per Task: context, registrar, Task, captured epoch, policy, phase, outcome kind and payload, and the optional accepted request. `Wait` is the all-`value` type alias for the same record. |
-| `ExternalBridge` | The per-Runtime `uv.external_wake_t`, the `waits` Map from 64-bit identity to `ExternalWait`, the monotonic `next_identity`, `closed`, and `withdrawn` (set once state close has withdrawn every parked native wait). |
+| `ExternalBridge` | The per-Runtime `uv.external_wake_t`, the `waits` Map from 64-bit identity to `ExternalWait`, the monotonic `next_identity`, and `closed`. |
 | `ExternalWait` | Reserved target and identity; closure registrars, or C-ABI registrars and context in its embedded `titan_async_retirement` cell plus a traced `native_owner`; the attached Completion and epoch; the bound cleanup Task; and separate `used`, `awaited`, `close_requested`, `registered`, `notified`, and `retired` state. |
 | Subscription `Core` | Queue with explicit count, terminal state, one reserved waiter, producer actions, and the cleanup drain capability. |
 | Public UV owner | Native request/handle storage and callback roots until its native terminal boundary. |
@@ -139,11 +139,18 @@ responsibility.
 Terminal settlement outside a Task can deliver immediately. Settlement from a
 different running Task first accepts a deferred queued wake and then commits
 the settled state with nonallocating field writes; if scheduling fails, the Wait
-stays pending so retry or shutdown can still address it. Delivery checks that
-the Wait is SETTLED, is still exactly `task.wait`, and has the current epoch; it
-clears the request, Wait, token, and explicit-suspension state before entering
-the continuation. Duplicate settlement raises rather than mutating an unrelated
-wait.
+stays pending so retry or shutdown can still address it. Settlement from a
+finalizer (`ffi.titan_in_finalizer(L)`) takes the same deferred path, because
+`Coroutine:resume` raises there and an inline delivery would publish the Task
+as failed with its root still suspended. `fatal` from a finalizer records the
+Runtime failure, accepts a `READY_DELIVER` wake for the exact Wait, and then
+commits `OUTCOME_FATAL` with the supplied error, detaching the consumed
+request; delivery retires and releases the Wait, so the Task gets its own
+operation's error rather than `runtime.failure`. Delivery
+checks that the Wait is SETTLED, is still exactly `task.wait`, and has the
+current epoch; it clears the request, Wait, token, and explicit-suspension
+state before entering the continuation. Duplicate settlement raises rather than
+mutating an unrelated wait.
 
 Completion reuse checks both owner and epoch. Preparation temporarily sets
 epoch zero, which no public method accepts, and registration publishes the new
@@ -233,18 +240,66 @@ every foreign-callback mistake or memory failure.
 
 ## Explicit suspend, Task status, listeners, and combinators
 
-`SuspendCancelAction` is `function (): ()`. `suspend` uses its `ResumeToken` as
-Completion context and the named registrar `start_suspend`. It stages the
-cancel action first; `start_suspend` publishes the token only after admission,
-so even a GC finalizer during cell setup sees a wrong-time resume as a
-mismatch. A `defer` clears the staged state if construction or admission fails.
-`Task:resume` checks token identity before any finished/pending shortcut, so
-equal source strings never authorize a different token. Matching pending wakes
-coalesce through `resume_pending`, which is set only after `enqueue_ready`
-succeeds. Completion retires the old token before a new wait can be installed.
+`SuspendCancelAction` is `function (): ()`. `suspend` uses its `ResumeToken`
+as Completion context and the named registrar `start_suspend`. It stages the
+cancel action first; `start_suspend` publishes the token (`suspended`,
+`resume_token`) only after admission. A `defer` clears the staged state if
+construction or admission fails.
 
-Cancelling an explicit suspension runs its cancel action and schedules the
-ordinary token wake; it never enters the target Task inline. Terminal
+The interval before publication contains GC safepoints, in the suspending Task
+and in the driver, so a finalizer can wake or cancel a waiter that cannot yet
+be resumed. One protocol covers it:
+
+- **Wake.** `Task:resume` checks the Task's state before the token. While the
+  Task is `TASK_RUNNING`, or its current Wait is still `WAIT_REGISTERING`, it
+  stores any token in `latched_token` (the latest call wins) and never
+  enqueues, so a registration keeps one settlement owner. Otherwise a different
+  token raises the mismatch, a pending wake coalesces through `resume_pending`,
+  and an exact token of a parked explicit suspension enqueues `READY_RESUME`
+  once. A ready Task, a pending native wait, a queued yield or delivery, and a
+  finished Task therefore raise.
+- **Latch lifetime.** Only `start_suspend` reads the latch: after `done:context`,
+  its last safepoint, it publishes the token and settles inline when
+  `latched_token` equals it. `advance_task` clears the latch at the top of each
+  run and `finish_task` clears it at termination, so a latch that the next
+  suspension did not consume (another token, a native or external wait, a
+  yield) is discarded. `clear_suspension` leaves it alone: the lexical defer of
+  a delivered `suspend` runs after the Task is running again and must not erase
+  a latch accepted since then.
+- **Cancellation.** `Task:cancel` stores the sticky reason and acts only on an
+  accepted, parked Wait (`WAIT_PENDING`): it cancels a cancellable request, and
+  for a published explicit suspension it runs the cancel action and resumes the
+  token. A running or ready Task meets the reason at its next admission check.
+  A Task whose Wait is registering meets it at the acceptance boundary in the
+  trampoline: once registration returns, with no safepoint before the
+  `WAIT_PENDING` commit, a published non-cleanup suspension with a reason runs
+  its cancel action and settles the Wait, so the cancellation is injected as
+  for one delivered later. This covers `start_suspend` and `start_external_wait`
+  alike, and the cancel action runs once.
+- **Delivery.** `deliver_wait` and the trampoline's inline delivery set
+  `TASK_RUNNING` before `clear_suspension` and the Result allocation, so a wake
+  at that allocation latches and is discarded instead of raising.
+
+The Runtime cannot tell "about to suspend" from "running past a delivered
+wait", so every waker follows the caller rule of the
+[public contract](../language/async-io.md#scheduling-and-driving-tasks): make the
+waiter discoverable before the last condition check, then either consume the
+registration before `resume` or recheck the condition after every return from
+`suspend`, and do not suspend on anything else in between. `async.channel` keeps
+one token and a waiter slot per side, so its blocking send and receive publish
+the slot and then loop while the buffer is still full or empty and the channel
+is open; a stale latch therefore costs one extra suspension. Subscriptions use
+a fresh token and a `notified` flag per wait, and `Core:wait` rechecks the
+queue and terminal state after publishing its waiter. `Receiver:wait` reserves
+before its take and loops. Their wakers call `Task:resume` directly.
+Combinator listeners run only from terminal publication, which never runs in a
+finalizer, because settlement and `fatal` from a finalizer are queued and
+`runtime_finalize` calls no listener.
+
+`Task:resume` checks token identity before any pending shortcut, so equal
+source strings never authorize a different token. Completion retires the old
+token before a new wait can be installed. Cancelling an explicit suspension
+never enters the target Task inline. Terminal
 publication (`finish_task`) clears the suspension, marks every listener entry
 non-live, and then delivers them in order. Removal before that snapshot is
 idempotent; removal during delivery cannot suppress a captured listener. Each
@@ -263,6 +318,21 @@ an `Error` with the caught Lua error value and raw trace; it does not by itself
 fail the Runtime. Raised nil follows the ordinary
 [Lua error normalization](error-handling.md#runtime-trace-model).
 
+`advance_task` resumes the root through `resume_root`, which calls the private
+non-raising `Coroutine:transfer_outcome` (see
+[coroutine entry](coroutines.md#entry-function)). A root that dies with an
+uncaught error returns that error instead of raising it. `resume_root` then
+appends the driver's propagation trace to the root's own trace, by raising
+through `raise_with_appended_trace`, only when the failure will be reported:
+when the Task has no cancellation reason and has not already recorded a
+failure. A cancellation is sticky and takes precedence at publication, and a
+`run_with_cleanup` wrapper has already recorded its body's failure with the
+body's trace, so neither ever reports a propagation trace. Both drop the
+staged trace. A cancelled root's failure is recorded without a trace, and a
+`run_with_cleanup` root keeps the failure and trace that its wrapper recorded.
+This saves one traceback capture of the scheduler stack per cancelled parked
+Task. `advance_task` treats a raised and a returned root failure alike.
+
 The 17 combinators (`join`, `join_two`..`join_five`, and
 `any_`/`race_`/`all_` at arities two through five) keep independent
 result/cancellation positions per operand. Fast paths inspect already terminal
@@ -273,8 +343,13 @@ unwinds.
 
 `async.channel` keeps a bounded circular buffer with an explicit count, at most
 one blocked sender and one blocked receiver (a second raises), and discards
-buffered items on close. Writer close is not automatic clean reader EOF; see
-the [language chapter](../language/async-io.md#bounded-channels).
+buffered items on close. A blocking operation occupies its waiter slot and then
+suspends in a loop while the buffer is still full or empty and the channel is
+open, so a wake before the slot was published is seen by the check and a stale
+latched wake costs one extra suspension
+([explicit suspension](#explicit-suspend-task-status-listeners-and-combinators)).
+Writer close is not automatic clean reader EOF; see the
+[language chapter](../language/async-io.md#bounded-channels).
 
 ## Persistent subscriptions
 
@@ -295,7 +370,12 @@ the producer. Error/end terminal changes roll back on wake failure the same way.
 
 One waiter reserves a Task/token pair and records whether it requests a batch.
 Reads check competing waiters and pending cancellation before transferring any
-item. Suspension uses the nonyielding exact detacher. A notification keeps the
+item. Suspension uses the nonyielding exact detacher. After publishing its
+waiter, `Core:wait` rechecks the queue and the terminal state, so a
+notification before publication is seen there and one after it is latched
+through `Task:resume` with the wait's fresh token
+([explicit suspension](#explicit-suspend-task-status-listeners-and-combinators)).
+A notification keeps the
 reservation until that reader resumes or unwinds, so another reader cannot
 steal its delivery. Cancellation only detaches that waiter; it does not stop the
 source or discard its events. Both `has_waiter()` methods report this
@@ -570,33 +650,37 @@ follows a remote GC pointer or enters the destination Lua state.
   allocating. Clearing `task` on release also drops the reference to a finished
   reader Task.
 - **Wake (`Receiver:wake`).** The `uv.async_t` callback copies and decodes
-  nothing. It returns unless a reader is reserved **and** that Task is
-  suspended on the reader's token (`task.resume_token == reader.token`, which
-  `start_suspend` publishes and delivery clears), then calls
-  `task:resume(reader.token)`; `Task:resume` coalesces repeated wakes through
-  `resume_pending`, so the reader keeps no notified flag of its own. A running
-  reader is never resumed. In particular, when a decode hook, or a finalizer run
-  at an allocation inside decode, closes the Receiver that is decoding its
-  first-pass packet, `close()`'s wake is a no-op: `wait` returns the value it
-  already took, and its next call raises `"receiver is closed"`. The packet stays
-  in the native slot, including while the reader's wake is queued, until
-  `wait()` takes it.
+  nothing. When a reader is reserved it calls `task:resume(reader.token)`: a
+  reader suspended on the token is resumed, and `Task:resume` coalesces
+  repeated wakes through `resume_pending`, so the reader keeps no notified flag
+  of its own. A running reader, including one about to suspend, gets the wake
+  latched ([explicit suspension](#explicit-suspend-task-status-listeners-and-combinators)).
+  In particular, when a decode hook, or a finalizer run at an allocation inside
+  decode, closes the Receiver that is decoding its first-pass packet, `wait`
+  returns the value it already took and its next call raises
+  `"receiver is closed"`; the latch is discarded at the reader's next
+  suspension. The packet stays in the native slot, including while the
+  reader's wake is queued, until `wait()` takes it.
 - **Wait (`Receiver:wait`, `receiver_take_native`).** `wait()` requires a
   running Task and rejects a second reader with
   `"receiver already has a waiting reader"`. It reserves `reader.task`
   **before** `checkpoint()` or any slot inspection, so a second caller cannot
   barge ahead while the first reader's wake is queued; its exit `defer` releases
   the reservation only if it still names this Task. Each loop turn declares a
-  fresh `raw` local and calls `receiver_take_native`, which returns `2` (closed,
-  raising `"receiver is closed"`), `1` (taken), or `0` (empty). On `1` it
-  installs `defer transfer.discard_message(raw)` and returns
+  fresh `raw` local and calls
+  `receiver_take_native`, which returns `2` (closed, raising
+  `"receiver is closed"`), `1` (taken), or `0` (empty). On `1` it installs
+  `defer transfer.discard_message(raw)` and returns
   `transfer.decode_message(raw)` under the
   [consuming raw-slot decode contract](transfer-library.md#consuming-raw-slot-decode);
   decode errors consume the packet and raise from `wait()` with no retry, and
   nil and false are ordinary data. On `0` it calls
-  `suspend(reader.token, reader.withdraw)`. A send between the empty check and
-  `suspend` leaves a pending `uv_async_send` whose callback runs only after the
-  reader has yielded with its token published.
+  `suspend(reader.token, reader.withdraw)` and loops. Because the reservation
+  precedes the take, a close between an empty take and the registration, from
+  a finalizer in the reader or in the driver, latches its wake, and the next
+  turn raises `"receiver is closed"`. A send in that interval leaves a pending
+  `uv_async_send` whose callback runs only after the reader has yielded with
+  its token published.
 - **Cancellation.** `Task:cancel` runs `withdraw` only while the reserving Task
   is suspended under it, so the reservation it clears is that Task's. An unread
   packet stays in the slot. The cancelled reader unwinds later through its
@@ -629,12 +713,13 @@ bootstrap used by independent states is described in the
 
 ## Foreign workers
 
-`run_foreign(f, arg)` is an ordinary await over public `uv.queue_work`
+`run_foreign(f, arg, abandoned)` is an ordinary await over public `uv.queue_work`
 (`start_foreign_work`). It rejects a NULL `f` before submission. The worker runs
 only `f(arg)` on raw native state; the loop-thread completion callback resolves
 nil or rejects an `OperationError` labelled `async.run_foreign`, and protects
 unexpected failures with fatal plus bare rethrow. The argument's owned storage
-stays in the suspended caller through completion.
+stays in the suspended caller through completion. The optional `abandoned`
+release is used only at Lua state close, as described below.
 
 Worker code must not inspect host Titan/Lua owners, call the Lua API on the
 hosting state, raise into its frames, or resume its Tasks. The
@@ -644,6 +729,29 @@ Titan modules there; that collector never receives a host GC object. Shared
 native bytes are synchronized by the caller. The libuv worker pool is shared with
 other native work, and async adds no queue or thread policy. Cancellation never
 detaches an accepted job.
+
+A Lua state close unwinds a Task parked in `run_foreign` before its job
+returns; the job finishes only later, in `runtime_finalize`'s drain. The wait's
+own cleanup releases nothing that the job uses, and `start_foreign_work`
+passes no `argument_owner`, so the argument's lifetime stays the caller's. An
+`owned` argument is safe, because `lua_close` frees no object before the drain.
+For other native state the caller passes `run_foreign`'s optional `abandoned`
+release. `run_foreign` keeps a `waiting` flag that a normal return or `catch`
+clears. Its `defer` finds it still set only when an unwind abandoned the wait,
+and then, while the state closes, calls `ForeignWork:abandon`. That appends the
+work to the active Runtime's `abandoned_work`, or releases at once when no
+Runtime is active any more, because `runtime_finalize` has already drained.
+`runtime_finalize` calls each queued release after `uv.loop_abandon` returns,
+on the closing thread, when every accepted job has returned. A release may
+therefore block on the worker pool, as closing an independent Lua state with
+queued pool work does: no abandoned job holds a pool thread then, whatever the
+pool size. Releasing on the job's own worker thread instead could deadlock
+once abandoned jobs occupy every pool thread
+([independent states](lua-library.md#host-state-close-during-run_async)).
+SQLite's [abandoned operations](sqlite3-library.md#lua-state-close) still
+release on the worker, because that release calls only SQLite. The public
+contract is in
+[foreign work at state close](../language/async-io.md#foreign-work-at-state-close).
 
 The UV `work_t` owner embeds a `uv_work_t` and a separate `titan_uv_work_data`
 (`titan/uv/work-data.h`) holding the C worker, argument, and owner address.
@@ -792,6 +900,29 @@ preserves shutdown admission, and `driving` makes a recursive `async.loop()` fai
 immediately. It never runs `close_handles`, `Receiver:disable`,
 `ExternalBridge:close`, domain unregister functions, or close listeners.
 
+While `lua_close` runs, `async.run` and `run_with_cleanup` refuse to start a
+Task, before `ensure_runtime` and before creating the root coroutine. They test
+`titan_state_closing` (`titan/ffi.h`, `G(L)->gcstp & GCSTPCLS`) and raise
+`cannot start a Task during Lua state close`. Such a Task could never run:
+the loop is never driven again, and `runtime_finalize` would only report it
+cancelled. Lua also ignores finalizer registrations during close, so the new
+root coroutine's `coro_gc` would never run and its stack mapping would leak.
+
+`new_runtime` makes the same test and raises
+`cannot create an async Runtime during Lua state close`. Every
+Runtime-creating path reaches it through `ensure_runtime` when no Runtime is
+active: `receiver()`, `prepare_wait` (behind `prepare_external_wait` and
+`prepare_native_retirement`), and the Task constructors. A Runtime created then
+would have no `runtime_finalize`, so its `uv` loop would leak. That happens to a
+finalizer that runs after `runtime_finalize` cleared `active_runtime`, or in a
+state that never had a Runtime. The refusal does not cover operations on a
+Runtime that is still active during the close.
+
+An unwinding `defer` that hits either refusal gets the error, which is reported
+as `error in coroutine cleanup (...)`. During an ordinary collection, a
+finalizer, including the unwind of an abandoned coroutine, may still start a
+Task on the active Runtime. That Task runs after the finalizer returns.
+
 The finalizer calls public `uv.loop_abandon`, not the ordinary driver. UV clears
 all user callback slots before driving libuv, including callbacks on
 already-closing handles and accepted requests, so no user Lua/Titan callback,
@@ -803,15 +934,21 @@ not protect against that native use. UV's abandonment sweep and its internal
 terminal handlers are described in the
 [extension guide](libuv-extension-guide.md#final-state-teardown-is-not-ordinary-shutdown).
 `active_runtime` is cleared only after `uv.loop_abandon` returns a successful
-`uv.loop_close`.
+`uv.loop_close`. The finalizer then calls the
+[abandoned `run_foreign` releases](#foreign-workers) queued by unwound waits.
 
-The application contract is unchanged: withdraw handles, finish sends, and drain
-the ordinary loop before closing the state. Abandonment reclaims libuv's loop
-internals, not application cleanup semantics. A finalizer that runs later during
-`lua_close` must not call anything that creates a Runtime (`async.run`,
-`async.run_with_cleanup`, `async.receiver`, `prepare_external_wait`,
-`prepare_native_retirement`, or library operations that start Tasks): Lua no
-longer registers finalizers then, so the new Runtime's loop leaks.
+The application contract still applies: withdraw handles, finish sends, and
+drain the ordinary loop before closing the state. Abandonment reclaims libuv's
+loop internals and closes their handles, not application cleanup semantics such
+as a graceful protocol shutdown; the public guidance is
+[cleanup that needs asynchronous I/O](../language/coroutines.md#cleanup-that-needs-asynchronous-io).
+Domain owners whose ordinary close awaits release their own native state
+synchronously at state close, from their finalizers or from a close that tests
+`titan_state_closing`:
+[Files](filesystem-library.md#lua-state-close),
+[SQLite connections](sqlite3-library.md#lua-state-close) and
+[TLS engines and contexts](ssl-library.md#lua-state-close). Their finalizers
+need no Runtime, so they work in either order with this one.
 
 **Parked native waits.** A Task parked in a native wait lends the domain a
 waiter node in its own coroutine frame: thread channel send and receive (the
@@ -823,59 +960,79 @@ still be running. Finalizers run newest first, so the coroutine can be finalized
 before or after the endpoint or `Thread` handle it waits on. In neither order
 may a queue still link the node once `coro_gc` releases the stack (issue #262).
 
-Before it destroys a suspended stack, `coro_gc` calls the
-[teardown hook](coroutines.md#suspended-stack-teardown-hook) that async
-installs, `withdraw_parked_native_waits`. The hook returns at once if there is
-no active Runtime with an external bridge, or if the bridge was already
-withdrawn. Otherwise it scans `ExternalBridge.waits` for a pending wait whose
-Task root is the coroutine being finalized. Completions are cached per Task, so
-the wait's `done.task` is the waiting Task. Any other call, such as a suspended
-raw coroutine collected while the Runtime runs, ends after this read-only scan.
-The hook adds nothing to the wait path or to Task creation; a weak
-coroutine-to-Task map would instead cost an insertion per Task and an ephemeron
-traversal in every collection cycle.
+State close [unwinds](coroutines.md#unwinding-an-abandoned-coroutine) every
+suspended coroutine before it releases the stack, so each parked wait is
+withdrawn by its own lexical cleanup while its node is still live. Every Task
+root is newer than its Runtime, so it is finalized before `runtime_finalize`. A
+coroutine stacked under a Task root unwinds as part of the root's chain. The
+unwind of one Task runs, innermost first:
 
-A match withdraws that Task's registered ordinary waits that have C-ABI
-callbacks (`wait_external_native`): `detach_domain` runs each
-`unregister_fn(context)` while the context is still on a live stack. The match
-is also the state-close test. An unfinished Task stays in `runtime.tasks` until
-`finish_task`, and `active_runtime` roots its Runtime until `loop()` retires it
-or `runtime_finalize` runs, which is registered before every Task and so
-finalizes after them. Ordinary GC therefore never finalizes the root of a Task
-that is still in that inventory. When the matched Task is that inventory entry
-and not finished, every parked stack is about to be released, so the hook sets
-the bridge's `withdrawn` flag and detaches every such wait in one linear sweep;
-later hooks return on the flag. If the invariant were ever broken, only the
-matched Task's waits would be withdrawn, which is still correct. No parked
-stack has been released before the first match: a suspended root finalized
-earlier would have matched its own wait, and a `STACKED` inner coroutine
-holding a wait cell is not released by its own finalizer.
+1. the wait cleanup: `ExternalWait:await`'s `defer` calls `detach_domain()`,
+   which runs the native `unregister_wait(context)` or the Titan closure
+   `unregister`, then `retire()`, then clears the suspension;
+   `wait_external_native`'s `wait:close()` and the channel `defer`s that
+   discard a held `wait.message` run in the same pass;
+2. the body's `defer`s and generic-`for` closes;
+3. `run_with_cleanup`'s cleanup;
+4. the coroutine floor, which ends the coroutine as dead.
 
-The hook only detaches domains. It never calls `retire` or
-`uv.native_external_wake_unregister` on a target: the bridge's
-`uv.external_wake_t` is created lazily with the first external wait, is
-usually newer than the waiting coroutine, and its finalizer may already have
-detached the core and consumed every registration reference. The domain's own
-retained target stays valid, so releasing it in the unregister function is
-safe, while a notification on the detached core returns `EINVAL` and wakes
-nothing.
+Ordinary GC never finalizes the root of a Task that is still in the inventory:
+an unfinished Task stays in `runtime.tasks` until `finish_task`, and
+`active_runtime` roots its Runtime until `loop()` retires it or
+`runtime_finalize` runs. Ordinary-GC unwinding therefore reaches plain
+coroutines such as generators, and a Task root only when `resume_root` failed
+before switching into it (for example on allocation failure in
+`root_transfer`): `advance_task` then publishes the Task as failed and
+`finish_task` drops it from the inventory while its root is still suspended.
+
+`retire()` releases the bridge target through the owner method
+`bridge.wake:unregister(target)`. The bridge's `uv.external_wake_t` is created
+lazily with the first external wait. It is usually newer than the waiting
+coroutine, so its finalizer may already have detached the core and consumed
+every registration reference. The owner method then returns `EINVAL` instead of
+dereferencing the consumed borrow. The domain's own retained target stays
+valid, so releasing it in the unregister function is safe, while a
+notification on the detached core returns `EINVAL` and wakes nothing.
 
 Closure-registered waits (`prepare_external_wait`, `wait_external`,
-`wait_external_cleanup`) are not withdrawn, because their unregister functions
-are Titan closures and state close runs no Runtime-owned Titan callbacks.
-Native retirement barriers are not withdrawn either, because their admission
-lives in heap storage, not on a stack.
+`wait_external_cleanup`) are withdrawn too. Their Titan `unregister` closure runs
+inside a finalizer and must not yield. It must also tolerate objects created
+after the Task having already been finalized. Native retirement barriers are
+not withdrawn, because their admission lives in heap storage, not on a stack.
+Armed gates stay nonterminal.
+
+When the Task has no cancellation reason, `run_with_cleanup`'s cleanup first
+records `"async Runtime abandoned at Lua state close"`, the reason that
+`runtime_finalize` publishes, but only while `ffi.titan_state_closing(L)` is
+set. It does not test `titan_in_finalizer`: the failed Task above is unwound
+inside an ordinary finalizer, and its cleanup receives the Task's actual
+reason, nil for a failed body. During the close the unwind runs outside the
+scheduler with `runtime.current_task == nil`, so `running()` and every
+Task-context operation raise
+`asynchronous operation must be called from an async Task`, and yields and
+resumes raise as in any finalizer. A cleanup's first await therefore raises,
+and that error is reported as a warning. A cleanup that was itself suspended,
+because the body had already finished, is unwound rather than run again.
+
+The `Thread:task` proxy's cleanup (`titan/thread/spawn.titan`) awaits the
+native-retirement barrier through `final_wait:wait_cleanup()` and then closes
+it. At state close it skips both, since they would raise outside a Task, and
+only forwards its reason to `Thread:cancel` when the thread has not finished.
+`runtime_finalize` then leaves the armed gate, and with it the proxy,
+nonterminal.
 
 The unregister function can run after the endpoint or `Thread` handle that the
-wait used was finalized, so thread domains keep a
+wait used was finalized. Thread domains therefore keep a
 [per-registration pin](thread-library.md#registration-pins-and-state-close-withdrawal),
 and the withdrawal may be the domain's final release, destroying it on the
 closing thread. Withdrawing a waiter that a producer already woke passes the
-wake on, so a waiter in another state is not starved. The Runtime finalizer
-later retires these Tasks without resuming them, as described above.
-Withdrawal protects the native queues; it is not cancellation, so no `defer`,
-cleanup body, or terminal listener runs, and the application contract above
-still applies.
+wake on, so a waiter in another state is not starved. A `Thread` method called
+on a handle whose finalizer already ran raises `thread handle was finalized`.
+
+The unwind calls neither `finish_task` nor the scheduler. `runtime_finalize`
+then retires these Tasks without resuming them, as described above: no Task
+resumes and no terminal listener runs. The application contract above still
+applies.
 
 `request_exit(code)` obtains the current Task, records only the first code,
 unbinds the Runtime's transfer loop before cancellation can enter cleanup,

@@ -192,8 +192,8 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
             }
             lu_byte _nvarargs = (lu_byte)_vcount;
             titan_ensure_stack(L, 1);
-            Udata *_varargs_ud = gco2u(luaC_newobj(L, LUA_VUSERDATA,
-                sizeudata(0, (size_t)_nvarargs * sizeof($ELEM_CT))));
+            Udata *_varargs_ud = titan_new_udata_object(L,
+                sizeudata(0, (size_t)_nvarargs * sizeof($ELEM_CT)));
             _varargs_ud->len = (size_t)_nvarargs * sizeof($ELEM_CT);
             _varargs_ud->nuvalue = 0; _varargs_ud->metatable = NULL;
             setuvalue(L, s2v(L->top.p), _varargs_ud);

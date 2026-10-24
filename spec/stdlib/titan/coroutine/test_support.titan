@@ -1,5 +1,7 @@
 local test = import "test"
 foreign import "string.h"
+foreign import "lua.h"
+foreign import "titan/ffi.h"
 
 local function contains(subject: string, fragment: string): boolean
   return ffi.strstr(subject, fragment) ~= nil
@@ -8,4 +10,99 @@ end
 local function caught_string(failure: value): string
   test.assert(failure is string, "coroutine error was not a string")
   return failure as string
+end
+
+-- Unwind scenarios run Lua code in a child lua.Lua state and record their
+-- events and Lua warnings into host-owned, NUL-terminated buffers of
+-- UNWIND_BUFFER_SIZE bytes, which outlive the child state. The public
+-- functions below are test infrastructure, reached from that Lua code with
+-- require 'coroutine.test_support'.
+local const UNWIND_BUFFER_SIZE = 8192
+
+-- Append `text` after `separator` (unless the buffer is empty). A full buffer
+-- drops the text, which makes the comparing test fail. Foreign bodies cannot
+-- read module constants: 8192 is UNWIND_BUFFER_SIZE.
+local foreign function unwind_buffer_append(buffer: *void, separator: const *char,
+                                            text: const *char)
+  local bytes = buffer as foreign *char
+  local used = ffi.strlen(bytes)
+  if used + ffi.strlen(separator) + ffi.strlen(text) < 8192 then
+    if used > 0 then
+      ffi.strcat(bytes, separator)
+    end
+    ffi.strcat(bytes, text)
+  end
+end
+
+-- The child state's lua_WarnFunction: one line per complete warning.
+local foreign function unwind_record_warning(buffer: *void, message: const *char,
+                                             tocont: int)
+  unwind_buffer_append(buffer, "", message)
+  if tocont == 0 then
+    unwind_buffer_append(buffer, "", "\n")
+  end
+end
+
+function unwind_capture_warnings(warnings: value)
+  ffi.lua_setwarnf(L, unwind_record_warning, warnings as foreign *void)
+end
+
+function unwind_append(log: value, entry: string)
+  unwind_buffer_append(log as foreign *void, " ", entry)
+end
+
+-- Run `body` under a Titan defer that logs `name`.
+function unwind_with_defer(log: value, name: string, body: function (): ())
+  defer unwind_append(log, name)
+  body()
+end
+
+-- The same, inside a function-level catch that logs `name:catch`.
+function unwind_guarded(log: value, name: string, body: function (): ())
+  defer unwind_append(log, name)
+  body()
+catch
+  unwind_append(log, name .. ":catch")
+end
+
+function unwind_fail(message: string)
+  raise message
+end
+
+-- Run `body` under a Titan defer that calls the Lua function `cleanup`.
+function unwind_with_cleanup(cleanup: function (): (), body: function (): ())
+  defer cleanup()
+  body()
+end
+
+-- The same, with the defer inside an immediately invoked lambda in expression
+-- position, which the compiler inlines into this function's frame.
+function unwind_with_inline_cleanup(cleanup: function (): (), body: function (): ()): integer
+  return 1 + (function (): integer
+    defer cleanup()
+    body()
+    return 1
+  end)()
+end
+
+-- The log buffer that coroutine.unwind_init_fixture's initializer appends to
+-- in this state; nil until a scenario binds it.
+local init_log: value
+
+function unwind_bind_init_log(log: value)
+  init_log = log
+end
+
+function unwind_init_append(entry: string)
+  if init_log ~= nil then unwind_append(init_log, entry) end
+end
+
+-- Whether the registry slot behind titan.backtrace() holds a trace in this
+-- state.
+function unwind_has_backtrace(): boolean
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve Lua stack" end
+  ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_BACKTRACE_KEY)
+  return ffi.lua_type(L, -1) ~= ffi.LUA_TNIL
 end

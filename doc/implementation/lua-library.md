@@ -73,9 +73,11 @@ The wrapper is the sole admission owner (`Lua:reserve`, `Lua:close`,
   keeps the reservation through result copy and cleanup. A busy or closed state
   rejects the call.
 - `close` rejects a busy state, closes an idle state once, and is then a no-op.
-  The GC finalizer calls the same `close`; `lua_close` runs the independent
-  state's `__gc` metamethods. Async work keeps the wrapper reachable until
-  native completion, so finalization cannot race a worker.
+  The GC finalizer calls the same `close` unless the wrapper is busy; `lua_close`
+  runs the independent state's `__gc` metamethods. Ordinary collection never
+  sees a busy wrapper, because async work keeps it reachable until native
+  completion. Only a [host-state close](#host-state-close-during-run_async)
+  can, and the abandoned call then closes the state.
 - `detach` rejects a busy or closed state, clears `handle`, and returns the raw
   `lua_State *` so an external owner (the `titan.thread` worker bootstrap) can
   close it on its own OS thread instead of the creating state's finalizer.
@@ -198,7 +200,7 @@ fixed `independent Lua call failed without a string error`.
 | Protected loading and argument copy | Root the compiled chunk, copied input strings, and decoded nominal arguments in the independent state; keep host input owners live while their bytes are borrowed. |
 | Protected chunk call and result conversion | Execute and convert only values belonging to the independent state; preserve its result roots or error object. |
 | Host conversion | Read rooted result slots after native execution stops; allocate host strings and `TransferValue` wrappers on the host thread. |
-| Deferred cleanup (`LuaCall:finish`) | Free the native result buffer, restore the independent stack to its saved entry height, and release the reservation after success, load/runtime/conversion error, or cancellation. |
+| Deferred cleanup (`LuaCall:finish`) | Free the native result buffer, restore the independent stack to its saved entry height, and release the reservation after success, load/runtime/conversion error, or cancellation. A [call abandoned by a host-state close](#host-state-close-during-run_async) skips this. |
 
 Stack pointers cannot survive an operation that grows that stack. Result
 addresses used for copying are read after native execution finishes and while
@@ -212,7 +214,9 @@ the argument Array, the owned `titan_lua_value[]` inputs, and an embedded
 `titan_lua_call` packet. The packet carries the independent state, chunk bytes
 and length, the diagnostic name (`name or chunk`, passed as `const char *`),
 argument data, and result and status storage. It then calls
-`async.run_foreign(lua_state_run, call.packet)`. Result slots borrow strings
+`async.run_foreign(lua_state_run, call.packet, lua_state_release_abandoned)`
+through `LuaCall:run_worker`; the third argument is the
+[host-state-close release](#host-state-close-during-run_async). Result slots borrow strings
 from the rooted independent stack and own no further allocation, so freeing the
 single result buffer also handles a partially converted run.
 
@@ -232,6 +236,33 @@ deferred `LuaCall:finish` covers that path without publishing results or
 freeing data the worker still uses. There is no Lua instruction hook, worker
 termination or per-state cancellation scheduler, so a nonterminating chunk holds
 its state and pool worker indefinitely.
+
+### Host-state close during `run_async`
+
+A host-state close unwinds a Task parked in `run_async` before the worker
+returns, so `LuaCall:finish` would restore the stack, free results and release
+the reservation while the worker still runs the independent state. The
+wrapper's finalizer could then `lua_close` it under the worker.
+`LuaCall:run_worker` sets `pending` before submission and clears it when the
+wait returns or raises. `catch` never runs during an unwind, so only an
+abandoned wait leaves it set. Its `defer` then clears the wrapper's handle and
+reservation, which makes the wrapper behave as closed and its later finalizer
+a no-op, and `finish` skips a pending call. Finalizers run newest first: a
+wrapper newer than the Task is finalized before the unwind, while still busy,
+and its finalizer skips it.
+
+The independent state itself goes to `run_foreign`'s
+[abandoned-work release](libuv-runtime.md#foreign-workers):
+`lua_state_release_abandoned` frees the result buffer and closes the state on
+the closing host thread, after the host Runtime's drain has seen the worker
+return. It must not run on the worker. Closing the independent state drains
+that state's own Runtime, which can wait for pool work the state queued, and
+abandoned `run_async` jobs can occupy every pool thread: closing on each
+worker would deadlock once four abandoned jobs occupy the default pool of four. After
+the drain, no abandoned job holds a pool thread. The `LuaCall` that embeds the
+packet, and the strings its packet borrows, outlive the worker and the release:
+`lua_close` frees no object before every finalizer, including the Runtime's,
+has run.
 
 ## Compiling and rooting a chunk
 
@@ -376,5 +407,9 @@ loads, duplicate-load rejection, preload/C/Titan/custom loaders, diagnostics,
 and the independent-state preload, transfer, receiver and async paths. Its
 cancellation case cancels a Task reading an unbounded FIFO source candidate,
 checks the cancelled status, and then requires the same name from a finite
-source to prove guard cleanup. Direct `package` table access and FIFO creation
+source to prove guard cleanup. `state_close_test.titan` closes host states
+with a Task parked in `run_async`: with the wrapper newer or older than the
+Task, with the worker still running or already returned, and, in a compiled
+child with a SIGALRM watchdog, with four abandoned jobs occupying the default
+pool while each independent state has queued pool work. Direct `package` table access and FIFO creation
 go through the test-only helpers in `spec/stdlib/titan/lua/test_support.titan`.

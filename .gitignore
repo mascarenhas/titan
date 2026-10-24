@@ -22,8 +22,10 @@
 /.windows-sdk/
 /.windows-sdk-validation/
 
-# libbacktrace source tree (cloned + built by `make libbacktrace`)
+# libbacktrace source tree (cloned + built by `make libbacktrace`) and the
+# archive that the Windows native preparation downloads
 /libbacktrace/
+/libbacktrace-*.tar.gz
 
 # bundled libuv release source, CMake build tree, and downloaded archive
 /libuv-v*/

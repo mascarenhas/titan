@@ -36,6 +36,8 @@ work()
 
 This is true for normal fallthrough, `return`, `break`, and errors, including out-of-memory errors: reaching registered cleanup does not itself allocate, so a deferred statement that does not allocate still runs. If a deferred statement raises, including through a failed allocation, its error replaces the pending action, and enclosing `defer` and `catch` blocks still run.
 
+A coroutine suspended inside the block also runs its deferred statements when it is abandoned: collected while suspended, or still suspended when its Lua state closes. That cleanup runs inside a Lua finalizer and cannot yield; see [abandoned coroutines](coroutines.md#abandoned-coroutines).
+
 Return expressions are evaluated before cleanup runs. For example, this returns `"body"` even though the deferred statement mutates `log` before control reaches the caller:
 
 ```titan

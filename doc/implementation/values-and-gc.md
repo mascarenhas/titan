@@ -331,7 +331,9 @@ Titan shares Lua's collector: there is no Titan heap and no reference counting.
 Generated function bodies allocate through Lua internals: `luaH_new` and
 `luaH_resizearray` (Maps), `luaS_new`/`luaS_newlstr`/`luaS_createlngstrobj`
 (strings), `luaF_newCclosure` (closures and wrappers), `luaS_newudata` (records,
-unions, Interface wrappers, module state), `luaC_newobj` (capture boxes), and
+unions, Interface wrappers, module state), `luaC_newobj` through the preamble's
+`titan_new_udata_object` (capture boxes and vararg payloads; it keeps the
+allocating call out of `gco2u`, whose operand `-DLUAI_ASSERT` evaluates twice), and
 runtime helpers such as `titan_array_new`. Module initialization also uses the
 public API (`lua_pushcclosure`, `luaL_newmetatable`). Generated code runs
 *outside* the Lua VM: it does not pass through `luaD_call`, keeps values in C
@@ -494,6 +496,10 @@ existing closure would need the **forward** barrier (recolouring the value).
   a `Udata` (`box_write`).
 
 Back-barrier sites pass `obj2gco(owner)`, not the owner's concrete pointer type.
+The `obj2gco` operand must be a typed GC object pointer (`Udata *`, `Table *`,
+…): under `-DLUAI_ASSERT` the macro reads its `tt` field, so an untyped
+`void *` bridge casts to `GCObject *` instead (`titan/ffi.h`
+`lmacro_luaC_barrierback`).
 Map raw stores go through `luaH_set`/`luaH_setint` (`set_table_entry_raw`,
 `coder/statements.lua`): "The GC barrier for the stored value is the caller's
 responsibility; new keys are barriered internally by the insertion code."

@@ -85,6 +85,7 @@ LIBUV_TARBALL     := $(LIBUV_SRC_DIR).tar.gz
 LIBUV_URL         := https://dist.libuv.org/dist/v$(LIBUV_VERSION)/$(LIBUV_TARBALL)
 LIBUV_SHA256      := cb0d6dd2128d5a95bd242c6cc982a24fe608fa93da57b6b4ec763b0018c53e64
 LIBUV_BUNDLED_LIB := $(LIBUV_BUILD_DIR)/libuv.a
+LIBUV_BUILD_CONFIG := $(LIBUV_BUILD_DIR)/.titan-build.config
 LIBUV_PATCH_FILE  := vendor/libuv/libuv-1.53.0-spawn-close.patch
 LIBUV_EXTRACTED   := $(LIBUV_SRC_DIR)/.titan-extracted-spawn-close-v1
 LIBUV_BUILD_TYPE  ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),Debug,Release)
@@ -402,7 +403,7 @@ STDLIB_IMPORTS_uv := gc iteration protobuf reflect
 STDLIB_IMPORTS_async := uv coroutine gc iteration string transfer
 STDLIB_IMPORTS_timer := async uv
 STDLIB_IMPORTS_io := os string async protobuf reflect
-STDLIB_IMPORTS_fs := async uv string protobuf reflect
+STDLIB_IMPORTS_fs := async uv string protobuf reflect gc
 STDLIB_IMPORTS_net := async uv string protobuf reflect
 STDLIB_IMPORTS_ssl := async fs net string gc uv protobuf reflect
 STDLIB_IMPORTS_url := peg string
@@ -418,7 +419,7 @@ STDLIB_IMPORTS_iteration :=
 STDLIB_IMPORTS_gc :=
 STDLIB_IMPORTS_test :=
 STDLIB_IMPORTS_reflect := iteration
-STDLIB_IMPORTS_sqlite3 := async uv reflect string math protobuf
+STDLIB_IMPORTS_sqlite3 := async uv reflect string math protobuf gc
 STDLIB_IMPORTS_json := reflect string math peg iteration
 STDLIB_IMPORTS_protobuf := gc reflect string
 STDLIB_IMPORTS_transfer := gc reflect protobuf
@@ -515,6 +516,7 @@ LIBBT_DIR := libbacktrace
 LIBBT_URL ?= https://github.com/ianlancetaylor/libbacktrace.git
 LIBBT_LIB := $(LIBBT_DIR)/.libs/libbacktrace.a
 LIBBT_CLONE_STAMP := $(LIBBT_DIR)/.titan-cloned
+LIBBT_CONFIG_STAMP := $(LIBBT_DIR)/.titan-build.config
 STDLIB_COMPLETION_STAMP := $(TITAN_OUTPUT_DIR)/.titan-stdlib-complete
 
 # These wrappers indirectly launch recursive Make processes. The `+` recipe
@@ -616,8 +618,23 @@ $(LIBBT_CLONE_STAMP):
 	}
 	@touch "$@"
 
-$(LIBBT_LIB): $(LIBBT_CLONE_STAMP)
+# Implementation notes: doc/implementation/build-script-audit.md#native-dependency-configuration-stamps
+# FORCE recomputes the recorded configuration on every run, but the stamp is
+# replaced only when its content changes, so an unchanged build keeps its
+# timestamp and nothing rebuilds. Only the archive below depends on it.
+$(LIBBT_CONFIG_STAMP): FORCE | $(LIBBT_CLONE_STAMP)
+	@set -e; tmp="$@.tmp"; \
+	printf '%s\n' $(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
+	  $(call make_shell_quote,CC=$(CC)) $(call make_shell_quote,AR=$(AR)) \
+	  $(call make_shell_quote,RANLIB=$(RANLIB)) \
+	  $(call make_shell_quote,LIBBT_CFLAGS=$(LIBBT_CFLAGS)) > "$$tmp"; \
+	if test -r "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv -f "$$tmp" "$@"; fi
+
+# Configure does not rebuild existing objects for new flags, so a rebuild
+# starts from a clean tree.
+$(LIBBT_LIB): $(LIBBT_CLONE_STAMP) $(LIBBT_CONFIG_STAMP)
 	@echo "==> Building libbacktrace (configure + make, $(LIBBT_CFLAGS))"
+	@if test -f "$(LIBBT_DIR)/Makefile"; then $(MAKE) -C "$(LIBBT_DIR)" clean; fi
 	cd "$(LIBBT_DIR)" && \
 		./configure CC=$(call make_shell_quote,$(CC)) \
 			AR=$(call make_shell_quote,$(AR)) \
@@ -699,9 +716,22 @@ $(LIBUV_EXTRACTED): $(LIBUV_TARBALL) $(LIBUV_PATCH_FILE)
 	git apply --directory="$(LIBUV_SRC_DIR)" "$(LIBUV_PATCH_FILE)"
 	@touch "$@"
 
-$(LIBUV_LIB): $(LIBUV_EXTRACTED)
+# Implementation notes: doc/implementation/build-script-audit.md#native-dependency-configuration-stamps
+# As for libbacktrace: rewritten only when the configuration changes, and
+# only the archive depends on it.
+$(LIBUV_BUILD_CONFIG): FORCE
+	@set -e; mkdir -p "$(LIBUV_BUILD_DIR)"; tmp="$@.tmp"; \
+	printf '%s\n' $(call make_shell_quote,CC=$(CC)) \
+	  $(call make_shell_quote,LIBUV_CMAKE_FLAGS=$(LIBUV_CMAKE_FLAGS)) \
+	  $(call make_shell_quote,LIBUV_BUILD_CFLAGS=$(LIBUV_BUILD_CFLAGS)) > "$$tmp"; \
+	if test -r "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv -f "$$tmp" "$@"; fi
+
+# A rebuild discards the CMake cache: it would keep an earlier compiler and,
+# when LIBUV_BUILD_CFLAGS becomes empty, earlier C flags.
+$(LIBUV_LIB): $(LIBUV_EXTRACTED) $(LIBUV_BUILD_CONFIG)
 	@$(MAKE) --no-print-directory check-libuv-tools
 	@echo "==> Configuring libuv $(LIBUV_VERSION) (static, PIC, $(LIBUV_BUILD_TYPE))"
+	rm -rf "$(LIBUV_BUILD_DIR)/CMakeCache.txt" "$(LIBUV_BUILD_DIR)/CMakeFiles"
 	cmake -S "$(LIBUV_SRC_DIR)" -B "$(LIBUV_BUILD_DIR)" \
 		$(LIBUV_CMAKE_FLAGS) \
 		$(if $(strip $(LIBUV_BUILD_CFLAGS)),-DCMAKE_C_FLAGS=$(call make_shell_quote,$(LIBUV_BUILD_CFLAGS)))
@@ -1013,7 +1043,8 @@ $(RUNTIME_O): titan-runtime/titan.c titan-runtime/titan.h titan-runtime/transfer
 		-I $(LIBBT_DIR) -o $@
 
 $(MINICORO_O): titan-runtime/minicoro.c \
-		titan-runtime/minicoro.h titan-runtime/titan/ffi.h \
+		titan-runtime/minicoro.h titan-runtime/titan.h titan-runtime/transfer.h \
+		titan-runtime/titan/ffi.h \
 		$(TITAN_RUNTIME_LUA_HEADERS) | $(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB)
 	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(CFLAGS) $(TITAN_EXTRA_CFLAGS) \
 		-c titan-runtime/minicoro.c -I titan-runtime -I $(TITAN_RUNTIME_LUA_SOURCE_PATH) \
@@ -1343,6 +1374,16 @@ TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/$(TITAN_STDLIB_TEST_PROGRAM_OUT
 # native profile across all 29 test roots, including fresh child compilers.
 # Focused gates may set a lower bound.
 TITAN_TEST_TIMEOUT ?= 600
+# One run's merged output, audited afterwards against the root inventory
+# written beside it. Concurrent filtered runs of one built executable need
+# distinct logs (and their own TMPDIR); the defaults are the shared
+# out/tests/stdout.log and out/tests/roots.txt.
+TITAN_TEST_RUN_LOG ?= $(TITAN_TEST_BUILD_DIR)/stdout.log
+ifeq ($(origin TITAN_TEST_RUN_LOG),file)
+TITAN_TEST_RUN_ROOTS := $(TITAN_TEST_BUILD_DIR)/roots.txt
+else
+TITAN_TEST_RUN_ROOTS = $(TITAN_TEST_RUN_LOG).roots
+endif
 TEST_TITANC ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(call make_shell_quote,$(PREFIX)/bin/titanc),titanc)
 TEST_LUA ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(PREFIX)/bin/lua,lua)
 ifeq ($(origin BUSTED),undefined)
@@ -1569,11 +1610,13 @@ titan-stdlib-test-build: $(TITAN_TEST_EXECUTABLE) ## Build every native Titan st
 
 # The aggregate and its children run outside <prefix>/bin. Give them the
 # selected installation's Lua paths instead of their executable-relative defaults.
-titan-stdlib-test-run: ## Run the built native suite, optionally with TITAN_FILTER
+titan-stdlib-test-run: ## Run the built native suite, optionally with TITAN_FILTER and a private TITAN_TEST_RUN_LOG
 	@test -x $(call make_shell_quote,$(TITAN_TEST_EXECUTABLE)) || { \
 	  echo "ERROR: run 'make titan-stdlib-test-build' first" >&2; exit 1; \
 	}
-	@printf '%s\n' $(TITAN_STDLIB_TEST_ROOTS) > $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)/roots.txt)
+	@mkdir -p "$$(dirname $(call make_shell_quote,$(TITAN_TEST_RUN_LOG)))" \
+	  "$$(dirname $(call make_shell_quote,$(TITAN_TEST_RUN_ROOTS)))"
+	@printf '%s\n' $(TITAN_STDLIB_TEST_ROOTS) > $(call make_shell_quote,$(TITAN_TEST_RUN_ROOTS))
 	@status=0; \
 	$(TITAN_TEST_COMPILER_ENV) \
 	LUA_PATH_5_5="$$( $(TEST_LUA) -E -e 'io.write(package.path)' )" \
@@ -1589,12 +1632,12 @@ titan-stdlib-test-run: ## Run the built native suite, optionally with TITAN_FILT
 	    set -- "$$@" "--filter=$$TITAN_FILTER"; \
 	  fi; \
 	  bash spec/support/run_with_timeout.sh "$$@" 2>&1 | tee "$$log"' -- \
-	  $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)/stdout.log) \
+	  $(call make_shell_quote,$(TITAN_TEST_RUN_LOG)) \
 	  $(call make_shell_quote,$(TITAN_TEST_TIMEOUT)) \
 	  $(call make_shell_quote,$(TITAN_TEST_EXECUTABLE)) || status=$$?; \
 	$(TEST_LUA) -E spec/support/check_stdlib_test_output.lua \
-	  $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)/stdout.log) \
-	  $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)/roots.txt) \
+	  $(call make_shell_quote,$(TITAN_TEST_RUN_LOG)) \
+	  $(call make_shell_quote,$(TITAN_TEST_RUN_ROOTS)) \
 	  $(call make_shell_quote_value,TITAN_FILTER); \
 	audit=$$?; test "$$status" = 0 || exit "$$status"; exit "$$audit"
 

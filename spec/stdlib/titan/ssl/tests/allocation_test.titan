@@ -70,4 +70,7 @@ function test_ssl_allocator_failure_retires_transferred_native_ownership(
   allocator_fixture_case(context, workspace, "input_growth")
   allocator_fixture_case(context, workspace, "write_growth")
   allocator_fixture_case(context, workspace, "shutdown")
+  -- The same child also balances OpenSSL allocations across a Lua state
+  -- close that abandons a TLS engine and an unclosed listener.
+  allocator_fixture_case(context, workspace, "state_close")
 end

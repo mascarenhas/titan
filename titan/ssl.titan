@@ -16,6 +16,7 @@ foreign import "openssl/pem.h"
 foreign import "openssl/ssl.h"
 foreign import "stddef.h"
 foreign import "string.h"
+foreign import "titan/ffi.h"
 
 local const connection_transfer_fields: const {reflect.Type} = {
   reflect.Type.is_string(),
@@ -417,6 +418,15 @@ end
 local function terminate(connection: Connection, graceful: boolean)
   -- Implementation notes: doc/implementation/ssl-library.md#duplex-admission-cancellation-and-failure
   if connection.state == STATE_CLOSED or connection.state == STATE_FAILED then return end
+  -- Implementation notes: doc/implementation/ssl-library.md#lua-state-close
+  -- Lua state close can neither close TCP nor await scope retirement. No
+  -- unwinding frame touches the engine, so free it now as an abort would;
+  -- the abandoned loop closes TCP.
+  if ffi.titan_state_closing(L) ~= 0 then
+    free_engine(connection)
+    connection.state = STATE_FAILED
+    return
+  end
   if connection.state == STATE_TERMINATING then
     async.await_cleanup_with(connection, start_cleanup)
     return
@@ -908,9 +918,35 @@ local function write_locked(connection: Connection, owner: Operation, data: stri
   end
 end
 
+-- Implementation notes: doc/implementation/ssl-library.md#lua-state-close
+-- Lua state close releases an engine that no close or abort retired; ordinary
+-- collection leaves the Connection to its owner.
+local function finalize_connection(candidate: value)
+  if ffi.titan_state_closing(L) == 0 then return end
+  local connection: Connection = candidate
+  connection:close()
+end
+
 local function new_connection(transport: net.Connection,
                               context: foreign *SSL_CTX,
                               client: boolean): Connection
+  -- Register the owner's state-close finalizer before allocating its engine.
+  local connection = Connection {
+    transport = transport,
+    handle = nil,
+    input = nil,
+    output = nil,
+    client = client,
+    state = STATE_HANDSHAKING,
+    reader = nil, writer = nil, control = nil,
+    handshaker = nil, feeder = nil, retry = nil,
+    cleanup_waiters = {}, scope_waiters = {},
+    transport_eof = false,
+    transport_shutdown = false,
+    transport_closed = false,
+    excess = "",
+  }
+  gc.finalizable<|value|>(connection, finalize_connection)
   ffi.ERR_clear_error()
   local handle = ffi.SSL_new(context)
   if not handle then
@@ -942,21 +978,10 @@ local function new_connection(transport: net.Connection,
   else
     ffi.SSL_set_accept_state(handle)
   end
-  return Connection {
-    transport = transport,
-    handle = handle,
-    input = input,
-    output = output,
-    client = client,
-    state = STATE_HANDSHAKING,
-    reader = nil, writer = nil, control = nil,
-    handshaker = nil, feeder = nil, retry = nil,
-    cleanup_waiters = {}, scope_waiters = {},
-    transport_eof = false,
-    transport_shutdown = false,
-    transport_closed = false,
-    excess = "",
-  }
+  connection.handle = handle
+  connection.input = input
+  connection.output = output
+  return connection
 end
 
 -- SSL_CTX_set_min_proto_version is a public function-like macro unavailable
@@ -1561,12 +1586,15 @@ function listen(host: string, port: integer, certificate_file: string,
   local context = server_context(certificate_data, private_key_data)
   do
     local listener = net.listen(host, port, backlog, reuse_port)
-    return Server {
+    local server = Server {
       listener = listener,
-      context = context,
+      context = nil,
       closed = false,
       listener_closed = false,
     }
+    gc.finalizable<|value|>(server, finalize_server)
+    server.context = context
+    return server
   catch
     local failure = error
     ffi.SSL_CTX_free(context)
@@ -1678,6 +1706,7 @@ function Connection.from_transfer_payload(payload: string): Connection
     transport_eof = transport_eof, transport_shutdown = transport_shutdown,
     transport_closed = false, excess = excess,
   }
+  gc.finalizable<|value|>(connection, finalize_connection)
   connection.transport = net.Connection.from_transfer_payload(transport_payload)
   connection.handle = handle
   connection.input = ffi.SSL_get_rbio(handle)
@@ -1785,6 +1814,11 @@ end
 --- Abort the transport before draining active operations and retire TLS state.
 -- @usage standard-library-ssl.md#tls-shutdown-and-eof
 function Connection:abort()
+  -- Lua state close has no Task to drain children; terminate frees the engine.
+  if ffi.titan_state_closing(L) ~= 0 then
+    terminate(self, false)
+    return
+  end
   local reader? = self.reader
   local writer? = self.writer
   local control? = self.control
@@ -1798,6 +1832,11 @@ end
 -- @usage standard-library-ssl.md#tls-shutdown-and-eof
 function Connection:close()
   if self.state == STATE_CLOSED or self.state == STATE_FAILED then return end
+  -- Lua state close cannot exchange close_notify; release the engine instead.
+  if ffi.titan_state_closing(L) ~= 0 then
+    terminate(self, false)
+    return
+  end
   local operation? = begin_operation(self, "close")
   if operation == nil then return end
   supervise(self, operation, function (): string?
@@ -1856,10 +1895,20 @@ function Server:close()
     if self.context then ffi.SSL_CTX_free(self.context) end
     self.context = nil
   end
+  -- Lua state close cannot await the listener; the abandoned loop closes it.
+  if ffi.titan_state_closing(L) ~= 0 then return end
   if not self.listener_closed then
     self.listener:close()
     self.listener_closed = true
   end
+end
+
+-- Implementation notes: doc/implementation/ssl-library.md#lua-state-close
+-- Lua state close releases the SSL_CTX of a Server that was never closed.
+local function finalize_server(candidate: value)
+  if ffi.titan_state_closing(L) == 0 then return end
+  local server: Server = candidate
+  server:close()
 end
 
 do

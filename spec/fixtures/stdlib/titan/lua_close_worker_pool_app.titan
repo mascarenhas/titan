@@ -1,0 +1,85 @@
+-- Closes a Lua state while four Tasks wait in run_async, one per default
+-- libuv pool thread, and each independent state has queued pool work of its
+-- own. Releasing those states must not need a pool thread that the abandoned
+-- jobs occupy. A SIGALRM watchdog turns a deadlock into a failed exit.
+local lua = import "lua"
+local async = import "async"
+local gc = import "gc"
+local uv = import "uv"
+foreign import "lua_close_worker_pool.h"
+foreign import "stdio.h"
+foreign import "unistd.h"
+
+-- Cells: 0 nested chunks started, 1 nested states queued pool work, 2 host
+-- close began, 3 nested chunks finished, 4 nested states closed after their
+-- chunk finished, 5 nested states closed under a running chunk.
+local CHILDREN = 4
+
+record CloseWatch
+  cells: foreign *void
+end
+
+local function close_watched(candidate: value)
+  local watch: CloseWatch = candidate
+  if ffi.lua_close_pool_get(watch.cells, 3) == CHILDREN then
+    ffi.lua_close_pool_add(watch.cells, 4)
+  else
+    ffi.lua_close_pool_add(watch.cells, 5)
+  end
+end
+
+-- Public so a nested state can call it.
+function child(raw: value)
+  local cells = raw as foreign *void
+  gc.finalizable<|value|>(CloseWatch(cells), close_watched)
+  ffi.lua_close_pool_add(cells, 0)
+  while ffi.lua_close_pool_get(cells, 0) < CHILDREN do uv.sleep(1) end
+  local submitted = false
+  async.run<|nil, value|>(function (): nil
+    submitted = true
+    async.run_foreign(ffi.lua_close_pool_noop, nil)
+    return nil
+  end)
+  while not submitted do uv.run(async.current_loop(), uv.RUN_NOWAIT) end
+  ffi.lua_close_pool_add(cells, 1)
+  while ffi.lua_close_pool_get(cells, 2) == 0 do uv.sleep(1) end
+  uv.sleep(100)
+  ffi.lua_close_pool_add(cells, 3)
+end
+
+-- Public so a nested state can call it.
+function start(raw: value)
+  local cells = raw as foreign *void
+  for _ = 1, CHILDREN do
+    async.run<|nil, value|>(function (): nil
+      local state = lua.new()
+      defer state:close()
+      state:run_async([[require('lua_close_worker_pool_app').child(...)]],
+                      "=pool-child", async.TransferValue.is_pointer(cells))
+      return nil
+    end)
+  end
+  while ffi.lua_close_pool_get(cells, 1) < CHILDREN do
+    uv.run(async.current_loop(), uv.RUN_NOWAIT)
+    uv.sleep(1)
+  end
+end
+
+function main(_: {string}): integer
+  ffi.alarm(60)
+  local cells: owned int[] = foreign int.new_array(6)
+  for index = 0, 5 do cells[index] = 0 end
+  local state = lua.new()
+  state:run([[require('lua_close_worker_pool_app').start(...)]],
+            "=pool-host", async.TransferValue.is_pointer(cells as foreign *void))
+  ffi.lua_close_pool_add(cells as foreign *void, 2)
+  state:close()
+  local closed = cells[4] as integer
+  local under = cells[5] as integer
+  if closed ~= CHILDREN or under ~= 0 then
+    ffi.puts("closed after chunk " .. closed .. ", closed under chunk " .. under)
+    return 1
+  end
+  ffi.puts("LUA_CLOSE_POOL_OK")
+  return 0
+end

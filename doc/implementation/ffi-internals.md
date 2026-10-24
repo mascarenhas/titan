@@ -164,7 +164,9 @@ them: value extractors (`lmacro_thvalue`, `lmacro_uvalue`, `lmacro_clCvalue`,
 tests (`lmacro_ttype`, `lmacro_ttypetag`, `lmacro_ttisLclosure`,
 `lmacro_ttisCclosure`, `lmacro_ttisfulluserdata`, `lmacro_ttislcf`,
 `lmacro_ttislightuserdata`), and writes (`lmacro_sethvalue`,
-`lmacro_luaC_barrierback`). They are the deliberately narrow exception to
+`lmacro_luaC_barrierback`, whose untyped object casts to `GCObject *` rather
+than through `obj2gco`, which reads the object's tag under `-DLUAI_ASSERT`).
+They are the deliberately narrow exception to
 Titan's lack of general function-like-macro inference, used by trusted
 standard-library foreign functions (uv, HTTP, coroutine, transfer, thread) to
 recover generated callback state. Add a bridge here rather than inferring a

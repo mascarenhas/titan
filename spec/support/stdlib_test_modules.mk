@@ -20,6 +20,7 @@ TITAN_TEST_MODULES := async.test_support \
 	async.tests \
 	coroutine.test_support \
 	coroutine.tests \
+	coroutine.unwind_init_fixture \
 	fs.test_support \
 	fs.tests \
 	gc.tests \
@@ -96,6 +97,7 @@ TITAN_TEST_FOREIGN_async.tests := 1
 
 TITAN_TEST_SOURCES_coroutine.test_support := spec/stdlib/titan/coroutine/test_support.titan
 TITAN_TEST_IMPORTS_coroutine.test_support :=
+TITAN_TEST_FOREIGN_coroutine.test_support := 1
 
 TITAN_TEST_SOURCES_coroutine.tests := spec/stdlib/titan/coroutine/tests/tests.titan \
 	spec/stdlib/titan/coroutine/tests/basic_test.titan \
@@ -103,14 +105,19 @@ TITAN_TEST_SOURCES_coroutine.tests := spec/stdlib/titan/coroutine/tests/tests.ti
 	spec/stdlib/titan/coroutine/tests/lifecycle_test.titan \
 	spec/stdlib/titan/coroutine/tests/lua_boundary_test.titan \
 	spec/stdlib/titan/coroutine/tests/nested_test.titan \
-	spec/stdlib/titan/coroutine/tests/running_test.titan
-TITAN_TEST_IMPORTS_coroutine.tests := coroutine.test_support support.command support.common
+	spec/stdlib/titan/coroutine/tests/running_test.titan \
+	spec/stdlib/titan/coroutine/tests/unwind_test.titan
+TITAN_TEST_IMPORTS_coroutine.tests := coroutine.test_support coroutine.unwind_init_fixture support.command support.common support.runtime
+
+TITAN_TEST_SOURCES_coroutine.unwind_init_fixture := spec/stdlib/titan/coroutine/unwind_init_fixture.titan
+TITAN_TEST_IMPORTS_coroutine.unwind_init_fixture := coroutine.test_support
 
 TITAN_TEST_SOURCES_fs.test_support := spec/stdlib/titan/fs/test_support.titan
 TITAN_TEST_IMPORTS_fs.test_support := support.common
 
 TITAN_TEST_SOURCES_fs.tests := spec/stdlib/titan/fs/tests.titan
 TITAN_TEST_IMPORTS_fs.tests := fs.test_support support.async support.common support.runtime
+TITAN_TEST_FOREIGN_fs.tests := 1
 
 TITAN_TEST_SOURCES_gc.tests := spec/stdlib/titan/gc/tests.titan
 TITAN_TEST_IMPORTS_gc.tests := support.common
@@ -180,8 +187,9 @@ TITAN_TEST_SOURCES_lua.tests := spec/stdlib/titan/lua/tests/tests.titan \
 	spec/stdlib/titan/lua/tests/independent_state_transfer_test.titan \
 	spec/stdlib/titan/lua/tests/record_payload_test.titan \
 	spec/stdlib/titan/lua/tests/require_test.titan \
-	spec/stdlib/titan/lua/tests/source_require_test.titan
-TITAN_TEST_IMPORTS_lua.tests := lua.handle_transfer_fixture lua.preload_fixture lua.receiver_fixture lua.test_support lua.transfer_fixture support.async support.common support.runtime
+	spec/stdlib/titan/lua/tests/source_require_test.titan \
+	spec/stdlib/titan/lua/tests/state_close_test.titan
+TITAN_TEST_IMPORTS_lua.tests := lua.handle_transfer_fixture lua.preload_fixture lua.receiver_fixture lua.test_support lua.transfer_fixture support.async support.command support.common support.runtime
 TITAN_TEST_SOURCES_lua.transfer_fixture := spec/stdlib/titan/lua/transfer_fixture.titan
 TITAN_TEST_IMPORTS_lua.transfer_fixture :=
 TITAN_TEST_FOREIGN_lua.transfer_fixture := 1
@@ -244,8 +252,10 @@ TITAN_TEST_SOURCES_sqlite3.tests := spec/stdlib/titan/sqlite3/tests/tests.titan 
 	spec/stdlib/titan/sqlite3/tests/mapping_test.titan \
 	spec/stdlib/titan/sqlite3/tests/query_test.titan \
 	spec/stdlib/titan/sqlite3/tests/transaction_test.titan \
+	spec/stdlib/titan/sqlite3/tests/state_close_test.titan \
 	spec/stdlib/titan/sqlite3/tests/worker_test.titan
 TITAN_TEST_IMPORTS_sqlite3.tests := support.async support.command support.runtime
+TITAN_TEST_FOREIGN_sqlite3.tests := 1
 
 TITAN_TEST_SOURCES_ssl.backpressure_support := spec/stdlib/titan/ssl/backpressure_support.titan
 TITAN_TEST_IMPORTS_ssl.backpressure_support := support.async
@@ -259,8 +269,10 @@ TITAN_TEST_SOURCES_ssl.tests := spec/stdlib/titan/ssl/tests/tests.titan \
 	spec/stdlib/titan/ssl/tests/error_strings_test.titan \
 	spec/stdlib/titan/ssl/tests/late_write_test.titan \
 	spec/stdlib/titan/ssl/tests/drain_failure_test.titan \
-	spec/stdlib/titan/ssl/tests/transfer_test.titan
+	spec/stdlib/titan/ssl/tests/transfer_test.titan \
+	spec/stdlib/titan/ssl/tests/state_close_test.titan
 TITAN_TEST_IMPORTS_ssl.tests := support.command net.test_support ssl.backpressure_support ssl.test_support support.async support.common support.runtime
+TITAN_TEST_FOREIGN_ssl.tests := 1
 
 TITAN_TEST_SOURCES_string.core_test := spec/stdlib/titan/string/core_test.titan
 TITAN_TEST_IMPORTS_string.core_test := string.test_support
@@ -293,7 +305,7 @@ TITAN_TEST_SOURCES_thread.tests := spec/stdlib/titan/thread/tests/tests.titan \
 	spec/stdlib/titan/thread/tests/ownership_test.titan \
 	spec/stdlib/titan/thread/tests/teardown_test.titan \
 	spec/stdlib/titan/thread/tests/wake_test.titan
-TITAN_TEST_IMPORTS_thread.tests := support.async support.command support.common support.runtime
+TITAN_TEST_IMPORTS_thread.tests := coroutine.test_support support.async support.command support.common support.runtime
 
 TITAN_TEST_SOURCES_timer.tests := spec/stdlib/titan/timer/tests.titan
 TITAN_TEST_IMPORTS_timer.tests := support.async support.runtime
@@ -341,7 +353,8 @@ TITAN_TEST_C_INPUTS_reflect.tests := spec/stdlib/titan/reflect/reflection_recurs
 TITAN_TEST_C_INPUTS_protobuf.tests := spec/stdlib/titan/protobuf/protobuf_fixture.h
 TITAN_TEST_C_INPUTS_async.tests = $(TITAN_TEST_BUILD_DIR)/async_foreign_work.h \
 	spec/stdlib/titan/async/tests/async_stack_probe.h \
-	spec/stdlib/titan/async/tests/receiver_probe.h
+	spec/stdlib/titan/async/tests/receiver_probe.h \
+	spec/stdlib/titan/io/print_capture.h
 TITAN_TEST_C_INPUTS_uv.runtime_tests = $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h
 TITAN_TEST_C_INPUTS_uv.public_tests = $(TITAN_TEST_BUILD_DIR)/uv_coverage_threads.h $(TITAN_TEST_BUILD_DIR)/uv_coverage_pty.h \
 	spec/stdlib/titan/uv/public_tests/abandon_process_probe.h

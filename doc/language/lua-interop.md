@@ -733,3 +733,10 @@ lives inside one Lua state. Consequently:
 * Each state has one canonical mutable Array metatable and one canonical const
   Array metatable. A proxy belongs to exactly one state and keeps its exact
   qualifier across every Lua-visible round trip.
+
+Threads of one state are a separate matter. Lua coroutines and Titan
+coroutines in one state enter one another only through resumes; C code that
+runs another thread's code without a resume, or re-enters an active ancestor
+thread with `lua_call` or `lua_pcall`, breaks the rule that unwinding an
+abandoned Titan coroutine relies on. See
+[unwinding limits](coroutines.md#unwinding-limits).

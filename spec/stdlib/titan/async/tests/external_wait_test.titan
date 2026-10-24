@@ -2446,3 +2446,178 @@ function test_external_wait_cleanup_shielded_across_cancel_and_shutdown(
     runtime_test.run(function () async.yield() end)
   end)
 end
+
+-- Counting closure registrars for the external-wait windows below.
+local record ExternalWaitWindow
+  registers: integer
+  registered: integer
+  unregisters: integer
+  null_targets: integer
+  early_unregisters: integer
+  target: {ExternalWaitTarget}
+  completed: boolean
+end
+
+local function external_wait_window_owner(window: ExternalWaitWindow): async.ExternalWait
+  return async.prepare_external_wait(function (target: foreign *void): boolean
+    window.registers = window.registers + 1
+    if target == nil then
+      window.null_targets = window.null_targets + 1
+      return false
+    end
+    external_wait_retain_target(window.target, target)
+    window.registered = window.registered + 1
+    return true
+  end, function ()
+    if window.registered == 0 then window.early_unregisters = window.early_unregisters + 1 end
+    window.unregisters = window.unregisters + 1
+    external_wait_release_target(window.target)
+  end)
+end
+
+-- Notify the registered target once the wait has registered, as its producer.
+local function external_wait_window_notify(window: ExternalWaitWindow)
+  for _ = 1, 50 do
+    if window.target[1] ~= nil then break end
+    timer.yield()
+  end
+  local target? = window.target[1]
+  if target ~= nil then
+    test.assert((uv.native_external_wake_notify(target.pointer) as integer) == 0,
+      "the external wait notification failed")
+    external_wait_release_target(window.target)
+  end
+end
+
+-- Task:cancel at every safepoint of an ordinary closure-registered wait, in
+-- the Task or in the driver (registration, activation, register_fn): the Task
+-- is cancelled with no notification, registered at most once with a target,
+-- and unregistered exactly once after a registration.
+local function external_wait_cancel_window(driver: boolean)
+  runtime_test.run(function ()
+    task_support.each_wake_offset(driver, nil, function (): task_support.WakeCase
+      local window = ExternalWaitWindow(0, 0, 0, 0, 0, {}, false)
+      local owner = external_wait_window_owner(window)
+      return task_support.WakeCase(function (): value
+        owner:wait()
+        return "notified"
+      end, function (target: async.Task)
+        target:cancel(async.CancellationReason.simple("cancelled while registering"))
+      end, nil, function (target: async.Task, offset: integer)
+        test.assert(support.cancelled_with(target:status(), "cancelled while registering") and
+          window.registers <= 1 and window.null_targets == 0 and window.early_unregisters == 0 and
+          window.unregisters == window.registered and window.target[1] == nil,
+          "offset " .. offset .. ": the cancelled external wait ended " ..
+          target:status():as_string() .. " with " .. window.registers .. " registrations, " ..
+          window.null_targets .. " NULL targets and " .. window.unregisters .. " unregistrations")
+      end)
+    end)
+  end)
+end
+
+local foreign function external_wait_window_register(context: *void, target: *void): int
+  if target == nil then
+    local fixture = context as foreign *titan_external_retirement_fixture
+    fixture.retire_error = -1
+    return -1
+  end
+  return external_retirement_register(context, target)
+end
+
+-- The same window through wait_external_native's C registrars.
+local function external_wait_native_cancel_window(driver: boolean)
+  runtime_test.run(function ()
+    task_support.each_wake_offset(driver, nil, function (): task_support.WakeCase
+      local fixture: owned *titan_external_retirement_fixture =
+        foreign titan_external_retirement_fixture.new()
+      return task_support.WakeCase(function (): value
+        async.wait_external_native(fixture, fixture as foreign *void,
+          external_wait_window_register, external_retirement_unregister)
+        return "notified"
+      end, function (target: async.Task)
+        target:cancel(async.CancellationReason.simple("cancelled while registering"))
+      end, nil, function (target: async.Task, offset: integer)
+        test.assert(support.cancelled_with(target:status(), "cancelled while registering") and
+          (fixture.register_calls as integer) <= 1 and (fixture.retire_error as integer) == 0 and
+          (fixture.unregister_calls as integer) == (fixture.register_calls as integer) and
+          fixture.target == nil,
+          "offset " .. offset .. ": the cancelled native external wait ended " ..
+          target:status():as_string() .. " with " .. (fixture.register_calls as integer) ..
+          " registrations and " .. (fixture.unregister_calls as integer) .. " unregistrations")
+      end)
+    end)
+  end)
+end
+
+-- A cleanup wait ignores the cancellation and completes on its notification.
+local function external_wait_cleanup_cancel_window(driver: boolean)
+  runtime_test.run(function ()
+    task_support.each_wake_offset(driver, nil, function (): task_support.WakeCase
+      local window = ExternalWaitWindow(0, 0, 0, 0, 0, {}, false)
+      local owner = external_wait_window_owner(window)
+      local drive = function (probe: task_support.WakeWindow, _: async.Task)
+        timer.yield()
+        if driver then probe.open = false end
+        external_wait_window_notify(window)
+      end
+      return task_support.WakeCase(function (): value
+        owner:wait_cleanup()
+        window.completed = true
+        return "notified"
+      end, function (target: async.Task)
+        target:cancel(async.CancellationReason.simple("cancelled during cleanup"))
+      end, drive, function (target: async.Task, offset: integer)
+        test.assert(window.completed and window.registers == 1 and window.unregisters == 0 and
+          support.cancelled_with(target:status(), "cancelled during cleanup"),
+          "offset " .. offset .. ": the cancellation changed the cleanup wait: " ..
+          target:status():as_string())
+      end)
+    end)
+  end)
+end
+
+function test_external_wait_cancel_in_registration_window(context: test.Context)
+  context:run("closure_in_task", function (_: test.Context) external_wait_cancel_window(false) end)
+  context:run("closure_in_driver", function (_: test.Context) external_wait_cancel_window(true) end)
+  context:run("native_in_task", function (_: test.Context)
+    external_wait_native_cancel_window(false)
+  end)
+  context:run("native_in_driver", function (_: test.Context)
+    external_wait_native_cancel_window(true)
+  end)
+  context:run("cleanup_in_task", function (_: test.Context)
+    external_wait_cleanup_cancel_window(false)
+  end)
+  context:run("cleanup_in_driver", function (_: test.Context)
+    external_wait_cleanup_cancel_window(true)
+  end)
+end
+
+-- Task:resume with an unrelated token at every driver safepoint of an external
+-- wait's registration latches and is discarded; the wait still completes on
+-- its notification.
+function test_resume_during_external_wait_registration_is_discarded(_: test.Context)
+  runtime_test.run(function ()
+    task_support.each_wake_offset(true, nil, function (): task_support.WakeCase
+      local window = ExternalWaitWindow(0, 0, 0, 0, 0, {}, false)
+      local owner = external_wait_window_owner(window)
+      local drive = function (probe: task_support.WakeWindow, _: async.Task)
+        timer.yield()
+        probe.open = false
+        external_wait_window_notify(window)
+      end
+      return task_support.WakeCase(function (): value
+        owner:wait()
+        return "notified"
+      end, function (target: async.Task)
+        -- Once registered, the wait is parked: there a mismatch raises.
+        if window.target[1] == nil then target:resume(async.ResumeToken("unrelated")) end
+      end, drive, function (target: async.Task, offset: integer)
+        local finished, result? = target:status():has_succeeded()
+        test.assert(finished and result == "notified" and window.registers == 1,
+          "offset " .. offset .. ": a resume during registration changed the external wait: " ..
+          target:status():as_string())
+      end)
+    end)
+  end)
+end

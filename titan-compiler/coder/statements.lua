@@ -86,7 +86,7 @@ end
 function newbox(ctx, typ, boxvar, slot)
     if is_rawbox(typ) then
         return render([[
-            Udata *$BOXVAR = gco2u(luaC_newobj(L, LUA_VUSERDATA, sizeudata(0, sizeof($CT))));
+            Udata *$BOXVAR = titan_new_udata_object(L, sizeudata(0, sizeof($CT)));
             $BOXVAR->len = sizeof($CT); $BOXVAR->nuvalue = 0; $BOXVAR->metatable = NULL;
             setuvalue(L, $SLOT, $BOXVAR);
         ]], {
@@ -96,7 +96,7 @@ function newbox(ctx, typ, boxvar, slot)
         })
     else
         return render([[
-            Udata *$BOXVAR = gco2u(luaC_newobj(L, LUA_VUSERDATA, sizeudata(1, 0)));
+            Udata *$BOXVAR = titan_new_udata_object(L, sizeudata(1, 0));
             $BOXVAR->len = 0; $BOXVAR->nuvalue = 1; $BOXVAR->metatable = NULL;
             setnilvalue(&$BOXVAR->uv[0].uv);
             setuvalue(L, $SLOT, $BOXVAR);
@@ -1352,6 +1352,11 @@ PA_BREAK  = "2"
 
 PA_RAISE  = "3"
 
+-- An abandoned-coroutine unwind landed on this try's boundary: after the
+-- finally, continue the unwind (`titan_unwind`) instead of resuming normal flow.
+-- Implementation notes: doc/implementation/error-handling.md#unwinding-through-finally
+PA_UNWIND = "4"
+
 -- Compute the per-return saved-value storage for a try-with-finally (B.4 "GC
 -- anchoring"). Fixed results use stack-anchored slots for GC types and
 -- `volatile` C temps for non-GC scalars. A flexible result gets frame-owned
@@ -2134,6 +2139,9 @@ function dispatch_after_finally(ctx, pa_var, frame, d_pa_err, d_pa_tb)
         PINKEY = recovery_string(ctx, "TITAN_TRACE_PINNED"),
     })
 
+    -- PA_UNWIND: the finally ran under the unwind guard, which reuses this
+    -- try's `_lj_N` (declared at try scope). Unlink it and continue the unwind
+    -- at the next finally boundary or coroutine floor; titan_unwind never returns.
     return render([[
         if ($PA == $PARETURN) {
             $RETARM
@@ -2141,6 +2149,10 @@ function dispatch_after_finally(ctx, pa_var, frame, d_pa_err, d_pa_tb)
             $BREAKARM
         } else if ($PA == $PARAISE) {
             $RAISEARM
+        } else if ($PA == $PAUNWIND) {
+            L->errorJmp = _lj_$ID.previous;
+            L->nCcalls = _oldnC_$ID;
+            titan_unwind(L);
         }
         /* PA_NONE: fall through past the try */
     ]], {
@@ -2148,16 +2160,21 @@ function dispatch_after_finally(ctx, pa_var, frame, d_pa_err, d_pa_tb)
         PARETURN = PA_RETURN,
         PABREAK = PA_BREAK,
         PARAISE = PA_RAISE,
+        PAUNWIND = PA_UNWIND,
         RETARM = return_arm,
         BREAKARM = break_arm,
         RAISEARM = raise_arm,
+        ID = frame.id,
     })
 end
 
 -- The "save" prologue of an inline setjmp boundary (rawrunprotected save), tagged
 -- with `tag` so a try with two boundaries (body + catch) keeps distinct locals.
+-- A boundary whose try has a finally is `marked`: its status starts as
+-- TITAN_STATUS_FINALLY so an abandoned-coroutine unwind can land on it. Lua
+-- only writes a status from luaD_throw, right before jumping here.
 -- Implementation notes: doc/implementation/error-handling.md#code-generator-overview
-function boundary_save(tag)
+function boundary_save(tag, marked)
     return render([[
         /* inline protected boundary (rawrunprotected save) */
         l_uint32 _oldnC_$T = L->nCcalls;
@@ -2166,27 +2183,31 @@ function boundary_save(tag)
         ptrdiff_t _oldtop_$T = savestack(L, L->top.p);
         ptrdiff_t _olderrfunc_$T = L->errfunc;
         lua_longjmp _lj_$T;
-        _lj_$T.status = LUA_OK;
+        _lj_$T.status = $INIT;
         _lj_$T.previous = L->errorJmp;
         L->errorJmp = &_lj_$T;
         if (TITAN_SETJMP(_lj_$T.b) == 0) {
-    ]], { T = tag })
+    ]], { T = tag, INIT = marked and "TITAN_STATUS_FINALLY" or "LUA_OK" })
 end
 
 -- The "tail" that closes a boundary's protected block and restores the
--- error-handler chain (rawrunprotected tail), opening the `if (status != OK)`
--- recovery arm and saving the caught error into slot `d_err` and its snapshotted
--- trace into slot `d_tb`. The caller supplies the recovery body and closes braces.
-function boundary_recover_open(ctx, tag, d_err, d_tb)
-    return render([[
-        }
-        /* restore the error-handler chain (rawrunprotected tail) */
-        L->errorJmp = _lj_$T.previous;
-        L->nCcalls = _oldnC_$T;
-        if (_lj_$T.status != LUA_OK) {
-            /* raised; errorhandler already filled the trace slot. Mirror
-             * luaD_pcall's recovery: restore ci/allowhook, close any to-be-
-             * closed vars from called Lua, materialize the error object. */
+-- error-handler chain (rawrunprotected tail), opening the recovery arm and
+-- saving the caught error into slot `d_err` and its snapshotted trace into
+-- slot `d_tb`. The caller supplies the recovery body and closes braces with
+-- `boundary_recover_close(unwind)`.
+--
+-- `unwind` is nil for an unmarked (catch-only) boundary. For a marked boundary
+-- it is `{ pa = <pending-action var>, guard = <tag of the try's body boundary> }`:
+-- an unwind landing restores the boundary state, closes the Lua frames above it
+-- with the unwind policy, skips any catch, sets PA_UNWIND, and runs the finally
+-- under a guard that reuses the try-scope `_lj_<guard>`. The ordinary-error
+-- close of the Lua frames above a marked boundary runs with that boundary
+-- re-armed: a `__close` method can suspend the coroutine there, before the
+-- finally has started, and abandoning it then must still land on this try.
+-- Implementation notes: doc/implementation/error-handling.md#unwinding-through-finally
+function boundary_recover_open(ctx, tag, d_err, d_tb, unwind)
+    local landing = ""
+    local close_frames = render([[
             L->ci = _oldci_$T;
             L->allowhook = _oldah_$T;
             /* A longjmp can skip an inner Titan Lua-entry wrapper before that
@@ -2196,6 +2217,73 @@ function boundary_recover_open(ctx, tag, d_err, d_tb)
              * slot from the skipped inner entry. */
             L->errfunc = _olderrfunc_$T;
             _lj_$T.status = luaD_closeprotected(L, _oldtop_$T, _lj_$T.status);
+    ]], { T = tag })
+    if unwind then
+        landing = render([[
+            if (_lj_$T.status != TITAN_STATUS_UNWIND) {
+                /* An ordinary error: close the Lua frames above with the error,
+                 * as luaD_pcall does, under this boundary re-armed as a finally
+                 * landing. luaD_closeprotected catches every error of a __close
+                 * itself, so only an abandoned-coroutine unwind (a __close that
+                 * suspended the coroutine) can jump here, with
+                 * TITAN_STATUS_UNWIND. errfunc: see the unmarked recovery. */
+                volatile TStatus _errst_$T = _lj_$T.status;
+                L->ci = _oldci_$T;
+                L->allowhook = _oldah_$T;
+                L->errfunc = _olderrfunc_$T;
+                _lj_$T.status = TITAN_STATUS_FINALLY;
+                _lj_$T.previous = L->errorJmp;
+                L->errorJmp = &_lj_$T;
+                if (TITAN_SETJMP(_lj_$T.b) == 0) {
+                    _lj_$T.status = luaD_closeprotected(L, _oldtop_$T, _errst_$T);
+                } else {
+                    /* the unwind drops the caught error: clear its trace */
+                    titan_unwind_clear_trace(L);
+                }
+                L->errorJmp = _lj_$T.previous;
+                L->nCcalls = _oldnC_$T;
+            }
+            if (_lj_$T.status == TITAN_STATUS_UNWIND) {
+                /* abandoned-coroutine unwind: close Lua frames above with no
+                 * error value, skip any catch, run the finally under a guard */
+                L->ci = _oldci_$T;
+                L->allowhook = _oldah_$T;
+                L->errfunc = _olderrfunc_$T;
+                titan_unwind_close(L, _oldtop_$T);
+                _base = restorestack(L, _base_off);
+                L->top.p = _base + TITAN_RESERVED_NSLOTS;
+                $SPILLRELOAD
+                $PA = $PAUNWIND;
+                _lj_$G.status = LUA_OK;
+                _lj_$G.previous = L->errorJmp;
+                L->errorJmp = &_lj_$G;
+                if (TITAN_SETJMP(_lj_$G.b) != 0) {
+                    titan_unwind_guard_failed(L, &_lj_$G, _oldnC_$G,
+                        _oldci_$G, _oldah_$G, _olderrfunc_$G,
+                        _base_off + TITAN_RESERVED_NSLOTS
+                            * (ptrdiff_t)sizeof(StackValue));
+                }
+            } else {
+        ]], {
+            T = tag,
+            G = unwind.guard,
+            PA = unwind.pa,
+            PAUNWIND = PA_UNWIND,
+            SPILLRELOAD = spill_reload(ctx),
+        })
+        close_frames = "/* the Lua frames above were closed under the re-armed boundary */"
+    end
+    return render([[
+        }
+        /* restore the error-handler chain (rawrunprotected tail) */
+        L->errorJmp = _lj_$T.previous;
+        L->nCcalls = _oldnC_$T;
+        if (_lj_$T.status != $INIT) {
+            $LANDING
+            /* raised; errorhandler already filled the trace slot. Mirror
+             * luaD_pcall's recovery: restore ci/allowhook, close any to-be-
+             * closed vars from called Lua, materialize the error object. */
+            $CLOSEFRAMES
             luaD_seterrorobj(L, _lj_$T.status, restorestack(L, _oldtop_$T));
             /* a value-call or another stack-growing operation inside the protected
              * region may have reallocated the stack; recompute _base before
@@ -2234,6 +2322,9 @@ function boundary_recover_open(ctx, tag, d_err, d_tb)
             $SPILLRELOAD
     ]], {
         T = tag,
+        INIT = unwind and "TITAN_STATUS_FINALLY" or "LUA_OK",
+        LANDING = landing,
+        CLOSEFRAMES = close_frames,
         ERRSTACK = stackslotat(d_err),
         TBSTACK = stackslotat(d_tb),
         SPILLRELOAD = spill_reload(ctx),
@@ -2241,6 +2332,12 @@ function boundary_recover_open(ctx, tag, d_err, d_tb)
         PINKEY = recovery_string(ctx, "TITAN_TRACE_PINNED"),
         EMPTYTRACE = recovery_string(ctx, '""'),
     })
+end
+
+-- Close the recovery arm opened by `boundary_recover_open`: the marked form also
+-- closes its `else` (error) branch.
+function boundary_recover_close(unwind)
+    return unwind and "}}" or "}"
 end
 
 -- `catch`/`finally` codegen.
@@ -2410,6 +2507,9 @@ function codetry(ctx, node)
     -- the body set it to (NONE unless a return/break in the body routed here, but
     -- a body that raised reached here by error, so it is NONE -> finally swallows).
     local catch_under_boundary = ""
+    -- Both boundaries of a try with a finally are marked; their unwind landings
+    -- share the try-scope `_lj_<id>` as the finally's guard.
+    local unwind = { pa = pa_var, guard = tostring(id) }
     if has_catch then
         catch_under_boundary = render([[
             TValue $ERR = *$ERRSLOT;
@@ -2420,16 +2520,17 @@ function codetry(ctx, node)
                 $CCATCH
             $CRECOVER
                 $NOCATCHRAISE
-            }
+            $CCLOSE
         ]], {
             ERR = errcvar,
             TB = tbcvar,
             ERRSLOT = slotat(d_err),
             TBSLOT = slotat(d_tb),
-            CSAVE = boundary_save(id .. "c"),
+            CSAVE = boundary_save(id .. "c", true),
             CCATCH = ccatch,
-            CRECOVER = boundary_recover_open(ctx, id .. "c", d_err, d_tb),
+            CRECOVER = boundary_recover_open(ctx, id .. "c", d_err, d_tb, unwind),
             NOCATCHRAISE = no_catch_raise,
+            CCLOSE = boundary_recover_close(unwind),
         })
     else
         -- finally-only: a body error becomes a pending RAISE re-propagated after
@@ -2440,6 +2541,9 @@ function codetry(ctx, node)
     local dispatch = dispatch_after_finally(ctx, pa_var, ret_frame,
         d_pa_err, d_pa_tb)
 
+    -- The boundary's declarations stay at try scope in both shapes: an unwind
+    -- landing leaves `_lj_<id>` linked as the finally's guard until the
+    -- dispatch unlinks it, so it must outlive `$CFINALLY` and `$DISPATCH`.
     local tmpl
     if node._defer_tail then
         tmpl = [[
@@ -2449,7 +2553,7 @@ function codetry(ctx, node)
                 $CBODY
             $RECOVER
                 $CATCHARM
-            }
+            $CLOSE
             $FINLABEL
             $CFINALLY
             /* dispatch the pending action (if-chain — never a C switch, which
@@ -2461,13 +2565,11 @@ function codetry(ctx, node)
             {
                 int $PA = $PANONE;
                 $RETDECLS
-                {
-                    $SAVE
-                        $CBODY
-                    $RECOVER
-                        $CATCHARM
-                    }
-                }
+                $SAVE
+                    $CBODY
+                $RECOVER
+                    $CATCHARM
+                $CLOSE
                 $FINLABEL
                 $CFINALLY
                 /* dispatch the pending action (if-chain — never a C switch, which
@@ -2481,10 +2583,11 @@ function codetry(ctx, node)
         PA = pa_var,
         PANONE = PA_NONE,
         RETDECLS = ret_decls,
-        SAVE = boundary_save(tostring(id)),
+        SAVE = boundary_save(tostring(id), true),
         CBODY = cbody,
-        RECOVER = boundary_recover_open(ctx, tostring(id), d_err, d_tb),
+        RECOVER = boundary_recover_open(ctx, tostring(id), d_err, d_tb, unwind),
         CATCHARM = catch_under_boundary,
+        CLOSE = boundary_recover_close(unwind),
         FINLABEL = fin_frame.label_used and (fin_label .. ": ;") or "",
         CFINALLY = cfinally,
         DISPATCH = dispatch,

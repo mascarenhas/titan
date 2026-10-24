@@ -588,7 +588,9 @@ function test_wake_many_channels_many_waiters_fifo_and_baton(context: test.Conte
       -- into the replacement operation, not the old wait's identical status.
       test.assert(ch_a_tx:try_send(100))
       ch_a_tx:close()
+      local deadline = poll_deadline()
       while stage < 2 and not seq_task:status():has_finished() do
+        check_poll_deadline(deadline, "the replacement receive starting")
         async.yield()
       end
       wait_until_waiting(seq_task)
@@ -670,7 +672,9 @@ local function exercise_thread_shutdown_session(session: integer, fatal_shutdown
     wait_until_waiting(waiter)
     worker:cancel(async.CancellationReason.simple("enter shutdown cleanup"))
     test.assert(entered_rx:receive())
+    local deadline = poll_deadline()
     while waiter_stage < 2 and not waiter:status():has_finished() do
+      check_poll_deadline(deadline, "the waiter's second receive starting")
       async.yield()
     end
     wait_until_waiting(waiter)

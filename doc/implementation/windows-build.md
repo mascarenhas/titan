@@ -82,13 +82,25 @@ build uses CMake and a bundled libuv independently of Titan's stdlib libuv.
 Plain `luarocks test` runs the complete native stdlib suite first, then the
 retained runtime/packaging specs, the stdlib-dependent compiler integrations,
 and the compiler/language partitions in private NTFS checkout copies. Windows
-defaults to two concurrent partition workers under native Job Objects; see
+defaults to three concurrent partition workers under native Job Objects; see
 [Busted partitions](test-runner.md#busted-partitions).
+
+## Native build parallelism
 
 The compiler honors `titanc --jobs N` and `TITAN_JOBS=N`. Parallel object
 commands launch through the stock LuaRocks `luv` dependency, whose exit
 callbacks report actual completion to the common scheduler; see [driver process
 transports](driver.md#experimental-windows-process-transports).
+
+`TITAN_JOBS` (default 1) is the only native build-parallelism setting on
+Windows, so set it to the CPU count for validation. It bounds the native
+dependency CMake build (`scripts/build_windows_native.sh`), generated-C
+compilation of the standard provider, and the shared native test build
+(`spec/support/windows_stdlib_tests.sh`). `MAKEFLAGS=-jN` has no effect:
+`Makefile.win` is `.NOTPARALLEL`, and LuaRocks starts its nested Make without
+the jobserver. The Lua, libbacktrace, and bundled OpenSSL builds stay at `-j1`.
+Busted compiler workers set their own bounds; see
+[Busted partitions](test-runner.md#busted-partitions).
 
 ## One controlled Lua DLL and its SDK
 
@@ -281,6 +293,11 @@ and exit status are shared with Unix; see [Linking a standalone
 program](driver.md#linking-a-standalone-program-drivercompile_program).
 `llvm-rc` (or the parsed `RC` command) embeds an `asInvoker`, UTF-8,
 long-path-aware manifest; no machine setting or global DLL search path changes.
+The manifest, resource source, and compiled resource are named after the
+generated entrypoint C file, keeping the module's slash hierarchy (for
+`foo.bar`, `foo/bar__entrypoint.c.manifest`, `.c.rc`, and `.c.res`, among the
+paths returned by `driver.windows_program_auxiliary_paths`), and live beside
+it, so they follow `--output` exactly as the entrypoint does.
 
 `spec/support/generate_windows_launcher_fixture.lua` emits the actual driver C,
 `.def`, manifest, and resource text for the native

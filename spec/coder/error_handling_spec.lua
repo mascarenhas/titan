@@ -1851,3 +1851,56 @@ describe("catch", function()
     end)
 
 end)
+
+-- Abandoned-coroutine unwinding (doc/implementation/error-handling.md
+-- #unwinding-through-finally): only finally-bearing boundaries are marked and
+-- get unwind landings.
+describe("unwind boundaries", function()
+    after_each(clean)
+
+    it("marks finally boundaries and leaves catch-only boundaries unmarked", function()
+        local csrc = compile_and_read_c([[
+            local function cleanup() end
+
+            local function step(limit: integer, n: integer): integer?
+                if n >= limit then return nil end
+                return n + 1
+            end
+
+            local function close_loop(_: integer) end
+
+            function deferred(): integer
+                defer cleanup()
+                return 1
+            end
+
+            function caught(): integer
+                do
+                    cleanup()
+                catch
+                    return 2
+                end
+                return 1
+            end
+
+            function looped(): integer
+                local total = 0
+                for x: integer in step, 3, 0, close_loop do
+                    total = total + x
+                end
+                return total
+            end
+        ]])
+        for _, name in ipairs({ "deferred", "looped" }) do
+            local body = native_body(csrc, name)
+            assert.truthy(body:find("_lj_1.status = TITAN_STATUS_FINALLY;", 1, true),
+                name .. " lacks the finally marker")
+        end
+        local caught = native_body(csrc, "caught")
+        assert.truthy(caught:find("_lj_1.status = LUA_OK;", 1, true), caught)
+        assert.truthy(caught:find("if (_lj_1.status != LUA_OK) {", 1, true), caught)
+        for _, fragment in ipairs({ "TITAN_STATUS_", "titan_unwind", "_errst_", "_pa_1" }) do
+            assert.falsy(caught:find(fragment, 1, true), "catch-only try has " .. fragment)
+        end
+    end)
+end)

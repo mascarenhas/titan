@@ -4055,7 +4055,7 @@ printf '%s\0' "$@" > "$TITAN_SELECTOR_ARGV_LOG"
                 for shard = 1, 5 do
                     expected_total = expected_total + #expected[shard]
                 end
-                assert.equal(161, expected_total)
+                assert.equal(162, expected_total)
                 assert.equal(expected_total, total)
 
                 local complete_log = root .. "/complete"
@@ -4246,12 +4246,31 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
             local mkdir_ok, mkdir_output = run_argv({
                 "mkdir", "-p", support, bin, temporary_base, state,
                 workspace .. "/.git", workspace .. "/.lua",
+                workspace .. "/.sdk-local/bin",
+                workspace .. "/.sdk-local-sibling",
+                workspace .. "/sdk[1]", workspace .. "/sdk*",
+                workspace .. "/sdk1",
             })
             assert.truthy(mkdir_ok, mkdir_output)
             write_file(workspace .. "/Makefile", "all:\n\t@true\n")
             write_file(workspace .. "/ordinary", "original\n")
             write_file(workspace .. "/.git/excluded", "git\n")
             write_file(workspace .. "/.lua/excluded", "lua\n")
+            -- The selected SDK lives inside the checkout under an arbitrary
+            -- name and is spelled through a symbolic link; workers still use
+            -- it in place, so the snapshot must omit exactly that tree.
+            write_file(workspace .. "/.sdk-local/bin/excluded", "sdk\n")
+            write_file(workspace .. "/.sdk-local-sibling/kept", "kept\n")
+            -- Selected SDKs named sdk[1] or sdk* would be tar patterns that
+            -- also match sdk1, so such a prefix is copied and nothing is lost.
+            for _, kept in ipairs({ "sdk[1]", "sdk*", "sdk1" }) do
+                write_file(workspace .. "/" .. kept .. "/kept", "kept\n")
+            end
+            local prefix_link = root .. "/sdk-link"
+            local link_ok, link_output = run_argv({
+                "ln", "-s", workspace .. "/.sdk-local", prefix_link,
+            })
+            assert.truthy(link_ok, link_output)
             write_file(support .. "/run_parallel_compiler_tests.sh",
                 read_file("spec/support/run_parallel_compiler_tests.sh"))
 
@@ -4272,6 +4291,10 @@ esac
 
 [[ $PWD != "$TITAN_FIXTURE_ORIGINAL" ]] || exit 72
 [[ ! -e .git && ! -e .lua ]] || exit 73
+[[ -z ${TITAN_FIXTURE_OMITTED:-} || ! -e $TITAN_FIXTURE_OMITTED ]] || exit 73
+for kept in .sdk-local-sibling 'sdk[1]' 'sdk*' sdk1; do
+    [[ $(cat "$kept/kept" 2>/dev/null) == kept ]] || exit 82
+done
 [[ $(cat ordinary) == original ]] || exit 74
 [[ $MAKEFLAGS == -j1 && $TITAN_JOBS == 1 ]] || exit 75
 case "$BUSTED" in /*) ;; *) exit 76 ;; esac
@@ -4383,6 +4406,8 @@ if [[ ${TITAN_FIXTURE_FAIL_SHARD:-} == "$shard" ]]; then exit 23; fi
                     "-u", "TITAN_FIXTURE_HANG_SHARD",
                     "PATH=" .. bin .. ":" .. assert(os.getenv("PATH")),
                     "BUSTED=busted",
+                    "PREFIX=" .. prefix_link,
+                    "TITAN_FIXTURE_OMITTED=.sdk-local",
                     "TMPDIR=" .. temporary_base,
                     "TITAN_FIXTURE_STATE=" .. state,
                     "TITAN_FIXTURE_ORIGINAL=" .. workspace,
@@ -4480,9 +4505,12 @@ workspace=$1
 state=$2
 temporary_base=$3
 bin=$4
+prefix=$5
 cd "$workspace" || exit 90
 env PATH="$bin:$PATH" \
     BUSTED=busted \
+    PREFIX="$prefix" \
+    TITAN_FIXTURE_OMITTED=.sdk-local \
     TMPDIR="$temporary_base" \
     TITAN_ROCK_TEST_JOBS=1 \
     TITAN_FIXTURE_STATE="$state" \
@@ -4524,7 +4552,7 @@ while kill -0 "$descendant" 2>/dev/null; do
     sleep 0.01
 done
 ]==], "titan-parallel-interruption", workspace, state,
-                    temporary_base, bin,
+                    temporary_base, bin, prefix_link,
                 })
             end
 
@@ -4537,6 +4565,15 @@ done
             ok, output = run_case(2)
             assert.truthy(ok, output)
             assert_complete_run(2, output)
+
+            for _, patterned in ipairs({ "sdk[1]", "sdk*" }) do
+                ok, output = run_case(nil, nil, {
+                    "PREFIX=" .. workspace .. "/" .. patterned,
+                    "TITAN_FIXTURE_OMITTED=",
+                })
+                assert.truthy(ok, output)
+                assert_complete_run(4, output)
+            end
 
             local why, code
             ok, output, why, code = run_case(nil, 2)
@@ -4587,6 +4624,88 @@ done
         remove_tree(root)
         if not tested then error(test_error, 0) end
     end)
+
+    it("launches the Windows exclusive compiler shard first and alone",
+        function()
+            -- The real Windows route needs CLANG64, cygpath, and the native
+            -- Job Object supervisor. Drive the launcher's own launch-order
+            -- and admission code with stub workers that finish oldest-first.
+            local launcher = read_file(
+                "spec/support/run_parallel_compiler_tests.sh")
+            local order_start = assert(launcher:find(
+                "\nlaunch_order=(1 2 3 4)\n", 1, true))
+            local _, order_finish = assert(launcher:find(
+                "\nfi\n", order_start, true))
+            local admission_start = assert(launcher:find(
+                "\n    while (( launched < 4 && active < jobs )); do\n",
+                order_finish, true))
+            local _, admission_finish = assert(launcher:find(
+                "\n    done\n", admission_start, true))
+            local harness = table.concat({ [==[
+set -u
+windows=$1
+exclusive_shard=$2
+jobs=$3
+worker_pids=()
+running=()
+schedule=()
+launched=0
+active=0
+completed=0
+launch_worker() {
+    worker_pids[$1]=1
+    running+=("$1")
+    schedule+=("start $1")
+}
+]==], launcher:sub(order_start + 1, order_finish), [==[
+while (( completed < 4 )); do
+]==], launcher:sub(admission_start + 1, admission_finish), [==[
+    if (( ${#running[@]} == 0 )); then
+        echo "scheduler admitted no shard" >&2
+        exit 1
+    fi
+    finished=${running[0]}
+    running=("${running[@]:1}")
+    unset 'worker_pids[$finished]'
+    schedule+=("finish $finished")
+    active=$((active - 1))
+    completed=$((completed + 1))
+done
+printf '%s\n' "${schedule[@]}"
+]==] })
+
+            local function schedule(windows, exclusive, jobs)
+                local ok, output, why, code = run_argv({
+                    "bash", "-c", harness, "titan-launch-order",
+                    tostring(windows), exclusive, tostring(jobs),
+                })
+                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                    tostring(code) .. ")")
+                local events = {}
+                for line in output:gmatch("[^\n]+") do
+                    events[#events + 1] = line
+                end
+                return table.concat(events, ", ")
+            end
+
+            -- Unix keeps manifest order and fills every permitted slot.
+            assert.equal("start 1, start 2, start 3, start 4, " ..
+                "finish 1, finish 2, finish 3, finish 4", schedule(0, "", 4))
+            assert.equal("start 1, start 2, finish 1, start 3, " ..
+                "finish 2, start 4, finish 3, finish 4", schedule(0, "", 2))
+            -- Windows runs the exclusive shard alone, then the other three
+            -- together under the default three workers.
+            assert.equal("start 3, finish 3, start 1, start 2, start 4, " ..
+                "finish 1, finish 2, finish 4", schedule(1, "3", 3))
+            assert.equal("start 3, finish 3, start 1, start 2, start 4, " ..
+                "finish 1, finish 2, finish 4", schedule(1, "3", 4))
+            assert.equal("start 1, finish 1, start 2, start 3, start 4, " ..
+                "finish 2, finish 3, finish 4", schedule(1, "1", 3))
+            assert.equal("start 4, finish 4, start 1, start 2, finish 1, " ..
+                "start 3, finish 2, finish 3", schedule(1, "4", 2))
+            assert.equal("start 2, finish 2, start 1, finish 1, start 3, " ..
+                "finish 3, start 4, finish 4", schedule(1, "2", 1))
+        end)
 
     it("bounds TERM-ignoring descendants for every command exit path",
         function()
@@ -5490,9 +5609,12 @@ done
                 "spec/support/run_parallel_compiler_tests.sh")
             for _, required in ipairs({
                 "jobs=${TITAN_ROCK_TEST_JOBS:-4}",
+                "jobs=${TITAN_ROCK_TEST_JOBS:-3}",
                 "[[ ! $jobs =~ ^[1-4]$ ]]",
                 "tar --exclude='./.git'",
                 "--exclude='./.lua'",
+                -- Bash 3.2 rejects an empty "${array[@]}" under set -u.
+                '${prefix_excludes[@]+"${prefix_excludes[@]}"}',
                 'mkfifo "$completion_fifo"',
                 'MAKEFLAGS=-j1',
                 'TITAN_JOBS=1',
@@ -5586,8 +5708,8 @@ done
                     integration_count = integration_count + 1
                 end
             end
-            assert.equal(8, integration_count)
-            assert.equal(161, assigned_count + integration_count)
+            assert.equal(9, integration_count)
+            assert.equal(162, assigned_count + integration_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")
@@ -5638,7 +5760,7 @@ done
                 'LUA_MYCFLAGS: "-fPIC -O1 -fno-lto -g ' ..
                 '-fsanitize=address,undefined'), sanitizer_job)
             for _, contract in ipairs({
-                'SANITIZER_NATIVE_CACHE_SCHEMA: "v3"',
+                'SANITIZER_NATIVE_CACHE_SCHEMA: "v4"',
                 "CC: cc", "AR: ar", "RANLIB: ranlib",
                 'SANITIZER_LUA_VERSION: "5.5.1"',
                 'SANITIZER_LIBUV_VERSION: "1.53.0"',
@@ -5771,12 +5893,14 @@ done
 
             assert.equal(1, count_literal(sanitizer_job,
                 "make titan-stdlib-test-build"), sanitizer_job)
-            assert.equal(41, count_literal(sanitizer_job,
+            assert.equal(43, count_literal(sanitizer_job,
                 "make titan-stdlib-test-run"), sanitizer_job)
             for _, filter in ipairs({
                 "TITAN_FILTER='test_lua_host_roots_coroutine_" ..
                 "payloads_and_tags_across_gc$'",
                 "TITAN_FILTER='test_timer_'",
+                "TITAN_FILTER='test_lua_close_'",
+                "TITAN_FILTER='test_unwind_'",
                 "TITAN_FILTER='test_fs_'",
                 "TITAN_FILTER='^uv%.task_tests%.'",
                 "TITAN_FILTER='^uv%.runtime_tests%.'",
@@ -5873,6 +5997,41 @@ done
                     1, true), step)
                 assert.truthy(step:find("exit 1", 1, true), step)
             end
+            local teardown_step = named_step(sanitizer_job,
+                "Run native teardown and unwinding sanitizer gate")
+            for _, label in ipairs({ "lua-close-teardown", "coroutine-unwind" }) do
+                assert.equal(1, count_literal(teardown_step,
+                    "ci_sanitizer_capture.sh " .. label .. " "), label)
+                assert.equal(2, count_literal(teardown_step, label), label)
+            end
+            for _, required in ipairs({
+                "grep -Eq '^\\[==========\\] [1-9][0-9]* tests? ran\\.$'",
+                '"$TITAN_SANITIZER_LOG_DIR/$teardown_log.log"',
+                "Teardown sanitizer filter ran no tests:",
+                "exit 1",
+            }) do
+                assert.truthy(teardown_step:find(required, 1, true), required)
+            end
+            local probe_step = named_step(sanitizer_job,
+                "Check ASan fake-stack placement of setjmp frames")
+            assert.equal(2, count_literal(probe_step,
+                "bash spec/support/ci_sanitizer_capture.sh"), probe_step)
+            for _, required in ipairs({
+                'ci_sanitizer_capture.sh asan-fake-stack-probe-build \\\n' ..
+                '            "$CC" $SANITIZER_FLAGS spec/support/asan_fake_stack_probe.c',
+                'ci_sanitizer_capture.sh asan-fake-stack-probe \\\n' ..
+                '            "$probe"',
+            }) do
+                assert.equal(1, count_literal(probe_step, required), required)
+            end
+            assert.truthy(read_file("spec/support/asan_fake_stack_probe.c"):find(
+                "__asan_addr_is_in_fake_stack(fake_stack, &buffer", 1, true))
+            assert.is_true(assert(sanitizer_job:find(
+                    "- name: Check ASan fake-stack placement of setjmp frames", 1, true)) <
+                assert(sanitizer_job:find(
+                    "- name: Run native teardown and unwinding sanitizer gate", 1, true)))
+            assert.truthy(sanitizer_job:find(
+                "detect_stack_use_after_return=1", 1, true), sanitizer_job)
             for _, removed in ipairs({
                 "spec/stdlib/uv_native_handles_spec.lua",
                 "spec/stdlib/uv_tasks_spec.lua",

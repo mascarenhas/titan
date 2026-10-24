@@ -8,6 +8,8 @@ local reflect = import "reflect"
 local protobuf = import "protobuf"
 local string = import "string"
 local math = import "math"
+local gc = import "gc"
+foreign import "titan/ffi.h"
 
 local const connection_transfer_fields: const {reflect.Type} = {
   reflect.Type.is_foreign_pointer(reflect.Type.is_foreign_void(), {}),
@@ -88,7 +90,6 @@ end
 -- public request retains the packet until its terminal callback has returned.
 local record CleanupWork
   local request: uv.work_t
-  local worker: foreign function (*void): void
   local packet: owned *TitanSqlitePacket
   local done: async.Completion<|CleanupWork, nil, integer|>?
   local number: integer
@@ -112,7 +113,7 @@ local function start_cleanup(done: async.Completion<|CleanupWork, nil, integer|>
   work.number = number
   work.request:set_data(work)
   local status = uv.queue_work(async.current_loop(), work.request,
-      work.worker, work.packet, cleanup_completed, work.packet)
+      sqlite_run_worker, work.packet, cleanup_completed, work.packet)
   if status ~= 0 then
     work.request:set_data(nil)
     work.done = nil
@@ -121,25 +122,71 @@ local function start_cleanup(done: async.Completion<|CleanupWork, nil, integer|>
   return nil
 end
 
+-- Implementation notes: doc/implementation/sqlite3-library.md#lua-state-close
+-- Lua state close unwinds a Task parked in a worker wait without completing
+-- the wait, and catch never runs during that unwind, so `pending` stays set.
+-- The packet and this Connection's handle then belong to whichever of the
+-- unwind and the worker finishes last; no later cleanup may touch them.
+local function Connection:abandon_if_pending(packet: owned *TitanSqlitePacket)
+  if packet.pending == 0 then return end
+  self.handle = nil
+  sqlite_abandon_worker(packet)
+end
+
+local function Connection:run_worker(worker: foreign function (*void): void,
+                                     packet: owned *TitanSqlitePacket)
+  packet.worker = worker
+  packet.handoff = 0
+  packet.pending = 1
+  defer self:abandon_if_pending(packet)
+  do
+    async.run_foreign(sqlite_run_worker, packet)
+  catch
+    packet.pending = 0
+    raise
+  end
+  packet.pending = 0
+end
+
 -- Implementation notes: doc/implementation/sqlite3-library.md#cancellation
-local function run_foreign_cleanup(worker: foreign function (*void): void,
-                                    packet: owned *TitanSqlitePacket)
-  local work = CleanupWork(uv.work_t(), worker, packet, nil, 0)
-  local result = async.await_cleanup_with<|CleanupWork, nil, integer|>(work, start_cleanup)
-  case result
-  when error(status) then
-    raise async.OperationError(status, uv.err_name(status), uv.strerror(status),
-                               "async.run_foreign")
-  else
+local function Connection:run_cleanup(worker: foreign function (*void): void,
+                                      packet: owned *TitanSqlitePacket)
+  -- Lua state close cannot await, and the reservation excludes any worker on
+  -- this connection, so retire synchronously on the loop thread.
+  if ffi.titan_state_closing(L) ~= 0 then
+    worker(packet)
+    return
+  end
+  packet.worker = worker
+  -- Allocate before marking the packet pending: a failure between the mark
+  -- and submission would abandon a packet that no worker owns.
+  local work = CleanupWork(uv.work_t(), packet, nil, 0)
+  packet.handoff = 0
+  packet.pending = 1
+  defer self:abandon_if_pending(packet)
+  do
+    local result = async.await_cleanup_with<|CleanupWork, nil, integer|>(work, start_cleanup)
+    packet.pending = 0
+    case result
+    when error(status) then
+      raise async.OperationError(status, uv.err_name(status), uv.strerror(status),
+                                 "async.run_foreign")
+    else
+    end
+  catch
+    packet.pending = 0
+    raise
   end
 end
 
 -- A packet is rooted by its suspended caller and this lexical cleanup. Raw
 -- pointers passed to run_foreign alone do not retain their pointees. SQLite
 -- resource retirement remains on a worker even during cancellation unwind.
-local function retire_packet(packet: owned *TitanSqlitePacket)
+-- An abandoned packet belongs to its state-close handoff instead.
+local function Connection:retire_packet(packet: owned *TitanSqlitePacket)
+  if packet.pending ~= 0 then return end
   if packet.owns_db ~= 0 or packet.owns_stmt ~= 0 or packet.needs_reset ~= 0 then
-    run_foreign_cleanup(sqlite_retire_worker, packet)
+    self:run_cleanup(sqlite_retire_worker, packet)
   end
 end
 
@@ -182,24 +229,40 @@ local function Statement:require_open(operation: string)
   end
 end
 
+-- Implementation notes: doc/implementation/sqlite3-library.md#lua-state-close
+-- Lua state close cannot await the worker pool, so it releases the connection
+-- synchronously on the loop thread. A busy Connection belongs to a Task parked
+-- in a worker wait, whose unwind hands it to that worker. Ordinary collection
+-- performs no database I/O.
+local function finalize_connection(candidate: value)
+  if ffi.titan_state_closing(L) == 0 then return end
+  local connection: Connection = candidate
+  local handle = connection.handle
+  if not handle or connection.busy then return end
+  connection.handle = nil
+  sqlite_release_connection(handle)
+end
+
 --- Open a SQLite database, including the special :memory: database.
 -- @param name Database filename, URI, or :memory:.
 -- @return Owned database connection.
 -- @usage standard-library-sqlite3.md#connections-and-statement-lifetime
 function connect(name: string): Connection
   check_no_nul(name, "connect")
-  -- Allocate the public shell before acquiring the native handle.
+  -- Allocate the public shell and register its state-close finalizer before
+  -- acquiring the native handle.
   local connection = Connection {
     handle = nil,
     statements = 0,
     busy = false,
     active_statement = nil
   }
+  gc.finalizable<|value|>(connection, finalize_connection)
   local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
-  defer retire_packet(packet)
+  defer connection:retire_packet(packet)
   copy_input(packet, name, "connect")
-  async.run_foreign(sqlite_open_worker, packet)
+  connection:run_worker(sqlite_open_worker, packet)
   check_result(packet, "connect")
   connection.handle = packet.db
   packet.owns_db = 0
@@ -217,10 +280,10 @@ function Connection:prepare(sql: string): Statement
   local statement = Statement { connection = self, handle = nil, parameter_count = 0 }
   local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
-  defer retire_packet(packet)
+  defer self:retire_packet(packet)
   packet.db = self.handle
   copy_input(packet, sql, "prepare")
-  async.run_foreign(sqlite_prepare_worker, packet)
+  self:run_worker(sqlite_prepare_worker, packet)
   check_result(packet, "prepare")
   statement.parameter_count = packet.parameter_count
   statement.handle = packet.stmt
@@ -248,9 +311,9 @@ function Connection:close()
   packet.db = self.handle
   -- A failed submission leaves the public owner open and available for retry.
   defer do
-    if packet.db == nil then self.handle = nil end
+    if packet.pending == 0 and packet.db == nil then self.handle = nil end
   end
-  run_foreign_cleanup(sqlite_close_worker, packet)
+  self:run_cleanup(sqlite_close_worker, packet)
   check_result(packet, "close")
 end
 
@@ -295,18 +358,23 @@ function Connection.from_transfer_payload(payload: string): Connection
       code = nil, extended_code = nil, operation = "from_transfer_payload"
     }
   end
-  return Connection {
-    handle = handle as foreign *sqlite3,
+  local connection = Connection {
+    handle = nil,
     statements = 0,
     busy = false,
     active_statement = nil
   }
+  gc.finalizable<|value|>(connection, finalize_connection)
+  connection.handle = handle as foreign *sqlite3
+  return connection
 end
 
 --- Finalize this statement after its active cursor is released.
 -- @usage standard-library-sqlite3.md#connections-and-statement-lifetime
 function Statement:close()
-  if not self.handle then return end
+  -- A Lua state close may already have released the Connection, and with it
+  -- every Statement.
+  if not self.handle or not self.connection.handle then return end
   self.connection:reserve("statement.close", true)
   defer self.connection.busy = false
   if self.connection.active_statement == self then
@@ -322,12 +390,12 @@ function Statement:close()
   packet.db = self.connection.handle
   packet.stmt = self.handle
   defer do
-    if packet.stmt == nil then
+    if packet.pending == 0 and packet.stmt == nil then
       self.handle = nil
       self.connection.statements = self.connection.statements - 1
     end
   end
-  run_foreign_cleanup(sqlite_finalize_worker, packet)
+  self.connection:run_cleanup(sqlite_finalize_worker, packet)
   check_result(packet, "statement.close")
 end
 
@@ -338,7 +406,7 @@ local function Connection:transaction(worker: foreign function (*void): void,
   local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   packet.db = self.handle
-  async.run_foreign(worker, packet)
+  self:run_worker(worker, packet)
   check_result(packet, operation)
 end
 
@@ -363,7 +431,7 @@ function Connection:get_autocommit(): boolean
   local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   packet.db = self.handle
-  async.run_foreign(sqlite_autocommit_worker, packet)
+  self:run_worker(sqlite_autocommit_worker, packet)
   return packet.autocommit ~= 0
 end
 
@@ -388,11 +456,11 @@ function Statement:execute(...: value): integer
   defer self.connection.busy = false
   local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
-  defer retire_packet(packet)
+  defer self.connection:retire_packet(packet)
   packet.db = self.connection.handle
   packet.stmt = self.handle
   self:bind(packet, "execute", ...)
-  async.run_foreign(sqlite_execute_worker, packet)
+  self.connection:run_worker(sqlite_execute_worker, packet)
   check_result(packet, "execute")
   return packet.changes
 end
@@ -407,11 +475,11 @@ function Statement:query(...: value): Cursor
   defer self.connection.busy = false
   local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
-  defer retire_packet(packet)
+  defer self.connection:retire_packet(packet)
   packet.db = self.connection.handle
   packet.stmt = self.handle
   self:bind(packet, "query", ...)
-  async.run_foreign(sqlite_query_worker, packet)
+  self.connection:run_worker(sqlite_query_worker, packet)
   check_result(packet, "query")
   local columns = decode_columns(packet)
   local row: Row?
@@ -456,12 +524,12 @@ function Cursor:fetch(): Row?
   local published = false
   defer do
     if not published then
-      retire_packet(packet)
+      self.statement.connection:retire_packet(packet)
       self.closed = true
       self.statement.connection.active_statement = nil
     end
   end
-  async.run_foreign(sqlite_fetch_worker, packet)
+  self.statement.connection:run_worker(sqlite_fetch_worker, packet)
   check_result(packet, "fetch")
   if packet.done ~= 0 then
     self.exhausted = true
@@ -483,6 +551,13 @@ function Cursor:close()
     self.closed = true
     return
   end
+  -- A Lua state close may already have released the Connection, and with it
+  -- this execution.
+  if not self.statement.connection.handle then
+    self.closed = true
+    self.pending = nil
+    return
+  end
   self.statement.connection:reserve("cursor.close", true)
   defer self.statement.connection.busy = false
   local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
@@ -491,12 +566,12 @@ function Cursor:close()
   packet.stmt = self.statement.handle
   packet.needs_reset = 1
   defer do
-    if packet.needs_reset == 0 then
+    if packet.pending == 0 and packet.needs_reset == 0 then
       self.closed = true
       self.pending = nil
       self.statement.connection.active_statement = nil
     end
   end
-  run_foreign_cleanup(sqlite_reset_worker, packet)
+  self.statement.connection:run_cleanup(sqlite_reset_worker, packet)
   check_result(packet, "cursor.close")
 end

@@ -178,7 +178,7 @@ function os_environ(): (integer, {env_item_t}?, integer)
   return status, result, count
 end
 
-local function data_copy_passwd(native: foreign *uv_passwd_t): passwd_t
+local function data_copy_passwd(native: foreign const *uv_passwd_t): passwd_t
   return passwd_t {
     username = native.username as string,
     uid = data_u64(native.uid as foreign uint64_t),

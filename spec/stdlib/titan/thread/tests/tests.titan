@@ -47,12 +47,49 @@ local function await_task<|T|>(task: async.Task<|T, value|>): T
   end
 end
 
+-- A poll for progress that another Task, thread or Lua state must make fails
+-- after this deadline instead of hanging until the runner's timeout (#279).
+local const POLL_DEADLINE_SECONDS = 5
+
+-- Start the deadline of one poll loop, in uv.hrtime nanoseconds.
+local function poll_deadline(): integer
+  return uv.hrtime() + POLL_DEADLINE_SECONDS * 1000000000
+end
+
+-- Fail the test once the poll for `progress` has passed its deadline.
+local function check_poll_deadline(deadline: integer, progress: string)
+  if uv.hrtime() > deadline then
+    test.assert(false, progress .. " did not happen within " ..
+                POLL_DEADLINE_SECONDS .. " s")
+  end
+end
+
 local function wait_until_waiting<|T|>(task: async.Task<|T, value|>)
+  local deadline = poll_deadline()
   while task:status():as_string() ~= "waiting" and
         not task:status():has_finished() do
+    check_poll_deadline(deadline, "the Task reaching waiting")
     async.yield()
   end
   test.assert(task:status():as_string() == "waiting", "expected task to reach waiting status")
+end
+
+-- Wait for every running and queued spawn of `group` to finish. A stranded
+-- slot fails after the poll deadline instead of hanging the test. Cleanups
+-- call this too, so it does not register a cleanup through spawn_task.
+local function drain_group(group: thread.Group, progress: string)
+  local observer = async.run<|nil, value|>(function (): nil
+    group:wait()
+    return nil
+  end)
+  local deadline = poll_deadline()
+  while not observer:status():has_finished() and uv.hrtime() <= deadline do
+    timer.sleep(1)
+  end
+  if not observer:status():has_finished() then observer:cancel() end
+  async.join(observer)
+  test.assert(observer:status():has_succeeded(), progress .. " did not happen within " ..
+              POLL_DEADLINE_SECONDS .. " s")
 end
 
 local function expect_error(action: function (): (), expected: string)
@@ -901,7 +938,11 @@ local function spawn_abandoned_thread_returning_sender_after_finish(): thread.Re
     return PipeEnvelope.sender_end(inner_tx, "abandoned-result-after-finish")
   end, tx, done_tx)
   test.assert(done_rx:receive())
-  while not _worker:status():has_finished() do async.yield() end
+  local deadline = poll_deadline()
+  while not _worker:status():has_finished() do
+    check_poll_deadline(deadline, "the abandoned worker finishing")
+    async.yield()
+  end
   return rx
 end
 
@@ -1258,4 +1299,172 @@ function test_group_admission_suspension_and_active_sibling_cancellation(context
     test.assert(#cancel_errs == 0 and not has_unexpected and unexpected == nil)
   end)
   context:log("END expected Group child proxy failure diagnostics")
+end
+
+-- A finalizer Group:cancel at every safepoint of a Task's queued admission
+-- (task_support.each_wake_offset), including between the admission waiter's
+-- append and its suspension: the spawn returns without starting its thread,
+-- with no token mismatch and no parked Task.
+function test_group_cancel_in_admission_window(_: test.Context)
+  runtime_test.run(function ()
+    task_support.each_wake_offset(false, nil, function (): task_support.WakeCase
+      local group = thread.group(1, false)
+      local block_tx, block_rx = thread.channel<|integer|>(1)
+      local unexpected_tx, unexpected_rx = thread.channel<|string|>(1)
+      local retire = function ()
+        block_tx:close()
+        group:cancel()
+        group:wait()
+        unexpected_tx:close()
+      end
+      runtime_test.cleanup(retire)
+      group:spawn_one(function (rx: thread.Receiver<|integer|>)
+        rx:receive_result()
+      end, block_rx)
+      return task_support.WakeCase(function (): value
+        group:spawn_one(function (tx: thread.Sender<|string|>)
+          tx:send("queued")
+        end, unexpected_tx)
+        return "returned"
+      end, function (_: async.Task)
+        group:cancel(async.CancellationReason.simple("group cancelled in admission"))
+      end, nil, function (spawner: async.Task, offset: integer)
+        local finished, result? = spawner:status():has_succeeded()
+        test.assert(finished and result == "returned", "offset " .. offset ..
+          ": a Group:cancel during admission left the spawner " .. spawner:status():as_string())
+        retire()
+        local received, _message? = unexpected_rx:try_receive()
+        test.assert(not received, "offset " .. offset .. ": the cancelled admission started its thread")
+      end)
+    end)
+  end)
+end
+
+-- A direct Task:cancel at every safepoint of a Task's queued admission
+-- (task_support.each_wake_offset), before the driver accepts its suspension.
+-- The rejected suspension runs no cancel action, so the spawn withdraws its
+-- waiter itself: the incumbent's release then frees the slot instead of
+-- granting it to the finished Task, and the Group drains.
+function test_task_cancel_in_group_admission_window(_: test.Context)
+  runtime_test.run(function ()
+    task_support.each_wake_offset(false, nil, function (): task_support.WakeCase
+      local group = thread.group(1, false)
+      local block_tx, block_rx = thread.channel<|integer|>(1)
+      local unexpected_tx, unexpected_rx = thread.channel<|string|>(1)
+      runtime_test.cleanup(function ()
+        block_tx:close()
+        group:cancel()
+        drain_group(group, "the Group draining at cleanup")
+        unexpected_tx:close()
+      end)
+      group:spawn_one(function (rx: thread.Receiver<|integer|>)
+        rx:receive_result()
+      end, block_rx)
+      return task_support.WakeCase(function (): value
+        group:spawn_one(function (tx: thread.Sender<|string|>)
+          tx:send("queued")
+        end, unexpected_tx)
+        return "returned"
+      end, function (spawner: async.Task)
+        spawner:cancel(async.CancellationReason.simple("spawner cancelled in admission"))
+      end, nil, function (spawner: async.Task, offset: integer)
+        test.assert(spawner:status():has_cancelled(), "offset " .. offset ..
+          ": a Task:cancel during admission left the spawner " .. spawner:status():as_string())
+        -- Retire the incumbent without a Group:cancel, which would deactivate
+        -- a stranded waiter.
+        block_tx:close()
+        drain_group(group, "offset " .. offset .. ": the Group draining after a cancelled admission")
+        local received, _message? = unexpected_rx:try_receive()
+        test.assert(not received, "offset " .. offset .. ": the cancelled admission started its thread")
+      end)
+    end)
+  end)
+end
+
+-- A finalizer that cancels a granted, still undelivered admission releases
+-- its slot synchronously. The target's first spawn is granted by the
+-- incumbent's release, takes the slot, fails to encode its entry and passes
+-- the slot to the queued admission at once. Then the target waits on the
+-- Group (`wait`) or spawns again (`spawn`) while that admission is cancelled
+-- at each of its safepoints (task_support.each_wake_offset), including
+-- between its running-count check and the publication of its waiter. The
+-- second spawn fails to encode its entry as well: that error shows it was
+-- admitted. When the cancellation never runs, the target parks behind the
+-- admitted thread, which holds its slot until the window is closed.
+local function group_release_window(mode: string)
+  runtime_test.run(function ()
+    task_support.each_wake_offset(false, nil, function (): task_support.WakeCase
+      local group = thread.group(1, false)
+      local block_tx, block_rx = thread.channel<|integer|>(1)
+      local hold_tx, hold_rx = thread.channel<|integer|>(1)
+      runtime_test.cleanup(function ()
+        block_tx:close()
+        hold_tx:close()
+        group:cancel()
+        drain_group(group, "the Group draining at cleanup")
+      end)
+      group:spawn_one(function (rx: thread.Receiver<|integer|>)
+        rx:receive_result()
+      end, block_rx)
+      local window_cell: task_support.WakeWindow? = nil
+      local queued: async.Task? = nil
+      local unencodable_spawn = function ()
+        group:spawn_one(function (_x: PrivateNonTransferable) end, PrivateNonTransferable(7))
+      end
+      local drive = function (window: task_support.WakeWindow, target: async.Task)
+        -- Count only the target's safepoints after its failed spawn.
+        window.open = false
+        window_cell = window
+        -- The target queues its admission first, so the incumbent's release
+        -- grants it.
+        wait_until_waiting(target)
+        local admission = spawn_task<|value|>(function (): value
+          group:spawn_one(function (rx: thread.Receiver<|integer|>)
+            rx:receive_result()
+          end, hold_rx)
+          return true
+        end, "queued admission")
+        queued = admission
+        wait_until_waiting(admission)
+        block_tx:close()
+        local deadline = poll_deadline()
+        while not target:status():has_finished() do
+          check_poll_deadline(deadline, "the target finishing")
+          -- Parked after its window opened: only the held thread can wake
+          -- the target now. Stop counting, then let that thread finish.
+          if window.open and target:status():as_string() == "waiting" then
+            window.open = false
+            hold_tx:close()
+          end
+          timer.sleep(1)
+        end
+      end
+      return task_support.WakeCase(function (): value
+        expect_error(unencodable_spawn, "record must be public with only public fields")
+        local window? = window_cell
+        if window ~= nil then window.open = true end
+        if mode == "wait" then
+          group:wait()
+        else
+          expect_error(unencodable_spawn, "record must be public with only public fields")
+        end
+        return "returned"
+      end, function (_: async.Task)
+        local admission? = queued
+        if admission ~= nil then
+          admission:cancel(async.CancellationReason.simple("granted admission cancelled"))
+        end
+      end, drive, function (target: async.Task, offset: integer)
+        local finished, result? = target:status():has_succeeded()
+        test.assert(finished and result == "returned", "offset " .. offset ..
+          ": a released slot left the target " .. target:status():as_string())
+        drain_group(group, "offset " .. offset .. ": the Group draining after a released slot")
+      end)
+    end)
+  end)
+end
+
+function test_group_slot_released_before_waiter_publication(context: test.Context)
+  context:run("wait", function (_: test.Context) group_release_window("wait") end)
+  context:run("spawn", function (_: test.Context) group_release_window("spawn") end)
 end

@@ -179,9 +179,9 @@ waiter before it releases the stack, and the channel stays alive until then
 even if every endpoint of the closing state is already gone. Clones held by
 other states or threads keep working: the blocked Task never receives or sends,
 and the channel closes as usual once its last sender or receiver is released.
-The blocked Task does not finish and its `defer` blocks do not run, so cancel
-and join such Tasks and drain their Runtime before closing the state when their
-cleanup matters
+The blocked Task does not finish, but it is unwound: its `defer` blocks run
+inside a finalizer, where they cannot await. Cancel and join such Tasks and
+drain their Runtime before closing the state when their cleanup needs to wait
 ([closing a state with an active Runtime](async-io.md#closing-a-lua-state-with-an-active-runtime)).
 
 ### Closing, cloning, and transferring endpoints
@@ -355,7 +355,7 @@ Inside the worker OS thread:
   joining. If the Lua state closes while a Task is suspended in `join()`, the
   state withdraws that join before it releases the Task's stack, so a worker
   that finishes later finds nothing to wake; the suspended `join()` never
-  returns.
+  returns. Withdrawing the join does not cancel the thread.
 - `Thread:cancel(reason?)` asks the worker's root `Task` to cancel cooperatively
   and wakes the child's event loop; the root's `defer` and cleanup handlers run
   normally. Child Tasks started inside the worker are not cancelled
@@ -423,10 +423,22 @@ Inside the worker OS thread:
     child had already finished but the immediate attempt to join it did not
     complete, the failure leaves a finished worker whose OS thread is still
     unjoined.
+  - **State close.** If the owning Lua state closes while the proxy is
+    unfinished, the proxy is [unwound](async-io.md#closing-a-lua-state-with-an-active-runtime)
+    and its cleanup forwards its first cancellation reason, or
+    `CancellationReason.simple("async Runtime abandoned at Lua state close")`,
+    to `Thread:cancel`. Closing a state therefore cancels the threads of its
+    unfinished proxies, including every running member of a `thread.Group`.
+    The cleanup cannot wait for the join during the close, so the proxy stays
+    nonterminal.
 
   See the
   [implementation wiring](../implementation/thread-library.md#join-proxy-retirement-and-the-native-terminal-barrier)
   for the mechanism.
+- A `Thread` handle can be reached after its finalizer has run, by cleanup that
+  runs at state close or by a finalizer that resurrects it. On such a handle,
+  `join()` and `cancel()` raise `thread handle was finalized`, and `status()`
+  returns a status it cached earlier or otherwise raises the same error.
 - If a standalone `Thread` fails with an uncaught error and nobody observes it
   (through `status()` after completion, `join()`, or `task()`) before its handle
   is garbage-collected, the formatted error and traceback are written to
@@ -458,7 +470,9 @@ dynamic set of worker threads:
   admission queue until a running worker finishes and releases its slot or the
   group is cancelled. Once `Group:cancel` has been called, directly or through
   `propagate_errors`, queued and later `spawn*` calls return immediately without
-  starting a thread.
+  starting a thread. Cancelling a Task while its `spawn*` call waits in the
+  queue withdraws the call, which starts no thread. A slot already granted to
+  it passes to the next queued call, or is released.
 - A worker keeps its slot until it has fully retired. The slot is released when
   the member's `Thread:task()` proxy becomes terminal, which includes the
   actual OS join. A group member is exactly one memoized `Thread:task()` proxy

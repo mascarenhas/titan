@@ -556,3 +556,69 @@ function test_buffered_subscription_snapshot_preserves_queue_and_terminal(_: tes
     subscription_ended(outcome)
   end)
 end
+
+-- A finalizer notification of a subscription reader at every safepoint of
+-- its read (task_support.each_wake_offset), before and after the waiter is
+-- published: the read returns the outcome at every offset.
+local record SubscriptionWindow
+  stream: async.BufferedSubscription<|value, value|>?
+  publish: (function (value): (boolean))?
+  fail: (function (value): (boolean))?
+  finish: (function (): (boolean))?
+end
+
+local function subscription_wake_window(driver: boolean,
+    wake: function (SubscriptionWindow): (), expected: value)
+  runtime_test.run(function ()
+    task_support.each_wake_offset(driver, nil, function (): task_support.WakeCase
+      local window = SubscriptionWindow(nil, nil, nil, nil)
+      local stream = async.BufferedSubscription<|value, value|>(function (publish: function (value): (boolean), fail: function (value): (boolean), finish: function (): (boolean)): async.SubscriptionActions<|value|>
+        window.publish, window.fail, window.finish = publish, fail, finish
+        return subscription_actions()
+      end)
+      window.stream = stream
+      return task_support.WakeCase(function (): value
+        case stream:next()
+        when item(payload) then return payload
+        when error(failure) then return failure
+        when ended() then return "ended"
+        when closed() then return "closed"
+        end
+      end, function (_: async.Task) wake(window) end, nil,
+      function (reader: async.Task, offset: integer)
+        local finished, result? = reader:status():has_succeeded()
+        test.assert(finished and result == expected, "offset " .. offset ..
+          ": the subscription notification left the reader " .. reader:status():as_string())
+        stream:close()
+      end)
+    end)
+  end)
+end
+
+function test_subscription_wake_before_reader_suspends(context: test.Context)
+  context:run("stop", function (_: test.Context)
+    subscription_wake_window(false, function (window: SubscriptionWindow)
+      window.stream:stop()
+    end, "ended")
+  end)
+  context:run("publish", function (_: test.Context)
+    subscription_wake_window(false, function (window: SubscriptionWindow)
+      window.publish(5)
+    end, 5)
+  end)
+  context:run("fail", function (_: test.Context)
+    subscription_wake_window(false, function (window: SubscriptionWindow)
+      window.fail("producer failed")
+    end, "producer failed")
+  end)
+  context:run("finish", function (_: test.Context)
+    subscription_wake_window(false, function (window: SubscriptionWindow)
+      window.finish()
+    end, "ended")
+  end)
+  context:run("stop_in_driver", function (_: test.Context)
+    subscription_wake_window(true, function (window: SubscriptionWindow)
+      window.stream:stop()
+    end, "ended")
+  end)
+end

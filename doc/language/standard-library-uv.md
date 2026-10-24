@@ -139,9 +139,12 @@ initialized handle and accepted request, closes the remaining handles, runs the
 loop until accepted native requests have finished, and closes the loop. No Lua
 or Titan callback runs, not even a close callback that was already requested,
 so Task continuations, domain unregister functions, and Runtime-close listeners
-do not run either. UV still performs its own native bookkeeping, but it never
-calls methods on domain objects held in callback captures or public userdata,
-whose native resources may already have been finalized.
+do not run either. (Async withdraws parked waits earlier, while it unwinds the
+suspended Tasks; see
+[closing a Lua state with an active Runtime](async-io.md#closing-a-lua-state-with-an-active-runtime).)
+UV still performs its own native bookkeeping, but it never calls methods on
+domain objects held in callback captures or public userdata, whose native
+resources may already have been finalized.
 
 Accepted filesystem and DNS requests release the results they own: a
 successful `open` or `mkstemp` descriptor, or an `opendir` directory, that was

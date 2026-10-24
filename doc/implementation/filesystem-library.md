@@ -46,6 +46,32 @@ string-backed buffer views and resubmit the unconsumed suffix after a short
 write, preserving 1-based slice indices and the exact borrowed lifetime. File
 mode mapping and creation permissions stay in this module.
 
+## Lua-state close
+
+A Lua state close cannot await a libuv request, so `File:close_with` tests
+`titan_state_closing` after its idempotence check and then closes the
+descriptor synchronously on the loop thread with `uv.fs_close` and a nil loop.
+A suspended Task's `defer file:close()` therefore completes during the close.
+`open` and `from_transfer_payload` register `finalize_file` with
+`gc.finalizable` before the File holds a descriptor. It returns at once unless
+the state is closing, so ordinary collection still leaves descriptors to their
+owners, and during close it calls `close_with`. A transferred-out File holds
+no descriptor, so its finalizer closes nothing.
+
+A Task parked in a read, write or flush request is unwound before the request
+completes, while a worker may still use the descriptor. Closing it then could
+hand that request a reused descriptor number. `File:perform` therefore keeps a
+local `pending` flag that a normal return or `catch` clears; `catch` never runs
+during an unwind, so a `defer` that finds the flag still set marks the File
+`abandoned`. Finalizers run newest first, so a File opened inside the Task is
+finalized before that Task unwinds; its operation then still counts itself in
+`pending_operations`. A state-close `close_with` therefore leaves the
+descriptor open when the File is abandoned or another operation is still
+counted; it is not released before the process exits. An in-flight `open` or
+`mkstemp` instead never published its descriptor, and UV's abandonment handler
+closes it when the request completes
+([final state teardown](libuv-extension-guide.md#final-state-teardown-is-not-ordinary-shutdown)).
+
 ## File transfer
 
 The generic manual-handoff rules are in
@@ -54,7 +80,8 @@ no `discard_transfer_payload` helper.
 
 `File.pending_operations` counts entry to exit of every public read, write and
 flush and the internal close, including a whole `read_until` composition and
-its nested reads. It is only a transfer admission guard and does not change
+its nested reads. It guards transfer admission and the
+[state-close close](#lua-state-close), and does not change ordinary
 concurrent-operation or close ordering. Deferred decrements keep it accurate
 through accepted native callbacks, result publication, cancellation and error
 unwinding.
@@ -63,7 +90,8 @@ unwinding.
 descriptor and buffered excess with the private `file_transfer_fields` schema
 (integer, string), and only then sets `handle` to -1 and clears `excess`.
 `from_transfer_payload` decodes the same schema, validates the signed native
-descriptor range, and returns `File(descriptor, excess, 0)`. A descriptor
+descriptor range, and returns a File that registers its state-close finalizer
+before taking the descriptor. A descriptor
 belongs to the process rather than a UV loop, so neither hook needs a Task,
 Runtime, or native I/O, and the descriptor and its file position move intact
 between Lua states.
@@ -188,5 +216,7 @@ cancellation, Runtime ownership, close acceptance, accepted-open abandonment,
 preaccept-close restoration, accepted close errors, and File transfer (shared
 position, source invalidation, malformed and closed payloads, hooks outside a
 Task, use after source-state shutdown, and rejection while concurrent reads
-are pending). Schema fixtures keep the File, Stat and Watcher declarations and
+are pending). `test_lua_close_closes_open_files` closes independent states
+holding a parked Task's File and an unclosed File and counts the process's
+open descriptors. Schema fixtures keep the File, Stat and Watcher declarations and
 the canonical `async.OperationError` owner.

@@ -46,7 +46,8 @@ function run_with_cleanup<|A, B|>(
     body: function (): (A),
     cleanup: function (CancellationReason<|B|>?): (),
     final_wait: ExternalWait?): Task<|A, B|>
-function run_foreign(f: foreign function (*void): void, arg: foreign *void)
+function run_foreign(f: foreign function (*void): void, arg: foreign *void,
+                     abandoned: foreign function (*void): void)
 function loop()
 function add_close_listener(listener: function (): ()): function (): ()
 function yield()
@@ -183,12 +184,15 @@ transition return the same snapshot; a later transition gets a fresh snapshot,
 even if its tag is again `running` or `waiting`. Retained snapshots never
 change. Unobserved nonterminal transitions do not construct public snapshots.
 
-`async.run_foreign(f, arg)` submits the C function pointer and argument to
-libuv's process-wide worker pool and suspends the current Task until the
-after-work callback runs on the event-loop thread. It is intended for blocking
-calls into an external C library. A restricted source `foreign function` is
-permitted because the compiler emits it as an exact C callback; its body must
-remain within the raw-C restrictions below.
+`async.run_foreign(f, arg, abandoned)` submits the C function pointer and
+argument to libuv's process-wide worker pool and suspends the current Task
+until the after-work callback runs on the event-loop thread. It is intended
+for blocking calls into an external C library. A restricted source
+`foreign function` is permitted because the compiler emits it as an exact C
+callback; its body must remain within the raw-C restrictions below. The
+optional `abandoned` (omit it or pass nil) is a C-only release for `arg`,
+called only when a Lua state close abandons the wait; see
+[foreign work at state close](#foreign-work-at-state-close).
 
 The worker performs exactly `f(arg)`. It must not inspect or mutate the
 hosting Lua state's Titan/Lua objects, call the Lua API on that state, invoke
@@ -217,6 +221,8 @@ worker pool is shared with libuv filesystem and name-resolution work, so
 long-running or numerous jobs can delay unrelated operations. A long-lived
 independent-state loop continues occupying its worker slot; leave pool capacity
 for work that its Tasks need. See the [pool-capacity discussion](standard-library-lua.md#two-phase-receiver-bootstrap).
+A Lua state close instead unwinds a waiting Task before its job returns; see
+[foreign work at state close](#foreign-work-at-state-close).
 
 Raw pointers and foreign function pointers have no dynamic Lua coercion. The
 serialized signature lets statically compiled Titan modules call
@@ -290,22 +296,98 @@ general wake for a Task waiting on a native operation or persistent source.
 Passing any other token raises synchronously in the caller of `resume`:
 `Task resume token mismatch (expected source: <source>)`. The message uses the
 stored expected token's source, never the supplied token's; a missing stored
-token or nil expected source is shown as `unknown source`. The check is
-unconditional whenever the Task has no current explicit suspension—including
-before suspension, after wake delivery until another suspension, or after
-terminal completion—so a wrong-time call raises with expected source
-`unknown source`; it is not a no-op.
+token or nil expected source is shown as `unknown source`.
+
+A running Task is the exception. `Task:resume(token)` on a Task that is
+running, or whose next wait the Runtime is still registering, latches `token`
+instead of raising; the latest call wins and the same token coalesces. The
+latch is consumed by the Task's immediately next suspension if that is
+`async.suspend` with the identical token, which then returns at once. Any other
+next suspension (another token, a native or external wait, `async.yield`), or
+the Task finishing, discards the latch. Only the Task's own code, or a
+finalizer that runs while it runs, can resume a running Task. A typical case is
+a finalizer that closes a coordination primitive just before its waiter parks.
+
+Because a running Task cannot tell an early wake from a stale one, a waker must
+hold a live registration: clear its registration before calling `resume`, so
+that each wait receives at most one `resume`, or make the waiter recheck its
+condition after every return from `suspend`. Reusing one token across waits is
+safe only under one of these two disciplines; a fresh token per wait makes a
+stale latch unmatchable. Make the waiter discoverable before the last check of
+its condition, so that a wake before that point is seen by the check and a wake
+after it is latched, and do not yield, await or suspend on anything else
+between that check and its `suspend`. An early wake meant for a later
+suspension is dropped silently: if a resume with token `B` is latched and the
+Task's next suspension is `suspend(A)`, that suspension parks and the latch is
+discarded.
+
+This one-waiter gate follows the first discipline, with a fresh token per wait:
+
+```titan
+local async = import "async"
+
+record Gate
+  local opened: boolean
+  local waiter: async.Task?
+  local token: async.ResumeToken?
+end
+
+function gate(): Gate
+  return Gate(false, nil, nil)
+end
+
+function Gate:wait()
+  if self.waiter ~= nil then raise "Gate already has a waiting Task" end
+  local current = async.running()
+  local token = async.ResumeToken.new("Gate.wait")
+  -- Publish the registration before the last check of the condition.
+  self.waiter = current
+  self.token = token
+  local detach = function ()
+    if self.waiter == current then
+      self.waiter = nil
+      self.token = nil
+    end
+  end
+  defer detach()
+  if self.opened then return end
+  async.suspend(token, detach)
+end
+
+function Gate:open()
+  self.opened = true
+  local waiter? = self.waiter
+  local token? = self.token
+  if waiter ~= nil and token ~= nil then
+    -- Consume the registration before resuming: each wait gets one resume.
+    self.waiter = nil
+    self.token = nil
+    waiter:resume(token)
+  end
+end
+```
+
+Every other wrong-time call still raises, with expected source
+`unknown source`: before the Task first runs, while it waits in a native
+operation or `async.yield`, and after terminal completion. It is not a no-op.
 
 With the correct token, `resume` does not enter the target Task inline. It
 synchronously requests a callback-deferred wake without yielding its caller,
 so it is valid from a terminal listener's main-thread context or another
 running Task. Repeated correct-token requests before the wake coalesce.
 
-The optional zero-argument cancellation action runs synchronously in the
+The optional zero-argument cancellation action runs at most once per
+suspension. When the Task is already suspended, it runs synchronously in the
 caller that requests cancellation, before the suspended Task's correct-token
-wake is scheduled. It is for nonyielding, nonraising detachment of an exact
-waiter or similar ownership state; an ordinary correct-token `resume` does not
-call it. Omitting the second argument is equivalent to passing nil.
+wake is scheduled. When the cancellation arrives while the Runtime is still
+registering the suspension, the action runs as the Runtime accepts it, and the
+suspension then raises the cancellation at once. A cancellation that arrives
+earlier, while the Task still runs, makes `suspend` raise without running the
+action. It is for
+nonyielding, nonraising detachment of an exact waiter or similar ownership
+state; an ordinary correct-token `resume` does not call it, and scope cleanup
+must still detach the waiter. Omitting the second argument is equivalent to
+passing nil.
 
 `ResumeToken`, `SuspendCancelAction`, the required token parameters, and the
 nil-accepting cancellation-action parameter are part of the public compiled-
@@ -608,7 +690,9 @@ handle; the owning `async.loop` must still run to complete that close. Runtime
 shutdown and garbage collection of the `Receiver` also close the slot and
 dispose of an unread packet. A decoder hook, or a finalizer that runs while
 `wait` decodes, may close the receiver being waited on: `wait` still returns the
-value it took, and the next `wait` raises `"receiver is closed"`.
+value it took, and the next `wait` raises `"receiver is closed"`. A finalizer
+that closes it while `wait` is about to suspend makes that `wait` raise
+`"receiver is closed"` too.
 
 **Stop senders and finish every in-flight send before calling `close` or
 letting the owning Runtime shut down.** Concurrent `send` and `close` are
@@ -1139,9 +1223,10 @@ no cleanup shielding and does not hold back Task publication.
 - **State close.** If the Lua state closes while the Task is still parked,
   `unregister_fn(context)` also runs during `lua_close`, before the Task's
   coroutine stack, and with it any automatic `context`, is released. The Task
-  does not resume and its `defer` blocks do not run, so `unregister_fn` must
-  also dispose of any native data that the context owns and that only the
-  Task's unwinding would otherwise release. By then `owner` may
+  does not resume, but its stack is
+  [unwound](coroutines.md#abandoned-coroutines): `unregister_fn` runs from the
+  wait's own cleanup, and the Task's `defer` blocks run afterwards inside a
+  finalizer. By then `owner` may
   already have been finalized, so the native object that `context` refers to
   must not depend on `owner` for its lifetime. From a linked registration
   until `unregister_fn` runs, or until the waiting Task's own next locked
@@ -1155,8 +1240,9 @@ no cleanup shielding and does not hold back Task publication.
   object may be destroyed on the closing thread. The Runtime's wake bridge may
   already be detached by then: releasing the waiter's retained `target` is
   still valid, and a notification on it does nothing. Waits made with
-  `prepare_external_wait`, `wait_external` or `wait_external_cleanup` are not
-  withdrawn at state close.
+  `prepare_external_wait`, `wait_external` or `wait_external_cleanup` are
+  withdrawn the same way: their `unregister` function runs inside a finalizer,
+  so it must not yield.
 - The callbacks write `context` through a pointer that Titan does not track. If
   the calling function keeps the context in automatic storage and a `defer` or
   `catch` reads it after an error, declare a pointer local
@@ -1336,10 +1422,11 @@ Each channel owns one private token shared by all of its blocking and wake
 paths. These calls use that token with `Task:resume(token)`, so repeated wake
 requests coalesce and never enter the other Task inline; code holding only the
 Task cannot wake the channel with a different token. A blocking operation
-suspends once. Its authorized normal wake comes only after the opposite
-operation has established buffer progress or `close` has committed terminal
-state, and the occupied waiter slot prevents another same-direction operation
-from stealing that progress before delivery. Cancellation instead injects the
+occupies its waiter slot and then waits until the opposite operation has
+established buffer progress or `close` has committed terminal state; it
+rechecks after every wake, so a stale wake on the shared token costs only
+another suspension. The occupied waiter slot prevents another same-direction
+operation from stealing that progress before delivery. Cancellation instead injects the
 Task's reason and unwinds; deferred cleanup removes its waiter registration.
 
 `close()` is synchronous and idempotent. Its first call marks the channel
@@ -1588,7 +1675,18 @@ at most 64 entries that were present when it began; it detaches each old entry
 before advancing the Task. New work waits for a later callback. This promises
 deferred delivery, not an exact libuv iteration. Ordinary callback settlement
 can enter its Task continuation directly, while settlement from another running
-Task is deferred.
+Task is deferred. Settlement from inside a finalizer, including the cleanup of
+an [abandoned coroutine](coroutines.md#abandoned-coroutines), is deferred the
+same way, because a finalizer cannot resume the waiting Task. A
+`Completion:fatal` made there likewise records the Runtime failure at once and
+queues its own operation's error for the waiting Task, which raises it at its
+`await` after the finalizer; the driver still reports the Runtime's first
+error. A finalizer may also run while a Task
+is about to suspend, after it began waiting and before the Runtime registered
+its suspension. Closing, sending on or receiving from an `async.channel`, any
+subscription notification (publish, fail, finish, stop), closing a `Receiver`,
+or cancelling the Task there still ends that wait (see
+[explicit suspension](#scheduling-and-driving-tasks)).
 CPU-heavy code that neither finishes nor yields blocks the event loop.
 
 Persistent sources publish into coalescing or buffered subscriptions. A queued
@@ -1887,6 +1985,9 @@ for, or reap the child. Code that owns the child's lifecycle must use the domain
 process kill/wait operations as required before its Tasks finish. A File owns
 an operating-system descriptor, not a loop handle. The Runtime does not close
 such descriptors through `uv.walk`; application code owns explicit File close.
+Besides process exit, only a
+[Lua state close](standard-library-fs.md#closing-the-lua-state) closes a
+forgotten File.
 
 Async maintains the sparse live-Task inventory needed for scheduling lifetime,
 exit, and shutdown. Public UV separately roots live native requests/handles for
@@ -1911,18 +2012,40 @@ bootstrap created a `Receiver` and never drove the loop, or after a driver
 raised and was not called again. Closing the state then closes the Runtime's
 remaining handles and its native loop without running any user callback,
 including close callbacks that were already requested. No Task resumes, and
-Runtime-close listeners and the unregister functions of closure-registered
-waits do not run. Accepted native requests still complete first, so closing the
-state can block until running worker-pool jobs finish. The low-level operation
-is [`uv.loop_abandon`](standard-library-uv.md#abandoned-loop-retirement).
+Runtime-close listeners do not run. Accepted native requests still complete
+first, so closing the state can block until running worker-pool jobs finish.
+The low-level operation is
+[`uv.loop_abandon`](standard-library-uv.md#abandoned-loop-retirement).
 
-Before then, the coroutine stack of each Task still parked in a
-`wait_external_native` wait is released only after that wait's `unregister_fn`
-has withdrawn it (see **State close** under [external waits](#external-waits)).
-Tasks blocked in [`thread` channel operations](standard-library-thread.md#sending-and-receiving)
+Before then, every unfinished Task is
+[unwound](coroutines.md#abandoned-coroutines) where it is suspended. Its
+`defer` statements run innermost first, inside a finalizer, and a parked wait
+is withdrawn by its own cleanup before the stack is released (see
+**State close** under [external waits](#external-waits)). Tasks blocked in
+[`thread` channel operations](standard-library-thread.md#sending-and-receiving)
 or `Thread:join()` are withdrawn this way, so channels and threads shared with
-other states stay usable. The parked Tasks never resume and their `defer`
-blocks do not run.
+other states stay usable. The cleanup of `run_with_cleanup` then runs with the
+Task's cancellation reason, or
+`simple("async Runtime abandoned at Lua state close")` when there was none.
+
+That unwind runs outside the scheduler. `async.running()` and every operation
+that needs the current Task, including each `await`, raise
+`asynchronous operation must be called from an async Task`; a direct yield or
+resume raises as in any [finalizer](standard-library-gc.md#finalizers). Each
+such error, like any other error a cleanup raises, is reported as a Lua warning
+and the unwind continues.
+
+Cleanup cannot start Tasks during state close: `async.run` and
+`run_with_cleanup` raise `cannot start a Task during Lua state close`. Nor can
+any code create a Runtime while the state closes: when no Runtime is active,
+`async.receiver`, `async.prepare_external_wait`,
+`async.prepare_native_retirement`, and library operations that would create
+one raise `cannot create an async Runtime during Lua state close`, because Lua
+registers no new finalizers then and that Runtime's loop would leak. Disposal
+that must survive state close has to be synchronous. Handing disposal to
+`async.run` from a `defer` works only while an ordinary collection unwinds an
+abandoned coroutine and a Runtime is active; that Task runs after the rest of
+the unwind.
 
 The unfinished Tasks of that Runtime do not resume and do not call their
 terminal listeners, but most of them still become terminal. Lua runs finalizers
@@ -1937,13 +2060,32 @@ nonterminal, because its terminal status follows native retirement: for
 example, a `Thread:task()` proxy whose OS thread was not joined reports
 `ready` or `waiting`, never a terminal status.
 
-This only reclaims native memory. It does not replace closing receivers,
-finishing or cancelling Tasks, and draining the loop before closing the state.
+This only reclaims native memory and releases native handles. It does not
+replace closing receivers, finishing or cancelling Tasks, and draining the loop
+before closing the state, and it cannot perform a graceful protocol shutdown;
+see [cleanup that needs asynchronous I/O](coroutines.md#cleanup-that-needs-asynchronous-io).
 
 Ordinary garbage collection never retires an active Runtime, because the async
-module keeps it reachable. A finalizer that runs during state close must not
-call anything that creates a Runtime, such as `async.run`,
-`async.run_with_cleanup`, `async.receiver`, `async.prepare_external_wait`,
-`async.prepare_native_retirement`, or a library operation that starts a Task:
-Lua registers no new finalizers while a state is closing, so that Runtime's
-loop would leak.
+module keeps it reachable.
+
+#### Foreign work at state close
+
+A Task waiting in `async.run_foreign` when its state closes is unwound before
+`f(arg)` returns. Its `defer` statements therefore run while `f` may still be
+using `arg`, and the state close waits for the job only afterwards, when the
+Runtime drains accepted work. Native memory or resources that the caller
+releases itself must not be released in a `defer` around `run_foreign`.
+
+An `owned` argument is safe, because the collector frees it only after that
+drain. For other native state, pass the optional third argument (omit it or
+pass nil otherwise): a C-only `abandoned` function, which takes `arg` like `f`. When a Lua state close
+abandons the wait, the Runtime calls `abandoned(arg)` on the closing thread
+once every accepted job, including `f(arg)`, has returned. It must not enter
+Lua or Titan code of the closing state. It may block, for example to close an
+independent Lua state; no abandoned job occupies a pool thread by then. In
+every other case `abandoned` is never called, and the caller releases its state
+after the call returns or in a `catch`, which an unwind never runs. The
+caller's own `defer` must then skip that release: a flag that is set before
+the call and cleared after it returns and in `catch` is still set only after
+an abandoned wait. `lua.Lua:run_async` releases its independent state this
+way.

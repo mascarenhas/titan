@@ -273,7 +273,7 @@ jobs:
       TITAN_PREFIX: ${{ github.workspace }}/.lua
       LIBUV_VERSION: "1.53.0"
       # Bump when any CMake option that affects the cached archive changes.
-      LIBUV_BUILD_PROFILE: "static-pic-validation-tests-off-v2"
+      LIBUV_BUILD_PROFILE: "static-pic-validation-tests-off-v3"
       LLHTTP_VERSION: "9.4.3"
       LLHTTP_SHA256: "1eb813c7437b31a87496a1cd3ed79f00746720f5e7e29c79b42c02cb69f36c39"
       LLHTTP_BUILD_PROFILE: "static-pic-hidden-c99-v1"
@@ -540,7 +540,7 @@ jobs:
       TITAN_PREFIX: ${{ github.workspace }}/.lua
       # Native dependency caches stop at the pre-LuaRocks boundary. Bump the
       # schema when their build recipes or cached layout change.
-      SANITIZER_NATIVE_CACHE_SCHEMA: "v3"
+      SANITIZER_NATIVE_CACHE_SCHEMA: "v4"
       CC: cc
       AR: ar
       RANLIB: ranlib
@@ -720,7 +720,9 @@ jobs:
           test "$(git -C libbacktrace rev-parse HEAD)" = \
             "$SANITIZER_LIBBACKTRACE_REV"
           test -f libbacktrace/.libs/libbacktrace.a
+          test -f libbacktrace/.titan-build.config
           test -f libuv-build/libuv.a
+          test -f libuv-build/.titan-build.config
           test -f llhttp-build/libtitan-llhttp.a
           test -f sqlite3-build/libtitan-sqlite3.a
           test -f openssl-build/libssl.a
@@ -856,6 +858,37 @@ jobs:
           bash spec/support/ci_sanitizer_capture.sh coroutine-gc \
             make titan-stdlib-test-run \
               TITAN_FILTER='test_lua_host_roots_coroutine_payloads_and_tags_across_gc$'
+
+      # Implementation notes: doc/implementation/continuous-integration.md#fake-stack-probe
+      - name: Check ASan fake-stack placement of setjmp frames
+        run: |
+          # GCC places a frame that calls setjmp on ASan's fake stack under
+          # detect_stack_use_after_return=1; Clang never does. Only such a lane
+          # exercises the coroutine crossing's fake-stack address normalization.
+          # If a runner image or compiler change stopped that placement, the
+          # test_unwind_ gate below would silently stop exercising it.
+          probe="$RUNNER_TEMP/asan-fake-stack-probe"
+          bash spec/support/ci_sanitizer_capture.sh asan-fake-stack-probe-build \
+            "$CC" $SANITIZER_FLAGS spec/support/asan_fake_stack_probe.c -o "$probe"
+          bash spec/support/ci_sanitizer_capture.sh asan-fake-stack-probe \
+            "$probe"
+
+      # The state-close teardown cases pass on a plain build; only ASan/LSan
+      # diagnoses their leaks and misuse. The unwinding cases assert cleanup order
+      # on every build; here they add memory-safety coverage of the crossings.
+      - name: Run native teardown and unwinding sanitizer gate
+        run: |
+          bash spec/support/ci_sanitizer_capture.sh lua-close-teardown \
+            make titan-stdlib-test-run TITAN_FILTER='test_lua_close_'
+          bash spec/support/ci_sanitizer_capture.sh coroutine-unwind \
+            make titan-stdlib-test-run TITAN_FILTER='test_unwind_'
+          for teardown_log in lua-close-teardown coroutine-unwind; do
+            if ! grep -Eq '^\[==========\] [1-9][0-9]* tests? ran\.$' \
+                "$TITAN_SANITIZER_LOG_DIR/$teardown_log.log"; then
+              echo "Teardown sanitizer filter ran no tests: $teardown_log" >&2
+              exit 1
+            fi
+          done
 
       - name: Run native async sanitizer gate (timer-fs)
         run: |

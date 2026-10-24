@@ -495,3 +495,122 @@ function test_reader_writer_channel_adapters(context: test.Context)
     cancelled_reader:close()
   end)
 end
+
+-- A finalizer wake of a blocked channel side at every safepoint of its
+-- suspension window (task_support.each_wake_offset). The waiter receives from
+-- an empty channel, or sends to a full one holding 1.
+local record ChannelWindow
+  send: function (integer): ()
+  receive: function (): (integer)
+  close: function (): ()
+  received: value
+end
+
+local function channel_wake_window(blocked_send: boolean, driver: boolean,
+    wake: function (ChannelWindow): (), expected: value)
+  runtime_test.run(function ()
+    task_support.each_wake_offset(driver, nil, function (): task_support.WakeCase
+      local send, receive, close = async.channel<|integer|>(1)
+      local channel = ChannelWindow(send, receive, close, nil)
+      local body: function (): (value) = function (): value
+        return receive()
+      catch
+        return error
+      end
+      if blocked_send then
+        send(1)
+        body = function (): value
+          send(2)
+          return "sent"
+        catch
+          return error
+        end
+      end
+      return task_support.WakeCase(body, function (_: async.Task) wake(channel) end, nil,
+        function (waiter: async.Task, offset: integer)
+          local finished, result? = waiter:status():has_succeeded()
+          test.assert(finished and result == expected, "offset " .. offset ..
+            ": the channel wake left the waiter " .. waiter:status():as_string())
+          if blocked_send and expected == "sent" then
+            test.assert(channel.received == 1 and receive() == 2,
+              "offset " .. offset .. ": the channel lost or reordered an item")
+          end
+          close()
+        end)
+    end)
+  end)
+end
+
+local function channel_close(channel: ChannelWindow) channel.close() end
+
+function test_channel_wake_before_waiter_suspends(context: test.Context)
+  context:run("receive_send_in_waiter", function (_: test.Context)
+    channel_wake_window(false, false, function (channel: ChannelWindow)
+      channel.send(17)
+    end, 17)
+  end)
+  context:run("receive_send_in_driver", function (_: test.Context)
+    channel_wake_window(false, true, function (channel: ChannelWindow)
+      channel.send(17)
+    end, 17)
+  end)
+  context:run("receive_close_in_waiter", function (_: test.Context)
+    channel_wake_window(false, false, channel_close, "channel is closed")
+  end)
+  context:run("receive_close_in_driver", function (_: test.Context)
+    channel_wake_window(false, true, channel_close, "channel is closed")
+  end)
+  context:run("send_receive_in_waiter", function (_: test.Context)
+    channel_wake_window(true, false, function (channel: ChannelWindow)
+      channel.received = channel.receive()
+    end, "sent")
+  end)
+  context:run("send_receive_in_driver", function (_: test.Context)
+    channel_wake_window(true, true, function (channel: ChannelWindow)
+      channel.received = channel.receive()
+    end, "sent")
+  end)
+  context:run("send_close_in_waiter", function (_: test.Context)
+    channel_wake_window(true, false, channel_close, "channel is closed")
+  end)
+  context:run("send_close_in_driver", function (_: test.Context)
+    channel_wake_window(true, true, channel_close, "channel is closed")
+  end)
+end
+
+-- A finalizer send while the receiver runs past its delivered receive leaves
+-- a stale latch on the shared token. The receiver's next blocking receive
+-- consumes it, rechecks the empty buffer and parks until a real send.
+function test_channel_tolerates_stale_latched_wake(_: test.Context)
+  runtime_test.run(function ()
+    task_support.each_wake_offset(false, nil, function (): task_support.WakeCase
+      local send, receive, close = async.channel<|integer|>(2)
+      local stage = 0
+      local body = function (): value
+        local first = receive()
+        local second = receive()
+        stage = 3
+        local third = receive()
+        return first .. "," .. second .. "," .. third
+      end
+      local drive = function (window: task_support.WakeWindow, receiver: async.Task)
+        window.open = false
+        timer.yield()
+        window.open = true
+        send(1)
+        for _ = 1, 50 do
+          if stage == 3 and receiver:status():as_string() == "waiting" then break end
+          timer.yield()
+        end
+        if stage == 3 then send(3) end
+      end
+      return task_support.WakeCase(body, function (_: async.Task) send(2) end, drive,
+        function (receiver: async.Task, offset: integer)
+          local finished, result? = receiver:status():has_succeeded()
+          test.assert(finished and result == "1,2,3", "offset " .. offset ..
+            ": a stale latched wake changed the receives: " .. receiver:status():as_string())
+          close()
+        end)
+    end)
+  end)
+end

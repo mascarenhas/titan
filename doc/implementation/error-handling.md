@@ -90,7 +90,10 @@ propagation trace in the caller, appends it to the staged trace, writes the
 combined string to `TITAN_BACKTRACE_KEY`, sets `TITAN_TRACE_PINNED`, and
 re-raises the original payload. The final handler therefore preserves the
 combined trace instead of only the shallow propagation site. The code is in
-`titan/coroutine.titan` (see [Coroutines](coroutines.md)).
+`titan/coroutine.titan` (see [Coroutines](coroutines.md)). The async driver
+uses a non-raising resume and appends the propagation trace only for a Task
+failure that it reports; otherwise it drops the staged trace
+([coroutine entry](coroutines.md#entry-function)).
 
 ### libbacktrace and frame merging
 
@@ -279,11 +282,12 @@ vendored into `titan-runtime/titan.h` from `ldo.c`. `boundary_save` and
 4. restore `L->errorJmp` and `L->nCcalls` on every exit from the protected
    block;
 5. on error, restore `ci` and `allowhook`, restore the saved `errfunc`, run
-   `luaD_closeprotected`, move the error object to the saved top with
-   `luaD_seterrorobj`, recompute `_base` from `_base_off`, snapshot the error
-   and trace into reserved slots, clear the registry trace and pin, restore
-   `L->top.p` to `_base + TITAN_RESERVED_NSLOTS`, and reload setjmp-sensitive
-   spills.
+   `luaD_closeprotected` (for a try with a finally, under the re-armed boundary
+   of [suspension during error recovery](#unwinding-through-finally)), move the
+   error object to the saved top with `luaD_seterrorobj`, recompute `_base`
+   from `_base_off`, snapshot the error and trace into reserved slots, clear the
+   registry trace and pin, restore `L->top.p` to
+   `_base + TITAN_RESERVED_NSLOTS`, and reload setjmp-sensitive spills.
 
 The saved `errfunc` is restored before `luaD_closeprotected` because the
 longjmp may have skipped an inner Titan Lua-entry wrapper before that wrapper
@@ -306,8 +310,9 @@ body allocates, calls, or raises.
 ### Pending actions for finally
 
 A try with finally has a discriminator whose values are the Lua string
-constants `PA_NONE`, `PA_RETURN`, `PA_BREAK`, and `PA_RAISE` (`"0"`..`"3"`) in
-`coder/statements.lua`, emitted as C integer literals.
+constants `PA_NONE`, `PA_RETURN`, `PA_BREAK`, `PA_RAISE`, and `PA_UNWIND`
+(`"0"`..`"4"`) in `coder/statements.lua`, emitted as C integer literals.
+`PA_UNWIND` belongs to [unwinding through finally](#unwinding-through-finally).
 
 Body or catch fallthrough leaves `PA_NONE`. A `return` or `break` inside a
 finally-protected body or catch does not use `longjmp`; it saves any return
@@ -331,6 +336,71 @@ reconstructs the native output descriptor and resumes the pending return; a
 raise from the finally abandons it. The flexible-tail frame owns bounded typed
 backing and, for GC-bearing elements, a parallel traced stack range that stays
 live throughout the finally body and any inside-out frame copy.
+
+### Unwinding through finally
+
+An abandoned suspended coroutine is unwound by its finalizer
+([Coroutines](coroutines.md#unwinding-an-abandoned-coroutine)). For that walk,
+`boundary_save` initializes the `lua_longjmp.status` of each boundary of a try
+with a finally to `TITAN_STATUS_FINALLY` instead of `LUA_OK`. Those are the body
+boundary and the catch boundary `<id>c`. Catch-only boundaries keep `LUA_OK`, and
+the walker skips them. On the normal path the only change is the constant, which
+`boundary_recover_open` also compares against.
+
+When the walker lands with `TITAN_STATUS_UNWIND`, the recovery arm:
+
+1. restores `ci`, `allowhook` and `errfunc`;
+2. closes the Lua frames above the boundary with `titan_unwind_close`, so each
+   `__close` gets no error value and each failure becomes one warning;
+3. restores `_base`, the reserved top and the setjmp spills;
+4. skips any catch and sets `PA_UNWIND`.
+
+The finally body then runs under a guard. The guard reuses the try-scope
+`_lj_<id>`, which is already unlinked, through another `TITAN_SETJMP` call
+site. If an error escapes the body, `titan_unwind_guard_failed` restores the
+boundary state, reports the error, closes the frames the body entered, and
+continues the unwind. After a normal finish, the dispatch arm for `PA_UNWIND`
+unlinks the guard and calls `titan_unwind`, which never returns.
+
+`titan_unwind`, `titan_unwind_close`, `titan_unwind_report` and
+`titan_unwind_guard_failed` are declared `TITAN_COLD`. This marks the unwind arm
+of the recovery, the guard failure and the `PA_UNWIND` dispatch unlikely. An
+optimized build may then place them outside the normal path's hot instruction
+stream; GCC can split them into the function's `.cold` part in `.text.unlikely`.
+
+**Suspension during error recovery.** A `__close` metamethod that the ordinary
+error recovery calls may suspend the coroutine with a Titan `yield`: Lua's
+`luaD_closeprotected` calls it through `luaD_callnoyield`, which refuses only a
+Lua yield. While that close runs, the try's finally has not started yet. So for
+a boundary of a try with a finally, the recovery re-arms the boundary first:
+
+1. it keeps the caught status in a `volatile` local and relinks `_lj_<id>` with
+   `TITAN_STATUS_FINALLY`;
+2. it runs `luaD_closeprotected` under another `TITAN_SETJMP` call site on the
+   same buffer, then unlinks the boundary again.
+
+`luaD_closeprotected` catches every error raised by a `__close` itself, so only
+the walker can jump to the re-armed boundary. That happens when the coroutine
+is abandoned while suspended in the close. The jump arrives with
+`TITAN_STATUS_UNWIND` and takes the landing above: the caught error is dropped,
+the rest of the close method and the catch never run, and the pending finally
+runs exactly once. Only on that jump, the re-arm's `TITAN_SETJMP` arm calls the
+cold `titan_unwind_clear_trace`, which clears the registry trace and pin
+(`TITAN_BACKTRACE_KEY`, `TITAN_TRACE_PINNED`) as a catch recovery does, so
+`titan.backtrace()` does not keep the dropped error's trace. The arm is that one
+call, so it adds almost no code to the function. If the coroutine is resumed instead, the close finishes and
+the ordinary recovery continues. The coroutine floor re-arms itself the same way
+around the close of an error that escaped the entry
+([Coroutines](coroutines.md#unwinding-an-abandoned-coroutine)).
+
+Every try with a finally declares its boundary locals at try scope, because the
+guard must outlive `$CFINALLY` and `$DISPATCH`. The guard's close level is the
+reserved top the landing established, `_base_off + TITAN_RESERVED_NSLOTS`
+slots. `_base_off` is written once at function entry, so it is well defined
+after the jump. The landings and the re-armed close read only what an error
+landing reads, and no code of the enclosing function runs between the
+re-arming `TITAN_SETJMP` and a jump to it (only `__close` methods do), so the
+setjmp spill analysis below needs no change.
 
 ### Boundary restoration on generated `goto`
 
@@ -481,8 +551,16 @@ from silently loading stale build artifacts.
 * `spec/coder/error_handling_spec.lua`: catch, fresh raise versus re-raise,
   trace clearing, pending actions, finally override, nested finally order,
   sustained-OOM catch/defer recovery across functions, closures, and module
-  initializers, GC-valued pending returns (including flexible tails), and
-  standalone uncaught-error reporting.
+  initializers, GC-valued pending returns (including flexible tails),
+  standalone uncaught-error reporting, and the generated unwind boundaries
+  (the finally marker and no unwind code in a catch-only try).
+* `spec/coder/unwind_stdlib_spec.lua`: a grafted catch-plus-finally try
+  unwound through its catch boundary under the installed `titan.coroutine`
+  (a stdlib compiler spec, run after the full provider is installed).
+* `spec/stdlib/titan/coroutine/tests/unwind_test.titan` (`test_unwind_*`):
+  unwinding behavior, including a coroutine abandoned while suspended in an
+  error-recovery `__close`, a failing finally inside an immediately invoked
+  lambda, and a module initializer suspended inside `require`.
 * `spec/coder/stack_relocation_spec.lua`: stack relocation through protected
   recovery.
 * `spec/abi_spec.lua`: runtime/compiler ABI constants.

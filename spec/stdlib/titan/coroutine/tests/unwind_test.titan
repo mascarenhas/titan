@@ -1,0 +1,1220 @@
+local unwind_gc = import "gc"
+local unwind_lua = import "lua"
+local unwind_async = import "async"
+local unwind_string = import "string"
+local unwind_runtime = import "support.runtime.titan"
+local unwind_init_fixture = import "coroutine.unwind_init_fixture"
+
+-- Collecting an abandoned suspended coroutine, or closing its Lua state,
+-- unwinds it: defers run innermost first, catch blocks do not run, and nothing
+-- after the suspension point runs. Every case is named test_unwind_* so that
+-- one filter selects them for the sanitizer lanes.
+
+local function unwind_log_text(log: {string}): string
+  local text = ""
+  for index = 1, #log do
+    if index > 1 then text = text .. " " end
+    text = text .. log[index]
+  end
+  return text
+end
+
+local function unwind_collect()
+  for _ = 1, 4 do unwind_gc.collect() end
+end
+
+local function unwind_step(limit: integer, n: integer): integer?
+  if n >= limit then return nil end
+  return n + 1
+end
+
+local function unwind_innermost_frame(log: {string}, tag: value)
+  defer log[#log + 1] = "frame3"
+  local close_loop: function (integer): () = function (_: integer)
+    log[#log + 1] = "for-close"
+  end
+  for _: integer in unwind_step, 2, 0, close_loop do
+    do
+      defer log[#log + 1] = "inner"
+      coroutine.yield("parked", tag)
+      log[#log + 1] = "after-yield"
+    catch
+      log[#log + 1] = "catch"
+    end
+  end
+  log[#log + 1] = "after-loop"
+end
+
+local function unwind_middle_frame(log: {string}, tag: value)
+  defer log[#log + 1] = "frame2"
+  unwind_innermost_frame(log, tag)
+  log[#log + 1] = "after-frame3"
+end
+
+local function unwind_abandon_nested_defers(log: {string})
+  local tag: value = {}
+  local co = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "frame1"
+    unwind_middle_frame(log, tag)
+    log[#log + 1] = "after-frame2"
+    return nil
+  end, tag)
+  test.assert(co:resume(nil, tag) == "parked")
+end
+
+function test_unwind_runs_suspended_defers_innermost_first(_context: test.Context)
+  local log: {string} = {}
+  unwind_abandon_nested_defers(log)
+  unwind_collect()
+  local text = unwind_log_text(log)
+  test.assert(text == "inner for-close frame3 frame2 frame1", "unwind log: " .. text)
+end
+
+-- A <- B <- C, C yields past B and A. Creation order decides finalizer order:
+-- newest first.
+local function unwind_abandon_chain_stacked_first(log: {string})
+  local tag_main: value = {}
+  local tag_b: value = {}
+  local tag_c: value = {}
+  local a = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "a"
+    local b = coroutine.create(function (_: value): value
+      defer log[#log + 1] = "b"
+      local c = coroutine.create(function (_: value): value
+        defer log[#log + 1] = "c"
+        return coroutine.yield("from-c", tag_main)
+      end, tag_c)
+      return c:resume(nil, tag_c)
+    end, tag_b)
+    return b:resume(nil, tag_b)
+  end, tag_main)
+  test.assert(a:resume(nil, tag_main) == "from-c")
+end
+
+local function unwind_abandon_chain_handler_first(log: {string})
+  local tag_main: value = {}
+  local tag_b: value = {}
+  local tag_c: value = {}
+  local c = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "c"
+    return coroutine.yield("from-c", tag_main)
+  end, tag_c)
+  local b = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "b"
+    return c:resume(nil, tag_c)
+  end, tag_b)
+  local a = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "a"
+    return b:resume(nil, tag_b)
+  end, tag_main)
+  test.assert(a:resume(nil, tag_main) == "from-c")
+end
+
+function test_unwind_stacked_chain_from_innermost(context: test.Context)
+  context:run("stacked_member_finalized_first", function (_: test.Context)
+    local log: {string} = {}
+    unwind_abandon_chain_stacked_first(log)
+    unwind_collect()
+    local text = unwind_log_text(log)
+    test.assert(text == "c b a", "unwind log: " .. text)
+  end)
+  context:run("handler_finalized_first", function (_: test.Context)
+    local log: {string} = {}
+    unwind_abandon_chain_handler_first(log)
+    unwind_collect()
+    local text = unwind_log_text(log)
+    test.assert(text == "c b a", "unwind log: " .. text)
+  end)
+end
+
+-- Created after the handler A and before the stacked member B, so its
+-- finalizer runs after B's and before A's. It resurrects both records.
+record UnwindResurrection
+  log: {string}
+  kept: {coroutine.Coroutine}
+  handler: coroutine.Coroutine?
+  stacked: coroutine.Coroutine?
+end
+
+local function unwind_resurrect(candidate: value)
+  local holder: UnwindResurrection = candidate
+  local handler = holder.handler as coroutine.Coroutine
+  local stacked = holder.stacked as coroutine.Coroutine
+  holder.log[#holder.log + 1] = "handler=" .. handler:status()
+  holder.log[#holder.log + 1] = "stacked=" .. stacked:status()
+  holder.kept[1] = handler
+  holder.kept[2] = stacked
+end
+
+local function unwind_abandon_resurrected_chain(log: {string}, kept: {coroutine.Coroutine})
+  local tag_main: value = {}
+  local tag_b: value = {}
+  local a: coroutine.Coroutine? = nil
+  a = coroutine.create(function (_: value): value
+    local holder = UnwindResurrection(log, kept, a, nil)
+    unwind_gc.finalizable<|value|>(holder, unwind_resurrect)
+    local b = coroutine.create(function (_: value): value
+      defer log[#log + 1] = "b"
+      return coroutine.yield("from-b", tag_main)
+    end, tag_b)
+    holder.stacked = b
+    return b:resume(nil, tag_b)
+  end, tag_main)
+  test.assert((a as coroutine.Coroutine):resume(nil, tag_main) == "from-b")
+end
+
+local function unwind_expect_invalid(co: coroutine.Coroutine, label: string)
+  test.assert(co:status() == "dead", label .. " status: " .. co:status())
+  local caught = false
+  do
+    co:resume(nil, "after-collection")
+  catch
+    caught = true
+    local message = support.caught_string(error)
+    test.assert(support.contains(message, "Invalid coroutine"), label .. ": " .. message)
+  end
+  test.assert(caught, label .. " resumed after collection")
+end
+
+function test_unwind_releases_stacked_coroutine_stack(_context: test.Context)
+  local log: {string} = {}
+  local kept: {coroutine.Coroutine} = {}
+  unwind_abandon_resurrected_chain(log, kept)
+  unwind_collect()
+  local text = unwind_log_text(log)
+  test.assert(text == "b handler=dead stacked=dead", "unwind log: " .. text)
+  test.assert(#kept == 2, "the holder did not resurrect both records")
+  unwind_expect_invalid(kept[1], "handler")
+  unwind_expect_invalid(kept[2], "stacked member")
+end
+
+local function unwind_abandon_failing_cleanup(log: {string})
+  local tag: value = {}
+  local co = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "outer"
+    defer raise "cleanup failure"
+    defer log[#log + 1] = "inner"
+    return coroutine.yield("parked", tag)
+  end, tag)
+  test.assert(co:resume(nil, tag) == "parked")
+end
+
+-- The host state comes from luaL_newstate, whose warnings are on, so the
+-- cleanup error appears on standard error as a Lua warning.
+function test_unwind_continues_after_cleanup_error(context: test.Context)
+  local log: {string} = {}
+  unwind_abandon_failing_cleanup(log)
+  context:log("BEGIN expected coroutine cleanup warning")
+  unwind_collect()
+  context:log("END expected coroutine cleanup warning")
+  local text = unwind_log_text(log)
+  test.assert(text == "inner outer", "unwind log: " .. text)
+end
+
+function test_unwind_runs_suspended_defers_in_generational_mode(_context: test.Context)
+  local was_generational = unwind_gc.generational()
+  defer do
+    if not was_generational then unwind_gc.incremental() end
+  end
+  local log: {string} = {}
+  unwind_abandon_nested_defers(log)
+  unwind_abandon_chain_stacked_first(log)
+  unwind_collect()
+  local text = unwind_log_text(log)
+  test.assert(text == "c b a inner for-close frame3 frame2 frame1" or
+              text == "inner for-close frame3 frame2 frame1 c b a", "unwind log: " .. text)
+end
+
+-- Lua code on a Titan coroutine's own thread closes that thread
+-- (coroutine.close() with no argument): Lua closes its variables and jumps to
+-- the coroutine floor, which ends the coroutine as returning nil.
+function test_unwind_floor_ends_self_closed_coroutine(_context: test.Context)
+  local log: {string} = {}
+  local close_self = common.lua_helper([==[
+    return function(append)
+      local c <close> = setmetatable({}, { __close = function(_, err)
+        append("closed:" .. tostring(err))
+      end })
+      coroutine.close()
+      append("after-close")
+    end
+  ]==]) as function (function (string): ()): ()
+  local co = coroutine.create(function (_: value): value
+    close_self(function (entry: string) log[#log + 1] = entry end)
+    log[#log + 1] = "after-call"
+    return "returned"
+  end, "self-close")
+  test.assert(co:resume(nil) == nil, "a self-closed coroutine returned a value")
+  test.assert(co:status() == "dead", "status: " .. co:status())
+  local text = unwind_log_text(log)
+  test.assert(text == "closed:nil", "log: " .. text)
+end
+
+local function unwind_abandon_yielding_cleanup(log: {string})
+  local tag: value = {}
+  local co = coroutine.create(function (_: value): value
+    defer do
+      coroutine.yield("from-cleanup", tag)
+    catch
+      log[#log + 1] = error as string
+    end
+    return coroutine.yield("parked", tag)
+  end, tag)
+  test.assert(co:resume(nil, tag) == "parked")
+end
+
+function test_unwind_cleanup_cannot_yield(_context: test.Context)
+  local log: {string} = {}
+  unwind_abandon_yielding_cleanup(log)
+  unwind_collect()
+  test.assert(#log == 1 and support.contains(log[1], "cannot yield from a finalizer"),
+              "unwind log: " .. unwind_log_text(log))
+end
+
+record UnwindFinalizerProbe
+  log: {string}
+  target: coroutine.Coroutine
+end
+
+local function unwind_probe_finalize(candidate: value)
+  local probe: UnwindFinalizerProbe = candidate
+  do
+    coroutine.yield(nil, "unwind-probe")
+  catch
+    probe.log[#probe.log + 1] = error as string
+  end
+  do
+    probe.target:resume(nil, "unwind-probe")
+  catch
+    probe.log[#probe.log + 1] = error as string
+  end
+  do
+    probe.target:error("injected", "unwind-probe")
+  catch
+    probe.log[#probe.log + 1] = error as string
+  end
+  if coroutine.is_yieldable("unwind-probe") then
+    probe.log[#probe.log + 1] = "yieldable"
+  end
+end
+
+local function unwind_register_probe(log: {string})
+  local target = coroutine.create(function (_: value): value return nil end, "unwind-probe")
+  local probe = UnwindFinalizerProbe(log, target)
+  unwind_gc.finalizable<|value|>(probe, unwind_probe_finalize)
+end
+
+-- The probe is finalized by a collection inside a coroutine whose resumer
+-- accepts the probe's tag, so only the finalizer prohibition stops the yield.
+function test_unwind_finalizer_cannot_yield_or_resume(_context: test.Context)
+  local log: {string} = {}
+  local collector = coroutine.create(function (_: value): value
+    test.assert(coroutine.is_yieldable("unwind-probe"), "the collector cannot yield")
+    unwind_register_probe(log)
+    unwind_collect()
+    return "collected"
+  end, "unwind-probe")
+  test.assert(collector:resume(nil, "unwind-probe") == "collected")
+  test.assert(#log == 3 and support.contains(log[1], "cannot yield from a finalizer") and
+              support.contains(log[2], "cannot resume a coroutine from a finalizer") and
+              support.contains(log[3], "cannot resume a coroutine from a finalizer"),
+              "finalizer log: " .. unwind_log_text(log))
+end
+
+local function unwind_abandon_unstarted(log: {string})
+  local tag: value = {}
+  local idle = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "idle-defer"
+    log[#log + 1] = "idle-body"
+    return nil
+  end, tag)
+  local injected = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "injected-defer"
+    log[#log + 1] = "injected-body"
+    return nil
+  end, tag)
+  local caught = false
+  do
+    injected:error("injected before start", tag)
+  catch
+    caught = error == "injected before start"
+  end
+  test.assert(caught, "the preloaded error did not reach the caller")
+  test.assert(idle:status() == "suspended" and injected:status() == "dead")
+end
+
+function test_unwind_never_started_coroutine_runs_nothing(_context: test.Context)
+  local log: {string} = {}
+  unwind_abandon_unstarted(log)
+  unwind_collect()
+  test.assert(#log == 0, "unwind log: " .. unwind_log_text(log))
+end
+
+local function unwind_abandon_inside_defer(log: {string})
+  local tag: value = {}
+  local co = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "outer"
+    do
+      defer do
+        log[#log + 1] = "cleanup-start"
+        coroutine.yield("parked-in-cleanup", tag)
+        log[#log + 1] = "cleanup-rest"
+      end
+      log[#log + 1] = "body"
+    catch
+      log[#log + 1] = "catch"
+    end
+    log[#log + 1] = "after-block"
+    return nil
+  end, tag)
+  test.assert(co:resume(nil, tag) == "parked-in-cleanup")
+end
+
+function test_unwind_abandons_suspended_defer_body(_context: test.Context)
+  local log: {string} = {}
+  unwind_abandon_inside_defer(log)
+  unwind_collect()
+  local text = unwind_log_text(log)
+  test.assert(text == "body cleanup-start outer", "unwind log: " .. text)
+end
+
+record UnwindHolder
+  inner: coroutine.Coroutine?
+end
+
+-- A resumes B through a mutable field. Once the field is cleared, only A's
+-- suspended resume frame keeps B reachable.
+local function unwind_park_through_field(log: {string}, holder: UnwindHolder,
+                                         tag_main: value): coroutine.Coroutine
+  local tag_b: value = {}
+  holder.inner = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "b-defer"
+    local got = coroutine.yield("from-b", tag_main)
+    log[#log + 1] = "b-resumed"
+    return got
+  end, tag_b)
+  local a = coroutine.create(function (_: value): value
+    return (holder.inner as coroutine.Coroutine):resume(nil, tag_b)
+  end, tag_main)
+  test.assert(a:resume(nil, tag_main) == "from-b")
+  return a
+end
+
+function test_unwind_resumer_roots_resumed_coroutine(_context: test.Context)
+  local log: {string} = {}
+  local holder = UnwindHolder(nil)
+  local tag_main: value = {}
+  local a = unwind_park_through_field(log, holder, tag_main)
+  holder.inner = nil
+  unwind_collect()
+  test.assert(#log == 0, "a live chain was unwound: " .. unwind_log_text(log))
+  test.assert(a:status() == "suspended", "handler status: " .. a:status())
+  test.assert(a:resume("answer", tag_main) == "answer")
+  test.assert(a:status() == "dead")
+  local text = unwind_log_text(log)
+  test.assert(text == "b-resumed b-defer", "completion log: " .. text)
+end
+
+-- Lua scenarios. Each runs in a child lua.Lua state, under two modes:
+-- "collect" (the scenario returns, then the child runs four full collections
+-- and its optional global after_collect) and "close" (the child state is
+-- closed). The log and the Lua warnings reach host-owned buffers.
+--
+-- observer(check) returns a table whose finalizer calls check. Created before
+-- the abandoned coroutine, it is older, so in both modes it runs after that
+-- coroutine's unwind.
+local UNWIND_LUA_PRELUDE = [==[
+  local log_buffer, warning_buffer, mode = ...
+  local support = require 'coroutine.test_support'
+  local titan_coroutine = require 'titan.coroutine'
+  support.unwind_capture_warnings(warning_buffer)
+  local function append(entry) support.unwind_append(log_buffer, entry) end
+  local function with_defer(name, body) support.unwind_with_defer(log_buffer, name, body) end
+  local function closer(name)
+    return setmetatable({}, { __close = function(_, err)
+      if err == nil then append(name) else append(name .. "!" .. tostring(err)) end
+    end })
+  end
+  local function failing_closer(name)
+    return setmetatable({}, { __close = function(_, err)
+      append(name .. ":" .. tostring(err))
+      error(name .. "-failure")
+    end })
+  end
+  local function observer(check)
+    return setmetatable({}, { __gc = check })
+  end
+  local function refused(ok, err)
+    if not ok and string.find(tostring(err), "cannot resume dead coroutine", 1, true) then
+      return "refused"
+    end
+    return "accepted:" .. tostring(err)
+  end
+  local tag = {}
+]==]
+
+local function unwind_run_lua(scenario: string, mode: string): (string, string)
+  local log: owned char[] = foreign char.new_array(support.UNWIND_BUFFER_SIZE)
+  local warnings: owned char[] = foreign char.new_array(support.UNWIND_BUFFER_SIZE)
+  local state = unwind_lua.new()
+  defer state:close()
+  state:run(UNWIND_LUA_PRELUDE .. scenario, "=unwind-scenario",
+    unwind_async.TransferValue.is_pointer(log as foreign *void),
+    unwind_async.TransferValue.is_pointer(warnings as foreign *void),
+    unwind_async.TransferValue.is_string(mode))
+  if mode == "close" then
+    state:close()
+  else
+    state:run([[
+      for _ = 1, 4 do collectgarbage() end
+      if after_collect then after_collect() end
+    ]], "=unwind-collect")
+  end
+  return (log as foreign *char) as string, (warnings as foreign *char) as string
+end
+
+local function unwind_warning_lines(warnings: string): {string}
+  local lines: {string} = {}
+  for line in unwind_string.split(warnings, "\n") do
+    if #line > 0 then lines[#lines + 1] = line end
+  end
+  return lines
+end
+
+-- Each expected fragment must appear in its own warning line, in order, and
+-- no other warning may be reported.
+local function unwind_assert_warnings(mode: string, warnings: string, expected: {string})
+  local lines = unwind_warning_lines(warnings)
+  test.assert(#lines == #expected, mode .. " warnings:\n" .. warnings)
+  for index = 1, #expected do
+    test.assert(support.contains(lines[index], "error in coroutine cleanup (") and
+                support.contains(lines[index], expected[index]),
+                mode .. " warnings:\n" .. warnings)
+  end
+end
+
+local function unwind_lua_mode(context: test.Context, mode: string, scenario: string,
+                               expected_log: string, expected_warnings: {string})
+  context:run(mode, function (_: test.Context)
+    local log, warnings = unwind_run_lua(scenario, mode)
+    test.assert(log == expected_log, mode .. " log: " .. log)
+    unwind_assert_warnings(mode, warnings, expected_warnings)
+  end)
+end
+
+-- The same expectations under ordinary collection and under state close.
+local function unwind_lua_case(context: test.Context, scenario: string, expected_log: string,
+                               expected_warnings: {string})
+  unwind_lua_mode(context, "collect", scenario, expected_log, expected_warnings)
+  unwind_lua_mode(context, "close", scenario, expected_log, expected_warnings)
+end
+
+local UNWIND_INTERLEAVED_SCENARIO = [==[
+  local co = titan_coroutine.create(function()
+    local lua_outer <close> = closer("lua-outer")
+    with_defer("titan-outer", function()
+      local lua_inner <close> = closer("lua-inner")
+      with_defer("titan-inner", function()
+        titan_coroutine.yield("parked", tag)
+        append("after-yield")
+      end)
+      append("after-inner")
+    end)
+    append("after-outer")
+  end, tag)
+  assert(co:resume(nil, tag) == "parked")
+]==]
+
+function test_unwind_interleaves_lua_close(context: test.Context)
+  unwind_lua_case(context, UNWIND_INTERLEAVED_SCENARIO,
+    "titan-inner lua-inner titan-outer lua-outer", {})
+end
+
+local UNWIND_PCALL_SCENARIO = [==[
+  local co = titan_coroutine.create(function()
+    local outer <close> = closer("c-outer")
+    pcall(function()
+      local in_pcall <close> = closer("c-pcall")
+      xpcall(function()
+        with_defer("d-xpcall", function()
+          titan_coroutine.yield("parked", tag)
+          append("after-yield")
+        end)
+      end, function(err) append("handler") return err end)
+      append("after-xpcall")
+    end)
+    append("after-pcall")
+  end, tag)
+  assert(co:resume(nil, tag) == "parked")
+]==]
+
+function test_unwind_skips_lua_pcall(context: test.Context)
+  unwind_lua_case(context, UNWIND_PCALL_SCENARIO, "d-xpcall c-pcall c-outer", {})
+end
+
+-- Level 0 is the Titan coroutine, level 1 a coroutine.wrap thread and level 2
+-- a coroutine.create thread; the Titan yield happens at level 2. At every
+-- level the Lua <close> encloses the Titan helper's defer.
+local UNWIND_CHAIN_SCENARIO = [==[
+  local kept = {}
+  local watch = observer(function()
+    append("l1=" .. coroutine.status(kept.l1))
+    append("l2=" .. coroutine.status(kept.l2))
+    append("wrap=" .. refused(pcall(kept.wrap)))
+    append("resume=" .. refused(coroutine.resume(kept.l2)))
+    append("co=" .. kept.co:status())
+  end)
+  local co = titan_coroutine.create(function()
+    local c0 <close> = closer("c0")
+    with_defer("d0", function()
+      local l1 = coroutine.wrap(function()
+        kept.l1 = coroutine.running()
+        local c1 <close> = closer("c1")
+        with_defer("d1", function()
+          local l2 = coroutine.create(function()
+            local c2 <close> = closer("c2")
+            with_defer("d2", function()
+              titan_coroutine.yield("parked", tag)
+              append("after-yield")
+            end)
+          end)
+          kept.l2 = l2
+          assert(coroutine.resume(l2))
+          append("after-resume")
+        end)
+      end)
+      kept.wrap = l1
+      l1()
+      append("after-wrap")
+    end)
+  end, tag)
+  kept.co = co
+  assert(co:resume(nil, tag) == "parked")
+]==]
+
+local UNWIND_CHAIN_LOG =
+  "d2 c2 d1 c1 d0 c0 l1=dead l2=dead wrap=refused resume=refused co=dead"
+
+function test_unwind_crosses_nested_lua_coroutines(context: test.Context)
+  unwind_lua_case(context, UNWIND_CHAIN_SCENARIO, UNWIND_CHAIN_LOG, {})
+end
+
+-- H's body enters Lua coroutine L1, whose body resumes Titan coroutine A; A
+-- yields past H to H's resumer.
+local UNWIND_STACKED_FROM_LUA_SCENARIO = [==[
+  local tag_a = {}
+  local kept = {}
+  local watch = observer(function()
+    append("l1=" .. coroutine.status(kept.l1))
+    append("a=" .. kept.a:status())
+    append("h=" .. kept.h:status())
+  end)
+  local h = titan_coroutine.create(function()
+    with_defer("d_h", function()
+      local a = titan_coroutine.create(function()
+        with_defer("d_a", function()
+          titan_coroutine.yield("parked", tag)
+          append("after-yield")
+        end)
+      end, tag_a)
+      kept.a = a
+      local l1 = coroutine.create(function()
+        local c_l1 <close> = closer("c_l1")
+        with_defer("d_l1", function()
+          a:resume(nil, tag_a)
+          append("after-a")
+        end)
+      end)
+      kept.l1 = l1
+      assert(coroutine.resume(l1))
+      append("after-l1")
+    end)
+  end, tag)
+  kept.h = h
+  assert(h:resume(nil, tag) == "parked")
+]==]
+
+function test_unwind_crosses_from_stacked_titan_resume(context: test.Context)
+  unwind_lua_case(context, UNWIND_STACKED_FROM_LUA_SCENARIO,
+    "d_a d_l1 c_l1 d_h l1=dead a=dead h=dead", {})
+end
+
+-- As the nested chain, but level 1 has only a Lua <close>: its thread head is
+-- an unmarked boundary, so the walker crosses it at once.
+local UNWIND_PLAIN_LEVEL_SCENARIO = [==[
+  local kept = {}
+  local watch = observer(function()
+    append("l1=" .. coroutine.status(kept.l1))
+    append("l2=" .. coroutine.status(kept.l2))
+  end)
+  local co = titan_coroutine.create(function()
+    local c0 <close> = closer("c0")
+    with_defer("d0", function()
+      local l1 = coroutine.wrap(function()
+        kept.l1 = coroutine.running()
+        local c1 <close> = closer("c1")
+        local l2 = coroutine.create(function()
+          local c2 <close> = closer("c2")
+          with_defer("d2", function()
+            titan_coroutine.yield("parked", tag)
+            append("after-yield")
+          end)
+        end)
+        kept.l2 = l2
+        assert(coroutine.resume(l2))
+        append("after-resume")
+      end)
+      l1()
+      append("after-wrap")
+    end)
+  end, tag)
+  assert(co:resume(nil, tag) == "parked")
+]==]
+
+function test_unwind_crosses_lua_level_without_finally(context: test.Context)
+  unwind_lua_case(context, UNWIND_PLAIN_LEVEL_SCENARIO,
+    "d2 c2 c1 d0 c0 l1=dead l2=dead", {})
+end
+
+-- Decoys that stay resumable: (a) a Lua coroutine suspended by
+-- coroutine.yield, (b) one suspended inside a pcall-protected body (a
+-- lua_pcallk continuation), and (c) another Titan coroutine with its own active
+-- L1 -> L2 resume chain, suspended by a Titan yield. Only the nested chain is
+-- abandoned. `decoys_first` orders the allocations.
+local UNWIND_DECOY_SCENARIO = [==[
+  decoys = {}
+  local d = decoys
+  if mode == "close" then
+    d.watch = observer(function()
+      append("a=" .. select(2, coroutine.resume(d.a, "x")))
+      append("b=" .. select(2, coroutine.resume(d.b, "y")))
+      append("c=" .. d.c:status() .. ":" .. coroutine.status(d.c_l1) .. ":" ..
+             coroutine.status(d.c_l2))
+    end)
+  end
+  local function make_decoys()
+    d.a = coroutine.create(function()
+      local got = coroutine.yield("a-1")
+      return "a-done:" .. got
+    end)
+    assert(select(2, coroutine.resume(d.a)) == "a-1")
+    d.b = coroutine.create(function()
+      local ok, got = pcall(function() return coroutine.yield("b-1") end)
+      return "b-done:" .. tostring(ok) .. ":" .. got
+    end)
+    assert(select(2, coroutine.resume(d.b)) == "b-1")
+    d.tag_c = {}
+    d.c = titan_coroutine.create(function()
+      local l1 = coroutine.create(function()
+        d.c_l1 = coroutine.running()
+        local l2 = coroutine.create(function()
+          d.c_l2 = coroutine.running()
+          return "l2:" .. titan_coroutine.yield("c-parked", d.tag_c)
+        end)
+        local _, got = coroutine.resume(l2)
+        return "l1:" .. got
+      end)
+      local _, got = coroutine.resume(l1)
+      return "c:" .. got
+    end, d.tag_c)
+    assert(d.c:resume(nil, d.tag_c) == "c-parked")
+  end
+  local function make_chain()
+    local co = titan_coroutine.create(function()
+      local c0 <close> = closer("c0")
+      with_defer("d0", function()
+        local l1 = coroutine.wrap(function()
+          local c1 <close> = closer("c1")
+          with_defer("d1", function()
+            local l2 = coroutine.create(function()
+              local c2 <close> = closer("c2")
+              with_defer("d2", function()
+                titan_coroutine.yield("parked", tag)
+              end)
+            end)
+            assert(coroutine.resume(l2))
+          end)
+        end)
+        l1()
+      end)
+    end, tag)
+    assert(co:resume(nil, tag) == "parked")
+  end
+  if decoys_first then
+    make_decoys()
+    make_chain()
+  else
+    make_chain()
+    make_decoys()
+  end
+  function after_collect()
+    append("a=" .. coroutine.status(d.a) .. ":" .. select(2, coroutine.resume(d.a, "x")))
+    append("b=" .. coroutine.status(d.b) .. ":" .. select(2, coroutine.resume(d.b, "y")))
+    append("c=" .. d.c:status() .. ":" .. coroutine.status(d.c_l1) .. ":" ..
+           coroutine.status(d.c_l2))
+    append("c-result=" .. d.c:resume("z", d.tag_c) .. ":" .. d.c:status())
+  end
+]==]
+
+local function unwind_decoy_order(context: test.Context, name: string, decoys_first: boolean)
+  context:run(name, function (child: test.Context)
+    local scenario = "local decoys_first = " .. (decoys_first and "true" or "false") ..
+      "\n" .. UNWIND_DECOY_SCENARIO
+    local chain = "d2 c2 d1 c1 d0 c0"
+    unwind_lua_mode(child, "collect", scenario,
+      chain .. " a=suspended:a-done:x b=suspended:b-done:true:y" ..
+      " c=suspended:normal:normal c-result=c:l1:l2:z:dead", {})
+    unwind_lua_mode(child, "close", scenario,
+      chain .. " a=a-done:x b=b-done:true:y c=dead:dead:dead", {})
+  end)
+end
+
+function test_unwind_crossing_spares_decoys(context: test.Context)
+  unwind_decoy_order(context, "decoys_first", true)
+  unwind_decoy_order(context, "chain_first", false)
+end
+
+-- Lua coroutine L yields normally back to Titan coroutine A, then continues
+-- on Titan coroutine B's stack, where it enters another Lua coroutine and
+-- performs the Titan yield. Only B is abandoned.
+local UNWIND_CONTINUATION_SCENARIO = [==[
+  local tag_a, tag_b = {}, {}
+  local kept = {}
+  if mode == "close" then
+    kept.watch = observer(function()
+      append("l=" .. coroutine.status(kept.l) .. " inner=" .. coroutine.status(kept.inner))
+      append("a=" .. kept.a:status())
+    end)
+  end
+  local l = coroutine.create(function()
+    local c_l <close> = closer("c_l")
+    coroutine.yield("first")
+    local inner = coroutine.create(function()
+      local c_inner <close> = closer("c_inner")
+      with_defer("d_inner", function()
+        titan_coroutine.yield("b-parked", tag_b)
+        append("after-yield")
+      end)
+    end)
+    kept.inner = inner
+    assert(coroutine.resume(inner))
+    append("after-inner")
+  end)
+  kept.l = l
+  kept.a = titan_coroutine.create(function()
+    local ok, first = coroutine.resume(l)
+    assert(ok and first == "first")
+    with_defer("d_a", function()
+      append("a-resumed:" .. titan_coroutine.yield("a-parked", tag_a))
+    end)
+    return "a-done"
+  end, tag_a)
+  assert(kept.a:resume(nil, tag_a) == "a-parked")
+  local b = titan_coroutine.create(function()
+    with_defer("d_b", function()
+      coroutine.resume(l)
+      append("after-l")
+    end)
+  end, tag_b)
+  assert(b:resume(nil, tag_b) == "b-parked")
+  if mode == "collect" then
+    function after_collect()
+      append("l=" .. coroutine.status(kept.l) .. " inner=" .. coroutine.status(kept.inner))
+      append("a=" .. kept.a:status())
+      append("a-result=" .. kept.a:resume("go", tag_a))
+    end
+  end
+]==]
+
+function test_unwind_crosses_continuation_on_new_stack(context: test.Context)
+  local unwound = "d_inner c_inner c_l d_b l=dead inner=dead"
+  unwind_lua_mode(context, "collect", UNWIND_CONTINUATION_SCENARIO,
+    unwound .. " a=suspended a-resumed:go d_a a-result=a-done", {})
+  unwind_lua_mode(context, "close", UNWIND_CONTINUATION_SCENARIO,
+    "d_inner c_inner c_l d_b d_a l=dead inner=dead a=dead", {})
+end
+
+-- In L1 a yieldable pcall body errors with two pending <close> variables. The
+-- first close method called by the recovery (c_second) enters the Titan
+-- helper, whose body performs the Titan yield. `lua_yield_first` first yields
+-- normally from that close method and resumes it.
+local UNWIND_YPCALL_SCENARIO = [==[
+  local kept = {}
+  local watch = observer(function()
+    append("l1=" .. coroutine.status(kept.l1))
+  end)
+  local co = titan_coroutine.create(function()
+    with_defer("d_x", function()
+      local l1 = coroutine.wrap(function()
+        kept.l1 = coroutine.running()
+        pcall(function()
+          local c_first <close> = closer("c_first")
+          local c_second <close> = setmetatable({}, { __close = function(_, err)
+            append("c_second:" .. (err and "error" or "nil"))
+            if lua_yield_first then
+              coroutine.yield("lua-yield")
+              append("c_second-resumed")
+            end
+            with_defer("d_second", function()
+              titan_coroutine.yield("parked", tag)
+              append("after-yield")
+            end)
+            append("c_second-exit")
+          end })
+          error("body-error")
+        end)
+        append("after-pcall")
+      end)
+      local first = l1()
+      if lua_yield_first then
+        assert(first == "lua-yield")
+        l1()
+      end
+      append("after-l1")
+    end)
+  end, tag)
+  assert(co:resume(nil, tag) == "parked")
+]==]
+
+function test_unwind_crosses_ypcall_recovery(context: test.Context)
+  context:run("titan_yield", function (child: test.Context)
+    unwind_lua_case(child, "local lua_yield_first = false\n" .. UNWIND_YPCALL_SCENARIO,
+      "c_second:error d_second c_first d_x l1=dead", {})
+  end)
+  context:run("lua_yield_then_titan_yield", function (child: test.Context)
+    unwind_lua_case(child, "local lua_yield_first = true\n" .. UNWIND_YPCALL_SCENARIO,
+      "c_second:error c_second-resumed d_second c_first d_x l1=dead", {})
+  end)
+end
+
+local UNWIND_CLOSE_ERRORS_SCENARIO = [==[
+  local co = titan_coroutine.create(function()
+    with_defer("d0", function()
+      local l1 = coroutine.wrap(function()
+        local c_outer <close> = failing_closer("outer")
+        local c_inner <close> = failing_closer("inner")
+        titan_coroutine.yield("parked", tag)
+      end)
+      l1()
+    end)
+  end, tag)
+  assert(co:resume(nil, tag) == "parked")
+]==]
+
+function test_unwind_reports_each_close_error(context: test.Context)
+  unwind_lua_case(context, UNWIND_CLOSE_ERRORS_SCENARIO, "inner:nil outer:nil d0",
+    {"inner-failure", "outer-failure"})
+end
+
+-- A failing close method creates an escaping closure over a new local and has
+-- its own pending <close> when it raises (main-3 N1).
+local UNWIND_ESCAPING_CLOSE_SCENARIO = [==[
+  local escaped
+  local watch = observer(function()
+    append("escaped=" .. escaped())
+  end)
+  local co = titan_coroutine.create(function()
+    with_defer("d0", function()
+      local l1 = coroutine.wrap(function()
+        local c_outer <close> = closer("outer")
+        local c_fail <close> = setmetatable({}, { __close = function(_, err)
+          append("fail:" .. tostring(err))
+          local captured = "captured-value"
+          escaped = function() return captured end
+          local nested <close> = closer("nested")
+          error("escaping-failure")
+        end })
+        titan_coroutine.yield("parked", tag)
+      end)
+      l1()
+    end)
+  end, tag)
+  assert(co:resume(nil, tag) == "parked")
+]==]
+
+function test_unwind_reports_escaping_close_error(context: test.Context)
+  unwind_lua_case(context, UNWIND_ESCAPING_CLOSE_SCENARIO,
+    "fail:nil nested outer d0 escaped=captured-value", {"escaping-failure"})
+end
+
+-- Three Lua levels: L1 inside a yieldable xpcall, plain L2, and L3 inside a
+-- non-yieldable xpcall reached through a string.gsub callback (lua_pcallk
+-- takes the luaD_pcall path there).
+local UNWIND_MIXED_PROTECTION_SCENARIO = [==[
+  local kept = {}
+  local watch = observer(function()
+    append("l1=" .. coroutine.status(kept.l1) .. " l2=" .. coroutine.status(kept.l2) ..
+           " l3=" .. coroutine.status(kept.l3))
+  end)
+  local co = titan_coroutine.create(function()
+    with_defer("d0", function()
+      local l1 = coroutine.wrap(function()
+        kept.l1 = coroutine.running()
+        local c1 <close> = closer("c1")
+        xpcall(function()
+          local c1p <close> = closer("c1p")
+          local l2 = coroutine.create(function()
+            local c2 <close> = closer("c2")
+            local l3 = coroutine.wrap(function()
+              kept.l3 = coroutine.running()
+              local c3 <close> = closer("c3")
+              string.gsub("x", "x", function()
+                xpcall(function()
+                  local c3p <close> = closer("c3p")
+                  with_defer("d3", function()
+                    titan_coroutine.yield("parked", tag)
+                    append("after-yield")
+                  end)
+                end, function(err) append("handler3") return err end)
+                append("after-pcall3")
+              end)
+              append("after-gsub")
+            end)
+            l3()
+            append("after-l3")
+          end)
+          kept.l2 = l2
+          assert(coroutine.resume(l2))
+          append("after-l2")
+        end, function(err) append("handler1") return err end)
+        append("after-pcall1")
+      end)
+      l1()
+      append("after-l1")
+    end)
+  end, tag)
+  assert(co:resume(nil, tag) == "parked")
+]==]
+
+function test_unwind_crosses_mixed_protection(context: test.Context)
+  unwind_lua_case(context, UNWIND_MIXED_PROTECTION_SCENARIO,
+    "d3 c3p c3 c2 c1p c1 d0 l1=dead l2=dead l3=dead", {})
+end
+
+-- The coroutine suspends inside a __close method called by the ordinary-error
+-- recovery of a finally-bearing Titan try, before that try's defer has run.
+local UNWIND_RECOVERY_CLOSE_SCENARIO = [==[
+  local co = titan_coroutine.create(function()
+    support.unwind_guarded(log_buffer, "titan-defer", function()
+      local closing <close> = setmetatable({}, { __close = function(_, err)
+        append("close:" .. (err and "error" or "nil"))
+        titan_coroutine.yield("parked", tag)
+        append("close-resumed")
+      end })
+      error("body-error")
+    end)
+    append("after-guarded")
+    return "done"
+  end, tag)
+  assert(co:resume(nil, tag) == "parked")
+  if resume_again then
+    assert(co:resume(nil, tag) == "done")
+  end
+]==]
+
+function test_unwind_runs_defer_pending_in_error_recovery(context: test.Context)
+  unwind_lua_case(context, "local resume_again = false\n" .. UNWIND_RECOVERY_CLOSE_SCENARIO,
+    "close:error titan-defer", {})
+  context:run("resumed", function (_: test.Context)
+    local log, warnings = unwind_run_lua(
+      "local resume_again = true\n" .. UNWIND_RECOVERY_CLOSE_SCENARIO, "collect")
+    test.assert(log == "close:error close-resumed titan-defer titan-defer:catch after-guarded",
+                "resumed log: " .. log)
+    unwind_assert_warnings("resumed", warnings, {})
+  end)
+  -- The dropped body error's trace must not stay visible to titan.backtrace().
+  context:run("trace_cleared", function (_: test.Context)
+    local log, warnings = unwind_run_lua(
+      "local resume_again = false\n" .. UNWIND_RECOVERY_CLOSE_SCENARIO .. [==[
+        function after_collect()
+          append("trace:" .. tostring(support.unwind_has_backtrace()))
+        end
+      ]==], "collect")
+    test.assert(log == "close:error titan-defer trace:false", "trace log: " .. log)
+    unwind_assert_warnings("trace_cleared", warnings, {})
+  end)
+end
+
+-- The first close method fails inside a Titan call, whose Lua-entry wrapper
+-- installed its own message handler; the second fails in Lua with enough
+-- locals to overwrite that handler's old stack slot.
+local UNWIND_HANDLER_SCENARIO = [==[
+  local co = titan_coroutine.create(function()
+    with_defer("d0", function()
+      local l1 = coroutine.wrap(function()
+        local last <close> = setmetatable({}, { __close = function(_, err)
+          append("last:" .. tostring(err))
+          local a, b, c, d, e, f, g, h, i, j = {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
+          error("second Lua close error")
+        end })
+        local first <close> = setmetatable({}, { __close = function(_, err)
+          append("first:" .. tostring(err))
+          support.unwind_fail("Titan close error")
+        end })
+        titan_coroutine.yield("parked", tag)
+      end)
+      l1()
+    end)
+  end, tag)
+  assert(co:resume(nil, tag) == "parked")
+]==]
+
+function test_unwind_close_errors_keep_message_handler(context: test.Context)
+  unwind_lua_case(context, UNWIND_HANDLER_SCENARIO, "first:nil last:nil d0",
+    {"Titan close error", "second Lua close error"})
+end
+
+-- The coroutine suspends below 120 nested protected Lua calls; its outer
+-- <close> then needs another 120 levels of C calls.
+local UNWIND_DEEP_CALLS_SCENARIO = [==[
+  local completed = 0
+  local function clean(depth)
+    if depth == 0 then completed = completed + 1 return end
+    local ok, err = pcall(clean, depth - 1)
+    if not ok then error(err, 0) end
+  end
+  clean(120)
+  local function descend(depth)
+    if depth == 0 then titan_coroutine.yield("parked", tag) return end
+    local ok, err = pcall(descend, depth - 1)
+    if not ok then error(err, 0) end
+  end
+  local watch = observer(function() append("completed=" .. completed) end)
+  local co = titan_coroutine.create(function()
+    local resource <close> = setmetatable({}, { __close = function()
+      clean(120)
+      append("cleaned")
+    end })
+    descend(120)
+  end, tag)
+  assert(co:resume(nil, tag) == "parked")
+]==]
+
+function test_unwind_floor_cleanup_after_deep_calls(context: test.Context)
+  unwind_lua_case(context, UNWIND_DEEP_CALLS_SCENARIO, "cleaned completed=2", {})
+end
+
+-- The child state is closed from a host Task: closing it switches from the
+-- host coroutine's stack into the child's coroutine stacks.
+function test_unwind_child_state_chain_closed_from_task(_context: test.Context)
+  local log = ""
+  local warnings = ""
+  unwind_runtime.run(function ()
+    -- async.running() raises outside a Task.
+    unwind_async.running()
+    log, warnings = unwind_run_lua(UNWIND_CHAIN_SCENARIO, "close")
+  end)
+  test.assert(log == UNWIND_CHAIN_LOG, "log: " .. log)
+  unwind_assert_warnings("close", warnings, {})
+end
+
+-- A Titan defer body fails during the unwind after entering a Lua function
+-- that holds a <close>: the guard reports the error once, closes that frame
+-- with no error value, and the enclosing cleanup continues. `runner` is the
+-- coroutine.test_support function that holds the failing defer.
+local function unwind_guard_failure_scenario(runner: string): string
+  return [==[
+  local co = titan_coroutine.create(function()
+    with_defer("outer", function()
+      support.]==] .. runner .. [==[(function()
+        local pending <close> = closer("cleanup-close")
+        error("cleanup-failure")
+      end, function()
+        titan_coroutine.yield("parked", tag)
+        append("after-yield")
+      end)
+      append("after-cleanup")
+    end)
+  end, tag)
+  assert(co:resume(nil, tag) == "parked")
+]==]
+end
+
+function test_unwind_reports_failing_defer_and_closes_its_frames(context: test.Context)
+  unwind_lua_case(context, unwind_guard_failure_scenario("unwind_with_cleanup"),
+    "cleanup-close outer", {"cleanup-failure"})
+end
+
+-- The same failing defer inside an immediately invoked lambda in expression
+-- position, whose boundaries the compiler emits inline in the host frame.
+function test_unwind_reports_failing_defer_in_immediate_lambda(context: test.Context)
+  unwind_lua_case(context, unwind_guard_failure_scenario("unwind_with_inline_cleanup"),
+    "cleanup-close outer", {"cleanup-failure"})
+end
+
+-- A module initializer suspended inside require. The coroutine.tests import
+-- initialized the host instance outside any coroutine. The child state
+-- requires the fixture inside a coroutine whose resumer accepts its tag, so
+-- the initializer suspends inside require and is abandoned there. The unwind
+-- runs the initializer's defer, crosses require's C frames into the caller's
+-- defer and <close>, and leaves the module partially initialized: a later
+-- require returns it without running the initializer again.
+local UNWIND_MODULE_INIT_SCENARIO = [==[
+  support.unwind_bind_init_log(log_buffer)
+  local co = titan_coroutine.create(function()
+    local outer <close> = closer("lua-close")
+    with_defer("caller-defer", function()
+      local fixture = require 'coroutine.unwind_init_fixture'
+      append("required:" .. fixture.stage)
+    end)
+  end, "unwind-init")
+  assert(co:resume(nil, "unwind-init") == "parked-in-init")
+  function after_collect()
+    append("stage:" .. require('coroutine.unwind_init_fixture').stage)
+  end
+]==]
+
+function test_unwind_runs_defers_of_module_initializer_suspended_in_require(
+    context: test.Context)
+  test.assert(unwind_init_fixture.stage == "initialized",
+              "host fixture stage: " .. unwind_init_fixture.stage)
+  unwind_lua_mode(context, "collect", UNWIND_MODULE_INIT_SCENARIO,
+    "init-defer caller-defer lua-close stage:loading", {})
+  unwind_lua_mode(context, "close", UNWIND_MODULE_INIT_SCENARIO,
+    "init-defer caller-defer lua-close", {})
+end
+
+-- A <- B, B yields past A. While the chain unwinds, B's cleanup closes B's
+-- own thread with coroutine.close(), which jumps straight to B's floor. The
+-- floor must keep unwinding: A's resume must neither return nor raise into
+-- A's protected call, so only the cleanups run. `closer` is Lua code run in
+-- B's cleanup before the close; the failing variant holds a <close> whose
+-- error must become a cleanup warning instead of reaching A.
+local function unwind_self_close_scenario(closer: string): string
+  return [==[
+  local inner_tag = {}
+  local a = titan_coroutine.create(function()
+    support.unwind_with_cleanup(function() append("a-cleanup") end, function()
+      local b = titan_coroutine.create(function()
+        support.unwind_with_cleanup(function()
+          append("b-cleanup")
+          ]==] .. closer .. [==[
+          coroutine.close()
+          append("b-after-close")
+        end, function()
+          titan_coroutine.yield("parked", tag)
+          append("b-after-yield")
+        end)
+        append("b-after-guard")
+      end, inner_tag)
+      local ok, err = pcall(function() return b:resume(nil, inner_tag) end)
+      append("a-after-resume:" .. tostring(ok) .. ":" .. tostring(err))
+    end)
+    append("a-after-guard")
+  end, tag)
+  assert(a:resume(nil, tag) == "parked")
+]==]
+end
+
+function test_unwind_self_close_in_cleanup_keeps_unwinding(context: test.Context)
+  unwind_lua_case(context, unwind_self_close_scenario(""), "b-cleanup a-cleanup", {})
+end
+
+function test_unwind_failing_self_close_in_cleanup_keeps_unwinding(context: test.Context)
+  unwind_lua_case(context, unwind_self_close_scenario([==[
+          local failing <close> = setmetatable({}, { __close = function()
+            append("b-close")
+            error("self-close-closer-failure")
+          end })]==]),
+    "b-cleanup b-close a-cleanup", {"self-close-closer-failure"})
+end

@@ -11,7 +11,7 @@ jobs=${TITAN_ROCK_TEST_JOBS:-4}
 windows=0
 if [[ ${MSYSTEM:-} == CLANG64 ]]; then
     windows=1
-    jobs=${TITAN_ROCK_TEST_JOBS:-2}
+    jobs=${TITAN_ROCK_TEST_JOBS:-3}
 fi
 if [[ ! $jobs =~ ^[1-4]$ ]]; then
     echo "TITAN_ROCK_TEST_JOBS must be an integer from 1 through 4" >&2
@@ -307,12 +307,32 @@ SH
 fi
 
 echo "Snapshotting the prepared checkout for four isolated compiler shards"
+# Workers use the selected SDK read-only at its own path, so a prefix inside
+# the checkout need not be copied into the worker snapshots. Tar reads an
+# exclusion as a pattern; copy a prefix whose name contains pattern syntax
+# rather than risk omitting some other checkout path.
+prefix_excludes=()
+if prefix_physical=$(cd "${PREFIX:-/nonexistent}" 2>/dev/null && pwd -P); then
+    case "$prefix_physical" in
+        "$workspace"/?*)
+            prefix_relative=${prefix_physical#"$workspace"/}
+            case "$prefix_relative" in
+                *'*'* | *'?'* | *'['* | *'\'*) ;;
+                *)
+                    prefix_excludes=(--exclude="./$prefix_relative"
+                                     --exclude="./$prefix_relative/*")
+                    ;;
+            esac
+            ;;
+    esac
+fi
 if ! (
     cd "$workspace" || exit 1
     tar --exclude='./.git' --exclude='./.git/*' \
         --exclude='./libbacktrace/.git' \
         --exclude='./libbacktrace/.git/*' \
         --exclude='./.lua' --exclude='./.lua/*' \
+        ${prefix_excludes[@]+"${prefix_excludes[@]}"} \
         -cf "$archive" .
 ); then
     echo "could not snapshot the prepared checkout" >&2
@@ -471,16 +491,26 @@ launched=0
 active=0
 completed=0
 scheduler_status=0
+# Unix launches shards in manifest order. On Windows the exclusive shard runs
+# first and alone; the other three then share the worker slots instead of
+# each queueing behind it.
+launch_order=(1 2 3 4)
+if (( windows != 0 )); then
+    launch_order=("$exclusive_shard")
+    for shard in 1 2 3 4; do
+        if [[ $shard != "$exclusive_shard" ]]; then launch_order+=("$shard"); fi
+    done
+fi
 while (( completed < 4 )); do
     while (( launched < 4 && active < jobs )); do
-        shard=$((launched + 1))
+        shard=${launch_order[$launched]}
         if (( windows != 0 && active != 0 )) &&
            [[ $shard == "$exclusive_shard" ||
               -n ${worker_pids[$exclusive_shard]-} ]]; then
             break
         fi
         launch_worker "$shard"
-        launched=$shard
+        launched=$((launched + 1))
         active=$((active + 1))
     done
 

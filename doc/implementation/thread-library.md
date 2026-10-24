@@ -207,19 +207,21 @@ a queue whose channel or control block can outlive the frame's Lua state. When
 that state closes with the Task still parked, two mechanisms keep the native
 queues safe (issue #262):
 
-- **Withdrawal before the stack is released.** Before `coro_gc` destroys a
-  suspended stack, async withdraws every parked C-ABI wait of the closing
-  state ([state close](libuv-runtime.md#lua-state-close-of-an-unretired-runtime))
+- **Withdrawal before the stack is released.** `coro_gc`
+  [unwinds](coroutines.md#unwinding-an-abandoned-coroutine) a suspended stack
+  before destroying it, so each parked C-ABI wait is withdrawn by its own
+  cleanup ([state close](libuv-runtime.md#lua-state-close-of-an-unretired-runtime))
   through its unregister callback: `channel_unregister_send_wait`,
   `channel_unregister_receive_wait` or `thread_control_unregister_join_wait`.
   After that, no queue links a node on a destroyed stack, so neither a later
   endpoint finalizer of the same state nor another state's or thread's send,
-  close, last release or worker completion can reach one. Because the parked
-  Task never unwinds, its `defer` cannot dispose the packet a withdrawn send
-  still holds; `channel_unregister_send_wait` therefore takes `wait.message`
-  and discards it natively after releasing `ch.mutex`, since discarding can
-  release endpoints of the same channel. A cancelled send's `defer` then finds
-  the cleared pointer. A parked receive or join cell owns no packet.
+  close, last release or worker completion can reach one.
+  `channel_unregister_send_wait` takes the packet a withdrawn send still holds
+  in `wait.message` and discards it natively after releasing `ch.mutex`, since
+  discarding can release endpoints of the same channel. The send's `defer`,
+  which runs afterwards on cancellation and on unwinding, finds the cleared
+  pointer. A parked receive or join cell owns no packet when it is withdrawn;
+  a packet already dequeued for it is disposed by the receive's `defer`.
 - **Per-registration pin.** That unregister can run after the state's endpoint
   or `Thread` handle was finalized and released its reference. `waiter_enqueue`
   therefore takes one pin under the domain mutex it already holds:
@@ -427,13 +429,17 @@ The proxy body awaits **logical finish only** (`wait_until_finished`) and
 projects success, failure or cancellation. It does not call `Thread:join`: a
 body join failure followed by cleanup would retry the join within one driver
 invocation, so only the prearmed barrier attempts the proxy's OS join. The
-cleanup registers `defer final_wait:close()` then
-`defer final_wait:wait_cleanup()`, and forwards its `reason` with
-`self:cancel(reason)` while `finished` is false. That reason is nil when the body
-failed without cancellation, so `Thread:cancel(nil)` sends the default
-`simple("cancelled")`. The generic driver gates terminal status, listeners and
-the result on native retirement, so a cancelled proxy cannot publish before the
-child's cleanup and OS join. Cancellation admission at the cleanup wait,
+cleanup forwards its `reason` with `self:cancel(reason)` while `finished` is
+false. Outside Lua-state close it first registers a `defer` that runs
+`final_wait:wait_cleanup()` and then `final_wait:close()`. That reason is nil
+when the body failed without cancellation, so `Thread:cancel(nil)` sends the
+default `simple("cancelled")`. At state close the cleanup runs outside any
+Task, so it skips the barrier and only forwards cancellation, and the armed
+gate stays nonterminal
+([state close](libuv-runtime.md#lua-state-close-of-an-unretired-runtime)). The
+generic driver gates terminal status, listeners and the result on native
+retirement, so a cancelled proxy cannot publish before the child's cleanup and
+OS join. Cancellation admission at the cleanup wait,
 reason precedence, negative-status retry and logical close are the generic
 [native-retirement contract](../language/async-io.md#native-retirement-capabilities)
 ([implementation](libuv-runtime.md#native-retirement-barriers)); this module
@@ -458,11 +464,25 @@ an admitted child; the same `Thread` and slot persist across setup failures.
 - **Admission.** `Group:spawn_raw_entry` calls `spawn_raw` with the membership
   Map, which inserts the handle as `false` before `uv.create_native_thread` and
   rolls it back on pre-start failure. Such a failure raises from `Group:spawn*`,
-  starts no worker and returns the slot.
+  starts no worker and returns the slot. A spawn that finds the group full
+  queues a waiter with a fresh token, then rechecks the group abort and the
+  running count before it suspends: a finalizer that runs before the waiter is
+  queued finds no waiter, so a `Group:cancel` wakes nobody and a cancelled
+  granted admission frees its slot instead of passing it on. Once the waiter is
+  queued, both wakes latch on its token
+  ([explicit suspension](libuv-runtime.md#explicit-suspend-task-status-listeners-and-combinators)).
+  The waiter's withdrawal is the suspension's cancel action. A `defer` runs it
+  again on every exit that did not take the slot, because a cancellation that
+  rejects the suspension before the driver accepts it runs no cancel action.
+  The withdrawal deactivates a queued waiter, or passes on a slot already
+  granted to it, so a later `release_slot` never grants a finished Task.
 - **Observation.** `Group:wait()` makes one pass over the membership Map before
   suspending. `observe_thread` takes the memoized monitor and checks its status
   first: a finished monitor retires inline; otherwise it forwards a pending
   group abort, installs one terminal listener, and marks the member `true`.
+  Each completion waiter is withdrawn the same way and rechecks the running
+  count after it is queued, because cancelling a granted admission from a
+  finalizer releases its slot synchronously.
 - **Retirement.** `finish_thread` runs only after the proxy's native gate. It
   checks membership, deletes it, registers `defer self:release_slot()`, and only
   then projects `spawned:status()` with the monitor's error as fallback. Retiring
@@ -474,6 +494,15 @@ an admitted child; the same `Thread` and slot persist across setup failures.
 - **Shutdown.** Runtime shutdown cancels each member proxy as an ordinary Task;
   the cleanup forwards to the worker, and membership removal and slot release
   still wait for the OS join.
+- **State close.** Closing the Lua state unwinds each waiting `spawn*` and
+  `Group:wait()` Task, newest first, and its withdrawal runs inside a
+  finalizer. A granted slot passes to the next queued admission, and the last
+  release wakes the completion waiters. Each wake only queues a continuation
+  that never runs, and nothing awaits. No withdrawn admission starts a thread.
+  Member proxies forward cancellation to their threads and stay nonterminal
+  ([proxy retirement](#join-proxy-retirement-and-the-native-terminal-barrier)).
+  `test_lua_close_withdraws_group_waiters` covers both cases: with and without
+  a running member.
 - **Retry boundaries.**
   - A live member whose OS join fails escapes `async.loop()` as the driver
     `OperationError`; Task, control, token, Runtime and slot survive, and a later

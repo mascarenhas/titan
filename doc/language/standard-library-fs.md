@@ -173,10 +173,22 @@ returns.
 Application code owns `File:close()`. A File is an operating-system descriptor,
 not a libuv loop handle, so async Runtime shutdown neither tracks nor closes a
 File left open. Such a descriptor remains open until application code closes
-it or operating-system process teardown reclaims it. Once libuv accepts a
-close submission, the File wrapper is terminal even if the callback reports an
-error. The runtime reports that error once and never retries the close, because
-the operating system may already have reused that descriptor number.
+it, its Lua state closes, or operating-system process teardown reclaims it.
+Once libuv accepts a close submission, the File wrapper is terminal even if the
+callback reports an error. The runtime reports that error once and never
+retries the close, because the operating system may already have reused that
+descriptor number.
+
+### Closing the Lua state
+
+Closing the Lua state closes every File of that state that is still open. The
+close runs synchronously on the closing thread, because the state close cannot
+await a libuv request, so a suspended Task's `defer file:close()` completes
+instead of raising. A File whose read, write or flush request was still in
+flight when a Task waiting for it was unwound stays open: the worker may still
+be using the descriptor, and closing it could redirect that request to a
+reused descriptor number. That descriptor remains open until the process
+exits.
 
 ## Transferring files
 

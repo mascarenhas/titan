@@ -1,8 +1,10 @@
 local test = import "test"
 local async = import "async"
+local lua = import "lua"
 local net = import "net"
 local ssl = import "ssl"
 local string = import "string"
+local uv = import "uv"
 foreign import "ssl_allocator_fixture.h"
 foreign import "stdio.h"
 
@@ -247,6 +249,67 @@ local function established_failure(kind: string)
   end)
 end
 
+local abandoned_parked = false
+local abandoned_server: ssl.Server? = nil
+
+-- Public so a nested Lua state can call it. Leaves an unclosed TLS listener
+-- and a TLS engine parked mid-handshake behind a pending lexical close; the
+-- plain TCP peer never answers.
+function abandon_tls(port: integer)
+  local task = async.run<|value, value|>(function (): value
+    for candidate = 47100, 47199 do
+      do
+        abandoned_server = ssl.listen("127.0.0.1", candidate, "server.pem",
+                                      "server-key.pem")
+        break
+      catch
+        if not (error is async.OperationError) or
+            (error as async.OperationError).name ~= "EADDRINUSE" then raise end
+      end
+    end
+    test.assert(abandoned_server ~= nil, "could not find an available state-close TLS port")
+    local connection = ssl.client(net.connect("127.0.0.1", port), "localhost", "ca.pem")
+    defer connection:close()
+    abandoned_parked = true
+    connection:handshake()
+    return nil
+  end)
+  while not abandoned_parked do
+    case task:status()
+    when failed(failure) then failure:raise()
+    else
+    end
+    uv.run(async.current_loop(), uv.RUN_NOWAIT)
+    if not abandoned_parked then uv.sleep(1) end
+  end
+end
+
+local function close_abandoned_tls_state()
+  run_case(function ()
+    local listener, port = listen_available()
+    defer listener:close()
+    local state = lua.new()
+    defer state:close()
+    state:run([[
+      package.path, package.cpath = '', ''
+      require('ssl_allocator_app').abandon_tls(...)
+    ]], "=abandoned-tls", async.TransferValue.is_integer(port))
+    state:close()
+  end)
+end
+
+-- Closing a Lua state must release the TLS engine, its BIOs, and every
+-- SSL_CTX that only that state owned. The first round allocates OpenSSL's
+-- lazily initialized process state; the second must return to that balance.
+local function state_close()
+  close_abandoned_tls_state()
+  local before = ffi.titan_ssl_allocator_live()
+  close_abandoned_tls_state()
+  local leaked = ffi.titan_ssl_allocator_live() - before
+  test.assert(leaked == 0, "Lua state close leaked " .. (leaked as integer) ..
+              " OpenSSL allocations")
+end
+
 function main(args: {string}): integer
   test.assert(#args == 1, "SSL allocator fixture requires one scenario")
   if ffi.titan_ssl_allocator_installed() ~= 1 then
@@ -256,7 +319,7 @@ function main(args: {string}): integer
   local scenario = args[1]
   if scenario ~= "client_context" and scenario ~= "ssl_object" and
       scenario ~= "server_context" and scenario ~= "accepted_engine" and
-      ffi.titan_ssl_allocator_layout_supported() ~= 1 then
+      scenario ~= "state_close" and ffi.titan_ssl_allocator_layout_supported() ~= 1 then
     ffi.puts("capability: targeted allocator callback locations require OpenSSL 3.5.7 or 3.5.9")
     return 77
   end
@@ -270,9 +333,10 @@ function main(args: {string}): integer
   elseif scenario == "trust_store_insertion" then trust_store_insertion()
   elseif scenario == "verification_host_copy" then verification_host_copy()
   elseif scenario == "accepted_engine" then accepted_engine()
+  elseif scenario == "state_close" then state_close()
   else raise "unknown SSL allocator fixture scenario"
   end
-  test.assert(ffi.titan_ssl_allocator_fired() == 1,
+  test.assert(scenario == "state_close" or ffi.titan_ssl_allocator_fired() == 1,
               "fixture omitted its verified one-shot allocation failure")
   ffi.puts("SSL_ALLOCATOR_OK")
   return 0

@@ -744,8 +744,11 @@ local function coalescing_receiver_close_unretired_runtime(park_task: boolean)
     "lua_close dispatched a callback capturing an already-finalized Thread")
   test.assert((counts[5] as integer) == 1,
     "lua_close did not successfully close the unretired Runtime's loop")
-  test.assert((counts[1] as integer) == registrations and (counts[2] as integer) == 0,
-    "lua_close re-entered an abandoned external wait")
+  -- The parked Task unwinds at close: its wait's own cleanup withdraws the
+  -- closure registration exactly once, and nothing registers again.
+  test.assert((counts[1] as integer) == registrations and
+              (counts[2] as integer) == registrations,
+    "lua_close did not withdraw the abandoned external wait exactly once")
   test.assert((counts[3] as integer) == 0,
     "lua_close entered a Runtime-close listener")
   test.assert((counts[4] as integer) == 0,

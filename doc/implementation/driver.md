@@ -1737,6 +1737,9 @@ runtime edits can be tested before reinstalling.
 * **`TITAN_LIKELY(x)` / `TITAN_UNLIKELY(x)`** — `__builtin_expect`
   wrappers (plain parentheses off GCC/Clang); used on the hot/cold
   sides of generated type checks.
+* **`TITAN_COLD`** — `__attribute__((cold))` (empty off GCC/Clang) on the
+  abandoned-coroutine unwind helpers. It marks calls to them unlikely, which lets
+  optimized builds place the calling blocks outside the hot instruction stream.
 * **Constants** — the version and path constants (`TITAN_ABI_VERSION`,
   `TITAN_VERSION`, `TITAN_LIBRARY_VERSION`, `TITAN_LIBRARY_VERSION_SUFFIX`,
   `TITAN_PATH_VAR`; see [Compiled-module

@@ -719,12 +719,20 @@ local function thread_finalize(self: Thread<|value|>)
   end
 end
 
+-- Cleanup run while an abandoned coroutine unwinds at Lua-state close can reach
+-- a Thread whose finalizer already released its control block.
+local function Thread:control(): foreign *titan_thread_control
+  local ctrl = self.native
+  if ctrl == nil then raise "thread handle was finalized" end
+  return ctrl
+end
+
 local function Thread:reconstruct_terminal_status(): ThreadStatus<|R|>
   local cached? = self.cached_status
   if cached ~= nil then
     return cached
   end
-  local ctrl = self.native
+  local ctrl = self:control()
   uv.native_mutex_lock(ctrl.mutex)
   ctrl.observed = 1
   local kind = ctrl.status_kind
@@ -788,7 +796,7 @@ function Thread:status(): ThreadStatus<|R|>
   if cached ~= nil then
     return cached
   end
-  local ctrl = self.native
+  local ctrl = self:control()
   uv.native_mutex_lock(ctrl.mutex)
   local done = ctrl.finished ~= 0
   uv.native_mutex_unlock(ctrl.mutex)
@@ -799,7 +807,7 @@ function Thread:status(): ThreadStatus<|R|>
 end
 
 local function Thread:wait_until_finished()
-  local ctrl = self.native
+  local ctrl = self:control()
   uv.native_mutex_lock(ctrl.mutex)
   local done = ctrl.finished ~= 0
   if done then ctrl.observed = 1 end
@@ -837,7 +845,7 @@ end
 -- @usage standard-library-thread.md
 function Thread:cancel(reason: async.CancellationReason<|value|>?)
   local actual = reason or async.CancellationReason.simple("cancelled")
-  local ctrl = self.native
+  local ctrl = self:control()
   uv.native_mutex_lock(ctrl.mutex)
   local ignore = ctrl.finished ~= 0 or ctrl.cancel_requested ~= 0
   uv.native_mutex_unlock(ctrl.mutex)
@@ -890,8 +898,14 @@ function Thread:task(): async.Task<|R, value|>
       raise "unreachable running status after native thread completion"
     end
   end, function (reason: async.CancellationReason<|value|>?)
-    defer final_wait:close()
-    defer final_wait:wait_cleanup()
+    -- While the Lua state closes this cleanup runs outside any Task, so it
+    -- cannot await the barrier; runtime_finalize leaves the armed gate
+    -- nonterminal instead.
+    -- Implementation notes: doc/implementation/libuv-runtime.md#lua-state-close-of-an-unretired-runtime
+    defer if ffi.titan_state_closing(L) == 0 then
+      defer final_wait:close()
+      final_wait:wait_cleanup()
+    end
     if not finished then self:cancel(reason) end
   end, final_wait)
   published = true

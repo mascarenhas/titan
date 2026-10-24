@@ -1882,6 +1882,14 @@ end
             pending("Mach-O universal Titan archive metadata and libtool repackaging")
             return
         end
+        -- driver.IS_DARWIN is unset until a compiler operation initializes
+        -- the platform; initialize it so a filtered run still exercises
+        -- the Darwin tools instead of passing vacuously.
+        local platform_context = driver.new_resolver_context()
+        local initialized, platform_error =
+            driver.initialize_platform(platform_context)
+        assert.truthy(driver.close_resolver_context(platform_context))
+        assert.truthy(initialized, platform_error)
         if not driver.IS_DARWIN then return end
 
         write_file(source_root .. "/fat/api.titan", [[
@@ -1968,11 +1976,25 @@ end
             x86_archive, raw_archive,
             "-output", raw_universal,
         }, workspace)
-        assert.falsy(accepted, rejection_output)
-        assert.truthy(
-            rejection_output:find("raw-member.a", 1, true) or
-            rejection_output:find("raw.txt", 1, true),
-            rejection_output)
+        if accepted then
+            -- Current Darwin lipo (cctools 27037, macOS 27) may report
+            -- success while dropping an input archive that has no Mach-O
+            -- member. The malformed member must not reach the container.
+            assert.falsy(read_file(raw_universal):find(
+                "titan metadata is not a Mach-O object", 1, true))
+            local filtered, filtered_err =
+                staticmetadata.scan_archive(
+                    raw_universal, metadata_options())
+            assert.truthy(filtered, filtered_err)
+            assert.equal("fat_archive", filtered.kind)
+            assert.equal(1, #filtered.slices)
+            assert.same({ "fat.api" }, filtered.key_order)
+        else
+            assert.truthy(
+                rejection_output:find("raw-member.a", 1, true) or
+                rejection_output:find("raw.txt", 1, true),
+                rejection_output)
+        end
 
         local universal = workspace .. "/fat/api.a"
         assert.truthy(os.remove(universal))
