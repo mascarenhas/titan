@@ -1124,9 +1124,28 @@ end
 -- every POSIX command retain their existing execution and diagnostics.
 function driver.run_link_command(argv, verbose, output)
     if not platform.windows then return run_argv(argv, verbose) end
+    if type(argv) ~= "table" or #argv == 0 then
+        return nil, "link command must be a nonempty argument array"
+    end
+    local count = #argv
+    for index = 1, count do
+        if argv[index] == nil then
+            return nil, "link command must be a dense argument array"
+        end
+    end
+    for key in pairs(argv) do
+        if type(key) ~= "number" or key < 1 or key > count or key % 1 ~= 0 then
+            return nil, "link command must be a dense argument array"
+        end
+    end
     local command, err = parsed_words(driver.CC, "CC")
     if not command then return nil, err end
     if #command == 0 then return nil, "CC command is empty" end
+    for index = 1, #command do
+        if argv[index] ~= command[index] then
+            return nil, "link command does not match the configured CC command prefix"
+        end
+    end
     local arguments = { table.unpack(argv, #command + 1) }
     local contents
     contents, err = platform.windows_response_contents(arguments)

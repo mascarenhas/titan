@@ -9139,9 +9139,9 @@ describe("Windows link response files", function()
         response = temporary.name("-native-link.rsp")
         os.remove(response)
         previous = {
-            windows = platform.windows, cc = driver.CC,
+            windows = platform.windows, cc = driver.CC, getenv = platform.getenv,
             reserve = driver.sibling_temporary_path,
-            execute = os.execute, print = _G.print,
+            execute = os.execute, print = _G.print, remove = os.remove,
         }
         platform.windows = true
         driver.CC = 'ccache "C:/compiler tools/clang.exe"'
@@ -9154,6 +9154,8 @@ describe("Windows link response files", function()
         driver.sibling_temporary_path = previous.reserve
         os.execute = previous.execute
         _G.print = previous.print
+        os.remove = previous.remove
+        platform.getenv = previous.getenv
         os.remove(response)
     end)
 
@@ -9161,6 +9163,7 @@ describe("Windows link response files", function()
         local contents = assert(platform.windows_response_contents({
             "", "plain.o", [=[C:\long path\file.o]=], [=[quote"inside.o]=],
             [=[trailing\]=], [=[a\"b]=], "%!^&|; ℙ.o",
+            "single'quote.o", "tab\tchar.o", "@flag",
         }))
         assert.equal([=[""
 "plain.o"
@@ -9169,6 +9172,9 @@ describe("Windows link response files", function()
 "trailing\\"
 "a\\\"b"
 "%!^&|; ℙ.o"
+"single'quote.o"
+"tab	char.o"
+"@flag"
 ]=], contents)
     end)
 
@@ -9180,6 +9186,33 @@ describe("Windows link response files", function()
             local contents, err = platform.windows_response_contents(arguments)
             assert.is_nil(contents)
             assert.is_string(err)
+        end
+    end)
+
+    it("rejects invalid argv and a different CC prefix before publication", function()
+        driver.sibling_temporary_path = function() error("response must not be reserved") end
+        os.execute = function() error("link must not launch") end
+        for _, case in ipairs({
+            { "nonempty argument array", nil },
+            { "nonempty argument array", false },
+            { "nonempty argument array", "not argv" },
+            { "nonempty argument array", {} },
+            { "dense argument array", {
+                "ccache", "C:/compiler tools/clang.exe", [4] = "input.o",
+            } },
+            { "dense argument array", {
+                "ccache", "C:/compiler tools/clang.exe", "input.o", extra = true,
+            } },
+            { "dense argument array", {
+                "ccache", "C:/compiler tools/clang.exe", "input.o", [1.5] = true,
+            } },
+            { "configured CC command prefix", { "other", "cc", "input.o" } },
+            { "configured CC command prefix", { "ccache", "other.exe", "input.o" } },
+            { "configured CC command prefix", { "ccache" } },
+        }) do
+            local ok, err = driver.run_link_command(case[2], false, "result.dll")
+            assert.is_nil(ok)
+            assert.matches(case[1], err, 1, true)
         end
     end)
 
@@ -9215,6 +9248,52 @@ describe("Windows link response files", function()
         end)
     end
 
+    for _, case in ipairs({ { "successful", true, 0 }, { "failed", false, 23 } }) do
+        it("reports response removal failure after a " .. case[1] .. " link", function()
+            os.execute = function() return case[2] or nil, "exit", case[3] end
+            os.remove = function(filename)
+                if filename == response then return nil, "injected removal failure" end
+                return previous.remove(filename)
+            end
+            local ok, err, code = driver.run_link_command({
+                "ccache", "C:/compiler tools/clang.exe", "input.o",
+            }, false, "result.dll")
+            assert.is_nil(ok)
+            assert.equal(case[3], code)
+            assert.equal((case[2] and "" or "exit; ") ..
+                "failed to remove link response file '" .. response ..
+                "': injected removal failure", err)
+            assert.equal("file", lfs.attributes(response, "mode"))
+        end)
+    end
+
+    it("reserves the real response beside the output and removes it", function()
+        driver.sibling_temporary_path = previous.reserve
+        if not previous.windows then platform.getenv = os.getenv end
+        local output = paths.basename(response) .. ".dll"
+        local prefix = output .. ".link.rsp.tmp."
+        os.execute = function(command)
+            local found
+            for filename in lfs.dir(".") do
+                if filename:sub(1, #prefix) == prefix then
+                    assert.is_nil(found)
+                    found = filename
+                end
+            end
+            assert.is_string(found)
+            response = found
+            assert.equal("file", lfs.attributes(response, "mode"))
+            assert.equal(assert(platform.windows_command({
+                "ccache", "C:/compiler tools/clang.exe", "@" .. response,
+            }, false)), command)
+            return true, "exit", 0
+        end
+        assert.is_true(driver.run_link_command({
+            "ccache", "C:/compiler tools/clang.exe", "-shared", "-o", output, "input.o",
+        }, false, output))
+        assert.is_nil(lfs.attributes(response))
+    end)
+
     it("removes the response file when execution throws", function()
         os.execute = function() error("injected link launch error") end
         local ok, err = driver.run_link_command({
@@ -9235,7 +9314,7 @@ describe("Windows link response files", function()
         assert.matches("failed to open link response file", err, 1, true)
     end)
 
-    it("links many long native Windows object paths", function()
+    it("links native Windows object paths beyond the CreateProcess limit", function()
         if not previous.windows then
             pending("native Windows Clang response-file transport")
             return
@@ -9266,12 +9345,12 @@ describe("Windows link response files", function()
             for _, argument in ipairs({ "-shared", "-o", output }) do
                 command[#command + 1] = argument:gsub("/", "\\")
             end
-            for index = 1, 100 do
+            for index = 1, 300 do
                 local name = root .. "/" .. string.rep("long_object_", 7) .. index .. ".o"
                 write(name, bytes)
                 command[#command + 1] = name:gsub("/", "\\")
             end
-            assert.is_true(#assert(platform.windows_command(command, false)) > 8191)
+            assert.is_true(#table.concat(command, " ") > 32767)
             local ok, term, code = driver.run_link_command(command, false, output)
             assert.is_true(ok, tostring(term) .. ", exit " .. tostring(code))
             assert.equal("file", lfs.attributes(output, "mode"))
