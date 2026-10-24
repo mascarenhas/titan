@@ -129,10 +129,7 @@ if not jobs or jobs > math.maxinteger then
     exit("--jobs and TITAN_JOBS require a positive integer")
 end
 
-local function link_failed(kind, modname, term, code)
-    return string.format("failed to link %s '%s' (%s%s)",
-        kind, modname, tostring(term), code and (", " .. tostring(code)) or "")
-end
+local link_failed = driver.link_failure_message
 
 driver.TITAN_SOURCE_PATH = args.tree or driver.TITAN_SOURCE_PATH
 driver.LUA_SOURCE_PATH = args.lua or driver.LUA_SOURCE_PATH
@@ -676,35 +673,36 @@ else
     local native_payload, payload_err =
         driver.classify_native_payloads(args.extra_object, native_target)
     if not native_payload then exit(payload_err) end
-    local temporary, temporary_directory =
-        driver.staged_library_output(provider_output)
-    if not temporary then
-        table.insert(errors, "failed to stage library '" .. provider ..
-            "': " .. tostring(temporary_directory))
-    end
-    if #errors > 0 then exit(table.concat(errors, "\n")) end
-    local ok, term, code = driver.compile_library_output(
-        temporary, ofiles, args.link, args.verbose, nil,
-        selected_static_archives, native_payload.inputs, provider_output,
-        platform.windows and output_names or nil)
-    if not ok then
-        driver.remove_path(temporary)
-        driver.remove_path(temporary .. ".dSYM")
-        driver.remove_path(temporary_directory)
-        table.insert(errors, link_failed("library", provider, term, code))
-    elseif platform.windows then
-        local valid, validation_err = driver.validate_library_image_fresh(
-            temporary, generated_entries, output_names, args.verbose)
-        if valid and provider == "titan" then
-            valid, validation_err = driver.validate_titan_support(temporary, args.verbose)
+    if platform.windows then
+        local temporary, temporary_directory =
+            driver.staged_library_output(provider_output)
+        if not temporary then
+            exit("failed to stage library '" .. provider .. "': " ..
+                tostring(temporary_directory))
         end
-        if valid then
-            valid, validation_err = driver.publish_windows_provider(
-                temporary, provider_output, shim_plans, provider)
+        local ok, term, code = driver.compile_library_output(
+            temporary, ofiles, args.link, args.verbose, nil,
+            selected_static_archives, native_payload.inputs, provider_output,
+            output_names)
+        if not ok then
+            driver.remove_path(temporary)
+            driver.remove_path(temporary .. ".dSYM")
+            driver.remove_path(temporary_directory)
+            table.insert(errors, link_failed("library", provider, term, code))
+        else
+            local valid, validation_err = driver.validate_library_image_fresh(
+                temporary, generated_entries, output_names, args.verbose)
+            if valid and provider == "titan" then
+                valid, validation_err = driver.validate_titan_support(temporary, args.verbose)
+            end
+            if valid then
+                valid, validation_err = driver.publish_windows_provider(
+                    temporary, provider_output, shim_plans, provider)
+            end
+            driver.remove_path(temporary)
+            driver.remove_path(temporary_directory)
+            if not valid then table.insert(errors, validation_err) end
         end
-        driver.remove_path(temporary)
-        driver.remove_path(temporary_directory)
-        if not valid then table.insert(errors, validation_err) end
     else
         local ordered_archive_inputs = {}
         for _, name in ipairs(linked_names) do
@@ -727,100 +725,35 @@ else
             }
         end
 
-        local temporary_archive = temporary:gsub("[.]so$", ".a")
-        local archive_result, archive_err = driver.build_static_archive(
-            temporary_archive, nil, nil, native_target, args.verbose,
-            ordered_archive_inputs)
-        if not archive_result then
-            driver.remove_path(temporary)
-            driver.remove_path(temporary .. ".dSYM")
-            driver.remove_path(temporary_archive)
-            driver.remove_path(temporary_directory)
-            table.insert(errors, "failed to build static provider '" ..
-                provider .. "': " .. tostring(archive_err))
-        else
-        local valid, validation_err =
-            driver.validate_library_image(temporary, output_names)
-        if valid and provider == "titan" then
-            valid, validation_err =
-                driver.validate_titan_support(temporary, args.verbose)
-        end
-        if valid then
-            valid, validation_err =
-                driver.validate_archive_library_equality(
-                    archive_result.archive, temporary, output_names,
-                    "staged provider pair for '" .. provider .. "'")
-        end
-        if valid then
-            valid, validation_err =
-                driver.validate_library_image_fresh(
-                    temporary, archive_result.entries, output_names,
-                    args.verbose)
-        end
-        local validation_image = temporary_directory ..
-            "/archive-validation.so"
-        if valid then
-            local image_ok, image_term, image_code =
-                driver.compile_archive_validation_image(
-                    validation_image, temporary_archive, args.link,
-                    args.verbose, nil, platform.windows and output_names or nil)
-            if not image_ok then
-                valid = nil
-                validation_err = link_failed(
-                    "archive validation image", provider,
-                    image_term, image_code)
-            end
-        end
-        if valid then
-            valid, validation_err =
-                driver.validate_library_image(
-                    validation_image, output_names)
-        end
-        if valid and provider == "titan" then
-            valid, validation_err =
-                driver.validate_titan_support(
-                    validation_image, args.verbose)
-        end
-        if valid then
-            valid, validation_err =
-                driver.validate_archive_library_equality(
-                    archive_result.archive, validation_image, output_names,
-                    "archive-backed provider for '" .. provider .. "'")
-        end
-        if valid then
-            valid, validation_err =
-                driver.validate_library_image_fresh(
-                    validation_image, archive_result.entries, output_names,
-                    args.verbose)
-        end
-        driver.remove_path(validation_image)
-        driver.remove_path(validation_image .. ".dSYM")
-        if not valid then
-            driver.remove_path(temporary)
-            driver.remove_path(temporary .. ".dSYM")
-            driver.remove_path(temporary_archive)
-            driver.remove_path(temporary_directory)
-            table.insert(errors, validation_err)
+        local pair, pair_err = driver.link_provider_pair({
+            provider = provider,
+            public_dso = provider_output,
+            libnames = ofiles,
+            link = args.link,
+            verbose = args.verbose,
+            static_archives = selected_static_archives,
+            ordered_payload = native_payload.inputs,
+            archive_inputs = ordered_archive_inputs,
+            target = native_target,
+            module_names = output_names,
+            parallelism = jobs,
+        })
+        if not pair then
+            table.insert(errors, pair_err)
         else
             local published, publish_err =
                 driver.publish_provider_bundle(
-                    temporary, temporary_archive, provider_output,
-                    shim_plans, archive_result.entries, {
+                    pair.dso, pair.archive, provider_output,
+                    shim_plans, pair.entries, {
                         provider = provider,
                         native_inputs = native_inputs,
                         output_root = args.output,
                     })
+            driver.remove_path(pair.directory)
             if not published then
-                driver.remove_path(temporary)
-                driver.remove_path(temporary .. ".dSYM")
-                driver.remove_path(temporary_archive)
-                driver.remove_path(temporary_directory)
                 table.insert(errors, "failed to publish provider pair '" ..
                     provider .. "': " .. tostring(publish_err))
-            else
-                driver.remove_path(temporary_directory)
             end
-        end
         end
     end
 end
