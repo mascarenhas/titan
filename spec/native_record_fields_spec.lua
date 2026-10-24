@@ -43,7 +43,9 @@ describe("trusted native record-field intrinsic", function()
     setup(function() probe_session = h.new_checker_probe_session() end)
     teardown(function() h.close_checker_probe_session(probe_session) end)
     after_each(function()
-        for _, suffix in ipairs({ ".c", ".o", ".so", ".a", ".titan.h", ".ffi.h" }) do
+        for _, suffix in ipairs({
+            ".c", ".o", ".so", ".a", ".titan.h", ".ffi.h", ".priv.h", ".parts",
+        }) do
             os.remove(module_name .. suffix)
         end
         os.execute("rm -rf " .. module_name .. ".so.dSYM")

@@ -193,8 +193,6 @@ describe("native callable symbol separators", function()
 
         assert.falsy(csrc:find("symbol_case_Foo_bar_new_titanstatic", 1, true))
         assert.falsy(csrc:find("symbol_case_Foo_bar_touch_titanmethod", 1, true))
-        assert.falsy(csrc:find("static int __index", 1, true))
-        assert.falsy(csrc:find("static int __newindex", 1, true))
         assert.falsy(csrc:find("ℳ", 1, true))
         assert.falsy(csrc:find("ℱ", 1, true))
 

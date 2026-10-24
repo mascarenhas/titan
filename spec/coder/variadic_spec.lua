@@ -13,6 +13,8 @@ local run_coder = h.run_coder
 
 local function clean()
     os.execute("rm -rf *.o *.so *.dSYM")
+    os.remove("test.parts")
+    os.remove("test.priv.h")
     if not h.verbose then os.execute("rm -f *.c") end
 end
 

@@ -166,6 +166,16 @@ local function remove_artifact(path)
     os.remove(path)
     local stem = path:match("^(.*)[.]c$")
     if stem then
+        local companion = io.open(stem .. ".parts", "rb")
+        if companion then
+            local count = driver.parse_parts_companion(companion:read("*a"), stem)
+            companion:close()
+            for index = 1, (count or 1) - 1 do
+                os.remove(driver.part_c_filename(stem, index))
+                os.remove(driver.part_object_filename(stem, index))
+            end
+        end
+        os.remove(stem .. ".priv.h")
         os.remove(stem .. ".ffi.h")
         os.remove(stem .. ".titan.h")
         os.remove(stem .. ".parts")

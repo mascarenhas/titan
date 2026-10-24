@@ -3,7 +3,7 @@ local h = require "spec.support.helpers"
 
 local function clean()
     for _, name in ipairs({"test", "nominal_provider", "nominal_consumer"}) do
-        for _, ext in ipairs({"c", "o", "so", "a", "ffi.h", "titan.h"}) do
+        for _, ext in ipairs({"c", "o", "so", "a", "ffi.h", "titan.h", "priv.h", "parts"}) do
             os.remove(name .. "." .. ext)
         end
     end

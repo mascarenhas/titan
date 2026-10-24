@@ -17,6 +17,10 @@ local function clean_generated_modules()
         os.remove(name .. ".o")
         os.remove(name .. ".so")
         os.remove(name .. ".a")
+        os.remove(name .. ".ffi.h")
+        os.remove(name .. ".titan.h")
+        os.remove(name .. ".priv.h")
+        os.remove(name .. ".parts")
         os.execute("rm -rf " .. name .. ".so.dSYM")
     end
 end
@@ -63,12 +67,17 @@ describe("unions (end-to-end)", function()
 
     it("publishes a boxed payload reader including private Array variants", function()
         h.with_extra_cflags({ "-DTITAN_COMPILER_TESTS" }, function()
-            h.compile_and_read_c([[
+            local compiled, compilation_error = h.build_so_chain({ {
+                name = "test", src = [[
                 local reflect = import "reflect"
                 union Packet
                     empty()
                     numbers({integer})
                     local hidden({integer}?)
+                end
+
+                function public_packet(): Packet
+                    return Packet.numbers({20, 22})
                 end
 
                 function private_packet(): Packet
@@ -91,7 +100,9 @@ describe("unions (end-to-end)", function()
                         raise "expected generated union reader"
                     end
                 end
-            ]])
+            ]],
+            } })
+            assert.truthy(compiled, compilation_error)
             local ok, err = h.call("test", [[
                 local packet = test.private_packet()
                 local tag, arity, total = test.inspect(packet)
@@ -100,7 +111,7 @@ describe("unions (end-to-end)", function()
                 assert(tag == 2 and arity == 1 and total == nil)
                 tag, arity, total = test.inspect(test.Packet.empty())
                 assert(tag == 0 and arity == 0 and total == nil)
-                tag, arity, total = test.inspect(test.Packet.numbers({20, 22}))
+                tag, arity, total = test.inspect(test.public_packet())
                 assert(tag == 1 and arity == 1 and total == 42)
                 local registry = debug.getregistry()
                 local mt = debug.getmetatable(packet)
