@@ -1,0 +1,1022 @@
+local assert = require "luassert"
+local cdriver = require "c-parser.cdriver"
+local checker = require "titan-compiler.checker"
+local coder = require "titan-compiler.coder"
+local compiler_io = require "titan-compiler.io"
+local coverage = require "titan-compiler.coverage"
+local coverage_lines = require "titan-compiler.coverage_lines"
+local driver = require "titan-compiler.driver"
+local h = require "spec.support.helpers"
+local installed_prefix = require "spec.support.installed_prefix"
+local lfs = require "lfs"
+local asan_mapper = require "spec.support.asan_generated_c_context"
+local objectmetadata = require "titan-compiler.objectmetadata"
+local parser = require "titan-compiler.parser"
+local platform = require "titan-compiler.platform"
+local staticmetadata = require "titan-compiler.staticmetadata"
+local temporary = require "spec.support.temporary"
+local util = require "titan-compiler.util"
+
+local PREFIX = installed_prefix.active()
+local LUA = PREFIX .. (platform.windows and "/bin/lua.exe" or "/bin/lua")
+local io_strategy = compiler_io.new_sync()
+
+local function write_file(path, contents)
+    local parent = path:match("^(.*)/[^/]+$")
+    if parent and lfs.attributes(parent, "mode") ~= "directory" then
+        local accum = path:sub(1, 1) == "/" and "" or "."
+        for part in parent:gmatch("[^/]+") do
+            accum = (accum == "" or accum == ".") and (accum == "" and ("/" .. part) or part)
+                or (accum .. "/" .. part)
+            if lfs.attributes(accum, "mode") ~= "directory" then
+                lfs.mkdir(accum)
+            end
+        end
+    end
+    local file = assert(io.open(path, "wb"))
+    assert(file:write(contents))
+    assert(file:close())
+end
+
+local function read_file(path)
+    local file = assert(io.open(path, "rb"))
+    local contents = assert(file:read("*a"))
+    assert(file:close())
+    return contents
+end
+
+local function file_exists(path)
+    return lfs.symlinkattributes(path, "mode") == "file"
+end
+
+local function remove_tree(path)
+    local mode = lfs.symlinkattributes(path, "mode")
+    if mode == "link" or mode == "file" then
+        os.remove(path)
+    elseif mode == "directory" then
+        for entry in lfs.dir(path) do
+            if entry ~= "." and entry ~= ".." then
+                remove_tree(path .. "/" .. entry)
+            end
+        end
+        lfs.rmdir(path)
+    end
+end
+
+local function run_cmd(argv, cwd)
+    local previous = cwd and assert(lfs.currentdir()) or nil
+    if cwd then assert(lfs.chdir(cwd)) end
+    local ok, result = pcall(function()
+        return io_strategy:run(argv, { stderr_to_stdout = true })
+    end)
+    if previous then assert(lfs.chdir(previous)) end
+    assert.is_true(ok, tostring(result))
+    local output = result.output or result.diagnostic or ""
+    if platform.windows then output = output:gsub("\r\n", "\n") end
+    return result.ok, output, result.why, result.status
+end
+
+local MULTI_CONSTRUCT_SOURCE = [[
+record Point
+    x: integer
+    y: integer
+end
+
+function Point:sum(): integer
+    return self.x + self.y
+end
+
+union Outcome
+    ok(integer)
+    err(string)
+end
+
+interface Measurable
+    function measure(): integer
+end
+
+function Point:measure(): integer
+    return self.x * 10 + self.y
+end
+
+base_offset: integer = 5
+
+local function make_adder(delta: integer): function(integer): integer
+    local captured = delta
+    return function(input: integer): integer
+        captured = captured + 1
+        return input + captured
+    end
+end
+
+function compute_alpha(a: integer, b: integer): integer
+    local p = Point.new(a, b)
+    local m: Measurable = p
+    local adder = make_adder(base_offset)
+    local adjusted: function(value): value = adder
+    local res: integer = adjusted(m:measure()) as integer
+    return res + p:sum()
+end
+
+function compute_beta(items: {integer}): integer
+    local copy: {integer} = { 10, 20, 30 }
+    local total = 0
+    for i = 1, #items do
+        total = total + items[i]
+    end
+    for i = 1, #copy do
+        total = total + copy[i]
+    end
+    return total
+end
+
+function compute_gamma(flag: boolean): integer
+    local choice = flag and Outcome.ok(42) or Outcome.err("nope")
+    case choice
+        when ok(v) then
+            return v
+        when err(msg) then
+            return #msg
+    end
+end
+
+do
+    base_offset = 10
+end
+]]
+
+describe("split generated C translation units (S1)", function()
+    local workspace
+    local saved_src, saved_out, saved_cc
+
+    before_each(function()
+        saved_src = driver.TITAN_SOURCE_PATH
+        saved_out = driver.OUTPUT_ROOT
+        saved_cc = driver.CC
+        workspace = temporary.name("-split-units")
+        os.remove(workspace)
+        assert(lfs.mkdir(workspace))
+    end)
+
+    after_each(function()
+        driver.TITAN_SOURCE_PATH = saved_src
+        driver.OUTPUT_ROOT = saved_out
+        driver.CC = saved_cc
+        driver.configure_foreign_c()
+        if workspace then
+            remove_tree(workspace)
+            workspace = nil
+        end
+    end)
+
+    local function check_module(modname, source, filename)
+        h.reset(true)
+        filename = filename or (modname:gsub("[.]", "/") .. ".titan")
+        local ast, parse_err = parser.parse(filename, source)
+        assert.truthy(ast, parse_err)
+        local _, errors = checker.check(modname, ast, source, filename)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        return ast
+    end
+
+    it("produces identical single-TU text when splitting is disabled or below threshold", function()
+        local ast_off = check_module("split_ident", MULTI_CONSTRUCT_SOURCE)
+        local gen_off = coder.generate(
+            "split_ident", ast_off, {}, driver.TITAN_ABI_VERSION, true, {
+                c_parts = 1,
+                split_threshold = 0,
+            })
+        assert.is_nil(gen_off.private_header)
+        assert.equal(1, #gen_off.parts)
+        assert.equal(0, gen_off.parts[1].index)
+        assert.is_true(gen_off.parts[1].code_bytes > 0)
+
+        local ast_below = check_module("split_ident", MULTI_CONSTRUCT_SOURCE)
+        local gen_below = coder.generate(
+            "split_ident", ast_below, {}, driver.TITAN_ABI_VERSION, true, {
+                c_parts = 4,
+                split_threshold = gen_off.parts[1].code_bytes + 1024,
+            })
+        assert.is_nil(gen_below.private_header)
+        assert.equal(1, #gen_below.parts)
+        assert.equal(0, gen_below.parts[1].index)
+        assert.equal(gen_off.parts[1].code_bytes, gen_below.parts[1].code_bytes)
+        assert.equal(gen_off.parts[1].code, gen_below.parts[1].code)
+        assert.same(gen_off.private_symbols, gen_below.private_symbols)
+    end)
+
+    it("partitions above-threshold modules into dense parts with a private header and part-0 pinning", function()
+        local ast = check_module("split_part", MULTI_CONSTRUCT_SOURCE)
+        local gen = coder.generate(
+            "split_part", ast, {}, driver.TITAN_ABI_VERSION, true, {
+                c_parts = 4,
+                split_threshold = 1,
+                private_header_output = "split_part.priv.h",
+            })
+        assert.is_string(gen.private_header)
+        assert.truthy(gen.private_header:sub(1, #coder.PRIVATE_HEADER_MARKER)
+            == coder.PRIVATE_HEADER_MARKER)
+        assert.equal(4, #gen.parts)
+        local sum_bytes = 0
+        for idx, part in ipairs(gen.parts) do
+            assert.equal(idx - 1, part.index)
+            assert.is_true(part.code_bytes > 0)
+            sum_bytes = sum_bytes + part.code_bytes
+            assert.truthy(part.code:find('#include "split_part.priv.h"', 1, true))
+        end
+
+        -- Part 0 owns protocol, metadata, init, preload, and resolver.
+        local part0 = gen.parts[1].code
+        assert.truthy(part0:find("TITAN_META_SECTION", 1, true))
+        assert.truthy(part0:find("Udata *split_part_init(lua_State *L)", 1, true))
+        assert.truthy(part0:find("int luaopen_split_part(lua_State *L)", 1, true))
+        assert.truthy(part0:find("split_part_\\u2119_register_preload(lua_State *L)", 1, true))
+        assert.truthy(part0:find("split_part_\\u2119_native_symbol(const char *symbol)", 1, true))
+        assert.truthy(part0:find("split_part_module_identity(void)", 1, true))
+        assert.truthy(part0:find("split_part_\\u2119_functag_0_tag[] =", 1, true))
+
+        for i = 2, #gen.parts do
+            local side = gen.parts[i].code
+            assert.is_nil(side:find("TITAN_META_SECTION", 1, true))
+            assert.is_nil(side:find("Udata *split_part_init(lua_State *L)", 1, true))
+            assert.is_nil(side:find("int luaopen_split_part(lua_State *L)", 1, true))
+            assert.is_nil(side:find("split_part_module_identity(void)", 1, true))
+            assert.is_nil(side:find("_functag_0_tag[] =", 1, true))
+        end
+    end)
+
+    it("compiles, links, and runs split modules with identical behavior and public symbols to unsplit", function()
+        local header_path = workspace .. "/raw_math.h"
+        write_file(header_path, [[
+#ifndef RAW_MATH_H
+#define RAW_MATH_H
+static inline int c_scale(int x, int factor) {
+    return x * factor;
+}
+#endif
+]])
+        local dep_src = string.format([[
+foreign import %q
+
+record SharedBox
+    value: integer
+end
+
+local function private_Step(x: integer): integer
+    return x + 3
+end
+
+function make_box(v: integer): SharedBox
+    return SharedBox.new(private_Step(v))
+end
+
+foreign function raw_triple(x: int): int
+    return ffi.c_scale(x, 3)
+end
+]], header_path)
+
+        local main_src = [[
+local dep = import "pkg.dep.titan"
+
+record Payload
+    count: integer
+    label: string
+end
+
+function Payload:format(): string
+    return self.label .. ":" .. self.count
+end
+
+union Status
+    ready(Payload)
+    empty()
+end
+
+interface Formatter
+    function format(): string
+end
+
+local function make_counter(seed: integer): function(integer): integer
+    local acc = seed
+    return function(step: integer): integer
+        acc = acc + step
+        return acc
+    end
+end
+
+function exercise_all(base: integer): (integer, string, boolean)
+    local box = dep.make_box(base)
+    local tripled = dep.raw_triple(box.value as foreign int) as integer
+    local c = make_counter(tripled)
+    local widened: function(value): value = c
+    local after_calls: integer = (widened(4) as integer) + (widened(6) as integer)
+    local p = Payload.new(after_calls, "sum")
+    local fmt: Formatter = p
+    local st = Status.ready(p)
+    local arr: {integer} = { base, tripled, after_calls }
+    local matched = false
+    case st
+        when ready(inner) then
+            matched = (inner.count == arr[3])
+        when empty() then
+            matched = false
+    end
+    return after_calls, fmt:format(), matched
+end
+]]
+
+        local function build_variant(subdir, c_parts, threshold)
+            h.reset(true)
+            local dir = workspace .. "/" .. subdir
+            local src_dir = dir .. "/src"
+            local out_dir = dir .. "/out"
+            write_file(src_dir .. "/pkg/dep.titan", dep_src)
+            write_file(src_dir .. "/pkg/main.titan", main_src)
+
+            local context = driver.new_resolver_context({
+                source_first = true,
+                output_root = out_dir,
+            })
+            assert(driver.configure_foreign_c(context))
+            local prev_src = driver.TITAN_SOURCE_PATH
+            local prev_out = driver.OUTPUT_ROOT
+            driver.TITAN_SOURCE_PATH = src_dir
+            driver.OUTPUT_ROOT = assert(driver.prepare_output_root(out_dir))
+            local loader = driver.defaultloader({}, {
+                source_roots = { ["pkg.dep"] = true, ["pkg.main"] = true },
+                source_first = true,
+                context = context,
+                output_root = driver.OUTPUT_ROOT,
+                c_parts = c_parts,
+                split_threshold = threshold,
+            })
+            assert(checker.checkimport("pkg.dep", loader))
+            assert(checker.checkimport("pkg.main", loader))
+            assert(driver.finalize_resolver_context(context))
+            local linked_names = { "pkg.dep", "pkg.main" }
+            local plans = assert(driver.plan_foreign_headers(linked_names, driver.imported))
+            assert(driver.write_foreign_header_plans(plans, false, false))
+
+            local requests = {}
+            for _, name in ipairs(linked_names) do
+                requests[#requests + 1] = {
+                    modname = name,
+                    mod = driver.imported[name],
+                    static_deps = context.native_static_names,
+                    options = {
+                        nominal_layouts = context.nominal_layouts,
+                        c_parts = c_parts,
+                        split_threshold = threshold,
+                    },
+                }
+            end
+            local results = driver.compile_modules(requests, 2, false)
+            for idx, res in ipairs(results) do
+                assert.is_true(res.ok, res.err)
+                assert.is_table(res.objects, "missing objects list for request " .. idx)
+            end
+
+            local gen_objs = {}
+            local ofiles = {}
+            for _, name in ipairs(linked_names) do
+                local mod = driver.imported[name]
+                gen_objs[#gen_objs + 1] = {
+                    modname = name,
+                    filename = mod.compiled,
+                    objects = mod.compiled_objects,
+                }
+                for _, obj in ipairs(mod.compiled_objects) do
+                    ofiles[#ofiles + 1] = obj
+                end
+            end
+            local target = assert(driver.derive_target_fingerprint(
+                gen_objs[1].filename, gen_objs[1].modname))
+            assert(driver.validate_generated_objects(gen_objs, target))
+
+            local shims, provider_out = assert(
+                driver.plan_module_shims("pkg", linked_names, driver.OUTPUT_ROOT))
+            local dso_path = provider_out
+            assert(driver.compile_library_output(
+                dso_path, ofiles, nil, false, nil, {}, nil, dso_path,
+                platform.windows and linked_names or nil))
+            for _, shim in ipairs(shims) do
+                write_file(shim.filename, shim.contents)
+            end
+            local archive_path
+            if not platform.windows then
+                archive_path = dso_path:gsub("[.]so$", ".a")
+                local archive_res, archive_err = driver.build_static_archive(
+                    archive_path, { driver.imported["pkg.dep"].compiled,
+                                    driver.imported["pkg.main"].compiled },
+                    nil, target, false)
+                assert.truthy(archive_res, archive_err)
+                local val_so = dir .. "/archive-val.so"
+                assert(driver.compile_archive_validation_image(
+                    val_so, archive_path, nil, false, nil, nil))
+                assert(driver.validate_library_image(val_so, linked_names))
+                assert(driver.validate_archive_library_equality(
+                    archive_res.archive, val_so, linked_names, "split archive validation"))
+                os.remove(val_so)
+            end
+
+            driver.TITAN_SOURCE_PATH = prev_src
+            driver.OUTPUT_ROOT = prev_out
+            assert(driver.close_resolver_context(context))
+            return {
+                out_dir = out_dir,
+                dso = dso_path,
+                archive = archive_path,
+                dep_objects = results[1].objects,
+                main_objects = results[2].objects,
+            }
+        end
+
+        local unsplit = build_variant("unsplit", 1, coder.DEFAULT_SPLIT_THRESHOLD)
+        local split = build_variant("split", 4, 1)
+
+        assert.equal(1, #unsplit.main_objects)
+        assert.equal(4, #split.main_objects)
+        assert.is_true(file_exists(split.out_dir .. "/pkg/main.priv.h"))
+        assert.is_true(file_exists(split.out_dir .. "/pkg/main.parts"))
+        assert.equal(4, driver.parse_parts_companion(
+            read_file(split.out_dir .. "/pkg/main.parts"),
+            split.out_dir .. "/pkg/main"))
+
+        -- Execute both providers in fresh Lua processes, exercising cross-part
+        -- calls, closures, transfer, protobuf codecs, reflection, and foreign bindings.
+        for _, variant in ipairs({ unsplit, split }) do
+            local script = workspace .. "/verify_run.lua"
+            write_file(script, string.format([[
+package.path = %q .. "/?.lua;" .. package.path
+package.cpath = %q .. "/?" .. %q .. ";" .. package.cpath
+local main = require("pkg.main")
+local dep = require("pkg.dep")
+local total, formatted, matched = main.exercise_all(7)
+assert(total == 74, "unexpected total: " .. tostring(total))
+assert(formatted == "sum:74", "unexpected formatted: " .. tostring(formatted))
+assert(matched == true, "unexpected matched")
+local box = dep.make_box(10)
+assert(box.value == 13)
+print("VARIANT_OK")
+]], variant.out_dir, variant.out_dir, platform.windows and ".dll" or ".so"))
+            local ok, out = run_cmd({ LUA, "-E", script })
+            assert.is_true(ok, out)
+            assert.truthy(out:find("VARIANT_OK", 1, true), out)
+        end
+
+        if not platform.windows and not driver.IS_DARWIN then
+            -- Verify DSO dynamic exported symbol sets are identical and no ℙ helper leaks.
+            local ok1, nm_unsplit = run_cmd({ "nm", "-D", "--defined-only", unsplit.dso })
+            local ok2, nm_split = run_cmd({ "nm", "-D", "--defined-only", split.dso })
+            assert.is_true(ok1, nm_unsplit)
+            assert.is_true(ok2, nm_split)
+            local function exported_names(nm_out)
+                local names = {}
+                for line in nm_out:gmatch("[^\n]+") do
+                    local sym = line:match("%s+[A-Za-z]%s+(%S+)%s*$")
+                    if sym then names[#names + 1] = sym end
+                end
+                table.sort(names)
+                return names
+            end
+            local pub_unsplit = exported_names(nm_unsplit)
+            local pub_split = exported_names(nm_split)
+            assert.same(pub_unsplit, pub_split)
+            for _, sym in ipairs(pub_split) do
+                assert.is_nil(sym:find("\226\132\153", 1, true),
+                    "private ℙ symbol leaked to DSO exports: " .. sym)
+            end
+
+            -- Check ld -r combined object undefined/defined equivalence against unsplit.
+            local combined_o = workspace .. "/combined_main.o"
+            local ld_argv = { "ld", "-r", "-o", combined_o }
+            for _, obj in ipairs(split.main_objects) do
+                ld_argv[#ld_argv + 1] = obj
+            end
+            local ld_ok, ld_out = run_cmd(ld_argv)
+            assert.is_true(ld_ok, ld_out)
+            local _, undef_unsplit = run_cmd({ "nm", "-u", unsplit.main_objects[1] })
+            local _, undef_combined = run_cmd({ "nm", "-u", combined_o })
+            local function undef_set(text)
+                local s = {}
+                for line in text:gmatch("[^\n]+") do
+                    local sym = line:match("U%s+(%S+)%s*$")
+                    if sym then s[sym] = true end
+                end
+                return s
+            end
+            assert.same(undef_set(undef_unsplit), undef_set(undef_combined))
+        end
+    end)
+
+    it("enforces complete part-set incremental reuse, repairs missing/truncated/stale parts, cleans holes, and leaves no commit marker on failure", function()
+        local src_dir = workspace .. "/inc_src"
+        local out_dir = workspace .. "/inc_out"
+        local titan_file = src_dir .. "/mod.titan"
+        write_file(titan_file, MULTI_CONSTRUCT_SOURCE)
+
+        local function run_compile(c_parts, threshold, incremental, inject_fail_part, inject_fail_rename)
+            h.reset(true)
+            local context = driver.new_resolver_context({
+                source_first = true,
+                output_root = out_dir,
+            })
+            assert(driver.configure_foreign_c(context))
+            local prev_src = driver.TITAN_SOURCE_PATH
+            local prev_out = driver.OUTPUT_ROOT
+            local prev_cc = driver.CC
+            driver.TITAN_SOURCE_PATH = src_dir
+            driver.OUTPUT_ROOT = assert(driver.prepare_output_root(out_dir))
+
+            local loader = driver.defaultloader({}, {
+                source_roots = { mod = true },
+                incremental = incremental,
+                context = context,
+                output_root = driver.OUTPUT_ROOT,
+                c_parts = c_parts,
+                split_threshold = threshold,
+            })
+            local ok, errs = checker.checkimport("mod", loader)
+            assert.truthy(ok, tostring(errs))
+            local mod = driver.imported["mod"]
+            local was_hit = mod.compiled ~= nil
+
+            if inject_fail_part then
+                local wrapper = workspace .. "/fail_part_cc.sh"
+                write_file(wrapper, string.format([==[#!/usr/bin/env bash
+for arg in "$@"; do
+  if [[ "$arg" == *".part%d.c" ]]; then
+    echo "injected part %d failure" >&2
+    exit 1
+  fi
+done
+exec %s "$@"
+]==], inject_fail_part, inject_fail_part, prev_cc))
+                run_cmd({ "chmod", "+x", wrapper })
+                driver.CC = wrapper
+            end
+
+            local orig_gen = coder.generate
+            if inject_fail_rename then
+                coder.generate = function(...)
+                    local res = orig_gen(...)
+                    -- Make part2.o a directory so rename_output fails during publication
+                    lfs.mkdir(out_dir .. "/mod.part2.o")
+                    return res
+                end
+            end
+
+            local results = driver.compile_modules({
+                {
+                    modname = "mod",
+                    mod = mod,
+                    static_deps = { mod = true },
+                    options = {
+                        c_parts = c_parts,
+                        split_threshold = threshold,
+                    },
+                },
+            }, 2, false)
+
+            coder.generate = orig_gen
+            driver.CC = prev_cc
+            driver.TITAN_SOURCE_PATH = prev_src
+            driver.OUTPUT_ROOT = prev_out
+            assert(driver.close_resolver_context(context))
+            return was_hit, results[1]
+        end
+
+        -- 1. Cold build with 4 parts
+        local hit, res = run_compile(4, 1, true)
+        assert.is_false(hit)
+        assert.is_true(res.ok, res.err)
+        assert.equal(4, #res.objects)
+        for k = 0, 3 do
+            assert.is_true(file_exists(driver.part_object_filename(out_dir .. "/mod", k)))
+        end
+        assert.is_true(file_exists(out_dir .. "/mod.parts"))
+        assert.is_true(file_exists(out_dir .. "/mod.priv.h"))
+
+        -- 2. Warm incremental build with same policy is a hit
+        hit, res = run_compile(4, 1, true)
+        assert.is_true(hit)
+        assert.is_true(res.ok)
+        assert.equal(4, #res.objects)
+
+        -- 3. Deleting a sidecar part (.part2.o) forces a full module miss and rebuilds it
+        assert(os.remove(out_dir .. "/mod.part2.o"))
+        hit, res = run_compile(4, 1, true)
+        assert.is_false(hit)
+        assert.is_true(res.ok)
+        assert.is_true(file_exists(out_dir .. "/mod.part2.o"))
+
+        -- 4. Truncating a sidecar part (.part1.o) forces a miss and rebuilds it
+        write_file(out_dir .. "/mod.part1.o", "truncated")
+        hit, res = run_compile(4, 1, true)
+        assert.is_false(hit)
+        assert.is_true(res.ok)
+
+        -- 5. Making a sidecar part older than source forces a miss
+        local src_mtime = assert(lfs.attributes(titan_file, "modification"))
+        assert(lfs.touch(out_dir .. "/mod.part3.o", src_mtime - 10, src_mtime - 10))
+        hit, res = run_compile(4, 1, true)
+        assert.is_false(hit)
+        assert.is_true(res.ok)
+
+        -- 6. Create a hole by deleting .part2.o/.part2.c, then reduce c_parts to 2:
+        --    stale .part3.o and .part3.c must still be cleaned!
+        assert(os.remove(out_dir .. "/mod.part2.o"))
+        assert(os.remove(out_dir .. "/mod.part2.c"))
+        hit, res = run_compile(2, 1, true)
+        assert.is_false(hit)
+        assert.is_true(res.ok)
+        assert.equal(2, #res.objects)
+        assert.is_false(file_exists(out_dir .. "/mod.part2.o"))
+        assert.is_false(file_exists(out_dir .. "/mod.part3.o"))
+        assert.is_false(file_exists(out_dir .. "/mod.part3.c"))
+
+        -- 7. Reduce c_parts to 1: .priv.h and .part1.o/.c must be cleaned!
+        hit, res = run_compile(1, 1, true)
+        assert.is_false(hit)
+        assert.is_true(res.ok)
+        assert.equal(1, #res.objects)
+        assert.is_false(file_exists(out_dir .. "/mod.priv.h"))
+        assert.is_false(file_exists(out_dir .. "/mod.part1.o"))
+        assert.is_false(file_exists(out_dir .. "/mod.part1.c"))
+
+        -- 8. Failed part compile leaves no primary mod.o or mod.parts
+        hit, res = run_compile(4, 1, false, 2, false)
+        assert.falsy(res.ok)
+        assert.is_false(file_exists(out_dir .. "/mod.o"))
+        assert.is_false(file_exists(out_dir .. "/mod.parts"))
+
+        -- 9. Failed rename during publication leaves no primary mod.o or mod.parts
+        hit, res = run_compile(4, 1, false, nil, true)
+        remove_tree(out_dir .. "/mod.part2.o")
+        assert.falsy(res.ok)
+        assert.is_false(file_exists(out_dir .. "/mod.o"))
+        assert.is_false(file_exists(out_dir .. "/mod.parts"))
+    end)
+
+    it("refuses user-owned .priv.h and .parts paths before mutating outputs", function()
+        local stem = workspace .. "/protected_mod"
+        local source_path = stem .. ".titan"
+        write_file(source_path, MULTI_CONSTRUCT_SOURCE)
+        local ast = check_module("protected_mod", MULTI_CONSTRUCT_SOURCE, source_path)
+
+        write_file(stem .. ".priv.h", "/* user authored header */\n")
+        local ok, err = driver.compile("protected_mod", ast, source_path, {}, false, {
+            c_parts = 4,
+            split_threshold = 1,
+        })
+        assert.is_nil(ok)
+        assert.matches("refusing to overwrite user-owned generated-header path", err, 1, true)
+        assert.equal("/* user authored header */\n", read_file(stem .. ".priv.h"))
+        assert.is_false(file_exists(stem .. ".o"))
+        os.remove(stem .. ".priv.h")
+
+        write_file(stem .. ".parts", "user owned companion\n")
+        ok, err = driver.compile("protected_mod", ast, source_path, {}, false, {
+            c_parts = 4,
+            split_threshold = 1,
+        })
+        assert.is_nil(ok)
+        assert.matches("refusing to overwrite user-owned companion path", err, 1, true)
+        assert.equal("user owned companion\n", read_file(stem .. ".parts"))
+        assert.is_false(file_exists(stem .. ".o"))
+    end)
+
+    it("maps ASan generated-C offsets to hidden functions in nonzero parts using snapshotted private headers", function()
+        if platform.windows or driver.IS_DARWIN then
+            pending("ELF BuildId and section-relative DWARF shadow verification apply to Linux ELF providers")
+            return
+        end
+        local gen_dir = workspace .. "/asan_gen"
+        local src_file = gen_dir .. "/asan_mod.titan"
+        write_file(src_file, MULTI_CONSTRUCT_SOURCE)
+        local ast = check_module("asan_mod", MULTI_CONSTRUCT_SOURCE, src_file)
+
+        local prev_cflags = driver.EXTRA_CFLAGS
+        local prev_ldflags = driver.EXTRA_LDFLAGS
+        driver.EXTRA_CFLAGS = { "-O0", "-fno-lto" }
+        driver.EXTRA_LDFLAGS = { "-O0", "-fno-lto", "-Wl,--build-id=sha1" }
+
+        local ok, err, primary_o, _, objects = driver.compile(
+            "asan_mod", ast, src_file, {}, false, {
+                c_parts = 4,
+                split_threshold = 1,
+            })
+        assert.truthy(ok, err)
+        assert.equal(4, #objects)
+        local provider = workspace .. "/asan_mod.so"
+        assert(driver.compile_library_output(provider, objects, nil, false))
+
+        driver.EXTRA_CFLAGS = prev_cflags
+        driver.EXTRA_LDFLAGS = prev_ldflags
+
+        -- Find a hidden function (e.g. a lambda or Lua entry) defined in a nonzero part (.part1.o .. .part3.o).
+        local target_sym_name
+        for part_idx = 2, #objects do
+            local nm_ok, nm_out = run_cmd({ "nm", "-anS", "--defined-only", objects[part_idx] })
+            assert.is_true(nm_ok, nm_out)
+            for _, sym in ipairs(asan_mapper.parse_nm(nm_out)) do
+                if sym.name:find("\226\132\153", 1, true) then
+                    target_sym_name = sym.name
+                    break
+                end
+            end
+            if target_sym_name then break end
+        end
+        assert.is_string(target_sym_name, "expected a ℙ hidden function in a nonzero part")
+
+        local dso_nm_ok, dso_nm_out = run_cmd({ "nm", "-anS", "--defined-only", provider })
+        assert.is_true(dso_nm_ok, dso_nm_out)
+        local dso_sym
+        for _, sym in ipairs(asan_mapper.parse_nm(dso_nm_out)) do
+            if sym.name == target_sym_name then
+                dso_sym = sym
+                break
+            end
+        end
+        assert.is_table(dso_sym, "missing hidden symbol in linked provider")
+
+        local _, readelf_out = run_cmd({ "readelf", "-n", provider })
+        local build_id = assert(readelf_out:match("Build ID:%s*([%da-fA-F]+)"))
+
+        local snapshot_dir = workspace .. "/asan_snapshot"
+        local unit_count, snap_err = asan_mapper.snapshot(snapshot_dir, provider, gen_dir)
+        assert.equal(4, unit_count, snap_err)
+        assert.is_true(file_exists(snapshot_dir .. "/headers/asan_mod.priv.h"))
+        assert.is_true(file_exists(snapshot_dir .. "/headers/asan_mod.ffi.h"))
+
+        -- Remove the original generated directory to prove shadow compilation uses snapshotted headers/parts.
+        remove_tree(gen_dir)
+
+        local log_file = workspace .. "/asan.log"
+        write_file(log_file, table.concat({
+            "==999==ERROR: AddressSanitizer: synthetic crash",
+            string.format("#0 0x7fff00001111 in %s %s:12 (%s+0x%x) (BuildId: %s)",
+                target_sym_name, src_file, provider, dso_sym.address, build_id),
+            "SUMMARY: AddressSanitizer: synthetic crash",
+            "",
+        }, "\n"))
+
+        local report, report_err = asan_mapper.report_logs(log_file, snapshot_dir, {
+            work_dir = workspace .. "/asan_shadow",
+        })
+        assert.is_string(report, report_err)
+        assert.truthy(report:find("symbol: " .. target_sym_name .. "+0x0", 1, true), report)
+        assert.matches("generated C context:.-/asan_mod%.part%d+%.c:%d+", report)
+    end)
+
+    it("preserves cross-part native and lambda error tracebacks with exact .titan locations", function()
+        local trace_src = [[
+local function make_throwing_lambda(tag: string): function(integer): integer
+    return function(x: integer): integer
+        if x < 0 then
+            raise "boom:" .. tag
+        end
+        return x + 1
+    end
+end
+
+local function middle_step(fn: function(integer): integer, v: integer): integer
+    return fn(v) + 10
+end
+
+function entry_point(v: integer): integer
+    local fn = make_throwing_lambda("part")
+    return middle_step(fn, v)
+end
+]]
+        local dir = workspace .. "/trace_test"
+        local src_file = dir .. "/trace_mod.titan"
+        write_file(src_file, trace_src)
+        local ast = check_module("trace_mod", trace_src, src_file)
+        local ok, err, _, _, objects = driver.compile(
+            "trace_mod", ast, src_file, {}, false, {
+                c_parts = 3,
+                split_threshold = 1,
+            })
+        assert.truthy(ok, err)
+        assert.equal(3, #objects)
+        local dso = dir .. "/trace_mod" .. (platform.windows and ".dll" or ".so")
+        assert(driver.compile_library_output(
+            dso, objects, nil, false, nil, {}, nil, dso,
+            platform.windows and { "trace_mod" } or nil))
+
+        local script = dir .. "/run_trace.lua"
+        write_file(script, string.format([[
+package.cpath = %q .. "/?" .. %q .. ";" .. package.cpath
+local titan = require("titan")
+local mod = require("trace_mod")
+local ok, err = pcall(mod.entry_point, -5)
+assert(not ok)
+assert(tostring(err):find("boom:part", 1, true), tostring(err))
+local bt = titan.backtrace()
+assert(bt:find("anonymous function at .*trace_mod%%.titan:2"), "missing lambda def line:\n" .. bt)
+assert(bt:find("in trace_mod.middle_step", 1, true), "missing middle_step frame:\n" .. bt)
+assert(bt:find("in trace_mod.entry_point", 1, true), "missing entry_point frame:\n" .. bt)
+assert(not bt:find("titanentry", 1, true), "leaked titanentry:\n" .. bt)
+assert(not bt:find("\226\132\153", 1, true), "leaked ℙ separator:\n" .. bt)
+print("TRACE_OK")
+]], dir, platform.windows and ".dll" or ".so"))
+        local run_ok, run_out = run_cmd({ LUA, "-E", script })
+        assert.is_true(run_ok, run_out)
+        assert.truthy(run_out:find("TRACE_OK", 1, true), run_out)
+    end)
+
+    it("converts coverage lines per part, records all part C files, and removes stale part counters", function()
+        local cov_dir = workspace .. "/cov_test"
+        local src_file = cov_dir .. "/cov_mod.titan"
+        write_file(src_file, MULTI_CONSTRUCT_SOURCE)
+        local ast = check_module("cov_mod", MULTI_CONSTRUCT_SOURCE, src_file)
+        local entry = { source_files = { src_file } }
+
+        local ok, err, primary_o, _, objects = driver.compile(
+            "cov_mod", ast, src_file, {}, false, {
+                c_parts = 4,
+                split_threshold = 1,
+                coverage = true,
+                coverage_backend = platform.windows and "llvm-gcov" or "gcc-gcov",
+            }, entry)
+        assert.truthy(ok, err)
+        assert.equal(4, #objects)
+        assert.is_table(entry.coverage)
+        assert.equal(4, #entry.coverage.files)
+        local all_lines = {}
+        for _, c_file in ipairs(entry.coverage.files) do
+            assert.is_true(file_exists(c_file), c_file)
+            local file_anchors = entry.coverage.anchors[c_file]
+            assert.is_table(file_anchors)
+            for _, lines in pairs(file_anchors) do
+                for _, ln in ipairs(lines) do all_lines[ln] = true end
+            end
+        end
+        assert.is_true(next(all_lines) ~= nil, "expected source line anchors across split parts")
+
+        -- Simulate stale .gcda/.gcno files for part 2 & 3, then recompile with c_parts = 2
+        write_file(cov_dir .. "/cov_mod.part2.gcda", "stale")
+        write_file(cov_dir .. "/cov_mod.part3.gcda", "stale")
+        write_file(cov_dir .. "/cov_mod.part3.gcno", "stale")
+        local ast2 = check_module("cov_mod", MULTI_CONSTRUCT_SOURCE, src_file)
+        local entry2 = { source_files = { src_file } }
+        local ok2, err2 = driver.compile(
+            "cov_mod", ast2, src_file, {}, false, {
+                c_parts = 2,
+                split_threshold = 1,
+                coverage = true,
+                coverage_backend = platform.windows and "llvm-gcov" or "gcc-gcov",
+            }, entry2)
+        assert.truthy(ok2, err2)
+        assert.equal(2, #entry2.coverage.files)
+        assert.is_false(file_exists(cov_dir .. "/cov_mod.part2.gcda"))
+        assert.is_false(file_exists(cov_dir .. "/cov_mod.part3.gcda"))
+        assert.is_false(file_exists(cov_dir .. "/cov_mod.part3.gcno"))
+    end)
+
+    it("excludes private ℙ symbols from Windows .def exports and rejects link-set symbol collisions", function()
+        local ast = check_module("win_mod", [[
+foreign function public_raw(x: int): int
+    return x + 1
+end
+local foreign function private_raw(x: int): int
+    return x + 2
+end
+function call_both(n: integer): integer
+    local fn = function(v: integer): integer return v + n end
+    return (public_raw(fn(1) as foreign int) as integer) + (private_raw(2) as integer)
+end
+]])
+        local def_text, export_names = driver.windows_provider_exports(
+            { "win_mod" }, { win_mod = ast._type }, "win_mod.dll")
+        assert.truthy(def_text:find("win_mod_\226\132\179_public_raw_titan", 1, true))
+        assert.is_nil(def_text:find("private_raw", 1, true))
+        for _, sym in ipairs(export_names) do
+            assert.is_nil(sym:find("\226\132\153", 1, true),
+                "Windows .def exported private ℙ symbol: " .. sym)
+        end
+
+        -- Verify record_module_symbols detects collisions in the private inventory
+        local owners = {}
+        local errs = {}
+        driver.record_module_symbols(owners, "left.mod", {
+            { symbol = "shared_private_sym", owner = "anonymous function 0" },
+        }, errs)
+        driver.record_module_symbols(owners, "right.mod", {
+            { symbol = "shared_private_sym", owner = "array writer 0" },
+        }, errs)
+        assert.equal(1, #errs)
+        assert.matches("cannot link C symbol 'shared_private_sym'", errs[1], 1, true)
+    end)
+
+    it("validates --c-parts and TITAN_C_PARTS precedence and rejects non-positive values", function()
+        local n, err = driver.parse_c_parts("8")
+        assert.equal(8, n)
+        assert.is_nil(err)
+
+        for _, bad in ipairs({ "0", "-1", "abc", "", "1.5", 0, -4 }) do
+            local val, parse_err = driver.parse_c_parts(bad)
+            assert.is_nil(val)
+            assert.equal("--c-parts and TITAN_C_PARTS require a positive integer", parse_err)
+        end
+    end)
+
+    it("preserves Titan source traceback lines across split parts and pretty-prints all part files", function()
+        local src_dir = workspace .. "/tb_src"
+        local out_dir = workspace .. "/tb_out"
+        local tb_source = MULTI_CONSTRUCT_SOURCE:gsub("do\n%s+base_offset = 10\nend", [[
+function boom_leaf(x: integer): integer
+    if x < 0 then
+        raise "negative_boom"
+    end
+    return x + 1
+end
+function boom_caller(x: integer): string
+    do
+        local _ = boom_leaf(x) + 10
+        return "ok"
+    catch
+        return (error as string) .. "\n" .. traceback
+    end
+end
+do
+    base_offset = 10
+end]])
+        write_file(src_dir .. "/tbmod.titan", tb_source)
+
+        local indent_log = workspace .. "/indent.log"
+        local indent_stub = workspace .. "/stub_clang_format.sh"
+        write_file(indent_stub, string.format([==[#!/usr/bin/env bash
+printf '%%s\n' "${@: -1}" >> %q
+]==], indent_log))
+        run_cmd({ "chmod", "+x", indent_stub })
+
+        h.reset(true)
+        local context = driver.new_resolver_context({
+            source_first = true,
+            output_root = out_dir,
+            pretty_print = true,
+        })
+        assert(driver.configure_foreign_c(context))
+        local prev_cf = driver.CLANG_FORMAT
+        driver.CLANG_FORMAT = indent_stub
+        driver.TITAN_SOURCE_PATH = src_dir
+        driver.OUTPUT_ROOT = assert(driver.prepare_output_root(out_dir))
+
+        local compile_opts = {
+            source_roots = { tbmod = true },
+            context = context,
+            output_root = driver.OUTPUT_ROOT,
+            c_parts = 4,
+            split_threshold = 1,
+            pretty_print = true,
+        }
+        local loader = driver.defaultloader({}, compile_opts)
+        assert.truthy(checker.checkimport("tbmod", loader))
+        assert(driver.prepare_foreign_headers({ "tbmod" }, driver.imported, false, true))
+        local mod = driver.imported["tbmod"]
+        local results = driver.compile_modules({
+            {
+                modname = "tbmod",
+                mod = mod,
+                static_deps = context.native_static_names,
+                options = {
+                    nominal_layouts = context.nominal_layouts,
+                    c_parts = 4,
+                    split_threshold = 1,
+                    pretty_print = true,
+                },
+            },
+        }, 2, false)
+        driver.CLANG_FORMAT = prev_cf
+        assert.is_true(results[1].ok, results[1].err)
+        assert.equal(4, #results[1].objects)
+        local formatted = read_file(indent_log)
+        assert.truthy(formatted:find("tbmod.priv.h", 1, true), formatted)
+        assert.truthy(formatted:find("tbmod.c", 1, true), formatted)
+        assert.truthy(formatted:find("tbmod.part1.c", 1, true), formatted)
+        assert.truthy(formatted:find("tbmod.part2.c", 1, true), formatted)
+        assert.truthy(formatted:find("tbmod.part3.c", 1, true), formatted)
+
+        local dso = out_dir .. "/tbmod" .. (platform.windows and ".dll" or ".so")
+        assert(driver.compile_library_output(
+            dso, results[1].objects, nil, false, nil, {}, nil, dso,
+            platform.windows and { "tbmod" } or nil))
+        local verify = workspace .. "/verify_tb.lua"
+        write_file(verify, string.format([[
+package.path = %q .. "/?.lua;" .. package.path
+package.cpath = %q .. "/?" .. %q .. ";" .. package.cpath
+local tbmod = require("tbmod")
+local trace = tbmod.boom_caller(-5)
+assert(trace:find("negative_boom", 1, true), trace)
+assert(trace:find("tbmod.titan:", 1, true), trace)
+assert(trace:find("boom_leaf", 1, true), trace)
+assert(trace:find("boom_caller", 1, true), trace)
+print("TB_OK")
+]], out_dir, out_dir, platform.windows and ".dll" or ".so"))
+        local run_ok, run_out = run_cmd({ LUA, "-E", verify })
+        assert.is_true(run_ok, run_out)
+        assert.truthy(run_out:find("TB_OK", 1, true), run_out)
+    end)
+end)
