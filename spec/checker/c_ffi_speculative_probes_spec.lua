@@ -557,6 +557,9 @@ end
     it("follow ordered header contexts and header changes between invocations",
     function()
         local directory = assert(compiler_io.new_sync():tmpname())
+        if platform.windows then
+            directory = assert(platform.path.normalize(directory))
+        end
         os.remove(directory)
         assert(lfs.mkdir(directory))
         local first_header = directory .. "/speculative_first.h"
