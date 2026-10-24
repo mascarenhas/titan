@@ -11,7 +11,6 @@ local types = require 'titan-compiler.types'
 local driver = require 'titan-compiler.driver'
 local compiler_io = require 'titan-compiler.io'
 local platform = require 'titan-compiler.platform'
-local temporary = require 'spec.support.temporary'
 
 -- A `require`d module does not inherit busted's `assert` (luassert) global, so
 -- bring it in explicitly. luassert's `assert` is a superset of Lua's `assert`,
@@ -434,9 +433,9 @@ end
 
 -- ===== `.so`-only import path =====
 
--- Compile one in-memory module to a `.so`. Sibling modules in `names` must
--- resolve through their own providers; any other source-selected dependencies
--- are compiled into this image under a disposable output tree.
+-- Compile one in-memory module to a `.so` containing only that root module.
+-- Every dependency must resolve through its own shared provider; `names`
+-- identifies siblings in the chain for the existing dynamic-selection check.
 local function build_one_so(name, src, names)
     reset(true)
     local static_deps = {}
@@ -447,76 +446,31 @@ local function build_one_so(name, src, names)
     -- a `.so`-only module invisible in traces.
     local ast = M.parse(src, name .. ".titan")
     if not ast then return nil, "parse error in " .. name end
-    local dependency_output = assert(driver.prepare_output_root(
-        temporary.name("-so-deps")))
-    local results = table.pack(xpcall(function()
-        local loader = driver.defaultloader(static_deps, {
-            output_root = dependency_output,
-        })
-        return driver.with_loader(loader, function(loader)
-            local _, errs = checker.check(
-                name, ast, src, name .. ".titan", loader)
-            if #errs ~= 0 then
-                return nil, name .. ": " .. table.concat(errs, "\n")
+    local loader = driver.defaultloader(static_deps)
+    return driver.with_loader(loader, function(loader)
+        local _, errs = checker.check(
+            name, ast, src, name .. ".titan", loader)
+        if #errs ~= 0 then return nil, name .. ": " .. table.concat(errs, "\n") end
+        for dep in pairs(static_deps) do
+            if names[dep] and dep ~= name then
+                return nil, name .. " linked '" .. dep .. "' statically, not via .so"
             end
-            local source_names = {}
-            for dep in pairs(static_deps) do
-                if names[dep] and dep ~= name then
-                    return nil, name .. " linked '" .. dep .. "' statically, not via .so"
-                end
-                local mod = driver.imported[dep]
-                if not mod then
-                    return nil, name .. " has no selected module for dependency '" .. dep .. "'"
-                end
-                if mod.kind == "static" then
-                    return nil, name .. " cannot build static archive dependency '" .. dep ..
-                        "': shared-provider fixtures do not support static archives"
-                end
-                if not mod.ast then
-                    return nil, name .. " has no checked source for dependency '" .. dep .. "'"
-                end
-                source_names[#source_names + 1] = dep
-            end
-            table.sort(source_names)
-            local ok, err = driver.prepare_foreign_headers(
-                source_names, driver.imported, verbose())
-            if not ok then return nil, err end
-            local objects = {}
-            for _, dep in ipairs(source_names) do
-                local mod = driver.imported[dep]
-                ok, err = driver.compile_module(dep, mod, static_deps, verbose())
-                if not ok then return nil, err end
-                for _, object in ipairs(driver.module_compiled_objects(mod)) do
-                    objects[#objects + 1] = object
-                end
-            end
-            local root_ok, root_err, _, _, root_objects =
-                driver.compile(name, ast, nil, static_deps, verbose())
-            if not root_ok then return nil, root_err end
-            for _, object in ipairs(root_objects) do
-                objects[#objects + 1] = object
-            end
-            return driver.compile_library(name, objects, nil, verbose())
-        end)
-    end, debug.traceback))
-    local cleaned, cleanup_error = driver.remove_path(dependency_output)
-    local build_error = not results[1] and results[2]
-        or not results[2] and results[3]
-    if not cleaned then
-        local message = "failed to remove dependency output '" .. dependency_output ..
-            "': " .. tostring(cleanup_error)
-        build_error = build_error and (tostring(build_error) .. "\n" .. message)
-            or message
-    end
-    if not results[1] then error(build_error, 0) end
-    if not results[2] or not cleaned then return nil, build_error end
-    return table.unpack(results, 2, results.n)
+            return nil, name .. ": dependency '" .. dep ..
+                "' resolved from source or a static archive; build_so_chain links " ..
+                "only the root module; place tests that import standard-library " ..
+                "modules in the installed-stdlib group"
+        end
+        local ok, err, _, _, objects =
+            driver.compile(name, ast, nil, static_deps, verbose())
+        if not ok then return nil, err end
+        return driver.compile_library(name, objects, nil, verbose())
+    end)
 end
 
 -- Build a chain of `.so`-only modules. `mods` is an array of {name=, src=} in
 -- dependency order (each may import earlier ones); the last is the module under
--- test. Returns (true) or (nil, message); asserts every sibling dependency
--- resolved dynamically, while allowing other source dependencies in the image.
+-- test. Returns (true) or (nil, message); requires every dependency to resolve
+-- dynamically through its own shared provider.
 function M.build_so_chain(mods, in_process)
     if platform.windows and not in_process then
         -- Windows retains DLL metadata mappings for the inspecting process.

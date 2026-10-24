@@ -138,7 +138,8 @@ compiler spec/coder/static_protocol_mismatch_spec.lua 6.701 7.064
 stdlib spec/coder/test_runner_spec.lua 20.987 -
 compiler spec/coder/type_relations_soundness_spec.lua 11.665 26.953
 compiler spec/coder/type_tests_spec.lua 1.492 7.539
-compiler spec/coder/unions_spec.lua 10.093 36.908
+compiler spec/coder/unions_spec.lua 8.322 36.908
+stdlib spec/coder/unions_stdlib_spec.lua 0.946 -
 stdlib spec/coder/unwind_stdlib_spec.lua 0.611 -
 compiler spec/coder/variadic_spec.lua 10.539 19.392
 compiler spec/compiler_environment_spec.lua 0.041 0.062

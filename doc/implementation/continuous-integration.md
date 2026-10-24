@@ -98,13 +98,15 @@ as `~` backups. Preserve dependencies and SDK/runtime files.
 
 Run `make stdlib-busted-test`, then the installed-stdlib integrations listed in
 `spec/support/ci_stdlib_compiler_test_files.txt` through
-`ci_test_groups.sh stdlib-compiler` with LuaCov. This includes
-`spec/coder/split_units_spec.lua`: its cross-part metadata checks import
-transfer, protobuf, and reflection from the installed provider. The compiler
-SDK installs no standard library; source-compiling protobuf's dependency
-closure requires private LPegLabel headers that the SDK omits. Snapshot and
-restore the canonical provider pair, shims, and checkout runtime around
-compiler fixtures.
+`ci_test_groups.sh stdlib-compiler` with LuaCov. Compiler integrations that
+import standard-library modules consume the installed provider rather than
+source-compiling those dependencies in compiler-only shards. This includes
+`spec/coder/split_units_spec.lua` (transfer, protobuf, and reflection) and
+`spec/coder/unions_stdlib_spec.lua` (reflection); compiler-only union cases
+remain in `spec/coder/unions_spec.lua`. The compiler SDK installs no standard
+library, and source-compiling protobuf's dependency closure also requires
+private LPegLabel headers that the SDK omits. Snapshot and restore the
+canonical provider pair, shims, and checkout runtime around compiler fixtures.
 The `rockspec_spec.lua` publication gate stages the already validated installed
 pair/shims and passes the exact `STDLIB_INSTALL_STAGE` to `publish-stdlib`;
 calling build-dependent `install-stdlib` here would rebuild all roots. Keep
