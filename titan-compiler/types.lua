@@ -2964,6 +2964,16 @@ function types.erase(typ)
     })
 end
 
+-- The walk follows every table field except `_tag` and the
+-- `_c_origin_header` provenance edge. A C declaration node (and a foreign
+-- module member) records the umbrella header that spelled it; that include
+-- record, its generated header, dependency headers, inputs, and observations
+-- are closed plain data (`declarationschemas` `include`, `header`, `input`,
+-- `observation`) with no type table, so nothing generic is reachable through
+-- it. Skipping it keeps every answer exact while avoiding a walk of the whole
+-- header dependency graph from each C type.
+local generic_walk_skips = { _tag = true, _c_origin_header = true }
+
 -- `memo`, when supplied, is owned by one caller-proven read-only batch (no
 -- reachable table changes while it lives). It records complete results only:
 -- a true root, or every table visited by a query that returned false. A
@@ -2993,7 +3003,7 @@ function types.contains_generic(typ, memo)
             return true
         end
         for key, child in pairs(value) do
-            if key ~= "_tag" and visit(child) then return true end
+            if not generic_walk_skips[key] and visit(child) then return true end
         end
         return false
     end
