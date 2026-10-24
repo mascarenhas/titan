@@ -3448,3 +3448,247 @@ enum probe_wide { PROBE_WIDE = 18446744073709551615ULL };
         remove_directory(root)
     end)
 end)
+
+describe("speculative acceptance batches", function()
+    -- A strategy whose `run` and optional `run_batch` decide each probe from
+    -- its fake-workspace source, so batching is observable without processes.
+    local function batching_service(decide, options)
+        local base = compiler_io.new_sync()
+        local log = { runs = {}, batches = {} }
+        local state, _, temp_provider = fake_environment()
+        local function verdict(argv)
+            local source
+            for index, argument in ipairs(argv) do
+                if argument == "-c" then source = argv[index + 1] end
+            end
+            local name = source and source:match("([^/\\]+)$")
+            return decide(name and state.files[name] or "", argv)
+        end
+        local strategy = setmetatable({}, { __index = base })
+        function strategy:run(argv)
+            log.runs[#log.runs + 1] = argv
+            return verdict(argv)
+        end
+        function strategy:run_batch(commands, batch_options)
+            log.batches[#log.batches + 1] = {
+                count = #commands, jobs = batch_options.jobs,
+                files = (function()
+                    local names = {}
+                    for name in pairs(state.files) do names[#names + 1] = name end
+                    return #names
+                end)(),
+            }
+            local results = {}
+            for index, argv in ipairs(commands) do results[index] = verdict(argv) end
+            return results, log.cancel
+        end
+        options = options or {}
+        options.io = strategy
+        options.temp_provider = options.temp_provider or temp_provider
+        options.include_dirs = options.include_dirs or {}
+        if options.jobs == nil then options.jobs = 4 end
+        local service = assert(cprobe.new_service(options))
+        return service, log, state
+    end
+
+    local function accept()
+        return { started = true, ok = true, status = 0, diagnostic = "" }
+    end
+
+    local function by_marker(source)
+        if source:find("rejected_s", 1, true) then
+            return { started = true, ok = false, status = 1,
+                diagnostic = "probe.c:9: error: rejected by test compiler" }
+        elseif source:find("missing_s", 1, true) then
+            return { started = false, ok = false, status = 127,
+                diagnostic = "test compiler is unavailable" }
+        end
+        return accept()
+    end
+
+    local function deferring_context(service, answers)
+        local batch = service:new_probe_batch(answers)
+        batch.deferring = answers == nil
+        return assert(service:module_context({ batch = batch })), batch
+    end
+
+    it("batches only services whose strategy runner can batch", function()
+        local service = batching_service(accept)
+        assert.is_true(service:batching())
+        assert.is_true(service:close())
+        service = batching_service(accept, { jobs = 1 })
+        assert.is_false(service:batching())
+        assert.is_true(service:close())
+        local unbatched = assert(cprobe.new_service({
+            include_dirs = {}, jobs = 4,
+            io = setmetatable({ run_batch = false }, { __index = compiler_io.new_sync() }),
+        }))
+        assert.is_false(unbatched:batching())
+        assert.is_true(unbatched:close())
+        local custom = new_fake_service({ jobs = 4 })
+        assert.is_false(custom:batching())
+        assert.is_true(custom:close())
+        local invalid, err = cprobe.new_service({ include_dirs = {}, jobs = 0 })
+        assert.is_nil(invalid)
+        assert.equal("jobs must be a positive integer", err)
+        local owner = batching_service(accept)
+        local other = batching_service(accept)
+        local rejected
+        rejected, err = other:module_context({ batch = owner:new_probe_batch() })
+        assert.is_nil(rejected)
+        assert.matches("batch must belong to this probe service", err, 1, true)
+        assert.is_true(owner:close())
+        assert.is_true(other:close())
+    end)
+
+    it("defers eligible misses with their final keys and publishes the verdicts",
+    function()
+        local service, log, state = batching_service(accept)
+        local module, batch = deferring_context(service)
+        local source = cpointer("source_s")
+        local first_target = cpointer("first_s")
+        local second_target = cpointer("second_s")
+
+        local first = module:probe_unsafe_object_pointer(source, first_target)
+        local duplicate = module:probe_unsafe_object_pointer(source, first_target)
+        local second = module:probe_unsafe_object_pointer(source, second_target)
+        local rendered = cprobe.render_unsafe_object_pointer_source(
+            module, source, first_target)
+        assert.equal("success", first.status)
+        assert.is_true(first.accepted)
+        assert.equal(sha256.hex(rendered), first.key)
+        assert.equal(first.key, duplicate.key)
+        assert.equal("success", second.status)
+        assert.not_equal(first.key, second.key)
+        -- Only the context baseline compiled synchronously; nothing is staged.
+        assert.equal(1, #log.runs)
+        assert.same({}, log.batches)
+        assert.same({}, state.files)
+
+        assert.is_true(batch:flush())
+        assert.same({ { count = 2, jobs = 4, files = 2 } }, log.batches)
+        assert.same({}, state.files)
+        local cached = module:probe_unsafe_object_pointer(source, first_target)
+        assert.is_true(cached.cached)
+        assert.equal("service", cached.cache_tier)
+        assert.equal(first.key, cached.key)
+        assert.is_true(batch:flush())
+        assert.equal(1, #log.batches)
+        assert.is_true(service:close())
+    end)
+
+    it("keeps hits, baseline failures, enum-range and undeclared extents synchronous",
+    function()
+        local service, log = batching_service(accept)
+        local module, batch = deferring_context(service)
+        local source = cpointer("source_s")
+        local target = cpointer("target_s")
+        batch.deferring = false
+        local direct = module:probe_unsafe_object_pointer(source, target)
+        assert.is_false(direct.cached)
+        assert.equal(2, #log.runs)
+        batch.deferring = true
+        local hit = module:probe_unsafe_object_pointer(source, target)
+        assert.is_true(hit.cached)
+        local pair = { left_type = cpointer("left_s"), right_type = cpointer("left_s") }
+        local synchronous = module:validate_declaration_compatibilities({ pair })[1]
+        assert.equal("success", synchronous.status)
+        assert.equal(3, #log.runs)
+        local other = { left_type = cpointer("right_s"), right_type = cpointer("right_s") }
+        local deferred = module:validate_declaration_compatibilities(
+            { other }, { deferrable = true })[1]
+        assert.equal("success", deferred.status)
+        assert.equal(3, #log.runs)
+        assert.equal(1, #batch.pending)
+        assert.is_true(batch:flush())
+        assert.is_true(service:close())
+
+        local failing, failing_log = batching_service(function(contents)
+            if contents:find("titan_probe_b", 1, true) then
+                return { started = true, ok = false, status = 1,
+                    diagnostic = "probe.c:1: error: broken header" }
+            end
+            return accept()
+        end)
+        local failing_module, failing_batch = deferring_context(failing)
+        local failed = failing_module:probe_unsafe_object_pointer(source, target)
+        assert.equal("infrastructure_failure", failed.status)
+        assert.matches("foreign header baseline failed", failed.message, 1, true)
+        assert.same({}, failing_batch.pending)
+        assert.equal(1, #failing_log.runs)
+        assert.is_true(failing:close())
+    end)
+
+    it("publishes only real verdicts and answers a recheck from completed runs",
+    function()
+        local service, log = batching_service(by_marker)
+        local module, batch = deferring_context(service)
+        local source = cpointer("source_s")
+        local accepted = module:probe_unsafe_object_pointer(source, cpointer("accepted_s"))
+        local rejected = module:probe_unsafe_object_pointer(source, cpointer("rejected_s"))
+        local missing = module:probe_unsafe_object_pointer(source, cpointer("missing_s"))
+        for _, result in ipairs({ accepted, rejected, missing }) do
+            assert.equal("success", result.status)
+        end
+        assert.is_false(batch:flush())
+        assert.equal("success", service.result_cache[accepted.key].outcome)
+        assert.equal("compiler_rejection", service.result_cache[rejected.key].outcome)
+        assert.is_nil(service.result_cache[missing.key])
+        assert.is_nil(batch.outcomes[accepted.key])
+        assert.is_nil(batch.outcomes[rejected.key])
+        assert.equal(1, #batch.outcomes[missing.key])
+        local runs = #log.runs
+
+        local recheck = deferring_context(service, batch.outcomes)
+        local again_rejected = recheck:probe_unsafe_object_pointer(source, cpointer("rejected_s"))
+        local again_missing = recheck:probe_unsafe_object_pointer(source, cpointer("missing_s"))
+        local repeated_missing = recheck:probe_unsafe_object_pointer(source, cpointer("missing_s"))
+        assert.equal("rejected", again_rejected.status)
+        assert.matches("rejected by test compiler", again_rejected.message, 1, true)
+        assert.equal("infrastructure_failure", again_missing.status)
+        assert.matches("could not be started", again_missing.message, 1, true)
+        assert.equal(again_missing.message, repeated_missing.message)
+        assert.equal(runs, #log.runs)
+        assert.equal(1, #log.batches)
+        assert.is_true(service:close())
+    end)
+
+    it("reports preparation failures and re-raises a cancellation after cleanup",
+    function()
+        local jobs = require "titan-compiler.jobs"
+        local writes = 0
+        local state, _, base_provider = fake_environment()
+        local function provider(...)
+            local workspace = base_provider(...)
+            local write = workspace.write
+            function workspace:write(name, contents)
+                if name:match("unsafe%-object%-pointer%.c$") then
+                    writes = writes + 1
+                    if writes == 1 then return nil, "injected write failure" end
+                end
+                return write(self, name, contents)
+            end
+            return workspace
+        end
+        local service, log = batching_service(accept, { temp_provider = provider })
+        local module, batch = deferring_context(service)
+        local source = cpointer("source_s")
+        module:probe_unsafe_object_pointer(source, cpointer("first_s"))
+        module:probe_unsafe_object_pointer(source, cpointer("second_s"))
+        local propagated
+        local previous = jobs.propagate
+        log.cancel = 2
+        jobs.propagate = function(signal)
+            propagated = { signal = signal, files = next(state.files) }
+        end
+        local called, accepted = pcall(batch.flush, batch)
+        jobs.propagate = previous
+        assert.is_true(called, accepted)
+        assert.is_false(accepted)
+        assert.equal(1, log.batches[1].count)
+        assert.same({ signal = 2 }, propagated)
+        local outcome = assert(next(batch.outcomes) and batch.outcomes[next(batch.outcomes)])
+        assert.equal("workspace", outcome[1].reason)
+        assert.is_true(service:close())
+    end)
+end)

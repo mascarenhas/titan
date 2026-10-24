@@ -53,7 +53,8 @@ local function run_titanc(arguments, environment_jobs)
         observed.preflight_requests = requests
         return { outputs = {}, inputs = {} }
     end
-    function driver.new_resolver_context()
+    function driver.new_resolver_context(options)
+        observed.resolver_jobs = options.jobs
         resolver = {
             source_names = {},
             selected_static_providers = {},
@@ -204,11 +205,14 @@ describe("titanc generated-C parallelism dispatch", function()
     it("lets the command-line jobs bound override the environment", function()
         local _, observed = run_titanc(ordinary_arguments("2"), "invalid")
         assert.equal(2, observed.jobs)
+        -- The same local cap bounds the resolver's speculative C probe batches.
+        assert.equal(2, observed.resolver_jobs)
     end)
 
     it("defaults to four generated-C compilations", function()
         local _, observed = run_titanc(ordinary_arguments(nil), nil)
         assert.equal(4, observed.jobs)
+        assert.equal(4, observed.resolver_jobs)
     end)
 
     it("uses TITAN_JOBS and preserves sorted batch diagnostics", function()
