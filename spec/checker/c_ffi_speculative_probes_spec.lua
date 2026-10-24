@@ -43,9 +43,9 @@ end
 
 -- One complete check of `roots` from in-memory sources under a fresh
 -- resolver whose probe compiler is the deterministic fixture compiler.
--- The Busted runners execute ordinary files under a nested serial Make
--- policy (MAKEFLAGS=-j1), which correctly keeps titanc synchronous; each
--- check here models a titanc run without a parent Make instead.
+-- On POSIX the Busted runners use nested serial Make (MAKEFLAGS=-j1), which
+-- keeps titanc synchronous. Each check here models a run without parent Make;
+-- Windows always applies only the local cap.
 local function check(modules, roots, jobs, options)
     options = options or {}
     types.registry = {}
@@ -475,6 +475,112 @@ end
             close(sync)
             close(batched)
         end
+    end)
+
+    local invalid_return = "types in return do not match, expected foreign int " ..
+        "but found invalid type"
+
+    local function baseline_chronology(source, failures, expected, candidates, retries)
+        local root = "speculative_flaky_baseline_" .. failures
+        local modules = { [root] = header_module(source) }
+        local sync = check(modules, { root }, 1)
+        local batched = check(modules, { root }, 4)
+        assert.same(expected, diagnostics(sync.report))
+        -- Compare every byte: diagnostic text, file/line/column, order,
+        -- multiplicity, and the dependent Invalid-type return errors.
+        assert.equal(sync.report, batched.report)
+        for _, outcome in ipairs({ sync, batched }) do
+            assert.equal(failures + 1, count(outcome.executions, function(event)
+                return event.probe_kind == "header_baseline"
+            end))
+            assert.equal(failures, count(outcome.executions, function(event)
+                return event.probe_kind == "header_baseline" and
+                    event.outcome == "infrastructure_failure"
+            end))
+            assert.equal(candidates, count(outcome.executions, function(event)
+                return event.probe_kind == "c_operator"
+            end))
+        end
+        assert.equal(0, count(sync.executions, speculative))
+        assert.equal(candidates - (retries or 0),
+            count(batched.executions, speculative))
+        assert.equal(1, count(batched.executions, function(event)
+            return speculative(event) and event.outcome == "compiler_rejection"
+        end))
+        close(sync)
+        close(batched)
+    end
+
+    it("replays a candidate's baseline failure before a later same-source success",
+    function()
+        baseline_chronology([[
+local function first(a: foreign spec_ok_t, b: foreign spec_ok_t): foreign int
+  return a + b
+end
+local function second(a: foreign spec_ok_t, b: foreign spec_ok_t): foreign int
+  return a + b
+end
+local function rejected(a: foreign speculative_reject_t, b: foreign speculative_reject_t): foreign int
+  return a * b
+end
+]], 2, {
+            "1:transient", "3:transient", "3:" .. invalid_return,
+            "9:rejected", "9:" .. invalid_return,
+        }, 2)
+    end)
+
+    it("consumes the nested baseline before a later uncached distinct candidate",
+    function()
+        baseline_chronology([[
+local function first(a: foreign spec_ok_t, b: foreign spec_ok_t): foreign int
+  return a + b
+end
+local function second(a: foreign spec_ok_t, b: foreign spec_ok_t): foreign int
+  return a + b
+end
+local function distinct(a: foreign speculative_flaky_t, b: foreign speculative_flaky_t): foreign int
+  return a - b
+end
+local function retry_distinct(a: foreign speculative_flaky_t, b: foreign speculative_flaky_t): foreign int
+  return a - b
+end
+local function rejected(a: foreign speculative_reject_t, b: foreign speculative_reject_t): foreign int
+  return a * b
+end
+]], 2, {
+            "1:transient", "3:transient", "3:" .. invalid_return,
+            "9:transient", "9:" .. invalid_return,
+            "15:rejected", "15:" .. invalid_return,
+        }, 4, 1)
+    end)
+
+    it("preserves multiple baseline-gated candidate failures in occurrence order",
+    function()
+        baseline_chronology([[
+local function first(a: foreign spec_ok_t, b: foreign spec_ok_t): foreign int
+  return a + b
+end
+local function second(a: foreign spec_ok_t, b: foreign spec_ok_t): foreign int
+  return a + b
+end
+local function third(a: foreign spec_ok_t, b: foreign spec_ok_t): foreign int
+  return a + b
+end
+local function fourth(a: foreign spec_ok_t, b: foreign spec_ok_t): foreign int
+  return a + b
+end
+local function distinct(a: foreign spec_ok_t, b: foreign spec_ok_t): foreign int
+  return a - b
+end
+local function rejected(a: foreign speculative_reject_t, b: foreign speculative_reject_t): foreign int
+  return a * b
+end
+]], 4, {
+            "1:transient", "3:transient", "3:" .. invalid_return,
+            "6:transient", "6:" .. invalid_return,
+            "9:transient", "9:" .. invalid_return,
+            "18:rejected", "18:" .. invalid_return,
+        }, 3)
     end)
 
     it("keep a wide enumerator's range check synchronous", function()
@@ -1050,7 +1156,7 @@ describe("speculative probe batch policy", function()
         end
     end
 
-    it("uses the local cap only for ordinary checks outside a serial Make",
+    it("uses the local cap for ordinary checks except under a serial POSIX Make",
     function()
         with_makeflags(nil)
         assert.equal(1, driver.probe_batch_jobs({}))
@@ -1059,7 +1165,19 @@ describe("speculative probe batch policy", function()
         assert.equal(1, driver.probe_batch_jobs({ jobs = 4, analysis_only = true }))
         assert.equal(1, driver.probe_batch_jobs({ jobs = 4, completion = {} }))
         with_makeflags("-j1")
-        assert.equal(1, driver.probe_batch_jobs({ jobs = 4 }))
+        for _, windows in ipairs({ false, true }) do
+            with_fields(platform, { windows = windows }, function()
+                assert.equal(windows and 4 or 1,
+                    driver.probe_batch_jobs({ jobs = 4 }))
+                assert.equal(1, driver.probe_batch_jobs({ jobs = 1 }))
+                assert.equal(1, driver.probe_batch_jobs({
+                    jobs = 4, analysis_only = true,
+                }))
+                assert.equal(1, driver.probe_batch_jobs({
+                    jobs = 4, completion = {},
+                }))
+            end)
+        end
         with_makeflags("-j4 --jobserver-auth=fifo:/tmp/titan-unused-pool")
         assert.equal(4, driver.probe_batch_jobs({ jobs = 4 }))
         assert.error_matches(function()

@@ -15,8 +15,8 @@ function jobs.set_request_index(prepared, request_index)
 end
 
 -- Flatten every prepared module's native jobs while retaining ownership.
--- `ordinal` is module/part order: the completion identity and the order in
--- which diagnostics are replayed and results are reported.
+-- `ordinal` is original module/part result and diagnostic order. The caller
+-- assigns completion identities by position in the sorted launch schedule.
 function jobs.flatten(prepared)
     local entries, results = {}, {}
     for module_position, compilation in ipairs(prepared) do

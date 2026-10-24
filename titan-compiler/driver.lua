@@ -1471,16 +1471,17 @@ function driver.completion_binary_catalog(context)
 end
 
 -- The local cap of this resolver's speculative C probe batches: titanc's
--- resolved job cap, except 1 for an explicit serial parent Make (`make -j1`)
--- and for analysis/completion resolvers. A parent jobserver is joined later
--- by each batch's job-slot ledger, exactly as generated-C compilation does.
+-- resolved job cap, except 1 for an explicit serial POSIX parent Make
+-- (`make -j1`) and for analysis/completion resolvers. On POSIX each batch's
+-- ledger joins the parent jobserver; Windows applies only the local cap.
 -- Implementation notes: doc/implementation/c-ffi-expressions.md#speculative-batched-acceptance-probes
 function driver.probe_batch_jobs(context)
     local cap = context.jobs
     if not cap or cap <= 1 or context.analysis_only or context.completion then
         return 1
     end
-    if jobs.make_policy(platform.getenv("MAKEFLAGS")).serial then return 1 end
+    if not platform.windows and
+       jobs.make_policy(platform.getenv("MAKEFLAGS")).serial then return 1 end
     return cap
 end
 

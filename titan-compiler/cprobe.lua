@@ -1872,9 +1872,10 @@ end
 -- misses first establish whether the shared header preamble itself compiles.
 -- A `deferrable` acceptance candidate whose context batch is deferring is
 -- recorded there after its lookup and baseline instead of being compiled. An
--- authoritative recheck's batch first replays the speculative pass's
--- nonpublishable runs of the same source.
-function Service:_run_source(stage, source, kind, context, question, deferrable)
+-- authoritative recheck first replays each occurrence's nonpublishable result,
+-- including a failed nested baseline owned by that candidate, before lookup.
+function Service:_run_source(stage, source, kind, context, question, deferrable,
+                             nested_baseline)
     kind = kind or "raw_source"
     local path, key = self:_cache_location(source)
     if self.closed then
@@ -1892,12 +1893,12 @@ function Service:_run_source(stage, source, kind, context, question, deferrable)
         self:_emit({ kind = "cache", cache = stage, hit = true, key = key })
         return batch:_defer_duplicate(pending, kind, context)
     end
-    -- Each nonpublishable run that the speculative pass completed for this
-    -- source answers one request of the recheck, in that pass's order, before
-    -- any verdict published later in that pass can. That run already passed
-    -- its baseline. Once they are used up, the request looks up and launches
-    -- exactly as the synchronous path's retry does.
-    local answer = batch and batch:_answer(key)
+    -- A candidate owns its failed baseline gate as one replay outcome. Nested
+    -- baseline calls neither consume nor record the independent history of
+    -- explicit validate_baseline calls. Replaying the candidate therefore
+    -- consumes its dependency too, before a later same-source cached verdict.
+    -- Exhausted histories allow the synchronous path's ordinary lookup/retry.
+    local answer = batch and not nested_baseline and batch:_answer(key)
     if answer then
         answer.key, answer.cache_path = key, path
         self:_trace_semantic(key, kind, context, answer, "not_applicable")
@@ -1916,7 +1917,7 @@ function Service:_run_source(stage, source, kind, context, question, deferrable)
     end
     local baseline
     if context and stage == "candidate" then
-        baseline = context:validate_baseline()
+        baseline = context:validate_baseline(true)
         if baseline.status ~= "success" then
             local run = {
                 classification = "infrastructure_failure",
@@ -1934,6 +1935,7 @@ function Service:_run_source(stage, source, kind, context, question, deferrable)
                 started = baseline.started,
             }
             run.key = key
+            if batch then batch:_observe(key, run) end
             self:_trace_semantic(key, kind, context, run)
             return run
         end
@@ -1944,7 +1946,7 @@ function Service:_run_source(stage, source, kind, context, question, deferrable)
     end
     local execution = self:_execute_source(stage, source, key,
         kind:gsub("_", "-"), question, context and context.generated_header)
-    if batch then batch:_observe(key, execution) end
+    if batch and not nested_baseline then batch:_observe(key, execution) end
     local run, publication = self:_publish_result(key, path, execution, question)
     run.key = key
     if baseline then run.baseline_cached = baseline.cached end
@@ -1959,12 +1961,12 @@ end
 -- call receives an assumed success carrying the real key. `flush` compiles
 -- the unique requests through the I/O strategy's `run_batch`, publishes only
 -- real verdicts, and reports whether every request was accepted. Every
--- executed run that was not published (infrastructure failures, including
--- synchronous ones such as baselines) is kept in `outcomes`; an authoritative
--- recheck receives them as `answers` and replays each once, in order,
--- before any later cache entry answers that source, so a completed verdict
--- is never compiled twice and a failed run is retried only where the
--- synchronous path would retry it.
+-- nonpublishable occurrence is kept in `outcomes`: a candidate's failed
+-- baseline gate belongs to the candidate, while explicit baseline calls keep
+-- their own history. An authoritative recheck receives these as `answers`
+-- and consumes each once, in order, before any later cache entry can answer
+-- that source. Completed verdicts never recompile; failed runs retry only
+-- where the synchronous path would retry them.
 -- Implementation notes: doc/implementation/c-ffi-expressions.md#speculative-batched-acceptance-probes
 local ProbeBatch = {}
 ProbeBatch.__index = ProbeBatch
@@ -2014,8 +2016,8 @@ function ProbeBatch:_observe(key, execution)
     outcomes[#outcomes + 1] = execution
 end
 
--- The next nonpublishable run of the speculative pass for `key`, in the order
--- that pass observed them, or nil once they are all used.
+-- The next nonpublishable outcome owned by `key` (including its failed
+-- baseline gate), in occurrence order, or nil once they are all consumed.
 function ProbeBatch:_answer(key)
     local answers = self.answers and self.answers[key]
     local position = (self.answer_positions[key] or 0) + 1
@@ -2204,10 +2206,12 @@ local function probe_result(context, kind, stage, source, run, rejection)
     return result
 end
 
-function ModuleContext:validate_baseline()
+-- Nested gates belong to the requesting candidate's replay outcome, not the
+-- ordered history of direct baseline validations.
+function ModuleContext:validate_baseline(nested)
     local source = self.baseline_source
     local run = self.service:_run_source(
-        "baseline", source, "header_baseline", self)
+        "baseline", source, "header_baseline", self, nil, nil, nested)
     return probe_result(self, "header_baseline", "baseline", source, run,
         "the final ordered foreign header context")
 end

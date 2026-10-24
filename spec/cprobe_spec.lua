@@ -3723,6 +3723,76 @@ describe("speculative acceptance batches", function()
         assert.is_true(service:close())
     end)
 
+    it("owns nested baseline failures separately from ordered direct validations",
+    function()
+        for _, failures in ipairs({ 1, 5 }) do
+            local baseline_calls, candidate_calls = 0, {}
+            local service, log = batching_service(function(source)
+                if source:find("titan_probe_b", 1, true) then
+                    baseline_calls = baseline_calls + 1
+                    if baseline_calls <= failures then
+                        return { started = false, ok = false, status = 127,
+                            diagnostic = "transient baseline " .. baseline_calls }
+                    end
+                    return accept()
+                end
+                candidate_calls[source] = (candidate_calls[source] or 0) + 1
+                return by_marker(source)
+            end)
+            local module, batch = deferring_context(service)
+            local source, target = cpointer("source_s"), cpointer("target_s")
+            local function candidate(context)
+                return context:probe_unsafe_object_pointer(source, target)
+            end
+            local function direct(context) return context:validate_baseline() end
+            -- One nested failure, or three direct failures interleaved with
+            -- two nested failures, all followed by same-source recovery.
+            local actions = failures == 1 and { candidate, candidate } or
+                { direct, candidate, direct, candidate, direct, candidate }
+            local original = {}
+            for index, action in ipairs(actions) do original[index] = action(module) end
+            local recovered = original[#original]
+            assert.equal("success", recovered.status)
+            assert.equal(failures + 1, baseline_calls)
+            module:probe_unsafe_object_pointer(source, cpointer("rejected_s"))
+            assert.is_false(batch:flush())
+            assert.equal("success", service.result_cache[recovered.key].outcome)
+            local runs = #log.runs
+            -- A completed candidate must still hit before its baseline. Force
+            -- a real miss only when a later distinct candidate needs the gate.
+            service.result_cache[module.baseline_key] = nil
+            local recheck = deferring_context(service, batch.outcomes)
+            for index, action in ipairs(actions) do
+                local replayed, first = action(recheck), original[index]
+                assert.equal(first.status, replayed.status)
+                assert.equal(first.key, replayed.key)
+                assert.equal(first.message, replayed.message)
+                assert.equal(first.diagnostic, replayed.diagnostic)
+                assert.equal(first.stage, replayed.stage)
+            end
+            assert.equal("rejected", recheck:probe_unsafe_object_pointer(
+                source, cpointer("rejected_s")).status)
+            assert.equal(runs, #log.runs)
+            assert.equal(failures + 1, baseline_calls)
+            -- No nested failure can remain in direct-baseline history and
+            -- shift onto this uncached distinct-key request.
+            local distinct = recheck:probe_unsafe_object_pointer(
+                source, cpointer("distinct_s"))
+            assert.equal("success", distinct.status)
+            assert.is_false(distinct.cached)
+            assert.equal(failures + 2, baseline_calls)
+            assert.equal(runs + 2, #log.runs)
+            for _, calls in pairs(candidate_calls) do assert.equal(1, calls) end
+            assert.equal(3, (function()
+                local total = 0
+                for _ in pairs(candidate_calls) do total = total + 1 end
+                return total
+            end)())
+            assert.equal(1, #log.batches)
+            assert.is_true(service:close())
+        end
+    end)
+
     it("finishes malformed batch containers and rethrows a raised batch",
     function()
         for _, container in ipairs({ "absent", false, "text", 7, {} }) do
