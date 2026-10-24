@@ -1217,16 +1217,22 @@ direct command path. Otherwise each child's stdout and stderr go to separate
 temporary files so a blocked pipe cannot deadlock the batch. Windows launches
 children through the stock LuaRocks `luv` process API, whose bundled libuv is
 independent of the Titan stdlib libuv payload. On Linux and macOS the batch
-requires the standard POSIX `mkfifo` utility: each child writes its batch
-index to one mode-`0600` named FIFO after its compiler exits. The parent opens
-that FIFO read/write, so it neither blocks before the first child nor sees a
+requires the standard POSIX `mkfifo` utility. Each child is a `sh` wrapper that
+runs the compiler in a subshell, then writes its batch index to one mode-`0600`
+named FIFO and exits with the compiler's status. Both shells catch INT, TERM,
+and HUP with a no-op trap (`trap :`, not an ignored signal), which `exec`
+resets, so the compiler keeps its default actions. A signal sent to the whole
+process group therefore cannot end a wrapper before its compiler has exited,
+and reaping a wrapper proves the compiler's lifetime ended. The parent opens
+the FIFO read/write, so it neither blocks before the first child nor sees a
 transient EOF while a slot is refilled. It makes the Lua `FILE` unbuffered
-before the first read, because it polls the descriptor and stdio read-ahead
-could otherwise hold a completion line that the kernel no longer reports. The
-parent then reaps exactly the child that completed and frees its slot. A
-completion-channel failure stops new launches, reaps active children, and fails
-the unlaunched jobs rather than risking a deadlock. Preparation failures do not
-launch a process.
+before the first read, because it
+polls the descriptor and stdio read-ahead could otherwise hold a completion
+line that the kernel no longer reports. The parent then reaps exactly the child
+that completed and frees its slot. A completion-channel failure stops new
+launches, reaps every active wrapper directly in launch order without waiting
+for further messages, and fails the unlaunched jobs rather than risking a
+deadlock. Preparation failures do not launch a process.
 
 ### GNU Make jobserver participation
 
@@ -1289,13 +1295,19 @@ not native UCRT descriptors.
 
 A parallel batch installs a temporary INT/TERM/HUP action (`_signal_guard`)
 that only records the first signal in a `sig_atomic_t` and writes a wake byte;
-ignored signals stay ignored. The batch then stops launching, waits for its
-running children, frees every slot, restores the previous actions (including
-Lua's SIGINT hook), and fails every module. `driver.compile_modules` re-raises
-the recorded signal under that restored action, so SIGINT surfaces as Lua's
-`interrupted!` error and SIGTERM terminates the process by its default action
-without the CLI's remaining cleanup. A SIGKILL cannot be intercepted, and the
-tokens a killed process held are not returned.
+ignored signals stay ignored. The batch checks for a recorded signal before
+every slot acquisition and launch, so a signal that arrives together with a
+ready token or completion starts no further compiler. It then stops reading
+completion messages and reaps its running wrappers directly, each after its
+compiler has exited, freeing one slot per reaped wrapper. Finally it returns
+every borrowed byte, restores the previous actions (including Lua's SIGINT
+hook), and fails every module. Every path that closes the guard, including a
+failed completion-channel setup, returns the recorded signal to the caller.
+`driver.compile_modules` re-raises it under the restored action after
+publication cleanup, so SIGINT surfaces as Lua's `interrupted!` error and
+SIGTERM or SIGHUP terminates the process by its default action without the
+CLI's remaining cleanup. A SIGKILL cannot be intercepted, and the tokens a
+killed process held are not returned.
 
 ### Shared C preprocessor, compiler, and linker inputs
 

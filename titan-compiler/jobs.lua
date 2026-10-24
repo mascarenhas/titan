@@ -266,7 +266,8 @@ function Slots:cancelled()
 end
 
 -- Returns every borrowed byte and restores the prior signal actions; call it
--- on every path. Idempotent.
+-- on every path. Idempotent. Afterwards `cancelled()` still reports a signal
+-- the guard caught, which the caller must return to its owner.
 function Slots:close()
     local ok, err = true, nil
     if self.client then

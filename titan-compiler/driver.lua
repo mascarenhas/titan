@@ -7370,7 +7370,12 @@ local function launch_prepared_compile(
             return nil, show_err
         end
     end
-    local notified_command = "(" .. command .. ") >" .. quoted_stdout ..
+    -- Both shells catch INT/TERM/HUP (exec resets caught signals, so the
+    -- compiler keeps its default actions). A process-group signal therefore
+    -- cannot end the wrapper before its compiler exits: reaping the wrapper
+    -- proves the compiler's lifetime ended, and the completion is still sent.
+    local notified_command = "trap : INT TERM HUP; " ..
+        "(trap : INT TERM HUP; " .. command .. ") >" .. quoted_stdout ..
         " 2>" .. quoted_stderr ..
         "; _titan_compile_status=$?; printf '%s\\n' " .. quoted_index ..
         " >" .. notification.quoted_path ..
@@ -7499,11 +7504,16 @@ function run_prepared_compiles(prepared, parallelism, verbose)
     local created, notification, notification_err = pcall(create_compile_notification)
     if not created then notification_err, notification = notification, nil end
     if not notification then
-        slots:close()
+        -- Closing restores the previous signal actions; a signal the guard
+        -- caught before then still belongs to the caller.
+        local closed, close_err = slots:close()
+        if not closed then
+            notification_err = tostring(notification_err) .. "; " .. tostring(close_err)
+        end
         for _, entry in ipairs(entries) do
             jobs.record(entry, nil, notification_err)
         end
-        return jobs.summarize(results)
+        return jobs.summarize(results), slots:cancelled()
     end
 
     local schedule = jobs.launch_order(entries)
@@ -7529,6 +7539,10 @@ function run_prepared_compiles(prepared, parallelism, verbose)
         local want_slot = false
         while not completion_err and not cancelled and
                 next_schedule <= #schedule do
+            -- A pending signal wins over a simultaneous slot or completion
+            -- event: check it before every acquisition and launch.
+            cancelled = slots:cancelled()
+            if cancelled then break end
             local granted, slot_err = slots:acquire_nowait()
             if granted == nil then
                 batch_failure("failed to acquire a jobserver token: " ..
@@ -7554,11 +7568,10 @@ function run_prepared_compiles(prepared, parallelism, verbose)
                 release_slot()
             end
             next_schedule = next_schedule + 1
-            cancelled = slots:cancelled()
         end
         if pending_count ~= 0 then
             local completed_index, process
-            if not completion_err then
+            if not completion_err and not cancelled then
                 local wait_called, event, value = pcall(
                     slots.wait, slots, notification.file, want_slot)
                 if not wait_called then event, value = nil, event end
@@ -7581,7 +7594,10 @@ function run_prepared_compiles(prepared, parallelism, verbose)
                         "completion: " .. tostring(value))
                 end
             end
-            if completion_err and not process then
+            -- After a completion-channel failure or a cancellation, reap
+            -- tracked children directly instead of waiting for messages that
+            -- may never arrive. Each wrapper exits only after its compiler.
+            if (completion_err or cancelled) and not process then
                 completed_index, process =
                     oldest_pending_process(pending, #entries)
             end
