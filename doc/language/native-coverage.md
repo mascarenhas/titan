@@ -137,7 +137,10 @@ make titan-native-coverage PREFIX=/tmp/titan-sdk CC=gcc-14 \
 
 Use `titan-native-coverage-build` to compile separately and
 `titan-native-coverage-run` to run the built executable and report without
-recompiling. `TITAN_FILTER` selects tests as usual. Rich reports are optional:
+recompiling. `TITAN_FILTER` selects tests as usual. Unlike `make
+titan-stdlib-test`, the coverage run always uses one test process, because
+every execution resets and then dumps the same counter files. Rich reports are
+optional:
 
 ```sh
 make titan-native-coverage PREFIX=/tmp/titan-sdk CC=gcc-14 \

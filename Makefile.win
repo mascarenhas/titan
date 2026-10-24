@@ -358,12 +358,22 @@ titan-native-coverage: titan-native-coverage-build
 	+$(MAKE) -f Makefile.win titan-native-coverage-run
 
 .PHONY: rock-test test
+# Implementation notes: doc/implementation/windows-build.md#test-ownership-and-keep-going
+# Windows keeps its native-build-first ownership: build and run the native
+# aggregate, then the per-file Busted shards under the native supervisor. A
+# failed native phase does not suppress the Busted phase; both statuses decide.
 rock-test: export TITAN_ROCK_TEST_STDLIB_SPECS = spec/asan_generated_c_context_spec.lua spec/dense_array_runtime_spec.lua spec/libuv_build_spec.lua spec/lpeglabel_build_spec.lua spec/minicoro_spec.lua spec/rockspec_spec.lua spec/titan_install_spec.lua
 rock-test: export TITAN_ROCK_TEST_SUPERVISOR = $(TITAN_TEST_BUILD_DIR)/sdk/bin/windows-test-supervisor.exe
-rock-test: titan-stdlib-test
+rock-test:
+	native_status=0; \
+	$(MAKE) -f Makefile.win titan-stdlib-test || native_status=$$?; \
+	busted_status=0; \
 	PREFIX=$(call quote,$(PREFIX)) TITAN_ROCK_TEST_INTERNAL=1 \
 	  BUSTED_FILTER=$(call quote,$(BUSTED_FILTER)) \
-	  bash spec/support/run_rock_tests.sh $(EXTRA_TEST_FLAGS)
+	  bash spec/support/run_rock_tests.sh $(EXTRA_TEST_FLAGS) || busted_status=$$?; \
+	test "$$native_status" = 0 || echo "native stdlib phase failed (status $$native_status)" >&2; \
+	test "$$busted_status" = 0 || echo "Busted phase failed (status $$busted_status)" >&2; \
+	test "$$native_status" = 0 && test "$$busted_status" = 0
 
 test: compiler
 	LUAROCKS_CONFIG=$(call quote,$(shell cygpath -m "$(LUAROCKS_CONFIG)")) \

@@ -22,6 +22,11 @@ while IFS= read -r -d '' source; do
     if [[ -f ${source%.c}.titan ]]; then rm -f -- "$source"; fi
 done < <(find spec -type f -name '*.c' -print0)
 
+while IFS= read -r -d '' titan_source; do
+    stem=${titan_source%.titan}
+    rm -f -- "$stem.parts" "$stem.priv.h" "$stem".part*.c "$stem".part*.o
+done < <(find spec -type f -name '*.titan' -print0)
+
 find spec -type f -name '*.o' -delete
 
 # Generated source-collaboration headers occur below spec/. Prove ownership
@@ -69,12 +74,18 @@ done < <(find . \
     -type f \( \
         -name '*__test_support.titan' -o \
         -name '*__test_support.c' -o -name '*__test_support.o' -o \
+        -name '*__test_support.parts' -o -name '*__test_support.priv.h' -o \
+        -name '*__test_support.part*.c' -o -name '*__test_support.part*.o' -o \
         -name '*__test_support.ffi.h' -o -name '*__test_support.titan.h' -o \
         -name '*__test_runner.titan' -o \
         -name '*__test_runner.c' -o -name '*__test_runner.o' -o \
+        -name '*__test_runner.parts' -o -name '*__test_runner.priv.h' -o \
+        -name '*__test_runner.part*.c' -o -name '*__test_runner.part*.o' -o \
         -name '*__test_runner.ffi.h' -o -name '*__test_runner.titan.h' -o \
         -name '*__test_entrypoint.titan' -o \
         -name '*__test_entrypoint.c' -o -name '*__test_entrypoint.o' -o \
+        -name '*__test_entrypoint.parts' -o -name '*__test_entrypoint.priv.h' -o \
+        -name '*__test_entrypoint.part*.c' -o -name '*__test_entrypoint.part*.o' -o \
         -name '*__test_entrypoint.ffi.h' -o -name '*__test_entrypoint.titan.h' \
     \) -print0)
 

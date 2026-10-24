@@ -200,6 +200,11 @@ persistent objects in the selected output tree (`TITAN_OUTPUT_DIR`, default
 and [output-directory routing](output-directory.md). The native stdlib test
 suite likewise has per-module object targets and installed-provider
 prerequisites, then a final incremental `--test` link in one build directory.
+Both object rules also read each module's `<stem>.parts` companion as a cheap
+completeness check and rebuild the whole module when it or a listed part is
+missing or malformed. Make reads the companion; the incremental loader never
+does, and the `.titan.source` record remains the reuse authority
+([standard-library object graph](build-script-audit.md#standard-library-object-graph)).
 
 Root driver/metadata specs cover object lookup, fallback, replay, and skipped
 compiler phases. `spec/coder/incremental_compilation_spec.lua` owns CLI and

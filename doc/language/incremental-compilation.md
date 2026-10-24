@@ -180,6 +180,12 @@ changes and the same build settings, it reuses the objects and provider pair
 left by the installation. `make install-stdlib` builds if necessary and copies
 that pair and its shims into the installation. With the prefix's Lua on `PATH`, these Make commands
 detect `PREFIX` automatically; an explicit `PREFIX` still takes precedence.
+Changed modules compile side by side in one Make job pool of `TITAN_JOBS` slots
+(default four) unless `make -jN` supplies another ([Build and test
+parallelism](build-profiles.md#build-and-test-parallelism)). Each module's
+`.parts` file lists its generated part files; a missing, incomplete, or
+damaged list or part rebuilds that whole module, even when only its object is
+requested.
 
 ## Separate standalone executables
 

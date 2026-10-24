@@ -167,6 +167,15 @@ production imports into the ordinary native aggregate, with `--coverage-module
 validator. A successful aggregate execution also writes its report. Children
 that import the prebuilt SDK stay unmeasured.
 
+Coverage runs stay serial on both platforms. Unix `titan-native-coverage-run`
+delegates to the focused `titan-stdlib-test-run` leaf, never to
+`titan-stdlib-test-run-parallel`: the executable resets the counters of its
+whole embedded inventory at startup and dumps them after its own run, so
+concurrent owner groups of one coverage executable would erase and race on the
+same `.gcda` files. The coverage build still compiles with up to `TITAN_JOBS`
+generated-C jobs and, as a `+` recipe, shares a parent Make's job pool ([Make
+job pool and titanc recipes](build-script-audit.md#make-job-pool-and-titanc-recipes)).
+
 | Variable | Unix `Makefile` default | Windows `Makefile.win` default |
 | --- | --- | --- |
 | `TITAN_COVERAGE_BUILD_DIR` | `out/coverage` | `$(WINDOWS_BUILD_ROOT)/native-coverage`, a private local NTFS SDK copy (`scripts/windows_native_coverage.sh`) |
