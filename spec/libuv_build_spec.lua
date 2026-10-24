@@ -642,6 +642,7 @@ local function make_temp_dir()
     if platform.windows then path = path:gsub("\\", "/") end
     os.remove(path)
     assert.truthy(lfs.mkdir(path))
+    path = assert(compiler_io.new_sync():realpath(path))
     return path
 end
 
@@ -7599,6 +7600,7 @@ release
                     for _, word in ipairs(case[1]) do argv[#argv + 1] = word end
                     for _, word in ipairs({
                         legacy, "--no-print-directory", case[2],
+                        "MAKE=" .. legacy,
                         "-f", fixture.root .. "/parent.mk",
                         "CHILD_ARGS=" .. table.concat(child_args, " "),
                     }) do

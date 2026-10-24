@@ -189,6 +189,7 @@ describe("split generated C translation units (S1)", function()
         workspace = temporary.name("-split-units")
         os.remove(workspace)
         assert(lfs.mkdir(workspace))
+        workspace = assert(io_strategy:realpath(workspace))
     end)
 
     after_each(function()
