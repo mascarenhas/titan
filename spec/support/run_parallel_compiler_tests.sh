@@ -425,8 +425,15 @@ done
 rm -f "$archive"
 
 # Each shard runs its planned files one Busted process at a time, records one
-# PASS/FAIL row per file, and keeps going after a failed file.
+# PASS/FAIL row per file, and keeps going after a failed file. The exclusive
+# files run alone and set their own compiler and Make caps, so their shard
+# drops the ordinary workers' nested -j1 policy: titanc reads an inherited
+# -j1 as a serial Make job policy.
 for shard in "${all_shards[@]}"; do
+    shard_job_policy=
+    if [[ $shard == "$exclusive_shard" ]]; then
+        shard_job_policy='unset MAKEFLAGS MFLAGS MAKELEVEL TITAN_JOBS'
+    fi
     cat > "$worker_root/execute-shard-$shard.sh" <<SH
 #!/usr/bin/env bash
 set -u
@@ -438,6 +445,7 @@ files_summary='$worker_root/shard-$shard.files'
 rm -f luacov.stats.out luacov.report.out "\$files_summary" || exit 1
 unset LUACOV_CONFIG
 export TITAN_PROBE_CACHE_DISABLE=1
+$shard_job_policy
 
 if (( windows != 0 )); then
     "\$TITAN_ROCK_TEST_LUA" "\$TITAN_ROCK_TEST_ORIGIN_CHECK" || exit 1
@@ -483,7 +491,8 @@ tag_output() {
 }
 
 # Run one shard in its private checkout and record its status. Nested
-# compiler and Make work inside a Busted worker stays at one job.
+# compiler and Make work inside an ordinary Busted worker stays at one job;
+# the exclusive shard's execute script clears that policy.
 run_worker_core() {
     local shard=$1
     local emit_fifo=${2:-0}

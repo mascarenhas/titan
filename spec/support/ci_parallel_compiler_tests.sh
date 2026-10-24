@@ -70,8 +70,16 @@ run_shard_phase='
         mkdir -p .tmp || exit 1
         export TMPDIR="$PWD/.tmp"
         unset LUACOV_CONFIG
-        BUSTED="$busted" MAKEFLAGS=-j1 TITAN_JOBS=1 \
-            bash spec/support/ci_test_groups.sh "compiler-shard-$shard" "$phase"
+        if [[ $phase == exclusive ]]; then
+            # These files run alone and set their own compiler and Make
+            # caps; titanc reads an inherited -j1 as a serial job policy.
+            env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u TITAN_JOBS \
+                BUSTED="$busted" \
+                bash spec/support/ci_test_groups.sh "compiler-shard-$shard" "$phase"
+        else
+            BUSTED="$busted" MAKEFLAGS=-j1 TITAN_JOBS=1 \
+                bash spec/support/ci_test_groups.sh "compiler-shard-$shard" "$phase"
+        fi
     ) 2>&1 | sed -u "s/^/[compiler shard $shard] /" | tee -a "$log"
     pipeline_status=("${PIPESTATUS[@]}")
     status=${pipeline_status[0]}

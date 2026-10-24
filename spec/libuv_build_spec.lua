@@ -3858,7 +3858,9 @@ end)
                 local bin = root .. "/bin"
                 local log = root .. "/argv"
                 local make_log = root .. "/selected-make"
+                local native_log = root .. "/native-phase"
                 local selected_make = root .. "/selected make"
+                local recursive_make = bin .. "/recursive-make"
                 assert(lfs.mkdir(bin))
                 local fake_busted = bin .. "/busted"
                 write_file(fake_busted, [==[#!/usr/bin/env bash
@@ -3867,13 +3869,28 @@ set -eu
 printf '%s\0' "$@" > "$TITAN_BUSTED_ARGV_LOG"
 exit 73
 ]==])
+                -- rock-test keeps going after the failed Busted phase. Its
+                -- recursive native build/run Make calls are recorded instead
+                -- of building the complete aggregate in this checkout.
                 write_file(selected_make, [==[#!/usr/bin/env bash
 set -eu
 printf 'selected\n' > "$TITAN_SELECTED_MAKE_LOG"
+exec make MAKE="$TITAN_RECURSIVE_MAKE" "$@"
+]==])
+                write_file(recursive_make, [==[#!/usr/bin/env bash
+set -eu
+for argument do
+    case "$argument" in
+        titan-stdlib-test-build | titan-stdlib-test-run | titan-stdlib-test-run-parallel)
+            printf '%s\n' "$argument" >> "$TITAN_NATIVE_PHASE_LOG"
+            exit 0
+            ;;
+    esac
+done
 exec make "$@"
 ]==])
                 local chmod_ok, chmod_output = run_argv({
-                    "chmod", "+x", fake_busted, selected_make,
+                    "chmod", "+x", fake_busted, selected_make, recursive_make,
                 })
                 assert.truthy(chmod_ok, chmod_output)
 
@@ -3896,6 +3913,8 @@ exec make "$@"
                     "BUSTED=busted",
                     "TITAN_BUSTED_ARGV_LOG=" .. log,
                     "TITAN_SELECTED_MAKE_LOG=" .. make_log,
+                    "TITAN_RECURSIVE_MAKE=" .. recursive_make,
+                    "TITAN_NATIVE_PHASE_LOG=" .. native_log,
                     "bash",
                     "spec/support/run_rock_tests.sh",
                     "--make=" .. selected_make,
@@ -3910,6 +3929,8 @@ exec make "$@"
                 local ok = run_argv(argv)
                 assert.falsy(ok)
                 assert.equal("selected\n", read_file(make_log))
+                assert.equal("titan-stdlib-test-build\ntitan-stdlib-test-run\n",
+                    read_file(native_log))
 
                 local encoded = read_file(log)
                 local actual = {}
@@ -4493,7 +4514,6 @@ for kept in .sdk-local-sibling 'sdk[1]' 'sdk*' sdk1; do
     [[ $(cat "$kept/kept" 2>/dev/null) == kept ]] || exit 82
 done
 [[ $(cat ordinary) == original ]] || exit 74
-[[ $MAKEFLAGS == -j1 && $TITAN_JOBS == 1 ]] || exit 75
 [[ $TITAN_SOURCE_GIT_ROOT == "$TITAN_FIXTURE_ORIGINAL" ]] || exit 76
 [[ -d $TMPDIR && $CCACHE_TEMPDIR == "$TMPDIR/ccache" &&
    -d $CCACHE_TEMPDIR ]] || exit 77
@@ -4505,6 +4525,14 @@ case "$test_file" in
     spec/coder/jobserver_spec.lua | spec/coder/parallel_compilation_spec.lua)
         exclusive=1 ;;
 esac
+# Ordinary workers keep nested Make/Titan work at one job. Exclusive files
+# run alone and own their caps, so no inherited Make job policy reaches them.
+if (( exclusive != 0 )); then
+    [[ -z ${MAKEFLAGS+set} && -z ${MFLAGS+set} && -z ${MAKELEVEL+set} &&
+       -z ${TITAN_JOBS+set} ]] || exit 75
+else
+    [[ $MAKEFLAGS == -j1 && $TITAN_JOBS == 1 ]] || exit 75
+fi
 enter_unit
 acquire_lock
 printf '%s\t%s\t%s\n' "$test_file" "$PWD" "$TMPDIR" >> "$state/observations"
@@ -5841,6 +5869,7 @@ printf '%s\n' "${schedule[@]}"
                 'mkfifo "$completion_fifo"',
                 'MAKEFLAGS=-j1',
                 'TITAN_JOBS=1',
+                "shard_job_policy='unset MAKEFLAGS MFLAGS MAKELEVEL TITAN_JOBS'",
                 'CCACHE_TEMPDIR="$worker_root/tmp-$shard/ccache"',
                 '-o gtest -v "\\$test_file"',
                 'printf \'[compiler shard %s] %s\\n\'',
@@ -5882,6 +5911,7 @@ printf '%s\n' "${schedule[@]}"
                 'unset LUACOV_CONFIG',
                 'MAKEFLAGS=-j1',
                 'TITAN_JOBS=1',
+                'env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u TITAN_JOBS',
                 '"compiler-shard-$shard" "$phase"',
                 'sed -u "s/^/[compiler shard $shard] /"',
                 'tee -a "$log"',
