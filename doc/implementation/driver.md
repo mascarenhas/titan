@@ -1100,10 +1100,10 @@ native_references, objects`.
    dense `parts` (part `i` has `index = i - 1`), an optional `private_header`,
    `private_symbols`, `direct_native_modules`, `native_bindings`, and
    `encoded_layouts`. The driver passes the effective part cap
-   (`driver.effective_c_parts`: `options.c_parts`, then `driver.C_PARTS`, then
-   `TITAN_C_PARTS`, then `driver.default_c_parts`, which is 4 on Linux and 1
-   elsewhere), the threshold (`coder.DEFAULT_SPLIT_THRESHOLD` unless
-   overridden), and the absolute `<stem>.priv.h` path for the parts'
+   (`driver.effective_c_parts`: `options.c_parts`, then `TITAN_C_PARTS`, then
+   `driver.default_c_parts`, which is 4 on Linux and 1 elsewhere), the
+   threshold (`coder.DEFAULT_SPLIT_THRESHOLD` unless overridden), and the
+   absolute `<stem>.priv.h` path for the parts'
    `#include`. The qualified `modname` controls the native prefix, registry
    identity, `_init`, `_abi`, `_types`, `luaopen_*`, and module-private `ℙ`
    symbols consistently. The `.titan.source` record stores `parts_version = 1`,
@@ -1439,6 +1439,7 @@ publication cleanup, so SIGINT surfaces as Lua's `interrupted!` error and
 SIGTERM or SIGHUP terminates the process by its default action without the
 CLI's remaining cleanup. A SIGKILL cannot be intercepted, and the tokens a
 killed process held are not returned.
+
 ### Shared C preprocessor, compiler, and linker inputs
 
 At driver initialization, `CC` defaults to `cc` and the three

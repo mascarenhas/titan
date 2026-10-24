@@ -83,14 +83,17 @@ link combines partials (`coverage.inventory`) and serializes the complete Lua
 table into the test executable. This uses compiler-known outputs and does not
 hash or attest the build.
 
-A [split module](codegen-overview.md#translation-unit-parts) is converted part
-by part: `driver.compile` runs `coverage_lines.convert` independently on each
-part's C file and passes the list to `coverage.partial`, so `files` holds every
-part's absolute C path in part order and `anchors` is keyed by each of those
-paths. The `.titan.source` record is appended to part 0 after conversion. The
-shared `<stem>.priv.h` is retained for diagnostics but is not converted and
-owns no source lines. Because every part is inventoried, the runtime reset
-removes each part's `.gcda` and `coverage.finish` reads each part's notes.
+Coverage converts generated C part by part. `driver.compile` runs
+`coverage_lines.convert` independently on each part's C file and always passes
+`coverage.partial` the ordered list of `{ filename, anchors }` parts, one entry
+for an unsplit module and one per part for a [split
+module](codegen-overview.md#translation-unit-parts). `files` therefore holds
+every part's absolute C path in part order and `anchors` is keyed by each of
+those paths. The `.titan.source` record is appended to part 0 after
+conversion. The shared `<stem>.priv.h` is retained for diagnostics but is not
+converted and owns no source lines. Because every part is inventoried, the
+runtime reset removes each part's `.gcda` and `coverage.finish` reads each
+part's notes.
 Incremental reuse in coverage mode additionally requires one recorded file per
 part and a regular `.c` and `.gcno` for every part
 ([split reuse checks](incremental-compilation.md#split-modules)).

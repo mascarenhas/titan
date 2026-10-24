@@ -175,37 +175,24 @@ function coverage.compile_flags(build, name)
     return flags
 end
 
-function coverage.partial(filename, source_files, anchors, backend)
+function coverage.partial(parts, source_files, backend)
     local sources = {}
     for _, source in ipairs(source_files) do sources[#sources + 1] = absolute(source) end
-    local function map_anchors(raw_anchors)
+    local files, anchors = {}, {}
+    for _, part in ipairs(parts) do
+        local generated = absolute(part.filename)
+        files[#files + 1] = generated
         local mapped = {}
-        for source, lines in pairs(raw_anchors or {}) do
+        for source, lines in pairs(part.anchors or {}) do
             local numbers = {}
             for line in pairs(lines) do numbers[#numbers + 1] = line end
             table.sort(numbers)
             mapped[absolute(source)] = numbers
         end
-        return mapped
+        anchors[generated] = mapped
     end
-    if type(filename) == "table" then
-        local files, all_anchors = {}, {}
-        for _, part in ipairs(filename) do
-            local generated = absolute(part.filename)
-            files[#files + 1] = generated
-            all_anchors[generated] = map_anchors(part.anchors)
-        end
-        return {
-            enabled = true,
-            backend = backend,
-            files = files,
-            sources = sources,
-            anchors = all_anchors,
-        }
-    end
-    local generated = absolute(filename)
-    return { enabled = true, backend = backend, files = { generated },
-        sources = sources, anchors = { [generated] = map_anchors(anchors) } }
+    return { enabled = true, backend = backend, files = files,
+        sources = sources, anchors = anchors }
 end
 
 function coverage.inventory(build, imported)

@@ -4618,10 +4618,9 @@ function driver.defaultloader(static_deps, options)
         if not valid_parts then
             return miss(parts_error)
         end
-        local active_c_parts = driver.effective_c_parts(
-            options.c_parts or context.c_parts)
+        local active_c_parts = driver.effective_c_parts(options.c_parts)
         local active_threshold = options.split_threshold
-            or context.split_threshold or coder.DEFAULT_SPLIT_THRESHOLD
+            or coder.DEFAULT_SPLIT_THRESHOLD
         if (native.c_parts ~= nil and native.c_parts ~= active_c_parts)
             or (native.split_threshold ~= nil
                 and native.split_threshold ~= active_threshold) then
@@ -6389,9 +6388,6 @@ function driver.effective_c_parts(override)
     if override ~= nil then
         return driver.parse_c_parts(override)
     end
-    if driver.C_PARTS ~= nil then
-        return driver.parse_c_parts(driver.C_PARTS)
-    end
     local env_val = platform.getenv("TITAN_C_PARTS")
     if env_val ~= nil then
         return driver.parse_c_parts(env_val)
@@ -7038,11 +7034,8 @@ local function prepare_compile(
                 coverage_parts[i] = { filename = part_c, anchors = anchors }
                 converted_codes[i] = { filename = part_c, code = converted }
             end
-            native.coverage = coverage.partial(
-                #coverage_parts == 1 and coverage_parts[1].filename or coverage_parts,
-                entry.source_files,
-                #coverage_parts == 1 and coverage_parts[1].anchors or nil,
-                options.coverage_backend)
+            native.coverage = coverage.partial(coverage_parts,
+                entry.source_files, options.coverage_backend)
             local metadata, metadata_error = metadata_code()
             if not metadata then return nil, metadata_error end
             converted_codes[1].code = converted_codes[1].code .. metadata
