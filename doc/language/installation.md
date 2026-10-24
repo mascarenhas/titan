@@ -289,9 +289,13 @@ Shell quoting in these variables is parsed once, so a path with spaces stays one
 argument and malformed quoting is rejected. Make does not track these settings; clean
 and rebuild after changing any of them.
 
-`TITAN_JOBS` (or `titanc -j N`) bounds concurrent generated-C compilations. It defaults
-to one, and values above one need the standard POSIX `mkfifo` utility. In a checkout
-you can also run `make -jN`.
+`TITAN_JOBS` (or `titanc -j N`) caps how many generated-C compilations one `titanc` run
+executes at once. It defaults to four; on Linux and macOS values above one need the
+standard POSIX `mkfifo` utility. Inside a GNU Make recipe `titanc` also shares Make's
+job slots ([Compiler jobs and GNU Make](build-profiles.md#compiler-jobs-and-gnu-make)).
+In a checkout, `make stdlib` and `luarocks make` share one Make job pool of `TITAN_JOBS`
+slots unless you pass `make -jN`; with macOS's stock Make, use `TITAN_JOBS=1` for a
+serial build ([Build and test parallelism](build-profiles.md#build-and-test-parallelism)).
 
 ### A separate rocks tree
 

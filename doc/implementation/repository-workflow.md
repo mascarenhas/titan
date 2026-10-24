@@ -101,18 +101,21 @@ runtime code that writes the stack through Lua internals is not checked.
 | Command, from the repository root | Purpose |
 | --- | --- |
 | `make test` | Prepare the selected SDK, reinstall the current compiler/provider with `luarocks make --force`, and run the complete mixed suite through `luarocks test`. |
-| `TITAN_JOBS=4 make -j4 test` | Four-way native/generated-C preparation variant. |
+| `TITAN_JOBS=8 TITAN_ROCK_TEST_JOBS=8 make -j8 test` | Wider variant: one eight-slot Make pool for preparation and both test domains, each `titanc` capped at eight, with eight Busted workers. Without these settings every phase uses one four-slot pool. |
 | `luarocks test` | Run against an already current install; its active `bin` on `PATH` is sufficient. It does not build the rock. |
-| `make rock-test` | Both test domains. In validation with no `PREFIX/bin/titanc`, it runs `make test` instead. |
-| `make busted-test BUSTED_FILTER='for loop'` | Busted only. |
+| `make rock-test` | Both test domains: per-file Busted workers with the native aggregate build in their pool, then the parallel native run. A failure in one domain does not skip the other. In validation with no `PREFIX/bin/titanc`, it runs `make test` instead. |
+| `make busted-test` | Busted only: every classified spec file once, across `TITAN_ROCK_TEST_JOBS` (default four) isolated workers in a `TITAN_JOBS` pool. |
+| `make busted-test BUSTED_FILTER='for loop'` | Busted only, as one focused process. |
 | `make stdlib-test` | Retained runtime/packaging Busted specs, then the native aggregate; no compiler specs and no coverage. |
-| `make titan-stdlib-test` | Build and run the aggregate native suite. |
-| `make titan-stdlib-test-build` | Build all native roots once. |
+| `make titan-stdlib-test` | Build the aggregate native suite, then run it with `titan-stdlib-test-run-parallel`, or with `titan-stdlib-test-run` when `TITAN_FILTER` is set. |
+| `make titan-stdlib-test-build` | Build all native roots once in one `TITAN_JOBS` pool. |
+| `make titan-stdlib-test-run-parallel TITAN_TEST_JOBS=4` | Run the existing aggregate as `TITAN_TEST_JOBS` (default four) owner groups, then the timing-guarded owners alone, and audit the union ([parallel runs](test-runner.md#parallel-native-aggregate-runs)). Rejects `TITAN_FILTER`. |
+| `make titan-stdlib-test-run` | One serial process over the existing aggregate. |
 | `make titan-stdlib-test-run TITAN_FILTER='^ssl[.]tests[.]'` | Filter a fresh execution of the existing aggregate; never filter compilation. |
 | `TMPDIR=/tmp/run-a make titan-stdlib-test-run TITAN_FILTER='^uv[.]' TITAN_TEST_RUN_LOG=/tmp/run-a/stdout.log` | Unix: one of several concurrent filtered executions of the same built aggregate; give each its own log and `TMPDIR` ([concurrent runs](test-runner.md#concurrent-filtered-runs)). |
 | `make rock-test BUSTED_FILTER='parser' TITAN_FILTER='^http[.]tests[.]'` | Independently filter both domains. Neither filter skips the other domain. |
-| `make titan-native-coverage` | Build and run the source-linked native coverage aggregate; see [native coverage](native-coverage.md#repository-integration-and-verification). |
-| `make stdlib` / `make install-stdlib` | Incremental standard-provider build / build then copy, using the installed compiler/SDK by default. |
+| `make titan-native-coverage` | Build and run the source-linked native coverage aggregate serially; see [native coverage](native-coverage.md#repository-integration-and-verification). |
+| `make stdlib` / `make install-stdlib` | Incremental standard-provider build in one `TITAN_JOBS` pool / build then copy, using the installed compiler/SDK by default. |
 | `make clean-stdlib` | Clear standard-provider outputs before changing tools, flags, profile, or OpenSSL mode. |
 | `make clean` / `make distclean` | Remove owned generated artifacts / also remove downloaded native dependency trees. |
 
@@ -120,8 +123,17 @@ Leaf build/run targets require a prepared matching SDK. Default Busted,
 `make busted-test`, `luarocks test`, and installed `titanc` use the installed
 compiler snapshot. Reinstall after compiler, runtime, or standard-library
 changes. `make test` owns this refresh; `luarocks test` alone does not.
-The Busted partitioning behind `rock-test` and `luarocks test` is described in
-[test runner](test-runner.md#busted-partitions).
+The per-file Busted scheduling behind `rock-test` and `luarocks test` is
+described in [Busted partitions](test-runner.md#busted-partitions), the native
+owner groups in [parallel native aggregate
+runs](test-runner.md#parallel-native-aggregate-runs), and the Make pool rules
+in [Make job pool and titanc
+recipes](build-script-audit.md#make-job-pool-and-titanc-recipes). The builds
+and the Busted workers share one pool: `TITAN_JOBS` slots (default four) unless
+`make -jN` or a parent Make supplies one. The native run starts after that
+work has drained and uses its own `TITAN_TEST_JOBS` processes. With macOS's
+stock GNU Make 3.81, `make -j1` cannot be distinguished from plain `make`; use
+`TITAN_JOBS=1` for a serial build.
 
 `titanc` accepts dotted module names, not file paths. Use its
 [CLI reference](driver.md#the-titanc-command-line) for provider/standalone

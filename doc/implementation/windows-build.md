@@ -79,11 +79,12 @@ installs compiler dependencies and the Titan source rock into the Lua prefix.
 Windows also installs `luv` for compiler subprocesses; its ordinary LuaRocks
 build uses CMake and a bundled libuv independently of Titan's stdlib libuv.
 
-Plain `luarocks test` runs the complete native stdlib suite first, then the
-retained runtime/packaging specs, the stdlib-dependent compiler integrations,
-and the compiler/language partitions in private NTFS checkout copies. Windows
-defaults to three concurrent partition workers under native Job Objects; see
-[Busted partitions](test-runner.md#busted-partitions).
+Plain `luarocks test` builds and runs the complete native stdlib suite first,
+then every retained runtime/packaging, stdlib-dependent compiler, and
+compiler/language spec file once, per file, in private NTFS checkout copies.
+Windows defaults to four concurrent Busted workers under native Job Objects;
+see [test ownership and keep-going](#test-ownership-and-keep-going) and [Busted
+partitions](test-runner.md#busted-partitions).
 
 ## Native build parallelism
 
@@ -92,15 +93,17 @@ commands launch through the stock LuaRocks `luv` dependency, whose exit
 callbacks report actual completion to the common scheduler; see [driver process
 transports](driver.md#experimental-windows-process-transports).
 
-`TITAN_JOBS` (default 1) is the only native build-parallelism setting on
-Windows, so set it to the CPU count for validation. It bounds the native
+`TITAN_JOBS` (default four) is the only native build-parallelism setting on
+Windows; raise it to the CPU count on a larger machine. It bounds the native
 dependency CMake build (`scripts/build_windows_native.sh`), generated-C
-compilation of the standard provider, and the shared native test build
-(`spec/support/windows_stdlib_tests.sh`). `MAKEFLAGS=-jN` has no effect:
-`Makefile.win` is `.NOTPARALLEL`, and LuaRocks starts its nested Make without
-the jobserver. The Lua, libbacktrace, and bundled OpenSSL builds stay at `-j1`.
-Busted compiler workers set their own bounds; see
-[Busted partitions](test-runner.md#busted-partitions).
+compilation of the standard provider (`scripts/build_windows_stdlib.sh`), and
+the shared native test build (`spec/support/windows_stdlib_tests.sh`).
+`MAKEFLAGS=-jN` has no effect: `Makefile.win` is `.NOTPARALLEL`, and LuaRocks
+starts its nested Make without the jobserver. The outer graph therefore
+intentionally delegates native parallelism to `titanc` and these scripts. The
+Lua, libbacktrace, and bundled OpenSSL builds stay at `-j1`. Busted compiler
+workers set their own bounds; see [Busted
+partitions](test-runner.md#busted-partitions).
 
 ## One controlled Lua DLL and its SDK
 
@@ -683,6 +686,29 @@ filesystem, and classified skip reasons. Repeat the shared suite with providers
 from both `validation` and `production` build profiles when validating the
 Windows port. Windows production recipes use their ordinary `-O2` defaults;
 test objects retain validation flags when consuming a production SDK.
+
+### Test ownership and keep-going
+
+`luarocks test` reaches `mingw32-make -f Makefile.win rock-test` through
+`spec/support/run_rock_tests.sh`. Windows keeps its native-build-first
+ownership: `rock-test` first builds and runs the complete native aggregate
+(`titan-stdlib-test`) in its private NTFS workspace, then runs the Busted phase
+through `run_rock_tests.sh` and the native Job Object supervisor. It does not
+mix the Unix Make jobserver into either phase. A failed native build or run
+does not suppress the Busted phase. Each phase that fails prints its status,
+and the target fails when either phase failed.
+
+The native aggregate runs as one serial process here; the Unix parallel owner
+groups are not used, because this workspace owns one supervisor, log, SDK copy,
+and scratch tree. Its build still compiles up to `TITAN_JOBS` (default four)
+generated-C objects at once. The Busted phase plans every classified spec file
+per file with the shared timing dataset, like Unix: the exclusive files run
+first and alone, then `TITAN_ROCK_TEST_JOBS` ordinary workers (default four)
+share the FIFO scheduler, so the exclusive files' explicit native job bounds
+never multiply with another active worker. Each worker records one result per
+file and continues after a failed file, and the supervisor preserves the
+worker's complete native exit status; see [Busted
+partitions](test-runner.md#busted-partitions).
 
 ## Native line coverage
 

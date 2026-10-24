@@ -101,3 +101,48 @@ Generated-C compilation concurrency is controlled by `titanc --jobs N` or
 default is one. This bound covers independent C object compilations, while
 checking, C generation and final linking retain their normal order. Windows
 stdlib builds also honor `TITAN_JOBS`.
+
+## Build and test parallelism
+
+In a Titan checkout, the Make targets that compile many modules (`make stdlib`,
+`make stdlib-objects`, `make titan-stdlib-test-objects`, and
+`make titan-stdlib-test-build`) and the build that `luarocks make` runs share
+one GNU Make job pool. Without a `-j` option they create one pool of
+`TITAN_JOBS` slots, four by default, so independent modules and the parts of
+large modules compile side by side within that budget. An explicit `make -jN`,
+or the pool of a parent Make, takes precedence: `make -j8 stdlib` runs at most
+eight jobs in total, and `TITAN_JOBS` then only caps each `titanc` run inside
+it. `make -j1` builds serially.
+
+macOS's stock GNU Make 3.81 cannot tell `make -j1` from plain `make`, so it
+still creates a `TITAN_JOBS` pool; use `TITAN_JOBS=1 make stdlib` for a serial
+build with that Make. Its pool still runs several modules at once, but each
+`titanc` inside it compiles with one job. GNU Make 4.4 or later (Homebrew
+`gmake`) also compiles a large module's parts in parallel.
+
+The repository's test commands use the same budget:
+
+* `make busted-test`, `make rock-test`, `make test`, and `luarocks test` run
+  each Busted spec file once across `TITAN_ROCK_TEST_JOBS` workers (default
+  four), each in a private copy of the checkout. Every worker holds one slot
+  of the shared pool, and `make rock-test` also builds the native test
+  executable inside that pool, so a four-slot budget runs four jobs in total.
+  Workers beyond the pool's slots wait for a free one, so raise both settings
+  together on a larger machine, for example
+  `TITAN_JOBS=8 TITAN_ROCK_TEST_JOBS=8 make rock-test`.
+* `make titan-stdlib-test` and the native phase of `make rock-test` run the
+  built native test executable as `TITAN_TEST_JOBS` groups of test owners at
+  once (default four; `1` runs them one group at a time), then run the
+  timing-sensitive owners alone. `make titan-stdlib-test-run` stays one
+  focused process, and `TITAN_FILTER` selects it.
+* A failing spec file or test group does not stop the others. Each command
+  finishes its remaining work, lists every failure, and then fails.
+
+Native coverage runs and native Windows test runs keep one native test process.
+On Windows, `TITAN_JOBS` (default four) is the only native build-parallelism
+setting; see [Windows native build
+parallelism](../implementation/windows-build.md#native-build-parallelism). The
+[repository workflow](../implementation/repository-workflow.md#choose-the-matching-profile-and-command)
+lists the commands, and [build and installation
+responsibilities](../implementation/build-script-audit.md#make-job-pool-and-titanc-recipes)
+describe the exact pool rules.

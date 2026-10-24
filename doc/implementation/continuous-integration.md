@@ -22,13 +22,19 @@ Linux defaults to `MAKEFLAGS=-j2` and `TITAN_JOBS=2` for its two-vCPU runners.
 The native coverage and sanitizer jobs each use a four-vCPU runner with 16GB RAM
 and override both limits to four. Large instrumented test units in the sanitizer
 job exceed the smaller runner's 8GB RAM.
-Native Make prerequisites may overlap; each compiler process overlaps only
-generated-C objects. Compiler shards override nested Make/Titan work to one
-slot and run at most two workers per runner. Dedicated parallelism regressions
-retain their explicit bounds. Recursive LuaRocks/CMake recipes preserve the Make
-jobserver; `ltitanlib.o` waits for the selected Lua installation's public
-headers. The generated-C completion protocol that keeps those slots full is
-owned by the [driver](driver.md#compiling-one-module-drivercompile).
+Under these caps, native Make prerequisites and the standard-library and
+native-test module objects overlap in one Make pool: every `titanc` recipe is a
+`+` recipe that shares it ([Make job pool and titanc
+recipes](build-script-audit.md#make-job-pool-and-titanc-recipes)), and each
+compiler process overlaps only its generated-C compilations inside it. The
+explicit caps keep the Makefile's default four-slot pool from oversubscribing
+the two-vCPU runners. Compiler shards override nested Make/Titan work to one
+slot outside their exclusive phase and run at most two workers per runner.
+Dedicated parallelism regressions retain their explicit bounds. Recursive
+LuaRocks/CMake recipes preserve the Make jobserver; `ltitanlib.o` waits for the
+selected Lua installation's public headers. The generated-C completion protocol
+that keeps those slots full is owned by the
+[driver](driver.md#compiling-one-module-drivercompile).
 
 ## Compiler producer and consumers
 
@@ -48,13 +54,23 @@ includes the active ABI. Restore reruns Lua/LuaRocks preparation, replaces only
 known active `0.6` Titan rock/direct-shim state, and verifies `package.cpath`
 contains `lib/titan/0.6/?.so`.
 
-`test-linux-compiler` runs groups 1–2 and 3–4 on separate runners
-(`spec/support/ci_parallel_compiler_tests.sh`). Each worker owns a checkout
+`test-linux-compiler` runs shards 1–2 and 3–4 of one four-way covered plan on
+separate runners (`spec/support/ci_parallel_compiler_tests.sh`).
+`spec/support/compiler_test_groups.lua ci-select compiler-shard-N` derives that
+plan from the timing dataset `ci_compiler_test_groups.txt` with the same
+longest-processing-time rule as local runs, over the compiler domain and its
+covered CI seconds (falling back to the local validation time); no shard
+numbers are stored. The dataset and `ci_stdlib_compiler_test_files.txt`
+classify compiler-only and stdlib-dependent integration files together,
+rejecting missing, stale, or overlapping entries; see [Busted
+partitions](test-runner.md#busted-partitions). Each worker owns a checkout
 extraction, `TMPDIR`, and LuaCov stats, and shares the compiler prefix
-read-only. The manifests `ci_compiler_test_groups.txt` and
-`ci_stdlib_compiler_test_files.txt` classify compiler-only and stdlib-dependent
-integration files together, rejecting missing, stale, or overlapping entries;
-the partition rule is in [Busted partitions](test-runner.md#busted-partitions).
+read-only. A runner first runs the ordinary files of its two shards
+concurrently, then each shard's exclusive files (`EXCLUSIVE_SPECS`, which count
+real overlapping compiler processes or drive real Make jobservers) alone, one
+shard after the other and without the nested `MAKEFLAGS=-j1`/`TITAN_JOBS=1`
+caps; LuaCov stats accumulate in the owning shard's extraction across both
+phases.
 Compiler-only workers need no canonical-provider snapshot because no later job
 consumes their outputs. Disposable generated fixtures use
 `TITAN_EXTRA_CFLAGS=-O0 -fno-lto`. `TITAN_COVERAGE_TEST_REQUIRED=1` makes
@@ -68,8 +84,8 @@ pass, generates its own report, and uploads directly with the `compiler`
 Codecov flag. The stdlib integration upload uses that same flag, so there is
 no full-tree merger job.
 
-Local `rock-test` uses the same partition manifest without LuaCov; see [Busted
-partitions](test-runner.md#busted-partitions).
+Local `rock-test` uses the same timing dataset and partition rule, per file and
+without LuaCov; see [Busted partitions](test-runner.md#busted-partitions).
 
 ## Standard library, packaging, and coverage
 
@@ -164,10 +180,11 @@ unwinding, async/libuv owners and callbacks, TLS/HTTP, WebSocket ownership,
 SQLite, JSON, reflection, PEG/regex, and the net/OS production smokes. Full
 library behavior belongs to native coverage. The 15-second Runtime shutdown
 check runs here because this aggregate carries no coverage-reporting overhead.
-The gates run serially: several carry timing oracles, such as that shutdown
-check, which concurrent filtered runs would load. Host Lua/parser dependencies
-use instrumented O1; libbacktrace, libuv, generated images, and disposable
-fixtures use instrumented O0; LTO stays disabled throughout.
+The gates run serially through that focused leaf, never through
+`titan-stdlib-test-run-parallel`: several carry timing oracles, such as that
+shutdown check, which concurrent filtered runs would load. Host Lua/parser
+dependencies use instrumented O1; libbacktrace, libuv, generated images, and
+disposable fixtures use instrumented O0; LTO stays disabled throughout.
 
 A gate whose filter could silently select nothing, for example after a case
 rename, also greps each log for the runner's `[==========] N test(s) ran.`
@@ -257,10 +274,13 @@ authorize its cost; dispatch only with an explicit maintainer request:
 gh workflow run macos.yml --ref <branch>
 ```
 
-The hosted job sets both concurrency bounds to three. It retries only
-dependency acquisition within the same prefix; build and complete test execution
-remain single-shot. Run all uncovered stdlib/runtime/packaging work and the
-aggregate before `ci_test_groups.sh compiler-uncovered`. Before compiler
+The hosted job sets all three concurrency bounds to three (`MAKEFLAGS=-j3`,
+`TITAN_JOBS=3`, and `TITAN_TEST_JOBS=3`), so its `make stdlib-test` runs the
+native aggregate as three ordinary owner groups followed by the timing-guarded
+owners alone. It retries only dependency acquisition within the same prefix;
+build and complete test execution remain single-shot. Run all uncovered
+stdlib/runtime/packaging work and the aggregate before
+`ci_test_groups.sh compiler-uncovered`. Before compiler
 fixtures, use `ci_stdlib_snapshot.sh` to preserve the runtime archive,
 canonical pair, conditional dSYM, and all shims, then restore them
 before bundled/system production smokes. Retain the real x86_64/arm64 universal

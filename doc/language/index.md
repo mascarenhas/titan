@@ -47,9 +47,9 @@ use the chapters below for the normative language reference.
 
 | Chapter | Covers |
 | --- | --- |
-| [Native build profiles](build-profiles.md) | Production optimization defaults and isolated O0/no-LTO validation SDKs. |
-| [Installing Titan on Linux and macOS](installation.md) | Build and install steps, the `PREFIX` and `ROCKS_TREE` directories, what the installation contains, how Titan finds it, bundled libuv and OpenSSL, building the standard library during development, uninstalling, and cleaning. |
-| [Installing and using Titan on Windows](windows-build.md) | Experimental CLANG64 installation, standalone LuaRocks configuration, DLL programs, packaging, cleanup, native test entrypoints, and build parallelism. |
+| [Native build profiles](build-profiles.md) | Production optimization defaults, isolated O0/no-LTO validation SDKs, and the checkout's shared Make job pool and test parallelism settings. |
+| [Installing Titan on Linux and macOS](installation.md) | Build and install steps, the `PREFIX` and `ROCKS_TREE` directories, what the installation contains, how Titan finds it, bundled libuv and OpenSSL, compilation job defaults, building the standard library during development, uninstalling, and cleaning. |
+| [Installing and using Titan on Windows](windows-build.md) | Experimental CLANG64 installation, standalone LuaRocks configuration, DLL programs, packaging, cleanup, native test entrypoints, Busted workers, and build parallelism. |
 | [Documentation comments](documentation-comments.md) | LDoc-style summaries and tags retained for editor hover and completion. |
 | [Design philosophy and history](philosophy.md) | Why Titan exists, its core commitments, the project's history and design principles. |
 | [The type system](types.md) | All Titan types; equality, symmetric non-transitive consistency, direct coercions, gradual views, callable adjustment, the normative boundary matrix, inference, and `value`. |
@@ -102,8 +102,8 @@ use the chapters below for the normative language reference.
 | [Lua states and loading standard library](standard-library-lua.md) | Independent states, native loader snapshots, canonical `transfer.TransferValue` copy/borrow policies over a separate carrier that moves no packet attachments, custom reconstruction, exclusive background execution and host-state close during it, two-phase `Receiver` bootstrap and cleanup, Reader input, and state cleanup; current-state loading, cooperative `require`, caches, and searchers. |
 | [Iteration standard library](standard-library-iteration.md) | Lua-compatible Map traversal, corrected generic-for iterator tuples, and Array iteration that preserves inner nil elements. |
 | [Garbage-collection standard library](standard-library-gc.md) | Weak Maps and ephemerons, collector actions and mode switches, byte counts, and Lua 5.5 tuning parameters. |
-| [Testing Titan code](standard-library-test.md) | The `titan.test` API, native `titanc --test` discovery, subtests and cleanup, filtering, failure output, and process statuses. |
-| [Native source coverage](native-coverage.md) | Compile-and-run executable-line coverage, automatic source selection, separate coverage objects, and optional LCOV/HTML/Cobertura reports. |
+| [Testing Titan code](standard-library-test.md) | The `titan.test` API, native `titanc --test` discovery, subtests and cleanup, filtering, failure output, process statuses, and the repository's parallel owner-group runs. |
+| [Native source coverage](native-coverage.md) | Compile-and-run executable-line coverage, automatic source selection, separate coverage objects, optional LCOV/HTML/Cobertura reports, and serial repository coverage runs. |
 | [Reflection standard library](standard-library-reflect.md) | Runtime inspection of 19 value kinds, public nominal descriptors, explicit type resolution, erased generic schemas, callable metadata, checked field access, lossless native projections, and default construction. |
 | [JSON standard library](standard-library-json.md) | JSON encoding and typed reflection-directed decoding, record and union mappings, optional null preservation, Unicode/numbers, structured diagnostics, and resource limits. |
 | [Protocol Buffers standard library](standard-library-protobuf.md) | Public record and union serialization through compiler-generated or reflective codecs, self-describing `value` and erased generic fields, native-buffer entries, anonymous field messages, native C fields, proto3 schemas, and independent-state payloads. Standalone protobuf calls grant no packet-resource authority. |

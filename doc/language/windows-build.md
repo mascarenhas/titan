@@ -117,13 +117,17 @@ mingw32-make -f Makefile.win test PREFIX=/c/Titan/sdk-validation
 
 With `LUAROCKS_CONFIG` selecting an already prepared SDK, plain
 `luarocks.exe test titan-0.6.0-1.rockspec` tests that installed compiler/provider
-without rebuilding the rock. The workflow runs the complete shared native
-standard-library suite, retained runtime/packaging specs, and compiler/language
-specs. Ordinary compiler tests run in private checkout copies with three workers
-by default; `TITAN_ROCK_TEST_JOBS=1` through `4` sets the bound.
+without rebuilding the rock. The workflow builds and runs the complete shared
+native standard-library suite first, then runs every retained runtime/packaging
+and compiler/language spec file once in private checkout copies, with four
+workers by default; `TITAN_ROCK_TEST_JOBS` sets any positive worker count. A
+failure in the native phase does not skip the specs, and a failing spec file
+does not stop the others; the run reports every failure and then fails.
 
-Set `TITAN_JOBS` to the number of CPUs for these runs; `MAKEFLAGS` is ignored.
-See [native build parallelism](../implementation/windows-build.md#native-build-parallelism).
+`TITAN_JOBS` (default four) bounds native and generated-C compilation for these
+runs; `MAKEFLAGS` is ignored. Raise it to the number of CPUs on a larger machine.
+See [native build parallelism](../implementation/windows-build.md#native-build-parallelism)
+and [test ownership](../implementation/windows-build.md#test-ownership-and-keep-going).
 
 For the shared suite's separate build/run targets, filtering, and evidence
 requirements, see [native Windows tests](../implementation/windows-build.md#shared-native-standard-library-tests).

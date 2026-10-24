@@ -418,9 +418,11 @@ new spec file and remeasure rows when costs change materially.
 count overlapping real compiler processes against their own caps, drive real
 parent Make jobservers, or install process-global signal guards. They run
 alone in their own checkout copy after every ordinary worker and any
-overlapped native build have finished. Every other file, including the
-retained and stdlib-compiler specs, is scheduled per file; there is no serial
-prefix. Those files write only their own checkout (for example
+overlapped native build have finished, with `MAKEFLAGS`, `MFLAGS`,
+`MAKELEVEL`, and `TITAN_JOBS` unset so each test sets its own caps; `titanc`
+would read an inherited `-j1` as a serial Make job policy. Every other file,
+including the retained and stdlib-compiler specs, is scheduled per file; there
+is no serial prefix. Those files write only their own checkout (for example
 `libuv-build/` or checkout-root fixtures) or private temporary SDK and staging
 trees, so all workers share the installed SDK read-only.
 
