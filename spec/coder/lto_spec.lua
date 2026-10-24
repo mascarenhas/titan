@@ -1,6 +1,7 @@
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
 local compiler_io = require "titan-compiler.io"
+local coder_names = require "titan-compiler.coder.names"
 local lfs = require "lfs"
 local objectmetadata = require "titan-compiler.objectmetadata"
 local platform = require "titan-compiler.platform"
@@ -132,9 +133,16 @@ describe("Titan link-time optimization", function()
         compiled("-c", "--incremental", "lto_fixture.base")
         compiled("-c", "--incremental", "lto_fixture.facade")
         compiled("-c", "--incremental", "direct_app")
-        -- The caller must not have seen a header-inline callee, or this would
-        -- merely demonstrate ordinary per-translation-unit optimization.
-        assert.falsy(read(base .. ".titan.h"):find("static inline", 1, true))
+        -- Only the forwarding entry is header-inline, not the foreign body:
+        -- the constant result must still propagate across objects through LTO.
+        local header = read(base .. ".titan.h")
+        local canonical = coder_names._foreign_func_name("lto_fixture.base", "answer")
+        local helper = coder_names._foreign_inline_name("lto_fixture.base", "answer")
+        local name, callee = header:match(
+            "static inline int (%S+)%(void%) {%s*return (%S+)%(%)%;%s*}")
+        assert.equal(helper, name, header)
+        assert.equal(canonical, callee, header)
+        assert.falsy(header:find("while", 1, true), header)
         local nm_ok, unresolved = run({ "nm", "-u", facade .. ".o" })
         assert.is_true(nm_ok, unresolved)
         assert.matches(SENTINEL, unresolved, 1, true)

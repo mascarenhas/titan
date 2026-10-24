@@ -6705,7 +6705,8 @@ function driver.prepare_foreign_headers(
 end
 
 local function prepare_compile(
-        modname, ast, sourcef, static_deps, verbose, options, source_entry)
+        modname, ast, sourcef, static_deps, verbose, options, source_entry,
+        header_plan)
     if not staticmetadata.valid_module_name(modname) then
         return nil, "invalid logical Titan module name " ..
             string.format("%q", modname)
@@ -6730,11 +6731,13 @@ local function prepare_compile(
     local parts_companion_path = stem .. ".parts"
     coder.prepare_coverage(ast, options and
         (options.coverage == true or options.coverage_backend ~= nil))
-    local header_plan
-    if not ast._foreign_header_prepared or not ast._ffi_header_prepared then
+    local owns_header_plan = header_plan == nil
+    if not header_plan and (not ast._foreign_header_prepared or not ast._ffi_header_prepared) then
         header_plan = driver.plan_foreign_header(modname, ast, sourcef)
         local valid, err = driver.validate_foreign_header_plan(header_plan)
         if not valid then return nil, err end
+    end
+    if header_plan then
         ast._foreign_header_recipe = header_plan.recipe
     end
     local imported_layouts = options and options.nominal_layouts
@@ -6758,6 +6761,7 @@ local function prepare_compile(
             c_parts = effective_c_parts,
             split_threshold = split_threshold,
             private_header_output = normalized_absolute_filename(priv_header_path),
+            foreign_header_plan = header_plan,
         })
     local generated_parts = assert(generated and generated.parts)
     local native_references = generated.direct_native_modules
@@ -6973,101 +6977,100 @@ local function prepare_compile(
         inputs[#inputs + 1] = input
     end
     local function materialize()
-    local output_ok, output_err = ensure_output_parent(filename)
-    if not output_ok then return nil, output_err end
-    if header_plan then
-        local ok, err = driver.write_foreign_header_plan(
-            header_plan, verbose, options and options.pretty_print)
-        if not ok then return nil, err end
-    end
-
-    -- Invalidate primary commit marker and companion first, then remove prior
-    -- sibling outputs.
-    os.remove(libname)
-    os.remove(parts_companion_path)
-    os.remove(filename)
-    os.remove(stem .. ".gcda")
-    os.remove(stem .. ".gcno")
-    for prior_path in pairs(prior_inventory) do
-        os.remove(prior_path)
-    end
-
-    if generated.private_header then
-        local ok, err = util.set_file_contents(
-            priv_header_path, generated.private_header)
-        if not ok then return nil, err end
-        local format_ok, format_err = driver.format_generated_file(
-            priv_header_path, verbose, options and options.pretty_print, nil, false)
-        if not format_ok then
-            os.remove(priv_header_path)
-            return nil, format_err
+        local output_ok, output_err = ensure_output_parent(filename)
+        if not output_ok then return nil, output_err end
+        if header_plan and owns_header_plan then
+            local ok, err = driver.write_foreign_header_plan(
+                header_plan, verbose, options and options.pretty_print)
+            if not ok then return nil, err end
         end
-    end
 
-    for _, part in ipairs(generated_parts) do
-        local part_c = driver.part_c_filename(stem, part.index)
-        local part_code = part.code
-        if not (options and options.coverage) and part.index == 0 then
+        -- Invalidate primary commit marker and companion first, then remove prior
+        -- sibling outputs.
+        os.remove(libname)
+        os.remove(parts_companion_path)
+        os.remove(filename)
+        os.remove(stem .. ".gcda")
+        os.remove(stem .. ".gcno")
+        for prior_path in pairs(prior_inventory) do
+            os.remove(prior_path)
+        end
+
+        if generated.private_header then
+            local ok, err = util.set_file_contents(
+                priv_header_path, generated.private_header)
+            if not ok then return nil, err end
+            local format_ok, format_err = driver.format_generated_file(
+                priv_header_path, verbose, options and options.pretty_print, nil, false)
+            if not format_ok then
+                os.remove(priv_header_path)
+                return nil, format_err
+            end
+        end
+
+        for _, part in ipairs(generated_parts) do
+            local part_c = driver.part_c_filename(stem, part.index)
+            local part_code = part.code
+            if not (options and options.coverage) and part.index == 0 then
+                local metadata, metadata_error = metadata_code()
+                if not metadata then return nil, metadata_error end
+                part_code = part_code .. metadata
+            end
+            os.remove(part_c)
+            local ok, err = util.set_file_contents(part_c, part_code)
+            if not ok then return nil, err end
+            local format_ok, format_err = driver.format_generated_file(
+                part_c, verbose, options and options.pretty_print, nil,
+                options and options.coverage)
+            if not format_ok then return nil, format_err end
+        end
+
+        if options and options.coverage then
+            local coverage_parts = {}
+            local converted_codes = {}
+            for i, part in ipairs(generated_parts) do
+                local part_c = driver.part_c_filename(stem, part.index)
+                local contents, read_error = util.get_file_contents(part_c)
+                if not contents then return nil, read_error end
+                local converted, conversion_error, anchors =
+                    require("titan-compiler.coverage_lines").convert(contents, part_c)
+                if not converted then return nil, conversion_error end
+                coverage_parts[i] = { filename = part_c, anchors = anchors }
+                converted_codes[i] = { filename = part_c, code = converted }
+            end
+            native.coverage = coverage.partial(
+                #coverage_parts == 1 and coverage_parts[1].filename or coverage_parts,
+                entry.source_files,
+                #coverage_parts == 1 and coverage_parts[1].anchors or nil,
+                options.coverage_backend)
             local metadata, metadata_error = metadata_code()
             if not metadata then return nil, metadata_error end
-            part_code = part_code .. metadata
+            converted_codes[1].code = converted_codes[1].code .. metadata
+            for _, item in ipairs(converted_codes) do
+                local written, write_error =
+                    util.set_file_contents(item.filename, item.code)
+                if not written then return nil, write_error end
+            end
         end
-        os.remove(part_c)
-        local ok, err = util.set_file_contents(part_c, part_code)
-        if not ok then return nil, err end
-        local format_ok, format_err = driver.format_generated_file(
-            part_c, verbose, options and options.pretty_print, nil,
-            options and options.coverage)
-        if not format_ok then return nil, format_err end
-    end
-
-    if options and options.coverage then
-        local coverage_parts = {}
-        local converted_codes = {}
-        for i, part in ipairs(generated_parts) do
-            local part_c = driver.part_c_filename(stem, part.index)
-            local contents, read_error = util.get_file_contents(part_c)
-            if not contents then return nil, read_error end
-            local converted, conversion_error, anchors =
-                require("titan-compiler.coverage_lines").convert(contents, part_c)
-            if not converted then return nil, conversion_error end
-            coverage_parts[i] = { filename = part_c, anchors = anchors }
-            converted_codes[i] = { filename = part_c, code = converted }
+        if source_entry then
+            source_entry.coverage = native.coverage
+            source_entry.private_symbols = private_symbols
         end
-        native.coverage = coverage.partial(
-            #coverage_parts == 1 and coverage_parts[1].filename or coverage_parts,
-            entry.source_files,
-            #coverage_parts == 1 and coverage_parts[1].anchors or nil,
-            options.coverage_backend)
-        local metadata, metadata_error = metadata_code()
-        if not metadata then return nil, metadata_error end
-        converted_codes[1].code = converted_codes[1].code .. metadata
-        for _, item in ipairs(converted_codes) do
-            local written, write_error =
-                util.set_file_contents(item.filename, item.code)
-            if not written then return nil, write_error end
-        end
-    end
-    if source_entry then
-        source_entry.coverage = native.coverage
-        source_entry.private_symbols = private_symbols
-    end
 
-
-    return {
-        modname = modname,
-        request_index = 1,
-        stem = stem,
-        primary_object = libname,
-        private_header = generated.private_header and priv_header_path or nil,
-        parts_companion = parts_companion_path,
-        jobs = prepared_jobs,
-        objects = ordered_objects,
-        source_record = native,
-        prior_inventory = prior_inventory,
-        native_references = native_references,
-        private_symbols = private_symbols,
-    }
+        return {
+            modname = modname,
+            request_index = 1,
+            stem = stem,
+            primary_object = libname,
+            private_header = generated.private_header and priv_header_path or nil,
+            parts_companion = parts_companion_path,
+            jobs = prepared_jobs,
+            objects = ordered_objects,
+            source_record = native,
+            prior_inventory = prior_inventory,
+            native_references = native_references,
+            private_symbols = private_symbols,
+        }
     end
     return {
         modname = modname, outputs = outputs, inputs = inputs,
@@ -7125,6 +7128,7 @@ function driver.compile(modname, ast, sourcef, static_deps, verbose, options, so
     driver.record_module_symbols(symbols, modname, plan.private_symbols, errors)
     if #errors > 0 then return nil, table.concat(errors, "\n") end
     local prepared, materialize_err = plan.materialize()
+    plan.materialize = nil
     if not prepared then return nil, materialize_err end
     -- Serial compilation runs every part in order, as the batch does, so a
     -- failing part does not hide another part's diagnostics.
@@ -7733,24 +7737,38 @@ function driver.plan_compile_requests(
         requests, verbose, native_inputs, symbol_owners, header_plans)
     validate_compile_requests(requests)
     local plans, outputs, inputs, symbols, errors = {}, {}, {}, {}, {}
+    local input_seen, headers_by_name = {}, {}
+    local function add_input(input)
+        if input and not input_seen[input] then
+            input_seen[input] = true
+            inputs[#inputs + 1] = input
+        end
+    end
+    for _, plan in ipairs(header_plans or {}) do headers_by_name[plan.modname] = plan end
     for symbol, owner in pairs(symbol_owners or {}) do symbols[symbol] = owner end
-    for _, input in ipairs(native_inputs or {}) do inputs[#inputs + 1] = input end
+    for _, input in ipairs(native_inputs or {}) do add_input(input) end
     for index, request in ipairs(requests) do
         local mod = request.mod
         local native = mod.object_metadata
         if not mod.compiled then
             local plan, err = prepare_compile(request.modname, mod.ast,
                 mod.native_output or mod.filename, request.static_deps,
-                verbose, request.options, mod)
+                verbose, request.options, mod, headers_by_name[request.modname])
             if not plan then return nil, err end
             plans[index] = plan
             native = plan.source_record
             for _, output in ipairs(plan.outputs) do outputs[#outputs + 1] = output end
-            for _, input in ipairs(plan.inputs) do inputs[#inputs + 1] = input end
+            for _, input in ipairs(plan.inputs) do add_input(input) end
         else
             plans[index] = false
             for _, object in ipairs(driver.module_compiled_objects(mod)) do
-                inputs[#inputs + 1] = object
+                add_input(object)
+            end
+            for _, input in ipairs(mod.source_files or { mod.filename }) do
+                add_input(input)
+            end
+            for _, dependency in ipairs(mod.c_header_dependencies or {}) do
+                add_input(dependency.filename or dependency.path)
             end
         end
         driver.record_module_symbols(symbols, request.modname,
@@ -7812,6 +7830,7 @@ function driver.compile_modules(requests, parallelism, verbose, plans)
             }
         else
             local compilation, prepare_err = plans[index].materialize()
+            plans[index].materialize = nil
             if not compilation then
                 results[index] = { err = prepare_err }
             else

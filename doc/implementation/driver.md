@@ -1246,21 +1246,27 @@ requests' primary objects are rejected before preparation.
 
 `driver.plan_compile_requests(requests, verbose, native_inputs, symbol_owners,
 header_plans)` runs steps 3–5 for every source request without writing
-anything. A request whose module is already compiled contributes its recorded
-object list as inputs and its recorded symbols. All modules' public and
+anything. Each source module is planned and generated with its own entry from
+`header_plans`, so it does not plan a second copy of its headers. A request
+whose module is already compiled contributes its recorded object list, source
+files, and C header dependencies as inputs, plus its recorded symbols. The
+inputs form one deduplicated list. All modules' public and
 private symbols are recorded into a copy of `symbol_owners`, the inventory the
 CLI has already filled from every carried or reused module, so two modules
 that would define the same C symbol fail with `cannot link C symbol ...` before
 any output changes. The generated and restored headers in `header_plans`, and
 their staging files, join the outputs, and the whole set is checked once with
 `driver.validate_provider_output_paths`. The returned plans carry the complete
-`outputs` and `inputs`. The CLI checks those exact outputs again together with
-its program outputs (`driver.validate_program_output_paths`, whose sixth
-`planned_outputs` argument replaces the per-module estimate) or with its
-provider and shim outputs. This applies to compile-only, library, and program
-invocations alike. Only then does it write headers and call
-`driver.compile_modules(requests, parallelism, verbose, plans)`, which plans
-the batch itself when no plans are given.
+`outputs` and `inputs`. The CLI checks those exact outputs again, against the
+same input list, together with its program outputs
+(`driver.validate_program_output_paths`, whose sixth `planned_outputs`
+argument replaces the per-module estimate) or with its provider and shim
+outputs. This applies to compile-only, library, and program invocations
+alike. Only then does the CLI write every planned header, as the batch's sole
+header writer, and call `driver.compile_modules(requests, parallelism,
+verbose, plans)`, which plans the batch itself when no plans are given. Each
+plan's `materialize` closure runs once and is then released, dropping the
+generated C it held.
 
 `driver.compile_modules` materializes every source plan in request order
 before compiling anything; only the native object commands that follow ever
