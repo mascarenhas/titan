@@ -2371,6 +2371,20 @@ The operating system reports lookup and execution failures. Serial
 inherited-output commands retain `os.execute`; their renderer applies C-runtime
 quoting followed by `cmd` escaping and sets `LANG=C` and `LC_ALL=C`.
 
+Windows native links use `driver.run_link_command` to avoid the `cmd.exe`
+command-length limit as the number or length of object paths grows. The parsed
+`CC` command/wrapper prefix stays on the command line; the remaining compiler
+and linker arguments go into a unique sibling `.link.rsp` temporary beside the
+output. `platform.windows_response_contents` applies the GNU response-file
+quoting used by MSYS2 Clang (escaping backslashes and quotes), without `cmd`
+escaping, one argument per LF line, and publication uses binary
+mode. DLL providers, standalone/test providers and launchers, and executable
+validation links share this path. The temporary is removed after both successful
+and failed execution. Verbose mode prints the expanded logical command followed
+by the actual short `@file` invocation; native diagnostics and exit codes retain
+their normal transport. POSIX links and ordinary compile/tool commands are
+unchanged.
+
 Captured Windows commands and parallel generated-C workers use the stock `luv`
 LuaRocks dependency. `uv.spawn` receives the parsed argument array, cwd and child
 environment; libuv owns Windows executable search and argument quoting. Capture

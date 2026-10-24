@@ -140,4 +140,25 @@ function platform.windows_process_command(argv)
     return table.concat(words, " "), executable
 end
 
+-- MSYS2 Clang uses GNU response-file quoting, not CRT or cmd.exe quoting.
+-- Quote every argument and escape both backslashes and quotes so native paths,
+-- empty arguments and trailing backslashes survive its response-file parser.
+function platform.windows_response_contents(argv)
+    if type(argv) ~= "table" or #argv == 0 then
+        return nil, "response arguments must be a nonempty argument array"
+    end
+    local words = {}
+    for index = 1, #argv do
+        local word, err = checked_word(argv[index], index, true)
+        if not word then return nil, err end
+        words[index] = '"' .. word:gsub('[\\"]', '\\%0') .. '"'
+    end
+    for key in pairs(argv) do
+        if type(key) ~= "number" or key < 1 or key > #argv or key % 1 ~= 0 then
+            return nil, "response arguments must be a dense argument array"
+        end
+    end
+    return table.concat(words, "\n") .. "\n"
+end
+
 return platform
