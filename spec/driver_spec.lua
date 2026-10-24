@@ -2273,6 +2273,7 @@ describe("loader resolver ownership", function()
             deduplicate_module_names = function(modules) return modules end,
             new_resolver_context = function() return {} end,
             configure_foreign_c = function() end,
+            default_c_parts = function() return 1 end,
             defaultloader = function()
                 error("injected titanc loader failure")
             end,
@@ -2302,6 +2303,7 @@ describe("loader resolver ownership", function()
             __call = function() return argument_parser end,
         })
         local modules = {
+            titan = titan,
             argparse = fake_argparse,
             ["titan-compiler.checker"] = {},
             ["titan-compiler.coder"] = {},
@@ -9141,6 +9143,7 @@ describe("Windows driver dispatch", function()
             cflags = driver.CFLAGS,
             compile_module = driver.compile_module,
             new_sync = compiler_io.new_sync,
+            execute = os.execute,
         }
         platform.windows = true
     end)
@@ -9153,6 +9156,7 @@ describe("Windows driver dispatch", function()
         driver.CFLAGS = previous.cflags
         driver.compile_module = previous.compile_module
         compiler_io.new_sync = previous.new_sync
+        os.execute = previous.execute
     end)
 
     it("initializes without requiring uname or native support", function()
@@ -9170,27 +9174,33 @@ describe("Windows driver dispatch", function()
         assert.equal(strategy, context.io)
     end)
 
-    it("uses the serial per-module path when one job is requested", function()
-        local calls, requests = {}, {}
+    it("executes preflighted one-job batches serially without native process support", function()
+        local calls, requests, plans = {}, {}, {}
         compiler_io.new_sync = function()
-            return {
-                cwd = function() return "C:/project" end,
-                stat = function() return nil end,
+            return { rename = function() return true end }
+        end
+        for _, leaf in ipairs({ "first", "failed", "last" }) do
+            local name = "windows_serial." .. leaf
+            local object = "C:/project/windows_serial/" .. leaf .. ".o"
+            requests[#requests + 1] = { modname = name, mod = {} }
+            plans[#plans + 1] = {
+                materialize = function()
+                    return {
+                        modname = name, primary_object = object,
+                        objects = { object },
+                        jobs = { { argv = { name }, object_path = object,
+                            temporary_object = object .. ".temporary", part_index = 0 } },
+                    }
+                end,
             }
         end
-        for _, name in ipairs({ "first", "failed", "last" }) do
-            requests[#requests + 1] = {
-                modname = "windows_serial." .. name,
-                mod = { filename = "C:/project/windows_serial/" .. name .. ".titan", ast = {} },
-                static_deps = {},
-            }
-        end
-        driver.compile_module = function(name)
+        os.execute = function(command)
+            local name = assert(command:match("windows_serial%.[a-z]+"))
             calls[#calls + 1] = name
             if name == "windows_serial.failed" then return nil, "compile rejected" end
-            return true, nil, name .. ".o"
+            return true
         end
-        local results = driver.compile_modules(requests, 1, false)
+        local results = driver.compile_modules(requests, 1, false, plans)
         assert.same({ "windows_serial.first", "windows_serial.failed",
             "windows_serial.last" }, calls)
         assert.is_true(results[1].ok)

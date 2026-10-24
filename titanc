@@ -187,8 +187,7 @@ local configured, configure_error =
     driver.configure_foreign_c(resolver_context)
 if not configured and configure_error then exit(configure_error) end
 if not c_parts then
-    c_parts = driver.default_c_parts and driver.default_c_parts()
-        or ((not platform.windows and not driver.IS_DARWIN) and 4 or 1)
+    c_parts = driver.default_c_parts()
 end
 local coverage_build
 if args.coverage then
@@ -364,59 +363,6 @@ if #errors == 0 then
     end
 end
 
-if main_module then
-    local source_outputs = {}
-    for _, name in ipairs(linked_names) do
-        local mod = driver.imported[name]
-        local header = header_plan_by_name[name]
-        source_outputs[#source_outputs + 1] = {
-            modname = name,
-            output = mod.native_output or mod.filename,
-            c_parts = c_parts,
-            foreign_header = header and header.managed
-                and header.filename or nil,
-            ffi_header = header and header.ffi_header and header.ffi_header.filename or nil,
-        }
-    end
-    local program_output = test_program_output or
-        driver.imported[main_module].program_output or
-        main_module:gsub("[.]", "/")
-    local entrypoint_output = test_entrypoint_output or
-        driver.generated_output_path(main_module:gsub("[.]", "/") .. "__entrypoint.c", args.output)
-    local program_inputs = {}
-    for name in pairs(resolver_context.source_names) do
-        local mod = driver.imported[name]
-        for _, filename in ipairs(mod.source_files or { mod.filename }) do
-            program_inputs[#program_inputs + 1] = filename
-        end
-    end
-    for _, mod in pairs(resolver_context.dynamic_names) do
-        if mod.filename then
-            program_inputs[#program_inputs + 1] = mod.filename
-        end
-    end
-    for _, archive in ipairs(selected_static_archives) do
-        program_inputs[#program_inputs + 1] = archive
-    end
-    for _, input in ipairs(args.extra_object or {}) do
-        program_inputs[#program_inputs + 1] = input
-    end
-    local extra_outputs
-    if platform.windows then
-        local paths, path_error = driver.windows_program_paths(main_module,
-            args.launcher_name, args.test and requested_modules[1] or nil,
-            args.output)
-        if not paths then exit(path_error) end
-        windows_program_outputs = paths
-        program_output = paths.executable
-        extra_outputs = driver.windows_program_auxiliary_paths(
-            entrypoint_output, paths.provider)
-    end
-    local outputs_ok, outputs_err = driver.validate_program_output_paths(
-        source_outputs, program_output, entrypoint_output, program_inputs,
-        extra_outputs)
-    if not outputs_ok then table.insert(errors, outputs_err) end
-end
 
 local mangled_owners = {}
 local symbol_owners = {}
@@ -461,137 +407,29 @@ for _, name in ipairs(preflight_names) do
             symbols = coder.interface_external_symbols(
                 name, resolver_context.native_interface_types[name])
         end
-        if driver.record_module_symbols then
-            driver.record_module_symbols(symbol_owners, name, symbols, errors)
-            if imported and imported.private_symbols then
-                driver.record_module_symbols(
-                    symbol_owners, name, imported.private_symbols, errors)
-            end
-        else
-            for _, entry in ipairs(symbols or {}) do
-                local symbol_previous = symbol_owners[entry.symbol]
-                if symbol_previous then
-                    table.insert(errors, "cannot link C symbol '" ..
-                        entry.symbol .. "': " .. symbol_previous.owner ..
-                        " in logical module '" .. symbol_previous.module ..
-                        "' conflicts with " .. entry.owner ..
-                        " in logical module '" .. name .. "'")
-                else
-                    symbol_owners[entry.symbol] = {
-                        module = name,
-                        owner = entry.owner,
-                    }
-                end
-            end
+        driver.record_module_symbols(symbol_owners, name, symbols, errors)
+        if imported and imported.private_symbols then
+            driver.record_module_symbols(
+                symbol_owners, name, imported.private_symbols, errors)
         end
     end
 end
-
-if not main_module and not args.compile_only then
-    local _unique_roots, left, right
-    provider, _unique_roots, left, right =
-        driver.common_module_provider(requested_modules)
-    if not provider then
-        exit("cannot link modules into one shared library: '" ..
-            tostring(left) .. "' and '" .. tostring(right) ..
-            "' have no common module prefix")
-    end
-
-    if #errors == 0 then
-        shim_plans, provider_output =
-            driver.plan_module_shims(provider, output_names, args.output)
-        if not shim_plans then table.insert(errors, provider_output) end
-    end
-    if #errors == 0 then
-        native_inputs = {}
-        for name in pairs(resolver_context.source_names) do
-            local mod = driver.imported[name]
-            for _, filename in ipairs(
-                    mod.source_files or { mod.filename }) do
-                native_inputs[#native_inputs + 1] = filename
-            end
-        end
-        for name, mod in pairs(resolver_context.dynamic_names) do
-            if mod.filename then
-                native_inputs[#native_inputs + 1] = mod.filename
-            end
-        end
-        for _, static_provider in ipairs(
-                resolver_context.selected_static_providers) do
-            native_inputs[#native_inputs + 1] = static_provider.archive
-        end
-        for _, input in ipairs(args.extra_object or {}) do
-            native_inputs[#native_inputs + 1] = input
-        end
-        local generated_outputs = {}
-        for _, name in ipairs(linked_names) do
-            local mod = driver.imported[name]
-            local stem = (mod.native_output or mod.filename):gsub(
-                "[.]titan$", "")
-            generated_outputs[#generated_outputs + 1] = {
-                path = stem .. ".c",
-                owner = "generated C for logical module '" .. name .. "'",
-            }
-            generated_outputs[#generated_outputs + 1] = {
-                path = stem .. ".o",
-                owner = "generated object for logical module '" .. name .. "'",
-            }
-            generated_outputs[#generated_outputs + 1] = {
-                path = stem .. ".parts",
-                owner = "generated parts companion for logical module '" .. name .. "'",
-                marker = driver.PARTS_COMPANION_HEADER_PREFIX,
-                marker_kind = "companion",
-            }
-            if c_parts > 1 then
-                generated_outputs[#generated_outputs + 1] = {
-                    path = stem .. ".priv.h",
-                    owner = "generated private header for logical module '" .. name .. "'",
-                    marker = driver.PRIVATE_HEADER_MARKER,
-                    marker_kind = "generated-header",
-                }
-                for k = 1, c_parts - 1 do
-                    generated_outputs[#generated_outputs + 1] = {
-                        path = stem .. ".part" .. tostring(k) .. ".c",
-                        owner = "generated C for logical module '" .. name .. "'",
-                    }
-                    generated_outputs[#generated_outputs + 1] = {
-                        path = stem .. ".part" .. tostring(k) .. ".o",
-                        owner = "generated object for logical module '" .. name .. "'",
-                    }
-                end
-            end
-            local header = header_plan_by_name[name]
-            if header and header.managed then
-                generated_outputs[#generated_outputs + 1] = {
-                    path = header.filename,
-                    owner = "generated foreign header for logical module '"
-                        .. name .. "'",
-                }
-            end
-        end
-        for _, shim in ipairs(shim_plans or {}) do
-            generated_outputs[#generated_outputs + 1] = {
-                path = shim.filename,
-                owner = "generated Lua shim for logical module '"
-                    .. shim.modname .. "'",
-            }
-        end
-        local outputs_ok, outputs_err =
-            driver.validate_provider_output_paths(
-                provider_output, native_inputs, generated_outputs)
-        if not outputs_ok then table.insert(errors, outputs_err) end
+native_inputs = {}
+for name in pairs(resolver_context.source_names) do
+    local mod = driver.imported[name]
+    for _, filename in ipairs(mod.source_files or { mod.filename }) do
+        native_inputs[#native_inputs + 1] = filename
     end
 end
-
-if #errors > 0 then exit(table.concat(errors, "\n")) end
-
-local libnames = {}
-local used_native_names = {}
-
-local headers_ok, headers_err = driver.write_foreign_header_plans(
-    header_plans, args.verbose, args.pretty_print)
-if not headers_ok then exit(headers_err) end
-
+for _, mod in pairs(resolver_context.dynamic_names) do
+    if mod.filename then native_inputs[#native_inputs + 1] = mod.filename end
+end
+for _, static_provider in ipairs(resolver_context.selected_static_providers) do
+    native_inputs[#native_inputs + 1] = static_provider.archive
+end
+for _, input in ipairs(args.extra_object or {}) do
+    native_inputs[#native_inputs + 1] = input
+end
 local compile_requests = {}
 for _, name in ipairs(linked_names) do
     local mod = driver.imported[name]
@@ -615,8 +453,111 @@ for _, name in ipairs(linked_names) do
         },
     }
 end
+local compile_plans
+if #errors == 0 then
+    local plan_error
+    compile_plans, plan_error = driver.plan_compile_requests(
+        compile_requests, args.verbose, native_inputs, symbol_owners, header_plans)
+    if not compile_plans then table.insert(errors, plan_error) end
+end
+if #errors > 0 then exit(table.concat(errors, "\n")) end
+if main_module then
+    local source_outputs = {}
+    for index, name in ipairs(linked_names) do
+        local mod = driver.imported[name]
+        local header = header_plan_by_name[name]
+        source_outputs[#source_outputs + 1] = {
+            modname = name,
+            output = mod.native_output or mod.filename,
+            c_parts = compile_plans[index] and compile_plans[index].part_count
+                or #driver.module_compiled_objects(mod),
+            foreign_header = header and header.managed
+                and header.filename or nil,
+            ffi_header = header and header.ffi_header and header.ffi_header.filename or nil,
+        }
+    end
+    local program_output = test_program_output or
+        driver.imported[main_module].program_output or
+        main_module:gsub("[.]", "/")
+    local entrypoint_output = test_entrypoint_output or
+        driver.generated_output_path(main_module:gsub("[.]", "/") .. "__entrypoint.c", args.output)
+    local program_inputs = {}
+    for name in pairs(resolver_context.source_names) do
+        local mod = driver.imported[name]
+        for _, filename in ipairs(mod.source_files or { mod.filename }) do
+            program_inputs[#program_inputs + 1] = filename
+        end
+    end
+    for _, mod in pairs(resolver_context.dynamic_names) do
+        if mod.filename then
+            program_inputs[#program_inputs + 1] = mod.filename
+        end
+    end
+    for _, archive in ipairs(selected_static_archives) do
+        program_inputs[#program_inputs + 1] = archive
+    end
+    for _, input in ipairs(args.extra_object or {}) do
+        program_inputs[#program_inputs + 1] = input
+    end
+    local extra_outputs
+    if platform.windows then
+        local paths, path_error = driver.windows_program_paths(main_module,
+            args.launcher_name, args.test and requested_modules[1] or nil,
+            args.output)
+        if not paths then exit(path_error) end
+        windows_program_outputs = paths
+        program_output = paths.executable
+        extra_outputs = driver.windows_program_auxiliary_paths(
+            entrypoint_output, paths.provider)
+    end
+    local outputs_ok, outputs_err = driver.validate_program_output_paths(
+        source_outputs, program_output, entrypoint_output, program_inputs,
+        extra_outputs, compile_plans.outputs)
+    if not outputs_ok then table.insert(errors, outputs_err) end
+end
+
+if not main_module and not args.compile_only then
+    local _unique_roots, left, right
+    provider, _unique_roots, left, right =
+        driver.common_module_provider(requested_modules)
+    if not provider then
+        exit("cannot link modules into one shared library: '" ..
+            tostring(left) .. "' and '" .. tostring(right) ..
+            "' have no common module prefix")
+    end
+
+    if #errors == 0 then
+        shim_plans, provider_output =
+            driver.plan_module_shims(provider, output_names, args.output)
+        if not shim_plans then table.insert(errors, provider_output) end
+    end
+    if #errors == 0 then
+        local generated_outputs = { table.unpack(compile_plans.outputs) }
+        for _, shim in ipairs(shim_plans or {}) do
+            generated_outputs[#generated_outputs + 1] = {
+                path = shim.filename,
+                owner = "generated Lua shim for logical module '"
+                    .. shim.modname .. "'",
+            }
+        end
+        local outputs_ok, outputs_err =
+            driver.validate_provider_output_paths(
+                provider_output, native_inputs, generated_outputs)
+        if not outputs_ok then table.insert(errors, outputs_err) end
+    end
+end
+
+if #errors > 0 then exit(table.concat(errors, "\n")) end
+
+local libnames = {}
+local used_native_names = {}
+
+local headers_ok, headers_err = driver.write_foreign_header_plans(
+    header_plans, args.verbose, args.pretty_print)
+if not headers_ok then exit(headers_err) end
+
 local compile_results =
-    driver.compile_modules(compile_requests, jobs, args.verbose)
+    driver.compile_modules(compile_requests, jobs, args.verbose, compile_plans)
 for index, name in ipairs(linked_names) do
     local result = compile_results[index]
     local mod = driver.imported[name]
@@ -624,10 +565,6 @@ for index, name in ipairs(linked_names) do
         table.insert(errors, result.err)
     else
         libnames[name] = result.libname
-        if driver.record_module_symbols and mod.private_symbols then
-            driver.record_module_symbols(
-                symbol_owners, name, mod.private_symbols, errors)
-        end
         for used_name in pairs(mod.native_references or {}) do
             used_native_names[used_name] = true
         end
@@ -654,9 +591,7 @@ for _, name in ipairs(linked_names) do
     generated_objects[#generated_objects + 1] = {
         modname = name,
         filename = libnames[name],
-        objects = driver.module_compiled_objects
-            and driver.module_compiled_objects(mod, libnames[name])
-            or { libnames[name] },
+        objects = driver.module_compiled_objects(mod),
     }
 end
 local native_target, target_or_err =
@@ -678,9 +613,7 @@ if main_module then
     local ofiles = {}
     for _, name in ipairs(linked_names) do
         local mod = driver.imported[name]
-        local objects = driver.module_compiled_objects
-            and driver.module_compiled_objects(mod, libnames[name])
-            or { libnames[name] }
+        local objects = driver.module_compiled_objects(mod)
         for _, object in ipairs(objects) do
             table.insert(ofiles, object)
         end
@@ -737,9 +670,7 @@ else
     local ofiles = {}
     for _, name in ipairs(linked_names) do
         local mod = driver.imported[name]
-        local objects = driver.module_compiled_objects
-            and driver.module_compiled_objects(mod, libnames[name])
-            or { libnames[name] }
+        local objects = driver.module_compiled_objects(mod)
         for _, object in ipairs(objects) do
             table.insert(ofiles, object)
         end
@@ -779,10 +710,11 @@ else
     else
         local ordered_archive_inputs = {}
         for _, name in ipairs(linked_names) do
-            ordered_archive_inputs[#ordered_archive_inputs + 1] = {
-                kind = "object",
-                input = libnames[name],
-            }
+            for _, object in ipairs(driver.module_compiled_objects(driver.imported[name])) do
+                ordered_archive_inputs[#ordered_archive_inputs + 1] = {
+                    kind = "object", input = object,
+                }
+            end
         end
         for _, static_provider in ipairs(
                 resolver_context.selected_static_providers) do

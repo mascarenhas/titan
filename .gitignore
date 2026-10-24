@@ -76,6 +76,7 @@
 /titan/json/json.c
 /titan/protobuf/protobuf.c
 /titan/thread/thread.c
+/titan/**/*.part[0-9]*.c
 /titan/json/json.titan.h
 
 # Generated logical-module shims for the combined standard-library image

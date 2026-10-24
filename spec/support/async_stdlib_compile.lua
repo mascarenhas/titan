@@ -37,10 +37,12 @@ end
 local objects = {}
 for name, imported in pairs(driver.imported) do
     if imported.ast then
-        local ok, err, object = driver.compile_module(name, imported,
+        local ok, err = driver.compile_module(name, imported,
             imported.deps or {}, false)
         if not ok then error(err, 0) end
-        objects[#objects + 1] = object
+        for _, object in ipairs(driver.module_compiled_objects(imported)) do
+            objects[#objects + 1] = object
+        end
     end
 end
 

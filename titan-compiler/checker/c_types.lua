@@ -666,6 +666,7 @@ function checker._foreign_function_reference(var)
             source = true,
             module = assert(decl._foreign_module),
             name = decl.name,
+            islocal = decl.islocal,
         }
     elseif decl._tag == "Type.ModuleMember"
            and decl.type and c_resolve(decl.type)._tag == "Type.CFunction"
@@ -678,6 +679,7 @@ function checker._foreign_function_reference(var)
                 module = decl.modname,
                 name = decl.name,
                 public = not decl.islocal,
+                islocal = decl.islocal,
                 type = decl.type,
             }
         end

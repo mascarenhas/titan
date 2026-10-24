@@ -2,6 +2,7 @@ local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
 local checker = require "titan-compiler.checker"
 local coder = require "titan-compiler.coder"
+local coder_names = require "titan-compiler.coder.names"
 local compiler_io = require "titan-compiler.io"
 local coverage = require "titan-compiler.coverage"
 local coverage_lines = require "titan-compiler.coverage_lines"
@@ -20,6 +21,18 @@ local util = require "titan-compiler.util"
 local PREFIX = installed_prefix.active()
 local LUA = PREFIX .. (platform.windows and "/bin/lua.exe" or "/bin/lua")
 local io_strategy = compiler_io.new_sync()
+local ROOT = assert(lfs.currentdir())
+
+local function cli_frontend(filename)
+    local file = assert(io.open(filename, "wb"))
+    assert(file:write(string.format([[
+package.path = %q .. "/?.lua;" .. package.path
+require("titan-compiler.coder").DEFAULT_SPLIT_THRESHOLD = 1
+dofile(%q .. "/titanc")
+]], ROOT, ROOT)))
+    assert(file:close())
+    return filename
+end
 
 local function write_file(path, contents)
     local parent = path:match("^(.*)/[^/]+$")
@@ -43,6 +56,24 @@ local function read_file(path)
     local contents = assert(file:read("*a"))
     assert(file:close())
     return contents
+end
+
+local function definition_parts(generated, symbol)
+    local owners = {}
+    for _, part in ipairs(generated.parts) do
+        for line in coder_names._linkage_symbol_name(part.code):gmatch("[^\n]+") do
+            if line:match("^%s*TITAN_MODULE_PRIVATE ")
+                or line:match("^%s*TITAN_SOURCE_LOCAL ")
+                or (line:find(symbol .. "(", 1, true) and line:match("{%s*$")) then
+                if (line:find(symbol .. "(", 1, true)
+                    or line:find(symbol .. "[]", 1, true))
+                    and (line:find("{", 1, true) or line:find("=", 1, true)) then
+                    owners[#owners + 1] = part.index
+                end
+            end
+        end
+    end
+    return owners
 end
 
 local function file_exists(path)
@@ -230,10 +261,21 @@ describe("split generated C translation units (S1)", function()
         assert.truthy(part0:find("TITAN_META_SECTION", 1, true))
         assert.truthy(part0:find("Udata *split_part_init(lua_State *L)", 1, true))
         assert.truthy(part0:find("int luaopen_split_part(lua_State *L)", 1, true))
-        assert.truthy(part0:find("split_part_\\u2119_register_preload(lua_State *L)", 1, true))
-        assert.truthy(part0:find("split_part_\\u2119_native_symbol(const char *symbol)", 1, true))
+        local pinned = {}
+        for _, entry in ipairs(gen.private_symbols) do
+            if entry.owner == "module preload helper"
+                or entry.owner == "module native symbol resolver"
+                or entry.owner == "function type tag 0" then
+                assert.same({ 0 }, definition_parts(gen, entry.symbol), entry.owner)
+                pinned[entry.owner] = true
+            end
+        end
+        assert.same({
+            ["module preload helper"] = true,
+            ["module native symbol resolver"] = true,
+            ["function type tag 0"] = true,
+        }, pinned)
         assert.truthy(part0:find("split_part_module_identity(void)", 1, true))
-        assert.truthy(part0:find("split_part_\\u2119_functag_0_tag[] =", 1, true))
 
         for i = 2, #gen.parts do
             local side = gen.parts[i].code
@@ -241,7 +283,308 @@ describe("split generated C translation units (S1)", function()
             assert.is_nil(side:find("Udata *split_part_init(lua_State *L)", 1, true))
             assert.is_nil(side:find("int luaopen_split_part(lua_State *L)", 1, true))
             assert.is_nil(side:find("split_part_module_identity(void)", 1, true))
-            assert.is_nil(side:find("_functag_0_tag[] =", 1, true))
+        end
+    end)
+
+    it("keeps one callback address across parts and pointer-keyed registration", function()
+        local header = workspace .. "/identity.h"
+        write_file(header, [[
+typedef int (*identity_callback)(int);
+static inline void identity_register(identity_callback *slot, identity_callback cb) {
+    *slot = cb;
+}
+static inline int identity_unregister(identity_callback *slot, identity_callback cb) {
+    if (*slot != cb) return 0;
+    *slot = 0;
+    return 1;
+}
+]])
+        local source = string.format([[
+foreign import %q
+local foreign function callback(input: int): int return input + 1 end
+function pointer_one(): foreign function(int): int return callback end
+function pointer_two(): foreign function(int): int return callback end
+function register_one(slot: foreign *identity_callback)
+    ffi.identity_register(slot, callback)
+end
+function unregister_two(slot: foreign *identity_callback): boolean
+    return ffi.identity_unregister(slot, callback) ~= 0
+end
+function exercise(): boolean
+    local slot = foreign identity_callback.new_array(1)
+    register_one(slot)
+    return pointer_one() == pointer_two() and unregister_two(slot)
+end
+]], header)
+        for _, count in ipairs({ 1, 8 }) do
+            local stem = workspace .. "/identity" .. count
+            local ast = check_module("identity", source, stem .. ".titan")
+            local generated = coder.generate("identity", ast, {},
+                driver.TITAN_ABI_VERSION, true, { c_parts = count, split_threshold = 1 })
+            if count == 1 then
+                local below = coder.generate("identity", ast, {},
+                    driver.TITAN_ABI_VERSION, true, {
+                        c_parts = 8, split_threshold = generated.parts[1].code_bytes + 1,
+                    })
+                assert.equal(generated.parts[1].code, below.parts[1].code)
+            end
+            if count > 1 then
+                local one = definition_parts(generated,
+                    coder_names._linkage_symbol_name(coder_names._foreign_func_name("identity", "pointer_one")))
+                local two = definition_parts(generated,
+                    coder_names._linkage_symbol_name(coder_names._foreign_func_name("identity", "pointer_two")))
+                assert.equal(1, #one)
+                assert.equal(1, #two)
+                assert.is_true(one[1] ~= two[1], "pointer producers must occupy different parts")
+            end
+            local ok, err, _, _, objects = driver.compile("identity", ast,
+                stem .. ".titan", {}, false, { c_parts = count, split_threshold = 1 })
+            assert.truthy(ok, err)
+            local dso = stem .. (platform.windows and ".dll" or ".so")
+            assert(driver.compile_library_output(dso, objects, nil, false,
+                nil, {}, nil, dso, platform.windows and { "identity" } or nil))
+            local script = workspace .. "/check_identity.lua"
+            write_file(script, string.format([[
+local open = assert(package.loadlib(%q, "luaopen_identity"))
+local module = open()
+assert(module.pointer_one() == module.pointer_two())
+assert(module.exercise())
+]], dso))
+            local ran, output = run_cmd({ LUA, "-E", script })
+            assert.truthy(ran, output)
+        end
+    end)
+
+    it("preflights every actual side output and cross-request aliases before mutation", function()
+        if platform.windows then pending("POSIX symlink/hardlink creation fixture"); return end
+        local stem = workspace .. "/aliases"
+        local path = stem .. ".titan"
+        write_file(path, MULTI_CONSTRUCT_SOURCE)
+        local function compile()
+            local ast = check_module("aliases", MULTI_CONSTRUCT_SOURCE, path)
+            return driver.compile("aliases", ast, path, {}, false,
+                { c_parts = 4, split_threshold = 1 })
+        end
+        assert(compile())
+        local old_c, old_o = read_file(stem .. ".c"), read_file(stem .. ".o")
+        for _, suffix in ipairs({ ".part1.c", ".part1.o", ".priv.h", ".parts" }) do
+            local saved = read_file(stem .. suffix)
+            assert(os.remove(stem .. suffix))
+            assert(lfs.link(path, stem .. suffix, true))
+            local ok, err = compile()
+            assert.is_nil(ok)
+            assert.is_string(err)
+            assert.equal(MULTI_CONSTRUCT_SOURCE, read_file(path))
+            assert.equal(old_c, read_file(stem .. ".c"))
+            assert.equal(old_o, read_file(stem .. ".o"))
+            assert(os.remove(stem .. suffix))
+            write_file(stem .. suffix, saved)
+        end
+        local staged_input = workspace .. "/stage-input.h"
+        write_file(staged_input, "staging input sentinel")
+        local stage_ast = check_module("aliases", MULTI_CONSTRUCT_SOURCE, path)
+        local reserve = driver.sibling_temporary_path
+        driver.sibling_temporary_path = function(destination, ...)
+            if destination:find(".ffi.h.format", 1, true) then
+                return staged_input:gsub("[.]h$", "")
+            end
+            return reserve(destination, ...)
+        end
+        local called, staged_ok, staged_error = pcall(driver.compile, "aliases",
+            stage_ast, path, {}, false, {
+                c_parts = 4, split_threshold = 1, native_inputs = { staged_input },
+            })
+        driver.sibling_temporary_path = reserve
+        assert.truthy(called, staged_ok)
+        assert.is_nil(staged_ok)
+        assert.matches("aliases input", staged_error, 1, true)
+        assert.equal("staging input sentinel", read_file(staged_input))
+        assert.equal(old_c, read_file(stem .. ".c"))
+        assert.equal(old_o, read_file(stem .. ".o"))
+        local input = workspace .. "/native-input.o"
+        write_file(input, "input sentinel")
+        assert(os.remove(stem .. ".part1.o"))
+        assert(lfs.link(input, stem .. ".part1.o"))
+        local ast = check_module("aliases", MULTI_CONSTRUCT_SOURCE, path)
+        local results = driver.compile_modules({ {
+            modname = "aliases", mod = { ast = ast, filename = path },
+            options = { c_parts = 4, split_threshold = 1, native_inputs = { input } },
+        } }, 1, false)
+        assert.is_nil(results[1].ok)
+        assert.matches("aliases input", results[1].err, 1, true)
+        assert.equal("input sentinel", read_file(input))
+        assert.equal(old_o, read_file(stem .. ".o"))
+        assert(os.remove(stem .. ".part1.o"))
+        local saved_part = read_file(stem .. ".part2.o")
+        assert(os.remove(stem .. ".part2.o"))
+        assert(lfs.mkdir(stem .. ".part2.o"))
+        local rejected, kind_error = compile()
+        assert.is_nil(rejected)
+        assert.matches("regular nonlink file", kind_error, 1, true)
+        assert.equal(old_o, read_file(stem .. ".o"))
+        assert(lfs.rmdir(stem .. ".part2.o"))
+        write_file(stem .. ".part2.o", saved_part)
+        local left = check_module("left", MULTI_CONSTRUCT_SOURCE, path)
+        local right_path = stem .. ".part1.titan"
+        local right = check_module("right", MULTI_CONSTRUCT_SOURCE, right_path)
+        results = driver.compile_modules({
+            { modname = "left", mod = { ast = left, filename = path },
+              options = { c_parts = 4, split_threshold = 1 } },
+            { modname = "right", mod = { ast = right, filename = right_path },
+              options = { c_parts = 1 } },
+        }, 2, false)
+        assert.is_nil(results[1].ok)
+        assert.matches("aliases output", results[1].err, 1, true)
+        assert.equal(old_o, read_file(stem .. ".o"))
+    end)
+
+    it("rejects private inventory collisions without writing or launching a compiler", function()
+        if platform.windows then pending("POSIX compiler launch sentinel"); return end
+        local requests = {}
+        for _, name in ipairs({ "left", "right" }) do
+            local path = workspace .. "/" .. name .. ".titan"
+            write_file(path, MULTI_CONSTRUCT_SOURCE)
+            requests[#requests + 1] = {
+                modname = name,
+                mod = { filename = path, ast = check_module(name, MULTI_CONSTRUCT_SOURCE, path) },
+                options = { c_parts = 4, split_threshold = 1 },
+            }
+            write_file(workspace .. "/" .. name .. ".c", "old C")
+            write_file(workspace .. "/" .. name .. ".o", "old object")
+        end
+        local generate, compiler = coder.generate, driver.CC
+        local launched, wrapper = workspace .. "/launched", workspace .. "/compiler.sh"
+        write_file(wrapper, "#!/bin/sh\n: > " .. launched .. "\nexit 1\n")
+        assert(run_cmd({ "chmod", "+x", wrapper }))
+        driver.CC = wrapper
+        coder.generate = function(...)
+            local generated = generate(...)
+            generated.private_symbols[#generated.private_symbols + 1] = {
+                symbol = "injected_shared_identity", owner = "injected owner",
+            }
+            return generated
+        end
+        local called, results = pcall(driver.compile_modules, requests, 2, false)
+        coder.generate, driver.CC = generate, compiler
+        assert.truthy(called, results)
+        assert.is_nil(results[1].ok)
+        assert.matches("cannot link C symbol", results[1].err, 1, true)
+        assert.is_false(file_exists(launched))
+        for _, name in ipairs({ "left", "right" }) do
+            assert.equal("old C", read_file(workspace .. "/" .. name .. ".c"))
+            assert.equal("old object", read_file(workspace .. "/" .. name .. ".o"))
+            assert.is_false(file_exists(workspace .. "/" .. name .. ".ffi.h"))
+        end
+    end)
+
+    it("links source-split programs and extracts split archive members with --static", function()
+        local src = workspace .. "/program-src"
+        local source_out, provider_out = workspace .. "/source-out", workspace .. "/provider-out"
+        local static_out = workspace .. "/static-out"
+        local frontend = cli_frontend(workspace .. "/frontend.lua")
+        write_file(src .. "/pkg/library.titan", MULTI_CONSTRUCT_SOURCE)
+        write_file(src .. "/app.titan", [[
+local lib = import "pkg.library"
+function main(args: {string}): integer
+    if lib.compute_alpha(2, 3) == 39 and lib.compute_beta({1, 2}) == 63
+        and lib.compute_gamma(true) == 42 then return 0 end
+    return 1
+end
+]])
+        local function cli(out, extra, root, path)
+            local argv = { "env", "TITAN_PATH_0_6=" .. (path or PREFIX .. "/lib/titan/0.6") .. ";;",
+                LUA, "-E", frontend, "--tree", src, "-o", out, "--c-parts", "4" }
+            if extra then argv[#argv + 1] = extra end
+            argv[#argv + 1] = root
+            local ok, output = run_cmd(argv)
+            assert.truthy(ok, output)
+        end
+        cli(source_out, nil, "app")
+        assert.equal(4, driver.parse_parts_companion(
+            read_file(source_out .. "/pkg/library.parts"), source_out .. "/pkg/library"))
+        local ok, output = run_cmd({ source_out .. (platform.windows and "/bin/app.exe" or "/app") })
+        assert.truthy(ok, output)
+        if platform.windows then return end
+        cli(provider_out, nil, "pkg.library")
+        local archive = provider_out .. "/pkg/library.a"
+        local listed, members = run_cmd({ "ar", "t", archive })
+        assert.truthy(listed, members)
+        assert.truthy(members:find("library.part1.o", 1, true), members)
+        assert(os.rename(src .. "/pkg/library.titan", src .. "/pkg/library.saved"))
+        cli(static_out, "--static", "app", provider_out)
+        assert(os.rename(provider_out .. "/pkg/library.so", provider_out .. "/pkg/library.hidden"))
+        ok, output = run_cmd({ static_out .. "/app" })
+        assert.truthy(ok, output)
+    end)
+
+    it("applies CLI/environment/default precedence and preflights compile-only, library and program outputs", function()
+        local frontend = cli_frontend(workspace .. "/frontend.lua")
+        write_file(workspace .. "/cli.titan", MULTI_CONSTRUCT_SOURCE)
+        local function cli(out, environment, options)
+            local argv = { "env" }
+            if environment then argv[#argv + 1] = "TITAN_C_PARTS=" .. environment
+            else argv[#argv + 1], argv[#argv + 2] = "-u", "TITAN_C_PARTS" end
+            for _, item in ipairs({ LUA, "-E", frontend, "--tree", workspace, "-o", out }) do
+                argv[#argv + 1] = item
+            end
+            for _, item in ipairs(options) do argv[#argv + 1] = item end
+            argv[#argv + 1] = "cli"
+            return run_cmd(argv)
+        end
+        for index, case in ipairs({
+            { "8", { "-c", "--c-parts", "2" }, 2 },
+            { "2", { "-c" }, 2 },
+            { false, { "-c" }, driver.default_c_parts() },
+            { "invalid", { "-c", "--c-parts", "1" }, 1 },
+        }) do
+            local out = workspace .. "/precedence" .. index
+            local ok, output = cli(out, case[1], case[2])
+            assert.truthy(ok, output)
+            local entry = assert(objectmetadata.read(read_file(out .. "/cli.o"), out .. "/cli.o"))
+            assert.equal(case[3], entry.object_metadata.c_parts)
+        end
+        for index, options in ipairs({
+            { "-c", "--c-parts", "4" }, { "--c-parts", "4" },
+        }) do
+            local out = workspace .. "/reject" .. index
+            write_file(out .. "/cli.parts", "user companion")
+            local ok = cli(out, "4", options)
+            assert.is_false(ok)
+            assert.equal("user companion", read_file(out .. "/cli.parts"))
+            assert.is_false(file_exists(out .. "/cli.c"))
+        end
+        local sentinel_out = workspace .. "/sentinel"
+        local sentinel_c, sentinel_o = sentinel_out .. "/cli.part99.c", sentinel_out .. "/cli.part99.o"
+        write_file(sentinel_c, "int split_external_sentinel(void) { return 99; }\n")
+        local command = assert(cdriver.split_shell_words(driver.CC))
+        for _, arg in ipairs({ "-fPIC", "-c", sentinel_c, "-o", sentinel_o }) do
+            command[#command + 1] = arg
+        end
+        local built, diagnostic = run_cmd(command)
+        assert.truthy(built, diagnostic)
+        local sentinel_bytes = read_file(sentinel_o)
+        local linked, link_output = cli(sentinel_out, "4",
+            { "--c-parts", "1", "-X", sentinel_o, "--" })
+        assert.truthy(linked, link_output)
+        assert.equal(sentinel_bytes, read_file(sentinel_o))
+        assert.equal("int split_external_sentinel(void) { return 99; }\n", read_file(sentinel_c))
+        write_file(workspace .. "/cli.titan", MULTI_CONSTRUCT_SOURCE .. [[
+function main(args: {string}): integer return 0 end
+]])
+        local out = workspace .. "/reject-program"
+        write_file(out .. "/cli.priv.h", "user header")
+        local ok = cli(out, "4", { "--c-parts", "4" })
+        assert.is_false(ok)
+        assert.equal("user header", read_file(out .. "/cli.priv.h"))
+        assert.is_false(file_exists(out .. "/cli.c"))
+        if not platform.windows then
+            local target = workspace .. "/cli.titan"
+            os.remove(out .. "/cli.priv.h")
+            assert(lfs.link(target, out .. "/cli.part1.c", true))
+            ok = cli(out, "4", { "-c", "--c-parts", "4" })
+            assert.is_false(ok)
+            assert.truthy(read_file(target):find("function main", 1, true))
+            assert.is_false(file_exists(out .. "/cli.c"))
         end
     end)
 
@@ -273,10 +616,16 @@ end
 foreign function raw_triple(x: int): int
     return ffi.c_scale(x, 3)
 end
+local foreign function imported_callback(x: int): int
+    return x + 9
+end
 ]], header_path)
 
         local main_src = [[
 local dep = import "pkg.dep.titan"
+local transfer = import "transfer"
+local protobuf = import "protobuf"
+local reflect = import "reflect"
 
 record Payload
     count: integer
@@ -322,6 +671,32 @@ function exercise_all(base: integer): (integer, string, boolean)
             matched = false
     end
     return after_calls, fmt:format(), matched
+end
+
+function imported_pointer_one(): foreign function(int): int return dep.imported_callback end
+function imported_pointer_two(): foreign function(int): int return dep.imported_callback end
+function imported_callback_identity(): boolean
+    return imported_pointer_one() == imported_pointer_two()
+end
+
+function exercise_metadata(): boolean
+    local counter = make_counter(10)
+    local packet = transfer.encode_message(counter)
+    defer transfer.discard_message(packet)
+    local restored: function(integer): integer = transfer.decode_message(packet)
+    if counter(2) ~= 12 or restored(3) ~= 13 then return false end
+    local original = Payload.new(restored(4), "codec")
+    local encoded = protobuf.serialize(original)
+    local decoded: Payload = protobuf.deserialize_nominal(encoded, "pkg.main.Payload", false)
+    if decoded.count ~= 17 or decoded.label ~= "codec" then return false end
+    case reflect.inspect(decoded)
+        when is_record(view) then
+            if view.n_fields ~= 2 or view:get(1) ~= 17 then return false end
+            view:set(2, "reflected")
+        else
+            return false
+    end
+    return decoded:format() == "reflected:17"
 end
 ]]
 
@@ -406,8 +781,7 @@ end
             if not platform.windows then
                 archive_path = dso_path:gsub("[.]so$", ".a")
                 local archive_res, archive_err = driver.build_static_archive(
-                    archive_path, { driver.imported["pkg.dep"].compiled,
-                                    driver.imported["pkg.main"].compiled },
+                    archive_path, ofiles,
                     nil, target, false)
                 assert.truthy(archive_res, archive_err)
                 local val_so = dir .. "/archive-val.so"
@@ -428,6 +802,7 @@ end
                 archive = archive_path,
                 dep_objects = results[1].objects,
                 main_objects = results[2].objects,
+                private_symbols = driver.imported["pkg.main"].private_symbols,
             }
         end
 
@@ -455,6 +830,8 @@ local total, formatted, matched = main.exercise_all(7)
 assert(total == 74, "unexpected total: " .. tostring(total))
 assert(formatted == "sum:74", "unexpected formatted: " .. tostring(formatted))
 assert(matched == true, "unexpected matched")
+assert(main.exercise_metadata(), "cross-part transfer/codecs/reflection failed")
+assert(main.imported_callback_identity(), "source-imported callback address diverged")
 local box = dep.make_box(10)
 assert(box.value == 13)
 print("VARIANT_OK")
@@ -464,8 +841,31 @@ print("VARIANT_OK")
             assert.truthy(out:find("VARIANT_OK", 1, true), out)
         end
 
+        if platform.windows then
+            local _, expected = driver.windows_provider_exports({ "pkg.dep", "pkg.main" }, {
+                ["pkg.dep"] = driver.imported["pkg.dep"].type,
+                ["pkg.main"] = driver.imported["pkg.main"].type,
+            }, "pkg.dll")
+            table.sort(expected)
+            for _, variant in ipairs({ unsplit, split }) do
+                local ok, output = run_cmd({ "objdump", "-p", variant.dso })
+                assert.truthy(ok, output)
+                local names, in_exports = {}, false
+                for line in output:gmatch("[^\r\n]+") do
+                    if line:find("[Ordinal/Name Pointer] Table", 1, true) then
+                        in_exports = true
+                    elseif in_exports then
+                        local name = line:match("^%s*%[%s*%d+%]%s+(%S+)%s*$")
+                        if name then names[#names + 1] = name
+                        elseif #names > 0 then break end
+                    end
+                end
+                table.sort(names)
+                assert.same(expected, names, output)
+            end
+        end
         if not platform.windows and not driver.IS_DARWIN then
-            -- Verify DSO dynamic exported symbol sets are identical and no ℙ helper leaks.
+            -- The final images preserve public exports and hide every inventoried private.
             local ok1, nm_unsplit = run_cmd({ "nm", "-D", "--defined-only", unsplit.dso })
             local ok2, nm_split = run_cmd({ "nm", "-D", "--defined-only", split.dso })
             assert.is_true(ok1, nm_unsplit)
@@ -482,9 +882,10 @@ print("VARIANT_OK")
             local pub_unsplit = exported_names(nm_unsplit)
             local pub_split = exported_names(nm_split)
             assert.same(pub_unsplit, pub_split)
-            for _, sym in ipairs(pub_split) do
-                assert.is_nil(sym:find("\226\132\153", 1, true),
-                    "private ℙ symbol leaked to DSO exports: " .. sym)
+            local exported = {}
+            for _, symbol in ipairs(pub_split) do exported[symbol] = true end
+            for _, entry in ipairs(split.private_symbols) do
+                assert.is_nil(exported[entry.symbol], entry.owner .. ": " .. entry.symbol)
             end
 
             -- Check ld -r combined object undefined/defined equivalence against unsplit.
@@ -507,6 +908,54 @@ print("VARIANT_OK")
             end
             assert.same(undef_set(undef_unsplit), undef_set(undef_combined))
         end
+    end)
+
+    it("invalidates the old primary during compilation and replays diagnostics in part order", function()
+        if platform.windows then pending("POSIX native diagnostic wrapper"); return end
+        local stem = workspace .. "/diagnostics"
+        local source_path = stem .. ".titan"
+        write_file(source_path, MULTI_CONSTRUCT_SOURCE)
+        local ast = check_module("diagnostics", MULTI_CONSTRUCT_SOURCE, source_path)
+        assert(driver.compile("diagnostics", ast, source_path, {}, false,
+            { c_parts = 4, split_threshold = 1 }))
+        ast = check_module("diagnostics", MULTI_CONSTRUCT_SOURCE, source_path)
+        local wrapper = workspace .. "/diagnostics_cc.sh"
+        write_file(wrapper, string.format([[
+#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    %q.c) part=0 ;;
+    %q.part1.c) part=1 ;;
+    %q.part2.c) part=2 ;;
+    %q.part3.c) part=3 ;;
+    *) continue ;;
+  esac
+  test ! -e %q.o || exit 95
+  test "$part" != 0 || sleep 0.1
+  echo "split-diagnostic-$part" >&2
+  exit 1
+done
+exit 94
+]], stem, stem, stem, stem, stem))
+        assert(run_cmd({ "chmod", "+x", wrapper }))
+        local old_cc, old_stderr = driver.CC, io.stderr
+        local diagnostics = assert(io.tmpfile())
+        driver.CC, io.stderr = wrapper, diagnostics
+        local called, results = pcall(driver.compile_modules, { {
+            modname = "diagnostics", mod = { ast = ast, filename = source_path },
+            options = { c_parts = 4, split_threshold = 1 },
+        } }, 4, false)
+        driver.CC, io.stderr = old_cc, old_stderr
+        assert(diagnostics:seek("set", 0))
+        local output = assert(diagnostics:read("*a"))
+        assert(diagnostics:close())
+        assert.truthy(called, results)
+        assert.is_nil(results[1].ok)
+        local position = 0
+        for part = 0, 3 do
+            position = assert(output:find("split-diagnostic-" .. part, position + 1, true), output)
+        end
+        assert.is_false(file_exists(stem .. ".o"))
     end)
 
     it("enforces complete part-set incremental reuse, repairs missing/truncated/stale parts, cleans holes, and leaves no commit marker on failure", function()
@@ -556,13 +1005,14 @@ exec %s "$@"
                 driver.CC = wrapper
             end
 
-            local orig_gen = coder.generate
+            local original_rename = os.rename
             if inject_fail_rename then
-                coder.generate = function(...)
-                    local res = orig_gen(...)
-                    -- Make part2.o a directory so rename_output fails during publication
-                    lfs.mkdir(out_dir .. "/mod.part2.o")
-                    return res
+                local suffix = inject_fail_rename == true and ".part2.o" or inject_fail_rename
+                os.rename = function(from, to)
+                    if to == out_dir .. "/mod" .. suffix then
+                        return nil, "injected publication failure for " .. suffix
+                    end
+                    return original_rename(from, to)
                 end
             end
 
@@ -574,11 +1024,12 @@ exec %s "$@"
                     options = {
                         c_parts = c_parts,
                         split_threshold = threshold,
+                        native_inputs = { out_dir .. "/mod.part99.o" },
                     },
                 },
             }, 2, false)
 
-            coder.generate = orig_gen
+            os.rename = original_rename
             driver.CC = prev_cc
             driver.TITAN_SOURCE_PATH = prev_src
             driver.OUTPUT_ROOT = prev_out
@@ -623,6 +1074,23 @@ exec %s "$@"
         assert.is_false(hit)
         assert.is_true(res.ok)
 
+        -- A valid object from another target is also a whole-module miss.
+        local part_bytes = read_file(out_dir .. "/mod.part1.o")
+        if part_bytes:sub(1, 4) == "\127ELF" then
+            write_file(out_dir .. "/mod.part1.o",
+                part_bytes:sub(1, 18) .. string.char(183, 0) .. part_bytes:sub(21))
+            hit, res = run_compile(4, 1, true)
+            assert.is_false(hit)
+            assert.is_true(res.ok, res.err)
+        end
+        for _, suffix in ipairs({ ".priv.h", ".parts" }) do
+            assert(os.remove(out_dir .. "/mod" .. suffix))
+            hit, res = run_compile(4, 1, false)
+            assert.is_true(res.ok, res.err)
+            assert.is_true(file_exists(out_dir .. "/mod" .. suffix))
+        end
+        write_file(out_dir .. "/mod.part99.c", "authored C sentinel")
+        write_file(out_dir .. "/mod.part99.o", "extra object sentinel")
         -- 6. Create a hole by deleting .part2.o/.part2.c, then reduce c_parts to 2:
         --    stale .part3.o and .part3.c must still be cleaned!
         assert(os.remove(out_dir .. "/mod.part2.o"))
@@ -643,6 +1111,8 @@ exec %s "$@"
         assert.is_false(file_exists(out_dir .. "/mod.priv.h"))
         assert.is_false(file_exists(out_dir .. "/mod.part1.o"))
         assert.is_false(file_exists(out_dir .. "/mod.part1.c"))
+        assert.equal("authored C sentinel", read_file(out_dir .. "/mod.part99.c"))
+        assert.equal("extra object sentinel", read_file(out_dir .. "/mod.part99.o"))
 
         -- 8. Failed part compile leaves no primary mod.o or mod.parts
         hit, res = run_compile(4, 1, false, 2, false)
@@ -650,12 +1120,18 @@ exec %s "$@"
         assert.is_false(file_exists(out_dir .. "/mod.o"))
         assert.is_false(file_exists(out_dir .. "/mod.parts"))
 
-        -- 9. Failed rename during publication leaves no primary mod.o or mod.parts
-        hit, res = run_compile(4, 1, false, nil, true)
-        remove_tree(out_dir .. "/mod.part2.o")
-        assert.falsy(res.ok)
-        assert.is_false(file_exists(out_dir .. "/mod.o"))
-        assert.is_false(file_exists(out_dir .. "/mod.parts"))
+        -- A failure at any publication boundary rolls back every object.
+        for _, suffix in ipairs({ ".part2.o", ".parts", ".o" }) do
+            hit, res = run_compile(4, 1, false)
+            assert.is_true(res.ok, res.err)
+            hit, res = run_compile(4, 1, false, nil, suffix)
+            assert.falsy(res.ok)
+            assert.matches("injected publication failure", res.err, 1, true)
+            for part = 0, 3 do
+                assert.is_false(file_exists(driver.part_object_filename(out_dir .. "/mod", part)))
+            end
+            assert.is_false(file_exists(out_dir .. "/mod.parts"))
+        end
     end)
 
     it("refuses user-owned .priv.h and .parts paths before mutating outputs", function()
@@ -673,9 +1149,17 @@ exec %s "$@"
         assert.matches("refusing to overwrite user-owned generated-header path", err, 1, true)
         assert.equal("/* user authored header */\n", read_file(stem .. ".priv.h"))
         assert.is_false(file_exists(stem .. ".o"))
+        ast = check_module("protected_mod", MULTI_CONSTRUCT_SOURCE, source_path)
+        ok, err = driver.compile("protected_mod", ast, source_path, {}, false, {
+            c_parts = 4, split_threshold = math.maxinteger,
+        })
+        assert.truthy(ok, err)
+        assert.equal("/* user authored header */\n", read_file(stem .. ".priv.h"))
+        os.remove(stem .. ".o")
         os.remove(stem .. ".priv.h")
 
         write_file(stem .. ".parts", "user owned companion\n")
+        ast = check_module("protected_mod", MULTI_CONSTRUCT_SOURCE, source_path)
         ok, err = driver.compile("protected_mod", ast, source_path, {}, false, {
             c_parts = 4,
             split_threshold = 1,
@@ -875,7 +1359,7 @@ print("TRACE_OK")
         assert.is_false(file_exists(cov_dir .. "/cov_mod.part3.gcno"))
     end)
 
-    it("excludes private ℙ symbols from Windows .def exports and rejects link-set symbol collisions", function()
+    it("excludes inventoried private symbols from Windows .def exports and rejects link-set collisions", function()
         local ast = check_module("win_mod", [[
 foreign function public_raw(x: int): int
     return x + 1
@@ -892,9 +1376,12 @@ end
             { "win_mod" }, { win_mod = ast._type }, "win_mod.dll")
         assert.truthy(def_text:find("win_mod_\226\132\179_public_raw_titan", 1, true))
         assert.is_nil(def_text:find("private_raw", 1, true))
-        for _, sym in ipairs(export_names) do
-            assert.is_nil(sym:find("\226\132\153", 1, true),
-                "Windows .def exported private ℙ symbol: " .. sym)
+        local generated = coder.generate("win_mod", ast, {}, driver.TITAN_ABI_VERSION,
+            true, { c_parts = 4, split_threshold = 1 })
+        local exported = {}
+        for _, symbol in ipairs(export_names) do exported[symbol] = true end
+        for _, entry in ipairs(generated.private_symbols) do
+            assert.is_nil(exported[entry.symbol], entry.owner .. ": " .. entry.symbol)
         end
 
         -- Verify record_module_symbols detects collisions in the private inventory

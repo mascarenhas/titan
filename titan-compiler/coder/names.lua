@@ -337,8 +337,13 @@ end
 function coder._record_private_symbol(tlcontext, symbol, owner)
     if not tlcontext or not tlcontext.private_symbols then return end
     local linkage = coder._linkage_symbol_name(symbol)
-    if tlcontext.private_symbol_seen[linkage] then return end
-    tlcontext.private_symbol_seen[linkage] = true
+    local previous = tlcontext.private_symbol_seen[linkage]
+    if previous then
+        assert(previous == owner, "private C symbol '" .. linkage
+            .. "' has distinct owners: " .. previous .. " and " .. owner)
+        return
+    end
+    tlcontext.private_symbol_seen[linkage] = owner
     tlcontext.private_symbols[#tlcontext.private_symbols + 1] = {
         symbol = linkage,
         owner = owner,
@@ -353,8 +358,15 @@ function coder._foreign_func_name(modname, name)
     return func_name(modname, name, false)
 end
 
-function coder._foreign_reference_name(reference, ctx)
+function coder._foreign_inline_name(modname, name)
+    return coder._private_symbol(modname, "foreign_inline", name)
+end
+
+function coder._foreign_reference_name(reference, ctx, direct)
     if reference.source then
+        if direct and reference.islocal then
+            return coder._foreign_inline_name(reference.module, reference.name)
+        end
         local name = coder._foreign_func_name(reference.module, reference.name)
         if ctx and reference.public then
             local tlcontext = ctx.tlcontext or ctx

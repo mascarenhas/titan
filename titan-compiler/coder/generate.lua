@@ -112,12 +112,7 @@ end
 function coder.prepare_coverage(ast, enabled)
     for _, node in ipairs(ast) do
         if node._tag == "Ast.TopLevelForeignFunc" then
-            local outlined = enabled == true and true or nil
-            if node._coverage_foreign_outline ~= outlined then
-                node._foreign_inline = nil
-            end
-            node._coverage_foreign_outline = outlined
-            if outlined then node._foreign_inline = false end
+            node._coverage_foreign_outline = enabled == true and true or nil
         end
     end
 end
@@ -416,25 +411,25 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         end
     end
 
+    local foreign_inline_bodies = {}
     for _, node in ipairs(ast) do
         if not node._ignore then
             local tag = node._tag
             if tag == "Ast.TopLevelForeignFunc" then
-                node._foreign_inline = coder._foreign_function_is_inline(node)
                 if not ast._foreign_header_output then
-                    if node._foreign_inline then
-                        table.insert(sigs,
-                            coder._code_foreign_function(tlcontext, node, true))
-                    else
-                        table.insert(sigs,
-                            (node.islocal and "TITAN_SOURCE_LOCAL " or "extern ")
-                            .. coder._foreign_function_signature(node) .. ";")
+                    table.insert(sigs,
+                        (node.islocal and "TITAN_SOURCE_LOCAL " or "extern ")
+                        .. coder._foreign_function_signature(node) .. ";")
+                    if node.islocal then
+                        table.insert(sigs, "static inline "
+                            .. coder._foreign_function_signature(node,
+                                coder._foreign_inline_name(modname, node.name)) .. ";")
+                        foreign_inline_bodies[#foreign_inline_bodies + 1] =
+                            coder._code_foreign_inline(tlcontext, node)
                     end
                 end
-                if not node._foreign_inline then
-                    emit_item("callable",
-                        coder._code_foreign_function(tlcontext, node, false))
-                end
+                emit_item("callable",
+                    coder._code_foreign_function(tlcontext, node, false))
             elseif tag == "Ast.TopLevelFunc" or tag == "Ast.TopLevelMethod" or tag == "Ast.TopLevelStatic" then
                 codefuncdec(tlcontext, node)
                 table.insert(sigs, node._sig)
@@ -513,6 +508,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
                 elseif tag == "Ast.TopLevelStatic" then
                     fn_group[#fn_group + 1] = node._luabody
                     fn_group[#fn_group + 1] = node._strictbody
+                    -- Build the static's canonical 5-upvalue closure once into
                     -- its shadow slot. Public statics are also installed into
                     -- the record's static-namespace table; local record functions remain
                     -- reachable to Titan code through direct/static-slot paths.
@@ -574,6 +570,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
             end
         end
     end
+    for _, body in ipairs(foreign_inline_bodies) do table.insert(sigs, body) end
 
     -- Drain pending lambdas to file scope. A lambda nested inside another lambda
     -- is registered only while the outer one's body is emitted, so re-read the

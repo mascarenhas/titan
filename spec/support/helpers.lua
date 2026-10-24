@@ -173,9 +173,9 @@ function M.with_extra_cflags(flags, fn)
 end
 
 function M.compile(modname, ast)
-    local ok, err, libname = driver.compile(modname, ast, nil, {}, verbose())
+    local ok, err, _, _, objects = driver.compile(modname, ast, nil, {}, verbose())
     if not ok then return ok, err end
-    return driver.compile_library(modname, { libname }, nil, verbose())
+    return driver.compile_library(modname, objects, nil, verbose())
 end
 
 local function compile_program(modname, objects)
@@ -233,9 +233,9 @@ local function compile_program(modname, objects)
 end
 
 function M.compile_app(modname, ast)
-    local ok, err, libname = driver.compile(modname, ast, nil, {}, verbose())
+    local ok, err, _, _, objects = driver.compile(modname, ast, nil, {}, verbose())
     if not ok then return ok, err end
-    return compile_program(modname, { libname })
+    return compile_program(modname, objects)
 end
 
 -- Run `code` under the stock Lua interpreter with `modname` loaded (`-l`),
@@ -412,8 +412,10 @@ function M.generate_modules(modules, main, forapp, options)
         local ofiles = {}
         for name, mod in pairs(imported) do
             local ok, e = driver.compile_module(name, mod, deps, verbose())
-            table.insert(ofiles, name .. ".o")
             if not ok then return nil, e end
+            for _, object in ipairs(driver.module_compiled_objects(mod)) do
+                table.insert(ofiles, object)
+            end
         end
         if forapp then
             local ok, e = compile_program(main, ofiles)
@@ -456,9 +458,9 @@ local function build_one_so(name, src, names)
             return nil, name .. " linked '" .. dep .. "' statically, not via .so"
         end
     end
-    local ok, err, lib = driver.compile(name, ast, nil, static_deps, verbose())
+    local ok, err, _, _, objects = driver.compile(name, ast, nil, static_deps, verbose())
     if not ok then return nil, err end
-    ok, err = driver.compile_library(name, { lib }, nil, verbose())
+    ok, err = driver.compile_library(name, objects, nil, verbose())
     if not ok then return nil, err end
     return true
 end

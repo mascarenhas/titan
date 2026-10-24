@@ -1322,21 +1322,16 @@ function coder.generate_foreign_header(modname, ast, tlcontext, header_paths)
     local inline_bodies = {}
     for _, node in ipairs(ast) do
         if not node._ignore and node._tag == "Ast.TopLevelForeignFunc" then
-            local inline = node._foreign_inline
-            if inline == nil then
-                inline = coder._foreign_function_is_inline(node)
-                node._foreign_inline = inline
-            end
             local signature = coder._foreign_function_signature(node)
-            if inline then
-                declarations[#declarations + 1] =
-                    "static inline " .. signature .. ";"
+            declarations[#declarations + 1] =
+                (node.islocal and "TITAN_SOURCE_LOCAL " or "extern ")
+                .. signature .. ";"
+            if node.islocal then
+                declarations[#declarations + 1] = "static inline "
+                    .. coder._foreign_function_signature(node,
+                        coder._foreign_inline_name(modname, node.name)) .. ";"
                 inline_bodies[#inline_bodies + 1] =
-                    coder._code_foreign_function(tlcontext, node, true)
-            else
-                declarations[#declarations + 1] =
-                    (node.islocal and "TITAN_SOURCE_LOCAL " or "extern ")
-                    .. signature .. ";"
+                    coder._code_foreign_inline(tlcontext, node)
             end
         end
     end

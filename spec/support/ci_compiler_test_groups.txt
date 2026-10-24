@@ -10,6 +10,9 @@
 # Coverage simplification uses local LLVM uncovered native_coverage_spec 63.154s
 # and new coverage_runtime_spec 0.100s; removed coverage_dependency_spec is excluded.
 # Other recorded costs are unchanged; assignments rerun longest-first as above.
+# Issue #295 local additions: jobserver 35.270s from S3's measured dataset;
+# split_units 29.188s from S1Fix-split-2.log (Linux GCC validation, 2026-10-24).
+# Keep jobserver with parallel_compilation until S3's dynamic/exclusive cutover.
 2 spec/abi_spec.lua 2.926
 1 spec/binary_compatibility_spec.lua 0.107
 4 spec/cdeclarator_spec.lua 0.058
@@ -95,6 +98,7 @@
 3 spec/coder/generics_spec.lua 31.540
 1 spec/coder/grammar_semantics_spec.lua 25.896
 3 spec/coder/interfaces_spec.lua 41.375
+3 spec/coder/jobserver_spec.lua 35.270
 2 spec/coder/line_directives_spec.lua 6.580
 4 spec/coder/lto_spec.lua 7.261
 1 spec/coder/map_metamethods_spec.lua 4.781
@@ -115,6 +119,7 @@
 3 spec/coder/so_trace_names_spec.lua 6.051
 4 spec/coder/source_import_local_visibility_spec.lua 76.086
 1 spec/coder/spread_expressions_spec.lua 11.918
+3 spec/coder/split_units_spec.lua 29.188
 1 spec/coder/standalone_paths_spec.lua 1.000
 2 spec/coder/stack_capacity_spec.lua 4.596
 3 spec/coder/stack_relocation_spec.lua 6.715
