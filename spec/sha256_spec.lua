@@ -38,3 +38,27 @@ describe("SHA-256", function()
         end)))
     end)
 end)
+
+describe("SHA-256 through a digest adapter", function()
+    local support = require "titan"
+
+    it("yields the pure-Lua hexadecimal digest from the native callback", function()
+        for _, message in ipairs({ "", "abc", "a\0b", string.rep("\255", 1000) }) do
+            assert.equal(sha256.hex(message), sha256.hex_via(support._sha256_binary, message))
+        end
+        assert.equal(sha256.hex("abc"), sha256.hex_via(nil, "abc"))
+    end)
+
+    it("falls back for transport errors and malformed digests", function()
+        assert.equal(sha256.hex("abc"), sha256.hex_via(function() error("busy") end, "abc"))
+        assert.equal(sha256.hex("abc"), sha256.hex_via(function() return "short" end, "abc"))
+        assert.equal(sha256.hex("abc"), sha256.hex_via(function() return 42 end, "abc"))
+    end)
+
+    it("propagates cancellation and foreign exception objects", function()
+        local cancelled = {}
+        local ok, err = pcall(sha256.hex_via, function() error(cancelled, 0) end, "abc")
+        assert.is_false(ok)
+        assert.equal(cancelled, err)
+    end)
+end)

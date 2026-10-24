@@ -6688,8 +6688,9 @@ local function create_compile_log()
 end
 
 -- Native batch helpers. This chunk is near Lua's 200-active-local limit, so
--- the helpers are scoped to this block and only the entry point escapes.
-local run_prepared_compiles
+-- the helpers are scoped to this block; only the scheduler entry point and
+-- the launch/reap/replay table shared with provider links escape.
+local run_prepared_compiles, compile_batch
 do
 
 local function protected_remove(path)
@@ -6787,6 +6788,17 @@ local function create_compile_notification()
     if not file then
         protected_remove(path)
         return nil, open_err
+    end
+    -- The batch polls this descriptor before each read, so stdio read-ahead
+    -- must never hold a completion line the kernel no longer reports.
+    local unbuffered_called, unbuffered, unbuffered_err =
+        pcall(file.setvbuf, file, "no")
+    if not unbuffered_called or not unbuffered then
+        pcall(file.close, file)
+        protected_remove(path)
+        return nil, "failed to make the parallel compiler completion FIFO " ..
+            "unbuffered: " .. tostring(unbuffered_called and unbuffered_err or
+                unbuffered)
     end
     local quoted_path, quote_err = cdriver.shell_quote(path)
     if not quoted_path then
@@ -7005,9 +7017,25 @@ local function oldest_pending_process(pending, count)
     end
 end
 
+-- Returns per-module results and the INT/TERM/HUP signal that cancelled the
+-- batch, if any; the caller re-raises it after its own cleanup.
 function run_prepared_compiles(prepared, parallelism, verbose)
     local entries, results = jobs.flatten(prepared)
-    if parallelism == 1 or #entries <= 1 then
+    local slots
+    if parallelism > 1 and #entries > 1 then
+        local slots_err
+        slots, slots_err = jobs.open_slots(parallelism)
+        if not slots then
+            for _, entry in ipairs(entries) do jobs.record(entry, nil, slots_err) end
+            return jobs.summarize(results)
+        end
+        -- Explicit `make -j1` or an unusable parent jobserver grants one slot.
+        if slots.limit == 1 then
+            slots:close()
+            slots = nil
+        end
+    end
+    if not slots then
         for _, entry in ipairs(entries) do
             jobs.record(entry, run_argv(entry.job.argv, verbose))
         end
@@ -7017,6 +7045,7 @@ function run_prepared_compiles(prepared, parallelism, verbose)
     local created, notification, notification_err = pcall(create_compile_notification)
     if not created then notification_err, notification = notification, nil end
     if not notification then
+        slots:close()
         for _, entry in ipairs(entries) do
             jobs.record(entry, nil, notification_err)
         end
@@ -7027,11 +7056,34 @@ function run_prepared_compiles(prepared, parallelism, verbose)
     local pending = {}
     local pending_count = 0
     local next_schedule = 1
-    local completion_err
-    while (not completion_err and next_schedule <= #schedule) or
+    local completion_err, cancelled
+    local function batch_failure(message)
+        completion_err = completion_err and (completion_err .. "; " .. message) or
+            message
+    end
+    local function release_slot()
+        local released, release_err = slots:release()
+        if not released then
+            batch_failure("failed to return a jobserver token: " ..
+                tostring(release_err))
+        end
+    end
+    while (not completion_err and not cancelled and next_schedule <= #schedule) or
             pending_count ~= 0 do
-        while not completion_err and pending_count < parallelism and
+        -- Acquire immediately before each launch: the first active job uses
+        -- this process's implicit slot, later ones borrow a token.
+        local want_slot = false
+        while not completion_err and not cancelled and
                 next_schedule <= #schedule do
+            local granted, slot_err = slots:acquire_nowait()
+            if granted == nil then
+                batch_failure("failed to acquire a jobserver token: " ..
+                    tostring(slot_err))
+                break
+            elseif not granted then
+                want_slot = true
+                break
+            end
             local entry = schedule[next_schedule]
             local launch_called, process, launch_err = pcall(
                 launch_prepared_compile, entry.job, verbose,
@@ -7045,39 +7097,59 @@ function run_prepared_compiles(prepared, parallelism, verbose)
                 pending_count = pending_count + 1
             else
                 jobs.record(entry, nil, launch_err)
+                release_slot()
             end
             next_schedule = next_schedule + 1
+            cancelled = slots:cancelled()
         end
         if pending_count ~= 0 then
             local completed_index, process
             if not completion_err then
-                local read_called, line, read_err =
-                    pcall(notification.file.read, notification.file, "*l")
-                if read_called then
-                    completed_index = tonumber(line)
-                    process = completed_index and pending[completed_index]
-                end
-                if not process then
-                    completion_err = "failed to receive parallel C compiler " ..
-                        "completion: " .. tostring(read_called and
-                            (read_err or line) or line)
+                local wait_called, event, value = pcall(
+                    slots.wait, slots, notification.file, want_slot)
+                if not wait_called then event, value = nil, event end
+                if event == "signal" then
+                    cancelled = value
+                elseif event == "completion" then
+                    local read_called, line, read_err =
+                        pcall(notification.file.read, notification.file, "*l")
+                    if read_called then
+                        completed_index = tonumber(line)
+                        process = completed_index and pending[completed_index]
+                    end
+                    if not process then
+                        batch_failure("failed to receive parallel C compiler " ..
+                            "completion: " .. tostring(read_called and
+                                (read_err or line) or line))
+                    end
+                elseif event ~= "slot" then
+                    batch_failure("failed to wait for parallel C compiler " ..
+                        "completion: " .. tostring(value))
                 end
             end
-            if completion_err then
+            if completion_err and not process then
                 completed_index, process =
                     oldest_pending_process(pending, #entries)
             end
-            pending[completed_index] = nil
-            pending_count = pending_count - 1
-            reap_prepared_compile_without_throw(process)
+            if process then
+                pending[completed_index] = nil
+                pending_count = pending_count - 1
+                -- Return the slot only after the child is reaped.
+                reap_prepared_compile_without_throw(process)
+                release_slot()
+            end
         end
     end
 
+    local slots_ok, slots_err = slots:close()
+    if not slots_ok then batch_failure(tostring(slots_err)) end
+    cancelled = cancelled or slots:cancelled()
     local notification_ok, cleanup_err =
         close_compile_notification(notification)
-    if not notification_ok then
-        completion_err = completion_err and
-            (completion_err .. "; " .. cleanup_err) or cleanup_err
+    if not notification_ok then batch_failure(cleanup_err) end
+    if cancelled then
+        batch_failure("parallel C compilation interrupted by signal " ..
+            tostring(cancelled))
     end
     if completion_err then
         for schedule_index = next_schedule, #schedule do
@@ -7100,8 +7172,18 @@ function run_prepared_compiles(prepared, parallelism, verbose)
             jobs.record(entry, ok, err, code)
         end
     end
-    return jobs.summarize(results)
+    return jobs.summarize(results), cancelled
 end
+
+-- The provider-link pipeline reuses the batch launcher, reaper, and replay.
+compile_batch = {
+    create_notification = create_compile_notification,
+    close_notification = close_compile_notification,
+    launch = launch_prepared_compile,
+    reap = reap_prepared_compile_without_throw,
+    finish = finish_prepared_compile_without_throw,
+    show_command = show_parallel_command,
+}
 
 end -- native batch helpers
 
@@ -7214,7 +7296,7 @@ function driver.compile_modules(requests, parallelism, verbose)
         end
     end
 
-    local compiled = run_prepared_compiles(prepared, parallelism, verbose)
+    local compiled, cancelled = run_prepared_compiles(prepared, parallelism, verbose)
     for prepared_index, compilation in ipairs(prepared) do
         local result = compiled[prepared_index]
         result.ok, result.err = publish_compiled_object(compilation, result.ok, result.err)
@@ -7232,6 +7314,9 @@ function driver.compile_modules(requests, parallelism, verbose)
             results[request_index] = { err = result.err }
         end
     end
+    -- A cancelled batch failed every module above, so no object was
+    -- published; deliver the signal under the restored action now.
+    jobs.propagate(cancelled)
     return results
 end
 

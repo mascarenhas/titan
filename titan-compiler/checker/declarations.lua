@@ -709,7 +709,9 @@ function check_foreign_environment(module_ast, st, errors)
     st.last_foreign_import_node = { loc = loc, headername = "ffi" }
     st.foreign_includes = { include }
     st.foreign_includes_version = (st.foreign_includes_version or 0) + 1
-    local conversion_key = st.cache_adapter and foreigncache.key(st, namespace)
+    -- A digest-only adapter has no storage: neither key nor graph is built.
+    local conversion_key = cacheadapter.can_get(st.cache_adapter) and
+        foreigncache.key(st, namespace)
     if conversion_key and foreigncache.restore(st, namespace, conversion_key) then
         cdriver.emit_process_phase(options, "ffi", include,
             "downstream_ffi_conversion", "cache_hit", cdriver.process_phase_clock(options))
@@ -760,7 +762,7 @@ function check_foreign_environment(module_ast, st, errors)
         namespace._type = types.CModule("ffi", members, type_members)
         cdriver.emit_process_phase(options, "ffi", include,
             "downstream_ffi_conversion", "complete", started)
-        if conversion_key and #errors == 0 then
+        if conversion_key and #errors == 0 and cacheadapter.can_put(st.cache_adapter) then
             foreigncache.store(st, conversion_key,
                 foreigncache.encode(st, namespace, conversion_key), namespace)
         end

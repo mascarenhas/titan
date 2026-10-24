@@ -654,4 +654,52 @@ describe("module foreign conversion payloads", function()
         assert.is_false(ok)
         assert.equal(cancelled, err)
     end)
+
+    it("does no storage work for a digest-only adapter", function()
+        local contents = "typedef int item_type;\n"
+        header("cached.h", contents)
+        local source = [[
+            foreign import "cached.h"
+            function answer(): integer return 42 end
+        ]]
+        local foreigncache = require "titan-compiler.foreigncache"
+        local sha256 = require "titan-compiler.sha256"
+        local original = {
+            key = foreigncache.key, encode = foreigncache.encode,
+            restore = foreigncache.restore, store = foreigncache.store,
+            encode_graph = cpp.encode_graph, decode_graph = cpp.decode_graph,
+        }
+        local storage_work = {}
+        local function spy(owner, name)
+            owner[name] = function(...)
+                storage_work[#storage_work + 1] = name
+                return original[name](...)
+            end
+        end
+        spy(foreigncache, "key")
+        spy(foreigncache, "encode")
+        spy(foreigncache, "restore")
+        spy(foreigncache, "store")
+        spy(cpp, "encode_graph")
+        spy(cpp, "decode_graph")
+        local digested = {}
+        local called, failure = pcall(check, source, {
+            sha256_binary = function(bytes)
+                digested[bytes] = true
+                return sha256.binary(bytes)
+            end,
+        })
+        foreigncache.key, foreigncache.encode = original.key, original.encode
+        foreigncache.restore, foreigncache.store = original.restore, original.store
+        cpp.encode_graph, cpp.decode_graph = original.encode_graph, original.decode_graph
+        assert.is_true(called, failure)
+        assert.same({}, storage_work)
+        -- The first load of the authored header used the adapter digest.
+        assert.is_true(digested[contents])
+        local ok, err = require("titan-compiler.cacheadapter").validate({
+            sha256_binary = sha256.binary, yield = function() end,
+        })
+        assert.is_nil(ok)
+        assert.truthy(err:find("sha256_binary alone", 1, true), err)
+    end)
 end)

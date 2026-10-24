@@ -276,6 +276,36 @@ describe("parallel generated-C compilation", function()
         end
     end
 
+    -- The batch polls the real completion FIFO descriptor, so channel
+    -- failures are injected through the shared FILE methods, for that one
+    -- handle only.
+    local file_methods = getmetatable(io.stdout).__index
+    local replaced_file_methods = {}
+    local function override_completion_file(callbacks)
+        local completion
+        io.open = function(path, mode)
+            local file, open_err = previous_open(path, mode)
+            if mode == "r+" and file then completion = file end
+            return file, open_err
+        end
+        for name, callback in pairs(callbacks) do
+            local original = file_methods[name]
+            replaced_file_methods[name] = original
+            file_methods[name] = function(file, ...)
+                if file == completion then return callback(original, file, ...) end
+                return original(file, ...)
+            end
+        end
+    end
+
+    local function restore_completion_file()
+        for name, original in pairs(replaced_file_methods) do
+            file_methods[name] = original
+        end
+        replaced_file_methods = {}
+        io.open = previous_open
+    end
+
     before_each(function()
         previous_cc = driver.CC
         previous_stdout = io.stdout
@@ -309,7 +339,7 @@ describe("parallel generated-C compilation", function()
         restore_tmpname()
         os.execute = previous_execute
         restore_launch()
-        io.open = previous_open
+        restore_completion_file()
         process.new_batch = previous_new_batch
         if diagnostic_stream and io.type(diagnostic_stream) == "file" then
             diagnostic_stream:close()
@@ -675,24 +705,17 @@ describe("parallel generated-C compilation", function()
                 return nil, "injected completion read failure"
             end
         else
-            io.open = function(path, mode)
-                local file, open_err = previous_open(path, mode)
-                if mode ~= "r+" or not file then return file, open_err end
-                return {
-                    read = function()
-                        return nil, "injected completion read failure"
-                    end,
-                    close = function()
-                        return file:close()
-                    end,
-                }
-            end
+            override_completion_file({
+                read = function()
+                    return nil, "injected completion read failure"
+                end,
+            })
         end
 
         local results = driver.compile_modules(
             checked_requests(REFILL_LEAVES), JOBS, false)
         restore_tmpname()
-        io.open = previous_open
+        restore_completion_file()
         for _, result in ipairs(results) do
             assert.falsy(result.ok)
             assert.truthy(tostring(result.err):find(
@@ -717,23 +740,16 @@ describe("parallel generated-C compilation", function()
                 return nil, "injected completion close failure"
             end
         else
-            io.open = function(path, mode)
-                local file, open_err = previous_open(path, mode)
-                if mode ~= "r+" or not file then return file, open_err end
-                return {
-                    read = function(_, pattern)
-                        return file:read(pattern)
-                    end,
-                    close = function()
-                        assert(file:close())
-                        return nil, "injected completion close failure"
-                    end,
-                }
-            end
+            override_completion_file({
+                close = function(original, file)
+                    assert(original(file))
+                    return nil, "injected completion close failure"
+                end,
+            })
         end
 
         local results = driver.compile_modules(checked_requests(), JOBS, false)
-        io.open = previous_open
+        restore_completion_file()
         for _, result in ipairs(results) do
             assert.falsy(result.ok)
             assert.truthy(tostring(result.err):find(
