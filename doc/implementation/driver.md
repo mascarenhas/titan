@@ -1134,10 +1134,11 @@ native_references, objects`.
    and the module's generated headers and their staging files. Its inputs are
    the source constituents, C header dependencies, and `native_inputs`.
 
-   Primary object metadata is read in binary mode, including the prior
-   inventory and Windows link-interface lookup: UCRT text reads can truncate
-   a COFF object at byte `0x1A`. The `.parts` companion is also read and written
-   in binary mode on every platform, preserving its exact LF-delimited format
+   Primary object metadata is read in binary mode here (the prior inventory)
+   and wherever else the driver reads compiled objects, including the Windows
+   link-interface lookup at link time: UCRT text reads can truncate a COFF
+   object at byte `0x1A`. The `.parts` companion is also read and written in
+   binary mode on every platform, preserving its exact LF-delimited format
    rather than translating it to CRLF on Windows. Ordinary source/header text
    I/O retains its existing text-mode semantics.
 5. **Preflight.** Before any invalidation or write, `driver.compile`
