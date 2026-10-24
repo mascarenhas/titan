@@ -449,10 +449,10 @@ local function build_one_so(name, src, names)
     if not ast then return nil, "parse error in " .. name end
     local dependency_output = assert(driver.prepare_output_root(
         temporary.name("-so-deps")))
-    local loader = driver.defaultloader(static_deps, {
-        output_root = dependency_output,
-    })
     local results = table.pack(xpcall(function()
+        local loader = driver.defaultloader(static_deps, {
+            output_root = dependency_output,
+        })
         return driver.with_loader(loader, function(loader)
             local _, errs = checker.check(
                 name, ast, src, name .. ".titan", loader)
@@ -464,9 +464,18 @@ local function build_one_so(name, src, names)
                 if names[dep] and dep ~= name then
                     return nil, name .. " linked '" .. dep .. "' statically, not via .so"
                 end
-                if driver.imported[dep].ast then
-                    source_names[#source_names + 1] = dep
+                local mod = driver.imported[dep]
+                if not mod then
+                    return nil, name .. " has no selected module for dependency '" .. dep .. "'"
                 end
+                if mod.kind == "static" then
+                    return nil, name .. " cannot build static archive dependency '" .. dep ..
+                        "': shared-provider fixtures do not support static archives"
+                end
+                if not mod.ast then
+                    return nil, name .. " has no checked source for dependency '" .. dep .. "'"
+                end
+                source_names[#source_names + 1] = dep
             end
             table.sort(source_names)
             local ok, err = driver.prepare_foreign_headers(
@@ -491,8 +500,16 @@ local function build_one_so(name, src, names)
         end)
     end, debug.traceback))
     local cleaned, cleanup_error = driver.remove_path(dependency_output)
-    if not results[1] then error(results[2], 0) end
-    if not cleaned then return nil, cleanup_error end
+    local build_error = not results[1] and results[2]
+        or not results[2] and results[3]
+    if not cleaned then
+        local message = "failed to remove dependency output '" .. dependency_output ..
+            "': " .. tostring(cleanup_error)
+        build_error = build_error and (tostring(build_error) .. "\n" .. message)
+            or message
+    end
+    if not results[1] then error(build_error, 0) end
+    if not results[2] or not cleaned then return nil, build_error end
     return table.unpack(results, 2, results.n)
 end
 

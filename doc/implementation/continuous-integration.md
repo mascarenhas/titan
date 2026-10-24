@@ -100,8 +100,9 @@ Run `make stdlib-busted-test`, then the installed-stdlib integrations listed in
 `spec/support/ci_stdlib_compiler_test_files.txt` through
 `ci_test_groups.sh stdlib-compiler` with LuaCov. This includes
 `spec/coder/split_units_spec.lua`: its cross-part metadata checks import
-transfer, protobuf, and reflection from the installed provider, whose native
-dependencies are intentionally absent from the compiler SDK. Snapshot and
+transfer, protobuf, and reflection from the installed provider. The compiler
+SDK installs no standard library; source-compiling protobuf's dependency
+closure requires private LPegLabel headers that the SDK omits. Snapshot and
 restore the canonical provider pair, shims, and checkout runtime around
 compiler fixtures.
 The `rockspec_spec.lua` publication gate stages the already validated installed

@@ -187,11 +187,13 @@ end
 describe("split generated C translation units (S1)", function()
     local workspace
     local saved_src, saved_out, saved_cc
+    local saved_clang_format, cleanup_context
 
     before_each(function()
         saved_src = driver.TITAN_SOURCE_PATH
         saved_out = driver.OUTPUT_ROOT
         saved_cc = driver.CC
+        saved_clang_format = driver.CLANG_FORMAT
         workspace = temporary.name("-split-units")
         os.remove(workspace)
         assert(lfs.mkdir(workspace))
@@ -203,6 +205,12 @@ describe("split generated C translation units (S1)", function()
         driver.TITAN_SOURCE_PATH = saved_src
         driver.OUTPUT_ROOT = saved_out
         driver.CC = saved_cc
+        driver.CLANG_FORMAT = saved_clang_format
+        if cleanup_context then
+            local context = cleanup_context
+            cleanup_context = nil
+            assert(driver.close_resolver_context(context))
+        end
         driver.configure_foreign_c()
         if workspace then
             remove_tree(workspace)
@@ -958,7 +966,7 @@ end
             assert(driver.configure_foreign_c(context))
             local prev_src = driver.TITAN_SOURCE_PATH
             local prev_out = driver.OUTPUT_ROOT
-            driver.TITAN_SOURCE_PATH = src_dir .. ";" .. prev_src
+            driver.TITAN_SOURCE_PATH = src_dir
             driver.OUTPUT_ROOT = assert(driver.prepare_output_root(out_dir))
             local loader = driver.defaultloader({}, {
                 source_roots = { ["pkg.dep"] = true, ["pkg.main"] = true },
@@ -979,6 +987,7 @@ end
                 linked_names[#linked_names + 1] = name
             end
             table.sort(linked_names)
+            assert.same({ "pkg.dep", "pkg.main" }, linked_names)
             local plans = assert(driver.plan_foreign_headers(linked_names, driver.imported))
             assert(driver.write_foreign_header_plans(plans, false, false))
 
@@ -1244,7 +1253,8 @@ assert(results[1].ok == nil, "injected C compilation unexpectedly succeeded")
                 split_threshold = threshold,
             })
             local ok, errs = checker.checkimport("mod", loader)
-            assert.truthy(ok, tostring(errs))
+            assert.truthy(ok, errs)
+            assert.equal(0, #errs, table.concat(errs, "\n"))
             local mod = driver.imported["mod"]
             local was_hit = mod.compiled ~= nil
 
@@ -1714,8 +1724,8 @@ assert(file:close())
             output_root = out_dir,
             pretty_print = true,
         })
+        cleanup_context = context
         assert(driver.configure_foreign_c(context))
-        local prev_cf = driver.CLANG_FORMAT
         driver.CLANG_FORMAT = assert(cdriver.shell_quote(LUA)) .. " " ..
             assert(cdriver.shell_quote(indent_stub))
         driver.TITAN_SOURCE_PATH = src_dir
@@ -1730,7 +1740,11 @@ assert(file:close())
             pretty_print = true,
         }
         local loader = driver.defaultloader({}, compile_opts)
-        assert.truthy(checker.checkimport("tbmod", loader))
+        local modtype, errors = checker.checkimport("tbmod", loader)
+        assert.truthy(modtype, errors)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        local finalized, finalize_errors = driver.finalize_resolver_context(context)
+        assert.truthy(finalized, finalize_errors and table.concat(finalize_errors, "\n"))
         assert(driver.prepare_foreign_headers({ "tbmod" }, driver.imported, false, true))
         local mod = driver.imported["tbmod"]
         local results = driver.compile_modules({
@@ -1746,7 +1760,7 @@ assert(file:close())
                 },
             },
         }, 2, false)
-        driver.CLANG_FORMAT = prev_cf
+        driver.CLANG_FORMAT = saved_clang_format
         assert.is_true(results[1].ok, results[1].err)
         assert.equal(4, #results[1].objects)
         local formatted = read_file(indent_log)
