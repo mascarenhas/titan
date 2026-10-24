@@ -1142,16 +1142,25 @@ native_references, objects`.
    `private_symbols` with `driver.record_module_symbols`. The CLI does the same
    for the whole link set first; see
    [batch planning](#batch-planning-drivercompile_modules).
-6. **Materialize** (`plan.materialize`). This writes the module's generated
-   headers when `driver.compile` planned them, then invalidates: it removes
-   `<stem>.o` (the commit marker), `<stem>.parts`, `<stem>.c`, `<stem>.gcda`,
-   `<stem>.gcno`, and every prior-inventory path. It writes `<stem>.priv.h` for a
-   split module and each part's C file, unlinking the old file first and
-   appending the `.titan.source` record to part 0. Each file is normalized in
-   place and optionally formatted with `--pretty-print`. Formatting failure
-   aborts before its object is compiled but retains the raw or partially
-   formatted `.c` as a diagnostic artifact. Coverage mode converts each part's
-   markers and then appends the record to part 0
+6. **Materialize** (`plan.materialize`). This first writes the module's
+   generated headers, but only when `prepare_compile` planned them itself: its
+   caller passed no header plan for the module, and at least one of the
+   module's two headers was not yet written by
+   `driver.write_foreign_header_plans` in this process. Absent such an earlier
+   write, that is a direct `driver.compile` or `driver.compile_module` call, or
+   a programmatic `driver.plan_compile_requests` or `driver.compile_modules`
+   call without a `header_plans` entry for the module. `titanc` plans the
+   headers of every source module it compiles (`driver.plan_foreign_headers`),
+   passes those plans to batch planning, and writes them itself, so under the
+   CLI materialize never writes a header. Materialize then invalidates: it
+   removes `<stem>.o` (the commit marker), `<stem>.parts`, `<stem>.c`,
+   `<stem>.gcda`, `<stem>.gcno`, and every prior-inventory path. It writes
+   `<stem>.priv.h` for a split module and each part's C file, unlinking the old
+   file first and appending the `.titan.source` record to part 0. Each file is
+   normalized in place and optionally formatted with `--pretty-print`.
+   Formatting failure aborts before its object is compiled but retains the raw
+   or partially formatted `.c` as a diagnostic artifact. Coverage mode converts
+   each part's markers and then appends the record to part 0
    ([native coverage](native-coverage.md#selection-and-object-ownership)).
 7. **Compile.** Each part's C is compiled with the parsed `driver.CC`, then
    `TITAN_EXTRA_CPPFLAGS`, Titan's fixed `driver.CFLAGS`,
@@ -1257,16 +1266,19 @@ that would define the same C symbol fail with `cannot link C symbol ...` before
 any output changes. The generated and restored headers in `header_plans`, and
 their staging files, join the outputs, and the whole set is checked once with
 `driver.validate_provider_output_paths`. The returned plans carry the complete
-`outputs` and `inputs`. The CLI checks those exact outputs again, against the
-same input list, together with its program outputs
-(`driver.validate_program_output_paths`, whose sixth `planned_outputs`
-argument replaces the per-module estimate) or with its provider and shim
-outputs. This applies to compile-only, library, and program invocations
-alike. Only then does the CLI write every planned header, as the batch's sole
-header writer, and call `driver.compile_modules(requests, parallelism,
-verbose, plans)`, which plans the batch itself when no plans are given. Each
-plan's `materialize` closure runs once and is then released, dropping the
-generated C it held.
+`outputs` and `inputs`. This planning check applies to compile-only, library,
+and program invocations alike. Program and library invocations then check
+those exact outputs a second time, against the same input list, together with
+their final outputs: a program (including a `--test` runner) with
+`driver.validate_program_output_paths`, whose sixth `planned_outputs` argument
+replaces the per-module estimate, and a library with
+`driver.validate_provider_output_paths` over the provider and its Lua shims. A
+compile-only (`-c`/`--compile-only`) invocation has no final output, so it
+skips this second check. Only then does the CLI write every planned header, as
+the batch's sole header writer, and call `driver.compile_modules(requests,
+parallelism, verbose, plans)`, which plans the batch itself when no plans are
+given. Each plan's `materialize` closure runs once and is then released,
+dropping the generated C it held.
 
 `driver.compile_modules` materializes every source plan in request order
 before compiling anything; only the native object commands that follow ever

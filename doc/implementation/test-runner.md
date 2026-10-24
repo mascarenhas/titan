@@ -601,16 +601,23 @@ cleanup helper (`spec/support/clean_generated_test_artifacts.sh`) prunes `out/`
 while inspecting synthetic fixtures and, unless `--keep-output` is selected,
 removes the owned `out/tests` and legacy `.titan-tests` directories
 recursively. Under `spec/`, legacy compiler outputs still use the bounded
-cleanup rules: remove every generated `.o`, and a `.c`, `.parts` companion,
-`.priv.h` private header, or nonzero part C file only when a same-stem
-`.titan` source exists. Generated headers require their exact compiler banner;
-synthetic test suffixes and root `test_runner_*` identify other owned
-fixtures. This does not consult Git, so it also works in a source rock while
-preserving author-written C/header fixtures and the ordinary `out/` provider
-stage. Outside `spec/`, `make clean` removes every C file, object, `.parts`
-companion, `.priv.h` header, and nonzero part C file and object that a
-compilation without `--output` leaves beside root, `titan/`, and `titan/uv/`
-modules or beside a standard folder module's main stem
+cleanup rules: remove every generated `.o`, and a primary `.c` only when a
+same-stem `.titan` source exists. Split-module outputs, below `spec/` and at
+the repository root, are removed only through a `<stem>.parts` companion whose
+every line matches `driver.render_parts_companion` exactly; the helper builds
+each deleted path from the companion's own stem, never from its contents, and
+a malformed companion deletes nothing. A failed split compile removes its
+companion but keeps the part C files and private header, so for a
+`.titan`-backed stem below `spec/` with no companion the helper removes only
+`<stem>.part<k>.c`/`.o` with a positive decimal `k` and a `<stem>.priv.h` whose
+first line is `coder.PRIVATE_HEADER_MARKER`. Generated headers require their
+exact compiler banner; synthetic test suffixes and root `test_runner_*`
+identify other owned fixtures. This does not consult Git, so it also works in
+a source rock while preserving author-written C/header fixtures and the
+ordinary `out/` provider stage. Outside `spec/`, `make clean` removes every C
+file, object, `.parts` companion, `.priv.h` header, and nonzero part C file
+and object that a compilation without `--output` leaves beside root, `titan/`,
+and `titan/uv/` modules or beside a standard folder module's main stem
 (`TITAN_LEGACY_SOURCE_OUTPUTS`), keeping authored sources and headers.
 
 CI runs this aggregate twice: once source-linked with native coverage in the

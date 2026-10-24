@@ -25,14 +25,31 @@ local function clean_generated_modules()
     end
 end
 
+local NATIVE_BODY_FIELDS = { "_body", "_luabody", "_strictbody", "_boundbody" }
+
 local function native_bodies(ast)
-    -- Constructors and authored case loads must retain the internal Array
-    -- representation. Reflection/codec readers intentionally box at the Lua
-    -- boundary and are not part of these native callable bodies.
-    local bodies = {}
-    for _, node in ipairs(ast) do
-        if node._body then bodies[#bodies + 1] = node._body end
+    -- Constructors, authored case loads, Lua and strict entries, bound-method
+    -- trampolines, and nested lambdas with their entries must retain the
+    -- internal Array representation. The coder attaches each of these bodies
+    -- to its AST node; reflection/codec readers intentionally box at the Lua
+    -- boundary and are not attached to any node. Children are reached through
+    -- source fields only, never through checker or coder annotations.
+    local bodies, seen = {}, {}
+    local function visit(node)
+        if type(node) ~= "table" or seen[node] then return end
+        seen[node] = true
+        for _, field in ipairs(NATIVE_BODY_FIELDS) do
+            if type(node[field]) == "string" then
+                bodies[#bodies + 1] = node[field]
+            end
+        end
+        for key, child in pairs(node) do
+            if type(key) ~= "string" or key:sub(1, 1) ~= "_" then
+                visit(child)
+            end
+        end
     end
+    visit(ast)
     assert(#bodies > 0)
     return table.concat(bodies, "\n")
 end

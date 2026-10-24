@@ -204,6 +204,13 @@ describe("native callable symbol separators", function()
         assert_contains(symbols, "symbol_case_ℳ_Choice_ℱ_item_titanstatic")
         assert.falsy(symbols:find("\\u2133", 1, true))
         assert.falsy(symbols:find("\\u2131", 1, true))
+        -- Metamethods are module-mangled; the object neither defines nor
+        -- references an unmangled C symbol (Mach-O adds one leading `_`).
+        for line in symbols:gmatch("[^\r\n]+") do
+            local name = line:match("(%S+)%s*$")
+            assert.falsy(name:match("^_?__index$"), line)
+            assert.falsy(name:match("^_?__newindex$"), line)
+        end
 
         local source_symbols = coder.external_symbols(MODULE, ast)
         local interface_symbols =

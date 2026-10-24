@@ -630,6 +630,10 @@ function call(input: integer): integer return plus_one(input) end
 00000000 W _weak_function
 00000000 V _weak_object
 00000000 u _unique_object
+00000000 w _weak_defined_function
+00000000 v _weak_defined_object
+00000000 ? _unknown_addressed
+         ? _unknown_bare
          U _entry
          U _external_macho
          w _weak_external_function
@@ -650,6 +654,7 @@ nm: no symbols
         assert.same({
             _entry = true, _internal = true, _weak_function = true,
             _weak_object = true, _unique_object = true,
+            _weak_defined_function = true, _weak_defined_object = true,
         }, symbols.defined)
         assert.same({
             _external_macho = true, _external_elf = true,
@@ -1174,7 +1179,7 @@ local results = driver.compile_modules({ {
     modname = "diagnostics", mod = { ast = ast, filename = filename },
     options = { c_parts = 4, split_threshold = 1 },
 } }, 4, false)
-assert(not results[1].ok, "injected C compilation unexpectedly succeeded")
+assert(results[1].ok == nil, "injected C compilation unexpectedly succeeded")
 ]], ROOT, MULTI_CONSTRUCT_SOURCE, source_path, wrapper))
         local ok, output = run_cmd({
             "env", "TITAN_ROCKS_ROOT=" .. PREFIX, LUA, probe,
