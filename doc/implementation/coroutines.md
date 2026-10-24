@@ -543,9 +543,11 @@ Unwinding has three layers:
   state requires it inside a coroutine, which covers an initializer abandoned
   inside `require`.
 - `spec/coder/error_handling_spec.lua` ("unwind boundaries") checks that a
-  finally boundary is initialized with `TITAN_STATUS_FINALLY`, that a
-  catch-only try emits no unwind code, and unwinds a try that has both a catch
-  and a finally.
+  finally boundary is initialized with `TITAN_STATUS_FINALLY` and that a
+  catch-only try emits no unwind code. `spec/coder/unwind_stdlib_spec.lua`
+  unwinds a try that has both a catch and a finally; it needs the installed
+  `titan.coroutine`, so it is listed in
+  `spec/support/ci_stdlib_compiler_test_files.txt`.
 - `spec/minicoro_spec.lua` drives `titan_coroutine_enter` from a C entry: an
   escaped error, an unwind, and an unwind of a coroutine suspended in the
   floor's error-recovery close. Titan code reaches the escaped-error branch

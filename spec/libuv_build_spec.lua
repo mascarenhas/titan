@@ -4055,7 +4055,7 @@ printf '%s\0' "$@" > "$TITAN_SELECTOR_ARGV_LOG"
                 for shard = 1, 5 do
                     expected_total = expected_total + #expected[shard]
                 end
-                assert.equal(161, expected_total)
+                assert.equal(162, expected_total)
                 assert.equal(expected_total, total)
 
                 local complete_log = root .. "/complete"
@@ -5708,8 +5708,8 @@ printf '%s\n' "${schedule[@]}"
                     integration_count = integration_count + 1
                 end
             end
-            assert.equal(8, integration_count)
-            assert.equal(161, assigned_count + integration_count)
+            assert.equal(9, integration_count)
+            assert.equal(162, assigned_count + integration_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")

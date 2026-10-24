@@ -553,8 +553,10 @@ from silently loading stale build artifacts.
   sustained-OOM catch/defer recovery across functions, closures, and module
   initializers, GC-valued pending returns (including flexible tails),
   standalone uncaught-error reporting, and the generated unwind boundaries
-  (the finally marker, no unwind code in a catch-only try, and a grafted
-  catch-plus-finally try unwound through its catch boundary).
+  (the finally marker and no unwind code in a catch-only try).
+* `spec/coder/unwind_stdlib_spec.lua`: a grafted catch-plus-finally try
+  unwound through its catch boundary under the installed `titan.coroutine`
+  (a stdlib compiler spec, run after the full provider is installed).
 * `spec/stdlib/titan/coroutine/tests/unwind_test.titan` (`test_unwind_*`):
   unwinding behavior, including a coroutine abandoned while suspended in an
   error-recovery `__close`, a failing finally inside an immediately invoked
