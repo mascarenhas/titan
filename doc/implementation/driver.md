@@ -1133,6 +1133,13 @@ native_references, objects`.
    object, `.gcno`, `.gcda`, and compile temporary, every prior-inventory path,
    and the module's generated headers and their staging files. Its inputs are
    the source constituents, C header dependencies, and `native_inputs`.
+
+   Primary object metadata is read in binary mode, including the prior
+   inventory and Windows link-interface lookup: UCRT text reads can truncate
+   a COFF object at byte `0x1A`. The `.parts` companion is also read and written
+   in binary mode on every platform, preserving its exact LF-delimited format
+   rather than translating it to CRLF on Windows. Ordinary source/header text
+   I/O retains its existing text-mode semantics.
 5. **Preflight.** Before any invalidation or write, `driver.compile`
    validates the plan with `driver.validate_provider_output_paths`: an
    existing output must be a regular non-link file, and no output may alias

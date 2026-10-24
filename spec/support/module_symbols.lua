@@ -9,7 +9,7 @@ local M = {}
 -- The source record, not the Make-facing companion or directory contents,
 -- defines the complete ordered native input set for one logical module.
 function M.collect(primary, run, nm)
-    local bytes = assert(util.get_file_contents(primary))
+    local bytes = assert(util.get_file_contents(primary, "rb"))
     local entry = assert(objectmetadata.read(bytes, primary))
     local native = assert(entry.object_metadata)
     assert(objectmetadata.validate_parts(native))

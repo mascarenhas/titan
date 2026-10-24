@@ -6843,7 +6843,7 @@ local function prepare_compile(
     local parts_attr = lfs.symlinkattributes(parts_companion_path)
     if parts_attr then
         local existing = parts_attr.mode == "file"
-            and util.get_file_contents(parts_companion_path) or nil
+            and util.get_file_contents(parts_companion_path, "rb") or nil
         local owned = existing and
             existing:sub(1, #driver.PARTS_COMPANION_HEADER_PREFIX)
                 == driver.PARTS_COMPANION_HEADER_PREFIX
@@ -6858,7 +6858,7 @@ local function prepare_compile(
     local prior_inventory = {}
     if priv_owned then prior_inventory[priv_header_path] = true end
     if lfs.symlinkattributes(libname, "mode") == "file" then
-        local old_bytes = util.get_file_contents(libname)
+        local old_bytes = util.get_file_contents(libname, "rb")
         local old_entry = old_bytes and objectmetadata.read(old_bytes, libname) or nil
         local old_native = old_entry and old_entry.object_metadata or nil
         if old_native and old_native.parts and objectmetadata.validate_parts(old_native) then
@@ -6873,7 +6873,7 @@ local function prepare_compile(
         end
     end
     if parts_attr then
-        local old_companion = util.get_file_contents(parts_companion_path)
+        local old_companion = util.get_file_contents(parts_companion_path, "rb")
         local old_count = old_companion and
             driver.parse_parts_companion(old_companion, stem) or nil
         if old_count and old_count > 1 then
@@ -7087,7 +7087,7 @@ local function publish_compiled_object(prepared, ok, err)
     end
     if ok and prepared.parts_companion and companion_temp then
         ok, err = util.set_file_contents(companion_temp,
-            driver.render_parts_companion(prepared.stem, #prepared.jobs))
+            driver.render_parts_companion(prepared.stem, #prepared.jobs), "wb")
         if ok then
             ok, err = rename_output(companion_temp, prepared.parts_companion)
         end
@@ -9223,7 +9223,7 @@ local function windows_link_interfaces(libnames, extra_objects, ordered_payload)
     for _, object in ipairs(objects) do
         if type(object) ~= "string"
            or not object:match("[.]part[1-9][0-9]*[.]o$") then
-            local bytes = util.get_file_contents(object)
+            local bytes = util.get_file_contents(object, "rb")
             local entry = bytes and objectmetadata.read(bytes, object)
             if entry then interfaces[entry.type.name] = entry.type end
         end
@@ -10212,7 +10212,7 @@ function driver.validate_program_output_paths(
         if not ok then return nil, err end
         local parts_attr = lfs.symlinkattributes(parts_path)
         if parts_attr and parts_attr.mode == "file" then
-            local existing = util.get_file_contents(parts_path)
+            local existing = util.get_file_contents(parts_path, "rb")
             if not existing or existing:sub(1, #driver.PARTS_COMPANION_HEADER_PREFIX)
                ~= driver.PARTS_COMPANION_HEADER_PREFIX then
                 return nil, "refusing to overwrite user-owned companion path '"
