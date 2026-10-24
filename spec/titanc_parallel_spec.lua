@@ -195,9 +195,9 @@ describe("titanc generated-C parallelism dispatch", function()
         assert.equal(2, observed.jobs)
     end)
 
-    it("defaults to one generated-C compilation", function()
+    it("defaults to four generated-C compilations", function()
         local _, observed = run_titanc(ordinary_arguments(nil), nil)
-        assert.equal(1, observed.jobs)
+        assert.equal(4, observed.jobs)
     end)
 
     it("uses TITAN_JOBS and preserves sorted batch diagnostics", function()

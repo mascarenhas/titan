@@ -107,7 +107,8 @@ local function titanc(
         environment_jobs, cli_jobs, failing_module, diagnostics,
         compiler, bounded)
     local local_path = ROOT .. "/?.lua;" .. ROOT .. "/?/init.lua;"
-    local argv = { "env" }
+    -- An ambient parent Make pool would otherwise bound these fixtures.
+    local argv = { "env", "-u", "MAKEFLAGS" }
     if environment_jobs then
         argv[#argv + 1] = "TITAN_JOBS=" .. environment_jobs
     else
@@ -123,7 +124,7 @@ local function titanc(
         "TITAN_PARALLEL_TEST_STATE=" .. state_directory,
         "TITAN_PARALLEL_TEST_DELAY=0.5",
         "TITAN_PARALLEL_TEST_EXPECTED=" .. tostring(math.min(
-            tonumber(cli_jobs or environment_jobs) or 1, #MODULES)),
+            tonumber(cli_jobs or environment_jobs) or 4, #MODULES)),
         "TITAN_PARALLEL_TEST_DIAGNOSTICS=" .. (diagnostics or ""),
         "TITAN_PARALLEL_TEST_FAIL=" .. (failing_module or ""),
         "TITAN_ROCKS_ROOT=" .. assert(PREFIX,
@@ -983,11 +984,11 @@ describe("parallel generated-C compilation", function()
         end
     end)
 
-    it("uses one CLI compilation job by default", function()
+    it("uses four CLI compilation jobs by default", function()
         local ok, output, why, code = titanc(nil)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        assert.equal("1\n", read_file(state_directory .. "/maximum"), output)
+        assert.equal("4\n", read_file(state_directory .. "/maximum"), output)
         assert.is_true(file_exists(workspace_directory ..
             (platform.windows and "/batch.dll" or "/batch.so")))
         if not platform.windows then

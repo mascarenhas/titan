@@ -22,6 +22,7 @@ local sha256 = require "titan-compiler.sha256"
 local ffiheaders = require "titan-compiler.ffiheaders"
 local objectmetadata = require "titan-compiler.objectmetadata"
 local documentation = require "titan-compiler.documentation"
+local jobs = require "titan-compiler.jobs"
 
 local lfs = require "lfs"
 
@@ -6615,18 +6616,42 @@ local function prepare_compile(
     if not reserved then return nil, temporary end
     if not temporary then return nil, temporary_error end
     append_argv(args, { "-o", temporary })
+    -- The prepared-module shape is the scheduler contract: one record per
+    -- logical module owning an ordered native job list whose first element
+    -- is part 0. The batch caller assigns request/module indices.
     return {
-        args = args,
-        libname = libname,
-        temporary = temporary,
+        modname = modname,
+        request_index = 1,
+        primary_object = libname,
+        private_header = nil,
+        jobs = {
+            {
+                module_index = 1,
+                part_index = 0,
+                c_path = filename,
+                object_path = libname,
+                temporary_object = temporary,
+                argv = args,
+                cost_bytes = #code,
+            },
+        },
         native_references = native_references,
-        generated_bytes = #code,
     }
 end
 
+-- The primary object is the module's commit marker, so it is renamed last.
+-- Any failure removes every unpublished temporary object.
 local function publish_compiled_object(prepared, ok, err)
-    if ok then ok, err = rename_output(prepared.temporary, prepared.libname) end
-    if not ok then os.remove(prepared.temporary) end
+    if ok then
+        for index = #prepared.jobs, 1, -1 do
+            local job = prepared.jobs[index]
+            ok, err = rename_output(job.temporary_object, job.object_path)
+            if not ok then break end
+        end
+    end
+    if not ok then
+        for _, job in ipairs(prepared.jobs) do os.remove(job.temporary_object) end
+    end
     return ok, err
 end
 
@@ -6635,14 +6660,37 @@ function driver.compile(modname, ast, sourcef, static_deps, verbose, options, so
     local prepared, prepare_err = prepare_compile(
         modname, ast, sourcef, static_deps, verbose, options, source_entry)
     if not prepared then return nil, prepare_err end
-    local ok, err = run_argv(prepared.args, verbose)
+    -- Serial compilation runs every part in order, as the batch does, so a
+    -- failing part does not hide another part's diagnostics.
+    local ok, err = true, nil
+    for _, job in ipairs(prepared.jobs) do
+        local job_ok, job_err = run_argv(job.argv, verbose)
+        if ok and not job_ok then ok, err = job_ok, job_err end
+    end
     ok, err = publish_compiled_object(prepared, ok, err)
     if ok then
-        return ok, nil, prepared.libname, prepared.native_references
+        return ok, nil, prepared.primary_object, prepared.native_references
     else
         return nil, err
     end
 end
+
+local function create_compile_log()
+    if driver.OUTPUT_ROOT then
+        local filename, err = driver.sibling_temporary_path(
+            path.join(driver.OUTPUT_ROOT, ".titan-temporary"))
+        if not filename then return nil, err end
+        local wrote, write_error = util.set_file_contents(filename, "")
+        if not wrote then return nil, write_error end
+        return filename
+    end
+    return compiler_io.new_sync():tmpname()
+end
+
+-- Native batch helpers. This chunk is near Lua's 200-active-local limit, so
+-- the helpers are scoped to this block and only the entry point escapes.
+local run_prepared_compiles
+do
 
 local function protected_remove(path)
     if not path then return true end
@@ -6700,18 +6748,6 @@ local function replay_compile_output(filename, stream)
     end
     if #errors ~= 0 then return nil, table.concat(errors, "; ") end
     return true
-end
-
-local function create_compile_log()
-    if driver.OUTPUT_ROOT then
-        local filename, err = driver.sibling_temporary_path(
-            path.join(driver.OUTPUT_ROOT, ".titan-temporary"))
-        if not filename then return nil, err end
-        local wrote, write_error = util.set_file_contents(filename, "")
-        if not wrote then return nil, write_error end
-        return filename
-    end
-    return compiler_io.new_sync():tmpname()
 end
 
 local function create_compile_notification()
@@ -6801,13 +6837,13 @@ local function show_parallel_command(command)
 end
 
 local function launch_prepared_compile(
-        prepared, verbose, notification, completion_index)
+        job, verbose, notification, completion_index)
     local command, command_err, executable
     if platform.windows then
-        command, executable = platform.windows_process_command(prepared.args)
+        command, executable = platform.windows_process_command(job.argv)
         if not command then command_err = executable end
     else
-        command, command_err = command_argv(prepared.args)
+        command, command_err = command_argv(job.argv)
     end
     if not command then return nil, command_err end
 
@@ -6828,7 +6864,7 @@ local function launch_prepared_compile(
             end
         end
         local called, launched, err = pcall(notification.batch.spawn,
-            notification.batch, prepared.args, stdout_path, stderr_path, completion_index)
+            notification.batch, job.argv, stdout_path, stderr_path, completion_index)
         if not called or not launched then
             protected_remove(stdout_path)
             protected_remove(stderr_path)
@@ -6969,41 +7005,26 @@ local function oldest_pending_process(pending, count)
     end
 end
 
-local function run_prepared_compiles(prepared, parallelism, verbose)
-    local results = {}
-    if parallelism == 1 or #prepared <= 1 then
-        for index, compilation in ipairs(prepared) do
-            local ok, err, code = run_argv(compilation.args, verbose)
-            results[index] = { ok = ok, err = err, code = code }
+function run_prepared_compiles(prepared, parallelism, verbose)
+    local entries, results = jobs.flatten(prepared)
+    if parallelism == 1 or #entries <= 1 then
+        for _, entry in ipairs(entries) do
+            jobs.record(entry, run_argv(entry.job.argv, verbose))
         end
-        return results
+        return jobs.summarize(results)
     end
 
     local created, notification, notification_err = pcall(create_compile_notification)
     if not created then notification_err, notification = notification, nil end
     if not notification then
-        for index = 1, #prepared do
-            results[index] = { err = notification_err }
+        for _, entry in ipairs(entries) do
+            jobs.record(entry, nil, notification_err)
         end
-        return results
+        return jobs.summarize(results)
     end
 
-    local schedule = {}
-    for index, compilation in ipairs(prepared) do
-        schedule[index] = {
-            index = index,
-            compilation = compilation,
-        }
-    end
-    table.sort(schedule, function(left, right)
-        local left_bytes = left.compilation.generated_bytes or 0
-        local right_bytes = right.compilation.generated_bytes or 0
-        if left_bytes ~= right_bytes then return left_bytes > right_bytes end
-        return left.index < right.index
-    end)
-
+    local schedule = jobs.launch_order(entries)
     local pending = {}
-    local processes = {}
     local pending_count = 0
     local next_schedule = 1
     local completion_err
@@ -7012,20 +7033,18 @@ local function run_prepared_compiles(prepared, parallelism, verbose)
         while not completion_err and pending_count < parallelism and
                 next_schedule <= #schedule do
             local entry = schedule[next_schedule]
-            local index = entry.index
             local launch_called, process, launch_err = pcall(
-                launch_prepared_compile, entry.compilation, verbose,
-                notification, index)
+                launch_prepared_compile, entry.job, verbose,
+                notification, entry.ordinal)
             if not launch_called then
                 launch_err, process = process, nil
             end
             if process then
-                process.index = index
-                pending[index] = process
-                processes[index] = process
+                entry.process = process
+                pending[entry.ordinal] = process
                 pending_count = pending_count + 1
             else
-                results[index] = { err = launch_err }
+                jobs.record(entry, nil, launch_err)
             end
             next_schedule = next_schedule + 1
         end
@@ -7046,7 +7065,7 @@ local function run_prepared_compiles(prepared, parallelism, verbose)
             end
             if completion_err then
                 completed_index, process =
-                    oldest_pending_process(pending, #prepared)
+                    oldest_pending_process(pending, #entries)
             end
             pending[completed_index] = nil
             pending_count = pending_count - 1
@@ -7062,15 +7081,14 @@ local function run_prepared_compiles(prepared, parallelism, verbose)
     end
     if completion_err then
         for schedule_index = next_schedule, #schedule do
-            local index = schedule[schedule_index].index
-            results[index] = { err = completion_err }
+            jobs.record(schedule[schedule_index], nil, completion_err)
         end
     end
 
     -- Reaping follows actual completion so a free slot is refilled promptly,
-    -- but diagnostics remain deterministic in the original request order.
-    for index = 1, #prepared do
-        local process = processes[index]
+    -- but diagnostics remain deterministic in module/part order.
+    for _, entry in ipairs(entries) do
+        local process = entry.process
         if process then
             local ok, err, code =
                 finish_prepared_compile_without_throw(process)
@@ -7079,11 +7097,13 @@ local function run_prepared_compiles(prepared, parallelism, verbose)
                 err = err and (tostring(err) .. "; " .. completion_err) or
                     completion_err
             end
-            results[index] = { ok = ok, err = err, code = code }
+            jobs.record(entry, ok, err, code)
         end
     end
-    return results
+    return jobs.summarize(results)
 end
+
+end -- native batch helpers
 
 local function validate_compile_requests(requests)
     local module_indices = {}
@@ -7133,10 +7153,11 @@ local function validate_compile_requests(requests)
     end
 end
 
--- With a bound above one, generate module C serially, launch larger units
--- first, and keep at most `parallelism` compiler processes busy by consuming
--- actual completion notifications. The one-job path retains the historical
--- per-module phase order. Only native object compilations ever overlap.
+-- With a bound above one, generate module C serially, then launch the
+-- flattened native jobs of every module larger first, keeping at most
+-- `parallelism` compiler processes busy by consuming actual completion
+-- notifications. The one-job path retains the historical per-module phase
+-- order. Only native object compilations ever overlap.
 function driver.compile_modules(requests, parallelism, verbose)
     assert(type(requests) == "table", "requests must be a table")
     assert(type(parallelism) == "number" and parallelism >= 1 and
@@ -7187,7 +7208,7 @@ function driver.compile_modules(requests, parallelism, verbose)
             if not compilation then
                 results[index] = { err = prepare_err }
             else
-                compilation.request_index = index
+                jobs.set_request_index(compilation, index)
                 prepared[#prepared + 1] = compilation
             end
         end
@@ -7200,11 +7221,11 @@ function driver.compile_modules(requests, parallelism, verbose)
         local request_index = compilation.request_index
         if result.ok then
             local request = requests[request_index]
-            request.mod.compiled = compilation.libname
+            request.mod.compiled = compilation.primary_object
             request.mod.native_references = compilation.native_references or {}
             results[request_index] = {
                 ok = true,
-                libname = compilation.libname,
+                libname = compilation.primary_object,
                 native_references = request.mod.native_references,
             }
         else

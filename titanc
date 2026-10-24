@@ -19,7 +19,7 @@ p:flag('--print-ast', 'Print the AST.')
 p:flag('--pretty-print', 'Format generated C and headers with clang-format.')
 p:flag('-v --verbose', 'Be verbose about compiler invocations.')
 p:option('-j --jobs',
-    'Maximum concurrent generated-C compilations (default: TITAN_JOBS or 1).')
+    'Maximum concurrent generated-C compilations (default: TITAN_JOBS or 4).')
 p:option('--launcher-name', 'Windows standalone/test launcher filename in bin (default: logical module name).')
 p:flag('--static', 'Prefer static Titan archive providers (unsupported on Windows).')
 p:flag('--source-first', 'Prefer available source modules to compiled providers.')
@@ -119,7 +119,7 @@ if args.compile_only then
     end
 end
 
-local jobs_text = args.jobs or platform.getenv("TITAN_JOBS") or "1"
+local jobs_text = args.jobs or platform.getenv("TITAN_JOBS") or "4"
 if type(jobs_text) ~= "string" or
    not jobs_text:match("^[1-9][0-9]*$") then
     exit("--jobs and TITAN_JOBS require a positive integer")
