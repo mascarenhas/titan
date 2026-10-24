@@ -295,8 +295,12 @@ standard POSIX `mkfifo` utility. Inside a GNU Make recipe `titanc` also shares M
 job slots ([Compiler jobs and GNU Make](build-profiles.md#compiler-jobs-and-gnu-make)).
 In a checkout, `make stdlib` and `luarocks make` share one Make job pool of `TITAN_JOBS`
 slots unless you pass `make -jN`. GNU Make before 4.2, including macOS's stock 3.81,
-builds serially unless `TITAN_JOBS` is set; put GNU Make 4.2 or later first on `PATH`,
-or set `TITAN_JOBS=4`, for the four-job pool
+builds serially unless `TITAN_JOBS` is set. On macOS, Homebrew's GNU Make gives the best
+out-of-the-box experience: run `brew install make` and put
+`$(brew --prefix)/opt/make/libexec/gnubin` first on `PATH` (otherwise the formula installs
+it only as `gmake`). With GNU Make 4.4 or later every build gets the four-job pool, and
+each `titanc` shares it, so a module split with `TITAN_C_PARTS` (opt-in on macOS)
+compiles its parts in parallel. With the stock make, set `TITAN_JOBS=4` instead
 ([Build and test parallelism](build-profiles.md#build-and-test-parallelism)).
 
 ### A separate rocks tree
