@@ -27,12 +27,12 @@ typed & elaborated ASTs        (decorated with _type/_decl… and checker-owned
    │                            companions are prepared before any object)
    │  coder.generate           (coder.lua facade + coder/* template slices)
    ▼
-one C translation unit per logical module
+one or more C translation units per logical module (plus `<stem>.priv.h` when split)
    │  clang-format             (opt-in --pretty-print; fixed explicit style)
    │  #line normalization      (ordinary mode; coverage uses final lexical
    │                            marker conversion instead)
-   │  driver.compile           (driver.lua — writes .c at the canonical output
-   │                            path, then invokes cc)
+   │  driver.compile           (driver.lua — writes part .c/.priv.h/.parts files
+   │                            and invokes cc per part)
    ▼
 object files ──► one common-prefix provider.so/provider.a + generated Lua shims
              └─► driver.compile_program → executable (when a main() exists)

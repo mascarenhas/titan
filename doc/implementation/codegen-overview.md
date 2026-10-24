@@ -14,7 +14,16 @@ generation.
 
 ```lua
 coder.generate(modname, ast, static_deps, abi, emit_line_directives, options)
-    --> source, direct_native_modules, foreign_header, native_bindings, encoded_layouts
+    --> {
+          parts = { { index = 0, source = "...", cost_bytes = n }, ... },
+          private_header = "..." | nil,
+          code_bytes = total_bytes,
+          direct_native_modules = { ... },
+          foreign_header = "..." | nil,
+          native_bindings = { ... },
+          encoded_layouts = "...",
+          private_symbols = { { symbol = "...", owner = "..." }, ... },
+        }
 ```
 
 (`titan-compiler/coder/generate.lua` `coder.generate`)
@@ -28,15 +37,26 @@ coder.generate(modname, ast, static_deps, abi, emit_line_directives, options)
   absent.
 - `abi` is the required compiled-module ABI string.
 - `emit_line_directives` defaults to true when omitted.
-- `options` carries the coverage mode (`coverage`, `coverage_backend`) and the
-  imported nominal layout plans (`nominal_layouts`).
+- `options` carries the coverage mode (`coverage`, `coverage_backend`), the
+  imported nominal layout plans (`nominal_layouts`), the maximum part count
+  (`c_parts`, default `4`), and the split threshold (`split_threshold`, default
+  `2 * 1024 * 1024` bytes of generated `code` items).
 
-`source` is the complete text of one C translation unit.
+`parts` is a dense 1-based array of translation-unit descriptors with 0-based
+`index` (`0 .. K - 1`). When `c_parts == 1` or `code_bytes < split_threshold`,
+`#parts == 1`, `private_header == nil`, and `parts[1].source` is identical to the
+single-translation-unit emission. When a module splits (`K > 1`), `private_header`
+contains the shared `<stem>.priv.h` declarations, part `0` (`<stem>.c`) retains
+the module state, metadata sections, and `_init`/`luaopen_*` entrypoints, and
+top-level callable definitions and helper routines are partitioned across parts
+`0 .. K - 1` by longest-processing-time (LPT) byte weight using module-qualified
+hidden `\u2119` (`ℙ`) symbols (`TITAN_MODULE_PRIVATE`).
 `direct_native_modules` is the set of direct dependencies that the generated
-object actually references. `native_bindings` classifies each referenced
+module actually references. `native_bindings` classifies each referenced
 dependency as `direct`, `handle` (an explicit dynamic import), or `global` (a
 transitive owner reached without its own import). `encoded_layouts` is this
-module's physical nominal layout string.
+module's physical nominal layout string, and `private_symbols` lists the
+module-private `ℙ` symbols for link-set collision checking.
 
 For a [folder module](folder-modules.md), `ast` is the same dense root list
 as for a flat module. It is assembled from independently parsed files and

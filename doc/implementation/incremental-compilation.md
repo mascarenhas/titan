@@ -57,10 +57,17 @@ is available. Compile-only mode skips main selection and common provider-name
 derivation, emits the selected source closure's objects/headers, closes the
 resolver, and returns before target/provider validation and final linking.
 Normal incremental linking uses the same publication and target checks as a
-cold build. Reused objects are never rewritten. A fresh object is compiled to a
-sibling temporary and renamed into place only on success
-(`publish_compiled_object`), so a failed compilation never leaves an object a
-later invocation could mistake for a hit.
+cold build. Reused objects are never rewritten. For a module that compiles into
+`K` parts, `publish_compiled_object` renames `<stem>.part1.o` ..
+`<stem>.part(K-1).o` first, writes `<stem>.parts`, and renames the primary
+`<stem>.o` into place last. A failed compilation removes staged and already-renamed
+sibling part objects and `.parts`, leaving no primary `<stem>.o` commit marker.
+During `--incremental` reuse, `load_source_object` reads the `parts` list from
+`<stem>.o`'s `.titan.source` record, cross-checks `<stem>.parts` when present,
+rejects any leftover `.partM.o` hole beyond the recorded count, and verifies
+that every part object exists, is non-empty, has the same target fingerprint,
+and is no older than every source constituent; otherwise the entire module is
+recompiled from source.
 
 ## Trusted source record
 

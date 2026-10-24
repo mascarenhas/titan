@@ -45,12 +45,16 @@ cannot be combined with `--print-ast`, which requires freshly checked ASTs.
 
 ## What object reuse promises
 
-After normal source resolution, `--incremental` looks for the companion object
-and requires it to be no older than every currently discovered source
-constituent. Equal timestamps count as current. The object supplies the
-module's declarations, source-private view, import and native-link facts, and
-generated header information. Reusing it skips parsing, checking, C generation,
-and C compilation for that module. `-v` reports reuse and fallback reasons.
+After normal source resolution, `--incremental` looks for the primary companion
+object (`<stem>.o`) and any split part objects (`<stem>.part1.o` ..
+`<stem>.part(K-1).o` recorded in `<stem>.o`'s `.titan.source` metadata and
+`<stem>.parts`), requiring every part object to exist and be no older than every
+currently discovered source constituent. Equal timestamps count as current. The
+primary object supplies the module's declarations, source-private view, import
+and native-link facts, generated header information, and part inventory. Reusing
+the complete part set skips parsing, checking, C generation, and C compilation
+for that module; if any part is missing or stale, the whole module is rebuilt
+from source. `-v` reports reuse and fallback reasons.
 
 Missing or older objects, absent source metadata, failed metadata loading or
 execution, and incompatible Titan ABI metadata fall back to source compilation.

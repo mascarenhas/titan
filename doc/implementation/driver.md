@@ -1077,32 +1077,34 @@ list; there is still one call. `options` carries `nominal_layouts`,
    live beside the canonical main, with no contributor-specific outputs. See
    [Foreign-function implementation](foreign-functions.md#generated-titanh-planning).
 3. `coder.generate(modname, ast, static_deps, abi, emit_line_directives,
-   options)` produces one raw C translation unit as a string plus its
-   direct-native-reference set, native bindings, and encoded nominal layouts.
-   The qualified `modname` controls the native prefix, registry identity,
-   `_init`, `_abi`, `_types`, and `luaopen_*` symbols consistently.
-4. The raw translation unit is written **next to the flat source or folder
-   main** as `sourcef:gsub("[.]titan$", "") .. ".c"` (if `sourcef` is not
-   given it defaults to the dots-to-slashes path), or, with `titanc --output`,
-   at the matching path below the output root (`driver.relocate_source_output`;
-   see [Output directory](output-directory.md)). It is then normalized in
-   place. `--pretty-print` additionally formats it before compilation.
-   Formatting failure aborts before its object is compiled but retains the raw
-   or partially formatted `.c` as a diagnostic artifact. Contributors never
-   receive generated C or object files.
-5. The object is compiled with the parsed `driver.CC`, then
+   options)` returns the generated-module table: `parts` (`1..K`), optional
+   `private_header`, `code_bytes`, `direct_native_modules`, `native_bindings`,
+   `encoded_layouts`, and `private_symbols`. The qualified `modname` controls
+   the native prefix, registry identity, `_init`, `_abi`, `_types`, `luaopen_*`,
+   and module-private `ℙ` symbols consistently.
+4. The primary translation unit (part `0`, including `.titan.meta` and
+   `.titan.source`) is written **next to the flat source or folder main** as
+   `sourcef:gsub("[.]titan$", "") .. ".c"` (or under `--output`; see
+   [Output directory](output-directory.md)). When `#parts > 1`, `<stem>.priv.h`
+   and `<stem>.part1.c` .. `<stem>.part(K-1).c` are written beside `<stem>.c`.
+   Each generated file is normalized in place and optionally formatted with
+   `--pretty-print` before compilation. Prior stale `.partN.c`, `.partN.o`, and
+   `.priv.h` artifacts from an earlier split of the same stem are removed before
+   emitting the new part set. Contributors never receive generated C or object
+   files.
+5. Each part `.c` is compiled with the parsed `driver.CC`, then
    `TITAN_EXTRA_CPPFLAGS`, Titan's fixed `driver.CFLAGS`,
    `TITAN_EXTRA_CFLAGS`, the `-I` include roots, and per-request extra flags,
    in that order (`driver.generated_compile_prefix`). When the resulting
    command enables LTO and names no seed, the driver appends
-   `-frandom-seed=<modname>` so archive bytes stay reproducible. The output
-   goes to a sibling temporary that is renamed into place only after success.
-   A direct `driver.compile` call runs this command immediately. The CLI's
-   default one-job path preserves that same generate/format/compile sequence
-   for each logical module. With a larger bound, it prepares every source
-   module through step 4 in logical-name order, then `driver.compile_modules`
-   runs only these independent object commands concurrently, bounded by
-   `--jobs`/`TITAN_JOBS`:
+   `-frandom-seed=<modname>` for part `0` and `-frandom-seed=<modname>#part<i>`
+   for nonzero parts so archive bytes stay reproducible. Each part output goes
+   to a sibling temporary; `publish_compiled_object` renames nonzero parts into
+   place first, writes the `<stem>.parts` companion (`version=1`, `count=K`, and
+   relative basenames), and renames the primary `<stem>.o` into place last so
+   `<stem>.o` is the atomic group-commit marker. With `--jobs`/`TITAN_JOBS`,
+   `driver.compile_modules` flattens all prepared part jobs across all prepared
+   modules into one cost-sorted worklist:
 
    ```sh
    cc --std=c99 -O3 -Wall -Wno-unused-but-set-variable -Wno-unused-function \
@@ -1963,7 +1965,8 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `--print-ast` | Print each module's AST after checking. | Not with `--incremental`. |
 | `--pretty-print` | Format generated C and headers with `CLANG_FORMAT`. | |
 | `-v`, `--verbose` | Print native-tool and formatter commands. | |
-| `-j`, `--jobs <n>` | Bound concurrent generated-C object compilations; overrides `TITAN_JOBS`, default 1. | Positive integer. |
+| `-j`, `--jobs <n>` | Bound concurrent generated-C object compilations; overrides `TITAN_JOBS` (default 4). | Positive integer. |
+| `--c-parts <n>` | Maximum generated C translation units per module above the 2 MiB threshold (`1` disables splitting); overrides `TITAN_C_PARTS`. | Positive integer. |
 | `--launcher-name <name>` | Windows standalone/test launcher filename in `bin` (default: logical module name). | Windows only; requires a standalone or test main; not with `-c`. |
 | `--static` | Run the archive pass before the DSO pass. | Not on Windows. |
 | `--source-first` | Prefer source to compiled providers for every dependency. | |
@@ -2000,7 +2003,8 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `TITAN_EXTRA_LDFLAGS` | `driver.lua` | empty | Ordered linker inputs appended to final provider and program links. |
 | `TITAN_BUILD_PROFILE` | `driver.lua` | `production` | `validation` selects `-O0 -fno-lto -g`; any other value is a toolchain error. |
 | `TITAN_NO_LINE_DIRECTIVES` | `driver.lua` | unset | Exact value `1` disables generated `#line` directives, like `--no-line-directives`. |
-| `TITAN_JOBS` | `titanc` | `1` | Generated-C compilation bound when `--jobs` is absent. |
+| `TITAN_JOBS` | `titanc` | `4` | Generated-C compilation bound when `--jobs` is absent. |
+| `TITAN_C_PARTS` | `titanc`, `driver.lua` | `4` | Maximum generated C translation units per module above the 2 MiB threshold when `--c-parts` is absent (`1` disables splitting). |
 | `TITAN_PATH_0_6`, `TITAN_PATH` | `driver.lua`, `titan.c` `pushpath`, `standalone_paths.lua` | unset | Compiled-module search path; the versioned name wins, and `;;` expands to the default. |
 | `TITAN_ROCKS_ROOT` | `driver.lua`, `titanc --print-root`, installed-compiler Make invocations | unset (empty means unset) | Internal `ROCKS_TREE` override for installation-root discovery; not a public deployment setting. |
 | `TITAN_PREFIX` | `driver.lua` | installation root | Root of the persistent C-probe cache `var/cache/titan-probes/2`. |

@@ -98,6 +98,8 @@ optimization and cross-module LTO while ordinary validation fixtures stay at
 
 Generated-C compilation concurrency is controlled by `titanc --jobs N` or
 `TITAN_JOBS=N` on Linux, macOS and Windows. The command-line option wins; the
-default is one. This bound covers independent C object compilations, while
-checking, C generation and final linking retain their normal order. Windows
-stdlib builds also honor `TITAN_JOBS`.
+default is four. Large modules (at least 2 MiB of generated C bodies) are split
+into up to `--c-parts N` or `TITAN_C_PARTS=N` translation units (default 4 on
+Linux, macOS, and Windows; `1` disables splitting) so their parts compile in
+parallel within the same job bound, while checking, C generation, and final
+linking retain their normal deterministic order.
