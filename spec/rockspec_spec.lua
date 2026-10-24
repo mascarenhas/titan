@@ -571,8 +571,10 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
         make_directory(source_repository)
         make_directory(unpack_root)
 
+        local git_root = (not lfs.symlinkattributes(".git", "mode") and
+            os.getenv("TITAN_SOURCE_GIT_ROOT")) or "."
         local ok, output, why, code = run({
-            "git", "ls-files", "--cached", "--others",
+            "git", "-C", git_root, "ls-files", "--cached", "--others",
             "--exclude-standard", "-z",
         })
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
@@ -584,8 +586,8 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             -- being packed and have no pathname to copy.
             if (path == "lua-5.5.1" or path == ".agents/skills") and
                     lfs.symlinkattributes(path, "mode") == "directory" then
-                local listed, files = run({ "git", "-C", path,
-                    "ls-files", "-z" })
+                local listed, files = run({ "git", "-C",
+                    git_root .. "/" .. path, "ls-files", "-z" })
                 assert.truthy(listed, files)
                 for source in (files .. "\0"):gmatch("(.-)%z") do
                     if source ~= "" then
