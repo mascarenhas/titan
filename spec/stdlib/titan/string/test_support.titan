@@ -74,7 +74,8 @@ local function render_error(failure: value): string
   do
     local top = ffi.lua_gettop(L)
     defer ffi.lua_settop(L, top)
-    if ffi.lua_checkstack(L, 2) ~= 0 then
+    -- Candidate plus the two temporary slots used by luaL_getmetafield/callmeta.
+    if ffi.lua_checkstack(L, 3) ~= 0 then
       ffi.lua_pushtvalue(L, failure)
       ffi.luaL_tolstring(L, -1, nil)
       local rendered: value = ffi.lua_totvalue(L, -1)

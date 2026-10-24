@@ -709,14 +709,8 @@ nm: no symbols
         end
     end)
 
-    it("links source-split programs and extracts split archive members with --static", function()
-        if platform.windows then
-            pending("Windows supports DLL providers, not --static archive extraction")
-            return
-        end
+    local function prepare_split_program()
         local src = workspace .. "/program-src"
-        local source_out, provider_out = workspace .. "/source-out", workspace .. "/provider-out"
-        local static_out = workspace .. "/static-out"
         local frontend = cli_frontend(workspace .. "/frontend.lua")
         write_file(src .. "/pkg/library.titan", MULTI_CONSTRUCT_SOURCE)
         write_file(src .. "/app.titan", [[
@@ -735,11 +729,26 @@ end
             local ok, output = run_cmd(argv)
             assert.truthy(ok, output)
         end
+        return src, cli
+    end
+
+    it("links and runs source-split programs", function()
+        local _, cli = prepare_split_program()
+        local source_out = workspace .. "/source-out"
         cli(source_out, nil, "app")
         assert.equal(4, driver.parse_parts_companion(
             read_file(source_out .. "/pkg/library.parts"), source_out .. "/pkg/library"))
         local ok, output = run_cmd({ source_out .. (platform.windows and "/bin/app.exe" or "/app") })
         assert.truthy(ok, output)
+    end)
+
+    it("extracts split archive members with --static", function()
+        if platform.windows then
+            pending("Windows supports DLL providers, not --static archive extraction")
+            return
+        end
+        local src, cli = prepare_split_program()
+        local provider_out, static_out = workspace .. "/provider-out", workspace .. "/static-out"
         cli(provider_out, nil, "pkg.library")
         local archive = provider_out .. "/pkg/library.a"
         local listed, members = run_cmd({ "ar", "t", archive })
@@ -748,7 +757,7 @@ end
         assert(os.rename(src .. "/pkg/library.titan", src .. "/pkg/library.saved"))
         cli(static_out, "--static", "app", provider_out)
         assert(os.rename(provider_out .. "/pkg/library.so", provider_out .. "/pkg/library.hidden"))
-        ok, output = run_cmd({ static_out .. "/app" })
+        local ok, output = run_cmd({ static_out .. "/app" })
         assert.truthy(ok, output)
     end)
 

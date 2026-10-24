@@ -482,7 +482,7 @@ describe("trusted object source metadata", function()
             end
             local compiled = strategy:run(argv)
             assert.is_true(compiled.ok, compiled.output or compiled.diagnostic)
-            local bytes = assert(util.get_file_contents(output))
+            local bytes = assert(util.get_file_contents(output, "rb"))
             local object = assert(staticmetadata.classify_object(bytes, output))
             assert.equal(public, object.metadata.payload)
             local restored = assert(objectmetadata.read(bytes, output))
@@ -536,7 +536,7 @@ static const unsigned char result[] = {84,73,84,69,78,85,77,0,1,12,
             local compiled = strategy:run({ "clang", "--target=x86_64-w64-windows-gnu",
                 "-std=c99", "-O0", "-fno-lto", "-Wall", "-Werror", "-c", source, "-o", output })
             assert.is_true(compiled.ok, compiled.output or compiled.diagnostic)
-            local bytes = assert(util.get_file_contents(output))
+            local bytes = assert(util.get_file_contents(output, "rb"))
             local object = assert(staticmetadata.classify_object(bytes, output))
             assert.same({ format = "coff", machine = 0x8664, word_size = 64,
                 endian = "little" }, object.fingerprint)
