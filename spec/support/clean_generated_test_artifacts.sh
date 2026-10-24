@@ -18,14 +18,49 @@ if [[ $# -ne 0 ]]; then
     exit 2
 fi
 
+# In-memory coder fixtures have no same-stem .titan source. A complete,
+# compiler-derived companion identifies their outputs without a per-test list.
+# Validate the entire inventory before deleting anything; never follow paths
+# supplied by a malformed or authored companion.
+clean_module_parts() {
+    local companion=$1 stem=${1%.parts} leaf=${1##*/}
+    leaf=${leaf%.parts}
+    local lines=() line='' count offset length index part suffix
+    local outputs=("$companion")
+    while IFS= read -r line; do
+        lines+=("$line")
+    done < "$companion"
+    [[ -z $line ]] || return 0
+    [[ -n ${lines[0]-} ]] || return 0
+    length=${#lines[@]}
+    if [[ ${lines[0]} == 'titan-parts-v1 1' ]]; then
+        [[ $length == 3 ]] || return 0
+        count=1
+        offset=1
+    else
+        (( length >= 6 )) || return 0
+        count=$(( (length - 2) / 2 ))
+        (( length == 2 + 2 * count )) || return 0
+        [[ ${lines[0]} == "titan-parts-v1 $count" &&
+           ${lines[1]} == "$leaf.priv.h" ]] || return 0
+        outputs+=("$stem.priv.h")
+        offset=2
+    fi
+    for ((part=0; part<count; part++)); do
+        suffix=''
+        if (( part > 0 )); then suffix=.part$part; fi
+        index=$((offset + 2 * part))
+        [[ ${lines[index]} == "$leaf$suffix.c" &&
+           ${lines[index+1]} == "$leaf$suffix.o" ]] || return 0
+        outputs+=("$stem$suffix.c" "$stem$suffix.o")
+    done
+    rm -f -- "${outputs[@]}"
+}
+
 while IFS= read -r -d '' source; do
     if [[ -f ${source%.c}.titan ]]; then rm -f -- "$source"; fi
 done < <(find spec -type f -name '*.c' -print0)
 
-while IFS= read -r -d '' titan_source; do
-    stem=${titan_source%.titan}
-    rm -f -- "$stem.parts" "$stem.priv.h" "$stem".part*.c "$stem".part*.o
-done < <(find spec -type f -name '*.titan' -print0)
 
 find spec -type f -name '*.o' -delete
 
@@ -107,5 +142,14 @@ done
 for fixture in ./test_runner_*; do
     if [[ -e $fixture || -L $fixture ]]; then rm -rf -- "$fixture"; fi
 done
+
+while IFS= read -r -d '' companion; do
+    clean_module_parts "$companion"
+done < <(
+    find spec -type f -name '*.parts' -print0
+    for companion in ./*.parts; do
+        if [[ -f $companion ]]; then printf '%s\0' "$companion"; fi
+    done
+)
 
 if ! $keep_output; then rm -rf -- .titan-tests out/tests; fi

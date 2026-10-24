@@ -6442,6 +6442,7 @@ printf '%s\n' "${schedule[@]}"
 
     it("cleans arbitrary test outputs without Git or per-test names",
         function()
+            local driver = require "titan-compiler.driver"
             local root = make_temp_dir()
             local success, failure = xpcall(function()
                 for _, directory in ipairs({
@@ -6459,6 +6460,30 @@ printf '%s\n' "${schedule[@]}"
                     "module generated_fixture\n",
                     ["spec/generated_fixture.c"] = "generated C\n",
                     ["spec/generated_fixture.o"] = "generated object\n",
+                    ["in_memory_fixture.parts"] =
+                    driver.render_parts_companion("in_memory_fixture", 3),
+                    ["in_memory_fixture.c"] = "generated C\n",
+                    ["in_memory_fixture.o"] = "generated object\n",
+                    ["in_memory_fixture.priv.h"] = "generated private header\n",
+                    ["in_memory_fixture.part1.c"] = "generated C\n",
+                    ["in_memory_fixture.part1.o"] = "generated object\n",
+                    ["in_memory_fixture.part2.c"] = "generated C\n",
+                    ["in_memory_fixture.part2.o"] = "generated object\n",
+                    ["in_memory_unsplit.parts"] =
+                    driver.render_parts_companion("in_memory_unsplit", 1),
+                    ["in_memory_unsplit.c"] = "generated C\n",
+                    ["in_memory_unsplit.o"] = "generated object\n",
+                    ["spec/nested with spaces/generated.parts"] =
+                    driver.render_parts_companion("generated", 2),
+                    ["spec/nested with spaces/generated.c"] = "generated C\n",
+                    ["spec/nested with spaces/generated.o"] = "generated object\n",
+                    ["spec/nested with spaces/generated.priv.h"] = "generated header\n",
+                    ["spec/nested with spaces/generated.part1.c"] = "generated C\n",
+                    ["spec/nested with spaces/generated.part1.o"] = "generated object\n",
+                    ["authored.parts"] =
+                    "titan-parts-v1 1\n../outside.c\nauthored.o\n",
+                    ["authored.c"] = "author written C\n",
+                    ["outside.c"] = "unrelated C\n",
                     ["future/deep/suite"] = "executable\n",
                     ["future/deep/suite__test_support.c"] = "generated C\n",
                     ["future/deep/suite__test_runner.o"] =
@@ -6512,6 +6537,19 @@ printf '%s\n' "${schedule[@]}"
                 for _, removed in ipairs({
                     "spec/generated_fixture.c",
                     "spec/generated_fixture.o",
+                    "in_memory_fixture.parts",
+                    "in_memory_fixture.c", "in_memory_fixture.o",
+                    "in_memory_fixture.priv.h",
+                    "in_memory_fixture.part1.c", "in_memory_fixture.part1.o",
+                    "in_memory_fixture.part2.c", "in_memory_fixture.part2.o",
+                    "in_memory_unsplit.parts", "in_memory_unsplit.c",
+                    "in_memory_unsplit.o",
+                    "spec/nested with spaces/generated.parts",
+                    "spec/nested with spaces/generated.c",
+                    "spec/nested with spaces/generated.o",
+                    "spec/nested with spaces/generated.priv.h",
+                    "spec/nested with spaces/generated.part1.c",
+                    "spec/nested with spaces/generated.part1.o",
                     "future/deep/suite",
                     "future/deep/suite__test_support.c",
                     "future/deep/suite__test_runner.o",
@@ -6529,6 +6567,7 @@ printf '%s\n' "${schedule[@]}"
                     "spec/nested/authored.titan.h",
                     "spec/nested with spaces/authored.ffi.h",
                     "authored/keep__test_support.ffi.h", "other.ffi.h",
+                    "authored.parts", "authored.c", "outside.c",
                 }) do
                     assert.equal(files[path], read_file(root .. "/" .. path),
                         path)
