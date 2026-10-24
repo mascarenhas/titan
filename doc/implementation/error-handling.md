@@ -384,10 +384,11 @@ the walker can jump to the re-armed boundary. That happens when the coroutine
 is abandoned while suspended in the close. The jump arrives with
 `TITAN_STATUS_UNWIND` and takes the landing above: the caught error is dropped,
 the rest of the close method and the catch never run, and the pending finally
-runs exactly once. Only on that jump, the re-arm's `TITAN_SETJMP` arm stores nil
-into the registry trace and pin (`TITAN_BACKTRACE_KEY`, `TITAN_TRACE_PINNED`),
-as a catch recovery does, so `titan.backtrace()` does not keep the dropped
-error's trace; the module-rooted keys make the stores allocation-free. If the coroutine is resumed instead, the close finishes and
+runs exactly once. Only on that jump, the re-arm's `TITAN_SETJMP` arm calls the
+cold `titan_unwind_clear_trace`, which clears the registry trace and pin
+(`TITAN_BACKTRACE_KEY`, `TITAN_TRACE_PINNED`) as a catch recovery does, so
+`titan.backtrace()` does not keep the dropped error's trace. The arm is that one
+call, so it adds almost no code to the function. If the coroutine is resumed instead, the close finishes and
 the ordinary recovery continues. The coroutine floor re-arms itself the same way
 around the close of an error that escaped the entry
 ([Coroutines](coroutines.md#unwinding-an-abandoned-coroutine)).

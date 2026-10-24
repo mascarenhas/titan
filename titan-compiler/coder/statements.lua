@@ -2237,13 +2237,8 @@ function boundary_recover_open(ctx, tag, d_err, d_tb, unwind)
                 if (TITAN_SETJMP(_lj_$T.b) == 0) {
                     _lj_$T.status = luaD_closeprotected(L, _oldtop_$T, _errst_$T);
                 } else {
-                    /* The unwind drops the caught error: clear its trace and
-                     * pin as the catch recovery below would (module-rooted
-                     * keys, so this cannot allocate). */
-                    TValue _dropped_trace_$T = {0};
-                    setnilvalue(&_dropped_trace_$T);
-                    titan_registry_set_string(L, $TRACEKEY, &_dropped_trace_$T);
-                    titan_registry_set_string(L, $PINKEY, &_dropped_trace_$T);
+                    /* the unwind drops the caught error: clear its trace */
+                    titan_unwind_clear_trace(L);
                 }
                 L->errorJmp = _lj_$T.previous;
                 L->nCcalls = _oldnC_$T;
@@ -2275,8 +2270,6 @@ function boundary_recover_open(ctx, tag, d_err, d_tb, unwind)
             PA = unwind.pa,
             PAUNWIND = PA_UNWIND,
             SPILLRELOAD = spill_reload(ctx),
-            TRACEKEY = recovery_string(ctx, "TITAN_BACKTRACE_KEY"),
-            PINKEY = recovery_string(ctx, "TITAN_TRACE_PINNED"),
         })
         close_frames = "/* the Lua frames above were closed under the re-armed boundary */"
     end
