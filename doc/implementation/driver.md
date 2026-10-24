@@ -1717,8 +1717,8 @@ policy.
 
 ```sh
 ./titanc [--print-root] [--print-ast] [--pretty-print] [-v|--verbose] \
-  [-j|--jobs <jobs>] [--launcher-name <name>] [--static] [--source-first] \
-  [--incremental] [-c|--compile-only] [--test] \
+  [-j|--jobs <jobs>] [--c-parts <n>] [--launcher-name <name>] [--static] \
+  [--source-first] [--incremental] [-c|--compile-only] [--test] \
   [--coverage [--coverage-backend <backend>] [--coverage-module <glob>]... \
     [--coverage-root <dir>] [--coverage-gcov <cmd>] \
     [--coverage-format <format>]... [--coverage-output <dir>] \
