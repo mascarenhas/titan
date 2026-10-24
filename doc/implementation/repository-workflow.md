@@ -101,9 +101,9 @@ runtime code that writes the stack through Lua internals is not checked.
 | Command, from the repository root | Purpose |
 | --- | --- |
 | `make test` | Prepare the selected SDK, reinstall the current compiler/provider with `luarocks make --force`, and run the complete mixed suite through `luarocks test`. |
-| `TITAN_JOBS=8 TITAN_ROCK_TEST_JOBS=8 make -j8 test` | Wider variant: one eight-slot Make pool for preparation and both test domains, each `titanc` capped at eight, with eight Busted workers. Without these settings every phase uses one four-slot pool. |
+| `TITAN_JOBS=8 TITAN_ROCK_TEST_JOBS=7 make -j8 test` | Wider variant: one eight-slot Make pool for preparation and both test domains, each `titanc` capped at eight, with seven Busted workers beside the overlapped native build. Without these settings every phase uses one four-slot pool. |
 | `luarocks test` | Run against an already current install; its active `bin` on `PATH` is sufficient. It does not build the rock. |
-| `make rock-test` | Both test domains: per-file Busted workers with the native aggregate build in their pool, then the parallel native run. A failure in one domain does not skip the other. In validation with no `PREFIX/bin/titanc`, it runs `make test` instead. |
+| `make rock-test` | Both test domains: per-file Busted workers (default three) with the native aggregate build in their pool, then the parallel native run. A failure in one domain does not skip the other. In validation with no `PREFIX/bin/titanc`, it runs `make test` instead. |
 | `make busted-test` | Busted only: every classified spec file once, across `TITAN_ROCK_TEST_JOBS` (default four) isolated workers in a `TITAN_JOBS` pool. |
 | `make busted-test BUSTED_FILTER='for loop'` | Busted only, as one focused process. |
 | `make stdlib-test` | Retained runtime/packaging Busted specs, then the native aggregate; no compiler specs and no coverage. |

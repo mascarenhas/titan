@@ -16,16 +16,6 @@
 
 set -u
 
-jobs=${TITAN_ROCK_TEST_JOBS:-4}
-if [[ ! $jobs =~ ^[1-9][0-9]*$ || ${#jobs} -gt 9 ]]; then
-    echo "TITAN_ROCK_TEST_JOBS must be a positive integer" >&2
-    exit 2
-fi
-pool_jobs=${TITAN_JOBS:-4}
-if [[ ! $pool_jobs =~ ^[1-9][0-9]*$ || ${#pool_jobs} -gt 9 ]]; then
-    echo "TITAN_JOBS must be a positive integer" >&2
-    exit 2
-fi
 windows=0
 if [[ ${MSYSTEM:-} == CLANG64 ]]; then
     windows=1
@@ -36,6 +26,23 @@ if (( windows != 0 )); then
     build_native=0
 fi
 native_status_file=${TITAN_ROCK_TEST_NATIVE_STATUS:-}
+# Four workers fill the default four-slot pool. When the native build
+# shares that pool, a fourth worker would wait for a slot while the build
+# holds one; three workers finished that phase sooner in measurement.
+default_jobs=4
+if (( build_native != 0 )); then
+    default_jobs=3
+fi
+jobs=${TITAN_ROCK_TEST_JOBS:-$default_jobs}
+if [[ ! $jobs =~ ^[1-9][0-9]*$ || ${#jobs} -gt 9 ]]; then
+    echo "TITAN_ROCK_TEST_JOBS must be a positive integer" >&2
+    exit 2
+fi
+pool_jobs=${TITAN_JOBS:-4}
+if [[ ! $pool_jobs =~ ^[1-9][0-9]*$ || ${#pool_jobs} -gt 9 ]]; then
+    echo "TITAN_JOBS must be a positive integer" >&2
+    exit 2
+fi
 
 workspace=$(pwd -P) || exit 1
 if [[ ! -f $workspace/Makefile ||

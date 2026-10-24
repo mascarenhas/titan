@@ -4697,7 +4697,8 @@ if [[ ${TITAN_FIXTURE_FAIL_FILE:-} == "$test_file" ]]; then exit 23; fi
             assert_complete_run(2, 2, output)
 
             -- The native build joins the same pool instead of adding units,
-            -- and the caller receives its status.
+            -- and the caller receives its status. Three workers are the
+            -- default when the build shares the pool.
             local native_status = root .. "/native.status"
             os.remove(native_status)
             ok, output = run_case(3, {
@@ -4705,7 +4706,7 @@ if [[ ${TITAN_FIXTURE_FAIL_FILE:-} == "$test_file" ]]; then exit 23; fi
                 "TITAN_ROCK_TEST_NATIVE_STATUS=" .. native_status,
             })
             assert.truthy(ok, output)
-            assert_complete_run(3, 4, output)
+            assert_complete_run(3, 3, output)
             assert.equal("native-built\n", read_file(state .. "/native-built"))
             assert.equal("0\n", read_file(native_status))
             assert.truthy(output:find("[native build] ", 1, true), output)
@@ -4719,13 +4720,13 @@ if [[ ${TITAN_FIXTURE_FAIL_FILE:-} == "$test_file" ]]; then exit 23; fi
             })
             assert.truthy(ok, output)
             assert.matches("^[1-9][0-9]*\n$", read_file(native_status))
-            assert_complete_run(3, 4, output)
+            assert_complete_run(3, 3, output)
 
             -- An explicit serial Make policy stays serial.
             ok, output = run_case(1, { "MAKEFLAGS=-j1", "TITAN_JOBS=4",
                 "TITAN_ROCK_TEST_BUILD_NATIVE=1" })
             assert.truthy(ok, output)
-            assert_complete_run(1, 4, output)
+            assert_complete_run(1, 3, output)
 
             -- A parent Make pool is joined, never multiplied: TITAN_JOBS=8
             -- alone does not override the inherited three-slot server.
@@ -4758,7 +4759,7 @@ if [[ ${TITAN_FIXTURE_FAIL_FILE:-} == "$test_file" ]]; then exit 23; fi
                 argv[#argv + 1] = root .. "/parent.mk"
                 ok, output = run_argv(argv)
                 assert.truthy(ok, output)
-                assert_complete_run(3, 4, output)
+                assert_complete_run(3, 3, output)
                 assert.equal("native-built\n", read_file(state .. "/native-built"))
             end
 
@@ -5860,7 +5861,9 @@ printf '%s\n' "${schedule[@]}"
             local local_parallel_compiler = read_file(
                 "spec/support/run_parallel_compiler_tests.sh")
             for _, required in ipairs({
-                "jobs=${TITAN_ROCK_TEST_JOBS:-4}",
+                "default_jobs=4",
+                "default_jobs=3",
+                "jobs=${TITAN_ROCK_TEST_JOBS:-$default_jobs}",
                 "[[ ! $jobs =~ ^[1-9][0-9]*$ || ${#jobs} -gt 9 ]]",
                 "tar --exclude='./.git'",
                 "--exclude='./.lua'",

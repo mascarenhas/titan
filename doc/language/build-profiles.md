@@ -123,13 +123,14 @@ build with that Make. Its pool still runs several modules at once, but each
 The repository's test commands use the same budget:
 
 * `make busted-test`, `make rock-test`, `make test`, and `luarocks test` run
-  each Busted spec file once across `TITAN_ROCK_TEST_JOBS` workers (default
-  four), each in a private copy of the checkout. Every worker holds one slot
-  of the shared pool, and `make rock-test` also builds the native test
-  executable inside that pool, so a four-slot budget runs four jobs in total.
+  each Busted spec file once across `TITAN_ROCK_TEST_JOBS` workers, each in a
+  private copy of the checkout. Every worker holds one slot of the shared
+  pool. `make rock-test` also builds the native test executable inside that
+  pool, so it defaults to three workers beside the build; `make busted-test`
+  defaults to four. A four-slot budget therefore runs four jobs in total.
   Workers beyond the pool's slots wait for a free one, so raise both settings
   together on a larger machine, for example
-  `TITAN_JOBS=8 TITAN_ROCK_TEST_JOBS=8 make rock-test`.
+  `TITAN_JOBS=8 TITAN_ROCK_TEST_JOBS=7 make rock-test`.
 * `make titan-stdlib-test` and the native phase of `make rock-test` run the
   built native test executable as `TITAN_TEST_JOBS` groups of test owners at
   once (default four; `1` runs them one group at a time), then run the

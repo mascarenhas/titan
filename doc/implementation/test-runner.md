@@ -426,10 +426,15 @@ is no serial prefix. Those files write only their own checkout (for example
 `libuv-build/` or checkout-root fixtures) or private temporary SDK and staging
 trees, so all workers share the installed SDK read-only.
 
-`TITAN_ROCK_TEST_JOBS` (default four, any positive integer) sets the number of
-ordinary workers, capped at the number of ordinary files. Each worker owns a
-private copy of the prepared checkout, `TMPDIR`, ccache scratch, and tagged
-log. It runs one Busted process per file with `MAKEFLAGS=-j1` and
+`TITAN_ROCK_TEST_JOBS` (any positive integer) sets the number of ordinary
+workers, capped at the number of ordinary files. It defaults to four, or to
+three when the native build shares the pool (Unix `rock-test`): a fourth
+worker would wait for a slot while the build holds one. Measured on a 24-thread
+Linux host with a cold native build, `rock-test` took 492 s with three workers
+and 560 s with four, while `busted-test` alone took 300 s with four and 324 s
+with three. Each worker owns a private copy of the prepared checkout,
+`TMPDIR`, ccache scratch, and tagged log. It runs one Busted process per file
+with `MAKEFLAGS=-j1` and
 `TITAN_JOBS=1`, removes checkout-root generated artifacts between files,
 records one PASS or FAIL row per file, and continues after a failed file.
 `TITAN_SOURCE_GIT_ROOT` lets `rockspec_spec.lua` read the real checkout's Git
