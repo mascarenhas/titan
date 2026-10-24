@@ -1230,9 +1230,9 @@ before the first read, because it
 polls the descriptor and stdio read-ahead could otherwise hold a completion
 line that the kernel no longer reports. The parent then reaps exactly the child
 that completed and frees its slot. A completion-channel failure stops new
-launches, reaps every active wrapper directly in launch order without waiting
-for further messages, and fails the unlaunched jobs rather than risking a
-deadlock. Preparation failures do not launch a process.
+launches, reaps every active wrapper directly in module/part order without
+waiting for further messages, and fails the unlaunched jobs rather than
+risking a deadlock. Preparation failures do not launch a process.
 
 ### GNU Make jobserver participation
 
