@@ -100,7 +100,12 @@ local function run_cmd(argv, cwd)
     local previous = cwd and assert(lfs.currentdir()) or nil
     if cwd then assert(lfs.chdir(cwd)) end
     local ok, result = pcall(function()
-        return io_strategy:run(argv, { stderr_to_stdout = true })
+        return io_strategy:run(argv, {
+            stderr_to_stdout = true,
+            -- Windows runtime outputs belong to its installed private SDK,
+            -- not the checkout's Unix Makefile/runtime archive.
+            env = platform.windows and { TITAN_ROCKS_ROOT = PREFIX } or nil,
+        })
     end)
     if previous then assert(lfs.chdir(previous)) end
     assert.is_true(ok, tostring(result))
@@ -190,6 +195,7 @@ describe("split generated C translation units (S1)", function()
         os.remove(workspace)
         assert(lfs.mkdir(workspace))
         workspace = assert(io_strategy:realpath(workspace))
+        if platform.windows then workspace = workspace:gsub("\\", "/") end
     end)
 
     after_each(function()
@@ -546,11 +552,11 @@ driver.compile_modules = function() error("generated compilation must not start"
 
     it("renders, writes and formats each CLI header once and releases materialized C", function()
         local log_path, format_log = workspace .. "/header_calls", workspace .. "/header_formats"
-        local formatter = workspace .. "/header_formatter.sh"
+        local formatter = workspace .. "/header_formatter.lua"
         write_file(formatter, string.format([[
-#!/bin/sh
-for file do :; done
-printf '%%s\n' "$file" >> %q
+local file = assert(io.open(%q, "ab"))
+assert(file:write(arg[#arg], "\n"))
+assert(file:close())
 ]], format_log))
         local frontend = cli_frontend(workspace .. "/header_frontend.lua", string.format([[
 local driver = require("titan-compiler.driver")
@@ -591,7 +597,7 @@ driver.compile_modules = function(...)
     return results
 end
 driver.CLANG_FORMAT = %q
-]], log_path, "bash " .. assert(cdriver.shell_quote(formatter))))
+]], log_path, assert(cdriver.shell_quote(LUA)) .. " " .. assert(cdriver.shell_quote(formatter))))
         local src, out = workspace .. "/once-src", workspace .. "/once-out"
         write_file(src .. "/once.titan", [[
 foreign function plus_one(input: int): int return input + 1 end
@@ -703,6 +709,10 @@ nm: no symbols
     end)
 
     it("links source-split programs and extracts split archive members with --static", function()
+        if platform.windows then
+            pending("Windows supports DLL providers, not --static archive extraction")
+            return
+        end
         local src = workspace .. "/program-src"
         local source_out, provider_out = workspace .. "/source-out", workspace .. "/provider-out"
         local static_out = workspace .. "/static-out"
@@ -729,7 +739,6 @@ end
             read_file(source_out .. "/pkg/library.parts"), source_out .. "/pkg/library"))
         local ok, output = run_cmd({ source_out .. (platform.windows and "/bin/app.exe" or "/app") })
         assert.truthy(ok, output)
-        if platform.windows then return end
         cli(provider_out, nil, "pkg.library")
         local archive = provider_out .. "/pkg/library.a"
         local listed, members = run_cmd({ "ar", "t", archive })
@@ -1226,25 +1235,34 @@ assert(results[1].ok == nil, "injected C compilation unexpectedly succeeded")
             local was_hit = mod.compiled ~= nil
 
             if inject_fail_part then
-                local wrapper = workspace .. "/fail_part_cc.sh"
-                write_file(wrapper, string.format([==[#!/usr/bin/env bash
-for arg in "$@"; do
-  if [[ "$arg" == *".part%d.c" ]]; then
-    echo "injected part %d failure" >&2
-    exit 1
-  fi
-done
-exec %s "$@"
-]==], inject_fail_part, inject_fail_part, prev_cc))
-                run_cmd({ "chmod", "+x", wrapper })
-                driver.CC = wrapper
+                local wrapper = workspace .. "/fail_part_cc.lua"
+                write_file(wrapper, string.format([==[
+local cdriver = require("c-parser.cdriver")
+local command = assert(cdriver.split_shell_words(%q))
+for _, argument in ipairs(arg) do
+    if argument:match("%%.part%d%%.c$") then
+        io.stderr:write("injected part %d failure\n")
+        local marker = assert(io.open(%q, "wb"))
+        assert(marker:write(argument))
+        assert(marker:close())
+        os.exit(1)
+    end
+    command[#command + 1] = argument
+end
+local result = require("titan-compiler.io").new_sync():run(command,
+    { stderr_to_stdout = true })
+io.stderr:write(result.output or result.diagnostic or "")
+os.exit(result.ok and 0 or 1)
+]==], prev_cc, inject_fail_part, inject_fail_part, workspace .. "/failed_part"))
+                driver.CC = assert(cdriver.shell_quote(LUA)) .. " " ..
+                    assert(cdriver.shell_quote(wrapper))
             end
 
             local original_rename = os.rename
             if inject_fail_rename then
                 local suffix = inject_fail_rename == true and ".part2.o" or inject_fail_rename
                 os.rename = function(from, to)
-                    if to == out_dir .. "/mod" .. suffix then
+                    if to:gsub("\\", "/") == out_dir .. "/mod" .. suffix then
                         return nil, "injected publication failure for " .. suffix
                     end
                     return original_rename(from, to)
@@ -1352,6 +1370,7 @@ exec %s "$@"
         -- 8. Failed part compile leaves no primary mod.o or mod.parts
         hit, res = run_compile(4, 1, false, 2, false)
         assert.falsy(res.ok)
+        assert.matches("%.part2%.c$", read_file(workspace .. "/failed_part"))
         assert.is_false(file_exists(out_dir .. "/mod.o"))
         assert.is_false(file_exists(out_dir .. "/mod.parts"))
 
@@ -1668,11 +1687,12 @@ end]])
         write_file(src_dir .. "/tbmod.titan", tb_source)
 
         local indent_log = workspace .. "/indent.log"
-        local indent_stub = workspace .. "/stub_clang_format.sh"
-        write_file(indent_stub, string.format([==[#!/usr/bin/env bash
-printf '%%s\n' "${@: -1}" >> %q
+        local indent_stub = workspace .. "/stub_clang_format.lua"
+        write_file(indent_stub, string.format([==[
+local file = assert(io.open(%q, "ab"))
+assert(file:write(arg[#arg], "\n"))
+assert(file:close())
 ]==], indent_log))
-        run_cmd({ "chmod", "+x", indent_stub })
 
         h.reset(true)
         local context = driver.new_resolver_context({
@@ -1682,7 +1702,8 @@ printf '%%s\n' "${@: -1}" >> %q
         })
         assert(driver.configure_foreign_c(context))
         local prev_cf = driver.CLANG_FORMAT
-        driver.CLANG_FORMAT = indent_stub
+        driver.CLANG_FORMAT = assert(cdriver.shell_quote(LUA)) .. " " ..
+            assert(cdriver.shell_quote(indent_stub))
         driver.TITAN_SOURCE_PATH = src_dir
         driver.OUTPUT_ROOT = assert(driver.prepare_output_root(out_dir))
 

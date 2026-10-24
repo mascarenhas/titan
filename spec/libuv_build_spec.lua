@@ -643,6 +643,7 @@ local function make_temp_dir()
     os.remove(path)
     assert.truthy(lfs.mkdir(path))
     path = assert(compiler_io.new_sync():realpath(path))
+    if platform.windows then path = path:gsub("\\", "/") end
     return path
 end
 
