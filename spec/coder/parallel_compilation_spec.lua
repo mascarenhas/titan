@@ -597,6 +597,85 @@ test "$3" = 0 || exit "$3"
         assert.is_true(file_exists(workspace_directory .. "/one.part0.o"))
     end)
 
+    it("batches split module parts and fails only the module of a failed part",
+       function()
+        local previous_getenv = platform.getenv
+        platform.getenv = function(name)
+            if name == "MAKEFLAGS" then return nil end
+            return previous_getenv(name)
+        end
+        finally(function() platform.getenv = previous_getenv end)
+        configure_counting_compiler("parts", "one.part1")
+        local leaves = { "one", "two", "eight" }
+        local requests = checked_requests(leaves)
+        for _, request in ipairs(requests) do
+            request.options = { c_parts = 3, split_threshold = 1 }
+        end
+        local diagnostic_path = workspace_directory .. "/diagnostics"
+        diagnostic_stream = assert(io.open(diagnostic_path, "w+b"))
+        io.stderr = diagnostic_stream
+        local results = driver.compile_modules(requests, JOBS, false)
+        assert(io.stderr:flush())
+        assert(io.stderr:seek("set", 0))
+        local diagnostics = assert(io.stderr:read("*a"))
+        assert(diagnostic_stream:close())
+        diagnostic_stream = nil
+        io.stderr = previous_stderr
+
+        -- Every part of every module is its own compiler process in one batch.
+        local commands = read_file(state_directory .. "/commands")
+        local parts = {}
+        for _, leaf in ipairs(leaves) do
+            parts[leaf] = {}
+            for command in commands:gmatch("[^\n]+") do
+                local part = command:match("/batch/" .. leaf .. "%.part(%d+)%.c")
+                if part then
+                    parts[leaf][#parts[leaf] + 1] = tonumber(part)
+                elseif command:find("/batch/" .. leaf .. ".c", 1, true) then
+                    parts[leaf][#parts[leaf] + 1] = 0
+                end
+            end
+            table.sort(parts[leaf])
+        end
+        assert.is_true(#parts.one >= 2, commands)
+        assert.is_true(#parts.eight >= 2, commands)
+        assert.equal(tostring(JOBS) .. "\n",
+            read_file(state_directory .. "/maximum"))
+
+        -- Diagnostics replay in module, then part, order.
+        local previous = 0
+        for _, leaf in ipairs(leaves) do
+            for _, part in ipairs(parts[leaf]) do
+                local label = part == 0 and leaf or (leaf .. ".part" .. part)
+                local position = assert(diagnostics:find(
+                    "parallel compiler diagnostic: " .. label .. "\n", 1, true),
+                    diagnostics)
+                assert.is_true(previous < position, diagnostics)
+                previous = position
+            end
+        end
+
+        -- The failed part fails only its module, which publishes nothing.
+        assert.falsy(results[1].ok)
+        assert.equal("exit", results[1].err)
+        assert.truthy(diagnostics:find("parallel compiler sentinel: one.part1", 1, true),
+            diagnostics)
+        for _, part in ipairs(parts.one) do
+            assert.is_false(file_exists(driver.part_object_filename(
+                source_root .. "/batch/one", part)))
+        end
+        assert.is_false(file_exists(source_root .. "/batch/one.parts"))
+        for index = 2, 3 do
+            local leaf = leaves[index]
+            assert.truthy(results[index].ok, results[index].err)
+            assert.equal(#parts[leaf], #results[index].objects)
+            for _, object in ipairs(results[index].objects) do
+                assert.is_true(file_exists(object), object)
+            end
+            assert.is_true(file_exists(source_root .. "/batch/" .. leaf .. ".parts"))
+        end
+    end)
+
     it("rejects duplicate modules and aliased object outputs", function()
         local requests = checked_requests()
         local ok, failure = pcall(driver.compile_modules,
