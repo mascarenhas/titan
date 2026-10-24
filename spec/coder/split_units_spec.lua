@@ -37,6 +37,7 @@ dofile(%q .. "/titanc")
 end
 
 local function write_file(path, contents)
+    if platform.windows then path = path:gsub("\\", "/") end
     local parent = path:match("^(.*)/[^/]+$")
     if parent and lfs.attributes(parent, "mode") ~= "directory" then
         local accum = path:sub(1, 1) == "/" and "" or "."
@@ -1082,17 +1083,12 @@ print("VARIANT_OK")
             }, "pkg.dll")
             table.sort(expected)
             for _, variant in ipairs({ unsplit, split }) do
-                local ok, output = run_cmd({ "objdump", "-p", variant.dso })
+                local ok, output = run_cmd({ "llvm-readobj", "--coff-exports", variant.dso })
                 assert.truthy(ok, output)
-                local names, in_exports = {}, false
+                local names = {}
                 for line in output:gmatch("[^\r\n]+") do
-                    if line:find("[Ordinal/Name Pointer] Table", 1, true) then
-                        in_exports = true
-                    elseif in_exports then
-                        local name = line:match("^%s*%[%s*%d+%]%s+(%S+)%s*$")
-                        if name then names[#names + 1] = name
-                        elseif #names > 0 then break end
-                    end
+                    local name = line:match("^%s*Name:%s+(%S+)%s*$")
+                    if name then names[#names + 1] = name end
                 end
                 table.sort(names)
                 assert.same(expected, names, output)
