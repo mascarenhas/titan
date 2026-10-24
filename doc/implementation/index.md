@@ -175,7 +175,7 @@ Each row links the chapter section that documents the limitation.
 | [Static compiled modules](static-compiled-modules.md#publication-and-installation) | Publication is recoverable within the process, not crash- or power-loss-atomic. |
 | [Binary compatibility](binary-compatibility.md#generated-exports-and-runtime-verification) | Verification is a protocol between generated providers, not a sandbox for untrusted DSOs. |
 | [Windows build](windows-build.md#windows-dll-publication) | Stale-shim retirement is not implemented on Windows. |
-| [Build and installation responsibilities](build-script-audit.md#make-job-pool-and-titanc-recipes) | GNU Make 3.81 hides `-jN` while parsing, so its `make -j1` cannot be told from plain `make` and still enters a `TITAN_JOBS` pool; use `TITAN_JOBS=1` for a serial build. |
+| [Build and installation responsibilities](build-script-audit.md#make-job-pool-and-titanc-recipes) | GNU Make before 4.2 (macOS's stock 3.81) cannot show `make -j1`, so without an explicit `TITAN_JOBS` its builds stay serial with one job per `titanc`; set `TITAN_JOBS` or put GNU Make 4.2 or later first on `PATH` for the four-job pool. |
 | [Windows build](windows-build.md#test-ownership-and-keep-going) | The Windows native aggregate runs as one serial process; only Unix splits it into parallel owner groups. |
 | [Native source coverage](native-coverage.md#direct-execution-and-reports) | Metrics cover Titan executable lines only, with no denominator exclusions; timing-sensitive paths can gain or lose hits between runs. |
 | [HTTP library](http-library.md#bounded-opening-and-protocol-takeover) | Ordinary client response parsers have no header-byte limit; there is no pipelining API, and keep-alive serves one exchange at a time. |

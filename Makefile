@@ -261,6 +261,17 @@ TITAN_EXTRA_CFLAGS   ?=
 TITAN_EXTRA_LDFLAGS  ?=
 TITAN_NO_LINE_DIRECTIVES ?=
 TITAN_JOBS ?= 4
+# Implementation notes: doc/implementation/build-script-audit.md#make-job-pool-and-titanc-recipes
+# GNU Make before 4.2 (macOS /usr/bin/make is 3.81) never shows -jN in
+# MAKEFLAGS, so `make -j1` looks exactly like `make`. There a TITAN_JOBS taken
+# only from this default keeps the serial build: no graph entry seeds a pool
+# and every titanc recipe compiles one C unit at a time. TITAN_JOBS from the
+# environment or the command line seeds its pool as on newer Make.
+TITAN_MAKE_HIDES_JOBS := $(filter 3.% 4.0 4.1,$(MAKE_VERSION))
+TITAN_JOBS_SERIAL_DEFAULT := $(if $(TITAN_MAKE_HIDES_JOBS),$(filter file,$(origin TITAN_JOBS)))
+ifneq ($(TITAN_JOBS_SERIAL_DEFAULT),)
+TITAN_JOBS := 1
+endif
 export CLANG_FORMAT TITAN_EXTRA_CPPFLAGS TITAN_EXTRA_CFLAGS \
 	TITAN_EXTRA_LDFLAGS TITAN_NO_LINE_DIRECTIVES
 # Keep every Titan compiler output in a separate, removable tree. Native
@@ -540,18 +551,19 @@ RECURSIVE_WRAPPER_GUARD = titan_mode=; set -f; set -- $$MAKEFLAGS; set +f; \
 # Graph entry targets (stdlib, stdlib-objects, titan-stdlib-test-objects,
 # titan-stdlib-test-build) build an internal `<entry>-graph` target. When the
 # parsed MAKEFLAGS already show a job policy (GNU Make 4 `-jN`/`-j` or an
-# inherited jobserver) or a dry-run/query/touch mode, the entry depends on its
-# graph directly. Otherwise it recurses once, deciding the pool from the
-# recipe's MAKEFLAGS, because GNU Make 3.81 exposes neither -jN nor its
-# jobserver while parsing: an inherited jobserver or an explicit -j word (the
-# 3.81 unlimited `j` flag letter included) keeps the caller's policy,
-# including -j1; otherwise one pool of TITAN_JOBS slots is seeded.
+# inherited jobserver) or a dry-run/query/touch mode, or when Make before 4.2
+# keeps its serial TITAN_JOBS default, the entry depends on its graph
+# directly. Otherwise it recurses once, deciding the pool from the recipe's
+# MAKEFLAGS, because GNU Make 3.81 exposes neither -jN nor its jobserver while
+# parsing: an inherited jobserver or an explicit -j word (the 3.81 unlimited
+# `j` flag letter included) keeps the caller's policy, including -j1;
+# otherwise one pool of TITAN_JOBS slots is seeded.
 empty :=
 space := $(empty) $(empty)
 TITAN_MAKE_OPTION_WORDS := $(filter-out _titan_,$(subst |, ,$(firstword $(subst |--|, ,_titan_|$(subst $(space),|,$(strip $(MAKEFLAGS)))|))))
 titan_flag_word = $(if $(subst -,,$(subst B,,$(subst L,,$(subst R,,$(subst S,,$(subst d,,$(subst e,,$(subst i,,$(subst j,,$(subst k,,$(subst n,,$(subst p,,$(subst q,,$(subst r,,$(subst s,,$(subst t,,$(subst v,,$(subst w,,$(1))))))))))))))))))),,$(1))
 TITAN_MAKE_FLAG_LETTERS := $(foreach word,$(filter-out --%,$(TITAN_MAKE_OPTION_WORDS)),$(call titan_flag_word,$(word)))
-TITAN_MAKE_GRAPH_RECURSE := $(if $(or $(filter -j% --jobserver-auth=% --jobserver-fds=%,$(TITAN_MAKE_OPTION_WORDS)),$(findstring n,$(TITAN_MAKE_FLAG_LETTERS)),$(findstring q,$(TITAN_MAKE_FLAG_LETTERS)),$(findstring t,$(TITAN_MAKE_FLAG_LETTERS))),,1)
+TITAN_MAKE_GRAPH_RECURSE := $(if $(or $(TITAN_JOBS_SERIAL_DEFAULT),$(filter -j% --jobserver-auth=% --jobserver-fds=%,$(TITAN_MAKE_OPTION_WORDS)),$(findstring n,$(TITAN_MAKE_FLAG_LETTERS)),$(findstring q,$(TITAN_MAKE_FLAG_LETTERS)),$(findstring t,$(TITAN_MAKE_FLAG_LETTERS))),,1)
 TITAN_JOBS_CHECK = case $(call make_shell_quote,$(TITAN_JOBS)) in ''|0*|*[!0-9]*|?????????*) \
 	  echo 'TITAN_JOBS must be a positive integer' >&2; exit 2 ;; esac;
 TITAN_MAKE_POOL = $(TITAN_JOBS_CHECK) pool=-j$(TITAN_JOBS); \
@@ -1314,8 +1326,9 @@ STDLIB_C_INPUTS_transfer = titan/transfer_native.h titan/protobuf/native.h
 STDLIB_C_INPUTS_thread = $(THREAD_TITAN_HEADERS) titan/transfer_native.h
 
 # The command is identical for object builds and the final link. Only the
-# latter receives native payload. Make schedules modules; each compiler gets
-# one generated-C slot so nested parallelism stays within the jobserver bound.
+# latter receives native payload. Make schedules modules; each compiler runs
+# up to TITAN_JOBS generated-C compilations, borrowing every slot beyond its
+# recipe's own from the shared jobserver.
 STDLIB_COMPILER_ENV = CC=$(call make_shell_quote,$(CC)) \
 	AR=$(call make_shell_quote,$(AR)) RANLIB=$(call make_shell_quote,$(RANLIB)) \
 	ROCKS_TREE=$(call make_shell_quote,$(TITAN_INSTALL_TREE)) \
@@ -1533,11 +1546,15 @@ STDLIB_BUSTED_TESTS := \
 # The unfiltered invocation schedules every retained, stdlib-compiler, and
 # compiler spec per file across isolated checkout workers that share one Make
 # job pool. rock-test also asks it to build the native aggregate inside that
-# pool and record the build status for the native phase.
+# pool and record the build status for the native phase. Make before 4.2 with
+# the serial TITAN_JOBS default passes no TITAN_JOBS: the runner then sizes a
+# private pool with one slot per Busted worker and one for the native build,
+# whose titanc recipes stay at one job.
 ROCK_TEST_BUSTED = $(TITAN_TEST_COMPILER_ENV) BUSTED=$(call make_shell_quote_value,BUSTED) \
 	BUSTED_FILTER=$(call make_shell_quote_value,BUSTED_FILTER) \
 	TITAN_ROCK_TEST_STDLIB_SPECS=$(call make_shell_quote_value,STDLIB_BUSTED_TESTS) \
-	MAKE=$(call make_shell_quote,$(MAKE)) TITAN_JOBS=$(call make_shell_quote,$(TITAN_JOBS)) \
+	MAKE=$(call make_shell_quote,$(MAKE)) \
+	$(if $(TITAN_JOBS_SERIAL_DEFAULT),,TITAN_JOBS=$(call make_shell_quote,$(TITAN_JOBS))) \
 	TITAN_ROCK_TEST_INTERNAL=1 \
 	bash spec/support/run_rock_tests.sh $(EXTRA_TEST_FLAGS)
 TITAN_ROCK_TEST_NATIVE_STATUS = $(abspath $(TITAN_TEST_BUILD_DIR))/.rock-test-native-build.status
@@ -1817,8 +1834,7 @@ TITAN_COVERAGE_EXECUTABLE = $(abspath $(TITAN_COVERAGE_BUILD_DIR))/$(TITAN_STDLI
 .PHONY: titan-native-coverage-build titan-native-coverage-run titan-native-coverage
 titan-native-coverage-build: $(STDLIB_NATIVE_PREREQS) $(TITAN_TEST_FIXTURE_OUTPUTS) ## Compile source-linked native tests with line coverage
 	@mkdir -p $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR))
-	+@set -e; cd $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)); \
-	$(RECURSIVE_WRAPPER_GUARD) \
+	+@$(RECURSIVE_WRAPPER_GUARD) set -e; cd $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)); \
 	CC=$(call make_shell_quote,$(CC)) TITAN_BUILD_PROFILE=validation \
 	TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_COVERAGE_CPPFLAGS)) \
 	TITAN_EXTRA_CFLAGS='-O0 -fno-lto' \
@@ -1902,6 +1918,15 @@ clean-stdlib: ## Remove standard-library artifacts before changing build inputs
 	rm -f $(STDLIB_GENERATED_FOREIGN_HEADERS) $(foreach module,$(STDLIB_MODULES),$(call stdlib_stem,$(module)).c $(call stdlib_stem,$(module)).parts $(call stdlib_stem,$(module)).priv.h $(call stdlib_stem,$(module)).part*.c $(call stdlib_stem,$(module)).part*.o)
 	rm -rf $(STDLIB_CONTAINER).dSYM
 
+# A supported compilation without --output leaves each module's C, object,
+# `.parts` companion, private header, and nonzero part C/objects beside its
+# source. Folder modules list only their compiler-named main stem; the root,
+# titan/, and titan/uv/ hold no authored C, objects, or `.priv.h` headers.
+TITAN_LEGACY_SOURCE_STEMS := * titan/* titan/uv/* titan/http/http \
+	titan/websocket/websocket titan/peg/peg titan/string/string titan/json/json
+TITAN_LEGACY_SOURCE_OUTPUTS = $(foreach stem,$(TITAN_LEGACY_SOURCE_STEMS),$(stem).c $(stem).o \
+	$(stem).parts $(stem).priv.h $(stem).part*.c $(stem).part*.o)
+
 clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 	rm -rf $(call make_shell_quote,$(TITAN_OUTPUT_DIR))
 	bash spec/support/clean_generated_test_artifacts.sh
@@ -1913,20 +1938,14 @@ clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 	rm -f $(TITAN_BOOTSTRAP_SO)
 	rm -rf $(TITAN_BOOTSTRAP_SO).dSYM
 	rmdir titan-runtime/bootstrap 2>/dev/null || true
-	rm -f titan/*.c titan/*.o
-	rm -f titan/uv/*.c titan/uv/*.o
-	rm -f titan/http/http.c titan/http/http.o
-	rm -f titan/websocket/websocket.c titan/websocket/websocket.o
-	rm -f titan/peg/peg.c titan/peg/peg.o
-	rm -f titan/string/string.c titan/string/string.o
-	rm -f titan/json/json.c titan/json/json.o
+	rm -f $(TITAN_LEGACY_SOURCE_OUTPUTS)
 	rm -f $(STDLIB_GENERATED_FOREIGN_HEADERS)
 	rm -f $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_QUALIFIED_SOS) $(STDLIB_SOS)
 	rm -f $(STDLIB_SHIMS)
 	rm -rf $(STDLIB_CONTAINER).dSYM
 	rm -rf $(addsuffix .dSYM,$(STDLIB_SOS)) \
 		$(addsuffix .dSYM,$(STDLIB_QUALIFIED_SOS))
-	rm -f *.c *.o *.so test
+	rm -f *.so test
 	rm -f luacov.stats.out luacov.report.out
 
 clean-lua: ## Remove Lua build artifacts and the checkout-local install; preserve the submodule

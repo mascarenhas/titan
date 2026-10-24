@@ -306,11 +306,17 @@ run_group() {
     done < "$filters_file"
 
     printf '===== starting native stdlib group %s =====\n' "$label"
+    # The subshell reports the supervised executable's status (124 after a
+    # timeout), not tee's: a passing report followed by a failing exit must
+    # fail the group. A raw log that could not be written also fails it.
     (
         export TMPDIR="$group_tmp"
         export TITAN_TEST_ROOT="$group_tmp"
         bash spec/support/run_with_timeout.sh "$timeout_seconds" \
             "$executable" "${filter_args[@]}" 2>&1 | tee "$raw_log"
+        run_status=("${PIPESTATUS[@]}")
+        if (( run_status[0] != 0 )); then exit "${run_status[0]}"; fi
+        exit "${run_status[1]}"
     ) 2>&1 | tag_group_output "$label"
     pipeline_status=("${PIPESTATUS[@]}")
     status=${pipeline_status[0]}

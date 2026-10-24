@@ -101,7 +101,7 @@ runtime code that writes the stack through Lua internals is not checked.
 | Command, from the repository root | Purpose |
 | --- | --- |
 | `make test` | Prepare the selected SDK, reinstall the current compiler/provider with `luarocks make --force`, and run the complete mixed suite through `luarocks test`. |
-| `TITAN_JOBS=8 TITAN_ROCK_TEST_JOBS=7 make -j8 test` | Wider variant: one eight-slot Make pool for preparation and both test domains, each `titanc` capped at eight, with seven Busted workers beside the overlapped native build. Without these settings every phase uses one four-slot pool. |
+| `TITAN_JOBS=8 TITAN_ROCK_TEST_JOBS=7 make -j8 test` | Wider variant: one eight-slot Make pool for preparation and both test domains, each `titanc` capped at eight, with seven Busted workers beside the overlapped native build. Without these settings every phase uses one four-slot pool with GNU Make 4.2 or later. |
 | `luarocks test` | Run against an already current install; its active `bin` on `PATH` is sufficient. It does not build the rock. |
 | `make rock-test` | Both test domains: per-file Busted workers (default three) with the native aggregate build in their pool, then the parallel native run. A failure in one domain does not skip the other. In validation with no `PREFIX/bin/titanc`, it runs `make test` instead. |
 | `make busted-test` | Busted only: every classified spec file once, across `TITAN_ROCK_TEST_JOBS` (default four) isolated workers in a `TITAN_JOBS` pool. |
@@ -131,9 +131,12 @@ in [Make job pool and titanc
 recipes](build-script-audit.md#make-job-pool-and-titanc-recipes). The builds
 and the Busted workers share one pool: `TITAN_JOBS` slots (default four) unless
 `make -jN` or a parent Make supplies one. The native run starts after that
-work has drained and uses its own `TITAN_TEST_JOBS` processes. With macOS's
-stock GNU Make 3.81, `make -j1` cannot be distinguished from plain `make`; use
-`TITAN_JOBS=1` for a serial build.
+work has drained and uses its own `TITAN_TEST_JOBS` processes. GNU Make before
+4.2, including macOS's stock 3.81, cannot show `make -j1`, so there the builds
+stay serial, with one job per `titanc`, unless `TITAN_JOBS` is set in the
+environment or on the command line; the Busted workers then share a private
+pool with one slot per worker plus one for the native build. Put GNU Make 4.2
+or later first on `PATH`, or set `TITAN_JOBS`, for the four-job default.
 
 `titanc` accepts dotted module names, not file paths. Use its
 [CLI reference](driver.md#the-titanc-command-line) for provider/standalone
