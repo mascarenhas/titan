@@ -363,6 +363,65 @@ coercive-Lua, and strict bound-method symbols. Concrete/Interface pair arrays
 and adjustment entries remain private to the source object that needs the
 conversion and add no archive protocol entry.
 
+## Provider link pipeline
+
+On Linux and macOS, `titanc` hands a no-`main` provider to
+`driver.link_provider_pair` once its objects are compiled and validated. The
+function owns one sibling staging directory: the DSO keeps the public basename
+there, beside the staged archive and the private `archive-validation.so`. It
+returns the validated DSO/archive pair, which `driver.publish_provider_bundle`
+then commits. Windows DLL providers have no archive and keep their synchronous
+link and validation.
+
+The pipeline has a fixed order, which is also its diagnostic order:
+
+1. link the staged DSO;
+2. build and verify the staged archive ([Native
+   composition](#native-composition));
+3. validate the DSO family: every logical protocol, the `titan` support entry
+   for that reserved provider, archive/DSO equality, and fresh-process loading;
+4. link the archive-backed image with the same final native policy as
+   `driver.compile_archive_validation_image`;
+5. validate the image family with the same four checks; then
+6. return the pair for publication.
+
+Concurrency follows the compiler's native job slots: the local bound and
+parent GNU Make jobserver rules for generated-C compilation also govern these
+links. Links run as native background jobs with captured output and a
+completion FIFO.
+
+* **One slot** (`--jobs 1`, `make -j1`, or an advertised but unusable
+  jobserver) runs the six steps strictly one after another.
+* **Several local slots without a usable jobserver.** The DSO link holds the
+  recipe's implicit slot while the compiler builds and verifies the archive.
+  The archive-backed link still starts only after the DSO link has been
+  reaped: on Linux both links use `-flto=auto`, and two links without a
+  jobserver would start two independent all-core LTRANS pools. The DSO
+  validations then run while the archive-backed link runs.
+* **A usable shared jobserver.** Once the archive is ready, the driver polls
+  for a token together with the DSO link's completion. A token starts the
+  archive-backed link at once under that borrowed slot. If the DSO link
+  finishes first, the image link reuses the recipe's slot instead. The child
+  inherits `MAKEFLAGS` and the jobserver descriptors, so GCC's LTRANS jobs draw
+  from the same pool. The borrowed byte is returned when the link is reaped.
+  Because LTRANS already fills the pool, the overlap mainly hides the serial
+  WPA, final-link, archive, and validation work rather than halving the link
+  time.
+
+Overlap never reorders observable results. Each link's captured output is
+replayed at a fixed point: the DSO's after the archive build, and the image's
+after the DSO validations. `--verbose` announces the image command after the
+DSO's replayed output, regardless of when its slot was granted. The first
+failure in the step order above is the one reported. A failure, an unexpected
+error, or an `INT`/`TERM`/`HUP` interruption does four things: it waits for
+every running link, discards unreplayed output, returns borrowed tokens, and
+removes the whole staging directory. Neither public path changes, and no
+temporary sibling remains. An interruption is then re-raised under the
+restored signal handler. `spec/coder/provider_link_pipeline_spec.lua` drives
+these cases through real parent Make jobservers and injected link and
+validation failures. `spec/coder/lto_spec.lua` repeats its optimized provider
+pair under a shared jobserver.
+
 ## Publication and installation
 
 `driver.publish_provider_bundle` publishes a no-main provider bundle. It stages

@@ -216,7 +216,9 @@ layout rules are in [Native nominal storage](nominal-storage.md).
 Both native forms go to one sibling staging directory; the contained DSO keeps
 the public basename so its macOS dSYM agrees. The staged pair is validated
 against itself and against an archive-backed image, then published as one
-recoverable transaction; see [Three-way
+recoverable transaction. The [provider link
+pipeline](static-compiled-modules.md#provider-link-pipeline) orders those links
+and validations within the shared job budget; see also [Three-way
 validation](static-compiled-modules.md#three-way-validation) and [Publication
 and installation](static-compiled-modules.md#publication-and-installation).
 
