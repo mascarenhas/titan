@@ -85,23 +85,26 @@ makes the target stale, while unchanged outputs keep their timestamps. The
 graph uses no grouped targets, so it also runs with the GNU Make that macOS
 ships. Published providers and shims are outputs, not prerequisites.
 
-For each module object the check also reads the `<stem>.parts` companion that
-the compiler publishes with every compiled module (`CHECK_TITAN_PARTS_COMPANION`).
-Its first line must be exactly `titan-parts-v1 N` with a positive `N`, and the
-remaining lines must be exactly the leaves the compiler derives for `N` parts,
-in order: `<leaf>.priv.h` only when `N` is at least two, `<leaf>.c` and
-`<leaf>.o`, then `<leaf>.partK.c` and `<leaf>.partK.o` for each `K` from 1 to
-`N-1`. Each listed leaf must be a regular file beside the companion, and no
-line may follow. A missing, symlinked, malformed, or incomplete companion, or a
-missing part, makes the whole module stale: the recipe removes `<stem>.o` and
-`<stem>.parts` before recompiling, and fails if the compiler did not publish a
-complete companion. A direct object target such as `make out/titan/uv/uv.o`
-therefore repairs a deleted part, private header, or companion by itself,
-without depending on a later link. The companion only makes this Make check
-cheap; the object's `.titan.source` record remains the compiler's reuse
-authority ([trusted source record](incremental-compilation.md#trusted-source-record)).
-The native test object rule (`titan_test_object_rule`) applies the same check
-under `out/tests`.
+The compiler publishes a `<stem>.parts` companion with every compiled module.
+It exists for build tools: Make reads it, and the compiler's incremental loader
+never does. Each module object's `FORCE` guard (`CHECK_TITAN_PARTS_COMPANION`)
+requires the companion to be a regular, non-symlink file whose first line is
+exactly `titan-parts-v1 K` with a positive `K`, followed by exactly the leaves
+the compiler derives for `K` parts, in order: `<leaf>.priv.h` only when `K` is
+at least two, `<leaf>.c`, `<leaf>.o`, then `<leaf>.partN.c` and
+`<leaf>.partN.o` for each `N` from 1 to `K-1`. An unsplit module's companion is
+therefore `titan-parts-v1 1`, `<leaf>.c`, `<leaf>.o`. Each listed leaf must be a
+regular, non-symlink file beside the companion, and no line may follow. A
+missing, symlinked, malformed, or incomplete companion, or a missing part,
+makes the whole module stale: the recipe removes `<stem>.o` and `<stem>.parts`
+before recompiling, and fails if the compiler did not publish a complete
+companion. A direct object target such as `make out/titan/uv/uv.o` therefore
+repairs a deleted part, private header, or companion by itself, without
+depending on a later link. The companion only makes this Make check cheap;
+compiler reuse trusts only the object's `.titan.source` record ([trusted source
+record](incremental-compilation.md#trusted-source-record)). The native test
+object rule (`titan_test_object_rule`) applies the same check under
+`out/tests`.
 
 `STDLIB_USE_INSTALLED_RUNTIME` defaults to `1` when
 `$(TITAN_INSTALL_TREE)/bin/titanc` exists. That selects the installed compiler,
@@ -127,7 +130,9 @@ so `titanc` receives Make's jobserver and can borrow job slots for further
 concurrent compilations or links beyond its recipe's own slot; the protocol is
 owned by the [driver](driver.md). The `+` marker also keeps a pipe jobserver's
 descriptors open through the wrapper layers, which GCC's `-flto=auto` link
-steps need as well.
+steps need as well. Before launching anything, the object recipes run the
+`.parts` completeness guard described in the [standard-library object
+graph](#standard-library-object-graph).
 
 `+` makes Make run a recipe even under `make -n`, `-q`, or `-t`, so each of
 these recipes starts with `RECURSIVE_WRAPPER_GUARD`. The guard scans
