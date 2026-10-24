@@ -1,5 +1,5 @@
 -- Repository-native gate, not a change to titan.test's public reporting/API.
--- Loaded without arguments, this returns the validator for build-harness tests.
+-- Loaded without arguments, this returns the validators for build-harness tests.
 local function final_counts(contents)
     local counts, headers = {}, 0
     for raw_line in (contents .. "\n"):gmatch("([^\n]*)\n") do
@@ -31,9 +31,16 @@ local function validate(contents, roots, filtered)
         inventory[root] = true
     end
     if #roots == 0 then return nil, "empty native test root inventory" end
-    local started, terminal, summaries = {}, {}, {}
+    local started, terminal, summaries, cases = {}, {}, {}, {}
     local categories = { platform = 0, capability = 0, unsupported = 0, portability = 0 }
-    local result = { passed = 0, skipped = 0, count = 0, owners = 0, categories = categories }
+    local result = {
+        passed = 0,
+        skipped = 0,
+        count = 0,
+        owners = 0,
+        categories = categories,
+        cases = cases,
+    }
     local began = false
     local function owner_of(name)
         for _, root in ipairs(roots) do
@@ -86,6 +93,7 @@ local function validate(contents, roots, filtered)
                         if passing then
                             if not started[name] then return nil, "passed case was never started: " .. name end
                             result.passed = result.passed + 1
+                            cases[name] = "passed"
                         else
                             local inherited = false
                             while reason:sub(1, 16) == "parent skipped: " do
@@ -101,6 +109,7 @@ local function validate(contents, roots, filtered)
                             end
                             categories[category] = categories[category] + 1
                             result.skipped = result.skipped + 1
+                            cases[name] = "skipped"
                         end
                     end
                 end
@@ -126,16 +135,154 @@ local function validate(contents, roots, filtered)
     return result
 end
 
-if select("#", ...) == 0 then return validate, final_counts end
-local output_path, roots_path, filter = ...
+local function validate_union(groups, roots)
+    local root_inventory = {}
+    for _, root in ipairs(roots or {}) do
+        if root_inventory[root] then return nil, "duplicate native test root: " .. root end
+        root_inventory[root] = true
+    end
+    if not roots or #roots == 0 then return nil, "empty native test root inventory" end
+    if type(groups) ~= "table" or #groups == 0 then
+        return nil, "empty native parallel group list"
+    end
+
+    local planned_owners = {}
+    local combined_cases = {}
+    local categories = { platform = 0, capability = 0, unsupported = 0, portability = 0 }
+    local combined = {
+        passed = 0,
+        skipped = 0,
+        count = 0,
+        owners = 0,
+        groups = #groups,
+        categories = categories,
+        cases = combined_cases,
+    }
+
+    for index, group in ipairs(groups) do
+        local label = tostring(group and group.id or index)
+        if type(group) ~= "table" or type(group.owners) ~= "table" or #group.owners == 0 then
+            return nil, "group " .. label .. ": empty native owner group"
+        end
+        for _, owner in ipairs(group.owners) do
+            if not root_inventory[owner] then
+                return nil, "group " .. label .. ": planned owner outside native root inventory: " .. tostring(owner)
+            end
+            if planned_owners[owner] then
+                return nil, "group " .. label .. ": duplicate planned native owner: " .. owner
+            end
+            planned_owners[owner] = label
+        end
+
+        local group_result, group_err = validate(group.contents or "", group.owners, false)
+        if not group_result then
+            return nil, "group " .. label .. ": " .. group_err
+        end
+
+        for case_name, status in pairs(group_result.cases) do
+            if combined_cases[case_name] then
+                return nil, "group " .. label .. ": duplicate native case across groups: " .. case_name
+            end
+            combined_cases[case_name] = status
+        end
+
+        combined.count = combined.count + group_result.count
+        combined.passed = combined.passed + group_result.passed
+        combined.skipped = combined.skipped + group_result.skipped
+        combined.owners = combined.owners + group_result.owners
+        for key, value in pairs(group_result.categories) do
+            categories[key] = categories[key] + value
+        end
+    end
+
+    for _, root in ipairs(roots) do
+        if not planned_owners[root] then
+            return nil, "native root did not execute: " .. root
+        end
+    end
+    if combined.owners ~= #roots then
+        return nil, "native owner union count differs from root inventory"
+    end
+    return combined
+end
+
+if select("#", ...) == 0 then return validate, final_counts, validate_union end
+
 local function read(path)
     local file = assert(io.open(path, "rb"))
     local contents = assert(file:read("a"))
     assert(file:close())
     return contents
 end
-local roots = {}
-for root in read(assert(roots_path)):gmatch("[^\r\n]+") do roots[#roots + 1] = root end
+
+local function read_lines(path)
+    local items = {}
+    for item in read(assert(path)):gmatch("[^\r\n]+") do
+        if item ~= "" then items[#items + 1] = item end
+    end
+    return items
+end
+
+local first_arg = select(1, ...)
+if first_arg == "--union" then
+    local argc = select("#", ...)
+    if argc < 4 or (argc - 2) % 3 ~= 0 then
+        io.stderr:write("usage: check_stdlib_test_output.lua --union ROOTS_FILE (GROUP_ID LOG_FILE OWNERS_FILE)...\n")
+        os.exit(2)
+    end
+    local roots = read_lines(select(2, ...))
+    local groups = {}
+    for index = 3, argc, 3 do
+        local group_id = select(index, ...)
+        local log_path = select(index + 1, ...)
+        local owners_path = select(index + 2, ...)
+        local log_file = io.open(log_path, "rb")
+        local contents = log_file and log_file:read("a") or ""
+        if log_file then log_file:close() end
+        local owners_file = io.open(owners_path, "rb")
+        local owners = {}
+        if owners_file then
+            local owners_text = owners_file:read("a") or ""
+            owners_file:close()
+            for item in owners_text:gmatch("[^\r\n]+") do
+                if item ~= "" then owners[#owners + 1] = item end
+            end
+        end
+        groups[#groups + 1] = {
+            id = group_id,
+            contents = contents,
+            owners = owners,
+        }
+    end
+    local result, err = validate_union(groups, roots)
+    if not result then
+        for _, group in ipairs(groups) do
+            local counts = final_counts(group.contents or "")
+            if counts then
+                io.stderr:write(string.format(
+                    "Native stdlib group %s report: selected=%d passed=%d skipped=%d failed=%d.\n",
+                    tostring(group.id), counts.count, counts.passed, counts.skipped, counts.failed))
+            else
+                io.stderr:write(string.format(
+                    "Native stdlib group %s report: incomplete; final counts unavailable.\n",
+                    tostring(group.id)))
+            end
+        end
+        io.stderr:write("Native stdlib gate: " .. err .. "\n")
+        os.exit(1)
+    end
+    print(string.format(
+        "Native stdlib gate: selected=%d passed=%d skipped=%d failed=0 owners=%d/%d groups=%d.",
+        result.count, result.passed, result.skipped, result.owners, #roots, result.groups))
+    print(string.format(
+        "Classified skips: platform=%d capability=%d unsupported=%d portability=%d.",
+        result.categories.platform, result.categories.capability,
+        result.categories.unsupported, result.categories.portability))
+    os.exit(0)
+end
+
+local output_path, roots_path, filter = ...
+local roots = read_lines(assert(roots_path))
 local contents = read(assert(output_path))
 local result, err = validate(contents, roots, filter ~= nil and filter ~= "")
 if not result then
