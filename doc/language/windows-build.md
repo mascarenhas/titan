@@ -74,6 +74,14 @@ Libraries emit one DLL provider and generated Lua shims. Programs emit a small
 can select another EXE name without changing provider identity. Windows Titan
 archive providers and `--static` are unsupported.
 
+Splitting large generated modules into several C translation units is opt-in
+on Windows: `--c-parts` defaults to 1 there. Pass `--c-parts N` or set
+`TITAN_C_PARTS=N` to enable it ([split
+modules](build-profiles.md#compilation-jobs-and-split-modules)). All parts of a
+module link into the same DLL, and the DLL still exports only each module's
+fixed entry points and public raw foreign functions; helpers shared between
+parts are never exported.
+
 Use [an output directory](output-directory.md) to separate generated files from
 sources and keep configurations independent:
 

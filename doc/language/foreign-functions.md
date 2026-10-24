@@ -245,7 +245,7 @@ cannot run a Titan `defer` while it unwinds.
 
 Every source module owns a compiler-generated `.ffi.h` with its ordered C
 environment. A module defining foreign functions also owns a `.titan.h` with
-their declarations and eligible inline bodies. Both go to the selected
+their declarations and the direct-call helpers of local ones. Both go to the selected
 [output directory](output-directory.md) with the same hierarchy as the generated
 C file, or beside the source when no output directory is selected:
 
@@ -262,7 +262,7 @@ The compiler prepares all needed headers before compiling any source object.
 `.ffi.h` includes explicit source dependencies' `.ffi.h` files first, then
 local foreign directives in module order. `.titan.h` includes its own `.ffi.h`
 and needed source dependencies' `.titan.h` declarations before emitting all
-foreign prototypes and then all eligible inline bodies. Generated C includes
+foreign prototypes and then all local direct-call helpers. Generated C includes
 its `.ffi.h` before its `.titan.h` when present.
 
 Both paths are compiler-owned. Titan refuses to overwrite an unowned path,
@@ -278,9 +278,17 @@ they do not need either generated header.
 
 ### Inline subset and function identity
 
-A local foreign function is emitted as `static inline` in the generated header only
-when its root body consists of optional direct local declarations followed by
-exactly one of:
+Every foreign function has exactly one out-of-line definition in its module's
+generated C: exported for a public function, hidden for a local one. Using a
+foreign function as a C function pointer always yields that definition's
+address, so within one linked image two pointers to the same function compare
+equal wherever they are taken, including in source importers and in
+separately compiled parts of a large module.
+
+Direct calls to a local foreign function, from its own module or a source
+importer, go through a `static inline` helper in the generated header. The
+helper contains a copy of the body only when the root body consists of
+optional direct local declarations followed by exactly one of:
 
 1. one expression return;
 2. one `if` whose sole `then` and required `else` each contain one expression
@@ -288,11 +296,10 @@ exactly one of:
 3. one `if` without `else` whose sole `then` returns, followed by one expression
    return.
 
-Every other local foreign function has a hidden external definition in the
-module's generated C file. Public foreign functions always have an exported
-external definition. The inline form is an optimization/header-availability rule,
-not a C constant-expression promise. Taking one inline function's address in
-two translation units may yield different addresses.
+For every other local foreign function the helper simply calls the
+out-of-line definition. Direct calls to public foreign functions always call
+the exported definition. The inline copy is an optimization/header-availability
+rule, not a C constant-expression promise.
 
 ## Native C names and ABI
 

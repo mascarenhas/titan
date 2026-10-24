@@ -27,19 +27,27 @@ this library-mode invocation:
 titanc a.b.left a.b.right
 ```
 
-produces one object and one generated Lua loader (or *shim*) for each logical
-module, but only one provider pair:
+produces generated C, objects, and one generated Lua loader (or *shim*) for
+each logical module, but only one provider pair:
 
 ```text
 a/b/left.c
 a/b/left.o
+a/b/left.parts
 a/b/left.lua
 a/b/right.c
 a/b/right.o
+a/b/right.parts
 a/b/right.lua
 a/b.so
 a/b.a
 ```
+
+Each `.parts` file is the module's small inventory of its generated C and
+objects. A module large enough to be
+[split](build-profiles.md#compilation-jobs-and-split-modules) also has
+`.priv.h`, `.part1.c`, `.part1.o`, and further numbered parts; the provider
+pair links every one of its objects.
 
 There is no `a/b/left.so` or `a/b/right.so`. Both Lua loaders find the
 physical provider `a.b` (`a/b.so`), then call their own exact native entry:
@@ -50,9 +58,9 @@ a/b/right.lua -> a/b.so -> luaopen_a_b_right
 ```
 
 The ordinary single-module case is the smallest instance of the same model.
-`titanc foo.bar` produces `foo/bar.c`, `foo/bar.o`, `foo/bar.so`,
-`foo/bar.a`, and `foo/bar.lua`; the logical module and physical provider both
-happen to be `foo.bar`.
+`titanc foo.bar` produces `foo/bar.c`, `foo/bar.o`, `foo/bar.parts`,
+`foo/bar.so`, `foo/bar.a`, and `foo/bar.lua`; the logical module and physical
+provider both happen to be `foo.bar`.
 
 ## Choosing the provider
 

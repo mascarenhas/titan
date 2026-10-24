@@ -102,6 +102,14 @@ the jobserver. The Lua, libbacktrace, and bundled OpenSSL builds stay at `-j1`.
 Busted compiler workers set their own bounds; see
 [Busted partitions](test-runner.md#busted-partitions).
 
+Splitting a large generated module into several translation units is opt-in on
+Windows: `driver.default_c_parts` returns 1 there, so the standard provider
+and other builds stay unsplit unless `titanc --c-parts N` or `TITAN_C_PARTS=N`
+asks for more. With a split, `TITAN_MODULE_PRIVATE` expands to nothing under
+`_WIN32`, so the parts share ordinary external symbols that PE does not
+export automatically
+([storage and visibility](codegen-overview.md#storage-and-visibility)).
+
 ## One controlled Lua DLL and its SDK
 
 The recipe uses the pinned Lua 5.5.1 submodule and installs matching sources
@@ -272,6 +280,9 @@ PE links disable automatic exports. `driver.windows_provider_exports` writes a
 producer-owned `.def` from every logical module physically carried into the
 DLL: `_abi_value`, `_abi`, `_types`, `_layouts`, `_compatibility`, `_init`, and
 `luaopen_*`, plus public raw foreign entries recovered from module interfaces.
+The list depends only on logical module names and their interfaces, which only
+part 0 of a split module carries. Part objects and module-private symbols never
+enter the `.def`, and `-Wl,--exclude-all-symbols` keeps them unexported.
 Hidden raw-address binding slots are never exported; canonical descriptor
 callbacks resolve later native function and slot addresses, and collision
 inventories are not export inventories. The support-only `luaopen_titan` keeps

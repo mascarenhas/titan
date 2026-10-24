@@ -96,10 +96,23 @@ schema versions. A small compiler smoke continues to test unset production
 optimization and cross-module LTO while ordinary validation fixtures stay at
 `-O0`.
 
+## Compilation jobs and split modules
+
 Generated-C compilation concurrency is controlled by `titanc --jobs N` or
 `TITAN_JOBS=N` on Linux, macOS and Windows. The command-line option wins; the
-default is four. Large modules (at least 2 MiB of generated C bodies) are split
-into up to `--c-parts N` or `TITAN_C_PARTS=N` translation units (default 4 on
-Linux, macOS, and Windows; `1` disables splitting) so their parts compile in
-parallel within the same job bound, while checking, C generation, and final
-linking retain their normal deterministic order.
+default is four. This bound covers independent C object compilations, while
+checking, C generation and final linking retain their normal order. Windows
+stdlib builds also honor `TITAN_JOBS`.
+
+A module whose generated C definitions reach 2 MiB can be split into
+several C translation units, which then compile as independent jobs under the
+same bound. `titanc --c-parts N` or `TITAN_C_PARTS=N` sets the maximum number
+of units per module; the command-line option wins, and the value must be a
+positive integer. `1` disables splitting. The default is 4 on Linux and 1 on
+macOS, Windows, and other platforms, so splitting is opt-in there. Smaller
+modules always stay in one unit. The part count is independent of `--jobs`:
+changing the job bound never changes generated files, while changing the part
+count changes them and makes previously compiled objects stale
+([incremental compilation](incremental-compilation.md#what-object-reuse-promises)).
+The extra generated files are listed in [Output
+directories](output-directory.md#source-hierarchy-and-final-outputs).

@@ -491,10 +491,16 @@ installation layout from the compiler launcher filename.
   `<root>/lib/liblua.a`, and `<root>/lib/titan/0.6/libtitan.a`.
 * `-l/--link` adds extra C libraries to the link line (FFI use).
 * `-j/--jobs <jobs>` bounds concurrent generated-C object compilations. It
-  defaults to the positive integer in `TITAN_JOBS`, or to `1` when that
+  defaults to the positive integer in `TITAN_JOBS`, or to `4` when that
   variable is unset. Values above one require the standard POSIX `mkfifo`
   utility. Parsing, checking, C generation, generated-header work, and final
   linking remain ordered in the compiler process.
+* `--c-parts <n>` sets the maximum number of C translation units into which a
+  module with at least 2 MiB of generated C definitions is split, so its parts
+  can compile in parallel. It defaults to the positive integer in
+  `TITAN_C_PARTS`, or to 4 on Linux and 1 elsewhere; `1` disables splitting.
+  It is independent of `--jobs`. See [Native build
+  profiles](build-profiles.md#compilation-jobs-and-split-modules).
 * `--static` prefers self-describing Titan `.a` providers over `.so`
   providers for ordinary dependencies. It still permits DSO/source fallback
   and does not request a fully static system executable. Windows rejects this

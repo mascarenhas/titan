@@ -157,16 +157,19 @@ Candidate membership is a compiler concern. The relative file only makes the
 fallback runtime load exact and relocatable; the logical registry owns
 initialized module identity.
 
-## One object per logical module
+## One object set per logical module
 
 Multi-module linking does not merge ASTs, module types, or generated C.
 `driver.defaultloader` checks each source module once and `coder.generate`
-emits one translation unit per logical module. A folder module has already
-been assembled into one AST, so it naturally contributes one object.
+emits one generated module per logical module: one translation unit, or
+several [parts](codegen-overview.md#translation-unit-parts) when the module is
+large. A folder module has already been assembled into one AST, so it
+naturally contributes one ordered object set: its primary object followed by
+any part objects.
 
 Library mode forms the union of every source module reachable from all
 requested roots, sorts logical names with `util.bytewise_less`, and links each
-source object exactly once. A dependency selected from a DSO remains dynamic
+source module's objects exactly once, part 0 first. A dependency selected from a DSO remains dynamic
 and contributes no object. A dependency selected from a static provider adds
 that physical archive once; its complete validated membership is available
 for direct native binding and is carried into both produced provider forms,
