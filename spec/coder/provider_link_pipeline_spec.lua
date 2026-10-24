@@ -114,8 +114,11 @@ end
 
 -- The two provider links are recognized by their private output names. The
 -- staged DSO link can be held open (TITAN_TEST_LINK_HOLD): `image` until the
--- archive-backed link has started, `archive` until the staged archive has
--- been indexed plus one second for any (forbidden) image link to start.
+-- archive-backed link has started, `image-end` until it has finished,
+-- `archive` until the staged archive has been indexed plus one second for
+-- any (forbidden) image link to start, and `release` (either link) until the
+-- test creates `<events>.release`. TITAN_TEST_FAIL_LINK names the failing
+-- link kind, or `both`.
 local LINK_WRAPPER = [[#!/bin/sh
 events=%s
 kind=
@@ -135,24 +138,26 @@ if [ -z "$kind" ]; then exec %s "$@"; fi
 printf '%%s-start\n' "$kind" >> "$events"
 %s "$@"
 status=$?
-if [ "$kind" = dso ]; then
-    tenths=0
-    settle=0
-    while [ "$tenths" -lt 600 ]; do
-        case "${TITAN_TEST_LINK_HOLD:-}" in
-            image) grep -q '^image-start$' "$events" && break ;;
-            archive)
-                if grep -q '^archive-indexed$' "$events"; then
-                    settle=$((settle + 1))
-                    [ "$settle" -ge 10 ] && break
-                fi ;;
-            *) break ;;
-        esac
-        sleep 0.1
-        tenths=$((tenths + 1))
-    done
-fi
-if [ "$kind" = "${TITAN_TEST_FAIL_LINK:-}" ]; then status=86; fi
+tenths=0
+settle=0
+while [ "$tenths" -lt 600 ]; do
+    case "$kind:${TITAN_TEST_LINK_HOLD:-}" in
+        dso:image) grep -q '^image-start$' "$events" && break ;;
+        dso:image-end) grep -q '^image-end$' "$events" && break ;;
+        dso:archive)
+            if grep -q '^archive-indexed$' "$events"; then
+                settle=$((settle + 1))
+                [ "$settle" -ge 10 ] && break
+            fi ;;
+        *:release) [ -e "$events.release" ] && break ;;
+        *) break ;;
+    esac
+    sleep 0.1
+    tenths=$((tenths + 1))
+done
+case "${TITAN_TEST_FAIL_LINK:-}" in
+    "$kind"|both) status=86 ;;
+esac
 printf '%%s-end\n' "$kind" >> "$events"
 exit "$status"
 ]]
@@ -469,6 +474,117 @@ describe("provider pair link pipeline", function()
                         output .. "/" .. leaf, "modification"), label)
                 end
             end
+        end
+    end)
+
+    -- No staged provider sibling, archive stage, or captured-output file.
+    local function assert_no_temporaries(label)
+        for _, entry in ipairs(listing(output)) do
+            assert.falsy(entry:find(".stage.tmp.", 1, true) or
+                entry:find(".archive-stage.", 1, true) or
+                entry:find(".titan-temporary", 1, true) or
+                entry:find("archive-validation", 1, true), label .. ": " .. entry)
+        end
+        assert.is_nil(lfs.attributes(output .. "/pkg.so"), label)
+        assert.is_nil(lfs.attributes(output .. "/pkg.a"), label)
+    end
+
+    it("reports the earlier pipeline failure when the later link fails first",
+       function()
+        if platform.windows then pending("Unix paired provider pipeline"); return end
+        local _, uname = shell(workspace, "uname -s")
+        if not uname:match("Linux") then
+            pending("usable shared jobserver transport with the host GNU Make")
+            return
+        end
+        -- The archive-backed link fails and finishes while the DSO link is
+        -- still held open; the DSO link or its validation then fails.
+        for _, case in ipairs({
+            { environment = { TITAN_TEST_FAIL_LINK = "both" },
+              message = "failed to link library 'pkg' (exit, 86)" },
+            { environment = {
+                  TITAN_TEST_FAIL_LINK = "image",
+                  TITAN_TEST_PROVIDER_FAIL = "validate_library_image_fresh:pkg.so",
+              },
+              message = "injected validate_library_image_fresh failure for pkg.so" },
+        }) do
+            case.environment.TITAN_TEST_LINK_HOLD = "image-end"
+            local ok, result = under_make(2, case.environment,
+                "--jobs", "4", "pkg.left", "pkg.right")
+            assert.falsy(ok, result)
+            assert.truthy(result:find(case.message, 1, true), result)
+            assert.falsy(result:find("archive validation image", 1, true), result)
+            local trace = lines(events)
+            assert.truthy(position(trace, "image-end") <
+                position(trace, "dso-end"), table.concat(trace, " "))
+            assert_no_temporaries(case.message)
+        end
+    end)
+
+    it("drains live links, cleans up, and re-raises an interrupt", function()
+        if platform.windows then pending("Unix paired provider pipeline"); return end
+        local _, uname = shell(workspace, "uname -s")
+        local cases = {
+            { mode = "serial", signal = "TERM", number = 15 },
+            { mode = "serial", signal = "HUP", number = 1 },
+            -- The restored SIGINT action is the Lua interpreter's
+            -- `interrupted!` error rather than signal termination.
+            { mode = "serial", signal = "INT", status = 1,
+              message = "interrupted!" },
+        }
+        if uname:match("Linux") then
+            cases[#cases + 1] = { mode = "overlap", signal = "TERM", number = 15 }
+        end
+        for _, case in ipairs(cases) do
+            local label = case.mode .. " " .. case.signal
+            remove_tree(output)
+            os.remove(events .. ".release")
+            local wait_links, start
+            if case.mode == "serial" then
+                prepare_build({ TITAN_TEST_LINK_HOLD = "release" },
+                    "--jobs", "1", "pkg.left", "pkg.right")
+                start = quote(titanc_script) .. " > run.out 2>&1 & " ..
+                    "runner=$!; echo $runner > titanc.pid; "
+                wait_links = "dso-start"
+            else
+                prepare_build({ TITAN_TEST_LINK_HOLD = "release" },
+                    "--jobs", "4", "pkg.left", "pkg.right")
+                write_file(workspace .. "/parent.mk",
+                    "all:\n\t+@" .. titanc_script ..
+                    " & echo $$! > titanc.pid; wait $$!\n")
+                start = "env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL " ..
+                    "-u MAKEOVERRIDES -u GNUMAKEFLAGS make --no-print-directory " ..
+                    "-j2 -f parent.mk > run.out 2>&1 & runner=$!; "
+                wait_links = "image-start"
+            end
+            local ok, result = shell(workspace, "rm -f titanc.pid; " .. start ..
+                "n=0; while ! grep -q '^" .. wait_links .. "$' " ..
+                quote(events) .. " 2>/dev/null && [ $n -lt 600 ]; do " ..
+                "sleep 0.1; n=$((n + 1)); done; sleep 0.3; " ..
+                "kill -" .. case.signal .. " $(cat titanc.pid); sleep 0.5; " ..
+                "touch " .. quote(events .. ".release") .. "; " ..
+                "wait $runner; echo \"status=$?\"; cat run.out")
+            assert.truthy(ok, result)
+            local trace = lines(events)
+            -- Every started link ran to completion before titanc exited.
+            assert.truthy(position(trace, "dso-end"), label .. ": " .. result)
+            assert.equal(position(trace, "image-start") ~= nil,
+                position(trace, "image-end") ~= nil, label)
+            if case.mode == "serial" then
+                assert.truthy(result:find("status=" ..
+                    (case.status or 128 + case.number), 1, true),
+                    label .. ": " .. result)
+                assert.truthy(result:find(case.message or "", 1, true),
+                    label .. ": " .. result)
+            else
+                assert.truthy(position(trace, "image-start"), label)
+                assert.truthy(result:find("Error " .. (128 + case.number), 1,
+                    true), label .. ": " .. result)
+                assert.falsy(result:lower():find("jobserver", 1, true), result)
+            end
+            assert.falsy(position(lines(validations),
+                "publish_provider_bundle pkg.so"), label)
+            assert_no_temporaries(label)
         end
     end)
 end)

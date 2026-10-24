@@ -391,7 +391,9 @@ links. Links run as native background jobs with captured output and a
 completion FIFO.
 
 * **One slot** (`--jobs 1`, `make -j1`, or an advertised but unusable
-  jobserver) runs the six steps strictly one after another.
+  jobserver) runs the six steps strictly one after another. Its links are
+  still background children, so the pipeline asks `jobs.open_slots` for the
+  cancellation guard even at one slot.
 * **Several local slots without a usable jobserver.** The DSO link holds the
   recipe's implicit slot while the compiler builds and verifies the archive.
   The archive-backed link still starts only after the DSO link has been
@@ -412,15 +414,25 @@ Overlap never reorders observable results. Each link's captured output is
 replayed at a fixed point: the DSO's after the archive build, and the image's
 after the DSO validations. `--verbose` announces the image command after the
 DSO's replayed output, regardless of when its slot was granted. The first
-failure in the step order above is the one reported. A failure, an unexpected
-error, or an `INT`/`TERM`/`HUP` interruption does four things: it waits for
-every running link, discards unreplayed output, returns borrowed tokens, and
-removes the whole staging directory. Neither public path changes, and no
-temporary sibling remains. An interruption is then re-raised under the
-restored signal handler. `spec/coder/provider_link_pipeline_spec.lua` drives
-these cases through real parent Make jobservers and injected link and
-validation failures. `spec/coder/lto_spec.lua` repeats its optimized provider
-pair under a shared jobserver.
+failure in the step order above is the one reported, even when a later step
+failed first in time; an image-slot acquisition error is likewise reported as
+an image-link failure after the DSO steps. A failure, an unexpected error, or
+an `INT`/`TERM`/`HUP` interruption does four things: it waits for every
+running link, discards unreplayed output, returns borrowed tokens, and removes
+the whole staging directory. Neither public path changes, and no temporary
+sibling remains. An interruption is returned to `titanc`, which closes its
+resolver (removing its own temporaries) and then re-raises the signal under
+the restored action: `TERM` and `HUP` terminate the process, while `INT`
+reaches the Lua interpreter's `interrupted!` handler. A PID-directed `INT`
+that arrives while a synchronous archive tool or fresh-process validator runs
+under `system()` can be ignored by the parent, as POSIX `system()` specifies.
+
+`spec/coder/provider_link_pipeline_spec.lua` drives these cases with real
+parent Make jobservers. It injects link and validation failures, including
+dual failures where the later step fails first, and sends `TERM`, `HUP`, and
+`INT` while links are live. The overlapped `TERM` case runs under a shared
+jobserver. `spec/coder/lto_spec.lua` repeats its optimized provider pair under
+a shared jobserver.
 
 ## Publication and installation
 

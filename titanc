@@ -725,7 +725,7 @@ else
             }
         end
 
-        local pair, pair_err = driver.link_provider_pair({
+        local pair, pair_err, pair_signal = driver.link_provider_pair({
             provider = provider,
             public_dso = provider_output,
             libnames = ofiles,
@@ -738,7 +738,13 @@ else
             module_names = output_names,
             parallelism = jobs,
         })
-        if not pair then
+        if pair_signal then
+            -- Remove the resolver's temporaries before re-raising.
+            driver.close_resolver_context(resolver_context)
+            resolver_context = nil
+            require("titan-compiler.jobs").propagate(pair_signal)
+            exit(pair_err)
+        elseif not pair then
             table.insert(errors, pair_err)
         else
             local published, publish_err =

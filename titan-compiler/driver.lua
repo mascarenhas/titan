@@ -8795,7 +8795,10 @@ function driver.link_provider_pair(request)
     end
     local archive = dso:gsub("[.]so$", ".a")
     local image = directory .. "/archive-validation.so"
-    local slots, slots_err = jobs.open_slots(request.parallelism)
+    -- Even one slot runs its links as background children, so the
+    -- cancellation guard must own INT/TERM/HUP for the whole transaction.
+    local slots, slots_err = jobs.open_slots(request.parallelism,
+        { guard = true })
     if not slots then
         remove_path(directory)
         return nil, slots_err
@@ -8935,7 +8938,12 @@ function driver.link_provider_pair(request)
         if overlap and slots.shared and archive_result and prepare_image() then
             while not links[1].reaped do
                 local granted, grant_err = slots:acquire_nowait()
-                if granted == nil then return grant_err end
+                if granted == nil then
+                    -- Reported after the DSO link and validations it follows.
+                    image_err = link_failure(
+                        "archive validation image", provider, grant_err)
+                    break
+                end
                 if granted then
                     start_image(true)
                     break
@@ -9020,8 +9028,10 @@ function driver.link_provider_pair(request)
     if signal or failure then
         remove_path(directory)
         if signal then
-            jobs.propagate(signal)
-            return nil, "provider link interrupted by signal " .. tostring(signal)
+            -- The caller releases its own resources, then calls
+            -- jobs.propagate(signal) under the restored signal action.
+            return nil, "provider link interrupted by signal " ..
+                tostring(signal), signal
         end
         return nil, failure
     end
