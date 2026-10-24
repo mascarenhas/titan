@@ -47,9 +47,11 @@ failed) and the error list; callers test `#errors == 0`. `loader` is the
 import callback (see [Imports](#imports-and-the-loader-protocol)); if
 omitted, a stub that fails every import is used. The other `options` fields
 are `completion`, `cache_adapter`, `prepare_ffi_header`,
-`target_profile_provider`, and `probe_service_provider`; the driver uses the
-last two to share the resolver-owned target profile and C probe service with
-dependency checks. The body runs under `xpcall`, so an owned probe service and
+`target_profile_provider`, `probe_service_provider`, and `reparse`; the driver
+uses the two providers to share the resolver-owned target profile and C probe
+service with dependency checks, and supplies `reparse` only when the resolver
+may batch C probes ([below](#speculative-probe-barrier-and-authoritative-recheck)).
+The body runs under `xpcall`, so an owned probe service and
 C header bundle are closed even when a checker invariant throws; the error is
 rethrown after cleanup.
 
@@ -69,6 +71,57 @@ returns `types.Invalid()`, the error-recovery type, so checking continues.
 When a duplicate refers to an earlier node, `location.format` adds that
 node's complete `filename:line:col`; this is essential when the declarations
 come from different contributors.
+
+### Speculative probe barrier and authoritative recheck
+
+With `options.reparse`, a resolver-owned `probe_service_provider`, and
+neither `analysis_only` nor a completion request, `checker.check` runs a
+speculative pass. Its symbol table carries `probe_speculation`; while
+`checkbodies` runs, eligible acceptance probes defer into the check's probe
+batch ([C FFI](c-ffi-expressions.md#speculative-batched-acceptance-probes)).
+Top-level checking, including imports, foreign environments and module
+variable initializers, stays synchronous.
+
+Immediately after `checkbodies`, before step 1 above, the batch flushes.
+Nothing that can publish a fact precedes this barrier: header dependencies,
+export validation, `makemoduletype`, interface registration, lowering,
+completion and the return to the loader all follow it. A nested import is
+checked by its own `checker.check` during the importer's top level, so it
+passes its own barrier before the importer receives its interface. If every
+verdict accepts, the pass continues unchanged: each deferred call returned
+exactly the fields a real success gives its consumer, so the pass executed
+the synchronous operation sequence.
+
+If any verdict rejects or fails, the pass stops at the barrier after its
+ordinary cleanup, and the check runs again authoritatively:
+
+1. `options.reparse()` assembles a fresh root from the same inputs; the
+   caller's root table is refilled so its reference stays valid.
+2. A fresh symbol table and error list rerun every step. Each top-level
+   import unit (`checker._checkimport_for`) replays the speculative pass's
+   recorded module type, errors and provenance, plus the `binary_modules`
+   entries and profile acquisition the unit added to the importer's state,
+   instead of calling the loader again. Nested checks, `driver.imported`
+   entries, dependency frames and loader registry writes therefore happen
+   once, as on the synchronous path. A diverging import sequence is an
+   internal compiler error.
+3. At the end of the import phase (`checker._finish_import_phase`) the
+   rerun asserts that every unit was replayed and restores `types.registry`
+   in place to the speculative pass's snapshot taken at that same point.
+   Every deferral follows the import phase, so that snapshot is the
+   synchronous registry; all later writes of the abandoned pass are discarded.
+4. Probes answer from completed results: published verdicts from memory,
+   nonpublishable runs from the batch's answers. The rerun never defers.
+
+The rerun is the synchronous check from the synchronous state, so its AST,
+diagnostics (text, location, order) and generated C are the synchronous
+path's. The remaining shared objects touched after the import phase are
+imported type graphs, which importer checks only normalize or memoize
+deterministically (portable C numeric metadata, owner prefix slots, enum
+carrier metadata from synchronous probes); this is the same invariant that
+lets several importers, and analysis followed by compilation, reuse one
+imported interface graph. An exception from the speculative pass propagates
+unchanged.
 
 ## The symbol table (`symtab.lua`)
 

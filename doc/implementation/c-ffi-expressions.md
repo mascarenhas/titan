@@ -327,9 +327,11 @@ request with its source digest, probe kind, header label, semantic outcome, cach
 tier (`service`, `analysis`, `persistent`, or `compiler`), repeat flag, and
 publication outcome. `execution_trace(event)` emits one event per physical
 compiler launch with its source digest, probe kind, header label,
-outcome, persistent-lookup/publication state, and optional nonnegative child
-wall time supplied by the compiler-I/O strategy. Observer exceptions are
-ignored and neither stream writes to stdout.
+outcome, persistent-lookup/publication state, `batch_kind` (`single` for a
+synchronous launch, `speculative` for a flushed batch member), and optional
+nonnegative child wall time supplied by the compiler-I/O strategy. Observer
+exceptions are ignored and neither stream writes to stdout. A batch member's
+semantic event is emitted when its batch flushes, in request order.
 
 The default workspace provider (`default_temp_provider` in `cprobe.lua`)
 reserves a private directory through the compiler I/O strategy's `tmpname`,
@@ -343,6 +345,64 @@ removed after each run and the directory is removed on every close path.
 
 Ordinary diagnostics show the first useful compiler line. Verbose mode also
 prints the full command, source, cache result, status, and captured diagnostic.
+
+### Speculative batched acceptance probes
+
+Most probe misses only accept or reject a construct whose Titan result the
+checker already computed. During `checkbodies`, a check whose resolver allows
+batching defers those misses into one `ProbeBatch` per checker invocation
+and continues as if the probe had passed. The batch is flushed at the
+checker's body barrier ([Checker](checker.md#speculative-probe-barrier-and-authoritative-recheck)).
+
+Eligibility is per call site. `c_operator` (`checker/calls.lua`
+`finish_c_operator`) and `unsafe_object_pointer`
+(`checker/type_syntax.lua` `_unsafe_c_pointer_conversion`) consume only
+acceptance and the source key, so their kinds are deferrable. The two
+extent validations, the automatic FAM extent and the fixed nominal C array
+extent in `checker/c_types.lua`, opt in with
+`validate_declaration_compatibilities(candidates, { deferrable = true })`.
+Enum-carrier selection and the enumerator range check inside the enum-support
+sequence choose checker state and stay synchronous, as do baselines,
+target-profile acquisition and every probe made during top-level checking.
+
+`Service:_run_source` defers only after the unchanged synchronous steps:
+render and hash the complete source at the call site from the context's
+immutable preamble and generated-header descriptor; look up memory, analysis
+and disk results; and, for a candidate miss, validate the context baseline.
+A hit or a failed baseline therefore returns exactly as before. A deferred
+request keeps its rendered source, key, cache path, kind and context; it is
+never rendered again. A repeated key while pending is a duplicate of the
+same request, separate from the completed `result_cache`, and observes the
+same memory-hit verbose event as the synchronous path. The call receives a
+success result carrying the real key.
+
+`ProbeBatch:flush` prepares each unique request with the synchronous path's
+`_prepare_execution` (workspace or staged generated-header workspace,
+numbered names, written source, argv), passes all argv arrays to the I/O
+strategy's optional `run_batch(commands, { jobs = N })`, and finishes each with
+`_finish_execution`: runner-result normalization, private-path diagnostic
+normalization and per-probe artifact removal. `_publish_result` then stores
+only real success and compiler rejection in memory, analysis and disk tiers.
+Assumed success, infrastructure failures, malformed results and
+cancellation are never published. Staged generated headers belong to the
+service until `Service:close`, so they outlive every reaped child.
+
+Every executed run that was not published, including synchronous baselines
+and enum queries of the same pass, is retained in `ProbeBatch.outcomes`.
+When a flush reports a failure the checker rechecks with a batch whose
+`answers` are those outcomes. Its `_run_source` consults them only where the
+synchronous path would launch the compiler, after the memory lookup and
+baseline gate; repeated requests reuse the last answer. A completed verdict
+is therefore never compiled twice.
+
+Batching requires `Service:batching()`: the runner is the I/O strategy
+itself, the service `jobs` cap is above one, and the strategy has the
+optional `run_batch` method. `compiler_io.new_sync()` implements it over the
+shared native scheduler in `jobs.lua`. Strategies without it, injected
+custom runners, `jobs = 1`, analysis and completion checks keep calling the
+runner synchronously. `run_batch` reaps every child before it returns; a
+caught INT/TERM/HUP is re-raised with `jobs.propagate` after per-probe
+cleanup, before any recheck.
 
 ## Contextual object-pointer conversion
 
