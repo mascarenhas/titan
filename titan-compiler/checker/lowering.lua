@@ -90,12 +90,14 @@ function generic_erased_descriptor(typ, state)
     local cached = state.erased_descriptors[typ]
     if cached then return cached end
     local tag = typ._tag
-    if not types.contains_generic(typ)
-       and tag ~= "Type.Record" and tag ~= "Type.Union"
+    -- Owner-bearing descriptors always take the canonical path below, so only
+    -- the remaining tags need the generic-graph walk.
+    if tag ~= "Type.Record" and tag ~= "Type.Union"
        and tag ~= "Type.Interface" and tag ~= "Type.Field"
        and tag ~= "Type.Variant" and tag ~= "Type.StaticMethod"
        and tag ~= "Type.Method" and tag ~= "Type.ModuleMember"
-       and tag ~= "Type.ModuleVariable" and tag ~= "Type.Module" then
+       and tag ~= "Type.ModuleVariable" and tag ~= "Type.Module"
+       and not types.contains_generic(typ) then
         state.erased_descriptors[typ] = typ
         return typ
     end
@@ -1526,8 +1528,11 @@ function generic_lower_erased_core(modname, tree, st, errors)
     tree._erased_registry = erased_registry
     generic_refresh_erased_annotations(tree)
     generic_freeze_declared_registry(tree, surface_registry, clone_memo)
-    types.assert_erased(tree._type)
-    for _, owner in pairs(erased_registry) do types.assert_erased(owner) end
+    -- Read-only validation batch: the graph is frozen and nothing below
+    -- mutates it, so these assertions share one complete-result memo.
+    local erased_memo = {}
+    types.assert_erased(tree._type, erased_memo)
+    for _, owner in pairs(erased_registry) do types.assert_erased(owner, erased_memo) end
     return declared, surface_registry
 end
 

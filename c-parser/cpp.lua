@@ -192,31 +192,24 @@ local function read_header_contents(filename, strategy)
 end
 
 local function content_identity(contents, physical, options)
-    local callback = options and options.cache_adapter
-        and options.cache_adapter.sha256_binary
-    local digest
-    if callback then
-        local ok, result = pcall(callback, contents)
-        if not ok and type(result) ~= "string" then error(result, 0) end
-        if ok and type(result) == "string" and #result == 32 then
-            digest = result:gsub(".", function(byte) return ("%02x"):format(byte:byte()) end)
-        end
-    end
-    if not digest then digest = sha256.hex(contents) end
+    local adapter = options and options.cache_adapter
+    local digest = sha256.hex_via(adapter and adapter.sha256_binary, contents)
     return "c-header-file-v2:sha256:" .. digest .. ";" .. physical
 end
 
-function cpp.header_file_identity(contents, path, strategy, read_state)
+-- `options.cache_adapter.sha256_binary`, when supplied, computes the content
+-- digest for first loads exactly as it does for revalidation.
+function cpp.header_file_identity(contents, path, strategy, read_state, options)
     strategy = strategy or default_io
     count_header(strategy, "file_hashes")
     local physical = read_state and read_state.physical_identity or physical_header(path, strategy)
     -- Supplied bytes without a certified read boundary retain no observation;
     -- final validation must freshly read them before enabling metadata reuse.
     local observation = read_state and cpp.copy_header_observation(read_state.observation)
-    return content_identity(contents, physical), observation
+    return content_identity(contents, physical, options), observation
 end
 
-function cpp.header_input_identity(kind, path, strategy)
+function cpp.header_input_identity(kind, path, strategy, options)
     strategy = strategy or default_io
     if kind == "file" then
         local contents, err = read_file_contents(path, strategy)
@@ -224,7 +217,7 @@ function cpp.header_input_identity(kind, path, strategy)
             return "c-header-file-v2:unreadable:" ..
                 cpp.header_search_identity(path, nil, strategy), err
         end
-        local identity = cpp.header_file_identity(contents, path, strategy)
+        local identity = cpp.header_file_identity(contents, path, strategy, nil, options)
         return identity
     elseif kind == "search" then
         return cpp.header_search_identity(path, nil, strategy)
@@ -1036,7 +1029,7 @@ local function forced_header_candidates(operand, cwd, incdirs, strategy)
 end
 
 local function scan_forced_headers(forced, incdirs, base_defines, cwd,
-                                   strategy)
+                                   strategy, identity_options)
     local dependencies = {}
     local dependency_identities = {}
     local search_inputs = {}
@@ -1056,7 +1049,8 @@ local function scan_forced_headers(forced, incdirs, base_defines, cwd,
 
     ctx.header_dependency_observer = function(path, contents, read_state)
         path = cpp.absolute_lookup_path(path, cwd, strategy)
-        local identity, observation = cpp.header_file_identity(contents, path, strategy, read_state)
+        local identity, observation = cpp.header_file_identity(
+            contents, path, strategy, read_state, identity_options)
         append_manifest(manifest, "file", path, identity)
         local previous = dependency_identities[path]
         if previous and previous ~= identity then
@@ -1234,7 +1228,8 @@ local function completed_forced_configuration(configuration)
     -- it remains provider-local. Persistent caches own extracted declarations
     -- only; a fresh provider rescans forced inputs before header-cache reuse.
     local scanned
-    scanned, err = scan_forced_headers(configuration.forced, base.incdirs, base.defines, cwd, config.io)
+    scanned, err = scan_forced_headers(configuration.forced, base.incdirs,
+        base.defines, cwd, config.io, { cache_adapter = adapter })
     if not scanned then return nil, err end
     scanned.incdirs, scanned.base_defines = copy_incdirs(base.incdirs), copy_map(base.defines)
     local defines

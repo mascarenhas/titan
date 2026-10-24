@@ -1214,3 +1214,28 @@ third
         end)
     end)
 end)
+
+describe("C header identities with a digest adapter", function()
+    local sha256 = require "titan-compiler.sha256"
+
+    it("match the pure-Lua identity for first loads and input identities", function()
+        local path = temporary.name()
+        local contents = "typedef int header_item;\n\0binary tail\n"
+        local file = assert(io.open(path, "wb"))
+        assert(file:write(contents))
+        assert(file:close())
+        local digested = 0
+        local options = { cache_adapter = { sha256_binary = function(bytes)
+            digested = digested + 1
+            return require("titan")._sha256_binary(bytes)
+        end } }
+        local plain = cpp.header_file_identity(contents, path)
+        local native = cpp.header_file_identity(contents, path, nil, nil, options)
+        assert.equal(plain, native)
+        assert.equal(1, digested)
+        assert.truthy(plain:find(sha256.hex(contents), 1, true), plain)
+        assert.equal(plain, cpp.header_input_identity("file", path, nil, options))
+        assert.equal(2, digested)
+        assert(os.remove(path))
+    end)
+end)

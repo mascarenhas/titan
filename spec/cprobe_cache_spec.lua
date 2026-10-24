@@ -82,3 +82,39 @@ describe("C-probe version 2 result codec", function()
         assert.is_nil(cache.encode(result))
     end)
 end)
+
+describe("C-probe cache keys with a digest adapter", function()
+    local cprobe = require "titan-compiler.cprobe"
+    local sha256 = require "titan-compiler.sha256"
+    local support = require "titan"
+
+    local function service(adapter)
+        return setmetatable({ cache_directory = "/cache", cache_adapter = adapter },
+            cprobe.Service)
+    end
+
+    it("keep the pure-Lua key bytes and cache paths", function()
+        local source = "#include <stddef.h>\nint probe(void) { return 0; }\n\0tail"
+        local plain_path, plain_key = service(nil):_cache_location(source)
+        local native_path, native_key = service({
+            sha256_binary = support._sha256_binary,
+        }):_cache_location(source)
+        assert.equal(sha256.hex(source), plain_key)
+        assert.equal(plain_key, native_key)
+        assert.equal(plain_path, native_path)
+    end)
+
+    it("fall back for transport errors and propagate cancellation", function()
+        assert.equal(sha256.hex("x"), service({
+            sha256_binary = function() error("busy") end,
+        }):_digest("x"))
+        assert.equal(sha256.hex("x"), service({
+            sha256_binary = function() return "short" end,
+        }):_digest("x"))
+        local cancelled = {}
+        local cancelling = service({ sha256_binary = function() error(cancelled, 0) end })
+        local ok, err = pcall(cancelling._digest, cancelling, "x")
+        assert.is_false(ok)
+        assert.equal(cancelled, err)
+    end)
+end)
