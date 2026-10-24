@@ -391,50 +391,136 @@ of one workspace must stay sequential.
 ### Busted partitions
 
 `make busted-test`, `luarocks test` (the rockspec `test` command) and Windows
-`rock-test` all enter `spec/support/run_rock_tests.sh`. An exact unfiltered run,
-with no `BUSTED_FILTER` and no appended Busted arguments, has three phases:
+`rock-test` all enter `spec/support/run_rock_tests.sh`. An exact unfiltered
+run, with no `BUSTED_FILTER` and no appended Busted arguments, hands every
+classified spec file to `spec/support/run_parallel_compiler_tests.sh`. A Busted
+filter or appended Busted argument selects the ordinary single-process route; a
+Titan-only filter leaves the partitioned run enabled.
 
-1. the retained runtime/packaging specs (`Makefile` `STDLIB_BUSTED_TESTS`,
-   `Makefile.win` `TITAN_ROCK_TEST_STDLIB_SPECS`), serially;
-2. the stdlib-dependent compiler integrations listed in
-   `spec/support/ci_stdlib_compiler_test_files.txt`, serially; then
-3. `spec/support/run_parallel_compiler_tests.sh`, which runs the four
-   compiler/language partitions of `spec/support/ci_compiler_test_groups.txt`
-   in private checkout copies.
+`spec/support/ci_compiler_test_groups.txt` (schema `titan-busted-timings-v2`) is
+the timing dataset. Its header records host, profile, date, and compiler; each
+row names one discovered `spec/**/*_spec.lua` file, its domain, its measured
+local validation seconds, and optional Linux CI covered seconds (`-` falls back
+to the local value). The `retained` domain is the runtime/packaging set
+(`Makefile` `STDLIB_BUSTED_TESTS`, `Makefile.win`
+`TITAN_ROCK_TEST_STDLIB_SPECS`), `stdlib` is
+`spec/support/ci_stdlib_compiler_test_files.txt`, and everything else is
+`compiler`. `spec/support/compiler_test_groups.lua` validates the complete
+classified union: a missing, stale, duplicate, or cross-domain row, or an
+unlisted `#stress` file, fails before any test starts. It plans any positive
+worker count with deterministic longest-processing-time assignment (heaviest
+file first, ties by path, to the least-loaded worker); each worker runs its
+files in path order. No shard identity is stored. Add a measured row with every
+new spec file and remeasure rows when costs change materially.
 
-The partition file assigns files longest-first by measured time to the
-least-loaded shard; rebalance it when costs change materially. Busted 2.3 has no
-native sharding. `TITAN_ROCK_TEST_JOBS=1` through `4` selects the number of
-concurrent workers, defaulting to four on Unix and three on Windows. Each worker
-gets `MAKEFLAGS=-j1`, `TITAN_JOBS=1`, and a private `TMPDIR` and ccache scratch,
-and uses the installed SDK read-only in place. The worker copies come from one
-snapshot of the prepared checkout that omits `.git`, `libbacktrace/.git`,
-`.lua`, and the selected `PREFIX` when that directory resolves inside the
-checkout. Tar reads exclusions as patterns, so a prefix whose checkout-relative
-name contains `*`, `?`, `[`, or a backslash is copied instead. Unix workers
-base their scratch on the caller's `TMPDIR`; Windows workers also get private
-TEMP/TMP below MSYS2's short `/tmp`, so nested fixture
-paths fit ordinary Win32 filename limits, and run under the native Job Object
-supervisor. Unix launches the shards in manifest order. On Windows the shard
-containing `spec/coder/parallel_compilation_spec.lua` runs first and alone, so
-its explicit native job bound does not multiply with another active shard; the
-other three shards then share the worker slots, which is why three workers
-suffice there. Local workers collect no LuaCov and never upload coverage. A
-Busted filter or appended Busted argument selects the ordinary single-process
-route; a Titan-only filter leaves sharding enabled.
+`EXCLUSIVE_SPECS` names the genuinely exclusive files:
+`spec/coder/parallel_compilation_spec.lua` and `spec/coder/jobserver_spec.lua`
+count overlapping real compiler processes against their own caps, drive real
+parent Make jobservers, or install process-global signal guards. They run
+alone in their own checkout copy after every ordinary worker and any
+overlapped native build have finished. Every other file, including the
+retained and stdlib-compiler specs, is scheduled per file; there is no serial
+prefix. Those files write only their own checkout (for example
+`libuv-build/` or checkout-root fixtures) or private temporary SDK and staging
+trees, so all workers share the installed SDK read-only.
 
-On Unix `rock-test` runs `busted-test` and then `titan-stdlib-test`; on Windows
-it builds and runs the native aggregate first. Both Windows Busted launchers
-(`run_rock_tests.sh` and the worker launcher in `run_parallel_compiler_tests.sh`)
-preload `luv` before Busted's per-file isolation. The library owns its native
-loop through its first module table, so that table must stay loaded while
-Busted restores `package.loaded` between files.
+`TITAN_ROCK_TEST_JOBS` (default four, any positive integer) sets the number of
+ordinary workers, capped at the number of ordinary files. Each worker owns a
+private copy of the prepared checkout, `TMPDIR`, ccache scratch, and tagged
+log. It runs one Busted process per file with `MAKEFLAGS=-j1` and
+`TITAN_JOBS=1`, removes checkout-root generated artifacts between files,
+records one PASS or FAIL row per file, and continues after a failed file.
+`TITAN_SOURCE_GIT_ROOT` lets `rockspec_spec.lua` read the real checkout's Git
+inventory from its `.git`-less copy. The copies come from one snapshot of the
+prepared checkout that omits `.git`, `libbacktrace/.git`, `.lua`, and the
+selected `PREFIX` when that directory resolves inside the checkout. Tar reads
+exclusions as patterns, so a prefix whose checkout-relative name contains `*`,
+`?`, `[`, or a backslash is copied instead. Unix workers base their scratch on
+the caller's `TMPDIR`; Windows workers also get private TEMP/TMP below MSYS2's
+short `/tmp`, so nested fixture paths fit ordinary Win32 filename limits, and
+run under the native Job Object supervisor.
+
+On Unix the ordinary workers are the targets of an ephemeral GNU Make
+3.81-compatible work graph with ASCII phony names, run with `-k` so every
+worker drains after a failure. The workers share one job pool with the
+optional native-aggregate build target. The launcher joins an inherited usable
+jobserver; otherwise it keeps an explicit `-j` word from `MAKEFLAGS`, including
+`-j1`; otherwise it seeds a fresh pool of `TITAN_JOBS` slots (default four).
+Each Busted worker holds one slot. The native build target is ordered first;
+its `titan-stdlib-test-build` sub-make and `titanc` processes borrow the
+remaining slots. A four-slot budget therefore runs four units in total, not
+four Busted workers plus four compilers, and `TITAN_JOBS=8` alone never widens
+an inherited four-slot pool. On Windows the launcher keeps its FIFO scheduler:
+the exclusive shard runs first and alone, then the ordinary shards share
+`TITAN_ROCK_TEST_JOBS` slots, so the exclusive files' explicit native job
+bounds never multiply with another active shard.
+
+At the end the launcher requires exactly one result row for every planned
+file, prints `Per-file Busted summary: passed=... failed=... total=...` and one
+`FAILED spec file:` line per failure, and exits nonzero if any file, worker, or
+required row failed. HUP, INT, and TERM terminate the work graph, the native
+build, and every worker's process group, killing TERM-ignoring descendants
+after a short grace period, then remove the scratch tree. Local workers collect
+no LuaCov and never upload coverage.
+
+On Unix `rock-test` runs that partitioned Busted phase with the native
+aggregate build overlapped inside its pool, then the native phase:
+`titan-stdlib-test-run-parallel`, or the focused `titan-stdlib-test-run` leaf
+when `TITAN_FILTER` is set. The native run starts only after every Busted
+worker and the build have finished. A Busted failure does not suppress the
+native phase, a failed native build skips only the native run, and the target
+fails when either phase failed. A focused Busted run builds the aggregate
+afterwards instead. On Windows `rock-test` builds and runs the native aggregate
+first, then the Busted phase, and likewise reports both statuses. Both Windows
+Busted launchers (`run_rock_tests.sh` and the worker launcher in
+`run_parallel_compiler_tests.sh`) preload `luv` before Busted's per-file
+isolation. The library owns its native loop through its first module table, so
+that table must stay loaded while Busted restores `package.loaded` between
+files.
+
+### Parallel native aggregate runs
+
+`make titan-stdlib-test-run-parallel` runs one complete prebuilt aggregate as
+owner groups through `spec/support/run_parallel_stdlib_tests.sh`. The plan
+derives from `TITAN_STDLIB_TEST_ROOTS` through `make -f
+spec/support/stdlib_test_modules.mk print-stdlib-test-owner-schedule`. That
+manifest annotates owners with measured validation durations
+(`TITAN_STDLIB_TEST_SECONDS_<owner>`; an unlisted owner counts one second) and
+timing guards (`TITAN_STDLIB_TEST_GUARD_<owner> := 1`). Ordinary owners are
+assigned by the same longest-processing-time rule to `TITAN_TEST_JOBS` groups
+(default four, any positive integer; one is serial). Each group executes the
+same binary from the repository root with one `--filter=^<owner>[.]test_` per
+owner (Lua patterns, never regex alternation), its own `TMPDIR` and
+`TITAN_TEST_ROOT`, its own log and process group, and the `TITAN_TEST_TIMEOUT`
+supervisor. A failing group does not stop the others.
+
+The guarded owners then run alone in one group, with no other group, Busted
+worker, or native build running. They are `timer.tests` (millisecond ticker
+cadence), `net.tests` (short transfer windows), `ssl.tests` (bounded
+backpressure turns), `http.tests` (30–200 ms TLS and idle deadlines),
+`websocket.tests` (continuous backpressure duration and read-step deadlines),
+and `os.tests` (wall-clock comparisons). `async.tests`, `thread.tests`, and
+`uv.runtime_tests` use phase barriers or multi-second safety deadlines and stay
+ordinary; the 15-second runtime-shutdown oracle keeps its explicit filtered CI
+step. Deadlines, retries, and case selection are unchanged.
+
+`check_stdlib_test_output.lua --union` audits every group's log as an
+unfiltered run of its planned owners, then the union: every root planned
+exactly once, no case reported by two groups, all selected cases terminal,
+classified skips only, and consistent totals. The concatenated group logs
+become `TITAN_TEST_RUN_LOG` and the root inventory `TITAN_TEST_RUN_ROOTS`. The
+target rejects `TITAN_FILTER`; `titan-stdlib-test-run` remains the focused
+single-invocation leaf, and `make titan-stdlib-test` builds and then runs the
+parallel target unless `TITAN_FILTER` is set. Native coverage
+(`titan-native-coverage-run`), the CI sanitizer gates, and Windows keep serial
+aggregate runs because they share coverage counters, timing ownership, or one
+workspace.
 
 ### Platform portability and complete execution
 
 `Makefile.win` provides the same build/run leaf targets through
 `spec/support/windows_stdlib_tests.sh`. It compiles every root, with up to
-`TITAN_JOBS` (default 1) concurrent generated-C object compilations, using the
+`TITAN_JOBS` (default four) concurrent generated-C object compilations, using the
 native CLANG64/UCRT SDK in a marked, disposable local NTFS workspace. The
 workspace contains a private SDK copy, test sources, authored child fixtures,
 generated objects, logs, and scratch paths. Test sources retain their

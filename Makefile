@@ -19,6 +19,7 @@ make_shell_quote_value = '$(subst ','"'"',$(value $(1)))'
 # provider dependencies. Choose it before Make expands the test graph.
 TITAN_TEST_GOALS := test rock-test busted-test stdlib-test stdlib-busted-test \
 	titan-stdlib-test titan-stdlib-test-build titan-stdlib-test-objects titan-stdlib-test-run \
+	titan-stdlib-test-run-parallel \
 	titan-native-coverage titan-native-coverage-build titan-native-coverage-run
 TITAN_BUILD_PROFILE ?= $(if $(filter $(TITAN_TEST_GOALS),$(MAKECMDGOALS)),validation,production)
 ifneq ($(TITAN_BUILD_PROFILE),production)
@@ -45,6 +46,8 @@ override PREFIX := $(abspath $(PREFIX))
 # spec/support/helpers.lua, so don't override this unless those consumers move
 # with it — the variable keeps the source/install paths below consistent.
 TITAN_MAKEFILE_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+# Graph-entry recursion re-reads this file even when invoked with -f elsewhere.
+TITAN_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
 LUA_VERSION      := 5.5.1
 LUA_ABI_VERSION  ?= 5.5
 LUA_DIR          := lua-$(LUA_VERSION)
@@ -257,6 +260,7 @@ TITAN_EXTRA_CPPFLAGS ?=
 TITAN_EXTRA_CFLAGS   ?=
 TITAN_EXTRA_LDFLAGS  ?=
 TITAN_NO_LINE_DIRECTIVES ?=
+TITAN_JOBS ?= 4
 export CLANG_FORMAT TITAN_EXTRA_CPPFLAGS TITAN_EXTRA_CFLAGS \
 	TITAN_EXTRA_LDFLAGS TITAN_NO_LINE_DIRECTIVES
 # Keep every Titan compiler output in a separate, removable tree. Native
@@ -519,16 +523,90 @@ LIBBT_CLONE_STAMP := $(LIBBT_DIR)/.titan-cloned
 LIBBT_CONFIG_STAMP := $(LIBBT_DIR)/.titan-build.config
 STDLIB_COMPLETION_STAMP := $(TITAN_OUTPUT_DIR)/.titan-stdlib-complete
 
-# These wrappers indirectly launch recursive Make processes. The `+` recipe
-# marker preserves the parent jobserver; this guard keeps that marker from
-# turning Make's dry-run, query, or touch modes into real wrapper execution.
-RECURSIVE_WRAPPER_GUARD = flags=$${MAKEFLAGS%% *}; case "$$flags" in -*) ;; *q*) exit 1 ;; *n*|*t*) exit 0 ;; esac;
+# These wrappers indirectly launch recursive Make processes or titanc. The `+`
+# recipe marker preserves the parent jobserver; this guard keeps that marker
+# from turning Make's dry-run, query, or touch modes into real wrapper
+# execution. Mode letters appear as GNU Make 4's leading flag word (`kn`) or,
+# in GNU Make 3.81 when a long option is present, as a dash word (`-nk`).
+# Only words made of no-argument flag letters count: 3.81 passes `NAME=value`
+# overrides without `--` when no flag is present, and option arguments such
+# as `-Onone` or `-I/tmp/include` may contain n, q, or t.
+RECURSIVE_WRAPPER_GUARD = titan_mode=; set -f; set -- $$MAKEFLAGS; set +f; \
+	for titan_word do case "$$titan_word" in --) break ;; --*) ;; \
+	  *[!-BLRSdeijknpqrstvw]*) ;; *) titan_mode=$$titan_mode$$titan_word ;; esac; done; \
+	case "$$titan_mode" in *q*) exit 1 ;; *n*|*t*) exit 0 ;; esac;
+
+# Implementation notes: doc/implementation/build-script-audit.md#make-job-pool-and-titanc-recipes
+# Graph entry targets (stdlib, stdlib-objects, titan-stdlib-test-objects,
+# titan-stdlib-test-build) build an internal `<entry>-graph` target. When the
+# parsed MAKEFLAGS already show a job policy (GNU Make 4 `-jN`/`-j` or an
+# inherited jobserver) or a dry-run/query/touch mode, the entry depends on its
+# graph directly. Otherwise it recurses once, deciding the pool from the
+# recipe's MAKEFLAGS, because GNU Make 3.81 exposes neither -jN nor its
+# jobserver while parsing: an inherited jobserver or an explicit -j word (the
+# 3.81 unlimited `j` flag letter included) keeps the caller's policy,
+# including -j1; otherwise one pool of TITAN_JOBS slots is seeded.
+empty :=
+space := $(empty) $(empty)
+TITAN_MAKE_OPTION_WORDS := $(filter-out _titan_,$(subst |, ,$(firstword $(subst |--|, ,_titan_|$(subst $(space),|,$(strip $(MAKEFLAGS)))|))))
+titan_flag_word = $(if $(subst -,,$(subst B,,$(subst L,,$(subst R,,$(subst S,,$(subst d,,$(subst e,,$(subst i,,$(subst j,,$(subst k,,$(subst n,,$(subst p,,$(subst q,,$(subst r,,$(subst s,,$(subst t,,$(subst v,,$(subst w,,$(1))))))))))))))))))),,$(1))
+TITAN_MAKE_FLAG_LETTERS := $(foreach word,$(filter-out --%,$(TITAN_MAKE_OPTION_WORDS)),$(call titan_flag_word,$(word)))
+TITAN_MAKE_GRAPH_RECURSE := $(if $(or $(filter -j% --jobserver-auth=% --jobserver-fds=%,$(TITAN_MAKE_OPTION_WORDS)),$(findstring n,$(TITAN_MAKE_FLAG_LETTERS)),$(findstring q,$(TITAN_MAKE_FLAG_LETTERS)),$(findstring t,$(TITAN_MAKE_FLAG_LETTERS))),,1)
+TITAN_JOBS_CHECK = case $(call make_shell_quote,$(TITAN_JOBS)) in ''|0*|*[!0-9]*|?????????*) \
+	  echo 'TITAN_JOBS must be a positive integer' >&2; exit 2 ;; esac;
+TITAN_MAKE_POOL = $(TITAN_JOBS_CHECK) pool=-j$(TITAN_JOBS); \
+	set -f; set -- $$MAKEFLAGS; set +f; \
+	for word do case "$$word" in --) break ;; \
+	  -j*|--jobserver-auth=*|--jobserver-fds=*) pool= ;; --*) ;; \
+	  *[!-BLRSdeijknpqrstvw]*) ;; *j*) pool= ;; esac; done;
+TITAN_GRAPH_MAKEFLAGS = --no-print-directory -f $(call make_shell_quote,$(TITAN_MAKEFILE))
+
+# Cheap FORCE-guard completeness check for one module's `<stem>.parts`
+# companion: `titan-parts-v1 N`, then exactly the compiler-derived sibling
+# leaves (`.priv.h` only when split, part 0 `.c`/`.o`, then each nonzero
+# part's `.c`/`.o`). Every listed leaf must be a regular file. A missing,
+# malformed, or incomplete companion makes the whole module stale; the
+# compiler's `.titan.source` record remains the authoritative reuse record.
+CHECK_TITAN_PARTS_COMPANION = check_parts_companion() { \
+	stem=$$1; \
+	dir=$${stem%/*}; \
+	leaf=$${stem\#\#*/}; \
+	if test "$$dir" = "$$stem"; then dir=.; fi; \
+	parts_file="$$stem.parts"; \
+	test -f "$$parts_file" && test ! -L "$$parts_file" || return 1; \
+	{ \
+	  IFS=' ' read -r magic count extra || return 1; \
+	  test "$$magic" = "titan-parts-v1" && test -z "$$extra" || return 1; \
+	  case "$$count" in ''|0*|*[!0-9]*|?????*) return 1 ;; esac; \
+	  if test "$$count" -ge 2; then \
+	    IFS= read -r entry || return 1; \
+	    test "$$entry" = "$$leaf.priv.h" || return 1; \
+	    test -f "$$dir/$$entry" && test ! -L "$$dir/$$entry" || return 1; \
+	  fi; \
+	  for expected in "$$leaf.c" "$$leaf.o"; do \
+	    IFS= read -r entry || return 1; \
+	    test "$$entry" = "$$expected" || return 1; \
+	    test -f "$$dir/$$entry" && test ! -L "$$dir/$$entry" || return 1; \
+	  done; \
+	  idx=1; \
+	  while test "$$idx" -lt "$$count"; do \
+	    for expected in "$$leaf.part$$idx.c" "$$leaf.part$$idx.o"; do \
+	      IFS= read -r entry || return 1; \
+	      test "$$entry" = "$$expected" || return 1; \
+	      test -f "$$dir/$$entry" && test ! -L "$$dir/$$entry" || return 1; \
+	    done; \
+	    idx=$$((idx + 1)); \
+	  done; \
+	  if IFS= read -r trailing || test -n "$$trailing"; then return 1; fi; \
+	} < "$$parts_file"; \
+};
 
 .PHONY: all help lua luarocks libbacktrace libuv libuv-config llhttp \
 	check-llhttp-tools sqlite3 check-sqlite3-tools openssl openssl-config check-openssl-tools \
 	check-system-openssl invalid-openssl-mode lpeglabel \
 	check-libuv-tools runtime \
-	stage-titan-bootstrap install-compiler-sdk install-titan-sdk publish-titan-sdk stdlib stdlib-objects install-stdlib \
+	stage-titan-bootstrap install-compiler-sdk install-titan-sdk publish-titan-sdk \
+	stdlib stdlib-graph stdlib-objects stdlib-objects-graph install-stdlib \
 	install publish-stdlib \
 	rock-test test rock-build \
 	clean clean-stdlib clean-lua clean-luarocks clean-libbacktrace clean-libuv \
@@ -1247,7 +1325,13 @@ STDLIB_COMPILER_ENV = CC=$(call make_shell_quote,$(CC)) \
 	TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))) \
 	TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS) $(STDLIB_OPENSSL_LDFLAGS)))
 
-stdlib-objects: $(foreach module,$(STDLIB_MODULES),$(call stdlib_outputs,$(module))) ## Compile standard-library objects without linking a provider
+stdlib-objects: ## Compile standard-library objects without linking a provider
+ifeq ($(TITAN_MAKE_GRAPH_RECURSE),1)
+	+@$(TITAN_MAKE_POOL) $(MAKE) $(TITAN_GRAPH_MAKEFLAGS) $$pool stdlib-objects-graph
+else
+stdlib-objects: stdlib-objects-graph
+endif
+stdlib-objects-graph: $(foreach module,$(STDLIB_MODULES),$(call stdlib_outputs,$(module)))
 
 # Implementation notes: doc/implementation/build-script-audit.md#standard-library-object-graph
 # A real object target owns its generated C and headers, including the exact
@@ -1260,30 +1344,41 @@ $(call stdlib_stem,$(1)).o: FORCE $(filter titan/$(1).titan titan/$(1)/%.titan,$
 	$(STDLIB_C_INPUTS_$(1)) $(STDLIB_COMPILER_PREREQS) \
 	$(STDLIB_TOOL_PREREQS) | $(STDLIB_NATIVE_PREREQS) $(STDLIB_BOOTSTRAP_PREREQ) \
 	$(STDLIB_RUNTIME_ARCHIVE_PREREQ) $(STDLIB_PLATFORM_PREREQS)
-	@set -e; \
+	+@$$(RECURSIVE_WRAPPER_GUARD) set -e; \
+	$$(CHECK_TITAN_PARTS_COMPANION) \
 	stale=0; \
 	newer=$$(call make_shell_quote,$$(filter-out FORCE,$$?)); \
 	test -z "$$$$newer" || stale=1; \
 	for output in $(call stdlib_outputs,$(1)); do \
 	  test -f "$$$$output" && test ! -L "$$$$output" || stale=1; \
 	done; \
+	check_parts_companion "$(call stdlib_stem,$(1))" || stale=1; \
 	if test "$$$$stale" = 1; then \
 	  echo "==> Compiling stdlib module titan.$(1)"; \
-	  rm -f "$$@"; \
+	  rm -f "$$@" "$(call stdlib_stem,$(1)).parts"; \
 	  unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
-	  $$(STDLIB_COMPILER_ENV) $$(TITANC) --output $$(call make_shell_quote,$$(TITAN_OUTPUT_DIR)) --source-first --incremental -j1 -c titan.$(1); \
+	  $$(STDLIB_COMPILER_ENV) $$(TITANC) --output $$(call make_shell_quote,$$(TITAN_OUTPUT_DIR)) --source-first --incremental -j$$(TITAN_JOBS) -c titan.$(1); \
 	  for output in $(call stdlib_outputs,$(1)); do \
 	    test -f "$$$$output" && test ! -L "$$$$output" || { \
 	      echo "ERROR: stdlib compilation did not produce $$$$output" >&2; exit 1; \
 	    }; \
 	  done; \
+	  check_parts_companion "$(call stdlib_stem,$(1))" || { \
+	    echo "ERROR: stdlib compilation did not produce $(call stdlib_stem,$(1)).parts" >&2; exit 1; \
+	  }; \
 	fi
 $(filter-out $(call stdlib_stem,$(1)).o,$(call stdlib_outputs,$(1))): $(call stdlib_stem,$(1)).o
 	@test -f "$$@" && test ! -L "$$@"
 endef
 $(foreach module,$(STDLIB_MODULES),$(eval $(call stdlib_object_rule,$(module))))
 
-stdlib: $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_SHIMS) ## Build the paired standard-library provider
+stdlib: ## Build the paired standard-library provider
+ifeq ($(TITAN_MAKE_GRAPH_RECURSE),1)
+	+@$(TITAN_MAKE_POOL) $(MAKE) $(TITAN_GRAPH_MAKEFLAGS) $$pool stdlib-graph
+else
+stdlib: stdlib-graph
+endif
+stdlib-graph: $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_SHIMS)
 
 $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_SHIMS): $(STDLIB_COMPLETION_STAMP)
 	@test -f "$@" && test ! -L "$@" || { \
@@ -1298,7 +1393,7 @@ $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_MODULE_OBJECTS) \
 		$(STDLIB_NATIVE_PREREQS) $(STDLIB_BOOTSTRAP_PREREQ) \
 		$(STDLIB_TOOL_PREREQS) | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
 		$(STDLIB_PLATFORM_PREREQS)
-	@set -e; \
+	+@$(RECURSIVE_WRAPPER_GUARD) set -e; \
 	stale=0; \
 	newer=$(call make_shell_quote,$(filter-out FORCE,$?)); \
 	test -z "$$newer" || stale=1; \
@@ -1318,7 +1413,7 @@ $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_MODULE_OBJECTS) \
 	  rm -rf $(addsuffix .dSYM,$(STDLIB_SOS)) \
 		$(addsuffix .dSYM,$(STDLIB_QUALIFIED_SOS)); \
 	  unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
-	  $(STDLIB_COMPILER_ENV) $(TITANC) --output $(call make_shell_quote,$(TITAN_OUTPUT_DIR)) --source-first --incremental \
+	  $(STDLIB_COMPILER_ENV) $(TITANC) --output $(call make_shell_quote,$(TITAN_OUTPUT_DIR)) --source-first --incremental -j$(TITAN_JOBS) \
 	    $(STDLIB_ROOTS) -X $(STDLIB_EXTRA_OBJECTS); \
 	  for output in $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_SHIMS); do \
 	    test -f "$$output" && test ! -L "$$output" || { \
@@ -1374,6 +1469,7 @@ TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/$(TITAN_STDLIB_TEST_PROGRAM_OUT
 # native profile across all 29 test roots, including fresh child compilers.
 # Focused gates may set a lower bound.
 TITAN_TEST_TIMEOUT ?= 600
+TITAN_TEST_JOBS ?= 4
 # One run's merged output, audited afterwards against the root inventory
 # written beside it. Concurrent filtered runs of one built executable need
 # distinct logs (and their own TMPDIR); the defaults are the shared
@@ -1433,15 +1529,26 @@ STDLIB_BUSTED_TESTS := \
 	spec/minicoro_spec.lua \
 	spec/rockspec_spec.lua spec/titan_install_spec.lua
 
+# Implementation notes: doc/implementation/test-runner.md#busted-partitions
+# The unfiltered invocation schedules every retained, stdlib-compiler, and
+# compiler spec per file across isolated checkout workers that share one Make
+# job pool. rock-test also asks it to build the native aggregate inside that
+# pool and record the build status for the native phase.
+ROCK_TEST_BUSTED = $(TITAN_TEST_COMPILER_ENV) BUSTED=$(call make_shell_quote_value,BUSTED) \
+	BUSTED_FILTER=$(call make_shell_quote_value,BUSTED_FILTER) \
+	TITAN_ROCK_TEST_STDLIB_SPECS=$(call make_shell_quote_value,STDLIB_BUSTED_TESTS) \
+	MAKE=$(call make_shell_quote,$(MAKE)) TITAN_JOBS=$(call make_shell_quote,$(TITAN_JOBS)) \
+	TITAN_ROCK_TEST_INTERNAL=1 \
+	bash spec/support/run_rock_tests.sh $(EXTRA_TEST_FLAGS)
+TITAN_ROCK_TEST_NATIVE_STATUS = $(abspath $(TITAN_TEST_BUILD_DIR))/.rock-test-native-build.status
+
 .PHONY: busted-test stdlib-busted-test stdlib-test \
-	titan-stdlib-test-build titan-stdlib-test-objects titan-stdlib-test-run titan-stdlib-test
+	titan-stdlib-test-build titan-stdlib-test-build-graph \
+	titan-stdlib-test-objects titan-stdlib-test-objects-graph \
+	titan-stdlib-test-run titan-stdlib-test-run-parallel titan-stdlib-test
 
 busted-test: ## Run retained Busted specs, optionally with BUSTED_FILTER
-	$(TITAN_TEST_COMPILER_ENV) BUSTED=$(call make_shell_quote_value,BUSTED) \
-		BUSTED_FILTER=$(call make_shell_quote_value,BUSTED_FILTER) \
-		TITAN_ROCK_TEST_STDLIB_SPECS=$(call make_shell_quote_value,STDLIB_BUSTED_TESTS) \
-		TITAN_ROCK_TEST_INTERNAL=1 \
-		bash spec/support/run_rock_tests.sh $(EXTRA_TEST_FLAGS)
+	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) $(ROCK_TEST_BUSTED)
 
 stdlib-busted-test: ## Run retained stdlib/runtime Busted specs without coverage
 	$(TITAN_TEST_COMPILER_ENV) BUSTED=$(call make_shell_quote_value,BUSTED) \
@@ -1473,6 +1580,7 @@ $(TITAN_TEST_CONFIG_STAMP): FORCE
 	if test -r "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; \
 	else \
 	  rm -f $(TITAN_TEST_MODULE_OBJECTS) \
+	    $(foreach module,$(TITAN_TEST_MODULES),$(call titan_test_stem,$(module)).parts $(call titan_test_stem,$(module)).priv.h $(call titan_test_stem,$(module)).part*.c $(call titan_test_stem,$(module)).part*.o) \
 	    $(TITAN_TEST_NATIVE_OBJECTS) $(TITAN_TEST_BUILD_DIR)/ssl_allocator_fixture.o \
 	    $(TITAN_TEST_LINUX_FAULT_OUTPUTS) \
 	    $(TITAN_TEST_BUILD_DIR)/ssl_error_strings.o $(TITAN_TEST_BUILD_DIR)/os_descriptor_limit.o \
@@ -1485,25 +1593,36 @@ define titan_test_object_rule
 $(call titan_test_stem,$(1)).o: FORCE $(TITAN_TEST_SOURCES_$(1)) $(TITAN_TEST_C_INPUTS_$(1)) \
 	$(foreach dependency,$(TITAN_TEST_IMPORTS_$(1)),$(call titan_test_outputs,$(dependency))) \
 	$(TITAN_TEST_COMPILER_PREREQS) $(TITAN_TEST_PROVIDER_PREREQS) $(TITAN_TEST_CONFIG_STAMP)
-	@set -e; stale=0; \
+	+@$$(RECURSIVE_WRAPPER_GUARD) set -e; stale=0; \
+	$$(CHECK_TITAN_PARTS_COMPANION) \
 	newer=$$(call make_shell_quote,$$(filter-out FORCE,$$?)); \
 	test -z "$$$$newer" || stale=1; \
-	for output in $(call titan_test_outputs,$(1)); do test -f "$$$$output" || stale=1; done; \
+	for output in $(call titan_test_outputs,$(1)); do test -f "$$$$output" && test ! -L "$$$$output" || stale=1; done; \
+	check_parts_companion "$(call titan_test_stem,$(1))" || stale=1; \
 	if test "$$$$stale" = 1; then \
-	  rm -f "$$@"; \
+	  rm -f "$$@" "$(call titan_test_stem,$(1)).parts"; \
 	  ( cd $$(call make_shell_quote,$$(TITAN_TEST_BUILD_DIR)); \
-	    $$(TITAN_TEST_COMPILER_ENV) $$(TEST_TITANC) --output . --test --incremental -j1 -c \
+	    $$(TITAN_TEST_COMPILER_ENV) $$(TEST_TITANC) --output . --test --incremental -j$$(TITAN_JOBS) -c \
 	      --tree $$(call make_shell_quote,$$(abspath spec/stdlib/titan)) $(1) ); \
 	  for output in $(call titan_test_outputs,$(1)); do \
-	    test -f "$$$$output" || { echo "ERROR: test compilation did not produce $$$$output" >&2; exit 1; }; \
+	    test -f "$$$$output" && test ! -L "$$$$output" || { echo "ERROR: test compilation did not produce $$$$output" >&2; exit 1; }; \
 	  done; \
+	  check_parts_companion "$(call titan_test_stem,$(1))" || { \
+	    echo "ERROR: test compilation did not produce $(call titan_test_stem,$(1)).parts" >&2; exit 1; \
+	  }; \
 	fi
 $(filter-out $(call titan_test_stem,$(1)).o,$(call titan_test_outputs,$(1))): $(call titan_test_stem,$(1)).o
-	@test -f "$$@"
+	@test -f "$$@" && test ! -L "$$@"
 endef
 $(foreach module,$(TITAN_TEST_MODULES),$(eval $(call titan_test_object_rule,$(module))))
 
-titan-stdlib-test-objects: $(TITAN_TEST_MODULE_OBJECTS) ## Compile native test modules without linking the runner
+titan-stdlib-test-objects: ## Compile native test modules without linking the runner
+ifeq ($(TITAN_MAKE_GRAPH_RECURSE),1)
+	+@$(TITAN_MAKE_POOL) $(MAKE) $(TITAN_GRAPH_MAKEFLAGS) $$pool titan-stdlib-test-objects-graph
+else
+titan-stdlib-test-objects: titan-stdlib-test-objects-graph
+endif
+titan-stdlib-test-objects-graph: $(TITAN_TEST_MODULE_OBJECTS)
 
 $(TITAN_TEST_BUILD_DIR)/async_foreign_work.h: spec/fixtures/stdlib/native/async_foreign_work.h $(TITAN_TEST_CONFIG_STAMP)
 	cp "$<" "$@"
@@ -1597,16 +1716,22 @@ $(TITAN_TEST_BUILD_DIR)/os_process_host_child: spec/fixtures/stdlib/native/os_pr
 $(TITAN_TEST_EXECUTABLE): FORCE $(TITAN_TEST_MODULE_OBJECTS) \
 		$(TITAN_TEST_FIXTURE_OUTPUTS) $(TITAN_TEST_COMPILER_PREREQS) \
 		$(TITAN_TEST_PROVIDER_PREREQS) $(TITAN_TEST_CONFIG_STAMP)
-	@set -e; \
+	+@$(RECURSIVE_WRAPPER_GUARD) set -e; \
 	newer=$(call make_shell_quote,$(filter-out FORCE,$?)); \
 	if test -n "$$newer" || test ! -f "$@"; then \
 	  cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); \
-	  $(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --output . --test --incremental --no-uv-bootstrap \
+	  $(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --output . --test --incremental --no-uv-bootstrap -j$(TITAN_JOBS) \
 	    --tree $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
 	    $(TITAN_STDLIB_TEST_ROOTS) -X async_foreign_work.o fs_fixture.o uv_stdio_probe.o; \
 	fi
 
-titan-stdlib-test-build: $(TITAN_TEST_EXECUTABLE) ## Build every native Titan stdlib test into one incremental executable
+titan-stdlib-test-build: ## Build every native Titan stdlib test into one incremental executable
+ifeq ($(TITAN_MAKE_GRAPH_RECURSE),1)
+	+@$(TITAN_MAKE_POOL) $(MAKE) $(TITAN_GRAPH_MAKEFLAGS) $$pool titan-stdlib-test-build-graph
+else
+titan-stdlib-test-build: titan-stdlib-test-build-graph
+endif
+titan-stdlib-test-build-graph: $(TITAN_TEST_EXECUTABLE)
 
 # The aggregate and its children run outside <prefix>/bin. Give them the
 # selected installation's Lua paths instead of their executable-relative defaults.
@@ -1641,8 +1766,39 @@ titan-stdlib-test-run: ## Run the built native suite, optionally with TITAN_FILT
 	  $(call make_shell_quote_value,TITAN_FILTER); \
 	audit=$$?; test "$$status" = 0 || exit "$$status"; exit "$$audit"
 
+# The unfiltered composition runs the complete inventory through the parallel
+# owner-group runner; TITAN_FILTER keeps one focused leaf invocation.
 titan-stdlib-test: titan-stdlib-test-build ## Build and run all native Titan stdlib tests
-	$(MAKE) titan-stdlib-test-run
+	@if test -n $(call make_shell_quote_value,TITAN_FILTER); then \
+	  $(MAKE) --no-print-directory titan-stdlib-test-run; \
+	else \
+	  $(MAKE) --no-print-directory titan-stdlib-test-run-parallel; \
+	fi
+
+# Implementation notes: doc/implementation/test-runner.md#parallel-native-aggregate-runs
+# One complete prebuilt aggregate runs as TITAN_TEST_JOBS ordinary owner
+# groups, then the timing-guarded owners alone; the union is audited.
+titan-stdlib-test-run-parallel: ## Run the built native suite in parallel owner groups, then timing-guarded owners alone
+	@if test -n $(call make_shell_quote_value,TITAN_FILTER); then \
+	  echo 'ERROR: titan-stdlib-test-run-parallel runs the complete inventory; use titan-stdlib-test-run with TITAN_FILTER' >&2; \
+	  exit 2; \
+	fi
+	@$(TITAN_TEST_COMPILER_ENV) \
+	LUA_PATH_5_5="$$( $(TEST_LUA) -E -e 'io.write(package.path)' )" \
+	LUA_CPATH_5_5="$$( $(TEST_LUA) -E -e 'io.write(package.cpath)' )" \
+	TEST_LUA=$(call make_shell_quote,$(TEST_LUA)) \
+	MAKE=$(call make_shell_quote,$(MAKE)) \
+	TITAN_TEST_MODULE_MANIFEST=$(call make_shell_quote,$(TITAN_TEST_MODULE_MANIFEST)) \
+	TITAN_TEST_EXECUTABLE=$(call make_shell_quote,$(TITAN_TEST_EXECUTABLE)) \
+	TITAN_TEST_TIMEOUT=$(call make_shell_quote,$(TITAN_TEST_TIMEOUT)) \
+	TITAN_TEST_JOBS=$(call make_shell_quote,$(TITAN_TEST_JOBS)) \
+	TITAN_TEST_RUN_LOG=$(call make_shell_quote,$(TITAN_TEST_RUN_LOG)) \
+	TITAN_TEST_RUN_ROOTS=$(call make_shell_quote,$(TITAN_TEST_RUN_ROOTS)) \
+	TITAN_TEST_BUILD_DIR=$(call make_shell_quote,$(abspath $(TITAN_TEST_BUILD_DIR))) \
+	TITAN_TEST_SOURCE_ROOT=$(call make_shell_quote,$(CURDIR)) \
+	TITAN_TEST_SDK_ROOT=$(call make_shell_quote,$(TITAN_TEST_INSTALL_ROOT)) \
+	TITAN_PROCESS_CHILD=$(call make_shell_quote,$(abspath $(TITAN_TEST_BUILD_DIR)/os_process_host_child)) \
+	bash spec/support/run_parallel_stdlib_tests.sh
 
 stdlib-test: stdlib-busted-test ## Run all stdlib/runtime tests without coverage
 	$(MAKE) titan-stdlib-test
@@ -1661,12 +1817,13 @@ TITAN_COVERAGE_EXECUTABLE = $(abspath $(TITAN_COVERAGE_BUILD_DIR))/$(TITAN_STDLI
 .PHONY: titan-native-coverage-build titan-native-coverage-run titan-native-coverage
 titan-native-coverage-build: $(STDLIB_NATIVE_PREREQS) $(TITAN_TEST_FIXTURE_OUTPUTS) ## Compile source-linked native tests with line coverage
 	@mkdir -p $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR))
-	@cd $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)); \
+	+@set -e; cd $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)); \
+	$(RECURSIVE_WRAPPER_GUARD) \
 	CC=$(call make_shell_quote,$(CC)) TITAN_BUILD_PROFILE=validation \
 	TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_COVERAGE_CPPFLAGS)) \
 	TITAN_EXTRA_CFLAGS='-O0 -fno-lto' \
 	TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip -O0 -fno-lto $(if $(filter Linux,$(HOST_OS)),-rdynamic) $(STDLIB_UV_LDFLAGS) $(STDLIB_OPENSSL_LDFLAGS))) \
-	$(TEST_TITANC) --output . --test --no-uv-bootstrap --coverage \
+	$(TEST_TITANC) --output . --test --no-uv-bootstrap --coverage -j$(TITAN_JOBS) \
 	  --coverage-module 'titan.*' --coverage-root $(call make_shell_quote,$(CURDIR)) \
 	  --coverage-gcov $(call make_shell_quote,$(TITAN_COVERAGE_GCOV)) \
 	  --coverage-output $(call make_shell_quote,$(abspath $(TITAN_COVERAGE_REPORT_DIR))) \
@@ -1694,8 +1851,38 @@ ifeq ($(TITAN_ROCK_TEST_PREPARE),1)
 rock-test: ## Prepare the isolated validation SDK, then run both test domains
 	$(MAKE) test
 else
-rock-test: busted-test ## Run retained Busted specs, then native Titan stdlib tests
-	$(MAKE) titan-stdlib-test
+# Implementation notes: doc/implementation/test-runner.md#busted-partitions
+# The unfiltered Busted phase also builds the native aggregate inside its job
+# pool. A Busted failure does not suppress the native phase; the native run
+# starts only after every Busted worker and the native build have finished.
+rock-test: ## Run retained Busted specs, then native Titan stdlib tests
+	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) \
+	status_file=$(call make_shell_quote,$(TITAN_ROCK_TEST_NATIVE_STATUS)); \
+	mkdir -p "$$(dirname "$$status_file")" && rm -f "$$status_file" || exit 1; \
+	busted_status=0; \
+	TITAN_ROCK_TEST_BUILD_NATIVE=1 TITAN_ROCK_TEST_NATIVE_STATUS="$$status_file" \
+	  $(ROCK_TEST_BUSTED) || busted_status=$$?; \
+	case "$$busted_status" in 129|130|143) rm -f "$$status_file"; exit "$$busted_status" ;; esac; \
+	build_status=0; \
+	if test -f "$$status_file"; then \
+	  read -r build_status < "$$status_file" || build_status=1; \
+	  rm -f "$$status_file"; \
+	else \
+	  $(MAKE) --no-print-directory titan-stdlib-test-build || build_status=$$?; \
+	fi; \
+	native_status=$$build_status; \
+	if test "$$build_status" = 0; then \
+	  if test -n $(call make_shell_quote_value,TITAN_FILTER); then \
+	    $(MAKE) --no-print-directory titan-stdlib-test-run || native_status=$$?; \
+	  else \
+	    $(MAKE) --no-print-directory titan-stdlib-test-run-parallel || native_status=$$?; \
+	  fi; \
+	else \
+	  echo "native stdlib test build failed (status $$build_status); the native run was skipped" >&2; \
+	fi; \
+	test "$$busted_status" = 0 || echo "Busted phase failed (status $$busted_status)" >&2; \
+	test "$$native_status" = 0 || echo "native stdlib phase failed (status $$native_status)" >&2; \
+	test "$$busted_status" = 0 && test "$$native_status" = 0
 endif
 
 test: lua luarocks ## Build/install the rock and run the suite via `luarocks test`
@@ -1712,7 +1899,7 @@ test: lua luarocks ## Build/install the rock and run the suite via `luarocks tes
 
 clean-stdlib: ## Remove standard-library artifacts before changing build inputs
 	rm -f $(STDLIB_MODULE_OBJECTS) $(STDLIB_SHIMS) $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_COMPLETION_STAMP)
-	rm -f $(STDLIB_GENERATED_FOREIGN_HEADERS) $(foreach module,$(STDLIB_MODULES),$(call stdlib_stem,$(module)).c)
+	rm -f $(STDLIB_GENERATED_FOREIGN_HEADERS) $(foreach module,$(STDLIB_MODULES),$(call stdlib_stem,$(module)).c $(call stdlib_stem,$(module)).parts $(call stdlib_stem,$(module)).priv.h $(call stdlib_stem,$(module)).part*.c $(call stdlib_stem,$(module)).part*.o)
 	rm -rf $(STDLIB_CONTAINER).dSYM
 
 clean: ## Remove generated build/test artifacts (keeps the Lua tree)
