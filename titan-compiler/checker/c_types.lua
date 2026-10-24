@@ -280,6 +280,11 @@ function checker._probe_for_c_types(st)
     return ensure_module_probe(st)
 end
 
+local ENUM_CARRIER_FIELDS = {
+    "spelling", "signed", "rank", "bits", "_c_numeric",
+    "_c_numeric_carriers", "_c_enum_validated",
+}
+
 function checker._ensure_c_enum_supported(
         st, typ, loc, errors, seen, spelling_only)
     if type(typ) ~= "table" then return true end
@@ -429,7 +434,12 @@ function checker._ensure_c_enum_supported(
         -- Preserve the selected expression/object carrier through later C
         -- operators. Titan-boundary coercions perform their own range check;
         -- normalizing here would change unsigned promotions and wraparound.
+        -- The enum may belong to an imported module, so a speculative pass
+        -- journals these fields before writing them.
         local carrier = selected.type
+        for _, field in ipairs(ENUM_CARRIER_FIELDS) do
+            checker._journal_write(st, resolved, field)
+        end
         resolved.spelling = carrier.spelling
         resolved.signed = carrier.signed
         resolved.rank = carrier.rank

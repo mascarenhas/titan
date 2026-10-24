@@ -483,13 +483,15 @@ end
 -- completion index) and returns its process record, or nil and an error;
 -- `launch_failed(position, err)` records a failed launch. A slot is acquired
 -- immediately before each launch and released only after its child was
--- reaped. After a channel failure or a caught signal no further position is
--- launched and every running child is reaped directly. Returns the first
--- unlaunched position, the batch failure text (if any), and the signal that
--- cancelled the batch (if any). `label` names the children in failures.
+-- reaped. After a channel failure, a caught signal or a raised `launch`, no
+-- further position is launched and every running child is reaped directly.
+-- Returns the first unlaunched position, the batch failure text (if any), the
+-- signal that cancelled the batch (if any), and `{ error = object }` holding
+-- what `launch` raised (if anything), which the caller rethrows unchanged
+-- after its own cleanup. `label` names the children in failures.
 function jobs.drive(slots, channel, count, launch, launch_failed, label)
     local pending, pending_count, next_position = {}, 0, 1
-    local failure, cancelled
+    local failure, cancelled, raised
     local function fail(message)
         failure = failure and (failure .. "; " .. message) or message
     end
@@ -499,12 +501,12 @@ function jobs.drive(slots, channel, count, launch, launch_failed, label)
             fail("failed to return a jobserver token: " .. tostring(release_err))
         end
     end
-    while (not failure and not cancelled and next_position <= count) or
-            pending_count ~= 0 do
+    local function stopped() return failure or cancelled or raised end
+    while (not stopped() and next_position <= count) or pending_count ~= 0 do
         -- Acquire immediately before each launch: the first active job uses
         -- this process's implicit slot, later ones borrow a token.
         local want_slot = false
-        while not failure and not cancelled and next_position <= count do
+        while not stopped() and next_position <= count do
             -- A pending signal wins over a simultaneous slot or completion
             -- event: check it before every acquisition and launch.
             cancelled = slots:cancelled()
@@ -518,7 +520,11 @@ function jobs.drive(slots, channel, count, launch, launch_failed, label)
                 break
             end
             local called, process, launch_err = pcall(launch, next_position)
-            if not called then launch_err, process = process, nil end
+            if not called then
+                raised = { error = process }
+                release_slot()
+                break
+            end
             if process then
                 pending[next_position] = process
                 pending_count = pending_count + 1
@@ -530,7 +536,7 @@ function jobs.drive(slots, channel, count, launch, launch_failed, label)
         end
         if pending_count ~= 0 then
             local completed, process
-            if not failure and not cancelled then
+            if not stopped() then
                 local wait_called, event, value = pcall(
                     slots.wait, slots, channel.file, want_slot)
                 if not wait_called then event, value = nil, event end
@@ -552,10 +558,11 @@ function jobs.drive(slots, channel, count, launch, launch_failed, label)
                         tostring(value))
                 end
             end
-            -- After a completion-channel failure or a cancellation, reap
-            -- tracked children directly instead of waiting for messages that
-            -- may never arrive. Each wrapper exits only after its command.
-            if (failure or cancelled) and not process then
+            -- After a completion-channel failure, a cancellation or a raised
+            -- launch, reap tracked children directly instead of waiting for
+            -- messages that may never arrive. Each wrapper exits only after
+            -- its command.
+            if stopped() and not process then
                 for position = 1, count do
                     if pending[position] then
                         completed, process = position, pending[position]
@@ -572,7 +579,7 @@ function jobs.drive(slots, channel, count, launch, launch_failed, label)
             end
         end
     end
-    return next_position, failure, cancelled
+    return next_position, failure, cancelled, raised
 end
 
 return jobs

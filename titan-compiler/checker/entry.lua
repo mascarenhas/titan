@@ -202,9 +202,9 @@ end
 
 -- Every deferral happens after the import phase, whose loader effects and
 -- registry state are therefore exactly the synchronous path's. A speculative
--- pass snapshots `types.registry` here; its recheck asserts that it replayed
--- every recorded unit and restores that snapshot in place, discarding every
--- registry write of the abandoned pass.
+-- pass snapshots `types.registry` here and starts its write journal; its
+-- recheck asserts that it replayed every recorded unit and restores that
+-- snapshot in place, discarding every registry entry of the abandoned pass.
 function checker._finish_import_phase(st)
     local speculation = st.probe_speculation
     if not speculation then return end
@@ -226,6 +226,31 @@ function checker._finish_import_phase(st)
         local entries = {}
         for name, owner in pairs(types.registry) do entries[name] = owner end
         speculation.registry = { object = types.registry, entries = entries }
+        speculation.journal = {}
+    end
+end
+
+-- The in-place writes that a pass can make after its import phase to a type
+-- object possibly owned by an imported module: an enum's compiler-selected
+-- carrier (`checker._ensure_c_enum_supported`) and a C declaration's
+-- fallback `_ffi_scope`. A speculative pass journals each written field's
+-- value from before its first write; a rejected pass's recheck restores them
+-- (`restore_journal`), so only authoritative writes survive. Implementation
+-- notes: doc/implementation/checker.md#speculative-probe-barrier-and-authoritative-recheck
+function checker._journal_write(st, object, field)
+    local journal = st.probe_speculation and st.probe_speculation.journal
+    if not journal then return end
+    local fields = journal[object]
+    if not fields then
+        fields = {}
+        journal[object] = fields
+    end
+    if fields[field] == nil then fields[field] = { object[field] } end
+end
+
+local function restore_journal(journal)
+    for object, fields in pairs(journal or {}) do
+        for field, prior in pairs(fields) do object[field] = prior[1] end
     end
 end
 
@@ -258,9 +283,11 @@ function checker.check(modname, ast, subject, filename, loader, options)
         modname, ast, subject, filename, loader, options, speculation)
     if not speculation.rejected then return module_type, errors end
 
-    -- A deferred probe failed: discard the speculative pass and check a
-    -- fresh parse authoritatively. Refill the caller's root so its reference
-    -- stays valid while every node is new.
+    -- A deferred probe failed: discard the speculative pass, undo its
+    -- journaled writes to shared type objects, and check a fresh parse
+    -- authoritatively. Refill the caller's root so its reference stays valid
+    -- while every node is new.
+    restore_journal(speculation.journal)
     local fresh, parse_error = options.reparse()
     if type(fresh) ~= "table" then
         error("internal compiler error: cannot reparse module '" .. modname ..

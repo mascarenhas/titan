@@ -1000,6 +1000,14 @@ local function normalize_runner_result(result, secondary)
             reason = "interrupted",
             diagnostic = result_diagnostic(result),
         }
+    elseif not has_status and started and not ok then
+        -- A launched child without a completed status (the stock runner's
+        -- capture, wait or batch-transport failure) is nonsemantic evidence;
+        -- keep the runner's own explanation visible.
+        local diagnostic = result_diagnostic(result)
+        return malformed_runner_result(result, diagnostic ~= "" and diagnostic
+            or "command runner returned no exit status for a started command",
+            started)
     elseif not has_status or not integral_exit_status(status) then
         local malformed = malformed_runner_result(result,
             "command runner returned an invalid exit status", started)
@@ -1863,7 +1871,9 @@ end
 -- One source, one lookup, one compiler invocation, one result. Candidate
 -- misses first establish whether the shared header preamble itself compiles.
 -- A `deferrable` acceptance candidate whose context batch is deferring is
--- recorded there after its lookup and baseline instead of being compiled.
+-- recorded there after its lookup and baseline instead of being compiled. An
+-- authoritative recheck's batch first replays the speculative pass's
+-- nonpublishable runs of the same source.
 function Service:_run_source(stage, source, kind, context, question, deferrable)
     kind = kind or "raw_source"
     local path, key = self:_cache_location(source)
@@ -1881,6 +1891,17 @@ function Service:_run_source(stage, source, kind, context, question, deferrable)
         -- The synchronous path's repeated request is a memory hit.
         self:_emit({ kind = "cache", cache = stage, hit = true, key = key })
         return batch:_defer_duplicate(pending, kind, context)
+    end
+    -- Each nonpublishable run that the speculative pass completed for this
+    -- source answers one request of the recheck, in that pass's order, before
+    -- any verdict published later in that pass can. That run already passed
+    -- its baseline. Once they are used up, the request looks up and launches
+    -- exactly as the synchronous path's retry does.
+    local answer = batch and batch:_answer(key)
+    if answer then
+        answer.key, answer.cache_path = key, path
+        self:_trace_semantic(key, kind, context, answer, "not_applicable")
+        return answer
     end
     local semantic, tier, lookup = self:_lookup_result(
         key, path, stage, context and context.module_name, question)
@@ -1921,19 +1942,13 @@ function Service:_run_source(stage, source, kind, context, question, deferrable)
         return batch:_defer(stage, source, key, path, kind, context, lookup,
             baseline and baseline.cached)
     end
-    local execution = batch and batch:_answer(key)
-    local answered = execution ~= nil
-    if not answered then
-        execution = self:_execute_source(stage, source, key,
-            kind:gsub("_", "-"), question, context and context.generated_header)
-        if batch then batch:_observe(key, execution) end
-    end
+    local execution = self:_execute_source(stage, source, key,
+        kind:gsub("_", "-"), question, context and context.generated_header)
+    if batch then batch:_observe(key, execution) end
     local run, publication = self:_publish_result(key, path, execution, question)
     run.key = key
     if baseline then run.baseline_cached = baseline.cached end
-    if not answered then
-        self:_trace_execution(key, kind, context, execution, lookup, publication)
-    end
+    self:_trace_execution(key, kind, context, execution, lookup, publication)
     self:_trace_semantic(key, kind, context, run, publication)
     return run
 end
@@ -1946,9 +1961,10 @@ end
 -- real verdicts, and reports whether every request was accepted. Every
 -- executed run that was not published (infrastructure failures, including
 -- synchronous ones such as baselines) is kept in `outcomes`; an authoritative
--- recheck receives them as `answers`, consumed at the point where the
--- synchronous path would launch the compiler, so a completed verdict is
--- never compiled twice.
+-- recheck receives them as `answers` and replays each once, in order,
+-- before any later cache entry answers that source, so a completed verdict
+-- is never compiled twice and a failed run is retried only where the
+-- synchronous path would retry it.
 -- Implementation notes: doc/implementation/c-ffi-expressions.md#speculative-batched-acceptance-probes
 local ProbeBatch = {}
 ProbeBatch.__index = ProbeBatch
@@ -1998,16 +2014,23 @@ function ProbeBatch:_observe(key, execution)
     outcomes[#outcomes + 1] = execution
 end
 
--- Completed nonpublishable runs of the speculative pass, in the order it
--- observed them; the last one keeps answering any further request.
+-- The next nonpublishable run of the speculative pass for `key`, in the order
+-- that pass observed them, or nil once they are all used.
 function ProbeBatch:_answer(key)
     local answers = self.answers and self.answers[key]
-    if not answers then return nil end
-    local position = math.min((self.answer_positions[key] or 0) + 1, #answers)
+    local position = (self.answer_positions[key] or 0) + 1
+    if not answers or position > #answers then return nil end
     self.answer_positions[key] = position
     return answers[position]
 end
 
+-- Raised errors keep their identity: a strategy cancellation from
+-- preparation or `run_batch` unwinds after every prepared probe's artifacts
+-- are removed. A result container that is not a table answers no command,
+-- so each prepared probe finishes as an infrastructure failure. A caught
+-- INT/TERM/HUP is recorded on the service and unwinds the check as an error
+-- after per-probe cleanup; `Service:close` delivers it once the workspaces
+-- are gone (a resolver closes its header bundle before its service).
 function ProbeBatch:flush()
     self.deferring = false
     local pending, requests = self.pending, self.requests
@@ -2015,27 +2038,37 @@ function ProbeBatch:flush()
     if #pending == 0 then return true end
     local service = self.service
     local prepared, commands = {}, {}
-    for index, request in ipairs(pending) do
-        local job, failed = service:_prepare_execution(request.stage,
-            request.source, request.key, (request.kind:gsub("_", "-")), nil,
-            request.context.generated_header)
-        if job then
-            commands[#commands + 1] = copy_array(job.argv)
-            job.command_index = #commands
+    local called, results, cancelled = pcall(function()
+        for index, request in ipairs(pending) do
+            local job, failed = service:_prepare_execution(request.stage,
+                request.source, request.key, (request.kind:gsub("_", "-")), nil,
+                request.context.generated_header)
+            if job then
+                commands[#commands + 1] = copy_array(job.argv)
+                job.command_index = #commands
+            end
+            prepared[index] = job or { failed = failed }
         end
-        prepared[index] = job or { failed = failed }
+        if #commands == 0 then return {} end
+        -- A strategy method, called directly like the synchronous runner.
+        return service.io:run_batch(commands, { jobs = service.jobs })
+    end)
+    if not called then
+        for _, job in ipairs(prepared) do
+            if not job.failed then
+                pcall(service._finish_execution, service, job, false, results)
+            end
+        end
+        error(results, 0)
     end
-    local results, cancelled = {}, nil
-    if #commands > 0 then
-        -- A strategy method, called directly like the synchronous runner so
-        -- strategy-owned cancellation keeps unwinding.
-        results, cancelled = service.io:run_batch(commands, { jobs = service.jobs })
-    end
+    local malformed = type(results) ~= "table" and
+        ("C probe batch runner returned a " .. type(results) ..
+            " instead of a result table") or nil
     local accepted = true
     for index, request in ipairs(pending) do
         local job = prepared[index]
-        local execution = job.failed or service:_finish_execution(
-            job, true, results[job.command_index])
+        local execution = job.failed or service:_finish_execution(job, true,
+            not malformed and results[job.command_index] or nil, malformed)
         self:_observe(request.key, execution)
         local run, publication = service:_publish_result(
             request.key, request.path, execution)
@@ -2056,16 +2089,26 @@ function ProbeBatch:flush()
                 request.run, request.publication)
         end
     end
-    -- Every child was reaped and every probe artifact removed; deliver a
-    -- caught INT/TERM/HUP under the restored action before any recheck.
-    jobs.propagate(cancelled)
+    if cancelled then
+        -- Never continue checking under a returning signal handler: unwind
+        -- to the service's owner, which closes it and then delivers.
+        service.cancelled_signal = cancelled
+        error("C probe batch interrupted by signal " .. tostring(cancelled), 0)
+    end
     return accepted
 end
 
+-- The stock native `run_batch` launches its own processes, so it stands in
+-- for the strategy only while the strategy's resolved `run` is the stock one
+-- too. A strategy that overrides `run`, directly or through its metatable,
+-- keeps its synchronous runner calls unless it supplies its own `run_batch`.
 function Service:batching()
     if not self.runner_is_strategy or self.jobs <= 1 then return false end
-    local readable, method = pcall(function() return self.io.run_batch end)
-    return readable and type(method) == "function"
+    local readable, run_batch, run = pcall(function()
+        return self.io.run_batch, self.io.run
+    end)
+    if not readable or type(run_batch) ~= "function" then return false end
+    return run_batch ~= default_io.run_batch or run == default_io.run
 end
 
 -- `answers` are a speculative pass's `outcomes`, for its authoritative recheck.
@@ -2365,7 +2408,7 @@ function Service:probe_operator(module_context, trait)
     return module_context:probe_operator(trait)
 end
 
-function Service:close()
+function Service:_close_workspaces()
     if self.closed and not self.workspace and not next(self.generated_workspaces or {}) then
         if self.close_error then return nil, self.close_error end
         return true
@@ -2404,6 +2447,18 @@ function Service:close()
         return nil, close_error
     end
     return true
+end
+
+-- A probe batch that caught INT/TERM/HUP unwound its check to this service's
+-- owner. Deliver that signal under the restored action only now, after the
+-- workspaces and staged headers are removed. The driver closes a resolver's
+-- C header bundle before its probe service.
+function Service:close()
+    local closed, close_error = self:_close_workspaces()
+    local signal = self.cancelled_signal
+    self.cancelled_signal = nil
+    jobs.propagate(signal)
+    return closed, close_error
 end
 
 Service.__close = function(self)

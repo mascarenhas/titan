@@ -7465,8 +7465,10 @@ function run_prepared_compiles(prepared, parallelism, verbose)
     local next_schedule, completion_err, cancelled = jobs.drive(
         slots, notification, #schedule, function(position)
             local entry = schedule[position]
-            local process, launch_err = launch_prepared_compile(
+            -- An unexpected Lua error fails only this job; the batch goes on.
+            local called, process, launch_err = pcall(launch_prepared_compile,
                 entry.job, verbose, notification, position)
+            if not called then process, launch_err = nil, process end
             entry.process = process
             return process, launch_err
         end, function(position, launch_err)
