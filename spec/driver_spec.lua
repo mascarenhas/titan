@@ -9157,14 +9157,14 @@ describe("Windows link response files", function()
         os.remove(response)
     end)
 
-    it("renders CRT quotes rather than cmd escapes with exact LF bytes", function()
+    it("renders GNU response quotes rather than cmd escapes with exact LF bytes", function()
         local contents = assert(platform.windows_response_contents({
             "", "plain.o", [=[C:\long path\file.o]=], [=[quote"inside.o]=],
             [=[trailing\]=], [=[a\"b]=], "%!^&|; ℙ.o",
         }))
         assert.equal([=[""
 "plain.o"
-"C:\long path\file.o"
+"C:\\long path\\file.o"
 "quote\"inside.o"
 "trailing\\"
 "a\\\"b"
@@ -9264,12 +9264,12 @@ describe("Windows link response files", function()
             files[#files + 1] = output
             command = assert(cdriver.split_shell_words(driver.CC))
             for _, argument in ipairs({ "-shared", "-o", output }) do
-                command[#command + 1] = argument
+                command[#command + 1] = argument:gsub("/", "\\")
             end
             for index = 1, 100 do
                 local name = root .. "/" .. string.rep("long_object_", 7) .. index .. ".o"
                 write(name, bytes)
-                command[#command + 1] = name
+                command[#command + 1] = name:gsub("/", "\\")
             end
             assert.is_true(#assert(platform.windows_command(command, false)) > 8191)
             local ok, term, code = driver.run_link_command(command, false, output)

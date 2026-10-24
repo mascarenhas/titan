@@ -140,9 +140,9 @@ function platform.windows_process_command(argv)
     return table.concat(words, " "), executable
 end
 
--- Clang's Windows response parser uses CRT quoting, not cmd.exe escaping.
--- One quoted argument per LF line also keeps empty arguments and trailing
--- backslashes intact. The caller owns binary publication and file lifetime.
+-- MSYS2 Clang uses GNU response-file quoting, not CRT or cmd.exe quoting.
+-- Quote every argument and escape both backslashes and quotes so native paths,
+-- empty arguments and trailing backslashes survive its response-file parser.
 function platform.windows_response_contents(argv)
     if type(argv) ~= "table" or #argv == 0 then
         return nil, "response arguments must be a nonempty argument array"
@@ -151,7 +151,7 @@ function platform.windows_response_contents(argv)
     for index = 1, #argv do
         local word, err = checked_word(argv[index], index, true)
         if not word then return nil, err end
-        words[index] = crt_argument(word)
+        words[index] = '"' .. word:gsub('[\\"]', '\\%0') .. '"'
     end
     for key in pairs(argv) do
         if type(key) ~= "number" or key < 1 or key > #argv or key % 1 ~= 0 then

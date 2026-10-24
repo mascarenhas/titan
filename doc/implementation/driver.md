@@ -2374,8 +2374,9 @@ Windows native links use `driver.run_link_command` to avoid the `cmd.exe`
 command-length limit as the number or length of object paths grows. The parsed
 `CC` command/wrapper prefix stays on the command line; the remaining compiler
 and linker arguments go into a unique sibling `.link.rsp` temporary beside the
-output. `platform.windows_response_contents` applies Windows CRT quoting
-without `cmd` escaping, one argument per LF line, and publication uses binary
+output. `platform.windows_response_contents` applies the GNU response-file
+quoting used by MSYS2 Clang (escaping backslashes and quotes), without `cmd`
+escaping, one argument per LF line, and publication uses binary
 mode. DLL providers, standalone/test providers and launchers, and executable
 validation links share this path. The temporary is removed after both successful
 and failed execution. Verbose mode prints the expanded logical command followed
