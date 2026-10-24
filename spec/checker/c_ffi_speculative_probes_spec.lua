@@ -64,6 +64,8 @@ local function check(modules, roots, jobs, options)
         jobs = jobs,
         io = options.io,
         analysis_only = options.analysis_only,
+        completion = options.completion,
+        output_root = options.output_root,
         transient_caches = options.cache_directory == nil,
         c_probe_execution_trace = function(event)
             executions[#executions + 1] = event
@@ -131,6 +133,35 @@ local function count(events, predicate)
 end
 
 local function speculative(event) return event.batch_kind == "speculative" end
+
+-- Each `FILE:LINE:COL: type error:` diagnostic of a report as "LINE:kind",
+-- in report order, with its kind reduced to a stable keyword.
+local function diagnostics(report)
+    local found = {}
+    for line in report:gmatch("[^\n]+") do
+        local row, message = line:match("[^:]+%.titan:(%d+):%d+: type error: (.*)")
+        if row then
+            local kind = message:find("transient failure", 1, true) and "transient"
+                or message:find("configured C compiler rejected", 1, true) and "rejected"
+                or message
+            found[#found + 1] = row .. ":" .. kind
+        end
+    end
+    return found
+end
+
+-- Temporarily replace fields of `target` around `body`.
+local function with_fields(target, replacements, body)
+    local saved = {}
+    for name, replacement in pairs(replacements) do
+        saved[name] = target[name]
+        target[name] = replacement
+    end
+    local results = table.pack(pcall(body))
+    for name in pairs(replacements) do target[name] = saved[name] end
+    if not results[1] then error(results[2], 0) end
+    return table.unpack(results, 2, results.n)
+end
 
 local ACCEPTED = header_module([[
 local function add(a: foreign spec_ok_t, b: foreign spec_ok_t): foreign int
@@ -231,7 +262,7 @@ describe("speculative batched acceptance probes", function()
         close(batched)
     end)
 
-    it("keep enum carriers, range checks and top-level probes synchronous",
+    it("keep enum carriers and top-level probes synchronous",
     function()
         local modules = { colors = header_module([[
 local start: foreign int = ffi.spec_three() + 1
@@ -368,23 +399,497 @@ end
         close(analysis)
         close(injected)
     end)
+
+    -- A fail-once/recover compiler: the synchronous path reports a failed
+    -- run once and retries the next request of the same source. The recheck
+    -- replays each recorded failure exactly once, in order, before a verdict
+    -- the speculative pass published later can answer that source.
+    it("replay each recorded probe failure once, like the synchronous retry",
+    function()
+        local returned = "types in return do not match, expected foreign int " ..
+            "but found invalid type"
+        local cases = {
+            -- Two deferred uses of one source, deduplicated into one run.
+            { root = "flaky", expected = { "3:transient", "3:" .. returned },
+              source = header_module([[
+local function first(a: foreign speculative_flaky_t, b: foreign speculative_flaky_t): foreign int
+  return a + b
+end
+local function second(a: foreign speculative_flaky_t, b: foreign speculative_flaky_t): foreign int
+  return a + b
+end
+]]) },
+            -- A top-level use fails; a later deferred use of the same source
+            -- succeeds while another deferred probe rejects.
+            { root = "flaky", top_level = true, expected = {
+                "2:transient",
+                "2:types in declaration of module variable seed do not match, " ..
+                    "expected foreign int but found invalid type",
+                "2:top level variable initialization must be constant",
+                "7:rejected", "7:" .. returned,
+              }, source = header_module([[
+local seed: foreign int = ffi.spec_flaky_value() + ffi.spec_flaky_value()
+local function again(): foreign int
+  return ffi.spec_flaky_value() + ffi.spec_flaky_value()
+end
+local function rejected(a: foreign speculative_reject_t, b: foreign speculative_reject_t): foreign int
+  return a * b
+end
+]]) },
+            -- The module's header baseline (its probes include the module's
+            -- generated FFI header) fails once, then recovers. A baseline
+            -- failure is reported at the module's foreign import.
+            { root = "speculative_flaky_baseline", expected = {
+                "1:transient", "9:rejected", "9:" .. returned,
+              }, source = header_module([[
+local function first(a: foreign spec_ok_t, b: foreign spec_ok_t): foreign int
+  return a + b
+end
+local function second(a: foreign spec_ok_t, b: foreign spec_ok_t): foreign int
+  return a - b
+end
+local function rejected(a: foreign speculative_reject_t, b: foreign speculative_reject_t): foreign int
+  return a * b
+end
+]]) },
+        }
+        for _, case in ipairs(cases) do
+            local modules = { [case.root] = case.source }
+            local sync = check(modules, { case.root }, 1)
+            local batched = check(modules, { case.root }, 4)
+            assert.same(case.expected, diagnostics(sync.report))
+            assert.equal(sync.report, batched.report)
+            assert.truthy(count(batched.executions, speculative) > 0)
+            if case.top_level then
+                -- The top-level and the deferred request are one source.
+                local failed, recovered
+                for _, event in ipairs(batched.executions) do
+                    if event.probe_kind == "c_operator" then
+                        if event.batch_kind == "single" then failed = event
+                        elseif event.outcome == "success" then recovered = event end
+                    end
+                end
+                assert.equal("infrastructure_failure", failed.outcome)
+                assert.equal(failed.key, recovered.key)
+            end
+            close(sync)
+            close(batched)
+        end
+    end)
+
+    it("keep a wide enumerator's range check synchronous", function()
+        local modules = { wide = header_module([[
+local function zero(): integer
+  return ffi.SPEC_WIDE_ZERO as integer
+end
+local function high(): integer
+  return ffi.SPEC_WIDE_HIGH as integer
+end
+local function rejected(a: foreign speculative_reject_t, b: foreign speculative_reject_t): foreign int
+  return a | b
+end
+]]) }
+        local sync = check(modules, { "wide" }, 1)
+        local batched = check(modules, { "wide" }, 4)
+        assert.equal(sync.report, batched.report)
+        assert.matches("C enumerator 'SPEC_WIDE_HIGH' is outside the range of lua_Integer",
+            sync.report, 1, true)
+        assert.falsy(sync.report:find("SPEC_WIDE_ZERO", 1, true))
+        assert.truthy(count(batched.executions, speculative) > 0)
+        -- One accepted and one rejected range check, both at their use.
+        for _, outcome in ipairs({ sync, batched }) do
+            local range_checks = 0
+            for _, event in ipairs(outcome.executions) do
+                if event.probe_kind == "declaration_compatibility" then
+                    range_checks = range_checks + 1
+                    assert.equal("single", event.batch_kind)
+                end
+            end
+            assert.equal(2, range_checks)
+        end
+        close(sync)
+        close(batched)
+    end)
+
+    it("report failing baselines and unrenderable conversions synchronously",
+    function()
+        local modules = {
+            -- Its probes include `speculative_broken_baseline.ffi.h`, whose
+            -- baseline the fixture compiler always rejects.
+            speculative_broken_baseline = header_module([[
+local function add(a: foreign spec_ok_t, b: foreign spec_ok_t): foreign int
+  return a + b
+end
+local function view(p: foreign *spec_item): foreign *spec_other
+  return p
+end
+]]),
+            anonymous = 'foreign import "' .. FIXTURE ..
+                '/speculative_anonymous.h"\n' .. [[
+local function anonymous(): foreign *spec_other
+  return ffi.spec_anonymous_first()
+end
+local function rejected(a: foreign speculative_reject_t, b: foreign speculative_reject_t): foreign int
+  return a * b
+end
+]],
+        }
+        local roots = { "speculative_broken_baseline", "anonymous" }
+        local sync = check(modules, roots, 1)
+        local batched = check(modules, roots, 4)
+        assert.equal(sync.report, batched.report)
+        local _, baseline_failures = sync.report:gsub(
+            "foreign header baseline failed", "")
+        assert.equal(2, baseline_failures)
+        assert.matches("cannot render anonymous C struct", sync.report, 1, true)
+        -- Nothing of the broken context is deferred; the other module's
+        -- rejection is, and its recheck renders the conversion again.
+        for _, event in ipairs(batched.executions) do
+            if event.batch_kind == "speculative" then
+                assert.equal("anonymous", event.module)
+            end
+        end
+        assert.truthy(count(batched.executions, speculative) > 0)
+        close(sync)
+        close(batched)
+    end)
+
+    it("follow ordered header contexts and header changes between invocations",
+    function()
+        local directory = assert(compiler_io.new_sync():tmpname())
+        os.remove(directory)
+        assert(lfs.mkdir(directory))
+        local first_header = directory .. "/speculative_first.h"
+        local second_header = directory .. "/speculative_second.h"
+        local function write_header(path, contents)
+            local file = assert(io.open(path, "wb"))
+            assert(file:write(contents))
+            assert(file:close())
+        end
+        local ok, err = pcall(function()
+            local function guarded(name, body)
+                return "#ifndef " .. name .. "\n#define " .. name .. "\n" ..
+                    body .. "#endif\n"
+            end
+            write_header(first_header, guarded("SPECULATIVE_FIRST_H",
+                '#include "' .. HEADER .. '"\ntypedef int spec_changing_t;\n'))
+            write_header(second_header, guarded("SPECULATIVE_SECOND_H",
+                '#include "' .. first_header .. '"\n' ..
+                "typedef spec_changing_t spec_second_t;\n"))
+            local modules = { changing = 'foreign import "' .. first_header ..
+                '"\nforeign import "' .. second_header .. '"\n' .. [[
+local function add(a: foreign spec_changing_t, b: foreign spec_second_t): foreign int
+  return a + b
+end
+local function view(p: foreign *spec_item): foreign *spec_other
+  return p
+end
+local function rejected(a: foreign speculative_reject_t, b: foreign speculative_reject_t): foreign int
+  return a * b
+end
+]] }
+            local before_sync = check(modules, { "changing" }, 1)
+            local before_batched = check(modules, { "changing" }, 4)
+            assert.equal(before_sync.report, before_batched.report)
+            assert.same({ "10:rejected", "10:types in return do not match, " ..
+                "expected foreign int but found invalid type" },
+                diagnostics(before_sync.report))
+            close(before_sync)
+            close(before_batched)
+            -- Physically change the first header between invocations.
+            write_header(first_header, guarded("SPECULATIVE_FIRST_H",
+                '#include "' .. HEADER .. '"\n' ..
+                "typedef struct spec_item spec_changing_t;\n"))
+            local after_sync = check(modules, { "changing" }, 1)
+            local after_batched = check(modules, { "changing" }, 4)
+            assert.equal(after_sync.report, after_batched.report)
+            assert.not_equal(before_sync.report, after_sync.report)
+            assert.truthy(count(after_batched.executions, speculative) > 0)
+            close(after_sync)
+            close(after_batched)
+        end)
+        remove_tree(directory)
+        assert(ok, err)
+    end)
+
+    -- A deferred rejection changes later checking of the consumer: the
+    -- abandoned pass types a pointer and reads an enum field that the
+    -- synchronous check never reaches. Imported graphs (including the
+    -- dependency's enum carrier state), interfaces and a later root's
+    -- generated C must still be the synchronous ones.
+    it("leave a source-imported dependency's graph as the synchronous check does",
+    function()
+        local modules = {
+            dep = header_module([[
+record Point
+  x: integer
+  y: integer
+end
+function Point:area(): integer
+  return self.x * self.y
+end
+interface Shape
+  function area(): integer
+end
+record Box<|T|>
+  item: T
+end
+function boxed<|T|>(item: T): Box<|T|>
+  return Box.new(item)
+end
+function shape(point: Point): Shape
+  return point
+end
+local function first_paint(): foreign *speculative_reject_paint
+  return ffi.spec_first_paint()
+end
+]]),
+            consumer = header_module([[
+local dep = import "dep.titan"
+local function area_of(shape: dep.Shape): integer
+  return shape:area()
+end
+function use(): integer
+  local box = dep.boxed(dep.Point.new(2, 3))
+  local next = dep.first_paint() + 1
+  return area_of(dep.shape(box.item)) + (next.color as integer)
+end
+]]),
+            later = [[
+local dep = import "dep.titan"
+function total(): integer
+  local box = dep.boxed(dep.Point.new(4, 5))
+  local shape: dep.Shape = box.item
+  return shape:area()
+end
+]],
+        }
+        -- The carrier state of dep's `spec_color`: the type of the `color`
+        -- field of the paint struct that dep's source-visible `first_paint`
+        -- returns.
+        local function color_state(outcome)
+            local seen, paint = {}, nil
+            local function visit(value)
+                if type(value) ~= "table" or seen[value] or paint then return end
+                seen[value] = true
+                if value._tag == "Type.CStruct" and type(value.fields) == "table" then
+                    for _, field in ipairs(value.fields) do
+                        if field.name == "color" then paint = value; return end
+                    end
+                end
+                for _, child in pairs(value) do visit(child) end
+            end
+            visit({ outcome.imported.dep.type, outcome.imported.dep.ast })
+            assert(paint, "dep exposes no paint struct")
+            local color
+            for _, field in ipairs(paint.fields) do
+                if field.name == "color" then color = types.resolve_c_typedef(field.type) end
+            end
+            assert.equal("Type.CInteger", color._tag)
+            return {
+                spelling = color.spelling, signed = color.signed,
+                rank = color.rank, bits = color.bits,
+                validated = color._c_enum_validated,
+            }
+        end
+        local roots = { "consumer", "later" }
+        local sync = check(modules, roots, 1)
+        local batched = check(modules, roots, 4)
+        assert.equal(sync.report, batched.report)
+        assert.matches("consumer:", sync.report, 1, true)
+        assert.matches("configured C compiler rejected", sync.report, 1, true)
+        assert.matches("later:$", sync.report)
+        assert.truthy(count(batched.executions, function(event)
+            return event.batch_kind == "speculative" and event.module == "consumer"
+        end) > 0)
+        -- The synchronous check never selects that enum's carrier, and the
+        -- abandoned pass leaves it unselected too.
+        assert.is_nil(color_state(sync).validated)
+        assert.same(color_state(sync), color_state(batched))
+        for _, name in ipairs({ "dep", "later" }) do
+            assert.equal(types.serialize(sync.imported[name].type),
+                types.serialize(batched.imported[name].type))
+        end
+        assert.equal(generated(sync, "later"), generated(batched, "later"))
+        close(sync)
+        close(batched)
+    end)
+
+    it("keep strategies that override run synchronous at four jobs", function()
+        local jobs = require "titan-compiler.jobs"
+        local modules = { mixed = MIXED }
+        local sync = check(modules, { "mixed" }, 1)
+        local entered = {}
+        local refused = {}
+        for _, name in ipairs({ "open_slots", "open_channel", "launch", "drive" }) do
+            refused[name] = function()
+                entered[#entered + 1] = name
+                error("native process transport entered: " .. name)
+            end
+        end
+        local cancellation = setmetatable({}, {
+            __tostring = function() return "injected runner cancellation" end,
+        })
+        local function is_probe(argv)
+            for _, argument in ipairs(argv) do
+                if argument:match("%d%d%d%d%d%d%-[%w%-]+%.c$") then return true end
+            end
+            return false
+        end
+        with_fields(jobs, refused, function()
+            for _, shape in ipairs({ "instance", "delegated" }) do
+                for _, cancel in ipairs({ false, true }) do
+                    local probes = 0
+                    local base = compiler_io.new_sync()
+                    local function run(_, argv, options)
+                        if is_probe(argv) then
+                            probes = probes + 1
+                            -- The first candidate after the header baseline.
+                            if cancel and probes == 2 then error(cancellation) end
+                        end
+                        return base:run(argv, options)
+                    end
+                    local strategy
+                    if shape == "instance" then
+                        strategy = compiler_io.new_sync()
+                        strategy.run = run
+                    else
+                        local overriding = compiler_io.new_sync()
+                        overriding.run = run
+                        strategy = setmetatable({}, { __index = overriding })
+                    end
+                    if cancel then
+                        local called, raised = pcall(check, modules, { "mixed" }, 4,
+                            { io = strategy })
+                        assert.is_false(called)
+                        assert.equal(cancellation, raised)
+                        assert.equal(2, probes)
+                    else
+                        local outcome = check(modules, { "mixed" }, 4, { io = strategy })
+                        assert.equal(0, count(outcome.executions, speculative))
+                        assert.equal(sync.report, outcome.report)
+                        -- The overriding runner answered every compilation.
+                        assert.equal(#sync.executions, probes)
+                        close(outcome)
+                    end
+                end
+            end
+        end)
+        assert.same({}, entered)
+        close(sync)
+
+        -- The driver's output-root wrapper overrides only `tmpname`, so the
+        -- stock runner still batches through it.
+        local output = assert(compiler_io.new_sync():tmpname())
+        os.remove(output)
+        assert(lfs.mkdir(output))
+        local ok, err = pcall(function()
+            local wrapped = check(modules, { "mixed" }, 4, { output_root = output })
+            assert.truthy(count(wrapped.executions, speculative) > 0)
+            assert.equal(sync.report, wrapped.report)
+            close(wrapped)
+        end)
+        remove_tree(output)
+        assert(ok, err)
+    end)
+
+    it("never defer the probes of a completion check", function()
+        local completion = require "titan-compiler.completion"
+        local source = ACCEPTED .. "function hole(): integer\n  return @\nend\n"
+        local caret = assert(source:find("@", 1, true)) - 1
+        local prepared = assert(completion.prepare("./accepted.titan",
+            source:sub(1, caret) .. source:sub(caret + 2), caret))
+        local outcome = check({ accepted = prepared.text }, { "accepted" }, 4,
+            { completion = prepared.request })
+        assert.truthy(#outcome.executions > 0)
+        assert.equal(0, count(outcome.executions, speculative))
+        assert.truthy(outcome.imported.accepted.completion)
+        close(outcome)
+    end)
+
+    -- A ledger, channel or log-cleanup failure after every child launched
+    -- still fails the whole batch: each deferred probe reports it, and no
+    -- verdict of that batch is published.
+    it("keep batch transport and cleanup failures visible and unpublished",
+    function()
+        local jobs = require "titan-compiler.jobs"
+        local one = header_module([[
+local function add(a: foreign spec_ok_t, b: foreign spec_ok_t): foreign int
+  return a + b
+end
+]])
+        local two = header_module([[
+local function add(a: foreign spec_ok_t, b: foreign spec_ok_t): foreign int
+  return a + b
+end
+local function sub(a: foreign spec_ok_t, b: foreign spec_ok_t): foreign int
+  return a - b
+end
+]])
+        local function faulted(fault, source, expected)
+            local overrides = {}
+            if fault == "release" or fault == "close" then
+                local open_slots = jobs.open_slots
+                overrides.open_slots = function(...)
+                    local slots, err = open_slots(...)
+                    if not slots then return nil, err end
+                    local method = slots[fault]
+                    slots[fault] = function(self)
+                        method(self)
+                        return nil, "injected " .. fault .. " failure"
+                    end
+                    return slots
+                end
+            elseif fault == "channel" then
+                local close_channel = jobs.close_channel
+                overrides.close_channel = function(channel)
+                    close_channel(channel)
+                    return nil, "injected channel failure"
+                end
+            else
+                local protected_remove = jobs.protected_remove
+                overrides.protected_remove = function(path)
+                    local removed, err = protected_remove(path)
+                    if not removed then return removed, err end
+                    return nil, "injected log failure"
+                end
+            end
+            local outcome = with_fields(jobs, overrides, function()
+                return check({ faulty = source }, { "faulty" }, 4)
+            end)
+            local service = outcome.context.probe_service
+            local keys = {}
+            for _, event in ipairs(outcome.executions) do
+                if event.batch_kind == "speculative" then
+                    assert.equal("infrastructure_failure", event.outcome, fault)
+                    assert.is_true(event.started, fault)
+                    assert.is_nil(service.result_cache[event.key], fault)
+                    keys[#keys + 1] = event.key
+                end
+            end
+            assert.equal(expected, #keys, fault)
+            local _, reported = outcome.report:gsub(
+                "the native C probe batch failed: [^\n]*injected " .. fault ..
+                    " failure", "")
+            assert.equal(expected, reported, outcome.report)
+            close(outcome)
+        end
+        for _, fault in ipairs({ "release", "close", "channel", "log" }) do
+            faulted(fault, two, 2)
+        end
+        -- One deferred probe takes the one-command branch.
+        faulted("close", one, 1)
+    end)
 end)
 
 -- The complete titanc path (folder sources, the driver's reparse closure,
--- `Sync:run_batch` and generated-C compilation) with one versus four jobs.
+-- `Sync:run_batch` and generated-C compilation) with one versus four jobs,
+-- launched through the compiler I/O process transport on every platform.
 describe("titanc speculative probe batches", function()
-    if platform.windows then
-        it("are exercised by the POSIX shell fixture", function()
-            pending("the fixture compiler is a POSIX shell script")
-        end)
-        return
-    end
     local installed_prefix = require "spec.support.installed_prefix"
     local PREFIX = installed_prefix.active()
-    local LUA = PREFIX .. "/bin/lua"
+    local LUA = PREFIX .. (platform.windows and "/bin/lua.exe" or "/bin/lua")
     local workspace
-
-    local function quote(text) return assert(cdriver.shell_quote(text)) end
 
     local function write(path, contents)
         local file = assert(io.open(path, "wb"))
@@ -400,28 +905,51 @@ describe("titanc speculative probe batches", function()
         return contents
     end
 
-    local function titanc(jobs, output, environment)
-        local command = "env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u TITAN_JOBS " ..
-            (environment or "") ..
-            " CC=" .. quote(PROBE_CC) ..
-            " TITAN_EXTRA_CPPFLAGS= TITAN_EXTRA_CFLAGS= TITAN_EXTRA_LDFLAGS=" ..
-            " TITAN_PROBE_CACHE_DISABLE=1 TITAN_ROCKS_ROOT=" .. quote(PREFIX) ..
-            " TITAN_RUNTIME_PREBUILT=1 " .. quote(LUA) .. " -e " ..
-            quote("package.path = " .. string.format("%q",
-                ROOT .. "/?.lua;" .. ROOT .. "/?/init.lua;") ..
-                " .. package.path") ..
-            " " .. quote(ROOT .. "/titanc") .. " --jobs " .. jobs ..
-            " -c -o " .. quote(output) .. " --tree " .. quote(workspace .. "/src") ..
-            " app 2>&1"
-        local pipe = assert(io.popen(command, "r"))
-        local text = assert(pipe:read("a"))
-        local ok = pipe:close()
-        -- Diagnostics name the source tree, never the output tree.
-        return ok == true, text
+    local function count_lines(path)
+        local _, lines = (read(path) or ""):gsub("\n", "")
+        return lines
+    end
+
+    -- One titanc run without a parent Make. Diagnostics name the source
+    -- tree, never the output tree.
+    local function titanc(jobs, output, options)
+        options = options or {}
+        local argv = {
+            "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKELEVEL",
+            "-u", "TITAN_JOBS",
+        }
+        for _, assignment in ipairs(options.environment or {}) do
+            argv[#argv + 1] = assignment
+        end
+        for _, argument in ipairs({
+            "CC=" .. probe_compiler(),
+            "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
+            "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_ROCKS_ROOT=" .. PREFIX,
+            "TITAN_RUNTIME_PREBUILT=1", LUA, "-e",
+            "package.path = " .. string.format("%q",
+                ROOT .. "/?.lua;" .. ROOT .. "/?/init.lua;") .. " .. package.path",
+            ROOT .. "/titanc", "--jobs", tostring(jobs), "-c", "-o", output,
+            "--tree", workspace .. "/src",
+        }) do
+            argv[#argv + 1] = argument
+        end
+        for _, argument in ipairs(options.arguments or {}) do
+            argv[#argv + 1] = argument
+        end
+        for _, root in ipairs(options.roots or { "app" }) do
+            argv[#argv + 1] = root
+        end
+        local result = compiler_io.new_sync():run(argv)
+        local text = result.output or result.diagnostic or ""
+        if platform.windows then text = text:gsub("\r\n", "\n") end
+        return result.ok == true, text
     end
 
     before_each(function()
         workspace = assert(compiler_io.new_sync():tmpname())
+        if platform.windows then
+            workspace = assert(platform.path.normalize(workspace))
+        end
         os.remove(workspace)
         assert(lfs.mkdir(workspace))
         assert(lfs.mkdir(workspace .. "/src"))
@@ -474,6 +1002,35 @@ end
         assert.matches("extra.titan", sync_output, 1, true)
         assert.equal(sync_output, batched_output)
         assert.falsy(read(workspace .. "/out-4/app/app.c"))
+    end)
+
+    it("reuse a valid dependency object without any new probe", function()
+        local state = workspace .. "/state"
+        assert(lfs.mkdir(state))
+        write(workspace .. "/src/dep.titan", ACCEPTED)
+        write(workspace .. "/src/app/app.titan", [[
+local dep = import "dep"
+function value(): integer
+  return dep.total()
+end
+]])
+        local environment = { "SPECULATIVE_PROBE_STATE=" .. state }
+        local built, built_output = titanc(4, workspace .. "/out",
+            { environment = environment, roots = { "dep" } })
+        assert.truthy(built, built_output)
+        local probes = count_lines(state .. "/probes")
+        assert.truthy(probes > 0)
+        local outputs = {}
+        for _, jobs in ipairs({ 1, 4 }) do
+            local ok, output = titanc(jobs, workspace .. "/out", {
+                environment = environment, arguments = { "--incremental" },
+            })
+            assert.truthy(ok, output)
+            assert.equal(probes, count_lines(state .. "/probes"), output)
+            outputs[#outputs + 1] = output
+        end
+        assert.equal(outputs[1], outputs[2])
+        assert.truthy(read(workspace .. "/out/app/app.o"))
     end)
 end)
 

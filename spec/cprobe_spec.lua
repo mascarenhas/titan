@@ -3528,6 +3528,32 @@ describe("speculative acceptance batches", function()
         local custom = new_fake_service({ jobs = 4 })
         assert.is_false(custom:batching())
         assert.is_true(custom:close())
+        -- The stock native batch stands in only for the stock runner: an
+        -- overridden `run`, on the instance or behind its metatable, keeps
+        -- synchronous runner calls unless `run_batch` is overridden too.
+        local function overriding_run(_, argv) return { started = false, ok = false, argv = argv } end
+        local instance = compiler_io.new_sync()
+        instance.run = overriding_run
+        local delegated_base = compiler_io.new_sync()
+        delegated_base.run = overriding_run
+        local owned_batch = setmetatable({
+            run_batch = function() return {} end,
+        }, { __index = delegated_base })
+        local output_root_wrapper = setmetatable({
+            tmpname = function() return nil, "unused" end,
+        }, { __index = compiler_io.new_sync() })
+        for _, case in ipairs({
+            { instance, false },
+            { setmetatable({}, { __index = delegated_base }), false },
+            { owned_batch, true },
+            { output_root_wrapper, true },
+        }) do
+            local candidate = assert(cprobe.new_service({
+                include_dirs = {}, jobs = 4, io = case[1],
+            }))
+            assert.equal(case[2], candidate:batching())
+            assert.is_true(candidate:close())
+        end
         local invalid, err = cprobe.new_service({ include_dirs = {}, jobs = 0 })
         assert.is_nil(invalid)
         assert.equal("jobs must be a positive integer", err)
@@ -3642,18 +3668,103 @@ describe("speculative acceptance batches", function()
         local recheck = deferring_context(service, batch.outcomes)
         local again_rejected = recheck:probe_unsafe_object_pointer(source, cpointer("rejected_s"))
         local again_missing = recheck:probe_unsafe_object_pointer(source, cpointer("missing_s"))
-        local repeated_missing = recheck:probe_unsafe_object_pointer(source, cpointer("missing_s"))
         assert.equal("rejected", again_rejected.status)
         assert.matches("rejected by test compiler", again_rejected.message, 1, true)
         assert.equal("infrastructure_failure", again_missing.status)
         assert.matches("could not be started", again_missing.message, 1, true)
-        assert.equal(again_missing.message, repeated_missing.message)
+        -- Completed verdicts and the recorded failure compiled nothing again.
         assert.equal(runs, #log.runs)
+        -- The recorded failure answered one request. A further use the
+        -- batch deduplicated retries synchronously, as the synchronous
+        -- path's second use would.
+        local repeated_missing = recheck:probe_unsafe_object_pointer(source, cpointer("missing_s"))
+        assert.equal(again_missing.message, repeated_missing.message)
+        assert.equal(runs + 1, #log.runs)
         assert.equal(1, #log.batches)
         assert.is_true(service:close())
     end)
 
-    it("reports preparation failures and re-raises a cancellation after cleanup",
+    it("replays a recorded failure once, before a verdict published later",
+    function()
+        local failed_once = {}
+        local service, log = batching_service(function(source)
+            if source:find("flaky_s", 1, true) and not failed_once[source] then
+                failed_once[source] = true
+                return { started = false, ok = false, status = 127,
+                    diagnostic = "transient test compiler failure" }
+            end
+            return by_marker(source)
+        end)
+        local module, batch = deferring_context(service)
+        local source = cpointer("source_s")
+        local flaky = cpointer("flaky_s")
+        -- A synchronous (top-level) use fails; a later deferred use of the
+        -- same source succeeds at the flush and is published.
+        batch.deferring = false
+        local first = module:probe_unsafe_object_pointer(source, flaky)
+        assert.equal("infrastructure_failure", first.status)
+        batch.deferring = true
+        local second = module:probe_unsafe_object_pointer(source, flaky)
+        module:probe_unsafe_object_pointer(source, cpointer("rejected_s"))
+        assert.is_false(batch:flush())
+        assert.equal("success", service.result_cache[second.key].outcome)
+        local runs = #log.runs
+
+        local recheck = deferring_context(service, batch.outcomes)
+        local again_first = recheck:probe_unsafe_object_pointer(source, flaky)
+        local again_second = recheck:probe_unsafe_object_pointer(source, flaky)
+        assert.equal("infrastructure_failure", again_first.status)
+        assert.matches("transient test compiler failure", again_first.message, 1, true)
+        assert.equal("success", again_second.status)
+        assert.is_true(again_second.cached)
+        assert.equal("rejected", recheck:probe_unsafe_object_pointer(
+            source, cpointer("rejected_s")).status)
+        assert.equal(runs, #log.runs)
+        assert.is_true(service:close())
+    end)
+
+    it("finishes malformed batch containers and rethrows a raised batch",
+    function()
+        for _, container in ipairs({ "absent", false, "text", 7, {} }) do
+            local service, _, state = batching_service(accept)
+            service.io.run_batch = function()
+                if container == "absent" then return nil end
+                return container
+            end
+            local module, batch = deferring_context(service)
+            local source = cpointer("source_s")
+            local first = module:probe_unsafe_object_pointer(source, cpointer("first_s"))
+            local second = module:probe_unsafe_object_pointer(source, cpointer("second_s"))
+            assert.is_false(batch:flush())
+            assert.same({}, state.files)
+            for _, result in ipairs({ first, second }) do
+                assert.is_nil(service.result_cache[result.key])
+                assert.equal("infrastructure_failure",
+                    batch.outcomes[result.key][1].classification)
+            end
+            assert.is_true(service:close())
+        end
+
+        local cancellation = setmetatable({}, {
+            __tostring = function() return "injected batch cancellation" end,
+        })
+        local service, _, state = batching_service(accept)
+        service.io.run_batch = function() error(cancellation) end
+        local module, batch = deferring_context(service)
+        local source = cpointer("source_s")
+        local first = module:probe_unsafe_object_pointer(source, cpointer("first_s"))
+        local second = module:probe_unsafe_object_pointer(source, cpointer("second_s"))
+        local called, raised = pcall(batch.flush, batch)
+        assert.is_false(called)
+        assert.equal(cancellation, raised)
+        -- Every prepared probe source was removed before the error unwound.
+        assert.same({}, state.files)
+        assert.is_nil(service.result_cache[first.key])
+        assert.is_nil(service.result_cache[second.key])
+        assert.is_true(service:close())
+    end)
+
+    it("reports preparation failures and delivers a caught signal after close",
     function()
         local jobs = require "titan-compiler.jobs"
         local writes = 0
@@ -3675,20 +3786,34 @@ describe("speculative acceptance batches", function()
         local source = cpointer("source_s")
         module:probe_unsafe_object_pointer(source, cpointer("first_s"))
         module:probe_unsafe_object_pointer(source, cpointer("second_s"))
-        local propagated
+        local delivered = {}
         local previous = jobs.propagate
         log.cancel = 2
         jobs.propagate = function(signal)
-            propagated = { signal = signal, files = next(state.files) }
+            if signal then
+                delivered[#delivered + 1] = {
+                    signal = signal, files = next(state.files), cleaned = state.cleaned,
+                }
+            end
         end
-        local called, accepted = pcall(batch.flush, batch)
+        local ok, err = pcall(function()
+            local called, raised = pcall(batch.flush, batch)
+            assert.is_false(called)
+            assert.equal("C probe batch interrupted by signal 2", raised)
+            assert.equal(1, log.batches[1].count)
+            -- Checking unwinds to the service's owner; nothing is delivered
+            -- until it closes the service.
+            assert.same({}, delivered)
+            assert.equal(2, service.cancelled_signal)
+            assert.same({}, state.files)
+            local outcome = assert(next(batch.outcomes) and batch.outcomes[next(batch.outcomes)])
+            assert.equal("workspace", outcome[1].reason)
+            assert.is_true(service:close())
+            assert.same({ { signal = 2, cleaned = 1 } }, delivered)
+            assert.is_true(service:close())
+            assert.equal(1, #delivered)
+        end)
         jobs.propagate = previous
-        assert.is_true(called, accepted)
-        assert.is_false(accepted)
-        assert.equal(1, log.batches[1].count)
-        assert.same({ signal = 2 }, propagated)
-        local outcome = assert(next(batch.outcomes) and batch.outcomes[next(batch.outcomes)])
-        assert.equal("workspace", outcome[1].reason)
-        assert.is_true(service:close())
+        assert(ok, err)
     end)
 end)

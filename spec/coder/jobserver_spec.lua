@@ -1055,47 +1055,73 @@ describe("speculative C probe batches under a parent Make", function()
         assert.equal(1, maximum(), output)
     end)
 
-    it("drain running probes, return tokens and re-raise SIGTERM", function()
-        local bytes = "abc"
-        local fifo = pool(bytes)
-        reset_state()
-        local pid_file = workspace .. "/titanc.pid"
-        local launcher = workspace .. "/titanc.sh"
-        write_file(launcher, "#!/bin/sh\necho $$ > " .. quote(pid_file) ..
-            "\nexec env CC=" .. quote(PROBES .. "/probe_cc.sh") ..
-            " SPECULATIVE_PROBE_STATE=" .. quote(state) ..
-            " SPECULATIVE_PROBE_EXPECTED=4 SPECULATIVE_PROBE_DELAY=2" ..
-            " MAKEFLAGS=" .. quote("-j4 --jobserver-auth=fifo:" .. fifo) ..
-            " TITAN_EXTRA_CPPFLAGS= TITAN_EXTRA_CFLAGS= TITAN_EXTRA_LDFLAGS=" ..
-            " TITAN_PROBE_CACHE_DISABLE=1 TITAN_ROCKS_ROOT=" .. quote(PREFIX) ..
-            " TITAN_RUNTIME_PREBUILT=1 " .. quote(LUA) ..
-            " -e " .. quote("package.path = " .. string.format("%q",
-                ROOT .. "/?.lua;" .. ROOT .. "/?/init.lua;") .. " .. package.path") ..
-            " " .. quote(ROOT .. "/titanc") .. " --jobs 4 -c -o " ..
-            quote(workspace .. "/out") .. " --tree " .. quote(workspace) ..
-            " probes\n")
-        assert(shell("chmod +x " .. quote(launcher)))
-        local script = "{ " .. quote(launcher) .. " & wait $!; echo \"status=$?\"; }"
-        local pipe = assert(io.popen(CLEAN_MAKE_ENV .. " sh -c " ..
-            quote(script) .. " 2>&1", "r"))
-        local function started()
-            if not exists(state .. "/started") then return 0 end
-            return tonumber(read_file(state .. "/started")) or 0
-        end
-        for _ = 1, 600 do
-            if started() >= 4 and exists(pid_file) then break end
-            os.execute("sleep 0.05")
-        end
-        local pid = assert(tonumber(read_file(pid_file)))
-        assert(os.execute("kill -TERM " .. pid))
-        local output = pipe:read("a")
-        pipe:close()
-        assert.truthy(output:find("status=143", 1, true), output)
-        -- The four running probes drained and nothing further launched.
-        assert.equal("0\n", read_file(state .. "/active"), output)
-        assert.equal(4, count_lines(state .. "/probes") - 1, output)
-        assert.falsy(exists(workspace .. "/out/probes.o"), output)
-        assert.equal(#bytes, available(fifo), output)
-        assert.same(sorted_bytes(bytes), sorted_bytes(holder:read(#bytes)))
-    end)
+    -- A caught signal unwinds the check to the resolver's owner, which
+    -- removes the probe workspace, logs, completion FIFO and header bundle
+    -- before the signal is delivered under its restored action. SIGINT
+    -- reaches the Lua interpreter's own handler, which ends titanc with an
+    -- error instead of a signal status.
+    for _, case in ipairs({
+        { name = "TERM", status = "143" },
+        { name = "HUP", status = "129" },
+        { name = "INT", status = "1", message = "C probe batch interrupted by signal 2" },
+    }) do
+        it("drain running probes, return tokens, clean up and re-raise SIG" ..
+           case.name, function()
+            local bytes = "abc"
+            local fifo = pool(bytes)
+            reset_state()
+            local out = workspace .. "/out"
+            local pid_file = workspace .. "/titanc.pid"
+            local launcher = workspace .. "/titanc.sh"
+            write_file(launcher, "#!/bin/sh\necho $$ > " .. quote(pid_file) ..
+                "\nexec env CC=" .. quote(PROBES .. "/probe_cc.sh") ..
+                " SPECULATIVE_PROBE_STATE=" .. quote(state) ..
+                " SPECULATIVE_PROBE_EXPECTED=4 SPECULATIVE_PROBE_DELAY=2" ..
+                " MAKEFLAGS=" .. quote("-j4 --jobserver-auth=fifo:" .. fifo) ..
+                " TITAN_EXTRA_CPPFLAGS= TITAN_EXTRA_CFLAGS= TITAN_EXTRA_LDFLAGS=" ..
+                " TITAN_PROBE_CACHE_DISABLE=1 TITAN_ROCKS_ROOT=" .. quote(PREFIX) ..
+                " TITAN_RUNTIME_PREBUILT=1 " .. quote(LUA) ..
+                " -e " .. quote("package.path = " .. string.format("%q",
+                    ROOT .. "/?.lua;" .. ROOT .. "/?/init.lua;") .. " .. package.path") ..
+                " " .. quote(ROOT .. "/titanc") .. " --jobs 4 -c -o " ..
+                quote(out) .. " --tree " .. quote(workspace) .. " probes\n")
+            assert(shell("chmod +x " .. quote(launcher)))
+            local script = "{ " .. quote(launcher) .. " & wait $!; echo \"status=$?\"; }"
+            local pipe = assert(io.popen(CLEAN_MAKE_ENV .. " sh -c " ..
+                quote(script) .. " 2>&1", "r"))
+            local function started()
+                if not exists(state .. "/started") then return 0 end
+                return tonumber(read_file(state .. "/started")) or 0
+            end
+            for _ = 1, 600 do
+                if started() >= 4 and exists(pid_file) then break end
+                os.execute("sleep 0.05")
+            end
+            local pid = assert(tonumber(read_file(pid_file)))
+            assert(os.execute("kill -" .. case.name .. " " .. pid))
+            local output = pipe:read("a")
+            pipe:close()
+            assert.truthy(output:find("status=" .. case.status .. "\n", 1, true), output)
+            if case.message then
+                assert.truthy(output:find(case.message, 1, true), output)
+            end
+            -- The four running probes drained and nothing further launched.
+            assert.equal("0\n", read_file(state .. "/active"), output)
+            assert.equal(4, count_lines(state .. "/probes") - 1, output)
+            assert.falsy(exists(out .. "/probes.o"), output)
+            assert.equal(#bytes, available(fifo), output)
+            assert.same(sorted_bytes(bytes), sorted_bytes(holder:read(#bytes)))
+            -- Every probe workspace, log, completion FIFO and header bundle
+            -- reserved under the output root was removed first.
+            local leftovers = {}
+            if exists(out) then
+                for entry in lfs.dir(out) do
+                    if entry:find("^%.titan%-temporary") then
+                        leftovers[#leftovers + 1] = entry
+                    end
+                end
+            end
+            assert.same({}, leftovers, output)
+        end)
+    end
 end)

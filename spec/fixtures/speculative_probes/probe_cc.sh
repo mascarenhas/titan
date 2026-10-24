@@ -5,6 +5,14 @@
 # reports an unavailable command, and every other probe and every generated
 # module compile through the configured compiler.
 #
+# Two probe forms fail as infrastructure exactly once per probe workspace and
+# exact source, then compile normally (a fail-once/recover compiler): a probe
+# naming `speculative_flaky` outside its `#include` lines, and a header
+# baseline (`titan_probe_b`) naming `speculative_flaky_baseline`. A baseline
+# naming `speculative_broken_baseline` is always rejected. A module's probes
+# include its generated `<module>.ffi.h`, so a module of either name has such
+# a baseline.
+#
 # SPECULATIVE_PROBE_STATE, when set, names a directory that records each probe
 # and the maximum number of overlapping probe compilers; SPECULATIVE_PROBE_DELAY
 # keeps each probe alive long enough for overlap to be observable, and
@@ -72,6 +80,20 @@ if [ "$probe" = yes ] && [ -n "$state" ]; then
     sleep "${SPECULATIVE_PROBE_DELAY:-0}"
 fi
 
+flaky=no
+if [ "$probe" = yes ]; then
+    if grep -v '^#include' "$source" | grep -q 'speculative_flaky'; then
+        flaky=yes
+    elif grep -q 'titan_probe_b' "$source" &&
+            grep -q 'speculative_flaky_baseline' "$source"; then
+        flaky=yes
+    fi
+fi
+if [ "$flaky" = yes ]; then
+    mark="$(dirname "$source")/.flaky-$(cksum < "$source" | cut -d ' ' -f 1)"
+    if [ -e "$mark" ]; then flaky=no; else : > "$mark"; fi
+fi
+
 status=0
 if [ "$probe" = yes ] && grep -q 'speculative_reject' "$source"; then
     echo "$source:1:1: error: rejected by the speculative probe test compiler" >&2
@@ -79,6 +101,13 @@ if [ "$probe" = yes ] && grep -q 'speculative_reject' "$source"; then
 elif [ "$probe" = yes ] && grep -q 'speculative_missing' "$source"; then
     echo "speculative probe test compiler: command not found" >&2
     status=127
+elif [ "$flaky" = yes ]; then
+    echo "speculative probe test compiler: transient failure" >&2
+    status=127
+elif [ "$probe" = yes ] && grep -q 'titan_probe_b' "$source" &&
+        grep -q 'speculative_broken_baseline' "$source"; then
+    echo "$source:1:1: error: broken baseline for the speculative probe test compiler" >&2
+    status=1
 else
     "${SPECULATIVE_PROBE_CC:-cc}" "$@" || status=$?
 fi
