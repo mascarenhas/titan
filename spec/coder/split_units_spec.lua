@@ -1116,7 +1116,6 @@ print("VARIANT_OK")
         local ast = check_module("diagnostics", MULTI_CONSTRUCT_SOURCE, source_path)
         assert(driver.compile("diagnostics", ast, source_path, {}, false,
             { c_parts = 4, split_threshold = 1 }))
-        ast = check_module("diagnostics", MULTI_CONSTRUCT_SOURCE, source_path)
         local wrapper = workspace .. "/diagnostics_cc.sh"
         write_file(wrapper, string.format([[
 #!/bin/sh
@@ -1136,19 +1135,30 @@ done
 exit 94
 ]], stem, stem, stem, stem, stem))
         assert(run_cmd({ "chmod", "+x", wrapper }))
-        local old_cc, old_stderr = driver.CC, io.stderr
-        local diagnostics = assert(io.tmpfile())
-        driver.CC, io.stderr = wrapper, diagnostics
-        local called, results = pcall(driver.compile_modules, { {
-            modname = "diagnostics", mod = { ast = ast, filename = source_path },
-            options = { c_parts = 4, split_threshold = 1 },
-        } }, 4, false)
-        driver.CC, io.stderr = old_cc, old_stderr
-        assert(diagnostics:seek("set", 0))
-        local output = assert(diagnostics:read("*a"))
-        assert(diagnostics:close())
-        assert.truthy(called, results)
-        assert.is_nil(results[1].ok)
+        -- Capture the real process boundary instead of replacing Busted's
+        -- sandboxed io table, which need not be the driver's io table.
+        local probe = workspace .. "/diagnostics.lua"
+        write_file(probe, string.format([[
+package.path = %q .. "/?.lua;" .. package.path
+require "spec.support.helpers"
+local checker = require "titan-compiler.checker"
+local driver = require "titan-compiler.driver"
+local parser = require "titan-compiler.parser"
+local source, filename = %q, %q
+local ast = assert(parser.parse(filename, source))
+local _, errors = checker.check("diagnostics", ast, source, filename)
+assert(#errors == 0, table.concat(errors, "\n"))
+driver.CC = %q
+local results = driver.compile_modules({ {
+    modname = "diagnostics", mod = { ast = ast, filename = filename },
+    options = { c_parts = 4, split_threshold = 1 },
+} }, 4, false)
+assert(not results[1].ok, "injected C compilation unexpectedly succeeded")
+]], ROOT, MULTI_CONSTRUCT_SOURCE, source_path, wrapper))
+        local ok, output = run_cmd({
+            "env", "TITAN_ROCKS_ROOT=" .. PREFIX, LUA, probe,
+        })
+        assert.is_true(ok, output)
         local position = 0
         for part = 0, 3 do
             position = assert(output:find("split-diagnostic-" .. part, position + 1, true), output)
