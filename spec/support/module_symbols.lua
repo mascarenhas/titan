@@ -24,14 +24,24 @@ function M.collect(primary, run, nm)
         local object = stem .. part.object_suffix
         assert(lfs.symlinkattributes(object, "mode") == "file", object)
         objects[#objects + 1] = object
-        for _, query in ipairs({ { "-U", defined }, { "-u", undefined } }) do
-            local argv = { table.unpack(nm) }
-            argv[#argv + 1], argv[#argv + 2] = query[1], object
-            local ok, output = run(argv)
-            assert(ok, output)
-            for line in output:gmatch("[^\r\n]+") do
-                local symbol = line:match("(%S+)%s*$")
-                if symbol then query[2][symbol] = true end
+        local argv = { table.unpack(nm) }
+        argv[#argv + 1] = object
+        local ok, output = run(argv)
+        assert(ok, output)
+        for line in output:gmatch("[^\r\n]+") do
+            local address, kind, symbol =
+                line:match("^%s*(%x+)%s+([%a?])%s+(%S+)%s*$")
+            if not symbol then
+                kind, symbol = line:match("^%s*([%a?])%s+(%S+)%s*$")
+            end
+            if symbol then
+                -- GNU nm uses lowercase w/v without an address for undefined
+                -- weak references; Mach-O reports undefined symbols as U.
+                if kind == "U" or (not address and (kind == "w" or kind == "v")) then
+                    undefined[symbol] = true
+                elseif kind ~= "?" then
+                    defined[symbol] = true
+                end
             end
         end
     end

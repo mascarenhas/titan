@@ -614,7 +614,7 @@ function call(input: integer): integer return plus_one(input) end
         assert.equal(1, foreign_count)
     end)
 
-    it("aggregates typed and Mach-O bare nm names and subtracts cross-part definitions", function()
+    it("aggregates plain nm definitions and undefined weak references across parts", function()
         local path = workspace .. "/symbols.titan"
         write_file(path, MULTI_CONSTRUCT_SOURCE)
         local ast = check_module("symbols", MULTI_CONSTRUCT_SOURCE, path)
@@ -623,17 +623,38 @@ function call(input: integer): integer return plus_one(input) end
         assert.truthy(ok, err)
         local symbols = module_symbols.collect(primary, function(argv)
             assert.equal("fixture-nm", argv[1])
-            local side = argv[3]:find(".part1.o", 1, true) ~= nil
-            if argv[2] == "-U" then
-                return true, side and "00000000 T _internal\n" or "00000000 T _entry\n"
+            assert.equal(2, #argv)
+            local side = argv[2]:find(".part1.o", 1, true) ~= nil
+            if side then
+                return true, [[00000000 T _internal
+00000000 W _weak_function
+00000000 V _weak_object
+00000000 u _unique_object
+         U _entry
+         U _external_macho
+         w _weak_external_function
+         v _weak_external_object
+]]
             end
-            assert.equal("-u", argv[2])
-            return true, side and "    U _entry\n_external_bare\n"
-                or "    U _internal\n    U _external_typed\n"
+            return true, [[00000000 T _entry
+         U _internal
+         U _external_elf
+         U _weak_function
+         U _weak_object
+         U _unique_object
+symbols.o:
+nm: no symbols
+]]
         end, { "fixture-nm" })
         assert.equal(2, #symbols.objects)
-        assert.same({ _entry = true, _internal = true }, symbols.defined)
-        assert.same({ _external_bare = true, _external_typed = true }, symbols.undefined)
+        assert.same({
+            _entry = true, _internal = true, _weak_function = true,
+            _weak_object = true, _unique_object = true,
+        }, symbols.defined)
+        assert.same({
+            _external_macho = true, _external_elf = true,
+            _weak_external_function = true, _weak_external_object = true,
+        }, symbols.undefined)
     end)
 
     it("rejects private inventory collisions without writing or launching a compiler", function()
