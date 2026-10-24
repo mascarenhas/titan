@@ -345,6 +345,9 @@ removed after each run and the directory is removed on every close path.
 
 Ordinary diagnostics show the first useful compiler line. Verbose mode also
 prints the full command, source, cache result, status, and captured diagnostic.
+Deferred command/result events are printed at the batch flush, and an
+authoritative recheck prints its cache/result/run events again, so verbose
+event timing and multiplicity can depend on the job count.
 
 ### Speculative batched acceptance probes
 
@@ -371,9 +374,10 @@ immutable preamble and generated-header descriptor; look up memory, analysis
 and disk results; and, for a candidate miss, validate the context baseline.
 A hit or a failed baseline therefore returns exactly as before. A deferred
 request keeps its rendered source, key, cache path, kind and context; it is
-never rendered again. A repeated key while pending is a duplicate of the
-same request, separate from the completed `result_cache`, and observes the
-same memory-hit verbose event as the synchronous path. The call receives a
+never rendered again. Any question-free request of a pending key joins that
+request, even from a call site that did not opt into deferral. Pending dedup
+is separate from the completed `result_cache` and observes the same
+memory-hit verbose event as the synchronous path. The call receives a
 success result carrying the real key.
 
 `ProbeBatch:flush` prepares each unique request with the synchronous path's
@@ -396,19 +400,22 @@ probe (a probe whose cleanup raises again stays in the service workspace for
 belong to the service until `Service:close`, so they outlive every reaped
 child.
 
-Every executed run that was not published, including synchronous baselines
-and enum queries of the same pass, is retained in `ProbeBatch.outcomes` in the
-order the pass observed it. When a flush reports a failure the checker
-rechecks with a batch whose `answers` are those outcomes. The recheck's
-`_run_source` replays them before any cache lookup: each recorded run of a
-source answers exactly one request of that source, in the recorded order,
-and needs no new baseline because it had already passed one. Once a source's
-recorded runs are used up the request looks up memory and disk and, on a
-miss, launches the compiler, exactly as the synchronous path retries a
-failed run. A failed run that preceded a success the speculative pass
-published later therefore still reports its failure at its own use; a use
-that pending deduplication folded into one deferred run retries like its
-synchronous counterpart; and a completed verdict is never compiled twice.
+Every nonpublishable occurrence of the pass is retained in
+`ProbeBatch.outcomes` under its requesting source key, in occurrence order.
+A candidate whose nested baseline gate fails owns that failure as its own
+outcome; the nested call neither records nor consumes the separate ordered
+history of explicit `validate_baseline()` calls. When a flush reports a
+failure the checker rechecks with a batch whose `answers` are those outcomes.
+Before any cache lookup, `_run_source` consumes each recorded outcome once
+for that source. Replaying a candidate's baseline-gate failure also consumes
+its dependency: no baseline failure is left to shift onto a later uncached
+distinct-key request. Direct baseline validations retain their own order.
+Once a source's recorded outcomes are exhausted, ordinary memory, analysis
+and disk lookup resumes; a completed cache hit still answers before checking
+the baseline, and a miss validates its baseline and retries synchronously.
+Thus an earlier failure survives a same-source success published later,
+pending-deduplicated extra uses retry as on the synchronous path, and
+completed semantic verdicts are never compiled twice.
 
 Batching requires `Service:batching()`: the runner is the I/O strategy
 itself, the service `jobs` cap is above one, and the strategy provides
@@ -420,11 +427,15 @@ still batches, while a strategy that overrides `run` on its instance or
 behind its metatable keeps its synchronous runner calls, cancellation and
 answers unless it also supplies its own `run_batch`. Strategies without it,
 injected custom runners, `jobs = 1`, analysis and completion checks keep
-calling the runner synchronously. No API-1 strategy method is required.
+calling the runner synchronously. The compiler I/O contract describes the
+[optional probe-batch capability](driver.md#optional-probe-batch-capability);
+no new strategy method is required.
 
-`run_batch` reaps every launched child and returns its borrowed tokens on
-every exit ([Driver](driver.md#parallel-generated-c-compilation)). A caught
-INT/TERM/HUP comes back to `flush` as a signal number, which it records on the
+`run_batch` reaps every launched child on every exit
+([Driver](driver.md#parallel-generated-c-compilation)). On POSIX it also
+returns borrowed jobserver tokens and captures INT/TERM/HUP. Windows uses
+only the local cap, with neither POSIX signal capture nor borrowed tokens.
+A caught POSIX signal comes back to `flush` as a signal number, which it records on the
 service at once, so the signal survives even if finishing or publication then
 raises. After per-probe cleanup the flush raises
 `C probe batch interrupted by signal N` (or the strategy's own error), so
@@ -435,7 +446,9 @@ then the service, whose `Service:close` removes its workspaces and staged
 headers and only then delivers the signal with `jobs.propagate`. `titanc`
 closes its resolver from a to-be-closed variable on that unwinding error, so
 a terminating signal ends the process only after its probe and header
-temporaries are gone.
+temporaries are gone. With default actions TERM/HUP terminate at that point;
+SIGINT instead exits `titanc` with status 1 and
+`C probe batch interrupted by signal 2`.
 
 ## Contextual object-pointer conversion
 

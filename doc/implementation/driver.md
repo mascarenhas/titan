@@ -840,8 +840,9 @@ contains no source, command, argv, diagnostic, or filesystem path.
 `options.c_probe_execution_trace` similarly receives one event per physical C
 compiler launch. Its fields are `event = "compiler_execution"`, `module`,
 `key`, `probe_kind`, `batch_kind`, `header_identity`, `header_label`, `outcome`,
-`started`, `persistent_lookup`, `publication`, and optional `wall_ms`. The service always
-reports `batch_kind = "single"`: each compiler invocation checks one probe.
+`started`, `persistent_lookup`, `publication`, and optional `wall_ms`. The service
+reports `batch_kind = "single"` for a synchronous launch and `"speculative"`
+for a flushed probe-batch member.
 `key` and `header_identity` have the same source-digest meanings as in the
 semantic event. The I/O strategy may supply finite nonnegative child wall
 milliseconds in its normalized `run` result; process CPU is never substituted.
@@ -923,6 +924,22 @@ message or a `run` result. Any uncancelled cleanup work required by the
 ownership rules remains rooted until it finishes. Callers must therefore close
 or discard the resolver attempt after cancellation and must not reuse its
 partially populated compiler state.
+
+#### Optional probe-batch capability
+
+`run_batch(commands, { jobs = N })` is optional, never a required strategy
+method. `commands` is a dense array of argv arrays. It returns
+`results, signal?`: `results` contains `run`-shaped tables in input order,
+with stdout and stderr merged and the same fixed C locale; `signal`, when
+present, is a caught POSIX INT/TERM/HUP number. Every launched child must be
+reaped and strategy-owned temporaries removed before the call returns or
+raises. Strategy cancellation propagates as the original object unchanged.
+Ordinary checks consult this capability only when the effective probe cap
+is above one, never for analysis or completion. Inherited stock batching
+requires the strategy's resolved `run` to be stock too; a strategy overriding
+`run` stays synchronous unless it explicitly supplies its own `run_batch`.
+See [C probe batches](#parallel-generated-c-compilation) for the stock
+transport and cleanup rules.
 
 ### Analysis loader options
 
@@ -1356,9 +1373,10 @@ successful module and then re-raises that signal (`jobs.propagate`). A cancelled
 batch fails every module, so no object is published before the signal is
 delivered.
 
-A one-job bound, a batch with only one job, an explicit parent `make -j1`, and
-an unusable parent jobserver run the jobs in module/part order through the
-direct command path. Otherwise each child's stdout and stderr go to separate
+A one-job bound or a batch with only one job uses module/part order through
+the direct command path. On POSIX, an explicit parent `make -j1` or an
+unusable parent jobserver also selects that path.
+Otherwise each child's stdout and stderr go to separate
 temporary files so a blocked pipe cannot deadlock the batch. Windows launches
 children through the stock LuaRocks `luv` process API, whose bundled libuv is
 independent of the Titan stdlib libuv payload. On Linux and macOS the batch
@@ -1383,13 +1401,17 @@ position is each child's completion index.
 The C probe service uses the same mechanism through the default compiler I/O
 strategy's optional `run_batch(commands, { jobs = N })` capability
 (`io.lua`). It launches each probe through `jobs.launch` with standard output
-and error merged into one log, the same `env LANG=C LC_ALL=C` command text as
-`Sync:run`, and returns results with `run`'s shape in input order. One ledger
+and error merged into one log, and returns `run`-shaped results in input order.
+On POSIX its command text uses the same `env LANG=C LC_ALL=C` prefix as
+`Sync:run`; Windows uses `platform.windows_process_command` and sets the
+locale in the spawn environment. One ledger
 (`jobs.open_slots(N, { guard = true })`) bounds each flush; a single granted
 slot or a single command runs in order through `run`. Every exit, returned or
 raised, reaps each launched child before its slot is released, closes the
-ledger (returning every borrowed token and restoring the signal actions), and
-removes the completion channel and every log. An error raised by the
+ledger, and removes the completion channel and every log. On POSIX ledger
+closure also returns every borrowed token and restores the signal actions.
+Windows uses only the local cap, without POSIX signal capture or jobserver
+tokens. An error raised by the
 strategy's own `run`, `tmpname` or `read_file`, such as an injected
 cancellation, stops further launches (`jobs.drive` returns it instead of
 recording a launch failure) and is rethrown unchanged after that teardown;
@@ -1409,7 +1431,7 @@ resolves it once; programmatic callers pass it as `parallelism`, and `titanc`
 also passes it to `driver.new_resolver_context({ jobs = N })`, which bounds
 that resolver's speculative C probe batches (`driver.probe_batch_jobs`
 returns one, keeping probes synchronous, without a cap above one, under an
-explicit serial `make -j1`, and for analysis or completion resolvers). Checking
+explicit serial POSIX `make -j1`, and for analysis or completion resolvers). Checking
 finishes before generated-C compilation starts and nested modules flush their
 batches one at a time, so probe and compiler children never share the budget
 concurrently; each batch opens and closes its own ledger. A parent GNU
@@ -1468,7 +1490,7 @@ own graph does so ([Make job pool](build-script-audit.md#make-job-pool-and-titan
 Windows uses only the local cap, because MSYS2 Make's jobserver descriptors are
 not native UCRT descriptors.
 
-A parallel batch installs a temporary INT/TERM/HUP action (`_signal_guard`)
+On POSIX, a parallel batch installs a temporary INT/TERM/HUP action (`_signal_guard`)
 that only records the first signal in a `sig_atomic_t` and writes a wake byte;
 ignored signals stay ignored. The batch checks for a recorded signal before
 every slot acquisition and launch, so a signal that arrives together with a
@@ -1481,8 +1503,11 @@ failed completion-channel setup, returns the recorded signal to the caller.
 `driver.compile_modules` re-raises it under the restored action after
 publication cleanup, so SIGINT surfaces as Lua's `interrupted!` error and
 SIGTERM or SIGHUP terminates the process by its default action without the
-CLI's remaining cleanup. A SIGKILL cannot be intercepted, and the tokens a
-killed process held are not returned.
+CLI's remaining cleanup. Probe batches instead unwind through resolver/service
+cleanup; their SIGINT exit is status 1 with
+`C probe batch interrupted by signal 2`, while TERM/HUP take their default
+action after cleanup; see [C FFI](c-ffi-expressions.md#speculative-batched-acceptance-probes).
+A SIGKILL cannot be intercepted, and tokens a killed process held are not returned.
 
 ### Shared C preprocessor, compiler, and linker inputs
 
@@ -1811,8 +1836,8 @@ compiler child: generated-C compilations, the second provider link, and each
 module's batch of body-phase C acceptance probes
 ([C FFI](c-ffi-expressions.md#speculative-batched-acceptance-probes)). Checker
 traversal, code generation and formatting stay ordered in the compiler
-process; `-j1`, `TITAN_JOBS=1` and an explicit serial `make -j1` also run every
-C probe synchronously where it is reached. A Unix provider pair builds its archive while the
+process; `-j1`, `TITAN_JOBS=1` and, on POSIX, an explicit serial `make -j1`
+also run every C probe synchronously where it is reached. A Unix provider pair builds its archive while the
 DSO links and starts the archive-backed validation link concurrently only with
 its own jobserver slot; see [Provider link
 pipeline](static-compiled-modules.md#provider-link-pipeline). `--static` swaps the compiled-provider passes
@@ -2430,15 +2455,18 @@ the expanded logical command followed by the actual short `@file` invocation;
 native diagnostics and exit codes retain their normal transport. POSIX links
 and ordinary compile/tool commands are unchanged.
 
-Captured Windows commands and parallel generated-C workers use the stock `luv`
-LuaRocks dependency. `uv.spawn` receives the parsed argument array, cwd and child
-environment; libuv owns Windows executable search and argument quoting. Capture
-uses a binary pipe, sharing its writer for merged stdout/stderr when requested.
-Parallel workers write separate stdout/stderr files, so compiler output cannot
-fill an unread pipe while the scheduler waits. Exit callbacks queue the completed
-request index; `uv.run("once")` delivers whichever child finishes first. Larger
-units start first and each completion frees its slot immediately. Diagnostics
-still replay in request order.
+Captured Windows commands, parallel generated-C workers and probe batches use
+the stock `luv` LuaRocks dependency. `uv.spawn` receives the parsed argument
+array, cwd and child environment; libuv owns Windows executable search and
+argument quoting. Capture uses a binary pipe, sharing its writer for merged
+stdout/stderr when requested. Generated-C workers write separate stdout and
+stderr files. Probe workers pass equal log paths: `Batch:spawn` opens one
+descriptor shared by both streams and closes that parent descriptor once.
+These file logs cannot fill an unread pipe while the scheduler waits.
+Exit callbacks queue the completed schedule position; `uv.run("once")`
+delivers whichever child finishes first. Larger generated-C units start first
+and each completion frees its slot immediately. Diagnostics still replay in
+original request order.
 
 The adapter closes process and pipe handles after completion and retains the
 native exit value, including 256 and 9009. Launch failures are distinct from

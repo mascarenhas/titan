@@ -79,6 +79,9 @@ neither `analysis_only` nor a completion request, `checker.check` runs a
 speculative pass. Its symbol table carries `probe_speculation`; while
 `checkbodies` runs, eligible acceptance probes defer into the check's probe
 batch ([C FFI](c-ffi-expressions.md#speculative-batched-acceptance-probes)).
+A batch exists only if the provided service enables `Service:batching()`;
+otherwise the pass still records imports and snapshots the registry but has
+no deferred verdict that can trigger a recheck.
 Top-level checking, including imports, foreign environments and module
 variable initializers, stays synchronous.
 
@@ -111,12 +114,15 @@ ordinary cleanup. `checker.check` first restores the pass's write journal
    `types.registry` in place to the speculative pass's snapshot taken at that
    same point. Every deferral follows the import phase, so that snapshot is
    the synchronous registry.
-4. Probes answer from completed results: published verdicts from memory, and
-   each nonpublishable run of the speculative pass once, in its order, before
-   any later cache entry for the same source; further requests retry like
-   the synchronous path
+4. Probes consume each nonpublishable occurrence of the speculative pass
+   once, in order for that source, before any later published verdict can
+   answer it. A candidate owns its failed nested baseline gate, so replay
+   consumes both together; that failure cannot shift to a later distinct
+   request. Explicit baseline validations keep a separate ordered history.
+   After exhaustion, normal completed-cache lookup still precedes baseline
+   validation, and misses retry synchronously
    ([C FFI](c-ffi-expressions.md#speculative-batched-acceptance-probes)).
-   The rerun never defers.
+   The rerun never defers or recompiles a completed semantic verdict.
 
 The speculative pass and the synchronous check run the same operations until
 the first deferred request whose real verdict is not success; afterwards the
@@ -232,7 +238,9 @@ without creating value symbols. Alias resolution and cycle detection are in
    from the AST and marks the record's `custom_constructor` metadata; see
    [record constructors](record-constructors.md).
 3. All Titan imports are visited in AST order, establishing module
-   environments before any non-variable declaration.
+   environments before any non-variable declaration, then
+   `checker._finish_import_phase` snapshots or restores the registry for the
+   [authoritative recheck](#speculative-probe-barrier-and-authoritative-recheck).
 4. `check_foreign_environment` builds the `ffi` namespace from the ordered
    header environment ([FFI internals](ffi-internals.md)); foreign aliases are
    resolved, `check_imported_c_declarations` validates imported C
@@ -953,9 +961,11 @@ declared without a return annotation default to **zero results** (`function (): 
 
 ## Imports and the loader protocol
 
-`Ast.TopLevelImport` is checked by
-`checker.checkimport(modname, loader, request)`. The parser has already removed
-a terminal `.titan` marker from `modname`; `checker/declarations.lua` passes
+`Ast.TopLevelImport` is checked through
+`checker._checkimport_for(st, ...)`, which wraps
+`checker.checkimport(modname, loader, request)` for import replay.
+The parser has already removed a terminal `.titan` marker from `modname`;
+`checker/declarations.lua` passes
 `{ kind = "source-import" }` only when the AST's separate `source_required` bit
 is true.
 The loader contract is:
@@ -1063,7 +1073,7 @@ a private C-typed member that never enters its interface.
 
 ## Process-global state
 
-Two pieces of mutable state outlive a `checker.check` call:
+The principal process-global containers that outlive a `checker.check` call are:
 
 * `types.registry`, the fqtn → `Type.Record`/`Type.Union`/`Type.Interface`
   map. After a non-analysis check, `checker.check` leaves the declared
@@ -1071,6 +1081,11 @@ Two pieces of mutable state outlive a `checker.check` call:
   erased AST carries the detached registry its coder invocation installs.
 * `driver.imported`, the import cache, including any `CIRCULAR_MARK`
   sentinels left by a failed run.
+
+A rejected speculative pass restores registry entries in place before its
+authoritative recheck. Its journaled writes to shared imported type objects
+are put back before reparsing; authoritative writes persist. See
+[Speculative probe barrier and authoritative recheck](#speculative-probe-barrier-and-authoritative-recheck).
 
 Any test or tool that checks more than one module (or the same module twice)
 must reset them, or nominal types from a previous run resolve in the next one.
