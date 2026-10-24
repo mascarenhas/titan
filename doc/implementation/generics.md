@@ -512,6 +512,34 @@ later rewritten to `value`. This separation is what lets metadata remain
 precise while coder enumerates the same ordinary public/private slots and
 layouts as non-generic code.
 
+### Erased-graph validation
+
+`types.contains_generic(typ, memo)` is the predicate behind
+`types.assert_erased` and `types.is_erased`. It reports a generic form when it
+reaches `Type.GenericScope`, `Type.TypeParameter`, `Type.Parameter`,
+`Type.FunctionScheme`, `Type.GenericAlias`, an applied `Type.Nominal`, or a
+record, union, Interface, method, or static method that still carries a scope
+or binders. It walks every table field except `_tag`, with a per-call `seen`
+set, so it also traverses plans and source-navigation edges and can be costly
+on a large module graph. Callers therefore test cheap shapes first:
+`checker_assignment_adjustment` (`checker/interfaces.lua`) walks a source or
+target only when the other side is `value` or a C `TValue`, and
+`generic_erased_descriptor` (`checker/lowering.lua`) walks only descriptors
+outside the owner-bearing tags that always take its canonical erasure path.
+
+The optional `memo` is explicit and caller-owned; there is no global or
+cross-check cache. A memo is valid only while no table reachable from the
+queried roots changes, and it records complete results only. A query that
+returns true records its root. A query that returns false records every table
+it visited, because the whole reachable graph was proven free of generic forms.
+A false answer from a cycle back-edge inside a query that ultimately returns
+true is not complete, so nothing else from that query is recorded. Exactly one
+batch shares a memo: the end of `generic_lower_erased_core`, after the erased
+module descriptor, the erased registry, the refreshed annotations, and the
+frozen declared registry are complete. It asserts `ast._type` and then every
+erased registry owner with one local memo and no intervening mutation, and
+discards the memo when it returns. Every other caller passes none.
+
 ## Constraint erasure
 
 Erasure (`types.erase`, `types.erase_constraint`) is a pure recursive type

@@ -96,8 +96,25 @@ schema versions. A small compiler smoke continues to test unset production
 optimization and cross-module LTO while ordinary validation fixtures stay at
 `-O0`.
 
-Generated-C compilation concurrency is controlled by `titanc --jobs N` or
-`TITAN_JOBS=N` on Linux, macOS and Windows. The command-line option wins; the
-default is one. This bound covers independent C object compilations, while
-checking, C generation and final linking retain their normal order. Windows
-stdlib builds also honor `TITAN_JOBS`.
+## Compiler jobs and GNU Make
+
+`titanc --jobs N` or `TITAN_JOBS=N` sets how many generated-C compilations one
+`titanc` run may execute at once on Linux, macOS and Windows. The command-line
+option wins, and the default is four. Checking, C generation and formatting stay
+serial. Library builds also use the bound for their two provider links: the
+second link overlaps the first only when a parent GNU Make jobserver grants it a
+slot; every validation still precedes publication. Windows stdlib builds also
+honor `TITAN_JOBS`.
+
+A `titanc` recipe marked with `+` in a GNU Make file shares Make's jobserver.
+Its first compilation uses the recipe's own job slot and each further one
+borrows a slot from Make, so `make -j8` runs at most eight jobs in total, while
+`--jobs` still caps each `titanc` run. Under `make -j1` titanc compiles
+serially. When Make advertises a jobserver that titanc cannot use, titanc prints
+one warning and compiles with one job. That includes a recipe without `+` under a
+pipe jobserver (GNU Make before 4.4, or 4.4 with `--jobserver-style=pipe`) and
+every recipe under macOS's stock GNU Make 3.81; mark each `titanc` recipe with
+`+`, and use GNU Make 4.4 or later (Homebrew `gmake`) for parallel compilation
+inside Make on macOS.
+Windows applies only the `--jobs`/`TITAN_JOBS` bound. See [GNU Make jobserver
+participation](../implementation/driver.md#gnu-make-jobserver-participation).

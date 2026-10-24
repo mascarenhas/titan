@@ -7187,6 +7187,11 @@ compile_batch = {
 
 end -- native batch helpers
 
+-- The scheduler over prepared-module records; publication stays with the
+-- caller, which also re-raises a returned cancellation signal.
+-- Implementation notes: doc/implementation/driver.md#parallel-generated-c-compilation
+driver.run_prepared_compiles = run_prepared_compiles
+
 local function validate_compile_requests(requests)
     local module_indices = {}
     local outputs = {}
@@ -8834,9 +8839,15 @@ end
 if values.n ~= 2 or type(values[2]) ~= "table" then
     finish(false, "luaopen_titan must return exactly one support table")
 end
-if type(values[2]._loadlib) ~= "function" or
-   type(values[2]._loadlibglobal) ~= "function" then
+local support = values[2]
+if type(support._loadlib) ~= "function" or
+   type(support._loadlibglobal) ~= "function" then
     finish(false, "luaopen_titan support table must expose _loadlib and _loadlibglobal")
+end
+-- titanc hashes C inputs through this entry and refuses to start without it.
+if type(support._sha256_binary) ~= "function" then
+    finish(false, "luaopen_titan support table lacks _sha256_binary; " ..
+        "the linked native support object is stale (rebuild titan-runtime/ltitanlib.c)")
 end
 finish(true, "ok")
 ]]

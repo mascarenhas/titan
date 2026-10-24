@@ -47,7 +47,7 @@ use the chapters below for the normative language reference.
 
 | Chapter | Covers |
 | --- | --- |
-| [Native build profiles](build-profiles.md) | Production optimization defaults and isolated O0/no-LTO validation SDKs. |
+| [Native build profiles](build-profiles.md) | Production optimization defaults, isolated O0/no-LTO validation SDKs, and `titanc` job defaults inside and outside GNU Make. |
 | [Installing Titan on Linux and macOS](installation.md) | Build and install steps, the `PREFIX` and `ROCKS_TREE` directories, what the installation contains, how Titan finds it, bundled libuv and OpenSSL, building the standard library during development, uninstalling, and cleaning. |
 | [Installing and using Titan on Windows](windows-build.md) | Experimental CLANG64 installation, standalone LuaRocks configuration, DLL programs, packaging, cleanup, native test entrypoints, and build parallelism. |
 | [Documentation comments](documentation-comments.md) | LDoc-style summaries and tags retained for editor hover and completion. |

@@ -496,6 +496,107 @@ describe("parallel generated-C compilation", function()
         assert.falsy(file_exists(source_root .. "/batch/three.o"))
     end)
 
+    it("schedules several parts per module and fails only the owning module",
+       function()
+        -- Synthetic prepared modules drive the scheduler directly. Each job
+        -- sleeps, reports its label on stderr, and exits with its status.
+        local previous_getenv = platform.getenv
+        platform.getenv = function(name)
+            if name == "MAKEFLAGS" then return nil end
+            return previous_getenv(name)
+        end
+        finally(function() platform.getenv = previous_getenv end)
+        local script = workspace_directory .. "/part_job.sh"
+        local output = assert(io.open(script, "wb"))
+        assert(output:write([[
+sleep "$2"
+echo "part diagnostic: $1" >&2
+test "$3" = 0 || exit "$3"
+: > "$4"
+]]))
+        assert(output:close())
+        -- { leaf, { { cost_bytes, delay, status }, ... } } in part order.
+        local modules = {
+            { "one", { { 10, 0.3, 0 }, { 300, 0.4, 0 }, { 50, 0.1, 23 } } },
+            { "two", { { 300, 0.2, 0 }, { 200, 0.1, 0 } } },
+            { "three", { { 100, 0.2, 0 } } },
+        }
+        local prepared = {}
+        for module_index, module in ipairs(modules) do
+            local compilation = {
+                modname = "batch." .. module[1],
+                request_index = module_index,
+                jobs = {},
+            }
+            for position, part in ipairs(module[2]) do
+                local label = module[1] .. ".part" .. (position - 1)
+                local object = workspace_directory .. "/" .. label .. ".o"
+                compilation.jobs[position] = {
+                    module_index = module_index,
+                    part_index = position - 1,
+                    c_path = workspace_directory .. "/" .. label .. ".c",
+                    object_path = object,
+                    temporary_object = object,
+                    argv = { platform.windows and "bash" or "sh", script, label,
+                        tostring(part[2]), tostring(part[3]), object },
+                    cost_bytes = part[1],
+                }
+            end
+            prepared[module_index] = compilation
+        end
+
+        local launched = {}
+        record_launches(launched)
+        local diagnostic_path = workspace_directory .. "/diagnostics"
+        diagnostic_stream = assert(io.open(diagnostic_path, "w+b"))
+        io.stderr = diagnostic_stream
+        local results, cancelled = driver.run_prepared_compiles(prepared, 2, false)
+        assert(io.stderr:flush())
+        assert(io.stderr:seek("set", 0))
+        local diagnostics = assert(io.stderr:read("*a"))
+        assert(diagnostic_stream:close())
+        diagnostic_stream = nil
+        io.stderr = previous_stderr
+        restore_launch()
+
+        -- Largest cost first; equal costs keep module, then part, order.
+        local expected_launches = {
+            "one.part1", "two.part0", "two.part1", "three.part0",
+            "one.part2", "one.part0",
+        }
+        assert.equal(#expected_launches, #launched, table.concat(launched, "\n"))
+        for index, label in ipairs(expected_launches) do
+            assert.truthy(launched[index]:find(label, 1, true),
+                table.concat(launched, "\n"))
+        end
+        -- Completion order differs; diagnostics replay in module/part order.
+        local previous = 0
+        for _, label in ipairs({ "one.part0", "one.part1", "one.part2",
+                "two.part0", "two.part1", "three.part0" }) do
+            local position = assert(diagnostics:find(
+                "part diagnostic: " .. label .. "\n", 1, true), diagnostics)
+            assert.is_true(previous < position, diagnostics)
+            previous = position
+        end
+
+        assert.is_nil(cancelled)
+        assert.equal(3, #results)
+        assert.is_nil(results[1].ok)
+        assert.equal("exit", results[1].err)
+        assert.equal(23, results[1].code)
+        assert.equal(3, #results[1].jobs)
+        assert.truthy(results[1].jobs[1].ok, results[1].jobs[1].err)
+        assert.truthy(results[1].jobs[2].ok, results[1].jobs[2].err)
+        assert.is_nil(results[1].jobs[3].ok)
+        assert.equal(23, results[1].jobs[3].code)
+        for index, count in pairs({ [2] = 2, [3] = 1 }) do
+            assert.truthy(results[index].ok, results[index].err)
+            assert.equal(count, #results[index].jobs)
+        end
+        assert.is_false(file_exists(workspace_directory .. "/one.part2.o"))
+        assert.is_true(file_exists(workspace_directory .. "/one.part0.o"))
+    end)
+
     it("rejects duplicate modules and aliased object outputs", function()
         local requests = checked_requests()
         local ok, failure = pcall(driver.compile_modules,

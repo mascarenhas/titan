@@ -490,11 +490,13 @@ installation layout from the compiler launcher filename.
   uses its matched `<root>/src/lua-5.5.1` headers,
   `<root>/lib/liblua.a`, and `<root>/lib/titan/0.6/libtitan.a`.
 * `-l/--link` adds extra C libraries to the link line (FFI use).
-* `-j/--jobs <jobs>` bounds concurrent generated-C object compilations. It
-  defaults to the positive integer in `TITAN_JOBS`, or to `1` when that
-  variable is unset. Values above one require the standard POSIX `mkfifo`
-  utility. Parsing, checking, C generation, generated-header work, and final
-  linking remain ordered in the compiler process.
+* `-j/--jobs <jobs>` caps concurrent generated-C object compilations. It
+  defaults to the positive integer in `TITAN_JOBS`, or to four when that
+  variable is unset. On Linux and macOS, values above one require the standard
+  POSIX `mkfifo` utility. Inside a parent GNU Make the run also shares Make's
+  job slots; see [Compiler jobs and GNU Make](build-profiles.md#compiler-jobs-and-gnu-make).
+  Parsing, checking, C generation, and generated-header work remain ordered in
+  the compiler process.
 * `--static` prefers self-describing Titan `.a` providers over `.so`
   providers for ordinary dependencies. It still permits DSO/source fallback
   and does not request a fully static system executable. Windows rejects this

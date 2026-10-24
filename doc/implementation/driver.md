@@ -686,6 +686,19 @@ exception objects propagate unchanged through the graph boundary. Required
 header content hashing also uses this callback when available; a broken string
 result/error falls back to the ordinary Lua digest, while cancellation propagates.
 
+A **digest-only** adapter supplies `sha256_binary` alone, with no `get`, `put`,
+`refresh_inputs`, or `yield` (`titan-compiler/cacheadapter.lua` `validate`);
+`titanc` passes this shape. It offers no storage, so storage work is gated on the
+actual capability (`cacheadapter.can_get`, `cacheadapter.can_put`), never on
+adapter presence. Header-cache restoration and observation refresh require
+`get`, header and FFI-conversion stores require `put`, and
+`checker/declarations.lua` builds an FFI conversion key and encodes its graph
+only when `get` exists. The digest still reaches first-load C-header identities
+(including forced-header scans), header revalidation, and the C-probe cache's
+result and baseline keys (`cprobe.Service:_digest`). Those keys keep the
+lowercase hexadecimal spelling of the pure-Lua digest, so probe-cache entries
+are shared between native and pure-Lua compilations.
+
 The `c-header-v7` payload (`c-parser/cdriver.lua` `HEADER_CACHE_VERSION`)
 stores the closed extracted-declaration graph described in [FFI
 internals](ffi-internals.md#checker-rules); it excludes CPP macro environments,
@@ -1097,12 +1110,13 @@ list; there is still one call. `options` carries `nominal_layouts`,
    command enables LTO and names no seed, the driver appends
    `-frandom-seed=<modname>` so archive bytes stay reproducible. The output
    goes to a sibling temporary that is renamed into place only after success.
-   A direct `driver.compile` call runs this command immediately. The CLI's
-   default one-job path preserves that same generate/format/compile sequence
-   for each logical module. With a larger bound, it prepares every source
-   module through step 4 in logical-name order, then `driver.compile_modules`
-   runs only these independent object commands concurrently, bounded by
-   `--jobs`/`TITAN_JOBS`:
+   A direct `driver.compile` call runs this command immediately. With
+   `--jobs 1` the CLI preserves that same generate/format/compile sequence for
+   each logical module. With the default four jobs or any larger bound, it
+   prepares every source module through step 4 in logical-name order, then
+   `driver.compile_modules` runs only these independent object commands
+   concurrently, as described in [Parallel generated-C
+   compilation](#parallel-generated-c-compilation):
 
    ```sh
    cc --std=c99 -O3 -Wall -Wno-unused-but-set-variable -Wno-unused-function \
@@ -1137,30 +1151,13 @@ list; there is still one call. `options` carries `nominal_layouts`,
    explicitly disables LTO so saved object functions can be compared with
    the generated-C diagnostic shadow.
 
-Windows, Linux and macOS use the same generated-C scheduling bound,
-larger-first launch order, immediate slot refilling and request-order diagnostic
-replay. Windows uses the stock LuaRocks `luv` process API; Linux and macOS use
-the POSIX completion FIFO described below. Windows' luv bundles its own libuv
-and is independent of the Titan stdlib libuv payload.
-
 The native-tool strings, and `CLANG_FORMAT` when `--pretty-print` actually
 selects it, are parsed into dense argument arrays with a small shell-word grammar
 supporting whitespace, single/double
 quotes, and backslash escapes. Each command builder quotes every resulting word,
 so spaces and shell metacharacters remain part of one argument rather than being
-reinterpreted. A direct command ends in `os.execute`. For a parallel module
-batch, the platform transport starts at most the requested number of those
-commands. Titan launches larger generated translation units first, using their
-byte lengths as a deterministic compile-cost estimate. Each compiler's stdout
-and stderr go to separate temporary files so a blocked pipe cannot deadlock the
-batch. On Linux and macOS, parallel mode requires the standard POSIX `mkfifo`
-utility. Each child publishes its prepared-batch index to one mode-`0600` named FIFO after the
-compiler exits; the parent reaps whichever child completed and immediately
-refills that slot. Once every child has been reaped, Titan replays and removes
-the logs in logical request order. A completion-channel failure stops new
-launches, reaps active children, and fails the unlaunched requests rather than
-risking a deadlock. Preparation failures do not launch a process, and native
-failures do not prevent already independent module objects from being attempted.
+reinterpreted. A direct command ends in `os.execute`; batch transports are
+described in [Parallel generated-C compilation](#parallel-generated-c-compilation).
 Unterminated quotes, trailing escapes, NUL bytes, an empty configured command,
 and non-dense programmatic argument arrays produce configuration errors.
 A malformed `CLANG_FORMAT` is therefore inert in the default mode. `-v` prints
@@ -1181,6 +1178,124 @@ artifacts, and native inputs, so it rejects those collisions before publishing
 a header. A one-job batch uses the single-module wrapper in order, while a
 larger batch preserves the same cache mutation and per-module result order and
 overlaps only the final C object commands.
+
+### Parallel generated-C compilation
+
+Preparation (`prepare_compile` in `driver.lua`) returns one record per logical
+module. Its ordered `jobs` array holds the module's native compile commands,
+part 0 first. Each job records its owning `module_index` (the module's request
+index), `part_index`, C and object paths, sibling temporary object, argument
+array, and `cost_bytes`, the generated byte count used as a deterministic
+compile-cost estimate. `driver.run_prepared_compiles(prepared, parallelism,
+verbose)` schedules such a list; its pure helpers live in
+`titan-compiler/jobs.lua`:
+
+1. It flattens every module's jobs and keeps each job's owner
+   (`jobs.flatten`).
+2. It launches the largest `cost_bytes` first. Ties keep module request order,
+   then part order (`jobs.launch_order`).
+3. It refills a slot as soon as any child reports completion, so completion
+   order is independent of launch order.
+4. After every child has been reaped, it replays each job's captured stdout and
+   stderr in module/part order, whatever the completion order was.
+5. A module succeeds only when every one of its jobs succeeded. Its error and
+   exit code are those of its first failing part, and every part's own result
+   stays in the module result's `jobs` array (`jobs.summarize`). An ordinary
+   compiler failure stops neither the module's remaining parts nor other
+   modules' queued jobs.
+
+The call returns one `{ok, err, code, jobs}` result per prepared module, in
+input order, plus the number of an INT, TERM, or HUP signal that cancelled the
+batch. It never publishes objects. `driver.compile_modules` publishes each
+successful module and then re-raises that signal (`jobs.propagate`). A cancelled
+batch fails every module, so no object is published before the signal is
+delivered.
+
+A one-job bound, a batch with only one job, an explicit parent `make -j1`, and
+an unusable parent jobserver run the jobs in module/part order through the
+direct command path. Otherwise each child's stdout and stderr go to separate
+temporary files so a blocked pipe cannot deadlock the batch. Windows launches
+children through the stock LuaRocks `luv` process API, whose bundled libuv is
+independent of the Titan stdlib libuv payload. On Linux and macOS the batch
+requires the standard POSIX `mkfifo` utility: each child writes its batch
+index to one mode-`0600` named FIFO after its compiler exits. The parent opens
+that FIFO read/write, so it neither blocks before the first child nor sees a
+transient EOF while a slot is refilled. It makes the Lua `FILE` unbuffered
+before the first read, because it polls the descriptor and stdio read-ahead
+could otherwise hold a completion line that the kernel no longer reports. The
+parent then reaps exactly the child that completed and frees its slot. A
+completion-channel failure stops new launches, reaps active children, and fails
+the unlaunched jobs rather than risking a deadlock. Preparation failures do not
+launch a process.
+
+### GNU Make jobserver participation
+
+The local cap is `titanc --jobs`, else `TITAN_JOBS`, else four. `titanc`
+resolves it once; programmatic callers pass it as `parallelism`. A parent GNU
+Make never raises it: a recipe running `titanc -j4` inside `make -j16` still
+runs at most four C compilers. On Linux and macOS, `jobs.open_slots` reads the
+inherited `MAKEFLAGS` (`jobs.make_policy`). Option words end at a standalone
+`--`, GNU Make backslash escapes are honored, and the **last**
+`--jobserver-auth=fifo:PATH`, `--jobserver-auth=R,W`, or legacy
+`--jobserver-fds=R,W` wins. Without an authorization, an explicit `-j1` runs
+serially; no `-j`, an unlimited `-j`, or no `MAKEFLAGS` at all uses the local
+cap. A cap of one never opens the jobserver.
+
+With a usable jobserver each running C compiler holds one slot:
+
+- The first active job uses the implicit slot that Make granted the recipe.
+  Titan never writes that slot back.
+- Each additional simultaneously running job first borrows one token. The
+  batch acquires it immediately before the launch, and the native client keeps
+  the exact byte it read in a ledger.
+- A failed launch frees its slot at once. Otherwise the slot is freed only
+  after the child has been reaped, including after a compiler failure. Freeing
+  a slot writes the most recently borrowed byte back whenever the ledger holds
+  more than `max(active - 1, 0)` bytes, so the ledger always equals the number
+  of borrowed slots and Make receives exactly the bytes it lent.
+- Batch cleanup (`Slots:close`) returns every remaining byte on success,
+  failure, and cancellation paths. Collecting or `<close>`-ing a native client
+  also returns its bytes.
+
+The native client (`titan-runtime/ltitanlib.c` `_jobserver_open`) uses private
+open-file descriptions, never the inherited ones. A FIFO authorization is
+opened twice, read-only and write-only, after checking that the path is a FIFO
+and that both opens reach that channel. On Linux, a pipe authorization is
+reopened through `/proc/self/fd/R` and `/proc/self/fd/W` after `fstat` proves
+that both descriptors are one open pipe. Only these private descriptions become
+nonblocking and close-on-exec; the descriptions Make shares with other recipes
+keep their blocking mode. A token read that loses a race with another client
+returns `EAGAIN`, and the batch waits again. `_jobserver_wait` polls the
+unbuffered completion FIFO, the token descriptor (only while a launch is
+waiting for a slot), and the signal wake pipe together. The batch therefore
+never blocks in a token read while its own children can still finish, and two
+recipes sharing `make -j2` each progress with their implicit slots. No helper
+process reads tokens.
+
+An advertised but unusable authorization prints one warning per process and
+uses one job. This covers an unrecognized authorization, closed or mismatched
+descriptors, a FIFO that cannot be opened, and any pipe authorization off
+Linux. It also covers GNU Make 4.4's `-2,-2` marker for a recipe that is not
+marked `+`: the marker is the last authorization and hides the real pipe.
+macOS's stock GNU Make 3.81 passes a pipe that Titan cannot reopen privately,
+so each `titanc` recipe there compiles serially in its one implicit slot while
+Make still runs independent recipes in parallel. GNU Make 4.4's FIFO jobserver
+(Homebrew `gmake`) or a standalone `titanc -jN` outside Make compiles in
+parallel on macOS. A Makefile that runs `titanc` must mark the recipe with `+`
+and keep `MAKEFLAGS` and the jobserver descriptors through any wrapper; Titan's
+own graph does so ([Make job pool](build-script-audit.md#make-job-pool-and-titanc-recipes)).
+Windows uses only the local cap, because MSYS2 Make's jobserver descriptors are
+not native UCRT descriptors.
+
+A parallel batch installs a temporary INT/TERM/HUP action (`_signal_guard`)
+that only records the first signal in a `sig_atomic_t` and writes a wake byte;
+ignored signals stay ignored. The batch then stops launching, waits for its
+running children, frees every slot, restores the previous actions (including
+Lua's SIGINT hook), and fails every module. `driver.compile_modules` re-raises
+the recorded signal under that restored action, so SIGINT surfaces as Lua's
+`interrupted!` error and SIGTERM terminates the process by its default action
+without the CLI's remaining cleanup. A SIGKILL cannot be intercepted, and the
+tokens a killed process held are not returned.
 
 ### Shared C preprocessor, compiler, and linker inputs
 
@@ -1490,10 +1605,14 @@ generated files below one folder while preserving the source hierarchy; see
 emitted C/header boundary into the fixed `clang-format` pass; default builds do
 not invoke it. `-v` prints every native-tool command line plus any opted-in
 formatter command, `--print-ast` dumps each module's AST after checking, and
-`-j`/`--jobs` sets the positive generated-C compilation bound. The command-line
-value overrides `TITAN_JOBS`; an unset environment defaults to one process.
-Neither setting parallelizes checking, code generation, formatting, provider
-validation, archiving, or linking. `--static` swaps the compiled-provider passes
+`-j`/`--jobs` sets the positive local job cap. The command-line value overrides
+`TITAN_JOBS`, and the cap is four when neither is set; a parent GNU Make
+jobserver can lower but never raise it ([GNU Make jobserver
+participation](#gnu-make-jobserver-participation)). Checking, code generation
+and formatting stay serial. A Unix provider pair builds its archive while the
+DSO links and starts the archive-backed validation link concurrently only with
+its own jobserver slot; see [Provider link
+pipeline](static-compiled-modules.md#provider-link-pipeline). `--static` swaps the compiled-provider passes
 to prefer self-describing archives before DSOs, `--test` selects the native test
 pipeline described in [Native test runner](test-runner.md), and the
 `--coverage` family instruments and reports native line coverage as described
@@ -1549,6 +1668,18 @@ option without `--coverage`, `--static` on Windows, `--compile-only` with
 test or standalone executable unless `-c` is given, a requested module named
 `titan.test.runner` in test mode, and, on Windows, any selected static Titan
 archive.
+
+After those preflight rejections and before creating its resolver, `titanc`
+loads the native support library (`require "titan"`) and exits with a
+reinstall diagnostic when it is missing or lacks `_sha256_binary`; an
+older support library is a stale installation, not a slower mode. It passes
+the digest-only adapter `{ sha256_binary = support._sha256_binary }` as the
+resolver's `cache_adapter` ([Cache adapter and persistent
+payloads](#cache-adapter-and-persistent-payloads)), so C-header content
+identities and C-probe cache keys are hashed natively while no cache entry is
+built or stored. `--print-root` returns before this point and never loads
+native support. Programmatic drivers without an adapter keep the pure-Lua
+digest.
 
 Every CLI module name is placed in one `requested_roots` set and passed to the
 filesystem loader. Those roots are source-first; everything they import runs
@@ -1855,7 +1986,8 @@ It is *not* part of the runtime SDK's `libtitan.a` or ordinary generated
 modules. Its table (`ltitanlib.c` `titanlib`) exports the user-facing
 `backtrace`, the internal testing helpers `pin` and `clear` used to exercise
 the traceback pin discipline, the loader helpers `_loadlib` and
-`_loadlibglobal`, and, on Windows only, `_abivalue`:
+`_loadlibglobal`, the compiler digest `_sha256_binary`, on Windows only
+`_abivalue`, and elsewhere the compiler's jobserver and signal helpers:
 
 ```lua
 -- Lua
@@ -1895,6 +2027,22 @@ the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
 `titan._abivalue(path, symbol)` (Windows only) is the compiler's ABI-marker
 query for PE providers; its contract is in [Windows loader
 boundary](windows-build.md#windows-loader-boundary).
+
+`titan._sha256_binary(bytes)` returns the 32-byte binary SHA-256 digest of a
+string, including embedded NUL and high bytes, and raises for any other
+argument. It is portable C over the public Lua API, with no OpenSSL or process
+dependency, so the private bootstrap provides it before the standard library
+exists. `titanc` refuses to start without it ([The `titanc` command
+line](#the-titanc-command-line)), and a physical provider named `titan` is
+published only when a fresh Lua process finds it, beside `_loadlib` and
+`_loadlibglobal`, in the linked support table (`driver.lua`
+`support_validation_script`); a stale `ltitanlib.o` therefore fails before
+publication instead of producing an installation that `titanc` rejects.
+
+The POSIX-only `_jobserver_open`, `_jobserver_wait`, `_signal_guard`,
+`_signal_pending`, and `_signal_raise` are private to `titan-compiler/jobs.lua`;
+[GNU Make jobserver participation](#gnu-make-jobserver-participation)
+describes the client ledger, the wait, and the temporary signal actions.
 
 ## Lua installation and executable-relative search paths
 
@@ -1963,7 +2111,7 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `--print-ast` | Print each module's AST after checking. | Not with `--incremental`. |
 | `--pretty-print` | Format generated C and headers with `CLANG_FORMAT`. | |
 | `-v`, `--verbose` | Print native-tool and formatter commands. | |
-| `-j`, `--jobs <n>` | Bound concurrent generated-C object compilations; overrides `TITAN_JOBS`, default 1. | Positive integer. |
+| `-j`, `--jobs <n>` | Local cap on concurrent generated-C compilations; overrides `TITAN_JOBS`, default 4. | Positive integer. |
 | `--launcher-name <name>` | Windows standalone/test launcher filename in `bin` (default: logical module name). | Windows only; requires a standalone or test main; not with `-c`. |
 | `--static` | Run the archive pass before the DSO pass. | Not on Windows. |
 | `--source-first` | Prefer source to compiled providers for every dependency. | |
@@ -2000,7 +2148,8 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `TITAN_EXTRA_LDFLAGS` | `driver.lua` | empty | Ordered linker inputs appended to final provider and program links. |
 | `TITAN_BUILD_PROFILE` | `driver.lua` | `production` | `validation` selects `-O0 -fno-lto -g`; any other value is a toolchain error. |
 | `TITAN_NO_LINE_DIRECTIVES` | `driver.lua` | unset | Exact value `1` disables generated `#line` directives, like `--no-line-directives`. |
-| `TITAN_JOBS` | `titanc` | `1` | Generated-C compilation bound when `--jobs` is absent. |
+| `TITAN_JOBS` | `titanc` | `4` | Local job cap when `--jobs` is absent. |
+| `MAKEFLAGS` | `jobs.lua` `open_slots` (Unix) | unset | A parent GNU Make's jobserver authorization and `-j1`; see [GNU Make jobserver participation](#gnu-make-jobserver-participation). |
 | `TITAN_PATH_0_6`, `TITAN_PATH` | `driver.lua`, `titan.c` `pushpath`, `standalone_paths.lua` | unset | Compiled-module search path; the versioned name wins, and `;;` expands to the default. |
 | `TITAN_ROCKS_ROOT` | `driver.lua`, `titanc --print-root`, installed-compiler Make invocations | unset (empty means unset) | Internal `ROCKS_TREE` override for installation-root discovery; not a public deployment setting. |
 | `TITAN_PREFIX` | `driver.lua` | installation root | Root of the persistent C-probe cache `var/cache/titan-probes/2`. |
