@@ -549,8 +549,9 @@ into one `titan.dll`.
 the provider DLL, and Lua shims below that stage. `publish-stdlib` copies
 `<WINDOWS_BUILD_ROOT>/out/titan.dll` and the shims under its `titan/` directory
 into the canonical SDK locations; it does not read source-adjacent outputs.
-`TITAN_JOBS` bounds generated-C compilation; checking, generation and the final
-link retain their normal order. The target neither reinstalls the compiler nor
+`TITAN_JOBS` bounds generated-C compilation and body-phase C validation probe
+batches; checker traversal, generation and the final link retain their normal
+order. The target neither reinstalls the compiler nor
 prepares those native inputs. `install-stdlib` builds that provider and then
 copies it; `publish-stdlib` copies an existing provider and its shims without
 rebuilding or validating them. The source rock instead builds the provider in

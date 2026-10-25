@@ -490,13 +490,15 @@ installation layout from the compiler launcher filename.
   uses its matched `<root>/src/lua-5.5.1` headers,
   `<root>/lib/liblua.a`, and `<root>/lib/titan/0.6/libtitan.a`.
 * `-l/--link` adds extra C libraries to the link line (FFI use).
-* `-j/--jobs <jobs>` caps concurrent generated-C object compilations. It
-  defaults to the positive integer in `TITAN_JOBS`, or to four when that
-  variable is unset. On Linux and macOS, values above one require the standard
-  POSIX `mkfifo` utility. Inside a parent GNU Make the run also shares Make's
-  job slots; see [Compiler jobs and GNU Make](build-profiles.md#compiler-jobs-and-gnu-make).
+* `-j/--jobs <jobs>` caps concurrent native compiler processes: generated-C
+  object compilations and, while modules are checked, batches of C validation
+  probes. It defaults to the positive integer in `TITAN_JOBS`, or to four when
+  that variable is unset. On Linux and macOS, values above one require the
+  standard POSIX `mkfifo` utility. Inside a parent GNU Make on those platforms the run also shares
+  Make's job slots; see [Compiler jobs and GNU Make](build-profiles.md#compiler-jobs-and-gnu-make).
   Parsing, checking, C generation, and generated-header work remain ordered in
-  the compiler process.
+  the compiler process, and diagnostics do not depend on the job count. With
+  `--jobs 1` (or, on Linux and macOS, under `make -j1`) every C probe runs when reached.
 * `--c-parts <n>` sets the maximum number of C translation units into which a
   module with at least 2 MiB of generated C definitions is split, so its parts
   can compile in parallel. It defaults to the positive integer in

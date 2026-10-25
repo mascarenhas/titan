@@ -98,15 +98,22 @@ optimization and cross-module LTO while ordinary validation fixtures stay at
 
 ## Compiler jobs and GNU Make
 
-`titanc --jobs N` or `TITAN_JOBS=N` sets how many generated-C compilations one
-`titanc` run may execute at once on Linux, macOS and Windows. The command-line
-option wins, and the default is four. Checking, C generation and formatting stay
-serial. Library builds also use the bound for their two provider links: the
+`titanc --jobs N` or `TITAN_JOBS=N` sets how many native compiler processes one
+`titanc` run may execute at once on Linux, macOS and Windows: generated-C
+compilations, and, while each module is checked, its batch of C validation
+probes. The command-line option wins, and the default is four. Parsing,
+checking, C generation and formatting stay ordered in the compiler process,
+and diagnostics and generated C do not depend on the job count. With
+`--jobs 1`, `TITAN_JOBS=1` or, on Linux and macOS, under `make -j1`, every
+C probe runs when it is reached. A C probe that fails during batching makes
+titanc check the module again, which adds work to failing builds; see
+[C validation probes](c-ffi-expressions.md#compiled-probe-cache).
+Library builds also use the bound for their two provider links: the
 second link overlaps the first only when a parent GNU Make jobserver grants it a
 slot; every validation still precedes publication. Windows stdlib builds also
 honor `TITAN_JOBS`.
 
-A `titanc` recipe marked with `+` in a GNU Make file shares Make's jobserver.
+On Linux and macOS, a `titanc` recipe marked with `+` in a GNU Make file shares Make's jobserver.
 Its first compilation uses the recipe's own job slot and each further one
 borrows a slot from Make, so `make -j8` runs at most eight jobs in total, while
 `--jobs` still caps each `titanc` run. Under `make -j1` titanc compiles

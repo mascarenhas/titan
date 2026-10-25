@@ -47,9 +47,11 @@ failed) and the error list; callers test `#errors == 0`. `loader` is the
 import callback (see [Imports](#imports-and-the-loader-protocol)); if
 omitted, a stub that fails every import is used. The other `options` fields
 are `completion`, `cache_adapter`, `prepare_ffi_header`,
-`target_profile_provider`, and `probe_service_provider`; the driver uses the
-last two to share the resolver-owned target profile and C probe service with
-dependency checks. The body runs under `xpcall`, so an owned probe service and
+`target_profile_provider`, `probe_service_provider`, and `reparse`; the driver
+uses the two providers to share the resolver-owned target profile and C probe
+service with dependency checks, and supplies `reparse` only when the resolver
+may batch C probes ([below](#speculative-probe-barrier-and-authoritative-recheck)).
+The body runs under `xpcall`, so an owned probe service and
 C header bundle are closed even when a checker invariant throws; the error is
 rethrown after cleanup.
 
@@ -69,6 +71,98 @@ returns `types.Invalid()`, the error-recovery type, so checking continues.
 When a duplicate refers to an earlier node, `location.format` adds that
 node's complete `filename:line:col`; this is essential when the declarations
 come from different contributors.
+
+### Speculative probe barrier and authoritative recheck
+
+With `options.reparse`, a resolver-owned `probe_service_provider`, and
+neither `analysis_only` nor a completion request, `checker.check` runs a
+speculative pass. Its symbol table carries `probe_speculation`; while
+`checkbodies` runs, eligible acceptance probes defer into the check's probe
+batch ([C FFI](c-ffi-expressions.md#speculative-batched-acceptance-probes)).
+A batch exists only if the provided service enables `Service:batching()`;
+otherwise the pass still records imports and snapshots the registry but has
+no deferred verdict that can trigger a recheck.
+Top-level checking, including imports, foreign environments and module
+variable initializers, stays synchronous.
+
+Immediately after `checkbodies`, before step 1 above, the batch flushes.
+Nothing that can publish a fact precedes this barrier: header dependencies,
+export validation, `makemoduletype`, interface registration, lowering,
+completion and the return to the loader all follow it. A nested import is
+checked by its own `checker.check` during the importer's top level, so it
+passes its own barrier before the importer receives its interface. If every
+verdict accepts, the pass continues unchanged: each deferred call returned
+exactly the fields a real success gives its consumer, so the pass executed
+the synchronous operation sequence.
+
+If any verdict rejects or fails, the pass stops at the barrier after its
+ordinary cleanup. `checker.check` first restores the pass's write journal
+(below), then runs the check again authoritatively:
+
+1. `options.reparse()` assembles a fresh root from the same inputs; the
+   caller's root table is refilled so its reference stays valid.
+2. A fresh symbol table and error list rerun every step. Each top-level
+   import unit (`checker._checkimport_for`) replays the speculative pass's
+   recorded module type, errors and provenance, plus the `binary_modules`
+   entries and profile acquisition the unit added to the importer's state,
+   instead of calling the loader again. Nested checks, `driver.imported`
+   entries, dependency frames and loader registry writes therefore happen
+   once, as on the synchronous path. A diverging import sequence is an
+   internal compiler error.
+3. At the end of the import phase (`checker._finish_import_phase`) the
+   rerun asserts that every unit was replayed and restores the entries of
+   `types.registry` in place to the speculative pass's snapshot taken at that
+   same point. Every deferral follows the import phase, so that snapshot is
+   the synchronous registry.
+4. Probes consume each nonpublishable occurrence of the speculative pass
+   once, in order for that source, before any later published verdict can
+   answer it. A candidate owns its failed nested baseline gate, so replay
+   consumes both together; that failure cannot shift to a later distinct
+   request. Explicit baseline validations keep a separate ordered history.
+   After exhaustion, normal completed-cache lookup still precedes baseline
+   validation, and misses retry synchronously
+   ([C FFI](c-ffi-expressions.md#speculative-batched-acceptance-probes)).
+   The rerun never defers or recompiles a completed semantic verdict.
+
+The speculative pass and the synchronous check run the same operations until
+the first deferred request whose real verdict is not success; afterwards the
+abandoned pass can reach code the synchronous check never reaches. A
+rejected pass's effects on state that outlives it are therefore either
+restored or proven replay-invariant:
+
+- **Restored.** Registry entries (step 3). After its import phase a
+  speculative pass also journals, in `speculation.journal`
+  (`checker._journal_write`), the two in-place writes it can make to a type
+  object that an imported module may own: the compiler-selected carrier that
+  `checker._ensure_c_enum_supported` stores on an enum (`spelling`, `signed`,
+  `rank`, `bits`, `_c_numeric`, `_c_numeric_carriers`, `_c_enum_validated`)
+  and the fallback `_ffi_scope` of a C declaration. Each field's value from
+  before its first write is put back before the rerun, which then makes
+  exactly the synchronous writes.
+- **Not reachable after the import phase.** Imported-owner registration,
+  `_source_complete`, portable C numeric normalization and module prefix slots
+  are written only by `register_module_interface`: by the import phase, whose
+  units are recorded and replayed rather than rerun, or after the barrier,
+  which an abandoned pass never reaches. Loader state likewise.
+- **Per-pass objects.** The module's AST, symbol table, converted C
+  declarations and tag records, interface implementations and adjustment
+  plans (computed per use; a frozen callable adapter is bound to one use
+  site), and generic inference entries are created by the pass itself and
+  dropped with it.
+- **Replay-invariant.** Published probe verdicts are keyed by the exact source
+  and answer any later request of it, which is the probe cache's own
+  contract. Header bundle files, header and preprocessing caches, the
+  foreign-declaration cache and the C numeric memo are idempotent
+  normalizations or content-keyed memos, which the rerun repeats with the same
+  bytes and values. Probe workspaces, staged headers and probe sequence
+  numbers are private temporaries removed at close and normalized out of
+  diagnostics. Cache and trace counters are telemetry. Checker globals are
+  reset at the start of each pass.
+
+The rerun is the synchronous check from the synchronous state, so its AST,
+diagnostics (text, location, order), imported graphs and generated C, and a
+later root's, are the synchronous path's. An exception from the speculative
+pass propagates unchanged, without a rerun.
 
 ## The symbol table (`symtab.lua`)
 
@@ -144,7 +238,9 @@ without creating value symbols. Alias resolution and cycle detection are in
    from the AST and marks the record's `custom_constructor` metadata; see
    [record constructors](record-constructors.md).
 3. All Titan imports are visited in AST order, establishing module
-   environments before any non-variable declaration.
+   environments before any non-variable declaration, then
+   `checker._finish_import_phase` snapshots or restores the registry for the
+   [authoritative recheck](#speculative-probe-barrier-and-authoritative-recheck).
 4. `check_foreign_environment` builds the `ffi` namespace from the ordered
    header environment ([FFI internals](ffi-internals.md)); foreign aliases are
    resolved, `check_imported_c_declarations` validates imported C
@@ -865,9 +961,11 @@ declared without a return annotation default to **zero results** (`function (): 
 
 ## Imports and the loader protocol
 
-`Ast.TopLevelImport` is checked by
-`checker.checkimport(modname, loader, request)`. The parser has already removed
-a terminal `.titan` marker from `modname`; `checker/declarations.lua` passes
+`Ast.TopLevelImport` is checked through
+`checker._checkimport_for(st, ...)`, which wraps
+`checker.checkimport(modname, loader, request)` for import replay.
+The parser has already removed a terminal `.titan` marker from `modname`;
+`checker/declarations.lua` passes
 `{ kind = "source-import" }` only when the AST's separate `source_required` bit
 is true.
 The loader contract is:
@@ -975,7 +1073,7 @@ a private C-typed member that never enters its interface.
 
 ## Process-global state
 
-Two pieces of mutable state outlive a `checker.check` call:
+The principal process-global containers that outlive a `checker.check` call are:
 
 * `types.registry`, the fqtn → `Type.Record`/`Type.Union`/`Type.Interface`
   map. After a non-analysis check, `checker.check` leaves the declared
@@ -983,6 +1081,11 @@ Two pieces of mutable state outlive a `checker.check` call:
   erased AST carries the detached registry its coder invocation installs.
 * `driver.imported`, the import cache, including any `CIRCULAR_MARK`
   sentinels left by a failed run.
+
+A rejected speculative pass restores registry entries in place before its
+authoritative recheck. Its journaled writes to shared imported type objects
+are put back before reparsing; authoritative writes persist. See
+[Speculative probe barrier and authoritative recheck](#speculative-probe-barrier-and-authoritative-recheck).
 
 Any test or tool that checks more than one module (or the same module twice)
 must reset them, or nominal types from a previous run resolve in the next one.

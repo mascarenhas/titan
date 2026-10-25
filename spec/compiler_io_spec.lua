@@ -739,3 +739,329 @@ describe("Windows synchronous compiler I/O", function()
         assert.is_true(ok, failure)
     end)
 end)
+
+-- The stock optional batch capability over the shared native scheduler.
+describe("synchronous compiler I/O batches", function()
+    local jobs = require "titan-compiler.jobs"
+    local cdriver = require "c-parser.cdriver"
+    local root
+
+    after_each(function()
+        if root then remove_tree(root); root = nil end
+    end)
+
+    -- The fixtures model a titanc run without a parent Make, whatever Make
+    -- runs this spec, unless a test supplies its own MAKEFLAGS.
+    local function under_make(makeflags, body)
+        local getenv = platform.getenv
+        return with_overrides(platform, {
+            getenv = function(name)
+                if name == "MAKEFLAGS" then return makeflags end
+                return getenv(name)
+            end,
+        }, body)
+    end
+
+    local function script(text) return { "sh", "-c", text } end
+
+    -- No ledger is left behind: a fresh signal guard can be installed.
+    local function assert_guard_restored()
+        if platform.windows then return end
+        local guard = assert(require("titan")._signal_guard())
+        assert.is_nil(guard:restore())
+    end
+
+    it("returns run's result for each command in input order", function()
+        under_make(nil, function()
+            local strategy = compiler_io.new_sync()
+            local commands = {
+                script("printf a; printf b >&2; printf c; exit 3"),
+                script("printf accepted"),
+                script("printf rejected >&2; exit 1"),
+            }
+            local results, cancelled = strategy:run_batch(commands, { jobs = 2 })
+            assert.is_nil(cancelled)
+            assert.equal(#commands, #results)
+            for index, argv in ipairs(commands) do
+                local expected = strategy:run(argv)
+                for _, field in ipairs({
+                    "started", "ok", "status", "why", "interrupted", "output",
+                    "diagnostic",
+                }) do
+                    assert.same(expected[field], results[index][field],
+                        index .. ": " .. field)
+                end
+            end
+            -- Standard output and error share one log, in write order.
+            assert.equal("abc", results[1].output)
+            assert.equal(3, results[1].status)
+            assert_guard_restored()
+        end)
+    end)
+
+    it("answers invalid and empty argv without opening a ledger", function()
+        local opened = 0
+        with_overrides(jobs, {
+            open_slots = function()
+                opened = opened + 1
+                error("no ledger is needed")
+            end,
+        }, function()
+            local results = compiler_io.new_sync():run_batch({
+                {}, "tool", { [1] = "sh", extra = "argument" },
+            }, { jobs = 4 })
+            assert.same({ started = false, ok = false,
+                diagnostic = "command is empty" }, results[1])
+            assert.is_false(results[2].started)
+            assert.matches("argument array", results[2].diagnostic, 1, true)
+            assert.is_false(results[3].started)
+            assert.matches("dense argument array", results[3].diagnostic, 1, true)
+        end)
+        assert.equal(0, opened)
+        assert.error_matches(function()
+            compiler_io.new_sync():run_batch({ script("true") }, { jobs = 0 })
+        end, "positive integer jobs bound", 1, true)
+    end)
+
+    it("runs a single command or a single granted slot in order through run",
+    function()
+        -- Windows batches apply only the local cap, so a serial parent Make
+        -- does not reduce them to one slot there; the two commands then take
+        -- the native batch.
+        for _, case in ipairs({
+            { makeflags = nil, jobs = 1, count = 2, serial = true },
+            { makeflags = "-j1", jobs = 4, count = 2, serial = not platform.windows },
+            { makeflags = nil, jobs = 4, count = 1, serial = true },
+        }) do
+            under_make(case.makeflags, function()
+                local strategy = compiler_io.new_sync()
+                local ran = {}
+                function strategy:run(argv, options)
+                    ran[#ran + 1] = argv[3]
+                    return compiler_io.new_sync():run(argv, options)
+                end
+                local commands = {}
+                for index = 1, case.count do
+                    commands[index] = script("printf " .. index)
+                end
+                local results = strategy:run_batch(commands, { jobs = case.jobs })
+                assert.equal(case.serial and case.count or 0, #ran)
+                for index = 1, case.count do
+                    if case.serial then assert.equal("printf " .. index, ran[index]) end
+                    assert.is_true(results[index].ok)
+                    assert.equal(tostring(index), results[index].output)
+                end
+                assert_guard_restored()
+            end)
+        end
+    end)
+
+    it("keeps no launched result usable after a transport or cleanup failure",
+    function()
+        local function faulted(fault, count)
+            local overrides = {}
+            local original_open = jobs.open_slots
+            if fault == "release" or fault == "close" then
+                overrides.open_slots = function(...)
+                    local slots, err = original_open(...)
+                    if not slots then return nil, err end
+                    local method = slots[fault]
+                    slots[fault] = function(self)
+                        method(self)
+                        return nil, "injected " .. fault .. " failure"
+                    end
+                    return slots
+                end
+            elseif fault == "channel" then
+                local close_channel = jobs.close_channel
+                overrides.close_channel = function(channel)
+                    close_channel(channel)
+                    return nil, "injected channel failure"
+                end
+            else
+                local protected_remove = jobs.protected_remove
+                overrides.protected_remove = function(path)
+                    local removed, err = protected_remove(path)
+                    if not removed then return removed, err end
+                    return nil, "injected log failure"
+                end
+            end
+            local commands = {}
+            for index = 1, count do commands[index] = script("printf child" .. index) end
+            local results = under_make(nil, function()
+                return with_overrides(jobs, overrides, function()
+                    return compiler_io.new_sync():run_batch(commands, { jobs = 2 })
+                end)
+            end)
+            for index = 1, count do
+                local result = results[index]
+                -- The child launched and its output stays visible, but no
+                -- completed status survives as semantic evidence.
+                assert.is_true(result.started, fault)
+                assert.is_false(result.ok, fault)
+                assert.is_nil(result.status, fault)
+                assert.matches("the native C probe batch failed: ",
+                    result.diagnostic, 1, true)
+                assert.matches("injected " .. fault .. " failure",
+                    result.diagnostic, 1, true)
+                assert.matches("child" .. index, result.diagnostic, 1, true)
+            end
+            assert_guard_restored()
+        end
+        for _, fault in ipairs({ "release", "close", "channel", "log" }) do
+            faulted(fault, 2)
+        end
+        -- The one-command branch runs through `run` without a channel.
+        faulted("close", 1)
+    end)
+
+    describe("cancellation", function()
+        if platform.windows then
+            it("is exercised with the POSIX completion channel", function()
+                pending("Windows batches have no channel reservation or signal guard")
+            end)
+            return
+        end
+
+        local cancellation = setmetatable({}, {
+            __tostring = function() return "injected strategy cancellation" end,
+        })
+        local holder
+
+        after_each(function()
+            if holder then holder:close(); holder = nil end
+        end)
+
+        local function quote(text) return assert(cdriver.shell_quote(text)) end
+
+        -- A parent GNU Make FIFO jobserver holding `bytes`.
+        local function pool(bytes)
+            root = workspace()
+            local fifo = root .. "/pool"
+            assert(os.execute("mkfifo -m 600 " .. quote(fifo)))
+            holder = assert(io.open(fifo, "r+"))
+            assert(holder:setvbuf("no"))
+            assert(holder:write(bytes))
+            return fifo
+        end
+
+        local function available(fifo)
+            local client = assert(require("titan")._jobserver_open("fifo", fifo))
+            local count = 0
+            while assert(client:acquire() ~= nil) and client:held() > count do
+                count = count + 1
+            end
+            assert(client:close())
+            return count
+        end
+
+        -- Runs `commands` at a local cap of four under a three-byte parent
+        -- pool, recording the ledger, each reap and slot release, and every
+        -- path the strategy reserved.
+        local function cancelled_batch(strategy, commands)
+            local fifo = pool("abc")
+            local events, reserved, ledger = {}, {}, nil
+            local tmpname = strategy.tmpname
+            strategy.tmpname = function(self)
+                local path, err = tmpname(self)
+                reserved[#reserved + 1] = path
+                return path, err
+            end
+            local open_slots, reap = jobs.open_slots, jobs.reap
+            local called, raised = under_make("-j4 --jobserver-auth=fifo:" .. fifo,
+                function()
+                    return with_overrides(jobs, {
+                        open_slots = function(...)
+                            local slots, err = open_slots(...)
+                            ledger = slots
+                            if slots then
+                                local release = slots.release
+                                slots.release = function(self)
+                                    events[#events + 1] = "release"
+                                    return release(self)
+                                end
+                            end
+                            return slots, err
+                        end,
+                        reap = function(process)
+                            events[#events + 1] = "reap"
+                            return reap(process)
+                        end,
+                    }, function()
+                        return pcall(strategy.run_batch, strategy, commands, { jobs = 4 })
+                    end)
+                end)
+            assert.is_false(called)
+            assert.equal(cancellation, raised)
+            -- The ledger returned every token and restored the signal actions.
+            assert.is_nil(ledger.client)
+            assert.is_nil(ledger.guard)
+            assert_guard_restored()
+            assert.equal(3, available(fifo))
+            -- The completion FIFO and every log are gone.
+            for _, path in ipairs(reserved) do
+                assert.is_nil(lfs.attributes(path), path)
+            end
+            return events, reserved
+        end
+
+        it("rethrows a raised channel reservation before any launch", function()
+            local strategy = compiler_io.new_sync()
+            local reservations = 0
+            local tmpname = strategy.tmpname
+            strategy.tmpname = function(self)
+                reservations = reservations + 1
+                if reservations == 1 then error(cancellation) end
+                return tmpname(self)
+            end
+            local events = cancelled_batch(strategy,
+                { script("printf one"), script("printf two") })
+            assert.same({}, events)
+        end)
+
+        it("reaps an earlier live child before it rethrows a raised log reservation",
+        function()
+            local strategy = compiler_io.new_sync()
+            local reservations = 0
+            local tmpname = strategy.tmpname
+            strategy.tmpname = function(self)
+                reservations = reservations + 1
+                if reservations == 3 then error(cancellation) end
+                return tmpname(self)
+            end
+            local events, reserved = cancelled_batch(strategy, {
+                script("sleep 0.3; printf one"), script("printf two"),
+                script("printf three"),
+            })
+            -- The second command's slot (a borrowed token) is released at
+            -- once; the first child is reaped before its implicit slot is.
+            assert.same({ "release", "reap", "release" }, events)
+            -- The completion FIFO and the first child's log.
+            assert.equal(2, #reserved)
+        end)
+
+        it("rethrows a raised one-command run after closing the ledger", function()
+            local strategy = compiler_io.new_sync()
+            function strategy:run() error(cancellation) end
+            local events, reserved = cancelled_batch(strategy, { script("printf one") })
+            assert.same({}, events)
+            assert.same({}, reserved)
+        end)
+
+        it("removes every log before it rethrows a raised log read", function()
+            local strategy = compiler_io.new_sync()
+            local reads = 0
+            local read_file = strategy.read_file
+            strategy.read_file = function(self, ...)
+                reads = reads + 1
+                if reads == 1 then error(cancellation) end
+                return read_file(self, ...)
+            end
+            local events, reserved = cancelled_batch(strategy,
+                { script("printf one"), script("printf two") })
+            assert.same({ "reap", "release", "reap", "release" }, events)
+            assert.equal(3, #reserved)
+            assert.equal(2, reads)
+        end)
+    end)
+end)

@@ -61,8 +61,10 @@ local function scope_foreign_type_surface(typ, st, seen)
     local tag = typ._tag
     if tag == "Type.CTypedef" or tag == "Type.CStruct"
        or tag == "Type.CUnion" then
-        if not (tag == "Type.CStruct" and types.is_c_lua_state(typ)) then
-            typ._ffi_scope = typ._ffi_scope or (st.modname .. ".ffi")
+        if not (tag == "Type.CStruct" and types.is_c_lua_state(typ))
+           and not typ._ffi_scope then
+            checker._journal_write(st, typ, "_ffi_scope")
+            typ._ffi_scope = st.modname .. ".ffi"
         end
     elseif tag == "Type.CPointer" then
         scope_foreign_type_surface(typ.pointee, st, seen)

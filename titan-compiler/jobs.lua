@@ -1,6 +1,7 @@
--- Native compile-job scheduling helpers shared by the driver's serial and
--- parallel object paths, and the job-slot ledger that participates in a
--- parent GNU Make jobserver.
+-- Native job scheduling shared by generated-C compilation, provider links and
+-- the C probe batch: the job-slot ledger that participates in a parent GNU
+-- Make jobserver, the completion channel, the background launcher, and the
+-- launch/reap loop.
 -- Implementation notes: doc/implementation/driver.md#parallel-generated-c-compilation
 local platform = require "titan-compiler.platform"
 
@@ -14,8 +15,8 @@ function jobs.set_request_index(prepared, request_index)
 end
 
 -- Flatten every prepared module's native jobs while retaining ownership.
--- `ordinal` is module/part order: the completion identity and the order in
--- which diagnostics are replayed and results are reported.
+-- `ordinal` is original module/part result and diagnostic order. The caller
+-- assigns completion identities by position in the sorted launch schedule.
 function jobs.flatten(prepared)
     local entries, results = {}, {}
     for module_position, compilation in ipairs(prepared) do
@@ -163,8 +164,8 @@ local function warn_unusable(auth, reason)
     pcall(io.stderr.write, io.stderr,
         "titanc: warning: the parent make jobserver (" .. auth.text ..
         ") is unusable: " .. tostring(reason) ..
-        "; compiling generated C with one job (mark the recipe with '+' " ..
-        "or use GNU Make 4.4's FIFO jobserver)\n")
+        "; running native compiler jobs one at a time (mark the recipe with " ..
+        "'+' or use GNU Make 4.4's FIFO jobserver)\n")
 end
 
 -- One job-slot ledger per native batch. The first active job uses the
@@ -293,6 +294,292 @@ function jobs.propagate(signo)
     if called and type(support) == "table" and type(support._signal_raise) == "function" then
         support._signal_raise(signo)
     end
+end
+
+local function protected_remove(path)
+    if not path then return true end
+    local called, removed, remove_err = pcall(os.remove, path)
+    if not called then return nil, removed end
+    return removed, remove_err
+end
+jobs.protected_remove = protected_remove
+
+local function shell_quote(word)
+    return require("c-parser.cdriver").shell_quote(word)
+end
+
+local function execute_argv(argv)
+    local quoted = {}
+    for index, argument in ipairs(argv) do
+        local word, err = shell_quote(argument)
+        if not word then return nil, err end
+        quoted[index] = word
+    end
+    return os.execute(table.concat(quoted, " "))
+end
+
+-- The completion channel of one native batch. POSIX: a private FIFO created
+-- at the fresh temporary pathname returned by `reserve()`; each background
+-- wrapper writes its completion index line after its command exited. Windows:
+-- the bounded luv process batch, whose `read` returns the next index.
+function jobs.open_channel(reserve)
+    if platform.windows then
+        local batch, err = require("titan-compiler.process").new_batch()
+        if not batch then return nil, err end
+        return {
+            batch = batch,
+            file = {
+                read = function() return batch:wait() end,
+                close = function() return batch:close() end,
+            },
+        }
+    end
+    local path, path_err = reserve()
+    if not path then return nil, path_err end
+    local removed, remove_err = protected_remove(path)
+    if not removed then
+        return nil, "failed to prepare parallel compiler completion FIFO: " ..
+            tostring(remove_err)
+    end
+    local made, term, code = execute_argv({ "mkfifo", "-m", "600", path })
+    if not made then
+        protected_remove(path)
+        return nil, "failed to create parallel compiler completion FIFO" ..
+            (code ~= nil and " (" .. tostring(term) .. ", exit " ..
+                tostring(code) .. ")" or ": " .. tostring(term))
+    end
+    -- Linux and Darwin both define a read/write FIFO open to return without a
+    -- peer. Keeping that descriptor's writer alive avoids blocking before the
+    -- first worker and prevents a transient EOF while a slot is refilled.
+    local open_called, file, open_err = pcall(io.open, path, "r+")
+    if not open_called then
+        protected_remove(path)
+        return nil, file
+    end
+    if not file then
+        protected_remove(path)
+        return nil, open_err
+    end
+    -- The batch polls this descriptor before each read, so stdio read-ahead
+    -- must never hold a completion line the kernel no longer reports.
+    local unbuffered_called, unbuffered, unbuffered_err =
+        pcall(file.setvbuf, file, "no")
+    if not unbuffered_called or not unbuffered then
+        pcall(file.close, file)
+        protected_remove(path)
+        return nil, "failed to make the parallel compiler completion FIFO " ..
+            "unbuffered: " .. tostring(unbuffered_called and unbuffered_err or
+                unbuffered)
+    end
+    local quoted_path, quote_err = shell_quote(path)
+    if not quoted_path then
+        pcall(file.close, file)
+        protected_remove(path)
+        return nil, quote_err
+    end
+    return {
+        file = file,
+        path = path,
+        quoted_path = quoted_path,
+    }
+end
+
+function jobs.close_channel(channel)
+    local errors = {}
+    local close_called, closed, close_err =
+        pcall(channel.file.close, channel.file)
+    if not close_called then
+        errors[#errors + 1] = "close: " .. tostring(closed)
+    elseif not closed then
+        errors[#errors + 1] = "close: " .. tostring(close_err)
+    end
+    if channel.path then
+        local removed, remove_err = protected_remove(channel.path)
+        if not removed then
+            errors[#errors + 1] = "remove: " .. tostring(remove_err)
+        end
+    end
+    if #errors ~= 0 then
+        return nil, "failed to clean parallel compiler completion " ..
+            (platform.windows and "batch (" or "FIFO (") ..
+            table.concat(errors, "; ") .. ")"
+    end
+    return true
+end
+
+-- Start one background command whose completion is reported on `channel`
+-- as `completion_index`. POSIX runs the already quoted shell `command`;
+-- Windows spawns `argv` directly. Standard output and error go to the two
+-- caller-owned log files, or are merged in order when both paths are equal.
+-- `before_start`, when given, runs after every fallible preparation step and
+-- immediately before the child starts (the driver prints verbose commands
+-- there). The caller removes its logs when this returns nil.
+function jobs.launch(channel, argv, command, stdout_path, stderr_path,
+                     completion_index, before_start)
+    if platform.windows then
+        if before_start then
+            local ready, ready_err = before_start()
+            if not ready then return nil, ready_err end
+        end
+        local called, launched, err = pcall(channel.batch.spawn,
+            channel.batch, argv, stdout_path, stderr_path, completion_index)
+        if not called or not launched then
+            return nil, called and err or launched
+        end
+        return { pipe = launched }
+    end
+    local quoted_stdout, quote_err = shell_quote(stdout_path)
+    if not quoted_stdout then return nil, quote_err end
+    local stderr_redirect
+    if stderr_path == stdout_path then
+        stderr_redirect = "2>&1"
+    else
+        local quoted_stderr
+        quoted_stderr, quote_err = shell_quote(stderr_path)
+        if not quoted_stderr then return nil, quote_err end
+        stderr_redirect = "2>" .. quoted_stderr
+    end
+    local quoted_index
+    quoted_index, quote_err = shell_quote(tostring(completion_index))
+    if not quoted_index then return nil, quote_err end
+    if before_start then
+        local ready, ready_err = before_start()
+        if not ready then return nil, ready_err end
+    end
+    -- Both shells catch INT/TERM/HUP (exec resets caught signals, so the
+    -- compiler keeps its default actions). A process-group signal therefore
+    -- cannot end the wrapper before its compiler exits: reaping the wrapper
+    -- proves the compiler's lifetime ended, and the completion is still sent.
+    local notified_command = "trap : INT TERM HUP; " ..
+        "(trap : INT TERM HUP; " .. command .. ") >" .. quoted_stdout ..
+        " " .. stderr_redirect ..
+        "; _titan_compile_status=$?; printf '%s\\n' " .. quoted_index ..
+        " >" .. channel.quoted_path ..
+        "; exit $_titan_compile_status"
+    local popen_called, pipe, popen_err =
+        pcall(io.popen, notified_command, "r")
+    if not popen_called then return nil, pipe end
+    if not pipe then return nil, popen_err end
+    return { pipe = pipe }
+end
+
+-- Wait for one launched child without throwing; records `ok`, `term` and
+-- `code` exactly as `io.popen`'s close (or the Windows process wait) reports.
+function jobs.reap(process)
+    process.finish_errors = {}
+    local called, ok, term, code = pcall(process.pipe.close, process.pipe)
+    if not called then
+        process.finish_errors[#process.finish_errors + 1] =
+            "reap: " .. tostring(ok)
+        pcall(process.pipe.close, process.pipe)
+        ok, term, code = nil, nil, nil
+    end
+    process.ok, process.term, process.code = ok, term, code
+    process.reaped = true
+end
+
+-- The launch/reap loop of one native batch over positions 1..count, launched
+-- in order. `launch(position)` starts that position (it is also the
+-- completion index) and returns its process record, or nil and an error;
+-- `launch_failed(position, err)` records a failed launch. A slot is acquired
+-- immediately before each launch and released only after its child was
+-- reaped. After a channel failure, a caught signal or a raised `launch`, no
+-- further position is launched and every running child is reaped directly.
+-- Returns the first unlaunched position, the batch failure text (if any), the
+-- signal that cancelled the batch (if any), and `{ error = object }` holding
+-- what `launch` raised (if anything), which the caller rethrows unchanged
+-- after its own cleanup. `label` names the children in failures.
+function jobs.drive(slots, channel, count, launch, launch_failed, label)
+    local pending, pending_count, next_position = {}, 0, 1
+    local failure, cancelled, raised
+    local function fail(message)
+        failure = failure and (failure .. "; " .. message) or message
+    end
+    local function release_slot()
+        local released, release_err = slots:release()
+        if not released then
+            fail("failed to return a jobserver token: " .. tostring(release_err))
+        end
+    end
+    local function stopped() return failure or cancelled or raised end
+    while (not stopped() and next_position <= count) or pending_count ~= 0 do
+        -- Acquire immediately before each launch: the first active job uses
+        -- this process's implicit slot, later ones borrow a token.
+        local want_slot = false
+        while not stopped() and next_position <= count do
+            -- A pending signal wins over a simultaneous slot or completion
+            -- event: check it before every acquisition and launch.
+            cancelled = slots:cancelled()
+            if cancelled then break end
+            local granted, slot_err = slots:acquire_nowait()
+            if granted == nil then
+                fail("failed to acquire a jobserver token: " .. tostring(slot_err))
+                break
+            elseif not granted then
+                want_slot = true
+                break
+            end
+            local called, process, launch_err = pcall(launch, next_position)
+            if not called then
+                raised = { error = process }
+                release_slot()
+                break
+            end
+            if process then
+                pending[next_position] = process
+                pending_count = pending_count + 1
+            else
+                launch_failed(next_position, launch_err)
+                release_slot()
+            end
+            next_position = next_position + 1
+        end
+        if pending_count ~= 0 then
+            local completed, process
+            if not stopped() then
+                local wait_called, event, value = pcall(
+                    slots.wait, slots, channel.file, want_slot)
+                if not wait_called then event, value = nil, event end
+                if event == "signal" then
+                    cancelled = value
+                elseif event == "completion" then
+                    local read_called, line, read_err =
+                        pcall(channel.file.read, channel.file, "*l")
+                    if read_called then
+                        completed = tonumber(line)
+                        process = completed and pending[completed]
+                    end
+                    if not process then
+                        fail("failed to receive " .. label .. " completion: " ..
+                            tostring(read_called and (read_err or line) or line))
+                    end
+                elseif event ~= "slot" then
+                    fail("failed to wait for " .. label .. " completion: " ..
+                        tostring(value))
+                end
+            end
+            -- After a completion-channel failure, a cancellation or a raised
+            -- launch, reap tracked children directly instead of waiting for
+            -- messages that may never arrive. Each wrapper exits only after
+            -- its command.
+            if stopped() and not process then
+                for position = 1, count do
+                    if pending[position] then
+                        completed, process = position, pending[position]
+                        break
+                    end
+                end
+            end
+            if process then
+                pending[completed] = nil
+                pending_count = pending_count - 1
+                -- Return the slot only after the child is reaped.
+                jobs.reap(process)
+                release_slot()
+            end
+        end
+    end
+    return next_position, failure, cancelled, raised
 end
 
 return jobs

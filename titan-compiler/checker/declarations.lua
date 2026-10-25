@@ -777,7 +777,7 @@ toplevel_visitor = util.make_visitor({
             kind = "source-import",
         } or nil
         local modtype, errs, import_info =
-            checker.checkimport(node.modname, loader, request)
+            checker._checkimport_for(st, node.modname, loader, request)
         if modtype then
             node._type = modtype
             -- The syntax explicitly requests the collaboration view, while
@@ -1693,6 +1693,7 @@ function checktoplevel(ast, st, errors, loader)
             visit_toplevel(node, st, errors, loader)
         end
     end
+    checker._finish_import_phase(st)
     check_foreign_environment(ast, st, errors)
     if next(st.foreign_aliases) then
         local before = #errors

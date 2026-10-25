@@ -26,6 +26,7 @@ compiler spec/checker/c_ffi_operators_spec.lua 3.461 26.345
 compiler spec/checker/c_ffi_owned_types_spec.lua 4.482 38.600
 compiler spec/checker/c_ffi_pointer_conversions_spec.lua 1.959 18.976
 compiler spec/checker/c_ffi_spec.lua 16.100 117.030
+compiler spec/checker/c_ffi_speculative_probes_spec.lua 9.000 -
 compiler spec/checker/c_ffi_stack_objects_spec.lua 1.930 20.858
 compiler spec/checker/c_ffi_surface_types_spec.lua 1.731 18.740
 compiler spec/checker/c_ffi_tag_names_spec.lua 3.887 24.451

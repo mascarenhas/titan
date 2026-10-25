@@ -327,9 +327,11 @@ request with its source digest, probe kind, header label, semantic outcome, cach
 tier (`service`, `analysis`, `persistent`, or `compiler`), repeat flag, and
 publication outcome. `execution_trace(event)` emits one event per physical
 compiler launch with its source digest, probe kind, header label,
-outcome, persistent-lookup/publication state, and optional nonnegative child
-wall time supplied by the compiler-I/O strategy. Observer exceptions are
-ignored and neither stream writes to stdout.
+outcome, persistent-lookup/publication state, `batch_kind` (`single` for a
+synchronous launch, `speculative` for a flushed batch member), and optional
+nonnegative child wall time supplied by the compiler-I/O strategy. Observer
+exceptions are ignored and neither stream writes to stdout. A batch member's
+semantic event is emitted when its batch flushes, in request order.
 
 The default workspace provider (`default_temp_provider` in `cprobe.lua`)
 reserves a private directory through the compiler I/O strategy's `tmpname`,
@@ -343,6 +345,110 @@ removed after each run and the directory is removed on every close path.
 
 Ordinary diagnostics show the first useful compiler line. Verbose mode also
 prints the full command, source, cache result, status, and captured diagnostic.
+Deferred command/result events are printed at the batch flush, and an
+authoritative recheck prints its cache/result/run events again, so verbose
+event timing and multiplicity can depend on the job count.
+
+### Speculative batched acceptance probes
+
+Most probe misses only accept or reject a construct whose Titan result the
+checker already computed. During `checkbodies`, a check whose resolver allows
+batching defers those misses into one `ProbeBatch` per checker invocation
+and continues as if the probe had passed. The batch is flushed at the
+checker's body barrier ([Checker](checker.md#speculative-probe-barrier-and-authoritative-recheck)).
+
+Eligibility is per call site. `c_operator` (`checker/calls.lua`
+`finish_c_operator`) and `unsafe_object_pointer`
+(`checker/type_syntax.lua` `_unsafe_c_pointer_conversion`) consume only
+acceptance and the source key, so their kinds are deferrable. The two
+extent validations, the automatic FAM extent and the fixed nominal C array
+extent in `checker/c_types.lua`, opt in with
+`validate_declaration_compatibilities(candidates, { deferrable = true })`.
+Enum-carrier selection and the enumerator range check inside the enum-support
+sequence choose checker state and stay synchronous, as do baselines,
+target-profile acquisition and every probe made during top-level checking.
+
+`Service:_run_source` defers only after the unchanged synchronous steps:
+render and hash the complete source at the call site from the context's
+immutable preamble and generated-header descriptor; look up memory, analysis
+and disk results; and, for a candidate miss, validate the context baseline.
+A hit or a failed baseline therefore returns exactly as before. A deferred
+request keeps its rendered source, key, cache path, kind and context; it is
+never rendered again. Any question-free request of a pending key joins that
+request, even from a call site that did not opt into deferral. Pending dedup
+is separate from the completed `result_cache` and observes the same
+memory-hit verbose event as the synchronous path. The call receives a
+success result carrying the real key.
+
+`ProbeBatch:flush` prepares each unique request with the synchronous path's
+`_prepare_execution` (workspace or staged generated-header workspace,
+numbered names, written source, argv), passes all argv arrays to the I/O
+strategy's optional `run_batch(commands, { jobs = N })`, and finishes each with
+`_finish_execution`: runner-result normalization, private-path diagnostic
+normalization and per-probe artifact removal. Every prepared probe is
+finished before `_publish_result` stores any verdict, and it stores only real
+success and compiler rejection in memory, analysis and disk tiers.
+Assumed success, infrastructure failures, malformed results and
+cancellation are never published. A result container that is not a table, or
+an entry that raises when read, answers no command: that probe still
+finishes, as an infrastructure failure. One cleanup boundary covers
+preparation, `run_batch`, finishing and publication. An error raised anywhere
+in it, such as a strategy cancellation during dispatch, artifact removal or
+cache publication, first retries the finishing of every unfinished prepared
+probe (a probe whose cleanup raises again stays in the service workspace for
+`Service:close`) and is then rethrown unchanged. Staged generated headers
+belong to the service until `Service:close`, so they outlive every reaped
+child.
+
+Every nonpublishable occurrence of the pass is retained in
+`ProbeBatch.outcomes` under its requesting source key, in occurrence order.
+A candidate whose nested baseline gate fails owns that failure as its own
+outcome; the nested call neither records nor consumes the separate ordered
+history of explicit `validate_baseline()` calls. When a flush reports a
+failure the checker rechecks with a batch whose `answers` are those outcomes.
+Before any cache lookup, `_run_source` consumes each recorded outcome once
+for that source. Replaying a candidate's baseline-gate failure also consumes
+its dependency: no baseline failure is left to shift onto a later uncached
+distinct-key request. Direct baseline validations retain their own order.
+Once a source's recorded outcomes are exhausted, ordinary memory, analysis
+and disk lookup resumes; a completed cache hit still answers before checking
+the baseline, and a miss validates its baseline and retries synchronously.
+Thus an earlier failure survives a same-source success published later,
+pending-deduplicated extra uses retry as on the synchronous path, and
+completed semantic verdicts are never compiled twice.
+
+Batching requires `Service:batching()`: the runner is the I/O strategy
+itself, the service `jobs` cap is above one, and the strategy provides
+`run_batch`. The stock `run_batch` of `compiler_io.new_sync()`, implemented
+over the shared native scheduler in `jobs.lua`, launches its own processes,
+so it counts only while the strategy's resolved `run` is the stock one too.
+The driver's output-root wrapper, which overrides only `tmpname`, therefore
+still batches, while a strategy that overrides `run` on its instance or
+behind its metatable keeps its synchronous runner calls, cancellation and
+answers unless it also supplies its own `run_batch`. Strategies without it,
+injected custom runners, `jobs = 1`, analysis and completion checks keep
+calling the runner synchronously. The compiler I/O contract describes the
+[optional probe-batch capability](driver.md#optional-probe-batch-capability);
+no new strategy method is required.
+
+`run_batch` reaps every launched child on every exit
+([Driver](driver.md#parallel-generated-c-compilation)). On POSIX it also
+returns borrowed jobserver tokens and captures INT/TERM/HUP. Windows uses
+only the local cap, with neither POSIX signal capture nor borrowed tokens.
+A caught POSIX signal comes back to `flush` as a signal number, which it records on the
+service at once, so the signal survives even if finishing or publication then
+raises. After per-probe cleanup the flush raises
+`C probe batch interrupted by signal N` (or the strategy's own error), so
+checking never continues under a returning signal handler. The check unwinds
+to the service's owner:
+`driver.close_resolver_context` closes the resolver's C header bundle and
+then the service, whose `Service:close` removes its workspaces and staged
+headers and only then delivers the signal with `jobs.propagate`. `titanc`
+closes its resolver from a to-be-closed variable on that unwinding error, so
+a terminating signal ends the process only after its probe and header
+temporaries are gone. With default actions TERM/HUP terminate at that point;
+SIGINT instead exits `titanc` with status 1 and
+`C probe batch interrupted by signal 2`.
 
 ## Contextual object-pointer conversion
 
