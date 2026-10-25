@@ -282,9 +282,17 @@ and the parent-facing endpoints of captured child stdio. They are not general
 `fs.File` or `net.Connection` handles. One private `Stdio` owner backs each
 stream with one of three descriptor backings: a terminal (`"tty"`), a pipe or
 Unix stream socket (`"pipe"`), or a file-backed parent descriptor (`"file"`).
-`kind()` returns that exact string (`"tty"`, `"pipe"`, or `"file"`), and
-`is_tty()` returns true when the backing is `"tty"`. Both methods use the same
-Task, Runtime, and closed-facade validation.
+`kind()` returns exactly `"tty"`, `"pipe"`, or `"file"`; `is_tty()` is true
+exactly when `kind()` is `"tty"`. Neither yields. Both require a running Task
+and the Runtime that owns the stream, raising `stdio stream belongs to a
+different async Runtime` otherwise. On a captured endpoint that was closed or
+transferred they raise `InputStream is closed` / `OutputStream is closed`. On a
+parent stream they classify descriptor 0, 1, or 2 on first use in the Runtime.
+A parent descriptor of an unsupported kind raises the `stdio.parent.kind`
+`async.OperationError` described below, and an invalid descriptor raises its
+`EBADF` error, so `kind()` never returns a fourth value. An open captured child
+endpoint is always a pipe: `kind() == "pipe"`, `is_tty() == false`, including
+after EOF.
 
 ### Spawn configuration
 
@@ -383,10 +391,15 @@ Parent standard streams support three descriptor backings:
 - `"file"` (`UV_FILE`, including regular files, `/dev/null` and other non-TTY
   character devices on Unix, and disk files and `NUL` on Windows): backed by
   libuv thread-pool filesystem requests (`uv_fs_read` and `uv_fs_write` at
-  offset `-1`) over the borrowed parent descriptor `0`, `1`, or `2`.
+  offset `-1`) over the borrowed parent descriptor `0`, `1`, or `2`. A
+  file-backed read or write runs on a libuv worker thread and cannot be
+  interrupted. A descriptor that blocks, such as a character device with no
+  data, keeps that request, and therefore Runtime shutdown or Lua-state close,
+  waiting until the operating system completes it.
 
-Captured child endpoints are always pipes and report `kind() == "pipe"` and
-`is_tty() == false`. A descriptor classified as a TCP socket, UDP socket, or
+Open captured child endpoints are always pipes and report `kind() == "pipe"` and
+`is_tty() == false`; after `close()` or transfer detachment they raise as
+described above. A parent descriptor classified as a TCP socket, UDP socket, or
 another unsupported kind is rejected instead of converting `InputStream` or
 `OutputStream` into a network socket.
 
@@ -416,9 +429,9 @@ On experimental Windows builds, known libuv pipe, console, and `UV_FILE`
 unknown native handle fails explicitly; the Unix socket-metadata fallback and
 `TITAN_STDIO_PIPE_FDS` hint do not apply. Pipe and console wrappers own a
 non-inheritable duplicate of the actual Windows handle, leaving the original
-parent stream open when the Runtime ends. File-backed parent streams pass the
-CRT descriptor `0`, `1`, or `2` directly to libuv's filesystem and process
-inheritance operations without `os_fd_t` conversion or `_setmode` changes.
+parent stream open when the Runtime ends. File-backed parent streams read and
+write bytes unchanged on Windows (no CRT text-mode newline translation) and
+pass descriptor `0`, `1`, or `2` directly to the child on inheritance.
 
 The Runtime caches each usable initialized parent owner. The launcher must
 update or clear `TITAN_STDIO_PIPE_FDS` when replacing inherited descriptors;
@@ -471,9 +484,12 @@ kill the child.
 Writes to a file-backed parent stream (`os.stdout` or `os.stderr` when
 descriptor `1` or `2` is `UV_FILE`) use libuv thread-pool `uv_fs_write`
 requests with offset `-1` so the loop thread never blocks on synchronous file
-I/O. Offset `-1` uses the operating system's current file position, preserving
-append redirects (`>>`) on both Unix (`O_APPEND`) and Windows (`HANDLE`
-position and access semantics). File-backed writes obey the following rules:
+I/O. On Unix, `>>` opens the descriptor with `O_APPEND`, so every write
+appends. On Windows, each write goes to the inherited handle's current file
+position; `cmd` `>>` places that position at end of file before the program
+starts, so output follows the existing bytes. Titan adds no append semantics of
+its own: concurrent writers to the same file are ordered only by the operating
+system. File-backed writes obey the following rules:
 
 - **Admission and FIFO ordering.** A write is admitted only inside the
   `async.await_with` registration callback after the cancellation check; a Task
@@ -491,13 +507,14 @@ position and access semantics). File-backed writes obey the following rules:
 - **Cancellation and teardown.** A Task cancelled after its write is accepted
   remains waiting until the entire logical write settles, and then receives its
   cancellation reason; written bytes are never rolled back. Graceful Runtime
-  shutdown (`async.loop` cancellation, `os.exit`, or Runtime failure) refuses
-  new writes while draining already accepted FIFO entries through callbacks.
-  Destructive Lua-state abandonment (`lua_close` driving `uv.loop_abandon`) is
-  excluded from the full-write guarantee: only the already submitted native
-  request runs to completion, queued entries and short-write remainders are
-  dropped without invoking callbacks, and descriptors `0`, `1`, and `2` remain
-  open.
+  shutdown (`os.exit`/`async.request_exit`, or a fatal Runtime failure) refuses
+  new writes but completes every already accepted write, in order, before the
+  loop closes. If the Lua state instead closes while its Runtime is still active
+  (see [closing a Lua state with an active Runtime](async-io.md#closing-a-lua-state-with-an-active-runtime)),
+  there is no full-write guarantee. Only the write already submitted to the
+  operating system finishes. Queued writes and unwritten remainders are dropped,
+  so the file may end with a prefix of the accepted output. Waiting Tasks do not
+  resume. Descriptors 0, 1, and 2 stay open.
 
 On Unix, loading `titan.async` changes a default `SIGPIPE` disposition to ignored
 so a child that closes stdin produces the ordinary libuv write error instead
@@ -607,9 +624,12 @@ stopped and cannot be handed off in that state.
 
 Unused `os.stdin`, `os.stdout`, and `os.stderr` facades copy their process-wide
 descriptor identity and resolve a fresh Runtime-local wrapper when used. These
-stable facades remain usable at the source. Standard input with active or
-buffered read state and standard output with a pending write are rejected.
-Captured terminal handles other than pipes are unsupported.
+stable facades remain usable at the source. Standard input that this Runtime
+has started reading, even if it has since reached EOF or failed, and standard
+output or error with an accepted write still pending are rejected. Untouched
+facades of any kind (`"tty"`, `"pipe"`, or `"file"`) transfer; `kind()`,
+`is_tty()`, and `with_parent_*` do not count as use. Captured terminal handles
+other than pipes are unsupported.
 
 The `Process` itself remains in the originating Runtime, which must stay alive
 to observe and reap the child. Its `wait`, `kill`, and exit handling continue
