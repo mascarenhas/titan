@@ -36,7 +36,9 @@ local function expect_normal(process: system.Process, label: string)
 end
 
 local function parent_pipes(): string
-  if system.stdin:is_tty() or system.stdout:is_tty() or system.stderr:is_tty() then
+  if system.stdin:is_tty() or system.stdout:is_tty() or system.stderr:is_tty() or
+     system.stdin:kind() ~= "pipe" or system.stdout:kind() ~= "pipe" or
+     system.stderr:kind() ~= "pipe" then
     raise "pipe parent stdio was misclassified"
   end
   if read_all(system.stdin) ~= "parent-pipe-input" then
@@ -66,11 +68,28 @@ local function parent_inheritance(): string
 end
 
 local function parent_tty(): string
-  if not system.stdout:is_tty() then
+  if not system.stdout:is_tty() or system.stdout:kind() ~= "tty" then
     raise "PTY stdout was not classified as a TTY"
   end
   system.stdout:write("tty-output")
   return "parent-tty-ok"
+end
+
+local function parent_file(): string
+  local before = ffi.titan_uv_test_stdio_open_fd_count()
+  if before < 0 then raise "could not count descriptors before file stdio" end
+  if system.stdout:is_tty() or system.stdout:kind() ~= "file" then
+    raise "file stdout was misclassified"
+  end
+  system.stdout:write("file-output")
+  system.stdout:close()
+  if system.stdout:kind() ~= "file" then
+    raise "closing file stdout changed its kind"
+  end
+  if ffi.titan_uv_test_stdio_open_fd_count() ~= before then
+    raise "parent file stdout leaked a descriptor"
+  end
+  return "parent-file-ok"
 end
 
 local function reject_parent_stdout(expected: string, expected_name: string?,
@@ -145,7 +164,9 @@ local function deny_metadata(probes: integer, descriptors: integer,
 end
 
 local function parent_stdout(): string
-  if system.stdout:is_tty() then raise "socket stdout was misclassified" end
+  if system.stdout:is_tty() or system.stdout:kind() ~= "pipe" then
+    raise "socket stdout was misclassified"
+  end
   system.stdout:write("pipe-stdout")
   return "parent-stdout-ok"
 end
@@ -171,7 +192,7 @@ local function run_case(mode: string): string
   elseif mode == "tty" then
     return parent_tty()
   elseif mode == "file" then
-    return reject_parent_stdout("parent-file-rejected")
+    return parent_file()
   elseif mode == "socket" then
     return reject_parent_stdout("parent-socket-rejected")
   elseif mode == "closed" then
@@ -183,7 +204,8 @@ local function run_case(mode: string): string
     return parent_pipes()
   elseif mode == "denied-stdin" then
     deny_metadata(ffi.TITAN_UV_TEST_STDIO_DENY_ALL, 7)
-    if system.stdin:is_tty() or read_all(system.stdin) ~= "parent-pipe-input" then
+    if system.stdin:is_tty() or system.stdin:kind() ~= "pipe" or
+       read_all(system.stdin) ~= "parent-pipe-input" then
       raise "hinted stdin did not preserve pipe input"
     end
     return "parent-stdin-ok"
@@ -192,7 +214,9 @@ local function run_case(mode: string): string
     return parent_stdout()
   elseif mode == "denied-stderr" then
     deny_metadata(ffi.TITAN_UV_TEST_STDIO_DENY_ALL, 7)
-    if system.stderr:is_tty() then raise "hinted stderr was misclassified" end
+    if system.stderr:is_tty() or system.stderr:kind() ~= "pipe" then
+      raise "hinted stderr was misclassified"
+    end
     system.stderr:write("pipe-stderr")
     return "parent-stderr-ok"
   elseif mode == "denied-reject" then

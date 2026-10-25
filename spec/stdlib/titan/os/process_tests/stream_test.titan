@@ -204,14 +204,23 @@ function test_stream_facades_capture_merge_inheritance_options_and_interfaces(
       local diagnostics = process_support.required_input(separate.stderr, "default stderr")
       check_interfaces(input, output)
       test.assert(not input:is_tty() and not output:is_tty() and
-                  not diagnostics:is_tty(),
-                  "captured pipe was classified as a TTY")
+                  not diagnostics:is_tty() and
+                  input:kind() == "pipe" and output:kind() == "pipe" and
+                  diagnostics:kind() == "pipe",
+                  "captured pipe was misclassified")
       input:close()
       input:close()
+      common.assert_raises_contains(function () input:kind() end,
+                                    "OutputStream is closed")
       test.assert(process_support.read_all(output) == "separate",
                   "default stdout capture changed")
+      test.assert(output:kind() == "pipe",
+                  "captured stdout lost pipe kind at EOF before facade close")
       test.assert(process_support.read_all(diagnostics) == "diagnostic",
                   "default stderr capture changed")
+      output:close()
+      common.assert_raises_contains(function () output:kind() end,
+                                    "InputStream is closed")
       process_support.assert_normal(separate:wait(), "default capture")
     end
 
@@ -331,6 +340,7 @@ function test_closed_stream_facades_remain_terminal_in_later_runtime(
     _context: test.Context)
   local closed_input: system.InputStream? = nil
   local closed_output: system.OutputStream? = nil
+  local stale_input: system.InputStream? = nil
 
   runtime_test.run(function ()
     local process = system.spawn(process_support.child_path(), {"exit", "0"})
@@ -343,21 +353,29 @@ function test_closed_stream_facades_remain_terminal_in_later_runtime(
       process.stderr, "retained stderr")
     input:close()
     output:close()
-    diagnostics:close()
+    process.stderr = nil
     process_support.assert_normal(process:wait(), "retained streams")
     closed_input = output
     closed_output = input
+    stale_input = diagnostics
   end)
 
   runtime_test.run(function ()
     local input = closed_input as system.InputStream
     test.assert(not input:read() and not input:read_until("missing"),
                 "closed input lost terminal EOF in a later Runtime")
+    common.assert_raises_contains(function () input:kind() end,
+                                  "InputStream is closed")
     input:close()
     local output = closed_output as system.OutputStream
     output:close()
+    common.assert_raises_contains(function () output:kind() end,
+                                  "OutputStream is closed")
     process_support.expect_failure(function ()
       output:write("late")
     end, "closed output became writable in a later Runtime")
+    local stale = stale_input as system.InputStream
+    common.assert_raises_contains(function () stale:kind() end,
+                                  "stdio stream belongs to a different async Runtime")
   end)
 end

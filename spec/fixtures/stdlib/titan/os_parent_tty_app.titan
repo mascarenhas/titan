@@ -4,7 +4,9 @@ local string = import "string"
 
 local function exercise(): string
   if not system.stdin:is_tty() or not system.stdout:is_tty() or
-     not system.stderr:is_tty() then
+     not system.stderr:is_tty() or
+     system.stdin:kind() ~= "tty" or system.stdout:kind() ~= "tty" or
+     system.stderr:kind() ~= "tty" then
     raise "parent standard streams lost their terminal kind"
   end
   local line? = system.stdin:read_until("\n", true)

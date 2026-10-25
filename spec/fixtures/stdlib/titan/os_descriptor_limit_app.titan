@@ -1,11 +1,389 @@
 local test = import "test"
 local async = import "async"
-local system = import "os"
-foreign import "os_descriptor_limit.h"
 local fs = import "fs"
+local gc = import "gc"
+local io = import "io"
+local tlua = import "lua"
+local system = import "os"
+local strings = import "string"
+local timer = import "timer"
+local uv = import "uv"
+foreign import "os_descriptor_limit.h"
 
-function main(args: {string}): integer
-  test.assert(#args == 1, "descriptor limit child requires one result path")
+record ReleaseWatch
+  cells: foreign *void
+end
+
+local function on_release_finalize(candidate: value)
+  local watch: ReleaseWatch = candidate
+  ffi.titan_test_worker_gate_release(watch.cells)
+end
+
+local function hold_workers(): (owned int[], {async.Task<|nil, value|>})
+  local cells: owned int[] = foreign int.new_array(4)
+  local raw = cells as foreign *void
+  ffi.titan_test_worker_gate_init(raw)
+  local workers: {async.Task<|nil, value|>} = {}
+  for index = 1, 4 do
+    workers[index] = async.run<|nil, value|>(function (): nil
+      async.run_foreign(
+        ffi.titan_test_worker_gate_work,
+        raw,
+        ffi.titan_test_worker_gate_noop)
+      return nil
+    end)
+  end
+  while ffi.titan_test_worker_gate_entered(raw) < 4 do
+    async.yield()
+    uv.sleep(1)
+  end
+  return cells, workers
+end
+
+local function release_workers(
+    cells: owned int[], workers: {async.Task<|nil, value|>})
+  ffi.titan_test_worker_gate_release(cells as foreign *void)
+  for index = 1, #workers do
+    async.join(workers[index])
+  end
+end
+
+local function wait_until_task_waiting(task: async.Task<|value, value|>, label: string)
+  while task:status():as_string() == "ready" or
+        task:status():as_string() == "running" do
+    async.yield()
+  end
+  test.assert(task:status():as_string() == "waiting",
+              label .. " did not reach waiting status")
+end
+
+local function assert_raises_substring(action: function (): (), expected: string)
+  local caught = false
+  do
+    action()
+  catch
+    caught = true
+    test.assert(strings.find(strings.tostring(error), expected) ~= nil,
+                "expected '" .. expected .. "', got: " .. strings.tostring(error))
+  end
+  test.assert(caught, "expected error containing '" .. expected .. "'")
+end
+
+function setup_abandoned_state(raw: value)
+  local cells = raw as foreign *void
+  for _ = 1, 4 do
+    async.run<|nil, value|>(function (): nil
+      async.run_foreign(
+        ffi.titan_test_worker_gate_work,
+        cells,
+        ffi.titan_test_worker_gate_noop)
+      return nil
+    end)
+  end
+  while ffi.titan_test_worker_gate_entered(cells) < 4 do
+    uv.run(async.current_loop(), uv.RUN_NOWAIT)
+    uv.sleep(1)
+  end
+  local w1 = async.run<|nil, value|>(function (): nil
+    do
+      system.stdout:write("ABANDONED-INFLIGHT;")
+      ffi.titan_test_worker_gate_fail(cells)
+    catch
+      ffi.titan_test_worker_gate_fail(cells)
+    end
+    return nil
+  end)
+  local w2 = async.run<|nil, value|>(function (): nil
+    do
+      system.stdout:write("ABANDONED-QUEUED;")
+      ffi.titan_test_worker_gate_fail(cells)
+    catch
+      ffi.titan_test_worker_gate_fail(cells)
+    end
+    return nil
+  end)
+  local r1 = async.run<|nil, value|>(function (): nil
+    do
+      system.stdin:read()
+      ffi.titan_test_worker_gate_fail(cells)
+    catch
+      ffi.titan_test_worker_gate_fail(cells)
+    end
+    return nil
+  end)
+  uv.run(async.current_loop(), uv.RUN_NOWAIT)
+  if w1:status():as_string() ~= "waiting" or
+     w2:status():as_string() ~= "waiting" or
+     r1:status():as_string() ~= "waiting" then
+    ffi.titan_test_worker_gate_release(cells)
+    raise "abandoned state tasks did not park in waiting state"
+  end
+  gc.finalizable<|value|>(ReleaseWatch(cells), on_release_finalize)
+end
+
+function exercise_cancelled_read_error(file_path: value)
+  local path = file_path as string
+  local saved_stdin = ffi.titan_test_dup_fd(0)
+  test.assert(saved_stdin >= 0, "could not save stdin for read error")
+  defer ffi.titan_test_restore_fd(saved_stdin, 0)
+  test.assert(ffi.titan_test_open_file_onto_fd(path, 1, 0) == 0,
+              "could not open write-only file onto stdin")
+  local completed = false
+  local main_task = async.run<|nil, value|>(function (): nil
+    test.assert(system.stdin:kind() == "file", "write-only file stdin lost file kind")
+    local cells, workers = hold_workers()
+    local cancel_reason = async.CancellationReason.simple("cancel-error-read")
+    local observed_cancel: value = nil
+    local reader1 = async.run<|nil, value|>(function (): nil
+      do
+        system.stdin:read()
+      catch
+        observed_cancel = error
+      end
+      return nil
+    end)
+    wait_until_task_waiting(reader1, "cancelled error reader")
+    reader1:cancel(cancel_reason)
+    async.join(reader1)
+    test.assert(reader1:status():has_cancelled() and observed_cancel == cancel_reason,
+                "cancelled error reader lost cancellation reason")
+    release_workers(cells, workers)
+    for _ = 1, 5 do async.yield() end
+
+    for attempt = 1, 2 do
+      local caught: async.OperationError? = nil
+      do
+        system.stdin:read()
+      catch
+        if error is async.OperationError then
+          caught = error as async.OperationError
+        else
+          raise
+        end
+      end
+      test.assert(caught ~= nil and caught.operation == "stdio.read" and caught.code < 0,
+                  "retained/sticky read error failed on attempt " .. attempt)
+    end
+    completed = true
+    return nil
+  end)
+  async.loop()
+  local failed, err? = main_task:status():has_failed()
+  if failed and err ~= nil then err:raise() end
+  test.assert(completed and main_task:status():has_succeeded(),
+              "cancelled read error task did not complete")
+end
+
+function exercise_delimiter_across_chunks(file_path: value)
+  local path = file_path as string
+  local part1 = strings.rep("P\0\r\n", 18000)
+  local part2 = strings.rep("Q\255\n\r", 18000)
+  local tail = "TAIL_WITHOUT_DELIMITER\0!"
+  local saved_stdin = ffi.titan_test_dup_fd(0)
+  test.assert(saved_stdin >= 0, "could not save stdin for delimiter test")
+  defer ffi.titan_test_restore_fd(saved_stdin, 0)
+  local completed = false
+  local main_task = async.run<|nil, value|>(function (): nil
+    fs.write_file(path, part1 .. "<DELIM>" .. part2 .. "<DELIM>" .. tail)
+    test.assert(ffi.titan_test_open_file_onto_fd(path, 0, 0) == 0,
+                "could not open delimiter input file onto stdin")
+    test.assert(system.stdin:read_until("<DELIM>", true) == part1,
+                "first multi-chunk read_until result mismatched")
+    test.assert(system.stdin:read_until("<DELIM>", false) == part2 .. "<DELIM>",
+                "second multi-chunk read_until result mismatched")
+    test.assert(system.stdin:read_until("<DELIM>", true) == tail,
+                "final tail read_until result mismatched")
+    test.assert(system.stdin:read_until("<DELIM>", true) == nil,
+                "read_until after EOF did not return nil")
+    test.assert(system.stdin:read() == nil,
+                "read after read_until EOF did not stay at EOF")
+    completed = true
+    return nil
+  end)
+  async.loop()
+  local failed, err? = main_task:status():has_failed()
+  if failed and err ~= nil then err:raise() end
+  test.assert(completed and main_task:status():has_succeeded(),
+              "delimiter across chunks task did not complete")
+end
+
+function exercise_partial_read_inheritance(file_path: value, program_path: value)
+  local path = file_path as string
+  local prog = program_path as string
+  local full_input = strings.rep("0123456789abcdef\0\r\n!", 7500)
+  local saved_stdin = ffi.titan_test_dup_fd(0)
+  test.assert(saved_stdin >= 0, "could not save stdin for partial inheritance")
+  defer ffi.titan_test_restore_fd(saved_stdin, 0)
+  local completed = false
+  local main_task = async.run<|nil, value|>(function (): nil
+    fs.write_file(path, full_input)
+    test.assert(ffi.titan_test_open_file_onto_fd(path, 0, 0) == 0,
+                "could not open partial inheritance file onto stdin")
+    test.assert(system.stdin:kind() == "file" and not system.stdin:is_tty(),
+                "partial inheritance stdin was not classified as file")
+    system.stdin:close()
+
+    -- First verify kind/is_tty/close alone consumed 0 bytes by reading the first chunk.
+    local first_chunk? = system.stdin:read()
+    test.assert(first_chunk ~= nil, "first partial read returned EOF")
+    local prefix = first_chunk as string
+    test.assert(#prefix > 0 and #prefix < #full_input,
+                "first read did not return a single partial chunk: " .. #prefix)
+    test.assert(prefix == strings.sub(full_input, 1, #prefix),
+                "first partial chunk bytes mismatched")
+
+    local child = system.spawn(
+      prog, {"child-inherit", "drain-stdin"}, system.with_parent_stdin)
+    test.assert(child.stdin == nil, "inherited stdin exposed a captured endpoint")
+    local child_out = child.stdout as system.InputStream
+    local child_err = child.stderr as system.InputStream
+    local remainder = ""
+    for chunk in child_out:read do remainder = remainder .. chunk end
+    local err_bytes = ""
+    for chunk in child_err:read do err_bytes = err_bytes .. chunk end
+    child_out:close()
+    child_err:close()
+    local status = child:wait()
+    test.assert(status.code == 0 and status.signal_number == 0,
+                "inheriting child failed: " .. err_bytes)
+    test.assert(remainder == strings.sub(full_input, #prefix + 1),
+                "inheriting child did not read the exact remainder from descriptor offset")
+    test.assert(system.stdin:read() == nil,
+                "parent stdin did not observe EOF after child drained remainder")
+    completed = true
+    return nil
+  end)
+  async.loop()
+  local failed, err? = main_task:status():has_failed()
+  if failed and err ~= nil then err:raise() end
+  test.assert(completed and main_task:status():has_succeeded(),
+              "partial read inheritance task did not complete")
+end
+
+function exercise_runtime_failure_and_reuse(in_path: value, out_path: value)
+  local input_file = in_path as string
+  local output_file = out_path as string
+  local saved_stdin = ffi.titan_test_dup_fd(0)
+  local saved_stdout = ffi.titan_test_dup_fd(1)
+  test.assert(saved_stdin >= 0 and saved_stdout >= 0, "could not save stdio fds")
+  defer do
+    ffi.titan_test_restore_fd(saved_stdin, 0)
+    ffi.titan_test_restore_fd(saved_stdout, 1)
+  end
+  test.assert(ffi.titan_test_open_file_onto_fd(input_file, 0, 0) == 0, "open r1 stdin")
+  test.assert(ffi.titan_test_open_file_onto_fd(output_file, 1, 1) == 0, "open r1 stdout")
+
+  local marker: value = {["fatal-runtime"] = "drain-writes"}
+  local source_trace = "runtime failure write drain origin"
+  local task1 = async.run<|nil, value|>(function (): nil
+    test.assert(system.stdin:read_until("|", true) == "R1_HEAD", "r1 read_until failed")
+    local cells, _workers = hold_workers()
+    local gate1: (function (nil): ())? = nil
+    local gate2: (function (nil): ())? = nil
+    local w1 = async.run<|nil, value|>(function (): nil
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal) gate1 = resolve end)
+      do system.stdout:write("FATAL-1;") catch end
+      return nil
+    end)
+    local w2 = async.run<|nil, value|>(function (): nil
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal) gate2 = resolve end)
+      do system.stdout:write("FATAL-2;") catch end
+      return nil
+    end)
+    while gate1 == nil or gate2 == nil do async.yield() end
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+      local r1, r2 = gate1, gate2
+      gate1 = nil
+      gate2 = nil
+      r1(nil)
+      r2(nil)
+      test.assert(w1:status():as_string() == "waiting" and
+                  w2:status():as_string() == "waiting",
+                  "fatal test writers did not suspend")
+      resolve(nil)
+    end)
+    ffi.titan_test_worker_gate_release(cells as foreign *void)
+    do
+      async.await_cleanup<|nil, nil|>(function (_resolve, _reject, fatal)
+        fatal(marker, source_trace)
+      end)
+    catch
+    end
+    return nil
+  end)
+  local caught_fatal = false
+  do
+    async.loop()
+  catch
+    caught_fatal = error == marker and traceback == source_trace
+  end
+  test.assert(caught_fatal and task1:status():has_succeeded(),
+              "Runtime 1 did not report expected fatal error")
+
+  test.assert(ffi.titan_test_rewind_fd(0) == 0, "could not rewind stdin for Runtime 2")
+  local r2_done = false
+  local task2 = async.run<|nil, value|>(function (): nil
+    test.assert(fs.read_file(output_file) == "FATAL-1;FATAL-2;",
+                "Runtime 1 failure did not drain accepted queued writes")
+    test.assert(system.stdin:kind() == "file" and system.stdout:kind() == "file",
+                "Runtime 2 lost file kind")
+    local fresh = ""
+    for chunk in system.stdin:read do fresh = fresh .. chunk end
+    test.assert(fresh == "R1_HEAD|R1_EXCESS_TAIL",
+                "Runtime 2 kept stale excess or sticky EOF: " .. fresh)
+    test.assert(system.stdin:read() == nil, "Runtime 2 did not reach EOF")
+    system.stdout:write("RUNTIME-2-OK;")
+    test.assert(fs.read_file(output_file) == "FATAL-1;FATAL-2;RUNTIME-2-OK;",
+                "Runtime 2 output did not append after Runtime 1 drained writes")
+    r2_done = true
+    return nil
+  end)
+  async.loop()
+  local failed2, err2? = task2:status():has_failed()
+  if failed2 and err2 ~= nil then err2:raise() end
+  test.assert(r2_done and task2:status():has_succeeded(), "Runtime 2 task failed")
+end
+
+function roundtrip_transferred_file_stdio()
+  local in_tv = async.TransferValue.from_value(system.stdin)
+  local out_tv = async.TransferValue.from_value(system.stdout)
+  local err_tv = async.TransferValue.from_value(system.stderr)
+  local destination = tlua.new()
+  defer destination:close()
+  destination:run([[require("os_descriptor_limit_app").exercise_transferred_file_stdio(...)]],
+    "=transfer-file-stdio-dest", in_tv, out_tv, err_tv)
+end
+
+function exercise_transferred_file_stdio(
+    stdin_val: value, stdout_val: value, stderr_val: value)
+  local in_stream = stdin_val as system.InputStream
+  local out_stream = stdout_val as system.OutputStream
+  local err_stream = stderr_val as system.OutputStream
+  local done = false
+  local task = async.run<|nil, value|>(function (): nil
+    test.assert(in_stream:kind() == "file" and not in_stream:is_tty(),
+                "transferred file stdin lost kind")
+    test.assert(out_stream:kind() == "file" and not out_stream:is_tty(),
+                "transferred file stdout lost kind")
+    test.assert(err_stream:kind() == "file" and not err_stream:is_tty(),
+                "transferred file stderr lost kind")
+    local data = ""
+    for chunk in in_stream:read do data = data .. chunk end
+    test.assert(data == "TRANSFER_FILE_INPUT",
+                "transferred file stdin read wrong bytes: " .. data)
+    out_stream:write("TRANSFER_FILE_STDOUT:" .. data)
+    err_stream:write("TRANSFER_FILE_STDERR")
+    done = true
+    return nil
+  end)
+  async.loop()
+  local failed, err? = task:status():has_failed()
+  if failed and err ~= nil then err:raise() end
+  test.assert(done and task:status():has_succeeded(),
+              "transferred file stdio worker failed")
+end
+
+local function run_emfile_case(result_path: string): integer
   test.assert(ffi.titan_test_fd_limit_lower() == 0, "could not lower child descriptor soft limit")
   local rejected = false
   do
@@ -28,6 +406,675 @@ function main(args: {string}): integer
   test.assert(input == "RLIMIT_INPUT_MARKER", "failed duplicate closed original input")
   test.assert(system.stdin:read() == nil, "restored input did not stay at EOF")
   system.stdin:close()
-  fs.write_file(args[1], "EMFILE_OK")
+  fs.write_file(result_path, "EMFILE_OK")
   return 0
+end
+
+local function run_shell_redirect(args: {string}): integer
+  local submode = args[2]
+  if submode == "echo-lines" then
+    test.assert(not system.stdin:is_tty() and system.stdin:kind() == "file",
+                "shell redirected stdin was not file")
+    test.assert(not system.stdout:is_tty() and system.stdout:kind() == "file",
+                "shell redirected stdout was not file")
+    test.assert(not system.stderr:is_tty() and system.stderr:kind() == "file",
+                "shell redirected stderr was not file")
+    io.print("HEADER")
+    for line in io.lines(system.stdin) do
+      io.print("LINE:" .. line)
+    end
+    system.stderr:write("STDERR_LOG\n")
+    return 0
+  elseif submode == "append" then
+    test.assert(system.stdout:kind() == "file", "append stdout was not file")
+    io.print(args[3])
+    return 0
+  elseif submode == "dev-null" then
+    test.assert(not system.stdin:is_tty() and system.stdin:kind() == "file",
+                "null device stdin was not classified as file")
+    test.assert(not system.stdout:is_tty() and system.stdout:kind() == "file",
+                "null device stdout was not classified as file")
+    test.assert(system.stdin:read() == nil, "null device stdin did not report immediate EOF")
+    test.assert(system.stdin:read() == nil, "null device stdin EOF was not sticky")
+    system.stdout:write("discarded-to-null")
+    io.print("also-discarded")
+    fs.write_file(args[3], "DEV_NULL_OK")
+    return 0
+  elseif submode == "binary-copy" then
+    test.assert(system.stdin:kind() == "file" and system.stdout:kind() == "file",
+                "binary-copy stdio was not file")
+    for chunk in system.stdin:read do
+      system.stdout:write(chunk)
+    end
+    return 0
+  end
+  raise "unknown shell-redirect submode: " .. submode
+end
+
+local function run_child_inherit(args: {string}): integer
+  local submode = args[2]
+  if submode == "drain-stdin" then
+    test.assert(system.stdin:kind() == "file", "inherited stdin was not file")
+    for chunk in system.stdin:read do
+      system.stdout:write(chunk)
+    end
+    return 0
+  elseif submode == "middle-all" then
+    test.assert(system.stdin:kind() == "file" and
+                system.stdout:kind() == "file" and
+                system.stderr:kind() == "file",
+                "inherited all-three stdio was not file")
+    local line? = system.stdin:read_until("\n", true)
+    test.assert(line ~= nil, "inherited stdin had no line")
+    system.stdout:write("CHILD-STDOUT:" .. (line as string) .. "\n")
+    system.stderr:write("CHILD-STDERR\n")
+    return 0
+  end
+  raise "unknown child-inherit submode: " .. submode
+end
+
+local function run_write_fifo_cancel_gc(workspace: string, result_path: string): integer
+  local saved_stdout = ffi.titan_test_dup_fd(1)
+  test.assert(saved_stdout >= 0, "could not save stdout")
+  defer ffi.titan_test_restore_fd(saved_stdout, 1)
+
+  local fifo_path = workspace .. "/fifo.out"
+  test.assert(ffi.titan_test_open_file_onto_fd(fifo_path, 1, 1) == 0, "open fifo.out")
+  test.assert(not system.stdout:is_tty() and system.stdout:kind() == "file",
+              "fifo stdout was not classified as file")
+
+  -- Empty write is a checked no-op; idle facade transfers cleanly.
+  system.stdout:write("")
+  test.assert(#fs.read_file(fifo_path) == 0, "empty write modified file")
+  async.TransferValue.from_value(system.stdout)
+
+  -- Cancelled before registration: nothing written.
+  local pre_reason = async.CancellationReason.simple("cancel-before-write-admission")
+  local pre_observed: value = nil
+  local pre_task = async.run<|nil, value|>(function (): nil
+    async.running():cancel(pre_reason)
+    do
+      system.stdout:write("MUST_NOT_WRITE")
+    catch
+      pre_observed = error
+    end
+    return nil
+  end)
+  async.join(pre_task)
+  test.assert(pre_task:status():has_cancelled() and pre_observed == pre_reason,
+              "pre-cancelled write task did not report exact cancellation reason")
+  test.assert(#fs.read_file(fifo_path) == 0, "pre-cancelled write wrote bytes")
+  async.TransferValue.from_value(system.stdout)
+
+  -- Hold worker threads so w1 is deterministically in flight and w2, w3 are queued.
+  local cells, workers = hold_workers()
+  local gate1: (function (nil): ())? = nil
+  local gate2: (function (nil): ())? = nil
+  local gate3: (function (nil): ())? = nil
+  local reason_inflight = async.CancellationReason.simple("cancel-inflight-file-write")
+  local reason_queued = async.CancellationReason.simple("cancel-queued-file-write")
+  local obs1: value = nil
+  local obs2: value = nil
+  local w3_done = false
+  local chunk1 = strings.rep("W1\0\r\n", 4096)
+  local chunk2 = strings.rep("W2\0\n\r", 4096)
+  local chunk3 = strings.rep("W3\255\0!", 4096)
+
+  local w1 = async.run<|nil, value|>(function (): nil
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal) gate1 = resolve end)
+    local payload = strings.rep("W1\0\r\n", 4096)
+    do system.stdout:write(payload) catch obs1 = error end
+    return nil
+  end)
+  local w2 = async.run<|nil, value|>(function (): nil
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal) gate2 = resolve end)
+    local payload = strings.rep("W2\0\n\r", 4096)
+    do system.stdout:write(payload) catch obs2 = error end
+    return nil
+  end)
+  local w3 = async.run<|nil, value|>(function (): nil
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal) gate3 = resolve end)
+    local payload = strings.rep("W3\255\0!", 4096)
+    system.stdout:write(payload)
+    w3_done = true
+    return nil
+  end)
+  while gate1 == nil or gate2 == nil or gate3 == nil do async.yield() end
+
+  async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+    local r1, r2, r3 = gate1, gate2, gate3
+    gate1, gate2, gate3 = nil, nil, nil
+    r1(nil)
+    r2(nil)
+    r3(nil)
+    test.assert(w1:status():as_string() == "waiting" and
+                w2:status():as_string() == "waiting" and
+                w3:status():as_string() == "waiting",
+                "file writers did not park after admission")
+    w1:cancel(reason_inflight)
+    w2:cancel(reason_queued)
+    gc.collect()
+    gc.collect()
+    test.assert(w1:status():as_string() == "waiting" and
+                w2:status():as_string() == "waiting" and
+                w3:status():as_string() == "waiting" and
+                obs1 == nil and obs2 == nil and not w3_done,
+                "cancelled file writes unwound before settlement")
+    assert_raises_substring(function ()
+      async.TransferValue.from_value(system.stdout)
+    end, "stream has a pending write")
+    resolve(nil)
+  end)
+
+  -- Other Tasks stay responsive while file writes are queued and in flight.
+  local responsive_turns = 0
+  local resp_task = async.run<|nil, value|>(function (): nil
+    for _ = 1, 5 do
+      responsive_turns = responsive_turns + 1
+      async.yield()
+    end
+    timer.sleep(1)
+    return nil
+  end)
+  async.join(resp_task)
+  test.assert(resp_task:status():has_succeeded() and responsive_turns == 5 and
+              w1:status():as_string() == "waiting" and
+              w2:status():as_string() == "waiting" and
+              w3:status():as_string() == "waiting",
+              "other Tasks were not responsive while writes were queued")
+
+  release_workers(cells, workers)
+  async.join(w1)
+  async.join(w2)
+  async.join(w3)
+  gc.collect()
+  test.assert(w1:status():has_cancelled() and obs1 == reason_inflight,
+              "in-flight cancelled write lost its exact reason")
+  test.assert(w2:status():has_cancelled() and obs2 == reason_queued,
+              "queued cancelled write lost its exact reason")
+  test.assert(w3:status():has_succeeded() and w3_done,
+              "trailing uncancelled write did not succeed")
+  test.assert(fs.read_file(fifo_path) == chunk1 .. chunk2 .. chunk3,
+              "FIFO write order or completeness failed across cancelled entries")
+  async.TransferValue.from_value(system.stdout)
+
+  -- Multi-MiB concurrent Tasks test (16 Tasks * 8 chunks * 16 KiB = 2 MiB)
+  local bulk_path = workspace .. "/multi_mib.out"
+  test.assert(ffi.titan_test_open_file_onto_fd(bulk_path, 1, 1) == 0, "open multi_mib.out")
+  local expected_chunks: {string} = {}
+  local writers: {async.Task<|nil, value|>} = {}
+  for task_id = 1, 16 do
+    writers[task_id] = async.run<|nil, value|>(function (): nil
+      for step = 1, 8 do
+        local tag = strings.format("T%02d-S%02d:", task_id, step)
+        local block = strings.rep(tag, 2048)
+        expected_chunks[#expected_chunks + 1] = block
+        system.stdout:write(block)
+      end
+      return nil
+    end)
+  end
+  for task_id = 1, 16 do
+    async.join(writers[task_id])
+    test.assert(writers[task_id]:status():has_succeeded(), "bulk writer failed")
+  end
+  local builder = strings.writer()
+  for index = 1, #expected_chunks do
+    builder:write(expected_chunks[index])
+  end
+  local expected_bulk = builder:drain()
+  local actual_bulk = fs.read_file(bulk_path)
+  test.assert(#actual_bulk == 2097152 and actual_bulk == expected_bulk,
+              "multi-MiB concurrent writes lost order or bytes: " .. #actual_bulk)
+
+  fs.write_file(result_path, "WRITE_FIFO_OK")
+  return 0
+end
+
+local function run_short_write_and_errors(workspace: string, result_path: string): integer
+  local saved_stdout = ffi.titan_test_dup_fd(1)
+  test.assert(saved_stdout >= 0, "could not save stdout")
+  defer ffi.titan_test_restore_fd(saved_stdout, 1)
+
+  -- 1. Read-only file on fd 1 fails with stdio.write, and later entry progresses
+  local ro_path = workspace .. "/readonly.txt"
+  local rec_path = workspace .. "/recovered.txt"
+  fs.write_file(ro_path, "seed")
+  test.assert(ffi.titan_test_open_file_onto_fd(ro_path, 0, 1) == 0, "open ro onto fd 1")
+  test.assert(system.stdout:kind() == "file", "readonly file stdout was not file")
+  local ro_err: async.OperationError? = nil
+  do
+    system.stdout:write("FAIL_ON_RO")
+  catch
+    if error is async.OperationError then
+      ro_err = error as async.OperationError
+    else
+      raise
+    end
+  end
+  test.assert(ro_err ~= nil and ro_err.operation == "stdio.write" and ro_err.code < 0,
+              "read-only stdout did not raise OperationError(stdio.write)")
+  test.assert(ffi.titan_test_open_file_onto_fd(rec_path, 1, 1) == 0, "open rec onto fd 1")
+  system.stdout:write("RECOVERED_AFTER_RO_ERR")
+  test.assert(fs.read_file(rec_path) == "RECOVERED_AFTER_RO_ERR",
+              "later write did not progress after write error")
+
+  -- 2. POSIX RLIMIT_FSIZE short-write continuation (normal + cancelled) and EFBIG
+  if ffi.titan_test_fsize_limit_supported() == 1 then
+    local sw1_path = workspace .. "/sw1.out"
+    local sw2_path = workspace .. "/sw2.out"
+    local sw3_path = workspace .. "/sw3.out"
+
+    -- 2a. Short write (4096) then continuation succeeds (total 10000)
+    test.assert(ffi.titan_test_open_file_onto_fd(sw1_path, 1, 1) == 0, "open sw1")
+    test.assert(ffi.titan_test_fsize_limit_short_write_once(4096) == 0, "short_write_once 1")
+    local payload1 = strings.rep("A", 4096) .. strings.rep("B", 5904)
+    system.stdout:write(payload1)
+    test.assert(ffi.titan_test_fsize_limit_restore() == 0, "restore sw1")
+    test.assert(ffi.titan_test_fsize_sigxfsz_count() == 1,
+                "expected exactly 1 SIGXFSZ short write in sw1")
+    test.assert(fs.read_file(sw1_path) == payload1, "sw1 content mismatch")
+
+    -- 2b. Short write (4096) under Task cancellation still finishes all 10000 bytes
+    test.assert(ffi.titan_test_open_file_onto_fd(sw2_path, 1, 1) == 0, "open sw2")
+    test.assert(ffi.titan_test_fsize_limit_short_write_once(4096) == 0, "short_write_once 2")
+    local payload2 = strings.rep("C", 4096) .. strings.rep("D", 5904)
+    local sw_reason = async.CancellationReason.simple("cancel-during-short-write")
+    local sw_observed: value = nil
+    local sw_gate: (function (nil): ())? = nil
+    local sw_writer = async.run<|nil, value|>(function (): nil
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal) sw_gate = resolve end)
+      do system.stdout:write(payload2) catch sw_observed = error end
+      return nil
+    end)
+    while sw_gate == nil do async.yield() end
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+      local release = sw_gate
+      sw_gate = nil
+      release(nil)
+      sw_writer:cancel(sw_reason)
+      resolve(nil)
+    end)
+    async.join(sw_writer)
+    test.assert(ffi.titan_test_fsize_limit_restore() == 0, "restore sw2")
+    test.assert(ffi.titan_test_fsize_sigxfsz_count() == 1,
+                "expected 1 SIGXFSZ short write in cancelled sw2")
+    test.assert(sw_writer:status():has_cancelled() and sw_observed == sw_reason,
+                "cancelled short write did not deliver exact reason")
+    test.assert(fs.read_file(sw2_path) == payload2,
+                "cancelled short write truncated its remainder")
+
+    -- 2c. Short write (4096) then EFBIG error with queued entry behind it
+    test.assert(ffi.titan_test_open_file_onto_fd(sw3_path, 1, 1) == 0, "open sw3")
+    test.assert(ffi.titan_test_fsize_limit_efbig(4096) == 0, "efbig limit")
+    local payload3 = strings.rep("E", 4096) .. strings.rep("F", 5904)
+    local efbig1: async.OperationError? = nil
+    local efbig2: async.OperationError? = nil
+    local g1: (function (nil): ())? = nil
+    local g2: (function (nil): ())? = nil
+    local t1 = async.run<|nil, value|>(function (): nil
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal) g1 = resolve end)
+      do system.stdout:write(payload3)
+      catch
+        if error is async.OperationError then efbig1 = error as async.OperationError
+        else raise end
+      end
+      return nil
+    end)
+    local t2 = async.run<|nil, value|>(function (): nil
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal) g2 = resolve end)
+      do system.stdout:write("SECOND_AT_LIMIT")
+      catch
+        if error is async.OperationError then efbig2 = error as async.OperationError
+        else raise end
+      end
+      return nil
+    end)
+    while g1 == nil or g2 == nil do async.yield() end
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+      local r1, r2 = g1, g2
+      g1, g2 = nil, nil
+      r1(nil)
+      r2(nil)
+      resolve(nil)
+    end)
+    async.join(t1)
+    async.join(t2)
+    test.assert(ffi.titan_test_fsize_limit_restore() == 0, "restore sw3")
+    test.assert(efbig1 ~= nil and efbig1.operation == "stdio.write" and efbig1.name == "EFBIG",
+                "first write at fsize limit did not report EFBIG")
+    test.assert(efbig2 ~= nil and efbig2.operation == "stdio.write" and efbig2.name == "EFBIG",
+                "queued write after EFBIG did not run")
+    test.assert(fs.read_file(sw3_path) == strings.rep("E", 4096),
+                "EFBIG did not preserve 4096-byte short-write prefix")
+    system.stdout:write(":AFTER_EFBIG")
+    test.assert(fs.read_file(sw3_path) == strings.rep("E", 4096) .. ":AFTER_EFBIG",
+                "subsequent write after restoring RLIMIT_FSIZE failed")
+  end
+
+  -- 3. Linux /dev/full -> ENOSPC
+  if fs.stat("/dev/full") ~= nil then
+    if ffi.titan_test_open_file_onto_fd("/dev/full", 1, 1) == 0 then
+      test.assert(system.stdout:kind() == "file", "/dev/full was not classified as file")
+      local full_err: async.OperationError? = nil
+      do
+        system.stdout:write("WRITE_TO_DEV_FULL")
+      catch
+        if error is async.OperationError then
+          full_err = error as async.OperationError
+        else
+          raise
+        end
+      end
+      test.assert(full_err ~= nil and full_err.operation == "stdio.write" and
+                  full_err.name == "ENOSPC",
+                  "/dev/full write did not report stdio.write ENOSPC")
+    end
+  end
+
+  fs.write_file(result_path, "SHORT_WRITE_AND_ERRORS_OK")
+  return 0
+end
+
+local function run_read_cancel_sticky_inheritance(
+    workspace: string, result_path: string, program_path: string): integer
+  local saved_stdin = ffi.titan_test_dup_fd(0)
+  local saved_stdout = ffi.titan_test_dup_fd(1)
+  local saved_stderr = ffi.titan_test_dup_fd(2)
+  test.assert(saved_stdin >= 0 and saved_stdout >= 0 and saved_stderr >= 0,
+              "could not save stdio descriptors")
+  defer do
+    ffi.titan_test_restore_fd(saved_stdin, 0)
+    ffi.titan_test_restore_fd(saved_stdout, 1)
+    ffi.titan_test_restore_fd(saved_stderr, 2)
+  end
+
+  local in_file = workspace .. "/read_test.in"
+  fs.write_file(in_file, "READ_CHUNK_PAYLOAD")
+  test.assert(ffi.titan_test_open_file_onto_fd(in_file, 0, 0) == 0, "open read_test.in")
+
+  -- 1. kind() outside a Task raises asynchronous operation must be called from an async Task
+  async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+    assert_raises_substring(function () system.stdin:kind() end, "must be called from an async Task")
+    assert_raises_substring(function () system.stdout:kind() end, "must be called from an async Task")
+    assert_raises_substring(function () system.stderr:kind() end, "must be called from an async Task")
+    resolve(nil)
+  end)
+
+  -- 2. Untouched file stdin: kind(), is_tty(), close(), and transfer succeed without starting reads
+  test.assert(system.stdin:kind() == "file" and not system.stdin:is_tty(),
+              "file stdin kind/is_tty failed")
+  system.stdin:close()
+  async.TransferValue.from_value(system.stdin)
+
+  -- 3. Cancelled before read submission does not start subscription
+  local pre_reason = async.CancellationReason.simple("cancel-before-read-submit")
+  local pre_obs: value = nil
+  local pre_reader = async.run<|nil, value|>(function (): nil
+    async.running():cancel(pre_reason)
+    do system.stdin:read() catch pre_obs = error end
+    return nil
+  end)
+  async.join(pre_reader)
+  test.assert(pre_reader:status():has_cancelled() and pre_obs == pre_reason,
+              "pre-cancelled reader lost reason")
+  async.TransferValue.from_value(system.stdin)
+
+  -- 4. In-flight read cancellation + immediate waiter replacement + competing reader rejection + GC
+  local cells1, workers1 = hold_workers()
+  local r_reason = async.CancellationReason.simple("replace-inflight-file-reader")
+  local r_obs: value = nil
+  local old_reader = async.run<|nil, value|>(function (): nil
+    do system.stdin:read() catch r_obs = error end
+    return nil
+  end)
+  wait_until_task_waiting(old_reader, "in-flight file reader")
+  assert_raises_substring(function ()
+    system.stdin:read()
+  end, "stream already has a waiting reader")
+  assert_raises_substring(function ()
+    async.TransferValue.from_value(system.stdin)
+  end, "standard input has active or buffered read state")
+
+  old_reader:cancel(r_reason)
+  test.assert(r_obs == nil, "cancelled file reader unwound before replacement")
+  local replacement_chunk: string? = nil
+  local new_reader = async.run<|nil, value|>(function (): nil
+    replacement_chunk = system.stdin:read()
+    return nil
+  end)
+  wait_until_task_waiting(new_reader, "replacement file reader")
+  gc.collect()
+  gc.collect()
+  release_workers(cells1, workers1)
+  async.join(old_reader)
+  async.join(new_reader)
+  test.assert(old_reader:status():has_cancelled() and r_obs == r_reason,
+              "old file reader lost cancellation reason")
+  test.assert(new_reader:status():has_succeeded() and
+              replacement_chunk == "READ_CHUNK_PAYLOAD",
+              "replacement file reader did not receive in-flight chunk once")
+
+  -- 5. Cancelled-read data retention and EOF retention (no replacement waiter at completion)
+  test.assert(ffi.titan_test_rewind_fd(0) == 0, "rewind for data retention")
+  local cells2, workers2 = hold_workers()
+  local ret_reader = async.run<|nil, value|>(function (): nil
+    do system.stdin:read() catch end
+    return nil
+  end)
+  wait_until_task_waiting(ret_reader, "data retention reader")
+  ret_reader:cancel(async.CancellationReason.simple("cancel-retain-data"))
+  async.join(ret_reader)
+  release_workers(cells2, workers2)
+  for _ = 1, 5 do async.yield() end
+  test.assert(system.stdin:read() == "READ_CHUNK_PAYLOAD",
+              "cancelled in-flight read did not retain its completed chunk")
+
+  local cells3, workers3 = hold_workers()
+  local eof_reader = async.run<|nil, value|>(function (): nil
+    do system.stdin:read() catch end
+    return nil
+  end)
+  wait_until_task_waiting(eof_reader, "eof retention reader")
+  eof_reader:cancel(async.CancellationReason.simple("cancel-retain-eof"))
+  async.join(eof_reader)
+  release_workers(cells3, workers3)
+  for _ = 1, 5 do async.yield() end
+  test.assert(system.stdin:read() == nil and system.stdin:read() == nil,
+              "cancelled in-flight EOF was not retained or sticky")
+  test.assert(system.stdin:kind() == "file", "file stdin lost kind after EOF")
+  assert_raises_substring(function ()
+    async.TransferValue.from_value(system.stdin)
+  end, "standard input has active or buffered read state")
+
+  -- 6. Cancelled-read error retention + sticky read error (fresh Runtime in tlua.Lua state)
+  do
+    local state = tlua.new()
+    defer state:close()
+    state:run([[require("os_descriptor_limit_app").exercise_cancelled_read_error(...)]],
+      "=read-err", async.TransferValue.is_string(workspace .. "/write_only_stdin.tmp"))
+  end
+
+  -- 7. Delimiter excess across 64 KiB chunk boundaries and final tail before nil
+  do
+    local state = tlua.new()
+    defer state:close()
+    state:run([[require("os_descriptor_limit_app").exercise_delimiter_across_chunks(...)]],
+      "=delim-chunks", async.TransferValue.is_string(workspace .. "/delim_chunks.tmp"))
+  end
+
+  -- 8. Partial read followed by inherited child reading the remainder
+  do
+    local state = tlua.new()
+    defer state:close()
+    state:run([[require("os_descriptor_limit_app").exercise_partial_read_inheritance(...)]],
+      "=partial-inherit",
+      async.TransferValue.is_string(workspace .. "/partial_inherit.tmp"),
+      async.TransferValue.is_string(program_path))
+  end
+
+  -- 9. All three file-backed descriptors inherited (ordered parent/child/parent content)
+  local inh_in = workspace .. "/inh_all.in"
+  local inh_out = workspace .. "/inh_all.out"
+  local inh_err = workspace .. "/inh_all.err"
+  fs.write_file(inh_in, "CHILD_INPUT_LINE\n")
+  test.assert(ffi.titan_test_open_file_onto_fd(inh_in, 0, 0) == 0, "open inh_in")
+  test.assert(ffi.titan_test_open_file_onto_fd(inh_out, 1, 1) == 0, "open inh_out")
+  test.assert(ffi.titan_test_open_file_onto_fd(inh_err, 1, 2) == 0, "open inh_err")
+  system.stdout:write("PARENT-OUT-1\n")
+  system.stderr:write("PARENT-ERR-1\n")
+  local child = system.spawn(
+    program_path, {"child-inherit", "middle-all"},
+    system.with_parent_stdin, system.with_parent_stdout, system.with_parent_stderr)
+  test.assert(child.stdin == nil and child.stdout == nil and child.stderr == nil,
+              "inherited file stdio exposed a captured endpoint")
+  local status = child:wait()
+  test.assert(status.code == 0 and status.signal_number == 0,
+              "all-inherited child did not exit 0")
+  system.stdout:write("PARENT-OUT-2\n")
+  system.stderr:write("PARENT-ERR-2\n")
+  test.assert(fs.read_file(inh_out) ==
+              "PARENT-OUT-1\nCHILD-STDOUT:CHILD_INPUT_LINE\nPARENT-OUT-2\n",
+              "inherited file stdout lost parent/child/parent ordering")
+  test.assert(fs.read_file(inh_err) ==
+              "PARENT-ERR-1\nCHILD-STDERR\nPARENT-ERR-2\n",
+              "inherited file stderr lost parent/child/parent ordering")
+
+  -- 10. Untouched file-backed facades transfer across states and function in destination
+  local tr_in = workspace .. "/tr_file.in"
+  local tr_out = workspace .. "/tr_file.out"
+  local tr_err = workspace .. "/tr_file.err"
+  fs.write_file(tr_in, "TRANSFER_FILE_INPUT")
+  test.assert(ffi.titan_test_open_file_onto_fd(tr_in, 0, 0) == 0, "open tr_in")
+  test.assert(ffi.titan_test_open_file_onto_fd(tr_out, 1, 1) == 0, "open tr_out")
+  test.assert(ffi.titan_test_open_file_onto_fd(tr_err, 1, 2) == 0, "open tr_err")
+  do
+    local origin = tlua.new()
+    defer origin:close()
+    origin:run([[require("os_descriptor_limit_app").roundtrip_transferred_file_stdio()]],
+      "=transfer-file-stdio")
+  end
+  test.assert(fs.read_file(tr_out) == "TRANSFER_FILE_STDOUT:TRANSFER_FILE_INPUT",
+              "transferred file stdout content mismatched")
+  test.assert(fs.read_file(tr_err) == "TRANSFER_FILE_STDERR",
+              "transferred file stderr content mismatched")
+
+  fs.write_file(result_path, "READ_CANCEL_STICKY_INHERIT_OK")
+  return 0
+end
+
+local function run_exit_queued_writes(): integer
+  local cells, _workers = hold_workers()
+  local g1: (function (nil): ())? = nil
+  local g2: (function (nil): ())? = nil
+  local g3: (function (nil): ())? = nil
+  local w1 = async.run<|nil, value|>(function (): nil
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal) g1 = resolve end)
+    do system.stdout:write("EXIT-1;") catch end
+    return nil
+  end)
+  local w2 = async.run<|nil, value|>(function (): nil
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal) g2 = resolve end)
+    do system.stdout:write("EXIT-2;") catch end
+    return nil
+  end)
+  local w3 = async.run<|nil, value|>(function (): nil
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal) g3 = resolve end)
+    do system.stdout:write("EXIT-3;") catch end
+    return nil
+  end)
+  while g1 == nil or g2 == nil or g3 == nil do async.yield() end
+  async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+    local r1, r2, r3 = g1, g2, g3
+    g1, g2, g3 = nil, nil, nil
+    r1(nil)
+    r2(nil)
+    r3(nil)
+    test.assert(w1:status():as_string() == "waiting" and
+                w2:status():as_string() == "waiting" and
+                w3:status():as_string() == "waiting",
+                "exit writers did not park")
+    resolve(nil)
+  end)
+  ffi.titan_test_worker_gate_release(cells as foreign *void)
+  system.exit(17)
+  return 0
+end
+
+local function run_runtime_failure_and_reuse(workspace: string, result_path: string): integer
+  local rf_in = workspace .. "/rf_in.txt"
+  local rf_out = workspace .. "/rf_out.txt"
+  fs.write_file(rf_in, "R1_HEAD|R1_EXCESS_TAIL")
+  local state = tlua.new()
+  defer state:close()
+  state:run([[require("os_descriptor_limit_app").exercise_runtime_failure_and_reuse(...)]],
+    "=runtime-failure-reuse",
+    async.TransferValue.is_string(rf_in),
+    async.TransferValue.is_string(rf_out))
+  fs.write_file(result_path, "RUNTIME_FAILURE_REUSE_OK")
+  return 0
+end
+
+local function run_destructive_state_close(
+    workspace: string, result_path: string): integer
+  local saved_stdin = ffi.titan_test_dup_fd(0)
+  local saved_stdout = ffi.titan_test_dup_fd(1)
+  test.assert(saved_stdin >= 0 and saved_stdout >= 0, "could not save stdio")
+  defer do
+    ffi.titan_test_restore_fd(saved_stdin, 0)
+    ffi.titan_test_restore_fd(saved_stdout, 1)
+  end
+  local in_path = workspace .. "/abandon.in"
+  local out_path = workspace .. "/abandon.out"
+  fs.write_file(in_path, "ABANDON_INPUT_DATA")
+  test.assert(ffi.titan_test_open_file_onto_fd(in_path, 0, 0) == 0, "open abandon.in")
+  test.assert(ffi.titan_test_open_file_onto_fd(out_path, 1, 1) == 0, "open abandon.out")
+
+  local cells: owned int[] = foreign int.new_array(4)
+  local raw = cells as foreign *void
+  ffi.titan_test_worker_gate_init(raw)
+  local state = tlua.new()
+  state:run([[require("os_descriptor_limit_app").setup_abandoned_state(...)]],
+    "=abandon-state", async.TransferValue.is_pointer(raw))
+  state:close()
+
+  test.assert(ffi.titan_test_worker_gate_failed(raw) == 0,
+              "a Titan/Lua callback ran during destructive state:close()")
+  test.assert(ffi.titan_test_fd_is_open(0) == 1 and
+              ffi.titan_test_fd_is_open(1) == 1 and
+              ffi.titan_test_fd_is_open(2) == 1,
+              "destructive state:close() closed a borrowed parent stdio descriptor")
+  system.stdout:write("HOST-AFTER-ABANDON;")
+  test.assert(fs.read_file(out_path) == "ABANDONED-INFLIGHT;HOST-AFTER-ABANDON;",
+              "destructive state:close() did not drain submitted write or failed to drop queued write: " ..
+              fs.read_file(out_path))
+  fs.write_file(result_path, "DESTRUCTIVE_STATE_CLOSE_OK")
+  return 0
+end
+
+function main(args: {string}): integer
+  local mode = args[1]
+  if mode == "exit-queued-writes" then
+    return run_exit_queued_writes()
+  elseif #args == 1 then
+    return run_emfile_case(args[1])
+  end
+  if mode == "shell-redirect" then
+    return run_shell_redirect(args)
+  elseif mode == "child-inherit" then
+    return run_child_inherit(args)
+  elseif mode == "write-fifo-cancel-gc" then
+    return run_write_fifo_cancel_gc(args[2], args[3])
+  elseif mode == "short-write-and-errors" then
+    return run_short_write_and_errors(args[2], args[3])
+  elseif mode == "read-cancel-sticky-inheritance" then
+    return run_read_cancel_sticky_inheritance(args[2], args[3], args[4])
+  elseif mode == "exit-queued-writes" then
+    return run_exit_queued_writes()
+  elseif mode == "runtime-failure-and-reuse" then
+    return run_runtime_failure_and_reuse(args[2], args[3])
+  elseif mode == "destructive-state-close" then
+    return run_destructive_state_close(args[2], args[3])
+  end
+  raise "unknown os_descriptor_limit_app mode: " .. mode
 end
