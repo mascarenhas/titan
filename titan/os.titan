@@ -1284,7 +1284,7 @@ local function FileStdio:pump_writes(stream: Stdio, retired: FileWriteOperation?
     failure_error = retired.failure_error
     failure_trace = retired.failure_trace
   end
-  -- Recovery only links preallocated entries: no allocation or settlement
+  -- Recovery only links preallocated entries: no heap allocation or settlement
   -- before the accepted tail is submitted or the FIFO is empty.
   while not self.writing and self.write_head ~= nil do
     local entry = self.write_head

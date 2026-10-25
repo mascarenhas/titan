@@ -95,11 +95,14 @@ The OS-specific choices are:
   `FileWriteOperation` nodes. The callback pump first links these nodes into a
   local retirement batch and submits the next accepted entry (or empties the
   FIFO), then settles that batch. Between catching a failure and reaching that
-  tail-safety boundary, recovery performs no Titan allocation of its own and
+  tail-safety boundary, recovery allocates no Titan heap objects of its own and
   does not settle a Completion: it only cleans the request and detaches/links
   existing entries. A later entry whose submission fails is retired the same
   way, so recovery always advances. Fatal settlement and construction/rethrow
-  of the first failure happen only after the tail is in flight or empty.
+  of the first failure happen only after the tail is in flight or empty. The
+  guarantee covers heap allocation only: a Lua stack-reservation failure in a
+  generated function prologue on this path is not covered, as on every other
+  callback path.
   `start_file_write` returns `nil` rather than a `uv.req_t`, so a Task cancelled
   after acceptance stays waiting until its full logical write settles and then
   receives cancellation via `await_with` terminal substitution. Each
