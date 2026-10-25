@@ -242,6 +242,26 @@ function exercise_cancelled_read_error(file_path: value)
   if failed and err ~= nil then err:raise() end
   test.assert(completed and main_task:status():has_succeeded(),
               "cancelled read error task did not complete")
+
+  local recovered = false
+  local recover_task = async.run<|nil, value|>(function (): nil
+    fs.write_file(path, "RECOVERED_AFTER_STICKY_READ_ERROR")
+    test.assert(ffi.titan_test_open_file_onto_fd(path, 0, 0) == 0,
+                "could not reopen readable file onto stdin between Runtimes")
+    test.assert(system.stdin:kind() == "file",
+                "reopened stdin lost file kind in later Runtime")
+    test.assert(system.stdin:read() == "RECOVERED_AFTER_STICKY_READ_ERROR",
+                "later Runtime retained sticky read error from previous Runtime")
+    test.assert(system.stdin:read() == nil,
+                "later Runtime did not reach fresh EOF after error reset")
+    recovered = true
+    return nil
+  end)
+  async.loop()
+  local rec_failed, rec_err? = recover_task:status():has_failed()
+  if rec_failed and rec_err ~= nil then rec_err:raise() end
+  test.assert(recovered and recover_task:status():has_succeeded(),
+              "read error reset across Runtimes failed")
 end
 
 function exercise_pump_fatal_drains_tail(out_path: value, recovery: value)
@@ -517,8 +537,9 @@ function exercise_runtime_failure_and_reuse(in_path: value, out_path: value)
     local fresh = ""
     for chunk in system.stdin:read do fresh = fresh .. chunk end
     test.assert(fresh == "R1_HEAD|R1_EXCESS_TAIL",
-                "Runtime 2 kept stale excess or sticky EOF: " .. fresh)
-    test.assert(system.stdin:read() == nil, "Runtime 2 did not reach EOF")
+                "Runtime 2 kept stale excess from Runtime 1: " .. fresh)
+    test.assert(system.stdin:read() == nil and system.stdin:read() == nil,
+                "Runtime 2 did not reach sticky EOF")
     system.stdout:write("RUNTIME-2-OK;")
     test.assert(fs.read_file(output_file) == "FATAL-1;FATAL-2;RUNTIME-2-OK;",
                 "Runtime 2 output did not append after Runtime 1 drained writes")
@@ -529,6 +550,28 @@ function exercise_runtime_failure_and_reuse(in_path: value, out_path: value)
   local failed2, err2? = task2:status():has_failed()
   if failed2 and err2 ~= nil then err2:raise() end
   test.assert(r2_done and task2:status():has_succeeded(), "Runtime 2 task failed")
+
+  test.assert(ffi.titan_test_rewind_fd(0) == 0, "could not rewind stdin for Runtime 3")
+  local r3_done = false
+  local task3 = async.run<|nil, value|>(function (): nil
+    test.assert(system.stdin:kind() == "file" and system.stdout:kind() == "file",
+                "Runtime 3 lost file kind")
+    local fresh3 = ""
+    for chunk in system.stdin:read do fresh3 = fresh3 .. chunk end
+    test.assert(fresh3 == "R1_HEAD|R1_EXCESS_TAIL",
+                "Runtime 3 kept sticky EOF from Runtime 2: " .. fresh3)
+    test.assert(system.stdin:read() == nil, "Runtime 3 did not reach fresh EOF")
+    system.stdout:write("RUNTIME-3-OK;")
+    test.assert(fs.read_file(output_file) ==
+                "FATAL-1;FATAL-2;RUNTIME-2-OK;RUNTIME-3-OK;",
+                "Runtime 3 output did not append after Runtime 2")
+    r3_done = true
+    return nil
+  end)
+  async.loop()
+  local failed3, err3? = task3:status():has_failed()
+  if failed3 and err3 ~= nil then err3:raise() end
+  test.assert(r3_done and task3:status():has_succeeded(), "Runtime 3 task failed")
 end
 
 function roundtrip_transferred_file_stdio()

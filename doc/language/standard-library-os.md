@@ -283,16 +283,18 @@ and the parent-facing endpoints of captured child stdio. They are not general
 stream with one of three descriptor backings: a terminal (`"tty"`), a pipe or
 Unix stream socket (`"pipe"`), or a file-backed parent descriptor (`"file"`).
 `kind()` returns exactly `"tty"`, `"pipe"`, or `"file"`; `is_tty()` is true
-exactly when `kind()` is `"tty"`. Neither yields. Both require a running Task
-and the Runtime that owns the stream, raising `stdio stream belongs to a
-different async Runtime` otherwise. On a captured endpoint that was closed or
-transferred they raise `InputStream is closed` / `OutputStream is closed`. On a
-parent stream they classify descriptor 0, 1, or 2 on first use in the Runtime.
-A parent descriptor of an unsupported kind raises the `stdio.parent.kind`
-`async.OperationError` described below, and an invalid descriptor raises its
-`EBADF` error, so `kind()` never returns a fourth value. An open captured child
-endpoint is always a pipe: `kind() == "pipe"`, `is_tty() == false`, including
-after EOF.
+exactly when `kind()` is `"tty"`. Neither yields. Both require a running Task,
+raising `async Runtime is not active` when no Runtime is active and
+`asynchronous operation must be called from an async Task` when called outside a
+Task. On a live captured endpoint owned by another Runtime they raise `stdio
+stream belongs to a different async Runtime`. On a captured endpoint that was
+closed or transferred they raise `InputStream is closed` / `OutputStream is
+closed`. On a parent stream they classify descriptor 0, 1, or 2 on first use in
+the Runtime. A parent descriptor of an unsupported kind raises the
+`stdio.parent.kind` `async.OperationError` described below, and an invalid
+descriptor raises its `EBADF` error, so `kind()` never returns a fourth value.
+An open captured child endpoint is always a pipe: `kind() == "pipe"`,
+`is_tty() == false`, including after EOF.
 
 ### Spawn configuration
 
