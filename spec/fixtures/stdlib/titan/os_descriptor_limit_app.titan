@@ -8,6 +8,7 @@ local system = import "os"
 local strings = import "string"
 local timer = import "timer"
 local uv = import "uv"
+foreign import "titan/ffi.h"
 foreign import "os_descriptor_limit.h"
 
 record ReleaseWatch
@@ -19,12 +20,12 @@ local function on_release_finalize(candidate: value)
   ffi.titan_test_worker_gate_release(watch.cells)
 end
 
-local function hold_workers(): (owned int[], {async.Task<|nil, value|>})
+local function hold_n_workers(count: integer): (owned int[], {async.Task<|nil, value|>})
   local cells: owned int[] = foreign int.new_array(4)
   local raw = cells as foreign *void
   ffi.titan_test_worker_gate_init(raw)
   local workers: {async.Task<|nil, value|>} = {}
-  for index = 1, 4 do
+  for index = 1, count do
     workers[index] = async.run<|nil, value|>(function (): nil
       async.run_foreign(
         ffi.titan_test_worker_gate_work,
@@ -33,11 +34,21 @@ local function hold_workers(): (owned int[], {async.Task<|nil, value|>})
       return nil
     end)
   end
-  while ffi.titan_test_worker_gate_entered(raw) < 4 do
+  local attempts = 0
+  while ffi.titan_test_worker_gate_entered(raw) < count do
+    attempts = attempts + 1
+    if attempts > 5000 then
+      ffi.titan_test_worker_gate_release(raw)
+      raise "worker gate timed out waiting for workers"
+    end
     async.yield()
     uv.sleep(1)
   end
   return cells, workers
+end
+
+local function hold_workers(): (owned int[], {async.Task<|nil, value|>})
+  return hold_n_workers(4)
 end
 
 local function release_workers(
@@ -69,8 +80,48 @@ local function assert_raises_substring(action: function (): (), expected: string
   test.assert(caught, "expected error containing '" .. expected .. "'")
 end
 
+local function cancel_and_retain_inflight_read(
+    reason: async.CancellationReason<|value|>): value
+  local cells_a, workers_a = hold_n_workers(3)
+  defer ffi.titan_test_worker_gate_release(cells_a as foreign *void)
+  local cells_b, workers_b = hold_n_workers(1)
+  defer ffi.titan_test_worker_gate_release(cells_b as foreign *void)
+
+  local observed: value = nil
+  local reader = async.run<|nil, value|>(function (): nil
+    do
+      system.stdin:read()
+    catch
+      observed = error
+    end
+    return nil
+  end)
+  wait_until_task_waiting(reader, "cancelled retention reader")
+  reader:cancel(reason)
+  async.join(reader)
+  test.assert(reader:status():has_cancelled() and observed == reason,
+              "cancelled retention reader lost cancellation reason")
+
+  local sentinel = async.run<|nil, value|>(function (): nil
+    async.run_foreign(
+      ffi.titan_test_worker_gate_noop,
+      nil,
+      ffi.titan_test_worker_gate_noop)
+    return nil
+  end)
+  wait_until_task_waiting(sentinel, "retention completion sentinel")
+
+  release_workers(cells_b, workers_b)
+  async.join(sentinel)
+  test.assert(sentinel:status():has_succeeded(),
+              "retention completion sentinel failed")
+  release_workers(cells_a, workers_a)
+  return observed
+end
+
 function setup_abandoned_state(raw: value)
   local cells = raw as foreign *void
+  gc.finalizable<|value|>(ReleaseWatch(cells), on_release_finalize)
   for _ = 1, 4 do
     async.run<|nil, value|>(function (): nil
       async.run_foreign(
@@ -80,7 +131,13 @@ function setup_abandoned_state(raw: value)
       return nil
     end)
   end
+  local attempts = 0
   while ffi.titan_test_worker_gate_entered(cells) < 4 do
+    attempts = attempts + 1
+    if attempts > 5000 then
+      ffi.titan_test_worker_gate_release(cells)
+      raise "abandoned state worker gate timed out"
+    end
     uv.run(async.current_loop(), uv.RUN_NOWAIT)
     uv.sleep(1)
   end
@@ -131,24 +188,8 @@ function exercise_cancelled_read_error(file_path: value)
   local completed = false
   local main_task = async.run<|nil, value|>(function (): nil
     test.assert(system.stdin:kind() == "file", "write-only file stdin lost file kind")
-    local cells, workers = hold_workers()
     local cancel_reason = async.CancellationReason.simple("cancel-error-read")
-    local observed_cancel: value = nil
-    local reader1 = async.run<|nil, value|>(function (): nil
-      do
-        system.stdin:read()
-      catch
-        observed_cancel = error
-      end
-      return nil
-    end)
-    wait_until_task_waiting(reader1, "cancelled error reader")
-    reader1:cancel(cancel_reason)
-    async.join(reader1)
-    test.assert(reader1:status():has_cancelled() and observed_cancel == cancel_reason,
-                "cancelled error reader lost cancellation reason")
-    release_workers(cells, workers)
-    for _ = 1, 5 do async.yield() end
+    cancel_and_retain_inflight_read(cancel_reason)
 
     for attempt = 1, 2 do
       local caught: async.OperationError? = nil
@@ -172,6 +213,108 @@ function exercise_cancelled_read_error(file_path: value)
   if failed and err ~= nil then err:raise() end
   test.assert(completed and main_task:status():has_succeeded(),
               "cancelled read error task did not complete")
+end
+
+function exercise_pump_fatal_drains_tail(out_path: value)
+  local path = out_path as string
+  local saved_stdout = ffi.titan_test_dup_fd(1)
+  test.assert(saved_stdout >= 0, "could not save stdout for pump fatal test")
+  defer ffi.titan_test_restore_fd(saved_stdout, 1)
+  defer ffi.titan_test_fsize_limit_restore()
+
+  local prev_ud: foreign *void = nil
+  local prev_alloc = ffi.lua_getallocf(L, prev_ud)
+  ffi.titan_test_slice_fault_configure(
+    prev_alloc, prev_ud, ffi.LUA_TUSERDATA as foreign size_t)
+  ffi.lua_setallocf(L, ffi.titan_test_slice_fault_alloc, nil)
+  defer do
+    ffi.titan_test_slice_fault_disarm()
+    ffi.lua_setallocf(L, prev_alloc, prev_ud)
+  end
+  local _calibrate = uv.buf_t.from_string("calibrate")
+  ffi.titan_test_slice_fault_watch_end()
+  test.assert(ffi.titan_test_slice_fault_size() > 0,
+              "could not calibrate buf_t userdata allocation size")
+
+  test.assert(ffi.titan_test_open_file_onto_fd(path, 1, 1) == 0,
+              "could not open pump fatal output file onto stdout")
+
+  local first_error = ""
+  local second_done = false
+  local main_task = async.run<|nil, value|>(function (): nil
+    local cells, _workers = hold_workers()
+    defer ffi.titan_test_worker_gate_release(cells as foreign *void)
+    test.assert(ffi.titan_test_fsize_limit_short_write_once(4096) == 0,
+                "could not arm short write limit for pump fatal test")
+    local g1: (function (nil): ())? = nil
+    local g2: (function (nil): ())? = nil
+    local w1 = async.run<|nil, value|>(function (): nil
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal) g1 = resolve end)
+      do
+        system.stdout:write(strings.rep("A", 10000))
+      catch
+        first_error = strings.tostring(error)
+      end
+      return nil
+    end)
+    local w2 = async.run<|nil, value|>(function (): nil
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal) g2 = resolve end)
+      do system.stdout:write("TAIL_AFTER_PUMP_FATAL") catch end
+      second_done = true
+      return nil
+    end)
+    while g1 == nil or g2 == nil do async.yield() end
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+      local r1, r2 = g1, g2
+      g1, g2 = nil, nil
+      r1(nil)
+      r2(nil)
+      test.assert(w1:status():as_string() == "waiting" and
+                  w2:status():as_string() == "waiting",
+                  "pump fatal writers did not park")
+      resolve(nil)
+    end)
+    ffi.titan_test_slice_fault_arm()
+    ffi.titan_test_worker_gate_release(cells as foreign *void)
+    return nil
+  end)
+
+  local outer_error = ""
+  do
+    async.loop()
+  catch
+    outer_error = strings.tostring(error)
+  end
+  ffi.titan_test_slice_fault_disarm()
+  ffi.lua_setallocf(L, prev_alloc, prev_ud)
+  test.assert(ffi.titan_test_fsize_limit_restore() == 0,
+              "could not restore fsize limit after pump fatal")
+  test.assert(ffi.titan_test_slice_fault_hits() == 2,
+              "slice fault allocator did not trigger twice")
+  test.assert(strings.find(first_error, "not enough memory") ~= nil,
+              "first write did not observe OOM: " .. first_error)
+  test.assert(strings.find(outer_error, "not enough memory") ~= nil,
+              "async.loop did not report fatal OOM: " .. outer_error)
+  test.assert(second_done and main_task:status():has_succeeded(),
+              "queued tail write was abandoned after pump fatal error")
+
+  local check_done = false
+  local check_task = async.run<|nil, value|>(function (): nil
+    test.assert(fs.read_file(path) ==
+                strings.rep("A", 4096) .. "TAIL_AFTER_PUMP_FATAL",
+                "pump fatal output file lost queued tail bytes")
+    system.stdout:write(":AFTER_RECOVERY")
+    test.assert(fs.read_file(path) ==
+                strings.rep("A", 4096) .. "TAIL_AFTER_PUMP_FATAL:AFTER_RECOVERY",
+                "subsequent Runtime write failed after pump fatal recovery")
+    check_done = true
+    return nil
+  end)
+  async.loop()
+  local failed, err? = check_task:status():has_failed()
+  if failed and err ~= nil then err:raise() end
+  test.assert(check_done and check_task:status():has_succeeded(),
+              "post-fatal verification task failed")
 end
 
 function exercise_delimiter_across_chunks(file_path: value)
@@ -278,6 +421,7 @@ function exercise_runtime_failure_and_reuse(in_path: value, out_path: value)
   local task1 = async.run<|nil, value|>(function (): nil
     test.assert(system.stdin:read_until("|", true) == "R1_HEAD", "r1 read_until failed")
     local cells, _workers = hold_workers()
+    defer ffi.titan_test_worker_gate_release(cells as foreign *void)
     local gate1: (function (nil): ())? = nil
     local gate2: (function (nil): ())? = nil
     local w1 = async.run<|nil, value|>(function (): nil
@@ -508,6 +652,7 @@ local function run_write_fifo_cancel_gc(workspace: string, result_path: string):
 
   -- Hold worker threads so w1 is deterministically in flight and w2, w3 are queued.
   local cells, workers = hold_workers()
+  defer ffi.titan_test_worker_gate_release(cells as foreign *void)
   local gate1: (function (nil): ())? = nil
   local gate2: (function (nil): ())? = nil
   local gate3: (function (nil): ())? = nil
@@ -635,6 +780,7 @@ local function run_short_write_and_errors(workspace: string, result_path: string
   local saved_stdout = ffi.titan_test_dup_fd(1)
   test.assert(saved_stdout >= 0, "could not save stdout")
   defer ffi.titan_test_restore_fd(saved_stdout, 1)
+  defer ffi.titan_test_fsize_limit_restore()
 
   -- 1. Read-only file on fd 1 fails with stdio.write, and later entry progresses
   local ro_path = workspace .. "/readonly.txt"
@@ -750,6 +896,13 @@ local function run_short_write_and_errors(workspace: string, result_path: string
     system.stdout:write(":AFTER_EFBIG")
     test.assert(fs.read_file(sw3_path) == strings.rep("E", 4096) .. ":AFTER_EFBIG",
                 "subsequent write after restoring RLIMIT_FSIZE failed")
+    -- 2d. Pump callback exception on head entry still drains queued FIFO tail
+    do
+      local state = tlua.new()
+      defer state:close()
+      state:run([[require("os_descriptor_limit_app").exercise_pump_fatal_drains_tail(...)]],
+        "=pump-fatal-tail", async.TransferValue.is_string(workspace .. "/pump_fatal.out"))
+    end
   end
 
   -- 3. Linux /dev/full -> ENOSPC
@@ -822,6 +975,7 @@ local function run_read_cancel_sticky_inheritance(
 
   -- 4. In-flight read cancellation + immediate waiter replacement + competing reader rejection + GC
   local cells1, workers1 = hold_workers()
+  defer ffi.titan_test_worker_gate_release(cells1 as foreign *void)
   local r_reason = async.CancellationReason.simple("replace-inflight-file-reader")
   local r_obs: value = nil
   local old_reader = async.run<|nil, value|>(function (): nil
@@ -836,50 +990,32 @@ local function run_read_cancel_sticky_inheritance(
     async.TransferValue.from_value(system.stdin)
   end, "standard input has active or buffered read state")
 
-  old_reader:cancel(r_reason)
-  test.assert(r_obs == nil, "cancelled file reader unwound before replacement")
-  local replacement_chunk: string? = nil
-  local new_reader = async.run<|nil, value|>(function (): nil
-    replacement_chunk = system.stdin:read()
+  local releaser = async.run<|nil, value|>(function (): nil
+    async.join(old_reader)
+    gc.collect()
+    gc.collect()
+    release_workers(cells1, workers1)
     return nil
   end)
-  wait_until_task_waiting(new_reader, "replacement file reader")
-  gc.collect()
-  gc.collect()
-  release_workers(cells1, workers1)
-  async.join(old_reader)
-  async.join(new_reader)
+  old_reader:cancel(r_reason)
+  test.assert(r_obs == nil and old_reader:status():as_string() == "waiting",
+              "cancelled file reader unwound before replacement")
+  -- The successor reserves the reader immediately before old_reader unwinds.
+  local replacement_chunk = system.stdin:read()
+  async.join(releaser)
   test.assert(old_reader:status():has_cancelled() and r_obs == r_reason,
               "old file reader lost cancellation reason")
-  test.assert(new_reader:status():has_succeeded() and
+  test.assert(releaser:status():has_succeeded() and
               replacement_chunk == "READ_CHUNK_PAYLOAD",
               "replacement file reader did not receive in-flight chunk once")
 
   -- 5. Cancelled-read data retention and EOF retention (no replacement waiter at completion)
   test.assert(ffi.titan_test_rewind_fd(0) == 0, "rewind for data retention")
-  local cells2, workers2 = hold_workers()
-  local ret_reader = async.run<|nil, value|>(function (): nil
-    do system.stdin:read() catch end
-    return nil
-  end)
-  wait_until_task_waiting(ret_reader, "data retention reader")
-  ret_reader:cancel(async.CancellationReason.simple("cancel-retain-data"))
-  async.join(ret_reader)
-  release_workers(cells2, workers2)
-  for _ = 1, 5 do async.yield() end
+  cancel_and_retain_inflight_read(async.CancellationReason.simple("cancel-retain-data"))
   test.assert(system.stdin:read() == "READ_CHUNK_PAYLOAD",
               "cancelled in-flight read did not retain its completed chunk")
 
-  local cells3, workers3 = hold_workers()
-  local eof_reader = async.run<|nil, value|>(function (): nil
-    do system.stdin:read() catch end
-    return nil
-  end)
-  wait_until_task_waiting(eof_reader, "eof retention reader")
-  eof_reader:cancel(async.CancellationReason.simple("cancel-retain-eof"))
-  async.join(eof_reader)
-  release_workers(cells3, workers3)
-  for _ = 1, 5 do async.yield() end
+  cancel_and_retain_inflight_read(async.CancellationReason.simple("cancel-retain-eof"))
   test.assert(system.stdin:read() == nil and system.stdin:read() == nil,
               "cancelled in-flight EOF was not retained or sticky")
   test.assert(system.stdin:kind() == "file", "file stdin lost kind after EOF")
@@ -965,6 +1101,7 @@ end
 
 local function run_exit_queued_writes(): integer
   local cells, _workers = hold_workers()
+  defer ffi.titan_test_worker_gate_release(cells as foreign *void)
   local g1: (function (nil): ())? = nil
   local g2: (function (nil): ())? = nil
   local g3: (function (nil): ())? = nil

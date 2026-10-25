@@ -1295,9 +1295,11 @@ local function FileStdio:retire_write(
 end
 
 local function FileStdio:pump_writes(stream: Stdio)
+  local failure: async.Error? = nil
   while not self.writing and self.write_head ~= nil do
     local entry = self.write_head
     local status = 0
+    local entry_failed = false
     do
       local buffer = entry.buffer
       local slice = buffer
@@ -1313,14 +1315,46 @@ local function FileStdio:pump_writes(stream: Stdio)
         self.writing = true
       end
     catch
-      uv.fs_req_cleanup(self.write_request)
+      entry_failed = true
+      local caught_error = error
+      local caught_trace = traceback
+      if failure == nil then
+        failure = async.Error(caught_error, caught_trace)
+      end
+      do uv.fs_req_cleanup(self.write_request) catch end
       local completion, number = self:pop_write(stream, entry)
-      completion:fatal(number, error, traceback)
-      raise
+      do completion:fatal(number, caught_error, caught_trace) catch end
     end
-    if self.writing then return end
-    self:retire_write(stream, entry, status)
+    if self.writing then break end
+    if not entry_failed then
+      do
+        self:retire_write(stream, entry, status)
+      catch
+        if failure == nil then
+          failure = async.Error(error, traceback)
+        end
+      end
+    end
   end
+  if failure ~= nil then
+    failure:raise()
+  end
+end
+
+local function FileStdio:retire_and_pump(
+    stream: Stdio, entry: FileWriteOperation, status: integer)
+  local failure: async.Error? = nil
+  do
+    self:retire_write(stream, entry, status)
+  catch
+    failure = async.Error(error, traceback)
+  end
+  do
+    self:pump_writes(stream)
+  catch
+    if failure == nil then failure = async.Error(error, traceback) end
+  end
+  if failure ~= nil then failure:raise() end
 end
 
 local function FileStdio:complete_write(stream: Stdio, request: uv.fs_t)
@@ -1331,10 +1365,14 @@ local function FileStdio:complete_write(stream: Stdio, request: uv.fs_t)
     result = uv.fs_get_result(request)
     uv.fs_req_cleanup(request)
   catch
-    uv.fs_req_cleanup(request)
+    local caught_error = error
+    local caught_trace = traceback
+    local failure = async.Error(caught_error, caught_trace)
+    do uv.fs_req_cleanup(request) catch end
     local completion, number = self:pop_write(stream, entry)
-    completion:fatal(number, error, traceback)
-    raise
+    do completion:fatal(number, caught_error, caught_trace) catch end
+    do self:pump_writes(stream) catch end
+    failure:raise()
   end
   if result > 0 then
     entry.offset = entry.offset + result
@@ -1342,14 +1380,12 @@ local function FileStdio:complete_write(stream: Stdio, request: uv.fs_t)
       self:pump_writes(stream)
       return
     end
-    self:retire_write(stream, entry, 0)
-    self:pump_writes(stream)
+    self:retire_and_pump(stream, entry, 0)
     return
   end
   local status = result
   if status == 0 then status = uv.EIO end
-  self:retire_write(stream, entry, status)
-  self:pump_writes(stream)
+  self:retire_and_pump(stream, entry, status)
 end
 
 local function start_file_write(

@@ -320,3 +320,59 @@ int titan_test_rewind_fd(int fd) {
     return lseek(fd, 0, SEEK_SET) == 0 ? 0 : -1;
 }
 #endif
+
+static titan_test_alloc_fn saved_alloc;
+static void *saved_alloc_data;
+static size_t watched_userdata_tag;
+static size_t watched_userdata_size;
+static int slice_fault_watching;
+static int slice_fault_armed;
+static int slice_fault_hits;
+
+void *titan_test_slice_fault_alloc(void *data, void *pointer, size_t old_size, size_t new_size) {
+    (void)data;
+    if (slice_fault_watching && pointer == NULL && old_size == watched_userdata_tag) {
+        watched_userdata_size = new_size;
+    }
+    if (slice_fault_armed && titan_test_fsize_sigxfsz_count() > 0 &&
+        pointer == NULL && old_size == watched_userdata_tag &&
+        new_size == watched_userdata_size) {
+        slice_fault_hits = slice_fault_hits + 1;
+        if (slice_fault_hits >= 2) {
+            slice_fault_armed = 0;
+        }
+        return NULL;
+    }
+    return saved_alloc(saved_alloc_data, pointer, old_size, new_size);
+}
+
+void titan_test_slice_fault_configure(titan_test_alloc_fn prev, void *prev_data, size_t userdata_tag) {
+    saved_alloc = prev;
+    saved_alloc_data = prev_data;
+    watched_userdata_tag = userdata_tag;
+    watched_userdata_size = 0;
+    slice_fault_watching = 1;
+    slice_fault_armed = 0;
+    slice_fault_hits = 0;
+}
+
+void titan_test_slice_fault_watch_end(void) {
+    slice_fault_watching = 0;
+}
+
+void titan_test_slice_fault_arm(void) {
+    slice_fault_armed = 1;
+}
+
+void titan_test_slice_fault_disarm(void) {
+    slice_fault_watching = 0;
+    slice_fault_armed = 0;
+}
+
+int titan_test_slice_fault_hits(void) {
+    return slice_fault_hits;
+}
+
+int titan_test_slice_fault_size(void) {
+    return (int)watched_userdata_size;
+}
