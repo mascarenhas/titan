@@ -76,6 +76,8 @@ local function parent_tty(): string
 end
 
 local function parent_file(): string
+  -- Windows counts process kernel handles; warm the process-wide libuv thread pool first.
+  fs.stat(".")
   local before = ffi.titan_uv_test_stdio_open_fd_count()
   if before < 0 then raise "could not count descriptors before file stdio" end
   if system.stdout:is_tty() or system.stdout:kind() ~= "file" then
