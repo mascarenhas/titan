@@ -23,17 +23,22 @@ async initialization, not to this module
 
 | Owner | Fields and responsibility |
 | --- | --- |
-| `Stdio` (private) | `native` (a `uv.stream_t` alternative), cached `handle` view, owning `loop`, optional `reads` buffered subscription, the prebuilt `alloc_read`/`deliver_read` callbacks, and `pending_writes`. |
+| `StreamStdio` (private) | `native` (a `uv.stream_t` alternative), cached `handle` (`uv.handle_t`) view, and the prebuilt `alloc_read`/`deliver_read` callbacks. |
+| `FileStdio` (private) | Borrowed CRT `descriptor` (`0`, `1`, or `2`), reusable `read_request` (`uv.fs_t`), lazy 64 KiB `read_buffer` (`uv.buf_t?`), `reading` flag, subscription capabilities (`deliver_read`, `publish_read`, `fail_read`, `finish_read`), reusable `write_request` (`uv.fs_t`), `writing` flag, `deliver_write` callback, and intrusive FIFO queue (`write_head`, `write_tail` of `FileWriteOperation`). |
+| `StdioBacking` (private) | Union of `stream(StreamStdio)` for pipe/TTY owners and `file(FileStdio)` for borrowed-descriptor file owners. |
+| `Stdio` (private) | `backing` (`StdioBacking`), owning `loop`, optional `reads` (`BufferedSubscription`), and `pending_writes`. |
 | `ProcessConfig` (private) | Process `options`, stdio `slots`, `environment` overlay, owning `loop`, `consumed` flag, and the rollback `cleanup` capability. |
 | `ProcessOwner` (private) | One `uv.process_t` (`native`), owning `loop`, retained exit `result`, and the coalescing `exits` subscription. |
 | `InputStream` / `OutputStream` (public) | A captured `Stdio` `handle` or a stable `parent_descriptor`; InputStream also keeps delimiter `excess`. |
 | `Process` (public) | The ProcessOwner `handle` and the parent-facing `stdin`, `stdout`, and `stderr` records. |
 
-A stream's concrete kind is the `uv.stream_t` alternative; parent or child
-provenance never guesses it. Live process and captured-stream operations check
-the current Task and the same Runtime. Closed facades stay idempotent where the
-public API says so. Cached views keep their native owner, but operations query
-current initialization and closing state rather than caching liveness.
+A stream's concrete kind (`"tty"`, `"pipe"`, or `"file"`) comes from
+`Stdio.backing` (`os_stdio_kind`); parent or child provenance never guesses it.
+Live process and captured-stream operations check the current Task and the same
+Runtime. Closed facades stay idempotent where the public API says so. Cached
+stream views keep their native owner, while operations query current
+initialization and closing state (`Stdio:is_closed()`); a file-backed `Stdio`
+borrows its host descriptor and is never closed within its Runtime.
 
 ## Reads, writes, and signals
 
@@ -42,21 +47,64 @@ The generic one-shot and persistent adapter recipes are in
 [persistent source adapter](libuv-extension-guide.md#persistent-source-adapter).
 The OS-specific choices are:
 
-- **Reads.** A native input source publishes copied byte strings through a
-  `BufferedSubscription`; queued bytes precede EOF or a terminal error, and
-  zero-length reads publish nothing. `async.checkpoint()` runs before the
-  `has_waiter()` contention diagnostic and before a lazy read source starts, so
-  pending cancellation wins without constructing a wait. Cancelling one waiter
-  leaves the shared source alive.
-- **Writes.** `start_stdio_write` is the named registrar for
-  `async.await_with`, with a private per-write `WriteOperation` context.
+- **Stream reads.** A native `StreamStdio` input source publishes copied byte
+  strings through a `BufferedSubscription`; queued bytes precede EOF or a
+  terminal error, and zero-length reads publish nothing. `async.checkpoint()`
+  runs before the `has_waiter()` contention diagnostic and before a lazy read
+  source starts, so pending cancellation wins without constructing a wait.
+  Cancelling one waiter leaves the shared source alive.
+- **File reads.** `FileStdio` uses the same `BufferedSubscription` and single
+  reader reservation with a demand-driven `uv.fs_read` producer (offset `-1`,
+  `FILE_READ_CHUNK_BYTES = 64 * 1024`) instead of continuous read-ahead. After
+  `async.checkpoint()`, `FileStdio:ensure_reads` initializes `Stdio.reads` and
+  captures `publish`, `fail`, and `finish` on `FileStdio` without starting I/O;
+  after the `has_waiter()` contention check, `FileStdio:demand_read` allocates
+  `read_buffer` lazily and submits one `uv.fs_read` only when `not self.reading`
+  and `not reads:has_pending()`. `FileStdio:complete_read` copies positive bytes
+  before `uv.fs_req_cleanup`, then publishes data, finishes on `0` (EOF), or
+  fails with `stdio.read` on negative status. Cancelling a waiting reader
+  detaches only that waiter in `BufferedSubscription`, allowing immediate
+  waiter replacement and retaining any completed chunk, EOF, or error for the
+  next reader. EOF and read errors remain sticky in `reads` for the Runtime's
+  lifetime.
+- **Stream writes.** `start_stream_write` is the registrar for
+  `async.await_with`, with a private per-write `StreamWriteOperation` context.
   Closed-stream validation and the empty-write fast path run inside
   registration, after cancellation admission, so a native request exists only
   for a nonempty write. `uv.write_string` retains the original binary string
   and embeds its scalar buffer descriptor until the terminal callback, without
   per-write buffer views. A successful submission increments
   `Stdio.pending_writes`; the terminal callback `stdio_written` decrements it.
-  Overlapping writes have independent contexts and requests.
+  Overlapping stream writes have independent contexts and requests.
+- **File writes.** `start_file_write` is the registrar for `async.await_with`,
+  with a private `FileWriteOperation` context that also serves as an intrusive
+  FIFO node (`write_head` / `write_tail` on `FileStdio`). Empty writes resolve
+  immediately during registration; nonempty writes wrap the string in a
+  readonly `uv.buf_t` view, increment `Stdio.pending_writes` (which counts both
+  in-flight and queued entries), and either submit the first `uv.fs_write`
+  (offset `-1`) on the reusable `write_request` when the FIFO is idle or append
+  to `write_tail`. `FileStdio:complete_write` and `FileStdio:pump_writes` drive
+  continuation from callbacks: a short write advances `entry.offset` and
+  resubmits `buffer:slice(entry.offset + 1, #entry.data - entry.offset)` without
+  copying suffix strings; a `0`-byte write result on a nonempty remainder fails
+  with `uv.EIO` to prevent spinning; negative status fails with `stdio.write`.
+  `FileStdio:pop_write` commits queue advancement (`write_head = entry.next`
+  and `pending_writes` decrement) before `FileStdio:retire_write` settles the
+  `Completion`, so a writer resumed inline cannot overtake older queued entries,
+  and an errored entry retires while later queued entries continue to run.
+  `start_file_write` returns `nil` rather than a `uv.req_t`, so a Task cancelled
+  after acceptance stays waiting until its full logical write settles and then
+  receives cancellation via `await_with` terminal substitution. Each
+  `uv.fs_write` cleans `write_request` via `uv.fs_req_cleanup` before reuse, and
+  any unexpected callback exception cleans the request, pops the entry, and
+  routes the error through `Completion:fatal`. During graceful Runtime end
+  (`async.loop` cancellation, `os.exit`, or Runtime failure), new writes are
+  refused by `await_with` admission while the callback pump drains accepted
+  FIFO entries without checking `async.is_closing()`. Under destructive
+  Lua-state close (`lua_close` -> `runtime_finalize` -> `uv.loop_abandon`), UV
+  clears request callbacks and drains only the already submitted `uv_fs_write`
+  natively; unsubmitted FIFO entries and short-write remainders are dropped and
+  borrowed descriptors `0`, `1`, and `2` remain open.
 - **Close.** `close_native` uses `async.await_cleanup_with`, so native close
   completes under sticky Task cancellation.
 - **Signals.** `wait_signal` validates the symbolic name, calls
@@ -76,23 +124,26 @@ The public stream records implement the custom `TransferValue` hooks.
 Runtime's loop and the Runtime not to be closing, but does not require a
 current Task; encoding and reconstruction are synchronous and never check
 cancellation. It rejects a nonzero `pending_writes`, a reserved reader, and any
-non-pipe stream, then asks `uv.stream_transfer_status` about native pending
-state. `pending_writes` covers accepted writes until their terminal callbacks,
-including writes whose bytes already left the native queue. The read callbacks
-live on the `Stdio` owner, so a failed handoff can restart a stopped reader
-without replacing its queue.
+non-pipe backing (`tty` or `file`), then asks `uv.stream_transfer_status` about
+native pending state. `pending_writes` covers accepted writes until their
+terminal callbacks (including queued and in-flight file writes). The stream read
+callbacks live on `StreamStdio`, so a failed handoff can restart a stopped
+reader without replacing its queue.
 
 The payloads use the private ordered `reflect.Type` schemas
 `input_transfer_fields` (descriptor, facade excess, terminal marker, optional
 `OperationError`, optional `uv.pipe_t` payload, and the queued strings from
 `snapshot_pending`) and `output_transfer_fields` (descriptor and optional pipe
 payload). A closed native pipe carries no pipe payload. Stable parent facades
-carry only their descriptor identity and reject active input state or pending
-writes. Successful encoding clears the source facade's `handle` and `excess`;
-the old subscription and native owner retire through their ordinary paths.
-Reconstruction creates a fresh subscription with destination closures and
-replays the copied strings before resuming production or publishing the
-terminal state.
+(including file-backed parent streams) carry only their descriptor identity and
+bypass `stream_transfer_preflight`: output rejects nonzero `pending_writes`, and
+input rejects non-empty `excess` or any started `reads` subscription (even after
+drained EOF or error). Untouched file-backed parent facades transfer cleanly;
+`kind()`, `is_tty()`, and inheritance never create `reads`. Successful captured
+encoding clears the source facade's `handle` and `excess`; the old subscription
+and native owner retire through their ordinary paths. Reconstruction creates a
+fresh subscription with destination closures and replays the copied strings
+before resuming production or publishing the terminal state.
 
 The exit watcher, `ProcessOwner`, and the reap obligation never move.
 Transferring a stream leaves the source Process's field as an inert facade, so
@@ -108,24 +159,42 @@ attempt is terminal even on `EINTR`.
 ## Stable parent streams and platform facts
 
 The module-level `stdin`/`stdout`/`stderr` records are stable across Runtime
-sessions. Their native wrappers are acquired lazily and cached for the current
+sessions. Their `Stdio` owners are acquired lazily and cached for the current
 loop; a later Runtime acquires its own and clears old excess. Within the same
 Runtime, a stable input facade keeps its previous `Stdio` even after EOF or a
-read error retired the native duplicate, so its queued bytes and excess stay
-readable. Parent-facade close is an idempotent no-op; Runtime cleanup retires
-remaining wrappers. `with_parent_*` configuration obtains a separate usable
-wrapper for inheritance, which may replace a retired cache entry without
-replacing the input facade's buffered read owner.
+read error retired a native stream duplicate (and `Stdio:is_closed()` is always
+false for a `FileStdio` owner, keeping its sticky EOF or error in the cache),
+so queued bytes, excess, and sticky terminal outcomes stay observable for that
+Runtime. Parent-facade close is an idempotent no-op; Runtime cleanup retires
+remaining native stream handles. `with_parent_*` configuration obtains a usable
+owner from `initialize_parent_stdio`: `StreamStdio` binds `uv.INHERIT_STREAM`
+with `uv.stdio_data_t.stream`, whereas `FileStdio` binds `uv.INHERIT_FD` with
+`uv.stdio_data_t.fd` on the borrowed CRT descriptor `0`, `1`, or `2` in both
+`bind_slot` and `configure_parent`.
 
-The platform helpers (`os_platform.h`) duplicate parent descriptors and inspect
-native facts; they contain no libuv header, owner layout, callback, or Task
-protocol. UV `guess_handle` selects pipe or TTY where possible. An unknown
-descriptor is inspected explicitly instead of trusting errno from a failed
-guess. Socket-family and socket-type contradictions defeat a pipe hint; only
-the narrow metadata-denial case may use the `TITAN_STDIO_PIPE_FDS` hint
-(`parent_stdio_pipe_hint`). The duplicate stays lexically owned until a public
-UV handle adopts it. Windows descriptor/HANDLE differences are handled by the
-platform helper and public identifier queries.
+For `UV_FILE` parent descriptors (regular files, `/dev/null` and other non-TTY
+character devices, and Windows disk files and `NUL`), `parent_stdio_kind`
+returns `uv.FILE` and `initialize_parent_stdio` constructs `FileStdio` borrowing
+CRT descriptor `0`, `1`, or `2` directly without duplicating it (D1). Unlike
+`uv_pipe_t` and `uv_tty_t`, whose `uv_close` closes their descriptor and
+therefore requires a close-on-exec duplicate, `uv_fs_read` and `uv_fs_write`
+never close the descriptor, and a duplicate would still share the underlying open
+file description's offset while requiring asynchronous and state-close release
+machinery. Borrowing requires only that the host keep descriptors `0`, `1`, and
+`2` open and unreplaced while the Runtime's cached owner and accepted requests
+use them.
+
+The platform helpers (`os_platform.h`) duplicate parent descriptors for
+stream-backed stdio and inspect native socket facts; they contain no libuv
+header, owner layout, callback, or Task protocol. UV `guess_handle` selects
+pipe, TTY, or file where possible. An unknown descriptor is inspected explicitly
+instead of trusting errno from a failed guess. Socket-family and socket-type
+contradictions defeat a pipe hint; only the narrow metadata-denial case may use
+the `TITAN_STDIO_PIPE_FDS` hint (`parent_stdio_pipe_hint`). A stream duplicate
+stays lexically owned until a public UV handle adopts it. Windows CRT
+descriptor/`HANDLE` differences for streams are handled by the platform helper
+and public identifier queries, while `FileStdio` passes integer CRT descriptors
+directly to `uv.fs_read`, `uv.fs_write`, and `uv.stdio_data_t.fd`.
 
 Captured stdout and stderr use the same buffered stream implementation. Merged
 output stores one InputStream in both Process fields, so excess, EOF, and close
