@@ -884,6 +884,9 @@ local record FileWriteOperation
   completion: async.Completion<|FileWriteOperation, nil, async.OperationError|>?
   number: integer
   next: FileWriteOperation?
+  result: integer
+  failure_error: value
+  failure_trace: string?
 end
 
 local union SpawnSlot
@@ -1263,43 +1266,29 @@ local function start_stream_write(
   return nil
 end
 
-local function FileStdio:pop_write(
-    stream: Stdio,
-    entry: FileWriteOperation): (
-    async.Completion<|FileWriteOperation, nil, async.OperationError|>, integer)
+local function FileStdio:pop_write(stream: Stdio, entry: FileWriteOperation)
   local next_entry? = entry.next
   entry.next = nil
   self.write_head = next_entry
   if next_entry == nil then self.write_tail = nil end
   stream.pending_writes = stream.pending_writes - 1
-  local completion = entry.completion
-  local number = entry.number
-  entry.completion = nil
   entry.buffer = nil
-  return completion, number
 end
 
-local function FileStdio:retire_write(
-    stream: Stdio, entry: FileWriteOperation, status: integer)
-  local completion, number = self:pop_write(stream, entry)
-  do
-    if status < 0 then
-      completion:reject(number, make_error(status, "stdio.write"))
-    else
-      completion:resolve(number, nil)
-    end
-  catch
-    completion:fatal(number, error, traceback)
-    raise
+local function FileStdio:pump_writes(stream: Stdio, retired: FileWriteOperation?)
+  local retired_head? = retired
+  local retired_tail? = retired
+  local failure_error: value = nil
+  local failure_trace: string? = nil
+  if retired ~= nil then
+    failure_error = retired.failure_error
+    failure_trace = retired.failure_trace
   end
-end
-
-local function FileStdio:pump_writes(stream: Stdio)
-  local failure: async.Error? = nil
+  -- Recovery only links preallocated entries: no allocation or settlement
+  -- before the accepted tail is submitted or the FIFO is empty.
   while not self.writing and self.write_head ~= nil do
     local entry = self.write_head
     local status = 0
-    local entry_failed = false
     do
       local buffer = entry.buffer
       local slice = buffer
@@ -1315,46 +1304,49 @@ local function FileStdio:pump_writes(stream: Stdio)
         self.writing = true
       end
     catch
-      entry_failed = true
-      local caught_error = error
-      local caught_trace = traceback
-      if failure == nil then
-        failure = async.Error(caught_error, caught_trace)
+      entry.failure_error = error
+      entry.failure_trace = traceback
+      if failure_trace == nil then
+        failure_error = error
+        failure_trace = traceback
       end
       do uv.fs_req_cleanup(self.write_request) catch end
-      local completion, number = self:pop_write(stream, entry)
-      do completion:fatal(number, caught_error, caught_trace) catch end
     end
     if self.writing then break end
-    if not entry_failed then
+    self:pop_write(stream, entry)
+    entry.result = status
+    if retired_tail == nil then retired_head = entry
+    else retired_tail.next = entry end
+    retired_tail = entry
+  end
+
+  while retired_head ~= nil do
+    local entry = retired_head
+    retired_head = entry.next
+    entry.next = nil
+    local completion = entry.completion
+    local number = entry.number
+    entry.completion = nil
+    local trace? = entry.failure_trace
+    if trace ~= nil then
+      do completion:fatal(number, entry.failure_error, trace) catch end
+    else
       do
-        self:retire_write(stream, entry, status)
-      catch
-        if failure == nil then
-          failure = async.Error(error, traceback)
+        if entry.result < 0 then
+          completion:reject(number, make_error(entry.result, "stdio.write"))
+        else
+          completion:resolve(number, nil)
         end
+      catch
+        if failure_trace == nil then
+          failure_error = error
+          failure_trace = traceback
+        end
+        do completion:fatal(number, error, traceback) catch end
       end
     end
   end
-  if failure ~= nil then
-    failure:raise()
-  end
-end
-
-local function FileStdio:retire_and_pump(
-    stream: Stdio, entry: FileWriteOperation, status: integer)
-  local failure: async.Error? = nil
-  do
-    self:retire_write(stream, entry, status)
-  catch
-    failure = async.Error(error, traceback)
-  end
-  do
-    self:pump_writes(stream)
-  catch
-    if failure == nil then failure = async.Error(error, traceback) end
-  end
-  if failure ~= nil then failure:raise() end
+  if failure_trace ~= nil then async.Error(failure_error, failure_trace):raise() end
 end
 
 local function FileStdio:complete_write(stream: Stdio, request: uv.fs_t)
@@ -1365,27 +1357,23 @@ local function FileStdio:complete_write(stream: Stdio, request: uv.fs_t)
     result = uv.fs_get_result(request)
     uv.fs_req_cleanup(request)
   catch
-    local caught_error = error
-    local caught_trace = traceback
-    local failure = async.Error(caught_error, caught_trace)
+    entry.failure_error = error
+    entry.failure_trace = traceback
     do uv.fs_req_cleanup(request) catch end
-    local completion, number = self:pop_write(stream, entry)
-    do completion:fatal(number, caught_error, caught_trace) catch end
-    do self:pump_writes(stream) catch end
-    failure:raise()
   end
-  if result > 0 then
+  if entry.failure_trace == nil and result > 0 then
     entry.offset = entry.offset + result
     if entry.offset < #entry.data then
-      self:pump_writes(stream)
+      self:pump_writes(stream, nil)
       return
     end
-    self:retire_and_pump(stream, entry, 0)
-    return
+    result = 0
+  elseif result == 0 then
+    result = uv.EIO
   end
-  local status = result
-  if status == 0 then status = uv.EIO end
-  self:retire_and_pump(stream, entry, status)
+  self:pop_write(stream, entry)
+  entry.result = result
+  self:pump_writes(stream, entry)
 end
 
 local function start_file_write(
@@ -1441,7 +1429,7 @@ local function os_stdio_write(stream: Stdio, data: string)
     end
   when file(backing) then
     case async.await_with<|FileWriteOperation, nil, async.OperationError|>(
-      FileWriteOperation(stream, backing, data, nil, 0, nil, 0, nil), start_file_write)
+      FileWriteOperation(stream, backing, data, nil, 0, nil, 0, nil, 0, nil, nil), start_file_write)
     when success() then
     when error(failure) then raise failure
     end

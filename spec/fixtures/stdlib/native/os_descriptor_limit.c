@@ -1,6 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include "os_descriptor_limit.h"
 
@@ -24,6 +26,11 @@ int titan_test_worker_gate_entered(void *raw) {
 void titan_test_worker_gate_release(void *raw) {
     int *cells = raw;
     __atomic_store_n(&cells[1], 1, __ATOMIC_RELEASE);
+}
+
+int titan_test_worker_gate_is_released(void *raw) {
+    int *cells = raw;
+    return __atomic_load_n(&cells[1], __ATOMIC_ACQUIRE);
 }
 
 int titan_test_worker_gate_finished(void *raw) {
@@ -67,7 +74,7 @@ int titan_test_fd_limit_restored(void) { return 0; }
 int titan_test_fsize_limit_supported(void) { return 0; }
 int titan_test_fsize_limit_efbig(long limit) { (void)limit; return ENOSYS; }
 int titan_test_fsize_limit_short_write_once(long limit) { (void)limit; return ENOSYS; }
-int titan_test_fsize_limit_restore(void) { return ENOSYS; }
+int titan_test_fsize_limit_restore(void) { return 0; }
 int titan_test_fsize_sigxfsz_count(void) { return 0; }
 
 int titan_test_fd_is_open(int fd) {
@@ -205,7 +212,7 @@ int titan_test_fd_limit_restored(void) {
 static void handle_sigxfsz_restore(int signum) {
     int saved_errno = errno;
     (void)signum;
-    sigxfsz_count = sigxfsz_count + 1;
+    __atomic_add_fetch(&sigxfsz_count, 1, __ATOMIC_RELAXED);
     (void)setrlimit(RLIMIT_FSIZE, &saved_fsize);
     errno = saved_errno;
 }
@@ -231,7 +238,7 @@ int titan_test_fsize_limit_efbig(long limit) {
         (void)sigaction(SIGXFSZ, &saved_sigxfsz, NULL);
         return err;
     }
-    sigxfsz_count = 0;
+    __atomic_store_n(&sigxfsz_count, 0, __ATOMIC_RELEASE);
     fsize_active = 1;
     return 0;
 }
@@ -253,7 +260,7 @@ int titan_test_fsize_limit_short_write_once(long limit) {
         (void)sigaction(SIGXFSZ, &saved_sigxfsz, NULL);
         return err;
     }
-    sigxfsz_count = 0;
+    __atomic_store_n(&sigxfsz_count, 0, __ATOMIC_RELEASE);
     fsize_active = 1;
     return 0;
 }
@@ -268,7 +275,7 @@ int titan_test_fsize_limit_restore(void) {
 }
 
 int titan_test_fsize_sigxfsz_count(void) {
-    return (int)sigxfsz_count;
+    return (int)__atomic_load_n(&sigxfsz_count, __ATOMIC_ACQUIRE);
 }
 
 int titan_test_fd_is_open(int fd) {
@@ -328,6 +335,7 @@ static size_t watched_userdata_size;
 static int slice_fault_watching;
 static int slice_fault_armed;
 static int slice_fault_hits;
+static int slice_fault_budget;
 
 void *titan_test_slice_fault_alloc(void *data, void *pointer, size_t old_size, size_t new_size) {
     (void)data;
@@ -336,9 +344,9 @@ void *titan_test_slice_fault_alloc(void *data, void *pointer, size_t old_size, s
     }
     if (slice_fault_armed && titan_test_fsize_sigxfsz_count() > 0 &&
         pointer == NULL && old_size == watched_userdata_tag &&
-        new_size == watched_userdata_size) {
+        (slice_fault_hits >= 2 || new_size == watched_userdata_size)) {
         slice_fault_hits = slice_fault_hits + 1;
-        if (slice_fault_hits >= 2) {
+        if (slice_fault_hits >= slice_fault_budget) {
             slice_fault_armed = 0;
         }
         return NULL;
@@ -360,7 +368,8 @@ void titan_test_slice_fault_watch_end(void) {
     slice_fault_watching = 0;
 }
 
-void titan_test_slice_fault_arm(void) {
+void titan_test_slice_fault_arm(int budget) {
+    slice_fault_budget = budget;
     slice_fault_armed = 1;
 }
 

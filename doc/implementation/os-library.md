@@ -89,23 +89,28 @@ The OS-specific choices are:
   copying suffix strings; a `0`-byte write result on a nonempty remainder fails
   with `uv.EIO` to prevent spinning; negative status fails with `stdio.write`.
   `FileStdio:pop_write` commits queue advancement (`write_head = entry.next`
-  and `pending_writes` decrement) before `FileStdio:retire_write` settles the
-  `Completion`, so a writer resumed inline cannot overtake older queued entries,
-  and an errored entry retires while later queued entries continue to run.
+  and `pending_writes` decrement) before settlement, so a writer resumed inline
+  cannot overtake older queued entries. Retired entries retain their Completion,
+  native result, and any caught error/trace in the preallocated
+  `FileWriteOperation` nodes. The callback pump first links these nodes into a
+  local retirement batch and submits the next accepted entry (or empties the
+  FIFO), then settles that batch. Between catching a failure and reaching that
+  tail-safety boundary, recovery performs no Titan allocation of its own and
+  does not settle a Completion: it only cleans the request and detaches/links
+  existing entries. A later entry whose submission fails is retired the same
+  way, so recovery always advances. Fatal settlement and construction/rethrow
+  of the first failure happen only after the tail is in flight or empty.
   `start_file_write` returns `nil` rather than a `uv.req_t`, so a Task cancelled
   after acceptance stays waiting until its full logical write settles and then
   receives cancellation via `await_with` terminal substitution. Each
-  `uv.fs_write` cleans `write_request` via `uv.fs_req_cleanup` before reuse, and
-  any unexpected callback exception cleans the request, pops the entry, routes
-  the error through `Completion:fatal`, and continues pumping remaining queued
-  FIFO entries before re-raising the first failure. During graceful Runtime end
-  (`async.request_exit`/`os.exit` or Runtime failure), new writes are refused by
-  `await_with` admission while the callback pump drains accepted FIFO entries
-  without checking `async.is_closing()`. Under destructive
-  Lua-state close (`lua_close` -> `runtime_finalize` -> `uv.loop_abandon`), UV
-  clears request callbacks and drains only the already submitted `uv_fs_write`
-  natively; unsubmitted FIFO entries and short-write remainders are dropped and
-  borrowed descriptors `0`, `1`, and `2` remain open.
+  `uv.fs_write` cleans `write_request` via `uv.fs_req_cleanup` before reuse.
+  During graceful Runtime end (`async.request_exit`/`os.exit` or Runtime
+  failure), new writes are refused by `await_with` admission while the callback
+  pump drains accepted FIFO entries without checking `async.is_closing()`.
+  Under destructive Lua-state close (`lua_close` -> `runtime_finalize` ->
+  `uv.loop_abandon`), UV clears request callbacks and drains only the already
+  submitted `uv_fs_write` natively; unsubmitted FIFO entries and short-write
+  remainders are dropped and borrowed descriptors `0`, `1`, and `2` remain open.
 - **Close.** `close_native` uses `async.await_cleanup_with`, so native close
   completes under sticky Task cancellation.
 - **Signals.** `wait_signal` validates the symbolic name, calls

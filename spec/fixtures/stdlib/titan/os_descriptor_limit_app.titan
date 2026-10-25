@@ -24,12 +24,14 @@ local function hold_n_workers(count: integer): (owned int[], {async.Task<|nil, v
   local cells: owned int[] = foreign int.new_array(4)
   local raw = cells as foreign *void
   ffi.titan_test_worker_gate_init(raw)
+  local handed_off = false
+  defer if not handed_off then ffi.titan_test_worker_gate_release(raw) end
   local workers: {async.Task<|nil, value|>} = {}
   for index = 1, count do
     workers[index] = async.run<|nil, value|>(function (): nil
       async.run_foreign(
         ffi.titan_test_worker_gate_work,
-        raw,
+        cells as foreign *void,
         ffi.titan_test_worker_gate_noop)
       return nil
     end)
@@ -44,6 +46,7 @@ local function hold_n_workers(count: integer): (owned int[], {async.Task<|nil, v
     async.yield()
     uv.sleep(1)
   end
+  handed_off = true
   return cells, workers
 end
 
@@ -57,6 +60,27 @@ local function release_workers(
   for index = 1, #workers do
     async.join(workers[index])
   end
+end
+
+function exercise_cancelled_worker_gate_acquisition()
+  local reason = async.CancellationReason.simple("cancel-during-worker-gate-acquisition")
+  local returned = false
+  local target = async.run<|nil, value|>(function (): nil
+    local cells, workers = hold_workers()
+    defer ffi.titan_test_worker_gate_release(cells as foreign *void)
+    returned = true
+    release_workers(cells, workers)
+    return nil
+  end)
+  local canceller = async.run<|nil, value|>(function (): nil
+    target:cancel(reason)
+    return nil
+  end)
+  async.loop()
+  local cancelled, observed? = target:status():has_cancelled()
+  test.assert(cancelled and observed == reason and not returned and
+              canceller:status():has_succeeded(),
+              "cancelled gate acquisition did not release its native workers")
 end
 
 local function wait_until_task_waiting(task: async.Task<|value, value|>, label: string)
@@ -121,7 +145,8 @@ end
 
 function setup_abandoned_state(raw: value)
   local cells = raw as foreign *void
-  gc.finalizable<|value|>(ReleaseWatch(cells), on_release_finalize)
+  local armed = false
+  defer if not armed then ffi.titan_test_worker_gate_release(cells) end
   for _ = 1, 4 do
     async.run<|nil, value|>(function (): nil
       async.run_foreign(
@@ -141,6 +166,9 @@ function setup_abandoned_state(raw: value)
     uv.run(async.current_loop(), uv.RUN_NOWAIT)
     uv.sleep(1)
   end
+  gc.collect()
+  test.assert(ffi.titan_test_worker_gate_is_released(cells) == 0,
+              "the abandonment release watch finalized during setup")
   local w1 = async.run<|nil, value|>(function (): nil
     do
       system.stdout:write("ABANDONED-INFLIGHT;")
@@ -176,6 +204,7 @@ function setup_abandoned_state(raw: value)
     raise "abandoned state tasks did not park in waiting state"
   end
   gc.finalizable<|value|>(ReleaseWatch(cells), on_release_finalize)
+  armed = true
 end
 
 function exercise_cancelled_read_error(file_path: value)
@@ -215,8 +244,11 @@ function exercise_cancelled_read_error(file_path: value)
               "cancelled read error task did not complete")
 end
 
-function exercise_pump_fatal_drains_tail(out_path: value)
+function exercise_pump_fatal_drains_tail(out_path: value, recovery: value)
   local path = out_path as string
+  local fail_recovery = recovery as boolean
+  local budget = 2
+  if fail_recovery then budget = 4 end
   local saved_stdout = ffi.titan_test_dup_fd(1)
   test.assert(saved_stdout >= 0, "could not save stdout for pump fatal test")
   defer ffi.titan_test_restore_fd(saved_stdout, 1)
@@ -241,6 +273,7 @@ function exercise_pump_fatal_drains_tail(out_path: value)
 
   local first_error = ""
   local second_done = false
+  local third_done = false
   local main_task = async.run<|nil, value|>(function (): nil
     local cells, _workers = hold_workers()
     defer ffi.titan_test_worker_gate_release(cells as foreign *void)
@@ -248,6 +281,7 @@ function exercise_pump_fatal_drains_tail(out_path: value)
                 "could not arm short write limit for pump fatal test")
     local g1: (function (nil): ())? = nil
     local g2: (function (nil): ())? = nil
+    local g3: (function (nil): ())? = nil
     local w1 = async.run<|nil, value|>(function (): nil
       async.await<|nil, nil|>(function (resolve, _reject, _fatal) g1 = resolve end)
       do
@@ -259,22 +293,30 @@ function exercise_pump_fatal_drains_tail(out_path: value)
     end)
     local w2 = async.run<|nil, value|>(function (): nil
       async.await<|nil, nil|>(function (resolve, _reject, _fatal) g2 = resolve end)
-      do system.stdout:write("TAIL_AFTER_PUMP_FATAL") catch end
+      do system.stdout:write("MIDDLE_AFTER_PUMP_FATAL") catch end
       second_done = true
       return nil
     end)
-    while g1 == nil or g2 == nil do async.yield() end
+    local w3 = async.run<|nil, value|>(function (): nil
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal) g3 = resolve end)
+      do system.stdout:write("TAIL_AFTER_PUMP_FATAL") catch end
+      third_done = true
+      return nil
+    end)
+    while g1 == nil or g2 == nil or g3 == nil do async.yield() end
     async.await<|nil, nil|>(function (resolve, _reject, _fatal)
-      local r1, r2 = g1, g2
-      g1, g2 = nil, nil
+      local r1, r2, r3 = g1, g2, g3
+      g1, g2, g3 = nil, nil, nil
       r1(nil)
       r2(nil)
+      r3(nil)
       test.assert(w1:status():as_string() == "waiting" and
-                  w2:status():as_string() == "waiting",
+                  w2:status():as_string() == "waiting" and
+                  w3:status():as_string() == "waiting",
                   "pump fatal writers did not park")
       resolve(nil)
     end)
-    ffi.titan_test_slice_fault_arm()
+    ffi.titan_test_slice_fault_arm(budget)
     ffi.titan_test_worker_gate_release(cells as foreign *void)
     return nil
   end)
@@ -289,23 +331,24 @@ function exercise_pump_fatal_drains_tail(out_path: value)
   ffi.lua_setallocf(L, prev_alloc, prev_ud)
   test.assert(ffi.titan_test_fsize_limit_restore() == 0,
               "could not restore fsize limit after pump fatal")
-  test.assert(ffi.titan_test_slice_fault_hits() == 2,
-              "slice fault allocator did not trigger twice")
+  test.assert(ffi.titan_test_slice_fault_hits() == budget,
+              "slice/recovery allocator did not exhaust its fault budget")
   test.assert(strings.find(first_error, "not enough memory") ~= nil,
               "first write did not observe OOM: " .. first_error)
   test.assert(strings.find(outer_error, "not enough memory") ~= nil,
               "async.loop did not report fatal OOM: " .. outer_error)
-  test.assert(second_done and main_task:status():has_succeeded(),
+  test.assert(second_done and third_done and main_task:status():has_succeeded(),
               "queued tail write was abandoned after pump fatal error")
 
   local check_done = false
   local check_task = async.run<|nil, value|>(function (): nil
-    test.assert(fs.read_file(path) ==
-                strings.rep("A", 4096) .. "TAIL_AFTER_PUMP_FATAL",
+    local expected = strings.rep("A", 4096)
+    if not fail_recovery then expected = expected .. "MIDDLE_AFTER_PUMP_FATAL" end
+    expected = expected .. "TAIL_AFTER_PUMP_FATAL"
+    test.assert(fs.read_file(path) == expected,
                 "pump fatal output file lost queued tail bytes")
     system.stdout:write(":AFTER_RECOVERY")
-    test.assert(fs.read_file(path) ==
-                strings.rep("A", 4096) .. "TAIL_AFTER_PUMP_FATAL:AFTER_RECOVERY",
+    test.assert(fs.read_file(path) == expected .. ":AFTER_RECOVERY",
                 "subsequent Runtime write failed after pump fatal recovery")
     check_done = true
     return nil
@@ -618,6 +661,12 @@ local function run_child_inherit(args: {string}): integer
 end
 
 local function run_write_fifo_cancel_gc(workspace: string, result_path: string): integer
+  do
+    local state = tlua.new()
+    defer state:close()
+    state:run([[require("os_descriptor_limit_app").exercise_cancelled_worker_gate_acquisition()]],
+      "=cancel-worker-gate-acquisition")
+  end
   local saved_stdout = ffi.titan_test_dup_fd(1)
   test.assert(saved_stdout >= 0, "could not save stdout")
   defer ffi.titan_test_restore_fd(saved_stdout, 1)
@@ -897,16 +946,18 @@ local function run_short_write_and_errors(workspace: string, result_path: string
     test.assert(fs.read_file(sw3_path) == strings.rep("E", 4096) .. ":AFTER_EFBIG",
                 "subsequent write after restoring RLIMIT_FSIZE failed")
     -- 2d. Pump callback exception on head entry still drains queued FIFO tail
-    do
+    for mode = 1, 2 do
       local state = tlua.new()
       defer state:close()
       state:run([[require("os_descriptor_limit_app").exercise_pump_fatal_drains_tail(...)]],
-        "=pump-fatal-tail", async.TransferValue.is_string(workspace .. "/pump_fatal.out"))
+        "=pump-fatal-tail",
+        async.TransferValue.is_string(workspace .. "/pump_fatal_" .. mode .. ".out"),
+        async.TransferValue.is_boolean(mode == 2))
     end
   end
 
   -- 3. Linux /dev/full -> ENOSPC
-  if fs.stat("/dev/full") ~= nil then
+  if ffi.titan_test_fsize_limit_supported() == 1 and fs.stat("/dev/full") ~= nil then
     if ffi.titan_test_open_file_onto_fd("/dev/full", 1, 1) == 0 then
       test.assert(system.stdout:kind() == "file", "/dev/full was not classified as file")
       local full_err: async.OperationError? = nil

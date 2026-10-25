@@ -17,6 +17,7 @@ void titan_test_worker_gate_work(void *raw);
 void titan_test_worker_gate_noop(void *raw);
 int titan_test_worker_gate_entered(void *raw);
 void titan_test_worker_gate_release(void *raw);
+int titan_test_worker_gate_is_released(void *raw);
 int titan_test_worker_gate_finished(void *raw);
 void titan_test_worker_gate_fail(void *raw);
 int titan_test_worker_gate_failed(void *raw);
@@ -31,7 +32,7 @@ typedef void *(*titan_test_alloc_fn)(void *data, void *pointer, size_t old_size,
 void *titan_test_slice_fault_alloc(void *data, void *pointer, size_t old_size, size_t new_size);
 void titan_test_slice_fault_configure(titan_test_alloc_fn prev, void *prev_data, size_t userdata_tag);
 void titan_test_slice_fault_watch_end(void);
-void titan_test_slice_fault_arm(void);
+void titan_test_slice_fault_arm(int budget);
 void titan_test_slice_fault_disarm(void);
 int titan_test_slice_fault_hits(void);
 int titan_test_slice_fault_size(void);
