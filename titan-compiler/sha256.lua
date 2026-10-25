@@ -1,6 +1,7 @@
--- Pure-Lua SHA-256 used to name persistent successful-probe markers.
--- Keep this module binary-safe and dependency-free: it is loaded while the
--- compiler is still establishing its native toolchain context.
+-- Pure-Lua SHA-256 for compiler identities and cache keys. Keep this module
+-- binary-safe and dependency-free: it is loaded while the compiler is still
+-- establishing its native toolchain context. The titanc CLI supplies the
+-- native digest through a cache adapter's `sha256_binary` (see hex_via).
 local sha256 = {}
 
 local MASK = 0xffffffff
@@ -87,10 +88,26 @@ function sha256.binary(message)
         table.unpack(digest_words(message)))
 end
 
+local function to_hex(digest)
+    return (("%02x"):rep(#digest):format(digest:byte(1, -1)))
+end
+
 function sha256.hex(message)
-    return (sha256.binary(message):gsub(".", function(byte)
-        return string.format("%02x", string.byte(byte))
-    end))
+    return to_hex(sha256.binary(message))
+end
+
+-- Hex digest through an optional adapter `sha256_binary` callback. A string
+-- error or a result that is not a 32-byte string falls back to this module;
+-- any other error (cancellation, a foreign exception) propagates unchanged.
+function sha256.hex_via(callback, message)
+    if callback then
+        local ok, result = pcall(callback, message)
+        if not ok and type(result) ~= "string" then error(result, 0) end
+        if ok and type(result) == "string" and #result == 32 then
+            return to_hex(result)
+        end
+    end
+    return sha256.hex(message)
 end
 
 return sha256

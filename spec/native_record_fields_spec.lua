@@ -43,7 +43,9 @@ describe("trusted native record-field intrinsic", function()
     setup(function() probe_session = h.new_checker_probe_session() end)
     teardown(function() h.close_checker_probe_session(probe_session) end)
     after_each(function()
-        for _, suffix in ipairs({ ".c", ".o", ".so", ".a", ".titan.h", ".ffi.h" }) do
+        for _, suffix in ipairs({
+            ".c", ".o", ".so", ".a", ".titan.h", ".ffi.h", ".priv.h", ".parts",
+        }) do
             os.remove(module_name .. suffix)
         end
         os.execute("rm -rf " .. module_name .. ".so.dSYM")
@@ -165,7 +167,7 @@ describe("trusted native record-field intrinsic", function()
     end)
 
     it("emits producer-only callbacks with dense UV and native payload reads", function()
-        local csrc, ast = h.compile_and_read_c(preamble .. [[
+        local csrc = h.compile_and_read_c(preamble .. [[
             foreign function read_count(owner: *Udata): lua_Integer
                 return ffi.titan_record_field(owner, "Owner", "count")
             end
@@ -186,7 +188,6 @@ describe("trusted native record-field intrinsic", function()
         assert.truthy(csrc:find("->uv[1].uv", 1, true))
         assert.truthy(csrc:find("->uv[0].uv", 1, true))
         assert.falsy(csrc:find("titan_record_field(", 1, true))
-        assert.is_false(declaration(ast, "read_count")._foreign_inline)
     end)
 
     it("reads live fields with one owner evaluation and borrows native objects", function()

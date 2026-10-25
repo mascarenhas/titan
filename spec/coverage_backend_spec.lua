@@ -94,8 +94,9 @@ describe("native coverage source build", function()
     it("reconstructs the executable list from fresh and reused object records", function()
         local build = assert(prepare({ coverage_format = { "html", "lcov" } }))
         local source, first, second = root .. "/first.titan", root .. "/.coverage/first.c", root .. "/.coverage/second.c"
-        local left = coverage.partial(first, { source }, { [source] = { [2] = true, [5] = true } }, build.backend)
-        local right = coverage.partial(second, { source }, {}, build.backend)
+        local left = coverage.partial({ { filename = first,
+            anchors = { [source] = { [2] = true, [5] = true } } } }, { source }, build.backend)
+        local right = coverage.partial({ { filename = second, anchors = {} } }, { source }, build.backend)
         local imported = {
             first = { kind = "source", ast = {}, coverage = left },
             second = { kind = "source", object_metadata = { coverage = right, coverage_test_functions = {} } },

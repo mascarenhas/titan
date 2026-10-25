@@ -21,6 +21,21 @@ describe("Titan utils", function()
 
      end)
 
+     it("preserves exact bytes with explicit binary file modes", function()
+         local filename = require("spec.support.temporary").name("-bytes")
+         local contents = "line\n\0\26\r\nend"
+         local tested, test_error = pcall(function()
+             assert.truthy(util.set_file_contents(filename, contents, "wb"))
+             local file = assert(io.open(filename, "rb"))
+             local bytes = file:read("a")
+             assert(file:close())
+             assert.equal(contents, bytes)
+             assert.equal(contents, util.get_file_contents(filename, "rb"))
+         end)
+         os.remove(filename)
+         if not tested then error(test_error, 0) end
+     end)
+
      it("orders strings by numeric bytes independent of text collation", function()
          local original = os.setlocale(nil, "collate")
          local locales = { "C", "C.UTF-8", "en_US.UTF-8", "pt_BR.UTF-8" }

@@ -204,14 +204,14 @@ describe("closure adjustment wrappers (end-to-end)", function()
                 return adjusted
             end
         ]])
-        local csrc = coder.generate("test", tree, {}, driver.TITAN_ABI_VERSION)
+        local csrc = coder.generate("test", tree, {}, driver.TITAN_ABI_VERSION).parts[1].code
         local signature =
-            "static TITAN_NOINLINE TString* test_callable_adapter_0("
+            "TITAN_MODULE_PRIVATE TITAN_NOINLINE TString* test_\\u2119_callable_adapter_0("
         local declaration = assert(csrc:find(signature, 1, true))
         local first = assert(csrc:find(
             signature, declaration + 1, true))
         local last = assert(csrc:find(
-            "static int test_callable_adapter_0_titanentry_strict",
+            "TITAN_MODULE_PRIVATE int test_\\u2119_callable_adapter_0_titanentry_strict",
             first, true))
         local body = csrc:sub(first, last - 1)
         local call = assert(body:find(
@@ -247,14 +247,14 @@ describe("closure adjustment wrappers (end-to-end)", function()
                 return adjusted
             end
         ]])
-        local csrc = coder.generate("test", tree, {}, driver.TITAN_ABI_VERSION)
+        local csrc = coder.generate("test", tree, {}, driver.TITAN_ABI_VERSION).parts[1].code
         local signature =
-            "static TITAN_NOINLINE void test_callable_adapter_0("
+            "TITAN_MODULE_PRIVATE TITAN_NOINLINE void test_\\u2119_callable_adapter_0("
         local declaration = assert(csrc:find(signature, 1, true))
         local first = assert(csrc:find(
             signature, declaration + 1, true))
         local last = assert(csrc:find(
-            "static int test_callable_adapter_0_titanentry_strict",
+            "TITAN_MODULE_PRIVATE int test_\\u2119_callable_adapter_0_titanentry_strict",
             first, true))
         local body = csrc:sub(first, last - 1)
         local call = assert(body:find(
@@ -300,7 +300,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
             local first = assert(csrc:find(
                 signature, declaration + 1, true))
             local last = assert(csrc:find(
-                "static int test_\\u2133_" .. name .. "_titanentry_lua",
+                "TITAN_MODULE_PRIVATE int test_\\u2133_" .. name .. "_titanentry_lua",
                 first, true))
             return csrc:sub(first, last - 1)
         end
@@ -325,7 +325,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
 
         -- The ordinary checked tree uses the shared adjusted-open builder.
         local tree = checked(source)
-        local csrc = coder.generate("test", tree, {}, driver.TITAN_ABI_VERSION)
+        local csrc = coder.generate("test", tree, {}, driver.TITAN_ABI_VERSION).parts[1].code
         assert_branch_publication(
             native_body(csrc, "forwarded"), "_open_vargs_")
     end)
@@ -333,7 +333,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
     it("allocates and initializes wrapper CClosures without API stack assembly",
     function()
         local tree = checked(FIXED_SOURCE)
-        local csrc = coder.generate("test", tree, {}, driver.TITAN_ABI_VERSION)
+        local csrc = coder.generate("test", tree, {}, driver.TITAN_ABI_VERSION).parts[1].code
         assert.truthy(csrc:find(
             "CClosure *_ca_wrapper =", 1, true), csrc)
         assert.truthy(csrc:find(
@@ -374,13 +374,13 @@ describe("closure adjustment wrappers (end-to-end)", function()
                 return adjusted(callback)
             end
         ]])
-        local csrc = coder.generate("test", tree, {}, driver.TITAN_ABI_VERSION)
+        local csrc = coder.generate("test", tree, {}, driver.TITAN_ABI_VERSION).parts[1].code
         local signature =
-            "static TITAN_NOINLINE TValue test_callable_adapter_0("
+            "TITAN_MODULE_PRIVATE TITAN_NOINLINE TValue test_\\u2119_callable_adapter_0("
         local declaration = assert(csrc:find(signature, 1, true))
         local first = assert(csrc:find(signature, declaration + 1, true))
         local last = assert(csrc:find(
-            "static int test_callable_adapter_0_titanentry_strict",
+            "TITAN_MODULE_PRIVATE int test_\\u2119_callable_adapter_0_titanentry_strict",
             first, true))
         local body = csrc:sub(first, last - 1)
         local poll = assert(body:find("luaC_checkGC(L);", 1, true))

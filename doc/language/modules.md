@@ -490,11 +490,19 @@ installation layout from the compiler launcher filename.
   uses its matched `<root>/src/lua-5.5.1` headers,
   `<root>/lib/liblua.a`, and `<root>/lib/titan/0.6/libtitan.a`.
 * `-l/--link` adds extra C libraries to the link line (FFI use).
-* `-j/--jobs <jobs>` bounds concurrent generated-C object compilations. It
-  defaults to the positive integer in `TITAN_JOBS`, or to `1` when that
-  variable is unset. Values above one require the standard POSIX `mkfifo`
-  utility. Parsing, checking, C generation, generated-header work, and final
-  linking remain ordered in the compiler process.
+* `-j/--jobs <jobs>` caps concurrent generated-C object compilations. It
+  defaults to the positive integer in `TITAN_JOBS`, or to four when that
+  variable is unset. On Linux and macOS, values above one require the standard
+  POSIX `mkfifo` utility. Inside a parent GNU Make the run also shares Make's
+  job slots; see [Compiler jobs and GNU Make](build-profiles.md#compiler-jobs-and-gnu-make).
+  Parsing, checking, C generation, and generated-header work remain ordered in
+  the compiler process.
+* `--c-parts <n>` sets the maximum number of C translation units into which a
+  module with at least 2 MiB of generated C definitions is split, so its parts
+  can compile in parallel. It defaults to the positive integer in
+  `TITAN_C_PARTS`, or to 4 on Linux and 1 elsewhere; `1` disables splitting.
+  It is independent of `--jobs`. See [Native build
+  profiles](build-profiles.md#split-modules).
 * `--static` prefers self-describing Titan `.a` providers over `.so`
   providers for ordinary dependencies. It still permits DSO/source fallback
   and does not request a fully static system executable. Windows rejects this
@@ -640,7 +648,10 @@ settings, quoted forward-slash spelling avoids ambiguity: set `CC` to the value
 unsupported as implicit tool commands. Bare names use Windows `SearchPathW`
 lookup; explicit paths select that exact native image. A native executable wrapper may precede
 the compiler. Windows command arguments must be valid UTF-8 without line breaks, and the
-initial shell transport has a conservative 8191-byte rendered-command limit.
+initial shell transport has a conservative 8191-byte rendered-command limit. Native links
+pass their compiler and linker arguments in a temporary response file (`@file`) beside the
+output, so the number or length of object paths does not count against this limit; the
+configured `CC` command and the response-file path stay on the command line.
 Explicit `\\?\` executable paths are unsupported by this transport; use an
 ordinary fully qualified executable path. Filesystem metadata operations retain
 their separate support for extended paths.

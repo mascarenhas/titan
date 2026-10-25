@@ -46,30 +46,23 @@ if [[ ${TITAN_ROCK_TEST_INTERNAL:-0} == 1 ]]; then
     if (( forwarded_count == 0 && $# == 0 )) &&
         [[ -z ${BUSTED_FILTER:-} ]]; then
         # This value is supplied by Make from its fixed, whitespace-free
-        # repository paths. Keep the retained runtime/packaging specs serial
-        # before the isolated compiler workers start.
+        # repository paths. The parallel compiler/runtime launcher schedules
+        # the retained runtime/packaging specs, stdlib-compiler integrations,
+        # and compiler specs per file across isolated checkout workers.
         stdlib_spec_list=${TITAN_ROCK_TEST_STDLIB_SPECS:-}
         [[ -n $stdlib_spec_list ]] || {
             echo "error: Make must select the retained runtime/packaging specs" >&2
             exit 2
         }
-        stdlib_specs=()
-        IFS=' ' read -r -a stdlib_specs <<< "$stdlib_spec_list"
-        export TITAN_PROBE_CACHE_DISABLE=1
-        run_busted "${stdlib_specs[@]}"
-        # These compiler integration fixtures consume installed logical
-        # standard modules. Run them once before the compiler-only workers,
-        # retaining the native Windows Lua/Busted adapter above.
-        stdlib_compiler_specs=()
         while read -r test_file extra; do
             if [[ -z ${test_file:-} || $test_file == \#* ]]; then continue; fi
             [[ $test_file == spec/*_spec.lua && -z ${extra:-} ]] || {
                 echo "error: invalid stdlib compiler spec: $test_file ${extra:-}" >&2
                 exit 2
             }
-            stdlib_compiler_specs+=("$test_file")
         done < spec/support/ci_stdlib_compiler_test_files.txt
-        run_busted "${stdlib_compiler_specs[@]}"
+        export TITAN_PROBE_CACHE_DISABLE=1
+        export TITAN_ROCK_TEST_STDLIB_SPECS="$stdlib_spec_list"
         exec bash spec/support/run_parallel_compiler_tests.sh
     fi
     if [[ -n ${BUSTED_FILTER:-} ]]; then

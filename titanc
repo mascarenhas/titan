@@ -19,7 +19,9 @@ p:flag('--print-ast', 'Print the AST.')
 p:flag('--pretty-print', 'Format generated C and headers with clang-format.')
 p:flag('-v --verbose', 'Be verbose about compiler invocations.')
 p:option('-j --jobs',
-    'Maximum concurrent generated-C compilations (default: TITAN_JOBS or 1).')
+    'Maximum concurrent generated-C compilations (default: TITAN_JOBS or 4).')
+p:option('--c-parts',
+    'Maximum generated-C translation units per module above the split threshold (default: TITAN_C_PARTS, 4 on Linux, or 1 on macOS/Windows).')
 p:option('--launcher-name', 'Windows standalone/test launcher filename in bin (default: logical module name).')
 p:flag('--static', 'Prefer static Titan archive providers (unsupported on Windows).')
 p:flag('--source-first', 'Prefer available source modules to compiled providers.')
@@ -119,7 +121,7 @@ if args.compile_only then
     end
 end
 
-local jobs_text = args.jobs or platform.getenv("TITAN_JOBS") or "1"
+local jobs_text = args.jobs or platform.getenv("TITAN_JOBS") or "4"
 if type(jobs_text) ~= "string" or
    not jobs_text:match("^[1-9][0-9]*$") then
     exit("--jobs and TITAN_JOBS require a positive integer")
@@ -129,10 +131,19 @@ if not jobs or jobs > math.maxinteger then
     exit("--jobs and TITAN_JOBS require a positive integer")
 end
 
-local function link_failed(kind, modname, term, code)
-    return string.format("failed to link %s '%s' (%s%s)",
-        kind, modname, tostring(term), code and (", " .. tostring(code)) or "")
+local explicit_c_parts = args.c_parts or platform.getenv("TITAN_C_PARTS")
+local c_parts
+if explicit_c_parts ~= nil then
+    if type(explicit_c_parts) ~= "string" or
+       not explicit_c_parts:match("^[1-9][0-9]*$") then
+        exit("--c-parts and TITAN_C_PARTS require a positive integer")
+    end
+    c_parts = tonumber(explicit_c_parts)
+    if not c_parts or c_parts > math.maxinteger then
+        exit("--c-parts and TITAN_C_PARTS require a positive integer")
+    end
 end
+local link_failed = driver.link_failure_message
 
 driver.TITAN_SOURCE_PATH = args.tree or driver.TITAN_SOURCE_PATH
 driver.LUA_SOURCE_PATH = args.lua or driver.LUA_SOURCE_PATH
@@ -145,12 +156,24 @@ end
 -- Synchronous native publication APIs share the CLI's temporary-file root.
 driver.OUTPUT_ROOT = args.output
 
+-- The CLI hashes C headers and probe sources natively. Digest-only: the
+-- adapter has no storage, so no cache entries are built or serialized. An
+-- older support library is a stale installation, not a slow fallback.
+local support_loaded, support = pcall(require, "titan")
+if not support_loaded or type(support) ~= "table" or
+   type(support._sha256_binary) ~= "function" then
+    exit("the installed Titan native support library is missing or stale " ..
+        "(it lacks _sha256_binary); reinstall Titan" ..
+        (support_loaded and "" or ": " .. tostring(support)))
+end
+
 resolver_context = driver.new_resolver_context({
     prefer_static = args.static,
     source_first = args.test or args.source_first,
     verbose = args.verbose,
     pretty_print = args.pretty_print,
     output_root = args.output,
+    cache_adapter = { sha256_binary = support._sha256_binary },
 })
 if driver.TOOLCHAIN_ERROR then exit(driver.TOOLCHAIN_ERROR) end
 if args.lua and driver.INSTALLED then
@@ -160,7 +183,9 @@ end
 local configured, configure_error =
     driver.configure_foreign_c(resolver_context)
 if not configured and configure_error then exit(configure_error) end
-
+if not c_parts then
+    c_parts = driver.default_c_parts()
+end
 local coverage_build
 if args.coverage then
     local coverage_error
@@ -192,6 +217,7 @@ local loader = driver.defaultloader({}, {
     context = resolver_context,
     coverage = coverage_build,
     output_root = args.output,
+    c_parts = c_parts,
 })
 
 for _, modname in ipairs(requested_modules) do
@@ -334,58 +360,6 @@ if #errors == 0 then
     end
 end
 
-if main_module then
-    local source_outputs = {}
-    for _, name in ipairs(linked_names) do
-        local mod = driver.imported[name]
-        local header = header_plan_by_name[name]
-        source_outputs[#source_outputs + 1] = {
-            modname = name,
-            output = mod.native_output or mod.filename,
-            foreign_header = header and header.managed
-                and header.filename or nil,
-            ffi_header = header and header.ffi_header and header.ffi_header.filename or nil,
-        }
-    end
-    local program_output = test_program_output or
-        driver.imported[main_module].program_output or
-        main_module:gsub("[.]", "/")
-    local entrypoint_output = test_entrypoint_output or
-        driver.generated_output_path(main_module:gsub("[.]", "/") .. "__entrypoint.c", args.output)
-    local program_inputs = {}
-    for name in pairs(resolver_context.source_names) do
-        local mod = driver.imported[name]
-        for _, filename in ipairs(mod.source_files or { mod.filename }) do
-            program_inputs[#program_inputs + 1] = filename
-        end
-    end
-    for _, mod in pairs(resolver_context.dynamic_names) do
-        if mod.filename then
-            program_inputs[#program_inputs + 1] = mod.filename
-        end
-    end
-    for _, archive in ipairs(selected_static_archives) do
-        program_inputs[#program_inputs + 1] = archive
-    end
-    for _, input in ipairs(args.extra_object or {}) do
-        program_inputs[#program_inputs + 1] = input
-    end
-    local extra_outputs
-    if platform.windows then
-        local paths, path_error = driver.windows_program_paths(main_module,
-            args.launcher_name, args.test and requested_modules[1] or nil,
-            args.output)
-        if not paths then exit(path_error) end
-        windows_program_outputs = paths
-        program_output = paths.executable
-        extra_outputs = driver.windows_program_auxiliary_paths(
-            entrypoint_output, paths.provider)
-    end
-    local outputs_ok, outputs_err = driver.validate_program_output_paths(
-        source_outputs, program_output, entrypoint_output, program_inputs,
-        extra_outputs)
-    if not outputs_ok then table.insert(errors, outputs_err) end
-end
 
 local mangled_owners = {}
 local symbol_owners = {}
@@ -430,22 +404,99 @@ for _, name in ipairs(preflight_names) do
             symbols = coder.interface_external_symbols(
                 name, resolver_context.native_interface_types[name])
         end
-        for _, entry in ipairs(symbols or {}) do
-            local symbol_previous = symbol_owners[entry.symbol]
-            if symbol_previous then
-                table.insert(errors, "cannot link C symbol '" ..
-                    entry.symbol .. "': " .. symbol_previous.owner ..
-                    " in logical module '" .. symbol_previous.module ..
-                    "' conflicts with " .. entry.owner ..
-                    " in logical module '" .. name .. "'")
-            else
-                symbol_owners[entry.symbol] = {
-                    module = name,
-                    owner = entry.owner,
-                }
-            end
+        driver.record_module_symbols(symbol_owners, name, symbols, errors)
+        if imported and imported.private_symbols then
+            driver.record_module_symbols(
+                symbol_owners, name, imported.private_symbols, errors)
         end
     end
+end
+native_inputs = {}
+for name in pairs(resolver_context.source_names) do
+    local mod = driver.imported[name]
+    for _, filename in ipairs(mod.source_files or { mod.filename }) do
+        native_inputs[#native_inputs + 1] = filename
+    end
+end
+for _, mod in pairs(resolver_context.dynamic_names) do
+    if mod.filename then native_inputs[#native_inputs + 1] = mod.filename end
+end
+for _, static_provider in ipairs(resolver_context.selected_static_providers) do
+    native_inputs[#native_inputs + 1] = static_provider.archive
+end
+for _, archive in ipairs(selected_static_archives) do
+    native_inputs[#native_inputs + 1] = archive
+end
+for _, input in ipairs(args.extra_object or {}) do
+    native_inputs[#native_inputs + 1] = input
+end
+local compile_requests = {}
+for _, name in ipairs(linked_names) do
+    local mod = driver.imported[name]
+    local extra_flags = test_modules[name] and { table.unpack(test_runner.TEST_COMPILE_FLAGS) } or {}
+    if coverage_build then
+        for _, flag in ipairs(coverage.compile_flags(coverage_build, name) or {}) do
+            extra_flags[#extra_flags + 1] = flag
+        end
+    end
+    compile_requests[#compile_requests + 1] = {
+        modname = name,
+        mod = mod,
+        static_deps = resolver_context.native_static_names,
+        options = {
+            pretty_print = args.pretty_print,
+            nominal_layouts = resolver_context.nominal_layouts,
+            extra_compile_flags = extra_flags,
+            coverage = coverage_build and coverage_build.selected[name] == true,
+            coverage_backend = coverage_build and coverage_build.backend,
+            c_parts = c_parts,
+        },
+    }
+end
+local compile_plans
+if #errors == 0 then
+    local plan_error
+    compile_plans, plan_error = driver.plan_compile_requests(
+        compile_requests, args.verbose, native_inputs, symbol_owners, header_plans)
+    if not compile_plans then table.insert(errors, plan_error) end
+end
+if #errors > 0 then exit(table.concat(errors, "\n")) end
+native_inputs = compile_plans.inputs
+if main_module then
+    local source_outputs = {}
+    for index, name in ipairs(linked_names) do
+        local mod = driver.imported[name]
+        local header = header_plan_by_name[name]
+        source_outputs[#source_outputs + 1] = {
+            modname = name,
+            output = mod.native_output or mod.filename,
+            c_parts = compile_plans[index] and compile_plans[index].part_count
+                or #driver.module_compiled_objects(mod),
+            foreign_header = header and header.managed
+                and header.filename or nil,
+            ffi_header = header and header.ffi_header and header.ffi_header.filename or nil,
+        }
+    end
+    local program_output = test_program_output or
+        driver.imported[main_module].program_output or
+        main_module:gsub("[.]", "/")
+    local entrypoint_output = test_entrypoint_output or
+        driver.generated_output_path(main_module:gsub("[.]", "/") .. "__entrypoint.c", args.output)
+    local extra_outputs
+    if platform.windows then
+        local paths, path_error = driver.windows_program_paths(main_module,
+            args.launcher_name, args.test and requested_modules[1] or nil,
+            args.output)
+        if not paths then exit(path_error) end
+        windows_program_outputs = paths
+        program_output = paths.executable
+        extra_outputs = driver.windows_program_auxiliary_paths(
+            entrypoint_output, paths.provider)
+    end
+    local outputs_ok, outputs_err = driver.validate_program_output_paths(
+        source_outputs, program_output, entrypoint_output, native_inputs,
+        extra_outputs, compile_plans.outputs)
+    if not outputs_ok then table.insert(errors, outputs_err) end
 end
 
 if not main_module and not args.compile_only then
@@ -464,48 +515,7 @@ if not main_module and not args.compile_only then
         if not shim_plans then table.insert(errors, provider_output) end
     end
     if #errors == 0 then
-        native_inputs = {}
-        for name in pairs(resolver_context.source_names) do
-            local mod = driver.imported[name]
-            for _, filename in ipairs(
-                    mod.source_files or { mod.filename }) do
-                native_inputs[#native_inputs + 1] = filename
-            end
-        end
-        for name, mod in pairs(resolver_context.dynamic_names) do
-            if mod.filename then
-                native_inputs[#native_inputs + 1] = mod.filename
-            end
-        end
-        for _, static_provider in ipairs(
-                resolver_context.selected_static_providers) do
-            native_inputs[#native_inputs + 1] = static_provider.archive
-        end
-        for _, input in ipairs(args.extra_object or {}) do
-            native_inputs[#native_inputs + 1] = input
-        end
-        local generated_outputs = {}
-        for _, name in ipairs(linked_names) do
-            local mod = driver.imported[name]
-            local stem = (mod.native_output or mod.filename):gsub(
-                "[.]titan$", "")
-            generated_outputs[#generated_outputs + 1] = {
-                path = stem .. ".c",
-                owner = "generated C for logical module '" .. name .. "'",
-            }
-            generated_outputs[#generated_outputs + 1] = {
-                path = stem .. ".o",
-                owner = "generated object for logical module '" .. name .. "'",
-            }
-            local header = header_plan_by_name[name]
-            if header and header.managed then
-                generated_outputs[#generated_outputs + 1] = {
-                    path = header.filename,
-                    owner = "generated foreign header for logical module '"
-                        .. name .. "'",
-                }
-            end
-        end
+        local generated_outputs = { table.unpack(compile_plans.outputs) }
         for _, shim in ipairs(shim_plans or {}) do
             generated_outputs[#generated_outputs + 1] = {
                 path = shim.filename,
@@ -529,30 +539,8 @@ local headers_ok, headers_err = driver.write_foreign_header_plans(
     header_plans, args.verbose, args.pretty_print)
 if not headers_ok then exit(headers_err) end
 
-local compile_requests = {}
-for _, name in ipairs(linked_names) do
-    local mod = driver.imported[name]
-    local extra_flags = test_modules[name] and { table.unpack(test_runner.TEST_COMPILE_FLAGS) } or {}
-    if coverage_build then
-        for _, flag in ipairs(coverage.compile_flags(coverage_build, name) or {}) do
-            extra_flags[#extra_flags + 1] = flag
-        end
-    end
-    compile_requests[#compile_requests + 1] = {
-        modname = name,
-        mod = mod,
-        static_deps = resolver_context.native_static_names,
-        options = {
-            pretty_print = args.pretty_print,
-            nominal_layouts = resolver_context.nominal_layouts,
-            extra_compile_flags = extra_flags,
-            coverage = coverage_build and coverage_build.selected[name] == true,
-            coverage_backend = coverage_build and coverage_build.backend,
-        },
-    }
-end
 local compile_results =
-    driver.compile_modules(compile_requests, jobs, args.verbose)
+    driver.compile_modules(compile_requests, jobs, args.verbose, compile_plans)
 for index, name in ipairs(linked_names) do
     local result = compile_results[index]
     local mod = driver.imported[name]
@@ -582,9 +570,11 @@ end
 
 local generated_objects = {}
 for _, name in ipairs(linked_names) do
+    local mod = driver.imported[name]
     generated_objects[#generated_objects + 1] = {
         modname = name,
         filename = libnames[name],
+        objects = driver.module_compiled_objects(mod),
     }
 end
 local native_target, target_or_err =
@@ -605,7 +595,11 @@ if not providers_valid then exit(providers_err) end
 if main_module then
     local ofiles = {}
     for _, name in ipairs(linked_names) do
-        table.insert(ofiles, libnames[name])
+        local mod = driver.imported[name]
+        local objects = driver.module_compiled_objects(mod)
+        for _, object in ipairs(objects) do
+            table.insert(ofiles, object)
+        end
     end
     local archive_entries = {}
     local archive_names =
@@ -658,48 +652,53 @@ if main_module then
 else
     local ofiles = {}
     for _, name in ipairs(linked_names) do
-        table.insert(ofiles, libnames[name])
+        local mod = driver.imported[name]
+        local objects = driver.module_compiled_objects(mod)
+        for _, object in ipairs(objects) do
+            table.insert(ofiles, object)
+        end
     end
-
     local native_payload, payload_err =
         driver.classify_native_payloads(args.extra_object, native_target)
     if not native_payload then exit(payload_err) end
-    local temporary, temporary_directory =
-        driver.staged_library_output(provider_output)
-    if not temporary then
-        table.insert(errors, "failed to stage library '" .. provider ..
-            "': " .. tostring(temporary_directory))
-    end
-    if #errors > 0 then exit(table.concat(errors, "\n")) end
-    local ok, term, code = driver.compile_library_output(
-        temporary, ofiles, args.link, args.verbose, nil,
-        selected_static_archives, native_payload.inputs, provider_output,
-        platform.windows and output_names or nil)
-    if not ok then
-        driver.remove_path(temporary)
-        driver.remove_path(temporary .. ".dSYM")
-        driver.remove_path(temporary_directory)
-        table.insert(errors, link_failed("library", provider, term, code))
-    elseif platform.windows then
-        local valid, validation_err = driver.validate_library_image_fresh(
-            temporary, generated_entries, output_names, args.verbose)
-        if valid and provider == "titan" then
-            valid, validation_err = driver.validate_titan_support(temporary, args.verbose)
+    if platform.windows then
+        local temporary, temporary_directory =
+            driver.staged_library_output(provider_output)
+        if not temporary then
+            exit("failed to stage library '" .. provider .. "': " ..
+                tostring(temporary_directory))
         end
-        if valid then
-            valid, validation_err = driver.publish_windows_provider(
-                temporary, provider_output, shim_plans, provider)
+        local ok, term, code = driver.compile_library_output(
+            temporary, ofiles, args.link, args.verbose, nil,
+            selected_static_archives, native_payload.inputs, provider_output,
+            output_names)
+        if not ok then
+            driver.remove_path(temporary)
+            driver.remove_path(temporary .. ".dSYM")
+            driver.remove_path(temporary_directory)
+            table.insert(errors, link_failed("library", provider, term, code))
+        else
+            local valid, validation_err = driver.validate_library_image_fresh(
+                temporary, generated_entries, output_names, args.verbose)
+            if valid and provider == "titan" then
+                valid, validation_err = driver.validate_titan_support(temporary, args.verbose)
+            end
+            if valid then
+                valid, validation_err = driver.publish_windows_provider(
+                    temporary, provider_output, shim_plans, provider)
+            end
+            driver.remove_path(temporary)
+            driver.remove_path(temporary_directory)
+            if not valid then table.insert(errors, validation_err) end
         end
-        driver.remove_path(temporary)
-        driver.remove_path(temporary_directory)
-        if not valid then table.insert(errors, validation_err) end
     else
         local ordered_archive_inputs = {}
         for _, name in ipairs(linked_names) do
-            ordered_archive_inputs[#ordered_archive_inputs + 1] = {
-                kind = "object",
-                input = libnames[name],
-            }
+            for _, object in ipairs(driver.module_compiled_objects(driver.imported[name])) do
+                ordered_archive_inputs[#ordered_archive_inputs + 1] = {
+                    kind = "object", input = object,
+                }
+            end
         end
         for _, static_provider in ipairs(
                 resolver_context.selected_static_providers) do
@@ -715,100 +714,41 @@ else
             }
         end
 
-        local temporary_archive = temporary:gsub("[.]so$", ".a")
-        local archive_result, archive_err = driver.build_static_archive(
-            temporary_archive, nil, nil, native_target, args.verbose,
-            ordered_archive_inputs)
-        if not archive_result then
-            driver.remove_path(temporary)
-            driver.remove_path(temporary .. ".dSYM")
-            driver.remove_path(temporary_archive)
-            driver.remove_path(temporary_directory)
-            table.insert(errors, "failed to build static provider '" ..
-                provider .. "': " .. tostring(archive_err))
-        else
-        local valid, validation_err =
-            driver.validate_library_image(temporary, output_names)
-        if valid and provider == "titan" then
-            valid, validation_err =
-                driver.validate_titan_support(temporary, args.verbose)
-        end
-        if valid then
-            valid, validation_err =
-                driver.validate_archive_library_equality(
-                    archive_result.archive, temporary, output_names,
-                    "staged provider pair for '" .. provider .. "'")
-        end
-        if valid then
-            valid, validation_err =
-                driver.validate_library_image_fresh(
-                    temporary, archive_result.entries, output_names,
-                    args.verbose)
-        end
-        local validation_image = temporary_directory ..
-            "/archive-validation.so"
-        if valid then
-            local image_ok, image_term, image_code =
-                driver.compile_archive_validation_image(
-                    validation_image, temporary_archive, args.link,
-                    args.verbose, nil, platform.windows and output_names or nil)
-            if not image_ok then
-                valid = nil
-                validation_err = link_failed(
-                    "archive validation image", provider,
-                    image_term, image_code)
-            end
-        end
-        if valid then
-            valid, validation_err =
-                driver.validate_library_image(
-                    validation_image, output_names)
-        end
-        if valid and provider == "titan" then
-            valid, validation_err =
-                driver.validate_titan_support(
-                    validation_image, args.verbose)
-        end
-        if valid then
-            valid, validation_err =
-                driver.validate_archive_library_equality(
-                    archive_result.archive, validation_image, output_names,
-                    "archive-backed provider for '" .. provider .. "'")
-        end
-        if valid then
-            valid, validation_err =
-                driver.validate_library_image_fresh(
-                    validation_image, archive_result.entries, output_names,
-                    args.verbose)
-        end
-        driver.remove_path(validation_image)
-        driver.remove_path(validation_image .. ".dSYM")
-        if not valid then
-            driver.remove_path(temporary)
-            driver.remove_path(temporary .. ".dSYM")
-            driver.remove_path(temporary_archive)
-            driver.remove_path(temporary_directory)
-            table.insert(errors, validation_err)
+        local pair, pair_err, pair_signal = driver.link_provider_pair({
+            provider = provider,
+            public_dso = provider_output,
+            libnames = ofiles,
+            link = args.link,
+            verbose = args.verbose,
+            static_archives = selected_static_archives,
+            ordered_payload = native_payload.inputs,
+            archive_inputs = ordered_archive_inputs,
+            target = native_target,
+            module_names = output_names,
+            parallelism = jobs,
+        })
+        if pair_signal then
+            -- Remove the resolver's temporaries before re-raising.
+            driver.close_resolver_context(resolver_context)
+            resolver_context = nil
+            require("titan-compiler.jobs").propagate(pair_signal)
+            exit(pair_err)
+        elseif not pair then
+            table.insert(errors, pair_err)
         else
             local published, publish_err =
                 driver.publish_provider_bundle(
-                    temporary, temporary_archive, provider_output,
-                    shim_plans, archive_result.entries, {
+                    pair.dso, pair.archive, provider_output,
+                    shim_plans, pair.entries, {
                         provider = provider,
                         native_inputs = native_inputs,
                         output_root = args.output,
                     })
+            driver.remove_path(pair.directory)
             if not published then
-                driver.remove_path(temporary)
-                driver.remove_path(temporary .. ".dSYM")
-                driver.remove_path(temporary_archive)
-                driver.remove_path(temporary_directory)
                 table.insert(errors, "failed to publish provider pair '" ..
                     provider .. "': " .. tostring(publish_err))
-            else
-                driver.remove_path(temporary_directory)
             end
-        end
         end
     end
 end

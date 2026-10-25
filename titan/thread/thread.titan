@@ -412,7 +412,8 @@ local function render_error_text(err: value): string
       text = failure.operation .. ": " .. failure.name ..
              " (" .. failure.code .. "): " .. failure.message
     else
-      if ffi.lua_checkstack(L, 2) == 0 then
+      -- Candidate plus the two temporary slots used by luaL_getmetafield/callmeta.
+      if ffi.lua_checkstack(L, 3) == 0 then
         raise "cannot reserve Lua stack for thread error rendering"
       end
       ffi.lua_pushtvalue(L, err)

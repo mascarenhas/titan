@@ -7,7 +7,8 @@ source=
 for argument in "$@"; do
     case "$argument" in
         */batch/one.c | */batch/two.c | */batch/three.c | */batch/four.c | \
-        */batch/five.c | */batch/six.c | */batch/seven.c | */batch/eight.c)
+        */batch/five.c | */batch/six.c | */batch/seven.c | */batch/eight.c | \
+        */batch/*.part[1-9]*.c)
             matched=yes
             source=$argument
             ;;

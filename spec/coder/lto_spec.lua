@@ -1,5 +1,7 @@
 local assert = require "luassert"
+local cdriver = require "c-parser.cdriver"
 local compiler_io = require "titan-compiler.io"
+local coder_names = require "titan-compiler.coder.names"
 local lfs = require "lfs"
 local objectmetadata = require "titan-compiler.objectmetadata"
 local platform = require "titan-compiler.platform"
@@ -77,7 +79,7 @@ describe("Titan link-time optimization", function()
         if workspace then remove(workspace) end
     end)
 
-    local function titanc(extra_compile, extra_link, ...)
+    local function titanc_arguments(extra_compile, extra_link, ...)
         -- GCC also uses MAKE for parallel LTO; skip only Titan's runtime build.
         local arguments = {
             "env", "-u", "TITAN_BUILD_PROFILE", "CC=" .. CC, "CCACHE_DISABLE=1", "TITAN_RUNTIME_PREBUILT=1",
@@ -89,7 +91,11 @@ describe("Titan link-time optimization", function()
             REPOSITORY .. "/titanc", "--tree", source_root,
         }
         for _, argument in ipairs({ ... }) do arguments[#arguments + 1] = argument end
-        return run(arguments)
+        return arguments
+    end
+
+    local function titanc(extra_compile, extra_link, ...)
+        return run(titanc_arguments(extra_compile, extra_link, ...))
     end
 
     local function compiled(...)
@@ -127,9 +133,16 @@ describe("Titan link-time optimization", function()
         compiled("-c", "--incremental", "lto_fixture.base")
         compiled("-c", "--incremental", "lto_fixture.facade")
         compiled("-c", "--incremental", "direct_app")
-        -- The caller must not have seen a header-inline callee, or this would
-        -- merely demonstrate ordinary per-translation-unit optimization.
-        assert.falsy(read(base .. ".titan.h"):find("static inline", 1, true))
+        -- Only the forwarding entry is header-inline, not the foreign body:
+        -- the constant result must still propagate across objects through LTO.
+        local header = read(base .. ".titan.h")
+        local canonical = coder_names._foreign_func_name("lto_fixture.base", "answer")
+        local helper = coder_names._foreign_inline_name("lto_fixture.base", "answer")
+        local name, callee = header:match(
+            "static inline int (%S+)%(void%) {%s*return (%S+)%(%)%;%s*}")
+        assert.equal(helper, name, header)
+        assert.equal(canonical, callee, header)
+        assert.falsy(header:find("while", 1, true), header)
         local nm_ok, unresolved = run({ "nm", "-u", facade .. ".o" })
         assert.is_true(nm_ok, unresolved)
         assert.matches(SENTINEL, unresolved, 1, true)
@@ -147,6 +160,31 @@ describe("Titan link-time optimization", function()
         assert.is_true(ok, output)
 
         compiled("--incremental", "lto_fixture.base", "lto_fixture.facade")
+        nm_ok, unresolved = run({ "nm", "-u", "lto_fixture.so" })
+        assert.is_true(nm_ok, unresolved)
+        assert.falsy(unresolved:find(SENTINEL, 1, true), unresolved)
+        ok, output = run({ LUA, "-E", "-e",
+            [[package.path = "./?.lua;" .. package.path; assert(require("lto_fixture.facade").answer() == 42)]] })
+        assert.is_true(ok, output)
+
+        -- Repeat the pair under a real shared jobserver. The archive-backed
+        -- LTO link may then borrow its own slot alongside the DSO link, and
+        -- GCC's LTRANS jobs join the same pool; both images must still be
+        -- optimized and validated before publication.
+        local quoted = {}
+        for index, argument in ipairs(titanc_arguments(nil, nil,
+                "--incremental", "--jobs", "3", "lto_fixture.base", "lto_fixture.facade")) do
+            quoted[index] = assert(cdriver.shell_quote(argument))
+        end
+        write(workspace .. "/provider.sh",
+            "exec " .. table.concat(quoted, " ") .. "\n")
+        write(workspace .. "/parent.mk", "all:\n\t+@sh provider.sh\n")
+        assert(os.remove("lto_fixture.so"))
+        assert(os.remove("lto_fixture.a"))
+        ok, output = run({ "env", "-u", "MAKEFLAGS", "-u", "MFLAGS",
+            "-u", "MAKELEVEL", "make", "--no-print-directory", "-j3",
+            "-f", "parent.mk" })
+        assert.is_true(ok, output)
         nm_ok, unresolved = run({ "nm", "-u", "lto_fixture.so" })
         assert.is_true(nm_ok, unresolved)
         assert.falsy(unresolved:find(SENTINEL, 1, true), unresolved)

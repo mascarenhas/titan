@@ -36,9 +36,9 @@ The compiler does not recursively collect sources from nested directories.
 
 All contributing files form one module named `graphics.scene`. Their
 declarations share one module scope, are checked together, and are emitted as
-one C translation unit. A `local` top-level declaration is private to the
-logical module, not to the file that contains it, so another contributor may
-use it:
+the generated C of that one module, never as one C file per contributor. A
+`local` top-level declaration is private to the logical module, not to the
+file that contains it, so another contributor may use it:
 
 ```titan
 -- graphics/scene/scene.titan
@@ -220,12 +220,16 @@ folder program from colliding with its `foo/bar/` source directory and also
 works when `--tree` points outside the current directory. Contributor files
 never receive generated `.c`, `.o`, `.lua`, `.so`, `.a`, or executable
 artifacts.
-A folder contributes exactly one object and one generated loader for its
-logical module, even when a multi-root invocation links that object into a
-shallower provider. The loader belongs to `foo.bar`, not to any source
-basename, and points at the provider selected for the whole invocation. For a
-dotted module built from an external tree, the compiler creates the logical
-output parent (such as `foo/`) in the current directory before linking.
+A folder's generated C and objects belong to its logical module as a whole:
+one object, or one object per part when a large module is
+[split](build-profiles.md#split-modules), always named
+from the canonical main (`foo/bar/bar.o`, `foo/bar/bar.part1.o`, ...). It has
+one generated loader for its logical module, even when a multi-root invocation
+links its objects into a shallower provider. The loader belongs to `foo.bar`,
+not to any source basename, and points at the provider selected for the whole
+invocation. For a dotted module built from an external tree, the compiler
+creates the logical output parent (such as `foo/`) in the current directory
+before linking.
 See [Static compiled modules](static-compiled-modules.md) for paired provider
 publication and archive resolution.
 
@@ -255,10 +259,13 @@ qualified spelling; no source marker is needed to use that interface.
 `titan.async` separately owns the Runtime and Task/error/subscription records.
 See the [UV reference](standard-library-uv.md) for the complete public surface.
 
-These files are one logical module and therefore produce one object and one
-`titan/uv.lua` loader, never one artifact per contributor. The production
-standard-library invocation links that object with the other twenty-five logical
-roots into the canonical `titan.so`/`titan.a` provider pair.
+These files are one logical module and therefore produce one `titan/uv.lua`
+loader and objects named from `uv.titan`, never one artifact per contributor.
+`titan.uv` is large enough to be split: with the Linux default of four parts
+its objects are `uv.o` and `uv.part1.o` through `uv.part3.o`. The production
+standard-library invocation links all of them with the objects of the other
+twenty-five logical roots into the canonical `titan.so`/`titan.a` provider
+pair.
 Titan imports select the preferred compiled form, while Lua
 `require "titan.uv"` selects the independent `titan.uv` logical module inside
 the DSO; no contributor is a separately loadable module.

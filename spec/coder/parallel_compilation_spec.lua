@@ -107,7 +107,8 @@ local function titanc(
         environment_jobs, cli_jobs, failing_module, diagnostics,
         compiler, bounded)
     local local_path = ROOT .. "/?.lua;" .. ROOT .. "/?/init.lua;"
-    local argv = { "env" }
+    -- An ambient parent Make pool would otherwise bound these fixtures.
+    local argv = { "env", "-u", "MAKEFLAGS" }
     if environment_jobs then
         argv[#argv + 1] = "TITAN_JOBS=" .. environment_jobs
     else
@@ -123,7 +124,7 @@ local function titanc(
         "TITAN_PARALLEL_TEST_STATE=" .. state_directory,
         "TITAN_PARALLEL_TEST_DELAY=0.5",
         "TITAN_PARALLEL_TEST_EXPECTED=" .. tostring(math.min(
-            tonumber(cli_jobs or environment_jobs) or 1, #MODULES)),
+            tonumber(cli_jobs or environment_jobs) or 4, #MODULES)),
         "TITAN_PARALLEL_TEST_DIAGNOSTICS=" .. (diagnostics or ""),
         "TITAN_PARALLEL_TEST_FAIL=" .. (failing_module or ""),
         "TITAN_ROCKS_ROOT=" .. assert(PREFIX,
@@ -275,6 +276,36 @@ describe("parallel generated-C compilation", function()
         end
     end
 
+    -- The batch polls the real completion FIFO descriptor, so channel
+    -- failures are injected through the shared FILE methods, for that one
+    -- handle only.
+    local file_methods = getmetatable(io.stdout).__index
+    local replaced_file_methods = {}
+    local function override_completion_file(callbacks)
+        local completion
+        io.open = function(path, mode)
+            local file, open_err = previous_open(path, mode)
+            if mode == "r+" and file then completion = file end
+            return file, open_err
+        end
+        for name, callback in pairs(callbacks) do
+            local original = file_methods[name]
+            replaced_file_methods[name] = original
+            file_methods[name] = function(file, ...)
+                if file == completion then return callback(original, file, ...) end
+                return original(file, ...)
+            end
+        end
+    end
+
+    local function restore_completion_file()
+        for name, original in pairs(replaced_file_methods) do
+            file_methods[name] = original
+        end
+        replaced_file_methods = {}
+        io.open = previous_open
+    end
+
     before_each(function()
         previous_cc = driver.CC
         previous_stdout = io.stdout
@@ -308,7 +339,7 @@ describe("parallel generated-C compilation", function()
         restore_tmpname()
         os.execute = previous_execute
         restore_launch()
-        io.open = previous_open
+        restore_completion_file()
         process.new_batch = previous_new_batch
         if diagnostic_stream and io.type(diagnostic_stream) == "file" then
             diagnostic_stream:close()
@@ -420,6 +451,7 @@ describe("parallel generated-C compilation", function()
     it("handles serial cache hits and preparation failures", function()
         local cached_request = checked_requests()[1]
         cached_request.mod.compiled = source_root .. "/cached.o"
+        cached_request.mod.compiled_objects = { cached_request.mod.compiled }
         cached_request.mod.native_references = { dependency = true }
         local cached = driver.compile_modules({ cached_request }, 1, false)
         assert.truthy(cached[1].ok, cached[1].err)
@@ -463,6 +495,186 @@ describe("parallel generated-C compilation", function()
         assert.equal(tostring(JOBS) .. "\n",
             read_file(state_directory .. "/maximum"))
         assert.falsy(file_exists(source_root .. "/batch/three.o"))
+    end)
+
+    it("schedules several parts per module and fails only the owning module",
+       function()
+        -- Synthetic prepared modules drive the scheduler directly. Each job
+        -- sleeps, reports its label on stderr, and exits with its status.
+        local previous_getenv = platform.getenv
+        platform.getenv = function(name)
+            if name == "MAKEFLAGS" then return nil end
+            return previous_getenv(name)
+        end
+        finally(function() platform.getenv = previous_getenv end)
+        local script = workspace_directory .. "/part_job.sh"
+        local output = assert(io.open(script, "wb"))
+        assert(output:write([[
+sleep "$2"
+echo "part diagnostic: $1" >&2
+test "$3" = 0 || exit "$3"
+: > "$4"
+]]))
+        assert(output:close())
+        -- { leaf, { { cost_bytes, delay, status }, ... } } in part order.
+        local modules = {
+            { "one", { { 10, 0.3, 0 }, { 300, 0.4, 0 }, { 50, 0.1, 23 } } },
+            { "two", { { 300, 0.2, 0 }, { 200, 0.1, 0 } } },
+            { "three", { { 100, 0.2, 0 } } },
+        }
+        local prepared = {}
+        for module_index, module in ipairs(modules) do
+            local compilation = {
+                modname = "batch." .. module[1],
+                request_index = module_index,
+                jobs = {},
+            }
+            for position, part in ipairs(module[2]) do
+                local label = module[1] .. ".part" .. (position - 1)
+                local object = workspace_directory .. "/" .. label .. ".o"
+                compilation.jobs[position] = {
+                    module_index = module_index,
+                    part_index = position - 1,
+                    c_path = workspace_directory .. "/" .. label .. ".c",
+                    object_path = object,
+                    temporary_object = object,
+                    argv = { platform.windows and "bash" or "sh", script, label,
+                        tostring(part[2]), tostring(part[3]), object },
+                    cost_bytes = part[1],
+                }
+            end
+            prepared[module_index] = compilation
+        end
+
+        local launched = {}
+        record_launches(launched)
+        local diagnostic_path = workspace_directory .. "/diagnostics"
+        diagnostic_stream = assert(io.open(diagnostic_path, "w+b"))
+        io.stderr = diagnostic_stream
+        local results, cancelled = driver.run_prepared_compiles(prepared, 2, false)
+        assert(io.stderr:flush())
+        assert(io.stderr:seek("set", 0))
+        local diagnostics = assert(io.stderr:read("*a"))
+        assert(diagnostic_stream:close())
+        diagnostic_stream = nil
+        io.stderr = previous_stderr
+        restore_launch()
+
+        -- Largest cost first; equal costs keep module, then part, order.
+        local expected_launches = {
+            "one.part1", "two.part0", "two.part1", "three.part0",
+            "one.part2", "one.part0",
+        }
+        assert.equal(#expected_launches, #launched, table.concat(launched, "\n"))
+        for index, label in ipairs(expected_launches) do
+            assert.truthy(launched[index]:find(label, 1, true),
+                table.concat(launched, "\n"))
+        end
+        -- Completion order differs; diagnostics replay in module/part order.
+        local previous = 0
+        for _, label in ipairs({ "one.part0", "one.part1", "one.part2",
+                "two.part0", "two.part1", "three.part0" }) do
+            local position = assert(diagnostics:find(
+                "part diagnostic: " .. label .. "\n", 1, true), diagnostics)
+            assert.is_true(previous < position, diagnostics)
+            previous = position
+        end
+
+        assert.is_nil(cancelled)
+        assert.equal(3, #results)
+        assert.is_nil(results[1].ok)
+        assert.equal("exit", results[1].err)
+        assert.equal(23, results[1].code)
+        assert.equal(3, #results[1].jobs)
+        assert.truthy(results[1].jobs[1].ok, results[1].jobs[1].err)
+        assert.truthy(results[1].jobs[2].ok, results[1].jobs[2].err)
+        assert.is_nil(results[1].jobs[3].ok)
+        assert.equal(23, results[1].jobs[3].code)
+        for index, count in pairs({ [2] = 2, [3] = 1 }) do
+            assert.truthy(results[index].ok, results[index].err)
+            assert.equal(count, #results[index].jobs)
+        end
+        assert.is_false(file_exists(workspace_directory .. "/one.part2.o"))
+        assert.is_true(file_exists(workspace_directory .. "/one.part0.o"))
+    end)
+
+    it("batches split module parts and fails only the module of a failed part",
+       function()
+        local previous_getenv = platform.getenv
+        platform.getenv = function(name)
+            if name == "MAKEFLAGS" then return nil end
+            return previous_getenv(name)
+        end
+        finally(function() platform.getenv = previous_getenv end)
+        configure_counting_compiler("parts", "one.part1")
+        local leaves = { "one", "two", "eight" }
+        local requests = checked_requests(leaves)
+        for _, request in ipairs(requests) do
+            request.options = { c_parts = 3, split_threshold = 1 }
+        end
+        local diagnostic_path = workspace_directory .. "/diagnostics"
+        diagnostic_stream = assert(io.open(diagnostic_path, "w+b"))
+        io.stderr = diagnostic_stream
+        local results = driver.compile_modules(requests, JOBS, false)
+        assert(io.stderr:flush())
+        assert(io.stderr:seek("set", 0))
+        local diagnostics = assert(io.stderr:read("*a"))
+        assert(diagnostic_stream:close())
+        diagnostic_stream = nil
+        io.stderr = previous_stderr
+
+        -- Every part of every module is its own compiler process in one batch.
+        local commands = read_file(state_directory .. "/commands")
+        local parts = {}
+        for _, leaf in ipairs(leaves) do
+            parts[leaf] = {}
+            for command in commands:gmatch("[^\n]+") do
+                local part = command:match("/batch/" .. leaf .. "%.part(%d+)%.c")
+                if part then
+                    parts[leaf][#parts[leaf] + 1] = tonumber(part)
+                elseif command:find("/batch/" .. leaf .. ".c", 1, true) then
+                    parts[leaf][#parts[leaf] + 1] = 0
+                end
+            end
+            table.sort(parts[leaf])
+        end
+        assert.is_true(#parts.one >= 2, commands)
+        assert.is_true(#parts.eight >= 2, commands)
+        assert.equal(tostring(JOBS) .. "\n",
+            read_file(state_directory .. "/maximum"))
+
+        -- Diagnostics replay in module, then part, order.
+        local previous = 0
+        for _, leaf in ipairs(leaves) do
+            for _, part in ipairs(parts[leaf]) do
+                local label = part == 0 and leaf or (leaf .. ".part" .. part)
+                local position = assert(diagnostics:find(
+                    "parallel compiler diagnostic: " .. label .. "\n", 1, true),
+                    diagnostics)
+                assert.is_true(previous < position, diagnostics)
+                previous = position
+            end
+        end
+
+        -- The failed part fails only its module, which publishes nothing.
+        assert.falsy(results[1].ok)
+        assert.equal("exit", results[1].err)
+        assert.truthy(diagnostics:find("parallel compiler sentinel: one.part1", 1, true),
+            diagnostics)
+        for _, part in ipairs(parts.one) do
+            assert.is_false(file_exists(driver.part_object_filename(
+                source_root .. "/batch/one", part)))
+        end
+        assert.is_false(file_exists(source_root .. "/batch/one.parts"))
+        for index = 2, 3 do
+            local leaf = leaves[index]
+            assert.truthy(results[index].ok, results[index].err)
+            assert.equal(#parts[leaf], #results[index].objects)
+            for _, object in ipairs(results[index].objects) do
+                assert.is_true(file_exists(object), object)
+            end
+            assert.is_true(file_exists(source_root .. "/batch/" .. leaf .. ".parts"))
+        end
     end)
 
     it("rejects duplicate modules and aliased object outputs", function()
@@ -570,7 +782,7 @@ describe("parallel generated-C compilation", function()
             "share object output", 1, true), tostring(failure))
     end)
 
-    it("bounds a self-referential object-output symlink", function()
+    it("rejects a self-referential object-output symlink without replacing it", function()
         local available, message = filesystem.symlink_capability()
         if not available then
             pending(message)
@@ -581,8 +793,10 @@ describe("parallel generated-C compilation", function()
         assert(lfs.link("./loop.o", source_root .. "/loop.o", true))
 
         local results = driver.compile_modules({ request }, JOBS, false)
-        assert.truthy(results[1].ok, results[1].err)
-        assert.truthy(file_exists(source_root .. "/loop.o"))
+        assert.is_nil(results[1].ok)
+        assert.matches("regular nonlink file", results[1].err, 1, true)
+        assert.equal("link", lfs.symlinkattributes(source_root .. "/loop.o", "mode"))
+        assert.equal("./loop.o", lfs.symlinkattributes(source_root .. "/loop.o", "target"))
     end)
 
     it("reports completion channel creation failures without launching", function()
@@ -674,24 +888,17 @@ describe("parallel generated-C compilation", function()
                 return nil, "injected completion read failure"
             end
         else
-            io.open = function(path, mode)
-                local file, open_err = previous_open(path, mode)
-                if mode ~= "r+" or not file then return file, open_err end
-                return {
-                    read = function()
-                        return nil, "injected completion read failure"
-                    end,
-                    close = function()
-                        return file:close()
-                    end,
-                }
-            end
+            override_completion_file({
+                read = function()
+                    return nil, "injected completion read failure"
+                end,
+            })
         end
 
         local results = driver.compile_modules(
             checked_requests(REFILL_LEAVES), JOBS, false)
         restore_tmpname()
-        io.open = previous_open
+        restore_completion_file()
         for _, result in ipairs(results) do
             assert.falsy(result.ok)
             assert.truthy(tostring(result.err):find(
@@ -716,23 +923,16 @@ describe("parallel generated-C compilation", function()
                 return nil, "injected completion close failure"
             end
         else
-            io.open = function(path, mode)
-                local file, open_err = previous_open(path, mode)
-                if mode ~= "r+" or not file then return file, open_err end
-                return {
-                    read = function(_, pattern)
-                        return file:read(pattern)
-                    end,
-                    close = function()
-                        assert(file:close())
-                        return nil, "injected completion close failure"
-                    end,
-                }
-            end
+            override_completion_file({
+                close = function(original, file)
+                    assert(original(file))
+                    return nil, "injected completion close failure"
+                end,
+            })
         end
 
         local results = driver.compile_modules(checked_requests(), JOBS, false)
-        io.open = previous_open
+        restore_completion_file()
         for _, result in ipairs(results) do
             assert.falsy(result.ok)
             assert.truthy(tostring(result.err):find(
@@ -983,11 +1183,11 @@ describe("parallel generated-C compilation", function()
         end
     end)
 
-    it("uses one CLI compilation job by default", function()
+    it("uses four CLI compilation jobs by default", function()
         local ok, output, why, code = titanc(nil)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        assert.equal("1\n", read_file(state_directory .. "/maximum"), output)
+        assert.equal("4\n", read_file(state_directory .. "/maximum"), output)
         assert.is_true(file_exists(workspace_directory ..
             (platform.windows and "/batch.dll" or "/batch.so")))
         if not platform.windows then

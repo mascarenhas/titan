@@ -20,9 +20,11 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PREFIX: ${{ github.workspace }}/.lua
       TITAN_PREFIX: ${{ github.workspace }}/.lua
-      # Standard macOS hosted runners expose three CPUs.
+      # Standard macOS hosted runners expose three CPUs; the parallel native
+      # aggregate run keeps the same explicit cap.
       MAKEFLAGS: "-j3"
       TITAN_JOBS: "3"
+      TITAN_TEST_JOBS: "3"
       OPENSSL_MODE: bundled
       LIBUV_VERSION: "1.53.0"
       # Bump when any CMake option that affects the cached archive changes.

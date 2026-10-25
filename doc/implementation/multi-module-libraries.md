@@ -157,16 +157,19 @@ Candidate membership is a compiler concern. The relative file only makes the
 fallback runtime load exact and relocatable; the logical registry owns
 initialized module identity.
 
-## One object per logical module
+## One object set per logical module
 
 Multi-module linking does not merge ASTs, module types, or generated C.
 `driver.defaultloader` checks each source module once and `coder.generate`
-emits one translation unit per logical module. A folder module has already
-been assembled into one AST, so it naturally contributes one object.
+emits one generated module per logical module: one translation unit, or
+several [parts](codegen-overview.md#translation-unit-parts) when the module is
+large. A folder module has already been assembled into one AST, so it
+naturally contributes one ordered object set: its primary object followed by
+any part objects.
 
 Library mode forms the union of every source module reachable from all
 requested roots, sorts logical names with `util.bytewise_less`, and links each
-source object exactly once. A dependency selected from a DSO remains dynamic
+source module's objects exactly once, part 0 first. A dependency selected from a DSO remains dynamic
 and contributes no object. A dependency selected from a static provider adds
 that physical archive once; its complete validated membership is available
 for direct native binding and is carried into both produced provider forms,
@@ -216,7 +219,9 @@ layout rules are in [Native nominal storage](nominal-storage.md).
 Both native forms go to one sibling staging directory; the contained DSO keeps
 the public basename so its macOS dSYM agrees. The staged pair is validated
 against itself and against an archive-backed image, then published as one
-recoverable transaction; see [Three-way
+recoverable transaction. The [provider link
+pipeline](static-compiled-modules.md#provider-link-pipeline) orders those links
+and validations within the shared job budget; see also [Three-way
 validation](static-compiled-modules.md#three-way-validation) and [Publication
 and installation](static-compiled-modules.md#publication-and-installation).
 
@@ -280,8 +285,10 @@ belongs to the Lua support API and every shim requires it. A **physical**
 provider named `titan` is valid only when its final image also contains
 `ltitanlib.o`'s genuine `luaopen_titan`. The driver checks that entry in a fresh
 Lua process (`driver.lua` `support_validation_script`) and requires exactly one
-support table exposing `_loadlib` and `_loadlibglobal`; compiler-side
-`package.loaded` state cannot satisfy the proof.
+support table exposing `_loadlib`, `_loadlibglobal`, and the compiler digest
+`_sha256_binary`. A stale support object without the digest fails as stale
+before publication. Compiler-side `package.loaded` state cannot satisfy the
+proof.
 
 The production standard library is the canonical example. One compiler
 invocation names all twenty-six logical roots (`Makefile` `STDLIB_ROOTS`):

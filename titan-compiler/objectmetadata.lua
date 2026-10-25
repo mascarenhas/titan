@@ -74,6 +74,67 @@ function objectmetadata.encode(entry, native)
     return payload
 end
 
+function objectmetadata.validate_parts(native)
+    if type(native) ~= "table" then
+        return nil, "missing object metadata table"
+    end
+    if native.parts_version ~= 1 then
+        return nil, "unsupported object part metadata version " ..
+            tostring(native.parts_version)
+    end
+    local parts = native.parts
+    if type(parts) ~= "table" or #parts < 1 then
+        return nil, "object part list must be a nonempty array"
+    end
+    for key in pairs(parts) do
+        if type(key) ~= "number" or key < 1 or key > #parts
+           or key % 1 ~= 0 then
+            return nil, "object part list must be a dense array"
+        end
+    end
+    for i = 1, #parts do
+        local part = parts[i]
+        if type(part) ~= "table" then
+            return nil, "object part entry #" .. tostring(i) .. " is not a table"
+        end
+        local index = i - 1
+        local expected_c = index == 0 and ".c"
+            or (".part" .. tostring(index) .. ".c")
+        local expected_o = index == 0 and ".o"
+            or (".part" .. tostring(index) .. ".o")
+        if part.index ~= index or part.c_suffix ~= expected_c
+           or part.object_suffix ~= expected_o then
+            return nil, "object part entry #" .. tostring(i) ..
+                " has invalid relative suffixes"
+        end
+        for key in pairs(part) do
+            if key ~= "index" and key ~= "c_suffix"
+               and key ~= "object_suffix" then
+                return nil, "object part entry #" .. tostring(i) ..
+                    " has unknown field " .. tostring(key)
+            end
+        end
+    end
+    if #parts == 1 then
+        if native.private_header ~= nil then
+            return nil, "unsplit object record cannot declare a private header"
+        end
+    else
+        if native.private_header ~= ".priv.h" then
+            return nil, "split object record requires private header suffix '.priv.h'"
+        end
+    end
+    if native.c_parts ~= nil and (type(native.c_parts) ~= "number"
+            or native.c_parts < 1 or native.c_parts % 1 ~= 0) then
+        return nil, "invalid object c_parts policy"
+    end
+    if native.split_threshold ~= nil and (type(native.split_threshold) ~= "number"
+            or native.split_threshold < 0 or native.split_threshold % 1 ~= 0) then
+        return nil, "invalid object split_threshold policy"
+    end
+    return true
+end
+
 function objectmetadata.decode(payload, origin, expected_abi)
     origin = origin or "<object source metadata>"
     expected_abi = expected_abi or version.TITAN_ABI_VERSION
@@ -88,6 +149,14 @@ function objectmetadata.decode(payload, origin, expected_abi)
                 .. tostring(expected_abi) .. " but found " .. tostring(record.abi)
         end
         local native = record.entry and record.entry.object_metadata
+        if native and (native.parts ~= nil or native.parts_version ~= nil
+                or native.private_header ~= nil) then
+            local valid_parts, parts_error = objectmetadata.validate_parts(native)
+            if not valid_parts then
+                return nil, "invalid object part metadata: " ..
+                    tostring(parts_error)
+            end
+        end
         if native and native.layouts ~= nil then
             local inventory, layout_error =
                 require("titan-compiler.nominallayout").decode(

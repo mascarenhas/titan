@@ -8,11 +8,12 @@ function coder._transfer_register_source(tlcontext, ftype, native, coercive,
     tlcontext.transfer_entries = tlcontext.transfer_entries or {}
     tlcontext.transfer_by_native = tlcontext.transfer_by_native or {}
     if tlcontext.transfer_by_native[native] then return end
+    local index = #tlcontext.transfer_entries
     local entry = {
         kind = "source", ftype = ftype, native = native,
         coercive = coercive, strict = strict, captures = captures or {},
-        loc = loc, id = tlcontext.prefix .. "transfer_entry_"
-            .. tostring(#tlcontext.transfer_entries),
+        loc = loc, index = index,
+        id = coder._private_symbol(tlcontext.module, "transfer_entry", index),
     }
     tlcontext.transfer_by_native[native] = entry
     tlcontext.transfer_entries[#tlcontext.transfer_entries + 1] = entry
@@ -140,14 +141,14 @@ local function emit_source_entry(tlcontext, entry)
         ]], { COUNT = #entry.captures })
     end
     return render([[
-        static void ${ID}_project(lua_State *L, CClosure *_fn) {
+        TITAN_MODULE_PRIVATE void ${ID}_project(lua_State *L, CClosure *_fn) {
             if (_fn->nupvalues != $NUP || _fn->f != $COERCIVE)
                 luaL_error(L, "closure does not match its transfer entry");
             Udata *_mod = uvalue(&_fn->upvalue[0]);
             (void)_mod;
             $PROJECT
         }
-        static void ${ID}_restore(lua_State *L, Udata *_mod, int _capture_base) {
+        TITAN_MODULE_PRIVATE void ${ID}_restore(lua_State *L, Udata *_mod, int _capture_base) {
             (void)_mod;
             _capture_base = lua_absindex(L, _capture_base);
             (void)_capture_base;
@@ -187,12 +188,12 @@ end
 
 local function emit_adapter_entry(tlcontext, entry)
     return render([[
-        static void ${ID}_project(lua_State *L, CClosure *_fn) {
+        TITAN_MODULE_PRIVATE void ${ID}_project(lua_State *L, CClosure *_fn) {
             if (_fn->nupvalues < 6)
                 luaL_error(L, "invalid adjusted closure capture");
             lua_pushtvalue(L, _fn->upvalue[_fn->nupvalues - 2]);
         }
-        static void ${ID}_restore(lua_State *L, Udata *_mod, int _capture_base) {
+        TITAN_MODULE_PRIVATE void ${ID}_restore(lua_State *L, Udata *_mod, int _capture_base) {
             _capture_base = lua_absindex(L, _capture_base);
             TValue _source_value = lua_totvalue(L, _capture_base);
             CClosure *_source = ttisCclosure(&_source_value)
@@ -227,17 +228,25 @@ local function emit_adapter_entry(tlcontext, entry)
     })
 end
 
-function coder._transfer_emit_entry(tlcontext, code, entry)
+function coder._transfer_emit_entry(tlcontext, sigs, code, entry)
     if entry.emitted then return end
     entry.emitted = true
+    coder._record_private_symbol(tlcontext, entry.id .. "_project",
+        "closure transfer entry " .. tostring(entry.index) .. " project")
+    coder._record_private_symbol(tlcontext, entry.id .. "_restore",
+        "closure transfer entry " .. tostring(entry.index) .. " restore")
+    sigs[#sigs + 1] = render([[
+        TITAN_MODULE_PRIVATE void ${ID}_project(lua_State *L, CClosure *_fn);
+        TITAN_MODULE_PRIVATE void ${ID}_restore(lua_State *L, Udata *_mod, int _capture_base);
+    ]], { ID = entry.id })
     code[#code + 1] = entry.kind == "adapter"
         and emit_adapter_entry(tlcontext, entry)
         or emit_source_entry(tlcontext, entry)
 end
 
-function coder._transfer_emit_sources(tlcontext, code)
+function coder._transfer_emit_sources(tlcontext, sigs, code)
     for _, entry in ipairs(tlcontext.transfer_entries or {}) do
-        coder._transfer_emit_entry(tlcontext, code, entry)
+        coder._transfer_emit_entry(tlcontext, sigs, code, entry)
     end
 end
 
@@ -258,16 +267,21 @@ function coder._transfer_emit_manifest(tlcontext, sigs, code)
     end
     local array = "NULL"
     if #initializers > 0 then
-        array = tlcontext.prefix .. "transfer_entries"
-        code[#code + 1] = "static const TitanTransferEntry " .. array
+        array = coder._private_symbol(tlcontext.module, "transfer_entries")
+        coder._record_private_symbol(tlcontext, array,
+            "closure transfer entry table")
+        code[#code + 1] = "TITAN_MODULE_PRIVATE const TitanTransferEntry " .. array
             .. "[] = {\n" .. table.concat(initializers, ",\n") .. "\n};"
     end
     -- Generated nominal codecs are reached through their metatable binding
     -- (TITAN_MT_CODEC); only the immutable entry array is emitted here.
     coder._codec_emit_table(tlcontext, code)
-    tlcontext.transfer_manifest = tlcontext.prefix .. "transfer_manifest"
+    tlcontext.transfer_manifest = coder._private_symbol(
+        tlcontext.module, "transfer_manifest")
+    coder._record_private_symbol(tlcontext, tlcontext.transfer_manifest,
+        "closure transfer manifest")
     code[#code + 1] = render([[
-        static const TitanTransferModule $MANIFEST = {
+        TITAN_MODULE_PRIVATE const TitanTransferModule $MANIFEST = {
             $NAME, $COUNT, $ENTRIES
         };
     ]], {

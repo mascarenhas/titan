@@ -679,6 +679,37 @@ function test_thread_spawn_arities_status_task_and_failure(_context: test.Contex
   end)
 end
 
+local function thread_string_failure_origin(): integer
+  raise "nested worker string failure"
+end
+
+function test_thread_renders_unobserved_string_failure_before_join(_context: test.Context)
+  runtime_test.run(function ()
+    local retired_tx, retired_rx = thread.channel<|boolean|>(1)
+    defer retired_tx:close()
+    defer retired_rx:close()
+    local worker = thread.spawn_one(function (retired: thread.Sender<|boolean|>): integer
+      -- Runtime retirement follows failure rendering. Do not observe the Thread
+      -- until this signal: join/status/task would otherwise bypass rendering.
+      async.add_close_listener(function ()
+        test.assert(retired:try_send(true), "worker retirement signal was lost")
+      end)
+      return thread_string_failure_origin()
+    end, retired_tx)
+    defer worker:join()
+    test.assert(retired_rx:receive(), "worker Runtime did not retire")
+    case worker:join()
+    when failed(failure) then
+      test.assert(failure.error == "nested worker string failure",
+                  "worker failure lost its original string")
+      test.assert(strings.find(failure.traceback, "thread_string_failure_origin") ~= nil,
+                  "worker failure lost its nested native frame")
+    else
+      raise "worker did not fail after rendering its string error"
+    end
+  end)
+end
+
 function test_thread_cancellation_propagates_to_worker(_context: test.Context)
   runtime_test.run(function ()
     local ready_tx, ready_rx = thread.channel<|boolean|>(1)

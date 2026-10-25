@@ -53,32 +53,52 @@ if ! printf '%s\n' "${shards[@]}" | xargs -r -n1 -P2 bash -c '
 fi
 
 export workspace worker_root busted
-xargs_status=0
-printf '%s\n' "${shards[@]}" | xargs -r -n1 -P2 bash -c '
-    shard=$1
+# Run one phase of one covered+stress shard in its private extraction. Its
+# LuaCov stats accumulate across both phases in that extraction.
+run_shard_phase='
+    phase=$1
+    shard=$2
     worker=$worker_root/work-$shard
     log=$worker_root/shard-$shard.log
     started=$SECONDS
-    printf "===== starting compiler covered+stress shard %s =====\n" "$shard"
+    printf "===== starting compiler covered+stress shard %s (%s files) =====\n" "$shard" "$phase"
     (
         cd "$worker" || exit 1
-        rm -f luacov.stats.out luacov.report.out || exit 1
+        if [[ $phase == ordinary ]]; then
+            rm -f luacov.stats.out luacov.report.out || exit 1
+        fi
         mkdir -p .tmp || exit 1
         export TMPDIR="$PWD/.tmp"
         unset LUACOV_CONFIG
-        BUSTED="$busted" MAKEFLAGS=-j1 TITAN_JOBS=1 \
-            bash spec/support/ci_test_groups.sh "compiler-shard-$shard"
-    ) 2>&1 | sed -u "s/^/[compiler shard $shard] /" | tee "$log"
+        if [[ $phase == exclusive ]]; then
+            # These files run alone and set their own compiler and Make
+            # caps; titanc reads an inherited -j1 as a serial job policy.
+            env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u TITAN_JOBS \
+                BUSTED="$busted" \
+                bash spec/support/ci_test_groups.sh "compiler-shard-$shard" "$phase"
+        else
+            BUSTED="$busted" MAKEFLAGS=-j1 TITAN_JOBS=1 \
+                bash spec/support/ci_test_groups.sh "compiler-shard-$shard" "$phase"
+        fi
+    ) 2>&1 | sed -u "s/^/[compiler shard $shard] /" | tee -a "$log"
     pipeline_status=("${PIPESTATUS[@]}")
     status=${pipeline_status[0]}
     if (( pipeline_status[1] != 0 || pipeline_status[2] != 0 )); then
         status=1
     fi
-    printf "===== finished compiler covered+stress shard %s: status=%s, %ss =====\n" \
-        "$shard" "$status" "$((SECONDS - started))"
-    printf "%s\n" "$status" > "$worker_root/shard-$shard.status"
+    printf "===== finished compiler covered+stress shard %s (%s files): status=%s, %ss =====\n" \
+        "$shard" "$phase" "$status" "$((SECONDS - started))"
+    printf "%s\n" "$status" > "$worker_root/shard-$shard.$phase.status"
     exit "$status"
-' _ || xargs_status=$?
+'
+# The two shards share this runner concurrently. Files that count real
+# overlapping compiler processes or drive real Make jobservers then run
+# alone, one shard after the other.
+xargs_status=0
+printf '%s\n' "${shards[@]}" | xargs -r -n1 -P2 bash -c "$run_shard_phase" _ \
+    ordinary || xargs_status=$?
+printf '%s\n' "${shards[@]}" | xargs -r -n1 -P1 bash -c "$run_shard_phase" _ \
+    exclusive || xargs_status=$?
 
 status=$xargs_status
 for shard in "${shards[@]}"; do
@@ -86,15 +106,17 @@ for shard in "${shards[@]}"; do
         echo "compiler shard $shard produced no readable log" >&2
         status=1
     fi
-    shard_status=
-    if [[ -f $worker_root/shard-$shard.status ]]; then
-        read -r shard_status < "$worker_root/shard-$shard.status"
-    fi
-    if [[ ! $shard_status =~ ^[0-9]+$ || $shard_status != 0 ]]; then
-        echo "compiler shard $shard failed: " \
-            "${shard_status:-missing status}" >&2
-        status=1
-    fi
+    for phase in ordinary exclusive; do
+        shard_status=
+        if [[ -f $worker_root/shard-$shard.$phase.status ]]; then
+            read -r shard_status < "$worker_root/shard-$shard.$phase.status"
+        fi
+        if [[ ! $shard_status =~ ^[0-9]+$ || $shard_status != 0 ]]; then
+            echo "compiler shard $shard ($phase files) failed: " \
+                "${shard_status:-missing status}" >&2
+            status=1
+        fi
+    done
 done
 if (( status != 0 )); then exit 1; fi
 

@@ -273,16 +273,17 @@ local function search_candidate_identity(path, openable, strategy)
     return cpp.header_search_identity(path, openable, strategy)
 end
 
-local function file_contents_identity(path, contents, strategy, read_state)
-    return cpp.header_file_identity(contents, path, strategy, read_state)
+local function file_contents_identity(path, contents, strategy, read_state, options)
+    return cpp.header_file_identity(contents, path, strategy, read_state, options)
 end
 
 -- Public, side-effect-free identity helper used by long-lived compiler
 -- clients to revalidate only the exact header paths and include candidates
 -- observed by cdriver. A search identity deliberately distinguishes a broken
 -- symlink from a symlink whose target is now a usable regular file.
-function cdriver.header_input_identity(kind, path, strategy)
-    return cpp.header_input_identity(kind, path, strategy or default_io)
+-- `options.cache_adapter.sha256_binary` optionally supplies the digest.
+function cdriver.header_input_identity(kind, path, strategy, options)
+    return cpp.header_input_identity(kind, path, strategy or default_io, options)
 end
 
 cdriver.revalidate_header_input = cpp.revalidate_header_input
@@ -619,7 +620,7 @@ local function header_entry_is_current(entry, options)
 end
 
 local function refresh_header_observations(entry, key, adapter)
-    if not entry.observations_changed or not adapter then return end
+    if not entry.observations_changed or not cacheadapter.can_get(adapter) then return end
     local inputs = header_entry_inputs(entry)
     local refreshed = cacheadapter.refresh_inputs(adapter, HEADER_CACHE_KIND, key, inputs)
     if refreshed == nil and adapter.put then
@@ -845,8 +846,8 @@ local function process_file_inner(filename, options)
             end
             return true
         end
-        return record_dependency(
-            path, file_contents_identity(path, contents, strategy, read_state))
+        return record_dependency(path, file_contents_identity(
+            path, contents, strategy, read_state, validation_options))
     end
     ctx.include_search_observer = function(path, openable)
         path = absolute_lookup_path(path, cwd, strategy)
@@ -916,7 +917,7 @@ local function process_file_inner(filename, options)
     include.c_header_graph_key = cache_key
     cache.lookups = cache.lookups + 1
     local restored_validated
-    if not cache.entries[cache_key] and options.cache_adapter then
+    if not cache.entries[cache_key] and cacheadapter.can_get(options.cache_adapter) then
         local payload, saved_inputs = cacheadapter.get(
             options.cache_adapter, HEADER_CACHE_KIND, cache_key)
         local decoded, restored = pcall(decode_header_entry,

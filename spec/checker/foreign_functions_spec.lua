@@ -182,14 +182,16 @@ describe("foreign functions (checker)", function()
             assert.truthy(ok, err)
 
             local call = ast[3].block.stats[1].exps[1]
-            assert.same({ source = true, module = "test", name = "second" },
-                call._direct_foreign_reference)
+            assert.same({
+                source = true, module = "test", name = "second", islocal = false,
+            }, call._direct_foreign_reference)
             assert.equal("foreign", call._named_call_kind)
             assert.same({ 2, 1 }, call._named_arg_order)
 
             local address = ast[5].block.stats[1].exps[1]
-            assert.same({ source = true, module = "test", name = "second" },
-                address._foreign_function_reference)
+            assert.same({
+                source = true, module = "test", name = "second", islocal = false,
+            }, address._foreign_function_reference)
         end)
     end)
 

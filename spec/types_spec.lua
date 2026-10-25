@@ -3814,3 +3814,180 @@ describe("Titan types", function()
     end)
 
 end)
+
+describe("contains_generic batch memo", function()
+    local function parameter()
+        local scope = types.GenericScope("sample", "sample.Box", nil,
+            "owner", "record")
+        return types.Parameter(scope, 1, "T", nil)
+    end
+
+    it("records every table of a complete negative query", function()
+        local shared = types.Array(types.Integer(), { tag = "no" })
+        local left = types.Map(types.String(), shared)
+        local right = types.Function({ shared }, { types.Boolean() }, false, nil, nil)
+        local memo = {}
+        assert.is_false(types.contains_generic(left, memo))
+        assert.is_false(memo[left])
+        assert.is_false(memo[shared])
+        -- The shared negative subgraph now answers from the memo.
+        assert.is_false(types.contains_generic(right, memo))
+        assert.is_false(memo[right])
+    end)
+
+    it("never publishes an incomplete answer from a positive cycle", function()
+        local negative = { _tag = "Type.Array" }
+        negative.elem = negative
+        local memo = {}
+        assert.is_false(types.contains_generic(negative, memo))
+        assert.is_false(memo[negative])
+
+        local root = { _tag = "Type.Map" }
+        local inner = { _tag = "Type.Array", elem = root }
+        root.keys, root.values = inner, parameter()
+        assert.is_true(types.contains_generic(root, memo))
+        assert.is_true(memo[root])
+        -- `inner` may have answered false through its back-edge to `root`.
+        assert.is_nil(memo[inner])
+        assert.is_true(types.contains_generic(inner, memo))
+        assert.is_true(memo[inner])
+    end)
+
+    it("keeps uncached callers exact across mutation", function()
+        local holder = types.Array(types.Integer(), { tag = "no" })
+        local stale = {}
+        assert.is_false(types.contains_generic(holder))
+        assert.is_false(types.contains_generic(holder, stale))
+        holder.elem = parameter()
+        assert.is_true(types.contains_generic(holder))
+        -- A memo belongs to one read-only batch; a fresh batch sees the edit.
+        assert.is_true(types.contains_generic(holder, {}))
+        assert.has_error(function() types.assert_erased(holder, {}) end,
+            "generic type reached erased core")
+    end)
+
+    it("agrees with unmemoized queries for shared cyclic graphs in any order", function()
+        local seed = 2953
+        local function random(limit)
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            return seed % limit + 1
+        end
+        for _ = 1, 40 do
+            local nodes = {}
+            for index = 1, 24 do
+                nodes[index] = random(9) == 1 and parameter() or { _tag = "Type.Array" }
+            end
+            for _, node in ipairs(nodes) do
+                if node._tag == "Type.Array" then
+                    node.elem = nodes[random(#nodes)]
+                    if random(2) == 1 then node.extra = nodes[random(#nodes)] end
+                end
+            end
+            local expected = {}
+            for index, node in ipairs(nodes) do
+                expected[index] = types.contains_generic(node)
+            end
+            local memo = {}
+            for _ = 1, #nodes * 2 do
+                local index = random(#nodes)
+                assert.equal(expected[index], types.contains_generic(nodes[index], memo))
+            end
+            for index, node in ipairs(nodes) do
+                if memo[node] ~= nil then assert.equal(expected[index], memo[node]) end
+            end
+        end
+    end)
+
+    -- A C declaration node's `_c_origin_header` is header provenance, not
+    -- type structure; the walk skips it but follows every other edge.
+    local function origin_header(rendered)
+        local observation = { modified_seconds = 1, modified_nanoseconds = 2,
+                              physical_identity = "inode:1" }
+        local input = { kind = "file", path = "/tmp/origin.h",
+                        identity = "/tmp/origin.h", observation = observation }
+        local header = { modname = "origin", logical_name = "origin.ffi.h",
+                         identity = "/tmp/origin.ffi.h", contents = "",
+                         direct_includes = { rendered },
+                         typedef_declarations = { "typedef int origin_t;" },
+                         dependencies = {}, search_inputs = { input },
+                         digest = "0" }
+        header.dependencies[1] = header
+        return { rendered = rendered, generated_header = header,
+                 c_header_dependencies = { input },
+                 c_header_search_inputs = { input } }
+    end
+
+    local function cyclic_c_graph(include)
+        local int = types.CInteger("int", true, 3, 32)
+        local alias = types.CTypedef("origin_int", int)
+        local owner = types.CStruct(nil, "origin_node", nil, {}, true, false)
+        local pointer = types.CPointer(owner, {})
+        owner.fields[1] = types.CField(owner, "next", pointer, nil, false)
+        owner.fields[2] = types.CField(owner, "value", alias, nil, false)
+        for _, node in ipairs({ alias, owner, pointer, owner.fields[1],
+                                owner.fields[2] }) do
+            node._c_origin_header = include
+        end
+        return pointer, owner, alias
+    end
+
+    it("skips only header provenance whose declared records hold no types", function()
+        -- If one of these records ever gains a type-valued field, the
+        -- `_c_origin_header` skip in types.contains_generic must be revisited.
+        local schemas = require "titan-compiler.declarationschemas"
+        local records = { include = true, header = true, input = true, observation = true }
+        local lists = { headers = "header", inputs = "input" }
+        local plain = { string = true, integer = true, boolean = true, names = true }
+        for name in pairs(records) do
+            for field, kind in pairs(assert(schemas[name], name)) do
+                local base = kind:gsub("%?$", "")
+                assert.is_true(plain[base] or records[lists[base] or base] or false,
+                    name .. "." .. field .. " has kind " .. kind)
+            end
+        end
+    end)
+
+    it("answers exactly for cyclic C declaration graphs without walking their header provenance", function()
+        local include = origin_header('"/tmp/origin.h"')
+        local pointer, owner, alias = cyclic_c_graph(include)
+        local member = types.ModuleMember("origin", "make",
+            types.CFunction({ pointer }, alias, false, nil), { "node" })
+        member._c_origin_header = include
+
+        assert.is_false(types.contains_generic(pointer))
+        assert.is_false(types.contains_generic(member))
+        assert.is_true(types.is_erased(owner))
+
+        local memo = {}
+        assert.is_false(types.contains_generic(member, memo))
+        assert.is_false(memo[member])
+        assert.is_false(memo[owner])
+        assert.is_false(memo[owner.fields[1]])
+        -- Provenance records are never part of a complete negative walk.
+        assert.is_nil(memo[include])
+        assert.is_nil(memo[include.generated_header])
+        assert.is_nil(memo[include.c_header_dependencies[1]])
+        -- Later roots sharing the same C graph answer from the memo.
+        assert.is_false(types.contains_generic(alias, memo))
+        assert.is_false(memo[alias])
+    end)
+
+    it("still reaches generic forms through every type edge beside provenance", function()
+        local include = origin_header("<origin.h>")
+        local pointer, owner = cyclic_c_graph(include)
+        local holder = types.Function({ pointer, parameter() }, {}, false, nil, nil)
+        local member = types.ModuleMember("origin", "use", holder, nil)
+        member._c_origin_header = include
+        assert.is_true(types.contains_generic(member))
+        assert.has_error(function() types.assert_erased(member, {}) end,
+            "generic type reached erased core")
+
+        -- A type edge rewritten between queries is visible to a fresh query
+        -- (here an artificial generic leaf): only provenance is skipped.
+        local before = types.contains_generic(owner)
+        owner.fields[2].type = parameter()
+        assert.is_false(before)
+        assert.is_true(types.contains_generic(owner))
+        assert.is_true(types.contains_generic(pointer, {}))
+    end)
+end)

@@ -227,10 +227,15 @@ function coder._reflection_constructor(ctx, node, variant)
     return table.concat(code, "\n")
 end
 
-function coder._reflection_metadata(ctx, code, node)
+function coder._reflection_metadata(ctx, sigs, code, node)
     local owner = node._type
+    local tlcontext = ctx.tlcontext or ctx
     local projector = coder._nominal_function_prefix(owner.name, "projection")
     local constructor = coder._nominal_function_prefix(owner.name, "construction")
+    coder._record_private_symbol(tlcontext, projector,
+        "nominal reflection '" .. owner.name .. "' projection")
+    coder._record_private_symbol(tlcontext, constructor,
+        "nominal reflection '" .. owner.name .. "' construction")
     local cases, constructors = {}, {}
     if owner._tag == "Type.Record" then
         local plan = coder._nominal_plan(ctx, owner)
@@ -267,11 +272,15 @@ function coder._reflection_metadata(ctx, code, node)
         constructors = { "switch (tag) { " .. table.concat(constructors, "\n")
             .. "default: luaL_error(L, \"cannot construct a private or invalid variant\"); }" }
     end
-    code[#code + 1] = "static void " .. projector
+    sigs[#sigs + 1] = "TITAN_MODULE_PRIVATE void " .. projector
+        .. "(lua_State *L, Udata *_rec, lua_Integer index, TValue *output);\n"
+        .. "TITAN_MODULE_PRIVATE void " .. constructor
+        .. "(lua_State *L, Udata *_mod, lua_Integer tag, TValue *input, TValue *output);"
+    code[#code + 1] = "TITAN_MODULE_PRIVATE void " .. projector
         .. "(lua_State *L, Udata *_rec, lua_Integer index, TValue *output) {\n"
         .. "ptrdiff_t _saved = savestack(L, L->top.p); titan_ensure_stack(L, 2);\n"
         .. table.concat(cases, "\n") .. "\n*output = lua_totvalue(L, -1); L->top.p = restorestack(L, _saved);\n}"
-    code[#code + 1] = "static void " .. constructor
+    code[#code + 1] = "TITAN_MODULE_PRIVATE void " .. constructor
         .. "(lua_State *L, Udata *_mod, lua_Integer tag, TValue *input, TValue *output) {\n"
         .. "(void)tag; (void)_mod; (void)input; (void)output;\n"
         .. table.concat(constructors, "\n") .. "\n}"

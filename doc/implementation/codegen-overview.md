@@ -14,7 +14,15 @@ generation.
 
 ```lua
 coder.generate(modname, ast, static_deps, abi, emit_line_directives, options)
-    --> source, direct_native_modules, foreign_header, native_bindings, encoded_layouts
+    --> {
+          parts = { { index = 0, code = "...", code_bytes = n }, ... },
+          private_header = "..." | nil,
+          private_symbols = { { symbol = "...", owner = "..." }, ... },
+          direct_native_modules = { ... },
+          foreign_header = "..." | nil,
+          native_bindings = { ... },
+          encoded_layouts = "...",
+        }
 ```
 
 (`titan-compiler/coder/generate.lua` `coder.generate`)
@@ -28,15 +36,29 @@ coder.generate(modname, ast, static_deps, abi, emit_line_directives, options)
   absent.
 - `abi` is the required compiled-module ABI string.
 - `emit_line_directives` defaults to true when omitted.
-- `options` carries the coverage mode (`coverage`, `coverage_backend`) and the
-  imported nominal layout plans (`nominal_layouts`).
+- `options` carries the coverage mode (`coverage`, `coverage_backend`), the
+  imported nominal layout plans (`nominal_layouts`), and the
+  [translation-unit split](#translation-unit-parts) policy: the maximum part
+  count `c_parts` (a positive integer, default `1`), the threshold
+  `split_threshold` (a nonnegative integer, default
+  `coder.DEFAULT_SPLIT_THRESHOLD`, 2 MiB), and `private_header_output`, the
+  path that split parts `#include` (default `<modname as path>.priv.h`). The
+  driver passes its effective `--c-parts` value, the threshold, and the
+  absolute `<stem>.priv.h` path; only tests override the threshold.
 
-`source` is the complete text of one C translation unit.
+`parts` is a dense array of C translation units whose `index` fields are
+`0 .. K - 1` in array order. `code` is the unit's complete C text and
+`code_bytes` its share of the module's measured code size. An unsplit module
+has exactly one part and no `private_header`. A split module's
+`private_header` is the text of the shared `<stem>.priv.h`.
+`private_symbols` inventories every module-private linkage name, with an
+owner description for diagnostics.
 `direct_native_modules` is the set of direct dependencies that the generated
-object actually references. `native_bindings` classifies each referenced
+module actually references. `native_bindings` classifies each referenced
 dependency as `direct`, `handle` (an explicit dynamic import), or `global` (a
 transitive owner reached without its own import). `encoded_layouts` is this
-module's physical nominal layout string.
+module's physical nominal layout string. `foreign_header` is the generated
+`.titan.h` text when the module defines foreign functions.
 
 For a [folder module](folder-modules.md), `ast` is the same dense root list
 as for a flat module. It is assembled from independently parsed files and
@@ -69,9 +91,10 @@ the shape of the output and the protocols it implements. Related chapters:
 - strict and dynamic policies: [type relations and boundary plans](type-relations-and-boundaries.md);
 - Array representation and lowering: [Dense Arrays](dense-arrays.md).
 
-One no-`main` CLI invocation may link several translation units into a single
-[multi-module provider](multi-module-libraries.md). The coder still runs once
-per logical module; it never sees a provider AST or emits aggregate metadata.
+One no-`main` CLI invocation may link the objects of several logical modules
+into a single [multi-module provider](multi-module-libraries.md). The coder
+still runs once per logical module; it never sees a provider AST or emits
+aggregate metadata.
 
 ## No C AST: templates, `util.render`, and `clang-format`
 
@@ -102,9 +125,12 @@ includes.
 
 ## Anatomy of a generated translation unit
 
-`coder.generate` assembles the unit from the preamble template
-(`coder/module.lua` `preamble`) and a `code` list. Three kind-filtered passes
-over the top levels fill the list:
+`coder.generate` renders the preamble template (`coder/module.lua` `preamble`)
+and an ordered list of emission items. Each item is one complete top-level C
+text classified as `callable`, `pinned`, or `metadata`; the classification
+drives the [translation-unit split](#translation-unit-parts). This section
+describes the single unit of an unsplit module. Three kind-filtered passes over
+the top levels fill the item list:
 
 1. imports, variables, records, unions, and Interfaces;
 2. nominal static-namespace tables;
@@ -128,8 +154,9 @@ semantic effect may still use `pairs`. The pieces appear in this order:
    compiler-provided and system headers get angle includes
    ([FFI internals](ffi-internals.md)). Then `cpreamble.after_foreign_imports`
    defines `TITAN_SOURCE_LOCAL` (hidden visibility) and silences clang's
-   `-Wunused-function` and `-Wparentheses-equality`. On ELF, a
-   `#pragma GCC visibility push(protected)` follows; see
+   `-Wunused-function` and `-Wparentheses-equality`. The `$MODULEPRIVATE`
+   definition of [`TITAN_MODULE_PRIVATE`](#storage-and-visibility) follows.
+   On ELF, a `#pragma GCC visibility push(protected)` comes next; see
    [the module protocol](#the-module-protocol).
 3. **Cross-module declarations** (`$INCLUDES`, filled by
    `init_data_from_other_modules`): `extern` prototypes for the direct
@@ -137,9 +164,11 @@ semantic effect may still use `pairs`. The pieces appear in this order:
    address bindings of imported raw foreign functions. Dynamic dependencies'
    bindings live in the module's native payload instead; see
    [Static vs dynamic dependency wiring](#static-vs-dynamic-dependency-wiring).
-4. **Forward signatures** (`$SIGS`): the native-convention prototype of
-   every function in this module, plus
-   `extern Udata *<dep>_init(lua_State *L);` per direct import.
+4. **Forward declarations** (`$SIGS`): the nominal payload declarations, the
+   module's `<prefix>native_data` payload type, the prototype of every
+   generated function in this module, and
+   `extern Udata *<dep>_init(lua_State *L);` per direct import. A split
+   module also declares its function-type tag arrays here.
 5. **Nominal support**: per record, union, and Interface, the
    `meta_index`/`meta_newindex` metamethod entries that serve field access from
    Lua ([Lua interop internals](lua-interop-internals.md)). A nominal type's
@@ -159,12 +188,12 @@ semantic effect may still use `pairs`. The pieces appear in this order:
 8. **`<prefix>_abi`**, **`<prefix>_abi_value`**, **`<prefix>_types`**,
    **`<prefix>_layouts`**, **`<prefix>_init`**, **`luaopen_<prefix>`**: the
    module-protocol functions, described below. One final DSO may contain this
-   complete set for several translation units; each set remains independent.
+   complete set for several logical modules; each set remains independent.
 
 ### Mixed-source `#line` attribution
 
-One folder-module C file contains functions and statements from several Titan
-files. `emitline(node)` (`coder/names.lua`) therefore works per node. It
+A folder module's generated C contains functions and statements from several
+Titan files. `emitline(node)` (`coder/names.lua`) therefore works per node. It
 C-quotes `node.loc.filename` and emits `#line` at safe physical-line sites
 such as function entries, statements, calls, `raise`, and related throw paths.
 It never installs one directive for the whole translation unit and never
@@ -188,7 +217,8 @@ Titan-attributed debug filenames to keep ordinary native Titan frames, so this
 mode can drop them from logical traces even though the symbol-to-display-name
 registry is unchanged.
 
-A trimmed but real example (elisions marked `...`). This module:
+A trimmed but real example of an unsplit module (elisions marked `...`). This
+module:
 
 ```titan
 -- counter.titan
@@ -203,30 +233,44 @@ generates:
 ```c
 #include <stdlib.h>
 ...                /* C library and Lua internal headers, titan.h, pragmas */
-
+#define TITAN_MODULE_PRIVATE static
+...
+#if defined(__ELF__)
+#pragma GCC visibility push(protected)
+#endif
+...                /* $SIGS: native payload type and every prototype */
 lua_Integer counter_\u2133_inc_titan(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer _param_n);
+TITAN_MODULE_PRIVATE int counter_\u2133_inc_titanentry_lua(lua_State *L);
+...
+
+TITAN_SOURCE_LOCAL const void *counter_module_identity(void) { ... }
 
 lua_Integer counter_\u2133_inc_titan(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer _param_n) {
-    {
-        return (_param_n+ ivalue(&_mod->uv[0].uv));
-    }
-}
-
-static int counter_\u2133_inc_titanentry_lua(lua_State *L) {
-    ...    /* argument count adjustment, error handler, dynamic argument plan */
-    lua_Integer res = counter_\u2133_inc_titan(L, _mod, _fn, _param_1);
-    setivalue(s2v(_firstret), res);
+    ...
+    _tmp_1 = intop(+, _param_n,  ivalue(&_mod->uv[0].uv));
     ...
 }
 
-static int counter_\u2133_inc_titanentry_strict(lua_State *L) {
+TITAN_MODULE_PRIVATE int counter_\u2133_inc_titanentry_lua(lua_State *L) {
+    ...    /* argument count adjustment, error handler, dynamic argument plan */
+}
+
+TITAN_MODULE_PRIVATE int counter_\u2133_inc_titanentry_strict(lua_State *L) {
     ...    /* hidden original closure plus strict argument guards */
 }
 
-static int counter_\u2133_meta_index(lua_State *L) { ... }    /* module member read  */
-static int counter_\u2133_meta_newindex(lua_State *L) { ... } /* module member write */
-int counter_abi(lua_State* L) { ... }       /* returns TITAN_ABI_VERSION */
+TITAN_MODULE_PRIVATE void counter_\u2119_transfer_entry_0_project(lua_State *L, CClosure *_fn) { ... }
+TITAN_MODULE_PRIVATE void counter_\u2119_transfer_entry_0_restore(lua_State *L, Udata *_mod, int _capture_base) { ... }
+TITAN_MODULE_PRIVATE const TitanTransferEntry counter_\u2119_transfer_entries[] = { ... };
+TITAN_MODULE_PRIVATE const TitanTransferModule counter_\u2119_transfer_manifest = { ... };
+TITAN_MODULE_PRIVATE int counter_\u2133_meta_index(lua_State *L) { ... }    /* module member read  */
+TITAN_MODULE_PRIVATE int counter_\u2133_meta_newindex(lua_State *L) { ... } /* module member write */
+static const unsigned char counter_titan_metadata[] = { ... };             /* .titan.meta section */
 int counter_types(lua_State* L) { ... }     /* serialized interface, below  */
+int counter_abi(lua_State* L) { ... }       /* returns TITAN_ABI_VERSION */
+...
+TITAN_MODULE_PRIVATE const char counter_\u2119_functag_0_tag[] = "Function({Integer()},{Integer()},false,nil,nil)";
+TITAN_MODULE_PRIVATE void counter_\u2119_register_preload(lua_State *L) { ... }
 
 Udata *counter_init(lua_State *L) { ... }
 
@@ -237,6 +281,12 @@ int luaopen_counter(lua_State *L) {
     L->top.p++;
     return 1;
 }
+
+TITAN_MODULE_PRIVATE void *counter_\u2119_native_symbol(const char *symbol) { ... }
+#if defined(__ELF__)
+#pragma GCC visibility pop
+#endif
+...                /* driver-appended .titan.source record */
 ```
 
 ### Generated names
@@ -270,19 +320,47 @@ Role suffixes:
 | static | `_titanstatic` | `_titanentry_luastatic` | `_titanentry_strictstatic` |
 | method | `_titanmethod` | `_titanentry_luamethod` | none |
 | bound method value | `_boundmethod` | `_titanentry_boundlua` | `_titanentry_boundstrict` |
-| lambda | `<prefix>lambda_<n>` (`lambda_register`, `coder/declarations.lua`) | `..._titanentry_lua` | `..._titanentry_strict` |
+| lambda | `<prefix>\u2119_lambda_<n>` (`lambda_register`, `coder/declarations.lua`) | `..._titanentry_lua` | `..._titanentry_strict` |
 
 Neither U+2133 nor U+2131 can occur in Titan's ASCII identifier alphabet, so
 the boundaries stay injective even when source names contain underscores.
-Generated C keeps both UCN spellings. `coder._linkage_symbol_name` converts
-them to UTF-8 `ℳ` and `ℱ` for object-file, DWARF, libbacktrace, and
-native-tool comparisons.
+Generated C keeps the UCN spellings. `coder._linkage_symbol_name` converts
+them, and the private boundary below, to UTF-8 `ℳ`, `ℱ`, and `ℙ` for
+object-file, DWARF, libbacktrace, display-name registry, and native-tool
+comparisons.
 
-`coder.external_symbols` inventories the non-file-local subset of these names
-plus each module protocol. Library-mode orchestration in the `titanc` script
-compares that exact set before code generation, including flattened
+Synthetic module-private helpers that have no source owner use a third
+boundary. `coder._private_symbol(modname, family, id)` spells them
+`<prefix>\u2119_<family>` or `<prefix>\u2119_<family>_<id>` (U+2119 DOUBLE-STRUCK
+CAPITAL P). The families are:
+
+| Family | Definition |
+| --- | --- |
+| `native_symbol` | the module's native-symbol resolver (`coder/binary.lua`) |
+| `register_preload` | the helper that registers the module's preload descriptor |
+| `titanentry_module_initializer` | the computed module-initializer body; it keeps the `titanentry` stack marker |
+| `lambda_<n>` | a hoisted lambda's native entry; its Lua and strict entries append `_titanentry_lua`/`_titanentry_strict` |
+| `callable_adapter_<n>` | a realized non-exact callable adapter site and its strict relay |
+| `array_writer_<n>` | a constructed Array element writer |
+| `transfer_entry_<n>` | a closure-transfer entry; its functions append `_project`/`_restore` |
+| `transfer_entries`, `transfer_codecs`, `transfer_manifest` | the closure-transfer entry table, nominal codec table, and module manifest |
+| `functag_<n>_tag` | a function-type tag string |
+| `interface_pair_<concrete>_to_<interface>_adapter_<slot>` | an adjusted Interface method adapter |
+| `foreign_inline_<name>` | the `static inline` direct-call helper of local foreign function `<name>` ([foreign functions](foreign-functions.md#contents-and-inline-classification)) |
+
+The family words are fixed, ids are decimal or a Titan identifier, and
+Interface fragments come from `coder._interface_symbol_fragment`, so names
+stay injective under the module prefix. Source-owned callables, accessors,
+metamethods, codecs, reflection helpers and Interface wrappers keep their
+`ℳ`/`ℱ` names even when they are module-private.
+
+`coder.external_symbols` inventories the non-file-local subset of the public
+names plus each module protocol. Library-mode orchestration in the `titanc`
+script compares that exact set before code generation, including flattened
 module-prefix and cross-family protocol collisions, rather than waiting for
-the linker to report duplicate definitions.
+the linker to report duplicate definitions. Module-private names are checked
+separately through `private_symbols`; see
+[Storage and visibility](#storage-and-visibility).
 
 ### Failure-only ASan generated-C mapping
 
@@ -292,6 +370,106 @@ failure, a mapper recovers physical generated-C lines from saved objects and a
 line-identical shadow compile, without rerunning the failure. The snapshot,
 proof steps, and refusal conditions are in
 [Continuous integration](continuous-integration.md#sanitizer-ownership-and-failure-diagnostics).
+
+## Translation-unit parts
+
+A module can be split into several C translation units so that one large
+module compiles as several parallel jobs (`coder.generate`, end of
+`coder/generate.lua`). The split happens after emission and moves whole
+emission items only. It never parses rendered C or divides a function.
+
+**Item classes.** Every emission item has one of three classes:
+
+- `callable` items are movable. Each is one complete top-level C text: a
+  top-level function, method, or static with its Lua, strict, and bound
+  entries; one of the generated function groups of a record, union, or
+  Interface (field accessors, metamethods, the `__call` entry, codecs,
+  reflection helpers); the out-of-line definition of a source foreign
+  function; a hoisted lambda with its three entries;
+  one closure-transfer `project`/`restore` pair; an Array writer; an Interface
+  pair wrapper or adapter; a realized callable adapter with its transfer
+  entry; or the module `meta_index`/`meta_newindex` pair.
+- `pinned` items stay in part 0 because they define data or a single module
+  identity: the module identity function and its static token, the computed
+  module-initializer body, the transfer entry, codec, and manifest tables,
+  `<prefix>_types`, `<prefix>_layouts`, `<prefix>_abi`, `<prefix>_compatibility`
+  and the public slot constants, imported foreign-binding pointers, the
+  function-type tag strings, `<prefix>_init` with the preload helper,
+  `luaopen_<prefix>`, and the native-symbol resolver. A large initializer is
+  never divided.
+- The `metadata` item, the `.titan.meta` section payload, also stays in part 0.
+
+**Size and threshold.** An item's `code_bytes` is the byte length of its
+rendered text, including its `#line` directives; the `metadata` item counts
+zero. The rendered preamble, the `$SIGS` declarations, and the `.titan.source`
+record that the driver appends to part 0 are not counted. The module total is
+the sum over all items. A module is split only when `c_parts > 1`, the total is
+at least `split_threshold`, and at least one item is movable; it then gets
+`min(c_parts, 1 + #movable)` candidate parts.
+
+**Unsplit output.** Without a split, the single part is the rendered preamble,
+every item in emission order, and the closing ELF visibility pop. Its
+`code_bytes` is the module total, and `private_header` is `nil`. Generation
+with `c_parts = 1` and generation below the threshold produce byte-identical
+text.
+
+**Partition.** Part 0 starts with every pinned and metadata item and a load
+equal to the pinned bytes. Movable items are sorted by decreasing `code_bytes`,
+with ties in source order, and each goes to the least-loaded part; on equal
+load the lowest part index wins. Each part then restores source order among
+its own items. Empty parts are dropped and the rest are renumbered densely, so
+the result has at most `c_parts` nonempty parts. A part's `code_bytes` is its
+final load, which the driver uses as the compile-cost estimate.
+
+**Split output.** `private_header` holds
+`/* Generated by Titan: module private declarations. */`
+(`coder.PRIVATE_HEADER_MARKER`), an include guard
+`TITAN_GENERATED_PRIVATE_<MANGLED MODULE>_HEADER_H`, the complete rendered
+preamble, and an ELF `#pragma GCC visibility pop` before the guard ends. The
+header therefore carries the includes, the split `TITAN_MODULE_PRIVATE`
+definition, typedefs, `static inline` preamble helpers, cross-module
+declarations, every prototype, and `extern` declarations of the function-type
+tag arrays. Each part, part 0 included, is
+`#include "<private_header_output>"`, an ELF
+`#pragma GCC visibility push(protected)`, its items, and the matching pop.
+
+### Storage and visibility
+
+Every generated module-private definition that another part may reference is
+declared with `TITAN_MODULE_PRIVATE`, emitted by the preamble's
+`$MODULEPRIVATE` placeholder:
+
+| Mode | `TITAN_MODULE_PRIVATE` |
+| --- | --- |
+| unsplit | `static` |
+| split, `_WIN32` | empty |
+| split, GCC or Clang elsewhere | `__attribute__((visibility("hidden")))` |
+| split, other compilers | empty |
+
+Unsplit modules therefore keep internal linkage. Split modules link the parts
+with hidden external symbols on ELF and Mach-O. On PE the macro adds nothing:
+the DLL link uses `--exclude-all-symbols` and an explicit `.def`, so only the
+fixed module entries and public raw foreign functions are exported
+([Windows build](windows-build.md)). Public native entries and module
+protocol functions keep ordinary external linkage. Local source entries that
+other modules may reach keep `TITAN_SOURCE_LOCAL`.
+
+A function-type tag string used to be a `static` array in `$SIGS`. It is now a
+pinned `TITAN_MODULE_PRIVATE` definition in part 0, and a split module's
+header declares it `extern`, so every part publishes the same tag address.
+The remaining `static` objects are function-local statics, section payloads in
+part 0 (`.titan.meta` and `.titan.source`), and preamble helpers, including
+the `static inline` direct-call helpers of local foreign functions. Those
+helpers' addresses are never taken: every pointer to a foreign function names
+its single out-of-line definition; see
+[Foreign functions](foreign-functions.md#contents-and-inline-classification).
+
+`private_symbols` lists every `TITAN_MODULE_PRIVATE` linkage name and each
+imported foreign-binding pointer, in UTF-8 linkage spelling, with an owner
+description. It includes `ℳ` and `ℱ` names as well as `ℙ` names. The object
+record stores it, and the driver checks the union of all modules' public and
+private symbols across the link set before any output changes; see
+[batch planning](driver.md#batch-planning-drivercompile_modules).
 
 ## Three entry roles per first-class Titan function
 
@@ -322,8 +500,11 @@ consumer-local strict relay. Eligibility, construction, and fallback are in
 ### Cross-state closure transfer metadata
 
 `coder/closure_transfer.lua` emits one immutable `TitanTransferModule` manifest
-per generated module (`coder._transfer_emit_manifest`). The module's
-native-symbol resolver returns it for `TITAN_TRANSFER_MANIFEST_SYMBOL`.
+per generated module (`coder._transfer_emit_manifest`), named
+`<prefix>\u2119_transfer_manifest`, beside its `<prefix>\u2119_transfer_entries`
+table when it has entries. Both are pinned `TITAN_MODULE_PRIVATE` data in part 0. The module's
+native-symbol resolver returns the manifest for
+`TITAN_TRANSFER_MANIFEST_SYMBOL`.
 Ordinary closure allocation and invocation do no extra lookup and keep their
 upvalue layout.
 
@@ -335,9 +516,10 @@ adapter has a `TitanTransferEntry` (`titan-runtime/transfer.h`) holding:
 - a generated `project` function; and
 - a generated `restore` function.
 
-Beside the manifest, the module emits one static `TitanTransferCodec` array
-with one entry per generated record or union codec (`coder/nominal_codec.lua`):
-qualified name, `is_union`, and the generated encode and decode functions. The
+When it has generated codecs, the module also emits one pinned `TITAN_MODULE_PRIVATE`
+`TitanTransferCodec` array, `<prefix>\u2119_transfer_codecs`, with one entry per
+generated record or union codec (`coder/nominal_codec.lua`): qualified name,
+`is_union`, and the generated encode and decode functions. The
 manifest does not reach this array. Instead, the nominal's metatable
 registration binds `TITAN_MT_CODEC` to the entry's address; see
 [generated nominal codecs](protobuf-library.md#generated-nominal-codecs).
@@ -646,7 +828,7 @@ generic dispatch.
 
 Each lambda's native, coercive-Lua, and strict entries are **hoisted to file
 scope** and emitted alongside the top-level functions under the name
-`<prefix>lambda_<n>` (`lambda_register`). A lambda nested inside another is
+`<prefix>\u2119_lambda_<n>` (`lambda_register`). A lambda nested inside another is
 discovered only while the outer body is generated, so the emission loop in
 `coder.generate` drains `tlcontext.lambdas` with an index-based `while` that
 re-reads the length on every iteration.
@@ -809,7 +991,9 @@ later state must select the same address; it cannot overwrite a raw binding.
 Generated Titan declarations and definitions have protected visibility on ELF,
 so a resolver's native addresses bind to its own image despite duplicate
 logical-module exports elsewhere. The pragma starts after the foreign headers
-and ends with the generated module, so foreign C linkage is unaffected.
+and ends with the generated module, so foreign C linkage is unaffected. In a
+split module the private header pops it at its end, and each part pushes it
+again after including the header.
 Darwin's two-level namespace already preserves these image-local bindings.
 
 ### `<prefix>_init` — one canonical module per Lua state

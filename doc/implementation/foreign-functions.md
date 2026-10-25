@@ -180,9 +180,10 @@ the process lifetime.
 
 Checking-time source headers precede final static/dynamic provenance, so both
 kinds of imported public entry use the same slot expression. A copied local
-inline callback declares its owner's hidden slot as `extern` in `.titan.h` and
-reads that owner slot, never a separate translation-unit-local copy. The
-binary-usage prescan retains references used only in prepared inline bodies.
+direct-call helper body declares its owner's hidden slot as `extern` in
+`.titan.h` and reads that owner slot, never a separate translation-unit-local
+copy. The binary-usage prescan retains references used only in prepared helper
+bodies.
 Header-dependent C types still require compatible original headers in the
 consumer.
 
@@ -198,7 +199,7 @@ co-residence or native symbol discovery does not create a Titan name for it.
 C declaration plumbing is kept separate from permission. Every explicit source
 import carries the producer's generated `.ffi.h` descriptor into the consumer's
 combined C environment. If the producer defines foreign functions, its
-`.titan.h` also makes their prototypes and eligible inline bodies visible to
+`.titan.h` also makes their prototypes and local direct-call helpers visible to
 generated C. The source-provenance overlay alone makes `alias.member` typecheck.
 Transitive C header inclusion does not grant transitive private Titan access.
 
@@ -222,10 +223,13 @@ the ordinary native/Lua/strict entry generator.
 `_foreign_function_signature` renders every parameter with `cdeclarator`,
 including C parameter adjustment, and renders a real `void` parameter list when
 there are no parameters. The body uses only ordinary C locals and the written
-parameters. Local inline definitions use `static inline`; local out-of-line
-definitions use `TITAN_SOURCE_LOCAL`, which selects hidden visibility on the
-supported GCC/Clang toolchains. Public definitions always remain out of line
-with external visibility and appear in the native provider export inventory.
+parameters. Every source foreign function has exactly one out-of-line
+definition, a movable item of its module's generated C. Local definitions use
+`TITAN_SOURCE_LOCAL`, which selects hidden visibility on the supported
+GCC/Clang toolchains; public definitions keep external visibility and appear
+in the native provider export inventory. A local function additionally gets
+the `static inline` direct-call helper described in
+[Contents and inline classification](#contents-and-inline-classification).
 
 C does not specify the evaluation order of operands or call arguments, whereas
 Titan does. `_foreign_freeze` is the sequencing primitive: it emits an exact
@@ -295,8 +299,12 @@ main first, then bytewise-sorted contributors.
 1. the ownership banner and module-derived include guard;
 2. its own `.ffi.h` and needed explicit-source `.titan.h` includes;
 3. the portable definition of `TITAN_SOURCE_LOCAL`;
-4. all foreign prototypes in declaration order; and
-5. all eligible inline bodies in declaration order.
+4. in declaration order, each foreign function's canonical prototype
+   (`TITAN_SOURCE_LOCAL` for a local function, `extern` for a public one),
+   followed for a local function by the `static inline` declaration of its
+   direct-call helper; then `extern TITAN_SOURCE_LOCAL` declarations of the
+   module's imported raw foreign binding slots; and
+5. every local direct-call helper body in declaration order.
 
 Before any generated companion is consumed or published, the driver applies
 required `#line` normalization. With `titanc --pretty-print` it additionally
@@ -304,20 +312,37 @@ runs the configured `clang-format` with Titan's explicit style and include
 sorting disabled. Default builds do not invoke the formatter; either mode
 preserves the intentional include sequence above.
 
-Putting every prototype before every inline body supports calls among the
+Putting every prototype before every helper body supports calls among the
 module's foreign declarations. Include lines are normalized and deduplicated.
 A generated module C file includes its own `.ffi.h` first and then its own
 `.titan.h` when present, plus needed explicit-source Titan declaration headers.
 It does not reconstruct a supplemental origin list from individual C types.
+When `coder.generate` runs without a prepared `.titan.h`, it puts the same
+prototypes and helper bodies in `$SIGS`.
 
-`_foreign_function_is_inline` first excludes public declarations, then skips an optional prefix of initialized local
-declarations and then recognizes exactly three root shapes: one return; one
-`if` whose sole then and else statements return; or one returning `if` without
-else followed by one return. The decision is cached as `_foreign_inline` and is
-shared by header and translation-unit generation. Every other local declaration
-gets a hidden prototype in the header and one hidden definition in the owning C
-file. A static-inline address is translation-unit-local. Public entries always
-have an extern prototype and one exported out-of-line definition.
+Each source foreign function has one canonical out-of-line definition,
+`coder._foreign_func_name` (the ordinary `ℳ` spelling), emitted once by its
+owning module. Every pointer-producing use, in the owner or in a source
+importer, names that definition, so all pointers to one foreign function are
+equal: across modules, across the [parts of a split
+module](codegen-overview.md#translation-unit-parts), and whether or not the
+module is split. Public entries have only this definition.
+
+A local function also has a direct-call helper
+`<prefix>\u2119_foreign_inline_<name>` (`coder._foreign_inline_name`), defined
+`static inline` in every translation unit that includes the header. Direct
+calls to a local source foreign function, in the owner or a source importer,
+call the helper (`coder._foreign_reference_name` with `direct = true`). The
+helper's address is never taken, so its per-unit copies are unobservable.
+`coder._code_foreign_inline` makes it a copy of the body when
+`_foreign_function_is_inline` accepts the function, and otherwise a one-line
+forwarder to the canonical definition. `_foreign_function_is_inline` first
+excludes public declarations, coverage-outlined functions, and functions with
+private native-record field layouts. It then skips an optional prefix of
+initialized local declarations and recognizes exactly three root shapes: one
+return; one `if` whose sole then and else statements return; or one returning
+`if` without else followed by one return. Header and module generation each
+recompute it; nothing is cached on the AST node.
 
 ### Temporary headers during checking
 

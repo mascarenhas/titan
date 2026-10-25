@@ -13,6 +13,8 @@ local run_coder = h.run_coder
 
 local function clean()
     os.execute("rm -rf *.o *.so *.dSYM")
+    os.remove("test.parts")
+    os.remove("test.priv.h")
     if not h.verbose then os.execute("rm -f *.c") end
 end
 
@@ -344,7 +346,7 @@ describe("collectable variadic parameters (code generator)", function()
 
     it("keeps static and forwarded native varargs in untraced C storage",
     function()
-        local csrc = h.compile_and_read_c([[
+        local _, ast = h.compile_and_read_c([[
             local function sink(...: string): integer
                 return #...
             end
@@ -358,14 +360,10 @@ describe("collectable variadic parameters (code generator)", function()
             end
         ]])
         local function native_body(name)
-            local signature = "lua_Integer test_\\u2133_" .. name .. "_titan("
-            local declaration = assert(csrc:find(signature, 1, true))
-            local first = assert(csrc:find(
-                signature, declaration + 1, true))
-            local last = assert(csrc:find(
-                "static int test_\\u2133_" .. name .. "_titanentry_lua",
-                first, true))
-            return csrc:sub(first, last - 1)
+            for _, node in ipairs(ast) do
+                if node.name == name then return assert(node._body) end
+            end
+            error("missing native body for " .. name)
         end
 
         local fixed = native_body("static_list")

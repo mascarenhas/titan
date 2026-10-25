@@ -24,6 +24,8 @@ local implementation = core.coder
 
 -- Supported compiler-facing API; implementation helpers live in the slices.
 return {
+    DEFAULT_SPLIT_THRESHOLD = implementation.DEFAULT_SPLIT_THRESHOLD,
+    PRIVATE_HEADER_MARKER = implementation.PRIVATE_HEADER_MARKER,
     generate = implementation.generate,
     prepare_coverage = implementation.prepare_coverage,
     generate_ffi_header = implementation.generate_ffi_header,

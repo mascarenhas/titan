@@ -201,6 +201,9 @@ end
 local function render_pointer(form: string, candidate: value): string
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then
+    raise "cannot reserve Lua stack for pointer formatting"
+  end
   ffi.lua_pushtvalue(L, candidate)
   local pointer = ffi.lua_topointer(L, -1)
   if not pointer then

@@ -13,7 +13,7 @@ roots=("${@:3}")
 winprefix=$(cygpath -m "$prefix")
 winsource=$(cygpath -m "$source_root")
 winbuild=$(cygpath -m "$build_root")
-export TITAN_ROCKS_ROOT="$winprefix" TITAN_RUNTIME_PREBUILT=1 TITAN_JOBS="${TITAN_JOBS:-1}"
+export TITAN_ROCKS_ROOT="$winprefix" TITAN_RUNTIME_PREBUILT=1 TITAN_JOBS="${TITAN_JOBS:-4}"
 export TITAN_EXTRA_CPPFLAGS="${TITAN_EXTRA_CPPFLAGS:-} -DUSING_UV_SHARED=1 -I\"$winprefix/include\" -I\"$winsource/vendor/lpeglabel\""
 for library in libuv libllhttp libsqlite3 libssl libcrypto; do
   TITAN_EXTRA_LDFLAGS="${TITAN_EXTRA_LDFLAGS:-} \"$winprefix/lib/$library.dll.a\""

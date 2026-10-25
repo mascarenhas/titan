@@ -30,6 +30,12 @@ local function interface_pair_id(prefix, concrete, interface)
         .. interface_symbol_fragment(interface)
 end
 
+local function interface_adapter_prefix(prefix, concrete, interface)
+    return prefix .. "\\u2119_interface_pair_"
+        .. interface_symbol_fragment(concrete) .. "_to_"
+        .. interface_symbol_fragment(interface)
+end
+
 local function interface_wrapper_id(prefix, concrete, interface)
     return prefix .. "\\u2133_" .. interface_symbol_fragment(concrete)
         .. "_\\u2131_" .. interface_symbol_fragment(interface)
@@ -146,9 +152,9 @@ describe("interfaces (end-to-end)", function()
                 return Impl.new()
             end
         ]]))
-        local pair = interface_pair_id(
+        local pair = interface_adapter_prefix(
             "test_", "test.Impl", "test.Transformer")
-        local signature = "static TITAN_NOINLINE TValue "
+        local signature = "TITAN_MODULE_PRIVATE TITAN_NOINLINE TValue "
             .. pair .. "_adapter_0"
         local declaration = assert(csrc:find(signature, 1, true))
         local start = assert(csrc:find(
@@ -522,7 +528,7 @@ describe("interfaces (end-to-end)", function()
                 for _, field in ipairs({ "numbers", "maybe" }) do
                     local accessor = prefix .. field .. "_fieldaccessor"
                     assert.truthy(csrc:find(
-                        "static void " .. accessor .. "(", 1, true))
+                        "TITAN_MODULE_PRIVATE void " .. accessor .. "(", 1, true))
                     assert.truthy(csrc:find(
                         "titan_cast_func(void *, " .. accessor .. ")", 1, true))
                     local body = generated_function(csrc, accessor .. "(")
@@ -894,7 +900,7 @@ describe("interfaces (end-to-end)", function()
                 box_wrapper, choice_wrapper, producer_wrapper,
             }) do
                 local body = generated_function(
-                    csrc, "static int " .. wrapper .. "(lua_State *L)")
+                    csrc, "TITAN_MODULE_PRIVATE int " .. wrapper .. "(lua_State *L)")
                 assert.truthy(body:find("upvalue[0]", 1, true), body)
                 assert.truthy(body:find("L->ci->func.p", 1, true), body)
                 assert.matches("_titan_interface_func%s*%+%s*1", body)
@@ -909,7 +915,7 @@ describe("interfaces (end-to-end)", function()
 
                 local escaped = wrapper:gsub("(%W)", "%%%1")
                 local _, definitions = csrc:gsub(
-                    "static%s+int%s+" .. escaped .. "%s*%b()%s*{", "")
+                    "TITAN_MODULE_PRIVATE%s+int%s+" .. escaped .. "%s*%b()%s*{", "")
                 assert.equal(1, definitions)
             end
             assert.is_nil(csrc:find(
@@ -1459,7 +1465,7 @@ describe("interfaces (end-to-end)", function()
                 "restorestack%(L,_base_off%)%+%d+%)"
                 .. "%+_ia_root_i",
                 csrc)
-            local pair = interface_pair_id(
+            local pair = interface_adapter_prefix(
                 "test_", "test.Concrete", "test.Runs")
             local adapter_name = pair .. "_adapter_1("
             local declaration = assert(
@@ -1559,7 +1565,7 @@ describe("interfaces (end-to-end)", function()
             local first = assert(csrc:find(
                 signature, declaration + 1, true))
             local last = assert(csrc:find(
-                "static int test_\\u2133_open_interfaces_titanentry_lua",
+                "TITAN_MODULE_PRIVATE int test_\\u2133_open_interfaces_titanentry_lua",
                 first, true))
             local body = csrc:sub(first, last - 1)
             local allocation = assert(body:find(
@@ -1644,14 +1650,14 @@ describe("interfaces (end-to-end)", function()
         ]]
             local csrc = normalize_c_whitespace(
                 h.compile_and_read_c(source))
-            local pair = interface_pair_id(
+            local pair = interface_adapter_prefix(
                 "test_", "test.ProtectorImpl", "test.Protector")
             local adapter = pair .. "_adapter_0"
             local declaration = assert(csrc:find(
-                "static TITAN_NOINLINE TValue " .. adapter,
+                "TITAN_MODULE_PRIVATE TITAN_NOINLINE TValue " .. adapter,
                 1, true))
             local start = assert(csrc:find(
-                "static TITAN_NOINLINE TValue " .. adapter,
+                "TITAN_MODULE_PRIVATE TITAN_NOINLINE TValue " .. adapter,
                 declaration + 1, true))
             local stop = assert(csrc:find(
                 "test_\\u2133_ProtectorImpl_\\u2131_protect_titanmethod(",
@@ -1734,7 +1740,11 @@ describe("interfaces (end-to-end)", function()
         ]]))
         local alpha = interface_pair_id(
             "test_", "test.AlphaRecord", "test.AlphaInterface")
+        local alpha_adapter = interface_adapter_prefix(
+            "test_", "test.AlphaRecord", "test.AlphaInterface")
         local zed = interface_pair_id(
+            "test_", "test.ZedRecord", "test.ZedInterface")
+        local zed_adapter = interface_adapter_prefix(
             "test_", "test.ZedRecord", "test.ZedInterface")
         local alpha_decl = assert(csrc:find(
             "TitanInterfaceMethod " .. alpha .. "[2]",
@@ -1754,15 +1764,15 @@ describe("interfaces (end-to-end)", function()
             .. "test_\\u2133_AlphaRecord_\\u2131_exact_titanmethod%)", csrc)
         assert.matches(alpha .. "%[1%]%s*=%s*titan_cast_func%(%s*"
             .. "TitanInterfaceMethod,%s*"
-            .. alpha .. "_adapter_1%)", csrc)
+            .. alpha_adapter .. "_adapter_1%)", csrc)
         assert.matches(zed .. "%[0%]%s*=%s*titan_cast_func%(%s*"
             .. "TitanInterfaceMethod,%s*"
             .. "test_\\u2133_ZedRecord_\\u2131_exact_titanmethod%)", csrc)
         assert.matches(zed .. "%[1%]%s*=%s*titan_cast_func%(%s*"
             .. "TitanInterfaceMethod,%s*"
-            .. zed .. "_adapter_1%)", csrc)
-        assert.is_nil(csrc:find(alpha .. "_adapter_0", 1, true))
-        assert.is_nil(csrc:find(zed .. "_adapter_0", 1, true))
+            .. zed_adapter .. "_adapter_1%)", csrc)
+        assert.is_nil(csrc:find(alpha_adapter .. "_adapter_0", 1, true))
+        assert.is_nil(csrc:find(zed_adapter .. "_adapter_0", 1, true))
         local _, alpha_declarations = csrc:gsub(
             "TitanInterfaceMethod " .. alpha:gsub("(%W)", "%%%1")
             .. "%[2%];", "")
@@ -1832,7 +1842,7 @@ describe("interfaces (end-to-end)", function()
             local first = assert(csrc:find(
                 "Udata*test_\\u2133_wrap_titan(", declaration + 1, true))
             local last = assert(csrc:find(
-                "static int test_\\u2133_wrap_titanentry_lua", first, true))
+                "TITAN_MODULE_PRIVATE int test_\\u2133_wrap_titanentry_lua", first, true))
             local body = csrc:sub(first, last - 1)
             local allocation = assert(body:find("luaS_newudata(", 1, true))
             local before = body:sub(1, allocation - 1)

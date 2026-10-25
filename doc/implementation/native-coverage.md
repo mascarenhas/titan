@@ -83,10 +83,27 @@ link combines partials (`coverage.inventory`) and serializes the complete Lua
 table into the test executable. This uses compiler-known outputs and does not
 hash or attest the build.
 
+Coverage converts generated C part by part. `driver.compile` runs
+`coverage_lines.convert` independently on each part's C file and always passes
+`coverage.partial` the ordered list of `{ filename, anchors }` parts, one entry
+for an unsplit module and one per part for a [split
+module](codegen-overview.md#translation-unit-parts). `files` therefore holds
+every part's absolute C path in part order and `anchors` is keyed by each of
+those paths. The `.titan.source` record is appended to part 0 after
+conversion. The shared `<stem>.priv.h` is retained for diagnostics but is not
+converted and owns no source lines. Because every part is inventoried, the
+runtime reset removes each part's `.gcda` and `coverage.finish` reads each
+part's notes.
+Incremental reuse in coverage mode additionally requires one recorded file per
+part and a regular `.c` and `.gcno` for every part
+([split reuse checks](incremental-compilation.md#split-modules)).
+
 `coverage.compile_flags` gives every source object `-O0 -fno-lto`. Selected
 objects add `--coverage -fprofile-update=atomic`. The GCC backend adds
 `-fkeep-static-functions` and `-dumpbase`/`-dumpbase-ext` so the compiler's
-temporary object name cannot rename the notes; the LLVM backend adds `-dumpdir`
+temporary object name cannot rename the notes; for a nonzero part the driver
+replaces the `-dumpbase` value with that part's C basename, so its notes are
+`<leaf>.part<k>.gcno`. The LLVM backend adds `-dumpdir`
 and marks selected source-owned native lambdas `__attribute__((used))`
 (`coder._coverage_keep_native_lambdas`) without emitting every unrelated inline
 header body. Native dependencies remain unmeasured. Final image links receive
@@ -152,6 +169,15 @@ production imports into the ordinary native aggregate, with `--coverage-module
 'titan.*'`, and reuse its fixtures, filters, timeout harness and output
 validator. A successful aggregate execution also writes its report. Children
 that import the prebuilt SDK stay unmeasured.
+
+Coverage runs stay serial on both platforms. Unix `titan-native-coverage-run`
+delegates to the focused `titan-stdlib-test-run` leaf, never to
+`titan-stdlib-test-run-parallel`: the executable resets the counters of its
+whole embedded inventory at startup and dumps them after its own run, so
+concurrent owner groups of one coverage executable would erase and race on the
+same `.gcda` files. The coverage build still compiles with up to `TITAN_JOBS`
+generated-C jobs and, as a `+` recipe, shares a parent Make's job pool ([Make
+job pool and titanc recipes](build-script-audit.md#make-job-pool-and-titanc-recipes)).
 
 | Variable | Unix `Makefile` default | Windows `Makefile.win` default |
 | --- | --- | --- |

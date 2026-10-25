@@ -33,7 +33,7 @@ local function generate(source)
     local _, errors = checker.check(
         "test", ast, source, "test.titan")
     assert.equal(0, #errors, table.concat(errors, "\n"))
-    return coder.generate("test", ast, {}, driver.TITAN_ABI_VERSION)
+    return coder.generate("test", ast, {}, driver.TITAN_ABI_VERSION).parts[1].code
 end
 
 local function generated_function(csrc, marker)
@@ -326,14 +326,14 @@ describe("dense Array code generation and boundaries", function()
         -- boolean, string, and {value}. Repeated integer/value constructors
         -- reuse their module-local closure and slot.
         assert.equal(5, count_matches(flat,
-            "static int test_array_writer_%d+%(lua_State %*L%) %{"))
+            "TITAN_MODULE_PRIVATE int test_\\u2119_array_writer_%d+%(lua_State %*L%) %{"))
         assert.equal(5, count_matches(flat,
-            "lua_pushcclosure%(L, test_array_writer_%d+, 1%);"))
+            "lua_pushcclosure%(L, test_\\u2119_array_writer_%d+, 1%);"))
 
         local writer_slots = {}
         local writer_count = 0
         for _, slot in flat:gmatch(
-            "lua_pushcclosure%(L, test_array_writer_(%d+), 1%); " ..
+            "lua_pushcclosure%(L, test_\\u2119_array_writer_(%d+), 1%); " ..
             "setobj2t%(L, &_mod%->uv%[(%d+)%]%.uv")
         do
             writer_count = writer_count + 1

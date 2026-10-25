@@ -184,7 +184,7 @@ records or payloads stay reflective, whose per-level C stack does not grow
 with field count. Deep reflective decoding and its error traceback can still
 exhaust a coroutine's C stack in unoptimized (`-O0`) builds.
 
-The declaring module emits one static `TitanTransferCodec` entry per codec and
+The declaring module emits one `TitanTransferCodec` entry per codec and
 binds the nominal's canonical metatable to it under `TITAN_MT_CODEC`
 ([closure transfer metadata](codegen-overview.md#cross-state-closure-transfer-metadata)).
 These layouts and the inline codec runtime in `transfer.h` are generated-code
@@ -196,7 +196,11 @@ when the metatable also has a registered resource codec
 precedence. Erased generic applications share the one metatable and entry.
 
 The entry's address is the nominal's codec identity tag; no codec path
-compares nominal names. The entry is a dedicated `static const` object, not a
+compares nominal names. The entry is an element of the declaring module's
+`TITAN_MODULE_PRIVATE const` `<prefix>\u2119_transfer_codecs` array, defined
+once in the module's part 0 (internal linkage when the module is unsplit; an
+unexported symbol shared by its parts when it is
+[split](codegen-overview.md#translation-unit-parts)), not a
 string literal, so the linker cannot merge it with another nominal's entry,
 and each entry also points at its own distinct name. The address is defined
 exactly once in each image that contains the declaring module, and no other

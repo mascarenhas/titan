@@ -67,6 +67,8 @@ function test_public_runner_rejects_nested_runs_and_resets_state(
     })
     test.assert(why == "exit" and code == 0,
                 "public runner lifecycle probe failed: " .. output)
+    test.assert(common.contains(output, "deliberate public runner failure"),
+                "public runner omitted its rendered string failure: " .. output)
   end)
 end
 

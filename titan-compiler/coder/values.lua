@@ -2019,6 +2019,8 @@ end
 -- Implementation notes: doc/implementation/dense-arrays.md#stock-gc-ownership-and-barriers
 function coder._emit_array_writers(tlcontext, sigs, code, initfuncs)
     for _, entry in ipairs(tlcontext.array_writer_list) do
+        coder._record_private_symbol(tlcontext, entry.name,
+            "array writer " .. tostring(entry.index))
         local loc = {
             filename = "<Lua write to "
                 .. types.tostring(types.Array(entry.elem, { tag = "no" })) .. ">",
@@ -2026,12 +2028,12 @@ function coder._emit_array_writers(tlcontext, sigs, code, initfuncs)
             col = 1,
         }
         table.insert(sigs, render([[
-            static int $NAME(lua_State *L);
+            TITAN_MODULE_PRIVATE int $NAME(lua_State *L);
         ]], {
             NAME = entry.name,
         }))
         table.insert(code, render([[
-            static int $NAME(lua_State *L) {
+            TITAN_MODULE_PRIVATE int $NAME(lua_State *L) {
                 StkId func = L->ci->func.p;
                 if (TITAN_UNLIKELY(L->top.p - func - 1 < 1)) {
                     return luaL_error(L,

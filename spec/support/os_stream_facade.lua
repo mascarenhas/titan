@@ -120,6 +120,10 @@ end
 function tostring(candidate: value): string
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
+  -- Candidate plus the two temporary slots used by luaL_getmetafield/callmeta.
+  if ffi.lua_checkstack(L, 3) == 0 then
+    raise "cannot reserve Lua stack for string conversion"
+  end
   ffi.lua_pushtvalue(L, candidate)
   ffi.luaL_tolstring(L, -1, nil)
   return ffi.lua_totvalue(L, -1) as value

@@ -297,6 +297,23 @@ public runner's exit-status or `skip` contract. See the
 [repository test workflow](../implementation/test-runner.md#platform-portability-and-complete-execution)
 and [native Windows commands](../implementation/windows-build.md#shared-native-standard-library-tests).
 
+Repeated filters also let several processes share one built executable. On
+Linux and macOS, the repository's `make titan-stdlib-test-run-parallel` target,
+which `make titan-stdlib-test` uses when no `TITAN_FILTER` is given, runs the
+same executable as `TITAN_TEST_JOBS` concurrent processes (default four, any
+positive integer; `1` runs the groups one after another). Each process selects
+a disjoint group of test owners with one anchored `--filter` per owner and gets
+its own temporary directory and log. Owners whose tests measure short
+deadlines or wall-clock behavior, such as the TLS, HTTP, WebSocket, timer, net,
+and OS suites, run afterwards in one process of their own, with nothing else
+running. The target then audits the combined output: every owner exactly once,
+no case reported twice, and consistent totals. A failing group does not stop
+the others. Deadlines, retries, and case selection are the same as in one
+serial run. `make titan-stdlib-test-run` remains the focused single-process
+command, and native coverage and Windows runs stay serial. See [parallel
+native aggregate runs](../implementation/test-runner.md#parallel-native-aggregate-runs)
+and [Build and test parallelism](build-profiles.md#build-and-test-parallelism).
+
 ## Initial boundaries
 
 The runner is intentionally synchronous and recursive. It supplies no suite

@@ -7,6 +7,7 @@ local coder_names = require "titan-compiler.coder.names"
 local compiler_io = require "titan-compiler.io"
 local installed_prefix = require "spec.support.installed_prefix"
 local lfs = require "lfs"
+local module_symbols = require "spec.support.module_symbols"
 local parser = require "titan-compiler.parser"
 local platform = require "titan-compiler.platform"
 local paths = require "titan-compiler.path"
@@ -231,8 +232,8 @@ local UV_FOREIGN_CALLBACKS = {
       record = "fs_poll_t", field = "close_handler", handler = "fs_poll_closed", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
 }
--- Simple C forwarding helpers may live in the generated foreign header as
--- static inline definitions. Their linkage names need not appear in nm output.
+-- Direct-call helpers may be inline, but each callback retains one canonical
+-- out-of-line address in the module's complete native object set.
 local UV_NATIVE_ENTRIES = {
     { name = "consume_spawn_pipes", source = "titan/uv/process.titan" },
     { name = "external_wake_drop_target_locked", source = "titan/uv/external_wake.titan" },
@@ -641,6 +642,8 @@ local function make_temp_dir()
     if platform.windows then path = path:gsub("\\", "/") end
     os.remove(path)
     assert.truthy(lfs.mkdir(path))
+    path = assert(compiler_io.new_sync():realpath(path))
+    if platform.windows then path = path:gsub("\\", "/") end
     return path
 end
 
@@ -726,6 +729,8 @@ local function run_stdlib_dry_make(argv)
     -- inputs, independently of any installed provider in the caller's prefix.
     table.insert(argv, "STDLIB_USE_INSTALLED_RUNTIME=0")
     table.insert(argv, "MAKE=false")
+    -- Ambient worker caps (TITAN_JOBS=1) must not change the command contract.
+    table.insert(argv, "TITAN_JOBS=4")
     for _, variable in ipairs({
         "STDLIB_TOOL_PREREQS",
         "STDLIB_PLATFORM_PREREQS",
@@ -803,7 +808,7 @@ local function stdlib_command(output)
     local normalized = output:gsub("\\\r\n", " "):gsub("\\\n", " ")
         :gsub("%s+", " ")
     local link = assert(normalized:find(
-        " --source-first --incremental " ..
+        " --source-first --incremental -j4 " ..
         table.concat(STDLIB_ROOTS, " "), 1, true), normalized)
     local first = 1
     for position in normalized:sub(1, link):gmatch("()CC='ccache cc'") do
@@ -1048,12 +1053,12 @@ esac
             local outputs = {}
             local compiler = { "#!/bin/sh", "set -eu",
                 'test "$1 $2" = "--output out"', 'shift 2',
-                'test "$1 $2 $3 $4" = "--source-first --incremental -j1 -c"',
+                'test "$1 $2 $3 $4" = "--source-first --incremental -j4 -c"',
                 'module="${5#titan.}"', 'case "$module" in' }
             for _, module in ipairs(STDLIB_MODULES) do
                 local stem = "out/titan/" .. module ..
                     (folders[module] and "/" .. module or "")
-                local files = { stem .. ".o", stem .. ".c", stem .. ".ffi.h" }
+                local files = { stem .. ".o", stem .. ".c", stem .. ".ffi.h", stem .. ".parts" }
                 if callbacks[module] then files[#files + 1] = stem .. ".titan.h" end
                 for _, file in ipairs(files) do outputs[#outputs + 1] = file end
                 compiler[#compiler + 1] = module .. ")"
@@ -1065,7 +1070,13 @@ esac
                 end
                 for _, file in ipairs(files) do
                     compiler[#compiler + 1] = "mkdir -p " .. quote(file:match("^(.*)/"))
-                    compiler[#compiler + 1] = "printf 'generated\\n' > " .. quote(file)
+                    if file:sub(-6) == ".parts" then
+                        compiler[#compiler + 1] = string.format(
+                            "printf 'titan-parts-v1 1\\n%s.c\\n%s.o\\n' > %s",
+                            module, module, quote(file))
+                    else
+                        compiler[#compiler + 1] = "printf 'generated\\n' > " .. quote(file)
+                    end
                 end
                 compiler[#compiler + 1] = ";;"
             end
@@ -1091,17 +1102,23 @@ esac
                 end
                 write_file(root .. "/" .. source, "build input\n")
             end
+            -- An explicit cap keeps -j4 independent of the host Make's
+            -- default job policy, which is serial before GNU Make 4.2. The
+            -- internal graph target runs this -j4 DAG directly on every GNU
+            -- Make; the entry's pool recursion (MAKE=false here) has its own
+            -- job-pool regressions.
             local argv = {
                 "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "GNUMAKEFLAGS",
-                "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES",
+                "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES", "-u", "TITAN_JOBS",
                 "make", "--no-print-directory", "-s", "-j4", "-C", root,
+                "TITAN_JOBS=4",
                 "MAKE=false", "PREFIX=" .. root, "STDLIB_USE_INSTALLED_RUNTIME=0",
                 "OPENSSL_MODE=system", "OPENSSL_PKG_CONFIG=true",
                 "TITANC=sh ./fake-titanc", "SQLITE3_HEADER=",
                 "STDLIB_COMPILER_PREREQS=prepared", "STDLIB_TOOL_PREREQS=prepared",
                 "STDLIB_NATIVE_PREREQS=prepared", "STDLIB_PLATFORM_PREREQS=prepared",
                 "STDLIB_RUNTIME_ARCHIVE_PREREQ=prepared", "STDLIB_BOOTSTRAP_PREREQ=prepared",
-                "stdlib-objects",
+                "stdlib-objects-graph",
             }
             -- Preserve the real local native-header wiring; replace only the
             -- unrelated external SDK inputs with this fixture's prepared file.
@@ -1131,6 +1148,8 @@ esac
                 for _, source in ipairs(inputs) do
                     assert(lfs.touch(root .. "/" .. source, old, old))
                 end
+                -- The recorded split policy is an object input too.
+                assert(lfs.touch(root .. "/out/.titan-c-parts.config", old, old))
                 for _, output in ipairs(outputs) do
                     assert(lfs.touch(root .. "/" .. output, old + 1, old + 1))
                 end
@@ -1149,6 +1168,46 @@ esac
             assert.same({ test = true }, build())
             assert(os.remove(root .. "/out/titan/test.c"))
             assert.same({ test = true }, build())
+            assert(os.remove(root .. "/out/titan/test.parts"))
+            assert.same({ test = true }, build())
+            for _, malformed in ipairs({
+                "titan-parts-v1 0\n",
+                "titan-parts-v1 1\nwrong.c\ntest.o\n",
+                "titan-parts-v1 1\ntest.c\ntest.o\nextra\n",
+                "titan-parts-v1 2\ntest.priv.h\ntest.c\ntest.o\ntest.part1.c\ntest.part1.o\n",
+            }) do
+                age_build()
+                write_file(root .. "/out/titan/test.parts", malformed)
+                assert(lfs.touch(root .. "/out/titan/test.parts", old + 1, old + 1))
+                assert.same({ test = true }, build())
+            end
+            -- Direct object target must repair a deleted split sidecar without
+            -- relying on a later link.
+            age_build()
+            for _, split_file in ipairs({
+                "out/titan/test.priv.h",
+                "out/titan/test.part1.c",
+                "out/titan/test.part1.o",
+            }) do
+                write_file(root .. "/" .. split_file, "split sidecar\n")
+                assert(lfs.touch(root .. "/" .. split_file, old + 1, old + 1))
+            end
+            write_file(root .. "/out/titan/test.parts",
+                "titan-parts-v1 2\ntest.priv.h\ntest.c\ntest.o\ntest.part1.c\ntest.part1.o\n")
+            assert(lfs.touch(root .. "/out/titan/test.parts", old + 1, old + 1))
+            local direct_argv = { table.unpack(argv) }
+            direct_argv[#direct_argv] = "out/titan/test.o"
+            local direct_ok, direct_out = run_argv(direct_argv)
+            assert.truthy(direct_ok, direct_out)
+            assert.equal("", read_file(root .. "/build.log"))
+            assert(os.remove(root .. "/out/titan/test.part1.o"))
+            direct_ok, direct_out = run_argv(direct_argv)
+            assert.truthy(direct_ok, direct_out)
+            assert.equal("test\n", read_file(root .. "/build.log"))
+            write_file(root .. "/build.log", "")
+            os.remove(root .. "/out/titan/test.priv.h")
+            os.remove(root .. "/out/titan/test.part1.c")
+            os.remove(root .. "/out/titan/test.part1.o")
             age_build()
             assert(lfs.touch(root .. "/titan/sqlite3/native.h", old + 2, old + 2))
             assert.same({ sqlite3 = true }, build())
@@ -1218,13 +1277,14 @@ test "$1 $2" = "--output out"
 shift 2
 mkdir -p out/titan
 case "$*" in
-  "--source-first --incremental -j1 -c titan.math")
+  "--source-first --incremental -j4 -c titan.math")
     printf 'compile\n' >> build.log
     for output in out/titan/math.o out/titan/math.c out/titan/math.ffi.h; do
       printf 'generated\n' > "$output"
     done
+    printf 'titan-parts-v1 1\nmath.c\nmath.o\n' > out/titan/math.parts
     ;;
-  "--source-first --incremental titan.math -X")
+  "--source-first --incremental -j4 titan.math -X")
     printf 'link\n' >> build.log
     for output in out/titan.so out/titan.a out/titan/math.lua; do
       printf 'provider\n' > "$output"
@@ -1239,13 +1299,15 @@ esac
             })
             assert.truthy(ok, output)
             write_file(root .. "/build.log", "")
+            -- An explicit cap keeps -j4 independent of the host Make's
+            -- default job policy, which is serial before GNU Make 4.2.
             local arguments = {
                 "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "GNUMAKEFLAGS",
                 "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES", "-u", "MAKE",
                 "-u", "ROCKS_TREE", "-u", "TITAN_ROCKS_ROOT",
-                "-u", "TITANC", "-u", "TITAN_LUA", "-u", "ROCK_TITANC",
+                "-u", "TITANC", "-u", "TITAN_LUA", "-u", "ROCK_TITANC", "-u", "TITAN_JOBS",
                 "-u", "ROCK_LUA", "-u", "STDLIB_USE_INSTALLED_RUNTIME",
-                "make", "--no-print-directory", "-s", "-C", root,
+                "make", "--no-print-directory", "-s", "-C", root, "TITAN_JOBS=4",
                 "PREFIX=" .. prefix, "HOST_OS=Linux",
                 "STDLIB_PLATFORM_PREREQS=prepared",
                 "OPENSSL_MODE=system",
@@ -1350,13 +1412,14 @@ esac
             assert.equal(installed_time, lfs.attributes(
                 installation .. "/lib/titan/0.6/titan.so", "modification"))
             local outputs = {
-                "out/titan/math.o", "out/titan/math.c", "out/titan/math.ffi.h",
+                "out/titan/math.o", "out/titan/math.c", "out/titan/math.ffi.h", "out/titan/math.parts",
                 "out/titan.so", "out/titan.a", "out/titan/math.lua", "build.complete",
             }
             local function age_build()
                 for _, path in ipairs(inputs) do
                     assert(lfs.touch(root .. "/" .. path, old, old))
                 end
+                assert(lfs.touch(root .. "/out/.titan-c-parts.config", old, old))
                 for _, path in ipairs(outputs) do
                     assert(lfs.touch(root .. "/" .. path, old + 1, old + 1))
                 end
@@ -1460,7 +1523,8 @@ esac
     end)
 
     it("validates complete native reports and narrowly classified skips", function()
-        local validate, final_counts = assert(loadfile("spec/support/check_stdlib_test_output.lua"))()
+        local validate, final_counts, validate_union =
+            assert(loadfile("spec/support/check_stdlib_test_output.lua"))()
         local roots = { "first.tests", "second.tests" }
         local output = table.concat({
             "[==========] Running Titan tests.",
@@ -1502,6 +1566,52 @@ esac
         assert.is_nil(final_counts(failed:gsub("%[==========%] 3 tests ran%.\n", "")))
         assert.is_nil(final_counts(failed .. "\n[  FAILED  ] 1 test."))
         assert.is_nil(final_counts("[==========] Running Titan tests.\n[ RUN      ] first.tests.test_value"))
+
+        local group_one_out = table.concat({
+            "[==========] Running Titan tests.",
+            "[ RUN      ] first.tests.test_value",
+            "[       OK ] first.tests.test_value",
+            "[==========] 1 test ran.",
+            "[  PASSED  ] 1 test.",
+        }, "\n")
+        local group_two_out = table.concat({
+            "[==========] Running Titan tests.",
+            "[ RUN      ] second.tests.test_optional",
+            "[  SKIPPED ] second.tests.test_optional.child (parent skipped: capability: locale unavailable)",
+            "[  SKIPPED ] second.tests.test_optional (capability: locale unavailable)",
+            "[==========] 2 tests ran.",
+            "[  PASSED  ] 0 tests.",
+            "[  SKIPPED ] 2 tests.",
+        }, "\n")
+        local union_ok, union_err = validate_union({
+            { id = "1", owners = { "first.tests" }, contents = group_one_out },
+            { id = "guarded", owners = { "second.tests" }, contents = group_two_out },
+        }, roots)
+        assert.truthy(union_ok, union_err)
+        assert.equal(3, union_ok.count)
+        assert.equal(1, union_ok.passed)
+        assert.equal(2, union_ok.skipped)
+        assert.equal(2, union_ok.owners)
+        assert.same(result.cases, union_ok.cases)
+
+        local function rejects_union(groups, expected, all_roots)
+            local accepted, message = validate_union(groups, all_roots or roots)
+            assert.is_nil(accepted)
+            assert.truthy(message:find(expected, 1, true), message)
+        end
+        rejects_union({
+            { id = "1", owners = { "first.tests", "second.tests" }, contents = group_one_out },
+        }, "native root did not execute: second.tests")
+        rejects_union({
+            { id = "1", owners = { "first.tests" }, contents = group_one_out },
+        }, "native root did not execute: second.tests")
+        rejects_union({
+            { id = "1", owners = { "first.tests" }, contents = group_one_out },
+            { id = "2", owners = { "first.tests", "second.tests" }, contents = output },
+        }, "duplicate planned native owner: first.tests")
+        rejects_union({
+            { id = "1", owners = {}, contents = group_one_out },
+        }, "empty native owner group")
     end)
 
     it("reuses separate native test objects and relinks only after a changed prerequisite", function()
@@ -1553,16 +1663,22 @@ esac
 stem="$(printf '%s' "$module" | tr . /)"
 mkdir -p "${stem%/*}"
 for suffix in o c ffi.h; do printf 'fixture output\n' > "$stem.$suffix"; done
+leaf="${stem##*/}"
+printf 'titan-parts-v1 1\n%s.c\n%s.o\n' "$leaf" "$leaf" > "$stem.parts"
 printf '%s\n' "$module" >> ../../build.log
 ]])
-            local argv = { "make", "--no-print-directory", "-s", "-j4", "-C", root,
+            -- The internal graph target runs this -j4 DAG directly on every
+            -- GNU Make; the entry's pool recursion (MAKE=false here) has its
+            -- own job-pool regressions. The caller's split policy starts unset.
+            local argv = { "env", "-u", "TITAN_C_PARTS",
+                "make", "--no-print-directory", "-s", "-j4", "-C", root,
                 "MAKE=false", "TEST_LUA=true", "TEST_TITANC=sh ../../fake-titanc",
                 "TITAN_TEST_INSTALL_ROOT=" .. root,
                 "TITAN_TEST_COMPILER_PREREQS=prepared",
                 "TITAN_TEST_PROVIDER_PREREQS=prepared", "TITAN_TEST_FIXTURE_OUTPUTS=prepared",
                 "TITAN_TEST_C_INPUTS_support.common=prepared",
                 "TITAN_TEST_MODULES=" .. table.concat(modules, " "),
-                "TITAN_STDLIB_TEST_ROOTS=test.tests", "titan-stdlib-test-build" }
+                "TITAN_STDLIB_TEST_ROOTS=test.tests", "titan-stdlib-test-build-graph" }
             local function build()
                 local succeeded, message = run_argv(argv)
                 assert.truthy(succeeded, message)
@@ -1584,9 +1700,10 @@ printf '%s\n' "$module" >> ../../build.log
             local old = os.time() - 30
             assert(lfs.touch(root .. "/prepared", old, old))
             assert(lfs.touch(root .. "/out/tests/build.config", old, old))
+            assert(lfs.touch(root .. "/out/tests/c-parts.config", old, old))
             for _, path in ipairs(sources) do
                 assert(lfs.touch(root .. "/" .. path, old, old))
-                for _, suffix in ipairs({ "o", "c", "ffi.h" }) do
+                for _, suffix in ipairs({ "o", "c", "ffi.h", "parts" }) do
                     assert(lfs.touch(root .. "/" .. path:gsub("^spec/stdlib/titan/", "out/tests/"):gsub("titan$", suffix), old + 2, old + 2))
                 end
             end
@@ -1598,6 +1715,44 @@ printf '%s\n' "$module" >> ../../build.log
                 ["test.tests"] = true, link = true }, build())
             assert.same({}, build())
             argv[#argv + 1] = "TITAN_FILTER=arbitrary-runtime-filter"
+            assert.same({}, build())
+
+            -- The recorded TITAN_C_PARTS recompiles every module object once
+            -- and relinks when it changes. An unchanged policy keeps its
+            -- stamp, and job settings are not recorded. Settling every output
+            -- after all fixture inputs lets a whole-second Make clock see a
+            -- replaced stamp as newer.
+            local policy = root .. "/out/tests/c-parts.config"
+            assert.equal("TITAN_C_PARTS=default\n", read_file(policy))
+            local function settle(directory)
+                for name in lfs.dir(directory) do
+                    local entry = directory .. "/" .. name
+                    if name ~= "." and name ~= ".." then
+                        if lfs.attributes(entry, "mode") == "directory" then
+                            settle(entry)
+                        else
+                            assert(lfs.touch(entry, old + 5, old + 5))
+                        end
+                    end
+                end
+            end
+            local function build_with(words)
+                local count = #argv
+                for _, word in ipairs(words) do argv[#argv + 1] = word end
+                local built = build()
+                for index = #argv, count + 1, -1 do argv[index] = nil end
+                return built
+            end
+            settle(root .. "/out/tests")
+            assert.same({}, build())
+            assert.same({}, build_with({ "-j2", "TITAN_JOBS=2" }))
+            assert.equal(old + 5, lfs.attributes(policy, "modification"))
+            assert.same(all, build_with({ "TITAN_C_PARTS=8" }))
+            assert.equal("TITAN_C_PARTS=8\n", read_file(policy))
+            assert.same({}, build_with({ "TITAN_C_PARTS=8" }))
+            settle(root .. "/out/tests")
+            assert.same(all, build())
+            assert.equal("TITAN_C_PARTS=default\n", read_file(policy))
             assert.same({}, build())
 
             -- Model a filesystem whose timestamp precision cannot separate
@@ -1612,7 +1767,7 @@ printf '%s\n' "$module" >> ../../build.log
                 root .. "/out/tests/build.config",
                 root .. "/out/tests/test/tests",
             }
-            for _, suffix in ipairs({ "o", "c", "ffi.h" }) do
+            for _, suffix in ipairs({ "o", "c", "ffi.h", "parts" }) do
                 for _, path in ipairs(sources) do
                     coarse_outputs[#coarse_outputs + 1] = root .. "/" ..
                         path:gsub("^spec/stdlib/titan/", "out/tests/"):gsub("titan$", suffix)
@@ -2130,19 +2285,19 @@ int main(void) {
     it("keeps native UV symbols and callback entrypoints in the canonical provider", function()
             local logical_object = stdlib_artifact("titan/uv/uv.o")
             assert.truthy(file_exists(logical_object), logical_object)
-            local ok, output, why, code = run_argv(tool_argv(
-                "NM", "nm", logical_object))
-            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                tostring(code) .. ")")
+            local symbols = module_symbols.collect(logical_object, run_argv)
+            local output = symbols.defined_text
             local entries = {}
             for _, entry in ipairs(UV_FOREIGN_CALLBACKS) do entries[#entries + 1] = entry end
             for _, entry in ipairs(UV_NATIVE_ENTRIES) do entries[#entries + 1] = entry end
             local foreign_header = read_file(stdlib_artifact("titan/uv/uv.titan.h"))
             for _, callback in ipairs(entries) do
                 local c_name = coder_names._foreign_func_name("titan.uv", callback.name)
+                local symbol = coder_names._linkage_symbol_name(c_name)
+                assert.truthy(nm_has_symbol(output, symbol), symbol)
                 if callback.inline then
-                    -- Require the emitted definition, not only a prototype;
-                    -- an optimizer may inline or internalize this C-only shim.
+                    c_name = coder_names._foreign_inline_name("titan.uv", callback.name)
+                    -- Require the direct-call body, not just its prototype.
                     local defined = false
                     for line in foreign_header:gmatch("[^\r\n]+") do
                         if line:match("^static inline ") and
@@ -2151,16 +2306,10 @@ int main(void) {
                         end
                     end
                     assert.truthy(defined, "missing inline definition: " .. c_name)
-                else
-                    local symbol = coder_names._linkage_symbol_name(c_name)
-                    assert.truthy(nm_has_symbol(output, symbol), symbol)
                 end
             end
 
-            ok, output, why, code = run_argv(tool_argv(
-                "NM", "nm", "-u", logical_object))
-            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                tostring(code) .. ")")
+            output = symbols.undefined_text
             for _, legacy in ipairs(LEGACY_UV_CALLBACKS) do
                 assert.falsy(nm_has_symbol(output, legacy),
                     logical_object .. ": " .. legacy)
@@ -2173,8 +2322,8 @@ int main(void) {
                 assert.falsy(nm_has_symbol(output, function_name),
                     logical_object .. ": " .. function_name)
             end
-            local async_ok, async_output = run_argv(tool_argv("NM", "nm", "-u", stdlib_artifact("titan/async.o")))
-            assert.truthy(async_ok, async_output)
+            local async_output = module_symbols.collect(
+                stdlib_artifact("titan/async.o"), run_argv).undefined_text
             for _, function_name in ipairs(SIGPIPE_EXTERNAL_HOST_CALLS) do
                 assert.equal(not platform.windows,
                     nm_has_symbol(async_output, function_name), function_name)
@@ -2238,8 +2387,7 @@ int main(void) {
             end
             local object = stdlib_artifact(module == "sqlite3" and
                 "titan/sqlite3/sqlite3.o" or "titan/" .. module .. ".o")
-            local ok, output = run_argv(tool_argv("NM", "nm", "-u", object))
-            assert.truthy(ok, output)
+            local output = module_symbols.collect(object, run_argv).undefined_text
             for symbol in output:gmatch("[^\r\n]+") do
                 assert.falsy(symbol:match("%s_?uv_[%w_]+$"), object .. ": " .. symbol)
             end
@@ -3760,7 +3908,9 @@ end)
                 local bin = root .. "/bin"
                 local log = root .. "/argv"
                 local make_log = root .. "/selected-make"
+                local native_log = root .. "/native-phase"
                 local selected_make = root .. "/selected make"
+                local recursive_make = bin .. "/recursive-make"
                 assert(lfs.mkdir(bin))
                 local fake_busted = bin .. "/busted"
                 write_file(fake_busted, [==[#!/usr/bin/env bash
@@ -3769,13 +3919,28 @@ set -eu
 printf '%s\0' "$@" > "$TITAN_BUSTED_ARGV_LOG"
 exit 73
 ]==])
+                -- rock-test keeps going after the failed Busted phase. Its
+                -- recursive native build/run Make calls are recorded instead
+                -- of building the complete aggregate in this checkout.
                 write_file(selected_make, [==[#!/usr/bin/env bash
 set -eu
 printf 'selected\n' > "$TITAN_SELECTED_MAKE_LOG"
+exec make MAKE="$TITAN_RECURSIVE_MAKE" "$@"
+]==])
+                write_file(recursive_make, [==[#!/usr/bin/env bash
+set -eu
+for argument do
+    case "$argument" in
+        titan-stdlib-test-build | titan-stdlib-test-run | titan-stdlib-test-run-parallel)
+            printf '%s\n' "$argument" >> "$TITAN_NATIVE_PHASE_LOG"
+            exit 0
+            ;;
+    esac
+done
 exec make "$@"
 ]==])
                 local chmod_ok, chmod_output = run_argv({
-                    "chmod", "+x", fake_busted, selected_make,
+                    "chmod", "+x", fake_busted, selected_make, recursive_make,
                 })
                 assert.truthy(chmod_ok, chmod_output)
 
@@ -3798,6 +3963,8 @@ exec make "$@"
                     "BUSTED=busted",
                     "TITAN_BUSTED_ARGV_LOG=" .. log,
                     "TITAN_SELECTED_MAKE_LOG=" .. make_log,
+                    "TITAN_RECURSIVE_MAKE=" .. recursive_make,
+                    "TITAN_NATIVE_PHASE_LOG=" .. native_log,
                     "bash",
                     "spec/support/run_rock_tests.sh",
                     "--make=" .. selected_make,
@@ -3812,6 +3979,8 @@ exec make "$@"
                 local ok = run_argv(argv)
                 assert.falsy(ok)
                 assert.equal("selected\n", read_file(make_log))
+                assert.equal("titan-stdlib-test-build\ntitan-stdlib-test-run\n",
+                    read_file(native_log))
 
                 local encoded = read_file(log)
                 local actual = {}
@@ -3935,16 +4104,13 @@ printf '%s\0' __TITAN_SHARDS__ >> "$TITAN_ROUTING_ARGV_LOG"
 
             local ok, output = run_case()
             assert.truthy(ok, output)
-            assert.same({ stdlib_specs, integration_specs, "sharded" },
-                decoded_calls(argv_log))
+            assert.same({ "sharded" }, decoded_calls(argv_log))
             assert.equal("sharded\n", read_file(shard_log))
 
             ok, output = run_case({ "TITAN_FILTER=native$tail" })
             assert.truthy(ok, output)
-            assert.same({ stdlib_specs, integration_specs, "sharded" },
-                decoded_calls(argv_log))
+            assert.same({ "sharded" }, decoded_calls(argv_log))
             assert.equal("sharded\n", read_file(shard_log))
-
             ok, output = run_case({ "BUSTED_FILTER=focus$tail" })
             assert.truthy(ok, output)
             assert.same({ { "--filter=focus$tail" } }, decoded_calls(argv_log))
@@ -3990,91 +4156,62 @@ printf '%s\0' "$@" > "$TITAN_SELECTOR_ARGV_LOG"
                 })
                 assert.truthy(chmod_ok, chmod_output)
 
-                local expected = { {}, {}, {}, {}, {} }
-                for line in read_file(
-                    "spec/support/ci_compiler_test_groups.txt"):
-                gmatch("[^\r\n]+") do
-                    local shard, path = line:match("^([1-4])%s+(%S+)")
-                    if shard then
-                        local paths = expected[tonumber(shard)]
-                        paths[#paths + 1] = path
-                    end
-                end
-                for line in read_file(
-                    "spec/support/ci_stdlib_compiler_test_files.txt"):
-                gmatch("[^\r\n]+") do
-                    if line:sub(1, 1) ~= "#" then
-                        expected[5][#expected[5] + 1] = line
-                    end
-                end
+                local groups_helper = assert(loadfile(
+                    "spec/support/compiler_test_groups.lua"))()
+                local inventory = assert(groups_helper.load())
 
-                local seen = {}
-                local total = 0
-                for shard = 1, 5 do
-                    local log = root .. "/shard-" .. shard
+                local function selected(group, log)
                     local ok, output = run_argv({
                         "env",
                         "BUSTED=" .. fake_busted,
                         "TITAN_SELECTOR_ARGV_LOG=" .. log,
-                        "bash", "spec/support/ci_test_groups.sh",
-                        shard == 5 and "stdlib-compiler-uncovered" or
-                            "compiler-uncovered-shard-" .. shard,
+                        "bash", "spec/support/ci_test_groups.sh", group,
                     })
                     assert.truthy(ok, output)
                     assert.truthy(output:find(
                         "without LuaCov", 1, true), output)
-
+                    local files = {}
                     local encoded = read_file(log)
                     local argv = {}
-                    local offset = 1
-                    while offset <= #encoded do
-                        local finish = assert(encoded:find(
-                            "\0", offset, true))
-                        argv[#argv + 1] = encoded:sub(offset, finish - 1)
-                        offset = finish + 1
+                    for argument in encoded:gmatch("([^%z]*)%z") do
+                        argv[#argv + 1] = argument
                     end
                     assert.same({ "-o", "gtest", "-v" },
                         { argv[1], argv[2], argv[3] })
-                    for _, argument in ipairs(argv) do
-                        assert.not_equal("-c", argument)
-                    end
-
-                    local actual = {}
                     for index = 4, #argv do
-                        local path = argv[index]
-                        assert.falsy(seen[path], path)
-                        seen[path] = true
-                        actual[#actual + 1] = path
-                        total = total + 1
+                        assert.not_equal("-c", argv[index])
+                        assert.truthy(argv[index]:match(
+                            "^spec/.+_spec[.]lua$"), argv[index])
+                        assert.falsy(files[argv[index]], argv[index])
+                        files[argv[index]] = true
                     end
-                    table.sort(actual)
-                    table.sort(expected[shard])
-                    assert.same(expected[shard], actual)
+                    return files
                 end
-                local expected_total = 0
-                for shard = 1, 5 do
-                    expected_total = expected_total + #expected[shard]
-                end
-                assert.equal(162, expected_total)
-                assert.equal(expected_total, total)
 
-                local complete_log = root .. "/complete"
-                local ok, output = run_argv({
-                    "env", "BUSTED=" .. fake_busted,
-                    "TITAN_SELECTOR_ARGV_LOG=" .. complete_log,
-                    "bash", "spec/support/ci_test_groups.sh",
-                    "compiler-uncovered",
-                })
-                assert.truthy(ok, output)
-                local complete = {}
-                for argument in read_file(complete_log):gmatch("([^%z]+)%z") do
-                    assert.not_equal("-c", argument)
-                    if argument:match("^spec/.+_spec[.]lua$") then
-                        assert.falsy(complete[argument], argument)
-                        complete[argument] = true
-                    end
+                local expected_stdlib, expected_complete = {}, {}
+                for _, item in ipairs(inventory.stdlib) do
+                    expected_stdlib[item.path] = true
+                    expected_complete[item.path] = true
                 end
-                assert.same(seen, complete)
+                for _, item in ipairs(inventory.compiler) do
+                    expected_complete[item.path] = true
+                end
+                assert.same(expected_stdlib, selected(
+                    "stdlib-compiler-uncovered", root .. "/stdlib"))
+                assert.same(expected_complete, selected(
+                    "compiler-uncovered", root .. "/complete"))
+
+                -- The former local-only uncovered shard selectors are gone:
+                -- local runs plan per file from the same timing dataset.
+                local ok, output, why, code = run_argv({
+                    "env", "BUSTED=" .. fake_busted,
+                    "TITAN_SELECTOR_ARGV_LOG=" .. root .. "/rejected",
+                    "bash", "spec/support/ci_test_groups.sh",
+                    "compiler-uncovered-shard-1",
+                })
+                assert.falsy(ok, output)
+                assert.equal("exit", why)
+                assert.equal(2, code)
             end, debug.traceback)
             remove_tree(root)
             if not tested then error(test_error, 0) end
@@ -4099,28 +4236,23 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
                 })
                 assert.truthy(chmod_ok, chmod_output)
 
+                local groups_helper = assert(loadfile(
+                    "spec/support/compiler_test_groups.lua"))()
+                local inventory = assert(groups_helper.load())
+                local ci_plan = assert(groups_helper.plan_ci(
+                    inventory, 4, "ci_covered"))
                 local expected = { {}, {}, {}, {}, {} }
-                for line in read_file(
-                    "spec/support/ci_compiler_test_groups.txt"):
-                gmatch("[^\r\n]+") do
-                    local shard, path = line:match("^([1-4])%s+(%S+)")
-                    if shard then
-                        local paths = expected[tonumber(shard)]
-                        paths[#paths + 1] = path
+                for shard = 1, 4 do
+                    for _, path in ipairs(ci_plan[shard].files) do
+                        expected[shard][#expected[shard] + 1] = path
                     end
                 end
-                for line in read_file(
-                    "spec/support/ci_stdlib_compiler_test_files.txt"):
-                gmatch("[^\r\n]+") do
-                    if line:sub(1, 1) ~= "#" then
-                        expected[5][#expected[5] + 1] = line
-                    end
+                for _, item in ipairs(inventory.stdlib) do
+                    expected[5][#expected[5] + 1] = item.path
                 end
                 local stress = {}
-                for line in read_file(
-                    "spec/support/ci_compiler_stress_files.txt"):
-                gmatch("[^\r\n]+") do
-                    if line:sub(1, 1) ~= "#" then stress[line] = true end
+                for _, item in ipairs(inventory.items) do
+                    if item.stress then stress[item.path] = true end
                 end
 
                 local function has_argument(argv, expected_argument)
@@ -4226,14 +4358,61 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
                     assert.same(expected_covered, covered)
                     assert.same(expected_stress, uncovered_stress)
                 end
+
+                -- Shard-pair runners run each shard's ordinary files
+                -- concurrently, then its exclusive files alone. The two
+                -- phases partition the same generated four-way plan.
+                local exclusive_seen = {}
+                for shard = 1, 4 do
+                    local phase_files = {}
+                    for _, phase in ipairs({ "ordinary", "exclusive" }) do
+                        local log = root .. "/phase-" .. shard .. "-" .. phase
+                        local ok, output = run_argv({
+                            "env", "BUSTED=" .. fake_busted,
+                            "TITAN_SELECTOR_ARGV_LOG=" .. log,
+                            "bash", "spec/support/ci_test_groups.sh",
+                            "compiler-shard-" .. shard, phase,
+                        })
+                        assert.truthy(ok, output)
+                        local calls = lfs.attributes(log) and
+                            decoded_calls(log) or {}
+                        for _, argv in ipairs(calls) do
+                            if has_argument(argv, "-c") then
+                                for _, argument in ipairs(argv) do
+                                    if argument:match("^spec/.+_spec[.]lua$") then
+                                        assert.falsy(phase_files[argument], argument)
+                                        phase_files[argument] = true
+                                        assert.equal(phase == "exclusive",
+                                            groups_helper.EXCLUSIVE_SPECS[argument] == true,
+                                            argument)
+                                        if phase == "exclusive" then
+                                            exclusive_seen[argument] = true
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    local expected_covered = {}
+                    for _, path in ipairs(expected[shard]) do
+                        expected_covered[path] = true
+                    end
+                    assert.same(expected_covered, phase_files)
+                end
+                for path in pairs(groups_helper.EXCLUSIVE_SPECS) do
+                    if inventory.by_path[path] then
+                        assert.truthy(exclusive_seen[path], path)
+                    end
+                end
             end, debug.traceback)
             remove_tree(root)
             if not tested then error(test_error, 0) end
         end)
 
-    it("isolates and bounds all four local compiler workers", function()
+    it("runs every planned spec file once in isolated, bounded, keep-going workers",
+        function()
             if platform.windows then
-                pending("Unix compiler worker concurrency and process-group supervision")
+                pending("Unix compiler worker Make pool and process-group supervision")
                 return
             end
         local root = make_temp_dir()
@@ -4244,7 +4423,8 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
             local temporary_base = root .. "/runner-tmp"
             local state = root .. "/state"
             local mkdir_ok, mkdir_output = run_argv({
-                "mkdir", "-p", support, bin, temporary_base, state,
+                "mkdir", "-p", support, workspace .. "/spec/coder", bin,
+                temporary_base, state,
                 workspace .. "/.git", workspace .. "/.lua",
                 workspace .. "/.sdk-local/bin",
                 workspace .. "/.sdk-local-sibling",
@@ -4252,7 +4432,11 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
                 workspace .. "/sdk1",
             })
             assert.truthy(mkdir_ok, mkdir_output)
-            write_file(workspace .. "/Makefile", "all:\n\t@true\n")
+            local lua = installed_prefix.active() .. "/bin/lua"
+            -- The native build target counts as one more pool unit.
+            write_file(workspace .. "/Makefile",
+                "titan-stdlib-test-build:\n\t@bash " ..
+                quote(bin .. "/native-build") .. "\n")
             write_file(workspace .. "/ordinary", "original\n")
             write_file(workspace .. "/.git/excluded", "git\n")
             write_file(workspace .. "/.lua/excluded", "lua\n")
@@ -4271,24 +4455,108 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
                 "ln", "-s", workspace .. "/.sdk-local", prefix_link,
             })
             assert.truthy(link_ok, link_output)
-            write_file(support .. "/run_parallel_compiler_tests.sh",
-                read_file("spec/support/run_parallel_compiler_tests.sh"))
+            for _, name in ipairs({
+                "run_parallel_compiler_tests.sh", "compiler_test_groups.lua",
+            }) do
+                write_file(support .. "/" .. name,
+                    read_file("spec/support/" .. name))
+            end
+            local ordinary_files = {
+                "spec/r1_spec.lua", "spec/r2_spec.lua", "spec/s1_spec.lua",
+                "spec/c1_spec.lua", "spec/c2_spec.lua", "spec/c3_spec.lua",
+                "spec/c4_spec.lua", "spec/c5_spec.lua",
+            }
+            local exclusive_files = {
+                "spec/coder/jobserver_spec.lua",
+                "spec/coder/parallel_compilation_spec.lua",
+            }
+            for _, list in ipairs({ ordinary_files, exclusive_files }) do
+                for _, path in ipairs(list) do
+                    write_file(workspace .. "/" .. path, "-- fixture\n")
+                end
+            end
+            write_file(support .. "/ci_stdlib_compiler_test_files.txt",
+                "spec/s1_spec.lua\n")
+            write_file(support .. "/ci_compiler_stress_files.txt", "# none\n")
+            write_file(support .. "/ci_compiler_test_groups.txt", table.concat({
+                "# Schema: titan-busted-timings-v2",
+                "retained spec/r1_spec.lua 9.0 -",
+                "retained spec/r2_spec.lua 3.0 -",
+                "stdlib spec/s1_spec.lua 7.0 -",
+                "compiler spec/c1_spec.lua 8.0 8.0",
+                "compiler spec/c2_spec.lua 6.0 6.0",
+                "compiler spec/c3_spec.lua 5.0 5.0",
+                "compiler spec/c4_spec.lua 4.0 4.0",
+                "compiler spec/c5_spec.lua 2.0 2.0",
+                "compiler spec/coder/jobserver_spec.lua 3.0 -",
+                "compiler spec/coder/parallel_compilation_spec.lua 3.0 -",
+                "",
+            }, "\n"))
 
-            local fake_busted = bin .. "/busted"
-            write_file(fake_busted, [==[#!/usr/bin/env bash
-exit 0
-]==])
-            write_file(support .. "/ci_test_groups.sh", [==[#!/usr/bin/env bash
-set -u
-
+            local common = [==[
 state=${TITAN_FIXTURE_STATE:?}
 expected_max=${TITAN_FIXTURE_EXPECTED_MAX:?}
-group=${1:-}
-case "$group" in
-    compiler-uncovered-shard-[1-4]) shard=${group##*-} ;;
-    *) echo "unexpected fixture group: $group" >&2; exit 71 ;;
-esac
-
+acquire_lock() {
+    while ! mkdir "$state/lock" 2>/dev/null; do sleep 0.01; done
+}
+release_lock() {
+    rmdir "$state/lock"
+}
+enter_unit() {
+    acquire_lock
+    active=$(($(cat "$state/active") + 1))
+    printf '%s\n' "$active" > "$state/active"
+    if (( active > $(cat "$state/maximum") )); then
+        printf '%s\n' "$active" > "$state/maximum"
+    fi
+    release_lock
+}
+leave_unit() {
+    acquire_lock
+    printf '%s\n' "$(($(cat "$state/active") - 1))" > "$state/active"
+    printf '%s\n' "$1" >> "$state/finished"
+    release_lock
+}
+# Hold the first wave until every permitted pool unit is occupied, making
+# the concurrency observation deterministic even on a heavily loaded host.
+barrier() {
+    local deadline=$((SECONDS + 5))
+    while (( $(cat "$state/maximum") < expected_max )); do
+        if (( SECONDS >= deadline )); then
+            echo "fixture concurrency barrier timed out" >&2
+            exit 78
+        fi
+        sleep 0.01
+    done
+}
+hang() {
+    (
+        trap '' TERM
+        while :; do sleep 1; done
+    ) &
+    printf '%s\n' "$!" >> "$state/term-ignoring-descendants"
+    wait "$!"
+    exit 81
+}
+]==]
+            write_file(bin .. "/native-build", "#!/usr/bin/env bash\nset -u\n" ..
+                common .. [==[
+enter_unit
+echo "fixture native build running"
+printf '1\n' > "$state/native-active"
+barrier
+if [[ ${TITAN_FIXTURE_NATIVE_HANG:-} == 1 ]]; then hang; fi
+sleep 0.3
+printf '0\n' > "$state/native-active"
+printf 'native-built\n' > "$state/native-built"
+leave_unit native-build
+exit "${TITAN_FIXTURE_NATIVE_STATUS:-0}"
+]==])
+            local fake_busted = bin .. "/busted"
+            write_file(fake_busted, "#!/usr/bin/env bash\nset -u\n" ..
+                common .. [==[
+[[ $# == 4 && $1 == -o && $2 == gtest && $3 == -v ]] || exit 70
+test_file=$4
 [[ $PWD != "$TITAN_FIXTURE_ORIGINAL" ]] || exit 72
 [[ ! -e .git && ! -e .lua ]] || exit 73
 [[ -z ${TITAN_FIXTURE_OMITTED:-} || ! -e $TITAN_FIXTURE_OMITTED ]] || exit 73
@@ -4296,141 +4564,121 @@ for kept in .sdk-local-sibling 'sdk[1]' 'sdk*' sdk1; do
     [[ $(cat "$kept/kept" 2>/dev/null) == kept ]] || exit 82
 done
 [[ $(cat ordinary) == original ]] || exit 74
-[[ $MAKEFLAGS == -j1 && $TITAN_JOBS == 1 ]] || exit 75
-case "$BUSTED" in /*) ;; *) exit 76 ;; esac
-[[ -d $TMPDIR ]] || exit 77
-[[ $CCACHE_TEMPDIR == "$TMPDIR/ccache" &&
-   -d $CCACHE_TEMPDIR ]] || exit 78
+[[ $TITAN_SOURCE_GIT_ROOT == "$TITAN_FIXTURE_ORIGINAL" ]] || exit 76
+[[ -d $TMPDIR && $CCACHE_TEMPDIR == "$TMPDIR/ccache" &&
+   -d $CCACHE_TEMPDIR ]] || exit 77
+# A previous file in this checkout must not leave root artifacts behind.
+[[ ! -e leftover.c && ! -e leftover.parts ]] || exit 83
 
-acquire_lock() {
-    while ! mkdir "$state/lock" 2>/dev/null; do sleep 0.01; done
-}
-release_lock() {
-    rmdir "$state/lock"
-}
-
-acquire_lock
-active=$(cat "$state/active")
-active=$((active + 1))
-printf '%s\n' "$active" > "$state/active"
-maximum=$(cat "$state/maximum")
-if [[ $active -gt $maximum ]]; then
-    printf '%s\n' "$active" > "$state/maximum"
+exclusive=0
+case "$test_file" in
+    spec/coder/jobserver_spec.lua | spec/coder/parallel_compilation_spec.lua)
+        exclusive=1 ;;
+esac
+# Ordinary workers keep nested Make/Titan work at one job. Exclusive files
+# run alone and own their caps, so no inherited Make job policy reaches them.
+if (( exclusive != 0 )); then
+    [[ -z ${MAKEFLAGS+set} && -z ${MFLAGS+set} && -z ${MAKELEVEL+set} &&
+       -z ${TITAN_JOBS+set} ]] || exit 75
+else
+    [[ $MAKEFLAGS == -j1 && $TITAN_JOBS == 1 ]] || exit 75
 fi
-printf '%s\t%s\t%s\t%s\n' "$shard" "$PWD" "$TMPDIR" "$BUSTED" \
-    >> "$state/observations"
-release_lock
-
-# Hold the first wave until every permitted slot is occupied, making the
-# concurrency observation deterministic even on a heavily loaded host.
-barrier_deadline=$((SECONDS + 5))
-while [[ $(cat "$state/maximum") -lt $expected_max ]]; do
-    if [[ $SECONDS -ge $barrier_deadline ]]; then
-        echo "fixture concurrency barrier timed out" >&2
-        exit 78
+enter_unit
+acquire_lock
+printf '%s\t%s\t%s\n' "$test_file" "$PWD" "$TMPDIR" >> "$state/observations"
+if (( exclusive != 0 )); then
+    ordinary_done=$(grep -c '^spec/[a-z0-9]*_spec[.]lua$' "$state/finished" || true)
+    if [[ $(cat "$state/active") != 1 || $(cat "$state/native-active") != 0 ||
+          $ordinary_done != "$TITAN_FIXTURE_ORDINARY_TOTAL" ]]; then
+        printf '%s\n' "$test_file" >> "$state/exclusive-overlap"
     fi
-    sleep 0.01
-done
+fi
+release_lock
+if (( exclusive == 0 )); then barrier; fi
 
-if [[ ${TITAN_FIXTURE_KILL_WRAPPER_SHARD:-} == "$shard" ]]; then
-    # The launcher makes the worker wrapper the process-group leader. Kill
-    # only that leader so it cannot send its ordinary FIFO completion record;
-    # leave this selector alive for the parent's dead-worker cleanup path.
-    wrapper=$(ps -o pgid= -p $$ | tr -d ' ')
-    [[ $wrapper =~ ^[0-9]+$ ]] || exit 79
-    printf '%s\n' "$wrapper" > "$state/killed-wrapper"
-    kill -KILL "$wrapper"
+if [[ ${TITAN_FIXTURE_KILL_WRAPPER_FILE:-} == "$test_file" ]]; then
+    # The launcher makes each shard's Busted runner a process-group leader.
+    # Kill only that leader so it cannot record its status; leave this file
+    # alive for the wrapper's dead-shard cleanup path.
+    leader=$(ps -o pgid= -p $$ | tr -d ' ')
+    [[ $leader =~ ^[0-9]+$ ]] || exit 79
+    printf '%s\n' "$leader" > "$state/killed-wrapper"
+    kill -KILL "$leader"
     sleep 30
     exit 80
 fi
+if [[ ${TITAN_FIXTURE_HANG_FILE:-} == "$test_file" ]]; then hang; fi
 
-if [[ ${TITAN_FIXTURE_HANG_SHARD:-} == "$shard" ]]; then
-    (
-        trap '' TERM
-        while :; do sleep 1; done
-    ) &
-    descendant=$!
-    printf '%s\n' "$descendant" > "$state/term-ignoring-descendant"
-    wait "$descendant"
-    exit 81
-fi
-
-printf 'fixture-output-%s\n' "$shard"
-touch "worker-mutated-$shard"
+printf 'fixture-output %s\n' "$test_file"
+touch "worker-mutated" leftover.c leftover.parts
 sleep 0.1
-
-acquire_lock
-active=$(cat "$state/active")
-printf '%s\n' "$((active - 1))" > "$state/active"
-printf '%s\n' "$shard" >> "$state/finished"
-release_lock
-
-if [[ ${TITAN_FIXTURE_FAIL_SHARD:-} == "$shard" ]]; then exit 23; fi
+leave_unit "$test_file"
+if [[ ${TITAN_FIXTURE_FAIL_FILE:-} == "$test_file" ]]; then exit 23; fi
 ]==])
             local chmod_ok, chmod_output = run_argv({
-                "chmod", "+x", fake_busted,
-                support .. "/run_parallel_compiler_tests.sh",
-                support .. "/ci_test_groups.sh",
+                "chmod", "+x", fake_busted, bin .. "/native-build",
             })
             assert.truthy(chmod_ok, chmod_output)
 
             local function reset_state()
                 for _, name in ipairs({
-                    "active", "maximum", "observations", "finished",
-                    "killed-wrapper", "term-ignoring-descendant",
+                    "observations", "finished", "killed-wrapper",
+                    "term-ignoring-descendants", "exclusive-overlap",
+                    "native-built",
                 }) do
                     os.remove(state .. "/" .. name)
                 end
                 write_file(state .. "/active", "0\n")
                 write_file(state .. "/maximum", "0\n")
+                write_file(state .. "/native-active", "0\n")
                 write_file(state .. "/observations", "")
                 write_file(state .. "/finished", "")
             end
 
-            local function run_case(jobs, fail_shard, extra_environment,
-                                    bounded)
-                reset_state()
-                local argv = {}
-                if bounded then
-                    argv[#argv + 1] = "bash"
-                    argv[#argv + 1] = lfs.currentdir() ..
-                        "/spec/support/run_with_timeout.sh"
-                    argv[#argv + 1] = "8"
-                end
-                for _, argument in ipairs({
-                    "bash", "-c",
-                    'cd "$1" && shift && exec "$@"',
-                    "titan-parallel-test", workspace,
-                    "env", "-u", "TITAN_ROCK_TEST_JOBS",
-                    "-u", "TITAN_FIXTURE_KILL_WRAPPER_SHARD",
-                    "-u", "TITAN_FIXTURE_HANG_SHARD",
+            local function fixture_environment(expected_max, extra)
+                local environment = {
                     "PATH=" .. bin .. ":" .. assert(os.getenv("PATH")),
                     "BUSTED=busted",
+                    "LUA=" .. lua,
                     "PREFIX=" .. prefix_link,
                     "TITAN_FIXTURE_OMITTED=.sdk-local",
                     "TMPDIR=" .. temporary_base,
                     "TITAN_FIXTURE_STATE=" .. state,
                     "TITAN_FIXTURE_ORIGINAL=" .. workspace,
-                    "TITAN_FIXTURE_EXPECTED_MAX=" .. tostring(jobs or 4),
+                    "TITAN_FIXTURE_EXPECTED_MAX=" .. tostring(expected_max),
+                    "TITAN_FIXTURE_ORDINARY_TOTAL=" .. tostring(#ordinary_files),
+                    "TITAN_ROCK_TEST_STDLIB_SPECS=spec/r1_spec.lua spec/r2_spec.lua",
+                }
+                for _, assignment in ipairs(extra or {}) do
+                    environment[#environment + 1] = assignment
+                end
+                return environment
+            end
+
+            local function run_case(expected_max, extra, bounded)
+                reset_state()
+                local argv = {}
+                if bounded then
+                    argv = {
+                        "bash", lfs.currentdir() .. "/spec/support/run_with_timeout.sh",
+                        "8",
+                    }
+                end
+                for _, argument in ipairs({
+                    "bash", "-c", 'cd "$1" && shift && exec "$@"',
+                    "titan-parallel-test", workspace,
+                    "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKELEVEL",
+                    "-u", "TITAN_JOBS", "-u", "TITAN_ROCK_TEST_JOBS",
+                    "-u", "TITAN_ROCK_TEST_BUILD_NATIVE",
+                    "-u", "TITAN_ROCK_TEST_NATIVE_STATUS",
                 }) do
                     argv[#argv + 1] = argument
                 end
-                if jobs then
-                    argv[#argv + 1] =
-                        "TITAN_ROCK_TEST_JOBS=" .. tostring(jobs)
-                end
-                if fail_shard then
-                    argv[#argv + 1] =
-                        "TITAN_FIXTURE_FAIL_SHARD=" .. tostring(fail_shard)
-                else
-                    argv[#argv + 1] = "TITAN_FIXTURE_FAIL_SHARD="
-                end
-                for _, assignment in ipairs(extra_environment or {}) do
+                for _, assignment in ipairs(fixture_environment(expected_max, extra)) do
                     argv[#argv + 1] = assignment
                 end
                 argv[#argv + 1] = "bash"
-                argv[#argv + 1] =
-                "spec/support/run_parallel_compiler_tests.sh"
+                argv[#argv + 1] = "spec/support/run_parallel_compiler_tests.sh"
                 return run_argv(argv)
             end
 
@@ -4440,185 +4688,257 @@ if [[ ${TITAN_FIXTURE_FAIL_SHARD:-} == "$shard" ]]; then exit 23; fi
                 end
             end
 
-            local function assert_complete_run(expected_max, output)
+            local function assert_complete_run(expected_max, workers, output)
                 assert.equal(tostring(expected_max) .. "\n",
                     read_file(state .. "/maximum"))
-                local roots = {}
-                local temporary_directories = {}
-                local observed_shards = {}
-                for line in read_file(state .. "/observations"):
-                gmatch("[^\r\n]+") do
-                    local shard, worker, tmpdir, busted =
-                        line:match("^(%d)\t([^\t]+)\t([^\t]+)\t([^\t]+)$")
-                    assert.truthy(shard, line)
-                    assert.falsy(observed_shards[shard], line)
-                    assert.falsy(roots[worker], line)
-                    assert.falsy(temporary_directories[tmpdir], line)
-                    observed_shards[shard] = true
-                    roots[worker] = true
-                    temporary_directories[tmpdir] = true
+                assert.falsy(lfs.attributes(state .. "/exclusive-overlap"),
+                    output)
+                local roots, seen = {}, {}
+                local count = 0
+                for line in read_file(state .. "/observations"):gmatch("[^\n]+") do
+                    local file, worker, tmpdir = line:match("^([^\t]+)\t([^\t]+)\t([^\t]+)$")
+                    assert.truthy(file, line)
+                    assert.falsy(seen[file], line)
+                    seen[file] = true
+                    count = count + 1
                     assert.not_equal(workspace, worker)
-                    assert.equal(fake_busted, busted)
+                    -- One checkout and TMPDIR belong to one shard.
+                    assert.truthy(roots[worker] == nil or roots[worker] == tmpdir, line)
+                    roots[worker] = tmpdir
+                    assert.truthy(output:find("fixture-output " .. file, 1, true),
+                        output)
                 end
-                local finished = {}
-                for shard in read_file(state .. "/finished"):
-                gmatch("[^\r\n]+") do
-                    finished[shard] = true
-                end
-                for shard = 1, 4 do
-                    local label = tostring(shard)
-                    assert.truthy(observed_shards[label], label)
-                    assert.truthy(finished[label], label)
-                    assert.truthy(output:find(
-                        "[compiler shard " .. label .. "] " ..
-                        "fixture-output-" .. label, 1, true), output)
-                    assert.truthy(output:find(
-                        "===== finished compiler shard " .. label ..
-                        ": status=", 1, true), output)
-                    assert.falsy(lfs.attributes(
-                        workspace .. "/worker-mutated-" .. label))
-                end
-                assert.equal(4, (function()
-                    local count = 0
-                    for _ in pairs(roots) do count = count + 1 end
-                    return count
-                end)())
-                assert.equal(4, (function()
-                    local count = 0
-                    for _ in pairs(temporary_directories) do
-                        count = count + 1
-                    end
-                    return count
-                end)())
-                assert.equal("original\n", read_file(
-                    workspace .. "/ordinary"))
+                assert.equal(#ordinary_files + #exclusive_files, count)
+                local checkout_count = 0
+                for _ in pairs(roots) do checkout_count = checkout_count + 1 end
+                -- Ordinary shards plus the exclusive shard.
+                assert.equal(workers + 1, checkout_count)
+                assert.falsy(lfs.attributes(workspace .. "/worker-mutated"))
+                assert.falsy(lfs.attributes(workspace .. "/leftover.c"))
+                assert.equal("original\n", read_file(workspace .. "/ordinary"))
                 assert_temporary_base_empty()
             end
 
-            local function run_interruption_case()
-                reset_state()
-                return run_argv({
-                    "bash", lfs.currentdir() ..
-                "/spec/support/run_with_timeout.sh", "10",
-                    "bash", "-c", [==[
-workspace=$1
-state=$2
-temporary_base=$3
-bin=$4
-prefix=$5
-cd "$workspace" || exit 90
-env PATH="$bin:$PATH" \
-    BUSTED=busted \
-    PREFIX="$prefix" \
-    TITAN_FIXTURE_OMITTED=.sdk-local \
-    TMPDIR="$temporary_base" \
-    TITAN_ROCK_TEST_JOBS=1 \
-    TITAN_FIXTURE_STATE="$state" \
-    TITAN_FIXTURE_ORIGINAL="$workspace" \
-    TITAN_FIXTURE_EXPECTED_MAX=1 \
-    TITAN_FIXTURE_FAIL_SHARD= \
-    TITAN_FIXTURE_HANG_SHARD=1 \
-    bash spec/support/run_parallel_compiler_tests.sh &
-runner=$!
-deadline=$((SECONDS + 5))
-while [[ ! -s $state/term-ignoring-descendant ]]; do
-    if ! kill -0 "$runner" 2>/dev/null; then
-        wait "$runner" || true
-        echo "parallel launcher exited before starting descendant" >&2
-        exit 91
-    fi
-    if [[ $SECONDS -ge $deadline ]]; then
-        kill -TERM "$runner" 2>/dev/null || true
-        wait "$runner" || true
-        echo "timed out waiting for TERM fixture descendant" >&2
-        exit 92
-    fi
-    sleep 0.01
-done
-descendant=$(cat "$state/term-ignoring-descendant")
-kill -TERM "$runner"
-runner_status=0
-wait "$runner" || runner_status=$?
-if [[ $runner_status -ne 143 ]]; then
-    echo "parallel launcher TERM status was $runner_status" >&2
-    exit 93
-fi
-deadline=$((SECONDS + 4))
-while kill -0 "$descendant" 2>/dev/null; do
-    if [[ $SECONDS -ge $deadline ]]; then
-        echo "TERM-ignoring descendant survived launcher cleanup" >&2
-        exit 94
-    fi
-    sleep 0.01
-done
-]==], "titan-parallel-interruption", workspace, state,
-                    temporary_base, bin, prefix_link,
-                })
-            end
-
-            local ok, output = run_case()
+            -- Default: four LPT shards in one fresh four-slot pool; the two
+            -- exclusive files run alone afterwards.
+            local ok, output = run_case(4)
             assert.truthy(ok, output)
-            assert_complete_run(4, output)
+            assert_complete_run(4, 4, output)
             assert.truthy(output:find(
-                "All four compiler shards passed", 1, true), output)
-
-            ok, output = run_case(2)
-            assert.truthy(ok, output)
-            assert_complete_run(2, output)
+                "Per-file Busted summary: passed=10 failed=0 total=10", 1, true), output)
+            assert.truthy(output:find("All 5 compiler shards passed", 1, true), output)
 
             for _, patterned in ipairs({ "sdk[1]", "sdk*" }) do
-                ok, output = run_case(nil, nil, {
+                ok, output = run_case(4, {
                     "PREFIX=" .. workspace .. "/" .. patterned,
                     "TITAN_FIXTURE_OMITTED=",
                 })
                 assert.truthy(ok, output)
-                assert_complete_run(4, output)
+                assert_complete_run(4, 4, output)
             end
 
+            -- More shards than the pool: TITAN_ROCK_TEST_JOBS chooses the
+            -- partition, TITAN_JOBS the shared budget.
+            ok, output = run_case(2, { "TITAN_ROCK_TEST_JOBS=4", "TITAN_JOBS=2" })
+            assert.truthy(ok, output)
+            assert_complete_run(2, 4, output)
+            ok, output = run_case(2, { "TITAN_ROCK_TEST_JOBS=2" })
+            assert.truthy(ok, output)
+            assert_complete_run(2, 2, output)
+
+            -- The native build joins the same pool instead of adding units,
+            -- and the caller receives its status. Three workers are the
+            -- default when the build shares the pool.
+            local native_status = root .. "/native.status"
+            os.remove(native_status)
+            ok, output = run_case(3, {
+                "TITAN_JOBS=3", "TITAN_ROCK_TEST_BUILD_NATIVE=1",
+                "TITAN_ROCK_TEST_NATIVE_STATUS=" .. native_status,
+            })
+            assert.truthy(ok, output)
+            assert_complete_run(3, 3, output)
+            assert.equal("native-built\n", read_file(state .. "/native-built"))
+            assert.equal("0\n", read_file(native_status))
+            assert.truthy(output:find("[native build] ", 1, true), output)
+
+            -- A failed native build is reported to the caller, which owns
+            -- the native phase; Busted shards still complete.
+            ok, output = run_case(3, {
+                "TITAN_JOBS=3", "TITAN_ROCK_TEST_BUILD_NATIVE=1",
+                "TITAN_ROCK_TEST_NATIVE_STATUS=" .. native_status,
+                "TITAN_FIXTURE_NATIVE_STATUS=7",
+            })
+            assert.truthy(ok, output)
+            assert.matches("^[1-9][0-9]*\n$", read_file(native_status))
+            assert_complete_run(3, 3, output)
+
+            -- Without TITAN_JOBS, which the Makefile omits on GNU Make before
+            -- 4.2, the seeded pool holds every worker plus the native build.
+            os.remove(native_status)
+            ok, output = run_case(4, {
+                "TITAN_ROCK_TEST_BUILD_NATIVE=1",
+                "TITAN_ROCK_TEST_NATIVE_STATUS=" .. native_status,
+            })
+            assert.truthy(ok, output)
+            assert_complete_run(4, 3, output)
+            assert.equal("native-built\n", read_file(state .. "/native-built"))
+            assert.equal("0\n", read_file(native_status))
+            ok, output = run_case(5, { "TITAN_ROCK_TEST_JOBS=5" })
+            assert.truthy(ok, output)
+            assert_complete_run(5, 5, output)
+
+            -- An explicit serial Make policy stays serial.
+            ok, output = run_case(1, { "MAKEFLAGS=-j1", "TITAN_JOBS=4",
+                "TITAN_ROCK_TEST_BUILD_NATIVE=1" })
+            assert.truthy(ok, output)
+            assert_complete_run(1, 3, output)
+
+            -- A parent Make pool is joined, never multiplied: TITAN_JOBS=8
+            -- alone does not override the inherited three-slot server.
+            local parent_styles = { {} }
+            local help_ok, help = run_argv({ "make", "--help" })
+            if help_ok and help:find("--jobserver-style", 1, true) then
+                parent_styles[#parent_styles + 1] = { "--jobserver-style=pipe" }
+            end
+            write_file(root .. "/parent.mk",
+                "all:\n\t+@cd " .. quote(workspace) ..
+                " && bash spec/support/run_parallel_compiler_tests.sh\n")
+            for _, style in ipairs(parent_styles) do
+                reset_state()
+                local argv = {
+                    "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKELEVEL",
+                    "-u", "TITAN_ROCK_TEST_JOBS",
+                }
+                for _, assignment in ipairs(fixture_environment(3, {
+                    "TITAN_JOBS=8", "TITAN_ROCK_TEST_BUILD_NATIVE=1",
+                })) do
+                    argv[#argv + 1] = assignment
+                end
+                for _, word in ipairs({
+                    "make", "--no-print-directory", "-j3",
+                }) do
+                    argv[#argv + 1] = word
+                end
+                for _, word in ipairs(style) do argv[#argv + 1] = word end
+                argv[#argv + 1] = "-f"
+                argv[#argv + 1] = root .. "/parent.mk"
+                ok, output = run_argv(argv)
+                assert.truthy(ok, output)
+                assert_complete_run(3, 3, output)
+                assert.equal("native-built\n", read_file(state .. "/native-built"))
+            end
+
+            -- An early failing file does not stop its shard or the others;
+            -- the summary names it and the run fails at the end.
             local why, code
-            ok, output, why, code = run_case(nil, 2)
+            ok, output, why, code = run_case(4, {
+                "TITAN_FIXTURE_FAIL_FILE=spec/c5_spec.lua",
+            })
             assert.falsy(ok, output)
             assert.equal("exit", why)
             assert.equal(1, code)
-            assert_complete_run(4, output)
+            assert_complete_run(4, 4, output)
             assert.truthy(output:find(
-                "compiler shard 2 failed: 23", 1, true), output)
+                "Per-file Busted summary: passed=9 failed=1 total=10", 1, true), output)
+            assert.truthy(output:find(
+                "FAILED spec file: spec/c5_spec.lua", 1, true), output)
 
+            -- A shard whose Busted group dies before recording its status
+            -- fails promptly; its unreported files are named.
             local started = os.time()
-            ok, output, why, code = run_case(1, nil, {
-                "TITAN_FIXTURE_KILL_WRAPPER_SHARD=1",
+            ok, output, why, code = run_case(1, {
+                "TITAN_ROCK_TEST_JOBS=1",
+                "TITAN_FIXTURE_KILL_WRAPPER_FILE=spec/c1_spec.lua",
             }, true)
             assert.falsy(ok, output)
             assert.equal("exit", why)
             assert.equal(1, code)
             assert.is_true(os.time() - started < 8, output)
-            assert.truthy(lfs.attributes(
-                state .. "/killed-wrapper", "mode"), output)
+            assert.truthy(lfs.attributes(state .. "/killed-wrapper", "mode"), output)
+            assert.truthy(output:find("exited before recording its status", 1, true),
+                output)
             assert.truthy(output:find(
-                "compiler shard 1", 1, true), output)
+                "planned spec file did not report a result", 1, true), output)
             assert_temporary_base_empty()
 
-            ok, output, why, code = run_interruption_case()
+            -- TERM drains the Make work graph, the native build, and every
+            -- shard, including descendants that ignore TERM.
+            reset_state()
+            os.remove(native_status)
+            local interruption = {
+                "bash", lfs.currentdir() .. "/spec/support/run_with_timeout.sh", "15",
+                "bash", "-c", [==[
+workspace=$1
+state=$2
+shift 2
+cd "$workspace" || exit 90
+env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u TITAN_JOBS "$@" \
+    bash spec/support/run_parallel_compiler_tests.sh &
+runner=$!
+deadline=$((SECONDS + 8))
+while (( $(cat "$state/term-ignoring-descendants" 2>/dev/null | wc -l) < 2 )); do
+    if ! kill -0 "$runner" 2>/dev/null; then
+        wait "$runner" || true
+        echo "parallel launcher exited before starting descendants" >&2
+        exit 91
+    fi
+    if (( SECONDS >= deadline )); then
+        kill -TERM "$runner" 2>/dev/null || true
+        wait "$runner" || true
+        echo "timed out waiting for TERM fixture descendants" >&2
+        exit 92
+    fi
+    sleep 0.01
+done
+kill -TERM "$runner"
+runner_status=0
+wait "$runner" || runner_status=$?
+if (( runner_status != 143 )); then
+    echo "parallel launcher TERM status was $runner_status" >&2
+    exit 93
+fi
+deadline=$((SECONDS + 4))
+while read -r descendant; do
+    while kill -0 "$descendant" 2>/dev/null; do
+        if (( SECONDS >= deadline )); then
+            echo "TERM-ignoring descendant survived launcher cleanup" >&2
+            exit 94
+        fi
+        sleep 0.01
+    done
+done < "$state/term-ignoring-descendants"
+]==], "titan-parallel-interruption", workspace, state,
+            }
+            for _, assignment in ipairs(fixture_environment(2, {
+                "TITAN_ROCK_TEST_JOBS=1", "TITAN_ROCK_TEST_BUILD_NATIVE=1",
+                "TITAN_ROCK_TEST_NATIVE_STATUS=" .. native_status,
+                "TITAN_FIXTURE_HANG_FILE=spec/c1_spec.lua",
+                "TITAN_FIXTURE_NATIVE_HANG=1",
+            })) do
+                interruption[#interruption + 1] = assignment
+            end
+            ok, output, why, code = run_argv(interruption)
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
-            assert.truthy(lfs.attributes(
-                state .. "/term-ignoring-descendant", "mode"), output)
+            assert.falsy(lfs.attributes(native_status), output)
             assert_temporary_base_empty()
 
-            for _, invalid in ipairs({ "0", "5", "invalid" }) do
+            for _, invalid in ipairs({
+                { "TITAN_ROCK_TEST_JOBS=0", "TITAN_ROCK_TEST_JOBS must be a positive integer" },
+                { "TITAN_ROCK_TEST_JOBS=-1", "TITAN_ROCK_TEST_JOBS must be a positive integer" },
+                { "TITAN_ROCK_TEST_JOBS=invalid", "TITAN_ROCK_TEST_JOBS must be a positive integer" },
+                { "TITAN_JOBS=0", "TITAN_JOBS must be a positive integer" },
+            }) do
                 ok, output, why, code = run_argv({
-                    "bash", "-c",
-                    'cd "$1" && shift && exec "$@"',
+                    "bash", "-c", 'cd "$1" && shift && exec "$@"',
                     "titan-parallel-validation", workspace,
-                    "env",
-                    "TITAN_ROCK_TEST_JOBS=" .. invalid,
+                    "env", invalid[1],
                     "bash", "spec/support/run_parallel_compiler_tests.sh",
                 })
                 assert.falsy(ok, output)
                 assert.equal("exit", why)
                 assert.equal(2, code)
-                assert.truthy(output:find(
-                    "must be an integer from 1 through 4", 1, true), output)
+                assert.truthy(output:find(invalid[2], 1, true), output)
             end
         end, debug.traceback)
         remove_tree(root)
@@ -4629,37 +4949,41 @@ done
         function()
             -- The real Windows route needs CLANG64, cygpath, and the native
             -- Job Object supervisor. Drive the launcher's own launch-order
-            -- and admission code with stub workers that finish oldest-first.
+            -- and admission functions with stub shards that finish oldest-first.
             local launcher = read_file(
                 "spec/support/run_parallel_compiler_tests.sh")
-            local order_start = assert(launcher:find(
-                "\nlaunch_order=(1 2 3 4)\n", 1, true))
-            local _, order_finish = assert(launcher:find(
-                "\nfi\n", order_start, true))
-            local admission_start = assert(launcher:find(
-                "\n    while (( launched < 4 && active < jobs )); do\n",
-                order_finish, true))
-            local _, admission_finish = assert(launcher:find(
-                "\n    done\n", admission_start, true))
+            local function shell_function(name)
+                local start = assert(launcher:find(
+                    "\n    " .. name .. "() {\n", 1, true), name)
+                local _, finish = assert(launcher:find("\n    }\n", start, true))
+                return launcher:sub(start + 1, finish)
+            end
             local harness = table.concat({ [==[
 set -u
-windows=$1
-exclusive_shard=$2
-jobs=$3
+exclusive_shard=$1
+jobs=$2
+shift 2
+ordinary_shards=("$@")
 worker_pids=()
 running=()
 schedule=()
-launched=0
 active=0
+launched=0
 completed=0
-launch_worker() {
-    worker_pids[$1]=1
-    running+=("$1")
-    schedule+=("start $1")
-}
-]==], launcher:sub(order_start + 1, order_finish), [==[
-while (( completed < 4 )); do
-]==], launcher:sub(admission_start + 1, admission_finish), [==[
+]==], shell_function("windows_launch_order"),
+                shell_function("windows_may_launch"), [==[
+windows_launch_order
+total_shards=${#launch_order[@]}
+while (( completed < total_shards )); do
+    while (( launched < total_shards )) &&
+          windows_may_launch "${launch_order[$launched]}"; do
+        shard=${launch_order[$launched]}
+        worker_pids[$shard]=1
+        running+=("$shard")
+        schedule+=("start $shard")
+        launched=$((launched + 1))
+        active=$((active + 1))
+    done
     if (( ${#running[@]} == 0 )); then
         echo "scheduler admitted no shard" >&2
         exit 1
@@ -4674,11 +4998,13 @@ done
 printf '%s\n' "${schedule[@]}"
 ]==] })
 
-            local function schedule(windows, exclusive, jobs)
-                local ok, output, why, code = run_argv({
+            local function schedule(exclusive, jobs, ordinary)
+                local argv = {
                     "bash", "-c", harness, "titan-launch-order",
-                    tostring(windows), exclusive, tostring(jobs),
-                })
+                    exclusive, tostring(jobs),
+                }
+                for _, shard in ipairs(ordinary) do argv[#argv + 1] = shard end
+                local ok, output, why, code = run_argv(argv)
                 assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                     tostring(code) .. ")")
                 local events = {}
@@ -4688,23 +5014,18 @@ printf '%s\n' "${schedule[@]}"
                 return table.concat(events, ", ")
             end
 
-            -- Unix keeps manifest order and fills every permitted slot.
-            assert.equal("start 1, start 2, start 3, start 4, " ..
-                "finish 1, finish 2, finish 3, finish 4", schedule(0, "", 4))
-            assert.equal("start 1, start 2, finish 1, start 3, " ..
-                "finish 2, start 4, finish 3, finish 4", schedule(0, "", 2))
-            -- Windows runs the exclusive shard alone, then the other three
-            -- together under the default three workers.
-            assert.equal("start 3, finish 3, start 1, start 2, start 4, " ..
-                "finish 1, finish 2, finish 4", schedule(1, "3", 3))
-            assert.equal("start 3, finish 3, start 1, start 2, start 4, " ..
-                "finish 1, finish 2, finish 4", schedule(1, "3", 4))
-            assert.equal("start 1, finish 1, start 2, start 3, start 4, " ..
-                "finish 2, finish 3, finish 4", schedule(1, "1", 3))
+            -- The exclusive shard (planned last) runs alone first; the
+            -- ordinary shards then share the worker bound.
+            assert.equal("start 5, finish 5, start 1, start 2, start 3, start 4, " ..
+                "finish 1, finish 2, finish 3, finish 4",
+                schedule("5", 4, { "1", "2", "3", "4" }))
             assert.equal("start 4, finish 4, start 1, start 2, finish 1, " ..
-                "start 3, finish 2, finish 3", schedule(1, "4", 2))
-            assert.equal("start 2, finish 2, start 1, finish 1, start 3, " ..
-                "finish 3, start 4, finish 4", schedule(1, "2", 1))
+                "start 3, finish 2, finish 3", schedule("4", 2, { "1", "2", "3" }))
+            assert.equal("start 3, finish 3, start 1, finish 1, start 2, finish 2",
+                schedule("3", 1, { "1", "2" }))
+            -- Without an exclusive shard every permitted slot fills in order.
+            assert.equal("start 1, start 2, finish 1, start 3, finish 2, finish 3",
+                schedule("", 2, { "1", "2", "3" }))
         end)
 
     it("bounds TERM-ignoring descendants for every command exit path",
@@ -4753,9 +5074,7 @@ printf '%s\n' "${schedule[@]}"
                 "RANLIB=$(call make_shell_quote,$(RANLIB))",
                 "CLANG_FORMAT ?= clang-format",
                 "TITAN_NO_LINE_DIRECTIVES ?=",
-                "RECURSIVE_WRAPPER_GUARD = flags=$${MAKEFLAGS%% *}; " ..
-                'case "$$flags" in -*) ;; *q*) exit 1 ;; ' ..
-                "*n*|*t*) exit 0 ;; esac;",
+                "RECURSIVE_WRAPPER_GUARD = titan_mode=; set -f; set -- $$MAKEFLAGS; set +f;",
                 "export CLANG_FORMAT TITAN_EXTRA_CPPFLAGS " ..
                 "TITAN_EXTRA_CFLAGS \\\n\t" ..
                 "TITAN_EXTRA_LDFLAGS TITAN_NO_LINE_DIRECTIVES",
@@ -4769,8 +5088,9 @@ printf '%s\n' "${schedule[@]}"
                 '$(STDLIB_COMPILER_ENV) "$(TITAN_LUA)" -E',
                 "rm -f $(STDLIB_PROVIDER_OUTPUTS)",
                 "rm -f $(STDLIB_SHIMS)",
-                "rm -f titan/peg/peg.c titan/peg/peg.o",
-                "rm -f titan/string/string.c titan/string/string.o",
+                "TITAN_LEGACY_SOURCE_STEMS := * titan/* titan/uv/* titan/http/http \\\n\t" ..
+                "titan/websocket/websocket titan/peg/peg titan/string/string titan/json/json",
+                "rm -f $(TITAN_LEGACY_SOURCE_OUTPUTS)",
                 "rm -rf $(STDLIB_CONTAINER).dSYM",
                 "include $(TITAN_TEST_MODULE_MANIFEST)",
                 "TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/" ..
@@ -4781,7 +5101,7 @@ printf '%s\n' "${schedule[@]}"
                 "\ntitan-stdlib-test-run:",
                 "\ntitan-stdlib-test: titan-stdlib-test-build",
                 "\nstdlib-test: stdlib-busted-test",
-                "\nrock-test: busted-test",
+                "\nrock-test: ## Run retained Busted specs, then native Titan stdlib tests",
             }) do
                 assert.truthy(makefile:find(contract, 1, true), contract)
             end
@@ -5117,7 +5437,7 @@ printf '%s\n' "${schedule[@]}"
             assert.is_true(assert(clean_recipe:find(
                 "bash spec/support/clean_generated_test_artifacts.sh",
                 1, true)) < assert(clean_recipe:find(
-                "rm -f titan/*.c titan/*.o", 1, true)))
+                "rm -f $(TITAN_LEGACY_SOURCE_OUTPUTS)", 1, true)))
             local generated_cleanup = read_file(
                 "spec/support/clean_generated_test_artifacts.sh")
             for _, cleanup_pattern in ipairs({
@@ -5573,9 +5893,8 @@ printf '%s\n' "${schedule[@]}"
                 '"$BUSTED" -c -o gtest -v --exclude-tags=stress ' ..
                     '"$test_file"',
                 "compiler | compiler-shard-[1-4] | stdlib-compiler)",
-                "compiler-uncovered | compiler-uncovered-shard-[1-4] | stdlib-compiler-uncovered)",
+                "compiler-uncovered | stdlib-compiler-uncovered)",
                 "compiler-shard-{1..4}",
-                "compiler-uncovered-shard-{1..4}",
                 "ci_compiler_test_groups.txt",
                 "ci_stdlib_compiler_test_files.txt",
                 'requested_domain=all',
@@ -5596,7 +5915,7 @@ printf '%s\n' "${schedule[@]}"
                 assert.falsy(groups:find(removed, 1, true), removed)
             end
             local uncovered_start = assert(groups:find(
-                "compiler-uncovered | compiler-uncovered-shard-[1-4] | stdlib-compiler-uncovered)",
+                "compiler-uncovered | stdlib-compiler-uncovered)",
                 1, true))
             local uncovered_finish = assert(groups:find(
                 "\n        ;;", uncovered_start, true))
@@ -5608,9 +5927,10 @@ printf '%s\n' "${schedule[@]}"
             local local_parallel_compiler = read_file(
                 "spec/support/run_parallel_compiler_tests.sh")
             for _, required in ipairs({
-                "jobs=${TITAN_ROCK_TEST_JOBS:-4}",
-                "jobs=${TITAN_ROCK_TEST_JOBS:-3}",
-                "[[ ! $jobs =~ ^[1-4]$ ]]",
+                "default_jobs=4",
+                "default_jobs=3",
+                "jobs=${TITAN_ROCK_TEST_JOBS:-$default_jobs}",
+                "[[ ! $jobs =~ ^[1-9][0-9]*$ || ${#jobs} -gt 9 ]]",
                 "tar --exclude='./.git'",
                 "--exclude='./.lua'",
                 -- Bash 3.2 rejects an empty "${array[@]}" under set -u.
@@ -5618,8 +5938,9 @@ printf '%s\n' "${schedule[@]}"
                 'mkfifo "$completion_fifo"',
                 'MAKEFLAGS=-j1',
                 'TITAN_JOBS=1',
+                "shard_job_policy='unset MAKEFLAGS MFLAGS MAKELEVEL TITAN_JOBS'",
                 'CCACHE_TEMPDIR="$worker_root/tmp-$shard/ccache"',
-                '"compiler-uncovered-shard-$shard"',
+                '-o gtest -v "\\$test_file"',
                 'printf \'[compiler shard %s] %s\\n\'',
                 "trap 'handle_signal 143' TERM",
                 'kill -TERM -- "-$pid"',
@@ -5659,9 +5980,11 @@ printf '%s\n' "${schedule[@]}"
                 'unset LUACOV_CONFIG',
                 'MAKEFLAGS=-j1',
                 'TITAN_JOBS=1',
-                '"compiler-shard-$shard"',
+                'env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u TITAN_JOBS',
+                '"compiler-shard-$shard" "$phase"',
                 'sed -u "s/^/[compiler shard $shard] /"',
-                'tee "$log"',
+                'tee -a "$log"',
+                'xargs -r -n1 -P1 bash -c "$run_shard_phase" _',
                 'pipeline_status=("${PIPESTATUS[@]}")',
                 "starting compiler covered+stress shard",
                 "finished compiler covered+stress shard",
@@ -5677,40 +6000,39 @@ printf '%s\n' "${schedule[@]}"
                     'cat "$worker_root/shard-$shard.log"', 1, true),
                 parallel_compiler)
 
-            local partition = read_file(
-                "spec/support/ci_compiler_test_groups.txt")
+            local groups_helper = assert(loadfile(
+                "spec/support/compiler_test_groups.lua"))()
+            local inventory, inv_err = groups_helper.load()
+            assert.truthy(inventory, inv_err)
+            for _, meta_key in ipairs({ "schema", "host", "profile", "date", "compiler" }) do
+                assert.truthy(inventory.metadata[meta_key], meta_key)
+            end
+            assert.equal(7, #inventory.retained)
+            assert.equal(11, #inventory.stdlib)
+            assert.equal(#inventory.items,
+                #inventory.retained + #inventory.stdlib + #inventory.compiler)
             local assigned = {}
-            local assigned_count = 0
-            local shard_counts = { 0, 0, 0, 0 }
-            for line in partition:gmatch("[^\n]+") do
-                if line:sub(1, 1) ~= "#" then
-                    local shard, filename, seconds = line:match(
-                        "^([1-4]) (spec/.+_spec[.]lua) ([0-9.]+)$")
-                    assert.truthy(shard, line)
-                    assert.falsy(assigned[filename], filename)
-                    assigned[filename] = true
-                    assigned_count = assigned_count + 1
-                    shard = tonumber(shard)
-                    shard_counts[shard] = shard_counts[shard] + 1
-                    assert.is_true(tonumber(seconds) >= 0)
+            for _, item in ipairs(inventory.items) do
+                assert.falsy(assigned[item.path], item.path)
+                assigned[item.path] = true
+                assert.is_true(item.local_validation_seconds >= 0)
+                assert.is_true(item.ci_covered_seconds >= 0)
+            end
+            assert.is_true(assigned["spec/coder/jobserver_spec.lua"])
+            assert.is_true(assigned["spec/coder/split_units_spec.lua"])
+            assert.equal("stdlib",
+                inventory.by_path["spec/coder/split_units_spec.lua"].domain)
+            assert.equal("compiler",
+                inventory.by_path["spec/coder/unions_spec.lua"].domain)
+            assert.equal("stdlib",
+                inventory.by_path["spec/coder/unions_stdlib_spec.lua"].domain)
+            local compiler_plan = assert(groups_helper.plan_ci(inventory))
+            for _, shard in ipairs(compiler_plan) do
+                for _, item in ipairs(shard.items) do
+                    assert.not_equal("spec/coder/split_units_spec.lua", item.path)
+                    assert.not_equal("spec/coder/unions_stdlib_spec.lua", item.path)
                 end
             end
-            assert.same({ 43, 29, 41, 40 }, shard_counts)
-            assert.equal(153, assigned_count)
-            local integration_count = 0
-            for line in read_file(
-                "spec/support/ci_stdlib_compiler_test_files.txt"):gmatch("[^\n]+") do
-                if line:sub(1, 1) ~= "#" then
-                    assert.truthy(line:match("^spec/.+_spec[.]lua$"), line)
-                    assert.falsy(assigned[line], line)
-                    assert.equal("file", lfs.attributes(line, "mode"), line)
-                    assigned[line] = true
-                    integration_count = integration_count + 1
-                end
-            end
-            assert.equal(9, integration_count)
-            assert.equal(162, assigned_count + integration_count)
-
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")
             local stress_assigned = {}
@@ -6178,6 +6500,7 @@ printf '%s\n' "${schedule[@]}"
 
     it("cleans arbitrary test outputs without Git or per-test names",
         function()
+            local driver = require "titan-compiler.driver"
             local root = make_temp_dir()
             local success, failure = xpcall(function()
                 for _, directory in ipairs({
@@ -6195,6 +6518,30 @@ printf '%s\n' "${schedule[@]}"
                     "module generated_fixture\n",
                     ["spec/generated_fixture.c"] = "generated C\n",
                     ["spec/generated_fixture.o"] = "generated object\n",
+                    ["in_memory_fixture.parts"] =
+                    driver.render_parts_companion("in_memory_fixture", 3),
+                    ["in_memory_fixture.c"] = "generated C\n",
+                    ["in_memory_fixture.o"] = "generated object\n",
+                    ["in_memory_fixture.priv.h"] = "generated private header\n",
+                    ["in_memory_fixture.part1.c"] = "generated C\n",
+                    ["in_memory_fixture.part1.o"] = "generated object\n",
+                    ["in_memory_fixture.part2.c"] = "generated C\n",
+                    ["in_memory_fixture.part2.o"] = "generated object\n",
+                    ["in_memory_unsplit.parts"] =
+                    driver.render_parts_companion("in_memory_unsplit", 1),
+                    ["in_memory_unsplit.c"] = "generated C\n",
+                    ["in_memory_unsplit.o"] = "generated object\n",
+                    ["spec/nested with spaces/generated.parts"] =
+                    driver.render_parts_companion("generated", 2),
+                    ["spec/nested with spaces/generated.c"] = "generated C\n",
+                    ["spec/nested with spaces/generated.o"] = "generated object\n",
+                    ["spec/nested with spaces/generated.priv.h"] = "generated header\n",
+                    ["spec/nested with spaces/generated.part1.c"] = "generated C\n",
+                    ["spec/nested with spaces/generated.part1.o"] = "generated object\n",
+                    ["authored.parts"] =
+                    "titan-parts-v1 1\n../outside.c\nauthored.o\n",
+                    ["authored.c"] = "author written C\n",
+                    ["outside.c"] = "unrelated C\n",
                     ["future/deep/suite"] = "executable\n",
                     ["future/deep/suite__test_support.c"] = "generated C\n",
                     ["future/deep/suite__test_runner.o"] =
@@ -6227,6 +6574,69 @@ printf '%s\n' "${schedule[@]}"
                     ["test.ffi.h"] = "ffi",
                     ["test.titan.h"] = "foreign",
                 }
+                local private_marker = driver.PRIVATE_HEADER_MARKER .. "\n"
+                for path, contents in pairs({
+                    -- A Titan-backed split cleaned through its companion.
+                    ["spec/sourced_split.titan"] = "module sourced_split\n",
+                    ["spec/sourced_split.parts"] =
+                    driver.render_parts_companion("sourced_split", 2),
+                    ["spec/sourced_split.c"] = "generated C\n",
+                    ["spec/sourced_split.priv.h"] = private_marker,
+                    ["spec/sourced_split.part1.c"] = "generated C\n",
+                    ["spec/sourced_split.part1.o"] = "generated object\n",
+                    -- A failed split compile leaves parts and the private
+                    -- header but no companion.
+                    ["spec/orphan_split.titan"] = "module orphan_split\n",
+                    ["spec/orphan_split.priv.h"] = private_marker,
+                    ["spec/orphan_split.part1.c"] = "generated C\n",
+                    ["spec/orphan_split.part12.c"] = "generated C\n",
+                    ["spec/orphan_split.part2.o"] = "generated object\n",
+                    ["spec/orphan_split.partial.c"] = "author written C\n",
+                    ["spec/orphan_split.part1x.c"] = "author written C\n",
+                    ["spec/unmarked_split.titan"] = "module unmarked_split\n",
+                    ["spec/unmarked_split.priv.h"] = "author written header\n",
+                }) do
+                    files[path] = contents
+                end
+                local cleaned_split_outputs = {
+                    "spec/sourced_split.parts", "spec/sourced_split.c",
+                    "spec/sourced_split.priv.h", "spec/sourced_split.part1.c",
+                    "spec/sourced_split.part1.o",
+                    "spec/orphan_split.priv.h", "spec/orphan_split.part1.c",
+                    "spec/orphan_split.part12.c", "spec/orphan_split.part2.o",
+                }
+                local preserved_split_outputs = {
+                    "spec/orphan_split.partial.c", "spec/orphan_split.part1x.c",
+                    "spec/unmarked_split.priv.h",
+                }
+                -- Every malformed companion keeps itself and every output it
+                -- would otherwise name.
+                local function split_companion(stem)
+                    return driver.render_parts_companion(stem, 2)
+                end
+                for stem, companion in pairs({
+                    wrong_priv = (split_companion("wrong_priv"):gsub(
+                        "\nwrong_priv%.priv%.h\n", "\nother.priv.h\n")),
+                    wrong_leaf = (split_companion("wrong_leaf"):gsub(
+                        "\nwrong_leaf%.part1%.c\n", "\nother.part1.c\n")),
+                    extra_line = split_companion("extra_line") ..
+                        "extra_line.part2.c\n",
+                    no_newline = split_companion("no_newline"):sub(1, -2),
+                    crlf_lines = (split_companion("crlf_lines"):gsub(
+                        "\n", "\r\n")),
+                }) do
+                    assert.not_equal(split_companion(stem), companion)
+                    files[stem .. ".parts"] = companion
+                    preserved_split_outputs[#preserved_split_outputs + 1] =
+                        stem .. ".parts"
+                    for _, suffix in ipairs({
+                        ".c", ".o", ".priv.h", ".part1.c", ".part1.o",
+                    }) do
+                        files[stem .. suffix] = "generated " .. suffix .. "\n"
+                        preserved_split_outputs[#preserved_split_outputs + 1] =
+                            stem .. suffix
+                    end
+                end
                 for path, kind in pairs(generated_headers) do
                     files[path] = kind == "ffi" and
                         "/* Generated by Titan: module C declaration environment. */\n" or
@@ -6248,6 +6658,19 @@ printf '%s\n' "${schedule[@]}"
                 for _, removed in ipairs({
                     "spec/generated_fixture.c",
                     "spec/generated_fixture.o",
+                    "in_memory_fixture.parts",
+                    "in_memory_fixture.c", "in_memory_fixture.o",
+                    "in_memory_fixture.priv.h",
+                    "in_memory_fixture.part1.c", "in_memory_fixture.part1.o",
+                    "in_memory_fixture.part2.c", "in_memory_fixture.part2.o",
+                    "in_memory_unsplit.parts", "in_memory_unsplit.c",
+                    "in_memory_unsplit.o",
+                    "spec/nested with spaces/generated.parts",
+                    "spec/nested with spaces/generated.c",
+                    "spec/nested with spaces/generated.o",
+                    "spec/nested with spaces/generated.priv.h",
+                    "spec/nested with spaces/generated.part1.c",
+                    "spec/nested with spaces/generated.part1.o",
                     "future/deep/suite",
                     "future/deep/suite__test_support.c",
                     "future/deep/suite__test_runner.o",
@@ -6265,9 +6688,24 @@ printf '%s\n' "${schedule[@]}"
                     "spec/nested/authored.titan.h",
                     "spec/nested with spaces/authored.ffi.h",
                     "authored/keep__test_support.ffi.h", "other.ffi.h",
+                    "authored.parts", "authored.c", "outside.c",
                 }) do
                     assert.equal(files[path], read_file(root .. "/" .. path),
                         path)
+                end
+                for _, path in ipairs(cleaned_split_outputs) do
+                    assert.falsy(file_exists(root .. "/" .. path), path)
+                end
+                for _, path in ipairs(preserved_split_outputs) do
+                    assert.equal(files[path], read_file(root .. "/" .. path),
+                        path)
+                end
+                for _, source in ipairs({
+                    "spec/sourced_split.titan", "spec/orphan_split.titan",
+                    "spec/unmarked_split.titan",
+                }) do
+                    assert.equal(files[source], read_file(root .. "/" .. source),
+                        source)
                 end
                 assert.is_nil(lfs.attributes(root .. "/future"))
                 assert.is_nil(lfs.attributes(
@@ -6281,6 +6719,1197 @@ printf '%s\n' "${schedule[@]}"
             end, debug.traceback)
             remove_tree(root)
             assert.truthy(success, failure)
+        end)
+
+    it("cleans legacy source-adjacent split outputs and keeps authored files",
+        function()
+            if platform.windows then
+                pending("Unix Makefile clean recipe")
+                return
+            end
+            local root = make_temp_dir()
+            local success, failure = xpcall(function()
+                for _, directory in ipairs({
+                    "spec", "spec/support", "titan", "titan/uv", "titan/http",
+                    "titan/json",
+                }) do
+                    assert.truthy(lfs.mkdir(root .. "/" .. directory))
+                end
+                write_file(root .. "/spec/support/clean_generated_test_artifacts.sh",
+                    read_file("spec/support/clean_generated_test_artifacts.sh"))
+                -- A compilation without --output leaves every part beside
+                -- the root, flat, titan/uv, and folder-main module sources.
+                local generated, authored = {}, {}
+                for _, stem in ipairs({
+                    "module", "titan/flat", "titan/uv/uv", "titan/http/http",
+                    "titan/json/json",
+                }) do
+                    for _, suffix in ipairs({
+                        ".c", ".o", ".parts", ".priv.h", ".part1.c", ".part1.o",
+                        ".part3.c", ".part3.o",
+                    }) do
+                        generated[#generated + 1] = stem .. suffix
+                    end
+                    authored[#authored + 1] = stem .. ".titan"
+                end
+                for _, path in ipairs({
+                    "titan/uv/data_native.h", "titan/http/native.c",
+                    "titan/http/native.h", "README.md",
+                }) do
+                    authored[#authored + 1] = path
+                end
+                for _, path in ipairs(generated) do
+                    write_file(root .. "/" .. path, "generated\n")
+                end
+                for _, path in ipairs(authored) do
+                    write_file(root .. "/" .. path, "authored " .. path .. "\n")
+                end
+
+                local ok, output = run_argv({
+                    "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKELEVEL",
+                    "make", "--no-print-directory", "-C", root,
+                    "-f", lfs.currentdir() .. "/Makefile",
+                    "TITAN_OUTPUT_DIR=out", "LPEGLABEL_BUILD_DIR=lpeglabel-build",
+                    "TEST_LUA=false", "clean",
+                })
+                assert.truthy(ok, output)
+                for _, path in ipairs(generated) do
+                    assert.falsy(file_exists(root .. "/" .. path), path)
+                end
+                for _, path in ipairs(authored) do
+                    assert.equal("authored " .. path .. "\n",
+                        read_file(root .. "/" .. path), path)
+                end
+            end, debug.traceback)
+            remove_tree(root)
+            assert.truthy(success, failure)
+        end)
+
+    it("partitions every spec file for any worker count N with LPT, isolates the exclusive files, and validates the union",
+        function()
+            local groups = assert(loadfile(
+                "spec/support/compiler_test_groups.lua"))()
+            local inventory, err = groups.load()
+            assert.truthy(inventory, err)
+            -- The classified union is exactly the discovered spec files.
+            local discovered = {}
+            for _, path in ipairs(source_inventory.lua_files("spec")) do
+                if path:match("_spec%.lua$") then discovered[path] = true end
+            end
+            local classified = {}
+            for _, item in ipairs(inventory.items) do
+                assert.falsy(classified[item.path], item.path)
+                classified[item.path] = true
+            end
+            assert.same(discovered, classified)
+            local expected_exclusive = {}
+            for path in pairs(groups.EXCLUSIVE_SPECS) do
+                if classified[path] then
+                    expected_exclusive[#expected_exclusive + 1] = path
+                end
+            end
+            table.sort(expected_exclusive)
+            assert.same({
+                "spec/coder/jobserver_spec.lua",
+                "spec/coder/parallel_compilation_spec.lua",
+            }, expected_exclusive)
+
+            local previous
+            for _, n in ipairs({ 1, 2, 3, 4, 5, 6, 8, 12 }) do
+                local plan, plan_err = groups.plan_local(
+                    inventory, n, "local_validation")
+                assert.truthy(plan, plan_err)
+                assert.equal(n, plan.requested_jobs)
+                assert.equal(n, plan.effective_jobs)
+                local exclusive_files = { table.unpack(plan.exclusive_files) }
+                table.sort(exclusive_files)
+                assert.same(expected_exclusive, exclusive_files)
+                local seen = {}
+                for _, path in ipairs(expected_exclusive) do seen[path] = true end
+                local count = #expected_exclusive
+                local loads = {}
+                for _, worker in ipairs(plan.workers) do
+                    assert.is_true(#worker.files > 0)
+                    for _, file in ipairs(worker.files) do
+                        assert.falsy(groups.EXCLUSIVE_SPECS[file], file)
+                        assert.falsy(seen[file], file)
+                        seen[file] = true
+                        count = count + 1
+                    end
+                    loads[#loads + 1] = worker.load
+                end
+                assert.same(classified, seen)
+                assert.equal(#inventory.items, count)
+                -- LPT bound: no worker exceeds the lightest one by more than
+                -- the largest single ordinary file.
+                local largest = 0
+                for _, item in ipairs(inventory.items) do
+                    if not item.exclusive then
+                        largest = math.max(largest, item.local_validation_seconds)
+                    end
+                end
+                table.sort(loads)
+                assert.is_true(loads[#loads] - loads[1] <= largest + 1e-9)
+                -- Deterministic: the same inputs yield the same plan.
+                local again = assert(groups.plan_local(inventory, n, "local_validation"))
+                for index, worker in ipairs(plan.workers) do
+                    assert.same(worker.files, again.workers[index].files)
+                end
+                previous = plan
+            end
+            assert.truthy(previous)
+
+            -- Capping empty workers when requested N exceeds available ordinary work.
+            local small_workers, small_eff = groups.partition_lpt({
+                { path = "spec/a_spec.lua", local_validation_seconds = 5.0 },
+                { path = "spec/b_spec.lua", local_validation_seconds = 2.0 },
+            }, 6, "local_validation")
+            assert.truthy(small_workers)
+            assert.equal(2, small_eff)
+            assert.equal(2, #small_workers)
+
+            for _, invalid_n in ipairs({ 0, -1, 1.5, "0", "abc", "" }) do
+                local bad = groups.plan_local(inventory, invalid_n)
+                assert.is_nil(bad)
+            end
+
+            -- Reject old fixed shard IDs, duplicates, missing files, and domain overlap.
+            local function check_rejects(overrides, expected_substring)
+                local ok_inv, load_err = groups.load(overrides)
+                assert.is_nil(ok_inv)
+                assert.truthy(load_err:find(expected_substring, 1, true),
+                    load_err)
+            end
+            check_rejects({
+                discovered_files = { "spec/a_spec.lua" },
+                retained_files = {},
+                read_file = function(path)
+                    if path == "p.txt" then return "1 spec/a_spec.lua 1.0\n" end
+                    return ""
+                end,
+                partition_file = "p.txt",
+                stdlib_file = "s.txt",
+                stress_file = "st.txt",
+            }, "invalid compiler partition row")
+            check_rejects({
+                discovered_files = { "spec/a_spec.lua" },
+                retained_files = {},
+                read_file = function(path)
+                    if path == "p.txt" then
+                        return "compiler spec/a_spec.lua 1.0\ncompiler spec/a_spec.lua 2.0\n"
+                    end
+                    return ""
+                end,
+                partition_file = "p.txt",
+                stdlib_file = "s.txt",
+                stress_file = "st.txt",
+            }, "duplicate compiler partition entry")
+            check_rejects({
+                discovered_files = { "spec/a_spec.lua" },
+                retained_files = {},
+                read_file = function(path)
+                    if path == "p.txt" then return "compiler spec/a_spec.lua 1.0 -\n" end
+                    if path == "s.txt" then return "spec/a_spec.lua\n" end
+                    return ""
+                end,
+                partition_file = "p.txt",
+                stdlib_file = "s.txt",
+                stress_file = "st.txt",
+            }, "compiler spec appears in both partitions")
+        end)
+
+    it("drains all files and workers after an early spec failure and reports per-file summaries",
+        function()
+            if platform.windows then
+                pending("Unix Make work-graph and shell keep-going fixture")
+                return
+            end
+            local root = make_temp_dir()
+            local tested, test_error = xpcall(function()
+                local workspace = root .. "/workspace"
+                local support = workspace .. "/spec/support"
+                local coder = workspace .. "/spec/coder"
+                local state = root .. "/state"
+                local tmp_base = root .. "/tmp"
+                local ok, output = run_argv({
+                    "mkdir", "-p", support, coder, state, tmp_base,
+                })
+                assert.truthy(ok, output)
+                write_file(state .. "/active", "0\n")
+                write_file(workspace .. "/Makefile",
+                    "titan-stdlib-test-build:\n\t@printf 'native-built\\n' > " ..
+                    quote(state .. "/native-built") .. "\n")
+                for _, name in ipairs({
+                    "run_rock_tests.sh",
+                    "run_parallel_compiler_tests.sh",
+                    "compiler_test_groups.lua",
+                    "ci_test_groups.sh",
+                }) do
+                    write_file(support .. "/" .. name,
+                        read_file("spec/support/" .. name))
+                end
+                ok, output = run_argv({
+                    "chmod", "+x",
+                    support .. "/run_rock_tests.sh",
+                    support .. "/run_parallel_compiler_tests.sh",
+                    support .. "/ci_test_groups.sh",
+                })
+                assert.truthy(ok, output)
+
+                local function make_spec(rel_path, body)
+                    write_file(workspace .. "/" .. rel_path, body)
+                end
+                local record_snippet = function(label, should_fail)
+                    return string.format([=[
+local state = %q
+describe(%q, function()
+    it("runs", function()
+        local f = assert(io.open(state .. "/ran-" .. %q, "wb"))
+        f:write("1\n")
+        f:close()
+        %s
+    end)
+end)
+]=], state, label, label, should_fail and 'error("deliberate early failure")' or "assert.is_true(true)")
+                end
+
+                make_spec("spec/retained_fail_spec.lua",
+                    record_snippet("retained_fail", true))
+                make_spec("spec/retained_pass_spec.lua",
+                    record_snippet("retained_pass", false))
+                make_spec("spec/stdlib_one_spec.lua",
+                    record_snippet("stdlib_one", false))
+                make_spec("spec/compiler_a_spec.lua",
+                    record_snippet("compiler_a", false))
+                make_spec("spec/compiler_b_spec.lua",
+                    record_snippet("compiler_b", false))
+                make_spec("spec/compiler_c_spec.lua",
+                    record_snippet("compiler_c", false))
+                make_spec("spec/coder/parallel_compilation_spec.lua",
+                    record_snippet("exclusive_parallel", false))
+
+                write_file(support .. "/ci_stdlib_compiler_test_files.txt",
+                    "spec/stdlib_one_spec.lua\n")
+                write_file(support .. "/ci_compiler_stress_files.txt", "# none\n")
+                write_file(support .. "/ci_compiler_test_groups.txt", table.concat({
+                    "# Schema: titan-busted-timings-v2",
+                    "# Host: fixture",
+                    "# Profile: validation",
+                    "# Date: 2026-10-24",
+                    "# Compiler: gcc",
+                    "retained spec/retained_fail_spec.lua 10.0 -",
+                    "retained spec/retained_pass_spec.lua 8.0 -",
+                    "stdlib spec/stdlib_one_spec.lua 7.0 -",
+                    "compiler spec/compiler_a_spec.lua 6.0 6.0",
+                    "compiler spec/compiler_b_spec.lua 5.0 5.0",
+                    "compiler spec/compiler_c_spec.lua 4.0 4.0",
+                    "compiler spec/coder/parallel_compilation_spec.lua 3.0 3.0",
+                    "",
+                }, "\n"))
+
+                local prefix = installed_prefix.active()
+                local why, code
+                ok, output, why, code = run_argv({
+                    "bash", "-c",
+                    'cd "$1" && shift && exec "$@"',
+                    "titan-keep-going-fixture", workspace,
+                    "env",
+                    "-u", "BUSTED_FILTER",
+                    "-u", "TITAN_FILTER",
+                    "-u", "TITAN_ROCK_TEST_FORWARDED",
+                    "-u", "TITAN_ROCK_TEST_ARGC",
+                    "PREFIX=" .. prefix,
+                    "LUA=" .. prefix .. "/bin/lua",
+                    "BUSTED=" .. prefix .. "/bin/busted",
+                    "TMPDIR=" .. tmp_base,
+                    "TITAN_ROCK_TEST_JOBS=5",
+                    "TITAN_ROCK_TEST_BUILD_NATIVE=1",
+                    "TITAN_ROCK_TEST_INTERNAL=1",
+                    "TITAN_ROCK_TEST_STDLIB_SPECS=spec/retained_fail_spec.lua spec/retained_pass_spec.lua",
+                    "bash", "spec/support/run_rock_tests.sh",
+                })
+                assert.falsy(ok, output)
+                assert.equal("exit", why)
+                assert.equal(1, code)
+                for _, label in ipairs({
+                    "retained_fail", "retained_pass", "stdlib_one",
+                    "compiler_a", "compiler_b", "compiler_c",
+                    "exclusive_parallel",
+                }) do
+                    assert.equal("1\n", read_file(state .. "/ran-" .. label), label)
+                end
+                assert.equal("native-built\n", read_file(state .. "/native-built"))
+                assert.truthy(output:find(
+                    "Per-file Busted summary: passed=6 failed=1 total=7", 1, true),
+                    output)
+                assert.truthy(output:find(
+                    "FAILED spec file: spec/retained_fail_spec.lua", 1, true),
+                    output)
+            end, debug.traceback)
+            remove_tree(root)
+            if not tested then error(test_error, 0) end
+        end)
+
+    it("runs parallel native stdlib owner groups, guards timing-sensitive owners, and audits the union",
+        function()
+            if platform.windows then
+                pending("Unix parallel native stdlib runner")
+                return
+            end
+            local root = make_temp_dir()
+            local tested, test_error = xpcall(function()
+                local state = root .. "/state"
+                local tmp_base = root .. "/tmp"
+                local ok, output = run_argv({ "mkdir", "-p", state, tmp_base })
+                assert.truthy(ok, output)
+                write_file(state .. "/active", "0\n")
+                write_file(state .. "/max-ordinary", "0\n")
+                write_file(state .. "/guarded-overlap", "0\n")
+                write_file(state .. "/ordinary-done", "0\n")
+
+                local fake_exe = root .. "/fake-stdlib-tests"
+                write_file(fake_exe, string.format([=[#!/usr/bin/env bash
+set -u
+state=%q
+acquire() { while ! mkdir "$state/lock" 2>/dev/null; do sleep 0.01; done; }
+release() { rmdir "$state/lock"; }
+
+owners=()
+is_guarded=0
+for arg in "$@"; do
+    case "$arg" in
+        --filter=^alpha\[.\]tests\[.\]test_) owners+=(alpha.tests) ;;
+        --filter=^beta\[.\]tests\[.\]test_) owners+=(beta.tests) ;;
+        --filter=^http\[.\]tests\[.\]test_) owners+=(http.tests); is_guarded=1 ;;
+    esac
+done
+
+acquire
+active=$(cat "$state/active")
+active=$((active + 1))
+printf '%%s\n' "$active" > "$state/active"
+if (( is_guarded != 0 )); then
+    if (( active > 1 )) || [[ $(cat "$state/ordinary-done") != 2 ]]; then
+        printf '1\n' > "$state/guarded-overlap"
+    fi
+else
+    max_ord=$(cat "$state/max-ordinary")
+    if (( active > max_ord )); then printf '%%s\n' "$active" > "$state/max-ordinary"; fi
+fi
+release
+
+sleep 0.1
+
+printf '[==========] Running Titan tests.\n'
+count=0
+for owner in "${owners[@]}"; do
+    printf '[ RUN      ] %%s.test_case\n' "$owner"
+    if [[ ${FAKE_FAIL_OWNER:-} == "$owner" ]]; then
+        printf '[  FAILED  ] %%s.test_case\n' "$owner"
+        acquire
+        active=$(cat "$state/active")
+        printf '%%s\n' "$((active - 1))" > "$state/active"
+        if (( is_guarded == 0 )); then
+            done_count=$(cat "$state/ordinary-done")
+            printf '%%s\n' "$((done_count + 1))" > "$state/ordinary-done"
+        fi
+        release
+        printf '[==========] 1 test ran.\n[  PASSED  ] 0 tests.\n[  FAILED  ] 1 test.\n'
+        exit 1
+    fi
+    printf '[       OK ] %%s.test_case\n' "$owner"
+    count=$((count + 1))
+done
+printf '[==========] %%s tests ran.\n' "$count"
+printf '[  PASSED  ] %%s tests.\n' "$count"
+
+acquire
+active=$(cat "$state/active")
+printf '%%s\n' "$((active - 1))" > "$state/active"
+if (( is_guarded == 0 )); then
+    done_count=$(cat "$state/ordinary-done")
+    printf '%%s\n' "$((done_count + 1))" > "$state/ordinary-done"
+fi
+release
+# A complete passing report does not prove a successful process.
+for owner in "${owners[@]}"; do
+    if [[ ${FAKE_EXIT_AFTER_REPORT_OWNER:-} == "$owner" ]]; then exit 7; fi
+    if [[ ${FAKE_HANG_AFTER_REPORT_OWNER:-} == "$owner" ]]; then sleep 60; fi
+done
+]=], state))
+                ok, output = run_argv({ "chmod", "+x", fake_exe })
+                assert.truthy(ok, output)
+
+                local prefix = installed_prefix.active()
+                local log = root .. "/stdout.log"
+                local roots_file = root .. "/roots.txt"
+                local function run_groups(extra)
+                    write_file(state .. "/active", "0\n")
+                    write_file(state .. "/ordinary-done", "0\n")
+                    write_file(state .. "/guarded-overlap", "0\n")
+                    local argv = {
+                        "env",
+                        "TMPDIR=" .. tmp_base,
+                        "TEST_LUA=" .. prefix .. "/bin/lua",
+                        "TITAN_TEST_EXECUTABLE=" .. fake_exe,
+                        "TITAN_TEST_JOBS=2",
+                        "TITAN_TEST_RUN_LOG=" .. log,
+                        "TITAN_TEST_RUN_ROOTS=" .. roots_file,
+                        "TITAN_STDLIB_TEST_ROOTS=alpha.tests beta.tests http.tests",
+                    }
+                    for _, assignment in ipairs(extra or {}) do
+                        argv[#argv + 1] = assignment
+                    end
+                    argv[#argv + 1] = "bash"
+                    argv[#argv + 1] = "spec/support/run_parallel_stdlib_tests.sh"
+                    local ran_ok, ran_output, why, code = run_argv(argv)
+                    assert.equal("0\n", read_file(state .. "/guarded-overlap"), ran_output)
+                    return ran_ok, ran_output, why, code
+                end
+                local passing_gate =
+                    "Native stdlib gate: selected=3 passed=3 skipped=0 failed=0 owners=3/3 groups=3."
+                ok, output = run_groups()
+                assert.truthy(ok, output)
+                assert.truthy(output:find(passing_gate, 1, true), output)
+
+                -- Keep-going across native groups when an ordinary group fails:
+                local fail_ok, fail_out = run_groups({ "FAKE_FAIL_OWNER=alpha.tests" })
+                assert.falsy(fail_ok, fail_out)
+                assert.truthy(fail_out:find("beta.tests.test_case", 1, true), fail_out)
+                assert.truthy(fail_out:find("http.tests.test_case", 1, true), fail_out)
+
+                -- The supervised process status decides a group even after a
+                -- complete passing report: a nonzero exit or a timeout fails
+                -- the run while the other ordinary group and the guarded
+                -- phase still execute and the union audit still passes.
+                for _, case in ipairs({
+                    { { "FAKE_EXIT_AFTER_REPORT_OWNER=alpha.tests" }, "7" },
+                    { { "FAKE_HANG_AFTER_REPORT_OWNER=alpha.tests", "TITAN_TEST_TIMEOUT=3" },
+                        "124" },
+                }) do
+                    local case_ok, case_out, why, code = run_groups(case[1])
+                    assert.falsy(case_ok, case_out)
+                    assert.equal("exit", why, case_out)
+                    assert.equal(1, code, case_out)
+                    assert.truthy(case_out:find("alpha.tests.test_case", 1, true), case_out)
+                    assert.truthy(case_out:find("beta.tests.test_case", 1, true), case_out)
+                    assert.truthy(case_out:find("http.tests.test_case", 1, true), case_out)
+                    assert.truthy(case_out:find(passing_gate, 1, true), case_out)
+                    assert.truthy(case_out:match("native stdlib group %d+ failed: " ..
+                        case[2] .. "\n"), case_out)
+                end
+            end, debug.traceback)
+            remove_tree(root)
+            if not tested then error(test_error, 0) end
+        end)
+
+    -- GNU Make's version as major * 100 + minor (3.81 is 381), or nil.
+    local function gnu_make_version(program)
+        local ok, output = run_argv({ program, "--version" })
+        local major, minor = output:match("^GNU Make (%d+)%.(%d+)")
+        if not (ok and major) then return nil end
+        return tonumber(major) * 100 + tonumber(minor)
+    end
+
+    -- GNU Make before 4.2 never shows -jN in MAKEFLAGS. macOS ships 3.81 as
+    -- /usr/bin/make; TITAN_TEST_LEGACY_MAKE may name another such binary.
+    local function legacy_gnu_make()
+        local configured = os.getenv("TITAN_TEST_LEGACY_MAKE")
+        if configured and configured ~= "" then
+            local version = gnu_make_version(configured)
+            assert(version and version < 402,
+                "TITAN_TEST_LEGACY_MAKE is not GNU Make before 4.2: " .. configured)
+            return configured
+        end
+        local version = gnu_make_version("/usr/bin/make")
+        if version and version < 402 then return "/usr/bin/make" end
+        return nil
+    end
+
+    -- Whether rock-test's Busted command passes TITAN_JOBS to the runner.
+    local function busted_command_passes_jobs(make_program, environment, root)
+        local probe = root .. "/busted-command.mk"
+        write_file(probe, "print-busted-command:\n\t@printf '%s\\n' " ..
+            "'$(subst ','\"'\"',$(ROCK_TEST_BUSTED))'\n")
+        local argv = { "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKELEVEL",
+            "-u", "TITAN_JOBS" }
+        for _, word in ipairs(environment) do argv[#argv + 1] = word end
+        for _, word in ipairs({
+            make_program, "--no-print-directory", "-s", "-f", "Makefile",
+            "-f", probe, "TEST_LUA=false", "print-busted-command",
+        }) do
+            argv[#argv + 1] = word
+        end
+        local ok, output = run_argv(argv)
+        assert.truthy(ok, output)
+        return output:find(" TITAN_JOBS=", 1, true) ~= nil, output
+    end
+
+    -- Builds the real stdlib object graph with one Make program and a
+    -- counting fake titanc that records its -j cap and the pool it inherited.
+    local function with_stdlib_pool_fixture(make_program, body)
+        local root = make_temp_dir()
+        local tested, test_error = xpcall(function()
+            local state = root .. "/state"
+            local out = root .. "/out"
+            local prepared = root .. "/prepared"
+            assert(lfs.mkdir(state))
+            write_file(prepared, "prepared for an isolated object graph\n")
+            local split_module = "string"
+
+            -- Every stdlib object recipe launches this counting compiler.
+            local inspect_mk = root .. "/inspect.mk"
+            write_file(inspect_mk, table.concat({
+                "print-stdlib-outputs:",
+                "\t@$(foreach module,$(STDLIB_MODULES),printf '%s %s %s\\n' " ..
+                    "'$(module)' '$(call stdlib_stem,$(module))' " ..
+                    "'$(call stdlib_outputs,$(module))';)",
+                "",
+            }, "\n"))
+            local common = {
+                "PREFIX=" .. root, "TEST_LUA=false",
+                "STDLIB_USE_INSTALLED_RUNTIME=0", "TITAN_OUTPUT_DIR=" .. out,
+                "TITANC=" .. root .. "/titanc",
+            }
+            for _, variable in ipairs({
+                "STDLIB_TOOL_PREREQS", "STDLIB_PLATFORM_PREREQS",
+                "STDLIB_NATIVE_PREREQS", "STDLIB_RUNTIME_ARCHIVE_PREREQ",
+                "STDLIB_BOOTSTRAP_PREREQ",
+            }) do
+                common[#common + 1] = variable .. "=" .. prepared
+            end
+            for _, module in ipairs(STDLIB_MODULES) do
+                common[#common + 1] = "STDLIB_C_INPUTS_" .. module .. "=" .. prepared
+            end
+            local clean_environment = {
+                "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKELEVEL",
+                "-u", "TITAN_JOBS", "-u", "TITAN_C_PARTS",
+                "TITAN_FIXTURE_STATE=" .. state,
+            }
+            local function make_argv(environment, flags, goal)
+                local argv = {}
+                for _, word in ipairs(clean_environment) do argv[#argv + 1] = word end
+                for _, word in ipairs(environment or {}) do argv[#argv + 1] = word end
+                argv[#argv + 1] = make_program
+                argv[#argv + 1] = "--no-print-directory"
+                for _, word in ipairs(flags or {}) do argv[#argv + 1] = word end
+                for _, word in ipairs(common) do argv[#argv + 1] = word end
+                argv[#argv + 1] = goal
+                return argv
+            end
+
+            local listed_ok, listed = run_argv(make_argv({},
+                { "-s", "-f", "Makefile", "-f", inspect_mk }, "print-stdlib-outputs"))
+            assert.truthy(listed_ok, listed)
+            write_file(state .. "/outputs", listed)
+            local stems = {}
+            for module, stem in listed:gmatch("([%w_]+) (%S+)[^\n]*\n") do
+                stems[module] = stem
+            end
+            assert.truthy(stems[split_module], listed)
+
+            write_file(root .. "/titanc", [==[#!/usr/bin/env bash
+set -u
+state=${TITAN_FIXTURE_STATE:?}
+module= output= jobs=
+while (( $# > 0 )); do
+    case $1 in
+        --output) output=$2; shift 2 ;;
+        -c) module=${2#titan.}; shift 2 ;;
+        -j*) jobs=$1; shift ;;
+        *) shift ;;
+    esac
+done
+[[ -n $module && -n $output && -n $jobs ]] || exit 70
+auth= explicit=
+set -f
+set -- ${MAKEFLAGS:-}
+set +f
+for word in "$@"; do
+    case $word in
+        --) break ;;
+        --jobserver-auth=* | --jobserver-fds=*) auth=${word#*=} ;;
+        -j*) explicit=$word ;;
+    esac
+done
+pool=none
+if [[ -n $auth ]]; then
+    pool=unusable
+    case $auth in
+        fifo:*) [[ -p ${auth#fifo:} ]] && pool=usable ;;
+        *,*) { true <&"${auth%%,*}" && true >&"${auth#*,}"; } 2>/dev/null && pool=usable ;;
+    esac
+elif [[ -n $explicit ]]; then
+    pool=$explicit
+fi
+acquire() { while ! mkdir "$state/lock" 2>/dev/null; do sleep 0.01; done; }
+release() { rmdir "$state/lock"; }
+acquire
+active=$(($(cat "$state/active") + 1))
+printf '%s\n' "$active" > "$state/active"
+if (( active > $(cat "$state/maximum") )); then
+    printf '%s\n' "$active" > "$state/maximum"
+fi
+printf '%s %s %s %s\n' "$module" "$jobs" "$pool" "${TITAN_C_PARTS:-default}" \
+    >> "$state/invocations"
+release
+deadline=$((SECONDS + 5))
+while (( $(cat "$state/maximum") < ${TITAN_FIXTURE_EXPECTED_MAX:-1} )); do
+    (( SECONDS < deadline )) || { echo "fixture concurrency barrier timed out" >&2; exit 78; }
+    sleep 0.01
+done
+sleep 0.05
+line=$(grep "^$module " "$state/outputs") || exit 71
+set -- $line
+stem=$2
+shift 2
+# Publish each output by rename, as the compiler does, replacing any link.
+publish() {
+    mkdir -p "${1%/*}" && printf 'fake %s\n' "$module" > "$1.tmp" &&
+        mv -f "$1.tmp" "$1" || exit 72
+}
+for file in "$@"; do publish "$file"; done
+leaf=${stem##*/}
+if [[ ${TITAN_FIXTURE_NO_COMPANION:-} != "$module" ]]; then
+    if [[ $module == "${TITAN_FIXTURE_SPLIT_MODULE:-}" ]]; then
+        for file in "$stem.priv.h" "$stem.part1.c" "$stem.part1.o"; do
+            publish "$file"
+        done
+        printf 'titan-parts-v1 2\n%s\n%s\n%s\n%s\n%s\n' "$leaf.priv.h" "$leaf.c" \
+            "$leaf.o" "$leaf.part1.c" "$leaf.part1.o" > "$stem.parts.tmp"
+    else
+        printf 'titan-parts-v1 1\n%s\n%s\n' "$leaf.c" "$leaf.o" > "$stem.parts.tmp"
+    fi
+    mv -f "$stem.parts.tmp" "$stem.parts"
+fi
+acquire
+printf '%s\n' "$(($(cat "$state/active") - 1))" > "$state/active"
+release
+]==])
+            assert.truthy(run_argv({ "chmod", "+x", root .. "/titanc" }))
+
+            local function reset(clean_outputs)
+                if clean_outputs then remove_tree(out) end
+                os.remove(state .. "/invocations")
+                write_file(state .. "/active", "0\n")
+                write_file(state .. "/maximum", "0\n")
+            end
+            local function invocations()
+                local result = {}
+                local file = io.open(state .. "/invocations", "rb")
+                if not file then return result end
+                for module, jobs, pool, parts in
+                        file:read("a"):gmatch("(%S+) (%S+) (%S+) (%S+)\n") do
+                    result[#result + 1] = {
+                        module = module, jobs = jobs, pool = pool, parts = parts,
+                    }
+                end
+                file:close()
+                return result
+            end
+            local function build(expected_max, environment, flags, goal)
+                reset(true)
+                local full_environment = {
+                    "TITAN_FIXTURE_EXPECTED_MAX=" .. tostring(expected_max),
+                    "TITAN_FIXTURE_SPLIT_MODULE=" .. split_module,
+                }
+                for _, word in ipairs(environment or {}) do
+                    full_environment[#full_environment + 1] = word
+                end
+                local ok, output = run_argv(make_argv(full_environment, flags,
+                    goal or "stdlib-objects"))
+                assert.truthy(ok, output)
+                assert.equal(tostring(expected_max) .. "\n",
+                    read_file(state .. "/maximum"), output)
+                local seen = {}
+                for _, call in ipairs(invocations()) do
+                    assert.falsy(seen[call.module], call.module)
+                    seen[call.module] = call
+                end
+                for _, module in ipairs(STDLIB_MODULES) do
+                    assert.truthy(seen[module], module)
+                end
+                return seen, output
+            end
+
+            body({
+                root = root, state = state, split_module = split_module,
+                stems = stems, common = common,
+                clean_environment = clean_environment, make_argv = make_argv,
+                reset = reset, invocations = invocations, build = build,
+            })
+        end, debug.traceback)
+        remove_tree(root)
+        if not tested then error(test_error, 0) end
+    end
+
+    it("enters one Make job pool at the stdlib graph without multiplying an inherited pool",
+        function()
+            if platform.windows then
+                pending("Unix GNU Make jobserver graph entry")
+                return
+            end
+            local version = gnu_make_version("make")
+            if not version or version < 402 then
+                pending("host make is not GNU Make 4.2 or newer")
+                return
+            end
+            with_stdlib_pool_fixture("make", function(fixture)
+                local root, state = fixture.root, fixture.state
+                local split_module, stems = fixture.split_module, fixture.stems
+                local common = fixture.common
+                local clean_environment = fixture.clean_environment
+                local make_argv, reset = fixture.make_argv, fixture.reset
+                local invocations, build = fixture.invocations, fixture.build
+
+                -- No Make job policy: one seeded pool of TITAN_JOBS (four)
+                -- slots, and every recipe passes the same cap to titanc.
+                local seen = build(4)
+                for _, call in pairs(seen) do
+                    assert.equal("-j4", call.jobs)
+                    assert.equal("usable", call.pool)
+                end
+                seen = build(2, { "TITAN_JOBS=2" })
+                for _, call in pairs(seen) do
+                    assert.equal("-j2", call.jobs)
+                    assert.equal("usable", call.pool)
+                end
+                -- Explicit -j1 stays serial and is not reseeded.
+                seen = build(1, {}, { "-j1" })
+                for _, call in pairs(seen) do
+                    assert.equal("-j4", call.jobs)
+                    assert.equal("-j1", call.pool)
+                end
+
+                -- A parent pool is joined through every wrapper layer, in both
+                -- jobserver styles; TITAN_JOBS=8 does not add slots to it.
+                write_file(root .. "/parent.mk", "all:\n\t+@$(MAKE) --no-print-directory -C " ..
+                    quote(lfs.currentdir()) .. " stdlib-objects $(CHILD_ARGS)\n")
+                local styles = { {} }
+                local help_ok, help = run_argv({ "make", "--help" })
+                if help_ok and help:find("--jobserver-style", 1, true) then
+                    styles[#styles + 1] = { "--jobserver-style=pipe" }
+                end
+                for _, style in ipairs(styles) do
+                    reset(true)
+                    local argv = {}
+                    for _, word in ipairs(clean_environment) do argv[#argv + 1] = word end
+                    argv[#argv + 1] = "TITAN_FIXTURE_EXPECTED_MAX=3"
+                    argv[#argv + 1] = "TITAN_FIXTURE_SPLIT_MODULE=" .. split_module
+                    argv[#argv + 1] = "TITAN_JOBS=8"
+                    argv[#argv + 1] = "make"
+                    argv[#argv + 1] = "--no-print-directory"
+                    argv[#argv + 1] = "-j3"
+                    for _, word in ipairs(style) do argv[#argv + 1] = word end
+                    argv[#argv + 1] = "-f"
+                    argv[#argv + 1] = root .. "/parent.mk"
+                    local child_args = {}
+                    for _, word in ipairs(common) do child_args[#child_args + 1] = quote(word) end
+                    argv[#argv + 1] = "CHILD_ARGS=" .. table.concat(child_args, " ")
+                    local ok, output = run_argv(argv)
+                    assert.truthy(ok, output)
+                    assert.equal("3\n", read_file(state .. "/maximum"), output)
+                    for _, call in ipairs(invocations()) do
+                        assert.equal("-j8", call.jobs)
+                        assert.equal("usable", call.pool, table.concat(style, " "))
+                    end
+                end
+
+                -- Dry-run, query, and touch modes never launch titanc. Touch
+                -- runs first, over the existing output tree it updates.
+                for _, mode in ipairs({ "-t", "-n", "-q" }) do
+                    reset(mode ~= "-t")
+                    local ok, output, why, code = run_argv(make_argv({}, { mode },
+                        "stdlib-objects"))
+                    assert.equal(0, #invocations(), mode .. ": " .. output)
+                    if mode == "-q" then
+                        assert.falsy(ok, output)
+                        assert.equal("exit", why)
+                        assert.not_equal(0, code)
+                    else
+                        assert.truthy(ok, mode .. ": " .. output)
+                    end
+                end
+
+                -- A direct object target repairs any missing or malformed
+                -- companion-listed sidecar without relying on a later link,
+                -- and stays a no-op while the listed set is complete.
+                build(4)
+                local stem = stems[split_module]
+                local object = stem .. ".o"
+                local function direct(expected_calls, environment)
+                    reset(false)
+                    local ok, output, why, code = run_argv(make_argv(environment, {}, object))
+                    local calls = invocations()
+                    assert.equal(expected_calls, #calls, output)
+                    if expected_calls > 0 then
+                        assert.equal(split_module, calls[1].module)
+                    end
+                    return ok, output, why, code
+                end
+                local split_environment = {
+                    "TITAN_FIXTURE_SPLIT_MODULE=" .. split_module,
+                }
+                assert.truthy(direct(0, split_environment))
+                local complete = read_file(stem .. ".parts")
+                local damage = {
+                    function() os.remove(stem .. ".part1.o") end,
+                    function() os.remove(stem .. ".priv.h") end,
+                    function() os.remove(stem .. ".parts") end,
+                    function() write_file(stem .. ".parts", complete .. "extra\n") end,
+                    function()
+                        write_file(stem .. ".parts", (complete:gsub(" 2\n", " 02\n", 1)))
+                    end,
+                    function()
+                        write_file(stem .. ".parts", (complete:gsub("[^\n]*%.priv%.h\n", "", 1)))
+                    end,
+                    function()
+                        write_file(stem .. ".parts", "titan-parts-v1 3\n" ..
+                            complete:match("^[^\n]*\n(.*)$"))
+                    end,
+                    function()
+                        os.remove(stem .. ".part1.c")
+                        assert(lfs.link(root .. "/prepared", stem .. ".part1.c", true))
+                    end,
+                }
+                for index, apply in ipairs(damage) do
+                    apply()
+                    assert.truthy(direct(1, split_environment), "damage " .. index)
+                    assert.equal(complete, read_file(stem .. ".parts"), "damage " .. index)
+                    assert.truthy(direct(0, split_environment), "damage " .. index)
+                end
+                -- A compiler run that leaves no companion is an error.
+                os.remove(stem .. ".parts")
+                local ok, output = direct(1, {
+                    "TITAN_FIXTURE_NO_COMPANION=" .. split_module,
+                })
+                assert.falsy(ok, output)
+                assert.truthy(output:find(
+                    "did not produce " .. stem .. ".parts", 1, true), output)
+
+                -- rock-test hands the four-slot default to the Busted runner.
+                local passes, busted_command = busted_command_passes_jobs("make", {}, root)
+                assert.is_true(passes, busted_command)
+            end)
+        end)
+
+    it("keeps GNU Make before 4.2 serial unless TITAN_JOBS is explicit",
+        function()
+            if platform.windows then
+                pending("Unix GNU Make job policy")
+                return
+            end
+            local legacy = legacy_gnu_make()
+            if not legacy then
+                pending("GNU Make before 4.2 is unavailable; set TITAN_TEST_LEGACY_MAKE")
+                return
+            end
+            with_stdlib_pool_fixture(legacy, function(fixture)
+                local function assert_calls(seen, jobs, pool, label)
+                    for _, call in pairs(seen) do
+                        assert.equal(jobs, call.jobs, label)
+                        assert.equal(pool, call.pool, label)
+                    end
+                end
+                -- `make` and every spelling of `make -j1` look alike here:
+                -- no pool is seeded and titanc compiles one C unit per recipe.
+                for _, flags in ipairs({ {}, { "-j1" }, { "--jobs=1" } }) do
+                    local label = table.concat(flags, " ")
+                    assert_calls(fixture.build(1, {}, flags), "-j1", "none", label)
+                end
+                -- An explicit TITAN_JOBS, from the environment or the command
+                -- line, seeds its own pool.
+                assert_calls(fixture.build(4, { "TITAN_JOBS=4" }), "-j4", "usable",
+                    "environment TITAN_JOBS=4")
+                assert_calls(fixture.build(4, {}, { "TITAN_JOBS=4" }), "-j4", "usable",
+                    "command-line TITAN_JOBS=4")
+                -- An explicit -jN keeps the caller's pool, one C unit per recipe.
+                assert_calls(fixture.build(3, {}, { "-j3" }), "-j1", "usable", "-j3")
+                -- Dry-run, query, and touch modes launch no compiler either
+                -- way. Touch runs first, over the existing output tree.
+                for _, mode in ipairs({ "-t", "-n", "-q" }) do
+                    for _, environment in ipairs({ {}, { "TITAN_JOBS=4" } }) do
+                        fixture.reset(mode ~= "-t")
+                        local ok, output = run_argv(fixture.make_argv(environment,
+                            { mode }, "stdlib-objects"))
+                        assert.equal(0, #fixture.invocations(), mode .. ": " .. output)
+                        assert.equal(mode ~= "-q", ok, mode .. ": " .. output)
+                    end
+                end
+
+                -- Recursive entry from a parent Make keeps the same policy,
+                -- and TITAN_JOBS=8 adds no slots to an inherited pool.
+                write_file(fixture.root .. "/parent.mk",
+                    "all:\n\t+@$(MAKE) --no-print-directory -C " ..
+                    quote(lfs.currentdir()) .. " stdlib-objects $(CHILD_ARGS)\n")
+                local child_args = {}
+                for _, word in ipairs(fixture.common) do
+                    child_args[#child_args + 1] = quote(word)
+                end
+                for _, case in ipairs({
+                    { {}, "-j1", 1, "-j1", "none" },
+                    { {}, "-j3", 3, "-j1", "usable" },
+                    { { "TITAN_JOBS=8" }, "-j3", 3, "-j8", "usable" },
+                }) do
+                    fixture.reset(true)
+                    local argv = {}
+                    for _, word in ipairs(fixture.clean_environment) do
+                        argv[#argv + 1] = word
+                    end
+                    argv[#argv + 1] = "TITAN_FIXTURE_EXPECTED_MAX=" .. case[3]
+                    argv[#argv + 1] = "TITAN_FIXTURE_SPLIT_MODULE=" .. fixture.split_module
+                    for _, word in ipairs(case[1]) do argv[#argv + 1] = word end
+                    for _, word in ipairs({
+                        legacy, "--no-print-directory", case[2],
+                        "MAKE=" .. legacy,
+                        "-f", fixture.root .. "/parent.mk",
+                        "CHILD_ARGS=" .. table.concat(child_args, " "),
+                    }) do
+                        argv[#argv + 1] = word
+                    end
+                    local label = table.concat(case[1], " ") .. " parent " .. case[2]
+                    local ok, output = run_argv(argv)
+                    assert.truthy(ok, label .. ": " .. output)
+                    assert.equal(case[3] .. "\n", read_file(fixture.state .. "/maximum"),
+                        label .. ": " .. output)
+                    local calls = fixture.invocations()
+                    assert.equal(#STDLIB_MODULES, #calls, label)
+                    assert_calls(calls, case[4], case[5], label)
+                end
+
+                -- Without an explicit TITAN_JOBS, the Busted runner receives
+                -- none and sizes its own private worker pool.
+                for _, case in ipairs({ { {}, false }, { { "TITAN_JOBS=4" }, true } }) do
+                    local passes, busted_command =
+                        busted_command_passes_jobs(legacy, case[1], fixture.root)
+                    assert.equal(case[2], passes, busted_command)
+                end
+            end)
+        end)
+
+    it("recompiles every stdlib object once after TITAN_C_PARTS changes and never for job settings",
+        function()
+            if platform.windows then
+                pending("Unix GNU Make object graph")
+                return
+            end
+            local programs = { "make" }
+            local legacy = legacy_gnu_make()
+            if legacy then programs[#programs + 1] = legacy end
+            for _, program in ipairs(programs) do
+                with_stdlib_pool_fixture(program, function(fixture)
+                    local stamp = fixture.root .. "/out/.titan-c-parts.config"
+                    local function rebuild(label, environment, flags)
+                        fixture.reset(false)
+                        local full = {
+                            "TITAN_FIXTURE_SPLIT_MODULE=" .. fixture.split_module,
+                        }
+                        for _, word in ipairs(environment) do full[#full + 1] = word end
+                        local ok, output = run_argv(fixture.make_argv(full, flags,
+                            "stdlib-objects"))
+                        assert.truthy(ok, program .. " " .. label .. ": " .. output)
+                        return fixture.invocations(), output
+                    end
+                    local function assert_recompiled(label, parts, environment, flags)
+                        -- A whole-second Make clock must still see the replaced
+                        -- stamp as newer than every object.
+                        assert.truthy(run_argv({ "sleep", "1" }))
+                        local calls, output = rebuild(label, environment, flags)
+                        label = program .. " " .. label
+                        local seen = {}
+                        for _, call in ipairs(calls) do
+                            assert.falsy(seen[call.module], label .. ": " .. call.module)
+                            seen[call.module] = true
+                            assert.equal(parts, call.parts, label)
+                        end
+                        assert.equal(#STDLIB_MODULES, #calls, label .. ": " .. output)
+                        assert.equal("TITAN_C_PARTS=" .. parts .. "\n", read_file(stamp), label)
+                    end
+
+                    for _, call in pairs(fixture.build(1, {}, { "-j1" })) do
+                        assert.equal("default", call.parts, program)
+                    end
+                    assert.equal("TITAN_C_PARTS=default\n", read_file(stamp), program)
+                    -- An unchanged policy and job settings leave the stamp, and
+                    -- therefore every object, untouched.
+                    local old = os.time() - 60
+                    assert(lfs.touch(stamp, old, old))
+                    for _, case in ipairs({
+                        { "unchanged", {}, {} },
+                        { "-j3", {}, { "-j3" } },
+                        { "environment TITAN_JOBS=2", { "TITAN_JOBS=2" }, {} },
+                        { "command-line TITAN_JOBS=8", {}, { "TITAN_JOBS=8" } },
+                    }) do
+                        local calls, output = rebuild(case[1], case[2], case[3])
+                        assert.equal(0, #calls, program .. " " .. case[1] .. ": " .. output)
+                        assert.equal(old, lfs.attributes(stamp, "modification"),
+                            program .. " " .. case[1])
+                    end
+                    assert_recompiled("command-line 8", "8", {}, { "TITAN_C_PARTS=8" })
+                    -- The environment and the command line spell the same policy.
+                    local calls, output = rebuild("environment 8", { "TITAN_C_PARTS=8" },
+                        { "-j3" })
+                    assert.equal(0, #calls, program .. ": " .. output)
+                    assert_recompiled("environment 1", "1", { "TITAN_C_PARTS=1" }, {})
+                    assert_recompiled("unset", "default", {}, {})
+                    calls, output = rebuild("unset again", {}, {})
+                    assert.equal(0, #calls, program .. ": " .. output)
+                end)
+            end
+        end)
+
+    it("keeps Make recipes portable to GNU Make 3.81 and guards every titanc launch",
+        function()
+            local makefile = read_file("Makefile")
+            -- Constructs introduced after GNU Make 3.81 (macOS /usr/bin/make).
+            for _, forbidden in ipairs({
+                "%$%(file ", "%$%(let ", "%$%(intcmp ", "%$%(guile ",
+                "\n[%w_]+%s*!=", "\n[%w_]+%s*::=", "\n%.ONESHELL", "\n%.WAIT",
+                "\nundefine ", "\n%.RECIPEPREFIX", "\n%.EXTRA_PREREQS",
+                "\n%.NOTINTERMEDIATE", "\nprivate ", "&:", "\ndefine [%w_]+%s*=",
+                "%-%-jobserver%-style",
+            }) do
+                assert.falsy(makefile:find(forbidden), forbidden)
+            end
+            -- Every recipe line that launches titanc directly or through a
+            -- variable is a `+` line whose first command is the
+            -- dry-run/query/touch guard, so those modes do no other work.
+            local logical = makefile:gsub("\\\n", " ")
+            local launches = 0
+            for line in logical:gmatch("[^\n]+") do
+                if line:match("^\t") and (line:find("%$%$?%(TITANC%)%s+%-") or
+                        line:find("%$%$?%(TEST_TITANC%)%s+%-")) then
+                    launches = launches + 1
+                    assert.truthy(line:match(
+                        "^\t[@-]*%+[@-]*%$%$?%(RECURSIVE_WRAPPER_GUARD%) "), line)
+                    assert.truthy(line:find("-j$$(TITAN_JOBS)", 1, true) or
+                        line:find("-j$(TITAN_JOBS)", 1, true), line)
+                end
+            end
+            assert.is_true(launches >= 5)
+            -- Each graph entry either depends on its internal graph target
+            -- (a job policy or n/q/t mode is visible while parsing) or
+            -- recurses once with a pool decided from the recipe's MAKEFLAGS.
+            for _, entry in ipairs({
+                "stdlib", "stdlib-objects", "titan-stdlib-test-objects",
+                "titan-stdlib-test-build",
+            }) do
+                local escaped = entry:gsub("%-", "%%-")
+                local recurse, direct = logical:match("\n" .. escaped ..
+                    ": ##[^\n]*\nifeq %(%$%(TITAN_MAKE_GRAPH_RECURSE%),1%)\n" ..
+                    "(\t[^\n]*)\nelse\n(" .. escaped .. ": [^\n]*)\nendif\n")
+                assert.truthy(recurse, entry)
+                assert.equal("\t+@$(TITAN_MAKE_POOL) $(MAKE) $(TITAN_GRAPH_MAKEFLAGS) $$pool " ..
+                    entry .. "-graph", recurse)
+                assert.equal(entry .. ": " .. entry .. "-graph", direct)
+            end
+
+            if platform.windows then return end
+            -- The guard and pool policy read GNU Make 4 and 3.81 MAKEFLAGS
+            -- spellings at recipe time.
+            local root = make_temp_dir()
+            local tested, test_error = xpcall(function()
+                local probe = root .. "/probe.mk"
+                write_file(probe, table.concat({
+                    "print-snippets:",
+                    "\t@printf '%s\\n' '$(subst ','\"'\"',$(RECURSIVE_WRAPPER_GUARD))' > " ..
+                        quote(root .. "/guard.sh"),
+                    "\t@printf '%s\\n' '$(subst ','\"'\"',$(TITAN_MAKE_POOL))' > " ..
+                        quote(root .. "/pool.sh"),
+                    "",
+                }, "\n"))
+                local ok, output = run_argv({
+                    "env", "-u", "MAKEFLAGS", "-u", "MAKELEVEL", "-u", "TITAN_JOBS",
+                    "make", "--no-print-directory", "-s", "-f", "Makefile", "-f", probe,
+                    "TEST_LUA=false", "TITAN_JOBS=4", "print-snippets",
+                })
+                assert.truthy(ok, output)
+                local guard = read_file(root .. "/guard.sh"):gsub("\n$", "")
+                local pool = read_file(root .. "/pool.sh"):gsub("\n$", "")
+                local function run_snippet(snippet, makeflags, tail)
+                    local ran_ok, ran_output, why, code = run_argv({
+                        "env", "MAKEFLAGS=" .. makeflags, "sh", "-c", snippet .. " " .. tail,
+                    })
+                    return ran_ok, ran_output, why, code
+                end
+                for _, case in ipairs({
+                    { "", "run" },
+                    { "kn --no-print-directory", 0 },
+                    { " --no-print-directory -nk", 0 },
+                    { " --no-print-directory -q", 1 },
+                    { "t", 0 },
+                    { "PREFIX=/tmp/titan-input", "run" },
+                    { " -Onone --no-print-directory", "run" },
+                    { " -I/tmp/include --no-print-directory", "run" },
+                    { "s -j4 --jobserver-auth=fifo:/tmp/GMfifo1 -- MODE=nqt", "run" },
+                }) do
+                    local ran_ok, ran_output, why, code =
+                        run_snippet(guard, case[1], "echo ran")
+                    if case[2] == "run" then
+                        assert.truthy(ran_ok, case[1] .. ": " .. ran_output)
+                        assert.equal("ran\n", ran_output, case[1])
+                    else
+                        assert.equal("exit", why, case[1])
+                        assert.equal(case[2], code, case[1])
+                        assert.equal("", ran_output, case[1])
+                    end
+                end
+                for _, case in ipairs({
+                    { "", "-j4" },
+                    { " -j1 --no-print-directory", "" },
+                    { " -j --no-print-directory", "" },
+                    { "s -j3 --jobserver-auth=fifo:/tmp/GMfifo1", "" },
+                    { "k --jobserver-fds=4,5 -j", "" },
+                    { " --no-print-directory - --jobserver-fds=4,5 -j", "" },
+                    { "j", "" },
+                    { " --no-print-directory -s", "-j4" },
+                    { "PREFIX=/jail/titan", "-j4" },
+                    { " --no-print-directory -- MODE=-j9", "-j4" },
+                }) do
+                    local ran_ok, ran_output = run_snippet(pool, case[1],
+                        "printf '<%s>' \"$pool\"")
+                    assert.truthy(ran_ok, case[1] .. ": " .. ran_output)
+                    assert.equal("<" .. case[2] .. ">", ran_output, case[1])
+                end
+
+                -- The coverage build's guard precedes its `cd`: dry-run,
+                -- query, and touch modes need no coverage directory and
+                -- launch nothing, while a real build still compiles there.
+                local launches_file = root .. "/coverage-launches"
+                local recorder = root .. "/coverage-titanc"
+                write_file(recorder, "#!/bin/sh\nprintf '%s\\n' \"$PWD\" >> " ..
+                    quote(launches_file) .. "\n")
+                assert.truthy(run_argv({ "chmod", "+x", recorder }))
+                local coverage_dir = root .. "/absent/coverage"
+                local function coverage_build(mode)
+                    local argv = {
+                        "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKELEVEL",
+                        "make", "--no-print-directory",
+                    }
+                    if mode then argv[#argv + 1] = mode end
+                    for _, word in ipairs({
+                        "STDLIB_NATIVE_PREREQS=", "TITAN_TEST_FIXTURE_OUTPUTS=",
+                        "TEST_LUA=false", "TEST_TITANC=" .. recorder,
+                        "TITAN_COVERAGE_BUILD_DIR=" .. coverage_dir,
+                        "titan-native-coverage-build",
+                    }) do
+                        argv[#argv + 1] = word
+                    end
+                    return run_argv(argv)
+                end
+                for _, mode in ipairs({ "-n", "-t", "-q" }) do
+                    local ran_ok, ran_output = coverage_build(mode)
+                    assert.equal(mode ~= "-q", ran_ok, mode .. ": " .. ran_output)
+                    assert.is_nil(lfs.attributes(coverage_dir), mode)
+                    assert.is_nil(lfs.attributes(launches_file), mode)
+                end
+                assert.is_nil(lfs.attributes("titan-native-coverage-build"))
+                local built_ok, built_output = coverage_build(nil)
+                assert.truthy(built_ok, built_output)
+                assert.equal(coverage_dir .. "\n", read_file(launches_file))
+            end, debug.traceback)
+            remove_tree(root)
+            if not tested then error(test_error, 0) end
         end)
 end)
 

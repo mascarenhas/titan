@@ -1572,7 +1572,7 @@ describe("C FFI code generation", function()
             end
 
             local init = c_function_body(
-                csrc, "test_titanentry_module_initializer")
+                csrc, "test_\\u2119_titanentry_module_initializer")
             local base = assert(init:find("StkId _base = L->top.p;", 1, true))
             local baseoff = assert(init:find(
                 "ptrdiff_t _base_off = savestack(L, _base);", base, true))

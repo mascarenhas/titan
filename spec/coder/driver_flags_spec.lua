@@ -160,6 +160,8 @@ local ARTIFACTS = {
     APPLICATION .. "/" .. MODULE .. ".c",
     APPLICATION .. "/" .. MODULE .. ".o",
     APPLICATION .. "/" .. MODULE .. ".ffi.h",
+    APPLICATION .. "/" .. MODULE .. ".parts",
+    APPLICATION .. "/" .. MODULE .. ".priv.h",
 }
 
 local function remove_tree(path)

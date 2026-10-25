@@ -2964,10 +2964,30 @@ function types.erase(typ)
     })
 end
 
-function types.contains_generic(typ)
+-- The walk follows every table field except `_tag` and the
+-- `_c_origin_header` provenance edge. A C declaration node (and a foreign
+-- module member) records the umbrella header that spelled it; that include
+-- record, its generated header, dependency headers, inputs, and observations
+-- are closed plain data (`declarationschemas` `include`, `header`, `input`,
+-- `observation`) with no type table, so nothing generic is reachable through
+-- it. Skipping it keeps every answer exact while avoiding a walk of the whole
+-- header dependency graph from each C type.
+local generic_walk_skips = { _tag = true, _c_origin_header = true }
+
+-- `memo`, when supplied, is owned by one caller-proven read-only batch (no
+-- reachable table changes while it lives). It records complete results only:
+-- a true root, or every table visited by a query that returned false. A
+-- false answer from a cycle back-edge inside a true query is not complete,
+-- so nothing else from such a query is recorded.
+-- Implementation notes: doc/implementation/generics.md#erased-graph-validation
+function types.contains_generic(typ, memo)
     local seen = {}
     local function visit(value)
         if type(value) ~= "table" or seen[value] then return false end
+        if memo then
+            local known = memo[value]
+            if known ~= nil then return known end
+        end
         seen[value] = true
         local tag = value._tag
         if tag == "Type.GenericScope" or tag == "Type.TypeParameter"
@@ -2983,19 +3003,27 @@ function types.contains_generic(typ)
             return true
         end
         for key, child in pairs(value) do
-            if key ~= "_tag" and visit(child) then return true end
+            if not generic_walk_skips[key] and visit(child) then return true end
         end
         return false
     end
-    return visit(typ)
+    local result = visit(typ)
+    if memo and type(typ) == "table" then
+        if result then
+            memo[typ] = true
+        else
+            for value in pairs(seen) do memo[value] = false end
+        end
+    end
+    return result
 end
 
 function types.is_erased(typ)
     return not types.contains_generic(typ)
 end
 
-function types.assert_erased(typ)
-    if types.contains_generic(typ) then
+function types.assert_erased(typ, memo)
+    if types.contains_generic(typ, memo) then
         error("generic type reached erased core", 2)
     end
     return typ

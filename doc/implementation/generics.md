@@ -512,6 +512,54 @@ later rewritten to `value`. This separation is what lets metadata remain
 precise while coder enumerates the same ordinary public/private slots and
 layouts as non-generic code.
 
+### Erased-graph validation
+
+`types.contains_generic(typ, memo)` is the predicate behind
+`types.assert_erased` and `types.is_erased`. It reports a generic form when it
+reaches `Type.GenericScope`, `Type.TypeParameter`, `Type.Parameter`,
+`Type.FunctionScheme`, `Type.GenericAlias`, an applied `Type.Nominal`, or a
+record, union, Interface, method, or static method that still carries a scope
+or binders. It walks every table field except `_tag` and `_c_origin_header`,
+with a per-call `seen` set, so it also traverses plans and source-navigation
+edges and can be costly on a large module graph.
+
+`_c_origin_header` is header provenance, not type structure. A C declaration
+node, or a foreign module member, records the include that spelled it
+(`types.mark_c_ffi_include`, `checker/declarations.lua`). That include record,
+its generated header, the dependency headers, the search inputs and their file
+observations are closed plain data: strings, integers, string lists and the
+other records in that list (`declarationschemas.lua` `include`, `header`,
+`input` and `observation`; `ffiheaders.lua` asserts that the include and
+typedef lists hold strings). No type table is reachable through the edge, so
+skipping it cannot change an answer. Following it, every query that reached a
+C type walked the whole header dependency graph again: about 89% of the tables
+visited while compiling `titan.uv`, and about 87% for `titan.ssl`. Every other
+field of a C node, such as its pointee, fields, parameters, qualifiers and
+numeric descriptors, is still walked.
+
+Callers also test cheap shapes first:
+`checker_assignment_adjustment` (`checker/interfaces.lua`) walks a source or
+target only when the other side is `value` or a C `TValue`, and
+`generic_erased_descriptor` (`checker/lowering.lua`) walks only descriptors
+outside the owner-bearing tags that always take its canonical erasure path.
+
+The optional `memo` is explicit and caller-owned; there is no global or
+cross-check cache. A memo is valid only while no table reachable from the
+queried roots changes, and it records complete results only. A query that
+returns true records its root. A query that returns false records every table
+it visited, because the whole reachable graph was proven free of generic forms.
+A false answer from a cycle back-edge inside a query that ultimately returns
+true is not complete, so nothing else from that query is recorded. Exactly one
+batch shares a memo: the end of `generic_lower_erased_core`, after the erased
+module descriptor, the erased registry, the refreshed annotations, and the
+frozen declared registry are complete. It asserts `ast._type` and then every
+erased registry owner with one local memo and no intervening mutation, and
+discards the memo when it returns. Every other caller passes none. Queries made
+while lowering cannot share a memo: lowering rewrites the AST annotations and
+adjustment plans that those queries reach, in the middle of the pass. The
+provenance skip above is not a cache. Each query is still a fresh, exact walk
+of the current graph.
+
 ## Constraint erasure
 
 Erasure (`types.erase`, `types.erase_constraint`) is a pure recursive type
@@ -798,8 +846,9 @@ installed erased registry and rejects:
   `_nominal_typeargs` list that lowering failed to consume.
 
 Apart from this assertion and metadata selection, coder is generic-unaware. It
-enumerates public/private slots from erased `ast._type`, generates one
-translation unit per logical module, chooses native types from ordinary
+enumerates public/private slots from erased `ast._type`, generates one module's
+C (one translation unit or several size-partitioned parts) per logical module,
+chooses native types from ordinary
 `Type.*` tags, and emits the ordinary function/closure/record/union/Interface,
 vararg, flex, Array-writer, Lua-entry, and GC templates.
 

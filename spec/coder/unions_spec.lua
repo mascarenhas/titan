@@ -17,30 +17,41 @@ local function clean_generated_modules()
         os.remove(name .. ".o")
         os.remove(name .. ".so")
         os.remove(name .. ".a")
+        os.remove(name .. ".ffi.h")
+        os.remove(name .. ".titan.h")
+        os.remove(name .. ".priv.h")
+        os.remove(name .. ".parts")
         os.execute("rm -rf " .. name .. ".so.dSYM")
     end
 end
 
-local function without_reflection_payload_reader(source, owner)
-    for _, suffix in ipairs({ "payload_reader", "projection", "codec_encode" }) do
-        local marker = "static void test_\\u2133_" .. owner
-            .. "_\\u2131_" .. suffix .. "("
-        local start = source:find(marker, 1, true)
-        -- Only nominals with a generated codec have an encoder.
-        assert(start or suffix == "codec_encode", marker)
-        if start then
-            local body_start = assert(source:find("{", start, true))
-            local body = assert(source:match("^%b{}", body_start))
-            -- Reflection, and a generated codec handing a field to the
-            -- reflective field encoder, box an Array for Lua. Exclude these
-            -- functions while retaining every constructor, case load, and
-            -- other function in the no-proxy assertion for compiler-internal
-            -- payload storage.
-            source = source:sub(1, start - 1)
-                .. source:sub(body_start + #body)
+local NATIVE_BODY_FIELDS = { "_body", "_luabody", "_strictbody", "_boundbody" }
+
+local function native_bodies(ast)
+    -- Constructors, authored case loads, Lua and strict entries, bound-method
+    -- trampolines, and nested lambdas with their entries must retain the
+    -- internal Array representation. The coder attaches each of these bodies
+    -- to its AST node; reflection/codec readers intentionally box at the Lua
+    -- boundary and are not attached to any node. Children are reached through
+    -- source fields only, never through checker or coder annotations.
+    local bodies, seen = {}, {}
+    local function visit(node)
+        if type(node) ~= "table" or seen[node] then return end
+        seen[node] = true
+        for _, field in ipairs(NATIVE_BODY_FIELDS) do
+            if type(node[field]) == "string" then
+                bodies[#bodies + 1] = node[field]
+            end
+        end
+        for key, child in pairs(node) do
+            if type(key) ~= "string" or key:sub(1, 1) ~= "_" then
+                visit(child)
+            end
         end
     end
-    return source
+    visit(ast)
+    assert(#bodies > 0)
+    return table.concat(bodies, "\n")
 end
 
 describe("unions (end-to-end)", function()
@@ -70,45 +81,6 @@ describe("unions (end-to-end)", function()
             assert.same(expected, find_symbol(source_symbols))
             assert.same(expected, find_symbol(interface_symbols))
         end)
-
-    it("publishes a boxed payload reader including private Array variants", function()
-        h.with_extra_cflags({ "-DTITAN_COMPILER_TESTS" }, function()
-            local csrc = h.compile_and_read_c([[
-                union Packet
-                    empty()
-                    numbers({integer})
-                    local hidden({integer}?)
-                end
-
-                function private_packet(): Packet
-                    local numbers = { 41, 42 }
-                    return Packet.hidden(numbers)
-                end
-            ]])
-            local reader = "test_\\u2133_Packet_\\u2131_payload_reader"
-            local start = assert(csrc:find("static void " .. reader .. "(", 1, true))
-            local stop = assert(csrc:find("static int ", start, true))
-            local body = csrc:sub(start, stop - 1)
-            assert.truthy(body:find("case 0:", 1, true))
-            assert.truthy(body:find("case 1:", 1, true))
-            assert.truthy(body:find("case 2:", 1, true))
-            assert.truthy(body:find("setnilvalue(tv);", 1, true))
-            local _, boxed = body:gsub("titan_array_require_proxy", "")
-            assert.equal(2, boxed)
-            assert.truthy(csrc:find(
-                "titan_cast_func(void *, " .. reader .. ")", 1, true))
-            assert.truthy(csrc:find(
-                "lua_rawsetp(L, -2, TITAN_MT_PAYLOAD);", 1, true))
-            local ok, err = h.call("test", [[
-                local packet = test.private_packet()
-                local registry = debug.getregistry()
-                local mt = debug.getmetatable(packet)
-                assert(type(mt[registry.TITAN_MT_PAYLOAD]) == "userdata")
-                assert(not mt[registry.TITAN_MT_TYPE]:find("hidden", 1, true))
-            ]])
-            assert.truthy(ok, err)
-        end)
-    end)
 
     it("constructs empty and payload variants and dispatches without fallthrough",
         function()
@@ -976,7 +948,7 @@ describe("unions (end-to-end)", function()
     end)
 
     it("stores Array payloads in their internal representation", function()
-        local csrc = h.compile_and_read_c([[
+        local csrc, ast = h.compile_and_read_c([[
             union Numbers
                 none()
                 nothing(nil)
@@ -1033,7 +1005,7 @@ describe("unions (end-to-end)", function()
         assert.match("luaS_newudata%s*%(%s*L,%s*sizeof%([^%)]+%),%s*0%s*%)", csrc)
         assert.match("luaS_newudata%s*%(%s*L,%s*sizeof%([^%)]+%),%s*1%s*%)", csrc)
         assert.not_match("titan_array_require_proxy",
-            without_reflection_payload_reader(csrc, "Numbers"))
+            native_bodies(ast))
         assert.match("switch%s*%(%s*_case_%d+_tag%s*%)", csrc)
         assert.match("case%s+2:%s*goto%s+_case_%d+_arm_%d+;", csrc)
 
@@ -1047,7 +1019,7 @@ describe("unions (end-to-end)", function()
 
     it("covers representative union payload storage and case loads once",
         function()
-            local csrc = h.compile_and_read_c([[
+            local csrc, ast = h.compile_and_read_c([[
             foreign import "spec/fixtures/c_tvalue_soundness.h"
 
             local type Owner = owned titan_spec_tvalue_int[]
@@ -1128,7 +1100,7 @@ describe("unions (end-to-end)", function()
             assert.match(
                 "hvalue%s*%(%s*&%(%(_tmp_%d+%)%->uv%[0%]%.uv%)%s*%)", csrc)
             assert.not_match("titan_array_require_proxy",
-                without_reflection_payload_reader(csrc, "Payload"))
+                native_bodies(ast))
             assert.match(
                 "luaC_barrierback%s*%(%s*L,%s*obj2gco%s*%(%s*_tmp_%d+%s*%)"
                 .. ",%s*&%(%(_tmp_%d+%)%->uv%[0%]%.uv%)%s*%)",
@@ -1142,7 +1114,7 @@ describe("unions (end-to-end)", function()
 
     it("round-trips the full payload matrix across full and minor GC #stress",
         function()
-            local csrc = h.compile_and_read_c([[
+            local csrc, ast = h.compile_and_read_c([[
             foreign import "titan/ffi.h"
             foreign import "lua.h"
 
@@ -1428,7 +1400,7 @@ describe("unions (end-to-end)", function()
             assert.match(
                 "hvalue%s*%(%s*&%(%(_tmp_%d+%)%->uv%[0%]%.uv%)%s*%)", csrc)
             assert.not_match("titan_array_require_proxy",
-                without_reflection_payload_reader(csrc, "Payload"))
+                native_bodies(ast))
             assert.match(
                 "luaC_barrierback%s*%(%s*L,%s*obj2gco%s*%(%s*_tmp_%d+%s*%)"
                 .. ",%s*&%(%(_tmp_%d+%)%->uv%[0%]%.uv%)%s*%)",

@@ -23,7 +23,8 @@ rejects a raw metadata member, and Darwin's `libtool -static` and universal
 tooling require valid native objects.
 
 Titan instead emits one metadata section in each already-generated logical
-module object:
+module's primary object (part 0 of a
+[split module](codegen-overview.md#translation-unit-parts)):
 
 ```c
 #if defined(__APPLE__)
@@ -55,8 +56,10 @@ with the object that defines the module's `_abi`, `_types`, `_layouts`, `_init`,
 metadata member to regenerate and no archive leaf name used as logical
 identity.
 
-The standalone entrypoint, runtime objects, `ltitanlib.o`, and ordinary native
-payload do not carry logical metadata.
+The standalone entrypoint, runtime objects, `ltitanlib.o`, ordinary native
+payload, and the part objects of split modules do not carry logical metadata.
+A part object is a metadata-free member like other native payload; it adds no
+logical key, and only the primary object identifies the module.
 
 ## Canonical payload
 
@@ -298,7 +301,8 @@ archives without groups (`driver.force_load_arguments`: GNU
 `--whole-archive`, Darwin `-force_load`). The paired static archive
 (`driver.build_static_archive`) flattens the identical logical/native payload:
 
-1. source objects in bytewise logical-name order;
+1. source modules in bytewise logical-name order, each as its primary object
+   immediately followed by its part objects in part order;
 2. selected providers in bytewise absolute-path order, preserving member
    order;
 3. every `-X` input in CLI order, inserting one object directly or each
@@ -360,8 +364,85 @@ program](driver.md#linking-a-standalone-program-drivercompile_program).
 
 For Interfaces, the use-site set includes the owner-exported native,
 coercive-Lua, and strict bound-method symbols. Concrete/Interface pair arrays
-and adjustment entries remain private to the source object that needs the
+and adjustment entries remain private to the generated module that needs the
 conversion and add no archive protocol entry.
+
+Ordinary archive extraction also completes a split module. The protocol entry
+points pull in its primary member, and the parts' module-private definitions
+are hidden but still global symbols in the archive index, so the primary's
+references to them, and the parts' references to each other, pull in the part
+members. No whole-archive option or extra input is needed.
+
+## Provider link pipeline
+
+On Linux and macOS, `titanc` hands a no-`main` provider to
+`driver.link_provider_pair` once its objects are compiled and validated. The
+function owns one sibling staging directory: the DSO keeps the public basename
+there, beside the staged archive and the private `archive-validation.so`. It
+returns the validated DSO/archive pair, which `driver.publish_provider_bundle`
+then commits. Windows DLL providers have no archive and keep their synchronous
+link and validation.
+
+The pipeline has a fixed order, which is also its diagnostic order:
+
+1. link the staged DSO;
+2. build and verify the staged archive ([Native
+   composition](#native-composition));
+3. validate the DSO family: every logical protocol, the `titan` support entry
+   for that reserved provider, archive/DSO equality, and fresh-process loading;
+4. link the archive-backed image with the same final native policy as
+   `driver.compile_archive_validation_image`;
+5. validate the image family with the same four checks; then
+6. return the pair for publication.
+
+Concurrency follows the compiler's native job slots: the local bound and
+parent GNU Make jobserver rules for generated-C compilation also govern these
+links. Links run as native background jobs with captured output and a
+completion FIFO.
+
+* **One slot** (`--jobs 1`, `make -j1`, or an advertised but unusable
+  jobserver) runs the six steps strictly one after another. Its links are
+  still background children, so the pipeline asks `jobs.open_slots` for the
+  cancellation guard even at one slot.
+* **Several local slots without a usable jobserver.** The DSO link holds the
+  recipe's implicit slot while the compiler builds and verifies the archive.
+  The archive-backed link still starts only after the DSO link has been
+  reaped: on Linux both links use `-flto=auto`, and two links without a
+  jobserver would start two independent all-core LTRANS pools. The DSO
+  validations then run while the archive-backed link runs.
+* **A usable shared jobserver.** Once the archive is ready, the driver polls
+  for a token together with the DSO link's completion. A token starts the
+  archive-backed link at once under that borrowed slot. If the DSO link
+  finishes first, the image link reuses the recipe's slot instead. The child
+  inherits `MAKEFLAGS` and the jobserver descriptors, so GCC's LTRANS jobs draw
+  from the same pool. The borrowed byte is returned when the link is reaped.
+  Because LTRANS already fills the pool, the overlap mainly hides the serial
+  WPA, final-link, archive, and validation work rather than halving the link
+  time.
+
+Overlap never reorders observable results. Each link's captured output is
+replayed at a fixed point: the DSO's after the archive build, and the image's
+after the DSO validations. `--verbose` announces the image command after the
+DSO's replayed output, regardless of when its slot was granted. The first
+failure in the step order above is the one reported, even when a later step
+failed first in time; an image-slot acquisition error is likewise reported as
+an image-link failure after the DSO steps. A failure, an unexpected error, or
+an `INT`/`TERM`/`HUP` interruption does four things: it waits for every
+running link, discards unreplayed output, returns borrowed tokens, and removes
+the whole staging directory. Neither public path changes, and no temporary
+sibling remains. An interruption is returned to `titanc`, which closes its
+resolver (removing its own temporaries) and then re-raises the signal under
+the restored action: `TERM` and `HUP` terminate the process, while `INT`
+reaches the Lua interpreter's `interrupted!` handler. A PID-directed `INT`
+that arrives while a synchronous archive tool or fresh-process validator runs
+under `system()` can be ignored by the parent, as POSIX `system()` specifies.
+
+`spec/coder/provider_link_pipeline_spec.lua` drives these cases with real
+parent Make jobservers. It injects link and validation failures, including
+dual failures where the later step fails first, and sends `TERM`, `HUP`, and
+`INT` while links are live. The overlapped `TERM` case runs under a shared
+jobserver. `spec/coder/lto_spec.lua` repeats its optimized provider pair under
+a shared jobserver.
 
 ## Publication and installation
 

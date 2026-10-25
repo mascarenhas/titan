@@ -8,6 +8,8 @@ $FOREIGNIMPORTS
 
 $AFTERFOREIGNIMPORTS
 
+$MODULEPRIVATE
+
 /* Native exports must refer to this image's definitions even when another
  * physical provider of the same logical module is mapped in the process.
  * Darwin's ordinary two-level namespace already preserves that binding. */
@@ -46,11 +48,12 @@ const char *${ABINAME}_value(void) {
 init = [[
 int $LUAOPEN_NAME(lua_State *L);
 
-static void $PRELOADNAME(lua_State *L) {
+TITAN_MODULE_PRIVATE void $PRELOADNAME(lua_State *L);
+
+TITAN_MODULE_PRIVATE void $PRELOADNAME(lua_State *L) {
     titan_module_preload(L, $PRELOADMODNAME, sizeof($PRELOADMODNAME) - 1,
         $LUAOPEN_NAME, $NATIVERESOLVER);
 }
-
 Udata *$INITNAME(lua_State *L) {
     titan_ensure_stack(L, 10);
     lua_getfield(L, LUA_REGISTRYINDEX, $MODNAMESTR);
@@ -252,7 +255,7 @@ function import_module(loadmods, initmods, sigs, mprefixes,
     end
 end
 
-function init_data_from_other_modules(tlcontext, includes, loadmods,
+function init_data_from_other_modules(tlcontext, includes, binding_defs, loadmods,
                                       loadglobals, initmetas, mprefixes,
                                       static_deps)
     -- Imported addresses belong to this Lua state's importer userdata. The
@@ -287,9 +290,13 @@ function init_data_from_other_modules(tlcontext, includes, loadmods,
     -- may redirect an address already visible to a raw callback.
     for _, func in ipairs(coder._sorted_foreign_imports(tlcontext)) do
         local pointer = types.CPointer(func.type, {})
-        table.insert(includes, "TITAN_SOURCE_LOCAL "
-            .. cdeclarator.render_declaration(pointer, func.binding)
-            .. " = NULL;")
+        local binding_decl = cdeclarator.render_declaration(pointer, func.binding)
+        coder._record_private_symbol(tlcontext, func.binding,
+            "foreign function binding '" .. func.module .. "." .. func.name .. "'")
+        table.insert(includes, "extern TITAN_SOURCE_LOCAL "
+            .. binding_decl .. ";")
+        table.insert(binding_defs, "TITAN_SOURCE_LOCAL "
+            .. binding_decl .. " = NULL;")
         local candidate
         if static_deps[func.module] == true then
             table.insert(includes, "extern "
@@ -365,8 +372,9 @@ function init_data_from_other_modules(tlcontext, includes, loadmods,
 end
 
 -- Implementation notes: doc/implementation/lua-interop-internals.md#records-from-lua
-function coderecorddec(ctx, code, initrecs, node)
-    local projector, constructor = coder._reflection_metadata(ctx, code, node)
+function coderecorddec(ctx, sigs, code, initrecs, node)
+    local tlcontext = ctx.tlcontext or ctx
+    local projector, constructor = coder._reflection_metadata(ctx, sigs, code, node)
     -- (the type tag is forward-declared up front in generate(), so that
     -- forward/mutually-recursive record field types resolve)
     local plan = coder._nominal_plan(ctx, node._type)
@@ -375,6 +383,8 @@ function coderecorddec(ctx, code, initrecs, node)
         if not field.islocal then
             local accessor = coder._nominal_function_prefix(
                 node._type.name, field.name) .. "_fieldaccessor"
+            coder._record_private_symbol(tlcontext, accessor,
+                "record field '" .. node._type.name .. "." .. field.name .. "' accessor")
             table.insert(fieldmap, render([[
                 lua_pushliteral(L, $NAME);
                 lua_pushlightuserdata(L, titan_cast_func(void *, $ACCESSOR));
@@ -416,8 +426,11 @@ function coderecorddec(ctx, code, initrecs, node)
                         field.type, "_rec", converted),
                 })
             end
+            table.insert(sigs, render([[
+                TITAN_MODULE_PRIVATE void $ACCESSOR(lua_State *L, Udata *_mod, Udata *_rec, TValue *tv, int write);
+            ]], { ACCESSOR = accessor }))
             table.insert(code, render([[
-                static void $ACCESSOR(lua_State *L, Udata *_mod, Udata *_rec, TValue *tv, int write) {
+                TITAN_MODULE_PRIVATE void $ACCESSOR(lua_State *L, Udata *_mod, Udata *_rec, TValue *tv, int write) {
                     (void)_mod; /* scalar fields need no cached identities */
                     if (write) {
                         $WRITE
@@ -447,8 +460,21 @@ function coderecorddec(ctx, code, initrecs, node)
             }))
         end
     end
+    local indexname = coder._nominal_metamethod_name(node._type.name, "index")
+    local newindexname = coder._nominal_metamethod_name(node._type.name, "newindex")
+    coder._record_private_symbol(tlcontext, indexname,
+        "record '" .. node._type.name .. "' __index")
+    coder._record_private_symbol(tlcontext, newindexname,
+        "record '" .. node._type.name .. "' __newindex")
+    table.insert(sigs, render([[
+        TITAN_MODULE_PRIVATE int $INDEXNAME(lua_State *L);
+        TITAN_MODULE_PRIVATE int $NEWINDEXNAME(lua_State *L);
+    ]], {
+        INDEXNAME = indexname,
+        NEWINDEXNAME = newindexname,
+    }))
     table.insert(code, render([[
-            static int $INDEXNAME(lua_State *L) {
+            TITAN_MODULE_PRIVATE int $INDEXNAME(lua_State *L) {
                 TValue *_recslot = s2v(L->ci->func.p + 1);
                 CClosure *_func = clCvalue(s2v(L->ci->func.p));
                 Udata *_mod = uvalue(&_func->upvalue[1]);
@@ -477,7 +503,7 @@ function coderecorddec(ctx, code, initrecs, node)
                     return luaL_error(L, "%s:%d:%d: field '%s' not found in record '%s'", $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
                 }
             }
-            static int $NEWINDEXNAME(lua_State *L) {
+            TITAN_MODULE_PRIVATE int $NEWINDEXNAME(lua_State *L) {
                 TValue *_recslot = s2v(L->ci->func.p + 1);
                 CClosure *_func = clCvalue(s2v(L->ci->func.p));
                 Udata *_mod = uvalue(&_func->upvalue[1]);
@@ -585,10 +611,13 @@ end
 -- Generate the Lua-facing metatable for a union. Variants, tags, and payloads
 -- are opaque; only public methods participate in lookup, and all writes fail.
 -- Implementation notes: doc/implementation/unions.md#functions-namespaces-and-lua-exposure
-function coder._codeuniondec(ctx, code, initnominals, node)
-    local projector, constructor = coder._reflection_metadata(ctx, code, node)
+function coder._codeuniondec(ctx, sigs, code, initnominals, node)
+    local tlcontext = ctx.tlcontext or ctx
+    local projector, constructor = coder._reflection_metadata(ctx, sigs, code, node)
     local payload_reader = coder._nominal_function_prefix(
         node._type.name, "payload_reader")
+    coder._record_private_symbol(tlcontext, payload_reader,
+        "union '" .. node._type.name .. "' payload reader")
     local payload_cases = {}
     for _, variant in ipairs(node._type.variants) do
         local plan = coder._nominal_plan(ctx, node._type, variant)
@@ -623,9 +652,13 @@ function coder._codeuniondec(ctx, code, initnominals, node)
             PART_CASES = table.concat(part_cases, "\n"),
         }))
     end
+    table.insert(sigs, render([[
+        TITAN_MODULE_PRIVATE void $READER(lua_State *L, Udata *_union, lua_Integer part,
+                                          TValue *tv);
+    ]], { READER = payload_reader }))
     table.insert(code, render([[
-        static void $READER(lua_State *L, Udata *_union, lua_Integer part,
-                            TValue *tv) {
+        TITAN_MODULE_PRIVATE void $READER(lua_State *L, Udata *_union, lua_Integer part,
+                                          TValue *tv) {
             switch ($TAG) {
                 $CASES
                 default:
@@ -660,8 +693,21 @@ function coder._codeuniondec(ctx, code, initnominals, node)
         })
     end
 
+    local indexname = coder._nominal_metamethod_name(node._type.name, "index")
+    local newindexname = coder._nominal_metamethod_name(node._type.name, "newindex")
+    coder._record_private_symbol(tlcontext, indexname,
+        "union '" .. node._type.name .. "' __index")
+    coder._record_private_symbol(tlcontext, newindexname,
+        "union '" .. node._type.name .. "' __newindex")
+    table.insert(sigs, render([[
+        TITAN_MODULE_PRIVATE int $INDEXNAME(lua_State *L);
+        TITAN_MODULE_PRIVATE int $NEWINDEXNAME(lua_State *L);
+    ]], {
+        INDEXNAME = indexname,
+        NEWINDEXNAME = newindexname,
+    }))
     table.insert(code, render([[
-        static int $INDEXNAME(lua_State *L) {
+        TITAN_MODULE_PRIVATE int $INDEXNAME(lua_State *L) {
             TValue *_unionslot = s2v(L->ci->func.p + 1);
             CClosure *_func = clCvalue(s2v(L->ci->func.p));
             Udata *_mod = uvalue(&_func->upvalue[1]);
@@ -683,7 +729,7 @@ function coder._codeuniondec(ctx, code, initnominals, node)
                 $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
         }
 
-        static int $NEWINDEXNAME(lua_State *L) {
+        TITAN_MODULE_PRIVATE int $NEWINDEXNAME(lua_State *L) {
             return luaL_error(L,
                 "%s:%d:%d: cannot assign member '%s' in union '%s'",
                 $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
@@ -786,7 +832,9 @@ function coder._code_interface_method_artifacts(
     -- checks/coerces the public Interface signature with that owner's `_mod`.
     -- Its final call is parameterized to read uv[0]/uv[1] and invoke the copied
     -- payload slot directly with `_fn = NULL`.
-    table.insert(sigs, "static int " .. luaname .. "(lua_State *L);")
+    coder._record_private_symbol(tlcontext, luaname,
+        "interface method '" .. interface.name .. ":" .. method.name .. "' Lua entry")
+    table.insert(sigs, "TITAN_MODULE_PRIVATE int " .. luaname .. "(lua_State *L);")
     table.insert(code, genluaentry(
         tlcontext, interface.name .. ":" .. method.name, "",
         method, method_node.loc, luaname, {
@@ -951,10 +999,13 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
     -- recover the same registry metatable through type2metatable.
     type2metatable(ctx, types.Nominal(interface.name))
 
+    local tlcontext = ctx.tlcontext or ctx
     local membermap = {}
     for _, field in ipairs(interface.fields) do
         local accessor = coder._nominal_function_prefix(
             interface.name, field.name) .. "_fieldaccessor"
+        coder._record_private_symbol(tlcontext, accessor,
+            "interface field '" .. interface.name .. "." .. field.name .. "' accessor")
         table.insert(membermap, render([[
             lua_pushliteral(L, $NAME);
             lua_pushlightuserdata(L, titan_cast_func(void *, $ACCESSOR));
@@ -963,8 +1014,11 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
             NAME = c_string_literal(field.name),
             ACCESSOR = accessor,
         }))
+        table.insert(sigs, render([[
+            TITAN_MODULE_PRIVATE void $ACCESSOR(lua_State *L, Udata *_mod, Udata *_interface, TValue *tv, int write);
+        ]], { ACCESSOR = accessor }))
         table.insert(code, render([[
-            static void $ACCESSOR(lua_State *L, Udata *_mod, Udata *_interface, TValue *tv, int write) {
+            TITAN_MODULE_PRIVATE void $ACCESSOR(lua_State *L, Udata *_mod, Udata *_interface, TValue *tv, int write) {
                 (void)_mod;
                 if (write) {
                     luaL_error(L,
@@ -1003,8 +1057,21 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
 
     local receiver_plan = assert(node._dynamic_receiver_plan,
         "Interface receiver lacks its Lua boundary plan")
+    local indexname = coder._nominal_metamethod_name(interface.name, "index")
+    local newindexname = coder._nominal_metamethod_name(interface.name, "newindex")
+    coder._record_private_symbol(tlcontext, indexname,
+        "interface '" .. interface.name .. "' __index")
+    coder._record_private_symbol(tlcontext, newindexname,
+        "interface '" .. interface.name .. "' __newindex")
+    table.insert(sigs, render([[
+        TITAN_MODULE_PRIVATE int $INDEXNAME(lua_State *L);
+        TITAN_MODULE_PRIVATE int $NEWINDEXNAME(lua_State *L);
+    ]], {
+        INDEXNAME = indexname,
+        NEWINDEXNAME = newindexname,
+    }))
     table.insert(code, render([[
-        static int $INDEXNAME(lua_State *L) {
+        TITAN_MODULE_PRIVATE int $INDEXNAME(lua_State *L) {
             TValue *_interfaceslot = s2v(L->ci->func.p + 1);
             CClosure *_func = clCvalue(s2v(L->ci->func.p));
             Udata *_mod = uvalue(&_func->upvalue[1]);
@@ -1038,7 +1105,7 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
                 $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
         }
 
-        static int $NEWINDEXNAME(lua_State *L) {
+        TITAN_MODULE_PRIVATE int $NEWINDEXNAME(lua_State *L) {
             return luaL_error(L,
                 "%s:%d:%d: cannot assign member '%s' in interface '%s'",
                 $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
@@ -1255,21 +1322,16 @@ function coder.generate_foreign_header(modname, ast, tlcontext, header_paths)
     local inline_bodies = {}
     for _, node in ipairs(ast) do
         if not node._ignore and node._tag == "Ast.TopLevelForeignFunc" then
-            local inline = node._foreign_inline
-            if inline == nil then
-                inline = coder._foreign_function_is_inline(node)
-                node._foreign_inline = inline
-            end
             local signature = coder._foreign_function_signature(node)
-            if inline then
-                declarations[#declarations + 1] =
-                    "static inline " .. signature .. ";"
+            declarations[#declarations + 1] =
+                (node.islocal and "TITAN_SOURCE_LOCAL " or "extern ")
+                .. signature .. ";"
+            if node.islocal then
+                declarations[#declarations + 1] = "static inline "
+                    .. coder._foreign_function_signature(node,
+                        coder._foreign_inline_name(modname, node.name)) .. ";"
                 inline_bodies[#inline_bodies + 1] =
-                    coder._code_foreign_function(tlcontext, node, true)
-            else
-                declarations[#declarations + 1] =
-                    (node.islocal and "TITAN_SOURCE_LOCAL " or "extern ")
-                    .. signature .. ";"
+                    coder._code_foreign_inline(tlcontext, node)
             end
         end
     end

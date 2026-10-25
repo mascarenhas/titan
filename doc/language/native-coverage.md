@@ -57,6 +57,14 @@ or artifact swap. The default report directory is `out/.coverage/report` with
 `-o out`; omitting `--output` retains source-adjacent artifacts and the original
 `.coverage/report` default. See [Output directories](output-directory.md).
 
+A large selected module may be
+[split](build-profiles.md#split-modules) into several C
+translation units in coverage builds too. Each part has its own generated C,
+object, and `.gcno`/`.gcda` files beside the primary ones, such as
+`out/app/.coverage/calc.part1.c` and `calc.part1.gcda`. Every part belongs to
+the module's coverage inventory, so counter resets and reports include all of
+them.
+
 `--incremental` works in coverage mode. Each compiled object carries its partial
 coverage file list; linking reconstructs the complete executable inventory from
 new and reused objects. Selected objects use O0/no LTO and atomic gcov-compatible
@@ -129,7 +137,10 @@ make titan-native-coverage PREFIX=/tmp/titan-sdk CC=gcc-14 \
 
 Use `titan-native-coverage-build` to compile separately and
 `titan-native-coverage-run` to run the built executable and report without
-recompiling. `TITAN_FILTER` selects tests as usual. Rich reports are optional:
+recompiling. `TITAN_FILTER` selects tests as usual. Unlike `make
+titan-stdlib-test`, the coverage run always uses one test process, because
+every execution resets and then dumps the same counter files. Rich reports are
+optional:
 
 ```sh
 make titan-native-coverage PREFIX=/tmp/titan-sdk CC=gcc-14 \

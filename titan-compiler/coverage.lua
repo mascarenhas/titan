@@ -175,17 +175,24 @@ function coverage.compile_flags(build, name)
     return flags
 end
 
-function coverage.partial(filename, source_files, anchors, backend)
-    local generated, sources, mapped = absolute(filename), {}, {}
+function coverage.partial(parts, source_files, backend)
+    local sources = {}
     for _, source in ipairs(source_files) do sources[#sources + 1] = absolute(source) end
-    for source, lines in pairs(anchors or {}) do
-        local numbers = {}
-        for line in pairs(lines) do numbers[#numbers + 1] = line end
-        table.sort(numbers)
-        mapped[absolute(source)] = numbers
+    local files, anchors = {}, {}
+    for _, part in ipairs(parts) do
+        local generated = absolute(part.filename)
+        files[#files + 1] = generated
+        local mapped = {}
+        for source, lines in pairs(part.anchors or {}) do
+            local numbers = {}
+            for line in pairs(lines) do numbers[#numbers + 1] = line end
+            table.sort(numbers)
+            mapped[absolute(source)] = numbers
+        end
+        anchors[generated] = mapped
     end
-    return { enabled = true, backend = backend, files = { generated },
-        sources = sources, anchors = { [generated] = mapped } }
+    return { enabled = true, backend = backend, files = files,
+        sources = sources, anchors = anchors }
 end
 
 function coverage.inventory(build, imported)

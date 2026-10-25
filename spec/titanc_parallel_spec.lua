@@ -45,6 +45,14 @@ local function run_titanc(arguments, environment_jobs)
 
     function driver.deduplicate_module_names(names) return names end
     function driver.configure_foreign_c() end
+    function driver.default_c_parts() return 4 end
+    function driver.record_module_symbols(_, _, symbols)
+        assert.same({}, symbols)
+    end
+    function driver.plan_compile_requests(requests)
+        observed.preflight_requests = requests
+        return { outputs = {}, inputs = {} }
+    end
     function driver.new_resolver_context()
         resolver = {
             source_names = {},
@@ -70,7 +78,9 @@ local function run_titanc(arguments, environment_jobs)
         return name:gsub("[.]", "_")
     end
     function driver.write_foreign_header_plans() return true end
-    function driver.compile_modules(requests, jobs, verbose)
+    function driver.compile_modules(requests, jobs, verbose, plans)
+        assert.is_table(plans)
+        assert.equal(requests, observed.preflight_requests)
         observed.requests = requests
         observed.jobs = jobs
         observed.verbose = verbose
@@ -80,6 +90,7 @@ local function run_titanc(arguments, environment_jobs)
                 results[index] = {
                     ok = true,
                     libname = "pkg/two.o",
+                    objects = { "pkg/two.o" },
                 }
             else
                 results[index] = {
@@ -195,9 +206,9 @@ describe("titanc generated-C parallelism dispatch", function()
         assert.equal(2, observed.jobs)
     end)
 
-    it("defaults to one generated-C compilation", function()
+    it("defaults to four generated-C compilations", function()
         local _, observed = run_titanc(ordinary_arguments(nil), nil)
-        assert.equal(1, observed.jobs)
+        assert.equal(4, observed.jobs)
     end)
 
     it("uses TITAN_JOBS and preserves sorted batch diagnostics", function()

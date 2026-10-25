@@ -31,14 +31,29 @@ if [[ -z ${BUSTED:-} ]]; then
         BUSTED=./lua_modules/bin/busted
     fi
 fi
+if [[ -n ${LUA:-} ]]; then
+    selector_lua=$LUA
+elif [[ -n ${PREFIX:-} && -x $PREFIX/bin/lua ]]; then
+    selector_lua=$PREFIX/bin/lua
+elif [[ -x .lua/bin/lua ]]; then
+    selector_lua=.lua/bin/lua
+elif [[ -x ./lua_modules/bin/lua ]]; then
+    selector_lua=./lua_modules/bin/lua
+else
+    selector_lua=lua
+fi
+
 group=${1:-}
+# An optional phase selects all, only ordinary, or only exclusive files of a
+# covered shard; ci_parallel_compiler_tests.sh runs exclusive files alone.
+phase=${2:-all}
 requested_shard=
 requested_domain=compiler
 case "$group" in
     compiler)
         ;;
     compiler-uncovered)
-        # The complete local/macOS compiler command retains both domains.
+        # The complete macOS compiler command retains both domains.
         requested_domain=all
         ;;
     stdlib-compiler | stdlib-compiler-uncovered)
@@ -47,230 +62,58 @@ case "$group" in
     compiler-shard-[1-4])
         requested_shard=${group##*-}
         ;;
-    compiler-uncovered-shard-[1-4])
-        requested_shard=${group##*-}
-        ;;
     *)
         usage="usage: $0 {compiler|compiler-uncovered|compiler-shard-{1..4}|"
-        usage+="compiler-uncovered-shard-{1..4}|stdlib-compiler|"
-        usage+="stdlib-compiler-uncovered}"
+        usage+="stdlib-compiler|stdlib-compiler-uncovered} [all|ordinary|exclusive]"
         echo "$usage" >&2
         exit 2
         ;;
 esac
-
-partition_file=spec/support/ci_compiler_test_groups.txt
-stdlib_partition_file=spec/support/ci_stdlib_compiler_test_files.txt
-stress_partition_file=spec/support/ci_compiler_stress_files.txt
-partition_files=()
-partition_shards=()
-partition_seen=()
-while read -r shard test_file observed_seconds extra; do
-    if [[ -z ${shard:-} || $shard == \#* ]]; then continue; fi
-    if [[ ! $shard =~ ^[1-4]$ || -z ${test_file:-} ||
-          ! ${observed_seconds:-} =~ ^[0-9]+([.][0-9]+)?$ ||
-          -n ${extra:-} ]]; then
-        echo "invalid compiler partition row: $shard ${test_file:-} " \
-            "${observed_seconds:-} ${extra:-}" >&2
+case "$phase" in
+    all | ordinary | exclusive) ;;
+    *)
+        echo "invalid compiler selection phase: $phase" >&2
         exit 2
-    fi
-    for existing in "${partition_files[@]}"; do
-        if [[ $existing == "$test_file" ]]; then
-            echo "duplicate compiler partition entry: $test_file" >&2
-            exit 2
-        fi
-    done
-    partition_files+=("$test_file")
-    partition_shards+=("$shard")
-done < "$partition_file"
+        ;;
+esac
 
-stdlib_files=()
-stdlib_seen=()
-while read -r test_file extra; do
-    if [[ -z ${test_file:-} || $test_file == \#* ]]; then continue; fi
-    if [[ $test_file != spec/*_spec.lua || -n ${extra:-} ]]; then
-        echo "invalid stdlib compiler row: $test_file ${extra:-}" >&2
-        exit 2
-    fi
-    for existing in "${stdlib_files[@]}"; do
-        if [[ $existing == "$test_file" ]]; then
-            echo "duplicate stdlib compiler entry: $test_file" >&2
-            exit 2
-        fi
-    done
-    for existing in "${partition_files[@]}"; do
-        if [[ $existing == "$test_file" ]]; then
-            echo "compiler spec appears in both partitions: $test_file" >&2
-            exit 2
-        fi
-    done
-    stdlib_files+=("$test_file")
-done < "$stdlib_partition_file"
-
-stress_files=()
-stress_seen=()
-while read -r test_file extra; do
-    if [[ -z ${test_file:-} || $test_file == \#* ]]; then continue; fi
-    if [[ $test_file != spec/*_spec.lua || -n ${extra:-} ]]; then
-        echo "invalid compiler stress row: $test_file ${extra:-}" >&2
-        exit 2
-    fi
-    for existing in "${stress_files[@]}"; do
-        if [[ $existing == "$test_file" ]]; then
-            echo "duplicate compiler stress entry: $test_file" >&2
-            exit 2
-        fi
-    done
-    stress_files+=("$test_file")
-done < "$stress_partition_file"
-
+# The Lua LPT helper validates ci_compiler_test_groups.txt,
+# ci_stdlib_compiler_test_files.txt, ci_compiler_stress_files.txt, and the
+# seven retained runtime/packaging specs:
+#   spec/asan_generated_c_context_spec.lua
+#   spec/dense_array_runtime_spec.lua
+#   spec/libuv_build_spec.lua
+#   spec/lpeglabel_build_spec.lua
+#   spec/minicoro_spec.lua
+#   spec/rockspec_spec.lua
+#   spec/titan_install_spec.lua
 compiler_tests=()
 compiler_unit_tests=()
 compiler_isolated_coverage_tests=()
 compiler_stress_tests=()
 compiler_unit_stress_tests=()
 compiler_isolated_stress_tests=()
-partition_status=0
-while IFS= read -r test_file; do
-    category=
-    case "$test_file" in
-        spec/asan_generated_c_context_spec.lua | \
-        spec/dense_array_runtime_spec.lua | \
-        spec/libuv_build_spec.lua | \
-        spec/lpeglabel_build_spec.lua | \
-        spec/minicoro_spec.lua | \
-        spec/rockspec_spec.lua | \
-        spec/titan_install_spec.lua)
-            # The stdlib/coverage and complete macOS lanes run these
-            # runtime and packaging specs without LuaCov.
-            ;;
-        spec/driver_spec.lua | \
-        spec/foreigntypes_spec.lua | \
-        spec/stdlib_compiler_spec.lua | \
-        spec/types_spec.lua)
-            # Run these tiny module-level tests in a fresh Busted process so
-            # their direct unit coverage is independent of Busted's file
-            # insulation and compiler modules loaded by earlier specs.
-            category=unit
-            ;;
-        spec/compiler_environment_spec.lua | \
-        spec/cprobe_cache_spec.lua | \
-        spec/cprobe_spec.lua | \
-        spec/parser_spec.lua | \
-        spec/sha256_spec.lua | \
-        spec/union_interface_spec.lua | \
-        spec/checker/static_compiled_modules_spec.lua | \
-        spec/coder/multi_module_libraries_spec.lua | \
-        spec/coder/native_coverage_spec.lua | \
-        spec/coder/parallel_compilation_spec.lua | \
-        spec/coder/static_compiled_modules_spec.lua | \
-        spec/coder/static_dynamic_facade_spec.lua | \
-        spec/coder/static_protocol_mismatch_spec.lua | \
-        spec/staticmetadata_spec.lua | \
-        spec/titanc_parallel_spec.lua)
-            # LuaCov keeps only the last loaded compiler prototype's line table
-            # inside one process. Exercise these direct prototypes in isolated
-            # Busted processes after the complete main compiler set.
-            category=isolated
-            ;;
+
+selection_output=
+if ! selection_output=$("$selector_lua" -E spec/support/compiler_test_groups.lua ci-select "$group" "$phase"); then
+    exit 2
+fi
+
+while IFS=$'\t' read -r category test_file; do
+    if [[ -z ${category:-} || -z ${test_file:-} ]]; then continue; fi
+    case "$category" in
+        main) compiler_tests+=("$test_file") ;;
+        unit) compiler_unit_tests+=("$test_file") ;;
+        isolated) compiler_isolated_coverage_tests+=("$test_file") ;;
+        stress_main) compiler_stress_tests+=("$test_file") ;;
+        stress_unit) compiler_unit_stress_tests+=("$test_file") ;;
+        stress_isolated) compiler_isolated_stress_tests+=("$test_file") ;;
         *)
-            category=main
+            echo "unknown compiler test category: $category $test_file" >&2
+            exit 2
             ;;
     esac
-
-    stress_index=
-    for index in "${!stress_files[@]}"; do
-        if [[ ${stress_files[$index]} == "$test_file" ]]; then
-            stress_index=$index
-            stress_seen[$index]=true
-            break
-        fi
-    done
-    if [[ -n $category ]]; then
-        if grep -q '#stress' "$test_file"; then
-            if [[ -z $stress_index ]]; then
-                echo "tagged compiler stress spec is missing from " \
-                    "$stress_partition_file: $test_file" >&2
-                partition_status=1
-            fi
-        elif [[ -n $stress_index ]]; then
-            echo "listed compiler stress spec has no #stress tag: " \
-                "$test_file" >&2
-            partition_status=1
-        fi
-    fi
-
-    if [[ -n $category ]]; then
-        domain=compiler
-        for index in "${!stdlib_files[@]}"; do
-            if [[ ${stdlib_files[$index]} == "$test_file" ]]; then
-                domain=stdlib
-                stdlib_seen[$index]=true
-                break
-            fi
-        done
-        shard=
-        partition_index=
-        if [[ $domain == compiler ]]; then
-            for index in "${!partition_files[@]}"; do
-                if [[ ${partition_files[$index]} == "$test_file" ]]; then
-                    shard=${partition_shards[$index]}
-                    partition_index=$index
-                    break
-                fi
-            done
-            if [[ -z $shard ]]; then
-                echo "compiler spec is missing from $partition_file: $test_file" >&2
-                partition_status=1
-                continue
-            fi
-            partition_seen[$partition_index]=true
-        fi
-        if [[ ( $requested_domain == all || $domain == "$requested_domain" ) &&
-              ( -z $requested_shard || $requested_shard == "$shard" ) ]]; then
-            case "$category" in
-                main) compiler_tests+=("$test_file") ;;
-                unit) compiler_unit_tests+=("$test_file") ;;
-                isolated) compiler_isolated_coverage_tests+=("$test_file") ;;
-            esac
-            if [[ -n $stress_index ]]; then
-                case "$category" in
-                    main) compiler_stress_tests+=("$test_file") ;;
-                    unit) compiler_unit_stress_tests+=("$test_file") ;;
-                    isolated)
-                        compiler_isolated_stress_tests+=("$test_file")
-                        ;;
-                esac
-            fi
-        fi
-    elif [[ -n $stress_index ]]; then
-        echo "stress spec is outside the compiler/language group: " \
-            "$test_file" >&2
-        partition_status=1
-    fi
-done < <(find spec -type f -name '*_spec.lua' -print | LC_ALL=C sort)
-
-for index in "${!partition_files[@]}"; do
-    if [[ -z ${partition_seen[$index]-} ]]; then
-        echo "stale or excluded compiler partition entry: " \
-            "${partition_files[$index]}" >&2
-        partition_status=1
-    fi
-done
-for index in "${!stdlib_files[@]}"; do
-    if [[ -z ${stdlib_seen[$index]-} ]]; then
-        echo "stale or excluded stdlib compiler entry: " \
-            "${stdlib_files[$index]}" >&2
-        partition_status=1
-    fi
-done
-for index in "${!stress_files[@]}"; do
-    if [[ -z ${stress_seen[$index]-} ]]; then
-        echo "stale compiler stress entry: ${stress_files[$index]}" >&2
-        partition_status=1
-    fi
-done
-if (( partition_status != 0 )); then exit 2; fi
+done <<< "$selection_output"
 
 # These specs deliberately reuse source/header pathnames across independent
 # compiler worlds, so production exact-text success markers must not cross
@@ -370,15 +213,16 @@ case "$group" in
             exit 1
         fi
         ;;
-    compiler-uncovered | compiler-uncovered-shard-[1-4] | stdlib-compiler-uncovered)
+    compiler-uncovered | stdlib-compiler-uncovered)
         compiler_count=$((${#compiler_tests[@]} +
             ${#compiler_unit_tests[@]} +
             ${#compiler_isolated_coverage_tests[@]}))
-        label=${requested_shard:+ shard $requested_shard}
-        echo "Running $compiler_count $domain_label spec files${label}" \
-            "without LuaCov"
-        "$BUSTED" -o gtest -v \
-            "${compiler_tests[@]}" "${compiler_unit_tests[@]}" \
-            "${compiler_isolated_coverage_tests[@]}"
+        echo "Running $compiler_count $domain_label spec files without LuaCov"
+        # An empty selection must not fall back to Busted's default spec root.
+        if (( compiler_count > 0 )); then
+            "$BUSTED" -o gtest -v \
+                "${compiler_tests[@]}" "${compiler_unit_tests[@]}" \
+                "${compiler_isolated_coverage_tests[@]}"
+        fi
         ;;
 esac

@@ -160,7 +160,7 @@ supply no generated C environment. Each module remains an ordinary separate C
 translation unit.
 
 A source dependency defining foreign functions also contributes `.titan.h` for
-its prototypes and eligible inline bodies. Generated C includes its own
+its prototypes and local direct-call helpers. Generated C includes its own
 `.ffi.h` before any `.titan.h`. Resolver-owned checking trees contain the actual
 generated headers with deterministic logical paths; there are no forwarding
 wrappers or supplemental origin lists collected from used type graphs.

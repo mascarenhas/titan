@@ -173,9 +173,9 @@ function M.with_extra_cflags(flags, fn)
 end
 
 function M.compile(modname, ast)
-    local ok, err, libname = driver.compile(modname, ast, nil, {}, verbose())
+    local ok, err, _, _, objects = driver.compile(modname, ast, nil, {}, verbose())
     if not ok then return ok, err end
-    return driver.compile_library(modname, { libname }, nil, verbose())
+    return driver.compile_library(modname, objects, nil, verbose())
 end
 
 local function compile_program(modname, objects)
@@ -233,9 +233,9 @@ local function compile_program(modname, objects)
 end
 
 function M.compile_app(modname, ast)
-    local ok, err, libname = driver.compile(modname, ast, nil, {}, verbose())
+    local ok, err, _, _, objects = driver.compile(modname, ast, nil, {}, verbose())
     if not ok then return ok, err end
-    return compile_program(modname, { libname })
+    return compile_program(modname, objects)
 end
 
 -- Run `code` under the stock Lua interpreter with `modname` loaded (`-l`),
@@ -412,8 +412,10 @@ function M.generate_modules(modules, main, forapp, options)
         local ofiles = {}
         for name, mod in pairs(imported) do
             local ok, e = driver.compile_module(name, mod, deps, verbose())
-            table.insert(ofiles, name .. ".o")
             if not ok then return nil, e end
+            for _, object in ipairs(driver.module_compiled_objects(mod)) do
+                table.insert(ofiles, object)
+            end
         end
         if forapp then
             local ok, e = compile_program(main, ofiles)
@@ -431,10 +433,9 @@ end
 
 -- ===== `.so`-only import path =====
 
--- Compile one module to a `.so` straight from its AST (its `.titan` never
--- touches disk, so the default loader must resolve any imports via their own
--- `.so`). `names` is the set of sibling module names in the chain, used to
--- assert none of them was statically linked. Returns (true) or (nil, message).
+-- Compile one in-memory module to a `.so` containing only that root module.
+-- Every dependency must resolve through its own shared provider; `names`
+-- identifies siblings in the chain for the existing dynamic-selection check.
 local function build_one_so(name, src, names)
     reset(true)
     local static_deps = {}
@@ -446,27 +447,36 @@ local function build_one_so(name, src, names)
     local ast = M.parse(src, name .. ".titan")
     if not ast then return nil, "parse error in " .. name end
     local loader = driver.defaultloader(static_deps)
-    local _, errs = driver.with_loader(loader, function(loader)
-        return checker.check(
+    return driver.with_loader(loader, function(loader)
+        local _, errs = checker.check(
             name, ast, src, name .. ".titan", loader)
-    end)
-    if #errs ~= 0 then return nil, name .. ": " .. table.concat(errs, "\n") end
-    for dep in pairs(static_deps) do
-        if names[dep] and dep ~= name then
-            return nil, name .. " linked '" .. dep .. "' statically, not via .so"
+        if #errs ~= 0 then return nil, name .. ": " .. table.concat(errs, "\n") end
+        local dependencies = {}
+        for dep in pairs(static_deps) do dependencies[#dependencies + 1] = dep end
+        table.sort(dependencies)
+        for _, dep in ipairs(dependencies) do
+            if names[dep] and dep ~= name then
+                return nil, name .. " linked '" .. dep .. "' statically, not via .so"
+            end
         end
-    end
-    local ok, err, lib = driver.compile(name, ast, nil, static_deps, verbose())
-    if not ok then return nil, err end
-    ok, err = driver.compile_library(name, { lib }, nil, verbose())
-    if not ok then return nil, err end
-    return true
+        if #dependencies > 0 then
+            return nil, name .. ": dependency '" .. dependencies[1] ..
+                "' resolved from source or a static archive; build_so_chain and " ..
+                "check_against_so link only the root module; list tests importing " ..
+                "standard-library modules in spec/support/ci_stdlib_compiler_test_files.txt " ..
+                "with a matching stdlib row in spec/support/ci_compiler_test_groups.txt"
+        end
+        local ok, err, _, _, objects =
+            driver.compile(name, ast, nil, static_deps, verbose())
+        if not ok then return nil, err end
+        return driver.compile_library(name, objects, nil, verbose())
+    end)
 end
 
 -- Build a chain of `.so`-only modules. `mods` is an array of {name=, src=} in
 -- dependency order (each may import earlier ones); the last is the module under
--- test. Returns (true) or (nil, message); asserts every dependency resolved
--- dynamically (from its `.so`), never statically linked.
+-- test. Returns (true) or (nil, message); requires every dependency to resolve
+-- dynamically through its own shared provider.
 function M.build_so_chain(mods, in_process)
     if platform.windows and not in_process then
         -- Windows retains DLL metadata mappings for the inspecting process.

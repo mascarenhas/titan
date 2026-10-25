@@ -132,6 +132,7 @@ local function annotated()
 end
 local function line_count(report, source, number)
     local active = false
+    local total
     for text in report:gmatch("[^\r\n]+") do
         local name = text:match("^%s*[^:]+:%s*0:Source:(.*)$")
         if name then
@@ -144,9 +145,10 @@ local function line_count(report, source, number)
         end
         local count, line = text:match("^%s*([^:]+):%s*(%d+):")
         if active and tonumber(line) == number then
-            return tonumber(count:match("%d+")) or 0
+            total = (total or 0) + (tonumber(count:match("%d+")) or 0)
         end
     end
+    return total
 end
 
 describe("native compile-and-run coverage", function()
@@ -225,6 +227,36 @@ function test_mixed(_context: test.Context) test.assert(true) end
         assert.truthy(ok, output)
         assert.equal(0, line_count(annotated(), workspace .. "/calc.titan", 8))
         assert.is_true((line_count(annotated(), workspace .. "/calc.titan", 2) or 0) > 0)
+    end)
+
+    it("reports and resets the complete split-module denominator across all parts", function()
+        available()
+        local frontend = workspace .. "/frontend.lua"
+        write(frontend, "package.path = " .. string.format("%q", workspace .. "/tooling/?.lua;")
+            .. " .. package.path\nrequire('titan-compiler.coder').DEFAULT_SPLIT_THRESHOLD = 1\n"
+            .. read(frontend))
+        local ok, output = compile(coverage_options(
+            "--coverage-module", "calc", "--c-parts", "4"))
+        assert.truthy(ok, output)
+        for part = 0, 3 do
+            local stem = workspace .. "/.coverage/calc"
+                .. (part == 0 and "" or ".part" .. part)
+            assert.truthy(lfs.attributes(stem .. ".gcno"), stem)
+        end
+        for _, run_case in ipairs({ { "test_other", 8, 2 }, { "test_twice", 2, 8 } }) do
+            ok, output = execute(run_case[1])
+            assert.truthy(ok, output)
+            assert.matches("Titan executable lines: 1/3", output, 1, true)
+            local report = annotated()
+            assert.is_true((line_count(report, workspace .. "/calc.titan", run_case[2]) or 0) > 0, report)
+            assert.equal(0, line_count(report, workspace .. "/calc.titan", run_case[3]))
+            assert.equal(0, line_count(report, workspace .. "/calc.titan", 5))
+            for part = 0, 3 do
+                local stem = workspace .. "/.coverage/calc"
+                    .. (part == 0 and "" or ".part" .. part)
+                assert.truthy(lfs.attributes(stem .. ".gcda"), stem)
+            end
+        end
     end)
 
     it("preserves taken and bypassed foreign decision lines after pretty-printing", function()

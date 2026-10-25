@@ -27,12 +27,12 @@ typed & elaborated ASTs        (decorated with _type/_decl… and checker-owned
    │                            companions are prepared before any object)
    │  coder.generate           (coder.lua facade + coder/* template slices)
    ▼
-one C translation unit per logical module
+one or more C translation units per logical module (plus `<stem>.priv.h` when split)
    │  clang-format             (opt-in --pretty-print; fixed explicit style)
    │  #line normalization      (ordinary mode; coverage uses final lexical
    │                            marker conversion instead)
-   │  driver.compile           (driver.lua — writes .c at the canonical output
-   │                            path, then invokes cc)
+   │  driver.compile           (driver.lua — writes part .c/.priv.h/.parts files
+   │                            and invokes cc per part)
    ▼
 object files ──► one common-prefix provider.so/provider.a + generated Lua shims
              └─► driver.compile_program → executable (when a main() exists)
@@ -64,8 +64,8 @@ Two facts shape everything downstream of the checker:
 
 | Chapter | Covers |
 | --- | --- |
-| [Repository development workflow](repository-workflow.md) | Read before running repository builds or tests; covers isolated prefixes, profile and environment hygiene, the command table, checkout-Lua Busted runs, output routing, and fixture/shared-output ownership. |
-| [Continuous integration and platform validation](continuous-integration.md) | Read before changing CI; covers Linux lanes and concurrency, compiler producer/consumer shards, stdlib coverage and packaging, caches, sanitizer diagnostics, and the macOS pre-merge gate. |
+| [Repository development workflow](repository-workflow.md) | Read before running repository builds or tests; covers isolated prefixes, profile and environment hygiene, the command table with its job-pool and test-parallelism settings, checkout-Lua Busted runs, output routing, and fixture/shared-output ownership. |
+| [Continuous integration and platform validation](continuous-integration.md) | Read before changing CI; covers Linux lanes and explicit concurrency caps, the four-way covered compiler shard plan and its exclusive phase, stdlib coverage and packaging, caches, sanitizer diagnostics, and the macOS pre-merge gate. |
 | [Standard-library implementation rules](standard-library-maintenance.md) | Read before changing any stdlib module; covers declaration ownership, cached invariants, counted FFI storage, narrow Lua/C boundaries, callback/result protocol shape, and test placement. |
 | [Documentation comments](documentation-comments.md) | Read before changing doc comments or hover; covers LDoc attachment rules, the detached document contract, declaration binding, `Documented` serialization, and hover/completion export. |
 | [AST and typedecl](ast-typedecl.md) | Read before adding or changing AST nodes or types; covers `typedecl` constructors, `_tag` dispatch, locations, the node inventory, pass-owned decorations, add-a-node checklists, and spec AST comparison. |
@@ -74,14 +74,14 @@ Two facts shape everything downstream of the checker:
 | [Const-value implementation](const-values.md) | Read before changing const; covers const bindings, fields and Arrays: descriptors, initializer-only authority, write rejection, Interface fields, linear-use freeze proofs, and the runtime Array pair. |
 | [Explicit source-import collaboration interfaces](source-import-visibility.md) | Read before changing `.titan` imports; covers the marker and logical identity, loader views, checker staging, inherited C headers, private module state, and the binary boundary. |
 | [Type relations and boundary plans](type-relations-and-boundaries.md) | Read before changing assignability, casts, or comparisons; covers consistency versus coercion, strict guards, dynamic coercion, C scalar conversions, written casts, the boundary matrix, and checker-owned plans. |
-| [Generics](generics.md) | Read before changing generics; covers staging and rigid checking, local inference, declared-graph freezing, constraint erasure, boundary casts, FFI admission, the erased-core coder boundary, metadata, and async owners. |
+| [Generics](generics.md) | Read before changing generics; covers staging and rigid checking, local inference, declared-graph freezing, memoized erased-graph validation, constraint erasure, boundary casts, FFI admission, the erased-core coder boundary, metadata, and async owners. |
 | [Closure adjustment wrappers](closure-adjustment-wrappers.md) | Read before changing non-exact callable adjustment; covers `nil_fill_result`, frozen adapter plans, wrapper eligibility and layout, native adapters, strict relays, and rooting. |
 | [Interfaces](interfaces.md) | Read before changing Interfaces; covers structural satisfaction, frozen conversion and adapter plans, wrapper layout, native entries, the four dispatch paths, metatable identity, downcasts, and separate compilation. |
 | [Named arguments](named-arguments.md) | Read before changing named calls; covers parser `ArgsNamed*` nodes, declaration `paramnames`, C prototype names, checker normalization, evaluation order, and record missing-field synthesis. |
 | [Record constructors](record-constructors.md) | Read before changing record construction; covers call desugaring and `new` overrides, raw construction authority, semantic metadata across providers, Lua namespace calls, and standard-library use. |
 | [Type aliases](type-aliases.md) | Read before changing type aliases; covers lazy resolution in the type namespace, foreign aliases, serialized `type_members`, and nominal member lookup across providers. |
 | [Union implementation](unions.md) | Read before changing unions; covers parser lowering, descriptors, visibility, payload eligibility, `case` checking and non-fallthrough, run-time layout, generated dispatch, Lua exposure, and serialized schemas. |
-| [Code generator: overview](codegen-overview.md) | Read before changing generated-C structure; covers templates, names, entry roles and the native calling convention, closures, the module protocol and ABI, pinned-Lua upgrades, dependency wiring, and user-value slots. |
+| [Code generator: overview](codegen-overview.md) | Read before changing generated-C structure; covers templates, names, translation-unit parts and module-private storage, entry roles and the native calling convention, closures, the module protocol and ABI, pinned-Lua upgrades, dependency wiring, and user-value slots. |
 | [Values and the GC](values-and-gc.md) | Read before touching GC-visible generated code; covers `TValue` and stack background, the C type of each Titan value, record/union/Interface/module userdata, the GC invariants, and call-result rooting. |
 | [Native nominal storage](nominal-storage.md) | Read before changing record/union layout; covers traced and native regions, fixed objects and borrowed projections, fresh constructor storage, exact native options, ABI, and native-owner callback access. |
 | [Dense Arrays](dense-arrays.md) | Read before changing Array representation or lowering; covers the backing/proxy pair, `lenhint` length, writers, reads and writes, const copy/freeze, and barriers. |
@@ -121,17 +121,17 @@ Two facts shape everything downstream of the checker:
 | [FFI internals](ffi-internals.md) | Read before changing `foreign import`; covers header preprocessing and parsing, TypeList extraction, `Type.C*`, `titan/ffi.h` bridges, checker rules, C calls, casts, arrays and fields, owned objects, and platform failure modes. |
 | [C FFI declarations and expressions](c-ffi-expressions.md) | Read before changing target-validated C checks; covers tag identity, declarators, the arithmetic profile, probe caching, object-pointer conversion, automatic/FAM allocation, aggregate setjmp spills, operators, macros, and enum carriers. |
 | [Trusted Lua C API boundary](ffi-lua-api-followup.md) | Read before using the Lua C API from Titan; covers why it is not a public FFI feature, the trusted stdlib discipline, and the per-operation stack/root ledger. |
-| [Native test runner](test-runner.md) | Read before changing `titanc --test` or `titan.test`; covers discovery, the synthetic runner, execution state, harness flags, regression placement, the native aggregate, Busted partitions, portability, and packaging. |
-| [Native source coverage](native-coverage.md) | Read before changing native coverage; covers markers and `#line` conversion, `.coverage` object separation, backend checks and flags, counter reset/dump, gcov/gcovr reporting, metric scope, and Make targets. |
+| [Native test runner](test-runner.md) | Read before changing `titanc --test` or `titan.test`; covers discovery, the synthetic runner, execution state, harness flags, regression placement, the native aggregate and its parallel owner groups, per-file Busted partitions, portability, and packaging. |
+| [Native source coverage](native-coverage.md) | Read before changing native coverage; covers markers and `#line` conversion, `.coverage` object separation, backend checks and flags, counter reset/dump, gcov/gcovr reporting, metric scope, and serial Make targets. |
 | [Completion analysis](completion.md) | Read before changing completion; covers coordinate-preserving source transforms, lexical and member candidates, detached saved descriptors, and private preparation. |
-| [Driver and toolchain](driver.md) | Read before changing module lookup, loaders, the language-server compiler API, C compilation and linking, `titanc`, or `titan-runtime/`; includes the flag and environment references. |
+| [Driver and toolchain](driver.md) | Read before changing module lookup, loaders, the language-server compiler API and cache adapters, C compilation and linking, the parallel job scheduler and GNU Make jobserver client, `titanc`, or `titan-runtime/`; includes the flag and environment references. |
 | [Output-directory routing](output-directory.md) | Read before changing `-o`/`--output`; covers source-relative artifact locations, `native_output`/`program_output` mapping, headers and temporary files, coverage paths, and validation. |
-| [Experimental Windows build](windows-build.md) | Read before changing Windows support; covers the controlled Lua DLL and SDKs, native build parallelism, UTF-8 relocation and loading, the loader boundary, launchers, DLL publication, NTFS tests, coverage, and experimental limits. |
-| [Build and installation responsibilities](build-script-audit.md) | Read before changing Make or LuaRocks; covers Lua and native dependency preparation, the stdlib object graph, install and publish targets, the private bootstrap, the LuaRocks install pass, and checks. |
-| [Object-backed source modules](incremental-compilation.md) | Read before changing `--incremental` or `-c`; covers `load_source_object` reuse, the trusted `.titan.source` record, LTO objects, headers without an AST, and Make-owned invalidation. |
+| [Experimental Windows build](windows-build.md) | Read before changing Windows support; covers the controlled Lua DLL and SDKs, native build parallelism, UTF-8 relocation and loading, the loader boundary, launchers, DLL publication, NTFS tests and their keep-going ownership, coverage, and experimental limits. |
+| [Build and installation responsibilities](build-script-audit.md) | Read before changing Make or LuaRocks; covers Lua and native dependency preparation, the stdlib object graph, its `.parts` completeness check and split-policy stamps, the Make job pool and guarded `titanc` recipes, install and publish targets, the private bootstrap, the LuaRocks install pass, and checks. |
+| [Object-backed source modules](incremental-compilation.md) | Read before changing `--incremental` or `-c`; covers `load_source_object` reuse and split-part checks, the trusted `.titan.source` record, LTO objects, headers without an AST, and Make-owned invalidation. |
 | [Folder modules](folder-modules.md) | Read before changing folder modules; covers resolver order and blocked contributors, single-AST assembly, one checker and code-generation pass, output and program paths, and stdlib ensembles. |
 | [Multi-module libraries](multi-module-libraries.md) | Read before changing provider bundles; covers provider prefix selection, candidate search and claims, canonical runtime imports, shims and validated publication, and the canonical stdlib root list and image. |
-| [Static compiled modules](static-compiled-modules.md) | Read before changing archive providers; covers the metadata section and payload, bounded container readers, target selection, import paths, native composition, three-way validation, and publication. |
+| [Static compiled modules](static-compiled-modules.md) | Read before changing archive providers; covers the metadata section and payload, bounded container readers, target selection, import paths, native composition, three-way validation, the job-budgeted provider link pipeline, and publication. |
 | [Selective binary dependency verification](binary-compatibility.md) | Read before changing provider compatibility; covers the compatibility projection, consumer usage, constant and closed-union proofs, generated exports and runtime verification, and provider-owned slots. |
 | [Archived issue benchmarks](benchmark-archives.md) | Index of issue benchmark archives published as GitHub pre-release ZIPs, permalinks to retired evidence chapters, and archive verification. |
 
@@ -170,11 +170,14 @@ Each row links the chapter section that documents the limitation.
 | [String library](string-library.md#match-records-and-result-projection) | The convenience `matches` closure deliberately lets a nil first capture terminate a generic `for`. |
 | [LPegLabel embedding](lpeglabel-embedding.md#construction-accounting-and-string-labels) | `behind` checks only the projected tree size; the engine alone enforces the capture-free, fixed-length, 255-byte look-behind rule. |
 | [Driver and toolchain](driver.md#module-names-and-the-search-paths) | Header-cache reuse misses same-file edits that keep the observed mtime; LuaFileSystem exposes no useful Windows file identities; `dlerror` reports only the last load attempt; compiler and flag strings use a small shell-word parser. |
-| [Object-backed source modules](incremental-compilation.md#build-and-validation-ownership) | Reuse checks only source mtimes and metadata/ABI compatibility; Make owns invalidation after compiler, flag, or imported-object changes. |
+| [Driver and toolchain](driver.md#gnu-make-jobserver-participation) | A `titanc` recipe without `+` under a pipe jobserver, or any recipe under macOS's stock GNU Make 3.81, compiles with one job; Windows ignores parent jobservers; a SIGKILLed `titanc` cannot return the tokens it borrowed. |
+| [Object-backed source modules](incremental-compilation.md#build-and-validation-ownership) | Reuse checks only source mtimes, metadata/ABI compatibility, split-part integrity, and the recorded split policy; Make owns invalidation after compiler, flag, or imported-object changes. |
 | [Multi-module libraries](multi-module-libraries.md#validated-publication-and-generated-shims) | Generated Lua shims select providers through Lua's `package.cpath`, not the Titan search path. |
 | [Static compiled modules](static-compiled-modules.md#publication-and-installation) | Publication is recoverable within the process, not crash- or power-loss-atomic. |
 | [Binary compatibility](binary-compatibility.md#generated-exports-and-runtime-verification) | Verification is a protocol between generated providers, not a sandbox for untrusted DSOs. |
 | [Windows build](windows-build.md#windows-dll-publication) | Stale-shim retirement is not implemented on Windows. |
+| [Build and installation responsibilities](build-script-audit.md#make-job-pool-and-titanc-recipes) | GNU Make before 4.2 (macOS's stock 3.81) cannot show `make -j1`, so without an explicit `TITAN_JOBS` its builds stay serial with one job per `titanc`; set `TITAN_JOBS` or put GNU Make 4.2 or later first on `PATH` for the four-job pool. |
+| [Windows build](windows-build.md#test-ownership-and-keep-going) | The Windows native aggregate runs as one serial process; only Unix splits it into parallel owner groups. |
 | [Native source coverage](native-coverage.md#direct-execution-and-reports) | Metrics cover Titan executable lines only, with no denominator exclusions; timing-sensitive paths can gain or lose hits between runs. |
 | [HTTP library](http-library.md#bounded-opening-and-protocol-takeover) | Ordinary client response parsers have no header-byte limit; there is no pipelining API, and keep-alive serves one exchange at a time. |
 | [WebSocket library](websocket-library.md#protocol-state-and-fairness) | No buffered-work fairness bound or starvation guarantee; fairness observations are Linux-only, and conformance runs only the Linux amd64 image. |

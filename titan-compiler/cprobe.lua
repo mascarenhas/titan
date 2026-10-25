@@ -1663,8 +1663,14 @@ end
 -- All memory and disk reuse answers the same question: has this exact raw C
 -- source already completed? Environment changes deliberately do not invalidate
 -- either outcome. Removing the cache is the programmer's refresh mechanism.
+-- An adapter digest yields the same hexadecimal key as the Lua fallback.
+function Service:_digest(source)
+    local adapter = self.cache_adapter
+    return sha256.hex_via(adapter and adapter.sha256_binary, source)
+end
+
 function Service:_cache_location(source)
-    local key = sha256.hex(source)
+    local key = self:_digest(source)
     return self.cache_directory and
         path_join(self.cache_directory, key .. ".result") or nil, key
 end
@@ -2092,7 +2098,7 @@ function Service:module_context(options)
         header_label = trace_header_label(includes),
     }, ModuleContext)
     context.baseline_source = render_baseline_source(context)
-    context.baseline_key = sha256.hex(context.baseline_source)
+    context.baseline_key = self:_digest(context.baseline_source)
     return context
 end
 

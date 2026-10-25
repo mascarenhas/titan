@@ -120,7 +120,7 @@ compiler-integrity errors.
 ## Adapter-site discovery
 
 `coder._callable_adapter_site` (`titan-compiler/coder/calls.lua`) gives each
-frozen non-exact plan used by a translation unit one deterministic private site,
+frozen non-exact plan used by a generated module one deterministic private site,
 keyed by the plan object rather than by interned type strings, in checked-AST
 discovery order. Emission drains the site list dynamically, because emitting
 one recursively frozen adapter can discover nested component sites.
@@ -267,7 +267,7 @@ owned by the source provider even when another module created the view.
 
 The source declaration's strict trailer cannot be copied: providers compile a
 declaration-specific source-tag check, which would reject a target-tagged
-wrapper. The creating translation unit instead emits a strict relay for B from
+wrapper. The creating module instead emits a strict relay for B from
 the shared strict-entry arity/tail/result and error shell plus the
 checker-frozen strict boundary plans.
 

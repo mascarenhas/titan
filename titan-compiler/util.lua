@@ -22,8 +22,8 @@ function util.tostring(v)
     return "{" .. table.concat(parts, ", ") .. "}"
 end
 
-function util.get_file_contents(filename)
-    local f, err = io.open(filename, "r")
+function util.get_file_contents(filename, mode)
+    local f, err = io.open(filename, mode or "r")
     if not f then
         return false, err
     end
@@ -36,8 +36,8 @@ function util.get_file_contents(filename)
     end
 end
 
-function util.set_file_contents(filename, contents)
-    local f, err = io.open(filename, "w")
+function util.set_file_contents(filename, contents, mode)
+    local f, err = io.open(filename, mode or "w")
     if not f then
         return false, err
     end

@@ -138,10 +138,21 @@ callable dispatch.
 The conversion helper:
 
 1. saves `lua_gettop(L)`;
-2. pushes the `TValue` carried by `value`;
-3. calls `luaL_tolstring`;
-4. captures the exact resulting Lua string;
-5. restores the saved top with `defer`.
+2. reserves three stack slots with `lua_checkstack(L, 3)`, raising "cannot
+   reserve Lua stack for string conversion" if Lua cannot grow the stack;
+3. pushes the `TValue` carried by `value`;
+4. calls `luaL_tolstring`;
+5. captures the exact resulting Lua string;
+6. restores the saved top with `defer`.
+
+The reservation is the helper's peak: the candidate plus the two temporaries
+`luaL_tolstring` pushes, either the metatable and event name for
+`luaL_getmetafield` or the callable and argument for `luaL_callmeta` (the
+default `__name` rendering also stays within candidate, name and result). Lua
+grows the stack for a called metamethod itself. A native caller can reach the
+helper with no free slots above its frame's top, so pushing without the
+reservation violates the raw API discipline; Lua's internal `api_check`
+assertions (`-DLUAI_ASSERT`) abort on it.
 
 This bypasses `_G.tostring` while preserving the native number,
 boolean/nil, and `__tostring` behavior. `format`'s `%s` path calls the same
