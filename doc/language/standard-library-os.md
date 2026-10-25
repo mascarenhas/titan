@@ -262,25 +262,39 @@ function InputStream:read_until(delimiter: string,
                                 chop: boolean?): string?
 function InputStream:close()
 function InputStream:is_tty(): boolean
+function InputStream:kind(): string
 function OutputStream:write(data: string)
 function OutputStream:close()
 function OutputStream:is_tty(): boolean
+function OutputStream:kind(): string
 ```
 
 Spawning, stream I/O, parent-stdio access, signalling, and waiting must run
-inside an async Task. `is_running` and `is_tty` do not yield, but still
-validate the exact Runtime that owns the resource. A Titan standalone
+inside an async Task. `is_running`, `is_tty`, and `kind` do not yield, but
+still validate the exact Runtime that owns the resource. A Titan standalone
 program that imports `os` gets the automatic async bootstrap; a Lua host should
 call these APIs from a function passed to `async.run`, then drive that Task
 with `async.loop` after loading `require "titan.async"`.
 
 `InputStream` and `OutputStream` are ordinary records with private fields.
 They represent process standard streams only: the Titan process's own stdio
-and the parent-facing endpoints of captured child stdio. They are not unions
-of files, sockets, parent resources, and child resources. The private
-low-level handle is the tagged value, with pipe and TTY variants, so
-`is_tty()` reports the actual native handle kind rather than the stream's
-origin.
+and the parent-facing endpoints of captured child stdio. They are not general
+`fs.File` or `net.Connection` handles. One private `Stdio` owner backs each
+stream with one of three descriptor backings: a terminal (`"tty"`), a pipe or
+Unix stream socket (`"pipe"`), or a file-backed parent descriptor (`"file"`).
+`kind()` returns exactly `"tty"`, `"pipe"`, or `"file"`; `is_tty()` is true
+exactly when `kind()` is `"tty"`. Neither yields. Both require a running Task,
+raising `async Runtime is not active` when no Runtime is active and
+`asynchronous operation must be called from an async Task` when called outside a
+Task. On a live captured endpoint owned by another Runtime they raise `stdio
+stream belongs to a different async Runtime`. On a captured endpoint that was
+closed or transferred they raise `InputStream is closed` / `OutputStream is
+closed`. On a parent stream they classify descriptor 0, 1, or 2 on first use in
+the Runtime. A parent descriptor of an unsupported kind raises the
+`stdio.parent.kind` `async.OperationError` described below, and an invalid
+descriptor raises its `EBADF` error, so `kind()` never returns a fourth value.
+An open captured child endpoint is always a pipe: `kind() == "pipe"`,
+`is_tty() == false`, including after EOF.
 
 ### Spawn configuration
 
@@ -363,19 +377,33 @@ The module exports three mutable stream variables:
 - `os.stdout: OutputStream` writes descriptor 1; and
 - `os.stderr: OutputStream` writes descriptor 2.
 
-These are stable high-level records with lazily initialized pipe-or-TTY owners
-for the current Runtime. Parent input retains its read owner throughout that
-Runtime, including queued bytes and delimiter excess after native EOF closes
-the duplicate. A retained stream rebinds after one `async.run`/`async.loop`
-session ends and another begins, without returning buffered input from the
+These are stable high-level records with lazily initialized owners for the
+current Runtime. Parent input retains its read owner throughout that Runtime,
+including queued bytes, delimiter excess, and sticky EOF or read error state.
+A retained stream rebinds after one `async.run`/`async.loop` session ends and
+another begins, without returning buffered input or terminal state from the
 previous Runtime.
 
-Process stdio supports TTY and named-pipe descriptors. A descriptor classified
-by libuv as a regular file, TCP socket, or another kind is rejected instead of
-turning `os.InputStream`/`OutputStream` into a `fs.File` or `net.Connection`
-variant. Those records independently implement the relevant structural `io`
-interfaces, but are not process-stream values. `is_tty()` checks the private
-handle's TTY/pipe tag; captured child endpoints are pipes and report false.
+Parent standard streams support three descriptor backings:
+
+- `"tty"` (`UV_TTY`): backed by a Runtime-owned `uv_tty_t` over a duplicate of
+  the parent descriptor;
+- `"pipe"` (`UV_NAMED_PIPE`, or a hinted Unix stream socket): backed by a
+  Runtime-owned `uv_pipe_t` over a duplicate of the parent descriptor; and
+- `"file"` (`UV_FILE`, including regular files, `/dev/null` and other non-TTY
+  character devices on Unix, and disk files and `NUL` on Windows): backed by
+  libuv thread-pool filesystem requests (`uv_fs_read` and `uv_fs_write` at
+  offset `-1`) over the borrowed parent descriptor `0`, `1`, or `2`. A
+  file-backed read or write runs on a libuv worker thread and cannot be
+  interrupted. A descriptor that blocks, such as a character device with no
+  data, keeps that request, and therefore Runtime shutdown or Lua-state close,
+  waiting until the operating system completes it.
+
+Open captured child endpoints are always pipes and report `kind() == "pipe"` and
+`is_tty() == false`; after `close()` or transfer detachment they raise as
+described above. A parent descriptor classified as a TCP socket, UDP socket, or
+another unsupported kind is rejected instead of converting `InputStream` or
+`OutputStream` into a network socket.
 
 A sandboxed launcher may supply parent streams through Unix stream sockets
 while denying the socket metadata calls that libuv uses to recognize them.
@@ -388,44 +416,54 @@ Omitting the variable or setting it to an empty string supplies no hint.
 The hint applies only when libuv reports an unknown kind, `fstat` identifies a
 socket, and socket family or type inspection fails with `EPERM` or `EACCES`.
 Titan still performs both inspections: any observed family other than
-`AF_UNIX` or type other than `SOCK_STREAM` rejects the stream. Known TTY and
-pipe descriptors need no hint; regular files, TCP sockets, and datagram
-sockets are rejected whenever libuv or either explicit probe identifies their
-incompatible kind. When both socket probes are denied, Titan trusts the
-launcher's assertion about the hidden family and type; the hint does not
-validate that unavailable metadata. An unsupported kind or failed inspection
-raises `async.OperationError` with
-operation `stdio.parent.kind` and a message naming the descriptor and probe.
-An invalid descriptor retains its actual `EBADF` error.
+`AF_UNIX` or type other than `SOCK_STREAM` rejects the stream. Known TTY,
+pipe, and `UV_FILE` descriptors need no hint and keep their classified kind;
+TCP sockets, datagram sockets, and other non-stream kinds are rejected whenever
+libuv or either explicit probe identifies them. When both socket probes are
+denied, Titan trusts the launcher's assertion about the hidden family and type;
+the hint does not validate that unavailable metadata. An unsupported kind or
+failed inspection raises `async.OperationError` with operation
+`stdio.parent.kind` and a message naming the descriptor and probe. An invalid
+descriptor retains its actual `EBADF` error.
 
-On experimental Windows builds, known libuv pipe and console kinds use the
-same Runtime-owned stream wrappers. An unknown native handle fails explicitly;
-the Unix socket-metadata fallback and `TITAN_STDIO_PIPE_FDS` hint do not apply.
-The wrapper owns a non-inheritable duplicate of the actual Windows handle,
-leaving the original parent stream open when the Runtime ends.
+On experimental Windows builds, known libuv pipe, console, and `UV_FILE`
+(disk file and `NUL`) kinds use the same Runtime-owned `Stdio` owners. An
+unknown native handle fails explicitly; the Unix socket-metadata fallback and
+`TITAN_STDIO_PIPE_FDS` hint do not apply. Pipe and console wrappers own a
+non-inheritable duplicate of the actual Windows handle, leaving the original
+parent stream open when the Runtime ends. File-backed parent streams read and
+write bytes unchanged on Windows (no CRT text-mode newline translation) and
+pass descriptor `0`, `1`, or `2` directly to the child on inheritance.
 
-The Runtime caches each usable initialized parent wrapper. The launcher
-must update or clear the hint when replacing inherited descriptors; changing
-the variable while a cached wrapper remains usable does not reclassify it.
+The Runtime caches each usable initialized parent owner. The launcher must
+update or clear `TITAN_STDIO_PIPE_FDS` when replacing inherited descriptors;
+changing the variable while a cached owner remains usable does not reclassify
+it.
 
-The raw parent descriptors remain owned by the host process. A native parent
-wrapper owns a close-on-exec duplicate, whose teardown cannot close the
-original descriptor. A `with_parent_*` configurator obtains a usable cached
-wrapper, creating a replacement if the earlier native wrapper retired, and installs it
-with `UV_INHERIT_STREAM`; libuv gives the child a duplicate of the descriptor
-used by the stream. The wrapper stays owned by the Runtime, and several
-children may inherit the same parent stream.
+The raw parent descriptors remain owned by the host process. A TTY or pipe
+parent owner uses a close-on-exec duplicate, whose teardown cannot close the
+original descriptor. A file-backed parent owner borrows descriptor `0`, `1`, or
+`2` directly without duplicating or closing it: the host must keep that
+descriptor open and unreplaced while the Runtime's cached owner and accepted
+requests use it, and rebinding descriptor `0`, `1`, or `2` mid-Runtime is not
+supported. A `with_parent_*` configurator obtains a usable cached owner,
+creating a replacement if an earlier stream duplicate retired: TTY and pipe
+owners bind `UV_INHERIT_STREAM`, while file-backed owners bind `UV_INHERIT_FD`
+with CRT descriptor `0`, `1`, or `2` (passing the raw descriptor on Unix and
+duplicating the underlying `HANDLE` for the child on Windows). Several children
+may inherit the same parent stream.
 
-The read watcher for parent stdin starts lazily on an `os.stdin` read.
-Preparing or inheriting that stream therefore does not consume bytes intended
-for a child before either reader actually asks for them.
+Reading on parent `os.stdin` starts lazily when `read` or `read_until` is
+called. Calling `kind()`, `is_tty()`, `close()`, or `with_parent_stdin` never
+creates read state or consumes bytes intended for a child.
 
 Closing any of the three stable parent stream facades is an idempotent no-op.
-It neither closes the Runtime-owned duplicate nor changes later operations on
-the facade. Native EOF or a read error may retire an input duplicate earlier;
-the same Runtime's input facade and subscription still retain buffered bytes
-until reads consume them. Runtime cleanup retires remaining native wrappers.
-This is distinct from closing a captured child endpoint.
+It neither closes a Runtime-owned duplicate nor closes a borrowed file
+descriptor, and it does not change later operations on the facade. Native EOF
+or a read error may retire a stream duplicate earlier; the same Runtime's input
+facade and subscription still retain buffered bytes and sticky terminal state.
+Runtime cleanup retires remaining native stream handles. This is distinct from
+closing a captured child endpoint.
 
 `InputStream` satisfies the standard `io.Reader`, `io.Closer`, and
 `io.ReaderCloser` Interfaces exactly.
@@ -436,13 +474,50 @@ any Interface.
 
 ### Process stream I/O
 
-Each nonempty write to a captured `process.stdin` immediately submits its own
-`uv_write_t` and returns only after that request's callback. Libuv supplies
-stream write ordering; Titan adds no operation queue. An empty write is a
-checked no-op. The request retains the original immutable string until its
-eventual callback while libuv borrows, but does not mutate, its bytes.
-Overlapping calls retain independent requests and strings. Cancelling the Task
-does not release that owner early or kill the child.
+Each nonempty write to a TTY or pipe stream (including captured
+`process.stdin`) immediately submits its own `uv_write_t` and returns only
+after that request's callback. Libuv supplies stream write ordering; Titan adds
+no operation queue for streams. An empty write is a checked no-op. The request
+retains the original immutable string until its eventual callback while libuv
+borrows, but does not mutate, its bytes. Overlapping calls retain independent
+requests and strings. Cancelling the Task does not release that owner early or
+kill the child.
+
+Writes to a file-backed parent stream (`os.stdout` or `os.stderr` when
+descriptor `1` or `2` is `UV_FILE`) use libuv thread-pool `uv_fs_write`
+requests with offset `-1` so the loop thread never blocks on synchronous file
+I/O. On Unix, `>>` opens the descriptor with `O_APPEND`, so every write
+appends. On Windows, each write goes to the inherited handle's current file
+position; `cmd` `>>` places that position at end of file before the program
+starts, so output follows the existing bytes. Titan adds no append semantics of
+its own: concurrent writers to the same file are ordered only by the operating
+system. File-backed writes obey the following rules:
+
+- **Admission and FIFO ordering.** A write is admitted only inside the
+  `async.await_with` registration callback after the cancellation check; a Task
+  cancelled before registration writes nothing, and an empty write is a checked
+  no-op. Per stream, at most one `uv_fs_write` is in flight, and accepted
+  writes execute in acceptance order. A callback-driven pump—not the calling
+  Task—owns submission, short-write continuation over `uv.buf_t` slices, and
+  advancement to the next queued entry before settling the completed entry, so
+  a resumed writer cannot overtake older queued writes.
+- **Completion and errors.** Each logical write settles once: success after all
+  bytes are written, or `async.OperationError` with operation `stdio.write` and
+  the native error code (`ENOSPC`, `EFBIG`, `EBADF`, and so on, or `EIO` if a
+  nonempty write reports zero bytes) after any prefix already written. An
+  errored entry retires and later queued entries still run.
+- **Cancellation and teardown.** A Task cancelled after its write is accepted
+  remains waiting until the entire logical write settles, and then receives its
+  cancellation reason; written bytes are never rolled back. Graceful Runtime
+  shutdown (`os.exit`/`async.request_exit`, or a fatal Runtime failure) refuses
+  new writes but completes every already accepted write, in order, before the
+  loop closes. If the Lua state instead closes while its Runtime is still active
+  (see [closing a Lua state with an active Runtime](async-io.md#closing-a-lua-state-with-an-active-runtime)),
+  there is no full-write guarantee. Only the write already submitted to the
+  operating system finishes. Queued writes and unwritten remainders are dropped,
+  so the file may end with a prefix of the accepted output. Waiting Tasks do not
+  resume. Descriptors 0, 1, and 2 stay open.
+
 On Unix, loading `titan.async` changes a default `SIGPIPE` disposition to ignored
 so a child that closes stdin produces the ordinary libuv write error instead
 of terminating the parent process. An already ignored signal or an
@@ -466,11 +541,22 @@ which its first read reports; the successfully spawned Process remains usable
 and waitable. The low-level module does not turn this setup failure into a
 child-termination policy.
 
+File-backed parent `os.stdin` uses the same single-reader subscription queue and
+facade delimiter excess as stream-backed input, but pairs it with a
+demand-driven `uv_fs_read` producer (64 KiB chunk buffer at offset `-1`)
+instead of continuous read-ahead: at most one `uv_fs_read` is in flight, and an
+admitted read call (after `async.checkpoint()` and the competing-reader check)
+submits a request only when none is in flight and no buffered chunk or terminal
+outcome is pending.
+
 An `InputStream:read()` returns that stream's oldest facade excess first.
 Otherwise it returns one oldest buffered native chunk, or waits for the next
 positive callback. A positive chunk is nonempty, binary, and timing-dependent.
-EOF returns `nil` permanently. A read error closes that output pipe; after
-completed chunks have drained, later reads raise its stored `async.OperationError`.
+EOF returns `nil` permanently for the current Runtime, and a read error raises
+its stored `async.OperationError` (`stdio.read` or `stdio.read.start`)
+permanently for the current Runtime after any earlier queued chunks have
+drained; file-backed `os.stdin` does not tail a growing file within the same
+Runtime, while a later Runtime starts with fresh read state.
 
 `InputStream:read_until(delimiter, chop)` rejects an empty delimiter and
 consumes through its first occurrence. With `chop` absent or false, an actual
@@ -490,6 +576,16 @@ therefore one waiter. A second Task that tries to wait on the same stream is
 rejected; there is no additional facade lock or read queue. Cancelling a
 waiting read detaches only its waiter, wakes that Task on a later loop turn,
 and leaves the physical read active for another Task.
+
+For file-backed `os.stdin`, cancelling a waiting reader likewise detaches only
+that waiter; a replacement reader may wait immediately, and the in-flight chunk,
+EOF, or read error is retained in the subscription and delivered once to the
+next reader. Because `read_until` retains bytes beyond the delimiter in facade
+excess from the 64 KiB read chunk, a child spawned with `with_parent_stdin`
+observes the operating-system descriptor offset after the chunk read rather
+than the logical delimiter offset. Concurrent I/O across parent and child
+processes, independent Lua states, or aliased stdout/stderr descriptors has no
+cross-owner serialization guarantee.
 
 Closing a captured `InputStream` is idempotent. It stops and closes that
 parent-side read pipe, discards facade excess and buffered native input, wakes
@@ -530,9 +626,12 @@ stopped and cannot be handed off in that state.
 
 Unused `os.stdin`, `os.stdout`, and `os.stderr` facades copy their process-wide
 descriptor identity and resolve a fresh Runtime-local wrapper when used. These
-stable facades remain usable at the source. Standard input with active or
-buffered read state and standard output with a pending write are rejected.
-Captured terminal handles other than pipes are unsupported.
+stable facades remain usable at the source. Standard input that this Runtime
+has started reading, even if it has since reached EOF or failed, and standard
+output or error with an accepted write still pending are rejected. Untouched
+facades of any kind (`"tty"`, `"pipe"`, or `"file"`) transfer; `kind()`,
+`is_tty()`, and `with_parent_*` do not count as use. Captured terminal handles
+other than pipes are unsupported.
 
 The `Process` itself remains in the originating Runtime, which must stay alive
 to observe and reap the child. Its `wait`, `kill`, and exit handling continue

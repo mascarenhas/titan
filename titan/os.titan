@@ -96,9 +96,9 @@ record OutputStream
 end
 
 -- These are process-stdio records: the Titan process's stable streams and
--- captured parent-facing endpoints of spawned processes. Their uv wrapper
--- contains the private pipe/TTY handle union; provenance and ownership remain
--- ordinary metadata and never determine the native stream kind.
+-- captured parent-facing endpoints of spawned processes. Their Stdio owner
+-- contains the private stream/file backing union; provenance and ownership
+-- remain ordinary metadata and never guess the underlying descriptor kind.
 --- Spawned process with independently owned optional captured streams.
 -- @field stdin Writable child stdin endpoint, or nil when inherited.
 -- @field stdout Readable child stdout endpoint, or nil when inherited.
@@ -755,6 +755,13 @@ function OutputStream:is_tty(): boolean
   return os_stdio_is_tty(output_handle(self))
 end
 
+--- Return the writable stream's descriptor backing kind.
+-- @return "tty", "pipe", or "file".
+-- @usage standard-library-os.md
+function OutputStream:kind(): string
+  return os_stdio_kind(output_handle(self))
+end
+
 --- Read a binary chunk from the process or standard-input stream.
 -- @return Bytes or nil at EOF or after terminal close.
 -- @usage standard-library-os.md
@@ -791,6 +798,13 @@ function InputStream:is_tty(): boolean
   return os_stdio_is_tty(input_handle(self))
 end
 
+--- Return the readable stream's descriptor backing kind.
+-- @return "tty", "pipe", or "file".
+-- @usage standard-library-os.md
+function InputStream:kind(): string
+  return os_stdio_kind(input_handle(self))
+end
+
 --- Request graceful program exit after Task and native ownership cleanup.
 -- @param code Exit code; nil selects zero.
 -- @usage standard-library-os.md
@@ -810,13 +824,40 @@ end
 
 -- Domain ownership stays here. Public uv owns native callback storage; async
 -- owns waits and subscription queues, never process or stdio policy.
-local record Stdio
+local FILE_READ_CHUNK_BYTES = 64 * 1024
+
+local record StreamStdio
   native: uv.stream_t
   handle: uv.handle_t
-  loop: uv.loop_t
-  reads: async.BufferedSubscription<|string, async.OperationError|>?
   alloc_read: uv.alloc_cb?
   deliver_read: uv.read_cb?
+end
+
+local record FileStdio
+  descriptor: integer
+  read_request: uv.fs_t
+  read_buffer: uv.buf_t?
+  reading: boolean
+  deliver_read: (function (uv.fs_t): ())?
+  publish_read: (function (string): (boolean))?
+  fail_read: (function (async.OperationError): (boolean))?
+  finish_read: (function (): (boolean))?
+  write_request: uv.fs_t
+  writing: boolean
+  deliver_write: (function (uv.fs_t): ())?
+  write_head: FileWriteOperation?
+  write_tail: FileWriteOperation?
+end
+
+local union StdioBacking
+  stream(StreamStdio)
+  file(FileStdio)
+end
+
+local record Stdio
+  backing: StdioBacking
+  loop: uv.loop_t
+  reads: async.BufferedSubscription<|string, async.OperationError|>?
   pending_writes: integer
 end
 
@@ -826,11 +867,26 @@ local record CloseOperation
   number: integer
 end
 
-local record WriteOperation
+local record StreamWriteOperation
   stream: Stdio
+  backing: StreamStdio
   data: string
-  completion: async.Completion<|WriteOperation, nil, async.OperationError|>?
+  completion: async.Completion<|StreamWriteOperation, nil, async.OperationError|>?
   number: integer
+end
+
+local record FileWriteOperation
+  stream: Stdio
+  file: FileStdio
+  data: string
+  buffer: uv.buf_t?
+  offset: integer
+  completion: async.Completion<|FileWriteOperation, nil, async.OperationError|>?
+  number: integer
+  next: FileWriteOperation?
+  result: integer
+  failure_error: value
+  failure_trace: string?
 end
 
 local union SpawnSlot
@@ -1009,33 +1065,51 @@ local function close_native(handle: uv.handle_t)
   end
 end
 
+local function StreamStdio:is_closed(): boolean
+  return stream_is_closed(self.handle)
+end
+
+local function Stdio:is_closed(): boolean
+  case self.backing
+  when stream(backing) then return backing:is_closed()
+  when file() then return false
+  end
+end
+
 local function discard_unpublished_stdio(stream: Stdio?)
-  if stream ~= nil and not stream_is_closed(stream.handle) then
-    uv.close(stream.handle, nil)
+  if stream == nil then return end
+  case stream.backing
+  when stream(backing) then
+    if not backing:is_closed() then uv.close(backing.handle, nil) end
+  when file() then
   end
 end
 
 local function new_pipe_stdio(loop: uv.loop_t): (integer, Stdio?)
   local pipe = uv.pipe_t.new()
-  local stream = Stdio(pipe:as_stream_t(), pipe:as_handle_t(), loop, nil, nil, nil, 0)
+  local backing = StreamStdio(pipe:as_stream_t(), pipe:as_handle_t(), nil, nil)
+  local stream = Stdio(StdioBacking.stream(backing), loop, nil, 0)
   local status = uv.pipe_init(loop, pipe, 0)
   if status < 0 then return status, nil end
   return 0, stream
 end
 
-local function resume_stream_read(stream: Stdio, operation: string)
-  check_status(uv.read_start(stream.native, stream.alloc_read, stream.deliver_read), operation)
+local function StreamStdio:resume_read(operation: string)
+  check_status(uv.read_start(self.native, self.alloc_read, self.deliver_read), operation)
 end
 
-local function start_stream_read(stream: Stdio, operation: string,
-    initial: {string}?, terminal: async.SubscriptionResult<|string, async.OperationError|>?)
+local function StreamStdio:start_read(
+    stream: Stdio, operation: string,
+    initial: {string}?,
+    terminal: async.SubscriptionResult<|string, async.OperationError|>?)
   if stream.reads ~= nil then return end
+  local backing = self
   stream.reads = async.BufferedSubscription<|string, async.OperationError|>.new(function (publish, fail, finish)
     local actions = async.SubscriptionActions<|string|>(function ()
-      if not stream_is_closed(stream.handle) then uv.read_stop(stream.native) end
+      if not backing:is_closed() then uv.read_stop(backing.native) end
     end, function (drain)
       drain()
-      close_native(stream.handle)
+      close_native(backing.handle)
     end)
     if initial ~= nil then
       for index = 1, #initial do publish(initial[index]) end
@@ -1047,18 +1121,18 @@ local function start_stream_read(stream: Stdio, operation: string,
       end
       return actions
     end
-    if stream_is_closed(stream.handle) then finish(); return actions end
-    stream.alloc_read = function (_: uv.handle_t, size: integer): uv.buf_t
+    if backing:is_closed() then finish(); return actions end
+    backing.alloc_read = function (_: uv.handle_t, size: integer): uv.buf_t
       return uv.buf_t.allocate(size)
     end
-    stream.deliver_read = function (_: uv.stream_t, count: integer, buffer: uv.buf_t?)
-        if count == 0 then return end
-        if count > 0 then publish(buffer:to_string(count)); return end
-        uv.read_stop(stream.native)
-        discard_unpublished_stdio(stream)
-        if count == uv.EOF then finish() else fail(make_error(count, "stdio.read")) end
-      end
-    local status = uv.read_start(stream.native, stream.alloc_read, stream.deliver_read)
+    backing.deliver_read = function (_: uv.stream_t, count: integer, buffer: uv.buf_t?)
+      if count == 0 then return end
+      if count > 0 then publish(buffer:to_string(count)); return end
+      uv.read_stop(backing.native)
+      discard_unpublished_stdio(stream)
+      if count == uv.EOF then finish() else fail(make_error(count, "stdio.read")) end
+    end
+    local status = uv.read_start(backing.native, backing.alloc_read, backing.deliver_read)
     if status < 0 then
       discard_unpublished_stdio(stream)
       fail(make_error(status, operation))
@@ -1067,11 +1141,89 @@ local function start_stream_read(stream: Stdio, operation: string,
   end)
 end
 
+local function start_stream_read(stream: Stdio, operation: string,
+    initial: {string}?, terminal: async.SubscriptionResult<|string, async.OperationError|>?)
+  case stream.backing
+  when stream(backing) then
+    backing:start_read(stream, operation, initial, terminal)
+  when file() then
+    raise "expected stream-backed stdio"
+  end
+end
+
+local function FileStdio:complete_read(request: uv.fs_t)
+  self.reading = false
+  local count = 0
+  local chunk = ""
+  do
+    count = uv.fs_get_result(request)
+    if count > 0 then
+      chunk = self.read_buffer:to_string(count)
+    end
+    uv.fs_req_cleanup(request)
+  catch
+    uv.fs_req_cleanup(request)
+    raise
+  end
+  if count > 0 then
+    self.publish_read(chunk)
+    return
+  end
+  if count == 0 then
+    self.finish_read()
+    return
+  end
+  self.fail_read(make_error(count, "stdio.read"))
+end
+
+local function FileStdio:ensure_reads(stream: Stdio)
+  if stream.reads ~= nil then return end
+  local file = self
+  self.deliver_read = function (request: uv.fs_t)
+    file:complete_read(request)
+  end
+  stream.reads = async.BufferedSubscription<|string, async.OperationError|>.new(
+    function (publish, fail, finish)
+      file.publish_read = publish
+      file.fail_read = fail
+      file.finish_read = finish
+      return async.SubscriptionActions<|string|>(
+        function () end,
+        function (drain) drain() end)
+    end)
+end
+
+local function FileStdio:demand_read(stream: Stdio)
+  local reads = stream.reads
+  if self.reading or reads:has_pending() then return end
+  local buffer? = self.read_buffer
+  if buffer == nil then
+    buffer = uv.buf_t.allocate(FILE_READ_CHUNK_BYTES)
+    self.read_buffer = buffer
+  end
+  local status = uv.fs_read(
+    stream.loop, self.read_request, self.descriptor,
+    {buffer}, -1, self.deliver_read)
+  if status < 0 then
+    uv.fs_req_cleanup(self.read_request)
+    self.fail_read(make_error(status, "stdio.read"))
+  else
+    self.reading = true
+  end
+end
+
 local function os_stdio_read(stream: Stdio): string?
   validate_stdio(stream)
   async.checkpoint()
-  start_stream_read(stream, "stdio.read.start")
-  if stream.reads:has_waiter() then raise "stream already has a waiting reader" end
+  case stream.backing
+  when stream(backing) then
+    backing:start_read(stream, "stdio.read.start", nil, nil)
+    if stream.reads:has_waiter() then raise "stream already has a waiting reader" end
+  when file(backing) then
+    backing:ensure_reads(stream)
+    if stream.reads:has_waiter() then raise "stream already has a waiting reader" end
+    backing:demand_read(stream)
+  end
   case stream.reads:next()
   when item(chunk) then return chunk
   when error(failure) then raise failure
@@ -1081,9 +1233,9 @@ local function os_stdio_read(stream: Stdio): string?
 end
 
 local function stdio_written(request: uv.write_t, status: integer)
-  local context = request:get_data() as WriteOperation
+  local context = request:get_data() as StreamWriteOperation
   context.stream.pending_writes = context.stream.pending_writes - 1
-  local completion = context.completion as async.Completion<|WriteOperation, nil, async.OperationError|>
+  local completion = context.completion as async.Completion<|StreamWriteOperation, nil, async.OperationError|>
   local number = context.number
   request:set_data(nil)
   context.completion = nil
@@ -1093,17 +1245,17 @@ local function stdio_written(request: uv.write_t, status: integer)
   catch completion:fatal(number, error, traceback); raise end
 end
 
-local function start_stdio_write(
-    completion: async.Completion<|WriteOperation, nil, async.OperationError|>,
+local function start_stream_write(
+    completion: async.Completion<|StreamWriteOperation, nil, async.OperationError|>,
     number: integer): uv.req_t?
   local context = completion:context(number)
-  if stream_is_closed(context.stream.handle) then raise "cannot write to a closed stream" end
+  if context.backing:is_closed() then raise "cannot write to a closed stream" end
   if #context.data == 0 then completion:resolve(number, nil); return nil end
   local request = uv.write_t.new()
   context.completion = completion
   context.number = number
   request:set_data(context)
-  local status = uv.write_string(request, context.stream.native, context.data, stdio_written)
+  local status = uv.write_string(request, context.backing.native, context.data, stdio_written)
   if status < 0 then
     request:set_data(nil)
     context.completion = nil
@@ -1114,27 +1266,215 @@ local function start_stdio_write(
   return nil
 end
 
+local function FileStdio:pop_write(stream: Stdio, entry: FileWriteOperation)
+  local next_entry? = entry.next
+  entry.next = nil
+  self.write_head = next_entry
+  if next_entry == nil then self.write_tail = nil end
+  stream.pending_writes = stream.pending_writes - 1
+  entry.buffer = nil
+end
+
+local function FileStdio:pump_writes(stream: Stdio, retired: FileWriteOperation?)
+  local retired_head? = retired
+  local retired_tail? = retired
+  local failure_error: value = nil
+  local failure_trace: string? = nil
+  if retired ~= nil then
+    failure_error = retired.failure_error
+    failure_trace = retired.failure_trace
+  end
+  -- Recovery only links preallocated entries: no heap allocation or settlement
+  -- before the accepted tail is submitted or the FIFO is empty.
+  while not self.writing and self.write_head ~= nil do
+    local entry = self.write_head
+    local status = 0
+    do
+      local buffer = entry.buffer
+      local slice = buffer
+      if entry.offset > 0 then
+        slice = buffer:slice(entry.offset + 1, #entry.data - entry.offset)
+      end
+      status = uv.fs_write(
+        stream.loop, self.write_request, self.descriptor,
+        {slice}, -1, self.deliver_write)
+      if status < 0 then
+        uv.fs_req_cleanup(self.write_request)
+      else
+        self.writing = true
+      end
+    catch
+      entry.failure_error = error
+      entry.failure_trace = traceback
+      if failure_trace == nil then
+        failure_error = error
+        failure_trace = traceback
+      end
+      do uv.fs_req_cleanup(self.write_request) catch end
+    end
+    if self.writing then break end
+    self:pop_write(stream, entry)
+    entry.result = status
+    if retired_tail == nil then retired_head = entry
+    else retired_tail.next = entry end
+    retired_tail = entry
+  end
+
+  while retired_head ~= nil do
+    local entry = retired_head
+    retired_head = entry.next
+    entry.next = nil
+    local completion = entry.completion
+    local number = entry.number
+    entry.completion = nil
+    local trace? = entry.failure_trace
+    if trace ~= nil then
+      do completion:fatal(number, entry.failure_error, trace) catch end
+    else
+      do
+        if entry.result < 0 then
+          completion:reject(number, make_error(entry.result, "stdio.write"))
+        else
+          completion:resolve(number, nil)
+        end
+      catch
+        if failure_trace == nil then
+          failure_error = error
+          failure_trace = traceback
+        end
+        do completion:fatal(number, error, traceback) catch end
+      end
+    end
+  end
+  if failure_trace ~= nil then async.Error(failure_error, failure_trace):raise() end
+end
+
+local function FileStdio:complete_write(stream: Stdio, request: uv.fs_t)
+  self.writing = false
+  local entry = self.write_head
+  local result = 0
+  do
+    result = uv.fs_get_result(request)
+    uv.fs_req_cleanup(request)
+  catch
+    entry.failure_error = error
+    entry.failure_trace = traceback
+    do uv.fs_req_cleanup(request) catch end
+  end
+  if entry.failure_trace == nil and result > 0 then
+    entry.offset = entry.offset + result
+    if entry.offset < #entry.data then
+      self:pump_writes(stream, nil)
+      return
+    end
+    result = 0
+  elseif result == 0 then
+    result = uv.EIO
+  end
+  self:pop_write(stream, entry)
+  entry.result = result
+  self:pump_writes(stream, entry)
+end
+
+local function start_file_write(
+    completion: async.Completion<|FileWriteOperation, nil, async.OperationError|>,
+    number: integer): uv.req_t?
+  local context = completion:context(number)
+  if #context.data == 0 then
+    completion:resolve(number, nil)
+    return nil
+  end
+  local buffer = uv.buf_t.from_string(context.data)
+  local file = context.file
+  local stream = context.stream
+  if file.write_head == nil then
+    local status = uv.fs_write(
+      stream.loop, file.write_request, file.descriptor,
+      {buffer}, -1, file.deliver_write)
+    if status < 0 then
+      uv.fs_req_cleanup(file.write_request)
+      completion:reject(number, make_error(status, "stdio.write"))
+      return nil
+    end
+    context.buffer = buffer
+    context.offset = 0
+    context.completion = completion
+    context.number = number
+    context.next = nil
+    file.writing = true
+    file.write_head = context
+    file.write_tail = context
+    stream.pending_writes = stream.pending_writes + 1
+    return nil
+  end
+  context.buffer = buffer
+  context.offset = 0
+  context.completion = completion
+  context.number = number
+  context.next = nil
+  file.write_tail.next = context
+  file.write_tail = context
+  stream.pending_writes = stream.pending_writes + 1
+  return nil
+end
+
 local function os_stdio_write(stream: Stdio, data: string)
   validate_stdio(stream)
-  case async.await_with<|WriteOperation, nil, async.OperationError|>(
-    WriteOperation(stream, data, nil, 0), start_stdio_write)
-  when success() then
-  when error(failure) then raise failure
+  case stream.backing
+  when stream(backing) then
+    case async.await_with<|StreamWriteOperation, nil, async.OperationError|>(
+      StreamWriteOperation(stream, backing, data, nil, 0), start_stream_write)
+    when success() then
+    when error(failure) then raise failure
+    end
+  when file(backing) then
+    case async.await_with<|FileWriteOperation, nil, async.OperationError|>(
+      FileWriteOperation(stream, backing, data, nil, 0, nil, 0, nil, 0, nil, nil), start_file_write)
+    when success() then
+    when error(failure) then raise failure
+    end
   end
 end
 
 local function os_stdio_close(stream: Stdio)
   validate_stdio(stream)
-  if stream.reads ~= nil then stream.reads:close()
-  else close_native(stream.handle) end
+  if stream.reads ~= nil then
+    stream.reads:close()
+    return
+  end
+  case stream.backing
+  when stream(backing) then close_native(backing.handle)
+  when file() then
+  end
+end
+
+local function os_stdio_kind(stream: Stdio): string
+  validate_stdio(stream)
+  case stream.backing
+  when stream(backing) then
+    case backing.native
+    when tty() then return "tty"
+    else return "pipe"
+    end
+  when file() then
+    return "file"
+  end
 end
 
 local function os_stdio_is_tty(stream: Stdio): boolean
-  validate_stdio(stream)
-  case stream.native
-  when tty() then return true
-  else return false
+  return os_stdio_kind(stream) == "tty"
+end
+
+local function new_file_stdio(loop: uv.loop_t, descriptor: integer): Stdio
+  local file = FileStdio(
+    descriptor,
+    uv.fs_t.new(), nil, false, nil, nil, nil, nil,
+    uv.fs_t.new(), false, nil, nil, nil)
+  local stream = Stdio(StdioBacking.file(file), loop, nil, 0)
+  file.deliver_write = function (request: uv.fs_t)
+    file:complete_write(stream, request)
   end
+  return stream
 end
 
 local function os_wait_signal(name: string): string
@@ -1241,6 +1581,7 @@ local function parent_stdio_kind(descriptor: integer): uv.handle_type
   case guessed
   when tty() then return guessed
   when named_pipe() then return guessed
+  when file() then return guessed
   when unknown() then
   else
     raise parent_stdio_kind_error(uv.ENOTSUP, descriptor,
@@ -1303,9 +1644,16 @@ end
 local function initialize_parent_stdio(loop: uv.loop_t, descriptor: integer): Stdio
   if parent_loop ~= loop then parent_loop = loop; cached_parent_stdio = {} end
   local cached? = cached_parent_stdio[descriptor + 1]
-  if cached ~= nil and not stream_is_closed(cached.handle) then return cached end
+  if cached ~= nil and not cached:is_closed() then return cached end
   cached_parent_stdio[descriptor + 1] = nil
   local kind = parent_stdio_kind(descriptor)
+  case kind
+  when file() then
+    local file_stream = new_file_stdio(loop, descriptor)
+    cached_parent_stdio[descriptor + 1] = file_stream
+    return file_stream
+  else
+  end
   local duplicate = duplicate_descriptor(descriptor as foreign int)
   defer ffi.titan_close_parent_duplicate(duplicate)
   local stream: Stdio? = nil
@@ -1318,10 +1666,11 @@ local function initialize_parent_stdio(loop: uv.loop_t, descriptor: integer): St
   end
   if tty then
     local native = uv.tty_t.new()
-    local owner = Stdio(native:as_stream_t(), native:as_handle_t(), loop, nil, nil, nil, 0)
+    local backing = StreamStdio(native:as_stream_t(), native:as_handle_t(), nil, nil)
+    local owner = Stdio(StdioBacking.stream(backing), loop, nil, 0)
     check_status(uv.tty_init(loop, native, duplicate as integer, 0), "stdio.parent.init")
     stream = owner
-    local status, actual? = uv.fileno(owner.handle)
+    local status, actual? = uv.fileno(backing.handle)
     check_status(status, "stdio.parent.fileno")
     if actual:to_integer() ~= uv.get_osfhandle(duplicate as integer):to_integer() then
       check_status(platform_status(ffi.titan_close_parent_duplicate(duplicate)), "stdio.parent.duplicate.close")
@@ -1331,14 +1680,20 @@ local function initialize_parent_stdio(loop: uv.loop_t, descriptor: integer): St
     local status = 0
     status, stream = new_pipe_stdio(loop)
     check_status(status, "stdio.parent.init")
-    case stream.native
-    when pipe(native) then status = uv.pipe_open(native, duplicate as integer)
-    else raise "expected pipe stream"
+    local handle: uv.handle_t? = nil
+    case stream.backing
+    when stream(backing) then
+      handle = backing.handle
+      case backing.native
+      when pipe(native) then status = uv.pipe_open(native, duplicate as integer)
+      else raise "expected pipe stream"
+      end
+    when file() then raise "expected pipe stream"
     end
     check_status(status, "stdio.parent.open")
     if ffi.TITAN_OS_WINDOWS ~= 0 then
       local actual: uv.os_fd_t? = nil
-      status, actual = uv.fileno(stream.handle)
+      status, actual = uv.fileno(handle)
       check_status(status, "stdio.parent.fileno")
       if actual:to_integer() ~= uv.get_osfhandle(duplicate as integer):to_integer() then
         check_status(platform_status(ffi.titan_close_parent_duplicate(duplicate)), "stdio.parent.duplicate.close")
@@ -1382,8 +1737,14 @@ end
 
 local function bind_slot(state: ProcessConfig, index: integer,
                          slot: SpawnSlot, flags: integer)
-  state.options.stdio[index + 1] = uv.stdio_container_t(flags,
-    uv.stdio_data_t.stream(slot_child(slot).native))
+  case slot_child(slot).backing
+  when stream(backing) then
+    state.options.stdio[index + 1] = uv.stdio_container_t(flags,
+      uv.stdio_data_t.stream(backing.native))
+  when file(backing) then
+    state.options.stdio[index + 1] = uv.stdio_container_t(flags,
+      uv.stdio_data_t.fd(backing.descriptor))
+  end
 end
 
 local function config_slot(state: ProcessConfig,
@@ -1457,19 +1818,27 @@ local function config_merged_output(state: ProcessConfig): (integer, SpawnSlot?)
   defer do ffi.titan_close_parent_duplicate(fd0); ffi.titan_close_parent_duplicate(fd1) end
   status, fd0, fd1 = uv.pipe(uv.NONBLOCK_PIPE, 0)
   if status < 0 then return status, nil end
-  case parent.native
-  when pipe(native) then status = uv.pipe_open(native, fd0)
-  else raise "expected pipe stream"
+  case parent.backing
+  when stream(backing) then
+    case backing.native
+    when pipe(native) then status = uv.pipe_open(native, fd0)
+    else raise "expected pipe stream"
+    end
+  when file() then raise "expected pipe stream"
   end
   if status < 0 then return status, nil end
   fd0 = -1
-  case child.native
-  when pipe(native) then status = uv.pipe_open(native, fd1)
-  else raise "expected pipe stream"
+  case child.backing
+  when stream(backing) then
+    case backing.native
+    when pipe(native) then status = uv.pipe_open(native, fd1)
+    else raise "expected pipe stream"
+    end
+    if status < 0 then return status, nil end
+    fd1 = -1
+    status = uv.stream_set_blocking(backing.native, 1)
+  when file() then raise "expected pipe stream"
   end
-  if status < 0 then return status, nil end
-  fd1 = -1
-  status = uv.stream_set_blocking(child.native, 1)
   if status < 0 then return status, nil end
   local slot = SpawnSlot.merged(child, parent)
   keep = true
@@ -1510,7 +1879,12 @@ local function configure_parent(config: ProcessConfig,
   status, parent = prepare_inherited_stdio(config, descriptor)
   if status < 0 then return status end
   local slot = parent as SpawnSlot
-  configure_slot(config, descriptor, slot, uv.INHERIT_STREAM)
+  local flags = uv.INHERIT_STREAM
+  case slot_child(slot).backing
+  when stream() then
+  when file() then flags = uv.INHERIT_FD
+  end
+  configure_slot(config, descriptor, slot, flags)
   return 0
 end
 
@@ -1823,19 +2197,29 @@ local function stream_transfer_preflight(stream: Stdio, reading: boolean)
   if stream.reads ~= nil and stream.reads:has_waiter() then
     raise "stream has a pending read"
   end
-  if not stream_is_closed(stream.handle) then
-    case stream.native
-    when pipe() then
-    else raise "only pipe streams support native handoff"
+  if not stream:is_closed() then
+    case stream.backing
+    when stream(backing) then
+      case backing.native
+      when pipe() then
+      else raise "only pipe streams support native handoff"
+      end
+      check_status(uv.stream_transfer_status(backing.native, reading), "stdio.transfer")
+    when file() then
+      raise "only pipe streams support native handoff"
     end
-    check_status(uv.stream_transfer_status(stream.native, reading), "stdio.transfer")
   end
 end
 
 local function stdio_native_payload(stream: Stdio): string
-  case stream.native
-  when pipe(native) then return native:to_transfer_payload()
-  else raise "only pipe streams support native handoff"
+  case stream.backing
+  when stream(backing) then
+    case backing.native
+    when pipe(native) then return native:to_transfer_payload()
+    else raise "only pipe streams support native handoff"
+    end
+  when file() then
+    raise "only pipe streams support native handoff"
   end
 end
 
@@ -1843,13 +2227,14 @@ local function restored_stdio(packet: string?): Stdio
   local loop = async.current_loop()
   if async.is_closing() then raise "cannot transfer a stream while async Runtime is shutting down" end
   local native = uv.pipe_t.new()
-  local stream = Stdio(native:as_stream_t(), native:as_handle_t(), loop, nil, nil, nil, 0)
+  local backing = StreamStdio(native:as_stream_t(), native:as_handle_t(), nil, nil)
+  local stream = Stdio(StdioBacking.stream(backing), loop, nil, 0)
   if packet == nil then return stream end
   native = uv.pipe_t.from_transfer_payload(packet)
   local adopted = false
   defer if not adopted then uv.close(native:as_handle_t()) end
-  stream.native = native:as_stream_t()
-  stream.handle = native:as_handle_t()
+  backing.native = native:as_stream_t()
+  backing.handle = native:as_handle_t()
   adopted = true
   return stream
 end
@@ -1869,7 +2254,7 @@ function OutputStream:to_transfer_payload(): string
   local native_packet: string? = nil
   if stream ~= nil then
     stream_transfer_preflight(stream, false)
-    if not stream_is_closed(stream.handle) then native_packet = stdio_native_payload(stream) end
+    if not stream:is_closed() then native_packet = stdio_native_payload(stream) end
   end
   self.handle = nil
   local exported = false
@@ -1930,16 +2315,21 @@ function InputStream:to_transfer_payload(): string
         end
       end
       for index = 1, batch.count do initial[index] = batch:get(index) end
-    elseif not stream_is_closed(stream.handle) then terminal_kind = 0 end
-    if not stream_is_closed(stream.handle) then
-      if reads ~= nil then check_status(uv.read_stop(stream.native), "stdio.transfer.read_stop") end
-      do
-        native_packet = stdio_native_payload(stream)
-      catch
-        if reads ~= nil and not stream_is_closed(stream.handle) then
-          resume_stream_read(stream, "stdio.transfer.read_resume")
+    elseif not stream:is_closed() then terminal_kind = 0 end
+    if not stream:is_closed() then
+      case stream.backing
+      when stream(backing) then
+        if reads ~= nil then check_status(uv.read_stop(backing.native), "stdio.transfer.read_stop") end
+        do
+          native_packet = stdio_native_payload(stream)
+        catch
+          if reads ~= nil and not backing:is_closed() then
+            backing:resume_read("stdio.transfer.read_resume")
+          end
+          raise
         end
-        raise
+      when file() then
+        raise "only pipe streams support native handoff"
       end
     end
   end
@@ -1982,7 +2372,7 @@ function InputStream.from_transfer_payload(payload: string): InputStream
   local stream = restored_stdio(native)
   local published = false
   defer if not published then discard_unpublished_stdio(stream) end
-  if terminal == nil and stream_is_closed(stream.handle) then
+  if terminal == nil and stream:is_closed() then
     raise "live input stream transfer has no pipe"
   end
   start_stream_read(stream, "stdio.transfer.read_start", initial, terminal)

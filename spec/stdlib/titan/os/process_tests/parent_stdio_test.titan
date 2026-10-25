@@ -61,3 +61,188 @@ function test_parent_stdin_duplicate_failure_preserves_original_descriptor(
                 "descriptor failure closed input or failed to restore its soft limit")
   end)
 end
+
+local function compile_file_stdio_fixture(workspace: string): string
+  fs.write_file(workspace .. "/os_descriptor_limit.h",
+    fs.read_file("spec/fixtures/stdlib/native/os_descriptor_limit.h"))
+  fs.write_file(workspace .. "/os_descriptor_limit_app.titan",
+    fs.read_file("spec/fixtures/stdlib/titan/os_descriptor_limit_app.titan"))
+  local output, why, compiled = command.compile(workspace,
+    "os_descriptor_limit_app", {"-X", command.fixture_object("os_descriptor_limit")})
+  test.assert(why == "exit" and compiled == 0,
+              "could not compile file stdio fixture: " .. output)
+  return command.program(workspace, "os_descriptor_limit_app")
+end
+
+local function run_shell_command(shell_command: string)
+  local shell = stream.popen(shell_command)
+  defer shell:close()
+  local diagnostic = ""
+  while true do
+    local chunk? = shell:read()
+    if not chunk then break end
+    diagnostic = diagnostic .. chunk
+  end
+  local status = shell:wait()
+  test.assert(status.code == 0 and status.signal_number == 0,
+              "shell redirect command failed (" .. status.code .. "): " .. diagnostic)
+end
+
+function test_parent_file_stdio_shell_redirections_and_binary_streams(
+    context: test.Context)
+  local workspace = ""
+  local program = ""
+  runtime_test.run(function ()
+    workspace = fs.tmpname()
+    fs.unlink(workspace)
+    fs.mkdir(workspace)
+    context:cleanup(function () command.remove_tree(workspace) end)
+    program = compile_file_stdio_fixture(workspace)
+  end)
+
+  context:run("redirect_input_output_and_stderr", function (_child: test.Context)
+    runtime_test.run(function ()
+      local in_path = workspace .. "/redir.in"
+      local out_path = workspace .. "/redir.out"
+      local err_path = workspace .. "/redir.err"
+      fs.write_file(in_path, "alpha\nbeta\ngamma")
+      run_shell_command(
+        '"' .. program .. '" shell-redirect echo-lines < "' ..
+        in_path .. '" > "' .. out_path .. '" 2> "' .. err_path .. '"')
+      test.assert(fs.read_file(out_path) ==
+                  "HEADER\nLINE:alpha\nLINE:beta\nLINE:gamma\n",
+                  "redirected stdout or io.lines(os.stdin) content mismatched: " ..
+                  fs.read_file(out_path))
+      test.assert(fs.read_file(err_path) == "STDERR_LOG\n",
+                  "redirected stderr content mismatched: " .. fs.read_file(err_path))
+    end)
+  end)
+
+  context:run("redirect_append_preserves_existing_bytes", function (_child: test.Context)
+    runtime_test.run(function ()
+      local append_path = workspace .. "/append.out"
+      run_shell_command(
+        '"' .. program .. '" shell-redirect append FIRST > "' .. append_path .. '"')
+      run_shell_command(
+        '"' .. program .. '" shell-redirect append SECOND >> "' .. append_path .. '"')
+      test.assert(fs.read_file(append_path) == "FIRST\nSECOND\n",
+                  "shell >> append did not preserve existing file bytes: " ..
+                  fs.read_file(append_path))
+    end)
+  end)
+
+  context:run("redirect_null_device_eof_and_discard", function (_child: test.Context)
+    runtime_test.run(function ()
+      local null_device = "/dev/null"
+      if common.is_windows() then null_device = "NUL" end
+      local result_path = workspace .. "/dev-null.result"
+      run_shell_command(
+        '"' .. program .. '" shell-redirect dev-null "' ..
+        result_path .. '" < ' .. null_device .. ' > ' .. null_device)
+      test.assert(fs.read_file(result_path) == "DEV_NULL_OK",
+                  "null device redirection failed")
+    end)
+  end)
+
+  context:run("redirect_binary_bytes_across_chunk_boundaries", function (_child: test.Context)
+    runtime_test.run(function ()
+      local bin_in = workspace .. "/binary.in"
+      local bin_out = workspace .. "/binary.out"
+      local payload = strings.rep("B\0\r\n\n\r\255X", 20480)
+      fs.write_file(bin_in, payload)
+      run_shell_command(
+        '"' .. program .. '" shell-redirect binary-copy < "' ..
+        bin_in .. '" > "' .. bin_out .. '"')
+      test.assert(fs.read_file(bin_out) == payload,
+                  "binary file redirection across 64 KiB chunks corrupted bytes")
+    end)
+  end)
+end
+
+function test_parent_file_stdio_writes_reads_inheritance_and_lifecycle(
+    context: test.Context)
+  local workspace = ""
+  local program = ""
+  runtime_test.run(function ()
+    workspace = fs.tmpname()
+    fs.unlink(workspace)
+    fs.mkdir(workspace)
+    context:cleanup(function () command.remove_tree(workspace) end)
+    program = compile_file_stdio_fixture(workspace)
+  end)
+
+  context:run("write_fifo_cancellation_gc_responsiveness_and_multi_mib", function (_child: test.Context)
+    runtime_test.run(function ()
+      local result_path = workspace .. "/write-fifo.result"
+      local output, why, status = command.capture(
+        {program, "write-fifo-cancel-gc", workspace, result_path},
+        workspace, {["UV_THREADPOOL_SIZE"] = "4"})
+      test.assert(why == "exit" and status == 0 and
+                  fs.read_file(result_path) == "WRITE_FIFO_OK",
+                  "write FIFO test failed (" .. why .. "/" .. status .. "): " .. output)
+    end)
+  end)
+
+  context:run("short_writes_and_write_errors", function (_child: test.Context)
+    runtime_test.run(function ()
+      local result_path = workspace .. "/short-write.result"
+      local output, why, status = command.capture(
+        {program, "short-write-and-errors", workspace, result_path},
+        workspace)
+      test.assert(why == "exit" and status == 0 and
+                  fs.read_file(result_path) == "SHORT_WRITE_AND_ERRORS_OK",
+                  "short-write/errors test failed (" .. why .. "/" .. status .. "): " .. output)
+    end)
+  end)
+
+  context:run("read_cancellation_retention_sticky_inheritance_and_transfer", function (_child: test.Context)
+    runtime_test.run(function ()
+      local result_path = workspace .. "/read-cancel.result"
+      local output, why, status = command.capture(
+        {program, "read-cancel-sticky-inheritance", workspace, result_path, program},
+        workspace, {["UV_THREADPOOL_SIZE"] = "4"})
+      test.assert(why == "exit" and status == 0 and
+                  fs.read_file(result_path) == "READ_CANCEL_STICKY_INHERIT_OK",
+                  "read/inheritance test failed (" .. why .. "/" .. status .. "): " .. output)
+    end)
+  end)
+
+  context:run("graceful_exit_drains_queued_file_writes", function (_child: test.Context)
+    runtime_test.run(function ()
+      local exit_out = workspace .. "/exit-drain.out"
+      local shell = stream.popen(
+        '"' .. program .. '" exit-queued-writes > "' .. exit_out .. '"')
+      defer shell:close()
+      while shell:read() ~= nil do end
+      local status = shell:wait()
+      test.assert(status.code == 17 and status.signal_number == 0,
+                  "os.exit did not exit with code 17: " .. status.code)
+      test.assert(fs.read_file(exit_out) == "EXIT-1;EXIT-2;EXIT-3;",
+                  "os.exit did not drain queued file writes: " .. fs.read_file(exit_out))
+    end)
+  end)
+
+  context:run("runtime_failure_drains_writes_and_later_runtime_resets_state", function (_child: test.Context)
+    runtime_test.run(function ()
+      local result_path = workspace .. "/runtime-failure.result"
+      local output, why, status = command.capture(
+        {program, "runtime-failure-and-reuse", workspace, result_path},
+        workspace, {["UV_THREADPOOL_SIZE"] = "4"})
+      test.assert(why == "exit" and status == 0 and
+                  fs.read_file(result_path) == "RUNTIME_FAILURE_REUSE_OK",
+                  "runtime failure/reuse test failed (" .. why .. "/" .. status .. "): " .. output)
+    end)
+  end)
+
+  context:run("destructive_state_close_abandons_queued_writes_and_keeps_fds_open", function (_child: test.Context)
+    runtime_test.run(function ()
+      local result_path = workspace .. "/destructive-close.result"
+      local output, why, status = command.capture(
+        {program, "destructive-state-close", workspace, result_path},
+        workspace, {["UV_THREADPOOL_SIZE"] = "4"})
+      test.assert(why == "exit" and status == 0 and
+                  fs.read_file(result_path) == "DESTRUCTIVE_STATE_CLOSE_OK",
+                  "destructive state close test failed (" .. why .. "/" .. status .. "): " .. output)
+    end)
+  end)
+end

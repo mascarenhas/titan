@@ -36,6 +36,9 @@ local function exercise_parent_stdin(wait_for_close: boolean)
   if not reader or not writer or not diagnostics then
     raise "parent stdio Interface conversion produced nil"
   end
+  if system.stdin:kind() ~= "pipe" then
+    raise "parent stdin pipe kind changed"
+  end
   if system.stdin:read_until("|", true) ~= "first" then
     raise "parent stdin delimiter read changed"
   end
@@ -44,7 +47,12 @@ local function exercise_parent_stdin(wait_for_close: boolean)
     raise "parent stdin retained bytes changed"
   end
   if system.stdin:read() then raise "parent stdin did not reach EOF" end
+  if system.stdin:kind() ~= "pipe" or system.stdout:kind() ~= "pipe" or
+     system.stderr:kind() ~= "pipe" then
+    raise "parent pipe kind changed at EOF"
+  end
   system.stdin:close()
+  if system.stdin:kind() ~= "pipe" then raise "borrowed stdin close changed kind" end
   if system.stdin:read() then raise "borrowed stdin close changed EOF" end
 end
 
