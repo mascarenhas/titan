@@ -426,6 +426,21 @@ arg = { [0] = %q .. "/titanc", "-v", "--incremental",
 dofile(%q .. "/titanc")
 ]], repository, repository, repository, first, second, first_output, second_output, executable, repository))
         local unprotected
+        local successor_image, successor_companions
+        local function companion_snapshot()
+            local result = {}
+            local function visit(path, relative)
+                local kind = lfs.symlinkattributes(path, "mode")
+                if kind == "directory" then
+                    result[relative] = { kind = kind }
+                    for name in lfs.dir(path) do
+                        if name ~= "." and name ~= ".." then visit(path .. "/" .. name, relative .. "/" .. name) end
+                    end
+                elseif kind then result[relative] = { kind = kind, bytes = read(path) } end
+            end
+            visit(executable .. ".dSYM", "")
+            return result
+        end
         local function release_native() write(release, "release") end
         contend(lua, frontend, {}, {}, true, {
             timeout = 60000, defer_waiter = true, env = compiler_environment({ CC = wrapper }),
@@ -441,9 +456,18 @@ dofile(%q .. "/titanc")
             end,
             release_orphan = release_native,
             allow_early_waiter = function() return unprotected end,
-            after_waiter_exit = release_native,
+            after_waiter_exit = function()
+                local captured, capture_error = pcall(function()
+                    successor_image = read(executable)
+                    successor_companions = companion_snapshot()
+                end)
+                release_native()
+                assert.is_true(captured, tostring(capture_error))
+            end,
         })
         assert.equal("file", lfs.attributes(executable, "mode"))
+        assert.equal(successor_image, read(executable))
+        assert.same(successor_companions, companion_snapshot())
         local result = compiler_io.new_sync():run({ executable })
         assert.equal(22, result.status, result.output or result.diagnostic)
         assert.not_equal(executable, read(stage_log))
