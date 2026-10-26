@@ -68,6 +68,7 @@ compiler spec/checker/type_relations_soundness_spec.lua 1.009 5.964
 compiler spec/checker/type_tests_spec.lua 0.773 5.536
 compiler spec/checker/unions_spec.lua 0.526 6.427
 compiler spec/checker/variadic_spec.lua 0.503 3.706
+compiler spec/checker_recovery_index_spec.lua 1.000 -
 compiler spec/codecov_report_spec.lua 0.002 0.017
 compiler spec/coder/adapter_registry_elimination_spec.lua 2.278 7.976
 compiler spec/coder/backtrace_spec.lua 2.580 6.038
