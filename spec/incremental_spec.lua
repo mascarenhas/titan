@@ -192,6 +192,30 @@ describe("incremental certificate identities", function()
         assert.equal(cancelled, err)
     end)
 
+    it("preserves failed-read diagnostics and cancellation values", function()
+        local path = "/src/main.titan"
+        local message = path .. ": forced read failure"
+        for _, reader in ipairs({ incremental.file_digest, incremental.file_contents }) do
+            for _, failure in ipairs({ "nil", "false" }) do
+                local ctx = context({ [path] = "source" })
+                function ctx.io:read_file()
+                    if failure == "false" then return false, message end
+                    return nil, message
+                end
+                assert.has_error(function() reader(ctx, path) end, message)
+                assert.equal(0, incremental.counters(ctx).file_hashes)
+                assert.equal(0, incremental.counters(ctx).file_reads)
+            end
+        end
+        local ctx = context({ [path] = "source" })
+        local cancelled = {}
+        function ctx.io:read_file() return false, cancelled end
+        local ok, err = pcall(incremental.file_contents, ctx, path)
+        assert.is_false(ok)
+        assert.equal(cancelled, err)
+        assert.equal("", incremental.file_contents(context({ [path] = "" }), path))
+    end)
+
     it("uses stored producer digests without reconstructing a restored AST", function()
         local ctx = context({})
         local entry = source_entry("main")
@@ -508,6 +532,69 @@ describe("incremental configuration", function()
         assert.equal(first, incremental.toolchain_identity(ctx, descriptor))
         assert.equal(2, #ctx.io.commands)
         assert.equal(0, incremental.counters(ctx).file_hashes)
+    end)
+
+    it("separates stable tool metadata from verbose compiler action commands", function()
+        local header = table.concat({
+            "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+            "Target: arm64-apple-darwin27.0.0",
+            "Thread model: posix",
+            "InstalledDir: /Library/Developer/CommandLineTools/usr/bin",
+            " (in-process)",
+        }, "\n")
+        local footer = table.concat({
+            "clang -cc1 version 21.0.0 based upon LLVM 21.0.0",
+            '#include "..." search starts here:',
+            "#include <...> search starts here:",
+            " /sdk/include",
+            "End of search list.",
+        }, "\n") .. "\n"
+        local function identity(cwd, change, clock)
+            local ctx = context({ ["/tool/cc"] = "driver", ["/tool/as"] = "assembler" })
+            ctx.io.clock = clock or 1
+            local action = ' "/tool/compiler with spaces" "-cc1" "-triple" "arm64-apple-darwin" ' ..
+                '"-E" "-fdebug-compilation-dir=' .. cwd .. '" "-fcoverage-compilation-dir=' .. cwd .. '"'
+            local banner = header .. "\n" .. action .. "\n" .. footer
+            local descriptor = { compiler_argv = { "/tool/cc" },
+                preprocessor_identity = "#define __COMPILER_VERSION__ 1\n",
+                banner = banner, stage_tools = { "/tool/as" } }
+            if change then change(descriptor, ctx) end
+            local digest, details = incremental.toolchain_identity(ctx, descriptor)
+            assert.equal(0, #ctx.io.commands)
+            assert.equal(0, incremental.counters(ctx).file_hashes)
+            return digest, details
+        end
+        local first, details = identity("/repository")
+        assert.truthy(details.banner:find(header, 1, true))
+        assert.truthy(details.banner:find(footer, 1, true))
+        assert.truthy(details.banner:find("'-cc1' '-triple' 'arm64-apple-darwin'", 1, true))
+        assert.is_nil(details.banner:find("/repository", 1, true))
+        assert.equal(first, (identity("/workspace with spaces")))
+        for _, replacement in ipairs({
+            { "clang%-2100%.3%.34%.2", "clang-2100.3.35.1" },
+            { "Target: arm64", "Target: x86_64" },
+            { "InstalledDir: /Library", "InstalledDir: /OtherLibrary" },
+            { "/sdk/include", "/other-sdk/include" },
+            { "LLVM 21%.0%.0", "LLVM 22.0.0" },
+            { '"arm64%-apple%-darwin"', '"x86_64-apple-darwin"' },
+        }) do
+            local changed = identity("/repository", function(descriptor)
+                descriptor.banner = descriptor.banner:gsub(replacement[1], replacement[2])
+            end)
+            assert.is_not.equal(first, changed)
+        end
+        assert.is_not.equal(first, (identity("/repository", function(descriptor)
+            descriptor.preprocessor_identity = "#define __COMPILER_VERSION__ 2\n"
+        end)))
+        assert.is_not.equal(first, (identity("/repository", nil, 2)))
+        assert.is_not.equal(first, (identity("/repository", function(_, ctx)
+            local stat = ctx.io.stat
+            function ctx.io:stat(path)
+                local result, err = stat(self, path)
+                if result and path == "/tool/as" then result.changed_seconds = result.changed_seconds + 1 end
+                return result, err
+            end
+        end)))
     end)
 
     it("shares only identical null-input compiler descriptions with the preprocessor", function()
