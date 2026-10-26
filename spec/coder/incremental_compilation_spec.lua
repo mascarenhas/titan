@@ -149,15 +149,15 @@ local function main(value)
 end
 
 -- Private copies keep publication/configuration fixtures away from the selected
--- SDK. Only read-only native libraries are hardlinked; headers are always copied.
-local function copy_tree(from, to, hardlink)
+-- SDK without changing link counts on shared installed archives or providers.
+local function copy_tree(from, to)
     mkdir(to)
     for name in lfs.dir(from) do
         if name ~= "." and name ~= ".." then
             local input, output = from .. "/" .. name, to .. "/" .. name
             if lfs.attributes(input, "mode") == "directory" then
-                copy_tree(input, output, hardlink)
-            elseif not hardlink or not lfs.link(input, output) then
+                copy_tree(input, output)
+            else
                 write(output, read(input))
             end
         end
@@ -170,7 +170,7 @@ local function private_sdk()
     if exists(prefix .. "/src/lua-5.5.1") then
         copy_tree(prefix .. "/src/lua-5.5.1", sdk_root .. "/src/lua-5.5.1")
     end
-    copy_tree(prefix .. "/lib", sdk_root .. "/lib", true)
+    copy_tree(prefix .. "/lib", sdk_root .. "/lib")
     return sdk_root
 end
 

@@ -2358,7 +2358,10 @@ describe("loader resolver ownership", function()
             ["titan-compiler.parser"] = {},
             ["titan-compiler.path"] = paths,
             ["titan-compiler.driver"] = fake_driver,
-            ["titan-compiler.incremental"] = {},
+            ["titan-compiler.incremental"] = {
+                load_digest_cache = function() return true end,
+                save_digest_cache = function() return true end,
+            },
             ["titan-compiler.nativeinputs"] = {
                 normalize = function() return {} end,
             },
@@ -2582,21 +2585,25 @@ describe("generated C formatting", function()
     local original_set_file_contents
     local original_native
 
+    local original_stderr
+
     before_each(function()
         original_execute = os.execute
         original_rename = os.rename
         original_print = _G.print
+        original_stderr = io.stderr
         original_formatter = driver.CLANG_FORMAT
         original_format_generated_file = driver.format_generated_file
         original_get_file_contents = util.get_file_contents
         original_set_file_contents = util.set_file_contents
-        original_native = platform.native
+        platform.native = original_native
     end)
 
     after_each(function()
         os.execute = original_execute
         os.rename = original_rename
         _G.print = original_print
+        io.stderr = original_stderr
         driver.CLANG_FORMAT = original_formatter
         driver.format_generated_file = original_format_generated_file
         util.get_file_contents = original_get_file_contents
@@ -2622,7 +2629,12 @@ describe("generated C formatting", function()
             commands[#commands + 1] = command
             return true, "exit", 0
         end
-        _G.print = function(command) printed[#printed + 1] = command end
+        io.stderr = {
+            write = function(_, command)
+                printed[#printed + 1] = tostring(command)
+                return true
+            end,
+        }
         driver.CLANG_FORMAT = "'/tools with spaces/clang-format' --Werror"
         local path = temporary.name(" generated module.c")
         write_file(path, "int value;\n")
@@ -3461,6 +3473,7 @@ describe("compiler module loader", function()
     local binary
     local previous
     local native_abi_exports
+    local static_provider_exports
 
     local function provider_path(path)
         return (path:gsub("%.so$", platform.windows and ".dll" or ".so"))
@@ -3496,6 +3509,7 @@ describe("compiler module loader", function()
         for name, modtype in pairs(module_types) do
             modtype.file = provider_path(modtype.file)
             provider.entries[name] = {
+                abi = driver.TITAN_ABI_VERSION,
                 type = modtype,
                 types = types.serialize(modtype),
                 layouts = empty_layouts(name),
@@ -3506,6 +3520,36 @@ describe("compiler module loader", function()
             provider.key_order[#provider.key_order + 1] = name
         end
         table.sort(provider.key_order, util.bytewise_less)
+        static_provider_exports[filename] = provider
+        staticmetadata.scan_archive = function(found_filename, options)
+            local template = static_provider_exports[found_filename]
+            if not template then
+                return previous.scan_archive(found_filename, options)
+            end
+            local result = {
+                archive = found_filename,
+                entries = {},
+                key_order = { table.unpack(template.key_order) },
+            }
+            for name, entry in pairs(template.entries) do
+                local copy = {}
+                for k, v in pairs(entry) do copy[k] = v end
+                if options and options.validate_types and copy.types then
+                    local decoded_types, err = options.validate_types(
+                        name, copy.types, copy.origin or found_filename)
+                    if not decoded_types then return nil, err end
+                    copy.decoded_types = decoded_types
+                end
+                if options and options.validate_layouts and copy.layouts then
+                    local decoded_layouts, err = options.validate_layouts(
+                        name, copy.layouts)
+                    if not decoded_layouts then return nil, err end
+                    copy.decoded_layouts = decoded_layouts
+                end
+                result.entries[name] = copy
+            end
+            return result
+        end
         context.provider_cache[filename] = provider
         return provider
     end
@@ -3798,8 +3842,10 @@ describe("compiler module loader", function()
             registry = types.registry,
             loadlib = titan._loadlib,
             abivalue = titan._abivalue,
+            scan_archive = staticmetadata.scan_archive,
         }
         native_abi_exports = {}
+        static_provider_exports = {}
         driver.TITAN_SOURCE_PATH = source
         driver.TITAN_BIN_PATH = binary
         driver.imported = {}
@@ -3813,6 +3859,7 @@ describe("compiler module loader", function()
         types.registry = previous.registry
         titan._loadlib = previous.loadlib
         titan._abivalue = previous.abivalue
+        staticmetadata.scan_archive = previous.scan_archive
         remove_tree(root)
     end)
 
@@ -4362,14 +4409,18 @@ describe("compiler module loader", function()
                 assert.is_true(counts.reads <= 1, path_key)
             end
             local shared_real = assert(hit_ctx.io:realpath(shared_header))
-            assert.equal(1, counters.files[shared_real].hashes)
-            assert.equal(1, require("c-parser.cpp").header_input_stats(hit_ctx.io).file_reads)
+            local header_stats = require("c-parser.cpp").header_input_stats(hit_ctx.io)
+            assert.is_true((counters.files[shared_real] and counters.files[shared_real].hashes or 0) <= 1)
+            assert.equal(1, header_stats.metadata_reuses + header_stats.file_hashes)
+            assert.is_true(header_stats.memo_reuses >= 1)
+            assert.is_true(header_stats.file_reads <= 1)
             for _, source_path in ipairs({ first_file, second_file, app_file }) do
                 local real = assert(hit_ctx.io:realpath(source_path))
                 assert.equal(1, counters.files[real].hashes, source_path)
                 assert.equal(1, counters.files[real].reads, source_path)
             end
 
+            local first_real = assert(hit_ctx.io:realpath(first_file))
             local warm_hashes = counters.file_hashes
             local warm_reads = counters.file_reads
             local revalidated = incremental.revalidate_record(
@@ -4381,11 +4432,11 @@ describe("compiler module loader", function()
             assert.equal("hit", revalidated.status)
             assert.equal(warm_hashes, counters.file_hashes)
             assert.equal(warm_reads, counters.file_reads)
-            assert.equal(1, counters.files[shared_real].hashes)
+            assert.equal(1, counters.files[first_real].hashes)
             assert.is_table(counters.revalidation)
             assert.equal(1, counters.revalidation.passes)
-            assert.equal(1, counters.revalidation.files[shared_real].hashes)
-
+            assert.equal(1, counters.revalidation.files[first_real].hashes)
+            assert.equal(1, counters.revalidation.files[first_real].reads)
             local worker_cfg = assert(driver.worker_configuration(hit_ctx))
             local worker_ctx = assert(driver.new_worker_context(
                 worker_cfg, compiler_io.new_sync()))
@@ -8051,9 +8102,9 @@ end
         assert.is_false(changed)
         assert.is_nil(classified)
         assert.same(observed, refreshed)
-        -- Sync observations are coarse on every platform, so content is read.
-        assert.equal(1, read_paths[outer])
-        assert.equal(1, read_paths[late_selected])
+        -- Precise native Sync observations reuse unchanged headers without reading.
+        assert.equal(0, read_paths[outer] or 0)
+        assert.equal(0, read_paths[late_selected] or 0)
 
         write_file(late_selected,
             "typedef long titan_driver_selected_header;\n")
@@ -9617,7 +9668,8 @@ describe("Windows link response files", function()
         previous = {
             windows = platform.windows, cc = driver.CC, getenv = platform.getenv,
             reserve = driver.sibling_temporary_path,
-            execute = os.execute, print = _G.print, remove = os.remove,
+            execute = os.execute, print = _G.print, stderr = io.stderr,
+            remove = os.remove,
         }
         platform.windows = true
         driver.CC = 'ccache "C:/compiler tools/clang.exe"'
@@ -9630,6 +9682,7 @@ describe("Windows link response files", function()
         driver.sibling_temporary_path = previous.reserve
         os.execute = previous.execute
         _G.print = previous.print
+        io.stderr = previous.stderr
         os.remove = previous.remove
         platform.getenv = previous.getenv
         os.remove(response)
@@ -9701,7 +9754,12 @@ describe("Windows link response files", function()
             local contents = assert(platform.windows_response_contents({ table.unpack(argv, 3) }))
             assert.is_true(#contents > 8191)
             local printed = {}
-            _G.print = function(line) printed[#printed + 1] = line end
+            io.stderr = {
+                write = function(_, line)
+                    printed[#printed + 1] = tostring(line)
+                    return true
+                end,
+            }
             os.execute = function(command)
                 assert.is_true(#command < 1024)
                 assert.truthy(command:find("@", 1, true))
