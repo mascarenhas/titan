@@ -237,4 +237,18 @@ lexer.DOT      = lexer.DOT      - (P(".") * R("09"))
 lexer.LBRACKET = lexer.LBRACKET - (P("[") * P("=")^0 * P("["))
 lexer.SUB      = lexer.SUB      - P("--")
 
+-- One complete lexical token of any kind, captures discarded. Lexical scans
+-- (parser.scan_imports) step over strings, comments and numerals with the
+-- parser's own token boundaries and string decoding instead of a second
+-- tokenizer. Every token pattern obeys the longest-match rule, so the choice
+-- order does not change which token matches.
+do
+    local names = {}
+    for tokname in pairs(symbols) do names[#names + 1] = tokname end
+    table.sort(names)
+    local token = lexer.STRINGLIT + lexer.NUMBER + lexer.ANYNAME
+    for _, tokname in ipairs(names) do token = token + lexer[tokname] end
+    lexer.any_token = token / 0
+end
+
 return lexer

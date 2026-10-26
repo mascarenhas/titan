@@ -25,9 +25,7 @@ dependencies = {
    "inspect >= 3.1.0",
    "argparse >= 0.7.0",
    "luafilesystem >= 1.9.0",
-   platforms = {
-      windows = { "luv >= 1.52.1" }
-   }
+   "luv >= 1.52.1"
 }
 test_dependencies = {
    "busted >= 2.0",

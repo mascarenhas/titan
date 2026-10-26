@@ -35,7 +35,7 @@ license texts and this attribution.
 
 ## luv
 
-The Windows compiler installs luv `1.52.1-0`, obtained from
+The compiler installs luv `1.52.1-0` on every platform, obtained from
 <https://github.com/luvit/luv/releases/tag/1.52.1-0>. Luv is Copyright 2014
 The Luvit Authors and is distributed under the Apache License 2.0, included in
 the dependency's `LICENSE.txt`. Its bundled libuv 1.52.1 retains the same

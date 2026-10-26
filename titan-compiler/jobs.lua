@@ -1,7 +1,8 @@
--- Native job scheduling shared by generated-C compilation, provider links and
--- the C probe batch: the job-slot ledger that participates in a parent GNU
--- Make jobserver, the completion channel, the background launcher, and the
--- launch/reap loop.
+-- Native job scheduling shared by generated-C compilation, provider links,
+-- the C probe batch and the build coordinator (titan-compiler.build): the
+-- job-slot ledger that participates in a parent GNU Make jobserver, the
+-- completion channel, the background launcher, the launch/reap loop, and the
+-- build-worker executor that sends a worker's batches to its coordinator.
 -- Implementation notes: doc/implementation/driver.md#parallel-generated-c-compilation
 local platform = require "titan-compiler.platform"
 
@@ -168,6 +169,65 @@ local function warn_unusable(auth, reason)
         "'+' or use GNU Make 4.4's FIFO jobserver)\n")
 end
 
+local warned_local_cap = false
+
+-- The single policy for a valid inherited pipe jobserver that this platform
+-- cannot reopen privately (stock macOS Make 3.81): titanc keeps its own local
+-- --jobs/TITAN_JOBS bound and takes no part in the parent's pool. It neither
+-- changes the flags of the parent's shared pipe descriptions nor reads
+-- tokens through a blocking helper thread. Sharing a parent pool requires
+-- GNU Make 4.4's FIFO jobserver or Linux's private reopen (maintainer
+-- decision for issue #303). Returns the bound to use.
+function jobs.unshareable_pipe_limit(local_cap, auth, reason)
+    if not warned_local_cap then
+        warned_local_cap = true
+        pcall(io.stderr.write, io.stderr,
+            "titanc: warning: the parent make jobserver (" .. auth.text ..
+            ") cannot be shared on this platform: " .. tostring(reason) ..
+            "; using titanc's own job bound of " .. tostring(local_cap) ..
+            " (GNU Make 4.4's FIFO jobserver shares the parent's pool)\n")
+    end
+    return local_cap
+end
+
+-- Build-worker native execution (titan-compiler.build_worker). A worker owns
+-- no ledger, jobserver client or signal guard: build_worker installs its
+-- coordinator channel here, and each batch opened through open_slots,
+-- open_channel, launch and drive becomes one request to the coordinator,
+-- which owns the invocation's single slot ledger and starts, reaps and
+-- reports every child. A synchronous io:run stays in the worker, under the
+-- frontend slot the coordinator granted it.
+-- `executor:run_batch(jobs)` takes { {argv, stdout, stderr}, ... } and
+-- returns per-job { ok, term, code } (nil for a job it never started), the
+-- transport failure text, and the cancelling signal number; it never raises
+-- for a transport failure.
+local remote
+
+function jobs.use_remote(executor)
+    remote = executor
+end
+
+local RemoteSlots = {}
+RemoteSlots.__index = RemoteSlots
+
+function RemoteSlots:acquire_nowait()
+    if self.active >= self.limit then return false end
+    self.active = self.active + 1
+    return true
+end
+
+function RemoteSlots:release()
+    if self.active > 0 then self.active = self.active - 1 end
+    return true
+end
+
+function RemoteSlots:cancelled() return self.cancelled_signal end
+
+function RemoteSlots:close()
+    self.active = 0
+    return true
+end
+
 -- One job-slot ledger per native batch. The first active job uses the
 -- implicit slot of the process that Make started; with a usable parent
 -- jobserver every further concurrent job holds one borrowed token, so the
@@ -183,6 +243,11 @@ function jobs.open_slots(local_cap, options)
     assert(math.type(local_cap) == "integer" and local_cap >= 1,
         "the local job cap must be a positive integer")
     options = options or {}
+    if remote then
+        return setmetatable({
+            limit = local_cap, shared = false, active = 0, remote = remote,
+        }, RemoteSlots)
+    end
     local slots = setmetatable({
         limit = local_cap, shared = false, active = 0,
     }, Slots)
@@ -196,17 +261,19 @@ function jobs.open_slots(local_cap, options)
     if makeflags == nil then makeflags = platform.getenv("MAKEFLAGS") end
     local policy = jobs.make_policy(makeflags)
     if policy.auth and local_cap > 1 then
-        local client, reason
+        local client, reason, unsupported
         if policy.auth.kind == "fifo" then
             client, reason = support._jobserver_open("fifo", policy.auth.path)
         elseif policy.auth.kind == "pipe" then
-            client, reason = support._jobserver_open(
+            client, reason, unsupported = support._jobserver_open(
                 "pipe", policy.auth.read, policy.auth.write)
         else
             reason = "unrecognized jobserver authorization"
         end
         if client then
             slots.client, slots.shared = client, true
+        elseif unsupported == "unsupported" then
+            slots.limit = jobs.unshareable_pipe_limit(local_cap, policy.auth, reason)
         else
             warn_unusable(policy.auth, reason)
             slots.limit = 1
@@ -268,6 +335,20 @@ function Slots:cancelled()
     return self.cancelled_signal
 end
 
+-- For an event loop that does its own waiting (titan-compiler.build): the
+-- private parent-jobserver descriptor to poll for readability after
+-- acquire_nowait returned false, and the cancellation guard's wake
+-- descriptor. Either is nil when it does not apply.
+function Slots:token_descriptor()
+    if self.client and self.active > 0 and self.active < self.limit then
+        return self.client:descriptor()
+    end
+end
+
+function Slots:signal_descriptor()
+    if self.guard then return self.support._signal_wake_descriptor() end
+end
+
 -- Returns every borrowed byte and restores the prior signal actions; call it
 -- on every path. Idempotent. Afterwards `cancelled()` still reports a signal
 -- the guard caught, which the caller must return to its owner.
@@ -321,8 +402,16 @@ end
 -- The completion channel of one native batch. POSIX: a private FIFO created
 -- at the fresh temporary pathname returned by `reserve()`; each background
 -- wrapper writes its completion index line after its command exited. Windows:
--- the bounded luv process batch, whose `read` returns the next index.
+-- the bounded luv process batch, whose `read` returns the next index. In a
+-- build worker: the list of requests that `drive` sends to the coordinator.
 function jobs.open_channel(reserve)
+    if remote then
+        return {
+            remote = true,
+            requests = {},
+            file = { close = function() return true end },
+        }
+    end
     if platform.windows then
         local batch, err = require("titan-compiler.process").new_batch()
         if not batch then return nil, err end
@@ -413,9 +502,22 @@ end
 -- caller-owned log files, or are merged in order when both paths are equal.
 -- `before_start`, when given, runs after every fallible preparation step and
 -- immediately before the child starts (the driver prints verbose commands
--- there). The caller removes its logs when this returns nil.
+-- there). The caller removes its logs when this returns nil. A build worker
+-- only records `argv` and the logs for its coordinator; `drive` sends them.
 function jobs.launch(channel, argv, command, stdout_path, stderr_path,
                      completion_index, before_start)
+    if channel.remote then
+        if before_start then
+            local ready, ready_err = before_start()
+            if not ready then return nil, ready_err end
+        end
+        local process = { remote = true, finish_errors = {} }
+        channel.requests[#channel.requests + 1] = {
+            argv = argv, stdout = stdout_path, stderr = stderr_path,
+            process = process,
+        }
+        return process
+    end
     if platform.windows then
         if before_start then
             local ready, ready_err = before_start()
@@ -466,6 +568,10 @@ end
 -- Wait for one launched child without throwing; records `ok`, `term` and
 -- `code` exactly as `io.popen`'s close (or the Windows process wait) reports.
 function jobs.reap(process)
+    if process.remote then
+        process.reaped = true
+        return
+    end
     process.finish_errors = {}
     local called, ok, term, code = pcall(process.pipe.close, process.pipe)
     if not called then
@@ -476,6 +582,53 @@ function jobs.reap(process)
     end
     process.ok, process.term, process.code = ok, term, code
     process.reaped = true
+end
+
+-- A build worker's batch: every position is recorded in order (the caller's
+-- size-descending schedule is the coordinator's start order), then sent as
+-- one request. The coordinator starts a prefix of it, so a job it never
+-- started carries an explanation instead of an exit status.
+local function remote_drive(slots, channel, count, launch, launch_failed)
+    local next_position, raised = count + 1, nil
+    for position = 1, count do
+        local called, process, launch_err = pcall(launch, position)
+        if not called then
+            raised = { error = process }
+            next_position = position
+            break
+        end
+        if not process then launch_failed(position, launch_err) end
+    end
+    local requests = channel.requests
+    channel.requests = {}
+    if #requests == 0 then return next_position, nil, nil, raised end
+    local batch = {}
+    for index, request in ipairs(requests) do
+        batch[index] = {
+            argv = request.argv, stdout = request.stdout, stderr = request.stderr,
+        }
+    end
+    local called, results, failure, cancelled =
+        pcall(slots.remote.run_batch, slots.remote, batch)
+    if not called then
+        raised = raised or { error = results }
+        results, failure = nil, "the build coordinator request failed"
+    end
+    for index, request in ipairs(requests) do
+        local process, result = request.process, results and results[index]
+        if result then
+            process.ok, process.term, process.code = result.ok, result.term, result.code
+        else
+            process.ok = nil
+            process.finish_errors[#process.finish_errors + 1] = cancelled and
+                ("not started: interrupted by signal " .. tostring(cancelled)) or
+                ("not started: " .. tostring(failure or
+                    "the build coordinator did not run it"))
+        end
+        process.reaped = true
+    end
+    slots.cancelled_signal = cancelled
+    return next_position, failure, cancelled, raised
 end
 
 -- The launch/reap loop of one native batch over positions 1..count, launched
@@ -490,6 +643,9 @@ end
 -- what `launch` raised (if anything), which the caller rethrows unchanged
 -- after its own cleanup. `label` names the children in failures.
 function jobs.drive(slots, channel, count, launch, launch_failed, label)
+    if channel.remote then
+        return remote_drive(slots, channel, count, launch, launch_failed)
+    end
     local pending, pending_count, next_position = {}, 0, 1
     local failure, cancelled, raised
     local function fail(message)
