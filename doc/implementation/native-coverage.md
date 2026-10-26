@@ -76,12 +76,23 @@ instead; `*` and `?` match logical-name characters including dots. Neither mode
 imports additional roots or instruments prebuilt providers. The generated test
 runner is unmeasured. An empty selection is a compiler error.
 
-Each generated object records its partial coverage inventory in the existing
-object metadata (`coverage.partial`): absolute generated C paths and the source
-anchors needed for reporting. Incremental reuse reads that metadata. The final
-link combines partials (`coverage.inventory`) and serializes the complete Lua
-table into the test executable. This uses compiler-known outputs and does not
-hash or attest the build.
+Each generated object records `coverage_test_functions`
+(`coverage.test_functions(ast)`) and its partial coverage inventory
+(`coverage.partial`: `enabled`, `backend`, absolute generated C `files`,
+`sources`, and `anchors`) in `.titan.source` object metadata, and records
+`{ enabled = <boolean>, backend = <string> }` in the certificate's
+`codegen.coverage` options. When `incremental.certify_local` checks a coverage
+object, it verifies `codegen.coverage` and requires one recorded file per part
+plus a regular `.c`, `.o`, and (when `coverage.enabled` is true) `.gcno` notes
+file for every part ([split reuse
+checks](incremental-compilation.md#split-modules)). At final link time,
+`coverage.select` reads `coverage_test_functions` from certified object-backed
+entries (`coverage.lua`), `coverage.inventory` combines their saved partials,
+and `linkcertificate.prepare` records the complete `coverage_runtime` table in
+the final-link recipe while snapshotting the immutable executable and provider
+outputs. Runtime `.gcda` counter files and generated report files are mutable
+execution outputs, not part of the final-link certificate, so running the
+coverage executable does not invalidate a subsequent incremental build.
 
 Coverage converts generated C part by part. `driver.compile` runs
 `coverage_lines.convert` independently on each part's C file and always passes
@@ -94,9 +105,6 @@ conversion. The shared `<stem>.priv.h` is retained for diagnostics but is not
 converted and owns no source lines. Because every part is inventoried, the
 runtime reset removes each part's `.gcda` and `coverage.finish` reads each
 part's notes.
-Incremental reuse in coverage mode additionally requires one recorded file per
-part and a regular `.c` and `.gcno` for every part
-([split reuse checks](incremental-compilation.md#split-modules)).
 
 `coverage.compile_flags` gives every source object `-O0 -fno-lto`. Selected
 objects add `--coverage -fprofile-update=atomic`. The GCC backend adds
@@ -165,23 +173,39 @@ them. Separate source/build trees provide independent sessions.
 ## Repository integration and verification
 
 The Unix and Windows `titan-native-coverage-build`/`-run` targets source-link
-production imports into the ordinary native aggregate, with `--coverage-module
-'titan.*'`, and reuse its fixtures, filters, timeout harness and output
-validator. A successful aggregate execution also writes its report. Children
-that import the prebuilt SDK stay unmeasured.
+production imports into the native aggregate with `--incremental`,
+`--coverage-module 'titan.*'`, `--test-dir` discovery over `spec/stdlib/titan`,
+explicit first root `test.tests`, and the three aggregate C helpers
+(`async_foreign_work.c`, `fs_fixture.c`, `uv_stdio_probe.c`) passed via
+`--c-source`, reusing the suite's fixtures, filters, timeout harness, and output
+validator. On Unix, `titan-native-coverage-build` runs from
+`$(TITAN_COVERAGE_BUILD_DIR)` (`out/coverage`) with `--output .`, `--tree
+$(abspath spec/stdlib/titan);$(CURDIR)`, `--exe $(TITAN_COVERAGE_EXECUTABLE)`,
+and `-X $(STDLIB_EXTRA_OBJECTS)`. On Windows (`scripts/windows_native_coverage.sh`
+and `spec/support/windows_stdlib_tests.sh` with `TITAN_TEST_COVERAGE=1`), the
+harness refreshes the marked NTFS workspace and invokes `titanc` with `--output
+"$work/coverage"` and `--exe "$winprefix/bin/titan-stdlib-tests.exe"`, keeping
+coverage objects, `.gcno` notes, `.native` helpers, and `.titan-links`
+certificates in `work/coverage` while the launcher in `work/sdk/bin` embeds the
+relative path to `work/coverage/lib/titan/0.6/test/tests.dll`. The harness
+records `TITAN_TEST_COVERAGE` in `work/compiler.env` and rejects a run requested
+with a different coverage mode. A successful aggregate execution writes its
+report. Children that import the prebuilt SDK stay unmeasured.
 
 Coverage runs stay serial on both platforms. Unix `titan-native-coverage-run`
 delegates to the focused `titan-stdlib-test-run` leaf, never to
 `titan-stdlib-test-run-parallel`: the executable resets the counters of its
 whole embedded inventory at startup and dumps them after its own run, so
 concurrent owner groups of one coverage executable would erase and race on the
-same `.gcda` files. The coverage build still compiles with up to `TITAN_JOBS`
-generated-C jobs and, as a `+` recipe, shares a parent Make's job pool ([Make
-job pool and titanc recipes](build-script-audit.md#make-job-pool-and-titanc-recipes)).
+same `.gcda` files. The coverage build compiles with up to `TITAN_JOBS`
+concurrent frontend workers and native compiler jobs and, as a `+` recipe
+guarded by `RECURSIVE_WRAPPER_GUARD`, shares a supported parent Make's job pool
+([Make job pool and titanc
+recipes](build-script-audit.md#make-job-pool-and-titanc-recipes)).
 
 | Variable | Unix `Makefile` default | Windows `Makefile.win` default |
 | --- | --- | --- |
-| `TITAN_COVERAGE_BUILD_DIR` | `out/coverage` | `$(WINDOWS_BUILD_ROOT)/native-coverage`, a private local NTFS SDK copy (`scripts/windows_native_coverage.sh`) |
+| `TITAN_COVERAGE_BUILD_DIR` | `out/coverage` | `$(WINDOWS_BUILD_ROOT)/native-coverage`, a private local NTFS workspace (`scripts/windows_native_coverage.sh`; compiler outputs under `coverage/`) |
 | `TITAN_COVERAGE_REPORT_DIR` | `$(TITAN_COVERAGE_BUILD_DIR)/report` | `$(TITAN_COVERAGE_BUILD_DIR)/report` |
 | `TITAN_COVERAGE_GCOV` | `gcov` | `llvm-cov.exe gcov` |
 | `TITAN_COVERAGE_GCOVR` / `TITAN_COVERAGE_FORMATS` | `gcovr` / empty | `gcovr` / empty |
@@ -189,7 +213,10 @@ job pool and titanc recipes](build-script-audit.md#make-job-pool-and-titanc-reci
 
 On Linux the coverage link adds `-rdynamic`. The source-linked aggregate
 contains the whole standard library, and the stock Lua C helper modules that
-the suite loads resolve the host Lua API from the executable.
+the suite loads resolve the host Lua API from the executable. In CI, the
+coverage lane also verifies that an identical `luarocks make --force` reinstall
+followed by `make titan-native-coverage-build TITAN_VERBOSE=1` hits all object,
+native, and final-link certificates without recompiling or relinking.
 
 `spec/coverage_lines_spec.lua` owns the lexical converter; coder attribution
 specs own real Titan source anchors, nested lowering, foreign outlining,

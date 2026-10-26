@@ -9,19 +9,21 @@ destination. No absolute source prefix or `..` component enters an
 output-relative stem.
 
 The [language chapter](../language/output-directory.md) defines paths and
-compatibility. The implementation lives in `titanc`, `driver.lua`, and
+compatibility. The implementation lives in `titanc`, `driver.lua`, `build.lua`,
+`incremental.lua`, `nativeinputs.lua`, `linkcertificate.lua`, and
 `coverage.lua`.
 
 ## One source identity, separate artifact locations
 
 The selected flat or folder source keeps its original filenames and constituent
-list. Those identities drive diagnostics, `#line`, source timestamps, quoted
-authored-header resolution, coverage source lines, and source-private import
-permissions. Only native output and program output paths move. Folder
-contributors still form one generated module owned by the canonical main. Its
-part files (`<stem>.part<k>.c`/`.o`), `<stem>.priv.h`, and `<stem>.parts` derive
-from the same mapped stem
-([split parts](codegen-overview.md#translation-unit-parts)).
+list. Those identities drive diagnostics, `#line`, source content digests and
+folder-membership certificates, quoted authored-header resolution, coverage
+source lines, and source-private import permissions. Only native output and
+program output paths move. Folder contributors still form one generated module
+owned by the canonical main. Its part files (`<stem>.part<k>.c`/`.o`) and
+`<stem>.priv.h` derive from the same mapped stem ([split
+parts](codegen-overview.md#translation-unit-parts)) and are recorded in the
+primary `<stem>.o`'s `.titan.source` metadata.
 
 The resolver's `output_root` option maps the canonical main's
 source-root-relative path to `native_output` and `program_output`
@@ -34,10 +36,17 @@ Without an output root the resolver keeps source-adjacent paths. Routing changes
 neither serialized interfaces nor the generated-code ABI.
 
 Final providers keep common-prefix naming below the output root, and generated
-Lua shims keep their logical module paths there. Unix programs and test runners
-use mapped program stems. Windows program linking receives the output root for
-its `bin/` launcher and `lib/titan/0.6/` provider layout
-(`driver.windows_program_paths`). Output routing never changes the source or
+Lua shims keep their logical module paths there. Without `--exe`, Unix programs
+and test runners use mapped `program_output` stems below the output root, and
+Windows programs use `<output>/bin/<logical>.exe` and
+`<output>/lib/titan/0.6/<logical/module>.dll` (`driver.windows_program_paths`).
+With `--exe PATH`, `PATH` is resolved relative to the invocation working
+directory rather than `--output`: on Unix the executable (and Darwin `.dSYM`
+bundle) is written at `PATH`, while on Windows the launcher (`.exe` appended if
+absent) is written at `PATH`, the companion provider DLL stays at
+`<output>/lib/titan/0.6/<logical/module>.dll`, and the launcher embeds the
+relative path from `<exe-dir>/../lib/titan/0.6` to that provider DLL (requiring
+both paths to share a volume). Output routing never changes the source or
 binary search paths.
 
 ## Headers, temporary files, and coverage
@@ -46,9 +55,36 @@ Generated FFI and foreign-function headers follow `native_output`. Checking FFI
 bundles and compiler-owned temporary files (diagnostics, child notifications,
 native validation) are created under the output root: the resolver context wraps
 `io:tmpname` into `<output_root>/.titan-temporary-*`, and `driver.OUTPUT_ROOT`
-places the compile-log temporaries. Both keep their normal cleanup. Provider and
-archive publication stages sit beside their mapped final paths. The C probe
+places the compile-log temporaries. Both keep their normal cleanup. Before
+dispatching a worker for a module miss, the coordinator unlinks the old primary
+`<stem>.o` and its recorded part objects (`driver.invalidate_source_object`);
+the worker compiles object parts into unique sibling temporaries and the
+coordinator renames non-primary parts before renaming `<stem>.o` last. Provider
+and archive publication stages sit beside their mapped final paths. The C probe
 cache keeps its own storage root.
+
+Under the primary output domain (`--output`, or the first `--tree` source root
+when `--output` is omitted), `titanc` also owns:
+
+- `<domain>/.titan-build.lock` (`build.lock_outputs`): the permanent OS lock
+  file (`O_NOFOLLOW | O_CLOEXEC` + `flock` on POSIX; `CreateFileW` with
+  `FILE_FLAG_OPEN_REPARSE_POINT` and no `FILE_SHARE_DELETE` + `LockFileEx` on
+  Windows) held from certification through publication, plus
+  `dirname(--exe)/.titan-build.lock` when `--exe` is used;
+- `<domain>/.titan/preamble.c` (`incremental.preamble_identity`): the stable
+  synthetic translation unit used to probe and certify the generated C preamble
+  and transitive SDK/system headers;
+- `<domain>/.native/<sha256(canonical-source-path)>.{o,record,i,d}`
+  (`nativeinputs.compile`): preprocessed output, dependency file, sidecar
+  certificate (`TITAN_NATIVE_RECORD_SCHEMA`), and compiled object for each
+  `--c-source` input; and
+- `<domain>/.titan-links/<sha256(canonical-final-output-set)>/`
+  (`linkcertificate.prepare`): the target's final-link certificate (`record`,
+  `TITAN_LINK_RECORD_SCHEMA`), linker dependency output (`link.d`), and
+  `synthetic/` directory (`<leaf>__test_runner.{titan,c,o}` and
+  `<leaf>__[test_]entrypoint.{c,o}`, plus Windows `.manifest`/`.rc`/`.res` and
+  `__coverage_dump.{c,o}` companions), isolating synthetic sources when several
+  executables in one output tree share a first root.
 
 Coverage applies its `.coverage` transform after ordinary output mapping
 (`titan-compiler/coverage.lua` `coverage.output_path`). This keeps the same
@@ -57,20 +93,25 @@ incremental objects. Unless `--coverage-output` overrides it, the report goes
 to `<output-root>/.coverage/report` (`coverage.prepare`). Source and counter
 inventories keep absolute paths.
 
-The repository Makefiles pass one output root through separate object recipes
-and final links; see [Build and installation
-responsibilities](build-script-audit.md) for the object graph. Native test and
-coverage configurations use separate subtrees below `out/`. The Windows scripts
-keep their private source, SDK, fixture, and launcher trees inside the selected
-build root; see [Experimental Windows build](windows-build.md).
+The repository Makefiles invoke one `titanc --incremental --output ...` command
+per target (`out` for `stdlib`/`stdlib-objects`, `out/tests` for
+`titan-stdlib-test-build`/`-objects`, `out/tests/native/<helper>.o` for
+child-only C fixture preparation, and `out/coverage` for
+`titan-native-coverage-build`); see [Build and installation
+responsibilities](build-script-audit.md). The Windows scripts keep their
+private source, SDK, fixture, native-helper, coverage, and launcher trees
+inside the selected build root; see [Experimental Windows
+build](windows-build.md).
 
 ## Validation boundaries
 
 `spec/driver_spec.lua` covers mapping and directory preparation. CLI
 integration specs (`spec/coder/incremental_compilation_spec.lua`,
-`spec/coder/test_runner_spec.lua`, `spec/coder/standalone_paths_spec.lua`)
-compile and run external source trees, libraries, folder modules, and test
-runners with output paths that contain spaces. Incremental cases verify reuse
+`spec/coder/build_coordination_spec.lua`, `spec/coder/link_certification_spec.lua`,
+`spec/coder/native_inputs_spec.lua`, `spec/coder/test_runner_spec.lua`,
+`spec/coder/standalone_paths_spec.lua`) compile and run external source trees,
+libraries, folder modules, and test runners with output paths that contain
+spaces. Incremental cases verify reuse
 and header restoration in the selected tree, and coverage cases verify the
 relocated `.coverage` artifacts and default report directory. Packaging specs
 check that publication and invalidation consume the output stage. The native
