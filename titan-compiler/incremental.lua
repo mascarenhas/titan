@@ -77,7 +77,7 @@ function incremental.digest(context, tag, value)
 end
 
 local function required(value, err, path)
-    if value == nil then
+    if not value then
         if err ~= nil and type(err) ~= "string" then error(err, 0) end
         error((path and (path .. ": ") or "") .. (err or "input is missing"), 0)
     end

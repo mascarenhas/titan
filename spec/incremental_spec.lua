@@ -192,6 +192,30 @@ describe("incremental certificate identities", function()
         assert.equal(cancelled, err)
     end)
 
+    it("preserves failed-read diagnostics and cancellation values", function()
+        local path = "/src/main.titan"
+        local message = path .. ": forced read failure"
+        for _, reader in ipairs({ incremental.file_digest, incremental.file_contents }) do
+            for _, failure in ipairs({ "nil", "false" }) do
+                local ctx = context({ [path] = "source" })
+                function ctx.io:read_file()
+                    if failure == "false" then return false, message end
+                    return nil, message
+                end
+                assert.has_error(function() reader(ctx, path) end, message)
+                assert.equal(0, incremental.counters(ctx).file_hashes)
+                assert.equal(0, incremental.counters(ctx).file_reads)
+            end
+        end
+        local ctx = context({ [path] = "source" })
+        local cancelled = {}
+        function ctx.io:read_file() return false, cancelled end
+        local ok, err = pcall(incremental.file_contents, ctx, path)
+        assert.is_false(ok)
+        assert.equal(cancelled, err)
+        assert.equal("", incremental.file_contents(context({ [path] = "" }), path))
+    end)
+
     it("uses stored producer digests without reconstructing a restored AST", function()
         local ctx = context({})
         local entry = source_entry("main")
