@@ -65,6 +65,7 @@ p:option('-D --define', 'Native preprocessor definition NAME[=VALUE]; repeatable
 p:option('--cflag', 'One native compile argument, written --cflag=-pthread; repeatable, order kept.'):count('*'):action(native_switch('cflag'))
 p:option('--ldflag', 'One native link argument, written --ldflag=-Wl,--as-needed; repeatable, order kept.'):count('*'):action(native_switch('ldflag'))
 p:option('--c-source', 'C file compiled and certified by this invocation, linked before -X payloads; repeatable.'):count('*')
+p:flag('--print-c-objects', 'With -c and --c-source, print one absolute certified object path per C-source argument in order; stdout contains paths only.')
 p:option('--test-dir', 'With --test, use every source module below this directory whose final name component follows the test convention (test, tests, spec, specs, *_test(s), *_spec(s)) as a root; repeatable.'):count('*')
 p:option('--test-exclude', 'With --test-dir, exclude this discovered logical module; repeatable.'):count('*')
 p:option('-X --extra-object',
@@ -124,6 +125,15 @@ local function finish()
         exit("failed to clean C probe service: " .. tostring(close_err))
     end
     release_locks()
+end
+
+if args.print_c_objects then
+    if not args.compile_only or #args.c_source == 0 then
+        exit("--print-c-objects requires --compile-only and at least one --c-source")
+    end
+    if args.print_root or args.print_ast then
+        exit("--print-c-objects cannot be combined with --print-root or --print-ast")
+    end
 end
 
 if args.print_root then
@@ -939,7 +949,27 @@ end
 if #errors > 0 then exit(table.concat(errors, "\n")) end
 
 if args.compile_only then
+    local listed_paths
+    if args.print_c_objects then
+        local cwd, cwd_error = resolver_context.io:cwd()
+        if not cwd then exit(cwd_error) end
+        local object_paths = {}
+        for _, object in ipairs(c_objects) do
+            local absolute, absolute_error =
+                platform.absolute(object.path, cwd, resolver_context.io)
+            if not absolute then exit(absolute_error) end
+            object_paths[linkcertificate.canonical_path(
+                resolver_context, object.source)] = absolute
+        end
+        listed_paths = {}
+        for _, source in ipairs(args.c_source) do
+            local canonical = linkcertificate.canonical_path(resolver_context, source)
+            listed_paths[#listed_paths + 1] = assert(object_paths[canonical],
+                "certified native object is missing for C source '" .. source .. "'")
+        end
+    end
     finish()
+    if listed_paths then io.stdout:write(table.concat(listed_paths, "\n"), "\n") end
     return
 end
 
