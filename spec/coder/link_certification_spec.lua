@@ -1,9 +1,11 @@
 local assert = require "luassert"
 local compiler_io = require "titan-compiler.io"
 local certificate = require "titan-compiler.linkcertificate"
+local incremental = require "titan-compiler.incremental"
 local lfs = require "lfs"
 local platform = require "titan-compiler.platform"
 local temporary = require "spec.support.temporary"
+local util = require "titan-compiler.util"
 local version = require "titan-compiler.version"
 
 local function remove(path)
@@ -19,6 +21,12 @@ end
 local function context() return { io = compiler_io.new_sync() } end
 local function write(path, bytes) assert(context().io:write_file(path, bytes)) end
 local function escape(path) return path:gsub("%$", "$$"):gsub("([ #])", "\\%1") end
+local function gnu_report(output, inputs)
+    local phony = {}
+    for _, filename in ipairs(inputs) do phony[#phony + 1] = filename .. ":\n" end
+    return output .. ": \\\n  " .. table.concat(inputs, " \\\n  ") .. "\n\n" ..
+        table.concat(phony, "\n")
+end
 
 local function clone(value)
     if type(value) ~= "table" then return value end
@@ -50,7 +58,7 @@ describe("final link certificates", function()
         for _, leaf in ipairs({ "main.o", "side.o", "helper.o", "payload.a", "provider.so", "runtime.a", "native.a", "program" }) do
             write(root .. "/" .. leaf, leaf .. " bytes")
         end
-        write(root .. "/link.d", "program: " .. escape(root .. "/native.a") .. "\n")
+        write(root .. "/link.d", gnu_report(root .. "/program", { root .. "/native.a" }))
         spec = {
             output_root = root, roots = { "app.main", "app.extra" }, entry = { module = "app.main", main = "({string}):integer" },
             kind = "program", outputs = { { path = root .. "/program" } },
@@ -146,12 +154,73 @@ describe("final link certificates", function()
         assert.is_false(hit())
     end)
 
+    it("orders output-set keys and directory members bytewise across locales", function()
+        local directory = root .. "/companion"
+        assert(lfs.mkdir(directory))
+        for _, name in ipairs({ "z", "A", "é" }) do write(directory .. "/" .. name, name) end
+        write(root .. "/z-image", "z image")
+        write(root .. "/é-image", "accented image")
+        spec.outputs = { { path = directory, kind = "directory" },
+            { path = root .. "/é-image" }, { path = root .. "/z-image" } }
+        local saved_locale = os.setlocale(nil, "collate")
+        local ok, err = pcall(function()
+            assert(os.setlocale("C", "collate"))
+            local ticket = commit()
+            local expected_keys = {}
+            for _, output in ipairs(spec.outputs) do
+                expected_keys[#expected_keys + 1] = certificate.canonical_path(context(), output.path)
+            end
+            table.sort(expected_keys, util.bytewise_less)
+            assert.equal(incremental.digest(context(), "final-output-set", expected_keys), ticket.key)
+            local record = assert(certificate.read_record(context(), ticket.record))
+            local names = {}
+            for _, member in ipairs(record.outputs[1].entries) do names[#names + 1] = member.path end
+            assert.same({ directory .. "/A", directory .. "/z", directory .. "/é" }, names)
+            for _, locale in ipairs({ "en_US.UTF-8", "pt_BR.UTF-8", "C.UTF-8" }) do
+                if os.setlocale(locale, "collate") then
+                    local ctx, next_ticket = prepare()
+                    assert.equal(ticket.key, next_ticket.key)
+                    assert.is_true(certificate.check(ctx, next_ticket))
+                end
+            end
+        end)
+        if saved_locale then assert(os.setlocale(saved_locale, "collate")) end
+        assert.is_true(ok, tostring(err))
+    end)
+
     it("rehashes actual linker-reported libraries and scripts on a hit", function()
         commit()
         write(root .. "/native.a", "new native library bytes")
         local accepted, reason = hit()
         assert.is_false(accepted)
         assert.equal("native libraries changed", reason)
+    end)
+
+    it("reads GNU linker literal paths with spaces and Make punctuation", function()
+        local library = root .. (platform.windows and "/native Ω #$ data.a" or "/native Ω #$ :back\\slash.a")
+        write(library, "literal library path")
+        write(root .. "/link.d", gnu_report(root .. "/target with spaces", {
+            library, root .. "/native.a", library,
+        }))
+        local ticket = commit()
+        local record = assert(certificate.read_record(context(), ticket.record))
+        assert.equal(2, #record.native)
+        assert.equal(library, record.native[1].path)
+        assert.is_true(hit())
+        write(library, "replacement library bytes")
+        assert.is_false(hit())
+    end)
+
+    it("reads LLD escaped Make dependency paths independently of GNU ld reports", function()
+        local library = root .. "/native Ω #$ data.a"
+        write(library, "escaped library path")
+        spec.native_libraries.backend = "lld"
+        write(root .. "/link.d", escape(root .. "/target with spaces") .. ": " .. escape(library) ..
+            "\n" .. escape(library) .. ":\n")
+        commit()
+        assert.is_true(hit())
+        write(library, "replacement library bytes")
+        assert.is_false(hit())
     end)
 
     it("reads Darwin dependency-info inputs without treating output records as inputs", function()
@@ -327,6 +396,71 @@ dofile(%q .. "/titanc")
         result = context().io:run({ exe("native-program") })
         assert.equal(3, result.status, result.output)
         compile({ "-c", "--c-source", root .. "/helper.c", "-DVALUE=2" })
+    end)
+
+    it("preserves the previous POSIX executable and dSYM after a partial failed link", function()
+        if platform.windows then pending("POSIX executable staging"); return end
+        compile({ "--exe", exe("program"), "app" })
+        local previous = read(exe("program"))
+        local modified = lfs.attributes(exe("program"), "modification")
+        local function snapshot(directory)
+            local result = {}
+            local function visit(path, relative)
+                local kind = lfs.symlinkattributes(path, "mode")
+                if kind == "directory" then
+                    result[relative] = { kind = kind }
+                    for name in lfs.dir(path) do
+                        if name ~= "." and name ~= ".." then visit(path .. "/" .. name, relative .. "/" .. name) end
+                    end
+                elseif kind then result[relative] = { kind = kind, bytes = read(path) } end
+            end
+            visit(directory, "")
+            return result
+        end
+        local dsym = snapshot(exe("program") .. ".dSYM")
+        if require("titan-compiler.driver").IS_DARWIN then
+            assert.equal("directory", lfs.attributes(exe("program") .. ".dSYM", "mode"))
+        end
+        local original_frontend = frontend
+        frontend = root .. "/partial-link.lua"
+        local stage_log = root .. "/partial-output"
+        write(frontend, string.format([[
+package.path = %q .. "/?.lua;" .. package.path
+local driver = require "titan-compiler.driver"
+local program, link = driver.compile_program, driver.run_link_command
+local in_program = false
+driver.compile_program = function(...)
+    in_program = true
+    local result = table.pack(program(...))
+    in_program = false
+    return table.unpack(result, 1, result.n)
+end
+driver.run_link_command = function(argv, ...)
+    if not in_program then return link(argv, ...) end
+    local output
+    for index, argument in ipairs(argv) do if argument == "-o" then output = argv[index + 1] end end
+    assert(output)
+    local file = assert(io.open(output, "wb"))
+    assert(file:write("partial failed native image")); assert(file:close())
+    file = assert(io.open(%q, "wb"))
+    assert(file:write(output)); assert(file:close())
+    return nil, "exit", 86
+end
+dofile(%q)
+]], repository, stage_log, original_frontend))
+        write(root .. "/app.titan", "function main(args: {string}): integer return 1 end\n")
+        compile({ "--exe", exe("program"), "app" }, false)
+        local staged = read(stage_log)
+        assert.not_equal("", staged)
+        assert.not_equal(exe("program"), staged)
+        assert.equal(previous, read(exe("program")))
+        assert.equal(modified, lfs.attributes(exe("program"), "modification"))
+        assert.same(dsym, snapshot(exe("program") .. ".dSYM"))
+        assert.is_nil(lfs.symlinkattributes(staged))
+        local stage_directory = staged:match("^(.*%.stage%.tmp%.[^/]+)/[^/]+$")
+        if stage_directory then assert.is_nil(lfs.symlinkattributes(stage_directory)) end
+        frontend = original_frontend
+        compile({ "--exe", exe("program"), "app" })
     end)
 
     it("retries a failed link from reusable module objects", function()

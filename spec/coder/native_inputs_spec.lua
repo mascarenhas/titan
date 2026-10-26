@@ -100,6 +100,43 @@ describe("certified app-owned C sources", function()
         assert.same({ "native-preprocess" }, phases)
     end)
 
+    it("retires invocation scratch after publication, hits and native failures", function()
+        local function clean()
+            for name in lfs.dir(root .. "/.native") do
+                if name ~= "." and name ~= ".." then
+                    assert.truthy(name:match("^[0-9a-f]+%.o$") or name:match("^[0-9a-f]+%.record$"),
+                        "retained native scratch: " .. name)
+                end
+            end
+        end
+        local first = assert(build())[1]
+        clean()
+        assert.is_true(assert(build())[1].hit)
+        clean()
+        write(source, "int helper(void) { return invalid; }\n")
+        assert.is_nil(build())
+        clean()
+        write(source, '#include "missing_native_input.h"\n')
+        assert.is_nil(build())
+        clean()
+        assert.equal("file", lfs.attributes(first.path, "mode"))
+        assert.equal("file", lfs.attributes(first.path:gsub("%.o$", ".record"), "mode"))
+    end)
+
+    it("retires preprocessing scratch before propagating cancellation", function()
+        local signal = {}
+        local ok, err = pcall(function()
+            build(nil, true, nil, function(phase)
+                if phase == "native-preprocess" then error(signal, 0) end
+            end)
+        end)
+        assert.is_false(ok)
+        assert.equal(signal, err)
+        for name in lfs.dir(root .. "/.native") do
+            assert.truthy(name == "." or name == "..", "retained cancelled native scratch: " .. name)
+        end
+    end)
+
     it("recompiles changed source and transitive header bytes with preserved mtimes", function()
         local first = assert(build())[1]
         local old = lfs.attributes(header, "modification")

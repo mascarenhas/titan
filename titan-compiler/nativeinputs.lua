@@ -156,29 +156,30 @@ end
 local function compile_node(context, request, source, stem)
     local preprocessed, dependencies = stem .. ".i", stem .. ".d"
     local object, sidecar = stem .. ".o", stem .. ".record"
-    local cacheable = cacheable_policy(request.compile_argv)
-    local argv = {}
-    append(argv, request.compile_argv)
-    append(argv, { "-E", "-MD", "-MF", dependencies, "-MT", "titan-native", source, "-o", preprocessed })
-    -- Always execute preprocessing: its output covers negative __has_include
-    -- decisions that cannot be represented by a positive dependency list.
-    run(context, request, argv, "native-preprocess")
-    incremental.invalidate_file(context, preprocessed)
-    local files = need(depfile.parse(need(context.io:read_file(dependencies))))
-    local recipe = { source = source, argv = request.compile_argv, toolchain = request.toolchain,
-        authored = incremental.file_digest(context, source),
-        preprocessed = incremental.file_digest(context, preprocessed),
-        dependencies = certificate.files(context, files) }
-    local input = incremental.digest(context, "native-c-input", recipe)
-    local record = certificate.read_record(context, sidecar)
-    if cacheable and request.incremental and native_record(record) and record.input == input and regular(context, object) then
-        local identity = incremental.file_digest(context, object)
-        if identity == record.object then
-            return { path = object, identity = identity, source = source, hit = true, cacheable = true }
-        end
-    end
-    local staged = reserve(context, object)
+    local staged
     local completed, result = pcall(function()
+        local cacheable = cacheable_policy(request.compile_argv)
+        local argv = {}
+        append(argv, request.compile_argv)
+        append(argv, { "-E", "-MD", "-MF", dependencies, "-MT", "titan-native", source, "-o", preprocessed })
+        -- Always execute preprocessing: its output covers negative __has_include
+        -- decisions that cannot be represented by a positive dependency list.
+        run(context, request, argv, "native-preprocess")
+        incremental.invalidate_file(context, preprocessed)
+        local files = need(depfile.parse(need(context.io:read_file(dependencies))))
+        local recipe = { source = source, argv = request.compile_argv, toolchain = request.toolchain,
+            authored = incremental.file_digest(context, source),
+            preprocessed = incremental.file_digest(context, preprocessed),
+            dependencies = certificate.files(context, files) }
+        local input = incremental.digest(context, "native-c-input", recipe)
+        local record = certificate.read_record(context, sidecar)
+        if cacheable and request.incremental and native_record(record) and record.input == input and regular(context, object) then
+            local identity = incremental.file_digest(context, object)
+            if identity == record.object then
+                return { path = object, identity = identity, source = source, hit = true, cacheable = true }
+            end
+        end
+        staged = reserve(context, object)
         local command = {}
         append(command, request.compile_argv)
         append(command, { "-c", source, "-o", staged })
@@ -209,8 +210,30 @@ local function compile_node(context, request, source, stem)
         incremental.invalidate_file(context, object)
         return { path = object, identity = identity, source = source, hit = false, cacheable = cacheable }
     end)
-    unlink(context, staged)
-    if not completed then error(result, 0) end
+    -- Only invocation scratch is retired. Committed .o/.record nodes may be
+    -- shared by other final targets and remain reusable when this source is
+    -- absent from a later invocation.
+    local cleanup_errors = {}
+    local cleanup_cancelled
+    local function retire(filename)
+        if not filename then return end
+        local removed, err = pcall(unlink, context, filename)
+        if not removed then
+            if type(err) ~= "string" and not cleanup_cancelled then cleanup_cancelled = { error = err } end
+            cleanup_errors[#cleanup_errors + 1] = tostring(err)
+        end
+        incremental.invalidate_file(context, filename)
+    end
+    retire(staged)
+    retire(preprocessed)
+    retire(dependencies)
+    if not completed and type(result) ~= "string" then error(result, 0) end
+    if cleanup_cancelled then error(cleanup_cancelled.error, 0) end
+    if not completed then
+        if #cleanup_errors > 0 then result = result .. "\nnative scratch cleanup: " .. table.concat(cleanup_errors, "; ") end
+        error(result, 0)
+    end
+    need(#cleanup_errors == 0, "native scratch cleanup: " .. table.concat(cleanup_errors, "; "))
     return result
 end
 
