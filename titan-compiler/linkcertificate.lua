@@ -6,6 +6,7 @@ local graphcodec = require "titan-compiler.graphcodec"
 local paths = require "titan-compiler.path"
 local platform = require "titan-compiler.platform"
 local version = require "titan-compiler.version"
+local util = require "titan-compiler.util"
 
 local certificate = {}
 local RECORD_LIMIT = 16 * 1024 * 1024
@@ -182,7 +183,7 @@ local function output_snapshot(context, output)
     else
         result.entries = {}
         local names = need(context.io:list(filename))
-        table.sort(names)
+        table.sort(names, util.bytewise_less)
         for _, name in ipairs(names) do
             need(name ~= "." and name ~= ".." and not name:find("[/\\]"), "invalid directory member")
             result.entries[#result.entries + 1] = output_snapshot(context, { path = paths.join(filename, name) })
@@ -294,6 +295,31 @@ function certificate.native_library_policy(context, request)
     return { cacheable = false, backend = backend or "none", argv = {}, reason = err }
 end
 
+-- GNU ld's write_dependency_file does not Make-escape filenames. It emits
+-- one literal input per continuation line, then repeats the complete input
+-- list as one literal phony target per line. Decode that second stanza, whose
+-- final colon is the only delimiter; spaces, #, $, colons and backslashes
+-- inside a path are data. LLD and native -MD output use the Make decoder.
+local function gnu_link_dependencies(bytes)
+    need(not bytes:find("\0", 1, true), "NUL in GNU linker dependency output")
+    bytes = bytes:gsub("\r\n", "\n")
+    local separator = need(bytes:find("\n\n", 1, true),
+        "GNU linker dependency output has no phony input stanza")
+    local result, seen = {}, {}
+    for line in (bytes:sub(separator + 2) .. "\n"):gmatch("(.-)\n") do
+        if line ~= "" then
+            need(line:sub(-1) == ":", "invalid GNU linker dependency input")
+            local filename = line:sub(1, -2)
+            need(filename ~= "", "empty GNU linker dependency input")
+            if not seen[filename] then
+                seen[filename] = true
+                result[#result + 1] = filename
+            end
+        end
+    end
+    return result
+end
+
 local function native_dependencies(context, policy)
     if not policy.cacheable then return nil, policy.reason end
     if not policy.dependency_file then return certificate.files(context, policy.files) end
@@ -314,6 +340,8 @@ local function native_dependencies(context, policy)
                 "unknown Darwin linker dependency opcode") end
             offset = finish + 1
         end
+    elseif policy.backend == "gnu" then
+        files = gnu_link_dependencies(bytes)
     else
         files = need(depfile.parse(bytes))
     end
@@ -342,7 +370,7 @@ function certificate.prepare(context, spec)
             kind = output.kind or "file" }
         keys[#keys + 1] = key
     end
-    table.sort(keys)
+    table.sort(keys, util.bytewise_less)
     local key = incremental.digest(context, "final-output-set", keys)
     local directory = paths.join(absolute(context, spec.output_root), ".titan-links", key)
     local input = { outputs = outputs }

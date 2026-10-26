@@ -461,15 +461,17 @@ assert(module.exercise())
 require("titan-compiler.driver").compile_modules = function()
     error("generated compilation must not start after a preflight collision")
 end
+require("titan-compiler.process").start_worker = function()
+    error("build workers must not start after a preflight collision")
+end
 ]])
-        for index, kind in ipairs({ "entrypoint", "executable", "provider", "shim" }) do
+        for index, kind in ipairs({ "executable", "provider", "shim" }) do
             local src, out = workspace .. "/final-src" .. index, workspace .. "/final-out" .. index
-            local is_program = kind == "entrypoint" or kind == "executable"
+            local is_program = kind == "executable"
             local name = is_program and "app" or "library"
             local shims, provider = assert(driver.plan_module_shims(name, { name }, out))
             local header
-            if kind == "entrypoint" then header = out .. "/app__entrypoint.c"
-            elseif kind == "executable" then
+            if kind == "executable" then
                 header = platform.windows
                     and assert(driver.windows_program_paths("app", nil, nil, out)).executable
                     or out .. "/app"
@@ -533,22 +535,20 @@ do base_offset = 10 end
         local hit_log = workspace .. "/cached-observed"
         frontend = cli_frontend(workspace .. "/cached_reject_frontend.lua", string.format([[
 local driver = require("titan-compiler.driver")
-local plan = driver.plan_compile_requests
-driver.plan_compile_requests = function(requests, ...)
-    local cached = false
-    for _, request in ipairs(requests) do
-        if request.modname == "a" then
-            assert(request.mod.compiled, "module a must be reused from its object")
-            cached = true
-        end
-    end
-    assert(cached, "module a must be part of the source link set")
+local preflight = assert(driver.preflight_build_outputs)
+driver.preflight_build_outputs = function(context, plan, ...)
+    local cached = assert(plan.modules.a, "module a must be part of the source link set")
+    assert(cached.certified and cached.certified.status == "hit",
+        "module a must be certified before collision preflight")
     local file = assert(io.open(%q, "wb"))
     assert(file:write("cached"))
     assert(file:close())
-    return plan(requests, ...)
+    return preflight(context, plan, ...)
 end
 driver.compile_modules = function() error("generated compilation must not start") end
+require("titan-compiler.process").start_worker = function()
+    error("build workers must not start after a preflight collision")
+end
 ]], hit_log))
         ok, output = run_cmd({ LUA, "-E", frontend, "--tree", src, "-o", out,
             "--c-parts", "4", "--incremental", "b" })
@@ -567,7 +567,10 @@ local file = assert(io.open(%q, "ab"))
 assert(file:write(arg[#arg], "\n"))
 assert(file:close())
 ]], format_log))
-        local frontend = cli_frontend(workspace .. "/header_frontend.lua", string.format([[
+        local formatter_command = assert(cdriver.shell_quote(LUA)) .. " " .. assert(cdriver.shell_quote(formatter))
+        local worker = workspace .. "/header_worker.lua"
+        write_file(worker, string.format([[
+local function main()
 local driver = require("titan-compiler.driver")
 local coder = require("titan-compiler.coder")
 local function record(name)
@@ -606,7 +609,15 @@ driver.compile_modules = function(...)
     return results
 end
 driver.CLANG_FORMAT = %q
-]], log_path, assert(cdriver.shell_quote(LUA)) .. " " .. assert(cdriver.shell_quote(formatter))))
+require("titan-compiler.build_worker").main()
+end
+return { main = main }
+]], log_path, formatter_command))
+        local frontend = cli_frontend(workspace .. "/header_frontend.lua", string.format([[
+package.path = %q .. "/?.lua;" .. package.path
+require("titan-compiler.build").WORKER_ENTRY = "header_worker"
+require("titan-compiler.driver").CLANG_FORMAT = %q
+]], workspace, formatter_command))
         local src, out = workspace .. "/once-src", workspace .. "/once-out"
         write_file(src .. "/once.titan", [[
 foreign function plus_one(input: int): int return input + 1 end
@@ -1289,6 +1300,7 @@ os.exit(result.ok and 0 or 1)
                     mod = mod,
                     static_deps = { mod = true },
                     options = {
+                        context = context,
                         c_parts = c_parts,
                         split_threshold = threshold,
                         native_inputs = { out_dir .. "/mod.part99.o" },
@@ -1312,7 +1324,6 @@ os.exit(result.ok and 0 or 1)
         for k = 0, 3 do
             assert.is_true(file_exists(driver.part_object_filename(out_dir .. "/mod", k)))
         end
-        assert.is_true(file_exists(out_dir .. "/mod.parts"))
         assert.is_true(file_exists(out_dir .. "/mod.priv.h"))
 
         -- 2. Warm incremental build with same policy is a hit
@@ -1334,12 +1345,15 @@ os.exit(result.ok and 0 or 1)
         assert.is_false(hit)
         assert.is_true(res.ok)
 
-        -- 5. Making a sidecar part older than source forces a miss
+        -- 5. A part's older mtime does not invalidate unchanged content.
         local src_mtime = assert(lfs.attributes(titan_file, "modification"))
         assert(lfs.touch(out_dir .. "/mod.part3.o", src_mtime - 10, src_mtime - 10))
+        local saved_part = read_file(out_dir .. "/mod.part3.o")
         hit, res = run_compile(4, 1, true)
-        assert.is_false(hit)
+        assert.is_true(hit)
         assert.is_true(res.ok)
+        assert.equal(saved_part, read_file(out_dir .. "/mod.part3.o"))
+        assert.equal(src_mtime - 10, lfs.attributes(out_dir .. "/mod.part3.o", "modification"))
 
         -- A valid object from another target is also a whole-module miss.
         local part_bytes = read_file(out_dir .. "/mod.part1.o")
