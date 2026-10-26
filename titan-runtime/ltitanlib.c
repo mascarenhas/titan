@@ -780,6 +780,52 @@ static int signal_wake_descriptor(lua_State *L) {
   return 1;
 }
 
+/* _sigpipe_ignore() -> guard | nil, reason. SIGPIPE is ignored until
+** guard:restore() (or collection) reinstates the exact prior action. The
+** build coordinator writes to worker control pipes whose reader may already
+** have died; such a write must fail with EPIPE instead of ending the
+** coordinator. Children it starts through libuv reset every disposition. */
+#define TITAN_SIGPIPE_GUARD_TYPE "titan.sigpipeguard"
+
+typedef struct TitanSigpipeGuard {
+  struct sigaction saved;
+  int active;
+} TitanSigpipeGuard;
+
+static int sigpipe_ignore(lua_State *L) {
+  TitanSigpipeGuard *guard =
+      (TitanSigpipeGuard *)lua_newuserdatauv(L, sizeof(TitanSigpipeGuard), 0);
+  struct sigaction ignore;
+  guard->active = 0;
+  luaL_setmetatable(L, TITAN_SIGPIPE_GUARD_TYPE);
+  memset(&ignore, 0, sizeof ignore);
+  ignore.sa_handler = SIG_IGN;
+  sigemptyset(&ignore.sa_mask);
+  if (sigaction(SIGPIPE, &ignore, &guard->saved) != 0)
+    return push_errno(L, "cannot ignore SIGPIPE", errno);
+  guard->active = 1;
+  return 1;
+}
+
+static void sigpipe_guard_release(TitanSigpipeGuard *guard) {
+  if (guard->active) sigaction(SIGPIPE, &guard->saved, NULL);
+  guard->active = 0;
+}
+
+/* guard:restore() -> true. Idempotent. */
+static int sigpipe_guard_restore(lua_State *L) {
+  sigpipe_guard_release(
+      (TitanSigpipeGuard *)luaL_checkudata(L, 1, TITAN_SIGPIPE_GUARD_TYPE));
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
+static int sigpipe_guard_gc(lua_State *L) {
+  sigpipe_guard_release(
+      (TitanSigpipeGuard *)luaL_checkudata(L, 1, TITAN_SIGPIPE_GUARD_TYPE));
+  return 0;
+}
+
 /* _jobserver_wait(completion_file, client_or_nil, watch_signals)
 ** -> "signal", signo | "completion" | "slot" | nil, reason.
 ** The completion FILE must be unbuffered; nothing is consumed from it. */
@@ -1088,6 +1134,7 @@ static const luaL_Reg titanlib[] = {
   { "_signal_pending", signal_pending },
   { "_signal_raise", signal_raise },
   { "_signal_wake_descriptor", signal_wake_descriptor },
+  { "_sigpipe_ignore", sigpipe_ignore },
 #endif
   { NULL, NULL }
 };
@@ -1116,6 +1163,15 @@ LUAMOD_API int luaopen_titan(lua_State *L) {
     lua_setfield(L, -2, "restore");
     lua_setfield(L, -2, "__index");
     lua_pushcfunction(L, signal_guard_gc);
+    lua_setfield(L, -2, "__gc");
+  }
+  lua_pop(L, 1);
+  if (luaL_newmetatable(L, TITAN_SIGPIPE_GUARD_TYPE)) {
+    lua_newtable(L);
+    lua_pushcfunction(L, sigpipe_guard_restore);
+    lua_setfield(L, -2, "restore");
+    lua_setfield(L, -2, "__index");
+    lua_pushcfunction(L, sigpipe_guard_gc);
     lua_setfield(L, -2, "__gc");
   }
   lua_pop(L, 1);

@@ -813,9 +813,9 @@ function Scheduler:emit()
     end
 end
 
-local function check_scheduler_support()
-    if platform.windows then return true end
-    return native_support({ "_signal_wake_descriptor" })
+local function scheduler_support()
+    if platform.windows then return {} end
+    return native_support({ "_signal_wake_descriptor", "_sigpipe_ignore" })
 end
 
 -- Run every node to completion. Returns true, or nil, the diagnostics in
@@ -824,9 +824,15 @@ end
 function Scheduler:run()
     self:drain_decisions()
     if #self.ready > 0 then
-        local supported, support_err = check_scheduler_support()
-        local ledger, ledger_err
-        if supported then
+        local support, support_err = scheduler_support()
+        local ledger, ledger_err, pipe_guard
+        if support and support._sigpipe_ignore then
+            -- A reply to a worker that just died must fail with EPIPE, not
+            -- end the coordinator; the prior action returns afterwards.
+            pipe_guard, support_err = support._sigpipe_ignore()
+            if not pipe_guard then support = nil end
+        end
+        if support then
             ledger, ledger_err = jobs.open_slots(self.options.jobs or 1, {
                 guard = true, makeflags = self.options.makeflags,
             })
@@ -849,6 +855,7 @@ function Scheduler:run()
             if not closed then self.failures[#self.failures + 1] = tostring(close_err) end
             self.cancelled = self.cancelled or ledger:cancelled()
         end
+        if pipe_guard then pipe_guard:restore() end
     end
     self:emit()
     local unsettled = {}
