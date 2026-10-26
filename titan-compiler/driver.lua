@@ -99,6 +99,15 @@ local function lua_cpath_suffix()
         (platform.windows and "/?.dll" or "/?.so")
 end
 
+local function compiler_file_contents(context, filename)
+    local read_ok, contents = pcall(incremental.file_contents, context, filename)
+    if not read_ok then
+        if type(contents) ~= "string" then error(contents, 0) end
+        return nil, contents
+    end
+    return contents
+end
+
 local function normalize_absolute_path(path)
     if platform.windows then return platform.path.normalize(path) end
     local components = {}
@@ -1412,30 +1421,26 @@ function driver.link_extra_flags()
     return driver.NATIVE_LINK_FLAGS or driver.EXTRA_LDFLAGS or {}
 end
 
--- Which linker dependency report a final program link can request, probed
--- once per resolver context: `darwin` (ld64 -dependency_info), `gnu` or `lld`
--- when the linker accepts --dependency-file, else `none`
--- (the final-link certificate then uses compiler-resolved -l paths).
+-- Dependency-report support is memoized in this resolver and persisted by the
+-- shared link-certificate owner under the observed native tool identities.
 function driver.native_link_backend(context)
     if context.native_link_backend then return context.native_link_backend end
-    local backend = "none"
-    if driver.IS_DARWIN then
-        backend = "darwin"
-    elseif not platform.windows then
-        local argv = compiler_argv(false, context)
-        local report = argv and context.io:tmpname()
-        if report then
-            append_argv(argv, {
-                "-Wl,--dependency-file=" .. report, "-Wl,--version",
-            })
-            local result = context.io:run(argv, { stderr_to_stdout = true })
-            if type(result) == "table" and result.started and result.ok then
-                backend = (result.output or result.diagnostic or ""):find("LLD", 1, true)
-                    and "lld" or "gnu"
-            end
-            if context.io:lstat(report) then context.io:unlink(report) end
-        end
-    end
+    local argv, argv_error = compiler_argv(false, context)
+    if not argv then return nil, argv_error end
+    local descriptor, descriptor_error = driver.toolchain_descriptor(context)
+    if not descriptor then return nil, descriptor_error end
+    local toolchain = incremental.toolchain_identity(context, descriptor)
+    local backend, backend_error = require("titan-compiler.linkcertificate")
+        .linker_backend(context, {
+            compiler_argv = argv,
+            link_flags = driver.link_extra_flags(),
+            toolchain = toolchain,
+            directory = context.output_root or
+                driver.TITAN_SOURCE_PATH:match("[^;]+") or ".",
+            darwin = driver.IS_DARWIN == true,
+            windows = platform.windows,
+        })
+    if not backend then return nil, backend_error end
     context.native_link_backend = backend
     return backend
 end
@@ -5307,7 +5312,7 @@ function driver.defaultloader(static_deps, options)
             return false, "build plan divergence: module '" .. modname ..
                 "' has no accepted object"
         end
-        local bytes, read_error = context.io:read_file(object)
+        local bytes, read_error = compiler_file_contents(context, object)
         if not bytes then
             return false, "cannot read planned object for module '" ..
                 modname .. "': " .. tostring(read_error)
@@ -5419,7 +5424,7 @@ function driver.defaultloader(static_deps, options)
                            source.certified_contents[filename] ~= nil then
                         input = source.certified_contents[filename]
                     else
-                        input, err = context.io:read_file(filename)
+                        input, err = compiler_file_contents(context, filename)
                         if not input then return nil, err end
                     end
                     inputs[index] = input
@@ -6435,7 +6440,7 @@ function driver.invalidate_source_object(context, modname, source)
     end
     local prior = {}
     if attributes.kind == "file" then
-        local bytes = context.io:read_file(primary)
+        local bytes = compiler_file_contents(context, primary)
         local record = bytes and objectmetadata.read(bytes, primary)
         local native = record and record.object_metadata
         if native and native.parts and objectmetadata.validate_parts(native) then
@@ -6638,7 +6643,8 @@ function driver.publish_staged_module(context, result)
         return discard("worker result for module '" .. tostring(modname) ..
             "' has no primary object")
     end
-    local bytes, read_error = context.io:read_file(primary.from)
+    local bytes, read_error = compiler_file_contents(
+        incremental.fresh_context(context), primary.from)
     if not bytes then
         return discard("cannot read staged object for module '" .. modname ..
             "': " .. tostring(read_error))
@@ -11660,7 +11666,7 @@ function driver.preflight_build_outputs(context, plan, options)
             -- A smaller new split policy can still retire the old inventory.
             local prior = certified and certified.record
             if not prior and context.io:lstat(stem .. ".o") then
-                local bytes, read_error = context.io:read_file(stem .. ".o")
+                local bytes, read_error = compiler_file_contents(context, stem .. ".o")
                 if not bytes then return nil, read_error end
                 prior = objectmetadata.read(bytes, stem .. ".o")
             end
@@ -11700,7 +11706,7 @@ function driver.preflight_build_outputs(context, plan, options)
                         source.certified_contents and source.certified_contents[filename]
                     if not contents then
                         local read_error
-                        contents, read_error = context.io:read_file(filename)
+                        contents, read_error = compiler_file_contents(context, filename)
                         if not contents then return nil, read_error end
                     end
                     local parsed, parse_error = parser.parse(filename, contents)
