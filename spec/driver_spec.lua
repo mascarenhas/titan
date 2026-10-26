@@ -4337,16 +4337,18 @@ describe("compiler module loader", function()
                 .. "    return first.value() + second.value()\n"
                 .. "end\n")
 
-            local item_record = types.Record(owner .. ".Item", {}, {}, {}, 0)
+            local item_record = types.Record(owner .. ".Item", {}, {}, {}, 1)
             local owner_type = types.Module(owner, {
                 types.ModuleMember(owner, "Item", item_record, nil),
-            }, { Item = item_record })
+            })
+            assert.is_true(driver.validate_module_interface(owner_type, owner))
             owner_type.file = owner .. ".so"
             local facade_type = types.Module(facade, {
                 types.ModuleMember(facade, "make",
                     types.Function({}, { types.Nominal(owner .. ".Item") },
                         false, nil, nil), {}),
             })
+            assert.is_true(driver.validate_module_interface(facade_type, facade))
             facade_type.file = facade .. ".so"
             local archive_path = binary .. "/" .. facade .. ".a"
             local roots = { [first] = true, [second] = true, [app] = true }
