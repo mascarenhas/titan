@@ -992,6 +992,8 @@ function driver.new_resolver_context(options)
         transient_caches = options.transient_caches == true,
         completion_closed_world = options.completion_closed_world == true,
         provider_cache = {},
+        decoded_provider_cache = {},
+        provider_cache_identity = {},
         contextual_types = {},
         contextual_resolutions = {},
         native_interface_types = {},
@@ -3720,10 +3722,60 @@ local function remember_nominal_layouts(context, inventory, filename)
     end
 end
 
+-- Decoded metadata is invocation-local and belongs to one observed physical
+-- provider, not to the logical module name or one spelling of its pathname.
+local function provider_decoding_cache(context, filename)
+    if not (context and context._resolver_context and context.io) then return nil end
+    local stat, stat_error = context.io:stat(filename)
+    if stat_error and type(stat_error) ~= "string" then error(stat_error, 0) end
+    if not stat or stat.kind ~= "file" then return nil end
+    local physical, physical_error = context.io:realpath(filename)
+    if physical_error and type(physical_error) ~= "string" then
+        error(physical_error, 0)
+    end
+    if not physical then return nil end
+    local key = stat.device ~= nil and stat.inode ~= nil and
+        ("inode:" .. tostring(stat.device) .. ":" .. tostring(stat.inode)) or
+        ("path:" .. physical)
+    local observation = table.concat({
+        tostring(stat.size), tostring(stat.mode),
+        tostring(stat.modified_seconds), tostring(stat.modified_nanoseconds),
+        tostring(stat.changed_seconds), tostring(stat.changed_nanoseconds),
+        tostring(stat.time_precision),
+    }, ":")
+    local cache = context.decoded_provider_cache[key]
+    if not cache or cache.observation ~= observation then
+        cache = { observation = observation, types = {}, layouts = {} }
+        context.decoded_provider_cache[key] = cache
+    end
+    return cache
+end
+
+local function decode_provider_interface(cache, modname, serialized, origin)
+    local saved = cache and cache.types[modname]
+    if saved and saved.serialized == serialized then return saved.type end
+    local modtype, err = driver.decode_module_interface(serialized, modname, origin)
+    if modtype and cache then
+        cache.types[modname] = { serialized = serialized, type = modtype }
+    end
+    return modtype, err
+end
+
+local function decode_provider_layouts(cache, modname, serialized)
+    local saved = cache and cache.layouts[modname]
+    if saved and saved.serialized == serialized then return saved.inventory end
+    local inventory, err = decode_nominal_layouts(modname, serialized)
+    if inventory and cache then
+        cache.layouts[modname] = { serialized = serialized, inventory = inventory }
+    end
+    return inventory, err
+end
+
 -- Probe one existing container for a logical module. A missing dlsym entry is
 -- a membership absence; an open failure is terminal. Callers decide whether a
 -- clean nonclaim is skippable (ancestor) or an error (exact candidate).
 local function probe_compiled_interface(modname, binf, options)
+    local decoded = provider_decoding_cache(options, binf)
     local prefix = driver.mangle_module_name(modname)
     local support = require("titan")
     local loadlib = support._loadlib
@@ -3792,8 +3844,8 @@ local function probe_compiled_interface(modname, binf, options)
     local types_or_err, types_call_err = one_metadata_result(
         typesf, "compiled module type metadata '" .. typesname .. "'")
     if not types_or_err then return "error", types_call_err end
-    local modt_or_err, validation_err = driver.decode_module_interface(
-        types_or_err, modname, binf .. ":" .. typesname)
+    local modt_or_err, validation_err = decode_provider_interface(
+        decoded, modname, types_or_err, binf .. ":" .. typesname)
     if not modt_or_err then
         return "error", "compiled container '" .. binf ..
             "' has invalid metadata for module '" .. modname .. "': " ..
@@ -3814,20 +3866,25 @@ local function probe_compiled_interface(modname, binf, options)
             layoutsf, "compiled module layout metadata '" .. layoutsname .. "'")
         if not serialized_layouts then return "error", layouts_call_err end
         local layout_err
-        layout_inventory, layout_err = decode_nominal_layouts(modname, serialized_layouts)
+        layout_inventory, layout_err =
+            decode_provider_layouts(decoded, modname, serialized_layouts)
         if not layout_inventory then
             return "error", "compiled container '" .. binf ..
                 "' has invalid nominal layout metadata for module '" ..
                 modname .. "': " .. tostring(layout_err)
         end
     end
-    return "valid", modt_or_err, {
+    -- Provider-relative binding lives on the module view. Keep it separate
+    -- from the shared decoded graph, including when two paths name one inode.
+    local module_view = {}
+    for key, value in pairs(modt_or_err) do module_view[key] = value end
+    return "valid", module_view, {
         module = modname,
         abi = abi_or_err,
         types = types_or_err,
         layouts = serialized_layouts,
         layout_inventory = layout_inventory,
-        type = modt_or_err,
+        type = module_view,
         origin = binf,
     }
 end
@@ -3901,8 +3958,9 @@ function driver.find_compiled_interface(paths, modname, context)
 end
 
 local function inspect_static_provider(context, filename, relative)
+    local decoded = provider_decoding_cache(context, filename)
     local cached = context.provider_cache[filename]
-    if cached then
+    if cached and context.provider_cache_identity[filename] == decoded then
         if cached.error then return nil, cached.error end
         return cached
     end
@@ -3911,12 +3969,14 @@ local function inspect_static_provider(context, filename, relative)
         io = context.io,
         expected_abi = driver.TITAN_ABI_VERSION,
         require_layouts = not context.analysis_only,
-        validate_layouts = not context.analysis_only and decode_nominal_layouts or nil,
+        validate_layouts = not context.analysis_only and function(name, serialized)
+            return decode_provider_layouts(decoded, name, serialized)
+        end or nil,
         validate_types = function(name, serialized, origin)
-            return driver.decode_module_interface(
-                serialized, name, origin)
+            return decode_provider_interface(decoded, name, serialized, origin)
         end,
     })
+    context.provider_cache_identity[filename] = decoded
     if not provider then
         local err = "cannot inspect static provider '" .. filename ..
             "': " .. tostring(scan_err)
@@ -3930,8 +3990,8 @@ local function inspect_static_provider(context, filename, relative)
         local modtype = entry.decoded_types
         local type_err
         if not modtype then
-            modtype, type_err = driver.decode_module_interface(
-                entry.types, name, entry.origin or filename)
+            modtype, type_err = decode_provider_interface(
+                decoded, name, entry.types, entry.origin or filename)
         end
         if not modtype then
             local err = "static provider '" .. filename ..
@@ -5869,7 +5929,7 @@ function driver.defaultloader(static_deps, options)
                 -- from that exact provider before reusing its interface.
                 if mod.kind == "dynamic" and not mod.layout_inventory then
                     local status, value, metadata =
-                        probe_compiled_interface(modname, mod.filename)
+                        probe_compiled_interface(modname, mod.filename, context)
                     if status ~= "valid" then
                         return false, status == "error" and value or
                             ("cached provider no longer claims module '" .. modname .. "'")
@@ -6768,9 +6828,69 @@ function driver.dependency_closure(modname)
     return closure
 end
 
+local FINAL_SELECTION_FIELDS = {
+    "kind", "compiled", "ast", "type", "filename", "relative",
+    "static_archive", "static_provider", "embedded_provider",
+    "object_metadata", "layout_inventory", "layouts",
+}
+
+local function resolver_selection(context, previous)
+    if previous and
+       (previous.loader ~= context.loader or
+        previous.analysis_only ~= context.analysis_only or
+        previous.embedded_provider ~= context.embedded_interface_provider or
+        previous.embedded_rejected ~= context.embedded_interface_provider_rejected or
+        previous.embedded_overlap ~= context.embedded_interface_provider_overlap) then
+        return false
+    end
+    local snapshot = not previous and {
+        modules = {}, resolutions = {},
+        loader = context.loader, analysis_only = context.analysis_only,
+        embedded_provider = context.embedded_interface_provider,
+        embedded_rejected = context.embedded_interface_provider_rejected,
+        embedded_overlap = context.embedded_interface_provider_overlap,
+    } or nil
+    local count = 0
+    for name, mod in pairs(driver.imported) do
+        count = count + 1
+        local saved = previous and previous.modules[name]
+        if previous and (not saved or saved.entry ~= mod) then return false end
+        local entry = not previous and { entry = mod } or nil
+        if mod ~= CIRCULAR_MARK then
+            for _, field in ipairs(FINAL_SELECTION_FIELDS) do
+                if previous then
+                    if saved[field] ~= mod[field] then return false end
+                else entry[field] = mod[field] end
+            end
+            local provider_file = mod.type and mod.type.file
+            if previous then
+                if saved.provider_file ~= provider_file then return false end
+            else entry.provider_file = provider_file end
+        end
+        if snapshot then snapshot.modules[name] = entry end
+    end
+    if previous and previous.module_count ~= count then return false end
+    if snapshot then snapshot.module_count = count end
+    count = 0
+    for key, resolution in pairs(context.contextual_resolutions or {}) do
+        count = count + 1
+        if previous then
+            if previous.resolutions[key] ~= resolution then return false end
+        else snapshot.resolutions[key] = resolution end
+    end
+    if previous then return previous.resolution_count == count end
+    snapshot.resolution_count = count
+    return snapshot
+end
+
 function driver.finalize_resolver_context(context)
     context = context or driver.new_resolver_context()
     reconcile_embedded_import_cache(context)
+    if context.finalized_selection and
+       resolver_selection(context, context.finalized_selection) then
+        return context
+    end
+    context.finalized_selection = nil
     local source_names = {}
     local dynamic_names = {}
     local selected_embedded_modules = {}
@@ -7108,6 +7228,7 @@ function driver.finalize_resolver_context(context)
     end
 
     if #errors ~= 0 then return nil, errors end
+    context.finalized_selection = resolver_selection(context)
     return context
 end
 
