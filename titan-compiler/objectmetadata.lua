@@ -69,6 +69,7 @@ function objectmetadata.encode(entry, native)
         abi = version.TITAN_ABI_VERSION,
         schema = version.OBJECT_RECORD_SCHEMA,
         digest = version.CERTIFICATE_DIGEST,
+        canonicalization = version.CERTIFICATE_CANONICALIZATION,
         module = projected.type.name,
         entry = projected,
     })
@@ -150,11 +151,14 @@ function objectmetadata.decode(payload, origin, expected_abi)
             return nil, "object source metadata envelope is not a table", "record-schema"
         end
         if record.schema ~= version.OBJECT_RECORD_SCHEMA
-            or record.digest ~= version.CERTIFICATE_DIGEST then
+            or record.digest ~= version.CERTIFICATE_DIGEST
+            or record.canonicalization ~= version.CERTIFICATE_CANONICALIZATION then
             return nil, "expected schema=" .. tostring(version.OBJECT_RECORD_SCHEMA)
                 .. " digest=" .. tostring(version.CERTIFICATE_DIGEST)
+                .. " canonicalization=" .. tostring(version.CERTIFICATE_CANONICALIZATION)
                 .. "; found schema=" .. tostring(record.schema)
-                .. " digest=" .. tostring(record.digest), "record-schema"
+                .. " digest=" .. tostring(record.digest)
+                .. " canonicalization=" .. tostring(record.canonicalization), "record-schema"
         end
         if record.abi ~= expected_abi then
             return nil, "object source metadata ABI mismatch: expected "

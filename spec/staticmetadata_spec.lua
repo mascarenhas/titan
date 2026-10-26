@@ -567,19 +567,22 @@ static const unsigned char result[] = {84,73,84,69,78,85,77,0,1,12,
     end)
 
     it("rejects absent old and mismatched certification envelopes", function()
-        local function payload(schema, digest)
+        local function payload(schema, digest, canonicalization)
             return "return {abi=" .. string.format("%q", version.TITAN_ABI_VERSION)
                 .. ",schema=" .. (schema and string.format("%q", schema) or "nil")
                 .. ",digest=" .. (digest and string.format("%q", digest) or "nil")
+                .. ",canonicalization=" .. (canonicalization and string.format("%q", canonicalization) or "nil")
                 .. ",entry={compiler_owned_extension=true}}"
         end
         for _, envelope in ipairs({
-            { nil, nil },
-            { "old", version.CERTIFICATE_DIGEST },
-            { version.OBJECT_RECORD_SCHEMA, "other-digest" },
-            { version.OBJECT_RECORD_SCHEMA, nil },
+            { nil, nil, nil },
+            { "old", version.CERTIFICATE_DIGEST, version.CERTIFICATE_CANONICALIZATION },
+            { version.OBJECT_RECORD_SCHEMA, "other-digest", version.CERTIFICATE_CANONICALIZATION },
+            { version.OBJECT_RECORD_SCHEMA, nil, version.CERTIFICATE_CANONICALIZATION },
+            { version.OBJECT_RECORD_SCHEMA, version.CERTIFICATE_DIGEST, nil },
+            { version.OBJECT_RECORD_SCHEMA, version.CERTIFICATE_DIGEST, "obsolete" },
         }) do
-            local entry, err, reason = objectmetadata.decode(payload(envelope[1], envelope[2]))
+            local entry, err, reason = objectmetadata.decode(payload(envelope[1], envelope[2], envelope[3]))
             assert.is_nil(entry)
             assert.equal("record-schema", reason)
             assert.matches("expected schema=", err, 1, true)
@@ -588,6 +591,7 @@ static const unsigned char result[] = {84,73,84,69,78,85,77,0,1,12,
         local envelope = assert(load(current, "metadata envelope", "t", {}))()
         assert.equal(version.OBJECT_RECORD_SCHEMA, envelope.schema)
         assert.equal(version.CERTIFICATE_DIGEST, envelope.digest)
+        assert.equal(version.CERTIFICATE_CANONICALIZATION, envelope.canonicalization)
         assert.equal(version.TITAN_ABI_VERSION, envelope.abi)
     end)
 
@@ -595,6 +599,7 @@ static const unsigned char result[] = {84,73,84,69,78,85,77,0,1,12,
         local payload = "return { abi=" .. string.format("%q", version.TITAN_ABI_VERSION)
             .. ", schema=" .. string.format("%q", version.OBJECT_RECORD_SCHEMA)
             .. ", digest=" .. string.format("%q", version.CERTIFICATE_DIGEST)
+            .. ", canonicalization=" .. string.format("%q", version.CERTIFICATE_CANONICALIZATION)
             .. ", entry={compiler_owned_extension=true} }"
         assert.same({ compiler_owned_extension = true },
             assert(objectmetadata.decode(payload)))
