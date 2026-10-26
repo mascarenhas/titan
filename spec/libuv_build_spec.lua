@@ -4121,11 +4121,11 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
                     assert.same(expected_stress, uncovered_stress)
                 end
 
-                -- Shard-pair runners run each shard's ordinary files
-                -- concurrently, then its exclusive files alone. The two
-                -- phases partition the same generated four-way plan.
+                -- Compiler shards and the installed-stdlib domain each split
+                -- into ordinary and exclusive phases without changing their
+                -- complete covered inventory.
                 local exclusive_seen = {}
-                for shard = 1, 4 do
+                for shard = 1, 5 do
                     local phase_files = {}
                     for _, phase in ipairs({ "ordinary", "exclusive" }) do
                         local log = root .. "/phase-" .. shard .. "-" .. phase
@@ -4133,7 +4133,8 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
                             "env", "BUSTED=" .. fake_busted,
                             "TITAN_SELECTOR_ARGV_LOG=" .. log,
                             "bash", "spec/support/ci_test_groups.sh",
-                            "compiler-shard-" .. shard, phase,
+                            shard == 5 and "stdlib-compiler" or
+                                "compiler-shard-" .. shard, phase,
                         })
                         assert.truthy(ok, output)
                         local calls = lfs.attributes(log) and
@@ -5762,7 +5763,9 @@ printf '%s\n' "${schedule[@]}"
                 assert.truthy(inventory.metadata[meta_key], meta_key)
             end
             assert.equal(7, #inventory.retained)
-            assert.equal(11, #inventory.stdlib)
+            -- These are installed-provider compiler specs, not native owners:
+            -- the four issue-303 integration specs extend the previous eleven.
+            assert.equal(15, #inventory.stdlib)
             assert.equal(#inventory.items,
                 #inventory.retained + #inventory.stdlib + #inventory.compiler)
             local assigned = {}
@@ -6362,6 +6365,8 @@ printf '%s\n' "${schedule[@]}"
             end
             table.sort(expected_exclusive)
             assert.same({
+                "spec/coder/build_coordination_spec.lua",
+                "spec/coder/build_scheduler_spec.lua",
                 "spec/coder/jobserver_spec.lua",
                 "spec/coder/parallel_compilation_spec.lua",
             }, expected_exclusive)
