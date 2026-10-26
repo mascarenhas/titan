@@ -385,7 +385,7 @@ assert(module.exercise())
         end
         assert(compile())
         local old_c, old_o = read_file(stem .. ".c"), read_file(stem .. ".o")
-        for _, suffix in ipairs({ ".part1.c", ".part1.o", ".priv.h", ".parts" }) do
+        for _, suffix in ipairs({ ".part1.c", ".part1.o", ".priv.h" }) do
             local saved = read_file(stem .. suffix)
             assert(os.remove(stem .. suffix))
             assert(lfs.link(path, stem .. suffix, true))
@@ -517,7 +517,7 @@ function read_value(): integer return ffi.R2_CACHED_VALUE end
                 snapshots[path] = read_file(path)
             end
         end
-        for _, suffix in ipairs({ ".ffi.h", ".parts" }) do
+        for _, suffix in ipairs({ ".ffi.h" }) do
             snapshots[out .. "/a" .. suffix] = read_file(out .. "/a" .. suffix)
         end
         write_file(src .. "/b.titan", 'local a = import "a"\n'
@@ -744,8 +744,9 @@ end
         local _, cli = prepare_split_program()
         local source_out = workspace .. "/source-out"
         cli(source_out, nil, "app")
-        assert.equal(4, driver.parse_parts_companion(
-            read_file(source_out .. "/pkg/library.parts"), source_out .. "/pkg/library"))
+        local record = assert(objectmetadata.read(read_file(source_out .. "/pkg/library.o"),
+            source_out .. "/pkg/library.o"))
+        assert.equal(4, #record.object_metadata.parts)
         local ok, output = run_cmd({ source_out .. (platform.windows and "/bin/app.exe" or "/app") })
         assert.truthy(ok, output)
     end)
@@ -794,16 +795,6 @@ end
             assert.truthy(ok, output)
             local entry = assert(objectmetadata.read(read_file(out .. "/cli.o"), out .. "/cli.o"))
             assert.equal(case[3], entry.object_metadata.c_parts)
-        end
-        for index, options in ipairs({
-            { "-c", "--c-parts", "4" }, { "--c-parts", "4" },
-        }) do
-            local out = workspace .. "/reject" .. index
-            write_file(out .. "/cli.parts", "user companion")
-            local ok = cli(out, "4", options)
-            assert.is_false(ok)
-            assert.equal("user companion", read_file(out .. "/cli.parts"))
-            assert.is_false(file_exists(out .. "/cli.c"))
         end
         local sentinel_out = workspace .. "/sentinel"
         local sentinel_c, sentinel_o = sentinel_out .. "/cli.part99.c", sentinel_out .. "/cli.part99.o"
@@ -1072,10 +1063,9 @@ end
         assert.equal(1, #unsplit.main_objects)
         assert.equal(4, #split.main_objects)
         assert.is_true(file_exists(split.out_dir .. "/pkg/main.priv.h"))
-        assert.is_true(file_exists(split.out_dir .. "/pkg/main.parts"))
-        assert.equal(4, driver.parse_parts_companion(
-            read_file(split.out_dir .. "/pkg/main.parts"),
-            split.out_dir .. "/pkg/main"))
+        local record = assert(objectmetadata.read(read_file(split.out_dir .. "/pkg/main.o"),
+            split.out_dir .. "/pkg/main.o"))
+        assert.equal(4, #record.object_metadata.parts)
 
         -- Execute both providers in fresh Lua processes, exercising cross-part
         -- calls, closures, transfer, protobuf codecs, reflection, and foreign bindings.
@@ -1360,7 +1350,7 @@ os.exit(result.ok and 0 or 1)
             assert.is_false(hit)
             assert.is_true(res.ok, res.err)
         end
-        for _, suffix in ipairs({ ".priv.h", ".parts" }) do
+        for _, suffix in ipairs({ ".priv.h" }) do
             assert(os.remove(out_dir .. "/mod" .. suffix))
             hit, res = run_compile(4, 1, false)
             assert.is_true(res.ok, res.err)
@@ -1391,15 +1381,14 @@ os.exit(result.ok and 0 or 1)
         assert.equal("authored C sentinel", read_file(out_dir .. "/mod.part99.c"))
         assert.equal("extra object sentinel", read_file(out_dir .. "/mod.part99.o"))
 
-        -- 8. Failed part compile leaves no primary mod.o or mod.parts
+        -- 8. Failed part compile leaves no primary mod.o.
         hit, res = run_compile(4, 1, false, 2, false)
         assert.falsy(res.ok)
         assert.matches("%.part2%.c$", read_file(workspace .. "/failed_part"))
         assert.is_false(file_exists(out_dir .. "/mod.o"))
-        assert.is_false(file_exists(out_dir .. "/mod.parts"))
 
         -- A failure at any publication boundary rolls back every object.
-        for _, suffix in ipairs({ ".part2.o", ".parts", ".o" }) do
+        for _, suffix in ipairs({ ".part2.o", ".o" }) do
             hit, res = run_compile(4, 1, false)
             assert.is_true(res.ok, res.err)
             hit, res = run_compile(4, 1, false, nil, suffix)
@@ -1408,11 +1397,10 @@ os.exit(result.ok and 0 or 1)
             for part = 0, 3 do
                 assert.is_false(file_exists(driver.part_object_filename(out_dir .. "/mod", part)))
             end
-            assert.is_false(file_exists(out_dir .. "/mod.parts"))
         end
     end)
 
-    it("refuses user-owned .priv.h and .parts paths before mutating outputs", function()
+    it("refuses user-owned .priv.h paths before mutating outputs", function()
         local stem = workspace .. "/protected_mod"
         local source_path = stem .. ".titan"
         write_file(source_path, MULTI_CONSTRUCT_SOURCE)
@@ -1436,16 +1424,6 @@ os.exit(result.ok and 0 or 1)
         os.remove(stem .. ".o")
         os.remove(stem .. ".priv.h")
 
-        write_file(stem .. ".parts", "user owned companion\n")
-        ast = check_module("protected_mod", MULTI_CONSTRUCT_SOURCE, source_path)
-        ok, err = driver.compile("protected_mod", ast, source_path, {}, false, {
-            c_parts = 4,
-            split_threshold = 1,
-        })
-        assert.is_nil(ok)
-        assert.matches("refusing to overwrite user-owned companion path", err, 1, true)
-        assert.equal("user owned companion\n", read_file(stem .. ".parts"))
-        assert.is_false(file_exists(stem .. ".o"))
     end)
 
     it("maps ASan generated-C offsets to hidden functions in nonzero parts using snapshotted private headers", function()
