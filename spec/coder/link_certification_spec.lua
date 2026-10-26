@@ -118,6 +118,7 @@ describe("final link certificates", function()
     end
     before_each(function()
         root = temporary.name(); assert(os.remove(root)); assert(lfs.mkdir(root))
+        root = certificate.canonical_path(context(), root)
         for _, leaf in ipairs({ "main.o", "side.o", "helper.o", "payload.a", "provider.so", "runtime.a", "native.a", "program" }) do
             write(root .. "/" .. leaf, leaf .. " bytes")
         end
@@ -145,6 +146,55 @@ describe("final link certificates", function()
         assert.is_true(hit())
         assert.equal(old, lfs.attributes(root .. "/program", "modification"))
         assert.equal(old, lfs.attributes(ticket.record, "modification"))
+    end)
+
+    it("reuses output recipes across physical-parent aliases and working-directory spellings", function()
+        if platform.windows then pending("POSIX directory alias fixture"); return end
+        local alias = root .. "/output alias"
+        assert(lfs.link(root, alias, true))
+        local target = root .. "/deliverables/bin/program"
+        local original = clone(spec)
+        original.output_root = alias
+        original.argv = {}
+        original.outputs = { { path = alias .. "/deliverables/bin/program" },
+            { path = alias .. "/deliverables/bin/program.dSYM", kind = "directory" } }
+        local cold_context = context()
+        local cold = certificate.prepare(cold_context, original)
+        assert.equal(target, cold.outputs[1].path)
+        assert.equal(target .. ".dSYM", cold.outputs[2].path)
+        assert(lfs.mkdir(root .. "/deliverables"))
+        assert(lfs.mkdir(root .. "/deliverables/bin"))
+        write(target, "new program bytes")
+        assert(lfs.mkdir(target .. ".dSYM"))
+        write(target .. ".dSYM/debug", "DWARF bytes")
+        assert(certificate.commit(cold_context, cold))
+
+        local relative = clone(spec)
+        relative.output_root = "."
+        relative.argv = {}
+        relative.outputs = { { path = "./deliverables/bin/program" },
+            { path = "./deliverables/bin/program.dSYM", kind = "directory" } }
+        local warm_context = context()
+        function warm_context.io:cwd() return root end
+        local warm = certificate.prepare(warm_context, relative)
+        assert.equal(cold.key, warm.key)
+        assert.equal(cold.directory, warm.directory)
+        assert.equal(cold.input, warm.input)
+        assert.is_true(certificate.check(warm_context, warm))
+        local record = assert(certificate.read_record(warm_context, warm.record))
+        assert.equal(target, record.outputs[1].path)
+        assert.equal(target .. ".dSYM/debug", record.outputs[2].entries[1].path)
+    end)
+
+    it("does not reuse a certified target through a substituted output leaf symlink", function()
+        if platform.windows then pending("POSIX symlink fixture"); return end
+        local original = commit()
+        local alias = root .. "/program-alias"
+        assert(lfs.link(root .. "/program", alias, true))
+        local ctx, ticket = prepare({ outputs = { { path = alias } } })
+        assert.equal(original.key, ticket.key)
+        assert.equal(alias, ticket.outputs[1].path)
+        assert.is_false(certificate.check(ctx, ticket))
     end)
 
     for _, field in ipairs({ "objects", "c_objects", "payloads", "providers", "archives", "runtime" }) do
@@ -606,6 +656,7 @@ describe("persistent precise file certification", function()
     end
     before_each(function()
         root = temporary.name(); assert(os.remove(root)); assert(lfs.mkdir(root))
+        root = certificate.canonical_path(context(), root)
         model = precise_model(root)
         bulk = { "main.o", "helper.o", "payload.a", "provider.so", "archive.a", "runtime.o", "native.a", "program" }
         for _, leaf in ipairs(bulk) do write(root .. "/" .. leaf, leaf .. " bytes") end
