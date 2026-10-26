@@ -203,6 +203,16 @@ jobs:
       - name: Run complete macOS tests without coverage
         run: |
           make stdlib-test EXTRA_TEST_FLAGS="-o gtest -v"
+          luarocks make --force
+          log="$RUNNER_TEMP/titan-native-identical-reinstall.log"
+          make titan-stdlib-test-build TITAN_VERBOSE=1 2>&1 | tee "$log"
+          grep -Eq '^Titan object hit ' "$log"
+          grep -Eq '^Titan native hit ' "$log"
+          grep -Eq '^Titan link hit ' "$log"
+          if grep -Eq '^Titan (object|native|link) miss |os_process_host_child[.]c' "$log"; then
+            echo "Identical SDK reinstall compiled or linked native artifacts" >&2
+            exit 1
+          fi
           make titan-stdlib-test-run \
             TITAN_FILTER='test_runtime_shutdown_closes_native_handles_but_not_files$' \
             TITAN_TEST_TIMEOUT=15
