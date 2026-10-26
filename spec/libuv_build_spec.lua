@@ -1586,7 +1586,10 @@ set -eu
 printf '%s\n' "$*" >> calls
 test "$1 $2 $3" = "-c --incremental --output"
 mkdir -p "$4/.native"
-printf 'unchanged native object\n' > "$4/.native/fixture.o"
+directory=$(pwd -P)
+object="$4/.native/${directory##*/}.o"
+printf 'unchanged native object\n' > "$object"
+printf '%s/%s\n' "$directory" "$object"
 ]])
             local base = { "env", "-u", "MAKEFLAGS", "-u", "MFLAGS",
                 "-u", "GNUMAKEFLAGS", "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES",
@@ -1614,7 +1617,7 @@ printf 'unchanged native object\n' > "$4/.native/fixture.o"
                 local name, flags = fixture[1], fixture[2]
                 write_file(root .. "/spec/fixtures/stdlib/native/" .. name .. ".c", "authored C\n")
                 local fixed = root .. "/out/tests/" .. name .. ".o"
-                local expected = "-c --incremental --output out/tests/native/" .. name .. ".o -j4 " ..
+                local expected = "-c --incremental --output out/tests/native/" .. name .. ".o -j4 --print-c-objects " ..
                     "--cflag=-std=c99 --cflag=-Wall --cflag=-Wextra --cflag=-Werror --cflag=-fPIC " ..
                     "-I spec/fixtures/stdlib/native " .. flags ..
                     "--c-source spec/fixtures/stdlib/native/" .. name .. ".c\n"
@@ -1637,6 +1640,36 @@ printf 'unchanged native object\n' > "$4/.native/fixture.o"
                     prepare(mode)
                     assert.equal(old, lfs.attributes(fixed, "modification"), name)
                 end
+            end
+            -- A moved checkout retains native nodes keyed by its former
+            -- canonical source path. Only the path printed by this invocation
+            -- identifies the current object; enumeration is not a selector.
+            local previous = root
+            local previous_leaf = assert(root:match("[^/]+$"))
+            for _, fixture in ipairs(fixtures) do
+                write_file(root .. "/out/tests/native/" .. fixture[1] ..
+                    ".o/.native/" .. previous_leaf .. ".o", "retired canonical-path node\n")
+            end
+            local moved = root .. "-moved"
+            assert(os.rename(root, moved))
+            root = moved
+            for index, argument in ipairs(base) do
+                local first, last = argument:find(previous, 1, true)
+                if first then
+                    base[index] = argument:sub(1, first - 1) .. root .. argument:sub(last + 1)
+                end
+            end
+            for _, fixture in ipairs(fixtures) do
+                local name = fixture[1]
+                local fixed = root .. "/out/tests/" .. name .. ".o"
+                assert(os.remove(fixed))
+                local argv = { table.unpack(base) }
+                argv[#argv + 1] = "out/tests/" .. name .. ".o"
+                local ok, output = run_argv(argv)
+                assert.truthy(ok, output)
+                assert.equal("unchanged native object\n", read_file(fixed), name)
+                assert.equal("retired canonical-path node\n", read_file(root ..
+                    "/out/tests/native/" .. name .. ".o/.native/" .. previous_leaf .. ".o"), name)
             end
         end, debug.traceback)
         remove_tree(root)

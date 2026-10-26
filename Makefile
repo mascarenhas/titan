@@ -1356,24 +1356,24 @@ $(addprefix $(TITAN_TEST_BUILD_DIR)/,$(TITAN_TEST_FIXTURE_HEADERS)): $(TITAN_TES
 
 # Child-program helpers, including the dual-use stdio input, are certified
 # separately with their exact native policy.
-# Each output tree contains one C source, so its single .native object can be
-# copied to the existing fixture pathname without exposing certificate names.
+# The compiler reports the current source's object path; old canonical-path
+# nodes retained after a checkout move never select the fixed fixture copy.
 define titan_test_native_rule
 $(TITAN_TEST_BUILD_DIR)/$(1).o: spec/fixtures/stdlib/native/$(1).c FORCE | check-titan-test-sdk
 	+@$$(RECURSIVE_WRAPPER_GUARD) $$(TITAN_JOBS_CHECK) set -e; \
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 	native_output=$$(call make_shell_quote,$$(TITAN_TEST_BUILD_DIR)/native/$(1).o); \
-	CC=$$(call make_shell_quote,$$(CC)) \
+	native_object=$$$$(CC=$$(call make_shell_quote,$$(CC)) \
 	TITAN_BUILD_PROFILE=$$(call make_shell_quote,$$(TITAN_BUILD_PROFILE)) \
 	TITAN_EXTRA_CPPFLAGS=$$(call make_shell_quote,$$(strip $$(TITAN_TEST_CPPFLAGS) $(3))) \
 	TITAN_EXTRA_CFLAGS=$$(call make_shell_quote,$$(TITAN_TEST_CFLAGS)) \
 	TITAN_EXTRA_LDFLAGS=$$(call make_shell_quote,$$(TITAN_TEST_LDFLAGS)) \
-	$$(TEST_TITANC) -c --incremental --output "$$$$native_output" -j$$(TITAN_JOBS) $$(TITAN_VERBOSE_FLAG) \
+	$$(TEST_TITANC) -c --incremental --output "$$$$native_output" -j$$(TITAN_JOBS) $$(TITAN_VERBOSE_FLAG) --print-c-objects \
 	  --cflag=-std=c99 --cflag=-Wall --cflag=-Wextra --cflag=-Werror --cflag=-fPIC \
-	  -I spec/fixtures/stdlib/native $(2) --c-source "$$<"; \
-	set -- "$$$$native_output"/.native/*.o; \
-	test "$$$$#" = 1 && test -f "$$$$1" || { echo 'ERROR: expected one certified native fixture object' >&2; exit 1; }; \
-	if ! cmp -s "$$$$1" "$$@"; then cp -p "$$$$1" "$$@"; fi
+	  -I spec/fixtures/stdlib/native $(2) --c-source "$$<"); \
+	case "$$$$native_object" in /*) ;; *) echo 'ERROR: expected one absolute certified native fixture object' >&2; exit 1 ;; esac; \
+	test -f "$$$$native_object" || { echo 'ERROR: missing reported native fixture object' >&2; exit 1; }; \
+	if ! cmp -s "$$$$native_object" "$$@"; then cp -p "$$$$native_object" "$$@"; fi
 endef
 $(eval $(call titan_test_native_rule,uv_stdio_probe))
 $(eval $(call titan_test_native_rule,sqlite3_worker_fixture,--cflag=-pthread,$(SQLITE3_CPPFLAGS)))
