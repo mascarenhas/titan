@@ -238,7 +238,11 @@ io.stdout:write("released\n"); io.stdout:flush()
         assert.is_true(holder_released, table.concat(events, "\n"))
         assert.equal(2, #children, table.concat(events, "\n"))
         assert.equal(0, children[2].code, table.concat(events, "\n"))
-        if not terminate then assert.equal(0, children[1].code, table.concat(events, "\n")) end
+        if not terminate then
+            assert.equal(0, children[1].code, table.concat(events, "\n"))
+        elseif options.defer_waiter then
+            assert.equal(9, children[1].signal, table.concat(events, "\n"))
+        end
         return events
     end
 
@@ -366,6 +370,9 @@ dofile(%q .. "/titanc")
 
     it("keeps a killed final-link coordinator from overwriting an external successor", function()
         if platform.windows then pending("POSIX final-link process lifetime"); return end
+        -- Output routing resolves physical ancestors. Match the wrapper's
+        -- input paths against the same spelling (not Darwin's /tmp alias).
+        root = assert(compiler_io.new_sync():realpath(root))
         local first, second, delivery = root .. "/first", root .. "/second", root .. "/delivery"
         assert(lfs.mkdir(first)); assert(lfs.mkdir(second)); assert(lfs.mkdir(delivery))
         write(first .. "/app.titan", "function main(args: {string}): integer return 11 end\n")
