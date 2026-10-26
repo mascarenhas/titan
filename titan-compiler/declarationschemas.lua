@@ -137,7 +137,9 @@ local schemas = {
         kind = "string", path = "string", identity = "string", restat = "boolean?", observation = "observation?",
     },
     observation = {
-        modified_seconds = "integer", modified_nanoseconds = "integer", physical_identity = "string",
+        precision = "string", size = "integer", physical_identity = "string",
+        modified_seconds = "integer", modified_nanoseconds = "integer",
+        changed_seconds = "integer?", changed_nanoseconds = "integer?",
     },
     numeric = {
         kind = "string", spelling = "string", signed = "boolean?", rank = "integer", bits = "integer",
