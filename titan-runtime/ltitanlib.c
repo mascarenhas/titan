@@ -1117,6 +1117,197 @@ static const luaL_Reg output_lock_methods[] = {
   { NULL, NULL }
 };
 
+
+/* Private compiler helper: precise file metadata for incremental observation
+** reuse. Returns { kind, dev, ino, size, mode, mtime_ns, ctime_ns } or
+** nil, errmsg, errno_code without raising on missing paths. */
+static int stat_precise(lua_State *L) {
+  size_t path_len = 0;
+  const char *path = luaL_checklstring(L, 1, &path_len);
+  int follow = lua_isnoneornil(L, 2) ? 1 : lua_toboolean(L, 2);
+  const char *kind;
+  char dev_buf[32], ino_buf[64];
+  lua_Integer size_val, mode_val, mtime_ns, ctime_ns;
+  if (strlen(path) != path_len) {
+    lua_pushnil(L);
+    lua_pushliteral(L, "path contains a NUL byte");
+    lua_pushinteger(L, EINVAL);
+    return 3;
+  }
+  if (path_len == 0) {
+    lua_pushnil(L);
+    lua_pushliteral(L, "ENOENT: No such file or directory");
+    lua_pushinteger(L, 2);
+    return 3;
+  }
+#if defined(_WIN32)
+  {
+    WCHAR *wide;
+    int count;
+    DWORD flags, file_type;
+    HANDLE handle;
+    FILE_BASIC_INFO basic_info;
+    FILE_STANDARD_INFO standard_info;
+    BY_HANDLE_FILE_INFORMATION handle_info;
+    FILE_ID_INFO id_info;
+    BOOL has_basic, has_standard, has_handle_info, has_id_info;
+    int64_t write_ticks, change_ticks;
+    luaL_checkstack(L, 5, "inspecting file metadata");
+    count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    if (count <= 0 || (unsigned)count > TITAN_WIN_PATH_CAP) {
+      DWORD error = count <= 0 ? GetLastError() : ERROR_FILENAME_EXCED_RANGE;
+      lua_pushnil(L);
+      titan_win_loader_error(L, follow ? "stat" : "lstat", path, error);
+      lua_pushinteger(L, (lua_Integer)error);
+      return 3;
+    }
+    wide = (WCHAR *)lua_newuserdatauv(L, (size_t)count * sizeof(WCHAR), 0);
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, count)) {
+      DWORD error = GetLastError();
+      lua_pushnil(L);
+      titan_win_loader_error(L, follow ? "stat" : "lstat", path, error);
+      lua_pushinteger(L, (lua_Integer)error);
+      return 3;
+    }
+    flags = FILE_FLAG_BACKUP_SEMANTICS |
+            (follow ? 0 : FILE_FLAG_OPEN_REPARSE_POINT);
+    handle = CreateFileW(wide, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, flags, NULL);
+    if (handle == INVALID_HANDLE_VALUE) {
+      DWORD error = GetLastError();
+      lua_pushnil(L);
+      if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ||
+          error == ERROR_CANT_ACCESS_FILE) {
+        lua_pushliteral(L, "ENOENT: No such file or directory");
+        lua_pushinteger(L, 2);
+      } else {
+        titan_win_loader_error(L, follow ? "stat" : "lstat", path, error);
+        lua_pushinteger(L, (lua_Integer)error);
+      }
+      return 3;
+    }
+    file_type = GetFileType(handle);
+    has_basic = GetFileInformationByHandleEx(
+        handle, FileBasicInfo, &basic_info, sizeof basic_info);
+    has_standard = GetFileInformationByHandleEx(
+        handle, FileStandardInfo, &standard_info, sizeof standard_info);
+    has_id_info = GetFileInformationByHandleEx(
+        handle, FileIdInfo, &id_info, sizeof id_info);
+    has_handle_info = GetFileInformationByHandle(handle, &handle_info);
+    CloseHandle(handle);
+    if (!has_basic || (!has_standard && !has_handle_info)) {
+      DWORD error = GetLastError();
+      lua_pushnil(L);
+      titan_win_loader_error(L, follow ? "stat" : "lstat", path, error);
+      lua_pushinteger(L, (lua_Integer)error);
+      return 3;
+    }
+    if (file_type != FILE_TYPE_DISK) {
+      kind = "other";
+    } else if (!follow &&
+               (basic_info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+      kind = "link";
+    } else if (has_standard
+                   ? standard_info.Directory
+                   : ((basic_info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)) {
+      kind = "directory";
+    } else {
+      kind = "file";
+    }
+    if (strcmp(kind, "directory") == 0) {
+      size_val = 0;
+    } else if (has_standard) {
+      size_val = (lua_Integer)standard_info.EndOfFile.QuadPart;
+    } else {
+      size_val = (lua_Integer)(((uint64_t)handle_info.nFileSizeHigh << 32) |
+                               (uint64_t)handle_info.nFileSizeLow);
+    }
+    if (strcmp(kind, "file") == 0) mode_val = 0x8000;
+    else if (strcmp(kind, "directory") == 0) mode_val = 0x4000;
+    else if (strcmp(kind, "link") == 0) mode_val = 0xA000;
+    else mode_val = 0;
+    if ((basic_info.FileAttributes & FILE_ATTRIBUTE_READONLY) != 0)
+      mode_val |= (strcmp(kind, "directory") == 0) ? 0555 : 0444;
+    else
+      mode_val |= (strcmp(kind, "directory") == 0) ? 0777 : 0666;
+    write_ticks = (int64_t)basic_info.LastWriteTime.QuadPart;
+    change_ticks = (int64_t)basic_info.ChangeTime.QuadPart;
+    if (change_ticks == 0) change_ticks = write_ticks;
+    mtime_ns = (lua_Integer)((write_ticks - 116444736000000000LL) * 100LL);
+    ctime_ns = (lua_Integer)((change_ticks - 116444736000000000LL) * 100LL);
+    if (has_id_info) {
+      int i;
+      snprintf(dev_buf, sizeof dev_buf, "%llu",
+               (unsigned long long)id_info.VolumeSerialNumber);
+      for (i = 0; i < 16; i++)
+        snprintf(ino_buf + 2 * i, 3, "%02x",
+                 (unsigned int)id_info.FileId.Identifier[i]);
+    } else if (has_handle_info) {
+      snprintf(dev_buf, sizeof dev_buf, "%lu",
+               (unsigned long)handle_info.dwVolumeSerialNumber);
+      snprintf(ino_buf, sizeof ino_buf, "%08lx%08lx",
+               (unsigned long)handle_info.nFileIndexHigh,
+               (unsigned long)handle_info.nFileIndexLow);
+    } else {
+      dev_buf[0] = '0'; dev_buf[1] = '\0';
+      ino_buf[0] = '0'; ino_buf[1] = '\0';
+    }
+  }
+#else
+  {
+    struct stat info;
+    int64_t mtime_sec, mtime_nsec, ctime_sec, ctime_nsec;
+    if ((follow ? stat(path, &info) : lstat(path, &info)) != 0) {
+      int err = errno;
+      lua_pushnil(L);
+      if (err == ENOENT)
+        lua_pushfstring(L, "ENOENT: %s", strerror(err));
+      else
+        lua_pushstring(L, strerror(err));
+      lua_pushinteger(L, (lua_Integer)err);
+      return 3;
+    }
+    if (S_ISREG(info.st_mode)) kind = "file";
+    else if (S_ISDIR(info.st_mode)) kind = "directory";
+    else if (S_ISLNK(info.st_mode)) kind = "link";
+    else kind = "other";
+    snprintf(dev_buf, sizeof dev_buf, "%llu", (unsigned long long)info.st_dev);
+    snprintf(ino_buf, sizeof ino_buf, "%llu", (unsigned long long)info.st_ino);
+    size_val = (lua_Integer)info.st_size;
+    mode_val = (lua_Integer)info.st_mode;
+#if defined(__APPLE__)
+    mtime_sec = (int64_t)info.st_mtimespec.tv_sec;
+    mtime_nsec = (int64_t)info.st_mtimespec.tv_nsec;
+    ctime_sec = (int64_t)info.st_ctimespec.tv_sec;
+    ctime_nsec = (int64_t)info.st_ctimespec.tv_nsec;
+#else
+    mtime_sec = (int64_t)info.st_mtim.tv_sec;
+    mtime_nsec = (int64_t)info.st_mtim.tv_nsec;
+    ctime_sec = (int64_t)info.st_ctim.tv_sec;
+    ctime_nsec = (int64_t)info.st_ctim.tv_nsec;
+#endif
+    mtime_ns = (lua_Integer)(mtime_sec * 1000000000LL + mtime_nsec);
+    ctime_ns = (lua_Integer)(ctime_sec * 1000000000LL + ctime_nsec);
+  }
+#endif
+  lua_createtable(L, 0, 7);
+  lua_pushstring(L, kind);
+  lua_setfield(L, -2, "kind");
+  lua_pushstring(L, dev_buf);
+  lua_setfield(L, -2, "dev");
+  lua_pushstring(L, ino_buf);
+  lua_setfield(L, -2, "ino");
+  lua_pushinteger(L, size_val);
+  lua_setfield(L, -2, "size");
+  lua_pushinteger(L, mode_val);
+  lua_setfield(L, -2, "mode");
+  lua_pushinteger(L, mtime_ns);
+  lua_setfield(L, -2, "mtime_ns");
+  lua_pushinteger(L, ctime_ns);
+  lua_setfield(L, -2, "ctime_ns");
+  return 1;
+}
 static const luaL_Reg titanlib[] = {
   { "backtrace", getbacktrace },
   { "pin", pintrace },
@@ -1125,6 +1316,7 @@ static const luaL_Reg titanlib[] = {
   { "_loadlibglobal", lazyglobalload },
   { "_sha256_binary", sha256_binary },
   { "_output_lock_open", output_lock_open },
+  { "_stat_precise", stat_precise },
 #if defined(_WIN32)
   { "_abivalue", abivalue },
 #else

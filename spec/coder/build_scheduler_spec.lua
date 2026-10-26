@@ -247,6 +247,68 @@ describe("process transport", function()
     end)
 end)
 
+describe("native precise stat", function()
+    local workspace
+    before_each(function() workspace = new_workspace() end)
+    after_each(function() remove_tree(workspace) end)
+
+    it("reports integer nanosecond ctime changes after a restored-mtime rewrite and shares hardlink identity", function()
+        local support = require "titan"
+        if type(support._stat_precise) ~= "function" then
+            pending("native _stat_precise requires a reinstalled runtime")
+            return
+        end
+        local absent, absent_err, absent_code =
+            support._stat_precise(workspace .. "/missing", true)
+        assert.is_nil(absent)
+        assert.truthy(tostring(absent_err):find("ENOENT", 1, true), absent_err)
+        assert.equal(2, absent_code)
+
+        local reference = workspace .. "/reference.txt"
+        local target = workspace .. "/target.txt"
+        local hard = workspace .. "/hard.txt"
+        write_file(reference, "aaaa")
+        write_file(target, "aaaa")
+        assert(lfs.link(target, hard))
+        if not platform.windows then
+            assert(os.execute("touch -r " .. quote(reference) .. " " .. quote(target)))
+        end
+        local before = assert(support._stat_precise(target, true))
+        local hard_obs = assert(support._stat_precise(hard, true))
+        local dir_obs = assert(support._stat_precise(workspace, true))
+        assert.equal("directory", dir_obs.kind)
+        assert.equal("file", before.kind)
+        assert.equal(4, before.size)
+        assert.equal("integer", math.type(before.size))
+        assert.equal("integer", math.type(before.mode))
+        assert.equal("integer", math.type(before.mtime_ns))
+        assert.equal("integer", math.type(before.ctime_ns))
+        assert.is_string(before.dev)
+        assert.is_string(before.ino)
+        assert.equal(before.dev, hard_obs.dev)
+        assert.equal(before.ino, hard_obs.ino)
+
+        require("titan-compiler.process").library().sleep(20)
+        write_file(target, "bbbb")
+        if platform.windows then
+            local uv = require("titan-compiler.process").library()
+            local sec = before.mtime_ns / 1000000000
+            assert(uv.fs_utime(target, sec, sec))
+        else
+            assert(os.execute("touch -r " .. quote(reference) .. " " .. quote(target)))
+        end
+        local after = assert(support._stat_precise(target, true))
+        assert.equal(before.size, after.size)
+        assert.equal(before.dev, after.dev)
+        assert.equal(before.ino, after.ino)
+        if not platform.windows then
+            assert.equal(before.mtime_ns, after.mtime_ns)
+        end
+        assert.is_true(after.ctime_ns > before.ctime_ns,
+            tostring(before.ctime_ns) .. " -> " .. tostring(after.ctime_ns))
+    end)
+end)
+
 -- The worker side of the protocol, driven by the request the test's hooks
 -- send: frontend accounting through a shared counter, native batches through
 -- the coordinator, output, results, malformed records and orphan behavior.
