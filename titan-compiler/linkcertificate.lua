@@ -49,6 +49,18 @@ local function canonical(context, path)
 end
 certificate.canonical_path = canonical
 
+local function output_path(context, path)
+    path = absolute(context, path)
+    -- Resolve ancestors, not the output leaf: snapshots must still reject a
+    -- substituted symlink even if its target has a valid output certificate.
+    local parent = path:match(platform.windows and "^(.*[/\\])[^/\\]+[/\\]*$" or "^(.*/)[^/]+/*$")
+    if not parent then return canonical(context, path) end
+    local trimmed = parent:gsub(platform.windows and "[/\\]+$" or "/+$", "")
+    if platform.is_absolute(trimmed) then parent = trimmed end
+    local filename = paths.join(canonical(context, parent), paths.basename(path))
+    return platform.windows and filename:gsub("\\", "/"):lower() or filename
+end
+
 local function mkdir(context, directory)
     local stat, err = context.io:lstat(directory)
     if err then error(err, 0) end
@@ -456,7 +468,7 @@ function certificate.prepare(context, spec)
     local outputs, keys, seen = {}, {}, {}
     for _, output in ipairs(spec.outputs) do
         if type(output) == "string" then output = { path = output } end
-        local filename = absolute(context, need(output.path))
+        local filename = output_path(context, need(output.path))
         local key = canonical(context, filename)
         need(not seen[key], "duplicate final output: " .. filename)
         seen[key] = true
@@ -466,7 +478,7 @@ function certificate.prepare(context, spec)
     end
     table.sort(keys, util.bytewise_less)
     local key = incremental.digest(context, "final-output-set", keys)
-    local directory = paths.join(absolute(context, spec.output_root), ".titan-links", key)
+    local directory = paths.join(canonical(context, spec.output_root), ".titan-links", key)
     local input = { outputs = outputs }
     for _, field in ipairs(RECIPE_FIELDS) do input[field] = spec[field] end
     for _, field in ipairs(FILE_FIELDS) do input[field] = certificate.files(context, spec[field]) end
