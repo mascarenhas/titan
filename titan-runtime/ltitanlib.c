@@ -530,10 +530,11 @@ static int jobserver_open(lua_State *L) {
     if (fstat((int)inherited_read, &read_channel) != 0 ||
         fstat((int)inherited_write, &write_channel) != 0)
       return push_failure(L, "the jobserver descriptors are closed");
-    if (!S_ISFIFO(read_channel.st_mode) || !S_ISFIFO(write_channel.st_mode) ||
-        !same_channel(&read_channel, &write_channel))
+    if (!S_ISFIFO(read_channel.st_mode) || !S_ISFIFO(write_channel.st_mode))
       return push_failure(L, "the jobserver descriptors are not one pipe");
 #if defined(__linux__)
+    if (!same_channel(&read_channel, &write_channel))
+      return push_failure(L, "the jobserver descriptors are not one pipe");
     {
       char path[64];
       snprintf(path, sizeof path, "/proc/self/fd/%d", (int)inherited_read);
@@ -549,6 +550,16 @@ static int jobserver_open(lua_State *L) {
       }
     }
 #else
+    {
+      int read_flags = fcntl((int)inherited_read, F_GETFL);
+      int write_flags = fcntl((int)inherited_write, F_GETFL);
+      if (read_flags < 0 || write_flags < 0 ||
+          ((read_flags & O_ACCMODE) != O_RDONLY &&
+           (read_flags & O_ACCMODE) != O_RDWR) ||
+          ((write_flags & O_ACCMODE) != O_WRONLY &&
+           (write_flags & O_ACCMODE) != O_RDWR))
+        return push_failure(L, "the jobserver descriptors are not one pipe");
+    }
     lua_pushnil(L);
     lua_pushliteral(L, "this platform cannot reopen an inherited "
                        "jobserver pipe privately");
