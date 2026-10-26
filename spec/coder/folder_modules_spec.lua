@@ -135,7 +135,8 @@ local function synthetic_file(output_root, basename)
             end
         end
     end
-    return assert(found, "missing target-private synthetic file: " .. basename)
+    assert.truthy(found, "missing target-private synthetic file: " .. basename)
+    return found
 end
 
 describe("folder modules through the public compiler", function()

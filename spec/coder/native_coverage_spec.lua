@@ -51,7 +51,8 @@ local function synthetic_file(output_root, relative)
             end
         end
     end
-    return assert(found, "missing target-private synthetic file: " .. relative)
+    assert.truthy(found, "missing target-private synthetic file: " .. relative)
+    return found
 end
 local function copy(from, to)
     if lfs.attributes(from, "mode") == "directory" then
