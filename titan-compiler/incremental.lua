@@ -256,28 +256,33 @@ function incremental.toolchain_identity(context, descriptor)
         stage_tools = descriptor.stage_tools, executable_path = context.executable_path }, {})
     local saved = memo.toolchains[key]
     if saved then return saved.digest, saved.details end
-    local configured = {}
-    for key, value in pairs(descriptor) do configured[key] = value end
-    configured.io = context.io
-    configured.cache_adapter = context.cache_adapter
-    configured.file_digest = function(path, bytes)
-        return incremental.file_digest(context, path, bytes)
-    end
-    local preprocessor, probe_error, probed_banner = descriptor.preprocessor_identity
-    if not preprocessor then
-        preprocessor, probe_error, probed_banner =
-            require("c-parser.cdriver").preprocessor_cache_identity(configured)
-        preprocessor = required(preprocessor, probe_error)
-    end
-    local null = platform.windows and "NUL" or "/dev/null"
-    local banner = descriptor.banner or probed_banner or run(context, append({ table.unpack(cc) },
-        { "-E", "-v", "-x", "c", null, "-o", null }))
-    local tools = { incremental.physical_executable(context, cc) }
     local wrapper = paths.basename(cc[1]):lower():gsub("%.exe$", "")
-    if wrapper == "ccache" or wrapper == "sccache" or wrapper == "distcc" then
+    local wrapped = wrapper == "ccache" or wrapper == "sccache" or wrapper == "distcc"
+    local description_argv = { cc[1] }
+    if wrapped then
         assert(cc[2] and cc[2]:sub(1, 1) ~= "-", "wrapped compiler must be explicit")
-        tools[#tools + 1] = incremental.physical_executable(context, cc[2])
+        description_argv[2] = cc[2]
     end
+    -- Effective flags belong to the options component. In particular, -O/-D
+    -- change the header-cache key and predefined macros, but not which compiler
+    -- installation is running. Probe its fixed, flagless self-description.
+    memo.toolchain_descriptions = memo.toolchain_descriptions or {}
+    local description_key = canonical({ argv = description_argv,
+        preprocessor = descriptor.preprocessor_identity, banner = descriptor.banner }, {})
+    local description = memo.toolchain_descriptions[description_key]
+    if not description then
+        local null = platform.windows and "NUL" or "/dev/null"
+        description = {
+            preprocessor = descriptor.preprocessor_identity or run(context,
+                append({ table.unpack(description_argv) }, { "-E", "-dM", "-x", "c", null })),
+            banner = descriptor.banner or run(context, append({ table.unpack(description_argv) },
+                { "-E", "-v", "-x", "c", null, "-o", null })),
+        }
+        memo.toolchain_descriptions[description_key] = description
+    end
+    local preprocessor, banner = description.preprocessor, description.banner
+    local tools = { incremental.physical_executable(context, cc) }
+    if wrapped then tools[#tools + 1] = incremental.physical_executable(context, cc[2]) end
     local stages = descriptor.stage_tools
     if not stages then
         stages = {}
@@ -300,8 +305,7 @@ function incremental.toolchain_identity(context, descriptor)
     for _, stage in ipairs(stages) do
         tools[#tools + 1] = incremental.physical_executable(context, stage)
     end
-    local details = { preprocessor = preprocessor, banner = banner, tools = tools,
-        target = descriptor.target_identity or descriptor.profile_identity or "" }
+    local details = { preprocessor = preprocessor, banner = banner, tools = tools }
     local digest = incremental.digest(context, "toolchain", details)
     memo.toolchains[key] = { digest = digest, details = details }
     return digest, details
@@ -692,7 +696,7 @@ function incremental.certify_local(context, modname, source)
         if source_ok and sources.status == "hit" then imports = cert.imports end
         local current = assert(context.incremental_configuration,
             "configuration must be computed before local certification")
-        for _, component in ipairs({ "compiler", "preamble", "toolchain", "options" }) do
+        for _, component in ipairs({ "compiler", "toolchain", "options", "preamble" }) do
             if cert.configuration[component] ~= current[component] then
                 return miss("configuration", component)
             end

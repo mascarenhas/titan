@@ -5,6 +5,7 @@ local types = require "titan-compiler.types"
 local sha256 = require "titan-compiler.sha256"
 local cpreamble = require "titan-compiler.cpreamble"
 local cpp = require "c-parser.cpp"
+local version = require "titan-compiler.version"
 
 local function context(files)
     local dirs = { ["/"] = true }
@@ -289,6 +290,31 @@ describe("incremental configuration", function()
         assert.is_not.equal(before.options, incremental.configuration(third).options)
     end)
 
+    it("probes one flagless toolchain description independently of effective options", function()
+        local ctx = context({ ["/tool/cc"] = "driver" })
+        local null = require("titan-compiler.platform").windows and "NUL" or "/dev/null"
+        function ctx.io:run(argv)
+            self.commands[#self.commands + 1] = argv
+            if argv[3] == "-dM" then
+                assert.same({ "/tool/cc", "-E", "-dM", "-x", "c", null }, argv)
+                return { ok = true, output = "#define __COMPILER_VERSION__ 1\n" }
+            end
+            assert.same({ "/tool/cc", "-E", "-v", "-x", "c", null, "-o", null }, argv)
+            return { ok = true, output = "clang fixed vendor banner" }
+        end
+        local descriptor = { compiler_argv = { "/tool/cc", "-DCC_OPTION=1" },
+            compile_flags = { "-O1", "-DEFFECTIVE_OPTION=1" }, include_dirs = { "/first-sdk" },
+            profile_identity = "first-effective-profile", stage_tools = {} }
+        local first = incremental.toolchain_identity(ctx, descriptor)
+        descriptor.compiler_argv[2] = "-DCC_OPTION=2"
+        descriptor.compile_flags = { "-O3", "-DEFFECTIVE_OPTION=2" }
+        descriptor.include_dirs = { "/second-sdk" }
+        descriptor.profile_identity = "second-effective-profile"
+        assert.equal(first, incremental.toolchain_identity(ctx, descriptor))
+        assert.equal(2, #ctx.io.commands)
+        assert.equal(0, incremental.counters(ctx).file_hashes)
+    end)
+
     it("certifies explicit wrappers and named compiler stages once per configuration", function()
         local ctx = context({ ["/tool/ccache"] = "wrapper", ["/tool/gcc"] = "driver",
             ["/tool/cc1"] = "compiler stage", ["/tool/as"] = "assembler" })
@@ -461,6 +487,24 @@ describe("incremental local certification", function()
         assert.same({}, changed.imports)
     end)
 
+    for _, case in ipairs({
+        { "compiler", { "compiler", "toolchain", "options", "preamble" } },
+        { "toolchain", { "toolchain", "options", "preamble" } },
+        { "options", { "options", "preamble" } },
+        { "preamble", { "preamble" } },
+    }) do
+        it("reports configuration " .. case[1] .. " before its dependent components", function()
+            local ctx, saved, source = fixture()
+            for _, component in ipairs(case[2]) do
+                saved.object_metadata.certificate.configuration[component] = "old"
+            end
+            local result = incremental.certify_local(ctx, "main", source)
+            assert.equal("configuration", result.reason)
+            assert.equal(case[1], result.detail)
+            assert.same({}, result.imports)
+        end)
+    end
+
     it("detects same-time source content edits and exact folder addition and removal", function()
         local ctx, _, source, files = fixture()
         files["/src/main.titan"] = "edited"
@@ -488,6 +532,20 @@ describe("incremental local certification", function()
         local moved, saved, moved_source = fixture()
         saved.object_metadata.certificate.stem = "/old/main"
         assert.equal("output-moved", incremental.certify_local(moved, "main", moved_source).reason)
+    end)
+
+    it("rejects obsolete envelope canonicalization before certifying sources", function()
+        local ctx, _, source = fixture()
+        local payload = "return {abi=" .. string.format("%q", version.TITAN_ABI_VERSION)
+            .. ",schema=" .. string.format("%q", version.OBJECT_RECORD_SCHEMA)
+            .. ",digest=" .. string.format("%q", version.CERTIFICATE_DIGEST)
+            .. ",canonicalization='obsolete',entry={}}"
+        objectmetadata.read = function() return objectmetadata.decode(payload) end
+        local result = incremental.certify_local(ctx, "main", source)
+        assert.equal("record-schema", result.reason)
+        assert.matches("canonicalization=obsolete", result.detail, 1, true)
+        assert.is_nil(result.imports)
+        assert.is_nil(ctx.io.reads["/src/main.titan"])
     end)
 
     it("checks descriptor search inputs before restoring any graph", function()
