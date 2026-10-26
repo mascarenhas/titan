@@ -247,6 +247,8 @@ describe("Windows compiler path integration", function()
             windows = platform.windows,
             native = platform.native,
             new_sync = compiler_io.new_sync,
+            lfs_attributes = lfs.attributes,
+            lfs_symlinkattributes = lfs.symlinkattributes,
         }
         platform.windows = true
         platform.native = function(name)
@@ -257,6 +259,8 @@ describe("Windows compiler path integration", function()
         platform.windows = originals.windows
         platform.native = originals.native
         compiler_io.new_sync = originals.new_sync
+        lfs.attributes = originals.lfs_attributes
+        lfs.symlinkattributes = originals.lfs_symlinkattributes
     end)
 
     local function header_manifest(paths, kind)
@@ -494,6 +498,116 @@ describe("Windows compiler path integration", function()
         assert.equal("C:/new/child/provider.dll.stage.tmp.stage/provider.dll", staged)
         assert.same({ "C:/new", "C:/new/child",
             "C:/new/child/provider.dll.stage.tmp.stage" }, created)
+    end)
+
+    it("checks Windows output reservation ancestors through compiler_io without full-table LFS calls", function()
+        lfs.symlinkattributes = function(path, request)
+            if request == nil then
+                error("full-table lfs.symlinkattributes is forbidden on Windows: " .. tostring(path))
+            end
+            return originals.lfs_symlinkattributes(path, request)
+        end
+        lfs.attributes = function(path, request)
+            if request == nil then
+                error("full-table lfs.attributes is forbidden on Windows: " .. tostring(path))
+            end
+            return originals.lfs_attributes(path, request)
+        end
+
+        local lstat_entries = {
+            ["C:/"] = {
+                kind = "directory", mode = 0x41ff, size = 0,
+                device = "100", inode = "1",
+            },
+            ["C:/project"] = {
+                kind = "directory", mode = 0x41ff, size = 0,
+                device = "100", inode = "2",
+            },
+            ["C:/project/file_parent"] = {
+                kind = "file", mode = 0x81b6, size = 12,
+                device = "100", inode = "3",
+            },
+            ["C:/project/link_parent"] = {
+                kind = "symlink", mode = 0xa1ff, size = 0,
+                device = "100", inode = "4",
+            },
+        }
+        local stat_entries = {
+            ["C:/project/link_parent"] = {
+                kind = "directory", mode = 0x41ff, size = 0,
+                device = "100", inode = "5",
+            },
+        }
+        local lstat_counts, stat_counts = {}, {}
+        local io_error_path, io_error_method
+        compiler_io.new_sync = function()
+            return {
+                cwd = function() return "C:/project" end,
+                lstat = function(_, filename)
+                    lstat_counts[filename] = (lstat_counts[filename] or 0) + 1
+                    if io_error_method == "lstat" and filename == io_error_path then
+                        return nil, "lstat: access denied: " .. filename
+                    end
+                    return lstat_entries[filename]
+                end,
+                stat = function(_, filename)
+                    stat_counts[filename] = (stat_counts[filename] or 0) + 1
+                    if io_error_method == "stat" and filename == io_error_path then
+                        return nil, "stat: broken target: " .. filename
+                    end
+                    return stat_entries[filename] or lstat_entries[filename]
+                end,
+            }
+        end
+
+        local sources = {
+            { modname = "app", output = "C:/project/build/app.titan", c_parts = 1 },
+        }
+        local ok, err = driver.validate_program_output_paths(
+            sources, "C:/project/build/bin/app.exe",
+            "C:/project/build/synthetic/app__entrypoint.c", {})
+        assert.is_true(ok, err)
+        assert.equal(1, lstat_counts["C:/"])
+        assert.equal(1, lstat_counts["C:/project"])
+        assert.equal(1, lstat_counts["C:/project/build"])
+
+        ok, err = driver.validate_program_output_paths(
+            sources, "C:/project/file_parent/app.exe",
+            "C:/project/build/synthetic/app__entrypoint.c", {})
+        assert.is_nil(ok)
+        assert.matches("output parent 'C:/project/file_parent' is not a directory", err, 1, true)
+
+        ok, err = driver.validate_program_output_paths(
+            sources, "C:/project/link_parent/app.exe",
+            "C:/project/build/synthetic/app__entrypoint.c", {})
+        assert.is_true(ok, err)
+        assert.equal(1, stat_counts["C:/project/link_parent"])
+
+        stat_entries["C:/project/link_parent"] = {
+            kind = "file", mode = 0x81b6, size = 12,
+            device = "100", inode = "6",
+        }
+        ok, err = driver.validate_program_output_paths(
+            sources, "C:/project/link_parent/app.exe",
+            "C:/project/build/synthetic/app__entrypoint.c", {})
+        assert.is_nil(ok)
+        assert.matches("output parent 'C:/project/link_parent' is not a directory", err, 1, true)
+
+        io_error_method = "lstat"
+        io_error_path = "C:/project"
+        ok, err = driver.validate_program_output_paths(
+            sources, "C:/project/build/bin/app.exe",
+            "C:/project/build/synthetic/app__entrypoint.c", {})
+        assert.is_nil(ok)
+        assert.matches("lstat: access denied: C:/project", err, 1, true)
+
+        io_error_method = "stat"
+        io_error_path = "C:/project/link_parent"
+        ok, err = driver.validate_program_output_paths(
+            sources, "C:/project/link_parent/app.exe",
+            "C:/project/build/synthetic/app__entrypoint.c", {})
+        assert.is_nil(ok)
+        assert.matches("stat: broken target: C:/project/link_parent", err, 1, true)
     end)
 end)
 
