@@ -397,7 +397,7 @@ int titan_uv_test_stdio_install_child_socket_stdout(int socket_mode) {
   }
   memset(&address, 0, sizeof(address));
   address.sin_family = AF_INET;
-  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_addr.s_addr = htonl(0x7f000001UL);
   address.sin_port = 0;
 
   switch (socket_mode) {
@@ -555,6 +555,7 @@ int titan_uv_test_stdio_restore_child_socket_stdout(void) {
 
 #include "uv_stdio_probe.h"
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -752,9 +753,9 @@ static int setup_tcp_stream(int target) {
     goto error;
   memset(&address, 0, sizeof(address));
   address.sin_family = AF_INET;
-  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   address.sin_port = 0;
-  if (bind(listener, (struct sockaddr *) &address, sizeof(address)) != 0 ||
+  if (inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) != 1 ||
+      bind(listener, (struct sockaddr *) &address, sizeof(address)) != 0 ||
       listen(listener, 1) != 0 ||
       getsockname(listener, (struct sockaddr *) &address, &address_len) != 0)
     goto error;
@@ -800,9 +801,9 @@ static int setup_tcp_listener_stdout(void) {
   }
   memset(&address, 0, sizeof(address));
   address.sin_family = AF_INET;
-  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   address.sin_port = 0;
-  if (bind(listener, (struct sockaddr *) &address, sizeof(address)) != 0 ||
+  if (inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) != 1 ||
+      bind(listener, (struct sockaddr *) &address, sizeof(address)) != 0 ||
       listen(listener, 1) != 0 ||
       replace_target(1, listener) != 0) {
     record_failure("TCP listener stdout setup failed: %s", strerror(errno));
@@ -824,9 +825,9 @@ static int setup_connected_udp_stdout(void) {
     goto error;
   memset(&address, 0, sizeof(address));
   address.sin_family = AF_INET;
-  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   address.sin_port = 0;
-  if (bind(peer, (struct sockaddr *) &address, sizeof(address)) != 0 ||
+  if (inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) != 1 ||
+      bind(peer, (struct sockaddr *) &address, sizeof(address)) != 0 ||
       getsockname(peer, (struct sockaddr *) &address, &address_len) != 0 ||
       fcntl(peer, F_SETFD, FD_CLOEXEC) != 0)
     goto error;

@@ -416,9 +416,9 @@ int titan_test_tcp_stdio_pair(int ipv6, int *accepted_fd, int *peer_fd) {
         }
         memset(&addr6, 0, sizeof(addr6));
         addr6.sin6_family = AF_INET6;
-        addr6.sin6_addr = in6addr_loopback;
         addr6.sin6_port = 0;
-        if (bind(listener, (struct sockaddr *)&addr6, sizeof(addr6)) != 0) {
+        if (inet_pton(AF_INET6, "::1", &addr6.sin6_addr) != 1 ||
+            bind(listener, (struct sockaddr *)&addr6, sizeof(addr6)) != 0) {
             saved_errno = (errno == EAFNOSUPPORT || errno == EADDRNOTAVAIL) ? -2 : errno;
             goto fail;
         }
@@ -440,9 +440,9 @@ int titan_test_tcp_stdio_pair(int ipv6, int *accepted_fd, int *peer_fd) {
         if (listener < 0) return errno;
         memset(&addr4, 0, sizeof(addr4));
         addr4.sin_family = AF_INET;
-        addr4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         addr4.sin_port = 0;
-        if (bind(listener, (struct sockaddr *)&addr4, sizeof(addr4)) != 0 ||
+        if (inet_pton(AF_INET, "127.0.0.1", &addr4.sin_addr) != 1 ||
+            bind(listener, (struct sockaddr *)&addr4, sizeof(addr4)) != 0 ||
             listen(listener, 1) != 0 ||
             getsockname(listener, (struct sockaddr *)&addr4, &len4) != 0) {
             saved_errno = errno;
