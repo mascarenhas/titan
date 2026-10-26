@@ -35,6 +35,69 @@ local function clone(value)
     return result
 end
 
+-- Real fixture files with deliberately controlled precise observations. The
+-- fake inode and mtime stay fixed across writes; only ctime advances, so a
+-- same-size replacement exercises the ctime gate rather than an inode miss.
+local function precise_model(root)
+    local model = { root = root, ctime = {}, ids = {}, executables = {}, clock = 1000000000, sequence = 0 }
+    local function key(path) return platform.windows and path:gsub("\\", "/") or path end
+    function model:context()
+        local strategy = compiler_io.new_sync()
+        local stat, lstat, read_file = strategy.stat, strategy.lstat, strategy.read_file
+        local write_file, rename = strategy.write_file, strategy.rename
+        strategy.reads = {}
+        local function decorate(metadata, err, path)
+            if not metadata then return nil, err end
+            path = key(path)
+            if not model.ids[path] then
+                model.sequence = model.sequence + 1
+                model.ids[path] = tostring(model.sequence)
+            end
+            local changed = model.ctime[path] or 1000000000
+            metadata.precision = model.coarse and "coarse" or "ns"
+            metadata.time_precision = metadata.precision
+            metadata.dev, metadata.ino = "1", model.ids[path]
+            metadata.device, metadata.inode = 1, tonumber(model.ids[path])
+            metadata.mtime_ns, metadata.ctime_ns = 1000000000, changed
+            metadata.modified_seconds, metadata.modified_nanoseconds = 1, 0
+            metadata.changed_seconds, metadata.changed_nanoseconds = changed // 1000000000, changed % 1000000000
+            if model.executables[path] then metadata.mode = 0x81ed end
+            return metadata
+        end
+        function strategy:stat(path)
+            local metadata, err = stat(self, path)
+            return decorate(metadata, err, path)
+        end
+        function strategy:lstat(path)
+            local metadata, err = lstat(self, path)
+            return decorate(metadata, err, path)
+        end
+        function strategy:read_file(path, bound)
+            local name = key(path)
+            self.reads[name] = (self.reads[name] or 0) + 1
+            return read_file(self, path, bound)
+        end
+        local function changed(path)
+            model.clock = model.clock + 1
+            model.ctime[key(path)] = model.clock
+        end
+        function strategy:write_file(path, bytes)
+            local ok, err = write_file(self, path, bytes)
+            if ok then changed(path) end
+            return ok, err
+        end
+        function strategy:rename(from, to)
+            local ok, err = rename(self, from, to)
+            if ok then changed(to) end
+            return ok, err
+        end
+        local ctx = { io = strategy, incremental_configuration = { compiler = "test-compiler" } }
+        assert(incremental.load_digest_cache(ctx, root))
+        return ctx
+    end
+    return model
+end
+
 describe("final link certificates", function()
     local root, spec
     local function prepare(overrides)
@@ -525,5 +588,268 @@ describe("native library coverage policy", function()
             assert.is_false(policy.cacheable)
             assert.matches("opaque linker input mechanism", policy.reason, 1, true)
         end
+    end)
+end)
+
+describe("persistent precise file certification", function()
+    local root, model, spec, bulk
+    local function saved(context)
+        assert(incremental.save_digest_cache(context))
+        return context
+    end
+    local function seed()
+        local ctx = model:context()
+        local ticket = certificate.prepare(ctx, spec)
+        assert(certificate.commit(ctx, ticket))
+        saved(ctx)
+        return ticket
+    end
+    before_each(function()
+        root = temporary.name(); assert(os.remove(root)); assert(lfs.mkdir(root))
+        model = precise_model(root)
+        bulk = { "main.o", "helper.o", "payload.a", "provider.so", "archive.a", "runtime.o", "native.a", "program" }
+        for _, leaf in ipairs(bulk) do write(root .. "/" .. leaf, leaf .. " bytes") end
+        write(root .. "/link.d", gnu_report(root .. "/program", { root .. "/native.a" }))
+        spec = { output_root = root, roots = { "app" }, kind = "program", templates = "template",
+            toolchain = "toolchain", argv = {}, outputs = { { path = root .. "/program" } },
+            objects = { root .. "/main.o" }, c_objects = { root .. "/helper.o" },
+            payloads = { root .. "/payload.a" }, providers = { root .. "/provider.so" },
+            archives = { root .. "/archive.a" }, runtime = { root .. "/runtime.o" },
+            native_libraries = { backend = "gnu", dependency_file = root .. "/link.d" } }
+    end)
+    after_each(function() remove(root) end)
+
+    it("reuses unchanged inputs, libraries and final outputs without reading their bytes", function()
+        seed()
+        local ctx = model:context()
+        local ticket = certificate.prepare(ctx, spec)
+        assert.is_true(certificate.check(ctx, ticket))
+        for _, leaf in ipairs(bulk) do
+            assert.equal(0, ctx.io.reads[root .. "/" .. leaf] or 0, leaf)
+        end
+        local record = assert(certificate.read_record(ctx, ticket.record))
+        assert.is_nil(record.observation)
+        assert.is_nil(record.native[1].observation)
+        assert.is_nil(record.outputs[1].observation)
+        saved(ctx)
+    end)
+
+    it("rereads a changed ctime with fixed inode, mtime and size without making observations semantic", function()
+        seed()
+        local filename = root .. "/provider.so"
+        local editor = model:context()
+        local before = assert(editor.io:stat(filename))
+        assert(editor.io:write_file(filename, "provider.so bytes"))
+        local after = assert(editor.io:stat(filename))
+        assert.equal(before.ino, after.ino)
+        assert.equal(before.mtime_ns, after.mtime_ns)
+        assert.equal(before.size, after.size)
+        assert.not_equal(before.ctime_ns, after.ctime_ns)
+        local ctx = model:context()
+        local ticket = certificate.prepare(ctx, spec)
+        assert.is_true(certificate.check(ctx, ticket))
+        assert.is_true((ctx.io.reads[filename] or 0) > 0)
+        assert.equal(0, ctx.io.reads[root .. "/main.o"] or 0)
+        saved(ctx)
+        assert(editor.io:write_file(filename, string.rep("X", #"provider.so bytes")))
+        ctx = model:context()
+        ticket = certificate.prepare(ctx, spec)
+        assert.is_false(certificate.check(ctx, ticket))
+        assert.is_true((ctx.io.reads[filename] or 0) > 0)
+    end)
+
+    it("rereads a same-size changed final output when only its ctime changes", function()
+        seed()
+        local filename = root .. "/program"
+        local editor = model:context()
+        assert(editor.io:write_file(filename, string.rep("X", #"program bytes")))
+        local ctx = model:context()
+        local ticket = certificate.prepare(ctx, spec)
+        local hit, reason = certificate.check(ctx, ticket)
+        assert.is_false(hit)
+        assert.equal("link outputs changed", reason)
+        assert.is_true((ctx.io.reads[filename] or 0) > 0)
+        assert.equal(0, ctx.io.reads[root .. "/main.o"] or 0)
+    end)
+
+    it("keeps fresh post-link rehashing even with a warm persistent cache", function()
+        seed()
+        local ctx = model:context()
+        local ticket = certificate.prepare(ctx, spec)
+        assert.equal(0, ctx.io.reads[root .. "/main.o"] or 0)
+        assert(certificate.commit(ctx, ticket))
+        for _, leaf in ipairs(bulk) do
+            assert.is_true((ctx.io.reads[root .. "/" .. leaf] or 0) > 0, leaf)
+        end
+        saved(ctx)
+        local next_context = model:context()
+        assert.is_true(certificate.check(next_context, certificate.prepare(next_context, spec)))
+        assert.equal(0, next_context.io.reads[root .. "/program"] or 0)
+    end)
+
+    it("falls back to reads with coarse observations", function()
+        seed()
+        model.coarse = true
+        local ctx = model:context()
+        assert.is_true(certificate.check(ctx, certificate.prepare(ctx, spec)))
+        for _, leaf in ipairs(bulk) do
+            assert.is_true((ctx.io.reads[root .. "/" .. leaf] or 0) > 0, leaf)
+        end
+    end)
+
+    it("uses the precise cache for native source, dependency and committed object bytes", function()
+        local native = require "titan-compiler.nativeinputs"
+        local source, header = root .. "/helper.c", root .. "/helper.h"
+        local contents = { [source] = "int helper(void);", [header] = "#define VALUE 1" }
+        write(source, contents[source]); write(header, contents[header])
+        local function compile(ctx)
+            local phases = {}
+            local objects, err = native.compile(ctx, {
+                sources = { source }, output_root = root, compile_argv = { "fake-cc" },
+                toolchain = "toolchain", incremental = true,
+                run = function(argv, phase)
+                    phases[#phases + 1] = phase
+                    local output, dependencies
+                    for index, argument in ipairs(argv) do
+                        if argument == "-o" then output = argv[index + 1]
+                        elseif argument == "-MF" then dependencies = argv[index + 1] end
+                    end
+                    local expanded = contents[source] .. "\n" .. contents[header]
+                    assert(ctx.io:write_file(output, (phase == "native-compile" and "object:" or "expanded:") .. expanded))
+                    if dependencies then
+                        assert(ctx.io:write_file(dependencies,
+                            "titan-native: " .. escape(source) .. " " .. escape(header) .. "\n"))
+                    end
+                    return { started = true, ok = true }
+                end,
+            })
+            assert.truthy(objects, err)
+            saved(ctx)
+            return objects[1], phases
+        end
+        local first = compile(model:context())
+        local warm = model:context()
+        local second, phases = compile(warm)
+        assert.is_true(second.hit)
+        assert.same({ "native-preprocess" }, phases)
+        for _, path in ipairs({ source, header, first.path }) do
+            assert.equal(0, warm.io.reads[path] or 0, path)
+        end
+        local editor = model:context()
+        contents[header] = "#define VALUE 2"
+        assert(editor.io:write_file(header, contents[header]))
+        local changed = model:context()
+        local third = compile(changed)
+        assert.is_false(third.hit)
+        assert.is_true((changed.io.reads[header] or 0) > 0)
+        assert.not_equal(first.identity, third.identity)
+        contents[source] = "int sample(void);"
+        assert(editor.io:write_file(source, contents[source]))
+        local source_changed = model:context()
+        local fourth = compile(source_changed)
+        assert.is_false(fourth.hit)
+        assert.is_true((source_changed.io.reads[source] or 0) > 0)
+        local object_size = assert(editor.io:stat(fourth.path)).size
+        assert(editor.io:write_file(fourth.path, string.rep("Z", object_size)))
+        local object_changed = model:context()
+        local repaired = compile(object_changed)
+        assert.is_false(repaired.hit)
+        assert.is_true((object_changed.io.reads[fourth.path] or 0) > 0)
+        assert.equal(fourth.identity, repaired.identity)
+    end)
+end)
+
+describe("linker dependency-feature memo", function()
+    local root, model, request, probes, resolves, reports, banner, supported, signal
+    local function invocation()
+        local ctx = model:context()
+        function ctx.io:run(argv)
+            local named = argv[#argv]:match("^%-print%-prog%-name=(.+)$")
+            if named then
+                resolves = resolves + 1
+                return { started = true, ok = true, output = root .. "/" .. named .. "\n" }
+            end
+            probes = probes + 1
+            for _, argument in ipairs(argv) do
+                local path = argument:match("^%-Wl,%-%-dependency%-file=(.+)$")
+                if path then reports[#reports + 1] = path end
+            end
+            if signal then error(signal, 0) end
+            return { started = true, ok = supported, why = "exit", status = supported and 0 or 1, output = banner }
+        end
+        return ctx
+    end
+    local function detect(overrides)
+        local ctx, options = invocation(), clone(request)
+        for key, value in pairs(overrides or {}) do options[key] = value end
+        local backend, err = certificate.linker_backend(ctx, options)
+        assert.truthy(backend, err)
+        assert(incremental.save_digest_cache(ctx))
+        return backend, ctx
+    end
+    before_each(function()
+        root = temporary.name(); assert(os.remove(root)); assert(lfs.mkdir(root))
+        model = precise_model(root)
+        for _, tool in ipairs({ "cc", "ld", "ld.lld" }) do
+            write(root .. "/" .. tool, "tool")
+            model.executables[root .. "/" .. tool] = true
+        end
+        request = { compiler_argv = { root .. "/cc" }, toolchain = "toolchain", directory = root }
+        probes, resolves, reports, banner, supported, signal = 0, 0, {}, "GNU ld 2.45", true, nil
+    end)
+    after_each(function()
+        for _, path in ipairs(reports) do assert.is_nil(lfs.symlinkattributes(path), path) end
+        remove(root)
+    end)
+
+    it("reuses feature detection while re-resolving the physical linker", function()
+        assert.equal("gnu", detect())
+        local filename = root .. "/.titan/linker-feature"
+        local old = os.time() - 60
+        assert(lfs.touch(filename, old, old))
+        assert.equal("gnu", detect())
+        assert.equal(1, probes)
+        assert.equal(2, resolves)
+        assert.equal(old, lfs.attributes(filename, "modification"))
+    end)
+
+    it("invalidates feature detection for same-path linker replacement and changed flags", function()
+        assert.equal("gnu", detect())
+        local editor = model:context()
+        assert(editor.io:write_file(root .. "/ld", "edit"))
+        banner = "LLD 22.1"
+        assert.equal("lld", detect())
+        assert.equal(2, probes)
+        assert.equal("lld", detect({ link_flags = { "-fuse-ld=lld" } }))
+        assert.equal(3, probes)
+        assert.equal("lld", detect({ link_flags = { "--ld-path=" .. root .. "/ld", "-fuse-ld=lld" } }))
+        assert.equal(4, probes)
+    end)
+
+    it("memoizes unsupported dependency output and reprobes malformed memo data", function()
+        supported = false
+        assert.equal("none", detect())
+        assert.equal("none", detect())
+        assert.equal(1, probes)
+        local editor = model:context()
+        assert(editor.io:write_file(root .. "/.titan/linker-feature", "not a data record"))
+        supported = true
+        assert.equal("gnu", detect())
+        assert.equal(2, probes)
+    end)
+
+    it("cleans the report and preserves cancellation without caching a verdict", function()
+        signal = {}
+        local ctx = invocation()
+        local ok, err = pcall(certificate.linker_backend, ctx, request)
+        assert.is_false(ok)
+        assert.equal(signal, err)
+        assert.is_nil(lfs.symlinkattributes(root .. "/.titan/linker-feature"))
+    end)
+
+    it("does not probe fixed Darwin and Windows policies", function()
+        assert.equal("darwin", certificate.linker_backend({}, { darwin = true }))
+        assert.equal("none", certificate.linker_backend({}, { windows = true }))
+        assert.equal(0, probes)
     end)
 end)

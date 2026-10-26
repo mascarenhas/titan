@@ -166,7 +166,7 @@ local function compile_node(context, request, source, stem)
         -- decisions that cannot be represented by a positive dependency list.
         run(context, request, argv, "native-preprocess")
         incremental.invalidate_file(context, preprocessed)
-        local files = need(depfile.parse(need(context.io:read_file(dependencies))))
+        local files = need(depfile.parse(incremental.file_contents(context, dependencies)))
         local recipe = { source = source, argv = request.compile_argv, toolchain = request.toolchain,
             authored = incremental.file_digest(context, source),
             preprocessed = incremental.file_digest(context, preprocessed),
@@ -185,7 +185,7 @@ local function compile_node(context, request, source, stem)
         append(command, { "-c", source, "-o", staged })
         run(context, request, command, "native-compile")
         need(regular(context, staged), "native compiler produced no regular object")
-        local current = { io = context.io, cache_adapter = context.cache_adapter }
+        local current = incremental.fresh_context(context)
         need(incremental.file_digest(current, source) == recipe.authored,
             "native source changed during compilation: " .. source)
         local observed = certificate.files(current, recipe.dependencies)
@@ -208,6 +208,10 @@ local function compile_node(context, request, source, stem)
             need(context.io:rename(staged, object))
         end
         incremental.invalidate_file(context, object)
+        -- Certify the committed path afresh (not the retired stage path), both
+        -- to catch publication races and to prime immediate native-only reuse.
+        need(incremental.file_digest(incremental.fresh_context(context), object) == identity,
+            "native object changed during publication: " .. object)
         return { path = object, identity = identity, source = source, hit = false, cacheable = cacheable }
     end)
     -- Only invocation scratch is retired. Committed .o/.record nodes may be

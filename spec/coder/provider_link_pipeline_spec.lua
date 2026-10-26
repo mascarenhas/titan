@@ -112,7 +112,8 @@ local function provider_artifacts(root, allow_success_record)
             assert.truthy(allow_success_record, "failed link retained a success record: " .. entry)
         end
         if entry ~= ".titan-build.lock" and entry ~= ".titan" and
-            entry ~= ".titan/preamble.c" and entry ~= ".titan-links" and
+            entry ~= ".titan/preamble.c" and entry ~= ".titan/digests" and
+            entry ~= ".titan/linker-feature" and entry ~= ".titan-links" and
             not link_bookkeeping then
             artifacts[#artifacts + 1] = entry
         end
