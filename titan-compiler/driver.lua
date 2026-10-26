@@ -99,7 +99,9 @@ local function lua_cpath_suffix()
         (platform.windows and "/?.dll" or "/?.so")
 end
 
-local function compiler_file_contents(context, filename)
+local perf = {}
+
+function perf.compiler_file_contents(context, filename)
     local read_ok, contents = pcall(incremental.file_contents, context, filename)
     if not read_ok then
         if type(contents) ~= "string" then error(contents, 0) end
@@ -3729,7 +3731,7 @@ end
 
 -- Decoded metadata is invocation-local and belongs to one observed physical
 -- provider, not to the logical module name or one spelling of its pathname.
-local function provider_decoding_cache(context, filename)
+function perf.provider_decoding_cache(context, filename)
     if not (context and context._resolver_context and context.io) then return nil end
     local stat, stat_error = context.io:stat(filename)
     if stat_error and type(stat_error) ~= "string" then error(stat_error, 0) end
@@ -3756,7 +3758,7 @@ local function provider_decoding_cache(context, filename)
     return cache
 end
 
-local function decode_provider_interface(cache, modname, serialized, origin)
+function perf.decode_provider_interface(cache, modname, serialized, origin)
     local saved = cache and cache.types[modname]
     if saved and saved.serialized == serialized then return saved.type end
     local modtype, err = driver.decode_module_interface(serialized, modname, origin)
@@ -3766,7 +3768,7 @@ local function decode_provider_interface(cache, modname, serialized, origin)
     return modtype, err
 end
 
-local function decode_provider_layouts(cache, modname, serialized)
+function perf.decode_provider_layouts(cache, modname, serialized)
     local saved = cache and cache.layouts[modname]
     if saved and saved.serialized == serialized then return saved.inventory end
     local inventory, err = decode_nominal_layouts(modname, serialized)
@@ -3780,7 +3782,7 @@ end
 -- a membership absence; an open failure is terminal. Callers decide whether a
 -- clean nonclaim is skippable (ancestor) or an error (exact candidate).
 local function probe_compiled_interface(modname, binf, options)
-    local decoded = provider_decoding_cache(options, binf)
+    local decoded = perf.provider_decoding_cache(options, binf)
     local prefix = driver.mangle_module_name(modname)
     local support = require("titan")
     local loadlib = support._loadlib
@@ -3849,7 +3851,7 @@ local function probe_compiled_interface(modname, binf, options)
     local types_or_err, types_call_err = one_metadata_result(
         typesf, "compiled module type metadata '" .. typesname .. "'")
     if not types_or_err then return "error", types_call_err end
-    local modt_or_err, validation_err = decode_provider_interface(
+    local modt_or_err, validation_err = perf.decode_provider_interface(
         decoded, modname, types_or_err, binf .. ":" .. typesname)
     if not modt_or_err then
         return "error", "compiled container '" .. binf ..
@@ -3872,7 +3874,7 @@ local function probe_compiled_interface(modname, binf, options)
         if not serialized_layouts then return "error", layouts_call_err end
         local layout_err
         layout_inventory, layout_err =
-            decode_provider_layouts(decoded, modname, serialized_layouts)
+            perf.decode_provider_layouts(decoded, modname, serialized_layouts)
         if not layout_inventory then
             return "error", "compiled container '" .. binf ..
                 "' has invalid nominal layout metadata for module '" ..
@@ -3963,7 +3965,7 @@ function driver.find_compiled_interface(paths, modname, context)
 end
 
 local function inspect_static_provider(context, filename, relative)
-    local decoded = provider_decoding_cache(context, filename)
+    local decoded = perf.provider_decoding_cache(context, filename)
     local cached = context.provider_cache[filename]
     if cached and context.provider_cache_identity[filename] == decoded then
         if cached.error then return nil, cached.error end
@@ -3975,10 +3977,10 @@ local function inspect_static_provider(context, filename, relative)
         expected_abi = driver.TITAN_ABI_VERSION,
         require_layouts = not context.analysis_only,
         validate_layouts = not context.analysis_only and function(name, serialized)
-            return decode_provider_layouts(decoded, name, serialized)
+            return perf.decode_provider_layouts(decoded, name, serialized)
         end or nil,
         validate_types = function(name, serialized, origin)
-            return decode_provider_interface(decoded, name, serialized, origin)
+            return perf.decode_provider_interface(decoded, name, serialized, origin)
         end,
     })
     context.provider_cache_identity[filename] = decoded
@@ -3995,7 +3997,7 @@ local function inspect_static_provider(context, filename, relative)
         local modtype = entry.decoded_types
         local type_err
         if not modtype then
-            modtype, type_err = decode_provider_interface(
+            modtype, type_err = perf.decode_provider_interface(
                 decoded, name, entry.types, entry.origin or filename)
         end
         if not modtype then
@@ -5312,7 +5314,7 @@ function driver.defaultloader(static_deps, options)
             return false, "build plan divergence: module '" .. modname ..
                 "' has no accepted object"
         end
-        local bytes, read_error = compiler_file_contents(context, object)
+        local bytes, read_error = perf.compiler_file_contents(context, object)
         if not bytes then
             return false, "cannot read planned object for module '" ..
                 modname .. "': " .. tostring(read_error)
@@ -5424,7 +5426,7 @@ function driver.defaultloader(static_deps, options)
                            source.certified_contents[filename] ~= nil then
                         input = source.certified_contents[filename]
                     else
-                        input, err = compiler_file_contents(context, filename)
+                        input, err = perf.compiler_file_contents(context, filename)
                         if not input then return nil, err end
                     end
                     inputs[index] = input
@@ -6440,7 +6442,7 @@ function driver.invalidate_source_object(context, modname, source)
     end
     local prior = {}
     if attributes.kind == "file" then
-        local bytes = compiler_file_contents(context, primary)
+        local bytes = perf.compiler_file_contents(context, primary)
         local record = bytes and objectmetadata.read(bytes, primary)
         local native = record and record.object_metadata
         if native and native.parts and objectmetadata.validate_parts(native) then
@@ -6643,7 +6645,7 @@ function driver.publish_staged_module(context, result)
         return discard("worker result for module '" .. tostring(modname) ..
             "' has no primary object")
     end
-    local bytes, read_error = compiler_file_contents(
+    local bytes, read_error = perf.compiler_file_contents(
         incremental.fresh_context(context), primary.from)
     if not bytes then
         return discard("cannot read staged object for module '" .. modname ..
@@ -6834,13 +6836,13 @@ function driver.dependency_closure(modname)
     return closure
 end
 
-local FINAL_SELECTION_FIELDS = {
+perf.FINAL_SELECTION_FIELDS = {
     "kind", "compiled", "ast", "type", "filename", "relative",
     "static_archive", "static_provider", "embedded_provider",
     "object_metadata", "layout_inventory", "layouts",
 }
 
-local function resolver_selection(context, previous)
+function perf.resolver_selection(context, previous)
     if previous and
        (previous.loader ~= context.loader or
         previous.analysis_only ~= context.analysis_only or
@@ -6863,7 +6865,7 @@ local function resolver_selection(context, previous)
         if previous and (not saved or saved.entry ~= mod) then return false end
         local entry = not previous and { entry = mod } or nil
         if mod ~= CIRCULAR_MARK then
-            for _, field in ipairs(FINAL_SELECTION_FIELDS) do
+            for _, field in ipairs(perf.FINAL_SELECTION_FIELDS) do
                 if previous then
                     if saved[field] ~= mod[field] then return false end
                 else entry[field] = mod[field] end
@@ -6893,7 +6895,7 @@ function driver.finalize_resolver_context(context)
     context = context or driver.new_resolver_context()
     reconcile_embedded_import_cache(context)
     if context.finalized_selection and
-       resolver_selection(context, context.finalized_selection) then
+       perf.resolver_selection(context, context.finalized_selection) then
         return context
     end
     context.finalized_selection = nil
@@ -7234,7 +7236,7 @@ function driver.finalize_resolver_context(context)
     end
 
     if #errors ~= 0 then return nil, errors end
-    context.finalized_selection = resolver_selection(context)
+    context.finalized_selection = perf.resolver_selection(context)
     return context
 end
 
@@ -11318,7 +11320,7 @@ end
 
 -- One filesystem observation per pathname, with prefix indexes for both
 -- spelling and physical identity. No collision query performs filesystem I/O.
-local function new_output_path_index(label, reservations)
+function perf.new_output_path_index(label, reservations)
     local observations, attributes, outputs = {}, {}, {}
     local fields = { "normalized", "physical", "portable" }
     local exact, trees, identities = {}, {}, {}
@@ -11494,7 +11496,7 @@ local function new_output_path_index(label, reservations)
 end
 
 function driver.validate_reserved_output_inputs(reservations, inputs)
-    return new_output_path_index("native provider output", reservations)
+    return perf.new_output_path_index("native provider output", reservations)
         .check_inputs(inputs)
 end
 
@@ -11508,7 +11510,7 @@ function driver.validate_program_output_paths(
        not entrypoint_c:match("[.]c$") then
         return nil, "standalone entrypoint path must end in .c"
     end
-    local index = new_output_path_index("program output")
+    local index = perf.new_output_path_index("program output")
     local add_output = index.add
 
     if planned_outputs then
@@ -11591,7 +11593,7 @@ function driver.validate_provider_output_paths(
             "' does not end in .so"
     end
 
-    local index = new_output_path_index("native provider output")
+    local index = perf.new_output_path_index("native provider output")
     local add_output = index.add
 
     local ok, err
@@ -11661,7 +11663,7 @@ function driver.preflight_build_outputs(context, plan, options)
             -- A smaller new split policy can still retire the old inventory.
             local prior = certified and certified.record
             if not prior and context.io:lstat(stem .. ".o") then
-                local bytes, read_error = compiler_file_contents(context, stem .. ".o")
+                local bytes, read_error = perf.compiler_file_contents(context, stem .. ".o")
                 if not bytes then return nil, read_error end
                 prior = objectmetadata.read(bytes, stem .. ".o")
             end
@@ -11701,7 +11703,7 @@ function driver.preflight_build_outputs(context, plan, options)
                         source.certified_contents and source.certified_contents[filename]
                     if not contents then
                         local read_error
-                        contents, read_error = compiler_file_contents(context, filename)
+                        contents, read_error = perf.compiler_file_contents(context, filename)
                         if not contents then return nil, read_error end
                     end
                     local parsed, parse_error = parser.parse(filename, contents)
