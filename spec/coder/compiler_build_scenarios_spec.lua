@@ -133,26 +133,38 @@ local function parse_verbose_output(output)
             parsed.native_hits[normalize_slashes(native_hit)] = true
         elseif native_miss then
             parsed.native_misses[normalize_slashes(native_miss)] = true
-        elseif line ~= "" and not line:match("^Titan ") and not line:match("^titanc:") then
+        elseif line ~= ""
+            and not line:match("^Titan ")
+            and not line:match("^titanc:")
+            and not line:match("^%[cprobe%]") then
             local normalized = normalize_slashes(line)
-            local is_preprocess = normalized:find(" -E ", 1, true) ~= nil
+            local has_e_flag = normalized:find(" -E ", 1, true) ~= nil
                 or normalized:find("'-E'", 1, true) ~= nil
                 or normalized:find('"-E"', 1, true) ~= nil
-                or normalized:find("-print-prog-name", 1, true) ~= nil
+            local is_preprocess = normalized:find("-print-prog-name", 1, true) ~= nil
                 or normalized:find("-print-file-name", 1, true) ~= nil
+                or (has_e_flag and (
+                    normalized:find("-dD", 1, true) ~= nil
+                    or normalized:find("-MD", 1, true) ~= nil
+                    or normalized:find(" -x ", 1, true) ~= nil
+                    or normalized:find("'-x'", 1, true) ~= nil
+                ))
             local is_compile = not is_preprocess and (
                 normalized:find(" -c ", 1, true) ~= nil
                 or normalized:find("'-c'", 1, true) ~= nil
                 or normalized:find('"-c"', 1, true) ~= nil
             )
+            local is_temporary_probe = normalized:find("/.titan-temporary", 1, true) ~= nil
+                or normalized:find("static_executable", 1, true) ~= nil
             if is_preprocess then
                 parsed.preprocess_commands[#parsed.preprocess_commands + 1] = normalized
             elseif is_compile then
-                if normalized:find("/.titan-links/", 1, true)
+                if is_temporary_probe then
+                    parsed.other_native_commands[#parsed.other_native_commands + 1] = normalized
+                elseif normalized:find("/.titan-links/", 1, true)
                     or normalized:find("__entrypoint.c", 1, true)
                     or normalized:find("__test_entrypoint.c", 1, true)
-                    or normalized:find("__test_runner", 1, true)
-                    or normalized:find("static_executable", 1, true) then
+                    or normalized:find("__test_runner", 1, true) then
                     parsed.synthetic_compiles[#parsed.synthetic_compiles + 1] = normalized
                 elseif normalized:find("/.native/", 1, true) then
                     parsed.c_source_compiles[#parsed.c_source_compiles + 1] = normalized
@@ -166,7 +178,7 @@ local function parse_verbose_output(output)
             elseif normalized:find(" -o ", 1, true)
                 or normalized:find("'-o'", 1, true)
                 or normalized:find('"-o"', 1, true) then
-                if normalized:find("static_executable", 1, true) then
+                if is_temporary_probe then
                     parsed.other_native_commands[#parsed.other_native_commands + 1] = normalized
                 else
                     parsed.link_commands[#parsed.link_commands + 1] = normalized
@@ -613,7 +625,7 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
         assert.matches("--exe", compile_only_exe.raw, 1, true)
 
         local library_only_exe = invoke_titanc({
-            args = { "--tree", source_dir, "--output", build_dir,
+            args = { "--tree", source_dir, "--output", workspace .. "/rejected-library-build",
                 "--exe", app_exe, "fixture.unrelated" },
         })
         assert.is_false(library_only_exe.ok)
@@ -982,14 +994,14 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
         write(custom_frontend, read(REPOSITORY .. "/titanc"))
         local frontend_first = build_target("app", {
             frontend = custom_frontend,
-            extra_args = define_args,
+            extra_args = c_source_args,
         })
         assert_link_skipped(frontend_first, "server-executable", app_exe)
 
         write(custom_frontend, read(custom_frontend) .. "\n-- changed compiler frontend input\n")
         local frontend_changed = build_target("app", {
             frontend = custom_frontend,
-            extra_args = define_args,
+            extra_args = c_source_args,
         })
         assert_module_rebuilt(frontend_changed, "fixture.leaf", "fixture/leaf.o", "configuration compiler")
         assert_module_rebuilt(frontend_changed, "fixture.unrelated", "fixture/unrelated.o", "configuration compiler")
@@ -1029,7 +1041,9 @@ local marker = %q
 local marker_file = io.open(marker, "rb")
 if marker_file then
     marker_file:close()
-    if not is_compile_or_preprocess and output_path and not output_path:find("static_executable", 1, true) then
+    if not is_compile_or_preprocess and output_path
+        and not output_path:find("%.titan%-temporary", 1)
+        and not output_path:find("static_executable", 1, true) then
         os.remove(marker)
         local out = io.open(output_path, "wb")
         if out then out:write(""); out:close() end
@@ -1047,7 +1061,7 @@ os.exit(result.ok and 0 or result.status or 1)
 ]=], REPOSITORY .. "/?.lua;" .. REPOSITORY .. "/?/init.lua;",
             table.concat(quoted_cc, ", "), fail_link_marker))
         local wrapper_env = {
-            CC = shell_command({ LUA, "-E", cc_wrapper }),
+            CC = shell_command({ LUA, cc_wrapper }),
         }
 
         build_target("app", { extra_args = define_args, env = wrapper_env })
@@ -1073,7 +1087,7 @@ end
         assert_module_reused(updated_tests, "fixture.app", "fixture/app.o")
         assert_module_reused(updated_tests, "fixture.unrelated", "fixture/unrelated.o")
         assert_module_reused(updated_tests, "fixture.other_test", "fixture/other_test.o")
-        assert_module_reused(updated_tests, "server.tests", "server/tests.o")
+        assert_module_rebuilt(updated_tests, "server.tests", "server/tests.o", "import-interface")
         assert_link_performed(updated_tests, "test-executable", test_exe)
 
         local updated_names = {
@@ -1249,7 +1263,7 @@ end
             "fixture.app_test.test_initial",
             "fixture.other_test.test_unrelated",
         }
-        local uv = require "luv"
+        local uv = require("titan-compiler.process").library()
 
         local function spawn_titanc(kind)
             local args = {
