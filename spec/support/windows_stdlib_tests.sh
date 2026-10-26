@@ -223,12 +223,12 @@ if [[ $mode == build ]]; then
     export TITAN_PROBE_CACHE_DISABLE=1 TITAN_PATH_0_6="$winprefix/lib/titan/0.6"
     unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 LUA_INIT LUA_INIT_5_5 ROCKS_TREE
     export PATH="$work/sdk/bin:$PATH"
-    # Child-only fixtures retain their fixed runtime object paths, but titanc
-    # certifies their authored C/header closure in a separate native-only tree.
+    # Fresh child programs need fixed object paths, including the UV helper
+    # also compiled into the aggregate. Certify each native source separately.
     native_args=(--cflag=-std=c99 --cflag=-Wall --cflag=-Wextra --cflag=-Werror
       -I "$winprefix/src/lua-5.5.1")
     for flag in "${cppflags[@]}" "${cflags[@]}"; do native_args+=("--cflag=$flag"); done
-    for fixture in sqlite3_worker_fixture ssl_allocator_fixture ssl_error_strings os_descriptor_limit; do
+    for fixture in uv_stdio_probe sqlite3_worker_fixture ssl_allocator_fixture ssl_error_strings os_descriptor_limit; do
       native_output="$work/native/$fixture"
       TITAN_EXTRA_CPPFLAGS= TITAN_EXTRA_CFLAGS= TITAN_EXTRA_LDFLAGS= \
         "$work/sdk/bin/lua.exe" "$winprefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" \
