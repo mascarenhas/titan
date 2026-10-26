@@ -8,7 +8,19 @@ enum titan_uv_test_stdio_mode {
   TITAN_UV_TEST_STDIO_SOCKET_STDOUT = 4,
   TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL = 5,
   TITAN_UV_TEST_STDIO_UNIX_DATAGRAM_STDOUT = 6,
-  TITAN_UV_TEST_STDIO_INET_DATAGRAM_STDOUT = 7
+  TITAN_UV_TEST_STDIO_INET_DATAGRAM_STDOUT = 7,
+  TITAN_UV_TEST_STDIO_TCP_CONNECTED_ALL = 8,
+  TITAN_UV_TEST_STDIO_TCP_LISTENER_STDOUT = 9,
+  TITAN_UV_TEST_STDIO_INET_CONNECTED_DATAGRAM_STDOUT = 10
+};
+
+enum titan_uv_test_stdio_child_socket_mode {
+  TITAN_UV_TEST_CHILD_SOCKET_TCP_OVERLAPPED = 1,
+  TITAN_UV_TEST_CHILD_SOCKET_TCP_NONOVERLAPPED = 2,
+  TITAN_UV_TEST_CHILD_SOCKET_TCP_LISTENER = 3,
+  TITAN_UV_TEST_CHILD_SOCKET_TCP_UNCONNECTED = 4,
+  TITAN_UV_TEST_CHILD_SOCKET_UDP_UNCONNECTED = 5,
+  TITAN_UV_TEST_CHILD_SOCKET_UDP_CONNECTED = 6
 };
 
 enum titan_uv_test_stdio_metadata_probe {
@@ -31,5 +43,8 @@ int titan_uv_test_stdio_deny_metadata(int probes, int descriptors,
                                       int access_error);
 int titan_uv_test_stdio_close_child_stdout(void);
 const char *titan_uv_test_stdio_closed_probe(void);
+int titan_uv_test_stdio_windows_child_sockets_supported(void);
+int titan_uv_test_stdio_install_child_socket_stdout(int socket_mode);
+int titan_uv_test_stdio_restore_child_socket_stdout(void);
 
 #endif

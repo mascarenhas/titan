@@ -3120,6 +3120,7 @@ int main(void) {
             "with_parent_stdin", "with_parent_stdout", "with_parent_stderr",
             "with_merged_output", "with_env", "spawn", "Process:wait",
             "Process:kill", "Process:is_running", "OutputStream:write",
+            "OutputStream:shutdown",
             "OutputStream:close", "OutputStream:is_tty",
             "OutputStream:kind", "InputStream:read",
             "InputStream:read_until", "InputStream:close",

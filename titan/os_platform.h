@@ -24,6 +24,8 @@ typedef struct titan_parent_stdio_probe {
   int status;
   const char *operation;
   int is_socket;
+  int is_listening;
+  int is_connected;
   int family;
   int is_unix;
   int is_stream;
@@ -33,6 +35,7 @@ typedef struct titan_parent_stdio_probe {
 
 #ifdef _WIN32
 #define TITAN_OS_WINDOWS 1
+#include <winsock2.h>
 #include <io.h>
 #include <limits.h>
 #include <stdint.h>
@@ -120,13 +123,34 @@ static inline int titan_close_parent_duplicate(int descriptor) {
   return errno == EBADF ? TITAN_OS_EBADF : TITAN_OS_UNKNOWN;
 }
 
+static inline void titan_inspect_parent_socket_windows(
+    HANDLE handle, titan_parent_stdio_probe *probe) {
+  int socket_type = 0;
+  int type_size = (int)sizeof(socket_type);
+  int error;
+  /* The Runtime's libuv loop has already started Winsock via uv_loop_init. */
+  if (getsockopt((SOCKET)(uintptr_t)handle, SOL_SOCKET, SO_TYPE,
+                 (char *)&socket_type, &type_size) == 0) {
+    probe->is_socket = 1;
+    return;
+  }
+  error = WSAGetLastError();
+  if (error != WSAENOTSOCK) {
+    probe->operation = "getsockopt(SO_TYPE)";
+    probe->status = error != 0 ? error : TITAN_OS_UNKNOWN;
+  }
+}
+
 static inline void titan_probe_parent_stdio(int descriptor,
                                             titan_parent_stdio_probe *probe) {
   HANDLE handle = (HANDLE)_get_osfhandle(descriptor);
   DWORD kind, error;
-  /* Windows has no POSIX socket-evidence fallback. Only status/operation are
-   * valid in this branch: unknown native handles never become guessed pipes. */
+  /* Windows has no POSIX socket-evidence fallback. GetFileType reports
+   * FILE_TYPE_PIPE for sockets as well as pipes, so inspect Winsock metadata
+   * before accepting a pipe guess or classifying an unknown handle. */
+  probe->status = 0;
   probe->operation = "GetFileType";
+  probe->is_socket = 0;
   if (handle == INVALID_HANDLE_VALUE) {
     probe->status = TITAN_OS_EBADF;
     return;
@@ -134,12 +158,33 @@ static inline void titan_probe_parent_stdio(int descriptor,
   SetLastError(ERROR_SUCCESS);
   kind = GetFileType(handle);
   error = GetLastError();
-  probe->status = kind == FILE_TYPE_UNKNOWN && error != ERROR_SUCCESS
-      ? (int)error : TITAN_OS_ENOTSUP;
+  if (kind == FILE_TYPE_UNKNOWN && error != ERROR_SUCCESS) {
+    probe->status = (int)error;
+    return;
+  }
+  titan_inspect_parent_socket_windows(handle, probe);
+  if (probe->status != 0 || probe->is_socket != 0)
+    return;
+  if (kind == FILE_TYPE_UNKNOWN)
+    probe->status = TITAN_OS_ENOTSUP;
+}
+
+/* Present only because foreign imports are unconditional; Windows libuv never
+ * classifies a parent descriptor as UV_TCP. */
+static inline void titan_inspect_parent_tcp(int descriptor,
+                                            titan_parent_stdio_probe *probe) {
+  (void)descriptor;
+  probe->status = TITAN_OS_ENOTSUP;
+  probe->operation = "socket-backed parent stdio is not supported on Windows";
 }
 #else
 #define TITAN_OS_WINDOWS 0
 #include <fcntl.h>
+#ifdef __APPLE__
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <netinet/tcp_fsm.h>
+#endif
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -209,6 +254,57 @@ static inline void titan_probe_parent_stdio(int descriptor,
   if (type_status == 0)
     probe->is_stream = type_size == sizeof(socket_type) &&
                        socket_type == SOCK_STREAM;
+}
+
+static inline void titan_inspect_parent_tcp(int descriptor,
+                                            titan_parent_stdio_probe *probe) {
+  struct sockaddr_storage peer;
+  socklen_t peer_size = sizeof(peer);
+#ifdef __APPLE__
+  struct tcp_connection_info info;
+  socklen_t info_size = sizeof(info);
+#else
+  int listening = 0;
+  socklen_t listening_size = sizeof(listening);
+#endif
+  probe->status = 0;
+  probe->operation = NULL;
+  probe->is_listening = 0;
+  probe->is_connected = 0;
+#ifdef __APPLE__
+  if (getsockopt(descriptor, IPPROTO_TCP, TCP_CONNECTION_INFO,
+                 &info, &info_size) == 0) {
+    if (info_size >= sizeof(info.tcpi_state) &&
+        info.tcpi_state == TCPS_LISTEN) {
+      probe->is_listening = 1;
+      return;
+    }
+  } else if (errno != ENOPROTOOPT && errno != EINVAL) {
+    probe->status = errno;
+    probe->operation = "getsockopt(TCP_CONNECTION_INFO)";
+    return;
+  }
+#else
+  if (getsockopt(descriptor, SOL_SOCKET, SO_ACCEPTCONN,
+                 &listening, &listening_size) == 0) {
+    if (listening_size == sizeof(listening) && listening != 0) {
+      probe->is_listening = 1;
+      return;
+    }
+  } else if (errno != ENOPROTOOPT && errno != EINVAL) {
+    probe->status = errno;
+    probe->operation = "getsockopt(SO_ACCEPTCONN)";
+    return;
+  }
+#endif
+  if (getpeername(descriptor, (struct sockaddr *)&peer, &peer_size) != 0) {
+    if (errno == ENOTCONN || errno == EINVAL)
+      return;
+    probe->status = errno;
+    probe->operation = "getpeername";
+    return;
+  }
+  probe->is_connected = 1;
 }
 #endif
 

@@ -313,3 +313,8 @@ This high-level `net` module does not expose UDP, Unix-domain/named pipes,
 arbitrary socket options, or endpoint inspection. The public
 [`uv` binding](standard-library-uv.md) provides those native operations for
 low-level clients and adapters.
+
+A connected TCP socket that an inetd-style launcher supplies as descriptor 0, 1,
+or 2 is not a `net.Connection`. On Linux and macOS it is used through
+`os.stdin`, `os.stdout`, and `os.stderr`; see
+[TCP-backed parent streams](standard-library-os.md#tcp-backed-parent-streams).

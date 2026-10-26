@@ -264,6 +264,7 @@ function InputStream:close()
 function InputStream:is_tty(): boolean
 function InputStream:kind(): string
 function OutputStream:write(data: string)
+function OutputStream:shutdown()
 function OutputStream:close()
 function OutputStream:is_tty(): boolean
 function OutputStream:kind(): string
@@ -280,9 +281,10 @@ with `async.loop` after loading `require "titan.async"`.
 They represent process standard streams only: the Titan process's own stdio
 and the parent-facing endpoints of captured child stdio. They are not general
 `fs.File` or `net.Connection` handles. One private `Stdio` owner backs each
-stream with one of three descriptor backings: a terminal (`"tty"`), a pipe or
-Unix stream socket (`"pipe"`), or a file-backed parent descriptor (`"file"`).
-`kind()` returns exactly `"tty"`, `"pipe"`, or `"file"`; `is_tty()` is true
+stream. `kind()` returns its descriptor kind: `"tty"` for a terminal, `"pipe"`
+for a pipe or Unix-domain stream socket, `"file"` for a file-backed parent
+descriptor, or `"tcp"` for a connected TCP socket on a parent descriptor
+(Linux and macOS). `is_tty()` is true
 exactly when `kind()` is `"tty"`. Neither yields. Both require a running Task,
 raising `async Runtime is not active` when no Runtime is active and
 `asynchronous operation must be called from an async Task` when called outside a
@@ -292,7 +294,7 @@ closed or transferred they raise `InputStream is closed` / `OutputStream is
 closed`. On a parent stream they classify descriptor 0, 1, or 2 on first use in
 the Runtime. A parent descriptor of an unsupported kind raises the
 `stdio.parent.kind` `async.OperationError` described below, and an invalid
-descriptor raises its `EBADF` error, so `kind()` never returns a fourth value.
+descriptor raises its `EBADF` error.
 An open captured child endpoint is always a pipe: `kind() == "pipe"`,
 `is_tty() == false`, including after EOF.
 
@@ -384,12 +386,12 @@ A retained stream rebinds after one `async.run`/`async.loop` session ends and
 another begins, without returning buffered input or terminal state from the
 previous Runtime.
 
-Parent standard streams support three descriptor backings:
+Parent standard streams support four descriptor backings:
 
 - `"tty"` (`UV_TTY`): backed by a Runtime-owned `uv_tty_t` over a duplicate of
   the parent descriptor;
 - `"pipe"` (`UV_NAMED_PIPE`, or a hinted Unix stream socket): backed by a
-  Runtime-owned `uv_pipe_t` over a duplicate of the parent descriptor; and
+  Runtime-owned `uv_pipe_t` over a duplicate of the parent descriptor;
 - `"file"` (`UV_FILE`, including regular files, `/dev/null` and other non-TTY
   character devices on Unix, and disk files and `NUL` on Windows): backed by
   libuv thread-pool filesystem requests (`uv_fs_read` and `uv_fs_write` at
@@ -397,13 +399,20 @@ Parent standard streams support three descriptor backings:
   file-backed read or write runs on a libuv worker thread and cannot be
   interrupted. A descriptor that blocks, such as a character device with no
   data, keeps that request, and therefore Runtime shutdown or Lua-state close,
-  waiting until the operating system completes it.
+  waiting until the operating system completes it; and
+- `"tcp"` (`UV_TCP`, Linux and macOS only): a connected IPv4 or IPv6 TCP
+  socket, backed by a Runtime-owned `uv_tcp_t` that adopts a close-on-exec
+  duplicate of the parent descriptor with `uv_tcp_open`. See
+  [TCP-backed parent streams](#tcp-backed-parent-streams).
 
 Open captured child endpoints are always pipes and report `kind() == "pipe"` and
 `is_tty() == false`; after `close()` or transfer detachment they raise as
-described above. A parent descriptor classified as a TCP socket, UDP socket, or
-another unsupported kind is rejected instead of converting `InputStream` or
-`OutputStream` into a network socket.
+described above. A parent descriptor of any other kind is rejected before I/O.
+Rejected kinds include a UDP or other datagram socket, a listening or
+unconnected TCP socket, and any socket on Windows. The error is an
+`async.OperationError` with `operation == "stdio.parent.kind"` and
+`name == "ENOTSUP"`, and its message names the descriptor and the unsupported
+kind or state.
 
 A sandboxed launcher may supply parent streams through Unix stream sockets
 while denying the socket metadata calls that libuv uses to recognize them.
@@ -416,19 +425,29 @@ Omitting the variable or setting it to an empty string supplies no hint.
 The hint applies only when libuv reports an unknown kind, `fstat` identifies a
 socket, and socket family or type inspection fails with `EPERM` or `EACCES`.
 Titan still performs both inspections: any observed family other than
-`AF_UNIX` or type other than `SOCK_STREAM` rejects the stream. Known TTY,
-pipe, and `UV_FILE` descriptors need no hint and keep their classified kind;
-TCP sockets, datagram sockets, and other non-stream kinds are rejected whenever
-libuv or either explicit probe identifies them. When both socket probes are
-denied, Titan trusts the launcher's assertion about the hidden family and type;
-the hint does not validate that unavailable metadata. An unsupported kind or
-failed inspection raises `async.OperationError` with operation
+`AF_UNIX` or type other than `SOCK_STREAM` rejects the stream. Descriptors that
+libuv classifies, including TCP sockets, never consult the hint, and it never
+turns a TCP or datagram socket into a pipe. When both socket probes are
+denied, Titan trusts the launcher's assertion about the hidden family and
+type; the hint does not validate that unavailable metadata. An unsupported
+kind or failed inspection raises `async.OperationError` with operation
 `stdio.parent.kind` and a message naming the descriptor and probe. An invalid
 descriptor retains its actual `EBADF` error.
 
 On experimental Windows builds, known libuv pipe, console, and `UV_FILE`
-(disk file and `NUL`) kinds use the same Runtime-owned `Stdio` owners. An
-unknown native handle fails explicitly; the Unix socket-metadata fallback and
+(disk file and `NUL`) kinds use the same Runtime-owned `Stdio` owners.
+Socket-backed parent stdio is not supported on Windows, although a custom
+launcher can pass a socket as a standard handle. Windows reports sockets as
+pipes, so before accepting a pipe or classifying an unknown handle Titan asks
+Winsock whether the descriptor's handle is a socket. This query reads no data.
+Any socket is rejected before a handle is duplicated or adopted. That includes
+connected, listening, or unconnected TCP (overlapped or not) and UDP. The
+error is `stdio.parent.kind` with name `ENOTSUP` and a message stating that
+socket-backed parent stdio is not supported on Windows. A handle that is not
+a socket keeps its usual classification. Any other Winsock failure raises
+`stdio.parent.kind` with that error. A socket-to-pipe relay can connect a
+Windows program's ordinary stdio to a network service. An unknown
+non-socket handle also fails explicitly; the Unix socket-metadata fallback and
 `TITAN_STDIO_PIPE_FDS` hint do not apply. Pipe and console wrappers own a
 non-inheritable duplicate of the actual Windows handle, leaving the original
 parent stream open when the Runtime ends. File-backed parent streams read and
@@ -440,30 +459,37 @@ update or clear `TITAN_STDIO_PIPE_FDS` when replacing inherited descriptors;
 changing the variable while a cached owner remains usable does not reclassify
 it.
 
-The raw parent descriptors remain owned by the host process. A TTY or pipe
-parent owner uses a close-on-exec duplicate, whose teardown cannot close the
-original descriptor. A file-backed parent owner borrows descriptor `0`, `1`, or
-`2` directly without duplicating or closing it: the host must keep that
-descriptor open and unreplaced while the Runtime's cached owner and accepted
-requests use it, and rebinding descriptor `0`, `1`, or `2` mid-Runtime is not
-supported. A `with_parent_*` configurator obtains a usable cached owner,
-creating a replacement if an earlier stream duplicate retired: TTY and pipe
-owners bind `UV_INHERIT_STREAM`, while file-backed owners bind `UV_INHERIT_FD`
-with CRT descriptor `0`, `1`, or `2` (passing the raw descriptor on Unix and
-duplicating the underlying `HANDLE` for the child on Windows). Several children
-may inherit the same parent stream.
+The raw parent descriptors remain owned by the host process. A TTY, pipe, or
+TCP parent owner uses a close-on-exec duplicate, whose teardown cannot close
+the original descriptor. On Unix the duplicate shares the original's open file
+description and, for a socket, its connection state. Adopting it makes that
+description nonblocking for every alias. A file-backed parent owner borrows
+descriptor `0`, `1`, or `2` directly without duplicating or closing it: the
+host must keep that descriptor open and unreplaced while the Runtime's cached
+owner and accepted requests use it, and rebinding descriptor `0`, `1`, or `2`
+mid-Runtime is not supported. A `with_parent_*` configurator obtains a usable
+cached owner, creating a replacement if an earlier stream duplicate retired.
+TTY, pipe, and TCP owners bind `UV_INHERIT_STREAM`, so the child receives the
+same open file description. File-backed owners bind `UV_INHERIT_FD` with CRT
+descriptor `0`, `1`, or `2`, passing the raw descriptor on Unix and
+duplicating the underlying `HANDLE` for the child on Windows. Several children
+may inherit the same parent stream. On Unix, libuv clears `O_NONBLOCK` on each
+standard descriptor it passes to a child. The description is shared, so later
+parent I/O on an inherited TTY, pipe, or TCP stream can block the event loop.
 
 Reading on parent `os.stdin` starts lazily when `read` or `read_until` is
 called. Calling `kind()`, `is_tty()`, `close()`, or `with_parent_stdin` never
-creates read state or consumes bytes intended for a child.
+creates read state or consumes bytes intended for a child. Once parent reading
+has started, bytes already read into Titan's buffers are not available to a
+subsequently spawned inheriting child.
 
 Closing any of the three stable parent stream facades is an idempotent no-op.
-It neither closes a Runtime-owned duplicate nor closes a borrowed file
-descriptor, and it does not change later operations on the facade. Native EOF
-or a read error may retire a stream duplicate earlier; the same Runtime's input
-facade and subscription still retain buffered bytes and sticky terminal state.
-Runtime cleanup retires remaining native stream handles. This is distinct from
-closing a captured child endpoint.
+It closes neither a Runtime-owned duplicate nor a borrowed file descriptor,
+does not send a TCP FIN, and does not change later operations on the facade.
+Native EOF or a read error may retire a stream duplicate earlier; the same
+Runtime's input facade and subscription still retain buffered bytes and sticky
+terminal state. Runtime cleanup retires remaining native stream handles. This
+is distinct from closing a captured child endpoint.
 
 `InputStream` satisfies the standard `io.Reader`, `io.Closer`, and
 `io.ReaderCloser` Interfaces exactly.
@@ -472,16 +498,80 @@ exactly. These are structural conversions at typed use sites; neither the
 records' private ownership metadata nor the low-level handle union is part of
 any Interface.
 
+### TCP-backed parent streams
+
+On Linux and macOS, descriptor 0, 1, or 2 may be a connected TCP socket.
+Launchers that supply one include inetd, systemd socket units with `Accept=yes`
+and `StandardInput=socket`, and launchd `inetdCompatibility` with
+`Wait=false`. A `"tcp"` stream supports the same `read`,
+`read_until`, and `write` operations as the other stream kinds. It also keeps
+their buffering, single-reader rule, write ordering, cancellation, and sticky
+EOF or error. TCP chunks are not messages. After any retained bytes, a peer
+write-half shutdown reads as EOF. A reset or other native failure raises a
+`stdio.read` or `stdio.write` `async.OperationError`, never a synthetic EOF.
+
+Only a connected socket that libuv identifies as IPv4 or IPv6 TCP is accepted.
+A listening socket is rejected with the probe text `listening TCP socket`, and
+a socket without a peer with `unconnected TCP socket`. Activation that hands
+the program a listener, such as systemd `Accept=no` (`LISTEN_FDS`) or launchd
+`Wait=true`, is not stdio support. Classification happens when a Runtime first
+uses the stream or prepares it for inheritance. A connection that the
+operating system no longer reports as connected at that point, for example
+after a peer reset, is therefore also rejected as unconnected. An unexpected
+inspection failure, such as a denied `getpeername`, raises
+`stdio.parent.kind` with that native error. `TITAN_STDIO_PIPE_FDS` is never a
+TCP hint.
+
+`OutputStream:shutdown()` ends TCP output while input stays readable:
+
+- It waits for every write already accepted on that output stream, then
+  half-closes the socket's write side (`uv_shutdown`, then `SHUT_WR`). The
+  peer reads those bytes followed by EOF. A Task cancelled before admission
+  submits nothing. An accepted shutdown completes even if its Task is
+  cancelled; that Task then raises its cancellation. A native failure raises
+  `async.OperationError` with operation `stdio.shutdown`.
+- Once a shutdown has been accepted, every later write through that output
+  stream raises `stdio.write` with name `EPIPE`, including an empty write.
+  Later `shutdown()` calls on it return at once. They neither wait for a
+  pending shutdown nor report its result, which goes only to its own caller.
+- On a `"tty"`, `"pipe"`, or `"file"` stream, including captured
+  `process.stdin`, `shutdown()` raises `async.OperationError` with operation
+  `stdio.shutdown` and name `ENOTSUP` and leaves the stream unchanged.
+  Closing a captured `process.stdin` remains the way to send EOF to a child.
+
+**Shutdown acts on the connection, not on one descriptor.** `os.stdout`,
+`os.stderr`, the raw descriptors, and descriptors inherited by children may
+all refer to the same connection, as they usually do under these launchers.
+Shutting down any of them ends output for all. Writes through the
+other aliases then fail with a native error such as `EPIPE`, whose exact code
+can differ. Their owners are not notified: each still submits its own
+`shutdown()` and reports what the operating system returns.
+
+Parent `close()` never sends FIN. When a Runtime ends, closing its owned
+duplicates does not deliver EOF to the peer while the raw descriptors, another
+state, or a child still holds the connection. Use `shutdown()` to end output
+explicitly.
+
+A child that inherits a TCP-backed stream shares the connection. With
+`os.stdin`, parent and child read the same byte stream, so whichever reads
+first consumes the bytes. A child's `shutdown()` ends output for the parent
+too. Transfers keep the descriptor-identity rule of
+[transferring process streams](#transferring-process-streams), and a receiving
+state adopts a fresh owner of the same connection. Concurrent use from several
+states or processes is not serialized.
+
 ### Process stream I/O
 
-Each nonempty write to a TTY or pipe stream (including captured
+Each nonempty write to a TTY, pipe, or TCP stream (including captured
 `process.stdin`) immediately submits its own `uv_write_t` and returns only
 after that request's callback. Libuv supplies stream write ordering; Titan adds
-no operation queue for streams. An empty write is a checked no-op. The request
-retains the original immutable string until its eventual callback while libuv
-borrows, but does not mutate, its bytes. Overlapping calls retain independent
-requests and strings. Cancelling the Task does not release that owner early or
-kill the child.
+no operation queue for streams. An empty write submits nothing. Once the stream
+is no longer writable, as after an accepted TCP `shutdown()`, every write,
+empty or not, raises `stdio.write` with name `EPIPE`. The request retains the
+original immutable string until its eventual callback while libuv borrows, but
+does not mutate, its bytes. Overlapping calls retain independent requests and
+strings. Cancelling the Task does not release that owner early or kill the
+child.
 
 Writes to a file-backed parent stream (`os.stdout` or `os.stderr` when
 descriptor `1` or `2` is `UV_FILE`) use libuv thread-pool `uv_fs_write`
@@ -529,8 +619,8 @@ Closing a captured `process.stdin` is idempotent. Its first call marks the
 stream terminal and submits the physical pipe's `uv_close`; later writes are
 rejected, and any independently submitted write still receives its own libuv
 callback. Closing the write-end pipe is what delivers EOF to the child;
-socket-style half-shutdown is not used. Programs whose child waits for input
-EOF must call it.
+`shutdown()` is not supported on pipes. Programs whose child waits for input
+EOF must call `close()`.
 
 Successful spawn initialization starts continuous reads on each captured
 output pipe. Each pipe retains GC-owned chunks even when no Task is waiting,
@@ -626,12 +716,16 @@ stopped and cannot be handed off in that state.
 
 Unused `os.stdin`, `os.stdout`, and `os.stderr` facades copy their process-wide
 descriptor identity and resolve a fresh Runtime-local wrapper when used. These
-stable facades remain usable at the source. Standard input that this Runtime
-has started reading, even if it has since reached EOF or failed, and standard
-output or error with an accepted write still pending are rejected. Untouched
-facades of any kind (`"tty"`, `"pipe"`, or `"file"`) transfer; `kind()`,
-`is_tty()`, and `with_parent_*` do not count as use. Captured terminal handles
-other than pipes are unsupported.
+stable facades remain usable at the source. Two kinds of facade are rejected:
+standard input that this Runtime has started reading, even if it has since
+reached EOF or failed, and standard output or error with an accepted write or
+shutdown still pending. Untouched facades of any kind (`"tty"`, `"pipe"`,
+`"file"`, or `"tcp"`) transfer; `kind()`, `is_tty()`, `close()`, and
+`with_parent_*` do not count as use. A completed TCP `shutdown()` leaves
+nothing pending, so that facade transfers too. The connection's write side
+stays shut down, however, and writes in the receiving state fail with the
+native error. Captured child endpoints are always pipes; a TCP-backed stream
+never hands off its native handle.
 
 The `Process` itself remains in the originating Runtime, which must stay alive
 to observe and reap the child. Its `wait`, `kill`, and exit handling continue

@@ -291,6 +291,23 @@ function test_parent_regular_file_stdio_classification_and_transfer(
   end)
 end
 
+function test_parent_tcp_stdio_classification_shutdown_and_inheritance(
+    _context: test.Context)
+  if ffi.titan_uv_test_stdio_mode_supported(ffi.TITAN_UV_TEST_STDIO_TCP_CONNECTED_ALL as integer) == 0 then
+    test.skip("platform: connected TCP parent stdio is supported on Linux and macOS")
+  end
+  with_stdio_fixture(function (workspace: string)
+    assert_stdio_fixture(
+      workspace, "tcp", "parent-tcp-ok",
+      ffi.TITAN_UV_TEST_STDIO_TCP_CONNECTED_ALL, 7,
+      "tcp-stdout", "tcp-stderr")
+    assert_stdio_fixture(
+      workspace, "inherit", "parent-inheritance-ok",
+      ffi.TITAN_UV_TEST_STDIO_TCP_CONNECTED_ALL, 0,
+      "", "")
+  end)
+end
+
 function test_parent_socket_stdio_rejection_does_not_leak(
     _context: test.Context)
   if ffi.titan_uv_test_stdio_mode_supported(ffi.TITAN_UV_TEST_STDIO_SOCKET_STDOUT as integer) == 0 then
@@ -298,8 +315,30 @@ function test_parent_socket_stdio_rejection_does_not_leak(
   end
   with_stdio_fixture(function (workspace: string)
     assert_stdio_fixture(
-      workspace, "socket", "parent-socket-rejected",
+      workspace, "tcp-unconnected", "parent-tcp-unconnected-rejected",
       ffi.TITAN_UV_TEST_STDIO_SOCKET_STDOUT, 0, "", "")
+    assert_stdio_fixture(
+      workspace, "tcp-listener", "parent-tcp-listener-rejected",
+      ffi.TITAN_UV_TEST_STDIO_TCP_LISTENER_STDOUT, 0, "", "")
+    assert_stdio_fixture(
+      workspace, "udp-unconnected", "parent-udp-unconnected-rejected",
+      ffi.TITAN_UV_TEST_STDIO_INET_DATAGRAM_STDOUT, 0, "", "")
+    assert_stdio_fixture(
+      workspace, "udp-connected", "parent-udp-connected-rejected",
+      ffi.TITAN_UV_TEST_STDIO_INET_CONNECTED_DATAGRAM_STDOUT, 0, "", "")
+  end)
+end
+
+function test_parent_windows_socket_stdio_rejection_preserves_pipes(
+    _context: test.Context)
+  if ffi.titan_uv_test_stdio_windows_child_sockets_supported() == 0 then
+    test.skip("platform: Windows CRT socket handle rejection requires _WIN32")
+  end
+  with_stdio_fixture(function (workspace: string)
+    assert_stdio_fixture(
+      workspace, "windows-sockets", "parent-windows-sockets-rejected",
+      ffi.TITAN_UV_TEST_STDIO_PIPE_ALL, 0,
+      "pipe-stdout", "pipe-stderr")
   end)
 end
 
@@ -337,12 +376,27 @@ function test_parent_stdio_hints_preserve_known_descriptor_kinds(
         ffi.TITAN_UV_TEST_STDIO_FILE_STDOUT, 0, "file-output", "", "1")
     end)
   end)
+  context:run("connected_tcp", function (_context: test.Context)
+    if ffi.titan_uv_test_stdio_mode_supported(ffi.TITAN_UV_TEST_STDIO_TCP_CONNECTED_ALL as integer) == 0 then
+      test.skip("platform: connected TCP parent stdio is supported on Linux and macOS")
+    end
+    with_stdio_fixture(function (workspace: string)
+      assert_stdio_fixture(workspace, "tcp", "parent-tcp-ok",
+        ffi.TITAN_UV_TEST_STDIO_TCP_CONNECTED_ALL, 7,
+        "tcp-stdout", "tcp-stderr", "invalid")
+    end)
+  end)
   local modes: {integer} = {
     ffi.TITAN_UV_TEST_STDIO_SOCKET_STDOUT,
+    ffi.TITAN_UV_TEST_STDIO_TCP_LISTENER_STDOUT,
     ffi.TITAN_UV_TEST_STDIO_INET_DATAGRAM_STDOUT,
+    ffi.TITAN_UV_TEST_STDIO_INET_CONNECTED_DATAGRAM_STDOUT,
     ffi.TITAN_UV_TEST_STDIO_UNIX_DATAGRAM_STDOUT,
   }
-  local names = {"inet_stream", "inet_datagram", "unix_datagram"}
+  local names = {
+    "inet_stream", "inet_listener", "inet_datagram",
+    "inet_connected_datagram", "unix_datagram",
+  }
   for index = 1, #modes do
     local mode = modes[index]
     context:run(names[index], function (_context: test.Context)
@@ -407,6 +461,10 @@ function test_parent_partial_metadata_denial_preserves_socket_contradictions(
       ffi.TITAN_UV_TEST_STDIO_UNIX_DATAGRAM_STDOUT, 0, "", "", "1")
     assert_stdio_fixture(workspace, "deny-type-reject", "parent-contradiction-rejected",
       ffi.TITAN_UV_TEST_STDIO_SOCKET_STDOUT, 0, "", "", "1")
+    assert_stdio_fixture(workspace, "deny-type-reject", "parent-contradiction-rejected",
+      ffi.TITAN_UV_TEST_STDIO_TCP_CONNECTED_ALL, 0, "", "", "1")
+    assert_stdio_fixture(workspace, "deny-peer-reject", "parent-peer-denied-rejected",
+      ffi.TITAN_UV_TEST_STDIO_TCP_CONNECTED_ALL, 0, "", "", "1")
   end)
 end
 

@@ -143,4 +143,5 @@ Component checks and a VM boot do not establish a complete Windows port test.
 Shared-folder watcher notifications are best effort; keep filesystem, SQLite,
 and local watcher validation on NTFS. Consult the
 [experimental boundaries](../implementation/windows-build.md#experimental-boundaries)
-for current platform gaps and the OpenSSL trust-root policy.
+for current platform gaps, such as unsupported socket-backed standard streams,
+and the OpenSSL trust-root policy.
