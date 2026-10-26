@@ -362,7 +362,8 @@ describe("standalone-prefix source installation", function()
             "cdeclarator.lua", "cpreamble.lua", "cprobe.lua",
             "cprobe_cache.lua", "ffiheaders.lua", "objectmetadata.lua",
             "csemantics.lua", "io.lua", "sha256.lua", "test_runner.lua",
-            "version.lua",
+            "version.lua", "build.lua", "build_worker.lua", "incremental.lua",
+            "depfile.lua", "linkcertificate.lua", "nativeinputs.lua", "testroots.lua",
         }) do
             assert_file(PREFIX ..
                 "/share/lua/5.5/titan-compiler/" .. module)
@@ -934,6 +935,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "spec/support/run_parallel_compiler_tests.sh",
             "spec/support/run_with_timeout.sh",
             "spec/support/clean_generated_test_artifacts.sh",
+            "spec/support/clean_generated_test_artifacts.lua",
             "spec/fixtures/stdlib/native/async_foreign_work.c",
             "spec/fixtures/stdlib/native/async_foreign_work.h",
             "spec/fixtures/stdlib/native/os_process_child.c",
