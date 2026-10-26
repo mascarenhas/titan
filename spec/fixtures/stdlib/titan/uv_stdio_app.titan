@@ -35,6 +35,26 @@ local function expect_normal(process: system.Process, label: string)
   end
 end
 
+
+local function expect_shutdown_enotsup(stream: system.OutputStream, label: string)
+  local rejected = false
+  do
+    stream:shutdown()
+  catch
+    if not (error is async.OperationError) then
+      raise label .. " shutdown did not raise OperationError"
+    end
+    local failure = error as async.OperationError
+    if failure.operation ~= "stdio.shutdown" or failure.name ~= "ENOTSUP" then
+      raise label .. " shutdown raised unexpected error: " ..
+            failure.operation .. ": " .. failure.name
+    end
+    rejected = true
+  end
+  if not rejected then
+    raise label .. " unexpectedly accepted shutdown"
+  end
+end
 local function parent_pipes(): string
   if system.stdin:is_tty() or system.stdout:is_tty() or system.stderr:is_tty() or
      system.stdin:kind() ~= "pipe" or system.stdout:kind() ~= "pipe" or
@@ -44,6 +64,8 @@ local function parent_pipes(): string
   if read_all(system.stdin) ~= "parent-pipe-input" then
     raise "parent stdin changed bytes"
   end
+  expect_shutdown_enotsup(system.stdout, "pipe stdout")
+  expect_shutdown_enotsup(system.stderr, "pipe stderr")
   system.stdout:write("pipe-stdout")
   system.stderr:write("pipe-stderr")
   return "parent-pipes-ok"
@@ -71,6 +93,7 @@ local function parent_tty(): string
   if not system.stdout:is_tty() or system.stdout:kind() ~= "tty" then
     raise "PTY stdout was not classified as a TTY"
   end
+  expect_shutdown_enotsup(system.stdout, "TTY stdout")
   system.stdout:write("tty-output")
   return "parent-tty-ok"
 end
@@ -83,6 +106,7 @@ local function parent_file(): string
   if system.stdout:is_tty() or system.stdout:kind() ~= "file" then
     raise "file stdout was misclassified"
   end
+  expect_shutdown_enotsup(system.stdout, "file stdout")
   system.stdout:write("file-output")
   system.stdout:close()
   if system.stdout:kind() ~= "file" then
@@ -94,11 +118,56 @@ local function parent_file(): string
   return "parent-file-ok"
 end
 
-local function reject_parent_stdout(expected: string, expected_name: string?,
-                                     expected_probe: string?,
-                                     close_stdout: boolean?): string
+local function expect_write_rejected(stream: system.OutputStream, data: string,
+                                     label: string)
+  local rejected = false
+  do
+    stream:write(data)
+  catch
+    if not (error is async.OperationError) then
+      raise label .. " write did not raise OperationError"
+    end
+    local failure = error as async.OperationError
+    if failure.operation ~= "stdio.write" or failure.code >= 0 then
+      raise label .. " write raised unexpected error: " ..
+            failure.operation .. ": " .. failure.name
+    end
+    rejected = true
+  end
+  if not rejected then
+    raise label .. " unexpectedly accepted write after shutdown"
+  end
+end
+
+local function parent_tcp(): string
+  if system.stdin:is_tty() or system.stdout:is_tty() or system.stderr:is_tty() or
+     system.stdin:kind() ~= "tcp" or system.stdout:kind() ~= "tcp" or
+     system.stderr:kind() ~= "tcp" then
+    raise "TCP parent stdio was misclassified"
+  end
+  system.stdin:close()
+  system.stdout:close()
+  system.stderr:close()
+  if read_all(system.stdin) ~= "parent-tcp-input" then
+    raise "parent TCP stdin changed bytes"
+  end
+  if system.stdin:read() ~= nil then
+    raise "parent TCP stdin did not keep sticky EOF"
+  end
+  system.stdout:write("tcp-stdout")
+  system.stderr:write("tcp-stderr")
+  system.stdout:shutdown()
+  system.stdout:shutdown()
+  expect_write_rejected(system.stdout, "after-shutdown", "TCP stdout")
+  expect_write_rejected(system.stdout, "", "TCP stdout empty")
+  return "parent-tcp-ok"
+end
+
+local function warm_child_process()
   local warm = system.spawn(child_path(), {"exit", "0"})
-  required_output(warm.stdin, "warm stdin"):close()
+  local warm_stdin = required_output(warm.stdin, "warm stdin")
+  expect_shutdown_enotsup(warm_stdin, "captured child stdin")
+  warm_stdin:close()
   local warm_stdout = required_input(warm.stdout, "warm stdout")
   local warm_stderr = required_input(warm.stderr, "warm stderr")
   read_all(warm_stdout)
@@ -107,7 +176,11 @@ local function reject_parent_stdout(expected: string, expected_name: string?,
   warm_stdout:close()
   warm_stderr:close()
   async.yield()
+end
 
+local function reject_parent_stdout_after_warm(
+    expected: string, expected_name: string?, expected_probe: string?,
+    close_stdout: boolean?): string
   if close_stdout and ffi.titan_uv_test_stdio_close_child_stdout() ~= 0 then
     raise "could not close child stdout for EBADF probe"
   end
@@ -156,6 +229,49 @@ local function reject_parent_stdout(expected: string, expected_name: string?,
   return expected
 end
 
+local function reject_parent_stdout(expected: string, expected_name: string?,
+                                     expected_probe: string?,
+                                     close_stdout: boolean?): string
+  warm_child_process()
+  return reject_parent_stdout_after_warm(
+    expected, expected_name, expected_probe, close_stdout)
+end
+
+local function reject_windows_child_sockets(): string
+  warm_child_process()
+  local modes: {integer} = {
+    ffi.TITAN_UV_TEST_CHILD_SOCKET_TCP_OVERLAPPED,
+    ffi.TITAN_UV_TEST_CHILD_SOCKET_TCP_NONOVERLAPPED,
+    ffi.TITAN_UV_TEST_CHILD_SOCKET_TCP_LISTENER,
+    ffi.TITAN_UV_TEST_CHILD_SOCKET_TCP_UNCONNECTED,
+    ffi.TITAN_UV_TEST_CHILD_SOCKET_UDP_UNCONNECTED,
+    ffi.TITAN_UV_TEST_CHILD_SOCKET_UDP_CONNECTED,
+  }
+  for index = 1, #modes do
+    local installed = ffi.titan_uv_test_stdio_install_child_socket_stdout(modes[index])
+    if installed ~= 0 then
+      raise ffi.titan_uv_test_stdio_failure() as string
+    end
+    do
+      defer do
+        if ffi.titan_uv_test_stdio_restore_child_socket_stdout() ~= 0 then
+          raise ffi.titan_uv_test_stdio_failure() as string
+        end
+      end
+      reject_parent_stdout_after_warm(
+        "parent-windows-socket-rejected", "ENOTSUP",
+        "socket-backed parent stdio is not supported on Windows")
+    end
+  end
+  if system.stdout:is_tty() or system.stdout:kind() ~= "pipe" then
+    raise "restored Windows pipe stdout was misclassified after socket rejection"
+  end
+  expect_shutdown_enotsup(system.stdout, "restored Windows pipe stdout")
+  system.stdout:write("pipe-stdout")
+  system.stderr:write("pipe-stderr")
+  return "parent-windows-sockets-rejected"
+end
+
 local function deny_metadata(probes: integer, descriptors: integer,
                              access_error: boolean?)
   local access = 0
@@ -195,8 +311,21 @@ local function run_case(mode: string): string
     return parent_tty()
   elseif mode == "file" then
     return parent_file()
+  elseif mode == "tcp" then
+    return parent_tcp()
   elseif mode == "socket" then
     return reject_parent_stdout("parent-socket-rejected")
+  elseif mode == "tcp-unconnected" then
+    return reject_parent_stdout("parent-tcp-unconnected-rejected", "ENOTSUP",
+                                "unconnected TCP socket")
+  elseif mode == "tcp-listener" then
+    return reject_parent_stdout("parent-tcp-listener-rejected", "ENOTSUP",
+                                "listening TCP socket")
+  elseif mode == "udp-connected" then
+    return reject_parent_stdout("parent-udp-connected-rejected", "ENOTSUP",
+                                "uv_guess_handle classified unsupported kind udp")
+  elseif mode == "windows-sockets" then
+    return reject_windows_child_sockets()
   elseif mode == "closed" then
     return reject_parent_stdout("parent-closed-rejected", "EBADF",
                                 ffi.titan_uv_test_stdio_closed_probe() as string, true)
@@ -238,6 +367,10 @@ local function run_case(mode: string): string
     deny_metadata(ffi.TITAN_UV_TEST_STDIO_DENY_TYPE, 2)
     return reject_parent_stdout("parent-contradiction-rejected", "ENOTSUP",
                                  "getsockname")
+  elseif mode == "deny-peer-reject" then
+    deny_metadata(ffi.TITAN_UV_TEST_STDIO_DENY_PEER, 2)
+    return reject_parent_stdout("parent-peer-denied-rejected", "EPERM",
+                                "getpeername")
   elseif mode == "denied-diagnostic" then
     deny_metadata(ffi.TITAN_UV_TEST_STDIO_DENY_ALL, 7)
     return denied_diagnostic()

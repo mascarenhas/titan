@@ -1,5 +1,6 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
 #include <windows.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -22,6 +23,8 @@ static char outputs[3][OUTPUT_CAPACITY];
 static char failure_message[256];
 static int allocated_console;
 static HANDLE console_standard_handles[3];
+static int child_saved_stdout = -1;
+static SOCKET child_peer_socket = INVALID_SOCKET;
 static const DWORD standard_kinds[3] = {
   STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE
 };
@@ -372,6 +375,177 @@ int titan_uv_test_stdio_close_child_stdout(void) {
 
 const char *titan_uv_test_stdio_closed_probe(void) { return "GetFileType"; }
 
+int titan_uv_test_stdio_windows_child_sockets_supported(void) { return 1; }
+
+int titan_uv_test_stdio_install_child_socket_stdout(int socket_mode) {
+  WSADATA wsa_data;
+  SOCKET target_socket = INVALID_SOCKET;
+  SOCKET listener = INVALID_SOCKET;
+  SOCKET peer = INVALID_SOCKET;
+  struct sockaddr_in address;
+  int address_len = (int)sizeof(address);
+  int saved = -1;
+  int fd = -1;
+  DWORD flags = WSA_FLAG_OVERLAPPED;
+  if (active_mode != 0 || child_saved_stdout >= 0) {
+    record_failure("child socket stdout fixture is already active");
+    return -1;
+  }
+  if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+    record_failure("WSAStartup failed in child socket fixture");
+    return -1;
+  }
+  memset(&address, 0, sizeof(address));
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+
+  switch (socket_mode) {
+  case TITAN_UV_TEST_CHILD_SOCKET_TCP_NONOVERLAPPED:
+    flags = 0;
+    /* fallthrough */
+  case TITAN_UV_TEST_CHILD_SOCKET_TCP_OVERLAPPED:
+    listener = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0,
+                          flags | WSA_FLAG_NO_HANDLE_INHERIT);
+    if (listener == INVALID_SOCKET ||
+        bind(listener, (struct sockaddr *)&address, sizeof(address)) != 0 ||
+        listen(listener, 1) != 0 ||
+        getsockname(listener, (struct sockaddr *)&address, &address_len) != 0) {
+      record_failure("could not prepare Windows loopback TCP listener");
+      goto fail;
+    }
+    peer = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0,
+                      flags | WSA_FLAG_NO_HANDLE_INHERIT);
+    if (peer == INVALID_SOCKET ||
+        connect(peer, (struct sockaddr *)&address, address_len) != 0) {
+      record_failure("could not connect Windows loopback TCP peer");
+      goto fail;
+    }
+    target_socket = accept(listener, NULL, NULL);
+    if (target_socket == INVALID_SOCKET) {
+      record_failure("could not accept Windows loopback TCP socket");
+      goto fail;
+    }
+    closesocket(listener);
+    listener = INVALID_SOCKET;
+    (void)SetHandleInformation((HANDLE)peer, HANDLE_FLAG_INHERIT, 0);
+    break;
+  case TITAN_UV_TEST_CHILD_SOCKET_TCP_LISTENER:
+    target_socket = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0,
+                               WSA_FLAG_OVERLAPPED);
+    if (target_socket == INVALID_SOCKET ||
+        bind(target_socket, (struct sockaddr *)&address, sizeof(address)) != 0 ||
+        listen(target_socket, 1) != 0) {
+      record_failure("could not create Windows listening TCP socket");
+      goto fail;
+    }
+    break;
+  case TITAN_UV_TEST_CHILD_SOCKET_TCP_UNCONNECTED:
+    target_socket = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0,
+                               WSA_FLAG_OVERLAPPED);
+    if (target_socket == INVALID_SOCKET) {
+      record_failure("could not create Windows unconnected TCP socket");
+      goto fail;
+    }
+    break;
+  case TITAN_UV_TEST_CHILD_SOCKET_UDP_UNCONNECTED:
+    target_socket = WSASocketW(AF_INET, SOCK_DGRAM, IPPROTO_UDP, NULL, 0,
+                               WSA_FLAG_OVERLAPPED);
+    if (target_socket == INVALID_SOCKET) {
+      record_failure("could not create Windows unconnected UDP socket");
+      goto fail;
+    }
+    break;
+  case TITAN_UV_TEST_CHILD_SOCKET_UDP_CONNECTED:
+    peer = WSASocketW(AF_INET, SOCK_DGRAM, IPPROTO_UDP, NULL, 0,
+                      WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
+    if (peer == INVALID_SOCKET ||
+        bind(peer, (struct sockaddr *)&address, sizeof(address)) != 0 ||
+        getsockname(peer, (struct sockaddr *)&address, &address_len) != 0) {
+      record_failure("could not bind Windows UDP peer socket");
+      goto fail;
+    }
+    target_socket = WSASocketW(AF_INET, SOCK_DGRAM, IPPROTO_UDP, NULL, 0,
+                               WSA_FLAG_OVERLAPPED);
+    if (target_socket == INVALID_SOCKET ||
+        connect(target_socket, (struct sockaddr *)&address, address_len) != 0) {
+      record_failure("could not connect Windows UDP socket");
+      goto fail;
+    }
+    (void)SetHandleInformation((HANDLE)peer, HANDLE_FLAG_INHERIT, 0);
+    break;
+  default:
+    record_failure("unknown Windows child socket mode %d", socket_mode);
+    return -1;
+  }
+
+  saved = _dup(1);
+  if (saved < 0 ||
+      !SetHandleInformation((HANDLE)_get_osfhandle(saved), HANDLE_FLAG_INHERIT, 0)) {
+    record_failure("could not save child stdout before socket install");
+    goto fail;
+  }
+  if (_close(1) != 0) {
+    record_failure("could not close child stdout for socket install");
+    goto fail;
+  }
+  fd = _open_osfhandle((intptr_t)target_socket, _O_WRONLY | _O_BINARY);
+  if (fd < 0) {
+    (void)_dup2(saved, 1);
+    _close(saved);
+    saved = -1;
+    record_failure("could not wrap Windows socket in CRT fd");
+    goto fail;
+  }
+  target_socket = INVALID_SOCKET;
+  if (fd != 1) {
+    if (_dup2(fd, 1) != 0) {
+      _close(fd);
+      (void)_dup2(saved, 1);
+      _close(saved);
+      record_failure("could not move Windows socket CRT fd to stdout");
+      if (peer != INVALID_SOCKET) closesocket(peer);
+      return -1;
+    }
+    _close(fd);
+  }
+  if (!SetStdHandle(STD_OUTPUT_HANDLE, (HANDLE)_get_osfhandle(1))) {
+    (void)_dup2(saved, 1);
+    _close(saved);
+    if (peer != INVALID_SOCKET) closesocket(peer);
+    record_failure("could not set STD_OUTPUT_HANDLE to Windows socket");
+    return -1;
+  }
+  child_saved_stdout = saved;
+  child_peer_socket = peer;
+  return 0;
+
+fail:
+  if (saved >= 0) _close(saved);
+  if (listener != INVALID_SOCKET) closesocket(listener);
+  if (peer != INVALID_SOCKET) closesocket(peer);
+  if (target_socket != INVALID_SOCKET) closesocket(target_socket);
+  return -1;
+}
+
+int titan_uv_test_stdio_restore_child_socket_stdout(void) {
+  int status = 0;
+  if (child_saved_stdout >= 0) {
+    if (_dup2(child_saved_stdout, 1) != 0 ||
+        !SetStdHandle(STD_OUTPUT_HANDLE, (HANDLE)_get_osfhandle(1))) {
+      record_failure("could not restore child stdout after socket check");
+      status = -1;
+    }
+    _close(child_saved_stdout);
+    child_saved_stdout = -1;
+  }
+  if (child_peer_socket != INVALID_SOCKET) {
+    closesocket(child_peer_socket);
+    child_peer_socket = INVALID_SOCKET;
+  }
+  return status;
+}
+
 #else
 #if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
 #define _DARWIN_C_SOURCE
@@ -565,6 +739,113 @@ static int setup_unix_stream(int target) {
   return 0;
 }
 
+static int setup_tcp_stream(int target) {
+  static const char input[] = "parent-tcp-input";
+  struct sockaddr_in address;
+  socklen_t address_len = sizeof(address);
+  int listener = -1;
+  int client = -1;
+  int accepted = -1;
+
+  listener = socket(AF_INET, SOCK_STREAM, 0);
+  if (listener < 0)
+    goto error;
+  memset(&address, 0, sizeof(address));
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  if (bind(listener, (struct sockaddr *) &address, sizeof(address)) != 0 ||
+      listen(listener, 1) != 0 ||
+      getsockname(listener, (struct sockaddr *) &address, &address_len) != 0)
+    goto error;
+  client = socket(AF_INET, SOCK_STREAM, 0);
+  if (client < 0 ||
+      connect(client, (struct sockaddr *) &address, address_len) != 0)
+    goto error;
+  accepted = accept(listener, NULL, NULL);
+  if (accepted < 0)
+    goto error;
+  close(listener);
+  listener = -1;
+  if (fcntl(client, F_SETFD, FD_CLOEXEC) != 0)
+    goto error;
+  if (replace_target(target, accepted) != 0)
+    goto error;
+  close(accepted);
+  accepted = -1;
+  peer_descriptors[target] = client;
+  if (target == 0 &&
+      (write(client, input, sizeof(input) - 1) !=
+         (ssize_t) (sizeof(input) - 1) ||
+       shutdown(client, SHUT_WR) != 0)) {
+    record_failure("could not seed TCP stdin socket: %s", strerror(errno));
+    return -1;
+  }
+  return 0;
+
+error:
+  record_failure("TCP stdio setup(fd %d) failed: %s", target, strerror(errno));
+  if (listener >= 0) close(listener);
+  if (client >= 0) close(client);
+  if (accepted >= 0) close(accepted);
+  return -1;
+}
+
+static int setup_tcp_listener_stdout(void) {
+  struct sockaddr_in address;
+  int listener = socket(AF_INET, SOCK_STREAM, 0);
+  if (listener < 0) {
+    record_failure("TCP listener stdout setup failed: %s", strerror(errno));
+    return -1;
+  }
+  memset(&address, 0, sizeof(address));
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  if (bind(listener, (struct sockaddr *) &address, sizeof(address)) != 0 ||
+      listen(listener, 1) != 0 ||
+      replace_target(1, listener) != 0) {
+    record_failure("TCP listener stdout setup failed: %s", strerror(errno));
+    close(listener);
+    return -1;
+  }
+  close(listener);
+  return 0;
+}
+
+static int setup_connected_udp_stdout(void) {
+  struct sockaddr_in address;
+  socklen_t address_len = sizeof(address);
+  int peer = -1;
+  int descriptor = -1;
+
+  peer = socket(AF_INET, SOCK_DGRAM, 0);
+  if (peer < 0)
+    goto error;
+  memset(&address, 0, sizeof(address));
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  if (bind(peer, (struct sockaddr *) &address, sizeof(address)) != 0 ||
+      getsockname(peer, (struct sockaddr *) &address, &address_len) != 0 ||
+      fcntl(peer, F_SETFD, FD_CLOEXEC) != 0)
+    goto error;
+  descriptor = socket(AF_INET, SOCK_DGRAM, 0);
+  if (descriptor < 0 ||
+      connect(descriptor, (struct sockaddr *) &address, address_len) != 0 ||
+      replace_target(1, descriptor) != 0)
+    goto error;
+  close(descriptor);
+  peer_descriptors[0] = peer;
+  return 0;
+
+error:
+  record_failure("connected UDP stdout setup failed: %s", strerror(errno));
+  if (peer >= 0) close(peer);
+  if (descriptor >= 0) close(descriptor);
+  return -1;
+}
+
 static int setup_tty(void) {
   struct termios attributes;
   char *slave_name;
@@ -706,6 +987,19 @@ int titan_uv_test_stdio_setup(int mode) {
     if (setup_socket_stdout(AF_INET, SOCK_DGRAM) != 0)
       goto fail;
     break;
+  case TITAN_UV_TEST_STDIO_TCP_CONNECTED_ALL:
+    if (setup_tcp_stream(0) != 0 || setup_tcp_stream(1) != 0 ||
+        setup_tcp_stream(2) != 0)
+      goto fail;
+    break;
+  case TITAN_UV_TEST_STDIO_TCP_LISTENER_STDOUT:
+    if (setup_tcp_listener_stdout() != 0)
+      goto fail;
+    break;
+  case TITAN_UV_TEST_STDIO_INET_CONNECTED_DATAGRAM_STDOUT:
+    if (setup_connected_udp_stdout() != 0)
+      goto fail;
+    break;
   default:
     record_failure("unknown stdio fixture mode %d", mode);
     goto fail;
@@ -719,7 +1013,7 @@ fail:
 
 int titan_uv_test_stdio_mode_supported(int mode) {
   return mode >= TITAN_UV_TEST_STDIO_PIPE_ALL &&
-         mode <= TITAN_UV_TEST_STDIO_INET_DATAGRAM_STDOUT;
+         mode <= TITAN_UV_TEST_STDIO_INET_CONNECTED_DATAGRAM_STDOUT;
 }
 
 int titan_uv_test_stdio_finish(int expected_nonblocking_mask) {
@@ -888,4 +1182,14 @@ int titan_uv_test_stdio_close_child_stdout(void) {
 }
 
 const char *titan_uv_test_stdio_closed_probe(void) { return "fstat"; }
+
+int titan_uv_test_stdio_windows_child_sockets_supported(void) { return 0; }
+
+int titan_uv_test_stdio_install_child_socket_stdout(int socket_mode) {
+  (void) socket_mode;
+  record_failure("Windows child socket stdout fixture requires _WIN32");
+  return -1;
+}
+
+int titan_uv_test_stdio_restore_child_socket_stdout(void) { return 0; }
 #endif

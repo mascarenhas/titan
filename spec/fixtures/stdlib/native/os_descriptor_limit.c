@@ -158,10 +158,70 @@ int titan_test_restore_fd(int saved_fd, int target_fd) {
 int titan_test_rewind_fd(int fd) {
     return _lseeki64(fd, 0, SEEK_SET) == 0 ? 0 : -1;
 }
+
+int titan_test_open_fd_count(void) {
+    DWORD count;
+    return GetProcessHandleCount(GetCurrentProcess(), &count) ? (int)count : -1;
+}
+
+int titan_test_tcp_stdio_supported(void) { return 0; }
+
+int titan_test_tcp_stdio_pair(int ipv6, int *accepted_fd, int *peer_fd) {
+    (void)ipv6;
+    if (accepted_fd != NULL) *accepted_fd = -1;
+    if (peer_fd != NULL) *peer_fd = -1;
+    return ENOSYS;
+}
+
+int titan_test_tcp_stdio_install_fd(int source_fd, int target_fd) {
+    (void)source_fd;
+    (void)target_fd;
+    return -1;
+}
+
+int titan_test_tcp_stdio_close_fd(int fd) {
+    (void)fd;
+    return -1;
+}
+
+int titan_test_tcp_stdio_shutdown_write(int fd) {
+    (void)fd;
+    return -1;
+}
+
+int titan_test_tcp_stdio_reset_close(int fd) {
+    (void)fd;
+    return -1;
+}
+
+int titan_test_tcp_stdio_spawn_child(
+    const char *program, const char *mode, const char *arg1, const char *arg2,
+    int ipv6, int alias_stderr, int *peer_fd_out, int *child_pid_out) {
+    (void)program;
+    (void)mode;
+    (void)arg1;
+    (void)arg2;
+    (void)ipv6;
+    (void)alias_stderr;
+    if (peer_fd_out != NULL) *peer_fd_out = -1;
+    if (child_pid_out != NULL) *child_pid_out = -1;
+    return ENOSYS;
+}
+
+int titan_test_tcp_stdio_wait_child(int child_pid, int *exit_code_out) {
+    (void)child_pid;
+    if (exit_code_out != NULL) *exit_code_out = -1;
+    return ENOSYS;
+}
 #else
+#include <arpa/inet.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <signal.h>
+#include <string.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -325,6 +385,191 @@ int titan_test_restore_fd(int saved_fd, int target_fd) {
 
 int titan_test_rewind_fd(int fd) {
     return lseek(fd, 0, SEEK_SET) == 0 ? 0 : -1;
+}
+
+int titan_test_open_fd_count(void) {
+    struct rlimit limit;
+    rlim_t maximum;
+    int descriptor;
+    int count = 0;
+    if (getrlimit(RLIMIT_NOFILE, &limit) != 0)
+        return -1;
+    maximum = limit.rlim_cur;
+    if (maximum == RLIM_INFINITY || maximum > 65536)
+        maximum = 65536;
+    for (descriptor = 0; (rlim_t)descriptor < maximum; descriptor++) {
+        errno = 0;
+        if (fcntl(descriptor, F_GETFD) >= 0 || errno != EBADF)
+            count++;
+    }
+    return count;
+}
+
+int titan_test_tcp_stdio_supported(void) { return 1; }
+
+int titan_test_tcp_stdio_pair(int ipv6, int *accepted_fd, int *peer_fd) {
+    int listener = -1;
+    int client = -1;
+    int accepted = -1;
+    int saved_errno = EIO;
+    if (accepted_fd != NULL) *accepted_fd = -1;
+    if (peer_fd != NULL) *peer_fd = -1;
+    if (accepted_fd == NULL || peer_fd == NULL) return EINVAL;
+
+    if (ipv6 != 0) {
+        struct sockaddr_in6 addr6;
+        socklen_t len6 = sizeof(addr6);
+        listener = socket(AF_INET6, SOCK_STREAM, 0);
+        if (listener < 0) return errno;
+        memset(&addr6, 0, sizeof(addr6));
+        addr6.sin6_family = AF_INET6;
+        addr6.sin6_addr = in6addr_loopback;
+        addr6.sin6_port = 0;
+        if (bind(listener, (struct sockaddr *)&addr6, sizeof(addr6)) != 0 ||
+            listen(listener, 1) != 0 ||
+            getsockname(listener, (struct sockaddr *)&addr6, &len6) != 0) {
+            saved_errno = errno;
+            goto fail;
+        }
+        client = socket(AF_INET6, SOCK_STREAM, 0);
+        if (client < 0 ||
+            connect(client, (struct sockaddr *)&addr6, len6) != 0) {
+            saved_errno = errno;
+            goto fail;
+        }
+    } else {
+        struct sockaddr_in addr4;
+        socklen_t len4 = sizeof(addr4);
+        listener = socket(AF_INET, SOCK_STREAM, 0);
+        if (listener < 0) return errno;
+        memset(&addr4, 0, sizeof(addr4));
+        addr4.sin_family = AF_INET;
+        addr4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr4.sin_port = 0;
+        if (bind(listener, (struct sockaddr *)&addr4, sizeof(addr4)) != 0 ||
+            listen(listener, 1) != 0 ||
+            getsockname(listener, (struct sockaddr *)&addr4, &len4) != 0) {
+            saved_errno = errno;
+            goto fail;
+        }
+        client = socket(AF_INET, SOCK_STREAM, 0);
+        if (client < 0 ||
+            connect(client, (struct sockaddr *)&addr4, len4) != 0) {
+            saved_errno = errno;
+            goto fail;
+        }
+    }
+    do {
+        accepted = accept(listener, NULL, NULL);
+    } while (accepted < 0 && errno == EINTR);
+    if (accepted < 0) {
+        saved_errno = errno;
+        goto fail;
+    }
+    close(listener);
+    listener = -1;
+    if (fcntl(accepted, F_SETFD, FD_CLOEXEC) != 0 ||
+        fcntl(client, F_SETFD, FD_CLOEXEC) != 0) {
+        saved_errno = errno;
+        goto fail;
+    }
+    *accepted_fd = accepted;
+    *peer_fd = client;
+    return 0;
+
+fail:
+    if (listener >= 0) close(listener);
+    if (client >= 0) close(client);
+    if (accepted >= 0) close(accepted);
+    return saved_errno != 0 ? saved_errno : EIO;
+}
+
+int titan_test_tcp_stdio_install_fd(int source_fd, int target_fd) {
+    int result;
+    if (source_fd < 0 || target_fd < 0 || target_fd > 2) return -1;
+    do {
+        result = dup2(source_fd, target_fd);
+    } while (result < 0 && errno == EINTR);
+    return result < 0 ? -1 : 0;
+}
+
+int titan_test_tcp_stdio_close_fd(int fd) {
+    if (fd < 0) return 0;
+    return close(fd) == 0 ? 0 : -1;
+}
+
+int titan_test_tcp_stdio_shutdown_write(int fd) {
+    return shutdown(fd, SHUT_WR) == 0 ? 0 : -1;
+}
+
+int titan_test_tcp_stdio_reset_close(int fd) {
+    struct linger sl;
+    if (fd < 0) return -1;
+    sl.l_onoff = 1;
+    sl.l_linger = 0;
+    (void)setsockopt(fd, SOL_SOCKET, SO_LINGER, &sl, sizeof(sl));
+    (void)close(fd);
+    return 0;
+}
+
+int titan_test_tcp_stdio_spawn_child(
+    const char *program, const char *mode, const char *arg1, const char *arg2,
+    int ipv6, int alias_stderr, int *peer_fd_out, int *child_pid_out) {
+    int accepted_fd = -1;
+    int peer_fd = -1;
+    int status;
+    pid_t pid;
+    if (peer_fd_out != NULL) *peer_fd_out = -1;
+    if (child_pid_out != NULL) *child_pid_out = -1;
+    if (program == NULL || mode == NULL || arg1 == NULL || arg2 == NULL ||
+        peer_fd_out == NULL || child_pid_out == NULL) {
+        return EINVAL;
+    }
+    status = titan_test_tcp_stdio_pair(ipv6, &accepted_fd, &peer_fd);
+    if (status != 0) return status;
+    fflush(NULL);
+    pid = fork();
+    if (pid < 0) {
+        int saved_errno = errno;
+        close(accepted_fd);
+        close(peer_fd);
+        return saved_errno != 0 ? saved_errno : EIO;
+    }
+    if (pid == 0) {
+        close(peer_fd);
+        while (dup2(accepted_fd, 0) < 0 && errno == EINTR) {}
+        while (dup2(accepted_fd, 1) < 0 && errno == EINTR) {}
+        if (alias_stderr != 0) {
+            while (dup2(accepted_fd, 2) < 0 && errno == EINTR) {}
+        }
+        if (accepted_fd > 2) close(accepted_fd);
+        execl(program, program, mode, arg1, arg2, (char *)NULL);
+        _exit(127);
+    }
+    close(accepted_fd);
+    *peer_fd_out = peer_fd;
+    *child_pid_out = (int)pid;
+    return 0;
+}
+
+int titan_test_tcp_stdio_wait_child(int child_pid, int *exit_code_out) {
+    int status = 0;
+    pid_t waited;
+    if (exit_code_out == NULL || child_pid <= 0) return EINVAL;
+    *exit_code_out = -1;
+    do {
+        waited = waitpid((pid_t)child_pid, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (waited < 0) return errno;
+    if (WIFEXITED(status)) {
+        *exit_code_out = WEXITSTATUS(status);
+        return 0;
+    }
+    if (WIFSIGNALED(status)) {
+        *exit_code_out = 128 + WTERMSIG(status);
+        return 0;
+    }
+    return 0;
 }
 #endif
 

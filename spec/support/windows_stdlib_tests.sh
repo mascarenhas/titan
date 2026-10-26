@@ -120,7 +120,7 @@ if [[ $mode == build ]]; then
   [[ -f $work/sdk/lib/libsqlite3.dll.a ]]
   # Match the ordinary Unix main-thread budget for unchanged deep-recursion
   # oracles at -O0; CLANG64 otherwise gives launchers only a 1 MiB reserve.
-  export TITAN_EXTRA_LDFLAGS="${TITAN_EXTRA_LDFLAGS:-} \"$winprefix/lib/libsqlite3.dll.a\" -luser32 -Wl,--stack,8388608"
+  export TITAN_EXTRA_LDFLAGS="${TITAN_EXTRA_LDFLAGS:-} \"$winprefix/lib/libsqlite3.dll.a\" -luser32 -lws2_32 -Wl,--stack,8388608"
   # Parse configured tool/flag strings without evaluating command substitutions.
   for name in CC TITAN_EXTRA_CFLAGS TITAN_EXTRA_CPPFLAGS TITAN_EXTRA_LDFLAGS; do
     perl -MText::ParseWords=shellwords -e '

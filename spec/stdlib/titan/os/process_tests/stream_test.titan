@@ -208,9 +208,25 @@ function test_stream_facades_capture_merge_inheritance_options_and_interfaces(
                   input:kind() == "pipe" and output:kind() == "pipe" and
                   diagnostics:kind() == "pipe",
                   "captured pipe was misclassified")
+      local shutdown_rejected = false
+      do
+        input:shutdown()
+      catch
+        test.assert(error is async.OperationError,
+                    "captured pipe shutdown did not raise OperationError")
+        local failure = error as async.OperationError
+        test.assert(failure.operation == "stdio.shutdown" and
+                    failure.name == "ENOTSUP",
+                    "captured pipe shutdown raised wrong error: " ..
+                    failure.operation .. ": " .. failure.name)
+        shutdown_rejected = true
+      end
+      test.assert(shutdown_rejected, "captured pipe accepted shutdown")
       input:close()
       input:close()
       common.assert_raises_contains(function () input:kind() end,
+                                    "OutputStream is closed")
+      common.assert_raises_contains(function () input:shutdown() end,
                                     "OutputStream is closed")
       test.assert(process_support.read_all(output) == "separate",
                   "default stdout capture changed")
@@ -370,6 +386,8 @@ function test_closed_stream_facades_remain_terminal_in_later_runtime(
     local output = closed_output as system.OutputStream
     output:close()
     common.assert_raises_contains(function () output:kind() end,
+                                  "OutputStream is closed")
+    common.assert_raises_contains(function () output:shutdown() end,
                                   "OutputStream is closed")
     process_support.expect_failure(function ()
       output:write("late")

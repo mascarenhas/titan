@@ -246,3 +246,43 @@ function test_parent_file_stdio_writes_reads_inheritance_and_lifecycle(
     end)
   end)
 end
+
+function test_parent_tcp_stdio_sessions_shutdown_inheritance_and_lifecycle(
+    context: test.Context)
+  if common.is_windows() then
+    test.skip("platform: connected TCP parent stdio is supported on Linux and macOS")
+  end
+  local workspace = ""
+  local program = ""
+  runtime_test.run(function ()
+    workspace = fs.tmpname()
+    fs.unlink(workspace)
+    fs.mkdir(workspace)
+    context:cleanup(function () command.remove_tree(workspace) end)
+    program = compile_file_stdio_fixture(workspace)
+  end)
+
+  context:run("inetd_launchd_ipv6_and_child_inheritance_sessions", function (_child: test.Context)
+    runtime_test.run(function ()
+      local result_path = workspace .. "/tcp-sessions.result"
+      local output, why, status = command.capture(
+        {program, "tcp-sessions", workspace, result_path, program},
+        workspace)
+      test.assert(why == "exit" and status == 0 and
+                  fs.read_file(result_path) == "TCP_SESSIONS_OK",
+                  "TCP parent stdio sessions failed (" .. why .. "/" .. status .. "): " .. output)
+    end)
+  end)
+
+  context:run("backpressure_cancellation_peer_reset_transfers_and_runtime_reuse", function (_child: test.Context)
+    runtime_test.run(function ()
+      local result_path = workspace .. "/tcp-lifecycle.result"
+      local output, why, status = command.capture(
+        {program, "tcp-backpressure-cancel-reset-reuse", workspace, result_path},
+        workspace)
+      test.assert(why == "exit" and status == 0 and
+                  fs.read_file(result_path) == "TCP_BACKPRESSURE_CANCEL_RESET_REUSE_OK",
+                  "TCP parent stdio lifecycle test failed (" .. why .. "/" .. status .. "): " .. output)
+    end)
+  end)
+end
