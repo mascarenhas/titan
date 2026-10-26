@@ -305,9 +305,18 @@ local loader_options = {
 
 -- One exclusive lock per output domain, held from certification through
 -- publication; a second invocation sharing the domain waits and recertifies.
-local lock_directories = {
-    args.output or driver.TITAN_SOURCE_PATH:match("^[^;]+") or ".",
-}
+local lock_directories = {}
+if args.output then
+    lock_directories[1] = args.output
+else
+    -- Source-adjacent objects may belong to any search root, while default
+    -- final providers/executables belong to the invocation's working tree.
+    for directory in driver.TITAN_SOURCE_PATH:gmatch("[^;]+") do
+        lock_directories[#lock_directories + 1] = directory
+    end
+    if #lock_directories == 0 then lock_directories[1] = "." end
+    lock_directories[#lock_directories + 1] = "."
+end
 if args.exe then
     local exe_directory, directory_error =
         driver.prepare_output_root(path.dirname(args.exe))
@@ -353,6 +362,23 @@ else
         coverage = coverage_build ~= nil,
         output_root = args.output,
         locks = output_locks,
+        preflight = function(plan)
+            local native_inputs = { table.unpack(args.extra_object or {}) }
+            for _, filename in ipairs(normalized_native.c_sources) do
+                native_inputs[#native_inputs + 1] = filename
+            end
+            return driver.preflight_build_outputs(resolver_context, plan, {
+                roots = requested_modules,
+                compile_only = args.compile_only,
+                test = args.test,
+                c_parts = c_parts,
+                output_root = args.output,
+                exe = args.exe,
+                no_uv_bootstrap = args.no_uv_bootstrap,
+                coverage = coverage_build ~= nil,
+                native_inputs = native_inputs,
+            })
+        end,
     })
     if signal then
         driver.close_resolver_context(resolver_context)
