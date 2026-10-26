@@ -105,6 +105,9 @@ function publication.publish(entries, fs, options)
                 need(copy_file(item.public, item.backup))
             end
         end
+        -- A final-link success marker must disappear before the first public
+        -- mutation. Preparation/backups above leave the predecessor intact.
+        if options.before_commit then need(options.before_commit()) end
         -- The caller orders the provider last, after its exact shim/source set.
         for index, item in ipairs(prepared) do
             if not item.unchanged and item.stage then
@@ -159,6 +162,22 @@ function publication.publish(entries, fs, options)
             (#cleanup_errors > 0 and ("\npublication cleanup: " .. table.concat(cleanup_errors, "; ")) or "")
     end
     return true
+end
+
+-- A standalone Windows program owns both images, even with an external --exe
+-- destination. Commit the launcher last and roll the whole set back on any
+-- caught failure; an interrupted set has no success certificate.
+function publication.publish_program(request, fs, options)
+    if type(request) ~= "table" or type(request.provider) ~= "table" or
+        type(request.executable) ~= "table" or not request.provider.source or
+        not request.executable.source then
+        return nil, "Windows program publication requires staged DLL and EXE"
+    end
+    local entries = {}
+    for _, entry in ipairs(request.companions or {}) do entries[#entries + 1] = entry end
+    entries[#entries + 1] = request.provider
+    entries[#entries + 1] = request.executable
+    return publication.publish(entries, fs, options)
 end
 
 return publication
