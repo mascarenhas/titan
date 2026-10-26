@@ -1016,12 +1016,12 @@ test "$3" = 0 || exit "$3"
             temporary_logs[#temporary_logs + 1] = path
             return path
         end)
-        io.stdout = {
+        io.stderr = {
             write = function() return nil, "injected command write failure" end,
             flush = function() return true end,
         }
         local results = driver.compile_modules(checked_requests(), JOBS, true)
-        io.stdout = previous_stdout
+        io.stderr = previous_stderr
         for _, result in ipairs(results) do
             assert.falsy(result.ok)
             assert.truthy(tostring(result.err):find(
@@ -1093,7 +1093,7 @@ test "$3" = 0 || exit "$3"
             return path
         end)
         local shown = {}
-        io.stdout = {
+        io.stderr = {
             write = function(_, output)
                 shown[#shown + 1] = output
                 return true
@@ -1103,7 +1103,7 @@ test "$3" = 0 || exit "$3"
 
         local results = driver.compile_modules(requests, JOBS, true)
         restore_tmpname()
-        io.stdout = previous_stdout
+        io.stderr = previous_stderr
         assert.falsy(results[1].ok)
         assert.truthy(tostring(results[1].err):find(
             "injected tmpname failure", 1, true), tostring(results[1].err))
