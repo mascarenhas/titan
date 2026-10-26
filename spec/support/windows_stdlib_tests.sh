@@ -230,13 +230,15 @@ if [[ $mode == build ]]; then
     for flag in "${cppflags[@]}" "${cflags[@]}"; do native_args+=("--cflag=$flag"); done
     for fixture in uv_stdio_probe sqlite3_worker_fixture ssl_allocator_fixture ssl_error_strings os_descriptor_limit; do
       native_output="$work/native/$fixture"
-      TITAN_EXTRA_CPPFLAGS= TITAN_EXTRA_CFLAGS= TITAN_EXTRA_LDFLAGS= \
+      object=$(TITAN_EXTRA_CPPFLAGS= TITAN_EXTRA_CFLAGS= TITAN_EXTRA_LDFLAGS= \
         "$work/sdk/bin/lua.exe" "$winprefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" \
-          -c --incremental -j "$TITAN_JOBS" --output "$(cygpath -m "$native_output")" \
-          "${native_args[@]}" --c-source "$(cygpath -m "$work/source/spec/fixtures/stdlib/native/$fixture.c")"
-      objects=("$native_output"/.native/*.o)
-      [[ ${#objects[@]} == 1 && -f ${objects[0]} ]]
-      copy_input "${objects[0]}" "$work/cwd/.titan-tests/$fixture.o"
+          -c --incremental --print-c-objects -j "$TITAN_JOBS" --output "$(cygpath -m "$native_output")" \
+          "${native_args[@]}" --c-source "$(cygpath -m "$work/source/spec/fixtures/stdlib/native/$fixture.c")")
+      object=${object%$'\r'}
+      [[ -n $object && $object != *$'\n'* && $object != *$'\r'* && -f $object ]] || {
+        echo 'Expected one reported native fixture object' >&2; exit 1;
+      }
+      copy_input "$object" "$work/cwd/.titan-tests/$fixture.o"
     done
     test_tree=$(cygpath -m "$work/source/spec/stdlib/titan")
     coverage_args=()

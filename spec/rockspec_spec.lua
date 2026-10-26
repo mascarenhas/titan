@@ -2687,13 +2687,14 @@ set -euo pipefail
 [[ $1 != -E ]] || exit 0
 printf '%s\n' "$*" >> "$WINDOWS_TITANC_LOG"
 shift
-output= exe= c_source= compile_only=0 coverage=0
+output= exe= c_source= compile_only=0 coverage=0 print_objects=0
 while [[ $# -gt 0 ]]; do
   case $1 in
     --output) output=$2; shift ;;
     --exe) exe=$2; shift ;;
     --c-source) c_source=$2; shift ;;
     -c) compile_only=1 ;;
+    --print-c-objects) print_objects=1 ;;
     --coverage) coverage=1 ;;
   esac
   shift
@@ -2706,6 +2707,7 @@ if [[ $compile_only == 1 ]]; then
     cp "$c_source" "$object"
     printf '%s\n' "$c_source" >> "$WINDOWS_C_COMPILE_LOG"
   fi
+  if [[ $print_objects == 1 ]]; then printf '%s\r\n' "$object"; fi
 else
   if [[ ! -f $exe ]]; then
     printf '%s\n' "aggregate executable" > "$exe"
@@ -2783,12 +2785,15 @@ fi
         assert.falsy(commands:find("async.tests", 1, true), commands)
         local _, native_sources = commands:gsub("%-%-c%-source", "")
         assert.equal(8, native_sources, commands)
+        local _, printed_objects = commands:gsub("%-%-print%-c%-objects", "")
+        assert.equal(5, printed_objects, commands)
         local fixed_helpers = { "uv_stdio_probe", "sqlite3_worker_fixture",
             "ssl_allocator_fixture", "ssl_error_strings", "os_descriptor_limit" }
         for _, name in ipairs(fixed_helpers) do
             local object = work .. "/cwd/.titan-tests/" .. name .. ".o"
             assert.equal(read_file(source .. "/" .. native .. name .. ".c"), read_file(object))
             assert.truthy(lfs.touch(object, 1000, 1000))
+            fixture(work, "native/" .. name .. "/.native/stale-other-tree.o", "stale native node\n")
         end
         local sdk_input = work .. "/sdk/lib/titan/0.6/titan.dll"
         local source_input = work .. "/source/spec/stdlib/titan/test/tests.titan"
@@ -2812,6 +2817,8 @@ fi
         assert.equal(1000, lfs.attributes(source_input, "modification"))
         for _, name in ipairs(fixed_helpers) do
             assert.equal(1000, lfs.attributes(work .. "/cwd/.titan-tests/" .. name .. ".o", "modification"))
+            assert.equal("stale native node\n", read_file(work .. "/native/" .. name ..
+                "/.native/stale-other-tree.o"))
         end
         assert_absent(work .. "/sdk/share/retired.lua")
         assert_absent(work .. "/source/spec/stdlib/titan/retired_tests.titan")
@@ -2849,6 +2856,8 @@ fi
         for _, name in ipairs(fixed_helpers) do
             local object = work .. "/cwd/.titan-tests/" .. name .. ".o"
             assert.equal(read_file(source .. "/" .. native .. name .. ".c"), read_file(object))
+            assert.equal("stale native node\n", read_file(work .. "/native/" .. name ..
+                "/.native/stale-other-tree.o"))
         end
         local notes = work .. "/coverage/.coverage/retained.gcno"
         assert.truthy(lfs.touch(notes, 1000, 1000))
