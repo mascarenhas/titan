@@ -6338,6 +6338,18 @@ function driver.new_worker_context(configuration, io_strategy)
     return context
 end
 
+-- A path this invocation rewrites must be hashed afresh by any later reader:
+-- forget its memoized digest under both its written and absolute spellings.
+local function forget_digests(context, filenames)
+    for _, filename in ipairs(filenames) do
+        incremental.invalidate_file(context, filename)
+        local called, absolute = pcall(normalized_absolute_filename, filename)
+        if called and absolute ~= filename then
+            incremental.invalidate_file(context, absolute)
+        end
+    end
+end
+
 -- Parent-only, right before a missed module's worker starts: retire its
 -- committed object. The primary object is the commit marker, so it is
 -- unlinked first; then the higher parts and coverage notes its record names.
@@ -6377,6 +6389,8 @@ function driver.invalidate_source_object(context, modname, source)
     for _, sibling in ipairs(prior) do
         if context.io:lstat(sibling) then context.io:unlink(sibling) end
     end
+    forget_digests(context, prior)
+    forget_digests(context, { primary })
     return true
 end
 
@@ -6492,6 +6506,19 @@ function driver.compile_planned_module(context, modname, options)
         jobs.propagate(cancelled)
         return nil, result.err
     end
+    -- Every final path this worker wrote; the coordinator forgets their
+    -- memoized digests before anything in its invocation reads them again.
+    local written = {}
+    for _, job in ipairs(compilation.jobs) do written[#written + 1] = job.c_path end
+    if compilation.private_header then
+        written[#written + 1] = compilation.private_header
+    end
+    for _, header in ipairs(header_plans) do
+        if header.filename then written[#written + 1] = header.filename end
+        if header.ffi_header and header.ffi_header.filename then
+            written[#written + 1] = header.ffi_header.filename
+        end
+    end
     local staged = {}
     for index, job in ipairs(compilation.jobs) do
         staged[index] = {
@@ -6505,6 +6532,7 @@ function driver.compile_planned_module(context, modname, options)
         object = compilation.primary_object,
         objects = compilation.objects,
         staged = staged,
+        written = written,
         diagnostics = {},
     }
 end
@@ -6575,6 +6603,17 @@ function driver.publish_staged_module(context, result)
         return discard("cannot publish object '" .. primary.to .. "': " ..
             tostring(rename_error))
     end
+    -- Published objects and the worker's generated files replaced bytes this
+    -- invocation may already have hashed (certification, link inputs).
+    local rewritten = {}
+    for _, staged in ipairs(result.staged or {}) do
+        rewritten[#rewritten + 1] = staged.from
+        rewritten[#rewritten + 1] = staged.to
+    end
+    for _, filename in ipairs(result.written or {}) do
+        rewritten[#rewritten + 1] = filename
+    end
+    forget_digests(context, rewritten)
     return {
         status = "hit",
         record = record,
