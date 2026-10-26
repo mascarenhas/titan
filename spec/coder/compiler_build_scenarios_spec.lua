@@ -1263,7 +1263,7 @@ end
             "fixture.app_test.test_initial",
             "fixture.other_test.test_unrelated",
         }
-        local uv = require "luv"
+        local uv = require("titan-compiler.process").library()
 
         local function spawn_titanc(kind)
             local args = {
