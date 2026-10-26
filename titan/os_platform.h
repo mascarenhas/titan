@@ -179,9 +179,6 @@ static inline void titan_inspect_parent_tcp(int descriptor,
 }
 #else
 #define TITAN_OS_WINDOWS 0
-#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
-#define _DARWIN_C_SOURCE 1
-#endif
 #include <fcntl.h>
 #ifdef __APPLE__
 #include <netinet/in.h>
