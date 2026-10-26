@@ -10,6 +10,7 @@ local test_runner = require 'titan-compiler.test_runner'
 local util = require 'titan-compiler.util'
 local platform = require 'titan-compiler.platform'
 local coverage = require 'titan-compiler.coverage'
+local build = require 'titan-compiler.build'
 
 -- Implementation notes: doc/implementation/driver.md#the-titanc-command-line
 local p = argparse('titan', 'Titan compiler')
@@ -49,15 +50,26 @@ p:option('-X --extra-object',
 local args = p:parse()
 
 local resolver_context
+-- Output-domain locks; process exit also releases them.
+local output_locks
+local function release_locks()
+    if output_locks then
+        local locks = output_locks
+        output_locks = nil
+        locks:release()
+    end
+end
 local resolver_cleanup <close> = setmetatable({}, {
     __close = function()
-        if not resolver_context then return end
-        local context = resolver_context
-        resolver_context = nil
-        -- Preserve the original exceptional-exit diagnostic. Ordinary exits
-        -- use exit() or the explicit success close below and can report a
-        -- cleanup failure directly.
-        pcall(driver.close_resolver_context, context)
+        if resolver_context then
+            local context = resolver_context
+            resolver_context = nil
+            -- Preserve the original exceptional-exit diagnostic. Ordinary
+            -- exits use exit() or the explicit success close below and can
+            -- report a cleanup failure directly.
+            pcall(driver.close_resolver_context, context)
+        end
+        pcall(release_locks)
     end,
 })
 
@@ -72,6 +84,7 @@ local function exit(msg)
                 tostring(close_err)
         end
     end
+    release_locks()
     io.stderr:write(msg, "\n")
     os.exit(1)
 end
@@ -82,6 +95,7 @@ local function finish()
     if not closed then
         exit("failed to clean C probe service: " .. tostring(close_err))
     end
+    release_locks()
 end
 
 if args.print_root then
@@ -213,7 +227,7 @@ for _, modname in ipairs(requested_modules) do
     end
     requested_roots[modname] = true
 end
-local loader = driver.defaultloader({}, {
+local loader_options = {
     source_roots = requested_roots,
     incremental = args.incremental,
     test = args.test,
@@ -222,26 +236,70 @@ local loader = driver.defaultloader({}, {
     coverage = coverage_build,
     output_root = args.output,
     c_parts = c_parts,
-})
+}
+
+-- One exclusive lock per output domain, held from certification through
+-- publication; a second invocation sharing the domain waits and recertifies.
+local lock_directories = {
+    args.output or driver.TITAN_SOURCE_PATH:match("^[^;]+") or ".",
+}
+local lock_error
+output_locks, lock_error = build.lock_outputs(
+    resolver_context.io, lock_directories, { verbose = args.verbose })
+if not output_locks then exit(lock_error) end
+
+local loader
+if args.print_ast then
+    -- A debugging view of each root's checked AST: check in this process,
+    -- where the ASTs live, and compile through the ordinary batch below.
+    loader = driver.defaultloader({}, loader_options)
+    for _, modname in ipairs(requested_modules) do
+        local ok, errs = checker.checkimport(modname, loader)
+        if not ok then
+            table.insert(errors, errs)
+        else
+            if #errs > 0 then table.insert(errors, table.concat(errs, "\n")) end
+            local ast = driver.imported[modname].ast
+            if ast then print(parser.pretty_print_ast(ast)) end
+        end
+    end
+    if #errors > 0 then exit(table.concat(errors, "\n")) end
+else
+    -- The coordinator certifies every module of the requested closure,
+    -- restores hits, compiles misses in worker processes and publishes
+    -- them; it returns with every source module restored and the resolver
+    -- finalized.
+    local built, diagnostics, signal = build.run(resolver_context, {
+        roots = requested_modules,
+        loader_options = loader_options,
+        incremental = args.incremental,
+        compile_only = args.compile_only,
+        test = args.test,
+        jobs = jobs,
+        verbose = args.verbose,
+        pretty_print = args.pretty_print,
+        c_parts = c_parts,
+        coverage = coverage_build ~= nil,
+        output_root = args.output,
+        locks = output_locks,
+    })
+    if signal then
+        driver.close_resolver_context(resolver_context)
+        resolver_context = nil
+        require("titan-compiler.jobs").propagate(signal)
+    end
+    if not built then exit(table.concat(diagnostics, "\n")) end
+    loader = resolver_context.loader
+end
 
 for _, modname in ipairs(requested_modules) do
-    local ok, errs = checker.checkimport(modname, loader)
-    if not ok then
-        table.insert(errors, errs)
-    else
-        if #errs > 0 then table.insert(errors, table.concat(errs, "\n")) end
-        local mod = driver.imported[modname]
-        local ast = mod.ast
-        if not args.test and not args.compile_only
-           and (mod.has_main or ast and checker.has_main(ast)) then
-            if main_module then
-                table.insert(errors, modname .. ": multiple main functions found (already declared in " .. main_module .. ")")
-            else
-                main_module = modname
-            end
-        end
-        if args.print_ast and ast then
-            print(parser.pretty_print_ast(ast))
+    local mod = driver.imported[modname]
+    if not args.test and not args.compile_only
+       and (mod.has_main or mod.ast and checker.has_main(mod.ast)) then
+        if main_module then
+            table.insert(errors, modname .. ": multiple main functions found (already declared in " .. main_module .. ")")
+        else
+            main_module = modname
         end
     end
 end
