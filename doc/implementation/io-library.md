@@ -2,10 +2,12 @@
 
 The user-facing Interfaces, printing, and line-iteration contracts are in the
 [I/O standard-library chapter](../language/standard-library-io.md).
-`titan/io.titan` is a flat Titan module importing only `os` and `string`
-through their ordinary public compiled interfaces. It adds no compiler
-intrinsic, Lua C API operation, or native code. Shell-process ownership lives
-in [`titan.os`](os-library.md#shell-process-stream), not this Interface module.
+`titan/io.titan` is a flat Titan module whose only imports are the ordinary
+public `os` and `string` interfaces, so a source build composes with
+compiled-only providers of both. It adds no compiler intrinsic, Lua C API
+operation, or native code. Concrete streams, including the shell facade, live
+with their resources in [`titan.os`](os-library.md#shell-process-stream) and
+other owners; `titan.io` declares only the Interfaces they satisfy.
 
 ## One-write printing
 
@@ -48,13 +50,13 @@ initial iterator call, body, update calls, and normal exit inside a synthetic
 region whose close slot owns cleanup. A close error has ordinary `finally`
 precedence and can replace a pending body error, `break`, or `return`.
 
-
 ## Tests
 
 The non-LuaCov native folder module `spec/stdlib/titan/io/tests/` uses
 `core_test.titan` to instrument string and output values and check conversion
 order, conversion before output, one write, and late lookup of a reassigned
 `os.stdout`. Structural ReaderCloser records check every exit path in the table
-above. Shell behavior and all seven Interface conversions are exercised by
-[`os.process_tests`](os-library.md#shell-process-stream).
+above. Shell-stream behavior, including its conversions to all seven
+Interfaces, is tested by `os.process_tests`
+([shell tests](os-library.md#shell-and-disposal-tests)).
 

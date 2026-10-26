@@ -90,10 +90,10 @@ propagation trace in the caller, appends it to the staged trace, writes the
 combined string to `TITAN_BACKTRACE_KEY`, sets `TITAN_TRACE_PINNED`, and
 re-raises the original payload. The final handler therefore preserves the
 combined trace instead of only the shallow propagation site. The code is in
-`titan/coroutine.titan` (see [Coroutines](coroutines.md)). The async driver
-uses a non-raising resume and appends the propagation trace only for a Task
-failure that it reports; otherwise it drops the staged trace
-([coroutine entry](coroutines.md#entry-function)).
+`titan/coroutine.titan` (see [Coroutines](coroutines.md)). The non-raising
+`Coroutine:transfer` instead clears the slot and returns the staged trace as an
+ordinary string; the async driver appends its own propagation trace only for a
+Task failure that it reports ([coroutine entry](coroutines.md#entry-function)).
 
 ### libbacktrace and frame merging
 

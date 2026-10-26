@@ -239,19 +239,23 @@ the propagation-side trace, combines it with the staged coroutine trace, pins
 it, and re-raises the same payload. The registry protocol is canonical in
 [Error handling](error-handling.md#trace-pinning).
 
-The public `Coroutine:transfer(payload, tag, inject_error)` shares the raising
-methods' switch and reachability protocol but returns a fixed
-`(boolean, value, string?)` tuple: failed flag, result/error, and optional trace.
-On failure it calls the private `pop_trace_for_append`, consuming the registry
-handoff into a traced local before returning. Success has no trace lookup,
-capture, copying, or outcome allocation. Tag/state/native/stack failures still
-raise in the caller. The producer's staging and raising helpers remain private.
+The public `Coroutine:transfer(payload, tag, inject_error)` runs the same
+finalizer check, tag resolution, receiver root, and
+`push_transfer`/`resume_switch`/`pop_transfer` sequence as `resume` and
+`error`. It differs only after the pop. On `ok=false` it calls
+`pop_trace_for_append`, which reads the staged trace into a traced local and
+clears `TITAN_TRACE_APPEND_KEY`, and then returns `(true, payload, trace)`
+instead of raising. On `ok=true` it returns `(false, payload, nil)` without
+reading the registry, capturing a trace, or allocating. Every `ok=false` that
+reaches a resumer comes from `coro_entry`'s catch, which always stages a trace
+first, so a returned outcome never leaves a stale trace behind. Errors raised
+before or during the switch (tag, state, finalizer, minicoro, stack) propagate
+as ordinary raises. The staging and raising helpers stay private to
+`titan/coroutine.titan`.
 
-The async driver uses ordinary `import "coroutine"` and owns report policy.
-It appends one driver-side trace only for reportable failures, ignores the
-callee trace for sticky cancellation, and preserves the already recorded
-body trace for `run_with_cleanup`. `resume_root` passes the optional trace to
-`advance_task`; the latter still catches infrastructure failures normally. See
+`titan/async.titan` imports `coroutine` through its ordinary public interface
+and uses `transfer` to drive Task roots; the report policy that decides whether
+to append a driver trace is described in
 [Task status](libuv-runtime.md#explicit-suspend-task-status-listeners-and-combinators).
 
 `Coroutine:error` before the first `resume` is handled without calling the

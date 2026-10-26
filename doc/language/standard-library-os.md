@@ -1,8 +1,8 @@
 # Operating-system standard library
 
 The `os` standard module provides portable clocks, calendars, locales,
-environment, path, process, graceful exit, one-shot signal, and child-process
-helpers. Its
+environment, path, process, graceful exit, one-shot signal, child-process, and
+shell-command helpers. Its
 synchronous CPU/current-time queries and resource-owning operations use public
 libuv APIs; calendar conversion, formatting, differences, and locale selection
 use ISO C where libuv has no equivalent. Titan imports its canonical short
@@ -642,30 +642,37 @@ that wrapper detaches both source aliases.
 The payload follows the
 [shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules).
 Copies do not create additional owners, and dropping the bytes does not close
-resources. For failed delivery, adopt and close the stream, or dispose the
-unadopted payload directly:
+resources. To recover a payload that was not delivered, adopt it and close the
+stream, or dispose of it without adopting it:
 
 ```text
 function InputStream.discard_transfer_payload(payload: string): integer
 function OutputStream.discard_transfer_payload(payload: string): integer
 ```
 
-These ordinary Titan APIs decode the owning type's opaque schema and close its
-optional detached captured pipe without adopting it. They need a live Lua/Titan
-state but no current Task or active Runtime, and still work after Runtime
-shutdown has closed adoption. Input descriptor 0 and output descriptors 1/2
-are identity-only no-ops: disposal never resolves, initializes, or closes parent
-stdio, including file-backed parent streams. Inert captured payloads also
-return zero without a native close.
+Each static accepts only an unadopted payload produced by the same type's
+`to_transfer_payload`. It closes the payload's detached captured pipe, if any,
+and returns the native close status. It runs in any live Lua state with the
+`os` module loaded, needs no current Task or active Runtime, and still works
+after Runtime shutdown has stopped adoption. It does not touch the
+originating `Process`, which keeps its `wait` and `kill` obligations.
 
-Malformed schemas, terminal markers, or descriptor discriminators raise before
-touching native ownership. A native close attempt consumes the capability even
-if its returned status is negative: clear retained payload state before
-reporting that status, and never retry, re-adopt, or double-discard those bytes.
-Raw payloads are trusted process-local manual capabilities, not authenticated or
-replay-safe data. Disposal neither terminates nor reaps the originating Process.
-It does not register OS streams as packet resources or make
-`transfer.discard_message` dispose them automatically.
+A payload copied from an unused `os.stdin`, `os.stdout`, or `os.stderr` facade
+carries only the descriptor identity: disposing it returns `0` and never
+resolves, opens, or closes the parent stream, whatever its `kind()`. A captured
+payload whose pipe had already closed also returns `0` without a native close.
+
+Disposal applies the same schema, terminal-outcome, and descriptor validation
+as adoption and raises before any native close when they fail. Passing an
+`InputStream` payload to `OutputStream.discard_transfer_payload`, or the
+reverse, is not detected reliably and is a caller error. Once a native close is
+attempted the capability is consumed even if the status is negative: clear any
+retained copy before reporting that status, and never retry, adopt, or dispose
+of the same bytes again.
+
+These statics are explicit manual cleanup. Native packet disposal such as
+`transfer.discard_message` never calls them, so a lossy or coalescing transport
+still must not carry these payloads.
 
 ### Process lifecycle
 
@@ -704,8 +711,7 @@ child's lifecycle. `uv_close` retires the watcher but does not signal, wait for,
 the child; the child may outlive the Runtime. Programs that require termination
 or reaping must explicitly call `kill` and `wait` while that Runtime is active.
 
-
-## Shell commands
+### Shell commands
 
 ```text
 record InputOutputStream
@@ -738,9 +744,10 @@ The child gets a captured stdin pipe and one captured pipe shared by stdout and
 stderr. `InputOutputStream:write` writes the child's stdin, while `read` and
 `read_until` consume that one merged output stream. There is exactly one
 high-level facade over the merged pipe, so no second reader can race through a
-separate stderr object. The record satisfies all seven `io` Interfaces
-structurally at the consumer's conversion site and adds `wait`; OS does not
-import IO to declare conformance.
+separate stderr object. The record converts to all seven
+[`io` Interfaces](standard-library-io.md#standard-implementations) and adds
+`wait`; as with every Interface, satisfaction is checked structurally where
+the conversion is written.
 
 `wait` reaps the child and stores its complete `os.ExitStatus`. Later calls
 return the stored status without waiting again; normal and signal termination
@@ -764,13 +771,13 @@ Read merged output through EOF before an ordinary `wait` when the child may
 produce more than one pipe buffer. Errors and cancellation follow the same
 Task and native-owner cleanup rules as direct process streams.
 
-## Transferring shell streams
+### Transferring shell streams
 
 `InputOutputStream:to_transfer_payload()` transfers the idle writable stdin and
 merged readable stdout/stderr pipes. Pending wrapper operations and underlying
 pipe reads or writes are rejected before either pipe is detached. Native pipe
 handoff follows the platform restrictions of
-[`os.InputStream` and `os.OutputStream`](standard-library-os.md#transferring-process-streams).
+[`os.InputStream` and `os.OutputStream`](#transferring-process-streams).
 `InputOutputStream.from_transfer_payload(payload)` adopts both pipes on the
 current destination Runtime, including buffered output.
 
@@ -801,9 +808,13 @@ child remains available through `wait()` and `close()`.
 The payload follows the
 [shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules):
 deliver and adopt it exactly once within this process, recover failed delivery,
-and explicitly close the destination. There is no public
-`discard_transfer_payload`. Copying or dropping a payload does not duplicate or
-close the owned pipes.
+and explicitly close the destination. The composite has no
+`discard_transfer_payload`; recover an undelivered payload by adopting it and
+closing the result. Copying or dropping a payload does not duplicate or close
+the owned pipes. A [`TransferValue`](async-io.md#transfer-values) carrying the
+record names the module `titan.os` and the nominal type
+`titan.os.InputOutputStream`; it is decoded only by a provider that declares
+that type.
 
 ## Errors
 

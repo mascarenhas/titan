@@ -38,7 +38,8 @@ the `coroutine` module.
 
 Titan's ordinary argument adjustment makes the second argument to
 `create`, `resume`, and `error` optional in practice: omitting it passes
-`nil`. `nil` means "no tag supplied" and is not a legal tag.
+`nil`. `nil` means "no tag supplied" and is not a legal tag. `transfer` takes
+the same tag in the middle position; pass `nil` explicitly to use the default.
 
 Payloads are ordinary `value`s, so `arg`, `err`, yielded values, and
 returned values may be `nil`. Tags must be non-nil.
@@ -197,32 +198,46 @@ same error value in the caller while preserving the coroutine traceback.
 Calling `co:error(err, tag)` before the first normal `resume` raises
 `err` without calling the entry function.
 
-## Non-raising transfer outcomes
+## Non-raising transfer
 
-`co:transfer(payload, tag, inject_error)` uses the same tags, stacked-chain
-routing, and input rules as `resume` when `inject_error` is false and `error`
-when it is true. Error injection before first entry never calls the body.
-The fixed result tuple is:
+`co:transfer(payload, tag, inject_error)` switches to the coroutine exactly as
+`co:resume(payload, tag)` does when `inject_error` is `false`, and exactly as
+`co:error(payload, tag)` does when it is `true`. Tags, tagged nested yield,
+and injection before the first resume (which never calls the entry function)
+behave the same. Only the way an uncaught error comes back differs:
 
-- `(false, payload, nil)` for a successful yield or normal return; inspect
-  `status()` to distinguish suspension from normal completion.
-- `(true, error, traceback)` for an uncaught callee error. The boolean means
-  **failed**, not dead. Nil and false are ordinary payloads and error values.
+| Outcome | Result |
+| --- | --- |
+| The coroutine yields or returns | `false, value, nil` |
+| An uncaught error ends the coroutine | `true, error, traceback` |
 
-As with `resume`/`error`, actually raising nil follows Lua 5.5's
-[`"<no error object>"` normalization](error-handling.md#raising-errors).
-This does not affect successful nil payloads or turn false into success.
+The first result means **failed**; it is not a "dead" flag. Use `status()` to
+tell a yield from a normal return. `nil` and `false` are ordinary values and
+ordinary error values, so never infer the outcome from the truthiness of the
+second result. Raising `nil` still delivers `"<no error object>"`, as in
+[raising errors](error-handling.md#raising-errors).
 
-The optional trace is the callee's already captured traceback. Coroutine
-consumes its pending handoff internally and returns the trace as an ordinary
-rooted string; the caller has no hidden trace slot to clear. Successful
-switches allocate no outcome wrapper and capture or copy no traceback.
-A scheduler may append its own propagation trace only when it will report the
-failure; cancellation and already recorded body failures need not pay for it.
+The traceback is the one captured when the error escaped the coroutine body,
+in the same frame-only form as a `catch` block's `traceback`. It is an
+ordinary string owned by the caller; the next raising operation does not see
+it. A caller that reports the failure can append its own propagation trace;
+a caller that drops the failure pays for no extra capture. A successful
+transfer captures no traceback and allocates no result object.
 
-Only uncaught callee errors become outcomes. Invalid tags/states, switching
-from finalizers, native transfer failures, and allocation/stack failures still
-raise normally in the caller. Abandoned-coroutine unwind remains noncatchable.
+Everything else still raises in the caller: a missing tag, a coroutine that is
+not suspended, a switch from a finalizer, and native, allocation, or stack
+failures. Unwinding an abandoned coroutine stays uncatchable.
+
+```titan
+local coroutine = import "coroutine"
+
+function run_step(co: coroutine.Coroutine, input: value): string
+    local failed, _, trace? = co:transfer(input, nil, false)
+    if failed then return "failed: " .. (trace or "") end
+    if co:status() == "dead" then return "returned" end
+    return "yielded"
+end
+```
 
 ## Status
 
@@ -236,8 +251,8 @@ raise normally in the caller. Abandoned-coroutine unwind remains noncatchable.
 | `"stacked"` | The coroutine is inside a skipped chain created by a tagged nested yield; resuming the suspended matching handler restores the skipped stack. |
 | `"dead"` | The entry function returned, an uncaught error escaped, or an error was injected before the entry function started. |
 
-Calling `resume` or `error` on a `running`, `normal`, `stacked`, or
-`dead` coroutine raises in the caller. For a tagged nested yield, resume
+Calling `resume`, `error`, or `transfer` on a `running`, `normal`, `stacked`,
+or `dead` coroutine raises in the caller. For a tagged nested yield, resume
 the suspended handler that received the yield instead.
 
 Titan coroutines are not Lua coroutines. The `yield` function on Titan's

@@ -154,7 +154,6 @@ after its close function has run calls the closed ReaderCloser, whose
 contracts. Callers must not separately close or consume the Reader while the
 iterator owns it.
 
-
 ## Standard implementations
 
 Satisfaction is structural at each coercion site; none of these records has an
@@ -207,10 +206,12 @@ combinations. These names describe the Titan caller's direction, not a child
 descriptor name. Calling `process.stdin:close()` does not imply a close
 operation on either readable stream.
 
-`os.InputOutputStream` delegates reads and writes to its one captured
-input/output pair; its close method coordinates both endpoints and the child
-process. Those exact method shapes satisfy every Interface in this chapter;
-the additional `wait` method does not affect structural conversion.
+`os.InputOutputStream`, returned by
+[`os.popen`](standard-library-os.md#shell-commands), delegates reads and writes
+to its one captured input/output pair; its close method coordinates both
+endpoints and the child process. Those exact method shapes satisfy every
+Interface in this chapter; the additional `wait` method does not affect
+structural conversion.
 
 `ssl.Connection` has the same four exact stream method shapes as
 `net.Connection`; its transport supervisor permits one reader and one writer

@@ -319,19 +319,21 @@ fail the Runtime. Raised nil follows the ordinary
 [Lua error normalization](error-handling.md#runtime-trace-model).
 
 `advance_task` resumes the root through `resume_root`, which calls the public
-`Coroutine:transfer` through ordinary `import "coroutine"` (see
-[coroutine entry](coroutines.md#entry-function)). The fixed tuple returns an
-uncaught-error flag, value, and optional already captured callee trace;
-coroutine consumes its private pending-trace handoff before returning.
-`resume_root` raises/catches locally once and concatenates the driver's
-propagation trace only when the failure will be reported: the Task has no
+[`Coroutine:transfer`](coroutines.md#entry-function) and passes its
+`(failed, value, trace)` tuple back to `advance_task`. A root that dies with
+an uncaught error therefore returns its error and the coroutine's own trace
+instead of raising. `resume_root` adds the driver's propagation trace, by
+raising and catching the error locally once and appending the catch's
+`traceback`, only when the failure will be reported: the Task has no
 cancellation reason and has not already recorded a failure. A cancellation is
-sticky and wins publication; `run_with_cleanup` already recorded its body's
-failure and trace. Neither captures a propagation trace. The optional trace
-travels through `resume_root` to `advance_task`, whose catch still handles
-transfer/infrastructure exceptions. No per-switch outcome object is allocated.
-The native trace-count regression remains one capture for parked cancellation,
-two for ordinary reported failure, and one for already recorded body failure.
+sticky and wins publication, and a `run_with_cleanup` wrapper has already
+recorded its body's failure with the body's trace, so neither pays for a
+propagation capture. `advance_task` records the returned trace for the
+terminal candidate; its own catch still handles a raise from the switch itself.
+Successful switches allocate nothing for the outcome. The native regression in
+`spec/stdlib/titan/async/tests/task_test.titan` pins the resulting capture
+counts: one for a parked cancellation, two for an ordinary reported failure,
+and one for an already recorded cleanup-body failure.
 
 The 17 combinators (`join`, `join_two`..`join_five`, and
 `any_`/`race_`/`all_` at arities two through five) keep independent

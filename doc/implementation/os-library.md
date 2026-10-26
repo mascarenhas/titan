@@ -2,11 +2,11 @@
 
 `titan/os.titan` implements the [OS API](../language/standard-library-os.md):
 environment and host queries, calendars, parent standard streams, process
-configuration, captured streams, signals, and graceful exit. It uses ordinary
-compiled imports of public `uv` and `async`. UV owns native storage and callback
-lifetimes and async owns Task waits and subscriptions
-([runtime](libuv-runtime.md)); all OS-specific process and stdio policy stays
-here.
+configuration, captured streams, the `popen` shell facade, signals, and
+graceful exit. It uses ordinary compiled imports of public `uv` and `async`.
+UV owns native storage and callback lifetimes and async owns Task waits and
+subscriptions ([runtime](libuv-runtime.md)); all OS-specific process and stdio
+policy stays here.
 
 Calendar, formatting, locale, and time-difference operations keep their ISO C
 implementation, adapted from Lua 5.5.1 `loslib.c`, with Lua-compatible
@@ -31,6 +31,7 @@ async initialization, not to this module
 | `ProcessOwner` (private) | One `uv.process_t` (`native`), owning `loop`, retained exit `result`, and the coalescing `exits` subscription. |
 | `InputStream` / `OutputStream` (public) | A captured `Stdio` `handle` or a stable `parent_descriptor`; InputStream also keeps delimiter `excess`. |
 | `Process` (public) | The ProcessOwner `handle` and the parent-facing `stdin`, `stdout`, and `stderr` records. |
+| `InputOutputStream` (public) | Shell facade over one Process: private `process`, `input`, `output`, staged `input_packet`, cached `status`, `closed`, and `pending_operations` ([shell process stream](#shell-process-stream)). |
 
 A stream's concrete kind (`"tty"`, `"pipe"`, or `"file"`) comes from
 `Stdio.backing` (`os_stdio_kind`); parent or child provenance never guesses it.
@@ -158,17 +159,22 @@ The exit watcher, `ProcessOwner`, and the reap obligation never move.
 Transferring a stream leaves the source Process's field as an inert facade, so
 process cleanup cannot close the adopted descriptor.
 
-The public `InputStream.discard_transfer_payload` and
-`OutputStream.discard_transfer_payload` statics decode their own schemas and
-close an unadopted pipe through `uv.pipe_t.discard_transfer_payload`, without a
-Runtime or Task. They are ordinary stateful Titan APIs, not no-Lua C release
-callbacks. Schema, input terminal-marker, and descriptor validation precede
-native disposal. Parent descriptor identities and inert captured payloads
-return zero without resolving parent stdio or initializing a Runtime.
-Callers clear their retained packet after the native close attempt and before
-reporting its status, because that attempt is terminal even on `EINTR`.
-Manual capabilities remain exactly-once and are never automatically disposed by
-native packet discard.
+`InputStream.discard_transfer_payload` and
+`OutputStream.discard_transfer_payload` are the public, adoption-free release
+path for these payloads. Each decodes its own schema with the same validation
+as the matching `from_transfer_payload` (terminal marker and failure presence,
+inert parent identity, descriptor `0`/`1`/`2` or `-1`, and, for input, a live
+marker only with a pipe payload) before touching native state. A parent
+identity or a captured payload without a pipe payload returns `0`. Otherwise it
+calls `uv.pipe_t.discard_transfer_payload`, which validates the descriptor and
+issues one native `close`. Nothing reads the current Runtime, current Task,
+parent `Stdio` cache, or loop, so disposal works in a fresh state and after
+Runtime exit has closed adoption. They are ordinary Titan functions running in
+a live Lua state, not C-only packet-resource release callbacks, and
+`transfer.discard_message` never calls them. A native close attempt is
+terminal even on `EINTR`: callers that retain a payload copy clear it before
+reporting the status. The payload formats carry no type discriminator, so the
+manuals require the caller to pass a payload to its producing type's disposer.
 
 ## Shell process stream
 
@@ -190,8 +196,10 @@ optional Process stream fields and constructs one `InputOutputStream`:
 
 `read`, `read_until`, and `write` delegate directly to the facades, so the
 record structurally satisfies all seven I/O Interfaces without another buffer
-or dispatch layer. `wait` calls `Process:wait` only while `status` is nil and
-returns the cached normal-or-signal result afterwards.
+or dispatch layer. `titan.os` does not import `titan.io`: each consumer's
+conversion site builds the Interface wrapper, while the nominal identity stays
+`titan.os.InputOutputStream`. `wait` calls `Process:wait` only while `status`
+is nil and returns the cached normal-or-signal result afterwards.
 
 `close` returns early only when `closed` is set. It discards a staged input
 packet, closes stdin, and, if no status is cached and `Process:is_running`
@@ -239,25 +247,6 @@ payloads; a lexical guard discards both if final serialization raises.
 adopting either pipe. If the readable pipe fails to adopt, a guard calls the OS
 module's `discard_unpublished_stdio` on the already adopted writable owner,
 which starts native close without waiting and so keeps the hook nonyielding.
-
-## Shell and disposal tests
-
-`spec/stdlib/titan/os/process_tests/shell_test.titan` exercises all seven IO
-Interface conversions, merged output, binary delimiter reads, shell selection,
-Unicode/quoting, retained exit status, repeated close, termination, cancellation,
-and cross-state pipe handoff with the Process retained at origin.
-`disposal_test.titan` checks endpoint disposal without a Task or adoptable
-Runtime, identity-only parents, inert captures, and invalid schema/discriminators.
-
-`spec/support/check_io_transfer_failure.sh` (Linux only; other platforms report
-a classified skip) takes an absolute installed SDK prefix and a new absolute
-output directory. It compiles `spec/fixtures/stdlib/native/io_transfer_dup_failure.c`
-into an object, links the `io_transfer_failure_app` fixture with that object
-passed through `-X`, and adds `-Wl,--wrap=dup,--wrap=close` through
-`TITAN_EXTRA_LDFLAGS`
-to make the second pipe duplication fail, then checks write, retry, close,
-terminal close-error consumption without retry, and exit cleanup of the staged
-descriptor. The close-error guard never closes a potentially reused descriptor.
 
 ## Stable parent streams and platform facts
 
@@ -369,3 +358,27 @@ policy; closing captured streams does not kill the child.
 `os.exit` calls `async.request_exit`; async cancels and drains the entrypoint
 session, including accepted requests and cleanup, before returning the exit
 code ([shutdown protocol](libuv-runtime.md#shutdown-and-process-control)).
+
+## Shell and disposal tests
+
+`spec/stdlib/titan/os/process_tests/shell_test.titan` covers conversion to all
+seven IO Interfaces, merged output, binary delimiter reads, fixed shell
+selection, quoting and Unicode arguments, retained exit status, repeated close,
+termination, cancellation, and cross-state pipe handoff with the Process kept
+at the origin. `disposal_test.titan` covers endpoint disposal in a fresh state
+and after Runtime exit, parent identities, payloads without a pipe, and
+malformed schemas and discriminators.
+
+`spec/support/check_io_transfer_failure.sh` (Linux only; other platforms report
+a classified skip) takes an absolute installed SDK prefix and a new absolute
+output directory. It compiles `spec/fixtures/stdlib/native/io_transfer_dup_failure.c`
+into an object, links the `io_transfer_failure_app` fixture with that object
+passed through `-X`, and adds `-Wl,--wrap=dup,--wrap=close` through
+`TITAN_EXTRA_LDFLAGS`. The wrappers fail the second pipe duplication of an
+armed handoff and can make the close of a staged descriptor report `EINTR`
+after really closing it. The fixture checks write, retry, and close recovery
+of a staged shell pipe, that a terminal close error consumes the staged
+payload without a retry, that both endpoint disposers return that status while
+the originating Process stays usable, and exit cleanup with adoption closed.
+After an injected close error the wrapper intercepts later closes of that
+descriptor number instead of closing a possibly reused descriptor.
