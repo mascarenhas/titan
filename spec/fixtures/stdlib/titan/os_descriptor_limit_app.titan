@@ -1769,6 +1769,7 @@ function exercise_tcp_isolated_shutdown_and_overlap()
     defer peer:close()
     test.assert(system.stdout:kind() == "tcp", "isolated shutdown stdout was not tcp")
     system.stdout:write("BEFORE_OVERLAP_SHUTDOWN;")
+    local output_identity = system.stdout:to_transfer_payload()
 
     local s1_gate: (function (nil): ())? = nil
     local s2_gate: (function (nil): ())? = nil
@@ -1795,6 +1796,9 @@ function exercise_tcp_isolated_shutdown_and_overlap()
       assert_raises_substring(function ()
         async.TransferValue.from_value(system.stdout)
       end, "stream has pending output")
+      test.assert(system.OutputStream.discard_transfer_payload(output_identity) == 0 and
+                  s1:status():as_string() == "waiting",
+                  "discarding an older parent identity disturbed pending shutdown")
       -- C1: overlapping second shutdown returns immediately while s1 is still waiting.
       r2(nil)
       test.assert(s2_returned and s2:status():has_succeeded() and
@@ -2144,6 +2148,9 @@ function exercise_transferred_tcp_stdio_dest(
     out_stream:write("TRANSFER_TCP_OUT:" .. (line as string) .. ";")
     err_stream:write("TRANSFER_TCP_ERR;")
     out_stream:shutdown()
+    test.assert(system.OutputStream.discard_transfer_payload(
+      out_stream:to_transfer_payload()) == 0,
+      "disposing a TCP parent identity after shutdown failed")
     post_shutdown_tv = async.TransferValue.from_value(out_stream)
     return nil
   end)
@@ -2209,6 +2216,24 @@ function exercise_tcp_cross_state_transfers()
     local in_tv = async.TransferValue.from_value(system.stdin)
     local out_tv = async.TransferValue.from_value(system.stdout)
     local err_tv = async.TransferValue.from_value(system.stderr)
+
+    local disposal = tlua.new()
+    defer disposal:close()
+    local disposed = disposal:run([[
+      local input, output, diagnostics = ...
+      local os = require("titan.os")
+      local async = require("titan.async")
+      assert(not pcall(async.current_loop), "disposal state already has a Runtime")
+      assert(os.InputStream.discard_transfer_payload(input) == 0)
+      assert(os.OutputStream.discard_transfer_payload(output) == 0)
+      assert(os.OutputStream.discard_transfer_payload(diagnostics) == 0)
+      assert(not pcall(async.current_loop), "TCP identity disposal initialized a Runtime")
+      return true
+    ]], "=discard-tcp-parent-identities",
+      async.TransferValue.is_string(system.stdin:to_transfer_payload()),
+      async.TransferValue.is_string(system.stdout:to_transfer_payload()),
+      async.TransferValue.is_string(system.stderr:to_transfer_payload()))
+    test.assert(disposed:to_value() == true)
 
     local dest = tlua.new()
     defer dest:close()
