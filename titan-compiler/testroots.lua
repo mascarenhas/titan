@@ -280,9 +280,10 @@ function testroots.discover(context, dirs, excludes, explicit_roots,
                 tostring(resolve_err or "source disappeared during discovery")
         end
         if source.kind == "blocked" then
-            return nil, "test module '" .. logical .. "' at '" .. physical ..
+            return nil, "test module '" .. logical .. "' at '" .. local_source.main ..
                 "' is shadowed by folder module '" .. source.owner ..
-                "' at '" .. source.main .. "'"
+                "' at '" .. source.main ..
+                "'; reorder --tree roots or narrow --test-dir"
         end
         if type(source.main) ~= "string" then
             return nil, "cannot resolve test module '" .. logical ..
@@ -293,7 +294,7 @@ function testroots.discover(context, dirs, excludes, explicit_roots,
         -- discovery area; when an earlier source root wins instead, running it
         -- would execute another subtree's tests.
         if not inside_discovery_area(source.main) then
-            return nil, "test module '" .. logical .. "' at '" .. physical ..
+            return nil, "test module '" .. logical .. "' at '" .. local_source.main ..
                 "' is shadowed by '" .. source.main ..
                 "'; reorder --tree roots or narrow --test-dir"
         end
@@ -304,7 +305,8 @@ function testroots.discover(context, dirs, excludes, explicit_roots,
             -- One logical name cannot select two sources; never silently run
             -- another subtree's tests.
             return nil, "ambiguous test module '" .. logical .. "': '" ..
-                existing.main .. "' and '" .. source.main .. "'"
+                existing.main .. "' and '" .. source.main ..
+                "'; reorder --tree roots or narrow --test-dir"
         end
         candidates[logical] = source
         return true
