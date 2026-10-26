@@ -9,8 +9,8 @@ local temporary = require "spec.support.temporary"
 local testroots = require "titan-compiler.testroots"
 local util = require "titan-compiler.util"
 
-local REPO = assert(lfs.currentdir())
-if platform.windows then REPO = assert(platform.path.normalize(REPO)) end
+local REPO = path.to_slash(assert(
+    compiler_io.new_sync():realpath(assert(lfs.currentdir()))))
 
 local IO_METHODS = {
     "cwd", "realpath", "stat", "lstat", "readable", "read_file",
@@ -48,10 +48,10 @@ local function basenames(values)
 end
 
 local function mkdirs(target)
-    local mode = lfs.symlinkattributes(target, "mode")
+    local mode = lfs.attributes(target, "mode")
     if mode == "directory" then return end
-    local parent = target:match("^(.*)/[^/]+$")
-    if parent and parent ~= "" and parent ~= target then mkdirs(parent) end
+    local parent = path.dirname(target)
+    if parent ~= "." and parent ~= target then mkdirs(parent) end
     assert(lfs.mkdir(target))
 end
 
@@ -79,17 +79,15 @@ local function remove_tree(target)
     end
 end
 
-local function workspace(files)
-    local root = temporary.name()
-    assert(os.remove(root))
-    mkdirs(root)
-    for name, contents in pairs(files or {}) do
-        if contents == false then
-            mkdirs(joined(root, name))
-        else
-            put(root, name, contents)
-        end
-    end
+local function canonical(filename)
+    return path.to_slash(assert(compiler_io.new_sync():realpath(filename)))
+end
+
+local function workspace()
+    local reservation = temporary.name()
+    local root = canonical(reservation)
+    assert(os.remove(reservation))
+    assert(lfs.mkdir(root))
     return root
 end
 
@@ -133,14 +131,22 @@ describe("automatic test-root discovery", function()
     local created = {}
 
     local function make(files)
-        local root = workspace(files)
+        local root = workspace()
         created[#created + 1] = root
+        for name, contents in pairs(files or {}) do
+            if contents == false then
+                mkdirs(joined(root, name))
+            else
+                put(root, name, contents)
+            end
+        end
         return root
     end
 
     after_each(function()
-        for _, root in ipairs(created) do remove_tree(root) end
+        local roots = created
         created = {}
+        for _, root in ipairs(roots) do remove_tree(root) end
     end)
 
     describe("root naming", function()
@@ -311,6 +317,47 @@ describe("automatic test-root discovery", function()
                 { joined(root, "loader/tests") }, {}, {}, source_path)
 
             assert.same({ "tests.outer_test" }, roots)
+        end)
+
+        it("preserves logical prefixes across different spellings of a symlinked parent",
+           function()
+            if not require_symlink_capability() then return end
+            local root = make({ ["physical"] = false })
+            assert(lfs.link(joined(root, "physical"), joined(root, "alias"), true))
+            put(root, "alias/src/tests/alpha_tests.titan", "")
+            local physical_tree = canonical(joined(root, "physical/src"))
+            local alias_tree = joined(root, "alias/src")
+            local expected_source = canonical(joined(physical_tree, "tests/alpha_tests.titan"))
+            for _, source_path in ipairs({ physical_tree, alias_tree }) do
+                for _, directory in ipairs({
+                    joined(physical_tree, "tests"), joined(alias_tree, "tests"),
+                }) do
+                    local roots, sources = testroots.discover(discovery_context(),
+                        { directory }, {}, {}, source_path)
+                    assert.same({ "tests.alpha_tests" }, roots)
+                    assert.equal(expected_source, canonical(sources["tests.alpha_tests"].main))
+                end
+                local roots = testroots.discover(discovery_context(),
+                    { joined(alias_tree, "tests"), joined(physical_tree, "tests") },
+                    {}, {}, source_path)
+                assert.same({ "tests.alpha_tests" }, roots)
+            end
+        end)
+
+        it("keeps first-containing-tree order across parent symlinks",
+           function()
+            if not require_symlink_capability() then return end
+            local root = make({ ["physical/src/tests/alpha_tests.titan"] = "" })
+            local parent_alias = joined(root, "alias")
+            assert(lfs.link(joined(root, "physical"), parent_alias, true))
+            local physical_tree = canonical(joined(root, "physical/src"))
+            local directory = joined(physical_tree, "tests")
+            local roots = testroots.discover(discovery_context(),
+                { directory }, {}, {}, parent_alias .. ";" .. physical_tree)
+            assert.same({ "src.tests.alpha_tests" }, roots)
+            roots = testroots.discover(discovery_context(),
+                { directory }, {}, {}, physical_tree .. ";" .. parent_alias)
+            assert.same({ "tests.alpha_tests" }, roots)
         end)
 
         it("keeps nested containing trees ordered rather than choosing the longest prefix",
@@ -969,12 +1016,15 @@ end
     end
 
     before_each(function()
-        suite = workspace({ ["src"] = false })
+        suite = workspace()
         tree, output = joined(suite, "src"), joined(suite, "out")
+        mkdirs(tree)
     end)
 
     after_each(function()
-        remove_tree(suite)
+        local root = suite
+        suite, tree, output = nil, nil, nil
+        if root then remove_tree(root) end
     end)
 
     it("uses bytewise automatic order for the default executable owner", function()
@@ -984,6 +1034,27 @@ end
         assert.equal("file", lfs.attributes(executable("A_tests"), "mode"))
         assert.is_nil(lfs.attributes(executable("z_tests")))
         assert.same({ "A_tests.test_pass", "z_tests.test_pass" }, cases(executable("A_tests")))
+    end)
+
+    it("builds and certifies discovery through a differently spelled source-tree parent", function()
+        if not require_symlink_capability() then return end
+        source("suite.alpha_tests", test_source("test_alias"))
+        local physical_tree = tree
+        local alias_tree = joined(suite, "source-alias")
+        assert(lfs.link(physical_tree, alias_tree, true))
+        tree = alias_tree
+        local program = destination("aliased-tests")
+        compiled("--test", "--test-dir", joined(physical_tree, "suite"),
+            "--incremental", "--exe", program)
+        assert.same({ "suite.alpha_tests.test_alias" }, cases(program))
+        local assert_unchanged = unchanged_artifacts(program)
+        local text = compiled("--test", "--test-dir", joined(alias_tree, "suite"),
+            "--incremental", "--exe", program)
+        contains(text, "Titan object hit suite.alpha_tests:")
+        absent(text, "Titan object miss ")
+        native_work_absent(text)
+        assert_unchanged()
+        assert.same({ "suite.alpha_tests.test_alias" }, cases(program))
     end)
 
     it("keeps the explicit CLI owner first and honors an exact executable destination", function()
