@@ -25,8 +25,8 @@ p:option('--c-parts',
 p:option('--launcher-name', 'Windows standalone/test launcher filename in bin (default: logical module name).')
 p:flag('--static', 'Prefer static Titan archive providers (unsupported on Windows).')
 p:flag('--source-first', 'Prefer available source modules to compiled providers.')
-p:flag('--incremental', 'Reuse source module objects that are no older than their sources; the build system owns other invalidation.')
-p:flag('-c --compile-only', 'Generate objects and headers only; always rebuild explicitly requested modules.')
+p:flag('--incremental', 'Reuse each source module object, including requested roots, whose certificate still matches: own sources, compiler, native configuration, C headers, dependency interfaces and bindings (-v explains each miss).')
+p:flag('-c --compile-only', 'Generate objects and headers only; without --incremental every module is rebuilt.')
 p:flag('--test', 'Build native Titan tests (objects only with --compile-only).')
 p:flag('--coverage', 'Instrument source modules without test_ functions and report when the test executable runs.')
 p:option('--coverage-backend', 'Coverage backend: gcc-gcov (Unix default) or llvm-gcov (Windows default).')
@@ -175,6 +175,9 @@ resolver_context = driver.new_resolver_context({
     output_root = args.output,
     cache_adapter = { sha256_binary = support._sha256_binary },
     jobs = jobs,
+    -- The real script, not a LuaRocks wrapper: object certificates hash the
+    -- frontend that actually runs.
+    frontend = arg and arg[0] or nil,
 })
 if driver.TOOLCHAIN_ERROR then exit(driver.TOOLCHAIN_ERROR) end
 if args.lua and driver.INSTALLED then
@@ -213,7 +216,7 @@ end
 local loader = driver.defaultloader({}, {
     source_roots = requested_roots,
     incremental = args.incremental,
-    forced_source_roots = args.compile_only and requested_roots or {},
+    test = args.test,
     source_overrides = source_overrides,
     context = resolver_context,
     coverage = coverage_build,
@@ -249,7 +252,6 @@ if coverage_build then
 end
 if #errors > 0 then exit(table.concat(errors, "\n")) end
 
-local test_modules = {}
 local test_program_output
 local test_entrypoint_output
 if args.test then
@@ -257,8 +259,7 @@ if args.test then
         exit("logical module '" .. test_runner.MODULE_NAME ..
             "' is reserved by --test")
     end
-    local cases
-    cases, test_modules = test_runner.discover(
+    local cases = test_runner.discover(
         requested_modules, driver.imported, driver.dependency_closure)
     if not args.compile_only then
         test_program_output = assert(
@@ -434,7 +435,7 @@ end
 local compile_requests = {}
 for _, name in ipairs(linked_names) do
     local mod = driver.imported[name]
-    local extra_flags = test_modules[name] and { table.unpack(test_runner.TEST_COMPILE_FLAGS) } or {}
+    local extra_flags = {}
     if coverage_build then
         for _, flag in ipairs(coverage.compile_flags(coverage_build, name) or {}) do
             extra_flags[#extra_flags + 1] = flag
@@ -445,6 +446,8 @@ for _, name in ipairs(linked_names) do
         mod = mod,
         static_deps = resolver_context.native_static_names,
         options = {
+            context = resolver_context,
+            test = args.test,
             pretty_print = args.pretty_print,
             nominal_layouts = resolver_context.nominal_layouts,
             extra_compile_flags = extra_flags,
