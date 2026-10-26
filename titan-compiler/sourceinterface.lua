@@ -3,10 +3,11 @@ local util = require "titan-compiler.util"
 local cdeclarator = require "titan-compiler.cdeclarator"
 local platform = require "titan-compiler.platform"
 local documentation = require "titan-compiler.documentation"
+local version = require "titan-compiler.version"
 
 local sourceinterface = {}
 
-local FORMAT = "titan-source-interface-v1"
+local FORMAT = version.SOURCE_INTERFACE_FORMAT
 
 local function frame(value)
     return tostring(#value) .. ":" .. value
@@ -436,7 +437,7 @@ local function encode_headers(headers)
         end
         local kind, path, identity = dependency.kind,
             dependency.path, dependency.identity
-        if kind ~= "file" and kind ~= "search" then
+        if kind ~= "file" and kind ~= "search" and kind ~= "origin" then
             fail("C header dependency " .. index .. " has invalid kind")
         elseif type(path) ~= "string" or not platform.is_absolute(path)
            or path:find("\0", 1, true) then

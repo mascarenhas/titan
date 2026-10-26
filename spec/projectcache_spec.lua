@@ -326,6 +326,33 @@ describe("declared project manifests", function()
         end)
     end
 
+    it("versions origin-bearing manifests and source interfaces independently of the ABI", function()
+        local projectcache = require "titan-compiler.projectcache"
+        local version = require "titan-compiler.version"
+        local entry = load_module("origin_manifest", "function answer(): integer return 42 end")
+        local path = assert(paths.join(platform.windows and "C:/" or "/", "headers/api.h"))
+        entry.c_header_dependencies = {
+            { kind = "file", path = path,
+                identity = version.C_HEADER_FILE_PROTOCOL .. ":sha256:" .. string.rep("a", 64),
+                observation = { precision = "coarse", size = 19,
+                    modified_seconds = 100, modified_nanoseconds = 0, physical_identity = "physical" } },
+            { kind = "origin", path = path, identity = version.C_HEADER_ORIGIN_PROTOCOL .. ";real=" .. path },
+            { kind = "search", path = path,
+                identity = version.C_HEADER_SEARCH_PROTOCOL .. ";exists=yes;kind=file;open=readable" },
+        }
+        local payload = assert(projectcache.encode(entry))
+        assert.equal(6, projectcache.VERSION)
+        assert.equal(version.PROJECT_CACHE_VERSION, assert(cpp.decode_graph(payload)).version)
+        assert.equal("2", version.TITAN_ABI_VERSION)
+        local restored = assert(projectcache.decode(payload))
+        assert.same(entry.c_header_dependencies, restored.c_header_dependencies)
+        local original = assert(driver.serialize_source_interface(entry))
+        assert.matches(version.SOURCE_INTERFACE_FORMAT, original, 1, true)
+        assert.equal(original, assert(driver.serialize_source_interface(restored)))
+        restored.c_header_dependencies[2].identity = version.C_HEADER_ORIGIN_PROTOCOL .. ";real=" .. path .. ".other"
+        assert.not_equal(original, assert(driver.serialize_source_interface(restored)))
+    end)
+
     it("retains custom constructor authority through a cached source interface", function()
         local provider = load_module("custom_provider", [[
             record Box<|T|> item: T end
@@ -620,7 +647,8 @@ describe("declared project manifests", function()
 
     it("overlays matching current header observations throughout a private graph", function()
         local entry = load_module("observations", "function answer(): integer return 42 end")
-        local old = { modified_seconds = 100, modified_nanoseconds = 5, physical_identity = "physical" }
+        local old = { precision = "ns", size = 19, modified_seconds = 100, modified_nanoseconds = 5,
+            changed_seconds = 99, changed_nanoseconds = 7, physical_identity = "physical" }
         local input = { kind = "file", path = paths.join(package.config:sub(1, 1) == "\\" and "C:/" or "/", "observed.h"), identity = "semantic", observation = old }
         entry.c_header_dependencies = { input }
         entry.ast._c_header_dependencies = { input }
@@ -631,7 +659,8 @@ describe("declared project manifests", function()
             kind = input.kind, path = input.path, identity = "other semantic", observation = old,
         }
         local payload = assert(driver.encode_project_entry(entry))
-        local current = { modified_seconds = 100, modified_nanoseconds = 6, physical_identity = "physical" }
+        local current = { precision = "ns", size = 19, modified_seconds = 100, modified_nanoseconds = 6,
+            changed_seconds = 99, changed_nanoseconds = 7, physical_identity = "physical" }
         local restored = assert(driver.decode_project_entry(payload, { header_inputs = {
             { kind = input.kind, path = input.path, identity = input.identity, observation = current },
         } }))
@@ -755,11 +784,7 @@ describe("declared project manifests", function()
                 load_module("baseline_consumer", consumer_source(index), { baseline_provider = provider }, {
                     io = strategy, header_inputs = current, cache_adapter = adapter,
                 })
-                if platform.windows then
-                    assert.is_true(reads > previous_reads)
-                else
-                    assert.equal(0, reads)
-                end
+                assert.is_true(reads > previous_reads)
             end
             if platform.windows then
                 assert.is_nil(provider.c_header_dependencies[1].observation)
@@ -903,7 +928,7 @@ describe("declared project manifests", function()
             function(root) root.abi = root.abi + 1 end,
             function(root) root.graph_version = root.graph_version + 1 end,
             function(root) root.kind = "another-graph-owner" end,
-            function(root) root.version = 1 end,
+            function(root) root.version = 5 end,
         }
         for _, mutate in ipairs(mutations) do
             local envelope = assert(cpp.decode_graph(payload))

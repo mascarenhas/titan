@@ -12,8 +12,8 @@ local version = require "titan-compiler.version"
 local definitions = require "titan-compiler.cdefinitioncache"
 local csemantics = require "titan-compiler.csemantics"
 
-cdriver.HEADER_CACHE_VERSION = 7
-local HEADER_CACHE_KIND = "c-header-v7"
+cdriver.HEADER_CACHE_VERSION = version.C_HEADER_CACHE_VERSION
+local HEADER_CACHE_KIND = "c-header-v" .. cdriver.HEADER_CACHE_VERSION
 
 local SEP = package.config:sub(1, 1)
 local default_io = compiler_io.new_sync()
@@ -438,6 +438,7 @@ local function preprocessor_options(options)
     return {
         io = strategy,
         cache_adapter = options.cache_adapter,
+        file_digest = options.file_digest,
         header_observations = options.header_observations or cpp.header_observation_index(options.header_inputs),
         compiler = options.compiler,
         language_mode = options.language_mode,
@@ -460,7 +461,7 @@ end
 function cdriver.preprocessor_cache_identity(options)
     local context, err = new_cpp_context(normalize_options(options))
     if not context then return nil, err end
-    return context.preprocessor_configuration_key
+    return context.preprocessor_configuration_key, nil, context.preprocessor_banner
 end
 
 -- Collect forced-header dependencies even when no foreign import occurs.
@@ -555,7 +556,7 @@ end
 
 local function input_tail_matches_prefix(inputs, identities)
     for _, input in ipairs(inputs) do
-        local present = identities[input.path]
+        local present = identities[input.kind .. "\0" .. input.path]
         if present ~= nil and present ~= input.identity then return false end
     end
     return true
@@ -719,7 +720,7 @@ end
 -- module or a fingerprint of preprocessing conditions. Resolve/hash each
 -- encountered header pathname once; generated paths map to their stable source
 -- identity. Byte positions add a declaration site for anonymous/prototype tags.
-local function declaration_scope_resolver(ctx, generated, generated_files, cwd, strategy)
+local function declaration_scope_resolver(ctx, generated, generated_files, cwd, strategy, record_origin)
     local starts, line_scopes, paths, identities, offset = {}, {}, {}, {}, 1
     for index, line in ipairs(ctx.output) do
         starts[index] = offset
@@ -739,6 +740,8 @@ local function declaration_scope_resolver(ctx, generated, generated_files, cwd, 
                     if not physical then
                         return nil, "cannot resolve declaring C header '" .. path .. "': " .. tostring(err)
                     end
+                    local recorded, record_error = record_origin(path, physical)
+                    if not recorded then return nil, record_error end
                     identity = "physical-header\0" .. physical
                 end
                 scope = identities[identity]
@@ -784,6 +787,7 @@ local function process_file_inner(filename, options)
     local validation_options = {
         io = strategy, header_validation = options.header_validation or {},
         cache_adapter = options.cache_adapter,
+        file_digest = options.file_digest,
         header_observations = options.header_observations or cpp.header_observation_index(options.header_inputs),
     }
     local ctx, err = new_cpp_context(options)
@@ -800,15 +804,17 @@ local function process_file_inner(filename, options)
     local dependency_identities = {}
     local search_inputs = {}
     local search_identities = {}
-    local function record_dependency(path, identity, observation)
+    local function record_dependency(path, identity, observation, kind)
         path = absolute_lookup_path(path, cwd, strategy)
-        local previous = dependency_identities[path]
+        kind = kind or "file"
+        local key = kind .. "\0" .. path
+        local previous = dependency_identities[key]
         if previous and previous ~= identity then
             return nil, "C header changed while it was being parsed: " .. path
         elseif not previous then
-            dependency_identities[path] = identity
+            dependency_identities[key] = identity
             dependencies[#dependencies + 1] = {
-                kind = "file",
+                kind = kind,
                 path = path,
                 identity = identity,
                 observation = cpp.copy_header_observation(observation),
@@ -822,12 +828,13 @@ local function process_file_inner(filename, options)
         -- Their temporary location is neither a real-header dependency nor
         -- a persistent include-search observation.
         if generated and generated_lookup_path(generated, path) then return true end
-        local previous = search_identities[path]
+        local key = "search\0" .. path
+        local previous = search_identities[key]
         if previous and previous ~= identity then
             return nil, "C include candidate changed while it was searched: " ..
                 path
         elseif not previous then
-            search_identities[path] = identity
+            search_identities[key] = identity
             search_inputs[#search_inputs + 1] = {
                 kind = "search",
                 path = path,
@@ -987,7 +994,7 @@ local function process_file_inner(filename, options)
                     analysis_entries[cache_key] = cached
                 end
                 for _, input in ipairs(cached.dependencies) do
-                    assert(record_dependency(input.path, input.identity, input.observation))
+                    assert(record_dependency(input.path, input.identity, input.observation, input.kind))
                 end
                 for _, input in ipairs(cached.search_inputs) do
                     assert(record_search(input.path, input.identity))
@@ -1016,10 +1023,15 @@ local function process_file_inner(filename, options)
     if not ctx then
         return nil, "failed preprocessing '"..filename.."': " .. err
     end
-    -- Parsing is a fresh publication boundary, separate from any attempted
-    -- reuse pass above. Matching observed mtime needs no second content read.
+    local declaration_scope, declaration_scope_error = declaration_scope_resolver(
+        ctx, generated, generated_files, cwd, strategy, function(path, real)
+            return record_dependency(path, version.C_HEADER_ORIGIN_PROTOCOL .. ";real=" .. real, nil, "origin")
+        end)
+    if not declaration_scope then return nil, declaration_scope_error end
+    -- Parsing is a fresh publication boundary. Coarse strategies freshly read;
+    -- only explicitly precise observations can take the metadata fast path.
     local final_validation = { io = strategy, header_validation = {}, cache_adapter = options.cache_adapter,
-        header_observations = validation_options.header_observations }
+        file_digest = options.file_digest, header_observations = validation_options.header_observations }
     for _, input in ipairs(dependencies) do
         local current, _, changed = cdriver.revalidate_header_input(input, final_validation)
         if not current or changed then
@@ -1052,9 +1064,6 @@ local function process_file_inner(filename, options)
         return nil, ("failed parsing: %s:%d:%d: %s\n%s"):format(filename, line, col, err, fragment)
     end
 
-    local declaration_scope, declaration_scope_error = declaration_scope_resolver(
-        ctx, generated, generated_files, cwd, strategy)
-    if not declaration_scope then return nil, declaration_scope_error end
     local type_conversion_started = cdriver.process_phase_clock(options)
     local ffi_types, err = ctypes.register_types(res, {
         header = generated and generated.identity or filename,
