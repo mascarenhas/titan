@@ -117,16 +117,24 @@ such as `typedef long int;` that introduce no name.
 and dependency descriptors. Their `titan-module-ffi-v2` digest covers the final
 contents and dependency digests. Restoration validates the declaration plan and
 materializes actual header files; it never reconstructs typedefs from public
-Titan metadata. The project manifest (`projectcache.VERSION`, 5) includes this
-schema. The foreign conversion cache (`foreigncache.lua`, kind
-`ffi-conversion-v8`) retains exact integer macro constants used in allocation
-selection and C declaration origins; payloads of another version are misses.
+Titan metadata. The project manifest (`projectcache.VERSION`, set from
+`version.PROJECT_CACHE_VERSION = 6` in `titan-compiler/version.lua`) and the
+source-interface manifest (`version.SOURCE_INTERFACE_FORMAT =
+"titan-source-interface-v2"`) include this schema and its `file`, `search`, and
+`origin` header dependencies. The foreign conversion cache (`foreigncache.lua`,
+`VERSION = 8`, kind `ffi-conversion-v8`) retains exact integer macro constants
+used in allocation selection and C declaration origins; payloads of another
+version are misses.
 
 The C driver maps parsed declaration positions through the preprocessor's
-existing output origins. Runtime identity is nominal: the declaring header and
-C declaration determine identity independently of the consuming Titan module.
-Generated FFI headers use their stable logical source identity; temporary
-checking paths never become runtime keys. Anonymous aggregates retain distinct
+existing output origins (`cdriver.declaration_scope_resolver`,
+`c-parser/cdriver.lua:723-772`). Runtime identity is nominal: the declaring
+header's `realpath` (`"c-header-" .. sha256("physical-header\0" .. realpath)`)
+and the C declaration determine identity independently of the consuming Titan
+module, and `declaration_scope_resolver` records an `origin` dependency input
+for every real header that contributes lines to the parsed output. Generated
+FFI headers use their stable logical source identity; temporary checking paths
+never become runtime keys. Anonymous aggregates retain distinct
 declaration sites. Typedef and tag origins survive conversion and cache restore,
 including named payloads reached after an owned pointer or array alias is
 unwrapped. Direct imports, source imports, and forced headers follow this same
@@ -140,6 +148,89 @@ This bookkeeping adds no preprocessing pass, macro-environment fingerprint,
 layout digest, or native compatibility probe. Compatible C build configuration
 is a program precondition, as in ordinary C linking. The origin metadata is not
 a certificate of matching C layouts under different compiler options or macros.
+
+### Header file, search, and origin identities
+
+`c-parser/cpp.lua` and `c-parser/cdriver.lua` separate semantic header identity
+from physical filesystem observations, using canonical protocol constants from
+`titan-compiler/version.lua`:
+
+* **`file` (`version.C_HEADER_FILE_PROTOCOL = "c-header-file-v3"`).** A
+  readable regular file has content-only identity
+  `c-header-file-v3:sha256:<hex>` (`cpp.header_file_identity`). Device, inode,
+  mode, and timestamps do not enter the identity string, so copy, hardlink, and
+  symlink publications of identical bytes compare equal. If a former `file`
+  input is missing, non-regular, or unreadable when revalidated, its identity
+  becomes `c-header-file-v3:unreadable:<search-identity>`.
+* **`search` (`version.C_HEADER_SEARCH_PROTOCOL = "c-header-search-v2"`).**
+  Every candidate path probed during ordered quote or angle lookup up to and
+  including the winning file records
+  `c-header-search-v2;exists=<yes|no>;kind=<followed-kind|missing>;open=<readable|unreadable>`
+  (`cpp.header_search_identity`). `exists` comes from `strategy:lstat(path)`
+  (so a dangling symlink has `exists=yes;kind=missing`), `kind` comes from
+  following the path with `strategy:stat(path)`, and `open` comes from
+  `strategy:readable(path)`.
+* **`origin` (`version.C_HEADER_ORIGIN_PROTOCOL = "c-header-origin-v1"`).**
+  Every real (non-generated) header whose lines reach the preprocessed output
+  and are resolved by `declaration_scope_resolver` records
+  `c-header-origin-v1;real=<realpath>` (`cpp.header_input_identity`).
+  Dependency maps key by `kind .. "\0" .. path`, so `file` and `origin` entries
+  for the same header coexist in `c_header_dependencies`. If a symlink or an
+  ancestor directory link is retargeted to a different `realpath` that happens
+  to contain identical bytes, `file` stays equal while `origin` changes (or
+  becomes `c-header-origin-v1;unresolved` if missing/unreadable), preventing a
+  cached module's nominal C declaration scopes from disagreeing with a fresh
+  parse.
+
+Each `file` dependency may also carry a physical `observation` table validated
+by `cpp.copy_header_observation` (`cpp.lua:172-191`; schema in
+`titan-compiler/declarationschemas.lua:137-143`):
+
+```lua
+{
+    precision = "ns" | "coarse",
+    size = <integer>,
+    physical_identity = "lstat=<kind:mode:dev:ino>;stat=<kind:mode:dev:ino>",
+    modified_seconds = <integer>,
+    modified_nanoseconds = <integer>,
+    changed_seconds = <integer?>,
+    changed_nanoseconds = <integer?>,
+}
+```
+
+`titan-compiler/io.lua` sets `time_precision = "coarse"` on the synchronous
+LuaFileSystem strategy because LuaFileSystem reports floating-point seconds
+rather than a guaranteed native nanosecond clock; a zero nanosecond fraction is
+never used to infer nanosecond precision. On Windows, `Sync` exposes no device
+or inode, so no reusable `observation` is saved (`reusable = false`), while a
+local `guard` observation still surrounds each read.
+
+`cpp.revalidate_header_input(previous, options)` (`cpp.lua:278-355`, re-exported
+as `cdriver.revalidate_header_input`) returns
+`refreshed_input, err, changed, reason`:
+
+* **Fast path (`metadata_reuses`).** A `file` input reuses its previous
+  `c-header-file-v3:sha256:<hex>` digest without reading bytes only when both
+  the saved (or `options.header_observations` baseline) observation and the
+  current observation have `precision == "ns"`, `saved.changed_seconds ~= nil`,
+  and equal `precision`, `size`, `modified_seconds`, `modified_nanoseconds`,
+  `changed_seconds`, `changed_nanoseconds`, and `physical_identity`, and
+  `strategy:readable(path)` is true.
+* **Guarded fresh read (`file_reads`, `file_hashes`).** In all other cases
+  (including every synchronous `titanc` build), `revalidate_header_input` reads
+  the file once per `options.header_validation` pass, checks that `physical_header`
+  and `guard` before and after the read are identical (returning
+  `nil, "C header changed while it was read: <path>", true, "changed-during-read"`
+  on a race), and hashes the bytes via `options.file_digest` or
+  `cache_adapter.sha256_binary`.
+* **Independent origin recheck (`origin_checks`).** `origin` inputs call
+  `strategy:realpath(path)` on every validation pass even when leaf `file`
+  observations use the `"ns"` fast path, so directory-symlink retargets over
+  hardlinked leaves are always detected.
+* **Classified change reasons.** When `changed` is `false`, `reason` is `nil`.
+  When `changed` is `true`, `reason` is `"content"`, `"provenance"` (`origin`
+  realpath changed), `"missing"`, `"unreadable"`, `"candidate"` (`search`
+  changed), or `"changed-during-read"`.
 
 ## Header Support Files
 
@@ -689,26 +780,31 @@ type and a scalar-cast marker, not the parsed operand. Parser bodies, ordinary
 source-location maps, raw macro environments, CPP spelling/spacing sidecars,
 and registrar bookkeeping do not survive this boundary.
 
-The `c-header-v7` byte payload uses this same read-only extracted graph, including
-declaration origins for typedefs and tags. A live
-hit shares it, while a disk restore reconstructs the closed schema once after
-codec/checksum and envelope validation. Real dependencies/search observations
-still validate the input closure. Forced `-include`/`-imacros` preprocessing
-state remains local to its I/O provider because another preprocessing request
-needs its mutable macro/output context. A fresh provider rescans those forced
-inputs before reusing the extracted header payload; no complete forced
-preprocessor context is written to disk.
+The `c-header-v8` byte payload (`cdriver.HEADER_CACHE_VERSION =
+version.C_HEADER_CACHE_VERSION = 8`) uses this same read-only extracted graph,
+including declaration origins for typedefs and tags. A live hit shares it,
+while a disk restore reconstructs the closed schema once after codec/checksum
+and envelope validation. Real `file`, `search`, and `origin` dependencies still
+validate the input closure. Forced `-include`/`-imacros` preprocessing state
+remains local to its I/O provider because another preprocessing request needs
+its mutable macro/output context. A fresh provider rescans those forced inputs
+before reusing the extracted header payload; no complete forced preprocessor
+context is written to disk.
 
-The `ffi-conversion-v8` payload retains final `Type.CModule` members and type
-members, callable parameter spellings, reachable C types/layouts/enum carriers,
-the final C type lookup and file-tag canonical map, numeric profile, and final
-field-macro classifications. It excludes raw-CType conversion memos, old
-declaration histories, unused ordinary-name lookup state, and prototype
-conversion registries. Restore binds origins to the current combined include
-descriptor and reconstructs the final order-zero type lookup used by module
-initializers; conversion is already complete. Each projection/reconstruction
-uses one memo and cooperative work budget, without another validation walk on
-ordinary cache reuse. Old-version and malformed payloads are cache misses.
+The `ffi-conversion-v8` payload (`foreigncache.lua`, `VERSION = 8`) retains
+final `Type.CModule` members and type members, callable parameter spellings,
+reachable C types/layouts/enum carriers, the final C type lookup and file-tag
+canonical map, numeric profile, and final field-macro classifications. Its
+cache key hashes `kind`, `path`, and `identity` across the module's complete
+`file`, `search`, and `origin` input closure, and saved observations pass
+through `cpp.copy_header_observation`, which drops legacy observation shapes.
+It excludes raw-CType conversion memos, old declaration histories, unused
+ordinary-name lookup state, and prototype conversion registries. Restore binds
+origins to the current combined include descriptor and reconstructs the final
+order-zero type lookup used by module initializers; conversion is already
+complete. Each projection/reconstruction uses one memo and cooperative work
+budget, without another validation walk on ordinary cache reuse. Old-version
+and malformed payloads are cache misses.
 
 ## Code Generation
 
