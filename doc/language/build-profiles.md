@@ -23,13 +23,15 @@ debug-friendly optimization in both compile and link flags:
 
 ```sh
 TITAN_EXTRA_CFLAGS='-Og -g -fno-lto' \
-TITAN_EXTRA_LDFLAGS='-Og -g -fno-lto' titanc app.main
+TITAN_EXTRA_LDFLAGS='-Og -g -fno-lto' titanc --incremental -o out app.main
 ```
 
-These extra flags follow the defaults. The later `-g` restores full debug
-information for both GCC and Clang, including ordinary variable tracking.
-Supplying matching link flags also covers Linux LTO. Rebuild existing objects
-when changing flags.
+Extra environment flags and command-line `--cflag` / `--ldflag` options follow
+the profile defaults. The later `-g` restores full debug information for both
+GCC and Clang, including ordinary variable tracking, and matching link flags
+disable Linux LTO at link time. With `--incremental`, changing compile flags
+automatically invalidates module object certificates (`configuration options`),
+while changing link-only flags invalidates only the final-link certificate.
 
 Set `TITAN_BUILD_PROFILE=validation` for development and validation builds:
 
@@ -98,87 +100,97 @@ optimization and cross-module LTO while ordinary validation fixtures stay at
 
 ## Compiler jobs and GNU Make
 
-`titanc --jobs N` or `TITAN_JOBS=N` sets how many native compiler processes one
-`titanc` run may execute at once on Linux, macOS and Windows: generated-C
-compilations, and, while each module is checked, its batch of C validation
-probes. The command-line option wins, and the default is four. Parsing,
-checking, C generation and formatting stay ordered in the compiler process,
-and diagnostics and generated C do not depend on the job count. With
-`--jobs 1`, `TITAN_JOBS=1` or, on Linux and macOS, under `make -j1`, every
-C probe runs when it is reached. A C probe that fails during batching makes
-titanc check the module again, which adds work to failing builds; see
-[C validation probes](c-ffi-expressions.md#compiled-probe-cache).
-Library builds also use the bound for their two provider links: the
-second link overlaps the first only when a parent GNU Make jobserver grants it a
-slot; every validation still precedes publication. Windows stdlib builds also
-honor `TITAN_JOBS`.
+`titanc --jobs N` (`-j N`) or `TITAN_JOBS=N` sets the maximum number of
+concurrent module-frontend worker processes and native compiler jobs one
+`titanc` invocation may run at once on Linux, macOS, and Windows. The
+command-line option wins, and the default is four.
 
-On Linux and macOS, a `titanc` recipe marked with `+` in a GNU Make file shares Make's jobserver.
-Its first compilation uses the recipe's own job slot and each further one
-borrows a slot from Make, so `make -j8` runs at most eight jobs in total, while
-`--jobs` still caps each `titanc` run. Under `make -j1` titanc compiles
-serially. When Make advertises a jobserver that titanc cannot use, titanc prints
-one warning and compiles with one job. That includes a recipe without `+` under a
-pipe jobserver (GNU Make before 4.4, or 4.4 with `--jobserver-style=pipe`) and
-every recipe under macOS's stock GNU Make 3.81; mark each `titanc` recipe with
-`+`, and use GNU Make 4.4 or later (Homebrew `gmake`) for parallel compilation
-inside Make on macOS.
-Windows applies only the `--jobs`/`TITAN_JOBS` bound. See [GNU Make jobserver
-participation](../implementation/driver.md#gnu-make-jobserver-participation).
+One coordinator process owns a single slot ledger for the invocation. Modules
+whose `.titan.source` certificates hit are restored in-process without starting
+a worker; a warm build where every module hits spawns no workers and opens no
+job pool. Modules that miss run in short-lived worker processes under the
+ledger. When a worker launches a batch of generated-C part compilations or C
+validation probes, its first native job inherits the worker's active slot and
+any additional batch jobs acquire free ledger slots; the worker resumes Lua
+execution once its batch finishes and returns the slot. Diagnostics and
+captured worker output are buffered and flushed in deterministic plan order, so
+the job count never changes generated C or diagnostic ordering. With
+`--jobs 1`, `TITAN_JOBS=1`, or (on Linux and macOS) under `make -j1`, `titanc`
+uses one slot and runs each C probe as it is reached. Library builds also use
+the slot bound for their two provider links: the second link overlaps the first
+only when a shared parent GNU Make jobserver grants a token, and every
+validation still precedes publication.
+
+On Linux and macOS, a `titanc` recipe marked with `+` in a GNU Makefile shares
+a parent GNU Make 4.4 or newer FIFO jobserver (`--jobserver-auth=fifo:...`), or
+a pipe jobserver on Linux where `titanc` can reopen `/proc/self/fd` privately.
+Its first active worker or native job uses the recipe's implicit slot and each
+further active job borrows one token from Make, so `make -j8` runs at most
+eight jobs in total while `--jobs` still caps each `titanc` invocation. Under
+`make -j1`, `titanc` runs serially. When a parent Make advertises a valid
+inherited pipe jobserver that the platform cannot reopen privately—such as
+macOS's stock GNU Make 3.81, GNU Make earlier than 4.4 on macOS, or
+`--jobserver-style=pipe` on macOS—`titanc` prints one warning and uses its own
+local `--jobs` / `TITAN_JOBS` cap without borrowing from the parent pool;
+sharing a parent Make pool on macOS requires GNU Make 4.4 or later (Homebrew
+`gmake`). When Make advertises a jobserver whose descriptors are unusable
+because the recipe was not marked with `+`, `titanc` warns once and runs with
+one job. Windows applies only the local `--jobs` / `TITAN_JOBS` bound. See
+[GNU Make jobserver participation](../implementation/driver.md#gnu-make-jobserver-participation).
 
 ## Split modules
 
-A module whose generated C definitions reach 2 MiB can be split into
-several C translation units, which then compile as independent jobs under the
-same bound. `titanc --c-parts N` or `TITAN_C_PARTS=N` sets the maximum number
-of units per module; the command-line option wins, and the value must be a
+A module whose generated C definitions reach 2 MiB can be split into several C
+translation units, which then compile as independent jobs under the same slot
+ledger. `titanc --c-parts N` or `TITAN_C_PARTS=N` sets the maximum number of
+units per module; the command-line option wins, and the value must be a
 positive integer. `1` disables splitting. The default is 4 on Linux and 1 on
 macOS, Windows, and other platforms, so splitting is opt-in there. Smaller
-modules always stay in one unit. The part count is independent of `--jobs`:
-changing the job bound never changes generated files, while changing the part
-count changes them and makes previously compiled objects stale
-([incremental compilation](incremental-compilation.md#what-object-reuse-promises)).
-In a Titan checkout, the Make targets that compile the standard library and
-the native tests record `TITAN_C_PARTS` and recompile every module object once
-after it changes; changing only `TITAN_JOBS` or `make -j` recompiles nothing.
-The extra generated files are listed in [Output
-directories](output-directory.md#source-hierarchy-and-final-outputs).
+modules always stay in one unit.
+
+The part count is independent of `--jobs`: changing the job bound never changes
+generated files, whereas `--c-parts` is recorded in each module's
+`.titan.source` object certificate (`codegen-options c_parts`) and the primary
+`<stem>.o` record owns the authoritative `parts` inventory. With
+`--incremental`, changing `--c-parts` or `TITAN_C_PARTS` misses with
+`codegen-options c_parts`, recompiles the module, and retires any obsolete
+`.part<k>.c`/`.o` or `.priv.h` companions
+([Incremental and separate compilation](incremental-compilation.md#what-object-reuse-promises)).
+The extra generated files are listed in
+[Output directories](output-directory.md#source-hierarchy-and-final-outputs).
 
 ## Build and test parallelism
 
-In a Titan checkout, the Make targets that compile many modules (`make stdlib`,
-`make stdlib-objects`, `make titan-stdlib-test-objects`, and
-`make titan-stdlib-test-build`) and the build that `luarocks make` runs share
-one GNU Make job pool. Without a `-j` option, GNU Make 4.2 or later creates
-one pool of `TITAN_JOBS` slots, four by default, so independent modules and
-the parts of large modules compile side by side within that budget. An
-explicit `make -jN`, or the pool of a parent Make, takes precedence:
-`make -j8 stdlib` runs at most eight jobs in total, and `TITAN_JOBS` then only
-caps each `titanc` run inside it. `make -j1` builds serially.
+In a Titan checkout, `make stdlib`, `make stdlib-objects`,
+`make titan-stdlib-test-objects`, `make titan-stdlib-test-build`, and the build
+that `luarocks make` runs invoke `titanc --incremental -j$(TITAN_JOBS)` in `+`
+recipes. Without a `-j` option on Make, GNU Make 4.2 or later defaults
+`TITAN_JOBS` to four, so `titanc` schedules module workers, probe batches, and
+split-module C parts across four slots. With GNU Make 4.4 or later (or on
+Linux), an explicit `make -jN` or parent Make FIFO/pipe pool is shared across
+recipes and `TITAN_JOBS` caps each `titanc` invocation inside it; `make -j1`
+builds serially.
 
-GNU Make before 4.2, including macOS's stock 3.81, cannot tell `make -j1` from
-plain `make`. With such a Make, `make` and `make -j1` both build serially, and
-each `titanc` compiles with one job, unless you set `TITAN_JOBS` in the
-environment or on the command line: `TITAN_JOBS=4 make stdlib` creates the
-four-slot pool. `make -jN` still runs `N` modules at once. macOS users get the
-four-job default either with GNU Make 4.2 or later first on `PATH` (Homebrew's
-`make` formula installs it as `gmake`) or by setting `TITAN_JOBS`. On macOS,
-each `titanc` in a pool still compiles with one job until GNU Make 4.4 or
-later, which also compiles a large module's parts in parallel.
+GNU Make before 4.2, including macOS's stock 3.81, cannot distinguish `make -j1`
+from plain `make`. With such a Make, `TITAN_JOBS` defaults to `1` so plain
+`make` and `make -j1` both build serially unless you set `TITAN_JOBS` explicitly
+(for example, `TITAN_JOBS=4 make stdlib`). On macOS, putting GNU Make 4.4 or
+later first on `PATH` (Homebrew's `make` formula installs it as `gmake`) enables
+both the four-job default and shared FIFO jobserver pools; under older Make on
+macOS, setting `TITAN_JOBS=4` gives each `titanc` invocation its local four-job
+cap without sharing the parent pipe pool.
 
 The repository's test commands use the same budget:
 
 * `make busted-test`, `make rock-test`, `make test`, and `luarocks test` run
   each Busted spec file once across `TITAN_ROCK_TEST_JOBS` workers, each in a
-  private copy of the checkout. Every worker holds one slot of the shared
+  private copy of the checkout. Every worker holds one slot of the shared Make
   pool. `make rock-test` also builds the native test executable inside that
   pool, so it defaults to three workers beside the build; `make busted-test`
   defaults to four. A four-slot budget therefore runs four jobs in total.
   Workers beyond the pool's slots wait for a free one, so raise both settings
   together on a larger machine, for example
-  `TITAN_JOBS=8 TITAN_ROCK_TEST_JOBS=7 make rock-test`. With GNU Make before
-  4.2 and no `TITAN_JOBS`, the workers instead share a pool with one slot per
-  worker plus one for the native build, whose `titanc` runs use one job each.
+  `TITAN_JOBS=8 TITAN_ROCK_TEST_JOBS=7 make rock-test`.
 * `make titan-stdlib-test` and the native phase of `make rock-test` run the
   built native test executable as `TITAN_TEST_JOBS` groups of test owners at
   once (default four; `1` runs them one group at a time), then run the
@@ -188,10 +200,10 @@ The repository's test commands use the same budget:
   finishes its remaining work, lists every failure, and then fails.
 
 Native coverage runs and native Windows test runs keep one native test process.
-On Windows, `TITAN_JOBS` (default four) is the only native build-parallelism
-setting; see [Windows native build
-parallelism](../implementation/windows-build.md#native-build-parallelism). The
-[repository workflow](../implementation/repository-workflow.md#choose-the-matching-profile-and-command)
-lists the commands, and [build and installation
-responsibilities](../implementation/build-script-audit.md#make-job-pool-and-titanc-recipes)
+On Windows, `TITAN_JOBS` (default four) bounds both module workers and native C
+compilations; see
+[Windows native build parallelism](../implementation/windows-build.md#native-build-parallelism).
+The [repository workflow](../implementation/repository-workflow.md#choose-the-matching-profile-and-command)
+lists the commands, and
+[build and installation responsibilities](../implementation/build-script-audit.md#make-job-pool-and-titanc-recipes)
 describe the exact pool rules.
