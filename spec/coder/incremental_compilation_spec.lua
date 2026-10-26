@@ -325,12 +325,24 @@ describe("incremental and separate compilation (CLI)", function()
         assert.equal("exit", why, text)
         assert.equal(42, code, text)
         assert.is_false(ok)
-        assert.is_true(exists(output .. "/" .. APP .. "__entrypoint.c"))
+        local synthetic_entrypoint
+        for entry in lfs.dir(output .. "/.titan-links") do
+            if entry ~= "." and entry ~= ".." then
+                local candidate = output .. "/.titan-links/" .. entry ..
+                    "/synthetic/" .. APP .. "__entrypoint.c"
+                if exists(candidate) then
+                    synthetic_entrypoint = candidate
+                end
+            end
+        end
+        assert.is_string(synthetic_entrypoint)
+        assert.is_false(exists(output .. "/" .. APP .. "__entrypoint.c"))
         assert.is_false(exists(APP .. "__entrypoint.c"))
         if platform.windows then
-            -- Launcher resources follow the entrypoint C file into the output tree.
+            -- Launcher resources follow the synthetic entrypoint C file into the output tree.
             for _, suffix in ipairs({ ".manifest", ".rc", ".res" }) do
-                assert.is_true(exists(output .. "/" .. APP .. "__entrypoint.c" .. suffix))
+                assert.is_true(exists(synthetic_entrypoint .. suffix))
+                assert.is_false(exists(output .. "/" .. APP .. "__entrypoint.c" .. suffix))
                 assert.is_false(exists(APP .. "__entrypoint.c" .. suffix))
             end
         end

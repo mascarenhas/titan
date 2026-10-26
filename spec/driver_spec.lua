@@ -697,13 +697,10 @@ describe("Windows launcher filenames", function()
             assert(lfs.chdir(directory))
             local real_sync = previous_sync()
             compiler_io.new_sync = function()
-                return {
+                return setmetatable({
                     stat = function() return { kind = "directory" } end,
-                    tmpname = function() return real_sync:tmpname() end,
-                    unlink = function(_, path, missing_ok)
-                        return real_sync:unlink(path, missing_ok)
-                    end,
-                }
+                    mkdir = function() return true end,
+                }, { __index = real_sync })
             end
             platform.windows = true
             local options = { module_names = { "app", "archive" },
