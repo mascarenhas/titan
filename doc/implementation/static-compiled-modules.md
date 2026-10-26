@@ -12,8 +12,11 @@ The implementation is split among:
 * `staticmetadata.lua`, which parses and validates native containers without
   subprocesses;
 * `driver.lua`, which owns resolution, provenance, target validation, native
-  linking, archive construction, and bundle publication; and
-* `titanc`, which finalizes invocation-wide membership before code generation.
+  linking, archive construction, and bundle publication;
+* `linkcertificate.lua`, which certifies final provider pairs and executables
+  before validation probes or links run; and
+* `titanc`, which coordinates module compilation and finalizes invocation-wide
+  membership.
 
 ## Why metadata is an object section
 
@@ -284,20 +287,21 @@ metadata or these ownership rules.
 ## Native composition
 
 Program and test links (`driver.standalone_native_link_inputs`) order inputs as
-source objects, selected Titan archives, user `-X` payload, Titan
-runtime/backtrace/Lua inputs, platform libraries, `-l` inputs, and final flags.
-ELF first groups selected providers with each other, leaves ordinary `-X`
-inputs outside that group in their original CLI order, then groups
-`libtitan.a` with the selected providers at the runtime position. Selected
-archives therefore receive an ordinary second search after runtime members
-introduce references to metadata-free provider payload, such as bundled libuv,
-while `-X` archives are never broadly rescanned or force-loaded. Backtrace, Lua,
-platform, `-l`, and final-flag inputs remain outside both groups. Darwin uses
-its continual archive search. `--static` never becomes a system `-static`
-linker option.
+source objects, selected Titan archives, `--c-source` objects and user `-X`
+payload (`extra_objects`), Titan runtime/backtrace/Lua inputs, platform
+libraries, `-l` inputs, and final flags. ELF first groups selected providers
+with each other, leaves `--c-source` and `-X` inputs outside that group in their
+original order (`--c-source` objects in first-source order followed by `-X`
+inputs in CLI order), then groups `libtitan.a` with the selected providers at
+the runtime position. Selected archives therefore receive an ordinary second
+search after runtime members introduce references to metadata-free provider
+payload, such as bundled libuv, while `-X` archives are never broadly rescanned
+or force-loaded. Backtrace, Lua, platform, `-l`, and final-flag inputs remain
+outside both groups. Darwin uses its continual archive search. `--static` never
+becomes a system `-static` linker option.
 
-Library-mode DSO construction instead force-loads selected-provider and `-X`
-archives without groups (`driver.force_load_arguments`: GNU
+Library-mode DSO construction instead force-loads selected-provider and
+`--c-source`/`-X` archives without groups (`driver.force_load_arguments`: GNU
 `--whole-archive`, Darwin `-force_load`). The paired static archive
 (`driver.build_static_archive`) flattens the identical logical/native payload:
 
@@ -305,8 +309,9 @@ archives without groups (`driver.force_load_arguments`: GNU
    immediately followed by its part objects in part order;
 2. selected providers in bytewise absolute-path order, preserving member
    order;
-3. every `-X` input in CLI order, inserting one object directly or each
-   archive's objects in member order at that position.
+3. every `--c-source` object (in first-source order) and `-X` input (in CLI
+   order), inserting one object directly or each archive's objects in member
+   order at that position.
 
 Runtime, backtrace, Lua, `-l`, and final flags are not copied into the archive.
 
@@ -375,7 +380,53 @@ members. No whole-archive option or extra input is needed.
 
 ## Provider link pipeline
 
-On Linux and macOS, `titanc` hands a no-`main` provider to
+Before generating synthetic runner or entrypoint sources, running
+`driver.run_standalone_archive_probe`, or entering `driver.link_provider_pair`,
+`titanc` prepares and checks a final-link certificate (`linkcertificate.prepare`
+and `linkcertificate.check`) under `<output>/.titan-links/<key>/`, where
+`<key>` is the SHA-256 digest of the canonical sorted final output paths. For a
+Unix provider pair, the certified `outputs` set comprises `<provider>.so`,
+`<provider>.a`, `<provider>.so.dSYM` (on Darwin), and every planned
+`<module>.lua` shim; for a standalone or test program, it comprises the
+executable (plus `.dSYM` on Darwin, or `<executable>.exe` and `<provider>.dll`
+on Windows).
+
+The link certificate hashes every input file by actual bytes: `objects` (all
+compiled source module object parts in link order), `c_objects` (`--c-source`
+nodes), `payloads` (`-X` inputs), `providers` (selected dynamic provider
+files), `archives` (`selected_static_providers` `.a` files, covering their
+complete member sequence and metadata), and `runtime` archives/objects, along
+with `bindings` (`resolver_context.native_bindings`), `roots`, `entry`, `kind`,
+`argv`, `toolchain` (compiler toolchain identity plus `AR`, `RANLIB`, `RC`),
+`policy`, and `environment`. Because source-object certificates
+(`incremental.lua`) fingerprint only the imported module's semantic public
+interface and layout inside a binary provider while the link certificate hashes
+the selected `providers` and `archives` files by content, an implementation-only
+rebuild of a dynamic provider reuses consumer source objects without
+recompiling them, while triggering a final relink of the consumer image when
+`titanc` runs.
+
+`titanc` restores any missing public foreign headers
+(`driver.prepare_foreign_headers`) under the output lock before checking the
+link certificate. On a hit (`Titan link hit <target>` under `-v`),
+`linkcertificate.check` verifies the saved record, the non-symlink
+kind/mode/content snapshot of every owned output file and directory entry, and
+the content digests of all recorded linker-reported native library inputs
+(`record.native`), and returns without running the standalone archive probe,
+`driver.link_provider_pair`, three-way validation, or bundle publication.
+
+On a link miss (`Titan link miss <target>: <reason>` under `-v`), `titanc`
+calls `linkcertificate.invalidate` to remove `<output>/.titan-links/<key>/record`
+before any final mutation, removes any stale `<ticket.directory>/link.d`, and
+passes `link_ticket.dependency_argv` (`-Wl,--dependency-file=<link.d>` on GNU
+ld/lld or `-Wl,-dependency_info,<link.d>` on Darwin ld64; compiler
+`-print-file-name` fallback when `driver.native_link_backend` is `"none"`) to
+the public DSO link (`request.final_link_flags` in `driver.link_provider_pair`)
+or the final program link (`driver.compile_program`). Neither the private
+`archive-validation.so` link nor `driver.run_standalone_archive_probe` receives
+`final_link_flags`.
+
+On Linux and macOS, `titanc` then hands a no-`main` provider to
 `driver.link_provider_pair` once its objects are compiled and validated. The
 function owns one sibling staging directory: the DSO keeps the public basename
 there, beside the staged archive and the private `archive-validation.so`. It
@@ -465,6 +516,17 @@ lack deterministic `D`. When that complete owned set is unchanged and no stale
 shim needs retiring, Titan removes the staged artifacts and preserves the public
 bundle and its mtimes. Any changed or missing member takes the ordinary
 transactional path.
+
+After `driver.publish_provider_bundle` (or `driver.compile_program` /
+`driver.publish_windows_provider`) succeeds, `titanc` calls
+`linkcertificate.commit`, which re-verifies all input file digests in a fresh
+context, snapshots the published outputs, records the linker-reported native
+library inputs from `link.d` (or the compiler fallback), and writes
+`<output>/.titan-links/<key>/record` last. Even when `publish_provider_bundle`
+finds the staged pair and shims byte-identical to the existing public outputs
+and preserves their timestamps, `linkcertificate.commit` writes the updated
+link record so subsequent no-op invocations hit before entering the link
+pipeline.
 
 When replacing a valid prior self-describing archive with fewer keys, its old
 key set enumerates the exact stale generated shims eligible for transactional
