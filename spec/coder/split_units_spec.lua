@@ -507,7 +507,28 @@ end
 foreign import %q
 function read_value(): integer return ffi.R2_CACHED_VALUE end
 ]], header))
-        local frontend = cli_frontend(workspace .. "/cache_frontend.lua")
+        local hit_log = workspace .. "/cached-observed"
+        -- The frontend is a certified compiler input: keep both its path and
+        -- bytes identical between the producer build and collision attempt.
+        local frontend = cli_frontend(workspace .. "/cache_frontend.lua", string.format([[
+local driver = require("titan-compiler.driver")
+local preflight = assert(driver.preflight_build_outputs)
+driver.preflight_build_outputs = function(context, plan, ...)
+    if plan.modules.b then
+        local cached = assert(plan.modules.a, "module a must be part of the source link set")
+        assert(cached.certified and cached.certified.status == "hit",
+            "module a must be certified before collision preflight")
+        local file = assert(io.open(%q, "wb"))
+        assert(file:write("cached"))
+        assert(file:close())
+        driver.compile_modules = function() error("generated compilation must not start") end
+        require("titan-compiler.process").start_worker = function()
+            error("build workers must not start after a preflight collision")
+        end
+    end
+    return preflight(context, plan, ...)
+end
+]], hit_log))
         local ok, output = run_cmd({ LUA, "-E", frontend, "--tree", src,
             "-o", out, "--c-parts", "4", "-c", "a" })
         assert.truthy(ok, output)
@@ -532,24 +553,6 @@ do base_offset = 10 end
             snapshots[path] = "previous b" .. suffix
             write_file(path, snapshots[path])
         end
-        local hit_log = workspace .. "/cached-observed"
-        frontend = cli_frontend(workspace .. "/cached_reject_frontend.lua", string.format([[
-local driver = require("titan-compiler.driver")
-local preflight = assert(driver.preflight_build_outputs)
-driver.preflight_build_outputs = function(context, plan, ...)
-    local cached = assert(plan.modules.a, "module a must be part of the source link set")
-    assert(cached.certified and cached.certified.status == "hit",
-        "module a must be certified before collision preflight")
-    local file = assert(io.open(%q, "wb"))
-    assert(file:write("cached"))
-    assert(file:close())
-    return preflight(context, plan, ...)
-end
-driver.compile_modules = function() error("generated compilation must not start") end
-require("titan-compiler.process").start_worker = function()
-    error("build workers must not start after a preflight collision")
-end
-]], hit_log))
         ok, output = run_cmd({ LUA, "-E", frontend, "--tree", src, "-o", out,
             "--c-parts", "4", "--incremental", "b" })
         assert.is_false(ok, output)
