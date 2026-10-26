@@ -603,6 +603,13 @@ if not args.compile_only and not args.print_ast then
         exit("cannot invalidate final link record: " .. tostring(invalidate_error))
     end
     link_ticket = ticket
+    -- Misses own the target's record directory (synthetic sources, linker
+    -- dependency report); a stale report must not survive into this link.
+    local directory_ready, directory_error =
+        driver.prepare_output_root(ticket.directory)
+    if not directory_ready then exit(directory_error) end
+    local policy = ticket.native_policy
+    if policy and policy.dependency_file then os.remove(policy.dependency_file) end
 end
 
 -- Synthetic runner and entrypoint sources belong to their final target.
