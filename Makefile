@@ -1261,7 +1261,7 @@ TITAN_TEST_CFLAGS = $(strip $(TITAN_PROFILE_NATIVE_FLAGS) $(if $(strip $(TITAN_E
 TITAN_TEST_LDFLAGS = $(strip $(TITAN_PROFILE_NATIVE_FLAGS) $(if $(strip $(TITAN_EXTRA_LDFLAGS)),$(TITAN_EXTRA_LDFLAGS),$(TITAN_TEST_EXTRA_LDFLAGS)))
 TITAN_TEST_C_SOURCES := spec/fixtures/stdlib/native/async_foreign_work.c \
 	spec/fixtures/stdlib/native/fs_fixture.c spec/fixtures/stdlib/native/uv_stdio_probe.c
-TITAN_TEST_FIXTURE_OUTPUTS := $(addprefix $(TITAN_TEST_BUILD_DIR)/,async_foreign_work.h uv_stdio_probe.h uv_coverage_threads.h uv_coverage_pty.h sqlite3_worker_fixture.h sqlite3_worker_fixture.o ssl_allocator_fixture.h ssl_allocator_fixture.o ssl_error_strings.h ssl_error_strings.o os_descriptor_limit.h os_descriptor_limit.o os_process_host_child)
+TITAN_TEST_FIXTURE_OUTPUTS := $(addprefix $(TITAN_TEST_BUILD_DIR)/,async_foreign_work.h uv_stdio_probe.h uv_stdio_probe.o uv_coverage_threads.h uv_coverage_pty.h sqlite3_worker_fixture.h sqlite3_worker_fixture.o ssl_allocator_fixture.h ssl_allocator_fixture.o ssl_error_strings.h ssl_error_strings.o os_descriptor_limit.h os_descriptor_limit.o os_process_host_child)
 # GNU ld fault wrappers belong only to fresh Linux child processes.
 # Keep their owned outputs separate from every aggregate -X payload.
 TITAN_TEST_LINUX_FAULT_OBJECTS := $(addprefix $(TITAN_TEST_BUILD_DIR)/,transfer_alloc_fault.o uv_sync_alloc_fault.o thread_retirement_fault.o)
@@ -1354,7 +1354,8 @@ endif
 $(addprefix $(TITAN_TEST_BUILD_DIR)/,$(TITAN_TEST_FIXTURE_HEADERS)): $(TITAN_TEST_BUILD_DIR)/%: spec/fixtures/stdlib/native/% | check-titan-test-sdk
 	cp "$<" "$@"
 
-# Child-only helpers are certified separately with their exact native policy.
+# Child-program helpers, including the dual-use stdio input, are certified
+# separately with their exact native policy.
 # Each output tree contains one C source, so its single .native object can be
 # copied to the existing fixture pathname without exposing certificate names.
 define titan_test_native_rule
@@ -1374,6 +1375,7 @@ $(TITAN_TEST_BUILD_DIR)/$(1).o: spec/fixtures/stdlib/native/$(1).c FORCE | check
 	test "$$$$#" = 1 && test -f "$$$$1" || { echo 'ERROR: expected one certified native fixture object' >&2; exit 1; }; \
 	if ! cmp -s "$$$$1" "$$@"; then cp -p "$$$$1" "$$@"; fi
 endef
+$(eval $(call titan_test_native_rule,uv_stdio_probe))
 $(eval $(call titan_test_native_rule,sqlite3_worker_fixture,--cflag=-pthread,$(SQLITE3_CPPFLAGS)))
 $(eval $(call titan_test_native_rule,ssl_allocator_fixture,--cflag=-pthread,$(STDLIB_OPENSSL_CPPFLAGS)))
 $(eval $(call titan_test_native_rule,ssl_error_strings,,$(STDLIB_OPENSSL_CPPFLAGS)))
