@@ -24,41 +24,17 @@ local uv
 -- between spec files) reuses the live loop instead of opening a second one.
 local LUV_ANCHOR = "titan-compiler.process: luv"
 
-local function load_luv()
-    local registry = debug.getregistry()
-    local anchored = registry[LUV_ANCHOR]
-    if anchored then return anchored end
-    local existing = package.loaded.luv
-    if type(existing) == "table" and existing._loop ~= nil then
-        registry[LUV_ANCHOR] = existing
-        return existing
-    end
-    local errors = {}
-    for index = 2, #(package.searchers or {}) do
-        local loader, extra = package.searchers[index]("luv")
-        if type(loader) == "function" then
-            anchored = loader("luv", extra)
-            if anchored == nil then anchored = true end
-            registry[LUV_ANCHOR] = anchored
-            return anchored
-        elseif type(loader) == "string" then
-            errors[#errors + 1] = loader
-        end
-    end
-    error("module 'luv' not found:" .. table.concat(errors), 2)
-end
-
-if type(package) == "table" and type(package.preload) == "table" and
-   package.preload.luv == nil then
-    package.preload.luv = load_luv
-end
-
 local function library()
     if not uv then
-        uv = load_luv()
-        if package.loaded.luv == nil then
-            package.loaded.luv = uv
+        local registry = debug.getregistry()
+        uv = registry[LUV_ANCHOR]
+        if not uv then
+            uv = require "luv"
+            registry[LUV_ANCHOR] = uv
         end
+    end
+    if package.loaded.luv == nil then
+        package.loaded.luv = uv
     end
     return uv
 end

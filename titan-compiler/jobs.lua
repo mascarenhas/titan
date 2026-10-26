@@ -8,41 +8,6 @@ local platform = require "titan-compiler.platform"
 
 local jobs = {}
 
-
--- Anchor luv's native loop in the Lua registry whenever `require "luv"` is
--- called, so Busted's per-file package.loaded restoration cannot collect the
--- loop userdata while luv_context(L)->loop still points to it. Importing
--- jobs.lua does not load luv.
-local LUV_ANCHOR = "titan-compiler.process: luv"
-
-local function load_luv()
-    local registry = debug.getregistry()
-    local anchored = registry[LUV_ANCHOR]
-    if anchored then return anchored end
-    local existing = package.loaded.luv
-    if type(existing) == "table" and existing._loop ~= nil then
-        registry[LUV_ANCHOR] = existing
-        return existing
-    end
-    local errors = {}
-    for index = 2, #(package.searchers or {}) do
-        local loader, extra = package.searchers[index]("luv")
-        if type(loader) == "function" then
-            anchored = loader("luv", extra)
-            if anchored == nil then anchored = true end
-            registry[LUV_ANCHOR] = anchored
-            return anchored
-        elseif type(loader) == "string" then
-            errors[#errors + 1] = loader
-        end
-    end
-    error("module 'luv' not found:" .. table.concat(errors), 2)
-end
-
-if type(package) == "table" and type(package.preload) == "table" and
-   package.preload.luv == nil then
-    package.preload.luv = load_luv
-end
 -- The batch caller assigns each prepared module its original request index;
 -- every job inherits it as its owning module index.
 function jobs.set_request_index(prepared, request_index)

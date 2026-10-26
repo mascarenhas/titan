@@ -223,13 +223,14 @@ end)
 describe("process transport", function()
     it("retains one anchored luv loop across package.loaded resets and GC", function()
         local process = require "titan-compiler.process"
-        local first = require "luv"
+        local first = process.library()
         package.loaded.luv = nil
+        package.loaded["titan-compiler.process"] = nil
         collectgarbage("collect")
         collectgarbage("collect")
-        local second = require "luv"
+        local second = require("titan-compiler.process").library()
         assert.equal(first, second)
-        assert.equal(first, process.library())
+        assert.equal(first, package.loaded.luv)
     end)
 
     it("runs worker-local argv commands through luv spawn", function()
