@@ -1149,7 +1149,7 @@ end
 local function run_argv(argv, verbose)
     local cmd, err = command_argv(argv)
     if not cmd then return nil, err end
-    if verbose then print(cmd) end
+    if verbose then io.stderr:write(cmd, "\n") end
     if platform.windows and jobs.is_remote() then
         return require("titan-compiler.process").run(argv)
     end
@@ -1205,7 +1205,7 @@ function driver.run_link_command(argv, verbose, output)
         if verbose then
             local shown, show_error = command_argv(argv)
             if not shown then return nil, show_error end
-            print(shown)
+            io.stderr:write(shown, "\n")
         end
         return run_argv(command, verbose)
     end)
@@ -1242,7 +1242,7 @@ function driver.format_generated_file(
         })
         local ok, term, code
         if strategy then
-            if verbose then print(assert(command_argv(args))) end
+            if verbose then io.stderr:write(assert(command_argv(args)), "\n") end
             local result = strategy:run(args, { stderr_to_stdout = true })
             ok = type(result) == "table" and result.started and result.ok
             term = type(result) == "table" and
@@ -8637,11 +8637,11 @@ local close_compile_notification = jobs.close_channel
 
 local function show_parallel_command(command)
     local write_called, written, write_err =
-        pcall(io.stdout.write, io.stdout, command .. "\n")
+        pcall(io.stderr.write, io.stderr, command .. "\n")
     if not write_called then return nil, written end
     if not written then return nil, write_err end
     local flush_called, flushed, flush_err =
-        pcall(io.stdout.flush, io.stdout)
+        pcall(io.stderr.flush, io.stderr)
     if not flush_called then return nil, flushed end
     if not flushed then return nil, flush_err end
     return true
@@ -8693,7 +8693,7 @@ local function finish_prepared_compile(process)
     local finish_errors = process.finish_errors
 
     local stdout_ok, stdout_err = protected_replay_compile_output(
-        process.stdout_path, io.stdout)
+        process.stdout_path, io.stderr)
     if not stdout_ok then
         finish_errors[#finish_errors + 1] =
             "stdout: " .. tostring(stdout_err)
