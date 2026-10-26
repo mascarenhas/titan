@@ -83,7 +83,7 @@ local function io_for(options)
 end
 
 local header_input_counters = setmetatable({}, { __mode = "k" })
-local header_counter_names = { "file_reads", "file_hashes", "metadata_reuses", "search_checks", "memo_reuses" }
+local header_counter_names = { "file_reads", "file_hashes", "metadata_reuses", "search_checks", "origin_checks", "memo_reuses" }
 local function count_header(strategy, name)
     local counters = header_input_counters[strategy]
     if not counters then counters = {}; header_input_counters[strategy] = counters end
@@ -129,50 +129,76 @@ function cpp.header_search_identity(path, openable, strategy)
     local link = strategy:lstat(path)
     local followed = strategy:stat(path)
     return table.concat({
-        "c-header-search-v1", "lstat=" .. attribute_identity(link),
-        "stat=" .. attribute_identity(followed),
+        version.C_HEADER_SEARCH_PROTOCOL, "exists=" .. (link and "yes" or "no"),
+        "kind=" .. (followed and followed.kind or "missing"),
         "open=" .. (openable and "readable" or "unreadable"),
     }, ";")
 end
 
-local function physical_header(path, strategy)
-    local link, followed = strategy:lstat(path), strategy:stat(path)
-    local physical = "lstat=" .. attribute_identity(link) ..
-        ";stat=" .. attribute_identity(followed)
-    local seconds = followed and followed.modified_seconds
-    local nanoseconds = followed and followed.modified_nanoseconds
-    local observation
-    if followed and followed.kind == "file"
-       and followed.device ~= nil and followed.inode ~= nil
-       and math.type(seconds) == "integer"
-       and math.type(nanoseconds) == "integer"
-       and nanoseconds >= 0 and nanoseconds < 1000000000 then
-        observation = {
-            modified_seconds = seconds,
-            modified_nanoseconds = nanoseconds,
-            physical_identity = physical,
-        }
-    end
-    return physical, observation, followed
+local function valid_time(seconds, nanoseconds)
+    return math.type(seconds) == "integer" and math.type(nanoseconds) == "integer"
+        and nanoseconds >= 0 and nanoseconds < 1000000000
 end
 
--- Observed times are validation metadata, not semantic identity. Unknown or
--- malformed legacy observations take the ordinary fresh-read path once.
+local function physical_header(path, strategy)
+    local link = strategy:lstat(path)
+    local followed, err = strategy:stat(path)
+    local physical = "lstat=" .. attribute_identity(link) ..
+        ";stat=" .. attribute_identity(followed)
+    local observation
+    if followed and followed.kind == "file"
+       and math.type(followed.size) == "integer" and followed.size >= 0
+       and valid_time(followed.modified_seconds, followed.modified_nanoseconds) then
+        observation = {
+            precision = followed.time_precision == "ns" and "ns" or "coarse",
+            size = followed.size,
+            modified_seconds = followed.modified_seconds,
+            modified_nanoseconds = followed.modified_nanoseconds,
+            physical_identity = physical,
+        }
+        if valid_time(followed.changed_seconds, followed.changed_nanoseconds) then
+            observation.changed_seconds = followed.changed_seconds
+            observation.changed_nanoseconds = followed.changed_nanoseconds
+        end
+    end
+    -- A strategy without file identity (notably Sync on Windows) still guards
+    -- size/times around reads, but cannot authorize metadata-only reuse.
+    local reusable = followed and followed.device ~= nil and followed.inode ~= nil
+    return physical, reusable and observation or nil, followed, observation, err
+end
+
+-- Observations are validation metadata, not semantic identity. Legacy or
+-- malformed observations take the ordinary fresh-read path.
 function cpp.copy_header_observation(value)
     if type(value) ~= "table" then return nil end
-    local seconds, nanoseconds, physical = rawget(value, "modified_seconds"),
-        rawget(value, "modified_nanoseconds"), rawget(value, "physical_identity")
-    if math.type(seconds) ~= "integer" or math.type(nanoseconds) ~= "integer"
-       or nanoseconds < 0 or nanoseconds >= 1000000000
-       or type(physical) ~= "string" or physical == "" then return nil end
-    return { modified_seconds = seconds, modified_nanoseconds = nanoseconds, physical_identity = physical }
+    local precision, size, physical = rawget(value, "precision"),
+        rawget(value, "size"), rawget(value, "physical_identity")
+    local seconds, nanoseconds = rawget(value, "modified_seconds"),
+        rawget(value, "modified_nanoseconds")
+    local changed, changed_ns = rawget(value, "changed_seconds"), rawget(value, "changed_nanoseconds")
+    if (precision ~= "ns" and precision ~= "coarse")
+       or math.type(size) ~= "integer" or size < 0
+       or not valid_time(seconds, nanoseconds)
+       or type(physical) ~= "string" or physical == ""
+       or ((changed ~= nil or changed_ns ~= nil) and not valid_time(changed, changed_ns)) then
+        return nil
+    end
+    return {
+        precision = precision, size = size, physical_identity = physical,
+        modified_seconds = seconds, modified_nanoseconds = nanoseconds,
+        changed_seconds = changed, changed_nanoseconds = changed_ns,
+    }
 end
 
 function cpp.same_header_observation(left, right)
     if left == nil or right == nil then return left == right end
     if type(left) ~= "table" or type(right) ~= "table" then return false end
-    return rawget(left, "modified_seconds") == rawget(right, "modified_seconds")
+    return rawget(left, "precision") == rawget(right, "precision")
+        and rawget(left, "size") == rawget(right, "size")
+        and rawget(left, "modified_seconds") == rawget(right, "modified_seconds")
         and rawget(left, "modified_nanoseconds") == rawget(right, "modified_nanoseconds")
+        and rawget(left, "changed_seconds") == rawget(right, "changed_seconds")
+        and rawget(left, "changed_nanoseconds") == rawget(right, "changed_nanoseconds")
         and rawget(left, "physical_identity") == rawget(right, "physical_identity")
 end
 
@@ -180,21 +206,22 @@ end
 -- racing with replacement or modification must not stamp older bytes with the
 -- newer metadata observed after the read.
 local function read_header_contents(filename, strategy)
-    local physical, observation = physical_header(filename, strategy)
+    local physical, observation, _, guard = physical_header(filename, strategy)
     local contents, err = read_file_contents(filename, strategy)
     if not contents then return nil, err end
-    local after_physical, after_observation = physical_header(filename, strategy)
+    local after_physical, _, _, after_guard = physical_header(filename, strategy)
     if physical ~= after_physical
-       or not cpp.same_header_observation(observation, after_observation) then
+       or not cpp.same_header_observation(guard, after_guard) then
         return nil, "C header changed while it was read: " .. filename, nil, true
     end
     return contents, nil, { physical_identity = physical, observation = observation }
 end
 
-local function content_identity(contents, physical, options)
+local function content_identity(contents, path, options)
     local adapter = options and options.cache_adapter
-    local digest = sha256.hex_via(adapter and adapter.sha256_binary, contents)
-    return "c-header-file-v2:sha256:" .. digest .. ";" .. physical
+    local digest = options and options.file_digest and options.file_digest(path, contents)
+        or sha256.hex_via(adapter and adapter.sha256_binary, contents)
+    return version.C_HEADER_FILE_PROTOCOL .. ":sha256:" .. digest
 end
 
 -- `options.cache_adapter.sha256_binary`, when supplied, computes the content
@@ -202,27 +229,32 @@ end
 function cpp.header_file_identity(contents, path, strategy, read_state, options)
     strategy = strategy or default_io
     count_header(strategy, "file_hashes")
-    local physical = read_state and read_state.physical_identity or physical_header(path, strategy)
     -- Supplied bytes without a certified read boundary retain no observation;
     -- final validation must freshly read them before enabling metadata reuse.
     local observation = read_state and cpp.copy_header_observation(read_state.observation)
-    return content_identity(contents, physical, options), observation
+    return content_identity(contents, path, options), observation
 end
 
 function cpp.header_input_identity(kind, path, strategy, options)
     strategy = strategy or default_io
     if kind == "file" then
-        local contents, err = read_file_contents(path, strategy)
+        local contents, err, read_state, changed = read_header_contents(path, strategy)
+        if changed then return nil, err end
         if not contents then
-            return "c-header-file-v2:unreadable:" ..
-                cpp.header_search_identity(path, nil, strategy), err
+            return version.C_HEADER_FILE_PROTOCOL .. ":unreadable:" ..
+                cpp.header_search_identity(path, false, strategy), err
         end
-        local identity = cpp.header_file_identity(contents, path, strategy, nil, options)
+        local identity = cpp.header_file_identity(contents, path, strategy, read_state, options)
         return identity
     elseif kind == "search" then
         return cpp.header_search_identity(path, nil, strategy)
+    elseif kind == "origin" then
+        count_header(strategy, "origin_checks")
+        local real, err = strategy:realpath(path)
+        if not real then return nil, err end
+        return version.C_HEADER_ORIGIN_PROTOCOL .. ";real=" .. real
     end
-    return nil, "C header input kind must be 'file' or 'search'"
+    return nil, "C header input kind must be 'file', 'search' or 'origin'"
 end
 
 function cpp.header_observation_index(inputs)
@@ -258,10 +290,18 @@ function cpp.revalidate_header_input(previous, options)
         current = {}
         if kind == "search" then
             current.identity = cpp.header_search_identity(path, nil, strategy)
+        elseif kind == "origin" then
+            current.identity = cpp.header_input_identity(kind, path, strategy)
+            if not current.identity then
+                local followed, err = strategy:stat(path)
+                current.reason = not followed and not err and "missing" or "unreadable"
+                current.identity = version.C_HEADER_ORIGIN_PROTOCOL .. ";unresolved"
+            end
         elseif kind == "file" then
-            current.physical, current.observation, current.followed = physical_header(path, strategy)
+            current.physical, current.observation, current.followed, current.guard, current.stat_error =
+                physical_header(path, strategy)
         else
-            return nil, "C header input kind must be 'file' or 'search'"
+            return nil, "C header input kind must be 'file', 'search' or 'origin'"
         end
         records[key] = current
     end
@@ -269,34 +309,49 @@ function cpp.revalidate_header_input(previous, options)
         local baseline = options.header_observations and
             options.header_observations[key .. "\0" .. previous.identity]
         local saved = cpp.copy_header_observation(baseline or previous.observation)
-        local digest, certified = previous.identity:match("^c%-header%-file%-v2:sha256:(%x+);(.+)$")
-        if saved and digest and #digest == 64 and certified == saved.physical_identity
-           and cpp.same_header_observation(saved, current.observation) then
+        local prefix = version.C_HEADER_FILE_PROTOCOL .. ":sha256:"
+        local digest = previous.identity:sub(1, #prefix) == prefix
+            and previous.identity:sub(#prefix + 1)
+        if saved and saved.precision == "ns" and saved.changed_seconds ~= nil
+           and current.observation and current.observation.precision == "ns"
+           and digest and #digest == 64 and not digest:find("[^%x]")
+           and cpp.same_header_observation(saved, current.observation)
+           and strategy:readable(path) then
             current.identity = previous.identity
             count_header(strategy, "metadata_reuses")
         else
-            -- A replacement/retarget is a different physical input: its old
-            -- timestamp is inapplicable even if numerically equal. Read once.
-            local contents = current.followed and read_file_contents(path, strategy)
+            local contents = current.followed and current.followed.kind == "file"
+                and read_file_contents(path, strategy)
             if contents then
-                local physical, observation = physical_header(path, strategy)
+                local physical, _, _, guard = physical_header(path, strategy)
                 if physical ~= current.physical
-                   or not cpp.same_header_observation(observation, current.observation) then
-                    return nil, "C header changed while it was read: " .. path
+                   or not cpp.same_header_observation(guard, current.guard) then
+                    records[key] = nil
+                    return nil, "C header changed while it was read: " .. path,
+                        true, "changed-during-read"
                 end
                 count_header(strategy, "file_hashes")
-                current.identity = content_identity(contents, physical, options)
+                current.identity = content_identity(contents, path, options)
             else
-                current.identity = "c-header-file-v2:unreadable:" ..
-                    cpp.header_search_identity(path, current.followed and nil or false, strategy)
+                -- No successful read: do not probe effective access a second time.
+                current.identity = version.C_HEADER_FILE_PROTOCOL .. ":unreadable:" ..
+                    cpp.header_search_identity(path, false, strategy)
+                current.reason = not current.followed and not current.stat_error
+                    and "missing" or "unreadable"
                 current.observation = nil
             end
         end
     end
+    local changed = current.identity ~= previous.identity
+    local reason
+    if changed then
+        reason = current.reason or (kind == "origin" and "provenance"
+            or kind == "search" and "candidate" or "content")
+    end
     return {
         kind = kind, path = path, identity = current.identity,
         observation = cpp.copy_header_observation(current.observation),
-    }, nil, current.identity ~= previous.identity
+    }, nil, changed, reason
 end
 
 local function debug() end
@@ -648,6 +703,7 @@ local function normalize_toolchain(options)
     return {
         io = io_for(options),
         cache_adapter = options.cache_adapter,
+        file_digest = options.file_digest,
         header_observations = options.header_observations or cpp.header_observation_index(options.header_inputs),
         compiler = compiler,
         language_mode = language_mode,
@@ -805,6 +861,7 @@ local function copy_config(config)
     return {
         io = config.io,
         cache_adapter = config.cache_adapter,
+        file_digest = config.file_digest,
         header_observations = config.header_observations,
         compiler = { table.unpack(config.compiler) },
         language_mode = config.language_mode,
@@ -937,7 +994,7 @@ local function probe_include_paths(config)
             end
         end
     end
-    return paths
+    return paths, nil, output
 end
 
 local function parse_macro_dump(output, strategy)
@@ -988,12 +1045,12 @@ local function base_probe(config)
     local probe_cache = probe_cache_for(config.io)
     local probed = probe_cache[key]
     if probed then return probed end
-    local incdirs, err = probe_include_paths(config)
+    local incdirs, err, banner = probe_include_paths(config)
     if not incdirs then return nil, err end
     local defines
     defines, err = probe_default_defines(config)
     if not defines then return nil, err end
-    probed = { incdirs = incdirs, defines = defines,
+    probed = { incdirs = incdirs, defines = defines, banner = banner,
         semantic_digest = preprocessor_semantic_digest(incdirs, defines) }
     probe_cache[key] = probed
     return probed
@@ -1174,7 +1231,7 @@ end
 
 local function forced_entry_is_current(entry, config)
     local refreshed, touched = {}, false
-    local options = { io = config.io, header_validation = {},
+    local options = { io = config.io, header_validation = {}, file_digest = config.file_digest,
         header_observations = config.header_observations, cache_adapter = config.cache_adapter }
     for index, input in ipairs(forced_inputs(entry.forced)) do
         local current, _, changed = cpp.revalidate_header_input(input, options)
@@ -1229,13 +1286,13 @@ local function completed_forced_configuration(configuration)
     -- only; a fresh provider rescans forced inputs before header-cache reuse.
     local scanned
     scanned, err = scan_forced_headers(configuration.forced, base.incdirs,
-        base.defines, cwd, config.io, { cache_adapter = adapter })
+        base.defines, cwd, config.io, { cache_adapter = adapter, file_digest = config.file_digest })
     if not scanned then return nil, err end
     scanned.incdirs, scanned.base_defines = copy_incdirs(base.incdirs), copy_map(base.defines)
     local defines
     defines, err = probe_default_defines(config)
     if not defines then return nil, err end
-    local probed = { incdirs = copy_incdirs(base.incdirs), defines = defines,
+    local probed = { incdirs = copy_incdirs(base.incdirs), defines = defines, banner = base.banner,
         semantic_digest = preprocessor_semantic_digest(base.incdirs, defines) }
     local entry = { owner = "titan-forced-preprocessor", version = 1, key = key,
         forced = scanned, probed = probed }
@@ -1276,13 +1333,13 @@ function cpp.new_context(options)
     local cache = probe_cache_for(config.io)
     probed = probed or cache[key]
     if not probed then
-        local incdirs
-        incdirs, err = probe_include_paths(config)
+        local incdirs, banner
+        incdirs, err, banner = probe_include_paths(config)
         if not incdirs then return nil, err end
         local defines
         defines, err = probe_default_defines(config)
         if not defines then return nil, err end
-        probed = { incdirs = incdirs, defines = defines,
+        probed = { incdirs = incdirs, defines = defines, banner = banner,
             semantic_digest = preprocessor_semantic_digest(incdirs, defines) }
     end
     cache[key] = probed
@@ -1290,6 +1347,7 @@ function cpp.new_context(options)
         io = config.io,
         incdirs = copy_incdirs(probed.incdirs),
         defines = clone_graph(probed.defines),
+        preprocessor_banner = probed.banner,
         macro_changes = copy_map(forced.macro_changes),
         ifmode = { true },
         output = { table.unpack(forced.output) },

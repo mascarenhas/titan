@@ -156,6 +156,8 @@ local function normalized_stat(attributes)
         inode = not platform.windows and attributes.ino or nil,
         modified_seconds = modified_seconds,
         modified_nanoseconds = modified_nanoseconds,
+        -- LFS exposes floating seconds, not a declared native nanosecond clock.
+        time_precision = "coarse",
     }
 end
 
