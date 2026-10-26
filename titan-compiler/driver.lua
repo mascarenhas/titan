@@ -11336,36 +11336,59 @@ end
 -- spelling and physical identity. No collision query performs filesystem I/O.
 function perf.new_output_path_index(label, reservations)
     local observations, attributes, outputs = {}, {}, {}
+    local windows_io = platform.windows and compiler_io.new_sync()
     local fields = { "normalized", "physical", "portable" }
     local exact, trees, identities = {}, {}, {}
     for _, field in ipairs(fields) do
         exact[field], trees[field] = {}, {}
     end
 
+    local function file_mode(attr)
+        if not attr then return nil end
+        if windows_io then return attr.kind == "symlink" and "link" or attr.kind end
+        return attr.mode
+    end
+
     local function attrs(path)
         local cached = attributes[path]
         if cached == nil then
-            cached = lfs.symlinkattributes(path) or false
+            if windows_io then
+                -- The shared I/O boundary handles LFS's Windows directory
+                -- table-query bug and retains complete no-follow metadata.
+                local err
+                cached, err = windows_io:lstat(path)
+                if err then return nil, err end
+            else
+                cached = lfs.symlinkattributes(path)
+            end
+            cached = cached or false
             attributes[path] = cached
         end
         return cached or nil
+    end
+
+    local function follow(path, attr)
+        if file_mode(attr) ~= "link" then return attr end
+        if windows_io then return windows_io:stat(path) end
+        local followed = lfs.attributes(path)
+        return followed
     end
 
     local function observe(path)
         local raw = absolute_filename(path)
         local cached = observations[raw]
         if cached then return cached end
-        local attr = attrs(raw)
-        local followed = attr
-        if attr and attr.mode == "link" then
-            followed = lfs.attributes(raw)
-        end
+        local attr, err = attrs(raw)
+        if err then return nil, err end
+        local followed
+        followed, err = follow(raw, attr)
+        if err then return nil, err end
         cached = {
             path = path,
             raw = raw,
             normalized = normalize_absolute_path(raw),
             physical = physical_absolute_filename(raw, attrs),
-            existing_mode = attr and attr.mode or nil,
+            existing_mode = file_mode(attr),
             device = not platform.windows and followed and followed.dev or nil,
             inode = not platform.windows and followed and followed.ino or nil,
         }
@@ -11447,10 +11470,13 @@ function perf.new_output_path_index(label, reservations)
         end
         local ok, err = ancestors(current)
         if not ok then return nil, err end
-        local attr = attrs(current)
-        local followed = attr
-        if attr and attr.mode == "link" then followed = lfs.attributes(current) end
-        if attr and (not followed or followed.mode ~= "directory") then
+        local attr
+        attr, err = attrs(current)
+        if err then return nil, err end
+        local followed
+        followed, err = follow(current, attr)
+        if err then return nil, err end
+        if attr and (not followed or file_mode(followed) ~= "directory") then
             return nil, "output parent '" .. current .. "' is not a directory"
         end
         checked_parents[current] = true
@@ -11459,8 +11485,10 @@ function perf.new_output_path_index(label, reservations)
 
     local index = { outputs = outputs }
     function index.add(path, owner, mode)
-        local observation = observe(path)
-        local ok, err = ancestors(observation.normalized)
+        local observation, err = observe(path)
+        if not observation then return nil, err end
+        local ok
+        ok, err = ancestors(observation.normalized)
         if not ok then return nil, err end
         if observation.existing_mode and observation.existing_mode ~= mode then
             local expected = mode == "directory" and
@@ -11492,7 +11520,8 @@ function perf.new_output_path_index(label, reservations)
         for _, input in ipairs(inputs or {}) do
             local path = archive_input_path(input)
             if type(path) == "string" then
-                local observation = observe(path)
+                local observation, err = observe(path)
+                if not observation then return nil, err end
                 local output, alias = match(observation)
                 if output then
                     return nil, label .. " '" .. output.normalized ..
