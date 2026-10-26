@@ -5,6 +5,7 @@ local driver = require "titan-compiler.driver"
 local native = require "titan-compiler.nativeinputs"
 local lfs = require "lfs"
 local platform = require "titan-compiler.platform"
+local process = require "titan-compiler.process"
 local temporary = require "spec.support.temporary"
 
 local function context() return { io = compiler_io.new_sync() } end
@@ -269,4 +270,140 @@ describe("opaque native C policy", function()
         remove(root)
         assert.is_true(ok, tostring(err))
     end)
+end)
+
+describe("native C object path CLI", function()
+    local root, sources, first, second, prefix, repository
+    local function read(path) return assert(context().io:read_file(path)) end
+    local function invoke(arguments)
+        local argv = {
+            platform.windows and "env.exe" or "env",
+            "TITAN_RUNTIME_PREBUILT=1", "CCACHE_DISABLE=1",
+            "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_ROCKS_ROOT=" .. prefix,
+            "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=-O0 -fno-lto",
+            "TITAN_EXTRA_LDFLAGS=",
+            prefix .. "/bin/lua" .. (platform.windows and ".exe" or ""), "-E", "-e",
+            string.format("package.path=%q..package.path; package.cpath=%q..package.cpath",
+                repository .. "/?.lua;" .. repository .. "/?/init.lua;",
+                repository .. "/titan-runtime/bootstrap/?" ..
+                    (platform.windows and ".dll" or ".so") .. ";"),
+            repository .. "/titanc",
+        }
+        for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
+        local stdout, stderr = root .. "/stdout", root .. "/stderr"
+        local batch = process.new_batch()
+        local child, err = batch:spawn(argv, stdout, stderr, 1)
+        if not child then
+            batch:close()
+            error(err, 0)
+        end
+        local ok, why, status = child:wait()
+        assert(batch:close())
+        return { ok = ok == true, why = why, status = status,
+            stdout = read(stdout):gsub("\r\n", "\n"),
+            stderr = read(stderr):gsub("\r\n", "\n") }
+    end
+    local function objects(output, arguments)
+        local argv = { "-c", "--incremental", "--print-c-objects", "-v", "--output", output }
+        for _, source in ipairs(arguments) do
+            argv[#argv + 1] = "--c-source"
+            argv[#argv + 1] = source
+        end
+        local result = invoke(argv)
+        assert.is_true(result.ok, result.stderr)
+        assert.equal("exit", result.why, result.stderr)
+        assert.equal(0, result.status, result.stderr)
+        local paths = {}
+        for line in result.stdout:gmatch("([^\n]+)\n") do
+            assert.is_true(platform.is_absolute(line), result.stdout)
+            assert.matches("%.o$", line)
+            assert.equal("file", lfs.attributes(line, "mode"))
+            paths[#paths + 1] = line
+        end
+        assert.equal(table.concat(paths, "\n") .. "\n", result.stdout)
+        return paths, result
+    end
+    before_each(function()
+        root = temporary.name(); assert(os.remove(root)); assert(lfs.mkdir(root))
+        root = assert(context().io:realpath(root))
+        sources = root .. "/C sources Ω"
+        assert(lfs.mkdir(sources))
+        first, second = sources .. "/first helper.c", sources .. "/second helper Ω.c"
+        write(first, "int first_helper(void) { return 17; }\n")
+        write(second, "int second_helper(void) { return 29; }\n")
+        prefix = require("spec.support.installed_prefix").active()
+        repository = assert(lfs.currentdir())
+        if platform.windows then repository = assert(platform.path.normalize(repository)) end
+    end)
+    after_each(function() remove(root) end)
+
+    it("prints current returned paths in argument order and preserves duplicates across warm builds", function()
+        local output = root .. "/build objects Ω"
+        assert(lfs.mkdir(output))
+        assert(lfs.mkdir(output .. "/.native"))
+        local stale = output .. "/.native/unrelated-stale.o"
+        write(stale, "unrelated retained object\n")
+        local arguments = { first, second, first, sources .. "/./first helper.c" }
+        local paths, cold = objects(output, arguments)
+        assert.equal(4, #paths)
+        assert.not_equal(paths[1], paths[2])
+        assert.same({ paths[1], paths[2], paths[1], paths[1] }, paths)
+        assert.matches("Titan native miss " .. first, cold.stderr, 1, true)
+        assert.matches("Titan native miss " .. second, cold.stderr, 1, true)
+        for _, path in ipairs(paths) do assert.not_equal(stale, path) end
+        assert.equal("unrelated retained object\n", read(stale))
+
+        local sentinel, before = 946684800, {}
+        for _, path in ipairs({ paths[1], paths[2], stale }) do
+            assert(lfs.touch(path, sentinel, sentinel))
+            before[path] = { bytes = read(path), modified = assert(lfs.attributes(path)).modification }
+        end
+        local warm_paths, warm = objects(output, arguments)
+        assert.same(paths, warm_paths)
+        assert.matches("Titan native hit " .. first, warm.stderr, 1, true)
+        assert.matches("Titan native hit " .. second, warm.stderr, 1, true)
+        assert.is_nil(warm.stderr:find("Titan native miss ", 1, true), warm.stderr)
+        for line in warm.stderr:gmatch("[^\n]+") do
+            local command = cdriver.split_shell_words(line)
+            for _, argument in ipairs(command or {}) do
+                assert.not_equal("-c", argument, "native compilation during warm reuse: " .. line)
+            end
+        end
+        for path, snapshot in pairs(before) do
+            assert.equal(snapshot.bytes, read(path))
+            assert.equal(snapshot.modified, assert(lfs.attributes(path)).modification)
+        end
+
+        -- Bind each printed slot to its requested source without predicting
+        -- the compiler's object naming scheme or discovering it by glob.
+        local first_only = objects(output, { first })
+        local second_only = objects(output, { second })
+        assert.same({ paths[1] }, first_only)
+        assert.same({ paths[2] }, second_only)
+        assert.equal("unrelated retained object\n", read(stale))
+    end)
+
+    for _, case in ipairs({
+        { name = "requires compile-only mode before creating outputs",
+            arguments = function() return { "--c-source", first } end },
+        { name = "requires a C source before creating outputs",
+            arguments = function() return { "-c" } end },
+        { name = "rejects installation-root printing before creating outputs",
+            arguments = function() return { "-c", "--c-source", first, "--print-root" } end },
+        { name = "rejects AST printing before creating outputs",
+            arguments = function() return { "-c", "--c-source", first, "--print-ast" } end },
+    }) do
+        it(case.name, function()
+            local output = root .. "/uncreated output Ω"
+            local argv = { "--print-c-objects", "-v", "--output", output }
+            for _, argument in ipairs(case.arguments()) do argv[#argv + 1] = argument end
+            local result = invoke(argv)
+            assert.is_false(result.ok, result.stderr)
+            assert.equal("exit", result.why, result.stderr)
+            assert.not_equal(0, result.status, result.stderr)
+            assert.equal("", result.stdout)
+            assert.matches("--print-c-objects", result.stderr, 1, true)
+            assert.is_nil(lfs.symlinkattributes(output))
+        end)
+    end
 end)
