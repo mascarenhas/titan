@@ -2781,8 +2781,15 @@ fi
         assert.truthy(commands:find("--exe " .. work .. "/sdk/bin/titan-stdlib-tests.exe", 1, true), commands)
         assert.falsy(commands:find("--launcher-name", 1, true), commands)
         assert.falsy(commands:find("async.tests", 1, true), commands)
-        local _, aggregate_helpers = commands:gsub("%-%-c%-source", "")
-        assert.equal(7, aggregate_helpers, commands)
+        local _, native_sources = commands:gsub("%-%-c%-source", "")
+        assert.equal(8, native_sources, commands)
+        local fixed_helpers = { "uv_stdio_probe", "sqlite3_worker_fixture",
+            "ssl_allocator_fixture", "ssl_error_strings", "os_descriptor_limit" }
+        for _, name in ipairs(fixed_helpers) do
+            local object = work .. "/cwd/.titan-tests/" .. name .. ".o"
+            assert.equal(read_file(source .. "/" .. native .. name .. ".c"), read_file(object))
+            assert.truthy(lfs.touch(object, 1000, 1000))
+        end
         local sdk_input = work .. "/sdk/lib/titan/0.6/titan.dll"
         local source_input = work .. "/source/spec/stdlib/titan/test/tests.titan"
         assert.truthy(lfs.touch(sdk_input, 1000, 1000))
@@ -2803,6 +2810,9 @@ fi
         assert.equal(links, read_file(link_log))
         assert.equal(1000, lfs.attributes(sdk_input, "modification"))
         assert.equal(1000, lfs.attributes(source_input, "modification"))
+        for _, name in ipairs(fixed_helpers) do
+            assert.equal(1000, lfs.attributes(work .. "/cwd/.titan-tests/" .. name .. ".o", "modification"))
+        end
         assert_absent(work .. "/sdk/share/retired.lua")
         assert_absent(work .. "/source/spec/stdlib/titan/retired_tests.titan")
         assert_absent(work .. "/cwd/spec/fixtures/retired.txt")
@@ -2828,10 +2838,18 @@ fi
         assert.truthy(lfs.touch(work .. "/sdk" .. edited_sdk, 1000, 1000))
         write_file(prefix .. edited_sdk, "changed SDK input\n")
         assert.truthy(lfs.touch(prefix .. edited_sdk, 1000, 1000))
+        -- Retained native certificates must also repair missing fixed copies.
+        for _, name in ipairs(fixed_helpers) do
+            assert.truthy(os.remove(work .. "/cwd/.titan-tests/" .. name .. ".o"))
+        end
         ok, output = harness("build", true)
         assert.truthy(ok, output)
         assert.equal("function value(): integer return 3 end\n", read_file(source_input))
         assert.equal("changed SDK input\n", read_file(work .. "/sdk" .. edited_sdk))
+        for _, name in ipairs(fixed_helpers) do
+            local object = work .. "/cwd/.titan-tests/" .. name .. ".o"
+            assert.equal(read_file(source .. "/" .. native .. name .. ".c"), read_file(object))
+        end
         local notes = work .. "/coverage/.coverage/retained.gcno"
         assert.truthy(lfs.touch(notes, 1000, 1000))
         ok, output = harness("build", true)
