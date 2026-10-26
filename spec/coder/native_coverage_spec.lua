@@ -39,6 +39,20 @@ local function remove_tree(filename)
         assert(lfs.rmdir(filename))
     elseif lfs.attributes(filename) then assert(os.remove(filename)) end
 end
+local function synthetic_file(output_root, relative)
+    local found
+    local links = output_root .. "/.titan-links"
+    for key in lfs.dir(links) do
+        if #key == 64 and key:match("^[0-9a-f]+$") then
+            local filename = links .. "/" .. key .. "/synthetic/" .. relative
+            if lfs.attributes(filename, "mode") == "file" then
+                assert.is_nil(found, relative)
+                found = filename
+            end
+        end
+    end
+    return assert(found, "missing target-private synthetic file: " .. relative)
+end
 local function copy(from, to)
     if lfs.attributes(from, "mode") == "directory" then
         assert(lfs.mkdir(to))
@@ -202,8 +216,10 @@ function test_mixed(_context: test.Context) test.assert(true) end
         local ok, output = compile(options)
         assert.truthy(ok, output)
         assert.truthy(lfs.attributes(output_root .. "/.coverage/calc.gcno"))
-        assert.truthy(lfs.attributes(output_root .. "/.coverage/checks__test_runner.c"))
-        assert.truthy(lfs.attributes(output_root .. "/checks__test_entrypoint.c"))
+        assert.truthy(lfs.attributes(synthetic_file(output_root,
+            ".coverage/checks__test_runner.c")))
+        assert.truthy(lfs.attributes(synthetic_file(output_root,
+            "checks__test_entrypoint.c")))
         assert.is_nil(lfs.attributes(workspace .. "/.coverage"))
         assert.is_nil(lfs.attributes(workspace .. "/checks__test_entrypoint.c"))
         local program = platform.windows and

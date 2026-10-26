@@ -123,6 +123,21 @@ local function escape_pattern(text)
     return (text:gsub("([^%w])", "%%%1"))
 end
 
+local function synthetic_file(output_root, basename)
+    local found
+    local links = output_root .. "/.titan-links"
+    for key in lfs.dir(links) do
+        if #key == 64 and key:match("^[0-9a-f]+$") then
+            local filename = links .. "/" .. key .. "/synthetic/" .. basename
+            if lfs.attributes(filename, "mode") == "file" then
+                assert.is_nil(found, basename)
+                found = filename
+            end
+        end
+    end
+    return assert(found, "missing target-private synthetic file: " .. basename)
+end
+
 describe("folder modules through the public compiler", function()
     local workspace
     local source_root
@@ -582,7 +597,7 @@ end
         assert.is_nil(lfs.attributes(
             workspace .. "/programs/folderapp", "mode"))
         assert.equal("file", lfs.attributes(
-            workspace .. "/programs/folderapp__entrypoint.c", "mode"))
+            synthetic_file(source_root, "folderapp__entrypoint.c"), "mode"))
         assert.equal("file", lfs.attributes(
             folder .. "/folderapp.c", "mode"))
         assert.equal("file", lfs.attributes(
@@ -597,7 +612,7 @@ end
         assert.equal("", output)
     end)
 
-    it("leaves flat library and program artifact paths unchanged", function()
+    it("keeps flat module outputs and moves program intermediates into the target namespace", function()
         write_file(source_root .. "/flatlib.titan", [[
 function answer(): integer
     return 11
@@ -625,7 +640,7 @@ end
             assert.is_nil(lfs.attributes(workspace .. "/flatapp", "mode"))
         end
         assert.equal("file", lfs.attributes(
-            workspace .. "/flatapp__entrypoint.c", "mode"))
+            synthetic_file(source_root, "flatapp__entrypoint.c"), "mode"))
         assert.is_nil(lfs.attributes(workspace .. "/flatapp__main", "mode"))
         local ok, output, why, code = run_program(workspace, "flatapp", "flatapp")
         assert.falsy(ok)

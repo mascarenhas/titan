@@ -127,6 +127,7 @@ describe("static compiled-module checker provenance", function()
     local binary
     local previous
     local native_abi_exports
+    local static_providers
 
     -- Native ABI membership is separate from the provider's Lua callbacks.
     local function mock_native_abi(filename, modules)
@@ -175,7 +176,7 @@ describe("static compiled-module checker provenance", function()
             provider.key_order[#provider.key_order + 1] = name
         end
         table.sort(provider.key_order, util.bytewise_less)
-        context.provider_cache[filename] = provider
+        static_providers[filename] = provider
         return provider
     end
 
@@ -195,8 +196,15 @@ describe("static compiled-module checker provenance", function()
             registry = types.registry,
             loadlib = titan._loadlib,
             abivalue = titan._abivalue,
+            scan_archive = staticmetadata.scan_archive,
         }
         native_abi_exports = {}
+        static_providers = {}
+        staticmetadata.scan_archive = function(filename, options)
+            local provider = static_providers[filename]
+            if provider then return provider end
+            return previous.scan_archive(filename, options)
+        end
         driver.TITAN_SOURCE_PATH = source
         driver.TITAN_BIN_PATH = binary
         driver.imported = {}
@@ -210,6 +218,7 @@ describe("static compiled-module checker provenance", function()
         types.registry = previous.registry
         titan._loadlib = previous.loadlib
         titan._abivalue = previous.abivalue
+        staticmetadata.scan_archive = previous.scan_archive
         remove_tree(root)
     end)
 

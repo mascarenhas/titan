@@ -791,6 +791,19 @@ printf '%%s\n' "$count" > %s
             "pkg.left", "pkg.right", "pkg.shared")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
+        assert.equal("2\n", read_file(counter))
+        assert.is_nil(lfs.attributes(snapshots .. "/staged-4.a", "mode"))
+
+        -- A final-link hit performs no archive work. Force a link-only recipe
+        -- miss to retain the ordinary-archive header-noise publication check.
+        environment.TITAN_EXTRA_LDFLAGS =
+            (os.getenv("TITAN_EXTRA_LDFLAGS") or "") .. " -L" ..
+            assert(cdriver.shell_quote(workspace))
+        ok, output, why, code = compile_with_environment(
+            workspace, source_root, environment, "-v",
+            "pkg.left", "pkg.right", "pkg.shared")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
         assert.equal("4\n", read_file(counter))
         local second_staged =
             read_file(snapshots .. "/staged-4.a")
