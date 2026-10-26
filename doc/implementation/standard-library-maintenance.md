@@ -16,6 +16,19 @@ dead helper. An exact-type adapter can still be worthwhile when a repeated
 typed call avoids generic callable adjustment; measure its one-time wrapper
 cost against the hot path rather than removing adapters mechanically.
 
+Library modules depend on each other only through ordinary public imports
+(`import "coroutine"`, `import "os"`); no source under `titan/` uses an
+explicit `.titan` [source import](source-import-visibility.md), and the import
+graph check in `spec/libuv_build_spec.lua` rejects one. Each source module must
+therefore compile against a compatible compiled-only provider of every
+dependency. When a consumer needs a producer's private state, either the
+behavior belongs with the producer (the shell facade lives in `titan.os`, next
+to the Process and streams it owns) or the producer should export one complete
+public operation (`Coroutine:transfer` returns the outcome and trace that
+async needs). The `STDLIB_IMPORTS_*` lists in the `Makefile` mirror these
+imports and still order the build; dropping a source import does not remove a
+dependency.
+
 Evaluate a pure zero-argument machine/module invariant once in the owning
 module's final initializer and cache it locally (the `titan.string` initializer
 in `titan/string/string.titan` is the model). Factories, mutable-state

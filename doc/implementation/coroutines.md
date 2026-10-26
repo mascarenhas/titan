@@ -239,14 +239,23 @@ the propagation-side trace, combines it with the staged coroutine trace, pins
 it, and re-raises the same payload. The registry protocol is canonical in
 [Error handling](error-handling.md#trace-pinning).
 
-The async driver resumes Task roots through the private
-`Coroutine:transfer_outcome` instead, which `titan/async.titan` reaches through
-`import "coroutine.titan"`. It performs `resume` or `error` but returns `true`
-and the payload for `ok=false`, leaving the staged trace in place. The driver's
-`resume_root` calls `raise_with_appended_trace` only for a failure that the
-Task will report. For a cancelled Task, or a `run_with_cleanup` Task that has
-already recorded its body's failure, it drops the staged trace with
-`pop_trace_for_append` and captures no propagation trace. See
+The public `Coroutine:transfer(payload, tag, inject_error)` runs the same
+finalizer check, tag resolution, receiver root, and
+`push_transfer`/`resume_switch`/`pop_transfer` sequence as `resume` and
+`error`. It differs only after the pop. On `ok=false` it calls
+`pop_trace_for_append`, which reads the staged trace into a traced local and
+clears `TITAN_TRACE_APPEND_KEY`, and then returns `(true, payload, trace)`
+instead of raising. On `ok=true` it returns `(false, payload, nil)` without
+reading the registry, capturing a trace, or allocating. Every `ok=false` that
+reaches a resumer comes from `coro_entry`'s catch, which always stages a trace
+first, so a returned outcome never leaves a stale trace behind. Errors raised
+before or during the switch (tag, state, finalizer, minicoro, stack) propagate
+as ordinary raises. The staging and raising helpers stay private to
+`titan/coroutine.titan`.
+
+`titan/async.titan` imports `coroutine` through its ordinary public interface
+and uses `transfer` to drive Task roots; the report policy that decides whether
+to append a driver trace is described in
 [Task status](libuv-runtime.md#explicit-suspend-task-status-listeners-and-combinators).
 
 `Coroutine:error` before the first `resume` is handled without calling the

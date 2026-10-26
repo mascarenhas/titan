@@ -422,10 +422,11 @@ These rules are generic; domain chapters keep only their gate and schema:
 
 - **Manual ownership.** A successfully encoded payload owns the duplicated
   native resource. It must be adopted exactly once through
-  `from_transfer_payload` or disposed explicitly. UV TCP/pipe and the
-  net/TLS/HTTP/WebSocket owners export `discard_transfer_payload`, which ends in
-  UV's native close; a close attempt consumes ownership even when it returns an
-  error status. File, process/shell streams and SQLite Connection have no such
+  `from_transfer_payload` or disposed explicitly. UV TCP/pipe, the
+  net/TLS/HTTP/WebSocket owners, and `os.InputStream`/`os.OutputStream` export
+  `discard_transfer_payload`, which ends in UV's native close; a close attempt
+  consumes ownership even when it returns an error status. `fs.File`, the
+  `os.InputOutputStream` shell composite, and `sqlite3.Connection` have no such
   helper and require their documented adoption/close recovery.
 - **Lossy carriers.** `async.Receiver` coalesces: a newer send replaces an
   unread packet. Discarding or overwriting a packet in either receiver releases

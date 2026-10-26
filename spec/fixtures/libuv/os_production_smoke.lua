@@ -2,7 +2,6 @@ local mode = assert(arg[1], "expected libuv mode label")
 local process_child = arg[2]
 local builtin = require "os"
 local system = require "titan.os"
-local titan_io = require "titan.io"
 
 assert(type(builtin) == "table")
 assert(type(system) == "userdata")
@@ -57,7 +56,7 @@ if process_child then
         check_parent_stream(system.stdout)
         check_parent_stream(system.stderr)
 
-        local merged = titan_io.popen(
+        local merged = system.popen(
             "printf '" .. mode .. "-stdout'; " ..
             "printf '" .. mode .. "-stderr' >&2")
         local merged_chunks = {}

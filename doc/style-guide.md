@@ -427,7 +427,7 @@ Test additions through public behavior or standalone native fixtures; uv tests
 must not rewrite the binding's source text without an explicitly justified,
 maintainer-approved native-boundary exception.
 
-For shell-command convenience, `io.popen` owns writable stdin and one readable
+For shell-command convenience, `os.popen` owns writable stdin and one readable
 stream that merges the child's stdout and stderr. Drain that output before
 `wait`; when input and output must progress together, schedule both directions
 concurrently. Use `os.spawn` instead when the program needs direct executable

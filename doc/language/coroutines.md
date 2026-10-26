@@ -25,6 +25,8 @@ function create(func: function (value): (value), default_tag: value): Coroutine
 function running(): Coroutine?
 function Coroutine:resume(arg: value, tag: value): value
 function Coroutine:error(err: value, tag: value): value
+function Coroutine:transfer(payload: value, tag: value,
+                            inject_error: boolean): (boolean, value, string?)
 function Coroutine:status(): string
 
 function yield(arg: value, tag: value): value
@@ -36,7 +38,8 @@ the `coroutine` module.
 
 Titan's ordinary argument adjustment makes the second argument to
 `create`, `resume`, and `error` optional in practice: omitting it passes
-`nil`. `nil` means "no tag supplied" and is not a legal tag.
+`nil`. `nil` means "no tag supplied" and is not a legal tag. `transfer` takes
+the same tag in the middle position; pass `nil` explicitly to use the default.
 
 Payloads are ordinary `value`s, so `arg`, `err`, yielded values, and
 returned values may be `nil`. Tags must be non-nil.
@@ -195,6 +198,47 @@ same error value in the caller while preserving the coroutine traceback.
 Calling `co:error(err, tag)` before the first normal `resume` raises
 `err` without calling the entry function.
 
+## Non-raising transfer
+
+`co:transfer(payload, tag, inject_error)` switches to the coroutine exactly as
+`co:resume(payload, tag)` does when `inject_error` is `false`, and exactly as
+`co:error(payload, tag)` does when it is `true`. Tags, tagged nested yield,
+and injection before the first resume (which never calls the entry function)
+behave the same. Only the way an uncaught error comes back differs:
+
+| Outcome | Result |
+| --- | --- |
+| The coroutine yields or returns | `false, value, nil` |
+| An uncaught error ends the coroutine | `true, error, traceback` |
+
+The first result means **failed**; it is not a "dead" flag. Use `status()` to
+tell a yield from a normal return. `nil` and `false` are ordinary values and
+ordinary error values, so never infer the outcome from the truthiness of the
+second result. Raising `nil` still delivers `"<no error object>"`, as in
+[raising errors](error-handling.md#raising-errors).
+
+The traceback is the one captured when the error escaped the coroutine body,
+in the same frame-only form as a `catch` block's `traceback`. It is an
+ordinary string owned by the caller; the next raising operation does not see
+it. A caller that reports the failure can append its own propagation trace;
+a caller that drops the failure pays for no extra capture. A successful
+transfer captures no traceback and allocates no result object.
+
+Everything else still raises in the caller: a missing tag, a coroutine that is
+not suspended, a switch from a finalizer, and native, allocation, or stack
+failures. Unwinding an abandoned coroutine stays uncatchable.
+
+```titan
+local coroutine = import "coroutine"
+
+function run_step(co: coroutine.Coroutine, input: value): string
+    local failed, _, trace? = co:transfer(input, nil, false)
+    if failed then return "failed: " .. (trace or "") end
+    if co:status() == "dead" then return "returned" end
+    return "yielded"
+end
+```
+
 ## Status
 
 `co:status()` returns:
@@ -207,8 +251,8 @@ Calling `co:error(err, tag)` before the first normal `resume` raises
 | `"stacked"` | The coroutine is inside a skipped chain created by a tagged nested yield; resuming the suspended matching handler restores the skipped stack. |
 | `"dead"` | The entry function returned, an uncaught error escaped, or an error was injected before the entry function started. |
 
-Calling `resume` or `error` on a `running`, `normal`, `stacked`, or
-`dead` coroutine raises in the caller. For a tagged nested yield, resume
+Calling `resume`, `error`, or `transfer` on a `running`, `normal`, `stacked`,
+or `dead` coroutine raises in the caller. For a tagged nested yield, resume
 the suspended handler that received the yield instead.
 
 Titan coroutines are not Lua coroutines. The `yield` function on Titan's

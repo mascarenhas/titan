@@ -50,6 +50,10 @@ env -u TITAN_IO_DUP_FAILURE -u TITAN_IO_EXIT_PROBE \
   "$executable" > "$output/recovery.log" 2>&1 || { cat "$output/recovery.log" >&2; exit 1; }
 grep -Fqx 'PASS: second-pipe failure retained write/retry/close ownership' \
   "$output/recovery.log" || { cat "$output/recovery.log" >&2; exit 1; }
+grep -Fqx 'PASS: terminal close error consumed retained ownership without retry' \
+  "$output/recovery.log" || { cat "$output/recovery.log" >&2; exit 1; }
+grep -Fqx 'PASS: endpoint disposers returned terminal close errors without adoption' \
+  "$output/recovery.log" || { cat "$output/recovery.log" >&2; exit 1; }
 env -u TITAN_IO_DUP_FAILURE TITAN_IO_EXIT_PROBE=1 \
   "$executable" > "$output/exit.log" 2>&1 || { cat "$output/exit.log" >&2; exit 1; }
 grep -Fqx 'PASS: exit cleanup discarded retained pipe with adoption still closed' \

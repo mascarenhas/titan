@@ -1,12 +1,13 @@
 # I/O-library implementation
 
-The user-facing Interfaces, printing, line iteration, and process-stream
-contracts are in the
+The user-facing Interfaces, printing, and line-iteration contracts are in the
 [I/O standard-library chapter](../language/standard-library-io.md).
-`titan/io.titan` is a flat Titan module over the existing Interface,
-generic-for, string, and OS process machinery. It adds no compiler intrinsic,
-Lua C API operation, or native code. It reaches the OS module's private stream
-helpers through the explicit source import `import "os.titan"`.
+`titan/io.titan` is a flat Titan module whose only imports are the ordinary
+public `os` and `string` interfaces, so a source build composes with
+compiled-only providers of both. It adds no compiler intrinsic, Lua C API
+operation, or native code. Concrete streams, including the shell facade, live
+with their resources in [`titan.os`](os-library.md#shell-process-stream) and
+other owners; `titan.io` declares only the Interfaces they satisfy.
 
 ## One-write printing
 
@@ -49,94 +50,12 @@ initial iterator call, body, update calls, and normal exit inside a synthetic
 region whose close slot owns cleanup. A close error has ordinary `finally`
 precedence and can replace a pending body error, `break`, or `return`.
 
-## Shell process stream
-
-`popen` calls the OS module's private `spawn_shell`, which builds the platform
-shell command and captures writable stdin plus one merged stdout/stderr pipe;
-the shell selection and Windows argument transport are described in
-[spawn transaction and exit delivery](os-library.md#spawn-transaction-and-exit-delivery).
-There are no CRT mode flags or text-mode conversions. `popen` narrows the
-optional Process stream fields and constructs one `InputOutputStream`:
-
-| Field | Meaning |
-| --- | --- |
-| `process` | Originating `os.Process`; nil on a transferred destination. |
-| `input` / `output` | The writable and merged-readable stream facades. `os.spawn` stores the same InputStream in both `stdout` and `stderr`, so no second facade exists. |
-| `input_packet` | A staged writable-pipe transfer payload (see below). |
-| `status` | Cached `ExitStatus`. |
-| `closed` | Set only after close has completed. |
-| `pending_operations` | Count of running `read`, `read_until`, `write`, `wait`, and `close` calls. |
-
-`read`, `read_until`, and `write` delegate directly to the facades, so the
-record structurally satisfies all seven I/O Interfaces without another buffer
-or dispatch layer. `wait` calls `Process:wait` only while `status` is nil and
-returns the cached normal-or-signal result afterwards.
-
-`close` returns early only when `closed` is set. It discards a staged input
-packet, closes stdin, and, if no status is cached and `Process:is_running`
-still reports a live child, sends `term` and calls the caching `wait`. A
-`defer` closes the merged InputStream even if signalling or waiting raises,
-and sets `closed` only when process cleanup succeeded, so a later call can
-retry what did not complete. Signals address the launched shell; the facade
-does not own a process tree or terminate descendants on close or Task
-cancellation.
-
-## Shell-stream transfer
-
-The generic manual-handoff rules are in
-[manual resource handoff](transfer-library.md#manual-resource-handoff). This
-section covers only the shell-stream gate and schema.
-
-The hooks move only the two captured pipes. The originating `Process` and its
-UV exit callback stay in the source Runtime; that callback keeps the private
-`ProcessOwner` rooted until exit even if the source `InputOutputStream` becomes
-unreachable. After a successful transfer the source has no communication
-facades but still owns wait and termination. The destination has no Process:
-its `wait` raises, and its `close` only closes its two streams.
-
-`to_transfer_payload` rejects a closed facade and a nonzero
-`pending_operations`, then runs the OS module's `stream_transfer_preflight` on
-both Stdio owners before detaching either, so a pending operation on the second
-pipe cannot detach the first. Process creation starts the captured output read
-before publishing the facade, so on Windows a fresh shell pipe commonly has a
-pending overlapped read and preflight rejects it (`stdio.transfer`, `EBUSY`)
-even after a yield. Live cross-state shell-pipe handoff therefore has a
-classified Windows skip.
-
-The writable pipe is detached first into `input_packet`. If detaching the
-readable pipe then fails, that packet stays on the source facade:
-`to_transfer_payload` can be retried, `write` reconstructs the owner through
-`restore_input` (also updating `Process.stdin` and clearing the field only after
-adoption succeeds), and `close` discards it with the OS module's
-`discard_output_transfer_payload`. `close` clears the field after that native
-close attempt and before reporting its status, so a close error is never
-retried against a possibly reused descriptor. After both detach, the payload is
-the private `stream_transfer_fields` protobuf schema holding the two OS child
-payloads; a lexical guard discards both if final serialization raises.
-
-`from_transfer_payload` decodes both strings and allocates the composite before
-adopting either pipe. If the readable pipe fails to adopt, a guard calls the OS
-module's `discard_unpublished_stdio` on the already adopted writable owner,
-which starts native close without waiting and so keeps the hook nonyielding.
-
 ## Tests
 
-The non-LuaCov native folder module `spec/stdlib/titan/io/tests/` has two
-constituents. `core_test.titan` instruments string and output values to check
-conversion order, conversion before output, one write, and late lookup of a
-reassigned `os.stdout`, and uses structural ReaderCloser records to check every
-exit path in the table above. `process_test.titan` covers Interface
-conversion, merged output, binary delimiter reads, retained exit status,
-idempotent close, running-child termination, parent-stdin plumbing through a
-compiled standalone child, pipe transfer, destination wait rejection,
-pending-reader rejection without detachment, malformed payloads, and use from
-an independent Lua state.
-
-`spec/support/check_io_transfer_failure.sh` (Linux only; other platforms report
-a classified skip) takes an absolute installed SDK prefix and a new absolute
-output directory. It compiles `spec/fixtures/stdlib/native/io_transfer_dup_failure.c`
-into an object, links the `io_transfer_failure_app` fixture with that object
-passed through `-X`, and adds `-Wl,--wrap=dup,--wrap=close` through
-`TITAN_EXTRA_LDFLAGS`
-to make the second pipe duplication fail, then checks write, retry, close, and
-exit cleanup of the staged descriptor.
+The non-LuaCov native folder module `spec/stdlib/titan/io/tests/` uses
+`core_test.titan` to instrument string and output values and check conversion
+order, conversion before output, one write, and late lookup of a reassigned
+`os.stdout`. Structural ReaderCloser records check every exit path in the table
+above. Shell-stream behavior, including its conversions to all seven
+Interfaces, is tested by `os.process_tests`
+([shell tests](os-library.md#shell-and-disposal-tests)).

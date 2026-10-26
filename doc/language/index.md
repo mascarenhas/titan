@@ -82,11 +82,11 @@ use the chapters below for the normative language reference.
 | [Folder modules](folder-modules.md) | Splitting one logical module across a canonical main and immediate contributors: shared scope, deterministic order, lookup privacy, initialization, and artifacts. |
 | [Lua interoperability](lua-interop.md) | Using Titan from Lua and Lua values in Titan: what crosses the boundary, what each type looks like on the other side, and where the run-time checks happen. |
 | [Error handling](error-handling.md) | The run-time error model: what raises errors, error messages, `pcall`, `titan.backtrace()`, and the option-type idiom for recoverable failures. |
-| [Coroutines](coroutines.md) | The `coroutine` standard module (`import "coroutine"` from Titan, `require "titan.coroutine"` from Lua): stackful asymmetric coroutines, tagged nested yield, error injection, current coroutine identity, status, Lua interop, and unwinding of abandoned coroutines (`defer`, generic-`for` close functions, and Lua `<close>` run at collection and state close), cleanup that needs asynchronous I/O, and unwinding limits. |
+| [Coroutines](coroutines.md) | The `coroutine` standard module (`import "coroutine"` from Titan, `require "titan.coroutine"` from Lua): stackful asymmetric coroutines, tagged nested yield, error injection, explicit non-raising transfer outcomes with owned traces, current coroutine identity, status, Lua interop, and unwinding of abandoned coroutines (`defer`, generic-`for` close functions, and Lua `<close>` run at collection and state close), cleanup that needs asynchronous I/O, and unwinding limits. |
 | [Public libuv binding](standard-library-uv.md) | Event loops, handles, requests, streams, filesystem, processes, threads and synchronization (including direct C-callable lock entries and a cross-thread wake bridge), and utilities; exact signatures, native status, callbacks, ownership, loop abandonment at final state teardown, and API coverage. |
 | [Asynchronous I/O and tasks](async-io.md) | Tasks, their status, errors, and cancellation; scheduling and driving a Runtime; adapting callbacks with `await`; persistent subscriptions; waits on other OS threads and retirement gates for Tasks that own native resources; coalescing cross-state receivers; bounded same-state channels and Reader/Writer adapters; terminal listeners and combinators; exact-token resume; resources and shutdown, including Lua-state close with an active Runtime. |
 | [Thread standard library](standard-library-thread.md) | Bounded cross-thread FIFO channels (`Sender`, `Receiver`) with nil-preserving iteration, transferable endpoints, and the state-close rule for blocked channel operations; standalone OS worker threads (`Thread`, `ThreadStatus`, `Error`) with `join()`, cooperative cancellation, finalized handles, and an `async.Task` proxy that becomes terminal only after the OS thread is joined and cancels its thread when its state closes; and bounded `Group` execution with first-error cancellation and explicit retry boundaries. |
-| [I/O standard library](standard-library-io.md) | The seven `Reader`/`Writer`/`Closer` Interface combinations, standard-output `print`, ownership-safe line iteration, and shell-command `popen` with merged output. |
+| [I/O standard library](standard-library-io.md) | The seven `Reader`/`Writer`/`Closer` Interface combinations, standard-output `print`, and ownership-safe line iteration. |
 | [Timer standard library](standard-library-timer.md) | Task delays, cooperative `yield`, recurring `Ticker` handles, dropped ticks, and explicit close. |
 | [Mathematical standard library](standard-library-math.md) | Typed C99 numeric operations, Lua 5.5-compatible xoshiro256** random sequences, and length-bounded numeric conversion. |
 | [Filesystem standard library](standard-library-fs.md) | Binary file I/O, missing-aware metadata, canonical paths, path operations, Runtime-bound filesystem watchers, and closing open Files at Lua-state close. |
@@ -96,7 +96,7 @@ use the chapters below for the normative language reference.
 | [HTTP/1.1 standard library](standard-library-http.md) | Strict HTTP and HTTPS clients with Runtime-scoped connection pools and bounded asynchronous response draining, ordered duplicate-preserving headers, standalone URL-module integration, streaming response/request bodies, per-connection server Tasks, opt-in shared-port listeners, ownership-aware request-header idle deadlines for listener and adopted Exchange serving, and sequential keep-alive request processing without pipelining support. |
 | [WebSocket messages](standard-library-websocket.md) | Direct Task-blocking ws/wss clients and HTTP handler upgrades, message framing, origin/subprotocol policy, controls, and owned session retirement. |
 | [Filesystem paths](standard-library-path.md) | Native lexical path normalization, joining, splitting, names, extensions and Windows volumes. |
-| [Operating-system standard library](standard-library-os.md) | Portable clocks and timestamps, ISO C calendars/locales, plus environment, parent stdio, signals, graceful exit, and configurable direct child processes. |
+| [Operating-system standard library](standard-library-os.md) | Portable clocks and timestamps, ISO C calendars/locales, environment, parent stdio, signals, graceful exit, configurable direct child processes, shell-command `popen` with merged output, and manual endpoint payload disposal. |
 | [PEG standard library](standard-library-peg.md) | Typed parsing-expression constructors and combinators, labeled failure/recovery, captures and callback timing, anchored pattern matching and leftmost search, locale controls, and relabel source notation. |
 | [String standard library](standard-library-string.md) | Binary byte operations, Lua-compatible formatting and packing, synchronous in-memory streams, and compiled byte-regex matching, capture iteration, splitting, and substitution. |
 | [Lua states and loading standard library](standard-library-lua.md) | Independent states, native loader snapshots, canonical `transfer.TransferValue` copy/borrow policies over a separate carrier that moves no packet attachments, custom reconstruction, exclusive background execution and host-state close during it, two-phase `Receiver` bootstrap and cleanup, Reader input, and state cleanup; current-state loading, cooperative `require`, caches, and searchers. |
@@ -226,10 +226,10 @@ remains rejected.
   previous one ([error handling](error-handling.md)).
 * **Titan ships a focused standard library.** It includes stackful
   `coroutine`; the libuv-backed `async` Task facade and `timer`; `io`
-  Interfaces plus printing, line iteration, and shell-process streams;
+  Interfaces plus printing and line iteration;
   asynchronous `fs` and `net`; reusable `url` parsing; high-level `ssl` and
   `http` short imports;
-  portable `os` helpers and direct child processes;
+  portable `os` helpers, direct child processes, and shell-process streams;
   typed PEG construction; byte-oriented string/regex operations; the
   `math`, `lua`, `iteration`, and `gc` modules,
   including explicit weak-map policy and table/userdata finalizer ownership;

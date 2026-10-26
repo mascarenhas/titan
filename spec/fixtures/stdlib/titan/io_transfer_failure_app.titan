@@ -1,14 +1,14 @@
 -- Run only through spec/support/check_io_transfer_failure.sh, which provides
 -- the controlled native dup wrapper in this separate child process.
-local io = import "io"
 local os = import "os"
 local async = import "async"
 local test = import "test"
 local string = import "string"
 local uv = import "uv"
 foreign import "stdio.h"
+foreign import "../native/io_transfer_dup_failure.h"
 
-local function arm(generation: string, source: io.InputOutputStream)
+local function arm(generation: string, source: os.InputOutputStream)
   os.setenv("TITAN_IO_DUP_FAILURE", generation)
   defer os.unsetenv("TITAN_IO_DUP_FAILURE")
   local rejected = false
@@ -21,9 +21,55 @@ local function arm(generation: string, source: io.InputOutputStream)
   test.assert(rejected, "second native pipe duplication was not rejected")
 end
 
+local function check_endpoint_close_status()
+  local child = os.spawn("/bin/sh", {"-c", "read line"})
+  local input: os.OutputStream = child.stdin
+  local output: os.InputStream = child.stdout
+  local diagnostics: os.InputStream = child.stderr
+  defer diagnostics:close()
+  defer output:close()
+  defer input:close()
+  local packet = ""
+  do
+    os.setenv("TITAN_IO_DUP_FAILURE", "6")
+    defer os.unsetenv("TITAN_IO_DUP_FAILURE")
+    packet = input:to_transfer_payload()
+  end
+  local attempts: integer = ffi.titan_io_close_failure_attempts()
+  local status = os.OutputStream.discard_transfer_payload(packet)
+  test.assert(status == uv.EINTR and ffi.titan_io_close_failure_attempts() == attempts + 1,
+              "output disposer did not return its terminal native close status")
+  ffi.titan_io_close_failure_release_guard()
+  test.assert(output:read() == nil)
+  test.assert(child:wait().code == 1, "output disposal lost the originating Process")
+
+  local reader_child = os.spawn("/bin/sh", {"-c", "read line"})
+  local writer: os.OutputStream = reader_child.stdin
+  local reader: os.InputStream = reader_child.stdout
+  local errors: os.InputStream = reader_child.stderr
+  defer errors:close()
+  defer reader:close()
+  defer writer:close()
+  do
+    os.setenv("TITAN_IO_DUP_FAILURE", "7")
+    defer os.unsetenv("TITAN_IO_DUP_FAILURE")
+    packet = reader:to_transfer_payload()
+  end
+  attempts = ffi.titan_io_close_failure_attempts()
+  status = os.InputStream.discard_transfer_payload(packet)
+  test.assert(status == uv.EINTR and ffi.titan_io_close_failure_attempts() == attempts + 1,
+              "input disposer did not return its terminal native close status")
+  ffi.titan_io_close_failure_release_guard()
+  test.assert(reader_child:is_running(), "input disposal retired its Process")
+  writer:write("finish\n")
+  writer:close()
+  test.assert(reader_child:wait().code == 0, "input disposal lost the originating Process")
+  ffi.puts("PASS: endpoint disposers returned terminal close errors without adoption")
+end
+
 function main(_args: {string}): integer
   if os.getenv("TITAN_IO_EXIT_PROBE") == "1" then
-    local exiting = io.popen("exit 0")
+    local exiting = os.popen("exit 0")
     defer do
       local rejected = false
       do uv.pipe_t.from_transfer_payload(string.char(8, 1))
@@ -43,7 +89,7 @@ function main(_args: {string}): integer
     async.request_exit(0)
   end
 
-  local source = io.popen("read line; printf '%s' \"$line\"")
+  local source = os.popen("read line; printf '%s' \"$line\"")
   defer source:close()
   arm("1", source)
   source:write("write-recovered\n")
@@ -51,11 +97,11 @@ function main(_args: {string}): integer
   test.assert(source:wait().code == 0)
   source:close()
 
-  local retry = io.popen("read line; printf '%s' \"$line\"")
+  local retry = os.popen("read line; printf '%s' \"$line\"")
   defer retry:close()
   arm("2", retry)
   local packet = async.TransferValue.from_value(retry)
-  local target: io.InputOutputStream = packet:to_value()
+  local target: os.InputOutputStream = packet:to_value()
   defer target:close()
   target:write("retry-recovered\n")
   test.assert(target:read_until("missing") == "retry-recovered")
@@ -63,11 +109,30 @@ function main(_args: {string}): integer
   target:close()
   retry:close()
 
-  local close = io.popen("read line")
+  local close = os.popen("read line")
   defer close:close()
   arm("3", close)
   close:close()
   test.assert(close:read() == nil)
+  local terminal = os.popen("read line")
+  defer terminal:close()
+  arm("5", terminal)
+  local rejected = false
+  do terminal:close()
+  catch
+    test.assert(error is async.OperationError)
+    local failure = error as async.OperationError
+    test.assert(failure.operation == "stdio.transfer.discard" and failure.name == "EINTR")
+    rejected = true
+  end
+  test.assert(rejected and ffi.titan_io_close_failure_attempts() == 1,
+              "terminal payload disposal lost the native close error")
+  terminal:close()
+  test.assert(ffi.titan_io_close_failure_attempts() == 1,
+              "shell close retried a consumed payload after a native close error")
+  ffi.titan_io_close_failure_release_guard()
+  ffi.puts("PASS: terminal close error consumed retained ownership without retry")
+  check_endpoint_close_status()
   ffi.puts("PASS: second-pipe failure retained write/retry/close ownership")
   return 0
 end

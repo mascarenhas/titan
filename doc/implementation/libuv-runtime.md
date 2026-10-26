@@ -318,20 +318,22 @@ an `Error` with the caught Lua error value and raw trace; it does not by itself
 fail the Runtime. Raised nil follows the ordinary
 [Lua error normalization](error-handling.md#runtime-trace-model).
 
-`advance_task` resumes the root through `resume_root`, which calls the private
-non-raising `Coroutine:transfer_outcome` (see
-[coroutine entry](coroutines.md#entry-function)). A root that dies with an
-uncaught error returns that error instead of raising it. `resume_root` then
-appends the driver's propagation trace to the root's own trace, by raising
-through `raise_with_appended_trace`, only when the failure will be reported:
-when the Task has no cancellation reason and has not already recorded a
-failure. A cancellation is sticky and takes precedence at publication, and a
-`run_with_cleanup` wrapper has already recorded its body's failure with the
-body's trace, so neither ever reports a propagation trace. Both drop the
-staged trace. A cancelled root's failure is recorded without a trace, and a
-`run_with_cleanup` root keeps the failure and trace that its wrapper recorded.
-This saves one traceback capture of the scheduler stack per cancelled parked
-Task. `advance_task` treats a raised and a returned root failure alike.
+`advance_task` resumes the root through `resume_root`, which calls the public
+[`Coroutine:transfer`](coroutines.md#entry-function) and passes its
+`(failed, value, trace)` tuple back to `advance_task`. A root that dies with
+an uncaught error therefore returns its error and the coroutine's own trace
+instead of raising. `resume_root` adds the driver's propagation trace, by
+raising and catching the error locally once and appending the catch's
+`traceback`, only when the failure will be reported: the Task has no
+cancellation reason and has not already recorded a failure. A cancellation is
+sticky and wins publication, and a `run_with_cleanup` wrapper has already
+recorded its body's failure with the body's trace, so neither pays for a
+propagation capture. `advance_task` records the returned trace for the
+terminal candidate; its own catch still handles a raise from the switch itself.
+Successful switches allocate nothing for the outcome. The native regression in
+`spec/stdlib/titan/async/tests/task_test.titan` pins the resulting capture
+counts: one for a parked cancellation, two for an ordinary reported failure,
+and one for an already recorded cleanup-body failure.
 
 The 17 combinators (`join`, `join_two`..`join_five`, and
 `any_`/`race_`/`all_` at arities two through five) keep independent

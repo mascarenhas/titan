@@ -121,9 +121,9 @@ belong in the corresponding compiler layer.
 | Cross-state `TransferValue` policies, flat packets, closure snapshots, custom hooks, manual native resource handoff | [Transfer policy](doc/implementation/transfer-library.md); public [transfer policies](doc/language/standard-library-transfer.md) and [conversions](doc/language/async-io.md#transfer-values) |
 | Lossy coalescing Receiver ownership, copied packets, borrowed send handles, two-phase bootstrap/cleanup | [Receiver ownership](doc/implementation/libuv-runtime.md#cross-state-receiver-ownership), [bootstrap and teardown](doc/implementation/lua-library.md#receiver-bootstrap-and-teardown); public [receivers](doc/language/async-io.md#cross-state-receivers) |
 | Cross-thread channels, standalone Thread handles, bounded Group execution | [Thread library](doc/implementation/thread-library.md); public [thread](doc/language/standard-library-thread.md) contract |
-| I/O Interfaces, printing, iteration, shell streams | [I/O library](doc/implementation/io-library.md) |
+| I/O Interfaces, printing, iteration | [I/O library](doc/implementation/io-library.md) |
 | Files, metadata, watchers, lexical paths | [Filesystem library](doc/implementation/filesystem-library.md), [path library](doc/implementation/standard-library-path.md) |
-| Child processes, stdio, signals, graceful exit | [OS library](doc/implementation/os-library.md) |
+| Child processes, shell streams, stdio, signals, graceful exit | [OS library](doc/implementation/os-library.md) |
 | DNS/TCP, TLS, shared-port listener binds, URLs, HTTP pooling/framing/deadlines | [DNS/TCP request and stream adapters](doc/implementation/libuv-networking.md), [TLS](doc/implementation/ssl-library.md), [URL](doc/implementation/url-library.md), [HTTP](doc/implementation/http-library.md) |
 | WebSocket framing, controls, byte/ownership handoff, retirement | [WebSocket library](doc/implementation/websocket-library.md) |
 | PEG, relabel, private LPegLabel engine and payload | [LPegLabel embedding](doc/implementation/lpeglabel-embedding.md) |

@@ -188,7 +188,7 @@ jobs:
       # Build one native argv/stdio child with the pinned bundled archive and
       # reuse it while smoke-testing both standard-library link modes. The OS
       # smoke invokes this executable directly through os.spawn and also
-      # exercises the shell-oriented io.popen convenience separately.
+      # exercises the shell-oriented os.popen convenience separately.
       - name: Build child-process smoke fixture
         run: |
           process_smoke_dir="$RUNNER_TEMP/titan-process-smoke"

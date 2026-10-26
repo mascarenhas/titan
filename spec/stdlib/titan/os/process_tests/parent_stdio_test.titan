@@ -75,7 +75,7 @@ local function compile_file_stdio_fixture(workspace: string): string
 end
 
 local function run_shell_command(shell_command: string)
-  local shell = stream.popen(shell_command)
+  local shell = system.popen(shell_command)
   defer shell:close()
   local diagnostic = ""
   while true do
@@ -210,7 +210,7 @@ function test_parent_file_stdio_writes_reads_inheritance_and_lifecycle(
   context:run("graceful_exit_drains_queued_file_writes", function (_child: test.Context)
     runtime_test.run(function ()
       local exit_out = workspace .. "/exit-drain.out"
-      local shell = stream.popen(
+      local shell = system.popen(
         '"' .. program .. '" exit-queued-writes > "' .. exit_out .. '"')
       defer shell:close()
       while shell:read() ~= nil do end

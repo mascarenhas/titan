@@ -448,16 +448,16 @@ parser works without the HTTP client.
 
 ## Child processes
 
-Use `io.popen` when you want shell syntax and a single stream that carries the
+Use `os.popen` when you want shell syntax and a single stream that carries the
 child's stdout and stderr together. Read that stream to the end before calling
 `wait`. This example uses POSIX shell syntax. Save it as `child.titan`:
 
 ```titan
 local fs = import "fs"
-local io = import "io"
+local os = import "os"
 local strings = import "string"
 
-local function read_all(command: io.InputOutputStream): string
+local function read_all(command: os.InputOutputStream): string
   local output = strings.writer()
   for chunk in command:read do
     output:write(chunk)
@@ -467,7 +467,7 @@ end
 
 function main(args: {string}): integer
   local command =
-    io.popen("printf 'child output'; printf 'warning' >&2")
+    os.popen("printf 'child output'; printf 'warning' >&2")
   defer command:close()
 
   local output = read_all(command)
@@ -487,7 +487,7 @@ titanc -o out child
 cat child.output
 ```
 
-`io.popen` runs `/bin/sh -c` on Linux and macOS, and `cmd.exe /d /s /c` on
+`os.popen` runs `/bin/sh -c` on Linux and macOS, and `cmd.exe /d /s /c` on
 Windows, so the command string follows that shell's syntax. It captures stdin and
 gives you one stream for the merged output. `wait` returns the full
 `os.ExitStatus`, including the signal if a signal ended the child.

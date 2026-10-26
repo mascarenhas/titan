@@ -1,8 +1,8 @@
 # I/O standard library
 
 The `io` standard module provides a type vocabulary for byte streams,
-formatted standard output, ownership-safe line iteration, and shell-command
-I/O. Titan imports the canonical module with `import "io"`:
+formatted standard output, and ownership-safe line iteration.
+Titan imports the canonical module with `import "io"`:
 
 ```titan
 local io = import "io"
@@ -19,14 +19,13 @@ automatically; an explicit `bytes as string` is redundant.
 
 The qualified Lua module is `titan.io`. Interfaces exist only in Titan's type
 namespace and are not fields of the returned module userdata; the runtime
-module exposes `print`, `lines`, and `popen`. Lua can still pass an Interface
+module exposes `print` and `lines`. Lua can still pass an Interface
 wrapper it received from Titan back to a Titan function expecting that exact
 Interface type.
 
-Operations in this module that reach a stream or process must run inside an
-async Task. In particular, `print`, iteration over a
-tuple returned by `lines`, `popen`, and the resulting process stream's methods
-can suspend. Merely constructing the iterator tuple with `lines(reader)` does
+Operations that reach a concrete stream follow its async Task contract.
+In particular, `print` and iteration over a tuple returned by `lines` can
+suspend. Merely constructing the iterator tuple with `lines(reader)` does
 not read or close the Reader. A standalone Titan program that imports `io`
 gets the async bootstrap transitively; a Lua host should call the yielding
 operations from `async.run` and drive them with `async.loop`.
@@ -155,105 +154,6 @@ after its close function has run calls the closed ReaderCloser, whose
 contracts. Callers must not separately close or consume the Reader while the
 iterator owns it.
 
-## Shell commands
-
-```text
-record InputOutputStream
-
-function InputOutputStream:read(): string?
-function InputOutputStream:read_until(delimiter: string,
-                                      chop: boolean?): string?
-function InputOutputStream:write(data: string)
-function InputOutputStream:close()
-function InputOutputStream:wait(): os.ExitStatus
-function InputOutputStream:to_transfer_payload(): string
-function InputOutputStream.from_transfer_payload(payload: string): InputOutputStream
-
-function popen(command: string): InputOutputStream
-```
-
-`popen` is the standard library's shell-string convenience. On Linux and
-macOS it invokes `/bin/sh -c command`. On Windows it selects `cmd.exe` from the
-Windows system directory and invokes it with `/d /s /c`. Command strings use
-the selected shell's syntax, including its quoting, expansion, operators, and
-redirection rules; POSIX shell commands are not portable to `cmd.exe`.
-
-Use `os.spawn` when an executable and arguments must be passed directly or
-stdout and stderr must remain separate. The command is text and rejects an
-embedded NUL before native process creation. `popen` has no mode argument; its
-captured pipes carry byte strings without CRT text-mode translation. A child
-program still chooses its own text encoding.
-
-The child gets a captured stdin pipe and one captured pipe shared by stdout and
-stderr. `InputOutputStream:write` writes the child's stdin, while `read` and
-`read_until` consume that one merged output stream. There is exactly one
-high-level facade over the merged pipe, so no second reader can race through a
-separate stderr object. The record satisfies `ReaderWriterCloser` exactly and
-adds `wait`.
-
-`wait` reaps the child and stores its complete `os.ExitStatus`. Later calls
-return the stored status without waiting again; normal and signal termination
-retain the same representation documented by `os.Process:wait`.
-
-`close` is idempotent. Its first call closes stdin, requests `term` only when
-the child is still running, and waits for that termination when necessary.
-After stdin close succeeds, a final cleanup closes the one merged InputStream
-and discards unread buffered output even when signalling or waiting raises.
-The composite facade reaches its terminal closed state only after process
-cleanup completes, so a later `close` can retry work that did not reach that
-point. If `wait` has already stored a status, `close` does not signal the exited
-child. A later `wait` returns the cached or already-retained process status;
-after output disposal, later `read` and `read_until` calls return nil.
-Signalling targets the launched shell process; neither `close` nor Task
-cancellation guarantees termination of its descendants.
-
-For large bidirectional traffic, schedule writing and reading concurrently so
-neither operating-system pipe can fill while the other direction is waiting.
-Read merged output through EOF before an ordinary `wait` when the child may
-produce more than one pipe buffer. Errors and cancellation follow the same
-Task and native-owner cleanup rules as direct process streams.
-
-## Transferring shell streams
-
-`InputOutputStream:to_transfer_payload()` transfers the idle writable stdin and
-merged readable stdout/stderr pipes. Pending wrapper operations and underlying
-pipe reads or writes are rejected before either pipe is detached. Native pipe
-handoff follows the platform restrictions of
-[`os.InputStream` and `os.OutputStream`](standard-library-os.md#transferring-process-streams).
-`InputOutputStream.from_transfer_payload(payload)` adopts both pipes on the
-current destination Runtime, including buffered output.
-
-Captured shell output starts reading as soon as `popen` creates the process.
-On Windows this normally leaves an overlapped read pending even before the
-first `read()` call. Such live shell pipes reject transfer with `EBUSY`;
-yielding alone does not make them idle. Rejection preserves the original
-wrapper's writes, reads, and child `wait()`.
-
-Child-process ownership remains at the origin. Keep the original Runtime
-running to receive and reap the child's exit. The original wrapper's `wait()`
-still returns the child status, and its `close()` still terminates a running
-child when needed. Its transferred read side returns EOF and its writes
-raise. The destination owns communication only: `wait()` raises
-`transferred InputOutputStream has no child process owner`, while `close()`
-closes its pipes without signalling or waiting for the child. Closing the
-origin wrapper can therefore terminate a child still communicating through the
-destination.
-
-If native handoff of the second pipe fails after the first succeeded, the
-source retains the first pipe's payload. A later transfer retries with that
-payload; `write()` re-adopts it locally, while `close()` directly retires its
-descriptor even after Runtime shutdown has closed transfer admission. If
-serializing the payload after both pipes detach fails, the hook closes both
-detached pipes and leaves the source communication facades closed; the original
-child remains available through `wait()` and `close()`.
-
-The payload follows the
-[shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules):
-deliver and adopt it exactly once within this process, recover failed delivery,
-and explicitly close the destination. There is no public
-`discard_transfer_payload`. Copying or dropping a payload does not duplicate or
-close the owned pipes.
-
 ## Standard implementations
 
 Satisfaction is structural at each coercion site; none of these records has an
@@ -266,7 +166,7 @@ Satisfaction is structural at each coercion site; none of these records has an
 | `fs.File` | all seven | adjusted |
 | `os.InputStream` | `Reader`, `Closer`, `ReaderCloser` | exact |
 | `os.OutputStream` | `Writer`, `Closer`, `WriterCloser` | exact |
-| `io.InputOutputStream` | all seven | exact |
+| `os.InputOutputStream` | all seven | exact |
 | `string.StringReader` | `Reader`, `Closer`, `ReaderCloser` | exact |
 | `string.StringWriter` | `Writer`, `Closer`, `WriterCloser` | exact |
 | `async.ChannelReader` | `Reader`, `Closer`, `ReaderCloser` | exact |
@@ -306,10 +206,12 @@ combinations. These names describe the Titan caller's direction, not a child
 descriptor name. Calling `process.stdin:close()` does not imply a close
 operation on either readable stream.
 
-`io.InputOutputStream` delegates reads and writes to its one captured
-input/output pair; its close method coordinates both endpoints and the child
-process. Those exact method shapes satisfy every Interface in this chapter;
-the additional `wait` method does not affect structural conversion.
+`os.InputOutputStream`, returned by
+[`os.popen`](standard-library-os.md#shell-commands), delegates reads and writes
+to its one captured input/output pair; its close method coordinates both
+endpoints and the child process. Those exact method shapes satisfy every
+Interface in this chapter; the additional `wait` method does not affect
+structural conversion.
 
 `ssl.Connection` has the same four exact stream method shapes as
 `net.Connection`; its transport supervisor permits one reader and one writer

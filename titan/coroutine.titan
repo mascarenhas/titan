@@ -281,28 +281,29 @@ function Coroutine:error(err: value, tag: value): value
   return result
 end
 
--- The async driver's resume: resume, or inject `payload` as an
--- error when `failed`, but return true and the uncaught error of the now dead
--- coroutine instead of raising it; otherwise false and the yielded or
--- returned value. The coroutine's own trace stays staged: the caller appends
--- its propagation trace with raise_with_appended_trace only for a failure it
--- reports, and otherwise drops it with pop_trace_for_append.
--- Implementation notes: doc/implementation/coroutines.md#entry-function
-local function Coroutine:transfer_outcome(payload: value, tag: value,
-                                          failed: boolean): (boolean, value)
+--- Transfer control without raising an uncaught callee error.
+-- @param payload Value delivered normally or injected as an error.
+-- @param tag Resumer tag; nil uses the stored default tag.
+-- @param inject_error True injects payload as an error at the suspension point.
+-- @return Failed flag, yielded/returned/error value, and optional callee traceback.
+-- @usage coroutines.md
+function Coroutine:transfer(payload: value, tag: value,
+                            inject_error: boolean): (boolean, value, string?)
   if ffi.titan_in_finalizer(L) ~= 0 then resume_from_finalizer() end
   local effective = effective_tag(self.default_tag, tag)
   local resumed: Coroutine? = self -- see Coroutine:resume
   local co = self.handle
   local source = transfer_source(co)
-  if failed then
+  if inject_error then
     push_transfer(source, TRANSFER_ERROR, payload)
   else
     push_transfer(source, TRANSFER_VALUE, payload)
   end
-  local dead, result = pop_transfer(resume_switch(co, source, effective))
+  local failed, result = pop_transfer(resume_switch(co, source, effective))
+  local trace: string? = nil
+  if failed then trace = pop_trace_for_append() end
   resumed = nil
-  return dead, result
+  return failed, result, trace
 end
 
 --- Query the current low-level coroutine state.
