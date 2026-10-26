@@ -82,6 +82,43 @@ function parser.normalize_import(modname)
     return standard_imports[modname] or modname, source_required
 end
 
+-- Lexical import discovery for compiler-owned build planning
+-- (titan-compiler.build). It recognizes exactly the parser's import
+-- declaration, `local NAME = import STRINGLIT` or the parenthesized string,
+-- using the lexer's own tokens, comments and string decoding, and normalizes
+-- each name with normalize_import. Every other token is stepped over whole.
+-- The full parser remains the syntax authority: a lexical failure returns
+-- nil and the caller parses instead. For a source the parser accepts, the
+-- result equals its TopLevelImport nodes in order.
+-- Implementation notes: doc/implementation/incremental-compilation.md
+local import_scanner
+do
+    local skip = (lexer.SPACE + lexer.COMMENT)^0
+    local function token(pattern) return pattern * skip end
+    local import_name = token(lexer.LPAREN) * token(lexer.STRINGLIT) *
+        token(lexer.RPAREN) + token(lexer.STRINGLIT)
+    local import_decl = (token(lexer.LOCAL) * token(lexer.NAME / 0) *
+        token(lexer.ASSIGN) * token(lexer.IMPORT) * import_name) /
+        function(modname)
+            local name, source_required = parser.normalize_import(modname)
+            return { name = name, source_required = source_required }
+        end
+    import_scanner = skip *
+        lpeg.Ct((import_decl + token(lexer.any_token))^0) * lpeg.Cp()
+end
+
+-- scan_imports(input) -> ordered { {name, source_required}, ... } | nil, err
+function parser.scan_imports(input)
+    assert(type(input) == "string", "source text must be a string")
+    local imports, position = import_scanner:match(input)
+    if not imports then
+        return nil, "lexical error " .. tostring(position)
+    elseif position ~= #input + 1 then
+        return nil, "unrecognized token at byte " .. tostring(position)
+    end
+    return imports
+end
+
 function defs.importdecl(loc, name_loc, localname, modname)
     local normalized, source_required = parser.normalize_import(modname)
     return with_name_loc(

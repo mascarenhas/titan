@@ -1,6 +1,10 @@
 #if !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700
 #endif
+/* Darwin hides flock(2)'s LOCK_* operations under a strict XSI level. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
 #if defined(_WIN32) && !defined(_WIN32_WINNT)
 #define _WIN32_WINNT 0x0602
 #endif
@@ -16,6 +20,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -489,7 +494,8 @@ static TitanJobserver *check_jobserver(lua_State *L, int index) {
 }
 
 /* _jobserver_open("fifo", path) or _jobserver_open("pipe", read_fd, write_fd)
-** -> client | nil, reason. */
+** -> client | nil, reason[, "unsupported"]. The third result marks a valid
+** inherited pipe that this platform cannot reopen privately. */
 static int jobserver_open(lua_State *L) {
   const char *kind = luaL_checkstring(L, 1);
   TitanJobserver *client =
@@ -543,8 +549,11 @@ static int jobserver_open(lua_State *L) {
       }
     }
 #else
-    return push_failure(L, "this platform cannot reopen an inherited "
-                           "jobserver pipe privately");
+    lua_pushnil(L);
+    lua_pushliteral(L, "this platform cannot reopen an inherited "
+                       "jobserver pipe privately");
+    lua_pushliteral(L, "unsupported");
+    return 3;
 #endif
   } else {
     return luaL_argerror(L, 1, "expected \"fifo\" or \"pipe\"");
@@ -600,6 +609,15 @@ static int jobserver_held(lua_State *L) {
   TitanJobserver *client =
       (TitanJobserver *)luaL_checkudata(L, 1, TITAN_JOBSERVER_TYPE);
   lua_pushinteger(L, (lua_Integer)client->held);
+  return 1;
+}
+
+/* client:descriptor() -> the private nonblocking token read descriptor, for
+** an event loop that polls readability (titan-compiler.build). Reading stays
+** with client:acquire(), which records the exact byte. */
+static int jobserver_descriptor(lua_State *L) {
+  TitanJobserver *client = check_jobserver(L, 1);
+  lua_pushinteger(L, (lua_Integer)client->read_fd);
   return 1;
 }
 
@@ -752,6 +770,62 @@ static int signal_raise(lua_State *L) {
   return 1;
 }
 
+/* _signal_wake_descriptor() -> the active guard's nonblocking wake read
+** descriptor | nil. An event loop polls it for readability and then reads
+** _signal_pending(); the guard's restore closes it. */
+static int signal_wake_descriptor(lua_State *L) {
+  if (titan_signal_guarded && titan_wake_read_fd >= 0)
+    lua_pushinteger(L, (lua_Integer)titan_wake_read_fd);
+  else lua_pushnil(L);
+  return 1;
+}
+
+/* _sigpipe_ignore() -> guard | nil, reason. SIGPIPE is ignored until
+** guard:restore() (or collection) reinstates the exact prior action. The
+** build coordinator writes to worker control pipes whose reader may already
+** have died; such a write must fail with EPIPE instead of ending the
+** coordinator. Children it starts through libuv reset every disposition. */
+#define TITAN_SIGPIPE_GUARD_TYPE "titan.sigpipeguard"
+
+typedef struct TitanSigpipeGuard {
+  struct sigaction saved;
+  int active;
+} TitanSigpipeGuard;
+
+static int sigpipe_ignore(lua_State *L) {
+  TitanSigpipeGuard *guard =
+      (TitanSigpipeGuard *)lua_newuserdatauv(L, sizeof(TitanSigpipeGuard), 0);
+  struct sigaction ignore;
+  guard->active = 0;
+  luaL_setmetatable(L, TITAN_SIGPIPE_GUARD_TYPE);
+  memset(&ignore, 0, sizeof ignore);
+  ignore.sa_handler = SIG_IGN;
+  sigemptyset(&ignore.sa_mask);
+  if (sigaction(SIGPIPE, &ignore, &guard->saved) != 0)
+    return push_errno(L, "cannot ignore SIGPIPE", errno);
+  guard->active = 1;
+  return 1;
+}
+
+static void sigpipe_guard_release(TitanSigpipeGuard *guard) {
+  if (guard->active) sigaction(SIGPIPE, &guard->saved, NULL);
+  guard->active = 0;
+}
+
+/* guard:restore() -> true. Idempotent. */
+static int sigpipe_guard_restore(lua_State *L) {
+  sigpipe_guard_release(
+      (TitanSigpipeGuard *)luaL_checkudata(L, 1, TITAN_SIGPIPE_GUARD_TYPE));
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
+static int sigpipe_guard_gc(lua_State *L) {
+  sigpipe_guard_release(
+      (TitanSigpipeGuard *)luaL_checkudata(L, 1, TITAN_SIGPIPE_GUARD_TYPE));
+  return 0;
+}
+
 /* _jobserver_wait(completion_file, client_or_nil, watch_signals)
 ** -> "signal", signo | "completion" | "slot" | nil, reason.
 ** The completion FILE must be unbuffered; nothing is consumed from it. */
@@ -805,9 +879,243 @@ static const luaL_Reg jobserver_methods[] = {
   { "release", jobserver_release },
   { "held", jobserver_held },
   { "close", jobserver_close },
+  { "descriptor", jobserver_descriptor },
   { NULL, NULL }
 };
 #endif
+
+/* Private compiler helper: the whole-output-tree build lock. A permanent
+** lock file is opened without following a substituted leaf, and an exclusive
+** OS lock on that handle (POSIX flock on the open-file description, Windows
+** LockFileEx) owns the tree. Closing the handle, collecting the userdata or
+** process death releases it; the file itself is never unlinked, which would
+** split one lock across two files. Waiting is the caller's nonblocking
+** try/sleep loop, so ordinary Lua interruption keeps working.
+** Implementation notes: doc/implementation/driver.md#output-tree-coordination */
+#define TITAN_OUTPUT_LOCK_TYPE "titan.outputlock"
+
+typedef struct TitanOutputLock {
+#if defined(_WIN32)
+  HANDLE handle;
+#else
+  int fd;
+#endif
+  int locked;
+  char identity[96];
+} TitanOutputLock;
+
+static TitanOutputLock *check_output_lock(lua_State *L) {
+  TitanOutputLock *lock =
+      (TitanOutputLock *)luaL_checkudata(L, 1, TITAN_OUTPUT_LOCK_TYPE);
+#if defined(_WIN32)
+  if (lock->handle == INVALID_HANDLE_VALUE)
+#else
+  if (lock->fd < 0)
+#endif
+    luaL_error(L, "attempt to use a closed build lock");
+  return lock;
+}
+
+static void output_lock_release(TitanOutputLock *lock) {
+#if defined(_WIN32)
+  if (lock->handle != INVALID_HANDLE_VALUE) CloseHandle(lock->handle);
+  lock->handle = INVALID_HANDLE_VALUE;
+#else
+  if (lock->fd >= 0) close(lock->fd);
+  lock->fd = -1;
+#endif
+  lock->locked = 0;
+}
+
+/* _output_lock_open(path) -> lock | nil, reason. Creates the file when it is
+** missing; rejects a symbolic link/reparse point or any non-regular leaf. */
+static int output_lock_open(lua_State *L) {
+#if defined(_WIN32)
+  const char *path = titan_win_loader_string(L, 1);
+  TitanOutputLock *lock;
+  BY_HANDLE_FILE_INFORMATION info;
+  WCHAR *wide;
+  int count;
+  luaL_checkstack(L, 4, "opening a build lock");
+  count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+  if (count == 0 || (unsigned)count > TITAN_WIN_PATH_CAP) {
+    DWORD error = count == 0 ? GetLastError() : ERROR_FILENAME_EXCED_RANGE;
+    lua_pushnil(L);
+    titan_win_loader_error(L, "cannot open build lock", path, error);
+    return 2;
+  }
+  wide = (WCHAR *)lua_newuserdatauv(L, (size_t)count * sizeof(WCHAR), 0);
+  if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, count)) {
+    DWORD error = GetLastError();
+    lua_pushnil(L);
+    titan_win_loader_error(L, "cannot open build lock", path, error);
+    return 2;
+  }
+  lock = (TitanOutputLock *)lua_newuserdatauv(L, sizeof(TitanOutputLock), 0);
+  lock->handle = INVALID_HANDLE_VALUE;
+  lock->locked = 0;
+  lock->identity[0] = '\0';
+  luaL_setmetatable(L, TITAN_OUTPUT_LOCK_TYPE);
+  /* No FILE_SHARE_DELETE: the lock file cannot be removed or renamed away
+  ** while any invocation holds it open. */
+  lock->handle = CreateFileW(wide, GENERIC_READ | GENERIC_WRITE,
+      FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  if (lock->handle == INVALID_HANDLE_VALUE) {
+    DWORD error = GetLastError();
+    lua_pushnil(L);
+    titan_win_loader_error(L, "cannot open build lock", path, error);
+    return 2;
+  }
+  if (GetFileType(lock->handle) != FILE_TYPE_DISK ||
+      !GetFileInformationByHandle(lock->handle, &info) ||
+      (info.dwFileAttributes &
+       (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0) {
+    output_lock_release(lock);
+    lua_pushnil(L);
+    lua_pushfstring(L, "build lock '%s' is not a regular file", path);
+    return 2;
+  }
+  snprintf(lock->identity, sizeof lock->identity, "win:%lx:%lx:%lx",
+           (unsigned long)info.dwVolumeSerialNumber,
+           (unsigned long)info.nFileIndexHigh,
+           (unsigned long)info.nFileIndexLow);
+  return 1;
+#else
+  const char *path = luaL_checkstring(L, 1);
+  TitanOutputLock *lock =
+      (TitanOutputLock *)lua_newuserdatauv(L, sizeof(TitanOutputLock), 0);
+  struct stat info;
+  lock->fd = -1;
+  lock->locked = 0;
+  lock->identity[0] = '\0';
+  luaL_setmetatable(L, TITAN_OUTPUT_LOCK_TYPE);
+  /* O_NONBLOCK keeps a substituted FIFO or device from blocking the open;
+  ** flock itself is requested nonblocking separately. */
+  do lock->fd = open(path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC |
+                     O_NONBLOCK, 0666);
+  while (lock->fd < 0 && errno == EINTR);
+  if (lock->fd < 0) {
+    int error_number = errno;
+    lua_pushnil(L);
+    if (error_number == ELOOP)
+      lua_pushfstring(L, "build lock '%s' is a symbolic link", path);
+    else
+      lua_pushfstring(L, "cannot open build lock '%s': %s", path,
+                      strerror(error_number));
+    return 2;
+  }
+  if (fstat(lock->fd, &info) != 0 || !S_ISREG(info.st_mode)) {
+    output_lock_release(lock);
+    lua_pushnil(L);
+    lua_pushfstring(L, "build lock '%s' is not a regular file", path);
+    return 2;
+  }
+  snprintf(lock->identity, sizeof lock->identity, "posix:%llu:%llu",
+           (unsigned long long)info.st_dev, (unsigned long long)info.st_ino);
+  return 1;
+#endif
+}
+
+/* lock:try() -> true (now held) | false (another handle holds it)
+** | nil, reason. */
+static int output_lock_try(lua_State *L) {
+  TitanOutputLock *lock = check_output_lock(L);
+  if (!lock->locked) {
+#if defined(_WIN32)
+    OVERLAPPED range;
+    memset(&range, 0, sizeof range);
+    if (!LockFileEx(lock->handle,
+                    LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1,
+                    0, &range)) {
+      DWORD error = GetLastError();
+      if (error == ERROR_LOCK_VIOLATION || error == ERROR_IO_PENDING) {
+        lua_pushboolean(L, 0);
+        return 1;
+      }
+      lua_pushnil(L);
+      titan_win_loader_error(L, "cannot lock build lock", lock->identity, error);
+      return 2;
+    }
+#else
+    int result;
+    do result = flock(lock->fd, LOCK_EX | LOCK_NB);
+    while (result != 0 && errno == EINTR);
+    if (result != 0) {
+      if (errno == EWOULDBLOCK || errno == EAGAIN) {
+        lua_pushboolean(L, 0);
+        return 1;
+      }
+      return push_errno(L, "cannot lock the build lock", errno);
+    }
+#endif
+    lock->locked = 1;
+  }
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
+/* lock:linked(path) -> true when path still names this lock's file. A tree
+** removed and recreated while waiting yields a new file that must be
+** reopened; Windows denies that removal while a handle is open. */
+static int output_lock_linked(lua_State *L) {
+  TitanOutputLock *lock = check_output_lock(L);
+#if defined(_WIN32)
+  (void)lock;
+  lua_pushboolean(L, 1);
+#else
+  const char *path = luaL_checkstring(L, 2);
+  struct stat held, named;
+  lua_pushboolean(L, fstat(lock->fd, &held) == 0 && lstat(path, &named) == 0 &&
+                         held.st_dev == named.st_dev &&
+                         held.st_ino == named.st_ino);
+#endif
+  return 1;
+}
+
+static int output_lock_identity(lua_State *L) {
+  TitanOutputLock *lock = check_output_lock(L);
+  lua_pushstring(L, lock->identity);
+  return 1;
+}
+
+/* lock:descriptor() -> POSIX descriptor | nil (Windows). The build
+** coordinator lets each worker inherit it, so the open-file description and
+** its flock stay held until every worker has exited, even after the
+** coordinator itself died. */
+static int output_lock_descriptor(lua_State *L) {
+  TitanOutputLock *lock = check_output_lock(L);
+#if defined(_WIN32)
+  (void)lock;
+  lua_pushnil(L);
+#else
+  lua_pushinteger(L, (lua_Integer)lock->fd);
+#endif
+  return 1;
+}
+
+/* lock:close() -> true. Idempotent; releases ownership. */
+static int output_lock_close(lua_State *L) {
+  output_lock_release(
+      (TitanOutputLock *)luaL_checkudata(L, 1, TITAN_OUTPUT_LOCK_TYPE));
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
+static int output_lock_gc(lua_State *L) {
+  output_lock_release(
+      (TitanOutputLock *)luaL_checkudata(L, 1, TITAN_OUTPUT_LOCK_TYPE));
+  return 0;
+}
+
+static const luaL_Reg output_lock_methods[] = {
+  { "try", output_lock_try },
+  { "linked", output_lock_linked },
+  { "identity", output_lock_identity },
+  { "descriptor", output_lock_descriptor },
+  { "close", output_lock_close },
+  { NULL, NULL }
+};
 
 static const luaL_Reg titanlib[] = {
   { "backtrace", getbacktrace },
@@ -816,6 +1124,7 @@ static const luaL_Reg titanlib[] = {
   { "_loadlib", lazyload },
   { "_loadlibglobal", lazyglobalload },
   { "_sha256_binary", sha256_binary },
+  { "_output_lock_open", output_lock_open },
 #if defined(_WIN32)
   { "_abivalue", abivalue },
 #else
@@ -824,11 +1133,20 @@ static const luaL_Reg titanlib[] = {
   { "_signal_guard", signal_guard },
   { "_signal_pending", signal_pending },
   { "_signal_raise", signal_raise },
+  { "_signal_wake_descriptor", signal_wake_descriptor },
+  { "_sigpipe_ignore", sigpipe_ignore },
 #endif
   { NULL, NULL }
 };
 
 LUAMOD_API int luaopen_titan(lua_State *L) {
+  if (luaL_newmetatable(L, TITAN_OUTPUT_LOCK_TYPE)) {
+    luaL_newlib(L, output_lock_methods);
+    lua_setfield(L, -2, "__index");
+    lua_pushcfunction(L, output_lock_gc);
+    lua_setfield(L, -2, "__gc");
+  }
+  lua_pop(L, 1);
 #if !defined(_WIN32)
   if (luaL_newmetatable(L, TITAN_JOBSERVER_TYPE)) {
     luaL_newlib(L, jobserver_methods);
@@ -845,6 +1163,15 @@ LUAMOD_API int luaopen_titan(lua_State *L) {
     lua_setfield(L, -2, "restore");
     lua_setfield(L, -2, "__index");
     lua_pushcfunction(L, signal_guard_gc);
+    lua_setfield(L, -2, "__gc");
+  }
+  lua_pop(L, 1);
+  if (luaL_newmetatable(L, TITAN_SIGPIPE_GUARD_TYPE)) {
+    lua_newtable(L);
+    lua_pushcfunction(L, sigpipe_guard_restore);
+    lua_setfield(L, -2, "restore");
+    lua_setfield(L, -2, "__index");
+    lua_pushcfunction(L, sigpipe_guard_gc);
     lua_setfield(L, -2, "__gc");
   }
   lua_pop(L, 1);
