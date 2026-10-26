@@ -857,6 +857,31 @@ local function probe_cache_for(strategy)
     return cache
 end
 
+-- Share only null-input compiler self-descriptions. Forced headers, response
+-- files and forwarded preprocessor options can change behind an identical
+-- argv, so their requests keep the ordinary observation/revalidation path.
+function cpp.cached_command(argv, stderr_to_stdout, strategy)
+    local null, count = platform.windows and "NUL" or "/dev/null", #argv
+    local macros = argv[count] == null and argv[count - 1] == "c"
+        and argv[count - 2] == "-x" and argv[count - 3] == "-E" and argv[count - 4] == "-dM"
+    local banner = argv[count] == null and argv[count - 1] == "-o" and argv[count - 2] == null
+        and argv[count - 3] == "c" and argv[count - 4] == "-x"
+        and argv[count - 5] == "-v" and argv[count - 6] == "-E"
+    local cacheable = macros or banner
+    for _, arg in ipairs(argv) do
+        if arg:match("^%-include") or arg:match("^%-imacros") or arg:match("^@")
+            or arg:match("^%-Wp,") or arg == "-Xpreprocessor" then cacheable = false end
+    end
+    if not cacheable then return run_command(argv, stderr_to_stdout, strategy) end
+    strategy = io_for({ io = strategy })
+    local cache = probe_cache_for(strategy)
+    local key = "description|" .. tostring(stderr_to_stdout ~= false) .. "|" .. key_argv(argv)
+    if cache[key] ~= nil then return cache[key] end
+    local output, err = run_command(argv, stderr_to_stdout, strategy)
+    if output ~= nil then cache[key] = output end
+    return output, err
+end
+
 local function copy_config(config)
     return {
         io = config.io,
@@ -971,7 +996,7 @@ local function probe_include_paths(config)
     local argv = config_argv(config)
     local null = platform.windows and "NUL" or "/dev/null"
     append_argv(argv, { "-E", "-v", "-x", "c", null, "-o", null })
-    local output, err = run_command(argv, true, config.io)
+    local output, err = cpp.cached_command(argv, true, config.io)
     if not output then
         return nil, "failed probing C include search: " .. err
     end
@@ -1028,7 +1053,7 @@ end
 local function probe_macro_definitions(config, source)
     local argv = config_argv(config)
     append_argv(argv, { "-dM", "-E", "-x", "c", source })
-    local output, err = run_command(argv, false, config.io)
+    local output, err = cpp.cached_command(argv, false, config.io)
     if not output then
         return nil, "failed probing C macros for '" .. source .. "': " .. err
     end

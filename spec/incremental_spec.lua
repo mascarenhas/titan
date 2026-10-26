@@ -56,6 +56,11 @@ local function context(files)
     function io:mkdir(path) dirs[path] = true; return true end
     function io:tmpname() files["/temporary.d"] = ""; return "/temporary.d" end
     function io:unlink(path) files[path] = nil; return true end
+    function io:rename(from, to)
+        files[to], files[from] = files[from], nil
+        self.renames = (self.renames or 0) + 1
+        return true
+    end
     function io:yield() self.yields = (self.yields or 0) + 1 end
     function io:run(argv)
         self.commands[#self.commands + 1] = argv
@@ -69,6 +74,22 @@ local function context(files)
     end
     local ctx = { io = io, cache_adapter = { sha256_binary = sha256.binary } }
     return ctx, files
+end
+
+local function precise_context(files)
+    local ctx = context(files)
+    local stat = ctx.io.stat
+    ctx.io.observation_changes = {}
+    function ctx.io:stat(path)
+        local value, err = stat(self, path)
+        if not value then return nil, err end
+        value.precision, value.dev, value.ino = "ns", "1", self.aliases[path] or path
+        value.size, value.mode = value.size or 0, value.mode or 0
+        value.mtime_ns, value.ctime_ns = 1000000000, self.clock * 1000000000
+        for key, changed in pairs(self.observation_changes[path] or {}) do value[key] = changed end
+        return value
+    end
+    return ctx
 end
 
 local function configuration()
@@ -241,6 +262,180 @@ describe("incremental certificate identities", function()
     end)
 end)
 
+describe("persistent precise digest cache", function()
+    local path, cache_path = "/src/main.titan", "/out/.titan/digests"
+    local function prime(files)
+        local ctx = precise_context(files)
+        assert(incremental.load_digest_cache(ctx, "/out"))
+        local digest = incremental.file_digest(ctx, path)
+        assert(incremental.save_digest_cache(ctx))
+        return digest
+    end
+
+    it("reuses unchanged content across invocations without reading or hashing", function()
+        local files = { [path] = "source" }
+        local digest = prime(files)
+        local ctx = precise_context(files)
+        assert(incremental.load_digest_cache(ctx, "/out"))
+        local current, bytes, observed = incremental.file_digest(ctx, path)
+        assert.equal(digest, current)
+        assert.is_nil(bytes)
+        assert.equal("ns", observed.precision)
+        assert.is_nil(ctx.io.reads[path])
+        local counts = incremental.counters(ctx)
+        assert.equal(0, counts.file_reads); assert.equal(0, counts.file_hashes)
+        assert.equal(1, counts.observation_reuses)
+        assert.equal(1, counts.files[path].observation_reuses)
+        assert(incremental.save_digest_cache(ctx))
+        assert.is_nil(ctx.io.renames)
+    end)
+
+    it("materializes bytes once without rehashing a precise cache hit", function()
+        local files = { [path] = "source" }; prime(files)
+        local ctx = precise_context(files)
+        assert(incremental.load_digest_cache(ctx, "/out"))
+        assert.equal("source", incremental.file_contents(ctx, path, 6))
+        assert.equal("source", incremental.file_contents(ctx, path, 6))
+        assert.equal(1, ctx.io.reads[path])
+        assert.equal(0, incremental.counters(ctx).file_hashes)
+        assert.has_error(function() incremental.file_contents(ctx, path, 5) end,
+            path .. ": file exceeds read limit")
+    end)
+
+    for _, change in ipairs({
+        { "dev", "2" }, { "ino", "replacement" }, { "size", 7 }, { "mode", 0x81a4 },
+        { "mtime_ns", 1000000001 }, { "ctime_ns", 1000000001 }, { "precision", "coarse" },
+    }) do
+        it("rehashes after a different " .. change[1] .. " observation", function()
+            local files = { [path] = "source" }; prime(files)
+            local ctx = precise_context(files)
+            ctx.io.observation_changes[path] = { [change[1]] = change[2] }
+            if change[1] == "size" then files[path] = "sources" end
+            assert(incremental.load_digest_cache(ctx, "/out"))
+            assert.equal(sha256.hex(files[path]), (incremental.file_digest(ctx, path)))
+            assert.equal(1, ctx.io.reads[path])
+            assert.equal(0, incremental.counters(ctx).observation_reuses)
+            assert.equal(1, incremental.counters(ctx).file_hashes)
+        end)
+    end
+
+    it("requires every precise field and a readable regular file", function()
+        local files = { [path] = "source" }; prime(files)
+        local ctx = precise_context(files)
+        local stat = ctx.io.stat
+        function ctx.io:stat(name)
+            local value, err = stat(self, name)
+            if name == path and value then value.ctime_ns = nil end
+            return value, err
+        end
+        assert(incremental.load_digest_cache(ctx, "/out"))
+        assert.equal(sha256.hex("source"), (incremental.file_digest(ctx, path)))
+        assert.equal(1, incremental.counters(ctx).file_hashes)
+        local unreadable = precise_context(files)
+        assert(incremental.load_digest_cache(unreadable, "/out"))
+        function unreadable.io:readable() return false end
+        function unreadable.io:read_file(name)
+            if name == path then return nil, "permission denied" end
+            return files[name]
+        end
+        assert.has_error(function() incremental.file_digest(unreadable, path) end, "permission denied")
+        assert.equal(0, incremental.counters(unreadable).observation_reuses)
+        local changed_kind = precise_context(files)
+        changed_kind.io.observation_changes[path] = { kind = "directory" }
+        assert(incremental.load_digest_cache(changed_kind, "/out"))
+        assert.has_error(function() incremental.file_digest(changed_kind, path) end)
+        assert.equal(0, incremental.counters(changed_kind).observation_reuses)
+    end)
+
+    it("falls back after an observation error and propagates cancellation", function()
+        local files = { [path] = "source" }; prime(files)
+        local ctx = precise_context(files)
+        assert(incremental.load_digest_cache(ctx, "/out"))
+        local stat, failed = ctx.io.stat, false
+        function ctx.io:stat(name)
+            if name == path and not failed then failed = true; return nil, "temporary stat failure" end
+            return stat(self, name)
+        end
+        incremental.file_digest(ctx, path)
+        assert.equal(1, incremental.counters(ctx).file_hashes)
+        local cancelled = {}
+        local other = precise_context(files)
+        assert(incremental.load_digest_cache(other, "/out"))
+        function other.io:stat() error(cancelled, 0) end
+        local ok, err = pcall(incremental.file_digest, other, path)
+        assert.is_false(ok); assert.equal(cancelled, err)
+    end)
+
+    it("does not reuse an observation through a different path spelling", function()
+        local files = { [path] = "source" }; prime(files)
+        local ctx = precise_context(files)
+        ctx.io.aliases["/alias.titan"] = path
+        assert(incremental.load_digest_cache(ctx, "/out"))
+        incremental.file_digest(ctx, "/alias.titan")
+        assert.equal(1, incremental.counters(ctx).file_hashes)
+        assert.equal(0, incremental.counters(ctx).observation_reuses)
+    end)
+
+    it("ignores malformed old and incomplete cache envelopes", function()
+        local codec = require "titan-compiler.graphcodec"
+        for _, payload in ipairs({ "malformed",
+            assert(codec.encode({ schema = "old", files = {}, objects = {} })),
+            assert(codec.encode({ schema = version.DIGEST_CACHE_SCHEMA,
+                digest = version.CERTIFICATE_DIGEST, canonicalization = version.CERTIFICATE_CANONICALIZATION,
+                abi = version.TITAN_ABI_VERSION, files = { [path] = { digest = sha256.hex("wrong") } },
+                objects = {} })),
+        }) do
+            local files = { [path] = "source", [cache_path] = payload }
+            local ctx = precise_context(files)
+            assert(incremental.load_digest_cache(ctx, "/out"))
+            incremental.file_digest(ctx, path)
+            assert.equal(1, incremental.counters(ctx).file_hashes)
+            assert(incremental.save_digest_cache(ctx))
+            assert.equal(version.DIGEST_CACHE_SCHEMA, assert(codec.decode(files[cache_path])).schema)
+        end
+    end)
+
+    it("retains the previous complete cache if publication fails", function()
+        local files = { [path] = "source" }; prime(files)
+        local previous = files[cache_path]
+        local ctx = precise_context(files)
+        assert(incremental.load_digest_cache(ctx, "/out"))
+        ctx.io.clock, files[path] = 2, "edited"
+        incremental.file_digest(ctx, path)
+        function ctx.io:rename() return nil, "rename denied" end
+        local ok, err = incremental.save_digest_cache(ctx)
+        assert.is_nil(ok); assert.equal("rename denied", err)
+        assert.equal(previous, files[cache_path])
+        for name in pairs(files) do assert.is_nil(name:find(".tmp.", 1, true)) end
+    end)
+
+    it("keeps source-adjacent and worker contexts out of persistent storage", function()
+        local files = { [path] = "source" }
+        local ctx = precise_context(files)
+        assert(incremental.load_digest_cache(ctx, nil))
+        incremental.file_digest(ctx, path)
+        assert(incremental.save_digest_cache(ctx))
+        assert.is_nil(files[cache_path])
+        local worker = precise_context(files)
+        incremental.file_digest(worker, path)
+        assert(incremental.save_digest_cache(worker))
+        assert.is_nil(files[cache_path])
+    end)
+
+    it("forces publication rehashes while sharing their verified cache evidence", function()
+        local files = { [path] = "source" }; prime(files)
+        local ctx = precise_context(files)
+        assert(incremental.load_digest_cache(ctx, "/out"))
+        local fresh = incremental.fresh_context(ctx)
+        assert.equal(sha256.hex("source"), (incremental.file_digest(fresh, path)))
+        assert.equal(1, incremental.counters(fresh).file_hashes)
+        assert.equal(0, incremental.counters(fresh).observation_reuses)
+        assert.equal(0, incremental.counters(ctx).file_hashes)
+        assert(incremental.save_digest_cache(fresh))
+        assert.is_nil(ctx.io.renames)
+    end)
+end)
+
 describe("incremental configuration", function()
     local function configured()
         local ctx, files = context({ ["/compiler/titan-compiler/driver.lua"] = "driver",
@@ -295,12 +490,12 @@ describe("incremental configuration", function()
         local null = require("titan-compiler.platform").windows and "NUL" or "/dev/null"
         function ctx.io:run(argv)
             self.commands[#self.commands + 1] = argv
-            if argv[3] == "-dM" then
-                assert.same({ "/tool/cc", "-E", "-dM", "-x", "c", null }, argv)
-                return { ok = true, output = "#define __COMPILER_VERSION__ 1\n" }
+            if argv[2] == "-dM" then
+                assert.same({ "/tool/cc", "-dM", "-E", "-x", "c", null }, argv)
+                return { started = true, ok = true, output = "#define __COMPILER_VERSION__ 1\n" }
             end
             assert.same({ "/tool/cc", "-E", "-v", "-x", "c", null, "-o", null }, argv)
-            return { ok = true, output = "clang fixed vendor banner" }
+            return { started = true, ok = true, output = "clang fixed vendor banner" }
         end
         local descriptor = { compiler_argv = { "/tool/cc" },
             compile_flags = { "-O1", "-DEFFECTIVE_OPTION=1" }, include_dirs = { "/first-sdk" },
@@ -313,6 +508,36 @@ describe("incremental configuration", function()
         assert.equal(first, incremental.toolchain_identity(ctx, descriptor))
         assert.equal(2, #ctx.io.commands)
         assert.equal(0, incremental.counters(ctx).file_hashes)
+    end)
+
+    it("shares only identical null-input compiler descriptions with the preprocessor", function()
+        local ctx = context({ ["/tool/cc"] = "driver" })
+        local null = require("titan-compiler.platform").windows and "NUL" or "/dev/null"
+        function ctx.io:run(argv, options)
+            self.commands[#self.commands + 1] = { argv = argv, capture = options.stderr_to_stdout }
+            local macro = argv[#argv - 3] == "-E"
+            return { started = true, ok = true,
+                output = macro and ("#define VALUE " .. #self.commands .. "\n") or "clang vendor" }
+        end
+        local macros = { "/tool/cc", "-dM", "-E", "-x", "c", null }
+        local banner = { "/tool/cc", "-E", "-v", "-x", "c", null, "-o", null }
+        assert(cpp.cached_command(macros, false, ctx.io))
+        assert(cpp.cached_command(banner, true, ctx.io))
+        incremental.toolchain_identity(ctx, { compiler_argv = { "/tool/cc" }, stage_tools = {} })
+        assert.equal(2, #ctx.io.commands)
+        local effective = { "/tool/cc", "-O2", "-dM", "-E", "-x", "c", null }
+        assert(cpp.cached_command(effective, false, ctx.io))
+        assert.equal(3, #ctx.io.commands)
+        assert(cpp.cached_command(macros, true, ctx.io))
+        assert.equal(4, #ctx.io.commands)
+        local forced = { "/tool/cc", "-include", "/forced.h", "-dM", "-E", "-x", "c", null }
+        assert(cpp.cached_command(forced, false, ctx.io))
+        assert(cpp.cached_command(forced, false, ctx.io))
+        assert.equal(6, #ctx.io.commands)
+        local other = context({})
+        other.io.run = ctx.io.run
+        assert(cpp.cached_command(macros, false, other.io))
+        assert.equal(1, #other.io.commands)
     end)
 
     for _, command in ipairs({
@@ -330,13 +555,12 @@ describe("incremental configuration", function()
             end
             function ctx.io:run(argv)
                 self.commands[#self.commands + 1] = argv
-                if argv[#command + 1] == "-E" then
-                    if argv[#command + 2] == "-dM" then
-                        assert.same(expected({ "-E", "-dM", "-x", "c", null }), argv)
-                        return { ok = true, output = "#define __COMPILER_VERSION__ 1\n" }
-                    end
+                if argv[#command + 1] == "-dM" then
+                    assert.same(expected({ "-dM", "-E", "-x", "c", null }), argv)
+                    return { started = true, ok = true, output = "#define __COMPILER_VERSION__ 1\n" }
+                elseif argv[#command + 1] == "-E" then
                     assert.same(expected({ "-E", "-v", "-x", "c", null, "-o", null }), argv)
-                    return { ok = true, output = "gcc compiler wrapper" }
+                    return { started = true, ok = true, output = "gcc compiler wrapper" }
                 end
                 local stage = argv[#argv]:match("^-print%-prog%-name=(.*)$")
                 assert.is_not_nil(stage)
@@ -634,6 +858,40 @@ describe("incremental local certification", function()
         local missing_h = incremental.certify_local(ctx, "main", source)
         assert.equal("parts", missing_h.reason)
         assert.matches("/out/main.priv.h", missing_h.detail, 1, true)
+    end)
+
+    it("uses precise source digests and cached content-only sidecar scan facts", function()
+        local ctx, saved, source, files = fixture()
+        local part = "/out/main.part1.o"
+        files[part], files["/out/main.part1.c"], files["/out/main.priv.h"] =
+            "sidecar object", "generated part", "private header"
+        saved.object_metadata.parts[2] = { index = 1, c_suffix = ".part1.c", object_suffix = ".part1.o" }
+        saved.object_metadata.private_header = ".priv.h"
+        ctx.io = precise_context(files).io
+        objectmetadata.read = function(_, path)
+            if path == "/out/main.o" then return saved end
+        end
+        local scans = {}
+        staticmetadata.scan_bytes = function(_, path)
+            scans[path] = (scans[path] or 0) + 1
+            return { kind = "object", fingerprint = {
+                format = "coff", word_size = 64, endian = "little", machine = 0x8664 } }
+        end
+        assert(incremental.load_digest_cache(ctx, "/out"))
+        assert.equal("hit", incremental.certify_local(ctx, "main", source).status)
+        assert(incremental.save_digest_cache(ctx))
+        assert.equal(1, scans[part])
+        local warm = precise_context(files)
+        warm.incremental_configuration, warm.incremental_options =
+            ctx.incremental_configuration, ctx.incremental_options
+        local fresh_source = { kind = source.kind, main = source.main, files = source.files }
+        assert(incremental.load_digest_cache(warm, "/out"))
+        assert.equal("hit", incremental.certify_local(warm, "main", fresh_source).status)
+        assert.is_nil(warm.io.reads[part])
+        assert.is_nil(warm.io.reads["/src/main.titan"])
+        assert.equal(1, scans[part])
+        assert.equal(0, incremental.counters(warm).file_hashes)
+        assert.equal(3, incremental.counters(warm).observation_reuses)
     end)
 
     it("shares source object and C-input hash memos across certifications", function()
