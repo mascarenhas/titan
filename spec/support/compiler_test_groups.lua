@@ -10,6 +10,8 @@ M.DEFAULT_STRESS_FILE = "spec/support/ci_compiler_stress_files.txt"
 -- caps, drive real parent Make jobservers, or install process-global signal
 -- guards. They run alone, never beside another Busted worker or native build.
 M.EXCLUSIVE_SPECS = {
+    ["spec/coder/build_coordination_spec.lua"] = true,
+    ["spec/coder/build_scheduler_spec.lua"] = true,
     ["spec/coder/parallel_compilation_spec.lua"] = true,
     ["spec/coder/jobserver_spec.lua"] = true,
 }
@@ -32,6 +34,8 @@ M.UNIT_SPECS = {
 }
 
 M.ISOLATED_COVERAGE_SPECS = {
+    ["spec/coder/build_coordination_spec.lua"] = true,
+    ["spec/coder/build_scheduler_spec.lua"] = true,
     ["spec/compiler_environment_spec.lua"] = true,
     ["spec/cprobe_cache_spec.lua"] = true,
     ["spec/cprobe_spec.lua"] = true,

@@ -6272,6 +6272,7 @@ printf '%s\n' "${schedule[@]}"
                 local stem, count = fixture[1], fixture[2]
                 local module = types.Module("cleanup.fixture", {}, {})
                 module._source = true
+                module.source_members, module.source_type_members = {}, {}
                 local native = { parts_version = 1, parts = {},
                     private_header = count > 1 and ".priv.h" or nil }
                 for index = 0, count - 1 do
