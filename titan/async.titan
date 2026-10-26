@@ -12,7 +12,7 @@ foreign import "stdlib.h"
 foreign import "string.h"
 foreign import "async_receiver_native.h"
 local uv = import "uv"
-local coroutine = import "coroutine.titan"
+local coroutine = import "coroutine"
 local gc = import "gc"
 local string = import "string"
 local transfer = import "transfer"
@@ -966,17 +966,20 @@ end
 -- reports gets the driver's propagation trace appended: a first cancellation
 -- is sticky and wins publication, and run_with_cleanup already recorded its
 -- body's failure with that body's trace.
-local function resume_root(task: Task, failed: boolean, payload: value): (boolean, value)
+local function resume_root(task: Task, failed: boolean,
+                           payload: value): (boolean, value, string?)
   task.runtime.current_task = task
   defer task.runtime.current_task = nil
-  local dead, result = task.root:transfer_outcome(payload, ASYNC_TAG, failed)
-  if dead then
-    if task.cancel_value == nil and task.terminal_kind ~= TERMINAL_FAILED then
-      coroutine.raise_with_appended_trace(result)
+  local dead, result, trace? = task.root:transfer(payload, ASYNC_TAG, failed)
+  if dead and task.cancel_value == nil and task.terminal_kind ~= TERMINAL_FAILED then
+    do
+      raise result
+    catch
+      if trace ~= nil then trace = trace .. "\n" .. traceback
+      else trace = traceback end
     end
-    coroutine.pop_trace_for_append()
   end
-  return dead, result
+  return dead, result, trace
 end
 
 local function wait_result(wait: Wait): (boolean, value)
@@ -1106,7 +1109,7 @@ local function advance_task(task: Task, failed: boolean, payload: value)
     local dead = false
     local yielded: value = nil
     local trace: string? = nil
-    do dead, yielded = resume_root(task, next_failed, next_payload)
+    do dead, yielded, trace = resume_root(task, next_failed, next_payload)
     catch
       dead = true
       yielded = error

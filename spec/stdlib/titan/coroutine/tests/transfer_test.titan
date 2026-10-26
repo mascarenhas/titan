@@ -1,0 +1,241 @@
+local function transfer_falsy_case(context: test.Context, name: string, payload: value)
+  context:run(name, function (_context: test.Context)
+    local co = coroutine.create(function (arg: value): value
+      test.assert(arg == payload, "transfer changed its initial payload")
+      return coroutine.yield(arg, "transfer")
+    end, "transfer")
+    local failed, result, trace? = co:transfer(payload, nil, false)
+    test.assert(not failed and result == payload and trace == nil)
+    test.assert(co:status() == "suspended", "yield was reported as completion")
+    failed, result, trace = co:transfer(payload, nil, false)
+    test.assert(not failed and result == payload and trace == nil)
+    test.assert(co:status() == "dead", "normal return was reported as a yield")
+  end)
+end
+
+function test_transfer_preserves_nil_and_false_payloads(context: test.Context)
+  transfer_falsy_case(context, "nil", nil)
+  transfer_falsy_case(context, "false", false)
+end
+
+local function transfer_error_case(context: test.Context, name: string, payload: value)
+  context:run(name, function (_context: test.Context)
+    local expected_error = payload
+    if expected_error == nil then expected_error = "<no error object>" end
+    local entered = false
+    local before_entry = coroutine.create(function (_: value): value
+      entered = true
+      return nil
+    end, "transfer")
+    local failed, result, trace? = before_entry:transfer(payload, nil, true)
+    test.assert(failed and result == expected_error and trace ~= nil and #trace > 0,
+                "pre-entry injection lost its explicit error outcome")
+    test.assert(not entered and before_entry:status() == "dead",
+                "pre-entry injection called the body")
+
+    local uncaught = coroutine.create(function (_: value): value
+      raise payload
+      return nil
+    end, "transfer")
+    failed, result, trace = uncaught:transfer(nil, nil, false)
+    test.assert(failed and result == expected_error and trace ~= nil and #trace > 0,
+                "uncaught error was confused with a falsy result")
+
+    local caught = coroutine.create(function (_: value): value
+      coroutine.yield("ready", "transfer")
+      return "missed"
+    catch
+      test.assert(error == expected_error, "injected error identity changed")
+      return payload
+    end, "transfer")
+    failed, result, trace = caught:transfer(nil, nil, false)
+    test.assert(not failed and result == "ready" and trace == nil)
+    failed, result, trace = caught:transfer(payload, nil, true)
+    test.assert(not failed and result == payload and trace == nil,
+                "handled injection was reported as failure")
+  end)
+end
+
+function test_transfer_preserves_error_identity_and_injection(context: test.Context)
+  transfer_error_case(context, "nil", nil)
+  transfer_error_case(context, "false", false)
+  transfer_error_case(context, "object", { ["marker"] = "error" })
+end
+
+local function first_transfer_failure(_: value): value
+  raise "first transfer failure"
+  return nil
+end
+
+local function second_transfer_failure(_: value): value
+  raise "second transfer failure"
+  return nil
+end
+
+function test_transfer_returns_owned_trace_without_contaminating_later_raises(
+    _context: test.Context)
+  local first = coroutine.create(first_transfer_failure, "transfer")
+  local failed, result, trace? = first:transfer(nil, nil, false)
+  test.assert(failed and result == "first transfer failure" and trace ~= nil)
+  gc.collect()
+  test.assert(common.contains(trace, "first_transfer_failure"),
+              "callee trace did not survive collection")
+  test.assert(not common.contains(trace, "second_transfer_failure"))
+
+  local second = coroutine.create(second_transfer_failure, "transfer")
+  local caught = false
+  do second:resume(nil)
+  catch
+    caught = true
+    test.assert(error == "second transfer failure")
+    test.assert(common.contains(traceback, "second_transfer_failure"))
+    test.assert(not common.contains(traceback, "first_transfer_failure"),
+                "transfer left a pending trace for the next raising operation")
+  end
+  test.assert(caught)
+  test.assert(common.contains(trace, "first_transfer_failure"),
+              "later transfers replaced the returned trace")
+  local success = coroutine.create(create_body, "transfer")
+  failed, result, trace = success:transfer(false, nil, false)
+  test.assert(not failed and result == false and trace == nil)
+end
+
+function test_transfer_routes_stacked_tags_and_roots_live_values(_context: test.Context)
+  local outer_tag: value = { ["tag"] = "outer" }
+  local inner_tag: value = { ["tag"] = "inner" }
+  local payload: value = { ["payload"] = "rooted" }
+  local inner = coroutine.create(function (arg: value): value
+    gc.collect()
+    test.assert(arg == payload)
+    local response = coroutine.yield(arg, outer_tag)
+    gc.collect()
+    return response
+  end, inner_tag)
+  local outer = coroutine.create(function (arg: value): value
+    local failed, result, trace? = inner:transfer(arg, nil, false)
+    test.assert(not failed and trace == nil)
+    return result
+  end, outer_tag)
+  local failed, result, trace? = outer:transfer(payload, nil, false)
+  test.assert(not failed and result == payload and trace == nil)
+  test.assert(outer:status() == "suspended" and inner:status() == "stacked")
+  gc.collect()
+  failed, result, trace = outer:transfer(false, nil, false)
+  test.assert(not failed and result == false and trace == nil)
+  test.assert(outer:status() == "dead" and inner:status() == "dead")
+end
+
+function test_transfer_rejects_invalid_states_and_tags_in_caller(_context: test.Context)
+  local missing = coroutine.create(create_body)
+  common.assert_raises_contains(function () missing:transfer(nil, nil, false) end,
+                               "must provide tag argument")
+  local co: coroutine.Coroutine? = nil
+  co = coroutine.create(function (_: value): value
+    common.assert_raises_contains(function () co:transfer(nil, nil, false) end,
+                                 "Coroutine not suspended")
+    return "done"
+  end, "transfer")
+  local failed, result, trace? = co:transfer(nil, nil, false)
+  test.assert(not failed and result == "done" and trace == nil)
+  common.assert_raises_contains(function () co:transfer(nil, nil, false) end,
+                               "Coroutine not suspended")
+  common.assert_raises_contains(function () co:transfer(nil, nil, true) end,
+                               "Coroutine not suspended")
+end
+
+local record TransferFinalizerProbe
+  log: {string}
+  target: coroutine.Coroutine
+end
+
+local function finalize_transfer_probe(candidate: value)
+  local probe: TransferFinalizerProbe = candidate
+  do probe.target:transfer(nil, nil, false)
+  catch
+    probe.log[#probe.log + 1] = error as string
+  end
+end
+
+local function register_transfer_probe(log: {string}, target: coroutine.Coroutine)
+  local owner = TransferFinalizerProbe(log, target)
+  gc.finalizable<|value|>(owner, finalize_transfer_probe)
+end
+
+function test_transfer_rejects_finalizer_switch_without_entering_body(
+    _context: test.Context)
+  local entered = false
+  local log: {string} = {}
+  local co = coroutine.create(function (_: value): value
+    entered = true
+    return nil
+  end, "transfer")
+  register_transfer_probe(log, co)
+  for _ = 1, 4 do gc.collect() end
+  test.assert(#log == 1 and log[1] == "cannot resume a coroutine from a finalizer" and
+              not entered and co:status() == "suspended")
+  local failed, _, trace? = co:transfer(nil, nil, false)
+  test.assert(not failed and trace == nil and entered)
+end
+
+function test_transfer_uses_raw_tag_equality_for_failed_nested_yield(
+    _context: test.Context)
+  local calls: {string: value} = { ["count"] = 0 }
+  local resume_tag: value = { ["kind"] = "resume" }
+  local yield_tag: value = { ["kind"] = "yield" }
+  local install_eq = common.lua_helper([==[
+    return function(tag, counter)
+      setmetatable(tag, {
+        __eq = function()
+          counter.count = counter.count + 1
+          return true
+        end,
+      })
+    end
+  ]==]) as function (value, {string: value}): ()
+  install_eq(resume_tag, calls)
+  install_eq(yield_tag, calls)
+  local co = coroutine.create(function (_: value): value
+    return coroutine.yield("unmatched", yield_tag)
+  end, resume_tag)
+  local failed, _, trace? = co:transfer(nil, nil, false)
+  test.assert(failed and trace ~= nil and calls["count"] == 0)
+  test.assert(co:status() == "dead")
+end
+
+local function abandon_transfer(log: {string})
+  local co = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "cleanup"
+    coroutine.yield(nil, "transfer")
+    return nil
+  catch
+    log[#log + 1] = "caught"
+    return nil
+  end, "transfer")
+  local failed, _, trace? = co:transfer(nil, nil, false)
+  test.assert(not failed and trace == nil)
+end
+
+function test_transfer_abandonment_unwinds_without_entering_catch(
+    _context: test.Context)
+  local log: {string} = {}
+  abandon_transfer(log)
+  for _ = 1, 4 do gc.collect() end
+  test.assert(#log == 1 and log[1] == "cleanup",
+              "abandoned transfer entered catch or skipped cleanup")
+end
+
+function test_transfer_roots_receiver_after_its_container_drops_it(
+    _context: test.Context)
+  local holder: {string: coroutine.Coroutine} = {}
+  holder["co"] = coroutine.create(function (_: value): value
+    holder["co"] = nil
+    gc.collect()
+    holder["co"] = coroutine.running()
+    return coroutine.yield(false, "transfer")
+  end, "transfer")
+  local failed, result, trace? = holder["co"]:transfer(nil, nil, false)
+  test.assert(not failed and result == false and trace == nil)
+  failed, result, trace = holder["co"]:transfer("retained", nil, false)
+  test.assert(not failed and result == "retained" and trace == nil)
+  test.assert(holder["co"]:status() == "dead")
+end

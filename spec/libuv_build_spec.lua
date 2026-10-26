@@ -996,6 +996,8 @@ esac
             local module = assert(source:match("^titan/([^/.]+)"))
             for _, node in ipairs(parsed_source(source)) do
                 if node._tag == "Ast.TopLevelImport" then
+                    assert.is_false(node.source_required,
+                        source .. " requires a producer's private source")
                     local dependency = assert(node.modname:match("^titan[.](.+)$"))
                     imports[module][dependency] = true
                 end
@@ -1012,6 +1014,76 @@ esac
             assert.same(expected, actual, module)
         end
     end)
+
+    for _, consumer in ipairs({ "async", "io" }) do
+        it("composes source " .. consumer .. " with a compiled-only public producer", function()
+            local root = make_temp_dir()
+            local tested, failure = xpcall(function()
+                assert(lfs.mkdir(root .. "/titan"))
+                write_file(root .. "/titan/" .. consumer .. ".titan",
+                    read_file("titan/" .. consumer .. ".titan"))
+                if consumer == "async" then
+                    for _, header in ipairs({
+                        "async_receiver_native.h", "async_signal_platform.h", "transfer_native.h",
+                    }) do
+                        write_file(root .. "/titan/" .. header, read_file("titan/" .. header))
+                    end
+                    write_file(root .. "/producer_composition_app.titan", [[
+local async = import "async"
+function main(_args: {string}): integer
+  local task = async.run<|integer, value|>(function (): integer
+    async.yield()
+    return 42
+  end)
+  async.loop()
+  local succeeded, result? = task:status():has_succeeded()
+  if succeeded and result == 42 then return 0 end
+  return 1
+end
+]])
+                else
+                    write_file(root .. "/producer_composition_app.titan", [[
+local io = import "io"
+function main(_args: {string}): integer
+  io.print("compiled-only OS")
+  return 0
+end
+]])
+                end
+                local producer = consumer == "async" and "coroutine" or "os"
+                assert.falsy(file_exists(root .. "/titan/" .. producer .. ".titan"))
+                local prefix = installed_prefix.active()
+                local executable_suffix = platform.windows and ".exe" or ""
+                -- Source async owns its POSIX signal policy; use the same
+                -- feature selection as the Unix stdlib build, not inherited
+                -- coroutine/minicoro headers.
+                local cppflags = os.getenv("TITAN_EXTRA_CPPFLAGS") or ""
+                if not platform.windows then cppflags = cppflags .. " -D_GNU_SOURCE" end
+                local argv = {
+                    platform.windows and "env.exe" or "env",
+                    "TITAN_EXTRA_CPPFLAGS=" .. cppflags,
+                    prefix .. "/bin/lua" .. executable_suffix,
+                    prefix .. "/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc",
+                    "--tree", root, "--output", root .. "/out", "--source-first",
+                }
+                if consumer == "async" then argv[#argv + 1] = "--no-uv-bootstrap" end
+                argv[#argv + 1] = "titan." .. consumer
+                argv[#argv + 1] = "producer_composition_app"
+                local compiled, output = run_argv(argv)
+                assert.truthy(compiled, output)
+                assert.truthy(file_exists(root .. "/out/titan/" .. consumer .. ".c"))
+                assert.falsy(file_exists(root .. "/out/titan/" .. producer .. ".c"),
+                    "producer was compiled from source instead of its public provider")
+                local program = root .. "/out/" ..
+                    (platform.windows and "bin/producer_composition_app.exe" or "producer_composition_app")
+                local ran, result = run_argv({ program })
+                assert.truthy(ran, result)
+                if consumer == "io" then assert.equal("compiled-only OS\n", result) end
+            end, debug.traceback)
+            remove_tree(root)
+            if not tested then error(failure, 0) end
+        end)
+    end
 
     it("requires source foreign headers only for modules declaring foreign functions", function()
         local expected = {}
@@ -2818,11 +2890,7 @@ int main(void) {
                 },
             }, interfaces)
             assert.same({
-                "InputOutputStream", "print", "lines",
-                "InputOutputStream:read", "InputOutputStream:read_until",
-                "InputOutputStream:write", "InputOutputStream:wait",
-                "InputOutputStream:close", "InputOutputStream:to_transfer_payload",
-                "InputOutputStream.from_transfer_payload", "popen",
+                "print", "lines",
             }, public_declarations(path))
         end)
 
@@ -3044,7 +3112,7 @@ int main(void) {
         assert.same({
             "Date", "Date.new", "ExitStatus", "ExitStatus.new",
             "SpawnConfig", "SpawnOption",
-            "InputStream", "OutputStream", "Process", "stdin", "stdout",
+            "InputStream", "OutputStream", "Process", "InputOutputStream", "stdin", "stdout",
             "stderr", "clock", "difftime", "date", "setlocale", "time",
             "getenv", "setenv", "unsetenv", "cwd", "chdir", "homedir",
             "tmpdir", "hostname", "exepath", "pid", "ppid",
@@ -3057,8 +3125,13 @@ int main(void) {
             "InputStream:read_until", "InputStream:close",
             "InputStream:is_tty", "InputStream:kind", "exit",
             "wait_signal",
+            "OutputStream.discard_transfer_payload", "InputStream.discard_transfer_payload",
             "OutputStream:to_transfer_payload", "OutputStream.from_transfer_payload",
             "InputStream:to_transfer_payload", "InputStream.from_transfer_payload",
+            "InputOutputStream:read", "InputOutputStream:read_until",
+            "InputOutputStream:write", "InputOutputStream:wait",
+            "InputOutputStream:close", "InputOutputStream:to_transfer_payload",
+            "InputOutputStream.from_transfer_payload", "popen",
         }, public_declarations("titan/os.titan"))
 
         assert.falsy(read_file("titan/os.titan"):find(
@@ -5215,7 +5288,7 @@ printf '%s\n' "${schedule[@]}"
                 "timer.sleep(0)",
                 "fs.write_file(marker,",
                 "local metadata = fs.stat(marker)",
-                "local merged = titan_io.popen(",
+                "local merged = system.popen(",
                 "static-process-stdoutstatic-process-stderr",
                 "local process = system.spawn(",
                 "system.with_stdin, system.with_stdout, " ..
@@ -5251,8 +5324,8 @@ printf '%s\n' "${schedule[@]}"
             local process_smoke =
                 read_file("spec/fixtures/libuv/os_production_smoke.lua")
             for _, contract in ipairs({
-                'local titan_io = require "titan.io"',
-                "local merged = titan_io.popen(",
+                'local system = require "titan.os"',
+                "local merged = system.popen(",
                 "mode .. \"-stdout\" .. mode .. \"-stderr\"",
                 "system.with_stdin, system.with_stdout,",
                 "local writer = assert(detached.stdin)",

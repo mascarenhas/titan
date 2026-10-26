@@ -625,7 +625,7 @@ function main(args: {string}): integer
     check_parent_stream(
       function (): boolean return system.stderr:is_tty() end)
 
-    local merged = titan_io.popen(
+    local merged = system.popen(
       "printf 'static-process-stdout'; " ..
       "printf 'static-process-stderr' >&2")
     local merged_output = ""
@@ -637,7 +637,7 @@ function main(args: {string}): integer
           "static-process-stdoutstatic-process-stderr" and
           merged_status.code == 0 and not merged_status.signal and
           merged_status.signal_number == 0,
-          "static io.popen changed merged output or exit status")
+          "static os.popen changed merged output or exit status")
     merged:close()
 
     local process_args: {string} = {"echo"}

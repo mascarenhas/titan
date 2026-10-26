@@ -24,6 +24,9 @@ local const input_transfer_fields: const {reflect.Type} = {
   reflect.Type.is_option(reflect.Type.is_string()),
   reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(), reflect.Type.is_string()),
 }
+local const stream_transfer_fields: const {reflect.Type} = {
+  reflect.Type.is_string(), reflect.Type.is_string(),
+}
 
 -- Time/date behavior is translated and adapted from src/loslib.c in the
 -- immutable Lua 5.5.1 release:
@@ -109,6 +112,18 @@ record Process
   stdin: OutputStream?
   stdout: InputStream?
   stderr: InputStream?
+end
+
+--- Owned shell-process stream exposing stdin and merged stdout/stderr.
+-- @usage standard-library-os.md
+record InputOutputStream
+  local process: Process?
+  local input: OutputStream?
+  local output: InputStream?
+  local input_packet: string?
+  local status: ExitStatus?
+  local closed: boolean
+  local pending_operations: integer
 end
 
 --- Stable readable standard-input stream of the Titan process.
@@ -694,15 +709,10 @@ function spawn(file: string, args: {string},
   end
 end
 
--- Only io.popen selects shell syntax. Ordinary spawn keeps libuv's normal argv
--- quoting; the source-private option is not part of the public SpawnOption API.
+-- Only popen selects shell syntax. Ordinary spawn keeps libuv's normal argv
+-- quoting; the private option is not part of the public SpawnOption API.
 local function with_shell_arguments(config: SpawnConfig): integer
   return os_spawn_config_for_shell(config.handle)
-end
-
-local function spawn_shell(command: string): Process
-  local file, args = os_shell_command(command)
-  return spawn(file, args, with_stdin, with_merged_output, with_shell_arguments)
 end
 
 --- Wait for child termination without closing captured streams.
@@ -2160,9 +2170,11 @@ local function checked_text(text: string, operation: string)
   if contains_nul(text) then raise make_error(uv.EINVAL, operation) end
 end
 
--- Validation precedes the native close. Once close is attempted, callers
--- clear their packet before reporting its status; retry must not close twice.
-local function discard_output_transfer_payload(payload: string): integer
+--- Dispose an unadopted captured output payload without a Runtime or Task.
+-- @param payload Exactly-once manual capability; parent identities are no-ops.
+-- @return Native close status; a close attempt consumes ownership even on error.
+-- @usage standard-library-os.md#transferring-process-streams
+function OutputStream.discard_transfer_payload(payload: string): integer
   local descriptor: integer, native: string? =
     protobuf.deserialize_fields(payload, output_transfer_fields)
   if descriptor == 1 or descriptor == 2 then
@@ -2174,12 +2186,22 @@ local function discard_output_transfer_payload(payload: string): integer
   return uv.pipe_t.discard_transfer_payload(native)
 end
 
-local function discard_input_transfer_payload(payload: string): integer
-  local descriptor: integer, _excess: string, _terminal: integer,
-    _failure: async.OperationError?, native: string?, _initial: {string} =
+--- Dispose an unadopted captured input payload without a Runtime or Task.
+-- @param payload Exactly-once manual capability; parent identities are no-ops.
+-- @return Native close status; a close attempt consumes ownership even on error.
+-- @usage standard-library-os.md#transferring-process-streams
+function InputStream.discard_transfer_payload(payload: string): integer
+  local descriptor: integer, excess: string, terminal_kind: integer,
+    failure: async.OperationError?, native: string?, initial: {string} =
     protobuf.deserialize_fields(payload, input_transfer_fields)
+  if terminal_kind < 0 or terminal_kind > 3 or
+      (terminal_kind == 2) ~= (failure ~= nil) then
+    raise "invalid input stream terminal payload"
+  end
   if descriptor == 0 then
-    if native ~= nil then raise "invalid standard input transfer payload" end
+    if #excess ~= 0 or native ~= nil or #initial ~= 0 or terminal_kind ~= 3 then
+      raise "invalid standard input transfer payload"
+    end
     return 0
   end
   if descriptor ~= -1 then raise "invalid retained input stream descriptor" end
@@ -2379,4 +2401,168 @@ function InputStream.from_transfer_payload(payload: string): InputStream
   result.handle = stream
   published = true
   return result
+end
+
+--- Read a chunk of merged shell stdout and stderr.
+-- @return Bytes, or nil at EOF or after terminal close.
+-- @usage standard-library-os.md
+function InputOutputStream:read(): string?
+  self.pending_operations = self.pending_operations + 1
+  defer self.pending_operations = self.pending_operations - 1
+  if self.closed or self.output == nil then return nil end
+  return self.output:read()
+end
+
+--- Read merged shell output through a binary delimiter.
+-- @param delimiter Nonempty delimiter, matched across chunks.
+-- @param chop True removes the delimiter.
+-- @return Bytes or final suffix, or nil at EOF or after terminal close.
+-- @usage standard-library-os.md
+function InputOutputStream:read_until(delimiter: string,
+                                      chop: boolean?): string?
+  self.pending_operations = self.pending_operations + 1
+  defer self.pending_operations = self.pending_operations - 1
+  if self.closed or self.output == nil then return nil end
+  return self.output:read_until(delimiter, chop)
+end
+
+-- A failed second pipe handoff leaves the first packet here, still owned by
+-- this facade. Clear it only after adoption succeeds or handoff returns both.
+local function InputOutputStream:restore_input()
+  local packet? = self.input_packet
+  if packet ~= nil then
+    local input = OutputStream.from_transfer_payload(packet)
+    self.input = input
+    if self.process ~= nil then self.process.stdin = input end
+    self.input_packet = nil
+  end
+end
+
+--- Write all bytes to the shell process stdin.
+-- @param data Binary bytes to send.
+-- @usage standard-library-os.md
+function InputOutputStream:write(data: string)
+  self.pending_operations = self.pending_operations + 1
+  defer self.pending_operations = self.pending_operations - 1
+  self:restore_input()
+  if self.input == nil then raise "InputOutputStream pipes were transferred" end
+  self.input:write(data)
+end
+
+--- Wait for and cache the shell process terminal status.
+-- @return Process exit code and signal information.
+-- @usage standard-library-os.md
+function InputOutputStream:wait(): ExitStatus
+  self.pending_operations = self.pending_operations + 1
+  defer self.pending_operations = self.pending_operations - 1
+  if self.process == nil then
+    raise "transferred InputOutputStream has no child process owner"
+  end
+  if self.status then return self.status end
+  local status = self.process:wait()
+  self.status = status
+  return status
+end
+
+--- Close streams and terminate and wait for the shell process if still running.
+-- @usage standard-library-os.md
+function InputOutputStream:close()
+  -- Implementation notes: doc/implementation/os-library.md#shell-process-stream
+  self.pending_operations = self.pending_operations + 1
+  defer self.pending_operations = self.pending_operations - 1
+  if self.closed then return end
+  local packet? = self.input_packet
+  if packet ~= nil then
+    local status = OutputStream.discard_transfer_payload(packet)
+    self.input_packet = nil
+    check_status(status, "stdio.transfer.discard")
+  end
+  if self.input ~= nil then self.input:close() end
+  local process_cleanup_complete = false
+  defer do
+    if self.output ~= nil then self.output:close() end
+    if process_cleanup_complete then self.closed = true end
+  end
+  if self.process ~= nil and not self.status and self.process:is_running() then
+    self.process:kill("term")
+    self:wait()
+  end
+  process_cleanup_complete = true
+end
+
+--- Detach idle communication pipes while retaining child ownership at origin.
+-- @return Opaque bytes owning both process streams, to adopt exactly once.
+-- @usage standard-library-os.md#transferring-shell-streams
+function InputOutputStream:to_transfer_payload(): string
+  -- Implementation notes: doc/implementation/os-library.md#shell-stream-transfer
+  if self.closed or self.output == nil then
+    raise "cannot transfer closed or detached InputOutputStream pipes"
+  end
+  if self.pending_operations ~= 0 then
+    raise "cannot transfer an InputOutputStream with a pending operation"
+  end
+  -- Preflight both owners before detaching either. An ordinary failure in
+  -- the second dup retains the first packet for write, retry, or close.
+  if self.input ~= nil and self.input.handle ~= nil then
+    stream_transfer_preflight(self.input.handle, false)
+  end
+  if self.output.handle ~= nil then stream_transfer_preflight(self.output.handle, true) end
+  if self.input_packet == nil then
+    if self.input == nil then raise "InputOutputStream pipes were transferred" end
+    self.input_packet = self.input:to_transfer_payload()
+    self.input = nil
+  end
+  local output_packet = self.output:to_transfer_payload()
+  local input_packet: string = self.input_packet
+  self.output = nil
+  self.input_packet = nil
+  local exported = false
+  defer if not exported then
+    defer InputStream.discard_transfer_payload(output_packet)
+    OutputStream.discard_transfer_payload(input_packet)
+  end
+  local payload = protobuf.serialize_fields(stream_transfer_fields, input_packet, output_packet)
+  exported = true
+  return payload
+end
+
+--- Adopt communication pipes without acquiring the originating child Process.
+-- @param payload Opaque protobuf bytes containing both process-stream payloads.
+-- @return Pipe owner; wait is available only on the original facade.
+-- @usage standard-library-os.md#transferring-shell-streams
+function InputOutputStream.from_transfer_payload(payload: string): InputOutputStream
+  local input_packet: string, output_packet: string =
+    protobuf.deserialize_fields(payload, stream_transfer_fields)
+  local result = InputOutputStream(nil, nil, nil, nil, nil, false, 0)
+  local adopted = false
+  defer if not adopted and result.input ~= nil then
+    discard_unpublished_stdio(result.input.handle)
+  end
+  result.input = OutputStream.from_transfer_payload(input_packet)
+  result.output = InputStream.from_transfer_payload(output_packet)
+  adopted = true
+  return result
+end
+
+--- Run a command with platform shell syntax and capture stdin plus merged output.
+-- @param command Shell command; /bin/sh on Unix, system cmd.exe on Windows.
+-- @return Owned stream; drain output before waiting when pipe capacity can matter.
+-- @usage standard-library-os.md
+function popen(command: string): InputOutputStream
+  local file, args = os_shell_command(command)
+  local process = spawn(file, args, with_stdin, with_merged_output, with_shell_arguments)
+  local input? = process.stdin
+  local output? = process.stdout
+  if not input or not output then
+    raise "internal popen spawn did not capture its streams"
+  end
+  return InputOutputStream {
+    process = process,
+    input = input,
+    output = output,
+    input_packet = nil,
+    status = nil,
+    closed = false,
+    pending_operations = 0,
+  }
 end

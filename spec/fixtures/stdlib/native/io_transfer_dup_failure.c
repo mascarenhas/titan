@@ -11,6 +11,11 @@
 static long generation;
 static unsigned calls;
 static int staged_descriptor = -1;
+static int failed_close_descriptor = -1;
+static int failed_close_attempts;
+
+int titan_io_close_failure_attempts(void) { return failed_close_attempts; }
+void titan_io_close_failure_release_guard(void) { failed_close_descriptor = -1; }
 
 int __wrap_dup(int descriptor) {
   const char *value = getenv("TITAN_IO_DUP_FAILURE");
@@ -33,6 +38,22 @@ int __wrap_dup(int descriptor) {
 int __wrap_close(int descriptor) {
   int tracked = descriptor == staged_descriptor && generation == 4;
   int result;
+  /* Return EINTR after a real close, then intercept any erroneous retry without
+   * touching that descriptor number again: the OS may already have reused it. */
+  if (descriptor == failed_close_descriptor) {
+    failed_close_attempts++;
+    errno = EINTR;
+    return -1;
+  }
+  if (descriptor == staged_descriptor && generation >= 5 && generation <= 7) {
+    staged_descriptor = -1;
+    failed_close_descriptor = descriptor;
+    failed_close_attempts++;
+    result = (int)syscall(SYS_close, descriptor);
+    if (result != 0) return result;
+    errno = EINTR;
+    return -1;
+  }
   if (tracked) staged_descriptor = -1;
   result = (int)syscall(SYS_close, descriptor);
   if (tracked && result == 0) {

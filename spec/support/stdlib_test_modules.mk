@@ -155,6 +155,7 @@ TITAN_TEST_SOURCES_coroutine.tests := spec/stdlib/titan/coroutine/tests/tests.ti
 	spec/stdlib/titan/coroutine/tests/lua_boundary_test.titan \
 	spec/stdlib/titan/coroutine/tests/nested_test.titan \
 	spec/stdlib/titan/coroutine/tests/running_test.titan \
+	spec/stdlib/titan/coroutine/tests/transfer_test.titan \
 	spec/stdlib/titan/coroutine/tests/unwind_test.titan
 TITAN_TEST_IMPORTS_coroutine.tests := coroutine.test_support coroutine.unwind_init_fixture support.command support.common support.runtime
 
@@ -194,9 +195,8 @@ TITAN_TEST_SOURCES_io.test_support := spec/stdlib/titan/io/test_support.titan
 TITAN_TEST_IMPORTS_io.test_support :=
 
 TITAN_TEST_SOURCES_io.tests := spec/stdlib/titan/io/tests/tests.titan \
-	spec/stdlib/titan/io/tests/core_test.titan \
-	spec/stdlib/titan/io/tests/process_test.titan
-TITAN_TEST_IMPORTS_io.tests := io.test_support os.process_test_support support.async support.command support.common support.runtime
+	spec/stdlib/titan/io/tests/core_test.titan
+TITAN_TEST_IMPORTS_io.tests := io.test_support os.process_test_support support.runtime
 
 TITAN_TEST_SOURCES_iteration.tests := spec/stdlib/titan/iteration/tests.titan
 TITAN_TEST_IMPORTS_iteration.tests := support.common
@@ -257,6 +257,7 @@ TITAN_TEST_SOURCES_os.process_test_support := spec/stdlib/titan/os/process_test_
 TITAN_TEST_IMPORTS_os.process_test_support := support.async support.common
 
 TITAN_TEST_SOURCES_os.process_tests := spec/stdlib/titan/os/process_tests/process_tests.titan \
+	spec/stdlib/titan/os/process_tests/disposal_test.titan \
 	spec/stdlib/titan/os/process_tests/exit_test.titan \
 	spec/stdlib/titan/os/process_tests/host_process_test.titan \
 	spec/stdlib/titan/os/process_tests/parent_stdio_test.titan \
@@ -266,6 +267,7 @@ TITAN_TEST_SOURCES_os.process_tests := spec/stdlib/titan/os/process_tests/proces
 	spec/stdlib/titan/os/process_tests/coverage_tty_test.titan \
 	spec/stdlib/titan/os/process_tests/coverage_read_failure_test.titan \
 	spec/stdlib/titan/os/process_tests/coverage_shutdown_admission_test.titan \
+	spec/stdlib/titan/os/process_tests/shell_test.titan \
 	spec/stdlib/titan/os/process_tests/transfer_test.titan
 TITAN_TEST_IMPORTS_os.process_tests := os.process_test_support support.async support.command support.common support.runtime
 
