@@ -1520,6 +1520,9 @@ TITAN_TEST_FIXTURE_OUTPUTS += $(TITAN_TEST_LINUX_FAULT_OUTPUTS)
 endif
 TITAN_TEST_CONFIG_STAMP := $(TITAN_TEST_BUILD_DIR)/build.config
 TITAN_TEST_C_PARTS_STAMP := $(TITAN_TEST_BUILD_DIR)/c-parts.config
+# Private incremental prototype: retain legacy scheduling for comparisons.
+TITAN_TEST_INCREMENTAL_MODE ?= graph
+TITAN_TEST_LINK_OBJECTS = $(if $(filter batch,$(TITAN_TEST_INCREMENTAL_MODE)),,$(TITAN_TEST_MODULE_OBJECTS))
 # TEST_LUA selects the installed SDK, just as it does for the compiler and the
 # native fixtures. A cold non-test Make invocation need not have one installed.
 TITAN_TEST_INSTALL_ROOT := $(shell $(TEST_LUA) -E -e 'io.write(assert(require("titan-compiler.driver").TITAN_ROOT))' 2>/dev/null)
@@ -1611,8 +1614,8 @@ $(TITAN_TEST_CONFIG_STAMP): FORCE
 	  $(call make_shell_quote,ROOTS=$(TITAN_STDLIB_TEST_ROOTS)) > "$$tmp"; \
 	if test -r "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; \
 	else \
-	  rm -f $(TITAN_TEST_MODULE_OBJECTS) \
-	    $(foreach module,$(TITAN_TEST_MODULES),$(call titan_test_stem,$(module)).parts $(call titan_test_stem,$(module)).priv.h $(call titan_test_stem,$(module)).part*.c $(call titan_test_stem,$(module)).part*.o) \
+	  rm -f $(if $(filter legacy,$(TITAN_TEST_INCREMENTAL_MODE)),$(TITAN_TEST_MODULE_OBJECTS) \
+	    $(foreach module,$(TITAN_TEST_MODULES),$(call titan_test_stem,$(module)).parts $(call titan_test_stem,$(module)).priv.h $(call titan_test_stem,$(module)).part*.c $(call titan_test_stem,$(module)).part*.o)) \
 	    $(TITAN_TEST_NATIVE_OBJECTS) $(TITAN_TEST_BUILD_DIR)/ssl_allocator_fixture.o \
 	    $(TITAN_TEST_LINUX_FAULT_OUTPUTS) \
 	    $(TITAN_TEST_BUILD_DIR)/ssl_error_strings.o $(TITAN_TEST_BUILD_DIR)/os_descriptor_limit.o \
@@ -1621,6 +1624,7 @@ $(TITAN_TEST_CONFIG_STAMP): FORCE
 	  mv -f "$$tmp" "$@"; \
 	fi
 
+ifeq ($(TITAN_TEST_INCREMENTAL_MODE),legacy)
 define titan_test_object_rule
 $(call titan_test_stem,$(1)).o: FORCE $(TITAN_TEST_SOURCES_$(1)) $(TITAN_TEST_C_INPUTS_$(1)) \
 	$(foreach dependency,$(TITAN_TEST_IMPORTS_$(1)),$(call titan_test_outputs,$(dependency))) \
@@ -1647,6 +1651,28 @@ $(call titan_test_stem,$(1)).o: FORCE $(TITAN_TEST_SOURCES_$(1)) $(TITAN_TEST_C_
 $(filter-out $(call titan_test_stem,$(1)).o,$(call titan_test_outputs,$(1))): $(call titan_test_stem,$(1)).o
 	@test -f "$$@" && test ! -L "$$@"
 endef
+else
+define titan_test_object_rule
+$(call titan_test_stem,$(1)).o: FORCE $(TITAN_TEST_SOURCES_$(1)) $(TITAN_TEST_C_INPUTS_$(1)) \
+	$(foreach dependency,$(TITAN_TEST_IMPORTS_$(1)),$(call titan_test_outputs,$(dependency))) \
+	$(TITAN_TEST_CONFIG_STAMP) $(TITAN_TEST_C_PARTS_STAMP)
+	+@$$(RECURSIVE_WRAPPER_GUARD) set -e; \
+	$$(CHECK_TITAN_PARTS_COMPANION) \
+	incremental=--incremental; \
+	if test -f "$$@"; then \
+	  for output in $(call titan_test_outputs,$(1)); do test -f "$$$$output" && test ! -L "$$$$output" || incremental=; done; \
+	  check_parts_companion "$(call titan_test_stem,$(1))" || incremental=; \
+	fi; \
+	( cd $$(call make_shell_quote,$$(TITAN_TEST_BUILD_DIR)); \
+	  $$(TITAN_TEST_COMPILER_ENV) $$(TEST_TITANC) --output . --test $$$$incremental -j$$(TITAN_JOBS) -c \
+	    --tree $$(call make_shell_quote,$$(abspath spec/stdlib/titan)) $(1) ); \
+	check_parts_companion "$(call titan_test_stem,$(1))" || { \
+	  echo "ERROR: test compilation did not produce $(call titan_test_stem,$(1)).parts" >&2; exit 1; \
+	}
+$(filter-out $(call titan_test_stem,$(1)).o,$(call titan_test_outputs,$(1))): $(call titan_test_stem,$(1)).o
+	@test -f "$$@" && test ! -L "$$@"
+endef
+endif
 $(foreach module,$(TITAN_TEST_MODULES),$(eval $(call titan_test_object_rule,$(module))))
 
 titan-stdlib-test-objects: ## Compile native test modules without linking the runner
@@ -1746,12 +1772,12 @@ $(TITAN_TEST_BUILD_DIR)/os_process_host_child: spec/fixtures/stdlib/native/os_pr
 
 # A changed configuration can remove the executable after Make has cached its
 # timestamp. Recheck its existence even when fast rebuilds share that timestamp.
-$(TITAN_TEST_EXECUTABLE): FORCE $(TITAN_TEST_MODULE_OBJECTS) \
+$(TITAN_TEST_EXECUTABLE): FORCE $(TITAN_TEST_LINK_OBJECTS) \
 		$(TITAN_TEST_FIXTURE_OUTPUTS) $(TITAN_TEST_COMPILER_PREREQS) \
 		$(TITAN_TEST_PROVIDER_PREREQS) $(TITAN_TEST_CONFIG_STAMP)
 	+@$(RECURSIVE_WRAPPER_GUARD) set -e; \
 	newer=$(call make_shell_quote,$(filter-out FORCE,$?)); \
-	if test -n "$$newer" || test ! -f "$@"; then \
+	if test "$(TITAN_TEST_INCREMENTAL_MODE)" = batch || test -n "$$newer" || test ! -f "$@"; then \
 	  cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); \
 	  $(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --output . --test --incremental --no-uv-bootstrap -j$(TITAN_JOBS) \
 	    --tree $(call make_shell_quote,$(abspath spec/stdlib/titan)) \

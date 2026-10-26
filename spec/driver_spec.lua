@@ -3806,6 +3806,7 @@ describe("compiler module loader", function()
             local stem = (entry.native_output or entry.filename):gsub("[.]titan$", "")
             local object = stem .. ".o"
             local native = {
+                configuration = entry.ast._incremental_configuration,
                 has_main = false, imports = {}, native_references = {},
                 external_symbols = {},
                 layouts = empty_layouts(entry.type.name),

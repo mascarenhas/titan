@@ -1614,7 +1614,7 @@ esac
         }, "empty native owner group")
     end)
 
-    it("reuses separate native test objects and relinks only after a changed prerequisite", function()
+    it("preserves legacy native object timestamp invalidation for prototype comparisons", function()
             if platform.windows then
                 pending("Unix Make native object DAG, timestamp rules and shell tool fixtures")
                 return
@@ -1674,6 +1674,7 @@ printf '%s\n' "$module" >> ../../build.log
                 "make", "--no-print-directory", "-s", "-j4", "-C", root,
                 "MAKE=false", "TEST_LUA=true", "TEST_TITANC=sh ../../fake-titanc",
                 "TITAN_TEST_INSTALL_ROOT=" .. root,
+                "TITAN_TEST_INCREMENTAL_MODE=legacy",
                 "TITAN_TEST_COMPILER_PREREQS=prepared",
                 "TITAN_TEST_PROVIDER_PREREQS=prepared", "TITAN_TEST_FIXTURE_OUTPUTS=prepared",
                 "TITAN_TEST_C_INPUTS_support.common=prepared",

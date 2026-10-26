@@ -129,8 +129,8 @@ function cpp.header_search_identity(path, openable, strategy)
     local link = strategy:lstat(path)
     local followed = strategy:stat(path)
     return table.concat({
-        "c-header-search-v1", "lstat=" .. attribute_identity(link),
-        "stat=" .. attribute_identity(followed),
+        "c-header-search-v1", "exists=" .. (link and "yes" or "no"),
+        "kind=" .. tostring(followed and followed.kind or "missing"),
         "open=" .. (openable and "readable" or "unreadable"),
     }, ";")
 end
@@ -138,7 +138,8 @@ end
 local function physical_header(path, strategy)
     local link, followed = strategy:lstat(path), strategy:stat(path)
     local physical = "lstat=" .. attribute_identity(link) ..
-        ";stat=" .. attribute_identity(followed)
+        ";stat=" .. attribute_identity(followed) ..
+        ";size=" .. tostring(followed and followed.size)
     local seconds = followed and followed.modified_seconds
     local nanoseconds = followed and followed.modified_nanoseconds
     local observation
@@ -194,7 +195,7 @@ end
 local function content_identity(contents, physical, options)
     local adapter = options and options.cache_adapter
     local digest = sha256.hex_via(adapter and adapter.sha256_binary, contents)
-    return "c-header-file-v2:sha256:" .. digest .. ";" .. physical
+    return "c-header-file-v2:sha256:" .. digest
 end
 
 -- `options.cache_adapter.sha256_binary`, when supplied, computes the content
@@ -269,8 +270,10 @@ function cpp.revalidate_header_input(previous, options)
         local baseline = options.header_observations and
             options.header_observations[key .. "\0" .. previous.identity]
         local saved = cpp.copy_header_observation(baseline or previous.observation)
-        local digest, certified = previous.identity:match("^c%-header%-file%-v2:sha256:(%x+);(.+)$")
-        if saved and digest and #digest == 64 and certified == saved.physical_identity
+        local digest = previous.identity:match("^c%-header%-file%-v2:sha256:(%x+)$")
+        -- A zero fraction may be coarse Sync LuaFileSystem time. Retain it
+        -- for read-race checks, but never use it to skip reading the bytes.
+        if saved and saved.modified_nanoseconds > 0 and digest and #digest == 64
            and cpp.same_header_observation(saved, current.observation) then
             current.identity = previous.identity
             count_header(strategy, "metadata_reuses")

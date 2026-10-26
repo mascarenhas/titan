@@ -4684,7 +4684,6 @@ function driver.defaultloader(static_deps, options)
             end
             return nil
         end
-        if forced_source_roots[modname] then return miss("explicit compile-only root") end
         local stem = driver.module_output_stem(source.native_output or source.main, modname)
         local object_path = stem .. ".o"
         local object_stat = context.io:lstat(object_path)
@@ -4705,6 +4704,18 @@ function driver.defaultloader(static_deps, options)
         if not native or not native.layouts then
             return miss("missing nominal layout metadata")
         end
+        local incremental = require("titan-compiler.incremental")
+        if native.configuration ~= incremental.configuration(driver, context) then
+            return miss("compiler or build configuration changed")
+        end
+        local current_headers, header_error, headers_changed =
+            driver.restat_c_header_dependencies(entry.c_header_dependencies, {
+                context = context,
+            })
+        if not current_headers or headers_changed then
+            return miss(header_error or "C header inputs changed")
+        end
+        entry.c_header_dependencies = current_headers
         local valid_parts, parts_error = objectmetadata.validate_parts(native)
         if not valid_parts then
             return miss(parts_error)
@@ -4789,8 +4800,8 @@ function driver.defaultloader(static_deps, options)
                 end
             end
         end
-        -- A valid record is compiler-owned data. Build-system prerequisites
-        -- own dependency/configuration freshness; replay only its link inputs.
+        -- Resolve imports before certifying the machine code against their
+        -- current per-module interfaces, not their provider container mtimes.
         driver.imported[modname] = CIRCULAR_MARK
         entry.filename, entry.source_files = source.main, source.files
         entry.native_output = source.native_output or source.main
@@ -4814,6 +4825,20 @@ function driver.defaultloader(static_deps, options)
             end
         end
         table.remove(dependency_stack)
+        for _, import in ipairs(native.imports) do
+            local dependency = driver.imported[import.name]
+            local digest = incremental.interface(dependency, import.source_required, context)
+            if import.interface ~= digest then
+                driver.imported[modname] = nil
+                return miss("import interface changed: " .. import.name)
+            end
+            local binding = dependency.kind == "dynamic" and "handle" or "direct"
+            if native.bindings[import.name] and native.bindings[import.name] ~= binding
+                or binding == "handle" and native.providers[import.name] ~= dependency.type.file then
+                driver.imported[modname] = nil
+                return miss("import binding changed: " .. import.name)
+            end
+        end
         for name, owner in pairs(entry.declared_registry) do
             if name:match("^(.*)%.") == modname or not types.registry[name] then
                 types.registry[name] = owner
@@ -4821,8 +4846,7 @@ function driver.defaultloader(static_deps, options)
         end
         local descriptor = entry.ffi_header_descriptor
         if descriptor then
-            -- Reattach source environments to the dependencies selected in
-            -- this invocation, without a content/fingerprint freshness check.
+            -- Reattach the certified dependency header environments.
             for index, name in ipairs(entry.source_imports) do
                 local dependency = driver.imported[name]
                 descriptor.dependencies[index] = dependency.ffi_header_descriptor
@@ -4995,6 +5019,8 @@ function driver.defaultloader(static_deps, options)
         else
             entry.source_manifest = source_manifest
         end
+        ast._incremental_configuration =
+            require("titan-compiler.incremental").configuration(driver, context)
         driver.imported[modname] = entry
         static_deps[modname] = true
         if foreign_header and not platform.is_absolute(foreign_header) then
@@ -6875,6 +6901,8 @@ local function prepare_compile(
         if not node._ignore and node._tag == "Ast.TopLevelImport" then
             imports[#imports + 1] = {
                 name = node.modname, source_required = node._source_import == true,
+                interface = require("titan-compiler.incremental").interface(
+                    driver.imported[node.modname], node._source_import == true),
             }
             if static_deps[node.modname] then deps[node.modname] = true
             else providers[node.modname] = node._type.file end
@@ -6901,6 +6929,8 @@ local function prepare_compile(
     end
     local coverage = require("titan-compiler.coverage")
     local native = {
+        configuration = ast._incremental_configuration or
+            require("titan-compiler.incremental").configuration(driver),
         imports = imports, bindings = native_bindings, providers = providers,
         has_main = checker.has_main(ast) and true or false,
         test_functions = require("titan-compiler.test_runner").function_names(ast),

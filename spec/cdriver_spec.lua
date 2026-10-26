@@ -514,19 +514,33 @@ describe("mtime-first C header validation", function()
         assert.equal(123, input.observation.modified_nanoseconds)
     end)
 
-    it("reads a replacement as a new input even when its mtime and bytes match", function()
+    it("rehashes replacements but reuses identical bytes despite a new inode", function()
         local world, input = fixture()
         world.attributes.inode = 18
         local current, err, changed = validate(world, input)
         assert.is_nil(err)
-        assert.is_true(changed)
-        assert.not_equal(input.identity, current.identity)
+        assert.is_false(changed)
+        assert.equal(input.identity, current.identity)
         assert.equal(1, world.reads)
         assert.equal(1, world.hashes)
         local stable, _, repeated = validate(world, current)
         assert.is_false(repeated)
         assert.same(current, stable)
         assert.equal(1, world.reads)
+    end)
+
+    it("rehashes coarse whole-second observations instead of hiding same-second edits", function()
+        local world = fixture()
+        world.attributes.modified_nanoseconds = 0
+        local input = assert(cpp.revalidate_header_input(
+            { kind = "file", path = "/header.h", identity = "unobserved" },
+            { io = world.io }))
+        assert.equal(0, input.observation.modified_nanoseconds)
+        world.contents = "typedef long observed_type;\n"
+        local current, err, changed = validate(world, input)
+        assert.is_nil(err)
+        assert.is_true(changed)
+        assert.not_equal(input.identity, current.identity)
     end)
 
     it("reads header contents when filesystem identity is unavailable", function()
@@ -683,9 +697,8 @@ describe("completed C header payload transport", function()
         end
         cdriver.clear_process_cache()
         local restored = assert_process_file(path, options)
-        assert.equal(platform.windows and 2 or 1, matches)
-        assert.same({ platform.windows and "unsigned" or "int" },
-            restored.changed_type.def)
+        assert.equal(2, matches)
+        assert.same({ "unsigned" }, restored.changed_type.def)
     end)
 
     it("refreshes touched input metadata without rewriting the persisted graph", function()
@@ -724,10 +737,8 @@ describe("completed C header payload transport", function()
         cdriver.clear_process_cache(strategy)
         assert_process_file(path, options)
         assert.equal(platform.windows and 0 or 1, refreshes)
-        assert.equal(platform.windows and 1 or 0,
-            cdriver.process_cache_stats(strategy).file_reads)
-        assert.equal(platform.windows and 1 or 0,
-            cdriver.process_cache_stats(strategy).file_hashes)
+        assert.equal(1, cdriver.process_cache_stats(strategy).file_reads)
+        assert.equal(1, cdriver.process_cache_stats(strategy).file_hashes)
     end)
 
     it("backfills touched observations through a legacy byte-only adapter", function()
@@ -744,10 +755,8 @@ describe("completed C header payload transport", function()
         cdriver.clear_process_cache(strategy)
         assert_process_file(path, options)
         assert.equal(1, matches)
-        assert.equal(platform.windows and 1 or 0,
-            cdriver.process_cache_stats(strategy).file_reads)
-        assert.equal(platform.windows and 1 or 0,
-            cdriver.process_cache_stats(strategy).file_hashes)
+        assert.equal(1, cdriver.process_cache_stats(strategy).file_reads)
+        assert.equal(1, cdriver.process_cache_stats(strategy).file_hashes)
     end)
 
     for _, flag in ipairs({ "-include", "-imacros" }) do
@@ -1018,7 +1027,7 @@ describe("completed C header payload transport", function()
         assert.matches("sha256_binary", invalid, 1, true)
     end)
 
-    it("retains direct symlink identity even when the target bytes are identical", function()
+    it("keeps equal content identity across symlink and hardlink publication", function()
         if not require_symlink_capability() then return end
         local path = header("typedef int link_type;\n")
         local link = path .. ".link"
@@ -1029,8 +1038,8 @@ describe("completed C header payload transport", function()
         os.remove(link)
         assert(lfs.link(path, link))
         local second = assert(cdriver.header_input_identity("file", link, strategy))
-        assert.not_equal(first, second)
-        assert.matches(";lstat=", first, 1, true)
+        assert.equal(first, second)
+        assert.matches("c-header-file-v2:sha256:", first, 1, true)
     end)
 end)
 
@@ -1294,9 +1303,9 @@ describe("C FFI cdriver", function()
 
             assert(os.remove(link))
             assert(lfs.link("second/nested", link, true))
-            assert.not_equal(first_file_identity,
+            assert.equal(first_file_identity,
                 assert(cdriver.header_input_identity("file", lookup)))
-            assert.not_equal(first_search_identity,
+            assert.equal(first_search_identity,
                 assert(cdriver.header_input_identity("search", lookup)))
 
             remove_tree(
@@ -1337,7 +1346,7 @@ describe("C FFI cdriver", function()
                 { alias, vendor, root })
         end)
 
-        it("uses physical identity when available and content identity otherwise",
+        it("uses content identity across physical replacement on every platform",
         function()
             local root = tmp_dir()
             local original = root .. "/original.h"
@@ -1362,20 +1371,13 @@ describe("C FFI cdriver", function()
             -- alone is replaced by the independently created file.
             if platform.windows then assert(os.remove(linked)) end
             assert(os.rename(replacement, linked))
-            if platform.windows then
-                assert.equal(original_file,
-                    assert(cdriver.header_input_identity("file", linked)))
-                assert.equal(original_search,
-                    assert(cdriver.header_input_identity("search", linked)))
-                write_file(linked, "typedef long titan_physical_header_value;\n")
-                assert.not_equal(original_file,
-                    assert(cdriver.header_input_identity("file", linked)))
-            else
-                assert.not_equal(original_file,
-                    assert(cdriver.header_input_identity("file", linked)))
-                assert.not_equal(original_search,
-                    assert(cdriver.header_input_identity("search", linked)))
-            end
+            assert.equal(original_file,
+                assert(cdriver.header_input_identity("file", linked)))
+            assert.equal(original_search,
+                assert(cdriver.header_input_identity("search", linked)))
+            write_file(linked, "typedef long titan_physical_header_value;\n")
+            assert.not_equal(original_file,
+                assert(cdriver.header_input_identity("file", linked)))
 
             remove_tree({ original, linked, replacement }, { root })
         end)
@@ -1414,9 +1416,9 @@ describe("C FFI cdriver", function()
             assert.truthy(ok, err)
             assert.equal(late_header,
                 include.c_header_dependencies[2].path)
-            assert.matches("lstat=file",
+            assert.matches("exists=yes",
                 include.c_header_search_inputs[2].identity, 1, true)
-            assert.matches("stat=file",
+            assert.matches("kind=file",
                 include.c_header_search_inputs[2].identity, 1, true)
             assert.matches("open=unreadable",
                 include.c_header_search_inputs[2].identity, 1, true)
@@ -1439,14 +1441,14 @@ describe("C FFI cdriver", function()
             assert(lfs.link(target, link, true))
             local broken = assert(cdriver.header_input_identity(
                 "search", link))
-            assert.matches("lstat=link", broken, 1, true)
-            assert.matches("stat=missing", broken, 1, true)
+            assert.matches("exists=yes", broken, 1, true)
+            assert.matches("kind=missing", broken, 1, true)
 
             write_file(target, "typedef int titan_future_header;\n")
             local followed = assert(cdriver.header_input_identity(
                 "search", link))
-            assert.matches("lstat=link", followed, 1, true)
-            assert.matches("stat=file", followed, 1, true)
+            assert.matches("exists=yes", followed, 1, true)
+            assert.matches("kind=file", followed, 1, true)
             assert.not_equal(broken, followed)
 
             assert(os.remove(link))

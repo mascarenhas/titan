@@ -323,7 +323,7 @@ describe("incremental and separate compilation (CLI)", function()
         exit_code(APP, 11)
     end)
 
-    it("forces all explicit roots even when reached through an earlier root", function()
+    it("rebuilds changed roots even when reached through an earlier root", function()
         local base = NAMESPACE .. ".base"
         local base_stem = source(base, [[
             local function answer(): integer return 13 end
@@ -335,13 +335,13 @@ describe("incremental and separate compilation (CLI)", function()
         write(base_stem .. ".titan", [[
             local function answer(): integer return 17 end
         ]])
-        assert(lfs.touch(base_stem .. ".titan", os.time() - 60))
+        assert(lfs.touch(base_stem .. ".titan", os.time() + 1))
         compiled("-c", "--incremental", APP, base)
         compiled("--incremental", APP)
         exit_code(APP, 17)
     end)
 
-    it("reuses dependency objects while rebuilding the explicit root", function()
+    it("certifies dependency objects and explicit incremental roots", function()
         local base = NAMESPACE .. ".base"
         local base_stem = source(base, [[function answer(): integer return 19 end]])
         local app_stem = source(APP, 'local base = import "' .. base .. [[.titan"
@@ -355,7 +355,7 @@ describe("incremental and separate compilation (CLI)", function()
         compiled("-c", "--incremental", APP)
         assert.equal(future, lfs.attributes(base_stem .. ".o", "modification"))
         assert.equal(contents, read(base_stem .. ".o"))
-        assert.is_true(lfs.attributes(app_stem .. ".o", "modification") < future)
+        assert.equal(future, lfs.attributes(app_stem .. ".o", "modification"))
         compiled("--incremental", APP)
         exit_code(APP, 19)
     end)
@@ -391,11 +391,12 @@ describe("incremental and separate compilation (CLI)", function()
         exit_code(APP, 42)
     end)
 
-    it("rejects changed cached native bindings until Make recompiles the root", function()
+    it("recompiles consumers automatically when native provider bindings change", function()
         local base = NAMESPACE .. ".base"
         source(base, [[function answer(): integer return 23 end]])
         compiled(base)
-        source(base, [[function answer(): integer return 29 end]])
+        local stem = source(base, [[function answer(): integer return 29 end]])
+        assert(lfs.touch(stem .. ".o", os.time() - 1))
         compiled("-c", "--incremental", "--source-first", base)
         source(APP, 'local base = import "' .. base .. [["
             function main(args: {string}): integer return base.answer() end
@@ -403,19 +404,94 @@ describe("incremental and separate compilation (CLI)", function()
         compiled("-c", "--incremental", "--source-first", APP)
         compiled("--incremental", "--source-first", APP)
         exit_code(APP, 29)
-        local ok, output = compile("--incremental", APP)
-        assert.is_false(ok)
-        assert.matches("requires direct binding", output, 1, true)
-        assert.matches("rebuild it with the selected dependency providers", output, 1, true)
-        compiled("-c", "--incremental", APP)
         compiled("--incremental", APP)
         exit_code(APP, 23)
-        ok, output = compile("--incremental", "--source-first", APP)
-        assert.is_false(ok)
-        assert.matches("requires handle binding", output, 1, true)
-        compiled("-c", "--incremental", "--source-first", APP)
         compiled("--incremental", "--source-first", APP)
         exit_code(APP, 29)
+    end)
+
+    it("reuses ordinary consumers after body edits and rebuilds after interface edits", function()
+        local base = NAMESPACE .. ".base"
+        local base_stem = source(base, [[function answer(): integer return 21 end]])
+        local app_stem = source(APP, 'local base = import "' .. base .. [["
+            function main(args: {string}): integer return base.answer() end
+        ]])
+        compiled("-c", "--source-first", base, APP)
+        local future = os.time() + 60
+        assert(lfs.touch(app_stem .. ".o", future))
+        write(base_stem .. ".titan", [[function answer(): integer return 22 end]])
+        assert(lfs.touch(base_stem .. ".titan", os.time() + 1))
+        compiled("--incremental", "--source-first", APP)
+        assert.equal(future, lfs.attributes(app_stem .. ".o", "modification"))
+        exit_code(APP, 22)
+        write(base_stem .. ".titan", [[function answer(): string return "changed" end]])
+        assert(lfs.touch(base_stem .. ".titan", os.time() + 2))
+        local ok, output = compile("--incremental", "--source-first", APP)
+        assert.is_false(ok)
+        assert.matches("string", output, 1, true)
+    end)
+
+    it("invalidates local C inputs without Make prerequisites and preserves consumers", function()
+        local base = NAMESPACE .. ".base"
+        local base_stem = source(base, [[
+            foreign import "value.h"
+            function answer(): integer return ffi.INCREMENTAL_VALUE end
+        ]])
+        local header = base_stem:match("^(.*)/") .. "/value.h"
+        write(header, "#define INCREMENTAL_VALUE 31\n")
+        local app_stem = source(APP, 'local base = import "' .. base .. [["
+            function main(args: {string}): integer return base.answer() end
+        ]])
+        compiled("-c", "--source-first", base, APP)
+        local future = os.time() + 60
+        assert(lfs.touch(app_stem .. ".o", future))
+        write(header, "#define INCREMENTAL_VALUE 32\n")
+        local output = compiled("--incremental", "--source-first", "-v", APP)
+        assert.matches("C header inputs changed", output, 1, true)
+        assert.equal(future, lfs.attributes(app_stem .. ".o", "modification"))
+        exit_code(APP, 32)
+    end)
+
+    it("fingerprints each binary import interface rather than provider bytes", function()
+        local base = NAMESPACE .. ".base"
+        local stem = source(base, [[function answer(): integer return 41 end]])
+        compiled(base)
+        local app_stem = source(APP, 'local base = import "' .. base .. [["
+            function main(args: {string}): integer return base.answer() end
+        ]])
+        compiled("-c", APP)
+        local future = os.time() + 60
+        assert(lfs.touch(app_stem .. ".o", future))
+        write(stem .. ".titan", [[function answer(): integer return 42 end]])
+        compiled(base)
+        compiled("--incremental", APP)
+        assert.equal(future, lfs.attributes(app_stem .. ".o", "modification"))
+        exit_code(APP, 42)
+        write(stem .. ".titan", [[function answer(): string return "changed" end]])
+        compiled(base)
+        local ok, output = compile("--incremental", APP)
+        assert.is_false(ok)
+        assert.matches("string", output, 1, true)
+    end)
+
+    it("invalidates copied local foreign helper bodies", function()
+        local base = NAMESPACE .. ".base"
+        local stem = source(base, [[
+            local foreign function answer(): int return 51 end
+        ]])
+        local app_stem = source(APP, 'local base = import "' .. base .. [[.titan"
+            function main(args: {string}): integer return base.answer() end
+        ]])
+        compiled("-c", base, APP)
+        local future = os.time() + 60
+        assert(lfs.touch(app_stem .. ".o", future))
+        write(stem .. ".titan", [[
+            local foreign function answer(): int return 52 end
+        ]])
+        assert(lfs.touch(stem .. ".titan", os.time() + 1))
+        compiled("--incremental", APP)
+        assert.is_true(lfs.attributes(app_stem .. ".o", "modification") < future)
+        exit_code(APP, 52)
     end)
 
     it("discards failed native output before a successful retry and warm link", function()
@@ -693,6 +769,7 @@ os.exit(result.ok and 0 or result.status or 1)
                 function test_renamed(context: test.Context) test.assert(true) end
                 function test_added(context: test.Context) test.assert(true) end
             ]])
+            assert(lfs.touch(second_stem .. ".titan", future + 1))
             compiled("-c", "--test", "--incremental", OTHER)
             compiled("--test", "--incremental", APP, OTHER)
             run_ok, run_output = run_program(APP, "--verbose")
@@ -789,7 +866,7 @@ os.exit(result.ok and 0 or result.status or 1)
         local left = NAMESPACE .. ".left"
         local right = NAMESPACE .. ".right"
         local base_stem = source(base, [[
-            foreign function bump(item: int): int return item + 1 end
+            local foreign function bump(item: int): int return item + 1 end
         ]])
         local stems = { base_stem }
         for index, name in ipairs({ left, right }) do
@@ -822,8 +899,9 @@ os.exit(result.ok and 0 or result.status or 1)
         local function make(...)
             local argv = { "make", "-f", makefile, "-j2" }
             for _, value in ipairs({ ... }) do argv[#argv + 1] = value end
-            local ok, output = run(argv)
-            assert.is_true(ok, output)
+            local ok, output, why, status = run(argv)
+            assert.is_true(ok, command(argv) .. "\n" .. tostring(why) .. " " ..
+                tostring(status) .. "\n" .. output)
         end
         local function values(expected_left, expected_right)
             local script = string.format(
@@ -850,8 +928,9 @@ os.exit(result.ok and 0 or result.status or 1)
             assert.equal(modified, lfs.attributes(path, "modification"), path)
         end
         write(base_stem .. ".titan", [[
-            foreign function bump(item: int): int return item + 5 end
+            local foreign function bump(item: int): int return item + 5 end
         ]])
+        assert(lfs.touch(base_stem .. ".o", os.time() - 1))
         make()
         values(6, 7)
         make("-q")
