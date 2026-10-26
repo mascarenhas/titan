@@ -4182,17 +4182,11 @@ local function preamble_probe_path(context)
     return normalized_absolute_filename(path.join(root, ".titan", "preamble.c"))
 end
 
--- Compute this invocation's configuration certificate once per resolver
--- context. Every certification and every record written through the context
--- shares it. Any failure is an explicit invocation error: a compiler that
--- cannot inventory itself or its native configuration cannot compile either.
-function driver.incremental_configuration(context)
-    if type(context) ~= "table" or context.io == nil then
-        error("configuration certification requires a resolver context", 2)
-    end
-    if context.incremental_configuration then
-        return context.incremental_configuration
-    end
+-- The certification facts of one resolver context (`context.incremental_options`
+-- for `titan-compiler.incremental`): the loaded compiler, the real frontend,
+-- the exact generated-object native prefix and toolchain, code-generation
+-- settings, and the per-module stem and expected-codegen callbacks.
+local function incremental_options(context)
     local root, root_error = loaded_compiler_root(context.io)
     if not root then
         return nil, "cannot certify compiler configuration: " ..
@@ -4202,7 +4196,7 @@ function driver.incremental_configuration(context)
     if not prefix then return nil, prefix_error end
     local toolchain, toolchain_error = driver.toolchain_descriptor(context)
     if not toolchain then return nil, toolchain_error end
-    local options = {
+    return {
         compiler_root = root,
         frontend = context.frontend or "api",
         compile_prefix = prefix,
@@ -4221,6 +4215,21 @@ function driver.incremental_configuration(context)
                 context.codegen_policy or {}, modname, native)
         end,
     }
+end
+
+-- Compute this invocation's configuration certificate once per resolver
+-- context. Every certification and every record written through the context
+-- shares it. Any failure is an explicit invocation error: a compiler that
+-- cannot inventory itself or its native configuration cannot compile either.
+function driver.incremental_configuration(context)
+    if type(context) ~= "table" or context.io == nil then
+        error("configuration certification requires a resolver context", 2)
+    end
+    if context.incremental_configuration then
+        return context.incremental_configuration
+    end
+    local options, options_error = incremental_options(context)
+    if not options then return nil, options_error end
     context.incremental_options = options
     local configuration, configuration_error =
         incremental.configuration(context, options)
@@ -4287,6 +4296,20 @@ local function resolver_plan(context, linked_names)
     return plan
 end
 
+-- A closed-data copy of a tagged source descriptor as build plans carry it:
+-- no read bytes and no generated contents.
+local function copy_source_descriptor(source)
+    local files = {}
+    for index, filename in ipairs(source.files) do files[index] = filename end
+    return {
+        kind = source.kind, main = source.main, files = files,
+        native_output = source.native_output,
+        program_output = source.program_output,
+        _output_root = source._output_root,
+        _coverage_output = source._coverage_output,
+    }
+end
+
 -- Implementation notes: doc/implementation/driver.md#driverdefaultloaderstatic_deps-options
 function driver.defaultloader(static_deps, options)
     static_deps = static_deps or {}
@@ -4302,6 +4325,25 @@ function driver.defaultloader(static_deps, options)
         test = options.test == true,
         coverage = options.coverage,
     }
+    -- Planning mode (the build coordinator): each source module is certified
+    -- and its imports are followed without parsing or checking it, while
+    -- binary providers are selected exactly as ordinary resolution selects
+    -- them. driver.resolution_plan closes planning.
+    local planning
+    if options.plan_mode then
+        if type(options.imports_for) ~= "function" then
+            error("plan_mode requires an imports_for function", 2)
+        end
+        planning = { nodes = {}, unavailable = {}, open = true }
+    end
+    -- Worker mode: the coordinator's authoritative plan replaces discovery.
+    -- Parent-certified dependencies are restored from their records without
+    -- recertification; any request outside the plan is a divergence.
+    local worker_plan = options.worker_plan
+    if worker_plan ~= nil and (type(worker_plan) ~= "table"
+            or type(worker_plan.modules) ~= "table") then
+        error("worker_plan must be a build plan descriptor", 2)
+    end
     local object_loaded = {}
     local source_overrides = options.source_overrides or {}
     local known_source_modules = options.known_source_modules or {}
@@ -4893,7 +4935,8 @@ function driver.defaultloader(static_deps, options)
     -- or checking its source. The caller has already selected every recorded
     -- import. Returns the restored entry; `nil, code, detail` for a miss
     -- before any resolver mutation; `false, err` for a failure.
-    local function restore_source_object(modname, source, record, active_loader)
+    local function restore_source_object(
+            modname, source, record, active_loader, published)
         local entry = record
         local native = type(entry) == "table" and entry.object_metadata
         if type(native) ~= "table" or type(native.parts) ~= "table"
@@ -4989,7 +5032,9 @@ function driver.defaultloader(static_deps, options)
             modname, entry.type, active_loader, modname, {}, true, {},
             source_import_permissions(entry))
         if not registered then return false, register_error end
-        if context.probe_verbose then
+        -- A worker restores parent-certified records; the coordinator
+        -- already reported their decision.
+        if context.probe_verbose and not worker_plan and not published then
             io.stderr:write("Titan object hit ", modname, ": ",
                 entry.compiled, "\n")
         end
@@ -5066,6 +5111,149 @@ function driver.defaultloader(static_deps, options)
         if entry == nil then return miss(restore_code, restore_detail) end
         if not entry then return false, restore_code end
         return true, entry.type, {}, restored_source_info(entry)
+    end
+
+    -- Planning: certify (stage 1 only) and follow the module's imports. The
+    -- placeholder entry keeps ordinary selection state (dependency sets,
+    -- source/provider overlap rebinding) without a checked type; the
+    -- coordinator replaces it by restoring an accepted record. A failing
+    -- import never stops planning: its importer misses and the worker's
+    -- checker reports the located diagnostic.
+    local function plan_source(modname, source, loader)
+        local certified
+        if options.incremental and not source.contents then
+            local configuration, configuration_error =
+                driver.incremental_configuration(context)
+            if not configuration then return false, configuration_error end
+            certified = incremental.certify_local(context, modname, source)
+        end
+        local imports, imports_error =
+            options.imports_for(modname, source, certified)
+        if not imports then return false, imports_error end
+        local node = {
+            source = source, certified = certified, imports = imports,
+            failed = {},
+        }
+        planning.nodes[modname] = node
+        driver.imported[modname] = CIRCULAR_MARK
+        local direct = {}
+        table.insert(dependency_stack, direct)
+        for _, import in ipairs(imports) do
+            local ok, result, errors = loader(import.name,
+                import.source_required and { kind = "source-import" } or nil)
+            if not ok or #errors ~= 0 then
+                local text = ok and table.concat(errors, "\n") or tostring(result)
+                node.failed[import.name] = text
+                if not planning.nodes[import.name] and
+                   planning.unavailable[import.name] == nil then
+                    planning.unavailable[import.name] = text
+                end
+            end
+        end
+        table.remove(dependency_stack)
+        driver.imported[modname] = {
+            kind = "source", _planned = true,
+            filename = source.main, source_files = source.files,
+            native_output = source.native_output or source.main,
+            program_output = source.program_output, deps = direct,
+        }
+        static_deps[modname] = true
+        return true, nil, {}, { kind = "source", filename = source.main }
+    end
+
+    -- Worker: restore a parent-certified dependency from its published record
+    -- without recertifying it, after restoring its own recorded imports.
+    local function restore_planned_source(modname, item, loader)
+        local object = item.object
+        if type(object) ~= "string" then
+            return false, "build plan divergence: module '" .. modname ..
+                "' has no accepted object"
+        end
+        local bytes, read_error = context.io:read_file(object)
+        if not bytes then
+            return false, "cannot read planned object for module '" ..
+                modname .. "': " .. tostring(read_error)
+        end
+        local record, record_error = objectmetadata.read(bytes, object)
+        if not record or type(record.object_metadata) ~= "table" then
+            return false, "cannot decode planned object for module '" ..
+                modname .. "': " .. tostring(record_error)
+        end
+        driver.imported[modname] = CIRCULAR_MARK
+        table.insert(dependency_stack, {})
+        for _, import in ipairs(record.object_metadata.imports or {}) do
+            local ok, result, errors = loader(import.name,
+                import.source_required and { kind = "source-import" } or nil)
+            if not ok or #errors ~= 0 then
+                table.remove(dependency_stack)
+                driver.imported[modname] = nil
+                return false, ok and table.concat(errors, "\n") or result
+            end
+        end
+        table.remove(dependency_stack)
+        driver.imported[modname] = nil
+        local entry, code, detail = restore_source_object(
+            modname, copy_source_descriptor(item.source), record, loader)
+        if entry == nil then
+            return false, "build plan divergence: module '" .. modname ..
+                "' cannot be restored: " .. tostring(code) ..
+                (detail and (" " .. tostring(detail)) or "")
+        elseif not entry then
+            return false, code
+        end
+        return true, entry.type, {}, restored_source_info(entry)
+    end
+
+    -- Worker: load exactly the provider the coordinator selected.
+    local function load_planned_binary(modname, item)
+        local resolved
+        if item.kind == "dynamic" then
+            local status, value, metadata =
+                probe_compiled_interface(modname, item.file, context)
+            if status ~= "valid" then
+                return false, status == "error" and value or
+                    ("planned provider '" .. tostring(item.file) ..
+                        "' no longer claims module '" .. modname .. "'")
+            end
+            value.file = item.relative
+            if item.provider_file ~= nil and value.file ~= item.provider_file then
+                return false, "build plan divergence: module '" .. modname ..
+                    "' provider file is '" .. tostring(value.file) ..
+                    "', planned '" .. tostring(item.provider_file) .. "'"
+            end
+            remember_nominal_layouts(context, metadata.layout_inventory, item.file)
+            resolved = {
+                kind = "dynamic", type = value, filename = item.file,
+                relative = item.relative, layouts = metadata.layouts,
+                layout_inventory = metadata.layout_inventory,
+            }
+        elseif item.kind == "static" then
+            local provider, provider_error = inspect_static_provider(
+                context, item.archive, item.relative)
+            if not provider then return false, provider_error end
+            local metadata = provider.entries[modname]
+            if not metadata then
+                return false, "planned static provider '" ..
+                    tostring(item.archive) .. "' contains no module '" ..
+                    modname .. "'"
+            end
+            remember_nominal_layouts(context, metadata.layout_inventory, item.archive)
+            resolved = {
+                kind = "static", type = metadata.type, filename = item.archive,
+                relative = item.relative, static_archive = item.archive,
+                static_provider = provider, layouts = metadata.layouts,
+                layout_inventory = metadata.layout_inventory,
+            }
+            static_deps[modname] = true
+        else
+            return false, "build plan divergence: module '" .. modname ..
+                "' has unsupported planned kind '" .. tostring(item.kind) .. "'"
+        end
+        resolved.compiled = true
+        driver.imported[modname] = resolved
+        remember_direct_dependency(modname)
+        remember_used_compiled_interface(context, modname, resolved.type)
+        return true, resolved.type, {}, { kind = resolved.kind }
     end
 
     -- Implementation notes: doc/implementation/folder-modules.md#source-descriptors-are-not-ast-nodes
@@ -5468,6 +5656,27 @@ function driver.defaultloader(static_deps, options)
             and not object_loaded[modname] then
             driver.imported[modname] = nil
         end
+        -- A worker never discovers: its dependencies and their providers are
+        -- the coordinator's plan. Only the module it compiles parses source.
+        if worker_plan and not driver.imported[modname] then
+            local item = worker_plan.modules[modname]
+            if not item then
+                return false, "build plan divergence: module '" .. modname ..
+                    "' is not in the coordinator's plan"
+            elseif item.kind == "unavailable" then
+                return false, item.error
+            elseif item.kind == "source" then
+                if modname ~= worker_plan.modname then
+                    return restore_planned_source(modname, item, loader)
+                end
+            elseif request and request.kind == "source-import" then
+                return false, "build plan divergence: source-imported module '" ..
+                    modname .. "' is planned as a " .. tostring(item.kind) ..
+                    " provider"
+            else
+                return load_planned_binary(modname, item)
+            end
+        end
 
         -- Command-line roots and `.titan` import spellings both require a
         -- source implementation. The latter is an edge-local request: it may
@@ -5520,6 +5729,11 @@ function driver.defaultloader(static_deps, options)
             rebound, rebound_err =
                 rebind_overlapping_static_providers(modname)
             if not rebound then return false, rebound_err end
+            if planning and planning.open then
+                local ok, modt, errors, info = plan_source(modname, candidate, loader)
+                if ok then remember_direct_dependency(modname) end
+                return ok, modt, errors, info
+            end
             local ok, modt, errors, info = load_source_object(modname, candidate, loader)
             if ok == nil then
                 ok, modt, errors, info = parse_source(modname, candidate, loader)
@@ -5549,6 +5763,7 @@ function driver.defaultloader(static_deps, options)
             source_overrides[modname] ~= nil
         if source_preferred and driver.imported[modname] and
            ((not driver.imported[modname].ast and not object_loaded[modname] and
+                not driver.imported[modname]._planned and
                 (not driver.imported[modname]._analysis_manifest or context.source_first
                     or not context.analysis_only)) or
             (driver.imported[modname].ast and
@@ -5679,21 +5894,25 @@ function driver.defaultloader(static_deps, options)
     loader_contexts[loader] = {
         context = context,
         owned = owns_context,
-        restore = function(modname, source, record)
-            return restore_source_object(modname, source, record, loader)
+        restore = function(modname, source, record, published)
+            return restore_source_object(
+                modname, source, record, loader, published)
         end,
+        planning = planning,
     }
     return loader
 end
 
 -- Restore an accepted object record through the loader bound to `context`,
--- after `incremental.verdict` returned a hit. `record` is the decoded record
--- (or `incremental.certify_local`'s result carrying it); every recorded
--- import must already be selected. Nothing is parsed, checked, or compiled.
+-- after `incremental.verdict` returned a hit or after the coordinator
+-- published a worker's object. `record` is the decoded record (or a
+-- certification result carrying it); every recorded import must already be
+-- selected. Nothing is parsed, checked, or compiled. `options.published`
+-- suppresses the `-v` hit line for a module compiled in this invocation.
 -- Returns the restored entry; `nil, code, detail` for a miss before any
 -- resolver mutation; `false, err` for a failure.
 -- Implementation notes: doc/implementation/incremental-compilation.md#resolver-and-cli-boundary
-function driver.restore_source_object(context, modname, source, record)
+function driver.restore_source_object(context, modname, source, record, options)
     if type(context) ~= "table" or context.io == nil then
         error("restoring an object requires a resolver context", 2)
     end
@@ -5706,7 +5925,583 @@ function driver.restore_source_object(context, modname, source, record)
        type(record.record) == "table" then
         record = record.record
     end
-    return binding.restore(modname, source, record)
+    return binding.restore(modname, source, record,
+        options and options.published == true)
+end
+
+-- Ordinary tagged source lookup (folder before flat, blocked constituents
+-- reported as such) over `source_path`, which defaults to the invocation's
+-- `;`-separated source roots. Returns a descriptor, `nil, err`, or `nil` when
+-- no root has the module.
+function driver.resolve_source(context, modname, source_path)
+    if type(context) ~= "table" or context.io == nil then
+        error("source lookup requires a resolver context", 2)
+    end
+    return resolve_source(source_path or driver.TITAN_SOURCE_PATH, modname,
+        context)
+end
+
+-- A module's current source descriptor exactly as this invocation's loader
+-- would select it: relocated under the output root, and coverage-relocated
+-- when sources are instrumented. Publication revalidates against it.
+local function current_source_descriptor(context, modname)
+    local source, source_error = resolve_source(
+        driver.TITAN_SOURCE_PATH, modname, context)
+    if not source then
+        return nil, source_error or ("source module '" .. modname ..
+            "' not found")
+    elseif source.kind == "blocked" then
+        return nil, blocked_source_error(modname, source)
+    end
+    local relocated, relocation_error = driver.relocate_source_output(
+        modname, source, context.output_root)
+    if not relocated then return nil, relocation_error end
+    local policy = context.codegen_policy
+    if policy and policy.coverage then
+        local prepared, coverage_error = require("titan-compiler.coverage")
+            .source(policy.coverage, modname, source)
+        if not prepared then return nil, coverage_error end
+    end
+    return source
+end
+
+-- Close planning and return the coordinator's authoritative plan over the
+-- planning loader's selection. `modules[name]` is a planned source (its
+-- descriptor, stage-1 certification, ordered imports and failed import
+-- diagnostics), the exact selected dynamic or static provider, or an
+-- unavailable name with its diagnostic. `order` lists source modules with
+-- dependencies first and bytewise ties; import-cycle members follow,
+-- bytewise, with `cyclic = true`. Interface digests of source modules exist
+-- only once `update` accepts their certified record (hit or published).
+-- Implementation notes: doc/implementation/incremental-compilation.md#resolver-and-cli-boundary
+function driver.resolution_plan(context)
+    if type(context) ~= "table" or context.io == nil then
+        error("a resolution plan requires a resolver context", 2)
+    end
+    local binding = context.loader and loader_contexts[context.loader]
+    local planning = binding and binding.planning
+    if not planning or not planning.open then
+        error("a resolution plan requires an open planning loader bound " ..
+            "to its resolver context", 2)
+    end
+    planning.open = false
+
+    local modules, linked = {}, {}
+    for name, mod in pairs(driver.imported) do
+        if mod ~= CIRCULAR_MARK then
+            local node = mod._planned and planning.nodes[name]
+            if node then
+                modules[name] = {
+                    kind = "source", source = node.source,
+                    certified = node.certified, imports = node.imports,
+                    failed = node.failed,
+                }
+                linked[name] = true
+            elseif mod.kind == "dynamic" then
+                modules[name] = {
+                    kind = "dynamic", file = mod.filename,
+                    relative = mod.relative,
+                    provider_file = mod.type and mod.type.file,
+                }
+            elseif mod.kind == "static" then
+                modules[name] = {
+                    kind = "static", archive = mod.static_archive,
+                    relative = mod.relative,
+                }
+                linked[name] = true
+                for carried in pairs(mod.static_provider and
+                        mod.static_provider.entries or {}) do
+                    linked[carried] = true
+                end
+            end
+        end
+    end
+    for name, text in pairs(planning.unavailable) do
+        if not modules[name] then
+            modules[name] = { kind = "unavailable", error = text }
+        end
+    end
+
+    local names = {}
+    for name, module in pairs(modules) do
+        if module.kind == "source" then names[#names + 1] = name end
+    end
+    table.sort(names, util.bytewise_less)
+    local waiting, dependents = {}, {}
+    for _, name in ipairs(names) do
+        local count, seen = 0, {}
+        for _, import in ipairs(modules[name].imports) do
+            local dependency = import.name
+            if dependency == name then
+                modules[name].cyclic = true
+            elseif modules[dependency] and modules[dependency].kind == "source"
+                   and not seen[dependency] then
+                seen[dependency] = true
+                count = count + 1
+                dependents[dependency] = dependents[dependency] or {}
+                table.insert(dependents[dependency], name)
+            end
+        end
+        waiting[name] = count
+    end
+    local order, ready = {}, {}
+    for _, name in ipairs(names) do
+        if waiting[name] == 0 and not modules[name].cyclic then
+            ready[#ready + 1] = name
+        end
+    end
+    while #ready > 0 do
+        table.sort(ready, util.bytewise_less)
+        local name = table.remove(ready, 1)
+        order[#order + 1] = name
+        for _, dependent in ipairs(dependents[name] or {}) do
+            waiting[dependent] = waiting[dependent] - 1
+            if waiting[dependent] == 0 and not modules[dependent].cyclic then
+                ready[#ready + 1] = dependent
+            end
+        end
+    end
+    for _, name in ipairs(names) do
+        if waiting[name] > 0 or modules[name].cyclic then
+            modules[name].cyclic = true
+            order[#order + 1] = name
+        end
+    end
+
+    local accepted = {}
+    local plan = { modules = modules, order = order }
+    function plan.linked(name)
+        local module = modules[name]
+        if module and module.kind == "unavailable" then return nil end
+        local mod, is_linked = certificate_dependency(context, name, linked)
+        if not mod then return nil end
+        return is_linked
+    end
+    function plan.provider_file(name)
+        local module = modules[name]
+        return module and module.kind == "dynamic" and module.provider_file or nil
+    end
+    function plan.digest(name, view)
+        local module = modules[name]
+        if module and module.kind == "unavailable" then
+            return nil, "unavailable"
+        elseif module and module.kind == "source" then
+            local certified = accepted[name]
+            if not certified then return nil, "pending" end
+            return incremental.interface_digest(context, certified.record, view)
+        end
+        local mod = certificate_dependency(context, name, linked)
+        if not mod then return nil, "unavailable" end
+        return incremental.interface_digest(context, mod, view)
+    end
+    function plan.update(name, certified)
+        local module = modules[name]
+        if not module or module.kind ~= "source" then
+            error("only planned source modules accept a certified record", 2)
+        elseif type(certified) ~= "table" or type(certified.record) ~= "table" then
+            error("a planned module update requires its certified record", 2)
+        end
+        accepted[name] = certified
+    end
+    function plan.accepted(name)
+        return accepted[name]
+    end
+    return plan
+end
+
+-- The closed data a worker receives for one module: per planned name, the
+-- source descriptor (with the accepted object of every certified
+-- dependency), the exact selected provider, or the unavailable diagnostic,
+-- each with its linked state.
+function driver.plan_descriptor(plan, modname)
+    local target = plan.modules[modname]
+    if not target or target.kind ~= "source" then
+        error("the build plan has no source module '" .. tostring(modname) ..
+            "'", 2)
+    end
+    local modules = {}
+    for name, module in pairs(plan.modules) do
+        local item = { kind = module.kind, linked = plan.linked(name) == true }
+        if module.kind == "source" then
+            item.source = copy_source_descriptor(module.source)
+            if name ~= modname then
+                local certified = plan.accepted(name)
+                item.object = certified and certified.object or nil
+            end
+        elseif module.kind == "dynamic" then
+            item.file, item.relative = module.file, module.relative
+            item.provider_file = module.provider_file
+        elseif module.kind == "static" then
+            item.archive, item.relative = module.archive, module.relative
+        else
+            item.error = module.error
+        end
+        modules[name] = item
+    end
+    return {
+        protocol = version.BUILD_WORKER_PROTOCOL,
+        modname = modname,
+        modules = modules,
+    }
+end
+
+local function copy_strings(values)
+    local copy = {}
+    for index, value in ipairs(values or {}) do copy[index] = value end
+    return copy
+end
+
+-- Everything a worker needs to reproduce this coordinator's compiler state,
+-- as closed data: driver paths and flags, resolver and code-generation
+-- policy, and the configuration certificate computed once here.
+function driver.worker_configuration(context)
+    local configuration, configuration_error =
+        driver.incremental_configuration(context)
+    if not configuration then return nil, configuration_error end
+    local policy = context.codegen_policy or {}
+    return {
+        protocol = version.BUILD_WORKER_PROTOCOL,
+        driver = {
+            source_path = driver.TITAN_SOURCE_PATH,
+            bin_path = driver.TITAN_BIN_PATH,
+            lua_source_path = driver.LUA_SOURCE_PATH,
+            emit_line_directives = driver.EMIT_LINE_DIRECTIVES,
+            output_root = driver.OUTPUT_ROOT,
+            extra_cppflags = copy_strings(driver.EXTRA_CPPFLAGS),
+            extra_cflags = copy_strings(driver.EXTRA_CFLAGS),
+        },
+        resolver = {
+            prefer_static = context.prefer_static,
+            source_first = context.source_first,
+            verbose = context.probe_verbose,
+            pretty_print = context.pretty_print,
+            output_root = context.output_root,
+            jobs = context.jobs,
+            frontend = context.frontend,
+            extra_ffi_include_dirs = copy_strings(context.extra_ffi_include_dirs),
+        },
+        policy = {
+            c_parts = policy.c_parts,
+            split_threshold = policy.split_threshold,
+            test = policy.test == true,
+            coverage = policy.coverage,
+        },
+        configuration = configuration,
+    }
+end
+
+-- A worker's resolver context from `driver.worker_configuration` data. The
+-- worker verifies only the compiler Lua it actually loaded against the
+-- coordinator's certificate; preamble, toolchain and options are inherited.
+function driver.new_worker_context(configuration, io_strategy)
+    if type(configuration) ~= "table" or
+       configuration.protocol ~= version.BUILD_WORKER_PROTOCOL or
+       type(configuration.driver) ~= "table" or
+       type(configuration.resolver) ~= "table" or
+       type(configuration.policy) ~= "table" or
+       type(configuration.configuration) ~= "table" then
+        return nil, "incompatible build worker configuration"
+    end
+    local settings = configuration.driver
+    driver.TITAN_SOURCE_PATH = settings.source_path
+    driver.TITAN_BIN_PATH = settings.bin_path
+    driver.LUA_SOURCE_PATH = settings.lua_source_path
+    driver.EMIT_LINE_DIRECTIVES = settings.emit_line_directives
+    driver.OUTPUT_ROOT = settings.output_root
+    driver.EXTRA_CPPFLAGS = copy_strings(settings.extra_cppflags)
+    driver.EXTRA_CFLAGS = copy_strings(settings.extra_cflags)
+    local support_loaded, support = pcall(require, "titan")
+    if not support_loaded or type(support) ~= "table" or
+       type(support._sha256_binary) ~= "function" then
+        return nil, "the installed Titan native support library is " ..
+            "missing or stale (it lacks _sha256_binary)"
+    end
+    local resolver = configuration.resolver
+    local context = driver.new_resolver_context({
+        io = io_strategy,
+        cache_adapter = { sha256_binary = support._sha256_binary },
+        prefer_static = resolver.prefer_static,
+        source_first = resolver.source_first,
+        verbose = resolver.verbose,
+        pretty_print = resolver.pretty_print,
+        output_root = resolver.output_root,
+        jobs = resolver.jobs,
+        frontend = resolver.frontend,
+        extra_ffi_include_dirs = resolver.extra_ffi_include_dirs,
+    })
+    local function fail(message)
+        driver.close_resolver_context(context)
+        return nil, message
+    end
+    if driver.TOOLCHAIN_ERROR then return fail(driver.TOOLCHAIN_ERROR) end
+    local configured, configure_error = driver.configure_foreign_c(context)
+    if not configured and configure_error then return fail(configure_error) end
+    local policy = configuration.policy
+    context.codegen_policy = {
+        c_parts = policy.c_parts,
+        split_threshold = policy.split_threshold,
+        test = policy.test == true,
+        coverage = policy.coverage,
+    }
+    local options, options_error = incremental_options(context)
+    if not options then return fail(options_error) end
+    local compiler, compiler_error =
+        incremental.compiler_component(context, options)
+    if not compiler then
+        return fail("cannot certify compiler configuration: " ..
+            tostring(compiler_error))
+    elseif compiler ~= configuration.configuration.compiler then
+        return fail("compiler installation changed during build")
+    end
+    context.incremental_options = options
+    context.incremental_configuration = configuration.configuration
+    return context
+end
+
+-- Parent-only, right before a missed module's worker starts: retire its
+-- committed object. The primary object is the commit marker, so it is
+-- unlinked first; then the higher parts and coverage notes its record names.
+-- An interruption at any later point leaves no acceptable object.
+function driver.invalidate_source_object(context, modname, source)
+    local stem = driver.module_output_stem(
+        source.native_output or source.main, modname)
+    local primary = stem .. ".o"
+    local attributes = context.io:lstat(primary)
+    if not attributes then return true end
+    if attributes.kind == "directory" then
+        return nil, "object output '" .. primary .. "' for module '" ..
+            modname .. "' is a directory"
+    end
+    local prior = {}
+    if attributes.kind == "file" then
+        local bytes = context.io:read_file(primary)
+        local record = bytes and objectmetadata.read(bytes, primary)
+        local native = record and record.object_metadata
+        if native and native.parts and objectmetadata.validate_parts(native) then
+            for _, part in ipairs(native.parts) do
+                if part.index >= 1 then
+                    local part_stem = stem .. ".part" .. tostring(part.index)
+                    prior[#prior + 1] = part_stem .. ".o"
+                    prior[#prior + 1] = part_stem .. ".c"
+                    prior[#prior + 1] = part_stem .. ".gcno"
+                    prior[#prior + 1] = part_stem .. ".gcda"
+                end
+            end
+        end
+    end
+    local removed, remove_error = context.io:unlink(primary)
+    if not removed then
+        return nil, "cannot invalidate object for module '" .. modname ..
+            "': " .. tostring(remove_error)
+    end
+    for _, sibling in ipairs(prior) do
+        if context.io:lstat(sibling) then context.io:unlink(sibling) end
+    end
+    return true
+end
+
+-- Worker: check and compile exactly one planned module. `options.plan` is
+-- `driver.plan_descriptor` data. Generated C and headers are written at their
+-- final paths (the coordinator already retired the old primary); every
+-- object part is compiled to a unique sibling temporary that only the
+-- coordinator publishes. Returns `{ modname, object, objects, staged =
+-- {{from, to, role}}, diagnostics = {} }` or `nil, diagnostics text`.
+function driver.compile_planned_module(context, modname, options)
+    options = options or {}
+    local plan = options.plan
+    if type(plan) ~= "table" or plan.protocol ~= version.BUILD_WORKER_PROTOCOL
+       or plan.modname ~= modname or type(plan.modules) ~= "table"
+       or type(plan.modules[modname]) ~= "table"
+       or plan.modules[modname].kind ~= "source" then
+        return nil, "invalid build plan for module '" .. tostring(modname) .. "'"
+    end
+    local policy = context.codegen_policy or {}
+    local test = options.test
+    if test == nil then test = policy.test end
+    local c_parts = options.c_parts or policy.c_parts
+    local verbose = options.verbose == true
+    local coverage_build = policy.coverage
+    local source = copy_source_descriptor(plan.modules[modname].source)
+    local loader = driver.defaultloader({}, {
+        context = context,
+        worker_plan = plan,
+        source_roots = { [modname] = true },
+        source_overrides = { [modname] = source },
+        test = test,
+        coverage = coverage_build,
+        output_root = context.output_root,
+        c_parts = c_parts,
+        split_threshold = policy.split_threshold,
+    })
+    local ok, errors = checker.checkimport(modname, loader)
+    if not ok then return nil, tostring(errors) end
+    if #errors > 0 then return nil, table.concat(errors, "\n") end
+    local finalized, finalize_errors = driver.finalize_resolver_context(context)
+    if not finalized then return nil, table.concat(finalize_errors, "\n") end
+    for name, planned in pairs(plan.modules) do
+        local selected = driver.imported[name]
+        if selected and selected ~= CIRCULAR_MARK and
+           planned.kind ~= "unavailable" and
+           (context.native_static_names[name] == true) ~= (planned.linked == true) then
+            return nil, "build plan divergence: module '" .. name .. "' is " ..
+                (planned.linked and "linked" or "not linked") ..
+                " in the plan but not in the worker's selection"
+        end
+    end
+
+    local mod = driver.imported[modname]
+    local extra_flags = {}
+    local coverage_selected = false
+    if coverage_build then
+        local coverage = require("titan-compiler.coverage")
+        coverage_selected = coverage.matches(coverage_build, modname,
+            coverage.test_functions(mod.ast)) == true
+        coverage_build.selected[modname] = coverage_selected or nil
+        extra_flags = coverage.compile_flags(coverage_build, modname) or {}
+    end
+    coder.prepare_coverage(mod.ast, coverage_build ~= nil)
+    local header_plans, header_error =
+        driver.plan_foreign_headers({ modname }, driver.imported)
+    if not header_plans then return nil, header_error end
+    local request = {
+        modname = modname,
+        mod = mod,
+        static_deps = context.native_static_names,
+        options = {
+            context = context,
+            test = test,
+            pretty_print = context.pretty_print,
+            nominal_layouts = context.nominal_layouts,
+            extra_compile_flags = extra_flags,
+            coverage = coverage_selected,
+            coverage_backend = coverage_build and coverage_build.backend,
+            c_parts = c_parts,
+            split_threshold = policy.split_threshold,
+            staged = true,
+        },
+    }
+    local plans, plan_error = driver.plan_compile_requests(
+        { request }, verbose, nil, nil, header_plans)
+    if not plans then return nil, plan_error end
+    local written, write_error = driver.write_foreign_header_plans(
+        header_plans, verbose, context.pretty_print)
+    if not written then return nil, write_error end
+    local compilation, materialize_error = plans[1].materialize()
+    plans[1].materialize = nil
+    if not compilation then return nil, materialize_error end
+    jobs.set_request_index(compilation, 1)
+
+    local parallelism = options.jobs or context.jobs or 1
+    local result, cancelled
+    if parallelism > 1 and #compilation.jobs > 1 then
+        local compiled
+        compiled, cancelled = driver.run_prepared_compiles(
+            { compilation }, parallelism, verbose)
+        result = compiled[1]
+    else
+        result = { ok = true }
+        for _, job in ipairs(compilation.jobs) do
+            local job_ok, job_err = run_argv(job.argv, verbose)
+            if result.ok and not job_ok then result = { err = job_err } end
+        end
+    end
+    if cancelled or not result.ok then
+        for _, job in ipairs(compilation.jobs) do
+            os.remove(job.temporary_object)
+        end
+        jobs.propagate(cancelled)
+        return nil, result.err
+    end
+    local staged = {}
+    for index, job in ipairs(compilation.jobs) do
+        staged[index] = {
+            from = job.temporary_object,
+            to = job.object_path,
+            role = job.part_index == 0 and "primary" or "part",
+        }
+    end
+    return {
+        modname = modname,
+        object = compilation.primary_object,
+        objects = compilation.objects,
+        staged = staged,
+        diagnostics = {},
+    }
+end
+
+-- Parent-only publication of a worker's staged object. The module's current
+-- source descriptor is resolved afresh and its recorded own sources and C
+-- inputs are revalidated with a fresh pass, so an edit during the build is
+-- an error rather than a certified mismatch. Parts are renamed first and
+-- the primary object last; any failure leaves no primary. Returns the
+-- certified result (`status`, `record`, `object`, `objects`, `imports`).
+function driver.publish_staged_module(context, result)
+    local modname = result.modname
+    local primary, parts = nil, {}
+    for _, staged in ipairs(result.staged or {}) do
+        if staged.role == "primary" then primary = staged
+        else parts[#parts + 1] = staged end
+    end
+    local function discard(message)
+        for _, staged in ipairs(result.staged or {}) do
+            if context.io:lstat(staged.from) then context.io:unlink(staged.from) end
+        end
+        return nil, message
+    end
+    if not primary then
+        return discard("worker result for module '" .. tostring(modname) ..
+            "' has no primary object")
+    end
+    local bytes, read_error = context.io:read_file(primary.from)
+    if not bytes then
+        return discard("cannot read staged object for module '" .. modname ..
+            "': " .. tostring(read_error))
+    end
+    local record, record_error = objectmetadata.read(bytes, primary.to)
+    if not record or type(record.object_metadata) ~= "table" then
+        return discard("cannot decode staged object for module '" .. modname ..
+            "': " .. tostring(record_error))
+    end
+    local source, source_error = current_source_descriptor(context, modname)
+    if not source then
+        return discard("cannot resolve module '" .. modname ..
+            "' for publication: " .. tostring(source_error))
+    end
+    local check = incremental.revalidate_record(context, modname, source, record)
+    if check.status ~= "hit" then
+        return discard("inputs of module '" .. modname ..
+            "' changed during the build: " .. tostring(check.reason) ..
+            (check.detail and check.detail ~= "" and
+                (" " .. tostring(check.detail)) or ""))
+    end
+    if context.io:lstat(primary.to) then
+        local removed, remove_error = context.io:unlink(primary.to)
+        if not removed then
+            return discard("cannot replace object for module '" .. modname ..
+                "': " .. tostring(remove_error))
+        end
+    end
+    for index = #parts, 1, -1 do
+        local renamed, rename_error =
+            context.io:rename(parts[index].from, parts[index].to)
+        if not renamed then
+            return discard("cannot publish object part '" .. parts[index].to ..
+                "': " .. tostring(rename_error))
+        end
+    end
+    local renamed, rename_error = context.io:rename(primary.from, primary.to)
+    if not renamed then
+        if context.io:lstat(primary.to) then context.io:unlink(primary.to) end
+        return discard("cannot publish object '" .. primary.to .. "': " ..
+            tostring(rename_error))
+    end
+    return {
+        status = "hit",
+        record = record,
+        object = primary.to,
+        objects = result.objects,
+        imports = record.object_metadata.imports,
+    }
 end
 
 -- Resolve the physical identity of already-known external dependencies without
@@ -7330,8 +8125,9 @@ local function prepare_compile(
         end
 
         -- Invalidate the primary commit marker first, then remove prior
-        -- sibling outputs.
-        os.remove(libname)
+        -- sibling outputs. A staged worker compile never touches the
+        -- primary name: its coordinator retired it before dispatch.
+        if not (options and options.staged) then os.remove(libname) end
         os.remove(filename)
         os.remove(stem .. ".gcda")
         os.remove(stem .. ".gcno")
