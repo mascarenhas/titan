@@ -10483,6 +10483,9 @@ function driver.link_provider_pair(request)
         local dso_link, dso_err = prepare_library_link(dso, request.libnames,
             request.link, verbose, nil, request.static_archives,
             request.ordered_payload, request.public_dso)
+        -- The final-link certificate's linker dependency report belongs to
+        -- the public DSO link only, never to the archive validation image.
+        if dso_link then append_argv(dso_link.argv, request.final_link_flags) end
         local launched = dso_link
         if dso_link then launched, dso_err = launch_now(1, dso_link, verbose) end
         if not launched then return link_failure("library", provider, dso_err) end
@@ -11469,8 +11472,22 @@ end
 -- the Unix pair publisher, this path never opens either provider in this Lua
 -- state. Retiring shims for removed logical modules is currently unsupported.
 -- Implementation notes: doc/implementation/windows-build.md#windows-dll-publication
-function driver.publish_windows_provider(staged, destination, shim_plans, provider)
+-- The synchronous filesystem operations of a recoverable Windows publication.
+local function windows_publication_fs()
     local filesystem = compiler_io.new_sync()
+    return {
+        stat = function(filename)
+            local metadata, err = filesystem:lstat(filename)
+            return metadata, err, metadata == nil and err == nil and 2 or nil
+        end,
+        reserve = function(filename) return filesystem:reserve_sibling(filename) end,
+        replace = function(from, to) return filesystem:rename(from, to) end,
+        remove = os.remove,
+    }
+end
+
+function driver.publish_windows_provider(staged, destination, shim_plans,
+        provider, before_commit)
     local entries = {}
     for _, plan in ipairs(shim_plans) do
         local ok, err = ensure_output_parent(plan.filename)
@@ -11479,15 +11496,9 @@ function driver.publish_windows_provider(staged, destination, shim_plans, provid
             contents = plan.contents, modname = plan.modname }
     end
     entries[#entries + 1] = { source = staged, destination = destination }
-    return require("titan-compiler.windows_publication").publish(entries, {
-        stat = function(filename)
-            local metadata, err = filesystem:lstat(filename)
-            return metadata, err, metadata == nil and err == nil and 2 or nil
-        end,
-        reserve = function(filename) return filesystem:reserve_sibling(filename) end,
-        replace = function(from, to) return filesystem:rename(from, to) end,
-        remove = os.remove,
-    }, {
+    return require("titan-compiler.windows_publication").publish(entries,
+        windows_publication_fs(), {
+        before_commit = before_commit,
         validate_existing = function(entry, existing)
             if existing and entry.modname then
                 local contents, err = util.get_file_contents(entry.destination)
@@ -11960,20 +11971,35 @@ __declspec(dllexport) int _titan_coverage_dump(lua_State *L) {
         extra_objects = { table.unpack(extra_objects or {}) }
         extra_objects[#extra_objects + 1] = dump_o
     end
-    local linked, term, code = driver.compile_library_output(paths.provider,
+    -- Both images are staged and published as one recoverable set, the DLL
+    -- before the launcher; a failure before publication leaves the previous
+    -- set untouched.
+    local staged_dll, dll_directory = driver.staged_library_output(paths.provider)
+    if not staged_dll then return nil, dll_directory end
+    local staged_exe, exe_directory = driver.staged_library_output(paths.executable)
+    if not staged_exe then
+        remove_path(dll_directory)
+        return nil, exe_directory
+    end
+    local function discard(...)
+        remove_path(dll_directory)
+        remove_path(exe_directory)
+        return nil, ...
+    end
+    local linked, term, code = driver.compile_library_output(staged_dll,
         libnames, link, verbose, extra_objects, static_archives,
-        nil, nil, module_names)
-    if not linked then return nil, term, code end
-    ok, err = driver.validate_library_image(paths.provider, module_names)
-    if not ok then return nil, err end
+        nil, paths.provider, module_names)
+    if not linked then return discard(term, code) end
+    ok, err = driver.validate_library_image(staged_dll, module_names)
+    if not ok then return discard(err) end
     if options.archive_names and #options.archive_names > 0 then
-        ok, err = driver.validate_library_image_fresh(paths.provider,
+        ok, err = driver.validate_library_image_fresh(staged_dll,
             assert(options.archive_entries), options.archive_names, verbose)
-        if not ok then return nil, err end
+        if not ok then return discard(err) end
     end
     if options.validate_titan_support then
-        ok, err = driver.validate_titan_support(paths.provider, verbose)
-        if not ok then return nil, err end
+        ok, err = driver.validate_titan_support(staged_dll, verbose)
+        if not ok then return discard(err) end
     end
 
     local entry_options = {
@@ -11985,37 +12011,48 @@ __declspec(dllexport) int _titan_coverage_dump(lua_State *L) {
     local entrypoint_c
     entrypoint_c, err = write_entrypoint(modname, entrypoint_name,
         program_name or options.output_module or modname, entry_options, verbose)
-    if not entrypoint_c then return nil, err end
+    if not entrypoint_c then return discard(err) end
     local entrypoint_o = entrypoint_c:gsub("[.]c$", ".o")
     local compile_args
     compile_args, err = driver.generated_compile_prefix()
-    if not compile_args then return nil, err end
+    if not compile_args then return discard(err) end
     append_argv(compile_args, { "-c", entrypoint_c, "-o", entrypoint_o })
     local compiled, cterm, ccode = run_argv(compile_args, verbose)
-    if not compiled then return nil, cterm, ccode end
+    if not compiled then return discard(cterm, ccode) end
 
     local manifest, resource_source, resource = entrypoint_c .. ".manifest",
         entrypoint_c .. ".rc", entrypoint_c .. ".res"
     ok, err = util.set_file_contents(manifest, driver.windows_launcher_manifest())
-    if not ok then return nil, err end
+    if not ok then return discard(err) end
     ok, err = util.set_file_contents(resource_source,
         driver.windows_launcher_resource(absolute_filename(manifest)))
-    if not ok then return nil, err end
+    if not ok then return discard(err) end
     local rc
     rc, err = parsed_words(platform.getenv("RC") or "llvm-rc", "RC")
-    if not rc then return nil, err end
-    if #rc == 0 then return nil, "RC command is empty" end
+    if not rc then return discard(err) end
+    if #rc == 0 then return discard("RC command is empty") end
     append_argv(rc, { "-FO", resource, resource_source })
     compiled, cterm, ccode = run_argv(rc, verbose)
-    if not compiled then return nil, cterm, ccode end
+    if not compiled then return discard(cterm, ccode) end
 
     local args
     args, err = compiler_argv(false)
-    if not args then return nil, err end
-    append_argv(args, { "-o", paths.executable, entrypoint_o, resource })
+    if not args then return discard(err) end
+    append_argv(args, { "-o", staged_exe, entrypoint_o, resource })
     append_runtime_libraries(args)
     append_argv(args, driver.link_extra_flags())
-    return driver.run_link_command(args, verbose, paths.executable)
+    local exe_linked, exe_term, exe_code =
+        driver.run_link_command(args, verbose, staged_exe)
+    if not exe_linked then return discard(exe_term, exe_code) end
+    local published, publish_error =
+        require("titan-compiler.windows_publication").publish_program({
+            provider = { source = staged_dll, destination = paths.provider },
+            executable = { source = staged_exe, destination = paths.executable },
+        }, windows_publication_fs(), { before_commit = options.before_commit })
+    remove_path(dll_directory)
+    remove_path(exe_directory)
+    if not published then return nil, publish_error end
+    return true
 end
 
 function driver.compile_program(modname, libnames, link, verbose, extra_objects,

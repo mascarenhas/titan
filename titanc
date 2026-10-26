@@ -65,7 +65,7 @@ p:option('-D --define', 'Native preprocessor definition NAME[=VALUE]; repeatable
 p:option('--cflag', 'One native compile argument, written --cflag=-pthread; repeatable, order kept.'):count('*'):action(native_switch('cflag'))
 p:option('--ldflag', 'One native link argument, written --ldflag=-Wl,--as-needed; repeatable, order kept.'):count('*'):action(native_switch('ldflag'))
 p:option('--c-source', 'C file compiled and certified by this invocation, linked before -X payloads; repeatable.'):count('*')
-p:option('--test-dir', 'With --test, use every module with test_ functions below this source directory as a root; repeatable.'):count('*')
+p:option('--test-dir', 'With --test, use every source module below this directory whose final name component follows the test convention (test, tests, spec, specs, *_test(s), *_spec(s)) as a root; repeatable.'):count('*')
 p:option('--test-exclude', 'With --test-dir, exclude this discovered logical module; repeatable.'):count('*')
 p:option('-X --extra-object',
     'Additional native object/archive payload carried into the linked provider outputs.'):args("*")
@@ -271,10 +271,13 @@ for _, modname in ipairs(requested_modules) do
     requested_roots[modname] = true
 end
 if #args.test_dir > 0 then
-    local discovered, discovery_error = require("titan-compiler.testroots")
+    -- Discovery returns every root (explicit ones included, in order) and
+    -- the ordinary descriptors it selected; its own errors are final.
+    local discovered, discovered_sources = require("titan-compiler.testroots")
         .discover(resolver_context, args.test_dir, args.test_exclude,
             requested_modules)
-    if not discovered then exit(discovery_error) end
+    if not discovered then exit(discovered_sources) end
+    requested_modules, requested_roots = {}, {}
     for _, modname in ipairs(discovered) do
         if modname == test_runner.MODULE_NAME then
             exit("logical module '" .. test_runner.MODULE_NAME ..
@@ -285,8 +288,8 @@ if #args.test_dir > 0 then
             requested_modules[#requested_modules + 1] = modname
         end
     end
-    if #requested_modules == 0 then
-        exit("--test-dir found no modules with test_ functions")
+    for modname, source in pairs(discovered_sources or {}) do
+        source_overrides[modname] = source
     end
 end
 local loader_options = {
@@ -570,8 +573,7 @@ if not args.compile_only and not args.print_ast then
         archives = archives,
         runtime = runtime,
         native_libraries = {
-            backend = kind ~= "library" and
-                driver.native_link_backend(resolver_context) or "none",
+            backend = driver.native_link_backend(resolver_context),
             compiler_argv = compile_prefix,
         },
     }
@@ -580,6 +582,11 @@ if not args.compile_only and not args.print_ast then
         if type(ticket) ~= "string" then error(ticket, 0) end
         exit(ticket)
     end
+    -- Generated public headers are restored under the lock even when the
+    -- final link hits; existing owned headers are preserved untouched.
+    local headers_ready, headers_error = driver.prepare_foreign_headers(
+        module_order, driver.imported, args.verbose, args.pretty_print)
+    if not headers_ready then exit(headers_error) end
     local target = outputs[1].path
     local hit, reason = linkcertificate.check(resolver_context, ticket)
     if hit then
@@ -969,6 +976,9 @@ if main_module then
                 pretty_print = args.pretty_print,
                 exe = args.exe,
                 final_link_flags = link_ticket and link_ticket.dependency_argv,
+                before_commit = link_ticket and function()
+                    return linkcertificate.invalidate(resolver_context, link_ticket)
+                end or nil,
                 output_module = args.test and requested_modules[1] or nil,
                 output_root = args.output,
                 coverage_runtime = coverage_runtime,
@@ -1017,7 +1027,10 @@ else
             end
             if valid then
                 valid, validation_err = driver.publish_windows_provider(
-                    temporary, provider_output, shim_plans, provider)
+                    temporary, provider_output, shim_plans, provider,
+                    link_ticket and function()
+                        return linkcertificate.invalidate(resolver_context, link_ticket)
+                    end or nil)
             end
             driver.remove_path(temporary)
             driver.remove_path(temporary_directory)
@@ -1049,6 +1062,7 @@ else
         local pair, pair_err, pair_signal = driver.link_provider_pair({
             provider = provider,
             public_dso = provider_output,
+            final_link_flags = link_ticket and link_ticket.dependency_argv,
             libnames = ofiles,
             verbose = args.verbose,
             static_archives = selected_static_archives,
