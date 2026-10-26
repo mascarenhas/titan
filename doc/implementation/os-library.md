@@ -23,10 +23,10 @@ async initialization, not to this module
 
 | Owner | Fields and responsibility |
 | --- | --- |
-| `StreamStdio` (private) | `native` (a `uv.stream_t` alternative: `pipe`, `tty`, or `tcp`), cached `handle` (`uv.handle_t`) view, prebuilt `alloc_read`/`deliver_read` callbacks, and `shut_down` completion flag for TCP output shutdown. |
+| `StreamStdio` (private) | `native` (a `uv.stream_t` alternative: `pipe`, `tty`, or `tcp`), cached `handle` (`uv.handle_t`) view, and the prebuilt `alloc_read`/`deliver_read` callbacks. |
 | `FileStdio` (private) | Borrowed CRT `descriptor` (`0`, `1`, or `2`), reusable `read_request` (`uv.fs_t`), lazy 64 KiB `read_buffer` (`uv.buf_t?`), `reading` flag, `deliver_read` `uv.fs_read` callback, subscription capabilities (`publish_read`, `fail_read`, `finish_read`), reusable `write_request` (`uv.fs_t`), `writing` flag, `deliver_write` callback, and intrusive FIFO queue (`write_head`, `write_tail` of `FileWriteOperation`). |
 | `StdioBacking` (private) | Union of `stream(StreamStdio)` for pipe/TTY/TCP owners and `file(FileStdio)` for borrowed-descriptor file owners. |
-| `Stdio` (private) | `backing` (`StdioBacking`), owning `loop`, optional `reads` (`BufferedSubscription`), and `pending_writes`. |
+| `Stdio` (private) | `backing` (`StdioBacking`), owning `loop`, optional `reads` (`BufferedSubscription`), and `pending_writes` (accepted writes plus an accepted TCP shutdown). |
 | `ProcessConfig` (private) | Process `options`, stdio `slots`, `environment` overlay, owning `loop`, `consumed` flag, and the rollback `cleanup` capability. |
 | `ProcessOwner` (private) | One `uv.process_t` (`native`), owning `loop`, retained exit `result`, and the coalescing `exits` subscription. |
 | `InputStream` / `OutputStream` (public) | A captured `Stdio` `handle` or a stable `parent_descriptor`; InputStream also keeps delimiter `excess`. |
@@ -68,26 +68,34 @@ The OS-specific choices are:
   waiter replacement and retaining any completed chunk, EOF, or error for the
   next reader. EOF and read errors remain sticky in `reads` for the Runtime's
   lifetime.
-- **Stream writes and TCP shutdown.** `start_stream_write` is the registrar for
+- **Stream writes.** `start_stream_write` is the registrar for
   `async.await_with`, with a private per-write `StreamWriteOperation` context.
-  Closed-stream validation, the `uv.is_writable` check (rejecting writes with
-  `stdio.write: EPIPE` once `uv.shutdown` has been accepted, including empty
-  writes), and the empty-write fast path run inside registration, after
-  cancellation admission, so a native request exists only for a nonempty
-  writable stream write. `uv.write_string` retains the original binary string
+  Inside registration, after cancellation admission, it runs three checks in
+  order. It rejects a closed stream. It rejects a stream that
+  `uv.is_writable` reports unwritable with `stdio.write: EPIPE`, as
+  `net.Connection:write` does; this is how empty writes fail after an accepted
+  TCP shutdown. It resolves an empty write without native work. A native
+  request therefore exists only for a nonempty write to a writable stream.
+  `uv.write_string` retains the original binary string
   and embeds its scalar buffer descriptor until the terminal callback, without
   per-write buffer views. A successful submission increments
   `Stdio.pending_writes`; the terminal callback `stdio_written` decrements it.
   Overlapping stream writes have independent contexts and requests.
-  `os_stdio_shutdown` validates the Runtime, runs `async.checkpoint()`, rejects
-  non-TCP backings with `stdio.shutdown: ENOTSUP` before mutating state, and for
-  `uv.stream_t.tcp` awaits `start_stream_shutdown` (`StreamShutdownOperation`).
-  `start_stream_shutdown` treats `backing.shut_down == true` as a no-op,
-  submits `uv.shutdown(request, backing.native, stdio_shut_down)`, and
-  increments `Stdio.pending_writes` until `stdio_shut_down` decrements it and
-  marks `backing.shut_down = true` on non-negative status. Returning `nil` from
-  registration keeps the `uv.shutdown_t` request and owner rooted until
-  `stdio_shut_down` completes even when the calling Task is cancelled.
+- **TCP shutdown.** `os_stdio_shutdown` validates the Runtime and calls
+  `async.checkpoint()`, so pending cancellation wins over the kind check.
+  Non-`tcp` backings raise `stdio.shutdown: ENOTSUP` without touching state.
+  For `uv.stream_t.tcp` it awaits `start_stream_shutdown` with a private
+  `StreamShutdownOperation` context. libuv's writable flag is the only
+  shutdown state. `uv_shutdown` clears that flag when it accepts a request and
+  refuses later submissions with `ENOTCONN`. The registrar therefore resolves
+  at once when `uv.is_writable` is false, as `net.Connection:shutdown` does,
+  and otherwise submits `uv.shutdown(request, native, stdio_shut_down)`. libuv
+  defers the actual `shutdown(2)` until previously accepted writes drain. An
+  accepted request increments `Stdio.pending_writes` until `stdio_shut_down`
+  decrements it and settles the operation with `stdio.shutdown` on a negative
+  status. The ordinary `await_with` policy never cancels accepted work: a
+  cancelled caller stays waiting until that callback, while UV roots the
+  request and its data-slot context.
 - **File writes.** `start_file_write` is the registrar for `async.await_with`,
   with a private `FileWriteOperation` context that also serves as an intrusive
   FIFO node (`write_head` / `write_tail` on `FileStdio`). Empty writes resolve
@@ -146,27 +154,27 @@ Runtime's loop and the Runtime not to be closing, but does not require a
 current Task; encoding and reconstruction are synchronous and never check
 cancellation. It rejects a nonzero `pending_writes`, a reserved reader, and any
 non-pipe backing (`tty`, `tcp`, or `file`), then asks `uv.stream_transfer_status`
-about native pending state. `pending_writes` covers accepted writes and
-in-flight TCP `uv.shutdown` requests until their terminal callbacks (including
-queued and in-flight file writes). The stream read callbacks live on
-`StreamStdio`, so a failed handoff can restart a stopped reader without
-replacing its queue.
+about native pending state. `pending_writes` covers accepted stream writes,
+queued and in-flight file writes, and an accepted TCP `uv.shutdown`, until
+their terminal callbacks; both stdio rejection sites report it as pending
+output. The stream read callbacks live on `StreamStdio`, so a failed handoff
+can restart a stopped reader without replacing its queue.
 
 The payloads use the private ordered `reflect.Type` schemas
 `input_transfer_fields` (descriptor, facade excess, terminal marker, optional
 `OperationError`, optional `uv.pipe_t` payload, and the queued strings from
 `snapshot_pending`) and `output_transfer_fields` (descriptor and optional pipe
-payload). A closed native pipe carries no pipe payload. Stable parent facades
-(including file-backed and TCP-backed parent streams) carry only their
-descriptor identity and bypass `stream_transfer_preflight`: output rejects
-nonzero `pending_writes`, and input rejects non-empty `excess` or any started
-`reads` subscription (even after drained EOF or error). Untouched parent facades
-transfer cleanly; `kind()`, `is_tty()`, `close()`, and inheritance never create
-`reads`. Completed `OutputStream:shutdown()` decrements `pending_writes` back to
-zero, allowing descriptor-identity transfer while the underlying OS socket
-remains write-shut-down. Successful captured encoding clears the source facade's
-`handle` and `excess`; the old subscription and native owner retire through
-their ordinary paths. Reconstruction creates a
+payload). A closed native pipe carries no pipe payload. Stable parent facades,
+whatever their backing, carry only their descriptor identity and bypass
+`stream_transfer_preflight`. Output rejects a nonzero `pending_writes`.
+Input rejects nonempty `excess` or any started `reads` subscription, even
+after drained EOF or error. Untouched parent facades transfer cleanly;
+`kind()`, `is_tty()`, `close()`, and inheritance never create `reads`. A
+completed TCP shutdown has already decremented `pending_writes`. The facade
+then transfers its identity, and the destination adopts a fresh `uv_tcp_t`
+over a socket whose write side remains shut down. Successful captured encoding
+clears the source facade's `handle` and `excess`; the old subscription and
+native owner retire through their ordinary paths. Reconstruction creates a
 fresh subscription with destination closures and replays the copied strings
 before resuming production or publishing the terminal state.
 
@@ -274,10 +282,10 @@ false for a `FileStdio` owner, keeping its sticky EOF or error in the cache),
 so queued bytes, excess, and sticky terminal outcomes stay observable for that
 Runtime. Parent-facade close is an idempotent no-op; Runtime cleanup retires
 remaining native stream handles. `with_parent_*` configuration obtains a usable
-owner from `initialize_parent_stdio`: `configure_parent` selects
-`uv.INHERIT_STREAM` or `uv.INHERIT_FD` from the backing, and `bind_slot`
-installs `uv.stdio_data_t.stream(native)` or `uv.stdio_data_t.fd(descriptor)`
-(CRT descriptor `0`, `1`, or `2`).
+owner from `initialize_parent_stdio`. `configure_parent` selects
+`uv.INHERIT_STREAM` for TTY, pipe, and TCP owners and `uv.INHERIT_FD` for file
+owners. `bind_slot` installs `uv.stdio_data_t.stream(native)` or
+`uv.stdio_data_t.fd(descriptor)` (CRT descriptor `0`, `1`, or `2`).
 
 For `UV_FILE` parent descriptors (regular files, `/dev/null` and other non-TTY
 character devices, and Windows disk files and `NUL`), `parent_stdio_kind`
@@ -294,28 +302,50 @@ use them.
 The platform helpers (`os_platform.h`) duplicate parent descriptors for
 stream-backed stdio and inspect native socket facts; they contain no libuv
 header, owner layout, callback, or Task protocol. UV `guess_handle` selects
-pipe, TTY, file, or (on Unix) TCP where possible. When `guess_handle` reports
-`uv.TCP` on Unix, `titan_inspect_parent_tcp` inspects `getsockopt(SOL_SOCKET,
-SO_ACCEPTCONN)` and `getpeername`: listening sockets and unconnected (`ENOTCONN`
-/ `EINVAL`) sockets are rejected with `stdio.parent.kind: ENOTSUP`, unexpected
-probe errors report their translated system error, and only connected `AF_INET`
-or `AF_INET6` stream sockets proceed to `new_tcp_stdio` + `uv.tcp_open` on a
-close-on-exec duplicate (`os_sock_t.from_integer`). On Windows, `GetFileType`
-maps Winsock sockets to `FILE_TYPE_PIPE`, so `parent_stdio_kind` runs
-`titan_probe_parent_stdio` (`getsockopt(SOL_SOCKET, SO_TYPE)` with Winsock
-initialized on demand via `WSAStartup` when `WSANOTINITIALISED`) before
-accepting `uv.NAMED_PIPE` or classifying `uv.UNKNOWN_HANDLE`: any socket handle
-raises `stdio.parent.kind: ENOTSUP` before duplication or adoption, while
-`WSAENOTSOCK` preserves genuine named/anonymous pipes. On Unix, an unknown
-descriptor is inspected explicitly instead of trusting errno from a failed
-guess. Socket-family and socket-type contradictions defeat a pipe hint; only the
-narrow `AF_UNIX` metadata-denial case may use the `TITAN_STDIO_PIPE_FDS` hint
-(`parent_stdio_pipe_hint`). A stream duplicate stays lexically owned until a
-public UV handle adopts it. Windows CRT descriptor/`HANDLE` differences for
-streams are handled by the platform helper and public identifier queries, while
-`FileStdio` passes integer CRT descriptors directly to `uv.fs_read`,
-`uv.fs_write`, and `uv.stdio_data_t.fd` without `os_fd_t` conversion or
-`_setmode` changes.
+pipe, TTY, file, or (on Unix) TCP where possible. `parent_stdio_kind` finishes
+every check before `initialize_parent_stdio` duplicates anything.
+
+For a Unix `uv.TCP` guess, `titan_inspect_parent_tcp` reads
+`getsockopt(SOL_SOCKET, SO_ACCEPTCONN)` and `getpeername`. A listening socket
+raises `stdio.parent.kind: ENOTSUP` with probe text `listening TCP socket`. A
+socket without a peer (`ENOTCONN` or `EINVAL`) raises the same error with
+`unconnected TCP socket`. Any other probe errno keeps its translated code.
+`getpeername` cannot tell a socket that never connected from one that a peer
+reset or that has fully closed. A Runtime, state, or child that classifies the
+descriptor after that point therefore rejects it the same way. The guess
+already guarantees an `AF_INET`/`AF_INET6` stream socket, because libuv
+checks the `getsockname` family, so the family is not checked again.
+`initialize_parent_stdio` then duplicates the descriptor with close-on-exec,
+creates the owner with `new_tcp_stdio` (`uv.tcp_init`), and adopts the
+duplicate with `uv.tcp_open(native, uv.os_sock_t.from_integer(duplicate))`.
+Until that call succeeds, the lexical `defer` owns the duplicate, and
+`discard_unpublished_stdio` closes an initialized handle whose open failed.
+Afterwards the handle owns it. `uv_tcp_open` sets `O_NONBLOCK` on the shared
+open file description and marks the handle readable and writable without
+consulting earlier shutdown state.
+
+On Windows, `GetFileType` reports sockets as `FILE_TYPE_PIPE`. libuv maps
+that to `uv.NAMED_PIPE` and never guesses `uv.TCP`. For both `uv.NAMED_PIPE`
+and `uv.UNKNOWN_HANDLE` guesses, `parent_stdio_kind` therefore calls
+`titan_probe_parent_stdio`. The probe asks Winsock about the CRT descriptor's
+`HANDLE` with `getsockopt(SOL_SOCKET, SO_TYPE)`, which reads no data. Winsock
+is already initialized, because the Runtime's `uv_loop_init` ran libuv's
+Winsock setup. A successful query raises `stdio.parent.kind: ENOTSUP` with
+probe text `socket-backed parent stdio is not supported on Windows`.
+`WSAENOTSOCK` continues on the pipe or unknown-handle path. Any other Winsock
+error raises with probe `getsockopt(SO_TYPE)`. The Windows
+`titan_inspect_parent_tcp` exists only because foreign imports are
+unconditional, and it reports the same rejection.
+
+On Unix, an unknown descriptor is inspected explicitly instead of trusting
+errno from a failed guess. Socket-family and socket-type contradictions defeat
+a pipe hint; only the narrow `AF_UNIX` metadata-denial case may use the
+`TITAN_STDIO_PIPE_FDS` hint (`parent_stdio_pipe_hint`), which a TCP guess never
+consults. A stream duplicate stays lexically owned until a public UV handle
+adopts it. Windows CRT descriptor/`HANDLE` differences for streams are handled
+by the platform helper and public identifier queries, while `FileStdio` passes
+integer CRT descriptors directly to `uv.fs_read`, `uv.fs_write`, and
+`uv.stdio_data_t.fd` without `os_fd_t` conversion or `_setmode` changes.
 
 Captured stdout and stderr use the same buffered stream implementation. Merged
 output stores one InputStream in both Process fields, so excess, EOF, and close

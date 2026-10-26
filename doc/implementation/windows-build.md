@@ -747,10 +747,12 @@ Its command string must use native Windows shell syntax; see
 [shell commands](../language/standard-library-os.md#shell-commands). Use
 `titan.os.spawn` for direct executable and argument control. Both retain the
 existing process ownership rules, without a descendant-termination guarantee.
-Connected TCP parent stdio (`kind() == "tcp"`) is supported on Linux and macOS
-only; on Windows, `titan.os` probes CRT standard handles with Winsock before the
-named-pipe path and rejects socket-valued parent descriptors with
-`stdio.parent.kind: ENOTSUP` before duplication or adoption.
+Socket-backed parent stdio is unsupported on Windows. Before its named-pipe or
+unknown-handle path, `titan.os` asks Winsock whether a standard handle is a
+socket. It rejects any socket with `stdio.parent.kind: ENOTSUP` before
+duplicating or adopting the handle
+([parent standard streams](../language/standard-library-os.md#parent-standard-streams)).
+Connected TCP stdio (`kind() == "tcp"`) is a Linux and macOS feature.
 
 The shared tests still need Windows equivalents for the Unix file-descriptor
 leak inventory, FIFO-based accepted-open cancellation, and USR1/USR2 delivery
