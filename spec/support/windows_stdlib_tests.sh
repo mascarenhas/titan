@@ -95,30 +95,36 @@ copy_input() {
 refresh_inputs() {
   local base=$1 destination=$2 manifest=$3 input relative directory
   shift 3
-  local -A current=()
   : > "$manifest.new"
   for input in "$@"; do
     relative=${input#"$base/"}
     [[ $relative != "$input" && $relative != /* && /$relative/ != */../* &&
        /$relative/ != */./* ]] || { echo "Invalid owned input: $input" >&2; return 1; }
-    current["$relative"]=1
     printf '%s\0' "$relative" >> "$manifest.new"
   done
   if [[ -f $manifest ]]; then
+    # Keep NUL-delimited membership linear without Bash 4 associative arrays.
+    perl -0e '
+      open my $new, "<", $ARGV[0] or die "$ARGV[0]: $!\n";
+      my %current = map { $_ => 1 } <$new>;
+      close $new or die "$ARGV[0]: $!\n";
+      open my $old, "<", $ARGV[1] or die "$ARGV[1]: $!\n";
+      while (my $path = <$old>) { print $path unless $current{$path}; }
+      close $old or die "$ARGV[1]: $!\n";
+    ' "$manifest.new" "$manifest" > "$manifest.removed"
     while IFS= read -r -d '' relative; do
       [[ -n $relative && $relative != /* && /$relative/ != */../* && /$relative/ != */./* ]] || {
         echo "Invalid owned input manifest: $manifest" >&2; return 1;
       }
-      if [[ ! ${current["$relative"]+present} ]]; then
-        owned_destination "$destination/$relative"
-        rm -f "$destination/$relative"
-        directory="$destination/$relative"
+      owned_destination "$destination/$relative"
+      rm -f "$destination/$relative"
+      directory="$destination/$relative"
+      directory=${directory%/*}
+      while [[ $directory != "$destination" ]] && rmdir "$directory" 2>/dev/null; do
         directory=${directory%/*}
-        while [[ $directory != "$destination" ]] && rmdir "$directory" 2>/dev/null; do
-          directory=${directory%/*}
-        done
-      fi
-    done < "$manifest"
+      done
+    done < "$manifest.removed"
+    rm -f "$manifest.removed"
   fi
   for input in "$@"; do
     relative=${input#"$base/"}
@@ -136,13 +142,20 @@ if [[ $mode == build ]]; then
   done
   mkdir -p "$work/sdk" "$work/source" "$work/cwd/spec/fixtures" "$work/cwd/.titan-tests"
   find "$prefix" \( -type f -o -type l \) -print0 > "$work/sdk.inputs.scan"
-  mapfile -d '' -t sdk_inputs < "$work/sdk.inputs.scan"
+  sdk_inputs=()
+  while IFS= read -r -d '' input; do sdk_inputs+=("$input"); done < "$work/sdk.inputs.scan"
   rm -f "$work/sdk.inputs.scan"
   refresh_inputs "$prefix" "$work/sdk" "$work/sdk.inputs" "${sdk_inputs[@]}"
-  shopt -s globstar nullglob
+  shopt -s nullglob
+  find "$source_root/spec/stdlib/titan" -name '.*' -prune -o \
+    \( -type f -o -type l \) \( -name '*.titan' -o -name '*.h' \) -print0 > "$work/source.inputs.scan"
   source_inputs=()
-  for input in "$source_root"/spec/stdlib/titan/**/*.titan "$source_root"/spec/stdlib/titan/**/*.h \
-      "$source_root"/spec/fixtures/stdlib/native/*.c "$source_root"/spec/fixtures/stdlib/native/*.h; do
+  while IFS= read -r -d '' input; do
+    case "$input" in *.titan.h|*.ffi.h) continue ;; esac
+    source_inputs+=("$input")
+  done < "$work/source.inputs.scan"
+  rm -f "$work/source.inputs.scan"
+  for input in "$source_root"/spec/fixtures/stdlib/native/*.c "$source_root"/spec/fixtures/stdlib/native/*.h; do
     case "$input" in *.titan.h|*.ffi.h) continue ;; esac
     source_inputs+=("$input")
   done
@@ -152,7 +165,9 @@ if [[ $mode == build ]]; then
   # Fresh-process tests read authored fixtures from the ordinary root CWD.
   # Same-stem generated C and synthetic runner headers are not fixture inputs.
   fixture_inputs=()
-  for input in "$source_root"/spec/fixtures/**/*; do
+  find "$source_root/spec/fixtures" -name '.*' -prune -o \
+    \( -type f -o -type l \) -print0 > "$work/fixtures.inputs.scan"
+  while IFS= read -r -d '' input; do
     [[ -f $input ]] || continue
     case "$input" in
       *.ffi.h|*.titan.h|*__test_support.*|*__test_runner.*|*__test_entrypoint.*) continue ;;
@@ -161,13 +176,15 @@ if [[ $mode == build ]]; then
       *) continue ;;
     esac
     fixture_inputs+=("$input")
-  done
+  done < "$work/fixtures.inputs.scan"
+  rm -f "$work/fixtures.inputs.scan"
   refresh_inputs "$source_root/spec/fixtures" "$work/cwd/spec/fixtures" \
     "$work/fixtures.inputs" "${fixture_inputs[@]}"
   "${MAKE:-make}" --no-print-directory -s \
     -f "$(cygpath -m "$source_root/spec/support/stdlib_test_modules.mk")" \
     print-stdlib-test-roots > "$work/roots.txt"
-  mapfile -t roots < "$work/roots.txt"
+  roots=()
+  while IFS= read -r root; do roots+=("${root%$'\r'}"); done < "$work/roots.txt"
   [[ ${#roots[@]} == 30 && ${roots[0]} == test.tests ]]
   copy_input "$source_root/spec/support/check_stdlib_test_output.lua" "$work/check_stdlib_test_output.lua"
   winprefix=$(cygpath -m "$work/sdk")
@@ -189,7 +206,8 @@ if [[ $mode == build ]]; then
       die "Empty C compiler command\n" if $ARGV[0] eq "CC" && !@a;
       print "$_\0" for @a' "$name" > "$work/$name.argv"
   done
-  mapfile -d '' -t compiler < "$work/CC.argv"
+  compiler=()
+  while IFS= read -r -d '' word; do compiler+=("$word"); done < "$work/CC.argv"
   titan_windows_raw_flags "$work" TEST
   [[ $("${compiler[@]}" -dumpmachine) == x86_64-w64-windows-gnu ]]
   for name in TITAN_BUILD_PROFILE CC AR RANLIB TITAN_EXTRA_CFLAGS TITAN_EXTRA_CPPFLAGS TITAN_EXTRA_LDFLAGS TEST_CFLAGS TEST_CPPFLAGS TEST_LDFLAGS; do
@@ -272,16 +290,16 @@ if [[ $mode == build ]]; then
       done
       export TITAN_EXTRA_LDFLAGS="$TITAN_EXTRA_LDFLAGS -lws2_32"
     fi
-    if [[ ${#payload[@]} -gt 0 ]]; then payload=(-X "${payload[@]}"); fi
+    if [[ ${payload[0]+present} ]]; then payload=(-X "${payload[@]}"); fi
     cd "$work/sdk"
     "$work/sdk/bin/lua.exe" "$winprefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" \
       --output "$(cygpath -m "$output")" --test --incremental --no-uv-bootstrap -j "$TITAN_JOBS" \
       --exe "$winprefix/bin/titan-stdlib-tests.exe" --tree "$test_tree" \
-      --test-dir "$(cygpath -m "$work/source/spec/stdlib/titan")" "${coverage_args[@]}" \
+      --test-dir "$(cygpath -m "$work/source/spec/stdlib/titan")" ${coverage_args[@]+"${coverage_args[@]}"} \
       --c-source "$(cygpath -m "$work/source/spec/fixtures/stdlib/native/async_foreign_work.c")" \
       --c-source "$(cygpath -m "$work/source/spec/fixtures/stdlib/native/fs_fixture.c")" \
       --c-source "$(cygpath -m "$work/source/spec/fixtures/stdlib/native/uv_stdio_probe.c")" \
-      test.tests "${payload[@]}"
+      test.tests ${payload[@]+"${payload[@]}"}
   ) 2>&1 | tee "$work/build.log"
   [[ -f $work/sdk/bin/titan-stdlib-tests.exe ]]
   printf '%s\n' "Windows x64 CLANG64/UCRT; shared native inventory; local NTFS; profile=$TITAN_BUILD_PROFILE" > "$work/build.complete"

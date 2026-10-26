@@ -350,18 +350,18 @@ TITAN_TEST_SUPERVISOR = $(TITAN_TEST_BUILD_DIR)/sdk/bin/windows-test-supervisor.
 windows-stdlib-test-native: $(call make_path,$(TITAN_TEST_HOST_CHILD)) $(call make_path,$(TITAN_TEST_SUPERVISOR))
 
 $(call make_path,$(TITAN_TEST_HOST_CHILD)): $(call make_path,$(TITAN_TEST_NATIVE_INPUT_DIR)/os_process_host_child.c) $(call make_path,$(TITAN_TEST_NATIVE_INPUT_DIR)/os_process_host_child_windows.h) $(call make_path,$(TITAN_TEST_BUILD_DIR)/native-flags.config)
-	@mapfile -d '' -t compiler < $(call quote,$(TITAN_TEST_BUILD_DIR)/CC.argv); \
-	  mapfile -d '' -t cppflags < $(call quote,$(TITAN_TEST_BUILD_DIR)/cppflags.argv); \
-	  mapfile -d '' -t cflags < $(call quote,$(TITAN_TEST_BUILD_DIR)/cflags.argv); \
-	  mapfile -d '' -t ldflags < $(call quote,$(TITAN_TEST_BUILD_DIR)/ldflags.argv); \
+	@compiler=(); while IFS= read -r -d '' word; do compiler+=("$$word"); done < $(call quote,$(TITAN_TEST_BUILD_DIR)/CC.argv); \
+	  cppflags=(); while IFS= read -r -d '' word; do cppflags+=("$$word"); done < $(call quote,$(TITAN_TEST_BUILD_DIR)/cppflags.argv); \
+	  cflags=(); while IFS= read -r -d '' word; do cflags+=("$$word"); done < $(call quote,$(TITAN_TEST_BUILD_DIR)/cflags.argv); \
+	  ldflags=(); while IFS= read -r -d '' word; do ldflags+=("$$word"); done < $(call quote,$(TITAN_TEST_BUILD_DIR)/ldflags.argv); \
 	  "$${compiler[@]}" -std=c99 -Wall -Wextra -Werror "$${cppflags[@]}" "$${cflags[@]}" "$${ldflags[@]}" -municode \
 	    $(call quote,$(TITAN_TEST_NATIVE_INPUT_DIR)/os_process_host_child.c) -o $(call quote,$(TITAN_TEST_HOST_CHILD))
 
 $(call make_path,$(TITAN_TEST_SUPERVISOR)): $(call make_path,$(TITAN_TEST_NATIVE_INPUT_DIR)/windows_test_supervisor.c) $(call make_path,$(TITAN_TEST_BUILD_DIR)/native-flags.config)
-	@mapfile -d '' -t compiler < $(call quote,$(TITAN_TEST_BUILD_DIR)/CC.argv); \
-	  mapfile -d '' -t cppflags < $(call quote,$(TITAN_TEST_BUILD_DIR)/cppflags.argv); \
-	  mapfile -d '' -t cflags < $(call quote,$(TITAN_TEST_BUILD_DIR)/cflags.argv); \
-	  mapfile -d '' -t ldflags < $(call quote,$(TITAN_TEST_BUILD_DIR)/ldflags.argv); \
+	@compiler=(); while IFS= read -r -d '' word; do compiler+=("$$word"); done < $(call quote,$(TITAN_TEST_BUILD_DIR)/CC.argv); \
+	  cppflags=(); while IFS= read -r -d '' word; do cppflags+=("$$word"); done < $(call quote,$(TITAN_TEST_BUILD_DIR)/cppflags.argv); \
+	  cflags=(); while IFS= read -r -d '' word; do cflags+=("$$word"); done < $(call quote,$(TITAN_TEST_BUILD_DIR)/cflags.argv); \
+	  ldflags=(); while IFS= read -r -d '' word; do ldflags+=("$$word"); done < $(call quote,$(TITAN_TEST_BUILD_DIR)/ldflags.argv); \
 	  "$${compiler[@]}" -std=c99 -Wall -Wextra -Werror "$${cppflags[@]}" "$${cflags[@]}" "$${ldflags[@]}" -municode \
 	    $(call quote,$(TITAN_TEST_NATIVE_INPUT_DIR)/windows_test_supervisor.c) -o $(call quote,$(TITAN_TEST_SUPERVISOR))
 
