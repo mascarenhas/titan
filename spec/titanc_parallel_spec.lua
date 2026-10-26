@@ -155,7 +155,12 @@ local function run_titanc(arguments, environment_jobs)
     local build = {}
     function build.lock_outputs(_, directories)
         observed.locked = directories
-        return { release = function() return true end }
+        return {
+            release = function()
+                observed.lock_released = true
+                return true
+            end,
+        }
     end
     function build.run(context, request)
         observed.build_jobs = request.jobs
@@ -181,6 +186,20 @@ local function run_titanc(arguments, environment_jobs)
         ["titan-compiler.driver"] = driver,
         ["titan-compiler.incremental"] = {
             toolchain_identity = function() return "toolchain" end,
+            load_digest_cache = function(context)
+                assert.equal(resolver, context)
+                assert.is_table(observed.locked)
+                assert.falsy(observed.lock_released)
+                observed.digest_cache_loaded = true
+                return true
+            end,
+            save_digest_cache = function(context)
+                assert.equal(resolver, context)
+                assert.falsy(context.closed)
+                assert.falsy(observed.lock_released)
+                observed.digest_cache_saved = true
+                return true
+            end,
         },
         ["titan-compiler.linkcertificate"] = {
             prepare = function()
