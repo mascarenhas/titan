@@ -9777,7 +9777,8 @@ function driver.derive_target_fingerprint(filename, expected_module)
     return parsed.fingerprint, parsed
 end
 
-function driver.validate_generated_objects(objects, target, entries)
+function driver.validate_generated_objects(objects, target, entries, context)
+    context = context or { io = compiler_io.new_sync() }
     for _, input in ipairs(objects or {}) do
         local filename = type(input) == "table" and input.filename or input
         local expected_module =
@@ -9801,20 +9802,14 @@ function driver.validate_generated_objects(objects, target, entries)
         local part_objects = type(input) == "table" and input.objects or nil
         for part_idx = 2, #(part_objects or {}) do
             local part_file = part_objects[part_idx]
-            local part_parsed, part_err = scan_native_file(part_file, nil, false)
-            if not part_parsed then return nil, part_err end
-            if part_parsed.kind ~= "object" then
+            local part_fingerprint, part_err =
+                incremental.part_fingerprint(context, part_file)
+            if not part_fingerprint then
                 return nil, "generated module part object '" ..
-                    tostring(part_file) ..
-                    "' is not a single-architecture relocatable object"
-            end
-            if part_parsed.metadata then
-                return nil, "generated module part object '" ..
-                    tostring(part_file) ..
-                    "' unexpectedly contains Titan module metadata"
+                    tostring(part_file) .. "': " .. tostring(part_err)
             end
             local part_matches, part_mismatch =
-                staticmetadata.fingerprint_matches(part_parsed.fingerprint, target)
+                staticmetadata.fingerprint_matches(part_fingerprint, target)
             if not part_matches then
                 return nil, "generated module part object '" ..
                     tostring(part_file) .. "' target mismatch: " ..

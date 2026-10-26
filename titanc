@@ -966,7 +966,8 @@ if not native_target then
 end
 local generated_entries = platform.windows and {} or nil
 local objects_valid, objects_err =
-    driver.validate_generated_objects(generated_objects, native_target, generated_entries)
+    driver.validate_generated_objects(
+        generated_objects, native_target, generated_entries, resolver_context)
 if not objects_valid then exit(objects_err) end
 local providers_valid, providers_err =
     driver.prepare_static_providers_for_target(
