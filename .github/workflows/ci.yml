@@ -841,8 +841,12 @@ jobs:
           TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
           TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
         run: |
+          # The first install owns the immutable failure-diagnostic snapshot.
+          # Only this identical reinstall skips taking a second snapshot.
           bash spec/support/ci_sanitizer_capture.sh identical-reinstall \
-            luarocks make --force
+            env TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT= luarocks make --force
+          cmp "$TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT/provider.so" \
+            "$PREFIX/lib/titan/0.6/titan.so"
           log="$RUNNER_TEMP/titan-sanitizer-identical-reinstall.log"
           bash spec/support/ci_sanitizer_capture.sh native-stdlib-identical-reinstall \
             make titan-stdlib-test-build TITAN_VERBOSE=1 2>&1 | tee "$log"
