@@ -674,13 +674,20 @@ describe("automatic test-root discovery", function()
 
         it("reports requested-directory metadata failures explicitly", function()
             local root = make({ ["one_test.titan"] = "" })
+            local base = compiler_io.new_sync()
             local strategy = observed({
-                stat = function() return nil, "permission denied while inspecting directory" end,
+                stat = function(filename)
+                    if path.normalize(filename) == path.normalize(root) then
+                        return nil, "permission denied while inspecting directory"
+                    end
+                    return base:stat(filename)
+                end,
             })
             local roots, message = testroots.discover(
                 discovery_context(strategy), { root }, {}, {}, root)
             assert.is_nil(roots)
-            assert.truthy(message:find("permission denied while inspecting directory", 1, true))
+            assert.equal("cannot resolve test directory '" .. root ..
+                "': permission denied while inspecting directory", message)
         end)
 
         it("reports an inspection failure instead of skipping an entry",
