@@ -24,13 +24,40 @@ local uv
 -- between spec files) reuses the live loop instead of opening a second one.
 local LUV_ANCHOR = "titan-compiler.process: luv"
 
+local function load_luv()
+    local registry = debug.getregistry()
+    local anchored = registry[LUV_ANCHOR]
+    if anchored then return anchored end
+    local existing = package.loaded.luv
+    if type(existing) == "table" and existing._loop ~= nil then
+        registry[LUV_ANCHOR] = existing
+        return existing
+    end
+    local errors = {}
+    for index = 2, #(package.searchers or {}) do
+        local loader, extra = package.searchers[index]("luv")
+        if type(loader) == "function" then
+            anchored = loader("luv", extra)
+            if anchored == nil then anchored = true end
+            registry[LUV_ANCHOR] = anchored
+            return anchored
+        elseif type(loader) == "string" then
+            errors[#errors + 1] = loader
+        end
+    end
+    error("module 'luv' not found:" .. table.concat(errors), 2)
+end
+
+if type(package) == "table" and type(package.preload) == "table" and
+   package.preload.luv == nil then
+    package.preload.luv = load_luv
+end
+
 local function library()
     if not uv then
-        local registry = debug.getregistry()
-        uv = registry[LUV_ANCHOR]
-        if not uv then
-            uv = require "luv"
-            registry[LUV_ANCHOR] = uv
+        uv = load_luv()
+        if package.loaded.luv == nil then
+            package.loaded.luv = uv
         end
     end
     return uv
@@ -87,6 +114,23 @@ function Process:wait()
 end
 Process.close = Process.wait
 
+
+-- Run `argv` directly with the C locale and wait for it, sharing the
+-- caller's standard streams; returns os.execute-shaped results. On Windows
+-- luv places the child in this process's kill-on-close Job Object.
+function process.run(argv, options)
+    library()
+    local child, err = spawn(argv, { 0, 1, 2 }, options)
+    if not child then
+        uv.run("nowait")
+        pcall(io.stderr.write, io.stderr,
+            "titanc: cannot start '" .. tostring(argv[1]) .. "': " ..
+            tostring(err) .. "\n")
+        pcall(io.stderr.flush, io.stderr)
+        return nil, "exit", 127
+    end
+    return child:wait()
+end
 function process.new_batch()
     library()
     return setmetatable({ children = {}, ready = {}, pending = 0 }, Batch)
@@ -191,11 +235,15 @@ end
 -- worker-owned logs. `completed(ok, term, code)` runs once, after the child
 -- was reaped, with io.popen-close shaped results. Returns the child, or nil
 -- and an error (nothing is reported then).
-function process.start_job(argv, stdout_path, stderr_path, completed)
+function process.start_job(argv, stdout_path, stderr_path, completed, options)
     library()
     local stdout, stderr = open_logs(stdout_path, stderr_path)
     if not stdout then return nil, stderr end
-    local child, err = spawn(argv, { nil, stdout, stderr }, nil,
+    local stdio = { nil, stdout, stderr }
+    for index, descriptor in ipairs(options and options.inherit or {}) do
+        stdio[3 + index] = descriptor
+    end
+    local child, err = spawn(argv, stdio, nil,
         function(code, signal) completed(exit_status(code, signal)) end)
     close_logs(stdout, stderr)
     if not child then

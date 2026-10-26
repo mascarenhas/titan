@@ -1145,6 +1145,8 @@ LUAMOD_API int luaopen_titan(lua_State *L) {
     lua_setfield(L, -2, "__index");
     lua_pushcfunction(L, output_lock_gc);
     lua_setfield(L, -2, "__gc");
+    lua_pushcfunction(L, output_lock_gc);
+    lua_setfield(L, -2, "__close");
   }
   lua_pop(L, 1);
 #if !defined(_WIN32)
@@ -1164,6 +1166,8 @@ LUAMOD_API int luaopen_titan(lua_State *L) {
     lua_setfield(L, -2, "__index");
     lua_pushcfunction(L, signal_guard_gc);
     lua_setfield(L, -2, "__gc");
+    lua_pushcfunction(L, signal_guard_gc);
+    lua_setfield(L, -2, "__close");
   }
   lua_pop(L, 1);
   if (luaL_newmetatable(L, TITAN_SIGPIPE_GUARD_TYPE)) {
@@ -1173,6 +1177,8 @@ LUAMOD_API int luaopen_titan(lua_State *L) {
     lua_setfield(L, -2, "__index");
     lua_pushcfunction(L, sigpipe_guard_gc);
     lua_setfield(L, -2, "__gc");
+    lua_pushcfunction(L, sigpipe_guard_gc);
+    lua_setfield(L, -2, "__close");
   }
   lua_pop(L, 1);
 #endif

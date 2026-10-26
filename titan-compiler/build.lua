@@ -147,6 +147,7 @@ function build.lock_outputs(strategy, directories, options)
                     announced = true
                     pcall(io.stderr.write, io.stderr,
                         "titanc: waiting for build lock '" .. entry.path .. "'\n")
+                    pcall(io.stderr.flush, io.stderr)
                 end
                 process.library().sleep(LOCK_POLL_MILLISECONDS)
             end
@@ -525,7 +526,8 @@ function Scheduler:start_native(job)
     batch.running = batch.running + 1
     self.running_native = self.running_native + 1
     local child, err = process.start_job(job.spec.argv, job.spec.stdout, job.spec.stderr,
-        function(ok, term, code) self:defer("native_done", job, ok, term, code) end)
+        function(ok, term, code) self:defer("native_done", job, ok, term, code) end,
+        { inherit = self.options.locks and self.options.locks:descriptors() or nil })
     if not child then
         -- Reported like a shell that could not execute the command.
         append_log(job.spec.stderr, "titanc: cannot start '" .. job.spec.argv[1] ..
@@ -841,17 +843,20 @@ function Scheduler:run()
             self:fatal(tostring(support_err or ledger_err))
         else
             self.ledger = ledger
-            self:watch_signals()
-            while true do
-                self:process_events()
-                self:drain_decisions()
-                self:dispatch()
-                self:emit()
-                if not self:busy() then break end
-                process.library().run("once")
-            end
+            local ok, loop_err = xpcall(function()
+                self:watch_signals()
+                while true do
+                    self:process_events()
+                    self:drain_decisions()
+                    self:dispatch()
+                    self:emit()
+                    if not self:busy() then break end
+                    process.library().run("once")
+                end
+            end, debug.traceback)
             self:close_handles()
             local closed, close_err = ledger:close()
+            if not ok then self:fatal("internal scheduler error: " .. tostring(loop_err)) end
             if not closed then self.failures[#self.failures + 1] = tostring(close_err) end
             self.cancelled = self.cancelled or ledger:cancelled()
         end
@@ -919,6 +924,10 @@ function build.run(context, request)
     if #diagnostics > 0 then return nil, diagnostics end
     local plan, plan_err = driver.resolution_plan(context)
     if not plan then return nil, append_all({}, plan_err) end
+    if request.preflight then
+        local ready, preflight_err = request.preflight(plan)
+        if not ready then return nil, append_all({}, preflight_err) end
+    end
 
     local nodes, by_name = {}, {}
     for _, name in ipairs(plan.order) do
