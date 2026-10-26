@@ -387,7 +387,8 @@ end
 local function stable_toolchain_banner(output)
     local cpp = require "c-parser.cpp"
     local lines = {}
-    for line in (output .. "\n"):gmatch("(.-)\r?\n") do
+    for raw_line in (output .. "\n"):gmatch("(.-)\r?\n") do
+        local line = raw_line
         -- Clang prints its generated cc1 action as well as its stable banner.
         -- These two directory operands describe the caller, not the compiler.
         -- Preserve every other action argument and all version/search metadata.
