@@ -102,6 +102,8 @@ local function parse_verbose_output(output)
         object_misses = {},
         link_hits = {},
         link_misses = {},
+        native_hits = {},
+        native_misses = {},
         module_compiles = {},
         synthetic_compiles = {},
         c_source_compiles = {},
@@ -117,6 +119,8 @@ local function parse_verbose_output(output)
         if not link_miss_target then
             link_miss_target, link_miss_reason = line:match("^Titan link miss ([^:]+): (.+)$")
         end
+        local native_hit = line:match("^Titan native hit (.+)$")
+        local native_miss = line:match("^Titan native miss (.+)$")
         if hit_mod then
             parsed.object_hits[hit_mod] = normalize_slashes(hit_path)
         elseif miss_mod then
@@ -125,6 +129,10 @@ local function parse_verbose_output(output)
             parsed.link_hits[normalize_slashes(link_hit)] = true
         elseif link_miss_target then
             parsed.link_misses[normalize_slashes(link_miss_target)] = link_miss_reason
+        elseif native_hit then
+            parsed.native_hits[normalize_slashes(native_hit)] = true
+        elseif native_miss then
+            parsed.native_misses[normalize_slashes(native_miss)] = true
         elseif line ~= "" and not line:match("^Titan ") and not line:match("^titanc:") then
             local normalized = normalize_slashes(line)
             local is_preprocess = normalized:find(" -E ", 1, true) ~= nil
@@ -951,18 +959,24 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
         local c_source_args = { "-DINCREMENTAL_BIAS=4", "--c-source", c_helper }
         local c_source_initial = build_target("app", { extra_args = c_source_args })
         assert.equal(0, #c_source_initial.module_compiles, c_source_initial.raw)
-        assert.equal(1, #c_source_initial.c_source_compiles, c_source_initial.raw)
+        assert.is_true(target_matches(c_source_initial.native_misses, c_helper) == true,
+            "expected 'Titan native miss " .. c_helper .. "' in:\n" .. c_source_initial.raw)
+        assert.is_nil(target_matches(c_source_initial.native_hits, c_helper), c_source_initial.raw)
         assert_link_performed(c_source_initial, "server-executable", app_exe)
 
         local c_source_noop = build_target("app", { extra_args = c_source_args })
+        assert.is_true(target_matches(c_source_noop.native_hits, c_helper) == true,
+            "expected 'Titan native hit " .. c_helper .. "' in:\n" .. c_source_noop.raw)
+        assert.is_nil(target_matches(c_source_noop.native_misses, c_helper), c_source_noop.raw)
         assert_link_skipped(c_source_noop, "server-executable", app_exe)
 
         write(c_helper, "int scenario_c_helper(void) { return 9; }\n")
         local c_source_changed = build_target("app", { extra_args = c_source_args })
         assert.equal(0, #c_source_changed.module_compiles, c_source_changed.raw)
-        assert.equal(1, #c_source_changed.c_source_compiles, c_source_changed.raw)
+        assert.is_true(target_matches(c_source_changed.native_misses, c_helper) == true,
+            "expected 'Titan native miss " .. c_helper .. "' in:\n" .. c_source_changed.raw)
+        assert.is_nil(target_matches(c_source_changed.native_hits, c_helper), c_source_changed.raw)
         assert_link_performed(c_source_changed, "server-executable", app_exe)
-
         -- Compiler frontend content change invalidates all module objects (configuration compiler).
         local custom_frontend = workspace .. "/custom-titanc"
         write(custom_frontend, read(REPOSITORY .. "/titanc"))
@@ -1078,6 +1092,7 @@ end
         assert_module_reused(restored_headers, "fixture.leaf", "fixture/leaf.o")
         assert.is_true(exists(build_dir .. "/fixture/leaf.titan.h"))
         assert.is_true(exists(build_dir .. "/fixture/leaf.ffi.h"))
+        assert_link_skipped(restored_headers, "test-executable", test_exe)
 
         -- Failed-link retry: a failed linker run compiles no modules, leaves no valid executable,
         -- and the subsequent retry relinks once from the reusable module objects.
