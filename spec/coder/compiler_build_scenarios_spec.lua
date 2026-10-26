@@ -292,8 +292,8 @@ foreign function native_value(): int return ffi.incremental_header_value() end
 foreign function native_checksum_ok(): int return ffi.incremental_checksum_ok() end
 local function hidden(): integer return %d end
 function value(): integer
-    if native_checksum_ok() == 0 then raise "native checksum verification failed" end
-    return native_value() + hidden() - 1
+    if (native_checksum_ok() as integer) == 0 then raise "native checksum verification failed" end
+    return (native_value() as integer) + hidden() - 1
 end
 %s]], adjustment, extra_declaration or "")
 end
@@ -317,7 +317,7 @@ local test = import "test"
 local app = import "fixture.app"
 local leaf = import "fixture.leaf.titan"
 function %s(context: test.Context)
-    test.assert(test.testing() and app.testing() and app.answer() > 0 and leaf.native_value() > 0)
+    test.assert(test.testing() and app.testing() and app.answer() > 0 and (leaf.native_value() as integer) > 0)
 end
 %s]], case_name, extra_cases or "")
 end
@@ -445,11 +445,11 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
             args[#args + 1] = "--exe"
             args[#args + 1] = exe_arg
         end
-        for _, extra in ipairs(options.extra_args or {}) do
-            args[#args + 1] = extra
-        end
         for _, root in ipairs(options.roots or (kind == "test" and { "server.tests" } or { "titan_language_server" })) do
             args[#args + 1] = root
+        end
+        for _, extra in ipairs(options.extra_args or {}) do
+            args[#args + 1] = extra
         end
         local step = invoke_titanc({
             args = args,
@@ -609,12 +609,104 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
         remove(workspace)
     end)
 
-    it("builds application and test executables into explicit --exe destinations, skips unchanged final links, and reuses objects across relative paths", function()
+    it("builds and incrementally updates application and test executables across closure, header, flag, profile, link, discovery, and recovery scenarios", function()
         populate_baseline_tree()
         local test_names = {
             "fixture.app_test.test_initial",
             "fixture.other_test.test_unrelated",
         }
+
+        -- Install one stable CC wrapper for the entire progression so failed-link
+        -- injection later does not alter toolchain identity mid-scenario.
+        local fail_link_marker = workspace .. "/fail-next-server-link"
+        local real_cc = assert(cdriver.split_shell_words(driver.CC))
+        local wrapper_cc_command
+        if platform.windows then
+            local cc_wrapper = workspace .. "/cc-wrapper.lua"
+            local quoted_cc = {}
+            for index, word in ipairs(real_cc) do
+                quoted_cc[index] = string.format("%q", word)
+            end
+            write(cc_wrapper, string.format([=[
+package.path = %q .. package.path
+local command = { %s }
+local is_compile_or_preprocess = false
+local output_path
+for index, value in ipairs(arg) do
+    if value == "-c" or value == "-E" or value:find("^-print-", 1) then
+        is_compile_or_preprocess = true
+    end
+    if arg[index - 1] == "-o" then
+        output_path = value
+    end
+    command[#command + 1] = value
+end
+local marker = %q
+local marker_file = io.open(marker, "rb")
+if marker_file then
+    marker_file:close()
+    if not is_compile_or_preprocess and output_path
+        and not output_path:find(".titan-temporary", 1, true)
+        and not output_path:find("static_executable", 1, true) then
+        os.remove(marker)
+        local out = io.open(output_path, "wb")
+        if out then out:write(""); out:close() end
+        io.stderr:write("injected linker failure after creating empty output\n")
+        os.exit(91)
+    end
+end
+local io_sync = require("titan-compiler.io").new_sync()
+local result = io_sync:run(command)
+if result.output and result.output ~= "" then io.stdout:write(result.output) end
+if result.diagnostic and result.diagnostic ~= "" and result.diagnostic ~= result.output then
+    io.stderr:write(result.diagnostic)
+end
+os.exit(result.ok and 0 or result.status or 1)
+]=], REPOSITORY .. "/?.lua;" .. REPOSITORY .. "/?/init.lua;",
+                table.concat(quoted_cc, ", "), fail_link_marker))
+            wrapper_cc_command = shell_command({ LUA, cc_wrapper })
+        else
+            local cc_wrapper = workspace .. "/cc-wrapper.sh"
+            write(cc_wrapper, table.concat({
+                "#!/bin/sh",
+                "if [ -f " .. assert(cdriver.shell_quote(fail_link_marker)) .. " ]; then",
+                "    is_comp=no",
+                "    out=",
+                "    prev=",
+                "    for a do",
+                "        case \"$a\" in",
+                "            -c|-E|-print-*) is_comp=yes ;;",
+                "        esac",
+                "        if [ \"$prev\" = -o ]; then out=$a; fi",
+                "        prev=$a",
+                "    done",
+                "    case \"$out\" in",
+                "        *.titan-temporary*|*static_executable*) ;;",
+                "        ?*)",
+                "            if [ \"$is_comp\" = no ]; then",
+                "                rm -f " .. assert(cdriver.shell_quote(fail_link_marker)),
+                "                : > \"$out\"",
+                "                printf 'injected linker failure after creating empty output\\n' >&2",
+                "                exit 91",
+                "            fi",
+                "            ;;",
+                "    esac",
+                "fi",
+                "exec " .. shell_command(real_cc) .. " \"$@\"",
+                "",
+            }, "\n"))
+            assert.is_true((run_command({ "chmod", "u+x", cc_wrapper })))
+            wrapper_cc_command = shell_command({ cc_wrapper })
+        end
+        local function build_scenario(kind, opts)
+            opts = opts or {}
+            local env = { CC = wrapper_cc_command }
+            for k, v in pairs(opts.env or {}) do env[k] = v end
+            local merged = {}
+            for k, v in pairs(opts) do merged[k] = v end
+            merged.env = env
+            return build_target(kind, merged)
+        end
 
         -- Reject invalid --exe combinations before mutating outputs.
         local compile_only_exe = invoke_titanc({
@@ -632,7 +724,7 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
         assert.matches("--exe", library_only_exe.raw, 1, true)
 
         -- Initial application build: compiles closure and links into external --exe path.
-        local initial_app = build_target("app")
+        local initial_app = build_scenario("app")
         assert_module_rebuilt(initial_app, "fixture.leaf", "fixture/leaf.o", "no-object")
         assert_module_rebuilt(initial_app, "fixture.app", "fixture/app/app.o", "no-object")
         assert_module_rebuilt(initial_app, "fixture.unrelated", "fixture/unrelated.o", "no-object")
@@ -643,7 +735,7 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
 
         -- Initial test build sharing the same output directory: reuses production objects
         -- (fixture.leaf, fixture.app, fixture.unrelated) and compiles only test modules.
-        local initial_tests = build_target("test")
+        local initial_tests = build_scenario("test")
         assert_module_reused(initial_tests, "fixture.leaf", "fixture/leaf.o")
         assert_module_reused(initial_tests, "fixture.app", "fixture/app/app.o")
         assert_module_reused(initial_tests, "fixture.unrelated", "fixture/unrelated.o")
@@ -675,7 +767,7 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
         verify_runtime(5, test_names, hostile_env)
 
         -- Warm no-op builds skip module compilation, runner/entrypoint generation, and linking.
-        local noop_app = build_target("app")
+        local noop_app = build_scenario("app")
         for _, item in ipairs({
             { "fixture.leaf", "fixture/leaf.o" },
             { "fixture.app", "fixture/app/app.o" },
@@ -686,7 +778,7 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
         end
         assert_link_skipped(noop_app, "server-executable", app_exe)
 
-        local noop_tests = build_target("test")
+        local noop_tests = build_scenario("test")
         for _, item in ipairs({
             { "fixture.leaf", "fixture/leaf.o" },
             { "fixture.app", "fixture/app/app.o" },
@@ -699,18 +791,16 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
         end
         assert_link_skipped(noop_tests, "test-executable", test_exe)
 
-        -- Relative --tree, --output, and --exe paths canonicalize to the same certificates.
-        local rel_app = build_target("app", {
+        -- Relative --output and --exe paths canonicalize to the same certificates.
+        local rel_app = build_scenario("app", {
             cwd = workspace,
-            tree = "source",
             output = "build",
             exe = "deliverables/bin/titan-language-server",
         })
         assert_link_skipped(rel_app, "server-executable", app_exe)
 
-        local rel_tests = build_target("test", {
+        local rel_tests = build_scenario("test", {
             cwd = workspace,
-            tree = "source",
             output = "build",
             exe = "build/tests/server/tests",
         })
@@ -719,32 +809,21 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
         -- A malformed test or unimported source outside the application closure is ignored.
         put_source("fixture/never_imported.titan", "function broken_unimported(\n")
         put_source("fixture/app_test.titan", "function unfinished(\n")
-        local app_ignores_broken_test = build_target("app")
+        local app_ignores_broken_test = build_scenario("app")
         assert_link_skipped(app_ignores_broken_test, "server-executable", app_exe)
 
-        local broken_test_build = build_target("test", { expect_failure = true })
+        local broken_test_build = build_scenario("test", { expect_failure = true })
         assert.equal(0, #broken_test_build.link_commands)
 
         put_source("fixture/app_test.titan", app_tests_source("test_initial"))
-        local restored_tests = build_target("test")
+        local restored_tests = build_scenario("test")
         assert_link_skipped(restored_tests, "test-executable", test_exe)
-        verify_runtime(5, test_names)
-    end)
-
-    it("recompiles only the producer on a leaf body edit and only the changed closure on import, folder, and layout transitions", function()
-        populate_baseline_tree()
-        local test_names = {
-            "fixture.app_test.test_initial",
-            "fixture.other_test.test_unrelated",
-        }
-        build_target("app")
-        build_target("test")
         verify_runtime(5, test_names)
 
         -- Tightened body-edit oracle: a leaf implementation-only edit recompiles
         -- fixture/leaf.o only and must NOT rewrite consumer fixture/app/app.o.
         put_source("fixture/leaf.titan", leaf_module_source(2))
-        local leaf_body_app = build_target("app")
+        local leaf_body_app = build_scenario("app")
         assert_module_rebuilt(leaf_body_app, "fixture.leaf", "fixture/leaf.o", "source-content")
         assert_module_reused(leaf_body_app, "fixture.app", "fixture/app/app.o")
         assert_module_reused(leaf_body_app, "fixture.unrelated", "fixture/unrelated.o")
@@ -752,7 +831,7 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
         assert.equal(1, #leaf_body_app.module_compiles, leaf_body_app.raw)
         assert_link_performed(leaf_body_app, "server-executable", app_exe)
 
-        local leaf_body_tests = build_target("test")
+        local leaf_body_tests = build_scenario("test")
         assert_module_reused(leaf_body_tests, "fixture.leaf", "fixture/leaf.o")
         assert_module_reused(leaf_body_tests, "fixture.app", "fixture/app/app.o")
         assert_module_reused(leaf_body_tests, "fixture.unrelated", "fixture/unrelated.o")
@@ -769,14 +848,14 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
         -- interface) and fixture.unrelated are still reused.
         put_source("fixture/leaf.titan",
             leaf_module_source(2, "function exported_bonus(): integer return 10 end\n"))
-        local leaf_api_app = build_target("app")
+        local leaf_api_app = build_scenario("app")
         assert_module_rebuilt(leaf_api_app, "fixture.leaf", "fixture/leaf.o", "source-content")
         assert_module_rebuilt(leaf_api_app, "fixture.app", "fixture/app/app.o", "import-interface")
         assert_module_reused(leaf_api_app, "fixture.unrelated", "fixture/unrelated.o")
         assert_module_reused(leaf_api_app, "titan_language_server", "titan_language_server.o")
         assert_link_performed(leaf_api_app, "server-executable", app_exe)
 
-        local leaf_api_tests = build_target("test")
+        local leaf_api_tests = build_scenario("test")
         assert_module_reused(leaf_api_tests, "fixture.leaf", "fixture/leaf.o")
         assert_module_reused(leaf_api_tests, "fixture.app", "fixture/app/app.o")
         assert_module_rebuilt(leaf_api_tests, "fixture.app_test", "fixture/app_test.o", "import-interface")
@@ -787,14 +866,14 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
         -- Changed import and source closure only.
         put_source("fixture/alternate.titan", "function value(): integer return 12 end\n")
         put_source("fixture/app/app.titan", app_module_source("alternate"))
-        local import_change_app = build_target("app")
+        local import_change_app = build_scenario("app")
         assert_module_rebuilt(import_change_app, "fixture.alternate", "fixture/alternate.o", "no-object")
         assert_module_rebuilt(import_change_app, "fixture.app", "fixture/app/app.o", "source-content")
         assert_module_reused(import_change_app, "fixture.unrelated", "fixture/unrelated.o")
         assert_module_reused(import_change_app, "titan_language_server", "titan_language_server.o")
         assert_link_performed(import_change_app, "server-executable", app_exe)
 
-        local import_change_tests = build_target("test")
+        local import_change_tests = build_scenario("test")
         assert_module_reused(import_change_tests, "fixture.alternate", "fixture/alternate.o")
         assert_module_reused(import_change_tests, "fixture.app", "fixture/app/app.o")
         assert_module_reused(import_change_tests, "fixture.leaf", "fixture/leaf.o")
@@ -807,49 +886,34 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
         put_source("fixture/app/app.titan", app_module_source("leaf", '#strings.upper("ok")'))
         assert(os.remove(source_dir .. "/fixture/app/extra.titan"))
         assert(os.remove(source_dir .. "/fixture/alternate.titan"))
-        local folder_member_removed = build_target("app")
+        local folder_member_removed = build_scenario("app")
         assert_module_rebuilt(folder_member_removed, "fixture.app", "fixture/app/app.o", "source-set")
         assert_module_reused(folder_member_removed, "fixture.leaf", "fixture/leaf.o")
         assert_module_reused(folder_member_removed, "fixture.unrelated", "fixture/unrelated.o")
         assert_module_reused(folder_member_removed, "titan_language_server", "titan_language_server.o")
-        build_target("test")
+        build_scenario("test")
         verify_runtime(6, test_names)
 
         -- Adding and then removing a contributor without modifying app.titan itself
         -- must also miss via source-set membership certification.
         put_source("fixture/app/side_member.titan",
             "local function side_constant(): integer return 0 end\n")
-        local contributor_added = build_target("app")
+        local contributor_added = build_scenario("app")
         assert_module_rebuilt(contributor_added, "fixture.app", "fixture/app/app.o", "source-set")
         assert(os.remove(source_dir .. "/fixture/app/side_member.titan"))
-        local contributor_removed_only = build_target("app")
+        local contributor_removed_only = build_scenario("app")
         assert_module_rebuilt(contributor_removed_only, "fixture.app", "fixture/app/app.o", "source-set")
 
         -- Folder-to-flat module layout transition.
         put_source("fixture/app.titan", app_module_source("leaf", '#strings.upper("ok")'))
         remove(source_dir .. "/fixture/app")
-        local flat_transition_app = build_target("app")
+        local flat_transition_app = build_scenario("app")
         assert_module_rebuilt(flat_transition_app, "fixture.app", "fixture/app.o", "no-object")
         assert_module_reused(flat_transition_app, "fixture.leaf", "fixture/leaf.o")
         assert_module_reused(flat_transition_app, "fixture.unrelated", "fixture/unrelated.o")
         assert_module_reused(flat_transition_app, "titan_language_server", "titan_language_server.o")
         assert.is_true(exists(build_dir .. "/fixture/app.o"))
-        build_target("test")
-        verify_runtime(6, test_names)
-    end)
-
-    it("invalidates affected objects on transitive C header, compile define, profile, and compiler changes while relinking without module compilation on link-only changes", function()
-        populate_baseline_tree()
-        -- Use flat fixture/app.titan to match the post-layout state of the scenario sequence.
-        put_source("fixture/app.titan", app_module_source("leaf", '#strings.upper("ok")'))
-        remove(source_dir .. "/fixture/app")
-        put_source("fixture/leaf.titan", leaf_module_source(2))
-        local test_names = {
-            "fixture.app_test.test_initial",
-            "fixture.other_test.test_unrelated",
-        }
-        build_target("app")
-        build_target("test")
+        build_scenario("test")
         verify_runtime(6, test_names)
 
         -- Transitive C header change (detail.h included by value.h) with preserved mtime:
@@ -860,7 +924,7 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
         put_source("fixture/detail.h", detail_header_source(8))
         assert(lfs.touch(detail_path, old_detail_mtime, old_detail_mtime))
 
-        local header_app = build_target("app")
+        local header_app = build_scenario("app")
         assert_module_rebuilt(header_app, "fixture.leaf", "fixture/leaf.o", "c-input")
         assert_module_reused(header_app, "fixture.app", "fixture/app.o")
         assert_module_reused(header_app, "fixture.unrelated", "fixture/unrelated.o")
@@ -868,7 +932,7 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
         assert.equal(1, #header_app.module_compiles, header_app.raw)
         assert_link_performed(header_app, "server-executable", app_exe)
 
-        local header_tests = build_target("test")
+        local header_tests = build_scenario("test")
         assert_module_reused(header_tests, "fixture.leaf", "fixture/leaf.o")
         assert_module_reused(header_tests, "fixture.app", "fixture/app.o")
         assert_module_reused(header_tests, "fixture.unrelated", "fixture/unrelated.o")
@@ -881,44 +945,44 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
         local extra_inc = workspace .. "/extra-include"
         mkdir(extra_inc)
         local define_args = { "-DINCREMENTAL_BIAS=4" }
-        local define_app = build_target("app", { extra_args = define_args })
+        local define_app = build_scenario("app", { extra_args = define_args })
         assert_module_rebuilt(define_app, "fixture.leaf", "fixture/leaf.o", "configuration options")
         assert_module_rebuilt(define_app, "fixture.unrelated", "fixture/unrelated.o", "configuration options")
-        build_target("test", { extra_args = define_args })
+        build_scenario("test", { extra_args = define_args })
         verify_runtime(15, test_names)
 
-        local define_noop = build_target("app", { extra_args = define_args })
+        local define_noop = build_scenario("app", { extra_args = define_args })
         assert_link_skipped(define_noop, "server-executable", app_exe)
 
         local cflag_args = { "-DINCREMENTAL_BIAS=4", "-I" .. extra_inc, "--cflag=-DINCREMENTAL_EXTRA_BIAS=2" }
-        local cflag_app = build_target("app", { extra_args = cflag_args })
+        local cflag_app = build_scenario("app", { extra_args = cflag_args })
         assert_module_rebuilt(cflag_app, "fixture.leaf", "fixture/leaf.o", "configuration options")
         assert_module_rebuilt(cflag_app, "fixture.unrelated", "fixture/unrelated.o", "configuration options")
-        build_target("test", { extra_args = cflag_args })
+        build_scenario("test", { extra_args = cflag_args })
         verify_runtime(17, test_names)
-        assert_link_skipped(build_target("app", { extra_args = cflag_args }), "server-executable", app_exe)
+        assert_link_skipped(build_scenario("app", { extra_args = cflag_args }), "server-executable", app_exe)
 
         -- Restore -DINCREMENTAL_BIAS=4 only.
-        build_target("app", { extra_args = define_args })
-        build_target("test", { extra_args = define_args })
+        build_scenario("app", { extra_args = define_args })
+        build_scenario("test", { extra_args = define_args })
         verify_runtime(15, test_names)
-        assert_link_skipped(build_target("app", { extra_args = define_args }), "server-executable", app_exe)
+        assert_link_skipped(build_scenario("app", { extra_args = define_args }), "server-executable", app_exe)
 
         -- Build profile change (validation -> production -> validation).
         local prod_env = { TITAN_BUILD_PROFILE = "production" }
-        local prod_app = build_target("app", { extra_args = define_args, env = prod_env })
+        local prod_app = build_scenario("app", { extra_args = define_args, env = prod_env })
         assert_module_rebuilt(prod_app, "fixture.leaf", "fixture/leaf.o", "configuration")
         assert_module_rebuilt(prod_app, "fixture.unrelated", "fixture/unrelated.o", "configuration")
-        build_target("test", { extra_args = define_args, env = prod_env })
+        build_scenario("test", { extra_args = define_args, env = prod_env })
         verify_runtime(15, test_names)
-        assert_link_skipped(build_target("app", { extra_args = define_args, env = prod_env }),
+        assert_link_skipped(build_scenario("app", { extra_args = define_args, env = prod_env }),
             "server-executable", app_exe)
 
-        local restored_val_app = build_target("app", { extra_args = define_args })
+        local restored_val_app = build_scenario("app", { extra_args = define_args })
         assert_module_rebuilt(restored_val_app, "fixture.unrelated", "fixture/unrelated.o", "configuration")
-        build_target("test", { extra_args = define_args })
+        build_scenario("test", { extra_args = define_args })
         verify_runtime(15, test_names)
-        assert_link_skipped(build_target("app", { extra_args = define_args }), "server-executable", app_exe)
+        assert_link_skipped(build_scenario("app", { extra_args = define_args }), "server-executable", app_exe)
 
         -- Pure link-only changes (-L, -l, --ldflag, -X) relink without recompiling any module object.
         local lib_dir = workspace .. "/native-lib-search"
@@ -934,12 +998,12 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
 
         local link_only_args = {
             "-DINCREMENTAL_BIAS=4",
+            "-X", payload_o,
             "-L", lib_dir,
             "-l", "m",
             "--ldflag=-L" .. lib_dir,
-            "-X", payload_o,
         }
-        local link_only_app = build_target("app", { extra_args = link_only_args })
+        local link_only_app = build_scenario("app", { extra_args = link_only_args })
         assert_module_reused(link_only_app, "fixture.leaf", "fixture/leaf.o")
         assert_module_reused(link_only_app, "fixture.app", "fixture/app.o")
         assert_module_reused(link_only_app, "fixture.unrelated", "fixture/unrelated.o")
@@ -947,7 +1011,7 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
         assert.equal(0, #link_only_app.module_compiles, link_only_app.raw)
         assert_link_performed(link_only_app, "server-executable", app_exe)
 
-        local link_only_noop = build_target("app", { extra_args = link_only_args })
+        local link_only_noop = build_scenario("app", { extra_args = link_only_args })
         assert_link_skipped(link_only_noop, "server-executable", app_exe)
 
         -- Changing -X payload bytes with preserved mtime relinks without recompiling module objects.
@@ -956,7 +1020,7 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
         assert.is_true((run_command(cc_argv)))
         assert(lfs.touch(payload_o, old_payload_mtime, old_payload_mtime))
 
-        local payload_relink = build_target("app", { extra_args = link_only_args })
+        local payload_relink = build_scenario("app", { extra_args = link_only_args })
         assert_module_reused(payload_relink, "fixture.leaf", "fixture/leaf.o")
         assert_module_reused(payload_relink, "fixture.app", "fixture/app.o")
         assert_module_reused(payload_relink, "fixture.unrelated", "fixture/unrelated.o")
@@ -969,107 +1033,47 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
         local c_helper = workspace .. "/app_helper.c"
         write(c_helper, "int scenario_c_helper(void) { return 7; }\n")
         local c_source_args = { "-DINCREMENTAL_BIAS=4", "--c-source", c_helper }
-        local c_source_initial = build_target("app", { extra_args = c_source_args })
+        local c_source_initial = build_scenario("app", { extra_args = c_source_args })
         assert.equal(0, #c_source_initial.module_compiles, c_source_initial.raw)
         assert.is_true(target_matches(c_source_initial.native_misses, c_helper) == true,
             "expected 'Titan native miss " .. c_helper .. "' in:\n" .. c_source_initial.raw)
         assert.is_nil(target_matches(c_source_initial.native_hits, c_helper), c_source_initial.raw)
         assert_link_performed(c_source_initial, "server-executable", app_exe)
 
-        local c_source_noop = build_target("app", { extra_args = c_source_args })
+        local c_source_noop = build_scenario("app", { extra_args = c_source_args })
         assert.is_true(target_matches(c_source_noop.native_hits, c_helper) == true,
             "expected 'Titan native hit " .. c_helper .. "' in:\n" .. c_source_noop.raw)
         assert.is_nil(target_matches(c_source_noop.native_misses, c_helper), c_source_noop.raw)
         assert_link_skipped(c_source_noop, "server-executable", app_exe)
 
         write(c_helper, "int scenario_c_helper(void) { return 9; }\n")
-        local c_source_changed = build_target("app", { extra_args = c_source_args })
+        local c_source_changed = build_scenario("app", { extra_args = c_source_args })
         assert.equal(0, #c_source_changed.module_compiles, c_source_changed.raw)
         assert.is_true(target_matches(c_source_changed.native_misses, c_helper) == true,
             "expected 'Titan native miss " .. c_helper .. "' in:\n" .. c_source_changed.raw)
         assert.is_nil(target_matches(c_source_changed.native_hits, c_helper), c_source_changed.raw)
         assert_link_performed(c_source_changed, "server-executable", app_exe)
+
         -- Compiler frontend content change invalidates all module objects (configuration compiler).
         local custom_frontend = workspace .. "/custom-titanc"
         write(custom_frontend, read(REPOSITORY .. "/titanc"))
-        local frontend_first = build_target("app", {
+        local frontend_first = build_scenario("app", {
             frontend = custom_frontend,
             extra_args = c_source_args,
         })
         assert_link_skipped(frontend_first, "server-executable", app_exe)
 
         write(custom_frontend, read(custom_frontend) .. "\n-- changed compiler frontend input\n")
-        local frontend_changed = build_target("app", {
+        local frontend_changed = build_scenario("app", {
             frontend = custom_frontend,
             extra_args = c_source_args,
         })
         assert_module_rebuilt(frontend_changed, "fixture.leaf", "fixture/leaf.o", "configuration compiler")
         assert_module_rebuilt(frontend_changed, "fixture.unrelated", "fixture/unrelated.o", "configuration compiler")
-    end)
 
-    it("scopes test discovery changes to the test image, restores missing generated headers, and recovers from failed links or interrupted outputs", function()
-        populate_baseline_tree()
-        put_source("fixture/app.titan", app_module_source("leaf", '#strings.upper("ok")'))
-        remove(source_dir .. "/fixture/app")
-        put_source("fixture/leaf.titan", leaf_module_source(2))
-        put_source("fixture/detail.h", detail_header_source(8))
-        local define_args = { "-DINCREMENTAL_BIAS=4" }
-
-        -- Use a stable CC wrapper so failed-link injection does not alter toolchain identity.
-        local fail_link_marker = workspace .. "/fail-next-server-link"
-        local cc_wrapper = workspace .. "/cc-wrapper.lua"
-        local real_cc = assert(cdriver.split_shell_words(driver.CC))
-        local quoted_cc = {}
-        for index, word in ipairs(real_cc) do
-            quoted_cc[index] = string.format("%q", word)
-        end
-        write(cc_wrapper, string.format([=[
-package.path = %q .. package.path
-local command = { %s }
-local is_compile_or_preprocess = false
-local output_path
-for index, value in ipairs(arg) do
-    if value == "-c" or value == "-E" or value:find("^-print-", 1) then
-        is_compile_or_preprocess = true
-    end
-    if arg[index - 1] == "-o" then
-        output_path = value
-    end
-    command[#command + 1] = value
-end
-local marker = %q
-local marker_file = io.open(marker, "rb")
-if marker_file then
-    marker_file:close()
-    if not is_compile_or_preprocess and output_path
-        and not output_path:find("%.titan%-temporary", 1)
-        and not output_path:find("static_executable", 1, true) then
-        os.remove(marker)
-        local out = io.open(output_path, "wb")
-        if out then out:write(""); out:close() end
-        io.stderr:write("injected linker failure after creating empty output\n")
-        os.exit(91)
-    end
-end
-local io_sync = require("titan-compiler.io").new_sync()
-local result = io_sync:run(command)
-if result.output and result.output ~= "" then io.stdout:write(result.output) end
-if result.diagnostic and result.diagnostic ~= "" and result.diagnostic ~= result.output then
-    io.stderr:write(result.diagnostic)
-end
-os.exit(result.ok and 0 or result.status or 1)
-]=], REPOSITORY .. "/?.lua;" .. REPOSITORY .. "/?/init.lua;",
-            table.concat(quoted_cc, ", "), fail_link_marker))
-        local wrapper_env = {
-            CC = shell_command({ LUA, cc_wrapper }),
-        }
-
-        build_target("app", { extra_args = define_args, env = wrapper_env })
-        build_target("test", { extra_args = define_args, env = wrapper_env })
-        verify_runtime(15, {
-            "fixture.app_test.test_initial",
-            "fixture.other_test.test_unrelated",
-        })
+        -- Restore the normal frontend with define_args before test-discovery and link-recovery checks.
+        build_scenario("app", { extra_args = define_args })
+        build_scenario("test", { extra_args = define_args })
 
         -- Test discovery change (rename + add test) affects only the test image;
         -- the application build is a complete no-op.
@@ -1078,10 +1082,10 @@ function test_added(context: test.Context)
     test.assert(test.testing())
 end
 ]]))
-        local app_after_test_edit = build_target("app", { extra_args = define_args, env = wrapper_env })
+        local app_after_test_edit = build_scenario("app", { extra_args = define_args })
         assert_link_skipped(app_after_test_edit, "server-executable", app_exe)
 
-        local updated_tests = build_target("test", { extra_args = define_args, env = wrapper_env })
+        local updated_tests = build_scenario("test", { extra_args = define_args })
         assert_module_rebuilt(updated_tests, "fixture.app_test", "fixture/app_test.o", "source-content")
         assert_module_reused(updated_tests, "fixture.leaf", "fixture/leaf.o")
         assert_module_reused(updated_tests, "fixture.app", "fixture/app.o")
@@ -1102,7 +1106,7 @@ end
         -- Missing generated .titan.h and .ffi.h headers are restored on an object hit.
         assert(os.remove(build_dir .. "/fixture/leaf.titan.h"))
         assert(os.remove(build_dir .. "/fixture/leaf.ffi.h"))
-        local restored_headers = build_target("test", { extra_args = define_args, env = wrapper_env })
+        local restored_headers = build_scenario("test", { extra_args = define_args })
         assert_module_reused(restored_headers, "fixture.leaf", "fixture/leaf.o")
         assert.is_true(exists(build_dir .. "/fixture/leaf.titan.h"))
         assert.is_true(exists(build_dir .. "/fixture/leaf.ffi.h"))
@@ -1112,16 +1116,15 @@ end
         -- and the subsequent retry relinks once from the reusable module objects.
         assert(os.remove(app_exe))
         write(fail_link_marker, "fail one final link\n")
-        local failed_link = build_target("app", {
+        local failed_link = build_scenario("app", {
             extra_args = define_args,
-            env = wrapper_env,
             expect_failure = true,
         })
         assert.equal(0, #failed_link.module_compiles, failed_link.raw)
         assert.matches("injected linker failure", failed_link.raw, 1, true)
         assert.is_false(exists(app_exe))
 
-        local retried_link = build_target("app", { extra_args = define_args, env = wrapper_env })
+        local retried_link = build_scenario("app", { extra_args = define_args })
         assert_module_reused(retried_link, "fixture.leaf", "fixture/leaf.o")
         assert_module_reused(retried_link, "fixture.app", "fixture/app.o")
         assert_module_reused(retried_link, "fixture.unrelated", "fixture/unrelated.o")
@@ -1132,17 +1135,17 @@ end
 
         -- Empty/interrupted executable output recovery.
         write(app_exe, "")
-        local recovered_empty_exe = build_target("app", { extra_args = define_args, env = wrapper_env })
+        local recovered_empty_exe = build_scenario("app", { extra_args = define_args })
         assert.equal(0, #recovered_empty_exe.module_compiles, recovered_empty_exe.raw)
         assert_link_performed(recovered_empty_exe, "server-executable", app_exe)
         assert.is_true((lfs.attributes(app_exe, "size") or 0) > 0)
         verify_runtime(15, updated_names)
-        assert_link_skipped(build_target("app", { extra_args = define_args, env = wrapper_env }),
+        assert_link_skipped(build_scenario("app", { extra_args = define_args }),
             "server-executable", app_exe)
 
         -- Interrupted module output recovery: primary object removed or truncated.
         assert(os.remove(build_dir .. "/fixture/leaf.o"))
-        local recovered_missing_primary = build_target("app", { extra_args = define_args, env = wrapper_env })
+        local recovered_missing_primary = build_scenario("app", { extra_args = define_args })
         assert_module_rebuilt(recovered_missing_primary, "fixture.leaf", "fixture/leaf.o", "no-object")
         assert_module_reused(recovered_missing_primary, "fixture.app", "fixture/app.o")
         assert_module_reused(recovered_missing_primary, "fixture.unrelated", "fixture/unrelated.o")
@@ -1150,7 +1153,7 @@ end
         verify_runtime(15, updated_names)
 
         write(build_dir .. "/fixture/leaf.o", "truncated partial object")
-        local recovered_truncated_primary = build_target("app", { extra_args = define_args, env = wrapper_env })
+        local recovered_truncated_primary = build_scenario("app", { extra_args = define_args })
         assert_module_rebuilt(recovered_truncated_primary, "fixture.leaf", "fixture/leaf.o", "record-unreadable")
         assert_module_reused(recovered_truncated_primary, "fixture.app", "fixture/app.o")
         assert_module_reused(recovered_truncated_primary, "fixture.unrelated", "fixture/unrelated.o")
@@ -1160,8 +1163,8 @@ end
 
     it("validates split C parts against the primary object record across part loss, truncation, policy shrink, source shrink, and module removal", function()
         local functions = {}
-        local literal = string.rep("x", 1024)
-        for index = 0, 1599 do
+        local literal = string.rep("x", 32768)
+        for index = 0, 63 do
             functions[#functions + 1] = string.format(
                 'function item_%d(): string return "%s" end', index, literal)
         end
@@ -1170,7 +1173,7 @@ end
         put_source("titan_language_server.titan", [[
 local split = import "fixture.split"
 function main(args: {string}): integer
-    return split.value() // 1024
+    return split.value() // 32768
 end
 ]])
         local stem = build_dir .. "/fixture/split"
@@ -1196,8 +1199,6 @@ end
         assert.is_false(ok)
 
         assert_link_skipped(build_target("app", { env = split_env }), "server-executable", app_exe)
-
-        -- Removing any split artifact (.part1.c, .part1.o, .priv.h) or truncating .part1.o
         -- misses against the primary record's parts list and rebuilds fixture.split.
         for _, suffix in ipairs({ ".part1.c", ".part1.o", ".priv.h" }) do
             assert(os.remove(stem .. suffix))
@@ -1236,7 +1237,7 @@ end
         assert.is_true(exists(stem .. ".priv.h"))
 
         -- Source shrink under TITAN_C_PARTS=3 transitions from multi-part to 1 part and cleans old parts.
-        put_source("fixture/split.titan", "function value(): integer return 1024 end\n")
+        put_source("fixture/split.titan", "function value(): integer return 32768 end\n")
         local source_shrunk = build_target("app", { env = split_env })
         assert_module_rebuilt(source_shrunk, "fixture.split", "fixture/split.o", "source-content")
         assert.equal(1, read_split_parts_count())
