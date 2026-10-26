@@ -196,11 +196,17 @@ describe("planned import lists", function()
         }, imports)
     end)
 
-    it("leave a syntax error to the module's worker", function()
-        write_file(workspace .. "/bad.titan", 'local x = import "x"\nfunction (\n')
+    it("keep lexically valid imports before a grammar error and leave lexical errors to the worker", function()
+        write_file(workspace .. "/grammar.titan", 'local x = import "x"\nfunction (\n')
+        assert.same({ { name = "x", source_required = false } },
+            build.imports_for(compiler_io.new_sync(), {
+                kind = "flat", main = workspace .. "/grammar.titan",
+                files = { workspace .. "/grammar.titan" },
+            }))
+        write_file(workspace .. "/lexical.titan", 'local x = import "x"\nlocal n = 1x\n')
         assert.same({}, build.imports_for(compiler_io.new_sync(), {
-            kind = "flat", main = workspace .. "/bad.titan",
-            files = { workspace .. "/bad.titan" },
+            kind = "flat", main = workspace .. "/lexical.titan",
+            files = { workspace .. "/lexical.titan" },
         }))
     end)
 
@@ -211,6 +217,32 @@ describe("planned import lists", function()
         })
         assert.is_nil(imports)
         assert.truthy(err:find("cannot read source", 1, true), err)
+    end)
+end)
+
+describe("process transport", function()
+    it("retains one anchored luv loop across package.loaded resets and GC", function()
+        local process = require "titan-compiler.process"
+        local first = require "luv"
+        package.loaded.luv = nil
+        collectgarbage("collect")
+        collectgarbage("collect")
+        local second = require "luv"
+        assert.equal(first, second)
+        assert.equal(first, process.library())
+    end)
+
+    it("runs worker-local argv commands through luv spawn", function()
+        local process = require "titan-compiler.process"
+        local interpreter = assert(process.library().exepath())
+        local ok, term, code = process.run({ interpreter, "-E", "-e", "os.exit(0)" })
+        assert.is_true(ok)
+        assert.equal("exit", term)
+        assert.equal(0, code)
+        local bad_ok, bad_term, bad_code = process.run({ interpreter, "-E", "-e", "os.exit(7)" })
+        assert.is_nil(bad_ok)
+        assert.equal("exit", bad_term)
+        assert.equal(7, bad_code)
     end)
 end)
 
@@ -383,7 +415,7 @@ describe("module build scheduler", function()
         end
         for index, entry in ipairs(spec) do
             for _, dependency in ipairs(entry[2] or {}) do
-                table.insert(nodes[index].deps, assert(by_name[dependency]))
+                nodes[index].deps[#nodes[index].deps + 1] = assert(by_name[dependency])
             end
         end
         return nodes
@@ -659,5 +691,60 @@ locks:release()
         assert.truthy(closed, output)
         assert.truthy(output:find("waiting for build lock", 1, true), output)
         assert.same({ "orphan done", "successor locked" }, lines(marker))
+    end)
+
+    it("keeps the output tree locked until an orphaned native batch job exits", function()
+        local tree = workspace .. "/tree"
+        assert(lfs.mkdir(tree))
+        local marker = workspace .. "/marker"
+        local job_started = workspace .. "/job.started"
+        local interpreter = assert(require("titan-compiler.process").library().exepath())
+        local prelude = string.format("package.path = %q\npackage.cpath = %q\n",
+            package.path, package.cpath) ..
+            'local build = require "titan-compiler.build"\n' ..
+            'local strategy = require("titan-compiler.io").new_sync()\n'
+        write_file(workspace .. "/coordinator.lua", prelude .. string.format([[
+local locks = assert(build.lock_outputs(strategy, { %q }))
+local scheduler = build.new_scheduler({ { name = "orphan", deps = {} } }, {
+    decide = function() return "build" end,
+    request = function(node)
+        return {
+            module = node.name, log = %q,
+            batches = { {
+                {
+                    argv = { "sh", "-c", "echo started > " .. %q .. "; sleep 1.5; echo 'orphan native done' >> " .. %q },
+                    stdout = %q, stderr = %q,
+                },
+            } },
+        }
+    end,
+    complete = function() return true end,
+}, { jobs = 2, locks = locks, worker_entry = "fake_build_worker", makeflags = false })
+scheduler:run()
+]], tree, log, quote(job_started), quote(marker), workspace .. "/native.out", workspace .. "/native.err"))
+        write_file(workspace .. "/successor.lua", prelude .. string.format([[
+local locks = assert(build.lock_outputs(strategy, { %q }, { verbose = true }))
+local file = assert(io.open(%q, "ab"))
+file:write("successor locked\n")
+file:close()
+locks:release()
+]], tree, marker))
+        local pid_file = workspace .. "/coordinator.pid"
+        assert(os.execute("sh -c " .. quote(quote(interpreter) .. " " ..
+            quote(workspace .. "/coordinator.lua") .. " >/dev/null 2>&1 & echo $! > " ..
+            quote(pid_file))))
+        for _ = 1, 400 do
+            if exists(job_started) then break end
+            os.execute("sleep 0.05")
+        end
+        assert.truthy(exists(job_started))
+        assert(os.execute("kill -KILL " .. assert(tonumber(read_file(pid_file)))))
+        local pipe = assert(io.popen(quote(TIMEOUT) .. " 30 " .. quote(interpreter) ..
+            " " .. quote(workspace .. "/successor.lua") .. " 2>&1", "r"))
+        local output = pipe:read("a")
+        local closed = pipe:close()
+        assert.truthy(closed, output)
+        assert.truthy(output:find("waiting for build lock", 1, true), output)
+        assert.same({ "orphan native done", "successor locked" }, lines(marker))
     end)
 end)

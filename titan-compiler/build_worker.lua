@@ -126,10 +126,16 @@ local function compile(session)
     if not context then
         return { ok = false, diagnostics = diagnostic_list(context_err) }
     end
-    local result, compile_err =
-        driver.compile_planned_module(context, request.module, request.options)
+    local called, result, compile_err = xpcall(
+        driver.compile_planned_module, function(err)
+            if type(err) == "string" then return err end
+            return debug.traceback(tostring(err), 2)
+        end, context, request.module, request.options)
     local closed, close_err = driver.close_resolver_context(context)
-    if not result then
+    if not called then
+        io.stderr:write(tostring(result), "\n")
+        return { ok = false, diagnostics = diagnostic_list(result) }
+    elseif not result then
         return { ok = false, diagnostics = diagnostic_list(compile_err) }
     elseif not closed then
         return { ok = false, diagnostics = {

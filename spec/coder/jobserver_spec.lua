@@ -354,12 +354,16 @@ describe("build-worker native batches", function()
 
     it("send the whole batch to the coordinator and keep its start order", function()
         local requests = {}
+        assert.is_false(remote_jobs.is_remote())
         remote_jobs.use_remote({ run_batch = function(_, batch)
             requests[#requests + 1] = batch
             -- The coordinator started a prefix, then was cancelled.
             return { { ok = true, term = "exit", code = 0 },
                      { ok = nil, term = "exit", code = 2 } }, nil, 15
         end })
+        assert.is_true(remote_jobs.is_remote())
+        -- The coordinator owns the signal guard and re-raises after draining.
+        remote_jobs.propagate(15)
         local slots = assert(remote_jobs.open_slots(4,
             { makeflags = "-j4 --jobserver-auth=fifo:/nonexistent" }))
         assert.equal(4, slots.limit)

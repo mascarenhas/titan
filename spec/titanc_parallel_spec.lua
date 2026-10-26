@@ -12,6 +12,9 @@ local MODULE_NAMES = {
     "titan-compiler.coverage",
     "titan-compiler.parser",
     "titan-compiler.driver",
+    "titan-compiler.incremental",
+    "titan-compiler.linkcertificate",
+    "titan-compiler.nativeinputs",
     "titan-compiler.test_runner",
     "titan-compiler.util",
 }
@@ -22,6 +25,7 @@ local function fake_argparse(arguments)
         local declaration = {}
         function declaration:args() return self end
         function declaration:count() return self end
+        function declaration:action() return self end
         function parser:argument() return declaration end
         function parser:flag() return declaration end
         function parser:option() return declaration end
@@ -38,6 +42,12 @@ local function run_titanc(arguments, environment_jobs)
         TITAN_SOURCE_PATH = ".",
         LUA_SOURCE_PATH = "lua",
         EMIT_LINE_DIRECTIVES = true,
+        EXTRA_CPPFLAGS = {},
+        EXTRA_CFLAGS = {},
+        EXTRA_LDFLAGS = {},
+        AR = "ar",
+        RANLIB = "ranlib",
+        BUILD_PROFILE = "validation",
     }
     local resolver
 
@@ -47,8 +57,26 @@ local function run_titanc(arguments, environment_jobs)
     end
 
     function driver.deduplicate_module_names(names) return names end
-    function driver.configure_foreign_c() end
+    function driver.apply_native_inputs(normalized)
+        observed.native_inputs = normalized
+    end
+    function driver.configure_foreign_c() return true end
     function driver.default_c_parts() return 4 end
+    function driver.prepare_output_root(dir) return dir end
+    function driver.module_compiled_objects(mod)
+        return { mod.filename:gsub("[.]titan$", ".o") }
+    end
+    function driver.source_link_inputs() return {} end
+    function driver.incremental_configuration()
+        return { compiler = "compiler" }
+    end
+    function driver.toolchain_descriptor() return {} end
+    function driver.generated_compile_prefix() return { "cc" } end
+    function driver.link_extra_flags() return {} end
+    function driver.native_link_backend() return "none" end
+    function driver.windows_launcher_manifest() return "" end
+    function driver.prepare_foreign_headers() return true end
+    function driver.preflight_build_outputs() return true end
     function driver.record_module_symbols(_, _, symbols)
         assert.same({}, symbols)
     end
@@ -151,6 +179,25 @@ local function run_titanc(arguments, environment_jobs)
             pretty_print_ast = function() return "" end,
         },
         ["titan-compiler.driver"] = driver,
+        ["titan-compiler.incremental"] = {
+            toolchain_identity = function() return "toolchain" end,
+        },
+        ["titan-compiler.linkcertificate"] = {
+            prepare = function()
+                return { directory = "link", synthetic_directory = "syn" }
+            end,
+            check = function() return false, "no-record" end,
+            invalidate = function() return true end,
+            commit = function() return true end,
+        },
+        ["titan-compiler.nativeinputs"] = {
+            normalize = function()
+                return {
+                    ordered = {}, c_sources = {}, compile_argv = {},
+                    link_argv = {}, cppflags = {}, cflags = {}, ldflags = {},
+                }
+            end,
+        },
         ["titan-compiler.test_runner"] = {
             MODULE_NAME = "__test.runner",
         },
@@ -200,9 +247,18 @@ local function ordinary_arguments(jobs)
     return {
         module = { "pkg.three", "pkg.two", "pkg.one" },
         jobs = jobs,
-        extra_object = {},
+        extra_object = nil,
         coverage_module = {},
         coverage_format = {},
+        link = {},
+        library_dir = {},
+        include_dir = {},
+        define = {},
+        cflag = {},
+        ldflag = {},
+        c_source = {},
+        test_dir = {},
+        test_exclude = {},
     }
 end
 
@@ -322,10 +378,15 @@ describe("titanc invocations sharing one output tree", function()
 #!/bin/sh
 log=${TITAN_SLOW_CC_LOG:?}
 slow=no
+compile_only=no
 for argument in "$@"; do
-    case "$argument" in */build/*.c) slow=yes ;; esac
+    case "$argument" in
+        -c) compile_only=yes ;;
+        */build/.titan/*) ;;
+        */build/*.c) slow=yes ;;
+    esac
 done
-test "$slow" = yes || exec cc "$@"
+test "$slow" = yes && test "$compile_only" = yes || exec cc "$@"
 printf 'start %s\n' "$$" >> "$log"
 sleep "${TITAN_SLOW_CC_DELAY:-0}"
 cc "$@"
@@ -416,37 +477,59 @@ end
         end
     end)
 
-    it("wait for the orphaned worker of a killed coordinator", function()
-        write_file(workspace .. "/slow.titan", [[
-function value(): integer
-  return 7
+    it("wait for the orphaned worker and native batch jobs of a killed coordinator", function()
+        local payload = string.rep("x", 1100 * 1024)
+        write_file(workspace .. "/slow.titan", string.format([[
+function first(): string
+  return "%s"
 end
-]])
+
+function second(): string
+  return "%s"
+end
+
+function value(): integer
+  return #first() + #second()
+end
+]], payload, payload))
         local pid_file = workspace .. "/titanc.pid"
         local log = workspace .. "/cc.log"
         -- A simple background command, so $! is titanc's own process.
+        -- Splitting into two C parts under -j 2 dispatches a remote batch
+        -- whose native compiler jobs must also hold the output-tree lock.
         assert(shell("cd " .. quote(workspace) .. " || exit 1; TITAN_SLOW_CC_DELAY=3 " ..
-            "./titanc.sh -c -o build slow > first.log 2>&1 & echo $! > " ..
+            "./titanc.sh -c -o build --c-parts 2 -j 2 slow > first.log 2>&1 & echo $! > " ..
             quote(pid_file)))
         for _ = 1, 1200 do
-            if #lines(log) > 0 then break end
+            if #lines(log) >= 2 then break end
             os.execute("sleep 0.05")
         end
-        assert.equal(1, #lines(log), exists(workspace .. "/first.log") and
+        assert.equal(2, #lines(log), exists(workspace .. "/first.log") and
             read_file(workspace .. "/first.log") or "")
-        -- The coordinator dies; its worker and compiler keep running.
+        -- The coordinator dies; its worker exits on control EOF, while both
+        -- coordinator-spawned native compilers keep running with the lock.
         assert(os.execute("kill -KILL " .. assert(tonumber(read_file(pid_file)))))
         local ok, output = shell(quote(TIMEOUT) .. " 120 sh -c " ..
             quote("cd " .. quote(workspace) .. " && TITAN_SLOW_CC_DELAY=0 " ..
-                "./titanc.sh -v -c -o build slow"))
+                "./titanc.sh -v -c -o build --c-parts 2 -j 2 slow"))
         assert.truthy(ok, output)
         assert.truthy(output:find("waiting for build lock", 1, true), output)
         local events = lines(log)
-        assert.equal(4, #events, table.concat(events, "\n"))
-        local orphan = assert(events[1]:match("^start (%d+)$"))
-        -- The successor compiled only after the orphan's compilation ended.
-        assert.same({ "start " .. orphan, "end " .. orphan }, { events[1], events[2] })
-        assert.truthy(events[3]:match("^start %d+$"), events[3])
+        assert.equal(8, #events, table.concat(events, "\n"))
+        local orphan_starts = {
+            assert(events[1]:match("^start (%d+)$")),
+            assert(events[2]:match("^start (%d+)$")),
+        }
+        local orphan_ends = {
+            assert(events[3]:match("^end (%d+)$")),
+            assert(events[4]:match("^end (%d+)$")),
+        }
+        table.sort(orphan_starts)
+        table.sort(orphan_ends)
+        -- The successor compiled only after both orphaned native jobs ended.
+        assert.same(orphan_starts, orphan_ends)
+        assert.truthy(events[5]:match("^start %d+$"), events[5])
         assert.truthy(exists(workspace .. "/build/slow.o"))
+        assert.truthy(exists(workspace .. "/build/slow.part1.o"))
     end)
 end)
