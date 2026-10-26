@@ -1564,18 +1564,23 @@ printf '%s\n' "$*" >> ../../calls
         if not tested then error(failure, 0) end
     end)
 
-    it("certifies child-only native helpers without rewriting unchanged fixed objects", function()
+    it("prepares every fixed child object from scratch and preserves unchanged publications", function()
         if platform.windows then pending("Unix Make native fixture preparation"); return end
         local root = make_temp_dir()
         local tested, failure = xpcall(function()
             assert.truthy(run_argv({ "mkdir", "-p", root .. "/out/tests",
                 root .. "/lib/titan/0.6", root .. "/spec/fixtures/stdlib/native" }))
             write_file(root .. "/lib/titan/0.6/titan.so", "installed provider\n")
-            write_file(root .. "/spec/fixtures/stdlib/native/os_descriptor_limit.c", "authored C\n")
-            local fixed = root .. "/out/tests/os_descriptor_limit.o"
-            write_file(fixed, "unchanged native object\n")
-            local old = os.time() - 30
-            assert(lfs.touch(fixed, old, old))
+            local fixtures = {
+                { "uv_stdio_probe", "" },
+                { "sqlite3_worker_fixture", "--cflag=-pthread " },
+                { "ssl_allocator_fixture", "--cflag=-pthread " },
+                { "ssl_error_strings", "" },
+                { "os_descriptor_limit", "" },
+                { "transfer_alloc_fault", "--cflag=-pthread -I titan " },
+                { "uv_sync_alloc_fault", "--cflag=-pthread " },
+                { "thread_retirement_fault", "--cflag=-pthread " },
+            }
             write_file(root .. "/record-compiler", [[#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> calls
@@ -1588,20 +1593,50 @@ printf 'unchanged native object\n' > "$4/.native/fixture.o"
                 "make", "--no-print-directory", "-s", "-C", root,
                 "-f", lfs.currentdir() .. "/Makefile", "PREFIX=" .. root,
                 "TITAN_JOBS=4", "TEST_LUA=true", "TEST_TITANC=sh ./record-compiler",
+                "TITAN_BUILD_PROFILE=validation", "HOST_OS=Linux",
                 "TITAN_TEST_INSTALL_ROOT=" .. root }
-            local expected = "-c --incremental --output out/tests/native/os_descriptor_limit.o -j4 " ..
-                "--cflag=-std=c99 --cflag=-Wall --cflag=-Wextra --cflag=-Werror --cflag=-fPIC " ..
-                "-I spec/fixtures/stdlib/native --c-source spec/fixtures/stdlib/native/os_descriptor_limit.c\n"
-            for _, mode in ipairs({ "", "", "-n", "-q", "-t" }) do
-                write_file(root .. "/calls", "")
-                local argv = { table.unpack(base) }
-                if mode ~= "" then argv[#argv + 1] = mode end
-                argv[#argv + 1] = "out/tests/os_descriptor_limit.o"
-                local ok, output, _, status = run_argv(argv)
-                if mode == "-q" then assert.is_false(ok); assert.equal(1, status, output)
-                else assert.truthy(ok, output) end
-                assert.equal(mode == "" and expected or "", read_file(root .. "/calls"))
-                assert.equal(old, lfs.attributes(fixed, "modification"))
+            write_file(root .. "/fixture-outputs.mk",
+                "print-fixture-objects:\n\t@printf '%s\\n' $(filter %.o,$(TITAN_TEST_FIXTURE_OUTPUTS))\n")
+            local query = { table.unpack(base) }
+            for _, argument in ipairs({ "-f", root .. "/fixture-outputs.mk", "print-fixture-objects" }) do
+                query[#query + 1] = argument
+            end
+            local listed, outputs = run_argv(query)
+            assert.truthy(listed, outputs)
+            local expected_objects, actual_objects = {}, {}
+            for _, fixture in ipairs(fixtures) do
+                expected_objects["out/tests/" .. fixture[1] .. ".o"] = true
+            end
+            for path in outputs:gmatch("[^\n]+") do actual_objects[path] = true end
+            assert.same(expected_objects, actual_objects,
+                "the complete aggregate build must prepare every fixed child object")
+            for _, fixture in ipairs(fixtures) do
+                local name, flags = fixture[1], fixture[2]
+                write_file(root .. "/spec/fixtures/stdlib/native/" .. name .. ".c", "authored C\n")
+                local fixed = root .. "/out/tests/" .. name .. ".o"
+                local expected = "-c --incremental --output out/tests/native/" .. name .. ".o -j4 " ..
+                    "--cflag=-std=c99 --cflag=-Wall --cflag=-Wextra --cflag=-Werror --cflag=-fPIC " ..
+                    "-I spec/fixtures/stdlib/native " .. flags ..
+                    "--c-source spec/fixtures/stdlib/native/" .. name .. ".c\n"
+                local function prepare(mode)
+                    write_file(root .. "/calls", "")
+                    local argv = { table.unpack(base) }
+                    if mode ~= "" then argv[#argv + 1] = mode end
+                    argv[#argv + 1] = "out/tests/" .. name .. ".o"
+                    local ok, output, _, status = run_argv(argv)
+                    if mode == "-q" then assert.is_false(ok); assert.equal(1, status, output)
+                    else assert.truthy(ok, output) end
+                    assert.equal(mode == "" and expected or "", read_file(root .. "/calls"))
+                end
+                assert.falsy(file_exists(fixed), "fresh fixture output unexpectedly exists: " .. name)
+                prepare("")
+                assert.equal("unchanged native object\n", read_file(fixed))
+                local old = os.time() - 30
+                assert(lfs.touch(fixed, old, old))
+                for _, mode in ipairs({ "", "", "-n", "-q", "-t" }) do
+                    prepare(mode)
+                    assert.equal(old, lfs.attributes(fixed, "modification"), name)
+                end
             end
         end, debug.traceback)
         remove_tree(root)
@@ -4121,11 +4156,11 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
                     assert.same(expected_stress, uncovered_stress)
                 end
 
-                -- Shard-pair runners run each shard's ordinary files
-                -- concurrently, then its exclusive files alone. The two
-                -- phases partition the same generated four-way plan.
+                -- Compiler shards and the installed-stdlib domain each split
+                -- into ordinary and exclusive phases without changing their
+                -- complete covered inventory.
                 local exclusive_seen = {}
-                for shard = 1, 4 do
+                for shard = 1, 5 do
                     local phase_files = {}
                     for _, phase in ipairs({ "ordinary", "exclusive" }) do
                         local log = root .. "/phase-" .. shard .. "-" .. phase
@@ -4133,7 +4168,8 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
                             "env", "BUSTED=" .. fake_busted,
                             "TITAN_SELECTOR_ARGV_LOG=" .. log,
                             "bash", "spec/support/ci_test_groups.sh",
-                            "compiler-shard-" .. shard, phase,
+                            shard == 5 and "stdlib-compiler" or
+                                "compiler-shard-" .. shard, phase,
                         })
                         assert.truthy(ok, output)
                         local calls = lfs.attributes(log) and
@@ -5762,7 +5798,9 @@ printf '%s\n' "${schedule[@]}"
                 assert.truthy(inventory.metadata[meta_key], meta_key)
             end
             assert.equal(7, #inventory.retained)
-            assert.equal(11, #inventory.stdlib)
+            -- These are installed-provider compiler specs, not native owners:
+            -- the four issue-303 integration specs extend the previous eleven.
+            assert.equal(15, #inventory.stdlib)
             assert.equal(#inventory.items,
                 #inventory.retained + #inventory.stdlib + #inventory.compiler)
             local assigned = {}
@@ -6362,6 +6400,8 @@ printf '%s\n' "${schedule[@]}"
             end
             table.sort(expected_exclusive)
             assert.same({
+                "spec/coder/build_coordination_spec.lua",
+                "spec/coder/build_scheduler_spec.lua",
                 "spec/coder/jobserver_spec.lua",
                 "spec/coder/parallel_compilation_spec.lua",
             }, expected_exclusive)
