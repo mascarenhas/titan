@@ -1023,6 +1023,14 @@ esac
                 "grep -Eq '^Titan link hit '",
                 "if grep -Eq '^Titan (object|native|link) miss |os_process_host_child[.]c'",
                 "exit 1")
+            if contract[2] == "Certify identical SDK reinstall without sanitizer compilation or linking" then
+                assert_ordered(gate,
+                    "ci_sanitizer_capture.sh identical-reinstall",
+                    "env TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT= luarocks make --force",
+                    'cmp "$TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT/provider.so"',
+                    '"$PREFIX/lib/titan/0.6/titan.so"',
+                    "ci_sanitizer_capture.sh native-stdlib-identical-reinstall")
+            end
         end
     end)
 
