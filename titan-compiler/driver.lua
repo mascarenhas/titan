@@ -142,7 +142,7 @@ end
 -- Canonicalize the longest existing pathname prefix through the filesystem.
 -- This preserves POSIX symlink/.. resolution for alias and containment checks
 -- while retaining every not-yet-created destination component.
-local function physical_absolute_filename(filename)
+local function physical_absolute_filename(filename, observe)
     if platform.windows then return normalized_absolute_filename(filename) end
     local raw = absolute_filename(filename)
     local previous = lfs.currentdir()
@@ -153,7 +153,9 @@ local function physical_absolute_filename(filename)
     local link_hops = 0
     while candidate and candidate ~= "" and not seen[candidate] do
         seen[candidate] = true
-        local attributes = lfs.symlinkattributes(candidate)
+        local attributes
+        if observe then attributes = observe(candidate)
+        else attributes = lfs.symlinkattributes(candidate) end
         if attributes and attributes.mode == "link" and attributes.target then
             link_hops = link_hops + 1
             local identity = attributes.dev ~= nil and
@@ -11180,6 +11182,188 @@ local function same_file_tree(left, right)
     return true
 end
 
+-- One filesystem observation per pathname, with prefix indexes for both
+-- spelling and physical identity. No collision query performs filesystem I/O.
+local function new_output_path_index(label, reservations)
+    local observations, attributes, outputs = {}, {}, {}
+    local fields = { "normalized", "physical", "portable" }
+    local exact, trees, identities = {}, {}, {}
+    for _, field in ipairs(fields) do
+        exact[field], trees[field] = {}, {}
+    end
+
+    local function attrs(path)
+        local cached = attributes[path]
+        if cached == nil then
+            cached = lfs.symlinkattributes(path) or false
+            attributes[path] = cached
+        end
+        return cached or nil
+    end
+
+    local function observe(path)
+        local raw = absolute_filename(path)
+        local cached = observations[raw]
+        if cached then return cached end
+        local attr = attrs(raw)
+        local followed = attr
+        if attr and attr.mode == "link" then
+            followed = lfs.attributes(raw)
+        end
+        cached = {
+            path = path,
+            raw = raw,
+            normalized = normalize_absolute_path(raw),
+            physical = physical_absolute_filename(raw, attrs),
+            existing_mode = attr and attr.mode or nil,
+            device = not platform.windows and followed and followed.dev or nil,
+            inode = not platform.windows and followed and followed.ino or nil,
+        }
+        cached.portable = cached.physical:lower()
+        observations[raw] = cached
+        return cached
+    end
+
+    local function earlier(left, right)
+        if not left or (right and right.index < left.index) then return right end
+        return left
+    end
+
+    local function components(path)
+        if platform.windows then path = path:gsub("\\", "/") end
+        return path:gmatch("[^/]+")
+    end
+
+    local function tree_match(tree, path)
+        local found = tree.terminal
+        for component in components(path) do
+            tree = tree.children and tree.children[component]
+            if not tree then return found end
+            found = earlier(found, tree.terminal)
+        end
+        return earlier(found, tree.first)
+    end
+
+    local function tree_insert(tree, path, output)
+        tree.first = earlier(tree.first, output)
+        for component in components(path) do
+            if not tree.children then tree.children = {} end
+            local child = tree.children[component]
+            if not child then child = {}; tree.children[component] = child end
+            tree = child
+            tree.first = earlier(tree.first, output)
+        end
+        tree.terminal = output
+    end
+
+    local function match(observation)
+        local found, alias
+        local function consider(candidate, candidate_alias)
+            if candidate and (not found or candidate.index < found.index) then
+                found, alias = candidate, candidate_alias
+            elseif candidate == found and candidate_alias then
+                alias = true
+            end
+        end
+        for _, field in ipairs(fields) do
+            consider(exact[field][observation[field]], true)
+            consider(tree_match(trees[field], observation[field]), false)
+        end
+        local device = observation.device and identities[observation.device]
+        consider(device and device[observation.inode], true)
+        return found, alias
+    end
+
+    local function insert(output)
+        output.index = #outputs + 1
+        outputs[#outputs + 1] = output
+        for _, field in ipairs(fields) do
+            exact[field][output[field]] = output
+            tree_insert(trees[field], output[field], output)
+        end
+        if output.device ~= nil and output.inode ~= nil then
+            local device = identities[output.device]
+            if not device then device = {}; identities[output.device] = device end
+            device[output.inode] = output
+        end
+    end
+
+    local checked_parents = {}
+    local function ancestors(path)
+        local current = platform.windows and platform.parent(path) or
+            path:match("^(.*)/[^/]+$")
+        if not current or current == "" or checked_parents[current] then
+            return true
+        end
+        local ok, err = ancestors(current)
+        if not ok then return nil, err end
+        local attr = attrs(current)
+        local followed = attr
+        if attr and attr.mode == "link" then followed = lfs.attributes(current) end
+        if attr and (not followed or followed.mode ~= "directory") then
+            return nil, "output parent '" .. current .. "' is not a directory"
+        end
+        checked_parents[current] = true
+        return true
+    end
+
+    local index = { outputs = outputs }
+    function index.add(path, owner, mode)
+        local observation = observe(path)
+        local ok, err = ancestors(observation.normalized)
+        if not ok then return nil, err end
+        if observation.existing_mode and observation.existing_mode ~= mode then
+            local expected = mode == "directory" and
+                "a nonlink directory" or "a regular nonlink file"
+            return nil, label .. " '" .. observation.normalized .. "' for " ..
+                owner .. " is not " .. expected
+        end
+        local previous, alias = match(observation)
+        if previous then
+            if alias then
+                return nil, label .. " '" .. observation.normalized ..
+                    "' for " .. owner .. " aliases output for " .. previous.owner
+            end
+            return nil, label .. " '" .. observation.normalized ..
+                "' for " .. owner ..
+                " has a path hierarchy conflict with output '" ..
+                previous.normalized .. "' for " .. previous.owner
+        end
+        insert({
+            path = path, owner = owner, mode = mode,
+            raw = observation.raw, normalized = observation.normalized,
+            physical = observation.physical, portable = observation.portable,
+            existing_mode = observation.existing_mode,
+            device = observation.device, inode = observation.inode,
+        })
+        return true
+    end
+    function index.check_inputs(inputs)
+        for _, input in ipairs(inputs or {}) do
+            local path = archive_input_path(input)
+            if type(path) == "string" then
+                local observation = observe(path)
+                local output, alias = match(observation)
+                if output then
+                    return nil, label .. " '" .. output.normalized ..
+                        "' for " .. output.owner ..
+                        (alias and " aliases input '" or
+                            " has a path hierarchy conflict with input '") ..
+                        observation.normalized .. "'"
+                end
+            end
+        end
+        return true
+    end
+    for _, output in ipairs(reservations or {}) do insert(output) end
+    return index
+end
+
+function driver.validate_reserved_output_inputs(reservations, inputs)
+    return new_output_path_index("native provider output", reservations)
+        .check_inputs(inputs)
+end
+
 function driver.validate_program_output_paths(
         source_outputs, executable, entrypoint_c, native_inputs, extra_outputs,
         planned_outputs)
@@ -11190,59 +11374,8 @@ function driver.validate_program_output_paths(
        not entrypoint_c:match("[.]c$") then
         return nil, "standalone entrypoint path must end in .c"
     end
-    local outputs = {}
-
-    local function below(path, parent)
-        return #path > #parent and
-            path:sub(1, #parent + 1) == parent .. "/"
-    end
-
-    local function add_output(path, owner, mode)
-        local ancestors_ok, ancestors_err =
-            validate_output_ancestors(path)
-        if not ancestors_ok then return nil, ancestors_err end
-        local attr = lfs.symlinkattributes(path)
-        if attr and attr.mode ~= mode then
-            local expected = mode == "directory" and
-                "a nonlink directory" or "a regular nonlink file"
-            return nil, "program output '" ..
-                normalized_absolute_filename(path) .. "' for " .. owner ..
-                " is not " .. expected
-        end
-
-        local output = {
-            path = path,
-            owner = owner,
-            mode = mode,
-            raw = absolute_filename(path),
-            normalized = normalized_absolute_filename(path),
-            physical = physical_absolute_filename(path),
-        }
-        output.portable = output.physical:lower()
-        for _, previous in ipairs(outputs) do
-            if output.normalized == previous.normalized or
-               output.physical == previous.physical or
-               output.portable == previous.portable or
-               same_existing_file(output.raw, previous.raw) then
-                return nil, "program output '" .. output.normalized ..
-                    "' for " .. owner .. " aliases output for " ..
-                    previous.owner
-            end
-            if below(output.normalized, previous.normalized) or
-               below(previous.normalized, output.normalized) or
-               below(output.physical, previous.physical) or
-               below(previous.physical, output.physical) or
-               below(output.portable, previous.portable) or
-               below(previous.portable, output.portable) then
-                return nil, "program output '" .. output.normalized ..
-                    "' for " .. owner ..
-                    " has a path hierarchy conflict with output '" ..
-                    previous.normalized .. "' for " .. previous.owner
-            end
-        end
-        outputs[#outputs + 1] = output
-        return true
-    end
+    local index = new_output_path_index("program output")
+    local add_output = index.add
 
     if planned_outputs then
         for _, output in ipairs(planned_outputs) do
@@ -11311,37 +11444,7 @@ function driver.validate_program_output_paths(
         if not ok then return nil, err end
     end
 
-    for _, input in ipairs(native_inputs or {}) do
-        local path = archive_input_path(input)
-        if type(path) == "string" then
-            local raw_input = absolute_filename(path)
-            local normalized_input = normalized_absolute_filename(path)
-            local physical_input = physical_absolute_filename(path)
-            local portable_input = physical_input:lower()
-            for _, output in ipairs(outputs) do
-                if normalized_input == output.normalized or
-                   physical_input == output.physical or
-                   portable_input == output.portable or
-                   same_existing_file(raw_input, output.raw) then
-                    return nil, "program output '" .. output.normalized ..
-                        "' for " .. output.owner .. " aliases input '" ..
-                        normalized_input .. "'"
-                end
-                if below(normalized_input, output.normalized) or
-                   below(output.normalized, normalized_input) or
-                   below(physical_input, output.physical) or
-                   below(output.physical, physical_input) or
-                   below(portable_input, output.portable) or
-                   below(output.portable, portable_input) then
-                    return nil, "program output '" .. output.normalized ..
-                        "' for " .. output.owner ..
-                        " has a path hierarchy conflict with input '" ..
-                        normalized_input .. "'"
-                end
-            end
-        end
-    end
-    return true
+    return index.check_inputs(native_inputs)
 end
 
 function driver.validate_provider_output_paths(
@@ -11354,54 +11457,8 @@ function driver.validate_provider_output_paths(
             "' does not end in .so"
     end
 
-    local outputs = {}
-    local function below(path, parent)
-        return #path > #parent
-            and path:sub(1, #parent + 1) == parent .. "/"
-    end
-    local function add_output(path, owner, mode)
-        local ancestors_ok, ancestors_err = validate_output_ancestors(path)
-        if not ancestors_ok then return nil, ancestors_err end
-        local attr = lfs.symlinkattributes(path)
-        if attr and attr.mode ~= mode then
-            local expected = mode == "directory"
-                and "a nonlink directory" or "a regular nonlink file"
-            return nil, "native provider output '" ..
-                normalized_absolute_filename(path) .. "' for " .. owner ..
-                " is not " .. expected
-        end
-        local output = {
-            raw = absolute_filename(path),
-            normalized = normalized_absolute_filename(path),
-            physical = physical_absolute_filename(path),
-            owner = owner,
-            mode = mode,
-        }
-        output.portable = output.physical:lower()
-        for _, previous in ipairs(outputs) do
-            if output.normalized == previous.normalized
-               or output.physical == previous.physical
-               or output.portable == previous.portable
-               or same_existing_file(output.raw, previous.raw) then
-                return nil, "native provider output '" .. output.normalized ..
-                    "' for " .. owner .. " aliases output for " ..
-                    previous.owner
-            end
-            if below(output.normalized, previous.normalized)
-               or below(previous.normalized, output.normalized)
-               or below(output.physical, previous.physical)
-               or below(previous.physical, output.physical)
-               or below(output.portable, previous.portable)
-               or below(previous.portable, output.portable) then
-                return nil, "native provider output '" .. output.normalized ..
-                    "' for " .. owner ..
-                    " has a path hierarchy conflict with output '" ..
-                    previous.normalized .. "' for " .. previous.owner
-            end
-        end
-        outputs[#outputs + 1] = output
-        return true
-    end
+    local index = new_output_path_index("native provider output")
+    local add_output = index.add
 
     local ok, err
     if public_dso then
@@ -11423,37 +11480,9 @@ function driver.validate_provider_output_paths(
             assert(generated.owner), generated.mode or "file")
         if not ok then return nil, err end
     end
-    for _, input in ipairs(native_inputs or {}) do
-        local path = archive_input_path(input)
-        if type(path) == "string" then
-            local raw_input = absolute_filename(path)
-            local normalized_input = normalized_absolute_filename(path)
-            local physical_input = physical_absolute_filename(path)
-            local portable_input = physical_input:lower()
-            for _, output in ipairs(outputs) do
-                if normalized_input == output.normalized
-                   or physical_input == output.physical
-                   or portable_input == output.portable
-                   or same_existing_file(raw_input, output.raw) then
-                    return nil, "native provider output '" ..
-                        output.normalized .. "' for " .. output.owner ..
-                        " aliases input '" .. normalized_input .. "'"
-                end
-                if below(normalized_input, output.normalized)
-                   or below(output.normalized, normalized_input)
-                   or below(physical_input, output.physical)
-                   or below(output.physical, physical_input)
-                   or below(portable_input, output.portable)
-                   or below(output.portable, portable_input) then
-                    return nil, "native provider output '" ..
-                        output.normalized .. "' for " .. output.owner ..
-                        " has a path hierarchy conflict with input '" ..
-                        normalized_input .. "'"
-                end
-            end
-        end
-    end
-    return true, public_archive
+    ok, err = index.check_inputs(native_inputs)
+    if not ok then return nil, err end
+    return true, public_archive, index.outputs
 end
 
 -- Reserve the whole invocation before the scheduler invalidates any object.
