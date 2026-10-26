@@ -680,19 +680,33 @@ function Scheduler:update_token_poll()
             self.token_poll:close()
             self.token_poll, self.token_polling = nil, false
         end
-        if not self.token_poll then
+        if not self.token_poll and not self.token_timer then
+            -- Darwin's kqueue backend rejects named FIFO descriptors in
+            -- uv_poll_init (UV_EINVAL); fall back to a short timer there so
+            -- uv.run("once") rechecks nonblocking client:acquire().
             self.token_poll = uv.new_poll(descriptor)
+            if not self.token_poll then
+                self.token_timer = uv.new_timer()
+            end
             self.token_descriptor = descriptor
         end
         if not self.token_polling then
             self.token_polling = true
-            self.token_poll:start("r", function()
-                self.token_poll:stop()
-                self.token_polling = false
-            end)
+            if self.token_poll then
+                self.token_poll:start("r", function()
+                    self.token_poll:stop()
+                    self.token_polling = false
+                end)
+            elseif self.token_timer then
+                self.token_timer:start(5, 5, function()
+                    self.token_timer:stop()
+                    self.token_polling = false
+                end)
+            end
         end
     elseif self.token_polling then
-        self.token_poll:stop()
+        if self.token_poll then self.token_poll:stop() end
+        if self.token_timer then self.token_timer:stop() end
         self.token_polling = false
     end
 end
@@ -770,14 +784,15 @@ function Scheduler:watch_signals()
 end
 
 function Scheduler:close_handles()
-    for _, name in ipairs({ "token_poll", "signal_poll" }) do
+    for _, name in ipairs({ "token_poll", "token_timer", "signal_poll" }) do
         local handle = self[name]
         if handle and not handle:is_closing() then handle:close() end
     end
     for _, handle in ipairs(self.signal_handles or {}) do
         if not handle:is_closing() then handle:close() end
     end
-    self.token_poll, self.signal_poll, self.signal_handles = nil, nil, nil
+    self.token_poll, self.token_timer, self.signal_poll, self.signal_handles =
+        nil, nil, nil, nil
     process.library().run("nowait")
 end
 

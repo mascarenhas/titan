@@ -95,6 +95,21 @@ local import_scanner
 do
     local skip = (lexer.SPACE + lexer.COMMENT)^0
     local function token(pattern) return pattern * skip end
+    local names = {}
+    for tokname, pat in pairs(lexer) do
+        if tokname ~= "SPACE" and tokname ~= "COMMENT" and
+           tokname ~= "STRINGLIT" and tokname ~= "NUMBER" and
+           tokname ~= "ANYNAME" and tokname ~= "NAME" and
+           not pat:match(tokname:lower()) then
+            names[#names + 1] = tokname
+        end
+    end
+    table.sort(names)
+    local any_token = lexer.STRINGLIT + lexer.NUMBER + lexer.ANYNAME
+    for _, tokname in ipairs(names) do
+        any_token = any_token + lexer[tokname]
+    end
+    any_token = any_token / 0
     local import_name = token(lexer.LPAREN) * token(lexer.STRINGLIT) *
         token(lexer.RPAREN) + token(lexer.STRINGLIT)
     local import_decl = (token(lexer.LOCAL) * token(lexer.NAME / 0) *
@@ -104,7 +119,7 @@ do
             return { name = name, source_required = source_required }
         end
     import_scanner = skip *
-        lpeg.Ct((import_decl + token(lexer.any_token))^0) * lpeg.Cp()
+        lpeg.Ct((import_decl + token(any_token))^0) * lpeg.Cp()
 end
 
 -- scan_imports(input) -> ordered { {name, source_required}, ... } | nil, err
