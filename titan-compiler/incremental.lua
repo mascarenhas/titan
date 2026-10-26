@@ -258,14 +258,10 @@ function incremental.toolchain_identity(context, descriptor)
     if saved then return saved.digest, saved.details end
     local wrapper = paths.basename(cc[1]):lower():gsub("%.exe$", "")
     local wrapped = wrapper == "ccache" or wrapper == "sccache" or wrapper == "distcc"
-    local description_argv = { cc[1] }
-    if wrapped then
-        assert(cc[2] and cc[2]:sub(1, 1) ~= "-", "wrapped compiler must be explicit")
-        description_argv[2] = cc[2]
-    end
-    -- Effective flags belong to the options component. In particular, -O/-D
-    -- change the header-cache key and predefined macros, but not which compiler
-    -- installation is running. Probe its fixed, flagless self-description.
+    local description_argv = { table.unpack(cc) }
+    -- The tokenized CC command is opaque: later words may name an interpreter
+    -- script, wrapper arguments or compiler options. Preserve it verbatim, and
+    -- omit only the separately supplied effective compilation flags.
     memo.toolchain_descriptions = memo.toolchain_descriptions or {}
     local description_key = canonical({ argv = description_argv,
         preprocessor = descriptor.preprocessor_identity, banner = descriptor.banner }, {})
@@ -282,7 +278,10 @@ function incremental.toolchain_identity(context, descriptor)
     end
     local preprocessor, banner = description.preprocessor, description.banner
     local tools = { incremental.physical_executable(context, cc) }
-    if wrapped then tools[#tools + 1] = incremental.physical_executable(context, cc[2]) end
+    if wrapped then
+        assert(cc[2] and cc[2]:sub(1, 1) ~= "-", "wrapped compiler must be explicit")
+        tools[#tools + 1] = incremental.physical_executable(context, cc[2])
+    end
     local stages = descriptor.stage_tools
     if not stages then
         stages = {}

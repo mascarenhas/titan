@@ -302,11 +302,11 @@ describe("incremental configuration", function()
             assert.same({ "/tool/cc", "-E", "-v", "-x", "c", null, "-o", null }, argv)
             return { ok = true, output = "clang fixed vendor banner" }
         end
-        local descriptor = { compiler_argv = { "/tool/cc", "-DCC_OPTION=1" },
+        local descriptor = { compiler_argv = { "/tool/cc" },
             compile_flags = { "-O1", "-DEFFECTIVE_OPTION=1" }, include_dirs = { "/first-sdk" },
             profile_identity = "first-effective-profile", stage_tools = {} }
         local first = incremental.toolchain_identity(ctx, descriptor)
-        descriptor.compiler_argv[2] = "-DCC_OPTION=2"
+        descriptor.cppflags = { "-DCHANGED_CPP_OPTION=1" }
         descriptor.compile_flags = { "-O3", "-DEFFECTIVE_OPTION=2" }
         descriptor.include_dirs = { "/second-sdk" }
         descriptor.profile_identity = "second-effective-profile"
@@ -314,6 +314,45 @@ describe("incremental configuration", function()
         assert.equal(2, #ctx.io.commands)
         assert.equal(0, incremental.counters(ctx).file_hashes)
     end)
+
+    for _, command in ipairs({
+        { "/tool/lua", "/wrappers/compiler script.lua" },
+        { "/tool/sh", "/wrappers/compiler script.sh" },
+    }) do
+        it("preserves the complete " .. command[1] .. " wrapper command in toolchain probes", function()
+            local ctx = context({ [command[1]] = "interpreter",
+                ["/tool/cc1"] = "compiler stage", ["/tool/as"] = "assembler" })
+            local null = require("titan-compiler.platform").windows and "NUL" or "/dev/null"
+            local function expected(tail)
+                local argv = { table.unpack(command) }
+                for _, value in ipairs(tail) do argv[#argv + 1] = value end
+                return argv
+            end
+            function ctx.io:run(argv)
+                self.commands[#self.commands + 1] = argv
+                if argv[#command + 1] == "-E" then
+                    if argv[#command + 2] == "-dM" then
+                        assert.same(expected({ "-E", "-dM", "-x", "c", null }), argv)
+                        return { ok = true, output = "#define __COMPILER_VERSION__ 1\n" }
+                    end
+                    assert.same(expected({ "-E", "-v", "-x", "c", null, "-o", null }), argv)
+                    return { ok = true, output = "gcc compiler wrapper" }
+                end
+                local stage = argv[#argv]:match("^-print%-prog%-name=(.*)$")
+                assert.is_not_nil(stage)
+                assert.same(expected({ "-O2", "-print-prog-name=" .. stage }), argv)
+                return { ok = true, output = "/tool/" .. stage .. "\n" }
+            end
+            local descriptor = { compiler_argv = command, compile_flags = { "-O2" } }
+            local digest, details = incremental.toolchain_identity(ctx, descriptor)
+            assert.equal(3, #details.tools)
+            assert.equal(command[1], details.tools[1].path)
+            assert.equal(digest, incremental.toolchain_identity(ctx, descriptor))
+            assert.equal(4, #ctx.io.commands)
+            assert.equal(0, incremental.counters(ctx).file_hashes)
+            assert.is_nil(ctx.io.reads[command[2]])
+        end)
+    end
 
     it("certifies explicit wrappers and named compiler stages once per configuration", function()
         local ctx = context({ ["/tool/ccache"] = "wrapper", ["/tool/gcc"] = "driver",
