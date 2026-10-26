@@ -8,6 +8,12 @@ local function lookup(module, fqtn)
     return checker._recovered_nominal_owner(module, fqtn)
 end
 
+local function interface(owner)
+    return types.Interface(owner, {
+        types.Field(owner, "value", types.Integer(), 0, true),
+    }, {})
+end
+
 describe("recovered nominal owner index", function()
     it("returns the first record or union in member order", function()
         local first = types.Record("recovered_index.Thing", {}, {}, {}, 0)
@@ -24,7 +30,7 @@ describe("recovered nominal owner index", function()
 
     it("keeps a member record ahead of the interface fallback", function()
         local record = types.Record("recovered_shadow.Owner", {}, {}, {}, 0)
-        local interface = types.Interface("recovered_shadow.Owner", {}, {})
+        local interface = interface("recovered_shadow.Owner")
         local module = types.Module("recovered_shadow", {
             types.ModuleMember("recovered_shadow", "Owner", record, nil),
         }, { Owner = interface })
@@ -34,7 +40,7 @@ describe("recovered nominal owner index", function()
 
     it("ignores interface members; only the type_members fallback sees them",
     function()
-        local interface = types.Interface("recovered_member_iface.View", {}, {})
+        local interface = interface("recovered_member_iface.View")
         local module = types.Module("recovered_member_iface", {
             types.ModuleMember(
                 "recovered_member_iface", "View", interface, nil),
@@ -81,7 +87,7 @@ describe("recovered nominal owner index", function()
     end)
 
     it("falls back to type_members for an exact interface owner", function()
-        local shape = types.Interface("recovered_interface.Shape", {}, {})
+        local shape = interface("recovered_interface.Shape")
         local module = types.Module(
             "recovered_interface", {}, { Shape = shape })
 

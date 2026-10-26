@@ -6,6 +6,7 @@ local foreigntypes = require "titan-compiler.foreigntypes"
 local cdriver = require "c-parser.cdriver"
 local cpp = require "c-parser.cpp"
 local platform = require "titan-compiler.platform"
+local compiler_io = require "titan-compiler.io"
 
 describe("module foreign conversion payloads", function()
     local imported, registry, original_convert, conversions
@@ -536,24 +537,29 @@ describe("module foreign conversion payloads", function()
         assert.equal(1, stats.conversion.hits)
         assert.equal(interface, assert(driver.serialize_source_interface(touched)))
         assert.same(original, payloads)
-        if platform.windows then
-            -- Without physical IDs there are no saved observations to refresh.
-            assert.equal(0, refreshes["c-header-v7"] or 0)
-            assert.equal(0, refreshes["ffi-conversion-v8"] or 0)
-        else
-            assert.is_true((refreshes["c-header-v7"] or 0) > 0)
+        local observation = compiler_io.new_sync():stat(path)
+        local precise = observation and observation.time_precision == "ns"
+            and observation.device ~= nil and observation.inode ~= nil
+        local header_kind = "c-header-v" .. cdriver.HEADER_CACHE_VERSION
+        if observation and observation.device ~= nil and observation.inode ~= nil then
+            assert.is_true((refreshes[header_kind] or 0) > 0)
             assert.equal(1, refreshes["ffi-conversion-v8"])
+        else
+            assert.equal(0, refreshes[header_kind] or 0)
+            assert.equal(0, refreshes["ffi-conversion-v8"] or 0)
         end
         local _, warm = check(source)
         assert.equal(count, conversions)
-        if platform.windows then
-            assert.is_true(warm.headers.file_reads > 0)
-            assert.is_true(warm.headers.file_hashes > 0)
-            assert.equal(0, refreshes["ffi-conversion-v8"] or 0)
-        else
+        if precise then
             assert.equal(0, warm.headers.file_reads)
             assert.equal(0, warm.headers.file_hashes)
             assert.equal(1, refreshes["ffi-conversion-v8"])
+        else
+            assert.is_true(warm.headers.file_reads > 0)
+            assert.is_true(warm.headers.file_hashes > 0)
+            assert.equal(observation and observation.device ~= nil
+                and observation.inode ~= nil and 1 or 0,
+                refreshes["ffi-conversion-v8"] or 0)
         end
     end)
 

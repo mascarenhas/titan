@@ -253,8 +253,8 @@ end
 
         local final_link
         for line in output:gmatch("[^\r\n]+") do
-            if line:find("'app__entrypoint.o'", 1, true) and
-               not line:find("'app__entrypoint.c'", 1, true) then
+            if line:find("/synthetic/app__entrypoint.o", 1, true) and
+               not line:find("/synthetic/app__entrypoint.c", 1, true) then
                 assert.is_nil(final_link, output)
                 final_link = line
             end
