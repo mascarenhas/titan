@@ -158,7 +158,41 @@ local function normalized_stat(attributes)
         modified_nanoseconds = modified_nanoseconds,
         -- LFS exposes floating seconds, not a declared native nanosecond clock.
         time_precision = "coarse",
+        precision = "coarse",
     }
+end
+
+local tried_native_support = false
+
+local function stat_attributes(path, follow)
+    local support = package.loaded.titan
+    if not support and not tried_native_support then
+        tried_native_support = true
+        local loaded, value = pcall(require, "titan")
+        if loaded then support = value end
+    end
+    local precise = type(support) == "table" and support._stat_precise
+    if type(precise) == "function" then
+        local attributes, err, code = precise(path, follow)
+        if not attributes then
+            if missing_errno(code) then return nil, nil end
+            return nil, operation_error(follow and "stat" or "lstat", err)
+        end
+        -- The native call owns this fresh result. Preserve its exact integer
+        -- timestamps and opaque file IDs for certificate observations, while
+        -- supplying the existing resolver/header fields from those same bytes.
+        attributes.kind = attributes.kind == "link" and "symlink" or attributes.kind
+        attributes.device, attributes.inode = attributes.dev, attributes.ino
+        attributes.modified_seconds = attributes.mtime_ns // 1000000000
+        attributes.modified_nanoseconds = attributes.mtime_ns % 1000000000
+        attributes.changed_seconds = attributes.ctime_ns // 1000000000
+        attributes.changed_nanoseconds = attributes.ctime_ns % 1000000000
+        attributes.precision, attributes.time_precision = "ns", "ns"
+        return attributes
+    end
+    local attributes, err = lfs_attributes(path, follow)
+    if not attributes then return nil, err end
+    return normalized_stat(attributes)
 end
 
 function Sync:cwd()
@@ -273,17 +307,13 @@ end
 function Sync:stat(path)
     local valid, path_err = checked_path(path)
     if not valid then return nil, path_err end
-    local attributes, err = lfs_attributes(path, true)
-    if not attributes then return nil, err end
-    return normalized_stat(attributes)
+    return stat_attributes(path, true)
 end
 
 function Sync:lstat(path)
     local valid, path_err = checked_path(path)
     if not valid then return nil, path_err end
-    local attributes, err = lfs_attributes(path, false)
-    if not attributes then return nil, err end
-    return normalized_stat(attributes)
+    return stat_attributes(path, false)
 end
 
 local function open_file(path, mode)
