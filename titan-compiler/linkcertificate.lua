@@ -22,10 +22,6 @@ local function need(value, err)
     return value
 end
 
-local function fresh(context)
-    return { io = context.io, cache_adapter = context.cache_adapter }
-end
-
 local function absolute(context, path)
     local cwd = need(context.io:cwd())
     return need(platform.absolute(path, cwd))
@@ -145,16 +141,114 @@ function certificate.read_record(context, filename)
     local stat, err = context.io:lstat(filename)
     if not stat then return nil, err or "missing record" end
     if stat.kind ~= "file" or stat.size > RECORD_LIMIT then return nil, "invalid record file" end
-    local bytes
-    bytes, err = context.io:read_file(filename, RECORD_LIMIT)
-    if not bytes then return nil, err end
+    local called, bytes = pcall(incremental.file_contents, context, filename, RECORD_LIMIT)
+    if not called then
+        if type(bytes) ~= "string" then error(bytes, 0) end
+        return nil, bytes
+    end
     return graphcodec.decode(bytes, codec_options(context))
 end
 
 function certificate.write_record(context, filename, record)
     local bytes, err = graphcodec.encode(record, codec_options(context))
     if not bytes then return nil, err end
-    return context.io:write_file(filename, bytes)
+    local written, write_error = context.io:write_file(filename, bytes)
+    if written then incremental.invalidate_file(context, filename) end
+    return written, write_error
+end
+
+-- Cache the dependency-report capability, not linker outputs. Re-resolve the
+-- named linker each invocation and include its physical identity, so replacing
+-- a same-path tool cannot retain an obsolete feature verdict.
+function certificate.linker_backend(context, request)
+    request = request or {}
+    if request.darwin then return "darwin" end
+    if request.windows then return "none" end
+    local report
+    local function discard_report()
+        if not report then return end
+        local stat, err = context.io:lstat(report)
+        if err then error(err, 0) end
+        if stat then
+            need(stat.kind == "file", "linker probe report is not a regular file")
+            need(context.io:unlink(report))
+        end
+        incremental.invalidate_file(context, report)
+        report = nil
+    end
+    local completed, backend = pcall(function()
+        need(type(request.compiler_argv) == "table" and #request.compiler_argv > 0,
+            "linker probe requires compiler argv")
+        need(type(request.toolchain) == "string", "linker probe requires toolchain identity")
+        need(type(request.directory) == "string", "linker probe requires an output directory")
+        local argv = { table.unpack(request.compiler_argv) }
+        for _, flag in ipairs(request.link_flags or {}) do argv[#argv + 1] = flag end
+        local linker_name, explicit_linker, fused_path = "ld"
+        for index, flag in ipairs(argv) do
+            local selected = flag:match("^%-fuse%-ld=(.+)$")
+            if selected then
+                if selected:find("[/\\]") then fused_path = selected
+                else linker_name, fused_path = "ld." .. selected, nil end
+            elseif flag:match("^%-%-ld%-path=") then
+                explicit_linker = flag:match("^%-%-ld%-path=(.*)$")
+            elseif flag == "--ld-path" then
+                explicit_linker = need(argv[index + 1], "--ld-path requires a linker path")
+            end
+        end
+        explicit_linker = explicit_linker or fused_path
+        if not explicit_linker then
+            local query = { table.unpack(argv) }
+            query[#query + 1] = "-print-prog-name=" .. linker_name
+            local result = context.io:run(query, { stderr_to_stdout = true })
+            need(type(result) == "table" and result.started and result.ok,
+                type(result) == "table" and (result.diagnostic or result.output) or "cannot resolve native linker")
+            explicit_linker = need((result.output or ""):match("^%s*(.-)%s*$"))
+            need(explicit_linker ~= "" and not explicit_linker:find("[\r\n]"),
+                "compiler did not name one native linker")
+        end
+        local key = incremental.digest(context, "linker-dependency-feature", {
+            argv = argv, toolchain = request.toolchain,
+            compiler = incremental.physical_executable(context, request.compiler_argv),
+            linker = incremental.physical_executable(context, explicit_linker),
+            compiler_identity = request.compiler_identity or
+                (context.incremental_configuration and context.incremental_configuration.compiler),
+        })
+        local directory = paths.join(absolute(context, request.directory), ".titan")
+        local filename = paths.join(directory, "linker-feature")
+        local record = certificate.read_record(context, filename)
+        if closed(record, { key = true, backend = true, digest = true, canonicalization = true }) and
+            record.key == key and record.digest == version.CERTIFICATE_DIGEST and
+            record.canonicalization == version.CERTIFICATE_CANONICALIZATION and
+            (record.backend == "gnu" or record.backend == "lld" or record.backend == "none") then
+            return record.backend
+        end
+        report = need(context.io:tmpname())
+        local probe = { table.unpack(argv) }
+        probe[#probe + 1] = "-Wl,--dependency-file=" .. report
+        probe[#probe + 1] = "-Wl,--version"
+        local result = context.io:run(probe, { stderr_to_stdout = true })
+        need(type(result) == "table" and result.started and not result.interrupted and result.why ~= "signal",
+            type(result) == "table" and (result.diagnostic or result.output) or "linker feature probe failed")
+        local selected = "none"
+        if result.ok then
+            local banner = result.output or result.diagnostic or ""
+            if banner:find("LLD", 1, true) then selected = "lld"
+            elseif banner:find("GNU ld", 1, true) then selected = "gnu" end
+        end
+        discard_report()
+        mkdir(context, directory)
+        need(certificate.write_record(context, filename, {
+            key = key, backend = selected, digest = version.CERTIFICATE_DIGEST,
+            canonicalization = version.CERTIFICATE_CANONICALIZATION,
+        }))
+        return selected
+    end)
+    local cleaned, cleanup_error = pcall(discard_report)
+    if not completed and type(backend) ~= "string" then error(backend, 0) end
+    if not cleaned and type(cleanup_error) ~= "string" then error(cleanup_error, 0) end
+    if not completed then return nil, backend end
+    if not cleaned then return nil, cleanup_error end
+    return backend
 end
 
 function certificate.files(context, files)
@@ -323,7 +417,7 @@ end
 local function native_dependencies(context, policy)
     if not policy.cacheable then return nil, policy.reason end
     if not policy.dependency_file then return certificate.files(context, policy.files) end
-    local bytes = need(context.io:read_file(policy.dependency_file))
+    local bytes = incremental.file_contents(context, policy.dependency_file)
     local files
     if policy.backend == "darwin" then
         files = {}
@@ -431,13 +525,15 @@ function certificate.invalidate(context, ticket)
     local stat, err = context.io:lstat(ticket.record)
     if not stat then return err == nil, err end
     need(stat.kind == "file", "link record is not a regular file")
-    return context.io:unlink(ticket.record)
+    local removed, remove_error = context.io:unlink(ticket.record)
+    if removed then incremental.invalidate_file(context, ticket.record) end
+    return removed, remove_error
 end
 
 function certificate.commit(context, ticket)
     -- Call only after the complete validated output set has been published.
     -- Recheck input bytes afresh; a memo from before linking cannot bless a race.
-    local current = fresh(context)
+    local current = incremental.fresh_context(context)
     for _, field in ipairs(FILE_FIELDS) do
         local files = certificate.files(current, ticket.recipe[field])
         need(incremental.digest(context, field, files) == incremental.digest(context, field, ticket.recipe[field]),
