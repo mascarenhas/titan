@@ -1840,6 +1840,8 @@ local function run_tcp_backpressure_and_shutdown(
   local peer_raw = foreign int.new_array(1)
   test.assert(ffi.titan_test_tcp_stdio_pair(0 as foreign int, acc, peer_raw) == 0,
               "create tcp pair for backpressure")
+  test.assert(ffi.titan_test_tcp_stdio_bound_buffers(acc[0], peer_raw[0], 16384 as foreign int) == 0,
+              "bound tcp socket buffers for backpressure")
   test.assert(ffi.titan_test_tcp_stdio_install_fd(acc[0], 0) == 0 and
               ffi.titan_test_tcp_stdio_install_fd(acc[0], 1) == 0,
               "install tcp pair onto 0 and 1")
@@ -1850,43 +1852,36 @@ local function run_tcp_backpressure_and_shutdown(
   test.assert(system.stdin:kind() == "tcp" and system.stdout:kind() == "tcp",
               "backpressure stdio was not tcp")
 
-  -- Multi-MiB concurrent TCP writes (8 Tasks * 8 chunks * 32 KiB = 2 MiB) + in-flight write & shutdown cancellation
-  local received_all = ""
-  local drain_task = async.run<|nil, value|>(function (): nil
-    received_all = peer:read_all()
-    return nil
-  end)
+  -- Withhold peer reads while 8 bulk writers (8 * 256 KiB = 2 MiB) plus a
+  -- trailing write (cw) and shutdown (cs) submit in deterministic order.
   local expected_chunks: {string} = {}
   local writers: {async.Task<|nil, value|>} = {}
+  local b_gates: {(function (nil): ())?} = {}
+  local bulk_template = strings.rep("0123456789abcdef\0\r\n\255", 13107)
   for task_id = 1, 8 do
+    local block = strings.format("TCP-%02d-BULK:", task_id) .. bulk_template
+    expected_chunks[task_id] = block
     writers[task_id] = async.run<|nil, value|>(function (): nil
-      for step = 1, 8 do
-        local tag = strings.format("TCP-%02d-%02d:", task_id, step)
-        local block = strings.rep(tag, 3276) .. "12345678"
-        expected_chunks[#expected_chunks + 1] = block
-        system.stdout:write(block)
-      end
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+        b_gates[task_id] = resolve
+      end)
+      system.stdout:write(block)
       return nil
     end)
   end
-  for task_id = 1, 8 do
-    async.join(writers[task_id])
-    test.assert(writers[task_id]:status():has_succeeded(), "TCP bulk writer failed")
-  end
 
-  -- In-flight write and shutdown cancellation behind accepted requests
   local w_gate: (function (nil): ())? = nil
   local s_gate: (function (nil): ())? = nil
   local w_reason = async.CancellationReason.simple("cancel-accepted-tcp-write")
   local s_reason = async.CancellationReason.simple("cancel-accepted-tcp-shutdown")
   local w_obs: value = nil
   local s_obs: value = nil
-  local tail_payload = strings.rep("FINAL_CANCELLED_WRITE\0\r\n", 4096)
-  expected_chunks[#expected_chunks + 1] = tail_payload
+  local tail_payload = strings.rep("FINAL_CANCELLED_WRITE\0\r\n", 8192)
+  expected_chunks[9] = tail_payload
 
   local cw = async.run<|nil, value|>(function (): nil
     async.await<|nil, nil|>(function (resolve, _reject, _fatal) w_gate = resolve end)
-    local copy = strings.rep("FINAL_CANCELLED_WRITE\0\r\n", 4096)
+    local copy = strings.rep("FINAL_CANCELLED_WRITE\0\r\n", 8192)
     do system.stdout:write(copy) catch w_obs = error end
     return nil
   end)
@@ -1895,31 +1890,72 @@ local function run_tcp_backpressure_and_shutdown(
     do system.stdout:shutdown() catch s_obs = error end
     return nil
   end)
-  while w_gate == nil or s_gate == nil do async.yield() end
+  while true do
+    local ready = w_gate ~= nil and s_gate ~= nil
+    for task_id = 1, 8 do
+      if b_gates[task_id] == nil then ready = false end
+    end
+    if ready then break end
+    async.yield()
+  end
+
   async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+    for task_id = 1, 8 do
+      local release_bulk = b_gates[task_id]
+      b_gates[task_id] = nil
+      release_bulk(nil)
+    end
     local rw, rs = w_gate, s_gate
     w_gate, s_gate = nil, nil
     rw(nil)
     rs(nil)
-    test.assert(cw:status():as_string() == "waiting" and
-                cs:status():as_string() == "waiting",
-                "TCP write/shutdown tasks did not park")
-    assert_raises_substring(function ()
-      async.TransferValue.from_value(system.stdout)
-    end, "stream has pending output")
-    cw:cancel(w_reason)
-    cs:cancel(s_reason)
-    gc.collect()
-    gc.collect()
     resolve(nil)
   end)
+
+  -- Advance several loop turns with peer reads still withheld so any write that
+  -- merely deferred its completion callback would settle. Because 2+ MiB exceeds
+  -- the bounded socket buffers, the send queue remains non-empty and cw/cs stay
+  -- blocked on real kernel TCP backpressure.
+  for _ = 1, 5 do async.yield() end
+  local queued_before_cancel = ffi.titan_test_tcp_stdio_pending_send_bytes(1 as foreign int) as integer
+  test.assert(queued_before_cancel > 0,
+              "expected positive pending kernel TCP send bytes under backpressure, got " ..
+              queued_before_cancel)
+  test.assert(cw:status():as_string() == "waiting" and
+              cs:status():as_string() == "waiting",
+              "backpressured TCP write/shutdown settled before peer started reading")
+  assert_raises_substring(function ()
+    async.TransferValue.from_value(system.stdout)
+  end, "stream has pending output")
+
+  cw:cancel(w_reason)
+  cs:cancel(s_reason)
+  gc.collect()
+  gc.collect()
+  for _ = 1, 5 do async.yield() end
+  test.assert(cw:status():as_string() == "waiting" and
+              cs:status():as_string() == "waiting" and
+              w_obs == nil and s_obs == nil and
+              (ffi.titan_test_tcp_stdio_pending_send_bytes(1 as foreign int) as integer) > 0,
+              "cancelled backpressured TCP write/shutdown unwound while peer was still not reading")
+
+  -- Now release peer drain and verify all bytes arrive in order followed by EOF.
+  local received_all = ""
+  local drain_task = async.run<|nil, value|>(function (): nil
+    received_all = peer:read_all()
+    return nil
+  end)
+  for task_id = 1, 8 do
+    async.join(writers[task_id])
+    test.assert(writers[task_id]:status():has_succeeded(), "TCP bulk writer failed")
+  end
   async.join(cw)
   async.join(cs)
   async.join(drain_task)
   test.assert(cw:status():has_cancelled() and w_obs == w_reason,
-              "cancelled TCP write lost its cancellation reason")
+              "cancelled backpressured TCP write lost its cancellation reason")
   test.assert(cs:status():has_cancelled() and s_obs == s_reason,
-              "cancelled TCP shutdown lost its cancellation reason")
+              "cancelled backpressured TCP shutdown lost its cancellation reason")
   test.assert(drain_task:status():has_succeeded(), "peer drain task failed")
 
   local builder = strings.writer()
@@ -1928,9 +1964,8 @@ local function run_tcp_backpressure_and_shutdown(
   end
   local expected_total = builder:drain()
   test.assert(#received_all == #expected_total and received_all == expected_total,
-              "TCP multi-MiB + cancelled write/shutdown bytes mismatched: " ..
+              "TCP backpressured multi-MiB + cancelled write/shutdown bytes mismatched: " ..
               #received_all .. " vs " .. #expected_total)
-
   fs.write_file(result_path, "TCP_BACKPRESSURE_SHUTDOWN_OK")
   return 0
 end

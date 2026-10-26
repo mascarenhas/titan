@@ -1,3 +1,6 @@
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <stddef.h>
@@ -187,6 +190,18 @@ int titan_test_tcp_stdio_reset_close(int fd) {
     return -1;
 }
 
+int titan_test_tcp_stdio_bound_buffers(int accepted_fd, int peer_fd, int bytes) {
+    (void)accepted_fd;
+    (void)peer_fd;
+    (void)bytes;
+    return -1;
+}
+
+int titan_test_tcp_stdio_pending_send_bytes(int fd) {
+    (void)fd;
+    return -1;
+}
+
 int titan_test_tcp_stdio_spawn_child(
     const char *program, const char *mode, const char *arg1, const char *arg2,
     int ipv6, int alias_stderr, int *peer_fd_out, int *child_pid_out) {
@@ -212,6 +227,9 @@ int titan_test_tcp_stdio_wait_child(int child_pid, int *exit_code_out) {
 #include <netinet/in.h>
 #include <signal.h>
 #include <string.h>
+#ifndef __APPLE__
+#include <sys/ioctl.h>
+#endif
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -502,6 +520,30 @@ int titan_test_tcp_stdio_reset_close(int fd) {
     (void)setsockopt(fd, SOL_SOCKET, SO_LINGER, &sl, sizeof(sl));
     (void)close(fd);
     return 0;
+}
+
+int titan_test_tcp_stdio_bound_buffers(int accepted_fd, int peer_fd, int bytes) {
+    int snd = bytes;
+    int rcv = bytes;
+    if (accepted_fd < 0 || peer_fd < 0 || bytes <= 0) return -1;
+    if (setsockopt(accepted_fd, SOL_SOCKET, SO_SNDBUF, &snd, sizeof(snd)) != 0 ||
+        setsockopt(peer_fd, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof(rcv)) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+int titan_test_tcp_stdio_pending_send_bytes(int fd) {
+    int pending = 0;
+#ifdef __APPLE__
+    socklen_t len = sizeof(pending);
+    if (getsockopt(fd, SOL_SOCKET, SO_NWRITE, &pending, &len) != 0)
+        return -1;
+#else
+    if (ioctl(fd, TIOCOUTQ, &pending) != 0)
+        return -1;
+#endif
+    return pending;
 }
 
 int titan_test_tcp_stdio_spawn_child(

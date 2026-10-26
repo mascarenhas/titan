@@ -306,8 +306,10 @@ pipe, TTY, file, or (on Unix) TCP where possible. `parent_stdio_kind` finishes
 every check before `initialize_parent_stdio` duplicates anything.
 
 For a Unix `uv.TCP` guess, `titan_inspect_parent_tcp` reads
-`getsockopt(SOL_SOCKET, SO_ACCEPTCONN)` and `getpeername`. A listening socket
-raises `stdio.parent.kind: ENOTSUP` with probe text `listening TCP socket`. A
+`getsockopt(SOL_SOCKET, SO_ACCEPTCONN)` on Linux (or `getsockopt(IPPROTO_TCP,
+TCP_CONNECTION_INFO)` for `TCPS_LISTEN` on macOS) and `getpeername`. A listening
+socket raises `stdio.parent.kind: ENOTSUP` with probe text `listening TCP
+socket`. A
 socket without a peer (`ENOTCONN` or `EINVAL`) raises the same error with
 `unconnected TCP socket`. Any other probe errno keeps its translated code.
 `getpeername` cannot tell a socket that never connected from one that a peer

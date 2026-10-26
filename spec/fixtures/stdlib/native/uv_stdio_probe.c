@@ -559,6 +559,7 @@ int titan_uv_test_stdio_restore_child_socket_stdout(void) {
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -929,10 +930,25 @@ static void read_peer(int target, int descriptor, int regular_file,
     if (count < 0 && errno == EINTR)
       continue;
     if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      struct pollfd polled;
+      int ready;
       if (allow_live_writer)
         break;
-      record_failure("fd %d still had a live writer after Runtime teardown",
-                     target);
+      polled.fd = descriptor;
+      polled.events = POLLIN;
+      polled.revents = 0;
+      do {
+        ready = poll(&polled, 1, 5000);
+      } while (ready < 0 && errno == EINTR);
+      if (ready > 0)
+        continue;
+      if (ready == 0) {
+        record_failure("fd %d still had a live writer after Runtime teardown",
+                       target);
+        break;
+      }
+      record_failure("could not poll captured fd %d output: %s",
+                     target, strerror(errno));
       break;
     }
     record_failure("could not read captured fd %d output: %s",

@@ -179,7 +179,15 @@ static inline void titan_inspect_parent_tcp(int descriptor,
 }
 #else
 #define TITAN_OS_WINDOWS 0
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
 #include <fcntl.h>
+#ifdef __APPLE__
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <netinet/tcp_fsm.h>
+#endif
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -255,12 +263,31 @@ static inline void titan_inspect_parent_tcp(int descriptor,
                                             titan_parent_stdio_probe *probe) {
   struct sockaddr_storage peer;
   socklen_t peer_size = sizeof(peer);
+#ifdef __APPLE__
+  struct tcp_connection_info info;
+  socklen_t info_size = sizeof(info);
+#else
   int listening = 0;
   socklen_t listening_size = sizeof(listening);
+#endif
   probe->status = 0;
   probe->operation = NULL;
   probe->is_listening = 0;
   probe->is_connected = 0;
+#ifdef __APPLE__
+  if (getsockopt(descriptor, IPPROTO_TCP, TCP_CONNECTION_INFO,
+                 &info, &info_size) == 0) {
+    if (info_size >= sizeof(info.tcpi_state) &&
+        info.tcpi_state == TCPS_LISTEN) {
+      probe->is_listening = 1;
+      return;
+    }
+  } else if (errno != ENOPROTOOPT && errno != EINVAL) {
+    probe->status = errno;
+    probe->operation = "getsockopt(TCP_CONNECTION_INFO)";
+    return;
+  }
+#else
   if (getsockopt(descriptor, SOL_SOCKET, SO_ACCEPTCONN,
                  &listening, &listening_size) == 0) {
     if (listening_size == sizeof(listening) && listening != 0) {
@@ -272,6 +299,7 @@ static inline void titan_inspect_parent_tcp(int descriptor,
     probe->operation = "getsockopt(SO_ACCEPTCONN)";
     return;
   }
+#endif
   if (getpeername(descriptor, (struct sockaddr *)&peer, &peer_size) != 0) {
     if (errno == ENOTCONN || errno == EINVAL)
       return;
