@@ -59,7 +59,7 @@ and checked-in test certificates; the runner does not modify a trust store.
 ## Earlier Windows baseline
 
 The issue's initial baseline was 44 cases at `25c095ae3f2a9f4e29d8b2c499b388216b8fb66b`.
-The merged initial port added nine `io.popen` cases, bringing the baseline to 53
+The merged initial port added nine shell-process cases, bringing the baseline to 53
 at `bda3ad10`. That count is historical, not a limit or target for the shared
 suite. The common suite retains that coverage as follows:
 
