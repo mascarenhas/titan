@@ -1730,9 +1730,9 @@ local function copy_c_header_dependencies(value, label)
         local kind = input.kind
         local path = input.path
         local identity = input.identity
-        if kind ~= "file" and kind ~= "search" then
+        if kind ~= "file" and kind ~= "search" and kind ~= "origin" then
             return nil, label .. " entry " .. index ..
-                " kind must be 'file' or 'search'"
+                " kind must be 'file', 'search', or 'origin'"
         elseif type(path) ~= "string" or not platform.is_absolute(path) or
                path:find("\0", 1, true) then
             return nil, label .. " entry " .. index ..
@@ -1819,7 +1819,10 @@ end
 -- Recompute the identities of an already-resolved module header closure. This
 -- never searches for a different header wholesale: `search` entries are the
 -- exact ordered candidates cdriver consulted, including misses, so a new
--- earlier shadow changes identity without walking an include tree.
+-- earlier shadow changes identity without walking an include tree. `origin`
+-- entries recheck the realpath that names a C declaration's nominal scope.
+-- The fourth result classifies the first changed input as
+-- `c-input <path>: content|provenance|missing|unreadable|candidate|changed-during-read`.
 -- Implementation notes: doc/implementation/driver.md#driverrestat_c_header_dependenciesdependencies-options
 function driver.restat_c_header_dependencies(value, options)
     local context, owns_context =
@@ -1829,29 +1832,37 @@ function driver.restat_c_header_dependencies(value, options)
         if owns_context then driver.close_resolver_context(context) end
         return nil, err
     end
-    local result, changed = {}, false
+    local result, changed, classified = {}, false, nil
     local validation_options = {
         io = context.io,
         cache_adapter = context.cache_adapter,
         header_observations = context.header_observations,
-        header_validation = options and options.header_validation or {},
+        header_validation = options and options.header_validation
+            or context.header_validation or {},
     }
     for index, dependency in ipairs(dependencies) do
-        local current, identity_error, input_changed =
+        local current, identity_error, input_changed, reason =
             cdriver.revalidate_header_input(dependency, validation_options)
         if not current then
             if owns_context then driver.close_resolver_context(context) end
             return nil, "cannot fingerprint C header input '" ..
-                dependency.path .. "': " .. tostring(identity_error)
+                dependency.path .. "': " .. tostring(identity_error),
+                input_changed == true,
+                reason and ("c-input " .. dependency.path .. ": " .. reason)
+                    or nil
         end
         result[index] = current
+        if input_changed and not classified then
+            classified = "c-input " .. dependency.path .. ": " ..
+                tostring(reason or "content")
+        end
         changed = changed or input_changed
     end
     if owns_context then
         local closed, close_error = driver.close_resolver_context(context)
         if not closed then return nil, close_error end
     end
-    return result, nil, changed
+    return result, nil, changed, classified
 end
 
 function driver.close_loader(loader)
