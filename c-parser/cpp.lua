@@ -161,8 +161,8 @@ local function physical_header(path, strategy)
             observation.changed_nanoseconds = followed.changed_nanoseconds
         end
     end
-    -- A strategy without file identity (notably Sync on Windows) still guards
-    -- size/times around reads, but cannot authorize metadata-only reuse.
+    -- A strategy without file identity (e.g. LFS fallback on Windows) still
+    -- guards size/times around reads, but cannot authorize metadata-only reuse.
     local reusable = followed and followed.device ~= nil and followed.inode ~= nil
     return physical, reusable and observation or nil, followed, observation, err
 end

@@ -54,9 +54,20 @@ local function with_overrides(target, replacements, body)
     return table.unpack(results, 2, results.n)
 end
 
+local function with_native_stat(native, body)
+    local support = require "titan"
+    return with_overrides(support, { _stat_precise = native }, body)
+end
+
+local function coarse_stat_it(name, body)
+    it(name, function() return with_native_stat(false, body) end)
+end
+
 local function posix_model_it(name, body)
     it(name, function()
-        return with_overrides(platform, { windows = false }, body)
+        return with_native_stat(false, function()
+            return with_overrides(platform, { windows = false }, body)
+        end)
     end)
 end
 
@@ -104,7 +115,7 @@ describe("compiler I/O strategy", function()
         assert.equal("dead", coroutine.status(co))
     end)
 
-    it("declares floating timestamp observations coarse at whole and fractional seconds", function()
+    coarse_stat_it("declares floating timestamp observations coarse at whole and fractional seconds", function()
         local strategy = compiler_io.new_sync()
         for _, stamp in ipairs({ 100, 100.125 }) do
             with_overrides(lfs, {
@@ -114,10 +125,122 @@ describe("compiler I/O strategy", function()
             }, function()
                 local stat = assert(strategy:stat("fixture.h"))
                 assert.equal("coarse", stat.time_precision)
+                assert.equal("coarse", stat.precision)
                 assert.equal(100, stat.modified_seconds)
                 assert.equal(stamp == 100 and 0 or 125000000, stat.modified_nanoseconds)
             end)
         end
+    end)
+
+    it("normalizes exact native timestamps and opaque identities for stat and lstat", function()
+        local calls = {}
+        local path = "SDK 日本/linked/../header.h"
+        local function native(filename, follow)
+            calls[#calls + 1] = { filename, follow }
+            return { kind = follow and "file" or "link",
+                dev = "18446744073709551615", ino = "0123456789abcdef0123456789abcdef",
+                size = 19, mode = follow and 0x81A4 or 0xA1FF,
+                mtime_ns = 1790816523123456789, ctime_ns = 1790816523987654321 }
+        end
+        with_native_stat(native, function()
+            with_overrides(lfs, {
+                attributes = function() error("native stat must not query LFS") end,
+                symlinkattributes = function() error("native lstat must not query LFS") end,
+            }, function()
+                local strategy = compiler_io.new_sync()
+                for _, follow in ipairs({ true, false }) do
+                    local stat = assert(follow and strategy:stat(path) or strategy:lstat(path))
+                    assert.same({
+                        kind = follow and "file" or "symlink",
+                        dev = "18446744073709551615", ino = "0123456789abcdef0123456789abcdef",
+                        device = "18446744073709551615", inode = "0123456789abcdef0123456789abcdef",
+                        size = 19, mode = follow and 0x81A4 or 0xA1FF,
+                        precision = "ns", time_precision = "ns",
+                        mtime_ns = 1790816523123456789, ctime_ns = 1790816523987654321,
+                        modified_seconds = 1790816523, modified_nanoseconds = 123456789,
+                        changed_seconds = 1790816523, changed_nanoseconds = 987654321,
+                    }, stat)
+                end
+                assert.same({ { path, true }, { path, false } }, calls)
+            end)
+        end)
+    end)
+
+    it("preserves exact-second and pre-epoch native timestamps", function()
+        for _, stamp in ipairs({ 0, -1, -1000000001 }) do
+            with_native_stat(function()
+                return { kind = "file", dev = "1", ino = "2", size = 0, mode = 0x81A4,
+                    mtime_ns = stamp, ctime_ns = stamp }
+            end, function()
+                local stat = assert(compiler_io.new_sync():stat("fixture.h"))
+                assert.equal("ns", stat.precision)
+                assert.equal(stamp, stat.mtime_ns)
+                assert.equal(stamp, stat.ctime_ns)
+                assert.equal(stamp // 1000000000, stat.modified_seconds)
+                assert.equal(stamp % 1000000000, stat.modified_nanoseconds)
+                assert.equal(stat.modified_seconds, stat.changed_seconds)
+                assert.equal(stat.modified_nanoseconds, stat.changed_nanoseconds)
+            end)
+        end
+    end)
+
+    it("distinguishes native missing paths and errors without querying coarse metadata", function()
+        local calls = 0
+        with_native_stat(function(path)
+            calls = calls + 1
+            if path == "missing" then return nil, "ENOENT: No such file or directory", 2 end
+            if path == "blocked/child" then return nil, "ENOTDIR: Not a directory", 20 end
+            return nil, "EACCES: Permission denied", 13
+        end, function()
+            with_overrides(lfs, {
+                attributes = function() error("native error must not query LFS") end,
+                symlinkattributes = function() error("native error must not query LFS") end,
+            }, function()
+                local strategy = compiler_io.new_sync()
+                for _, method in ipairs({ "stat", "lstat" }) do
+                    local missing, err = strategy[method](strategy, "missing")
+                    assert.is_nil(missing)
+                    assert.is_nil(err)
+                    missing, err = strategy[method](strategy, "blocked/child")
+                    assert.is_nil(missing)
+                    assert.equal("ENOTDIR: Not a directory", err)
+                    missing, err = strategy[method](strategy, "denied")
+                    assert.is_nil(missing)
+                    assert.equal("EACCES: Permission denied", err)
+                end
+                assert.equal(6, calls)
+                assert.is_nil(strategy:stat(false))
+                assert.is_nil(strategy:lstat("bad\0path"))
+                assert.equal(6, calls)
+            end)
+        end)
+    end)
+
+    it("observes native precise support added after a coarse lookup", function()
+        with_native_stat(false, function()
+            local strategy = compiler_io.new_sync()
+            with_overrides(lfs, {
+                attributes = function()
+                    return { mode = "file", size = 0, modification = 100 }
+                end,
+            }, function()
+                assert.equal("coarse", assert(strategy:stat("fixture.h")).precision)
+                require("titan")._stat_precise = function()
+                    return { kind = "file", dev = "1", ino = "2", size = 0, mode = 0x81A4,
+                        mtime_ns = 100000000000, ctime_ns = 100000000001 }
+                end
+                assert.equal("ns", assert(strategy:stat("fixture.h")).precision)
+            end)
+        end)
+    end)
+
+    it("propagates native precise-stat cancellation unchanged", function()
+        local cancelled = {}
+        with_native_stat(function() error(cancelled, 0) end, function()
+            local ok, err = pcall(compiler_io.new_sync().stat, compiler_io.new_sync(), "fixture.h")
+            assert.is_false(ok)
+            assert.equal(cancelled, err)
+        end)
     end)
 
     it("preserves binary files and normalizes filesystem operations", function()
@@ -163,12 +286,20 @@ describe("compiler I/O strategy", function()
 
         local metadata = assert(strategy:stat(source))
         local expected_keys = {
-            "kind", "mode", "modified_nanoseconds", "modified_seconds", "size", "time_precision",
+            "kind", "mode", "modified_nanoseconds", "modified_seconds",
+            "precision", "size", "time_precision",
         }
-        if not platform.windows then
-            table.insert(expected_keys, 1, "inode")
-            table.insert(expected_keys, 1, "device")
+        local precise = metadata.precision == "ns"
+        if precise then
+            for _, key in ipairs({
+                "changed_seconds", "changed_nanoseconds", "ctime_ns", "mtime_ns", "dev", "ino",
+            }) do expected_keys[#expected_keys + 1] = key end
         end
+        if precise or not platform.windows then
+            expected_keys[#expected_keys + 1] = "device"
+            expected_keys[#expected_keys + 1] = "inode"
+        end
+        table.sort(expected_keys)
         assert.same(expected_keys, (function()
             local keys = {}
             for key in pairs(metadata) do keys[#keys + 1] = key end
@@ -178,7 +309,14 @@ describe("compiler I/O strategy", function()
         assert.equal("file", metadata.kind)
         assert.equal(#bytes, metadata.size)
         assert.equal(0x8000, metadata.mode & 0xF000)
-        if platform.windows then
+        if precise then
+            assert.is_string(metadata.device)
+            assert.is_string(metadata.inode)
+            assert.equal(metadata.dev, metadata.device)
+            assert.equal(metadata.ino, metadata.inode)
+            assert.equal("integer", math.type(metadata.mtime_ns))
+            assert.equal("integer", math.type(metadata.ctime_ns))
+        elseif platform.windows then
             assert.is_nil(metadata.device)
             assert.is_nil(metadata.inode)
         else
@@ -187,7 +325,7 @@ describe("compiler I/O strategy", function()
         end
         assert.is_number(metadata.modified_seconds)
         assert.is_number(metadata.modified_nanoseconds)
-        assert.equal("coarse", metadata.time_precision)
+        assert.equal(precise and "ns" or "coarse", metadata.time_precision)
         assert.is_true(metadata.modified_nanoseconds >= 0)
         assert.is_true(metadata.modified_nanoseconds < 1000000000)
 
@@ -196,7 +334,7 @@ describe("compiler I/O strategy", function()
         local hard_link_metadata = assert(strategy:stat(hard_link))
         assert.equal(bytes, assert(strategy:read_file(hard_link)))
         assert.equal(metadata.size, hard_link_metadata.size)
-        if not platform.windows then
+        if precise or not platform.windows then
             assert.equal(metadata.device, hard_link_metadata.device)
             assert.equal(metadata.inode, hard_link_metadata.inode)
         end
@@ -646,11 +784,12 @@ describe("Windows synchronous compiler I/O", function()
         end
     end)
 
-    it("uses LuaFileSystem metadata and lexical existing paths on Windows", function()
+    coarse_stat_it("uses LuaFileSystem metadata and lexical existing paths on Windows", function()
         local attributes = { mode = "file", permissions = "rw-rw-rw-",
             size = 4294967419, dev = 7, ino = 0, modification = 1790816523 }
         local metadata = { kind = "file", mode = 0x81B6, size = 4294967419,
-            modified_seconds = 1790816523, modified_nanoseconds = 0, time_precision = "coarse" }
+            modified_seconds = 1790816523, modified_nanoseconds = 0,
+            time_precision = "coarse", precision = "coarse" }
         local calls = {}
         local function query(name, path)
             calls[#calls + 1] = { name, path }

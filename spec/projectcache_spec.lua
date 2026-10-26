@@ -765,12 +765,7 @@ describe("declared project manifests", function()
             load_module("baseline_consumer", consumer_source(0),
                 { baseline_provider = provider }, { io = strategy, cache_adapter = adapter })
             local old_observation = provider.c_header_dependencies[1].observation
-            local old_stamp
-            if platform.windows then
-                assert.is_nil(old_observation)
-            else
-                old_stamp = assert(old_observation).modified_seconds
-            end
+            local precise = old_observation and old_observation.precision == "ns"
             local stamp = assert(lfs.attributes(header, "modification"))
             assert(lfs.touch(header, stamp + 1, stamp + 1))
             local current, restat_error, changed = driver.restat_c_header_dependencies(
@@ -784,13 +779,10 @@ describe("declared project manifests", function()
                 load_module("baseline_consumer", consumer_source(index), { baseline_provider = provider }, {
                     io = strategy, header_inputs = current, cache_adapter = adapter,
                 })
-                assert.is_true(reads > previous_reads)
+                if precise then assert.equal(previous_reads, reads)
+                else assert.is_true(reads > previous_reads) end
             end
-            if platform.windows then
-                assert.is_nil(provider.c_header_dependencies[1].observation)
-            else
-                assert.equal(old_stamp, provider.c_header_dependencies[1].observation.modified_seconds)
-            end
+            assert.same(old_observation, provider.c_header_dependencies[1].observation)
         end)
         os.remove(header)
         assert.is_true(ok, err)

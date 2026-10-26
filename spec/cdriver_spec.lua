@@ -696,6 +696,61 @@ describe("semantic C header validation", function()
         assert.equal(cancellation, err)
     end)
 
+    it("uses native Sync observations for header reuse and detects preserved-mtime edits through ctime", function()
+        local support = require "titan"
+        local native = support._stat_precise
+        local path = platform.windows and "C:/header.h" or "/header.h"
+        local contents = "typedef long observed_type;\n"
+        local changed_ns, reads = 100000000001, 0
+        support._stat_precise = function(filename, follow)
+            assert.equal(path, filename)
+            assert.is_boolean(follow)
+            return { kind = "file", dev = "18446744073709551615",
+                ino = "0123456789abcdef0123456789abcdef",
+                size = #contents, mode = 0x81A4,
+                mtime_ns = 100000000000, ctime_ns = changed_ns }
+        end
+        local ok, failure = pcall(function()
+            local strategy = compiler_io.new_sync()
+            function strategy:readable(filename) assert.equal(path, filename); return true end
+            function strategy:read_file(filename)
+                assert.equal(path, filename)
+                reads = reads + 1
+                return contents
+            end
+            local input = assert(cpp.revalidate_header_input(
+                { kind = "file", path = path, identity = "unobserved" }, { io = strategy }))
+            assert.equal("ns", input.observation.precision)
+            assert.equal(0, input.observation.modified_nanoseconds)
+            assert.equal(1, input.observation.changed_nanoseconds)
+            assert.equal(1, reads)
+            reads = 0
+            cpp.clear_header_input_stats(strategy)
+            local current, err, changed = cpp.revalidate_header_input(input, { io = strategy })
+            assert.is_nil(err)
+            assert.is_false(changed)
+            assert.same(input, current)
+            assert.equal(0, reads)
+            assert.equal(0, cpp.header_input_stats(strategy).file_reads)
+            assert.equal(0, cpp.header_input_stats(strategy).file_hashes)
+            assert.equal(1, cpp.header_input_stats(strategy).metadata_reuses)
+            contents = "typedef char observed_type;\n"
+            changed_ns = changed_ns + 1
+            local updated, update_error, differs, reason = cpp.revalidate_header_input(input, { io = strategy })
+            assert.is_nil(update_error)
+            assert.is_true(differs)
+            assert.equal("content", reason)
+            assert.not_equal(input.identity, updated.identity)
+            assert.equal(input.observation.size, updated.observation.size)
+            assert.equal(input.observation.modified_seconds, updated.observation.modified_seconds)
+            assert.equal(input.observation.modified_nanoseconds, updated.observation.modified_nanoseconds)
+            assert.equal(2, updated.observation.changed_nanoseconds)
+            assert.equal(1, reads)
+        end)
+        support._stat_precise = native
+        if not ok then error(failure, 0) end
+    end)
+
     for _, precision in ipairs({ "coarse", "unknown", "absent" }) do
         it("hashes bytes with " .. precision .. " precision even at a nonzero nanosecond", function()
             local world, input = fixture()
@@ -996,6 +1051,9 @@ describe("completed C header payload transport", function()
             return true
         end
         local strategy = compiler_io.new_sync()
+        local observation = assert(strategy:stat(path))
+        local precise = observation.time_precision == "ns"
+        local expected_refreshes = observation.device ~= nil and observation.inode ~= nil and 1 or 0
         local options = { io = strategy, cache_adapter = adapter }
         assert_process_file(path, options)
         local key, original = next(payloads)
@@ -1006,20 +1064,21 @@ describe("completed C header payload transport", function()
         assert_process_file(path, options)
         assert.equal(1, matches)
         assert.equal(1, puts)
-        assert.equal(platform.windows and 0 or 1, refreshes)
+        assert.equal(expected_refreshes, refreshes)
         assert.equal(original, payloads[key])
         assert.equal(1, cdriver.process_cache_stats(strategy).file_reads)
         assert.equal(1, cdriver.process_cache_stats(strategy).file_hashes)
         cdriver.clear_process_cache(strategy)
         assert_process_file(path, options)
-        assert.equal(platform.windows and 0 or 1, refreshes)
-        assert.equal(1, cdriver.process_cache_stats(strategy).file_reads)
-        assert.equal(1, cdriver.process_cache_stats(strategy).file_hashes)
+        assert.equal(expected_refreshes, refreshes)
+        assert.equal(precise and 0 or 1, cdriver.process_cache_stats(strategy).file_reads)
+        assert.equal(precise and 0 or 1, cdriver.process_cache_stats(strategy).file_hashes)
     end)
 
     it("backfills touched observations through a legacy byte-only adapter", function()
         local path = header("typedef int legacy_touch;\n")
         local strategy = compiler_io.new_sync()
+        local precise = assert(strategy:stat(path)).time_precision == "ns"
         local options = { io = strategy, cache_adapter = adapter }
         assert_process_file(path, options)
         local stamp = assert(lfs.attributes(path, "modification"))
@@ -1031,8 +1090,8 @@ describe("completed C header payload transport", function()
         cdriver.clear_process_cache(strategy)
         assert_process_file(path, options)
         assert.equal(1, matches)
-        assert.equal(1, cdriver.process_cache_stats(strategy).file_reads)
-        assert.equal(1, cdriver.process_cache_stats(strategy).file_hashes)
+        assert.equal(precise and 0 or 1, cdriver.process_cache_stats(strategy).file_reads)
+        assert.equal(precise and 0 or 1, cdriver.process_cache_stats(strategy).file_hashes)
     end)
 
     for _, flag in ipairs({ "-include", "-imacros" }) do
