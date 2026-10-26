@@ -1131,6 +1131,18 @@ local function parsed_words(value, label)
     return words
 end
 
+function perf.compiler_command()
+    local command, err = parsed_words(driver.CC, "CC")
+    if not command then return nil, err end
+    -- POSIX CC may use the shell builtin to replace its command shell. It is
+    -- not an executable, and argv-based compiler queries must omit it too.
+    if not platform.windows and command[1] == "exec" then
+        table.remove(command, 1)
+    end
+    if #command == 0 then return nil, "CC command is empty" end
+    return command
+end
+
 local function command_argv(argv)
     if platform.windows then return platform.windows_command(argv, false) end
     local quoted = {}
@@ -1175,9 +1187,8 @@ function driver.run_link_command(argv, verbose, output)
             return nil, "link command must be a dense argument array"
         end
     end
-    local command, err = parsed_words(driver.CC, "CC")
+    local command, err = perf.compiler_command()
     if not command then return nil, err end
-    if #command == 0 then return nil, "CC command is empty" end
     for index = 1, #command do
         if argv[index] ~= command[index] then
             return nil, "link command does not match the configured CC command prefix"
@@ -1355,9 +1366,8 @@ local function compiler_argv(include_extra_compile_flags, context)
         if not ok then return nil, err end
         if not closed then return nil, close_error end
     end
-    local cc, err = parsed_words(driver.CC, "CC")
+    local cc, err = perf.compiler_command()
     if not cc then return nil, err end
-    if #cc == 0 then return nil, "CC command is empty" end
     if driver.BUILD_PROFILE == "production" and driver.CFLAGS == default_cflags then
         local strategy = supplied_context and supplied_context.io
         if not strategy then
@@ -1453,9 +1463,8 @@ end
 -- cprobe is told not to synthesize a second `-std` spelling.
 function driver.toolchain_descriptor(context)
     if driver.TOOLCHAIN_ERROR then return nil, driver.TOOLCHAIN_ERROR end
-    local cc, err = parsed_words(driver.CC, "CC")
+    local cc, err = perf.compiler_command()
     if not cc then return nil, err end
-    if #cc == 0 then return nil, "CC command is empty" end
 
     local effective, compile_err = compiler_argv(true, context)
     if not effective then return nil, compile_err end
@@ -6308,6 +6317,11 @@ function driver.worker_configuration(context)
     local configuration, configuration_error =
         driver.incremental_configuration(context)
     if not configuration then return nil, configuration_error end
+    -- This is requested lazily, after graph/output preflight and before the
+    -- first worker starts. Source-checkout runtime builds belong exclusively
+    -- to the coordinator, including a certified hit that falls back to a miss.
+    local runtime_ok, runtime_error = perf.check_runtime(context.probe_verbose)
+    if not runtime_ok then return nil, runtime_error end
     local policy = context.codegen_policy or {}
     return {
         protocol = version.BUILD_WORKER_PROTOCOL,
@@ -6318,6 +6332,7 @@ function driver.worker_configuration(context)
             emit_line_directives = driver.EMIT_LINE_DIRECTIVES,
             output_root = driver.OUTPUT_ROOT,
             clang_format = driver.CLANG_FORMAT,
+            runtime_prepared = perf.runtime_checked == true,
             extra_cppflags = copy_strings(driver.EXTRA_CPPFLAGS),
             extra_cflags = copy_strings(driver.EXTRA_CFLAGS),
             native_compile_flags = driver.NATIVE_COMPILE_FLAGS and
@@ -6411,6 +6426,7 @@ function driver.new_worker_context(configuration, io_strategy)
     end
     context.incremental_options = options
     context.incremental_configuration = configuration.configuration
+    perf.runtime_checked = settings.runtime_prepared == true
     return context
 end
 
@@ -7533,11 +7549,9 @@ local function runtime_archive_is_current(runtime_lib)
     return true
 end
 
-local runtime_checked = false
-
-local function check_runtime(verbose)
-    runtime_checked = runtime_checked or driver.INSTALLED
-    if runtime_checked then return true end
+function perf.check_runtime(verbose)
+    perf.runtime_checked = perf.runtime_checked or driver.INSTALLED
+    if perf.runtime_checked then return true end
     local runtime_lib = driver.TITAN_RUNTIME_PATH .. "libtitan.a"
     if platform.getenv("TITAN_RUNTIME_PREBUILT") ~= "1" then
         local make, err = parsed_words(platform.getenv("MAKE") or "make", "MAKE")
@@ -7564,7 +7578,7 @@ local function check_runtime(verbose)
         return nil, "Titan runtime archive has invalid members: " ..
             tostring(archive_err)
     end
-    runtime_checked = true
+    perf.runtime_checked = true
     return true
 end
 
@@ -8108,7 +8122,7 @@ local function prepare_compile(
         or split_threshold % 1 ~= 0 then
         return nil, "split_threshold requires a nonnegative integer"
     end
-    local runtime_ok, runtime_err = check_runtime(verbose)
+    local runtime_ok, runtime_err = perf.check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
     sourcef = sourcef or modname:gsub("[.]", "/") .. ".titan"
     static_deps = static_deps or {}
@@ -10431,7 +10445,7 @@ local function prepare_library_link(soname, libnames, link, verbose,
     if platform.windows and (not module_names or #module_names == 0) then
         return nil, "Windows DLL linking requires its logical module inventory"
     end
-    local runtime_ok, runtime_err = check_runtime(verbose)
+    local runtime_ok, runtime_err = perf.check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
     local output_ok, output_err = ensure_output_parent(soname)
     if not output_ok then return nil, output_err end
@@ -11733,6 +11747,73 @@ function driver.preflight_build_outputs(context, plan, options)
         input(selected.file or selected.archive)
     end
 
+    -- Reject graph-wide native-name collisions before any worker generates C.
+    -- Fresh sources contribute only declaration-independent symbols; checked
+    -- method/slot/private inventories still receive the final complete check.
+    do
+        local native_names, carried_types = {}, {}
+        for name in pairs(modules) do native_names[name] = true end
+        for _, name in ipairs(binary_names) do
+            native_names[name] = true
+            local imported = driver.imported[name]
+            local provider = imported and imported.static_provider
+            for carried, entry in pairs(provider and provider.entries or {}) do
+                native_names[carried] = true
+                carried_types[carried] = entry.type
+            end
+        end
+        for name in pairs(context.native_constraints) do native_names[name] = true end
+        local names = {}
+        for name in pairs(native_names) do names[#names + 1] = name end
+        table.sort(names, util.bytewise_less)
+        local mangled_owners, symbol_owners, errors = {}, {}, {}
+        for _, name in ipairs(names) do
+            local mangled = driver.mangle_module_name(name)
+            local previous = mangled_owners[mangled]
+            if previous and previous ~= name then
+                errors[#errors + 1] = "cannot link logical modules '" ..
+                    previous .. "' and '" .. name ..
+                    "': both use C symbol prefix '" .. mangled .. "'"
+            else
+                mangled_owners[mangled] = name
+                local info, imported = modules[name], driver.imported[name]
+                if imported == CIRCULAR_MARK then imported = nil end
+                local symbols, private_symbols
+                if info and info.saved then
+                    local native = info.saved.object_metadata
+                    symbols = native.external_symbols or
+                        coder.interface_external_symbols(name, info.type)
+                    private_symbols = native.private_symbols
+                elseif info then
+                    -- An empty public interface avoids inferring unchecked
+                    -- type-dependent slots while using the coder's own names.
+                    local declarations = { _type = types.Module(name, {}) }
+                    for _, node in ipairs(info.nodes) do
+                        if node._tag == "Ast.TopLevelFunc" or
+                           node._tag == "Ast.TopLevelForeignFunc" then
+                            declarations[#declarations + 1] = node
+                        end
+                    end
+                    symbols = coder.external_symbols(name, declarations)
+                elseif imported and imported.external_symbols then
+                    symbols, private_symbols =
+                        imported.external_symbols, imported.private_symbols
+                else
+                    local interface = imported and imported.type or
+                        carried_types[name] or context.native_interface_types[name]
+                    if interface then
+                        -- Recovered ABI-2 interfaces do not promise optional
+                        -- exports such as the native ABI-value query.
+                        symbols = coder.interface_external_symbols(name, interface)
+                    end
+                end
+                driver.record_module_symbols(symbol_owners, name, symbols, errors)
+                driver.record_module_symbols(symbol_owners, name, private_symbols, errors)
+            end
+        end
+        if #errors > 0 then return nil, table.concat(errors, "\n") end
+    end
+
     -- Resolve just the transparent signature shapes needed for main selection,
     -- including local/imported aliases; the ordinary checker remains authority
     -- for all declaration validity and function bodies.
@@ -11854,8 +11935,11 @@ function driver.preflight_build_outputs(context, plan, options)
         if stem and reserved.existing_mode == "file" then
             local contents, read_error = context.io:read_file(reserved.path, 16384)
             if not contents then return nil, read_error end
-            local owned = contents:sub(1, #driver.GENERATED_C_MARKER) ==
-                driver.GENERATED_C_MARKER
+            -- Coverage conversion places its exact first line directive
+            -- before the marker; retain its physical generated-line anchors.
+            local marker_start = contents:match('^#line 2 "[^\r\n]*"\r?\n()') or 1
+            local owned = contents:sub(marker_start,
+                marker_start + #driver.GENERATED_C_MARKER - 1) == driver.GENERATED_C_MARKER
             if not owned then
                 local compact = contents:gsub("%s+", "")
                 local private_include = "#include" ..
@@ -12325,7 +12409,7 @@ function driver.run_standalone_archive_probe(
         link, verbose, extra_objects, validate_titan_support, options)
     options = options or {}
     if #module_names == 0 and not validate_titan_support then return true end
-    local runtime_ok, runtime_err = check_runtime(verbose)
+    local runtime_ok, runtime_err = perf.check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
     local base, base_error = create_compile_log()
     if not base then return nil, base_error end
@@ -12526,7 +12610,7 @@ function driver.compile_program(modname, libnames, link, verbose, extra_objects,
                                 program_output, static_archives,
                                 entrypoint_output, program_name, options)
     options = options or {}
-    local runtime_ok, runtime_err = check_runtime(verbose)
+    local runtime_ok, runtime_err = perf.check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
     if platform.windows then
         return compile_windows_program(modname, libnames, link, verbose,
