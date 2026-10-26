@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Coverage uses the ordinary Windows native build and run harness.
+# Coverage retains its own compiler output tree and gcno inventory in WORKSPACE,
+# while reusing the ordinary SDK refresh, incremental build and serial runner.
 set -euo pipefail
 if [[ ${MSYSTEM:-} != CLANG64 || $# -lt 2 ||
       ( $1 != build && $1 != run ) ||

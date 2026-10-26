@@ -32,6 +32,6 @@ if [[ ${STDLIB_USE_INSTALLED_RUNTIME:-1} == 0 ]]; then
   export TITAN_COMPILER_BOOTSTRAP="$winbuild/runtime"
   compiler=(-E -e 'package.path="./?.lua;./?/init.lua;" .. package.path; package.cpath=os.getenv("TITAN_COMPILER_BOOTSTRAP") .. "/?.dll;" .. package.cpath' ./titanc)
 fi
-"$lua" "${compiler[@]}" --output "$winbuild/out" --source-first -j "$TITAN_JOBS" --tree "$winsource" \
+"$lua" "${compiler[@]}" --output "$winbuild/out" --source-first --incremental -j "$TITAN_JOBS" --tree "$winsource" \
   "${roots[@]}" -X "$winbuild/runtime/ltitanlib.o" "$winbuild/runtime/libtitan-lpeglabel.a"
 echo "Built the Windows standard-library DLL and ${#roots[@]} generated shims."
