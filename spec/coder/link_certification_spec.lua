@@ -99,7 +99,7 @@ local function precise_model(root)
 end
 
 describe("final link certificates", function()
-    local root, spec
+    local root, spec, previous_cwd
     local function prepare(overrides)
         local request = clone(spec)
         for key, value in pairs(overrides or {}) do request[key] = value end
@@ -117,6 +117,7 @@ describe("final link certificates", function()
         return certificate.check(ctx, ticket)
     end
     before_each(function()
+        previous_cwd = assert(lfs.currentdir())
         root = temporary.name(); assert(os.remove(root)); assert(lfs.mkdir(root))
         root = certificate.canonical_path(context(), root)
         for _, leaf in ipairs({ "main.o", "side.o", "helper.o", "payload.a", "provider.so", "runtime.a", "native.a", "program" }) do
@@ -136,7 +137,10 @@ describe("final link certificates", function()
             native_libraries = { backend = "gnu", dependency_file = root .. "/link.d" },
         }
     end)
-    after_each(function() remove(root) end)
+    after_each(function()
+        assert(lfs.chdir(previous_cwd))
+        remove(root)
+    end)
 
     it("accepts an unchanged complete output set without rewriting it", function()
         local ticket = commit()
@@ -175,7 +179,7 @@ describe("final link certificates", function()
         relative.outputs = { { path = "./deliverables/bin/program" },
             { path = "./deliverables/bin/program.dSYM", kind = "directory" } }
         local warm_context = context()
-        function warm_context.io:cwd() return root end
+        assert(lfs.chdir(root))
         local warm = certificate.prepare(warm_context, relative)
         assert.equal(cold.key, warm.key)
         assert.equal(cold.directory, warm.directory)
