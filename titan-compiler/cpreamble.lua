@@ -4,24 +4,50 @@
 -- macro state during validation and production compilation.
 local cpreamble = {}
 
-cpreamble.fixed_includes = [[#include <stdlib.h>
-#include <stddef.h>
-#include <string.h>
-#include <math.h>
+-- One inventory feeds both emitted module includes and certification. Runtime
+-- includes are also closed over by the probe, without changing module macro
+-- visibility merely to certify entrypoint/FFI support.
+cpreamble.include_constants = {
+    { "<stdlib.h>", module = true },
+    { "<stddef.h>", module = true },
+    { "<string.h>", module = true },
+    { "<math.h>", module = true },
+    { '"luaconf.h"', module = true },
+    { '"lauxlib.h"', module = true },
+    { '"lstate.h"', module = true },
+    { '"lgc.h"', module = true },
+    { '"ltable.h"', module = true },
+    { '"ltm.h"', module = true },
+    { '"lfunc.h"', module = true },
+    { '"lstring.h"', module = true },
+    { '"lvm.h"', module = true },
+    { '"lobject.h"', module = true },
+    { '"ldo.h"', module = true },
+    { '"titan.h"', module = true },
+    { '"lua.h"' },
+    { '"lualib.h"' },
+    { '<titan/ffi.h>' },
+    { '<windows.h>', condition = "defined(_WIN32)" },
+    { '<wchar.h>', condition = "defined(_WIN32)" },
+    { '<unistd.h>', condition = "!defined(_WIN32)" },
+    { '<limits.h>', condition = "!defined(_WIN32)" },
+    { '<mach-o/dyld.h>', condition = "defined(__APPLE__)" },
+}
 
-#include "luaconf.h"
-#include "lauxlib.h"
-#include "lstate.h"
-#include "lgc.h"
-#include "ltable.h"
-#include "ltm.h"
-#include "lfunc.h"
-#include "lstring.h"
-#include "lvm.h"
-#include "lobject.h"
-#include "ldo.h"
+function cpreamble.includes(all)
+    local lines = {}
+    for _, include in ipairs(cpreamble.include_constants) do
+        if all or include.module then
+            if include.condition then lines[#lines + 1] = "#if " .. include.condition end
+            lines[#lines + 1] = "#include " .. include[1]
+            if include.condition then lines[#lines + 1] = "#endif" end
+        end
+    end
+    return table.concat(lines, "\n")
+end
 
-#include "titan.h"]]
+cpreamble.fixed_includes = cpreamble.includes(false)
+cpreamble.certification_includes = cpreamble.includes(true) .. "\n"
 
 cpreamble.fixed_prefix = cpreamble.fixed_includes .. [[
 

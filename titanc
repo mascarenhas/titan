@@ -10,6 +10,21 @@ local test_runner = require 'titan-compiler.test_runner'
 local util = require 'titan-compiler.util'
 local platform = require 'titan-compiler.platform'
 local coverage = require 'titan-compiler.coverage'
+local build = require 'titan-compiler.build'
+local path = require 'titan-compiler.path'
+local incremental = require 'titan-compiler.incremental'
+local nativeinputs = require 'titan-compiler.nativeinputs'
+local linkcertificate = require 'titan-compiler.linkcertificate'
+
+-- Native switches keep their exact command-line order across kinds.
+local native_cli = {}
+local function native_switch(kind)
+    return function(result, target, value)
+        result[target] = result[target] or {}
+        table.insert(result[target], value)
+        native_cli[#native_cli + 1] = { kind = kind, value = value }
+    end
+end
 
 -- Implementation notes: doc/implementation/driver.md#the-titanc-command-line
 local p = argparse('titan', 'Titan compiler')
@@ -22,11 +37,11 @@ p:option('-j --jobs',
     'Maximum concurrent native compiler jobs: generated-C compilations and batched C probes (default: TITAN_JOBS or 4).')
 p:option('--c-parts',
     'Maximum generated-C translation units per module above the split threshold (default: TITAN_C_PARTS, 4 on Linux, or 1 on macOS/Windows).')
-p:option('--launcher-name', 'Windows standalone/test launcher filename in bin (default: logical module name).')
+p:option('--exe', 'Exact executable destination, relative to the current directory (Windows appends .exe when absent; the DLL provider stays under --output).')
 p:flag('--static', 'Prefer static Titan archive providers (unsupported on Windows).')
 p:flag('--source-first', 'Prefer available source modules to compiled providers.')
-p:flag('--incremental', 'Reuse source module objects that are no older than their sources; the build system owns other invalidation.')
-p:flag('-c --compile-only', 'Generate objects and headers only; always rebuild explicitly requested modules.')
+p:flag('--incremental', 'Reuse each source module object, including requested roots, whose certificate still matches: own sources, compiler, native configuration, C headers, dependency interfaces and bindings (-v explains each miss).')
+p:flag('-c --compile-only', 'Generate objects and headers only; without --incremental every module is rebuilt.')
 p:flag('--test', 'Build native Titan tests (objects only with --compile-only).')
 p:flag('--coverage', 'Instrument source modules without test_ functions and report when the test executable runs.')
 p:option('--coverage-backend', 'Coverage backend: gcc-gcov (Unix default) or llvm-gcov (Windows default).')
@@ -43,21 +58,40 @@ p:flag('--no-line-directives',
 p:option('-u --lua', 'Path to Lua source tree (source checkouts only; installed compilers use their matching Lua SDK).')
 p:option('-t --tree', 'Root of the source tree, used for looking for source modules (defaults to ".").')
 p:option('-o --output', 'Folder for generated files, preserving the source hierarchy (created if needed).')
-p:option('-l --link', 'Comma-separated list of additional libraries to link into module.')
+p:option('-l --link', 'Library linked into the final executable or provider; repeatable, comma lists allowed, order kept.'):count('*'):action(native_switch('library'))
+p:option('-L --library-dir', 'Native library search directory for final links; repeatable, order kept.'):count('*'):action(native_switch('libdir'))
+p:option('-I --include-dir', 'Native include directory for C headers, probes and generated C; repeatable, order kept, searched before the SDK.'):count('*'):action(native_switch('include'))
+p:option('-D --define', 'Native preprocessor definition NAME[=VALUE]; repeatable, order kept.'):count('*'):action(native_switch('define'))
+p:option('--cflag', 'One native compile argument, written --cflag=-pthread; repeatable, order kept.'):count('*'):action(native_switch('cflag'))
+p:option('--ldflag', 'One native link argument, written --ldflag=-Wl,--as-needed; repeatable, order kept.'):count('*'):action(native_switch('ldflag'))
+p:option('--c-source', 'C file compiled and certified by this invocation, linked before -X payloads; repeatable.'):count('*')
+p:option('--test-dir', 'With --test, use every source module below this directory whose final name component follows the test convention (test, tests, spec, specs, *_test(s), *_spec(s)) as a root; repeatable.'):count('*')
+p:option('--test-exclude', 'With --test-dir, exclude this discovered logical module; repeatable.'):count('*')
 p:option('-X --extra-object',
     'Additional native object/archive payload carried into the linked provider outputs.'):args("*")
 local args = p:parse()
 
 local resolver_context
+-- Output-domain locks; process exit also releases them.
+local output_locks
+local function release_locks()
+    if output_locks then
+        local locks = output_locks
+        output_locks = nil
+        locks:release()
+    end
+end
 local resolver_cleanup <close> = setmetatable({}, {
     __close = function()
-        if not resolver_context then return end
-        local context = resolver_context
-        resolver_context = nil
-        -- Preserve the original exceptional-exit diagnostic. Ordinary exits
-        -- use exit() or the explicit success close below and can report a
-        -- cleanup failure directly.
-        pcall(driver.close_resolver_context, context)
+        if resolver_context then
+            local context = resolver_context
+            resolver_context = nil
+            -- Preserve the original exceptional-exit diagnostic. Ordinary
+            -- exits use exit() or the explicit success close below and can
+            -- report a cleanup failure directly.
+            pcall(driver.close_resolver_context, context)
+        end
+        pcall(release_locks)
     end,
 })
 
@@ -72,6 +106,7 @@ local function exit(msg)
                 tostring(close_err)
         end
     end
+    release_locks()
     io.stderr:write(msg, "\n")
     os.exit(1)
 end
@@ -82,6 +117,7 @@ local function finish()
     if not closed then
         exit("failed to clean C probe service: " .. tostring(close_err))
     end
+    release_locks()
 end
 
 if args.print_root then
@@ -97,8 +133,10 @@ if args.print_root then
     io.stdout:write(root, "\n")
     return
 end
-if #args.module == 0 then
-    exit("at least one module name is required (or use --print-root)")
+if #args.module == 0 and #args.test_dir == 0 and
+   not (args.compile_only and #args.c_source > 0) then
+    exit("at least one module name is required (or use --print-root, " ..
+        "--test-dir, or -c --c-source)")
 end
 
 if args.incremental and args.print_ast then
@@ -113,12 +151,20 @@ if platform.windows and args.static then
     exit("--static is not supported on Windows; Titan modules use DLL providers")
 end
 if args.compile_only then
-    if args.launcher_name then
-        exit("--launcher-name cannot be combined with --compile-only")
+    if args.exe then
+        exit("--exe cannot be combined with --compile-only")
     end
-    if args.link ~= nil or args.extra_object ~= nil or args.no_uv_bootstrap then
-        exit("--compile-only cannot be combined with -l, -X, or --no-uv-bootstrap")
+    if #args.link > 0 or #args.library_dir > 0 or #args.ldflag > 0 or
+       args.extra_object ~= nil or args.no_uv_bootstrap then
+        exit("--compile-only cannot be combined with -l, -L, --ldflag, -X, " ..
+            "or --no-uv-bootstrap")
     end
+end
+if (#args.test_dir > 0 or #args.test_exclude > 0) and not args.test then
+    exit("--test-dir and --test-exclude require --test")
+end
+if #args.test_exclude > 0 and #args.test_dir == 0 then
+    exit("--test-exclude requires --test-dir")
 end
 
 local jobs_text = args.jobs or platform.getenv("TITAN_JOBS") or "4"
@@ -175,12 +221,27 @@ resolver_context = driver.new_resolver_context({
     output_root = args.output,
     cache_adapter = { sha256_binary = support._sha256_binary },
     jobs = jobs,
+    -- The real script, not a LuaRocks wrapper: object certificates hash the
+    -- frontend that actually runs.
+    frontend = arg and arg[0] or nil,
 })
 if driver.TOOLCHAIN_ERROR then exit(driver.TOOLCHAIN_ERROR) end
 if args.lua and driver.INSTALLED then
     exit("--lua is only available in a source checkout; the installed " ..
         "compiler must use its matching Lua SDK")
 end
+-- Defaults, then the supported TITAN_EXTRA_* ambient inputs, then CLI
+-- switches, each in its own order; normalized once for every native phase.
+local normalized_native, native_error = nativeinputs.normalize({
+    env = {
+        TITAN_EXTRA_CPPFLAGS = driver.EXTRA_CPPFLAGS,
+        TITAN_EXTRA_CFLAGS = driver.EXTRA_CFLAGS,
+        TITAN_EXTRA_LDFLAGS = driver.EXTRA_LDFLAGS,
+    },
+    cli = { ordered = native_cli, c_sources = args.c_source, exe = args.exe },
+})
+if not normalized_native then exit(native_error) end
+driver.apply_native_inputs(normalized_native)
 local configured, configure_error =
     driver.configure_foreign_c(resolver_context)
 if not configured and configure_error then exit(configure_error) end
@@ -192,9 +253,8 @@ if args.coverage then
     local coverage_error
     coverage_build, coverage_error = coverage.prepare(driver, args, resolver_context.io)
     if not coverage_build then exit(coverage_error) end
-    driver.EXTRA_LDFLAGS = { table.unpack(driver.EXTRA_LDFLAGS or {}) }
-    table.insert(driver.EXTRA_LDFLAGS, "--coverage")
-    table.insert(driver.EXTRA_LDFLAGS, "-fno-lto")
+    table.insert(driver.NATIVE_LINK_FLAGS, "--coverage")
+    table.insert(driver.NATIVE_LINK_FLAGS, "-fno-lto")
 end
 
 local errors = {}
@@ -210,35 +270,107 @@ for _, modname in ipairs(requested_modules) do
     end
     requested_roots[modname] = true
 end
-local loader = driver.defaultloader({}, {
+if #args.test_dir > 0 then
+    -- Discovery returns every root (explicit ones included, in order) and
+    -- the ordinary descriptors it selected; its own errors are final.
+    local discovered, discovered_sources = require("titan-compiler.testroots")
+        .discover(resolver_context, args.test_dir, args.test_exclude,
+            requested_modules)
+    if not discovered then exit(discovered_sources) end
+    requested_modules, requested_roots = {}, {}
+    for _, modname in ipairs(discovered) do
+        if modname == test_runner.MODULE_NAME then
+            exit("logical module '" .. test_runner.MODULE_NAME ..
+                "' is reserved by --test")
+        end
+        if not requested_roots[modname] then
+            requested_roots[modname] = true
+            requested_modules[#requested_modules + 1] = modname
+        end
+    end
+    for modname, source in pairs(discovered_sources or {}) do
+        source_overrides[modname] = source
+    end
+end
+local loader_options = {
     source_roots = requested_roots,
     incremental = args.incremental,
-    forced_source_roots = args.compile_only and requested_roots or {},
+    test = args.test,
     source_overrides = source_overrides,
     context = resolver_context,
     coverage = coverage_build,
     output_root = args.output,
     c_parts = c_parts,
-})
+}
+
+-- One exclusive lock per output domain, held from certification through
+-- publication; a second invocation sharing the domain waits and recertifies.
+local lock_directories = {
+    args.output or driver.TITAN_SOURCE_PATH:match("^[^;]+") or ".",
+}
+if args.exe then
+    local exe_directory, directory_error =
+        driver.prepare_output_root(path.dirname(args.exe))
+    if not exe_directory then exit(directory_error) end
+    lock_directories[#lock_directories + 1] = exe_directory
+end
+local lock_error
+output_locks, lock_error = build.lock_outputs(
+    resolver_context.io, lock_directories, { verbose = args.verbose })
+if not output_locks then exit(lock_error) end
+
+local loader
+if args.print_ast then
+    -- A debugging view of each root's checked AST: check in this process,
+    -- where the ASTs live, and compile through the ordinary batch below.
+    loader = driver.defaultloader({}, loader_options)
+    for _, modname in ipairs(requested_modules) do
+        local ok, errs = checker.checkimport(modname, loader)
+        if not ok then
+            table.insert(errors, errs)
+        else
+            if #errs > 0 then table.insert(errors, table.concat(errs, "\n")) end
+            local ast = driver.imported[modname].ast
+            if ast then print(parser.pretty_print_ast(ast)) end
+        end
+    end
+    if #errors > 0 then exit(table.concat(errors, "\n")) end
+else
+    -- The coordinator certifies every module of the requested closure,
+    -- restores hits, compiles misses in worker processes and publishes
+    -- them; it returns with every source module restored and the resolver
+    -- finalized.
+    local built, diagnostics, signal = build.run(resolver_context, {
+        roots = requested_modules,
+        loader_options = loader_options,
+        incremental = args.incremental,
+        compile_only = args.compile_only,
+        test = args.test,
+        jobs = jobs,
+        verbose = args.verbose,
+        pretty_print = args.pretty_print,
+        c_parts = c_parts,
+        coverage = coverage_build ~= nil,
+        output_root = args.output,
+        locks = output_locks,
+    })
+    if signal then
+        driver.close_resolver_context(resolver_context)
+        resolver_context = nil
+        require("titan-compiler.jobs").propagate(signal)
+    end
+    if not built then exit(table.concat(diagnostics, "\n")) end
+    loader = resolver_context.loader
+end
 
 for _, modname in ipairs(requested_modules) do
-    local ok, errs = checker.checkimport(modname, loader)
-    if not ok then
-        table.insert(errors, errs)
-    else
-        if #errs > 0 then table.insert(errors, table.concat(errs, "\n")) end
-        local mod = driver.imported[modname]
-        local ast = mod.ast
-        if not args.test and not args.compile_only
-           and (mod.has_main or ast and checker.has_main(ast)) then
-            if main_module then
-                table.insert(errors, modname .. ": multiple main functions found (already declared in " .. main_module .. ")")
-            else
-                main_module = modname
-            end
-        end
-        if args.print_ast and ast then
-            print(parser.pretty_print_ast(ast))
+    local mod = driver.imported[modname]
+    if not args.test and not args.compile_only
+       and (mod.has_main or mod.ast and checker.has_main(mod.ast)) then
+        if main_module then
+            table.insert(errors, modname .. ": multiple main functions found (already declared in " .. main_module .. ")")
+        else
+            main_module = modname
         end
     end
 end
@@ -249,22 +381,257 @@ if coverage_build then
 end
 if #errors > 0 then exit(table.concat(errors, "\n")) end
 
-local test_modules = {}
 local test_program_output
 local test_entrypoint_output
+local test_cases
 if args.test then
     if driver.imported[test_runner.MODULE_NAME] then
         exit("logical module '" .. test_runner.MODULE_NAME ..
             "' is reserved by --test")
     end
-    local cases
-    cases, test_modules = test_runner.discover(
+    test_cases = test_runner.discover(
         requested_modules, driver.imported, driver.dependency_closure)
-    if not args.compile_only then
-        test_program_output = assert(
-            driver.imported[requested_modules[1]].program_output)
-        test_entrypoint_output = test_program_output .. "__test_entrypoint.c"
-        local runner_source, runner_source_err = test_runner.render(cases)
+end
+local builds_program = main_module ~= nil or
+    (args.test and not args.compile_only)
+if args.exe and not builds_program then
+    exit("--exe is only valid when compiling a standalone or test executable")
+end
+if args.no_uv_bootstrap and not builds_program then
+    exit("--no-uv-bootstrap is only valid when compiling a standalone executable")
+end
+if coverage_build and not args.compile_only and not builds_program then
+    exit("--coverage requires a test or standalone executable; use -c for coverage objects")
+end
+
+-- --c-source nodes are preprocessed and certified on every invocation; a
+-- hit runs no native compile. Their objects take the native-payload
+-- position, before -X payloads.
+local c_objects = {}
+if #normalized_native.c_sources > 0 then
+    local compile_argv, compile_error = driver.generated_compile_prefix()
+    if not compile_argv then exit(compile_error) end
+    local toolchain, toolchain_error = driver.toolchain_descriptor(resolver_context)
+    if not toolchain then exit(toolchain_error) end
+    local compiled, native_compile_error = nativeinputs.compile(resolver_context, {
+        sources = normalized_native.c_sources,
+        output_root = lock_directories[1],
+        compile_argv = compile_argv,
+        toolchain = toolchain,
+        incremental = args.incremental == true,
+    })
+    if not compiled then exit(native_compile_error) end
+    for _, object in ipairs(compiled) do
+        if args.verbose then
+            io.stderr:write("Titan native ", object.hit and "hit " or "miss ",
+                tostring(object.source), "\n")
+        end
+        c_objects[#c_objects + 1] = object
+    end
+end
+local extra_objects = {}
+for _, object in ipairs(c_objects) do extra_objects[#extra_objects + 1] = object.path end
+for _, input in ipairs(args.extra_object or {}) do
+    extra_objects[#extra_objects + 1] = input
+end
+if #extra_objects == 0 then extra_objects = nil end
+
+-- The final-link certificate gates every runner/entrypoint generation,
+-- archive probe, validation link and final link. A hit changes nothing.
+local link_ticket, program_path, windows_paths, coverage_runtime
+if not args.compile_only and not args.print_ast then
+    local planned, plan_errors = driver.finalize_resolver_context(resolver_context)
+    if not planned then exit(table.concat(plan_errors, "\n")) end
+    local root = args.test and requested_modules[1] or main_module
+    local outputs, kind = {}, "library"
+    if builds_program then
+        kind = args.test and "test" or "program"
+        if platform.windows then
+            local paths, path_error = driver.windows_program_paths(
+                args.test and test_runner.MODULE_NAME or main_module, args.exe,
+                args.test and requested_modules[1] or nil, args.output)
+            if not paths then exit(path_error) end
+            windows_paths = paths
+            outputs = { { path = paths.executable }, { path = paths.provider } }
+        else
+            program_path = args.exe or driver.imported[root].program_output or
+                root:gsub("[.]", "/")
+            outputs = { { path = program_path, executable = true } }
+            if driver.IS_DARWIN then
+                outputs[2] = { path = program_path .. ".dSYM", kind = "directory" }
+            end
+        end
+    else
+        local library, _, left, right =
+            driver.common_module_provider(requested_modules)
+        if not library then
+            exit("cannot link modules into one shared library: '" ..
+                tostring(left) .. "' and '" .. tostring(right) ..
+                "' have no common module prefix")
+        end
+        local seen, names = {}, {}
+        for name in pairs(resolver_context.source_names) do seen[name] = true end
+        for _, static_provider in ipairs(resolver_context.selected_static_providers) do
+            for name in pairs(static_provider.entries) do seen[name] = true end
+        end
+        for name in pairs(seen) do names[#names + 1] = name end
+        table.sort(names, util.bytewise_less)
+        local shims, library_output = driver.plan_module_shims(library, names, args.output)
+        if not shims then exit(library_output) end
+        outputs[1] = { path = library_output }
+        if not platform.windows then
+            outputs[#outputs + 1] = { path = (library_output:gsub("[.]so$", ".a")) }
+            if driver.IS_DARWIN then
+                outputs[#outputs + 1] = { path = library_output .. ".dSYM", kind = "directory" }
+            end
+        end
+        for _, shim in ipairs(shims) do outputs[#outputs + 1] = { path = shim.filename } end
+    end
+
+    local module_order = {}
+    for name in pairs(resolver_context.source_names) do
+        module_order[#module_order + 1] = name
+    end
+    table.sort(module_order, util.bytewise_less)
+    local objects = {}
+    for _, name in ipairs(module_order) do
+        for _, object in ipairs(driver.module_compiled_objects(driver.imported[name])) do
+            objects[#objects + 1] = object
+        end
+    end
+    local dynamic_order, providers = {}, {}
+    for name in pairs(resolver_context.dynamic_names) do
+        dynamic_order[#dynamic_order + 1] = name
+    end
+    table.sort(dynamic_order, util.bytewise_less)
+    for _, name in ipairs(dynamic_order) do
+        local filename = resolver_context.dynamic_names[name].filename
+        if filename then providers[#providers + 1] = filename end
+    end
+    local archives = {}
+    for _, static_provider in ipairs(resolver_context.selected_static_providers) do
+        archives[#archives + 1] = static_provider.archive
+    end
+    local runtime, runtime_flags = {}, {}
+    for _, input in ipairs(driver.INSTALLED and
+            driver.installed_link_inputs(driver.INSTALL_PATHS, driver.IS_DARWIN) or
+            driver.source_link_inputs()) do
+        if input:find("[/\\]") then runtime[#runtime + 1] = input
+        else runtime_flags[#runtime_flags + 1] = input end
+    end
+    if coverage_build and builds_program then
+        local inventory_error
+        coverage_runtime, inventory_error =
+            coverage.inventory(coverage_build, driver.imported)
+        if not coverage_runtime then exit(inventory_error) end
+    end
+    local configuration, configuration_error =
+        driver.incremental_configuration(resolver_context)
+    if not configuration then exit(configuration_error) end
+    local descriptor, descriptor_error = driver.toolchain_descriptor(resolver_context)
+    if not descriptor then exit(descriptor_error) end
+    local compile_prefix, prefix_error = driver.generated_compile_prefix()
+    if not compile_prefix then exit(prefix_error) end
+    local spec = {
+        output_root = lock_directories[1],
+        outputs = outputs,
+        roots = requested_modules,
+        kind = kind,
+        entry = {
+            module = args.test and test_runner.MODULE_NAME or main_module,
+            no_uv_bootstrap = args.no_uv_bootstrap == true,
+        },
+        no_uv_bootstrap = args.no_uv_bootstrap == true,
+        argv = driver.link_extra_flags(),
+        toolchain = {
+            compiler = (incremental.toolchain_identity(resolver_context, descriptor)),
+            ar = driver.AR, ranlib = driver.RANLIB,
+            rc = platform.getenv("RC") or "",
+        },
+        test_cases = test_cases,
+        templates = configuration.compiler,
+        coverage = coverage_runtime,
+        companions = windows_paths and {
+            manifest = driver.windows_launcher_manifest(),
+            relative_provider = windows_paths.relative_provider,
+        } or nil,
+        policy = {
+            uname = driver.UNAME or "", darwin = driver.IS_DARWIN == true,
+            profile = driver.BUILD_PROFILE,
+            target = driver.TARGET_PROFILE and driver.TARGET_PROFILE.identity or "",
+        },
+        bindings = resolver_context.native_bindings,
+        environment = {
+            runtime_flags = runtime_flags,
+            MACOSX_DEPLOYMENT_TARGET = platform.getenv("MACOSX_DEPLOYMENT_TARGET") or "",
+            SDKROOT = platform.getenv("SDKROOT") or "",
+        },
+        objects = objects,
+        c_objects = c_objects,
+        payloads = args.extra_object or {},
+        providers = providers,
+        archives = archives,
+        runtime = runtime,
+        native_libraries = {
+            backend = driver.native_link_backend(resolver_context),
+            compiler_argv = compile_prefix,
+        },
+    }
+    local prepared, ticket = pcall(linkcertificate.prepare, resolver_context, spec)
+    if not prepared then
+        if type(ticket) ~= "string" then error(ticket, 0) end
+        exit(ticket)
+    end
+    -- Generated public headers are restored under the lock even when the
+    -- final link hits; existing owned headers are preserved untouched.
+    local headers_ready, headers_error = driver.prepare_foreign_headers(
+        module_order, driver.imported, args.verbose, args.pretty_print)
+    if not headers_ready then exit(headers_error) end
+    local target = outputs[1].path
+    local hit, reason = linkcertificate.check(resolver_context, ticket)
+    if hit then
+        if args.verbose then io.stderr:write("Titan link hit ", target, "\n") end
+        finish()
+        return
+    end
+    if args.verbose then
+        io.stderr:write("Titan link miss ", target, ": ", tostring(reason), "\n")
+    end
+    local invalidated, invalidate_error =
+        linkcertificate.invalidate(resolver_context, ticket)
+    if not invalidated then
+        exit("cannot invalidate final link record: " .. tostring(invalidate_error))
+    end
+    link_ticket = ticket
+    -- Misses own the target's record directory (synthetic sources, linker
+    -- dependency report); a stale report must not survive into this link.
+    local directory_ready, directory_error =
+        driver.prepare_output_root(ticket.directory)
+    if not directory_ready then exit(directory_error) end
+    local policy = ticket.native_policy
+    if policy and policy.dependency_file then os.remove(policy.dependency_file) end
+end
+
+-- Synthetic runner and entrypoint sources belong to their final target.
+if builds_program and not args.compile_only then
+    local root = args.test and requested_modules[1] or main_module
+    local synthetic_base
+    if link_ticket then
+        synthetic_base = path.join(link_ticket.synthetic_directory,
+            (root:gsub(".*[.]", "")))
+    else
+        synthetic_base = driver.imported[root].program_output or
+            driver.generated_output_path(root:gsub("[.]", "/"), args.output)
+    end
+    test_entrypoint_output = synthetic_base ..
+        (args.test and "__test_entrypoint.c" or "__entrypoint.c")
+    if not program_path and not platform.windows then
+        program_path = args.exe or driver.imported[root].program_output or
+            root:gsub("[.]", "/")
+    end
+    if args.test then
+        test_program_output = synthetic_base
+        local runner_source, runner_source_err = test_runner.render(test_cases)
         if not runner_source then exit(runner_source_err) end
         source_overrides[test_runner.MODULE_NAME] =
             test_runner.source_descriptor(test_program_output, runner_source)
@@ -279,29 +646,6 @@ if args.test then
         main_module = test_runner.MODULE_NAME
     end
 end
-
-if args.launcher_name then
-    if not main_module then
-        exit("--launcher-name is only valid when compiling a standalone executable")
-    end
-    local launcher, launcher_error =
-        driver.windows_launcher_name(main_module, args.launcher_name)
-    if not launcher then exit(launcher_error) end
-    if not platform.windows then
-        exit("--launcher-name is only supported for Windows launchers")
-    end
-end
-
-if args.no_uv_bootstrap and not main_module then
-    exit("--no-uv-bootstrap is only valid when compiling a standalone executable")
-end
-if coverage_build and not args.compile_only and not main_module then
-    exit("--coverage requires a test or standalone executable; use -c for coverage objects")
-end
-if coverage_build and main_module and not args.compile_only and not test_entrypoint_output then
-    test_entrypoint_output = driver.imported[main_module].program_output .. "__entrypoint.c"
-end
-
 local finalized, finalize_errors =
     driver.finalize_resolver_context(resolver_context)
 if not finalized then
@@ -434,7 +778,7 @@ end
 local compile_requests = {}
 for _, name in ipairs(linked_names) do
     local mod = driver.imported[name]
-    local extra_flags = test_modules[name] and { table.unpack(test_runner.TEST_COMPILE_FLAGS) } or {}
+    local extra_flags = {}
     if coverage_build then
         for _, flag in ipairs(coverage.compile_flags(coverage_build, name) or {}) do
             extra_flags[#extra_flags + 1] = flag
@@ -445,6 +789,8 @@ for _, name in ipairs(linked_names) do
         mod = mod,
         static_deps = resolver_context.native_static_names,
         options = {
+            context = resolver_context,
+            test = args.test,
             pretty_print = args.pretty_print,
             nominal_layouts = resolver_context.nominal_layouts,
             extra_compile_flags = extra_flags,
@@ -478,16 +824,17 @@ if main_module then
             ffi_header = header and header.ffi_header and header.ffi_header.filename or nil,
         }
     end
-    local program_output = test_program_output or
-        driver.imported[main_module].program_output or
-        main_module:gsub("[.]", "/")
+    local program_output = program_path or main_module:gsub("[.]", "/")
     local entrypoint_output = test_entrypoint_output or
         driver.generated_output_path(main_module:gsub("[.]", "/") .. "__entrypoint.c", args.output)
     local extra_outputs
     if platform.windows then
-        local paths, path_error = driver.windows_program_paths(main_module,
-            args.launcher_name, args.test and requested_modules[1] or nil,
-            args.output)
+        local paths, path_error = windows_paths, nil
+        if not paths then
+            paths, path_error = driver.windows_program_paths(main_module,
+                args.exe, args.test and requested_modules[1] or nil,
+                args.output)
+        end
         if not paths then exit(path_error) end
         windows_program_outputs = paths
         program_output = paths.executable
@@ -562,8 +909,7 @@ if args.compile_only then
     return
 end
 
-local coverage_runtime
-if coverage_build and main_module then
+if coverage_build and main_module and not coverage_runtime then
     local inventory_error
     coverage_runtime, inventory_error = coverage.inventory(coverage_build, driver.imported)
     if not coverage_runtime then exit(inventory_error) end
@@ -621,23 +967,25 @@ if main_module then
     if not platform.windows then
         probe_ok, probe_err = driver.run_standalone_archive_probe(
             archive_entries, archive_names, ofiles, selected_static_archives,
-            args.link, args.verbose, args.extra_object,
+            nil, args.verbose, extra_objects,
             validate_titan_support, { pretty_print = args.pretty_print })
     end
     if not probe_ok then
         table.insert(errors, probe_err)
     else
-        local program_output = test_program_output or
-            driver.imported[main_module].program_output
         local ok, term, code = driver.compile_program(main_module, ofiles,
-            args.link, args.verbose, args.extra_object,
-            program_output, selected_static_archives,
+            nil, args.verbose, extra_objects,
+            program_path, selected_static_archives,
             test_entrypoint_output,
             args.test and requested_modules[1]:gsub(".*[.]", "") or nil,
             {
                 no_uv_bootstrap = args.no_uv_bootstrap,
                 pretty_print = args.pretty_print,
-                launcher_name = args.launcher_name,
+                exe = args.exe,
+                final_link_flags = link_ticket and link_ticket.dependency_argv,
+                before_commit = link_ticket and function()
+                    return linkcertificate.invalidate(resolver_context, link_ticket)
+                end or nil,
                 output_module = args.test and requested_modules[1] or nil,
                 output_root = args.output,
                 coverage_runtime = coverage_runtime,
@@ -660,7 +1008,7 @@ else
         end
     end
     local native_payload, payload_err =
-        driver.classify_native_payloads(args.extra_object, native_target)
+        driver.classify_native_payloads(extra_objects, native_target)
     if not native_payload then exit(payload_err) end
     if platform.windows then
         local temporary, temporary_directory =
@@ -670,7 +1018,7 @@ else
                 tostring(temporary_directory))
         end
         local ok, term, code = driver.compile_library_output(
-            temporary, ofiles, args.link, args.verbose, nil,
+            temporary, ofiles, nil, args.verbose, nil,
             selected_static_archives, native_payload.inputs, provider_output,
             output_names)
         if not ok then
@@ -686,7 +1034,10 @@ else
             end
             if valid then
                 valid, validation_err = driver.publish_windows_provider(
-                    temporary, provider_output, shim_plans, provider)
+                    temporary, provider_output, shim_plans, provider,
+                    link_ticket and function()
+                        return linkcertificate.invalidate(resolver_context, link_ticket)
+                    end or nil)
             end
             driver.remove_path(temporary)
             driver.remove_path(temporary_directory)
@@ -718,8 +1069,8 @@ else
         local pair, pair_err, pair_signal = driver.link_provider_pair({
             provider = provider,
             public_dso = provider_output,
+            final_link_flags = link_ticket and link_ticket.dependency_argv,
             libnames = ofiles,
-            link = args.link,
             verbose = args.verbose,
             static_archives = selected_static_archives,
             ordered_payload = native_payload.inputs,
@@ -756,5 +1107,16 @@ end
 
 if #errors > 0 then exit(table.concat(errors, "\n")) end
 
+-- The success record is written last, after the complete output set.
+if link_ticket then
+    local called, committed, commit_error =
+        pcall(linkcertificate.commit, resolver_context, link_ticket)
+    if not called then
+        if type(committed) ~= "string" then error(committed, 0) end
+        exit(committed)
+    elseif not committed then
+        exit("cannot record final link: " .. tostring(commit_error))
+    end
+end
 
 finish()

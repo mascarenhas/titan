@@ -104,6 +104,22 @@ describe("compiler I/O strategy", function()
         assert.equal("dead", coroutine.status(co))
     end)
 
+    it("declares floating timestamp observations coarse at whole and fractional seconds", function()
+        local strategy = compiler_io.new_sync()
+        for _, stamp in ipairs({ 100, 100.125 }) do
+            with_overrides(lfs, {
+                attributes = function()
+                    return { mode = "file", size = 4, modification = stamp, dev = 1, ino = 2 }
+                end,
+            }, function()
+                local stat = assert(strategy:stat("fixture.h"))
+                assert.equal("coarse", stat.time_precision)
+                assert.equal(100, stat.modified_seconds)
+                assert.equal(stamp == 100 and 0 or 125000000, stat.modified_nanoseconds)
+            end)
+        end
+    end)
+
     it("preserves binary files and normalizes filesystem operations", function()
         root = workspace()
         local strategy = compiler_io.new_sync()
@@ -147,7 +163,7 @@ describe("compiler I/O strategy", function()
 
         local metadata = assert(strategy:stat(source))
         local expected_keys = {
-            "kind", "mode", "modified_nanoseconds", "modified_seconds", "size",
+            "kind", "mode", "modified_nanoseconds", "modified_seconds", "size", "time_precision",
         }
         if not platform.windows then
             table.insert(expected_keys, 1, "inode")
@@ -171,6 +187,7 @@ describe("compiler I/O strategy", function()
         end
         assert.is_number(metadata.modified_seconds)
         assert.is_number(metadata.modified_nanoseconds)
+        assert.equal("coarse", metadata.time_precision)
         assert.is_true(metadata.modified_nanoseconds >= 0)
         assert.is_true(metadata.modified_nanoseconds < 1000000000)
 
@@ -633,7 +650,7 @@ describe("Windows synchronous compiler I/O", function()
         local attributes = { mode = "file", permissions = "rw-rw-rw-",
             size = 4294967419, dev = 7, ino = 0, modification = 1790816523 }
         local metadata = { kind = "file", mode = 0x81B6, size = 4294967419,
-            modified_seconds = 1790816523, modified_nanoseconds = 0 }
+            modified_seconds = 1790816523, modified_nanoseconds = 0, time_precision = "coarse" }
         local calls = {}
         local function query(name, path)
             calls[#calls + 1] = { name, path }

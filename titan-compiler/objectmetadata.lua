@@ -1,5 +1,5 @@
 -- Trusted compiler-produced source records travel with their native objects.
--- Make owns freshness; this reader only loads the Lua record and checks ABI.
+-- ABI, record schema and certificate policy are independent compatibility gates.
 local projectcache = require "titan-compiler.projectcache"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local util = require "titan-compiler.util"
@@ -67,6 +67,8 @@ function objectmetadata.encode(entry, native)
     projected.object_metadata = native
     local ok, payload = pcall(serialize, {
         abi = version.TITAN_ABI_VERSION,
+        schema = version.OBJECT_RECORD_SCHEMA,
+        digest = version.CERTIFICATE_DIGEST,
         module = projected.type.name,
         entry = projected,
     })
@@ -139,14 +141,28 @@ function objectmetadata.decode(payload, origin, expected_abi)
     origin = origin or "<object source metadata>"
     expected_abi = expected_abi or version.TITAN_ABI_VERSION
     local chunk, err = load(payload, "@" .. origin, "t", {})
-    if not chunk then return nil, err end
+    if not chunk then return nil, err, "record-unreadable" end
     -- A malformed or obsolete compiler record is a cache miss. Deliberately
     -- do not apply the persisted analysis graph's separate validation policy.
-    local ok, entry, failure = pcall(function()
+    local ok, entry, failure, reason = pcall(function()
         local record = chunk()
+        if type(record) ~= "table" then
+            return nil, "object source metadata envelope is not a table", "record-schema"
+        end
+        if record.schema ~= version.OBJECT_RECORD_SCHEMA
+            or record.digest ~= version.CERTIFICATE_DIGEST then
+            return nil, "expected schema=" .. tostring(version.OBJECT_RECORD_SCHEMA)
+                .. " digest=" .. tostring(version.CERTIFICATE_DIGEST)
+                .. "; found schema=" .. tostring(record.schema)
+                .. " digest=" .. tostring(record.digest), "record-schema"
+        end
         if record.abi ~= expected_abi then
             return nil, "object source metadata ABI mismatch: expected "
-                .. tostring(expected_abi) .. " but found " .. tostring(record.abi)
+                .. tostring(expected_abi) .. " but found " .. tostring(record.abi),
+                "record-schema"
+        end
+        if type(record.entry) ~= "table" then
+            return nil, "object source metadata has no entry", "record-schema"
         end
         local native = record.entry and record.entry.object_metadata
         if native and (native.parts ~= nil or native.parts_version ~= nil
@@ -154,7 +170,7 @@ function objectmetadata.decode(payload, origin, expected_abi)
             local valid_parts, parts_error = objectmetadata.validate_parts(native)
             if not valid_parts then
                 return nil, "invalid object part metadata: " ..
-                    tostring(parts_error)
+                    tostring(parts_error), "parts"
             end
         end
         if native and native.layouts ~= nil then
@@ -169,8 +185,8 @@ function objectmetadata.decode(payload, origin, expected_abi)
         end
         return record.entry
     end)
-    if not ok then return nil, tostring(entry) end
-    return entry, failure
+    if not ok then return nil, tostring(entry), "record-unreadable" end
+    return entry, failure, reason or (failure and "record-unreadable" or nil)
 end
 
 function objectmetadata.render(payload, symbol)

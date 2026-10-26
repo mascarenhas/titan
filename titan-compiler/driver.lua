@@ -21,6 +21,7 @@ local graphcodec = require "titan-compiler.graphcodec"
 local sha256 = require "titan-compiler.sha256"
 local ffiheaders = require "titan-compiler.ffiheaders"
 local objectmetadata = require "titan-compiler.objectmetadata"
+local incremental = require "titan-compiler.incremental"
 local documentation = require "titan-compiler.documentation"
 local jobs = require "titan-compiler.jobs"
 
@@ -939,6 +940,12 @@ function driver.new_resolver_context(options)
     if jobs_cap ~= nil and (math.type(jobs_cap) ~= "integer" or jobs_cap < 1) then
         error("jobs must be a positive integer", 2)
     end
+    -- The real command-line script that loaded this compiler, or "api" for
+    -- embedding callers. Only the configuration certificate consumes it.
+    local frontend = options.frontend
+    if frontend ~= nil and (type(frontend) ~= "string" or frontend == "") then
+        error("frontend must be a nonempty path", 2)
+    end
     local source_profile_stack = {}
     local client_header_trace = options.c_header_process_trace
     if client_header_trace ~= nil and
@@ -1006,6 +1013,10 @@ function driver.new_resolver_context(options)
         extra_ffi_include_dirs = extra_ffi_include_dirs,
         output_root = options.output_root,
         jobs = jobs_cap,
+        frontend = frontend,
+        -- One shared C-input revalidation pass for every certification in
+        -- this invocation: each recorded header is checked at most once.
+        header_validation = {},
     }
     local initialized, layout_error = driver.initialize_layout(context)
     if not initialized then
@@ -1347,12 +1358,16 @@ local function compiler_argv(include_extra_compile_flags, context)
     if not cflags then return nil, err end
     local argv = {}
     append_argv(argv, cc)
-    if include_extra_compile_flags then
+    -- Normalized invocation extras (TITAN_EXTRA_* then CLI switches, in
+    -- order) follow the profile defaults; without them the ambient
+    -- environment flags keep their historical placement.
+    local native = driver.NATIVE_COMPILE_FLAGS
+    if include_extra_compile_flags and not native then
         append_argv(argv, driver.EXTRA_CPPFLAGS)
     end
     append_argv(argv, cflags)
     if include_extra_compile_flags then
-        append_argv(argv, driver.EXTRA_CFLAGS)
+        append_argv(argv, native or driver.EXTRA_CFLAGS)
     end
     return argv
 end
@@ -1372,6 +1387,49 @@ function driver.generated_compile_prefix()
     if not args then return nil, err end
     append_compile_includes(args)
     return args
+end
+
+-- Install one invocation's `nativeinputs.normalize` result: its ordered
+-- compile extras follow the profile defaults in every generated-object,
+-- probe and header-checking command (SDK include roots stay last), and its
+-- ordered link extras keep their exact flag/library interleaving on every
+-- link. Call before `driver.configure_foreign_c`.
+function driver.apply_native_inputs(normalized)
+    driver.NATIVE_COMPILE_FLAGS = { table.unpack(normalized.compile_argv or {}) }
+    driver.NATIVE_LINK_FLAGS = { table.unpack(normalized.link_argv or {}) }
+end
+
+-- The link extras every native link appends: the normalized invocation
+-- extras when installed, else the ambient TITAN_EXTRA_LDFLAGS.
+function driver.link_extra_flags()
+    return driver.NATIVE_LINK_FLAGS or driver.EXTRA_LDFLAGS or {}
+end
+
+-- Which linker dependency report a final program link can request, probed
+-- once per resolver context: `darwin` (ld64 -dependency_info), `gnu` when
+-- the linker accepts --dependency-file (GNU ld 2.35+, lld), else `none`
+-- (the final-link certificate then uses compiler-resolved -l paths).
+function driver.native_link_backend(context)
+    if context.native_link_backend then return context.native_link_backend end
+    local backend = "none"
+    if driver.IS_DARWIN then
+        backend = "darwin"
+    elseif not platform.windows then
+        local argv = compiler_argv(false, context)
+        local report = argv and context.io:tmpname()
+        if report then
+            append_argv(argv, {
+                "-Wl,--dependency-file=" .. report, "-Wl,--version",
+            })
+            local result = context.io:run(argv, { stderr_to_stdout = true })
+            if type(result) == "table" and result.started and result.ok then
+                backend = "gnu"
+            end
+            if context.io:lstat(report) then context.io:unlink(report) end
+        end
+    end
+    context.native_link_backend = backend
+    return backend
 end
 
 -- One immutable description of the native compiler prefix used for generated
@@ -1485,6 +1543,21 @@ function driver.probe_batch_jobs(context)
     return cap
 end
 
+-- The invocation's content-digest memo, shared by object certification and
+-- every C header/preamble read of a fresh check, so each distinct file is
+-- hashed at most once per resolver context.
+local function context_file_digest(context)
+    if not context.file_digest then
+        context.file_digest = function(path, bytes)
+            local digest, digest_error =
+                incremental.file_digest(context, path, bytes)
+            if digest == nil then return nil, digest_error end
+            return digest
+        end
+    end
+    return context.file_digest
+end
+
 function driver.get_probe_service(context)
     if context.foreign_c_configuration_id ~=
        driver.FOREIGN_C_CONFIGURATION_ID then
@@ -1572,6 +1645,7 @@ function driver.get_probe_service(context)
         io = context.io,
         cache_adapter = context.cache_adapter,
         header_observations = context.header_observations,
+        file_digest = context_file_digest(context),
         process_trace = context.c_header_process_trace,
         process_analysis = context.c_header_analysis,
         persistent_cache_trace = persistent_cache_trace,
@@ -1659,7 +1733,9 @@ function driver.language_server_cache_identity(options)
         item = tostring(item)
         pieces[#pieces + 1] = #item .. ":" .. item
     end
-    for _, values in ipairs({ driver.EXTRA_CPPFLAGS or {}, driver.EXTRA_CFLAGS or {},
+    for _, values in ipairs({
+        driver.NATIVE_COMPILE_FLAGS or driver.EXTRA_CPPFLAGS or {},
+        not driver.NATIVE_COMPILE_FLAGS and driver.EXTRA_CFLAGS or {},
         driver.foreign_include_dirs(), context.extra_ffi_include_dirs or {} }) do
         pieces[#pieces + 1] = "[" .. #values .. ":"
         for _, item in ipairs(values) do pieces[#pieces + 1] = #item .. ":" .. item end
@@ -1730,9 +1806,9 @@ local function copy_c_header_dependencies(value, label)
         local kind = input.kind
         local path = input.path
         local identity = input.identity
-        if kind ~= "file" and kind ~= "search" then
+        if kind ~= "file" and kind ~= "search" and kind ~= "origin" then
             return nil, label .. " entry " .. index ..
-                " kind must be 'file' or 'search'"
+                " kind must be 'file', 'search', or 'origin'"
         elseif type(path) ~= "string" or not platform.is_absolute(path) or
                path:find("\0", 1, true) then
             return nil, label .. " entry " .. index ..
@@ -1819,7 +1895,10 @@ end
 -- Recompute the identities of an already-resolved module header closure. This
 -- never searches for a different header wholesale: `search` entries are the
 -- exact ordered candidates cdriver consulted, including misses, so a new
--- earlier shadow changes identity without walking an include tree.
+-- earlier shadow changes identity without walking an include tree. `origin`
+-- entries recheck the realpath that names a C declaration's nominal scope.
+-- The fourth result classifies the first changed input as
+-- `c-input <path>: content|provenance|missing|unreadable|candidate|changed-during-read`.
 -- Implementation notes: doc/implementation/driver.md#driverrestat_c_header_dependenciesdependencies-options
 function driver.restat_c_header_dependencies(value, options)
     local context, owns_context =
@@ -1829,29 +1908,37 @@ function driver.restat_c_header_dependencies(value, options)
         if owns_context then driver.close_resolver_context(context) end
         return nil, err
     end
-    local result, changed = {}, false
+    local result, changed, classified = {}, false, nil
     local validation_options = {
         io = context.io,
         cache_adapter = context.cache_adapter,
         header_observations = context.header_observations,
-        header_validation = options and options.header_validation or {},
+        header_validation = options and options.header_validation
+            or context.header_validation or {},
     }
     for index, dependency in ipairs(dependencies) do
-        local current, identity_error, input_changed =
+        local current, identity_error, input_changed, reason =
             cdriver.revalidate_header_input(dependency, validation_options)
         if not current then
             if owns_context then driver.close_resolver_context(context) end
             return nil, "cannot fingerprint C header input '" ..
-                dependency.path .. "': " .. tostring(identity_error)
+                dependency.path .. "': " .. tostring(identity_error),
+                input_changed == true,
+                reason and ("c-input " .. dependency.path .. ": " .. reason)
+                    or nil
         end
         result[index] = current
+        if input_changed and not classified then
+            classified = "c-input " .. dependency.path .. ": " ..
+                tostring(reason or "content")
+        end
         changed = changed or input_changed
     end
     if owns_context then
         local closed, close_error = driver.close_resolver_context(context)
         if not closed then return nil, close_error end
     end
-    return result, nil, changed
+    return result, nil, changed, classified
 end
 
 function driver.close_loader(loader)
@@ -4064,6 +4151,7 @@ local function check_source_module(
         completion = completion_request,
         cache_adapter = context.cache_adapter,
         header_observations = context.header_observations,
+        file_digest = context_file_digest(context),
         target_profile_provider = function()
             return driver.get_target_profile(context)
         end,
@@ -4080,6 +4168,220 @@ local function check_source_module(
         modname, ast, input, filename, loader, check_options)
 end
 
+-- Certification facts; only `incremental_options` escapes this block.
+local incremental_options
+do
+
+-- The directory holding the loaded `titan-compiler/` and `c-parser/` trees:
+-- a source checkout root or an installed LuaRocks share directory. The
+-- configuration certificate hashes the Lua that actually runs from here.
+local function loaded_compiler_root(strategy)
+    local source = DRIVER_SOURCE
+    if not source then
+        return nil, "cannot locate the loaded compiler driver source"
+    end
+    source = source:sub(2)
+    if platform.windows then
+        local absolute, absolute_error = absolute_filename(source, strategy)
+        if not absolute then return nil, absolute_error end
+        source = absolute
+    elseif source:sub(1, 1) ~= "/" then
+        local current_dir, current_error = strategy:cwd()
+        if not current_dir then return nil, current_error end
+        source = current_dir .. "/" .. source
+    end
+    local root = source:match(platform.windows and
+        "^(.*)[/\\]titan%-compiler[/\\]driver[.]lua$" or
+        "^(.*)/titan%-compiler/driver[.]lua$")
+    if not root then
+        return nil, "loaded compiler driver '" .. source ..
+            "' is not titan-compiler/driver.lua"
+    end
+    return normalize_root(root, strategy)
+end
+
+-- Native flags a test owner's generated C is compiled with. Compilation and
+-- certification share this decision: an object compiled without them can
+-- never satisfy a `--test` build, whose runner relies on unoptimized sibling
+-- calls for case locations.
+function driver.test_owner_flags(test_build, test_functions)
+    if test_build and type(test_functions) == "table" and
+       #test_functions > 0 then
+        return { table.unpack(
+            require("titan-compiler.test_runner").TEST_COMPILE_FLAGS) }
+    end
+    return {}
+end
+
+-- The code-generation options an object must have been produced with under
+-- one resolver policy (`c_parts`, `split_threshold`, `test`, `coverage`).
+-- `native` is a record's object metadata or a fresh module's equivalent.
+local function expected_codegen_options(policy, modname, native)
+    native = native or {}
+    local coverage
+    if policy.coverage then
+        coverage = {
+            enabled = require("titan-compiler.coverage").matches(
+                policy.coverage, modname,
+                native.coverage_test_functions or native.test_functions) == true,
+            backend = policy.coverage.backend,
+        }
+    end
+    return {
+        c_parts = driver.effective_c_parts(policy.c_parts),
+        split_threshold = policy.split_threshold or coder.DEFAULT_SPLIT_THRESHOLD,
+        test_flags = #driver.test_owner_flags(
+            policy.test, native.test_functions) > 0,
+        coverage = coverage,
+    }
+end
+
+-- The absolute output stem a module's certificate records. A moved output
+-- tree therefore misses instead of reusing objects whose paths changed.
+local function certified_stem(modname, source)
+    return normalized_absolute_filename(driver.module_output_stem(
+        source.native_output or source.main, modname))
+end
+
+-- The generated-preamble probe translation unit has one stable path inside
+-- the invocation's output domain, so expansions of `__FILE__` in forced
+-- includes cannot vary between invocations.
+local function preamble_probe_path(context)
+    local root = context.output_root or
+        driver.TITAN_SOURCE_PATH:match("^[^;]+") or "."
+    return normalized_absolute_filename(path.join(root, ".titan", "preamble.c"))
+end
+
+-- The certification facts of one resolver context (`context.incremental_options`
+-- for `titan-compiler.incremental`): the loaded compiler, the real frontend,
+-- the exact generated-object native prefix and toolchain, code-generation
+-- settings, and the per-module stem and expected-codegen callbacks.
+function incremental_options(context)
+    local root, root_error = loaded_compiler_root(context.io)
+    if not root then
+        return nil, "cannot certify compiler configuration: " ..
+            tostring(root_error)
+    end
+    local prefix, prefix_error = driver.generated_compile_prefix()
+    if not prefix then return nil, prefix_error end
+    local toolchain, toolchain_error = driver.toolchain_descriptor(context)
+    if not toolchain then return nil, toolchain_error end
+    return {
+        compiler_root = root,
+        frontend = context.frontend or "api",
+        compile_prefix = prefix,
+        toolchain_descriptor = toolchain,
+        build_profile = driver.BUILD_PROFILE,
+        emit_line_directives = driver.EMIT_LINE_DIRECTIVES,
+        pretty_print = context.pretty_print == true,
+        extra_ffi_include_dirs = context.extra_ffi_include_dirs or {},
+        titan_root = driver.TITAN_ROOT or "",
+        preamble_path = preamble_probe_path(context),
+        stem = certified_stem,
+        codegen_options = function(modname, record)
+            local native = type(record) == "table" and
+                (record.object_metadata or record) or nil
+            return expected_codegen_options(
+                context.codegen_policy or {}, modname, native)
+        end,
+    }
+end
+
+end -- certification facts
+
+-- Compute this invocation's configuration certificate once per resolver
+-- context. Every certification and every record written through the context
+-- shares it. Any failure is an explicit invocation error: a compiler that
+-- cannot inventory itself or its native configuration cannot compile either.
+function driver.incremental_configuration(context)
+    if type(context) ~= "table" or context.io == nil then
+        error("configuration certification requires a resolver context", 2)
+    end
+    if context.incremental_configuration then
+        return context.incremental_configuration
+    end
+    local options, options_error = incremental_options(context)
+    if not options then return nil, options_error end
+    context.incremental_options = options
+    local configuration, configuration_error =
+        incremental.configuration(context, options)
+    if not configuration then
+        return nil, "cannot certify compiler configuration: " ..
+            tostring(configuration_error)
+    end
+    context.incremental_configuration = configuration
+    return configuration
+end
+
+-- A module or contextual owner as this resolver currently knows it, with
+-- whether it is compiled into the same image: an ordinary selection, a
+-- recovered contextual owner, a member carried by a selected static provider,
+-- or (type recovery only, without selecting anything) the provider ordinary
+-- lookup would choose, which an exposer can reach only through globals.
+local function certificate_dependency(context, name, linked_names)
+    local mod = driver.imported[name]
+    if mod and mod ~= CIRCULAR_MARK then
+        return mod, linked_names[name] == true
+    end
+    local recovered = context.contextual_owner_entries and
+        context.contextual_owner_entries[name]
+    if recovered then return recovered, recovered.linked == true end
+    for _, selected in pairs(driver.imported) do
+        if selected ~= CIRCULAR_MARK and selected.kind == "static" and
+           selected.static_provider and selected.static_provider.entries[name] then
+            local carried = selected.static_provider.entries[name]
+            return {
+                kind = "static", type = carried.type, layouts = carried.layouts,
+                filename = selected.static_archive,
+                static_archive = selected.static_archive,
+            }, true
+        end
+    end
+    local resolved = driver.find_dependency_interface(
+        driver.TITAN_BIN_PATH, name, context)
+    return resolved, false
+end
+
+-- The certificate plan interface over this resolver's selection: `linked`
+-- names are compiled into the same image (direct bindings), a dynamic
+-- provider's file is the handle a direct import loads, and digests come from
+-- producer-stored self digests or per-module binary provider metadata.
+local function resolver_plan(context, linked_names)
+    local plan = {}
+    function plan.linked(name)
+        local mod, linked = certificate_dependency(context, name, linked_names)
+        if not mod then return nil end
+        return linked
+    end
+    function plan.provider_file(name)
+        local mod = driver.imported[name]
+        if not mod or mod == CIRCULAR_MARK or mod.kind ~= "dynamic" then
+            return nil
+        end
+        return mod.type and mod.type.file
+    end
+    function plan.digest(name, view)
+        local mod = certificate_dependency(context, name, linked_names)
+        if not mod then return nil, "unavailable" end
+        return incremental.interface_digest(context, mod, view)
+    end
+    return plan
+end
+
+-- A closed-data copy of a tagged source descriptor as build plans carry it:
+-- no read bytes and no generated contents.
+local function copy_source_descriptor(source)
+    local files = {}
+    for index, filename in ipairs(source.files) do files[index] = filename end
+    return {
+        kind = source.kind, main = source.main, files = files,
+        native_output = source.native_output,
+        program_output = source.program_output,
+        _output_root = source._output_root,
+        _coverage_output = source._coverage_output,
+    }
+end
+
 -- Implementation notes: doc/implementation/driver.md#driverdefaultloaderstatic_deps-options
 function driver.defaultloader(static_deps, options)
     static_deps = static_deps or {}
@@ -4087,7 +4389,33 @@ function driver.defaultloader(static_deps, options)
     local owns_context = options.context == nil
     local context = options.context or driver.new_resolver_context(options)
     local source_roots = options.source_roots or {}
-    local forced_source_roots = options.forced_source_roots or {}
+    -- The object code-generation policy certification compares records
+    -- against; compilation requests of the same invocation use these values.
+    context.codegen_policy = {
+        c_parts = options.c_parts,
+        split_threshold = options.split_threshold,
+        test = options.test == true,
+        coverage = options.coverage,
+    }
+    -- Planning mode (the build coordinator): each source module is certified
+    -- and its imports are followed without parsing or checking it, while
+    -- binary providers are selected exactly as ordinary resolution selects
+    -- them. driver.resolution_plan closes planning.
+    local planning
+    if options.plan_mode then
+        if type(options.imports_for) ~= "function" then
+            error("plan_mode requires an imports_for function", 2)
+        end
+        planning = { nodes = {}, unavailable = {}, open = true }
+    end
+    -- Worker mode: the coordinator's authoritative plan replaces discovery.
+    -- Parent-certified dependencies are restored from their records without
+    -- recertification; any request outside the plan is a divergence.
+    local worker_plan = options.worker_plan
+    if worker_plan ~= nil and (type(worker_plan) ~= "table"
+            or type(worker_plan.modules) ~= "table") then
+        error("worker_plan must be a build plan descriptor", 2)
+    end
     local object_loaded = {}
     local source_overrides = options.source_overrides or {}
     local known_source_modules = options.known_source_modules or {}
@@ -4675,191 +5003,118 @@ function driver.defaultloader(static_deps, options)
         end
     end
 
-    -- Implementation notes: doc/implementation/incremental-compilation.md#resolver-and-cli-boundary
-    local function load_source_object(modname, source, loader)
-        if not options.incremental or source.contents then return nil end
-        local function miss(reason)
-            if context.probe_verbose then
-                io.stderr:write("Titan object miss ", modname, ": ", tostring(reason), "\n")
-            end
-            return nil
+    -- Restore one accepted object record into this resolver without parsing
+    -- or checking its source. The caller has already selected every recorded
+    -- import. Returns the restored entry; `nil, code, detail` for a miss
+    -- before any resolver mutation; `false, err` for a failure.
+    local function restore_source_object(
+            modname, source, record, active_loader, published)
+        local entry = record
+        local native = type(entry) == "table" and entry.object_metadata
+        if type(native) ~= "table" or type(native.parts) ~= "table"
+           or type(native.imports) ~= "table" then
+            return nil, "record-unreadable", "record has no object metadata"
         end
-        if forced_source_roots[modname] then return miss("explicit compile-only root") end
-        local stem = driver.module_output_stem(source.native_output or source.main, modname)
-        local object_path = stem .. ".o"
-        local object_stat = context.io:lstat(object_path)
-        if not object_stat or object_stat.kind ~= "file" then return miss("no object") end
-        for _, filename in ipairs(source.files) do
-            local attr = context.io:stat(filename)
-            if not attr or attr.modified_seconds > object_stat.modified_seconds
-                or (attr.modified_seconds == object_stat.modified_seconds
-                    and attr.modified_nanoseconds > object_stat.modified_nanoseconds) then
-                return miss("source is newer: " .. filename)
-            end
+        local native_output = source.native_output or source.main
+        local stem = driver.module_output_stem(native_output, modname)
+        local compiled_objects = {}
+        for index, part in ipairs(native.parts) do
+            compiled_objects[index] = stem .. part.object_suffix
         end
-        local bytes, read_error = context.io:read_file(object_path)
-        if not bytes then return miss(read_error) end
-        local entry, metadata_error = objectmetadata.read(bytes, object_path)
-        if not entry then return miss(metadata_error) end
-        local native = entry.object_metadata
-        if not native or not native.layouts then
-            return miss("missing nominal layout metadata")
-        end
-        local valid_parts, parts_error = objectmetadata.validate_parts(native)
-        if not valid_parts then
-            return miss(parts_error)
-        end
-        local active_c_parts = driver.effective_c_parts(options.c_parts)
-        local active_threshold = options.split_threshold
-            or coder.DEFAULT_SPLIT_THRESHOLD
-        if (native.c_parts ~= nil and native.c_parts ~= active_c_parts)
-            or (native.split_threshold ~= nil
-                and native.split_threshold ~= active_threshold) then
-            return miss("split generation policy changed")
-        end
-        local compiled_objects = { object_path }
-        if #native.parts > 1 then
-            local primary_parsed, primary_err = staticmetadata.scan_bytes(
-                bytes, object_path, {
-                    expected_abi = driver.TITAN_ABI_VERSION,
-                })
-            if not primary_parsed or primary_parsed.kind ~= "object" then
-                return miss(primary_err or "invalid primary object")
-            end
-            for part_idx = 2, #native.parts do
-                local part = native.parts[part_idx]
-                local part_object = stem .. part.object_suffix
-                local part_stat = context.io:lstat(part_object)
-                if not part_stat or part_stat.kind ~= "file" then
-                    return miss("missing or nonregular part object: " .. part_object)
-                end
-                for _, filename in ipairs(source.files) do
-                    local attr = context.io:stat(filename)
-                    if not attr or attr.modified_seconds > part_stat.modified_seconds
-                        or (attr.modified_seconds == part_stat.modified_seconds
-                            and attr.modified_nanoseconds > part_stat.modified_nanoseconds) then
-                        return miss("source is newer than part object: " .. filename)
-                    end
-                end
-                local part_bytes, part_read_err = context.io:read_file(part_object)
-                if not part_bytes then return miss(part_read_err) end
-                local part_parsed, part_scan_err = staticmetadata.scan_bytes(
-                    part_bytes, part_object, {
-                        expected_abi = driver.TITAN_ABI_VERSION,
-                    })
-                if not part_parsed or part_parsed.kind ~= "object" then
-                    return miss(part_scan_err or ("invalid part object: " .. part_object))
-                end
-                if part_parsed.metadata ~= nil
-                    or objectmetadata.read(part_bytes, part_object) ~= nil then
-                    return miss("sidecar part object unexpectedly contains metadata: "
-                        .. part_object)
-                end
-                local matches, mismatch = staticmetadata.fingerprint_matches(
-                    part_parsed.fingerprint, primary_parsed.fingerprint)
-                if not matches then
-                    return miss("part object target mismatch: " .. tostring(mismatch))
-                end
-                compiled_objects[part_idx] = part_object
-            end
-        end
-        if options.coverage then
-            local coverage = require("titan-compiler.coverage")
-            local measured = coverage.matches(options.coverage, modname,
-                native.coverage_test_functions or native.test_functions)
-            local saved = native.coverage
-            if not saved or saved.enabled ~= measured or
-                saved.backend ~= options.coverage.backend then
-                return miss("coverage selection or backend changed")
-            end
-            if measured then
-                if type(saved.files) ~= "table"
-                    or #saved.files ~= #native.parts then
-                    return miss("coverage part inventory mismatch")
-                end
-                for _, part in ipairs(native.parts) do
-                    local part_c = stem .. part.c_suffix
-                    local part_gcno = part_c:gsub("[.]c$", ".gcno")
-                    local c_stat = context.io:lstat(part_c)
-                    local gcno_stat = context.io:lstat(part_gcno)
-                    if not c_stat or c_stat.kind ~= "file"
-                        or not gcno_stat or gcno_stat.kind ~= "file" then
-                        return miss("missing coverage part artifact for " .. part_c)
-                    end
-                end
-            end
-        end
-        -- A valid record is compiler-owned data. Build-system prerequisites
-        -- own dependency/configuration freshness; replay only its link inputs.
-        driver.imported[modname] = CIRCULAR_MARK
-        entry.filename, entry.source_files = source.main, source.files
-        entry.native_output = source.native_output or source.main
-        entry.program_output = source.program_output
-        entry.compiled = object_path
-        entry.compiled_objects = compiled_objects
-        entry.has_main = native.has_main
-        entry.test_functions = native.test_functions
-        entry.external_symbols = native.external_symbols
-        entry.private_symbols = native.private_symbols or {}
-        entry.native_references = native.native_references
-        entry.deps = {}
-        table.insert(dependency_stack, entry.deps)
+        local deps = {}
         for _, import in ipairs(native.imports) do
-            local ok, result, errors = loader(import.name,
-                import.source_required and { kind = "source-import" } or nil)
-            if not ok or #errors ~= 0 then
-                table.remove(dependency_stack)
-                driver.imported[modname] = nil
-                return false, ok and table.concat(errors, "\n") or result
+            local dependency = driver.imported[import.name]
+            if not dependency or dependency == CIRCULAR_MARK then
+                return nil, "dependency-unavailable", import.name
+            end
+            if dependency.ast or dependency.kind == "source" or
+               dependency.kind == "static" then
+                deps[import.name] = true
             end
         end
-        table.remove(dependency_stack)
-        for name, owner in pairs(entry.declared_registry) do
-            if name:match("^(.*)%.") == modname or not types.registry[name] then
-                types.registry[name] = owner
-            end
-        end
+
+        -- Context-owned checking artifacts come first; they change no
+        -- resolver state. Source C environments are reattached to the
+        -- dependencies selected in this invocation, whose interfaces the
+        -- verdict has already certified.
         local descriptor = entry.ffi_header_descriptor
+        local restored_descriptor
         if descriptor then
-            -- Reattach source environments to the dependencies selected in
-            -- this invocation, without a content/fingerprint freshness check.
-            for index, name in ipairs(entry.source_imports) do
+            for index, name in ipairs(entry.source_imports or {}) do
                 local dependency = driver.imported[name]
-                descriptor.dependencies[index] = dependency.ffi_header_descriptor
-                    or dependency.ast._ffi_header
+                local current = dependency and dependency ~= CIRCULAR_MARK and
+                    (dependency.ffi_header_descriptor or
+                        dependency.ast and dependency.ast._ffi_header)
+                if not current then
+                    return nil, "dependency-unavailable", name
+                end
+                descriptor.dependencies[index] = current
             end
             local restored, err = ffiheaders.materialize(context, descriptor)
-            if not restored then driver.imported[modname] = nil; return false, err end
-            entry.ffi_header_descriptor = restored
-            entry.ffi_header = normalized_absolute_filename(
-                driver.ffi_header_filename(entry.native_output))
-            entry.checking_ffi_header = restored.filename
+            if not restored then return false, err end
+            restored_descriptor = restored
         end
+        local checking_foreign_header
         if native.foreign_header then
-            entry.foreign_header = driver.foreign_header_filename(entry.native_output)
             local logical = modname:gsub("[.]", "/") .. ".titan.h"
             local filename, err = ffiheaders.filename(context, logical)
-            if not filename then driver.imported[modname] = nil; return false, err end
+            if not filename then return false, err end
             local contents = ffiheaders.foreign_contents(native.foreign_header,
                 ffiheaders.relative(logical, descriptor.logical_name), function(name)
                     return ffiheaders.relative(logical, name:gsub("[.]", "/") .. ".titan.h")
                 end)
             ffiheaders.remember_file(context, filename)
             local wrote, write_error = context.io:write_file(filename, contents)
-            if not wrote then driver.imported[modname] = nil; return false, write_error end
-            entry.checking_foreign_header = filename
+            if not wrote then return false, write_error end
+            checking_foreign_header = filename
+        end
+
+        entry.filename, entry.source_files = source.main, source.files
+        entry.native_output = native_output
+        entry.program_output = source.program_output
+        entry.compiled = compiled_objects[1]
+        entry.compiled_objects = compiled_objects
+        entry.has_main = native.has_main
+        entry.test_functions = native.test_functions
+        entry.external_symbols = native.external_symbols
+        entry.private_symbols = native.private_symbols or {}
+        entry.native_references = native.native_references
+        entry.deps = deps
+        entry.interface_digests = native.certificate
+            and native.certificate.interface or nil
+        if restored_descriptor then
+            entry.ffi_header_descriptor = restored_descriptor
+            entry.ffi_header = normalized_absolute_filename(
+                driver.ffi_header_filename(native_output))
+            entry.checking_ffi_header = restored_descriptor.filename
+        end
+        if native.foreign_header then
+            entry.foreign_header = driver.foreign_header_filename(native_output)
+            entry.checking_foreign_header = checking_foreign_header
+        end
+        for name, owner in pairs(entry.declared_registry or {}) do
+            if name:match("^(.*)%.") == modname or not types.registry[name] then
+                types.registry[name] = owner
+            end
         end
         driver.imported[modname] = entry
         object_loaded[modname] = true
         static_deps[modname] = true
         local registered, register_error = checker.register_module_interface(
-            modname, entry.type, loader, modname, {}, true, {},
+            modname, entry.type, active_loader, modname, {}, true, {},
             source_import_permissions(entry))
         if not registered then return false, register_error end
-        if context.probe_verbose then
-            io.stderr:write("Titan object hit ", modname, ": ", object_path, "\n")
+        -- A worker restores parent-certified records; the coordinator
+        -- already reported their decision.
+        if context.probe_verbose and not worker_plan and not published then
+            io.stderr:write("Titan object hit ", modname, ": ",
+                entry.compiled, "\n")
         end
-        return true, entry.type, {}, {
+        return entry
+    end
+
+    local function restored_source_info(entry)
+        return {
             kind = "source", filename = entry.filename,
             foreign_header = entry.checking_foreign_header,
             foreign_header_for_check = entry.checking_foreign_header ~= nil,
@@ -4871,11 +5126,215 @@ function driver.defaultloader(static_deps, options)
         }
     end
 
+    -- Certify an existing object instead of parsing its source: stage 1
+    -- (`incremental.certify_local`) reads only the record, own sources and C
+    -- inputs; the record's imports are then selected exactly as a fresh parse
+    -- of the certified bytes would; stage 2 (`incremental.verdict`) compares
+    -- the recorded interfaces and bindings with that selection. Only a hit
+    -- restores anything. Every miss is reported with `-v` and parses fresh.
+    -- Implementation notes: doc/implementation/incremental-compilation.md#resolver-and-cli-boundary
+    local function load_source_object(modname, source, loader)
+        if not options.incremental or source.contents then return nil end
+        local function miss(code, detail)
+            if context.probe_verbose then
+                io.stderr:write("Titan object miss ", modname, ": ",
+                    tostring(code), (detail ~= nil and detail ~= "")
+                        and (" " .. tostring(detail)) or "", "\n")
+            end
+            return nil
+        end
+        local configuration, configuration_error =
+            driver.incremental_configuration(context)
+        if not configuration then return false, configuration_error end
+        local certified = incremental.certify_local(context, modname, source)
+        if certified.status ~= "hit" then
+            return miss(certified.reason, certified.detail)
+        end
+
+        -- Certified own-source bytes fix the record's imports to exactly the
+        -- requests a fresh parse would make, so selecting them first changes
+        -- nothing a miss would not. A dependency failure is that failure.
+        driver.imported[modname] = CIRCULAR_MARK
+        table.insert(dependency_stack, {})
+        for _, import in ipairs(certified.imports) do
+            local ok, result, errors = loader(import.name,
+                import.source_required and { kind = "source-import" } or nil)
+            if not ok or #errors ~= 0 then
+                table.remove(dependency_stack)
+                driver.imported[modname] = nil
+                return false, ok and table.concat(errors, "\n") or result
+            end
+        end
+        table.remove(dependency_stack)
+        driver.imported[modname] = nil
+
+        local verdict = incremental.verdict(
+            certified.record, resolver_plan(context, static_deps))
+        if verdict.status == "pending" then
+            -- This resolver checks every module before generating any code,
+            -- so a freshly checked producer has no self digest yet.
+            return miss("dependency-rebuilt",
+                table.concat(verdict.names or {}, " "))
+        elseif verdict.status ~= "hit" then
+            return miss(verdict.reason, verdict.detail)
+        end
+        local entry, restore_code, restore_detail = restore_source_object(
+            modname, source, certified.record, loader)
+        if entry == nil then return miss(restore_code, restore_detail) end
+        if not entry then return false, restore_code end
+        return true, entry.type, {}, restored_source_info(entry)
+    end
+
+    -- Planning: certify (stage 1 only) and follow the module's imports. The
+    -- placeholder entry keeps ordinary selection state (dependency sets,
+    -- source/provider overlap rebinding) without a checked type; the
+    -- coordinator replaces it by restoring an accepted record. A failing
+    -- import never stops planning: its importer misses and the worker's
+    -- checker reports the located diagnostic.
+    local function plan_source(modname, source, loader)
+        local certified
+        if options.incremental and not source.contents then
+            local configuration, configuration_error =
+                driver.incremental_configuration(context)
+            if not configuration then return false, configuration_error end
+            certified = incremental.certify_local(context, modname, source)
+        end
+        local imports, imports_error =
+            options.imports_for(modname, source, certified)
+        if not imports then return false, imports_error end
+        local node = {
+            source = source, certified = certified, imports = imports,
+            failed = {},
+        }
+        planning.nodes[modname] = node
+        driver.imported[modname] = CIRCULAR_MARK
+        local direct = {}
+        table.insert(dependency_stack, direct)
+        for _, import in ipairs(imports) do
+            local ok, result, errors = loader(import.name,
+                import.source_required and { kind = "source-import" } or nil)
+            if not ok or #errors ~= 0 then
+                local text = ok and table.concat(errors, "\n") or tostring(result)
+                node.failed[import.name] = text
+                if not planning.nodes[import.name] and
+                   planning.unavailable[import.name] == nil then
+                    planning.unavailable[import.name] = text
+                end
+            end
+        end
+        table.remove(dependency_stack)
+        driver.imported[modname] = {
+            kind = "source", _planned = true,
+            filename = source.main, source_files = source.files,
+            native_output = source.native_output or source.main,
+            program_output = source.program_output, deps = direct,
+        }
+        static_deps[modname] = true
+        return true, nil, {}, { kind = "source", filename = source.main }
+    end
+
+    -- Worker: restore a parent-certified dependency from its published record
+    -- without recertifying it, after restoring its own recorded imports.
+    local function restore_planned_source(modname, item, loader)
+        local object = item.object
+        if type(object) ~= "string" then
+            return false, "build plan divergence: module '" .. modname ..
+                "' has no accepted object"
+        end
+        local bytes, read_error = context.io:read_file(object)
+        if not bytes then
+            return false, "cannot read planned object for module '" ..
+                modname .. "': " .. tostring(read_error)
+        end
+        local record, record_error = objectmetadata.read(bytes, object)
+        if not record or type(record.object_metadata) ~= "table" then
+            return false, "cannot decode planned object for module '" ..
+                modname .. "': " .. tostring(record_error)
+        end
+        driver.imported[modname] = CIRCULAR_MARK
+        table.insert(dependency_stack, {})
+        for _, import in ipairs(record.object_metadata.imports or {}) do
+            local ok, result, errors = loader(import.name,
+                import.source_required and { kind = "source-import" } or nil)
+            if not ok or #errors ~= 0 then
+                table.remove(dependency_stack)
+                driver.imported[modname] = nil
+                return false, ok and table.concat(errors, "\n") or result
+            end
+        end
+        table.remove(dependency_stack)
+        driver.imported[modname] = nil
+        local entry, code, detail = restore_source_object(
+            modname, copy_source_descriptor(item.source), record, loader)
+        if entry == nil then
+            return false, "build plan divergence: module '" .. modname ..
+                "' cannot be restored: " .. tostring(code) ..
+                (detail and (" " .. tostring(detail)) or "")
+        elseif not entry then
+            return false, code
+        end
+        return true, entry.type, {}, restored_source_info(entry)
+    end
+
+    -- Worker: load exactly the provider the coordinator selected.
+    local function load_planned_binary(modname, item)
+        local resolved
+        if item.kind == "dynamic" then
+            local status, value, metadata =
+                probe_compiled_interface(modname, item.file, context)
+            if status ~= "valid" then
+                return false, status == "error" and value or
+                    ("planned provider '" .. tostring(item.file) ..
+                        "' no longer claims module '" .. modname .. "'")
+            end
+            value.file = item.relative
+            if item.provider_file ~= nil and value.file ~= item.provider_file then
+                return false, "build plan divergence: module '" .. modname ..
+                    "' provider file is '" .. tostring(value.file) ..
+                    "', planned '" .. tostring(item.provider_file) .. "'"
+            end
+            remember_nominal_layouts(context, metadata.layout_inventory, item.file)
+            resolved = {
+                kind = "dynamic", type = value, filename = item.file,
+                relative = item.relative, layouts = metadata.layouts,
+                layout_inventory = metadata.layout_inventory,
+            }
+        elseif item.kind == "static" then
+            local provider, provider_error = inspect_static_provider(
+                context, item.archive, item.relative)
+            if not provider then return false, provider_error end
+            local metadata = provider.entries[modname]
+            if not metadata then
+                return false, "planned static provider '" ..
+                    tostring(item.archive) .. "' contains no module '" ..
+                    modname .. "'"
+            end
+            remember_nominal_layouts(context, metadata.layout_inventory, item.archive)
+            resolved = {
+                kind = "static", type = metadata.type, filename = item.archive,
+                relative = item.relative, static_archive = item.archive,
+                static_provider = provider, layouts = metadata.layouts,
+                layout_inventory = metadata.layout_inventory,
+            }
+            static_deps[modname] = true
+        else
+            return false, "build plan divergence: module '" .. modname ..
+                "' has unsupported planned kind '" .. tostring(item.kind) .. "'"
+        end
+        resolved.compiled = true
+        driver.imported[modname] = resolved
+        remember_direct_dependency(modname)
+        remember_used_compiled_interface(context, modname, resolved.type)
+        return true, resolved.type, {}, { kind = resolved.kind }
+    end
+
     -- Implementation notes: doc/implementation/folder-modules.md#source-descriptors-are-not-ast-nodes
     local function parse_source_inner(modname, source, loader, profile_frame)
         -- Each input is read once. The checker's authoritative recheck after
         -- a failed speculative probe batch assembles a fresh root from the
-        -- same strings.
+        -- same strings. After a certification miss these are exactly the
+        -- bytes certification hashed, so the new record certifies what this
+        -- invocation compiled.
         local inputs = {}
         local function assemble(frame)
             local ast = {}
@@ -4890,6 +5349,9 @@ function driver.defaultloader(static_deps, options)
                             return nil, "generated source has no contents for '" ..
                                 filename .. "'"
                         end
+                    elseif source.certified_contents and
+                           source.certified_contents[filename] ~= nil then
+                        input = source.certified_contents[filename]
                     else
                         input, err = context.io:read_file(filename)
                         if not input then return nil, err end
@@ -4965,6 +5427,19 @@ function driver.defaultloader(static_deps, options)
                     context, modname, ast)
             if header_error then errors[#errors + 1] = header_error end
         end
+        -- Own-source certificate of the exact bytes parsed above. Generated
+        -- sources and semantic-only resolvers never produce reusable objects.
+        -- A string failure (a constituent vanished after it was read) leaves
+        -- the object uncertified, so it can only miss later.
+        local source_certificate
+        if not source.contents and not context.analysis_only then
+            local contents = {}
+            for index, filename in ipairs(source.files) do
+                contents[filename] = inputs[index]
+            end
+            source_certificate =
+                incremental.source_certificate(context, source, contents)
+        end
         local entry = {
             kind = "source",
             ast = ast,
@@ -4980,6 +5455,7 @@ function driver.defaultloader(static_deps, options)
             checking_foreign_header = checking_foreign_header,
             ffi_header = ast._ffi_header and ast._ffi_header.identity,
             checking_ffi_header = ast._ffi_header and ast._ffi_header.filename,
+            source_certificate = source_certificate,
         }
         local source_manifest, manifest_error =
             driver.serialize_source_interface(entry)
@@ -5094,7 +5570,11 @@ function driver.defaultloader(static_deps, options)
             return true, cached.type, {}
         end
 
-        local function remember_type(modtype, resolved, ordinary_lookup, inventory)
+        -- `layouts`/`linked` describe the recovered owner for object
+        -- certificates: its provider's encoded layouts and whether the
+        -- exposer carries it into the same image.
+        local function remember_type(
+                modtype, resolved, ordinary_lookup, inventory, layouts, linked)
             inventory = inventory or resolved.layout_inventory
             context.contextual_types[cache_key] = {
                 type = modtype, layout_inventory = inventory,
@@ -5106,6 +5586,18 @@ function driver.defaultloader(static_deps, options)
             remember_contextual_resolution(
                 context, modname, exposing_name, resolved, ordinary_lookup,
                 physical_identity)
+            if layouts then
+                context.contextual_owner_entries =
+                    context.contextual_owner_entries or {}
+                context.contextual_owner_entries[modname] = {
+                    kind = linked and "static" or "dynamic",
+                    type = modtype,
+                    layouts = layouts,
+                    filename = resolved.filename,
+                    static_archive = linked and resolved.static_archive or nil,
+                    linked = linked,
+                }
+            end
             return true, modtype, {}
         end
 
@@ -5118,7 +5610,9 @@ function driver.defaultloader(static_deps, options)
                     add_native_constraint(context, modname, "direct-carried",
                         exposing.static_archive, exposing_name)
                 end
-                return remember_type(entry.type, exposing, false, entry.layout_inventory)
+                return remember_type(entry.type, exposing, false,
+                    entry.layout_inventory, entry.layouts,
+                    exposing.kind == "static")
             end
         elseif exposing.kind == "dynamic" then
             local status, value, metadata =
@@ -5126,7 +5620,8 @@ function driver.defaultloader(static_deps, options)
             if status == "valid" then
                 add_native_constraint(context, modname, "dynamic-global",
                     exposing.filename, exposing_name)
-                return remember_type(value, exposing, false, metadata.layout_inventory)
+                return remember_type(value, exposing, false,
+                    metadata.layout_inventory, metadata.layouts, false)
             elseif status == "error" then
                 context.contextual_types[cache_key] = { error = value }
                 return false, value
@@ -5163,7 +5658,8 @@ function driver.defaultloader(static_deps, options)
             add_native_constraint(context, modname, "dynamic-global",
                 exposing.static_archive or exposing.filename, exposing_name)
         end
-        return remember_type(resolved.type, resolved, true)
+        return remember_type(resolved.type, resolved, true, nil,
+            resolved.layouts, false)
     end
 
     local function loader(modname, request)
@@ -5232,6 +5728,27 @@ function driver.defaultloader(static_deps, options)
             and not object_loaded[modname] then
             driver.imported[modname] = nil
         end
+        -- A worker never discovers: its dependencies and their providers are
+        -- the coordinator's plan. Only the module it compiles parses source.
+        if worker_plan and not driver.imported[modname] then
+            local item = worker_plan.modules[modname]
+            if not item then
+                return false, "build plan divergence: module '" .. modname ..
+                    "' is not in the coordinator's plan"
+            elseif item.kind == "unavailable" then
+                return false, item.error
+            elseif item.kind == "source" then
+                if modname ~= worker_plan.modname then
+                    return restore_planned_source(modname, item, loader)
+                end
+            elseif request and request.kind == "source-import" then
+                return false, "build plan divergence: source-imported module '" ..
+                    modname .. "' is planned as a " .. tostring(item.kind) ..
+                    " provider"
+            else
+                return load_planned_binary(modname, item)
+            end
+        end
 
         -- Command-line roots and `.titan` import spellings both require a
         -- source implementation. The latter is an edge-local request: it may
@@ -5274,7 +5791,7 @@ function driver.defaultloader(static_deps, options)
             if not relocated then return false, relocation_error end
             if options.coverage then
                 local prepared, coverage_error = require("titan-compiler.coverage").source(
-                    options.coverage, modname, candidate, forced_source_roots)
+                    options.coverage, modname, candidate)
                 if not prepared then return false, coverage_error end
             end
             context.source_modules[modname] = true
@@ -5284,6 +5801,11 @@ function driver.defaultloader(static_deps, options)
             rebound, rebound_err =
                 rebind_overlapping_static_providers(modname)
             if not rebound then return false, rebound_err end
+            if planning and planning.open then
+                local ok, modt, errors, info = plan_source(modname, candidate, loader)
+                if ok then remember_direct_dependency(modname) end
+                return ok, modt, errors, info
+            end
             local ok, modt, errors, info = load_source_object(modname, candidate, loader)
             if ok == nil then
                 ok, modt, errors, info = parse_source(modname, candidate, loader)
@@ -5313,6 +5835,7 @@ function driver.defaultloader(static_deps, options)
             source_overrides[modname] ~= nil
         if source_preferred and driver.imported[modname] and
            ((not driver.imported[modname].ast and not object_loaded[modname] and
+                not driver.imported[modname]._planned and
                 (not driver.imported[modname]._analysis_manifest or context.source_first
                     or not context.analysis_only)) or
             (driver.imported[modname].ast and
@@ -5443,9 +5966,625 @@ function driver.defaultloader(static_deps, options)
     loader_contexts[loader] = {
         context = context,
         owned = owns_context,
+        restore = function(modname, source, record, published)
+            return restore_source_object(
+                modname, source, record, loader, published)
+        end,
+        planning = planning,
     }
     return loader
 end
+
+-- Restore an accepted object record through the loader bound to `context`,
+-- after `incremental.verdict` returned a hit or after the coordinator
+-- published a worker's object. `record` is the decoded record (or a
+-- certification result carrying it); every recorded import must already be
+-- selected. Nothing is parsed, checked, or compiled. `options.published`
+-- suppresses the `-v` hit line for a module compiled in this invocation.
+-- Returns the restored entry; `nil, code, detail` for a miss before any
+-- resolver mutation; `false, err` for a failure.
+-- Implementation notes: doc/implementation/incremental-compilation.md#resolver-and-cli-boundary
+function driver.restore_source_object(context, modname, source, record, options)
+    if type(context) ~= "table" or context.io == nil then
+        error("restoring an object requires a resolver context", 2)
+    end
+    local binding = context.loader and loader_contexts[context.loader]
+    if not binding or binding.context ~= context or not binding.restore then
+        error("restoring an object requires a loader bound to its " ..
+            "resolver context", 2)
+    end
+    if type(record) == "table" and record.object_metadata == nil and
+       type(record.record) == "table" then
+        record = record.record
+    end
+    return binding.restore(modname, source, record,
+        options and options.published == true)
+end
+
+-- Ordinary tagged source lookup (folder before flat, blocked constituents
+-- reported as such) over `source_path`, which defaults to the invocation's
+-- `;`-separated source roots. Returns a descriptor, `nil, err`, or `nil` when
+-- no root has the module.
+function driver.resolve_source(context, modname, source_path)
+    if type(context) ~= "table" or context.io == nil then
+        error("source lookup requires a resolver context", 2)
+    end
+    return resolve_source(source_path or driver.TITAN_SOURCE_PATH, modname,
+        context)
+end
+
+-- Coordinator and worker entry points; their private helpers stay local to
+-- this block.
+do
+
+-- A module's current source descriptor exactly as this invocation's loader
+-- would select it: relocated under the output root, and coverage-relocated
+-- when sources are instrumented. Publication revalidates against it.
+local function current_source_descriptor(context, modname)
+    local source, source_error = resolve_source(
+        driver.TITAN_SOURCE_PATH, modname, context)
+    if not source then
+        return nil, source_error or ("source module '" .. modname ..
+            "' not found")
+    elseif source.kind == "blocked" then
+        return nil, blocked_source_error(modname, source)
+    end
+    local relocated, relocation_error = driver.relocate_source_output(
+        modname, source, context.output_root)
+    if not relocated then return nil, relocation_error end
+    local policy = context.codegen_policy
+    if policy and policy.coverage then
+        local prepared, coverage_error = require("titan-compiler.coverage")
+            .source(policy.coverage, modname, source)
+        if not prepared then return nil, coverage_error end
+    end
+    return source
+end
+
+-- Close planning and return the coordinator's authoritative plan over the
+-- planning loader's selection. `modules[name]` is a planned source (its
+-- descriptor, stage-1 certification, ordered imports and failed import
+-- diagnostics), the exact selected dynamic or static provider, or an
+-- unavailable name with its diagnostic. `order` lists source modules with
+-- dependencies first and bytewise ties; import-cycle members follow,
+-- bytewise, with `cyclic = true`. Interface digests of source modules exist
+-- only once `update` accepts their certified record (hit or published).
+-- Implementation notes: doc/implementation/incremental-compilation.md#resolver-and-cli-boundary
+function driver.resolution_plan(context)
+    if type(context) ~= "table" or context.io == nil then
+        error("a resolution plan requires a resolver context", 2)
+    end
+    local binding = context.loader and loader_contexts[context.loader]
+    local planning = binding and binding.planning
+    if not planning or not planning.open then
+        error("a resolution plan requires an open planning loader bound " ..
+            "to its resolver context", 2)
+    end
+    planning.open = false
+
+    local modules, linked = {}, {}
+    for name, mod in pairs(driver.imported) do
+        if mod ~= CIRCULAR_MARK then
+            local node = mod._planned and planning.nodes[name]
+            if node then
+                modules[name] = {
+                    kind = "source", source = node.source,
+                    certified = node.certified, imports = node.imports,
+                    failed = node.failed,
+                }
+                linked[name] = true
+            elseif mod.kind == "dynamic" then
+                modules[name] = {
+                    kind = "dynamic", file = mod.filename,
+                    relative = mod.relative,
+                    provider_file = mod.type and mod.type.file,
+                }
+            elseif mod.kind == "static" then
+                modules[name] = {
+                    kind = "static", archive = mod.static_archive,
+                    relative = mod.relative,
+                }
+                linked[name] = true
+                for carried in pairs(mod.static_provider and
+                        mod.static_provider.entries or {}) do
+                    linked[carried] = true
+                end
+            end
+        end
+    end
+    for name, text in pairs(planning.unavailable) do
+        if not modules[name] then
+            modules[name] = { kind = "unavailable", error = text }
+        end
+    end
+
+    local names = {}
+    for name, module in pairs(modules) do
+        if module.kind == "source" then names[#names + 1] = name end
+    end
+    table.sort(names, util.bytewise_less)
+    local waiting, dependents = {}, {}
+    for _, name in ipairs(names) do
+        local count, seen = 0, {}
+        for _, import in ipairs(modules[name].imports) do
+            local dependency = import.name
+            if dependency == name then
+                modules[name].cyclic = true
+            elseif modules[dependency] and modules[dependency].kind == "source"
+                   and not seen[dependency] then
+                seen[dependency] = true
+                count = count + 1
+                dependents[dependency] = dependents[dependency] or {}
+                table.insert(dependents[dependency], name)
+            end
+        end
+        waiting[name] = count
+    end
+    local order, ready = {}, {}
+    for _, name in ipairs(names) do
+        if waiting[name] == 0 and not modules[name].cyclic then
+            ready[#ready + 1] = name
+        end
+    end
+    while #ready > 0 do
+        table.sort(ready, util.bytewise_less)
+        local name = table.remove(ready, 1)
+        order[#order + 1] = name
+        for _, dependent in ipairs(dependents[name] or {}) do
+            waiting[dependent] = waiting[dependent] - 1
+            if waiting[dependent] == 0 and not modules[dependent].cyclic then
+                ready[#ready + 1] = dependent
+            end
+        end
+    end
+    for _, name in ipairs(names) do
+        if waiting[name] > 0 or modules[name].cyclic then
+            modules[name].cyclic = true
+            order[#order + 1] = name
+        end
+    end
+
+    local accepted = {}
+    local plan = { modules = modules, order = order }
+    function plan.linked(name)
+        local module = modules[name]
+        if module and module.kind == "unavailable" then return nil end
+        local mod, is_linked = certificate_dependency(context, name, linked)
+        if not mod then return nil end
+        return is_linked
+    end
+    function plan.provider_file(name)
+        local module = modules[name]
+        return module and module.kind == "dynamic" and module.provider_file or nil
+    end
+    function plan.digest(name, view)
+        local module = modules[name]
+        if module and module.kind == "unavailable" then
+            return nil, "unavailable"
+        elseif module and module.kind == "source" then
+            local certified = accepted[name]
+            if not certified then return nil, "pending" end
+            return incremental.interface_digest(context, certified.record, view)
+        end
+        local mod = certificate_dependency(context, name, linked)
+        if not mod then return nil, "unavailable" end
+        return incremental.interface_digest(context, mod, view)
+    end
+    function plan.update(name, certified)
+        local module = modules[name]
+        if not module or module.kind ~= "source" then
+            error("only planned source modules accept a certified record", 2)
+        elseif type(certified) ~= "table" or type(certified.record) ~= "table" then
+            error("a planned module update requires its certified record", 2)
+        end
+        accepted[name] = certified
+    end
+    function plan.accepted(name)
+        return accepted[name]
+    end
+    return plan
+end
+
+-- The closed data a worker receives for one module: per planned name, the
+-- source descriptor (with the accepted object of every certified
+-- dependency), the exact selected provider, or the unavailable diagnostic,
+-- each with its linked state.
+function driver.plan_descriptor(plan, modname)
+    local target = plan.modules[modname]
+    if not target or target.kind ~= "source" then
+        error("the build plan has no source module '" .. tostring(modname) ..
+            "'", 2)
+    end
+    local modules = {}
+    for name, module in pairs(plan.modules) do
+        local item = { kind = module.kind, linked = plan.linked(name) == true }
+        if module.kind == "source" then
+            item.source = copy_source_descriptor(module.source)
+            if name ~= modname then
+                local certified = plan.accepted(name)
+                item.object = certified and certified.object or nil
+            end
+        elseif module.kind == "dynamic" then
+            item.file, item.relative = module.file, module.relative
+            item.provider_file = module.provider_file
+        elseif module.kind == "static" then
+            item.archive, item.relative = module.archive, module.relative
+        else
+            item.error = module.error
+        end
+        modules[name] = item
+    end
+    return {
+        protocol = version.BUILD_WORKER_PROTOCOL,
+        modname = modname,
+        modules = modules,
+    }
+end
+
+local function copy_strings(values)
+    local copy = {}
+    for index, value in ipairs(values or {}) do copy[index] = value end
+    return copy
+end
+
+-- Everything a worker needs to reproduce this coordinator's compiler state,
+-- as closed data: driver paths and flags, resolver and code-generation
+-- policy, and the configuration certificate computed once here.
+function driver.worker_configuration(context)
+    local configuration, configuration_error =
+        driver.incremental_configuration(context)
+    if not configuration then return nil, configuration_error end
+    local policy = context.codegen_policy or {}
+    return {
+        protocol = version.BUILD_WORKER_PROTOCOL,
+        driver = {
+            source_path = driver.TITAN_SOURCE_PATH,
+            bin_path = driver.TITAN_BIN_PATH,
+            lua_source_path = driver.LUA_SOURCE_PATH,
+            emit_line_directives = driver.EMIT_LINE_DIRECTIVES,
+            output_root = driver.OUTPUT_ROOT,
+            extra_cppflags = copy_strings(driver.EXTRA_CPPFLAGS),
+            extra_cflags = copy_strings(driver.EXTRA_CFLAGS),
+            native_compile_flags = driver.NATIVE_COMPILE_FLAGS and
+                copy_strings(driver.NATIVE_COMPILE_FLAGS) or nil,
+        },
+        resolver = {
+            prefer_static = context.prefer_static,
+            source_first = context.source_first,
+            verbose = context.probe_verbose,
+            pretty_print = context.pretty_print,
+            output_root = context.output_root,
+            jobs = context.jobs,
+            frontend = context.frontend,
+            extra_ffi_include_dirs = copy_strings(context.extra_ffi_include_dirs),
+        },
+        policy = {
+            c_parts = policy.c_parts,
+            split_threshold = policy.split_threshold,
+            test = policy.test == true,
+            coverage = policy.coverage,
+        },
+        configuration = configuration,
+    }
+end
+
+-- A worker's resolver context from `driver.worker_configuration` data. The
+-- worker verifies only the compiler Lua it actually loaded against the
+-- coordinator's certificate; preamble, toolchain and options are inherited.
+function driver.new_worker_context(configuration, io_strategy)
+    if type(configuration) ~= "table" or
+       configuration.protocol ~= version.BUILD_WORKER_PROTOCOL or
+       type(configuration.driver) ~= "table" or
+       type(configuration.resolver) ~= "table" or
+       type(configuration.policy) ~= "table" or
+       type(configuration.configuration) ~= "table" then
+        return nil, "incompatible build worker configuration"
+    end
+    local settings = configuration.driver
+    driver.TITAN_SOURCE_PATH = settings.source_path
+    driver.TITAN_BIN_PATH = settings.bin_path
+    driver.LUA_SOURCE_PATH = settings.lua_source_path
+    driver.EMIT_LINE_DIRECTIVES = settings.emit_line_directives
+    driver.OUTPUT_ROOT = settings.output_root
+    driver.EXTRA_CPPFLAGS = copy_strings(settings.extra_cppflags)
+    driver.EXTRA_CFLAGS = copy_strings(settings.extra_cflags)
+    driver.NATIVE_COMPILE_FLAGS = settings.native_compile_flags and
+        copy_strings(settings.native_compile_flags) or nil
+    local support_loaded, support = pcall(require, "titan")
+    if not support_loaded or type(support) ~= "table" or
+       type(support._sha256_binary) ~= "function" then
+        return nil, "the installed Titan native support library is " ..
+            "missing or stale (it lacks _sha256_binary)"
+    end
+    local resolver = configuration.resolver
+    local context = driver.new_resolver_context({
+        io = io_strategy,
+        cache_adapter = { sha256_binary = support._sha256_binary },
+        prefer_static = resolver.prefer_static,
+        source_first = resolver.source_first,
+        verbose = resolver.verbose,
+        pretty_print = resolver.pretty_print,
+        output_root = resolver.output_root,
+        jobs = resolver.jobs,
+        frontend = resolver.frontend,
+        extra_ffi_include_dirs = resolver.extra_ffi_include_dirs,
+    })
+    local function fail(message)
+        driver.close_resolver_context(context)
+        return nil, message
+    end
+    if driver.TOOLCHAIN_ERROR then return fail(driver.TOOLCHAIN_ERROR) end
+    local configured, configure_error = driver.configure_foreign_c(context)
+    if not configured and configure_error then return fail(configure_error) end
+    local policy = configuration.policy
+    context.codegen_policy = {
+        c_parts = policy.c_parts,
+        split_threshold = policy.split_threshold,
+        test = policy.test == true,
+        coverage = policy.coverage,
+    }
+    local options, options_error = incremental_options(context)
+    if not options then return fail(options_error) end
+    local compiler, compiler_error =
+        incremental.compiler_component(context, options)
+    if not compiler then
+        return fail("cannot certify compiler configuration: " ..
+            tostring(compiler_error))
+    elseif compiler ~= configuration.configuration.compiler then
+        return fail("compiler installation changed during build")
+    end
+    context.incremental_options = options
+    context.incremental_configuration = configuration.configuration
+    return context
+end
+
+-- Parent-only, right before a missed module's worker starts: retire its
+-- committed object. The primary object is the commit marker, so it is
+-- unlinked first; then the higher parts and coverage notes its record names.
+-- An interruption at any later point leaves no acceptable object.
+function driver.invalidate_source_object(context, modname, source)
+    local stem = driver.module_output_stem(
+        source.native_output or source.main, modname)
+    local primary = stem .. ".o"
+    local attributes = context.io:lstat(primary)
+    if not attributes then return true end
+    if attributes.kind == "directory" then
+        return nil, "object output '" .. primary .. "' for module '" ..
+            modname .. "' is a directory"
+    end
+    local prior = {}
+    if attributes.kind == "file" then
+        local bytes = context.io:read_file(primary)
+        local record = bytes and objectmetadata.read(bytes, primary)
+        local native = record and record.object_metadata
+        if native and native.parts and objectmetadata.validate_parts(native) then
+            for _, part in ipairs(native.parts) do
+                if part.index >= 1 then
+                    local part_stem = stem .. ".part" .. tostring(part.index)
+                    prior[#prior + 1] = part_stem .. ".o"
+                    prior[#prior + 1] = part_stem .. ".c"
+                    prior[#prior + 1] = part_stem .. ".gcno"
+                    prior[#prior + 1] = part_stem .. ".gcda"
+                end
+            end
+        end
+    end
+    local removed, remove_error = context.io:unlink(primary)
+    if not removed then
+        return nil, "cannot invalidate object for module '" .. modname ..
+            "': " .. tostring(remove_error)
+    end
+    for _, sibling in ipairs(prior) do
+        if context.io:lstat(sibling) then context.io:unlink(sibling) end
+    end
+    return true
+end
+
+-- Worker: check and compile exactly one planned module. `options.plan` is
+-- `driver.plan_descriptor` data. Generated C and headers are written at their
+-- final paths (the coordinator already retired the old primary); every
+-- object part is compiled to a unique sibling temporary that only the
+-- coordinator publishes. Returns `{ modname, object, objects, staged =
+-- {{from, to, role}}, diagnostics = {} }` or `nil, diagnostics text`.
+function driver.compile_planned_module(context, modname, options)
+    options = options or {}
+    local plan = options.plan
+    if type(plan) ~= "table" or plan.protocol ~= version.BUILD_WORKER_PROTOCOL
+       or plan.modname ~= modname or type(plan.modules) ~= "table"
+       or type(plan.modules[modname]) ~= "table"
+       or plan.modules[modname].kind ~= "source" then
+        return nil, "invalid build plan for module '" .. tostring(modname) .. "'"
+    end
+    local policy = context.codegen_policy or {}
+    local test = options.test
+    if test == nil then test = policy.test end
+    local c_parts = options.c_parts or policy.c_parts
+    local verbose = options.verbose == true
+    local coverage_build = policy.coverage
+    local source = copy_source_descriptor(plan.modules[modname].source)
+    local loader = driver.defaultloader({}, {
+        context = context,
+        worker_plan = plan,
+        source_roots = { [modname] = true },
+        source_overrides = { [modname] = source },
+        test = test,
+        coverage = coverage_build,
+        output_root = context.output_root,
+        c_parts = c_parts,
+        split_threshold = policy.split_threshold,
+    })
+    local ok, errors = checker.checkimport(modname, loader)
+    if not ok then return nil, tostring(errors) end
+    if #errors > 0 then return nil, table.concat(errors, "\n") end
+    local finalized, finalize_errors = driver.finalize_resolver_context(context)
+    if not finalized then return nil, table.concat(finalize_errors, "\n") end
+    for name, planned in pairs(plan.modules) do
+        local selected = driver.imported[name]
+        if selected and selected ~= CIRCULAR_MARK and
+           planned.kind ~= "unavailable" and
+           (context.native_static_names[name] == true) ~= (planned.linked == true) then
+            return nil, "build plan divergence: module '" .. name .. "' is " ..
+                (planned.linked and "linked" or "not linked") ..
+                " in the plan but not in the worker's selection"
+        end
+    end
+
+    local mod = driver.imported[modname]
+    local extra_flags = {}
+    local coverage_selected = false
+    if coverage_build then
+        local coverage = require("titan-compiler.coverage")
+        coverage_selected = coverage.matches(coverage_build, modname,
+            coverage.test_functions(mod.ast)) == true
+        coverage_build.selected[modname] = coverage_selected or nil
+        extra_flags = coverage.compile_flags(coverage_build, modname) or {}
+    end
+    coder.prepare_coverage(mod.ast, coverage_build ~= nil)
+    local header_plans, header_error =
+        driver.plan_foreign_headers({ modname }, driver.imported)
+    if not header_plans then return nil, header_error end
+    local request = {
+        modname = modname,
+        mod = mod,
+        static_deps = context.native_static_names,
+        options = {
+            context = context,
+            test = test,
+            pretty_print = context.pretty_print,
+            nominal_layouts = context.nominal_layouts,
+            extra_compile_flags = extra_flags,
+            coverage = coverage_selected,
+            coverage_backend = coverage_build and coverage_build.backend,
+            c_parts = c_parts,
+            split_threshold = policy.split_threshold,
+            staged = true,
+        },
+    }
+    local plans, plan_error = driver.plan_compile_requests(
+        { request }, verbose, nil, nil, header_plans)
+    if not plans then return nil, plan_error end
+    local written, write_error = driver.write_foreign_header_plans(
+        header_plans, verbose, context.pretty_print)
+    if not written then return nil, write_error end
+    local compilation, materialize_error = plans[1].materialize()
+    plans[1].materialize = nil
+    if not compilation then return nil, materialize_error end
+    jobs.set_request_index(compilation, 1)
+
+    local parallelism = options.jobs or context.jobs or 1
+    local result, cancelled
+    if parallelism > 1 and #compilation.jobs > 1 then
+        local compiled
+        compiled, cancelled = driver.run_prepared_compiles(
+            { compilation }, parallelism, verbose)
+        result = compiled[1]
+    else
+        result = { ok = true }
+        for _, job in ipairs(compilation.jobs) do
+            local job_ok, job_err = run_argv(job.argv, verbose)
+            if result.ok and not job_ok then result = { err = job_err } end
+        end
+    end
+    if cancelled or not result.ok then
+        for _, job in ipairs(compilation.jobs) do
+            os.remove(job.temporary_object)
+        end
+        jobs.propagate(cancelled)
+        return nil, result.err
+    end
+    local staged = {}
+    for index, job in ipairs(compilation.jobs) do
+        staged[index] = {
+            from = job.temporary_object,
+            to = job.object_path,
+            role = job.part_index == 0 and "primary" or "part",
+        }
+    end
+    return {
+        modname = modname,
+        object = compilation.primary_object,
+        objects = compilation.objects,
+        staged = staged,
+        diagnostics = {},
+    }
+end
+
+-- Parent-only publication of a worker's staged object. The module's current
+-- source descriptor is resolved afresh and its recorded own sources and C
+-- inputs are revalidated with a fresh pass, so an edit during the build is
+-- an error rather than a certified mismatch. Parts are renamed first and
+-- the primary object last; any failure leaves no primary. Returns the
+-- certified result (`status`, `record`, `object`, `objects`, `imports`).
+function driver.publish_staged_module(context, result)
+    local modname = result.modname
+    local primary, parts = nil, {}
+    for _, staged in ipairs(result.staged or {}) do
+        if staged.role == "primary" then primary = staged
+        else parts[#parts + 1] = staged end
+    end
+    local function discard(message)
+        for _, staged in ipairs(result.staged or {}) do
+            if context.io:lstat(staged.from) then context.io:unlink(staged.from) end
+        end
+        return nil, message
+    end
+    if not primary then
+        return discard("worker result for module '" .. tostring(modname) ..
+            "' has no primary object")
+    end
+    local bytes, read_error = context.io:read_file(primary.from)
+    if not bytes then
+        return discard("cannot read staged object for module '" .. modname ..
+            "': " .. tostring(read_error))
+    end
+    local record, record_error = objectmetadata.read(bytes, primary.to)
+    if not record or type(record.object_metadata) ~= "table" then
+        return discard("cannot decode staged object for module '" .. modname ..
+            "': " .. tostring(record_error))
+    end
+    local source, source_error = current_source_descriptor(context, modname)
+    if not source then
+        return discard("cannot resolve module '" .. modname ..
+            "' for publication: " .. tostring(source_error))
+    end
+    local check = incremental.revalidate_record(context, modname, source, record)
+    if check.status ~= "hit" then
+        return discard("inputs of module '" .. modname ..
+            "' changed during the build: " .. tostring(check.reason) ..
+            (check.detail and check.detail ~= "" and
+                (" " .. tostring(check.detail)) or ""))
+    end
+    if context.io:lstat(primary.to) then
+        local removed, remove_error = context.io:unlink(primary.to)
+        if not removed then
+            return discard("cannot replace object for module '" .. modname ..
+                "': " .. tostring(remove_error))
+        end
+    end
+    for index = #parts, 1, -1 do
+        local renamed, rename_error =
+            context.io:rename(parts[index].from, parts[index].to)
+        if not renamed then
+            return discard("cannot publish object part '" .. parts[index].to ..
+                "': " .. tostring(rename_error))
+        end
+    end
+    local renamed, rename_error = context.io:rename(primary.from, primary.to)
+    if not renamed then
+        if context.io:lstat(primary.to) then context.io:unlink(primary.to) end
+        return discard("cannot publish object '" .. primary.to .. "': " ..
+            tostring(rename_error))
+    end
+    return {
+        status = "hit",
+        record = record,
+        object = primary.to,
+        objects = result.objects,
+        imports = record.object_metadata.imports,
+    }
+end
+
+end -- coordinator and worker entry points
 
 -- Resolve the physical identity of already-known external dependencies without
 -- parsing source or retaining compiler state. Language-server clients use this
@@ -6384,7 +7523,6 @@ driver.FOREIGN_HEADER_MARKER =
     "/* Generated by Titan: source foreign function interface. */"
 driver.FFI_HEADER_MARKER = ffiheaders.MARKER
 driver.PRIVATE_HEADER_MARKER = coder.PRIVATE_HEADER_MARKER
-driver.PARTS_COMPANION_HEADER_PREFIX = "titan-parts-v1 "
 
 function driver.module_output_stem(sourcef, modname)
     sourcef = sourcef or modname:gsub("[.]", "/") .. ".titan"
@@ -6408,11 +7546,6 @@ function driver.private_header_filename(sourcef)
     return stem .. ".priv.h"
 end
 
-function driver.parts_companion_filename(sourcef)
-    local stem = sourcef:gsub("[.]titan$", "")
-    return stem .. ".parts"
-end
-
 function driver.part_c_filename(stem, part_index)
     stem = stem:gsub("[.]titan$", "")
     assert(type(part_index) == "number" and part_index >= 0
@@ -6427,41 +7560,6 @@ function driver.part_object_filename(stem, part_index)
         and part_index % 1 == 0, "part_index must be a nonnegative integer")
     return part_index == 0 and (stem .. ".o")
         or (stem .. ".part" .. tostring(part_index) .. ".o")
-end
-
-function driver.render_parts_companion(stem, part_count)
-    stem = stem:gsub("[.]titan$", "")
-    assert(type(part_count) == "number" and part_count >= 1
-        and part_count % 1 == 0, "part_count must be a positive integer")
-    local leaf = stem:match("([^/\\]+)$") or stem
-    local lines = { "titan-parts-v1 " .. tostring(part_count) }
-    if part_count > 1 then
-        lines[#lines + 1] = leaf .. ".priv.h"
-    end
-    lines[#lines + 1] = leaf .. ".c"
-    lines[#lines + 1] = leaf .. ".o"
-    for k = 1, part_count - 1 do
-        lines[#lines + 1] = leaf .. ".part" .. tostring(k) .. ".c"
-        lines[#lines + 1] = leaf .. ".part" .. tostring(k) .. ".o"
-    end
-    lines[#lines + 1] = ""
-    return table.concat(lines, "\n")
-end
-
-function driver.parse_parts_companion(contents, stem)
-    if type(contents) ~= "string" then
-        return nil, "missing .parts companion contents"
-    end
-    local count_text = contents:match("^titan%-parts%-v1 ([1-9][0-9]*)\n")
-    local count = tonumber(count_text)
-    if not count or count > math.maxinteger then
-        return nil, "malformed .parts companion header"
-    end
-    local expected = driver.render_parts_companion(stem, count)
-    if contents ~= expected then
-        return nil, "malformed .parts companion inventory"
-    end
-    return count
 end
 
 function driver.default_c_parts()
@@ -6830,7 +7928,6 @@ local function prepare_compile(
     local filename = stem .. ".c"
     local libname = stem .. ".o"
     local priv_header_path = stem .. ".priv.h"
-    local parts_companion_path = stem .. ".parts"
     coder.prepare_coverage(ast, options and
         (options.coverage == true or options.coverage_backend ~= nil))
     local owns_header_plan = header_plan == nil
@@ -6870,6 +7967,29 @@ local function prepare_compile(
     local native_bindings = generated.native_bindings
     local encoded_layouts = generated.encoded_layouts
     local private_symbols = generated.private_symbols or {}
+    -- Objects compiled through a resolver context from authored source carry
+    -- a certificate. Producer self digests come from this coder output, so a
+    -- fresh producer and its later restored record cannot disagree; consumers
+    -- planned in the same invocation read them when their records render.
+    local context = options and options.context
+    local certify = context ~= nil and source_entry ~= nil and
+        source_entry.source_certificate ~= nil
+    if certify then
+        local configuration, configuration_error =
+            driver.incremental_configuration(context)
+        if not configuration then return nil, configuration_error end
+        local digests, digest_error = incremental.producer_digests(
+            context, source_entry, encoded_layouts, ast._foreign_header_recipe)
+        if not digests then
+            return nil, "cannot certify object for module '" .. modname ..
+                "': " .. tostring(digest_error)
+        end
+        source_entry.interface_digests = digests
+    end
+    local test_functions =
+        require("titan-compiler.test_runner").function_names(ast)
+    local test_flags = driver.test_owner_flags(
+        options and options.test, test_functions)
     local imports, deps, providers = {}, {}, {}
     for _, node in ipairs(ast) do
         if not node._ignore and node._tag == "Ast.TopLevelImport" then
@@ -6903,7 +8023,7 @@ local function prepare_compile(
     local native = {
         imports = imports, bindings = native_bindings, providers = providers,
         has_main = checker.has_main(ast) and true or false,
-        test_functions = require("titan-compiler.test_runner").function_names(ast),
+        test_functions = test_functions,
         coverage_test_functions = coverage.test_functions(ast),
         external_symbols = coder.external_symbols(modname, ast),
         private_symbols = private_symbols,
@@ -6920,14 +8040,48 @@ local function prepare_compile(
         native.coverage = { enabled = options.coverage == true,
             backend = options.coverage_backend }
     end
+    local certificate_attempted = false
     local function metadata_code()
+        if certify and not certificate_attempted then
+            certificate_attempted = true
+            local made, certificate = pcall(incremental.make_certificate,
+                context, source_entry, native, {
+                    source = source_entry.source_certificate,
+                    stem = normalized_absolute_filename(stem),
+                    codegen = {
+                        c_parts = effective_c_parts,
+                        split_threshold = split_threshold,
+                        test_flags = #test_flags > 0,
+                        coverage = options and options.coverage_backend and {
+                            enabled = options.coverage == true,
+                            backend = options.coverage_backend,
+                        } or nil,
+                    },
+                    plan = resolver_plan(context, static_deps),
+                    binary_usage = ast._binary_usage,
+                    generated_parts = generated_parts,
+                    private_header = generated.private_header,
+                })
+            if made then
+                native.certificate = certificate
+            elseif type(certificate) ~= "string" then
+                error(certificate, 0)
+            elseif context.probe_verbose then
+                -- A dependency digest this resolver cannot supply (for
+                -- example a producer compiled out of order by an API caller)
+                -- leaves the object uncertified: it is correct but can only
+                -- miss later.
+                io.stderr:write("Titan object uncertified ", modname, ": ",
+                    certificate, "\n")
+            end
+        end
         local payload, metadata_error = objectmetadata.encode(entry, native)
         if not payload then return nil, metadata_error end
         return "\n" .. objectmetadata.render(payload,
             "titan_object_source_" .. driver.mangle_module_name(modname))
     end
-    -- Preflight existing private header and .parts companion before any
-    -- invalidation or file write.
+    -- Preflight an existing private header before any invalidation or file
+    -- write.
     local priv_attr = lfs.symlinkattributes(priv_header_path)
     local priv_owned = false
     if priv_attr and priv_attr.mode == "file" then
@@ -6946,21 +8100,10 @@ local function prepare_compile(
                 .. priv_header_path .. "'"
         end
     end
-    local parts_attr = lfs.symlinkattributes(parts_companion_path)
-    if parts_attr then
-        local existing = parts_attr.mode == "file"
-            and util.get_file_contents(parts_companion_path, "rb") or nil
-        local owned = existing and
-            existing:sub(1, #driver.PARTS_COMPANION_HEADER_PREFIX)
-                == driver.PARTS_COMPANION_HEADER_PREFIX
-        if parts_attr.mode ~= "file" or not owned then
-            return nil, "refusing to overwrite user-owned companion path '"
-                .. parts_companion_path .. "'"
-        end
-    end
 
-    -- Discover prior compiler-owned outputs before invalidating the primary
-    -- object and companion so stale higher parts are removed even with holes.
+    -- Discover prior compiler-owned outputs from the existing primary record
+    -- before invalidating it, so stale higher parts are removed even with
+    -- holes. No directory is scanned and no other inventory is trusted.
     local prior_inventory = {}
     if priv_owned then prior_inventory[priv_header_path] = true end
     if lfs.symlinkattributes(libname, "mode") == "file" then
@@ -6978,23 +8121,10 @@ local function prepare_compile(
             end
         end
     end
-    if parts_attr then
-        local old_companion = util.get_file_contents(parts_companion_path, "rb")
-        local old_count = old_companion and
-            driver.parse_parts_companion(old_companion, stem) or nil
-        if old_count and old_count > 1 then
-            if priv_owned then prior_inventory[priv_header_path] = true end
-            for k = 1, old_count - 1 do
-                prior_inventory[driver.part_c_filename(stem, k)] = true
-                prior_inventory[driver.part_object_filename(stem, k)] = true
-                prior_inventory[stem .. ".part" .. tostring(k) .. ".gcno"] = true
-                prior_inventory[stem .. ".part" .. tostring(k) .. ".gcda"] = true
-            end
-        end
-    end
 
     local base_args, flags_err = driver.generated_compile_prefix()
     if not base_args then return nil, flags_err end
+    append_argv(base_args, test_flags)
     append_argv(base_args, options and options.extra_compile_flags)
     local lto, explicit_seed = false, false
     for _, argument in ipairs(base_args) do
@@ -7052,7 +8182,6 @@ local function prepare_compile(
             }
         end
     end
-    output(parts_companion_path)
     if generated.private_header then output(priv_header_path) end
     for _, part in ipairs(generated_parts) do
         output(driver.part_c_filename(stem, part.index))
@@ -7062,7 +8191,6 @@ local function prepare_compile(
         output(part_stem .. ".gcda")
     end
     for _, job in ipairs(prepared_jobs) do output(job.temporary_object) end
-    output(prepared_jobs[1].temporary_object .. ".parts")
     for prior_path in pairs(prior_inventory) do output(prior_path) end
     if header_plan then
         for _, header in ipairs(generated_header_entries(header_plan)) do
@@ -7087,10 +8215,10 @@ local function prepare_compile(
             if not ok then return nil, err end
         end
 
-        -- Invalidate primary commit marker and companion first, then remove prior
-        -- sibling outputs.
-        os.remove(libname)
-        os.remove(parts_companion_path)
+        -- Invalidate the primary commit marker first, then remove prior
+        -- sibling outputs. A staged worker compile never touches the
+        -- primary name: its coordinator retired it before dispatch.
+        if not (options and options.staged) then os.remove(libname) end
         os.remove(filename)
         os.remove(stem .. ".gcda")
         os.remove(stem .. ".gcno")
@@ -7162,7 +8290,6 @@ local function prepare_compile(
             stem = stem,
             primary_object = libname,
             private_header = generated.private_header and priv_header_path or nil,
-            parts_companion = parts_companion_path,
             jobs = prepared_jobs,
             objects = ordered_objects,
             source_record = native,
@@ -7178,12 +8305,10 @@ local function prepare_compile(
     }
 end
 
--- Sibling part objects and the Make companion are published first; the primary
--- object is the module's commit marker and is renamed last. Any failure removes
--- the primary marker, companion, and all temporary/sibling objects.
+-- Sibling part objects are published first; the primary object is the
+-- module's commit marker and is renamed last. Any failure removes the
+-- primary marker and all temporary/sibling objects.
 local function publish_compiled_object(prepared, ok, err)
-    local companion_temp = prepared.jobs[1]
-        and (prepared.jobs[1].temporary_object .. ".parts") or nil
     if ok then
         for index = #prepared.jobs, 2, -1 do
             local job = prepared.jobs[index]
@@ -7191,20 +8316,11 @@ local function publish_compiled_object(prepared, ok, err)
             if not ok then break end
         end
     end
-    if ok and prepared.parts_companion and companion_temp then
-        ok, err = util.set_file_contents(companion_temp,
-            driver.render_parts_companion(prepared.stem, #prepared.jobs), "wb")
-        if ok then
-            ok, err = rename_output(companion_temp, prepared.parts_companion)
-        end
-    end
     if ok then
         local job0 = prepared.jobs[1]
         ok, err = rename_output(job0.temporary_object, job0.object_path)
     end
     if not ok then
-        if companion_temp then os.remove(companion_temp) end
-        if prepared.parts_companion then os.remove(prepared.parts_companion) end
         if prepared.primary_object then os.remove(prepared.primary_object) end
         for _, job in ipairs(prepared.jobs) do
             os.remove(job.temporary_object)
@@ -7733,39 +8849,71 @@ function driver.windows_launcher_name(modname, override)
     local name = override or modname
     if type(name) ~= "string" or name == "" or
        name:find('[%z\1-\31\127<>:"/\\|?*]') or name:find('[. ]$') then
-        return nil, "--launcher-name requires a valid Windows filename without a path"
+        return nil, "--exe requires a valid Windows filename"
     end
     local length = utf8.len(name)
-    if not length then return nil, "--launcher-name requires valid UTF-8" end
+    if not length then return nil, "--exe requires valid UTF-8" end
     local stem = name:match("^[^.]*"):gsub(" +$", ""):upper()
     if stem == "CON" or stem == "PRN" or stem == "AUX" or stem == "NUL" or
        stem == "CONIN$" or stem == "CONOUT$" or
        stem:match("^COM[1-9]$") or stem:match("^LPT[1-9]$") or
        stem == "COM¹" or stem == "COM²" or stem == "COM³" or
        stem == "LPT¹" or stem == "LPT²" or stem == "LPT³" then
-        return nil, "--launcher-name cannot use a reserved Windows device name"
+        return nil, "--exe cannot use a reserved Windows device name"
     end
     if name:sub(-4):lower() ~= ".exe" then name = name .. ".exe" end
     local units = 0
     for _, value in utf8.codes(name) do units = units + (value > 0xffff and 2 or 1) end
-    if units > 255 then return nil, "--launcher-name exceeds a Windows filename component" end
+    if units > 255 then return nil, "--exe exceeds a Windows filename component" end
     return name
 end
 
-function driver.windows_program_paths(modname, override, output_module, output_root)
+-- Windows launcher and provider paths. Without `exe` the launcher is
+-- `<output>/bin/<logical>.exe`; `exe` is an exact destination relative to the
+-- invocation directory (`.exe` appended when absent). The provider DLL always
+-- stays under the output tree's `lib/titan/<version>`; the launcher names it
+-- relative to its own default library directory `<exe dir>/../lib/titan/<version>`,
+-- which must be on the provider's volume.
+function driver.windows_program_paths(modname, exe, output_module, output_root)
     output_module = output_module or modname
-    local name, err = driver.windows_launcher_name(output_module, override)
-    if not name then return nil, err end
     local relative = output_module:gsub("[.]", "/") .. ".dll"
     local result = {
-        executable = "bin/" .. name,
         provider = "lib/titan/" .. driver.TITAN_LIBRARY_VERSION .. "/" .. relative,
         relative_provider = relative,
     }
-    if output_root then
-        result.executable = path.join(output_root, result.executable)
-        result.provider = path.join(output_root, result.provider)
+    if output_root then result.provider = path.join(output_root, result.provider) end
+    if exe == nil then
+        local name, err = driver.windows_launcher_name(output_module)
+        if not name then return nil, err end
+        result.executable = "bin/" .. name
+        if output_root then
+            result.executable = path.join(output_root, result.executable)
+        end
+        return result
     end
+    local name, err = driver.windows_launcher_name(output_module, path.basename(exe))
+    if not name then return nil, err end
+    local directory = path.dirname(exe)
+    result.executable = path.join(directory, name)
+    local library = normalized_absolute_filename(path.join(directory,
+        "../lib/titan/" .. driver.TITAN_LIBRARY_VERSION))
+    local provider = normalized_absolute_filename(result.provider)
+    if (path.volume(library) or ""):lower() ~= (path.volume(provider) or ""):lower() then
+        return nil, "--exe '" .. exe .. "' is on another volume than its " ..
+            "provider '" .. provider .. "'"
+    end
+    local from, to = {}, {}
+    for component in path.to_slash(library):gmatch("[^/]+") do from[#from + 1] = component end
+    for component in path.to_slash(provider):gmatch("[^/]+") do to[#to + 1] = component end
+    local common = 0
+    while common < #from and common < #to - 1 and
+          from[common + 1]:lower() == to[common + 1]:lower() do
+        common = common + 1
+    end
+    local pieces = {}
+    for _ = common + 1, #from do pieces[#pieces + 1] = ".." end
+    for index = common + 1, #to do pieces[#pieces + 1] = to[index] end
+    result.relative_provider = table.concat(pieces, "/")
     return result
 end
 
@@ -9169,7 +10317,7 @@ local function prepare_library_link(soname, libnames, link, verbose,
             table.insert(args, "-l" .. lib)
         end
     end
-    append_argv(args, driver.EXTRA_LDFLAGS)
+    append_argv(args, driver.link_extra_flags())
     return {
         argv = args,
         soname = soname,
@@ -9335,6 +10483,9 @@ function driver.link_provider_pair(request)
         local dso_link, dso_err = prepare_library_link(dso, request.libnames,
             request.link, verbose, nil, request.static_archives,
             request.ordered_payload, request.public_dso)
+        -- The final-link certificate's linker dependency report belongs to
+        -- the public DSO link only, never to the archive validation image.
+        if dso_link then append_argv(dso_link.argv, request.final_link_flags) end
         local launched = dso_link
         if dso_link then launched, dso_err = launch_now(1, dso_link, verbose) end
         if not launched then return link_failure("library", provider, dso_err) end
@@ -10061,19 +11212,6 @@ function driver.validate_program_output_paths(
         if not ok then return nil, err end
         ok, err = add_output(stem .. ".o", owner, "file")
         if not ok then return nil, err end
-        local parts_path = stem .. ".parts"
-        ok, err = add_output(parts_path,
-            "generated parts companion for " .. owner, "file")
-        if not ok then return nil, err end
-        local parts_attr = lfs.symlinkattributes(parts_path)
-        if parts_attr and parts_attr.mode == "file" then
-            local existing = util.get_file_contents(parts_path, "rb")
-            if not existing or existing:sub(1, #driver.PARTS_COMPANION_HEADER_PREFIX)
-               ~= driver.PARTS_COMPANION_HEADER_PREFIX then
-                return nil, "refusing to overwrite user-owned companion path '"
-                    .. parts_path .. "'"
-            end
-        end
         local max_parts = tonumber(source.c_parts) or 1
         local priv_path = stem .. ".priv.h"
         if max_parts > 1 then
@@ -10334,8 +11472,22 @@ end
 -- the Unix pair publisher, this path never opens either provider in this Lua
 -- state. Retiring shims for removed logical modules is currently unsupported.
 -- Implementation notes: doc/implementation/windows-build.md#windows-dll-publication
-function driver.publish_windows_provider(staged, destination, shim_plans, provider)
+-- The synchronous filesystem operations of a recoverable Windows publication.
+local function windows_publication_fs()
     local filesystem = compiler_io.new_sync()
+    return {
+        stat = function(filename)
+            local metadata, err = filesystem:lstat(filename)
+            return metadata, err, metadata == nil and err == nil and 2 or nil
+        end,
+        reserve = function(filename) return filesystem:reserve_sibling(filename) end,
+        replace = function(from, to) return filesystem:rename(from, to) end,
+        remove = os.remove,
+    }
+end
+
+function driver.publish_windows_provider(staged, destination, shim_plans,
+        provider, before_commit)
     local entries = {}
     for _, plan in ipairs(shim_plans) do
         local ok, err = ensure_output_parent(plan.filename)
@@ -10344,15 +11496,9 @@ function driver.publish_windows_provider(staged, destination, shim_plans, provid
             contents = plan.contents, modname = plan.modname }
     end
     entries[#entries + 1] = { source = staged, destination = destination }
-    return require("titan-compiler.windows_publication").publish(entries, {
-        stat = function(filename)
-            local metadata, err = filesystem:lstat(filename)
-            return metadata, err, metadata == nil and err == nil and 2 or nil
-        end,
-        reserve = function(filename) return filesystem:reserve_sibling(filename) end,
-        replace = function(from, to) return filesystem:rename(from, to) end,
-        remove = os.remove,
-    }, {
+    return require("titan-compiler.windows_publication").publish(entries,
+        windows_publication_fs(), {
+        before_commit = before_commit,
         validate_existing = function(entry, existing)
             if existing and entry.modname then
                 local contents, err = util.get_file_contents(entry.destination)
@@ -10772,7 +11918,7 @@ function driver.run_standalone_archive_probe(
             table.insert(args, "-l" .. lib)
         end
     end
-    append_argv(args, driver.EXTRA_LDFLAGS)
+    append_argv(args, driver.link_extra_flags())
     local linked, link_term, link_code = driver.run_link_command(args, verbose, executable)
     if not linked then
         cleanup()
@@ -10793,7 +11939,7 @@ end
 local function compile_windows_program(modname, libnames, link, verbose,
         extra_objects, static_archives, entrypoint_name, program_name, options)
     local paths, err = driver.windows_program_paths(
-        modname, options.launcher_name, options.output_module, options.output_root)
+        modname, options.exe, options.output_module, options.output_root)
     if not paths then return nil, err end
     local ok
     ok, err = ensure_output_parent(paths.executable)
@@ -10825,20 +11971,35 @@ __declspec(dllexport) int _titan_coverage_dump(lua_State *L) {
         extra_objects = { table.unpack(extra_objects or {}) }
         extra_objects[#extra_objects + 1] = dump_o
     end
-    local linked, term, code = driver.compile_library_output(paths.provider,
+    -- Both images are staged and published as one recoverable set, the DLL
+    -- before the launcher; a failure before publication leaves the previous
+    -- set untouched.
+    local staged_dll, dll_directory = driver.staged_library_output(paths.provider)
+    if not staged_dll then return nil, dll_directory end
+    local staged_exe, exe_directory = driver.staged_library_output(paths.executable)
+    if not staged_exe then
+        remove_path(dll_directory)
+        return nil, exe_directory
+    end
+    local function discard(...)
+        remove_path(dll_directory)
+        remove_path(exe_directory)
+        return nil, ...
+    end
+    local linked, term, code = driver.compile_library_output(staged_dll,
         libnames, link, verbose, extra_objects, static_archives,
-        nil, nil, module_names)
-    if not linked then return nil, term, code end
-    ok, err = driver.validate_library_image(paths.provider, module_names)
-    if not ok then return nil, err end
+        nil, paths.provider, module_names)
+    if not linked then return discard(term, code) end
+    ok, err = driver.validate_library_image(staged_dll, module_names)
+    if not ok then return discard(err) end
     if options.archive_names and #options.archive_names > 0 then
-        ok, err = driver.validate_library_image_fresh(paths.provider,
+        ok, err = driver.validate_library_image_fresh(staged_dll,
             assert(options.archive_entries), options.archive_names, verbose)
-        if not ok then return nil, err end
+        if not ok then return discard(err) end
     end
     if options.validate_titan_support then
-        ok, err = driver.validate_titan_support(paths.provider, verbose)
-        if not ok then return nil, err end
+        ok, err = driver.validate_titan_support(staged_dll, verbose)
+        if not ok then return discard(err) end
     end
 
     local entry_options = {
@@ -10850,37 +12011,48 @@ __declspec(dllexport) int _titan_coverage_dump(lua_State *L) {
     local entrypoint_c
     entrypoint_c, err = write_entrypoint(modname, entrypoint_name,
         program_name or options.output_module or modname, entry_options, verbose)
-    if not entrypoint_c then return nil, err end
+    if not entrypoint_c then return discard(err) end
     local entrypoint_o = entrypoint_c:gsub("[.]c$", ".o")
     local compile_args
     compile_args, err = driver.generated_compile_prefix()
-    if not compile_args then return nil, err end
+    if not compile_args then return discard(err) end
     append_argv(compile_args, { "-c", entrypoint_c, "-o", entrypoint_o })
     local compiled, cterm, ccode = run_argv(compile_args, verbose)
-    if not compiled then return nil, cterm, ccode end
+    if not compiled then return discard(cterm, ccode) end
 
     local manifest, resource_source, resource = entrypoint_c .. ".manifest",
         entrypoint_c .. ".rc", entrypoint_c .. ".res"
     ok, err = util.set_file_contents(manifest, driver.windows_launcher_manifest())
-    if not ok then return nil, err end
+    if not ok then return discard(err) end
     ok, err = util.set_file_contents(resource_source,
         driver.windows_launcher_resource(absolute_filename(manifest)))
-    if not ok then return nil, err end
+    if not ok then return discard(err) end
     local rc
     rc, err = parsed_words(platform.getenv("RC") or "llvm-rc", "RC")
-    if not rc then return nil, err end
-    if #rc == 0 then return nil, "RC command is empty" end
+    if not rc then return discard(err) end
+    if #rc == 0 then return discard("RC command is empty") end
     append_argv(rc, { "-FO", resource, resource_source })
     compiled, cterm, ccode = run_argv(rc, verbose)
-    if not compiled then return nil, cterm, ccode end
+    if not compiled then return discard(cterm, ccode) end
 
     local args
     args, err = compiler_argv(false)
-    if not args then return nil, err end
-    append_argv(args, { "-o", paths.executable, entrypoint_o, resource })
+    if not args then return discard(err) end
+    append_argv(args, { "-o", staged_exe, entrypoint_o, resource })
     append_runtime_libraries(args)
-    append_argv(args, driver.EXTRA_LDFLAGS)
-    return driver.run_link_command(args, verbose, paths.executable)
+    append_argv(args, driver.link_extra_flags())
+    local exe_linked, exe_term, exe_code =
+        driver.run_link_command(args, verbose, staged_exe)
+    if not exe_linked then return discard(exe_term, exe_code) end
+    local published, publish_error =
+        require("titan-compiler.windows_publication").publish_program({
+            provider = { source = staged_dll, destination = paths.provider },
+            executable = { source = staged_exe, destination = paths.executable },
+        }, windows_publication_fs(), { before_commit = options.before_commit })
+    remove_path(dll_directory)
+    remove_path(exe_directory)
+    if not published then return nil, publish_error end
+    return true
 end
 
 function driver.compile_program(modname, libnames, link, verbose, extra_objects,
@@ -10935,7 +12107,9 @@ function driver.compile_program(modname, libnames, link, verbose, extra_objects,
             table.insert(args, "-l" .. lib)
         end
     end
-    append_argv(args, driver.EXTRA_LDFLAGS)
+    append_argv(args, driver.link_extra_flags())
+    -- The final-link certificate's linker dependency report, final image only.
+    append_argv(args, options.final_link_flags)
     local ok, term, code = driver.run_link_command(args, verbose, execname)
     if ok then run_dsymutil(execname, verbose) end
     return ok, term, code
