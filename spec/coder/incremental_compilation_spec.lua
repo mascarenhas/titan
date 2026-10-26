@@ -4,6 +4,8 @@ local compiler_io = require "titan-compiler.io"
 local driver = require "titan-compiler.driver"
 local lfs = require "lfs"
 local platform = require "titan-compiler.platform"
+local filesystem = require "spec.support.filesystem"
+local objectmetadata = require "titan-compiler.objectmetadata"
 
 local NAMESPACE = "incremental_cli_fixture"
 local APP = "incremental_cli_app"
@@ -13,6 +15,7 @@ local REPOSITORY = assert(lfs.currentdir())
 if platform.windows then REPOSITORY = assert(platform.path.normalize(REPOSITORY)) end
 local SHARED_SUFFIX = platform.windows and ".dll" or ".so"
 local workspace
+local compiler_root, sdk_root, compiler_environment
 
 local function exists(path)
     return lfs.attributes(path, "mode") ~= nil
@@ -90,16 +93,29 @@ end
 local function compiler_arguments()
     -- Match the existing CLI specs: exercise this checkout's CLI and compiler
     -- while keeping the selected installation's Lua/native SDK.
-    return {
+    local argv = {
         "env", "TITAN_RUNTIME_PREBUILT=1", "CCACHE_DISABLE=1", "TITAN_PROBE_CACHE_DISABLE=1",
-        "TITAN_ROCKS_ROOT=" .. assert(prefix, "incremental CLI specs require an installed SDK"),
+        "TITAN_ROCKS_ROOT=" .. assert(sdk_root or prefix,
+            "incremental CLI specs require an installed SDK"),
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=-O0 -fno-lto", "TITAN_EXTRA_LDFLAGS=-fno-lto",
         LUA, "-E", "-e",
         string.format("package.path = %q .. package.path; package.cpath = %q .. package.cpath",
-            REPOSITORY .. "/?.lua;" .. REPOSITORY .. "/?/init.lua;",
+            (compiler_root or REPOSITORY) .. "/?.lua;" ..
+                (compiler_root or REPOSITORY) .. "/?/init.lua;",
             REPOSITORY .. "/titan-runtime/bootstrap/?" .. SHARED_SUFFIX .. ";"),
-        REPOSITORY .. "/titanc", "--tree", workspace,
+        (compiler_root or REPOSITORY) .. "/titanc", "--tree", workspace,
     }
+    for name, value in pairs(compiler_environment or {}) do
+        local replaced = false
+        for index, argument in ipairs(argv) do
+            if argument:sub(1, #name + 1) == name .. "=" then
+                argv[index], replaced = name .. "=" .. value, true
+                break
+            end
+        end
+        if not replaced then table.insert(argv, 2, name .. "=" .. value) end
+    end
+    return argv
 end
 
 local function compile(...)
@@ -132,8 +148,116 @@ local function main(value)
     return "function main(args: {string}): integer\nreturn " .. value .. "\nend\n"
 end
 
+-- Private copies keep publication/configuration fixtures away from the selected
+-- SDK. Only read-only native libraries are hardlinked; headers are always copied.
+local function copy_tree(from, to, hardlink)
+    mkdir(to)
+    for name in lfs.dir(from) do
+        if name ~= "." and name ~= ".." then
+            local input, output = from .. "/" .. name, to .. "/" .. name
+            if lfs.attributes(input, "mode") == "directory" then
+                copy_tree(input, output, hardlink)
+            elseif not hardlink or not lfs.link(input, output) then
+                write(output, read(input))
+            end
+        end
+    end
+end
+
+local function private_sdk()
+    sdk_root = workspace .. "/sdk"
+    copy_tree(prefix .. "/include", sdk_root .. "/include")
+    if exists(prefix .. "/src/lua-5.5.1") then
+        copy_tree(prefix .. "/src/lua-5.5.1", sdk_root .. "/src/lua-5.5.1")
+    end
+    copy_tree(prefix .. "/lib", sdk_root .. "/lib", true)
+    return sdk_root
+end
+
+local function private_compiler()
+    compiler_root = workspace .. "/compiler"
+    copy_tree(REPOSITORY .. "/titan-compiler", compiler_root .. "/titan-compiler")
+    copy_tree(REPOSITORY .. "/c-parser", compiler_root .. "/c-parser")
+    write(compiler_root .. "/titanc", read(REPOSITORY .. "/titanc"))
+    write(compiler_root .. "/titan-config.lua", read(REPOSITORY .. "/titan-config.lua"))
+    return compiler_root
+end
+
+local function certified(...)
+    return compiled("-o", workspace .. "/build", "--incremental",
+        "--source-first", "-v", ...)
+end
+
+local function object_path(stem)
+    return workspace .. "/build/" .. stem:sub(#workspace + 2) .. ".o"
+end
+
+local function remember_objects(stems)
+    local saved, timestamp = {}, os.time() - 120
+    for name, stem in pairs(stems) do
+        local path = object_path(stem)
+        assert(lfs.touch(path, timestamp, timestamp))
+        saved[name] = { path = path, bytes = read(path), timestamp = timestamp }
+    end
+    return saved
+end
+
+local function decisions(output, saved, misses)
+    local seen = {}
+    for line in output:gmatch("[^\n]+") do
+        local status, name, detail = line:match("^Titan object (%w+) ([^:]+): (.+)$")
+        if name and saved[name] then
+            assert.is_nil(seen[name], "duplicate object decision: " .. line)
+            seen[name] = status
+            local reason = misses[name]
+            if reason then
+                assert.equal("miss", status, line)
+                assert.equal(reason, detail:sub(1, #reason), line)
+            else
+                assert.equal("hit", status, line)
+            end
+        end
+    end
+    for name, previous in pairs(saved) do
+        assert.is_string(seen[name], output)
+        local modified = assert(lfs.attributes(previous.path, "modification"))
+        if misses[name] then
+            assert.not_equal(previous.timestamp, modified, name)
+        else
+            assert.equal(previous.timestamp, modified, name)
+            assert.equal(previous.bytes, read(previous.path), name)
+        end
+    end
+end
+
+local function no_native_compile(output)
+    for line in output:gmatch("[^\n]+") do
+        assert.is_nil(line:match("%s['\"]?%-c['\"]?%s"),
+            "unexpected native compilation: " .. line)
+    end
+end
+
+local function certified_exit(expected)
+    local executable = platform.windows and
+        assert(driver.windows_program_paths(APP, nil, nil, workspace .. "/build")).executable
+        or workspace .. "/build/" .. APP
+    local argv = { "env",
+        "PATH=" .. prefix .. "/bin" .. (platform.windows and ";" or ":") ..
+            (os.getenv("PATH") or ""),
+        "TITAN_PATH_0_6=" .. workspace .. "/build" ..
+            (platform.windows and "/lib/titan/0.6" or "") .. ";" ..
+            (sdk_root or prefix) .. "/lib/titan/0.6;;", executable }
+    if platform.windows then table.insert(argv, 2, "MSYS2_ENV_CONV_EXCL=TITAN_PATH_0_6") end
+    local ok, output, why, status = run(argv)
+    assert.equal("exit", why, output)
+    assert.equal(expected, status, output)
+    assert.equal(expected == 0, ok, output)
+    return output
+end
+
 describe("incremental and separate compilation (CLI)", function()
     before_each(function()
+        compiler_root, sdk_root, compiler_environment = nil, nil, {}
         workspace = assert(compiler_io.new_sync():tmpname())
         assert(os.remove(workspace))
         if platform.windows then workspace = assert(platform.path.normalize(workspace)) end
@@ -323,7 +447,7 @@ describe("incremental and separate compilation (CLI)", function()
         exit_code(APP, 11)
     end)
 
-    it("forces all explicit roots even when reached through an earlier root", function()
+    it("rebuilds changed roots even when reached through an earlier root", function()
         local base = NAMESPACE .. ".base"
         local base_stem = source(base, [[
             local function answer(): integer return 13 end
@@ -341,7 +465,7 @@ describe("incremental and separate compilation (CLI)", function()
         exit_code(APP, 17)
     end)
 
-    it("reuses dependency objects while rebuilding the explicit root", function()
+    it("certifies dependency objects and explicit incremental roots", function()
         local base = NAMESPACE .. ".base"
         local base_stem = source(base, [[function answer(): integer return 19 end]])
         local app_stem = source(APP, 'local base = import "' .. base .. [[.titan"
@@ -352,10 +476,12 @@ describe("incremental and separate compilation (CLI)", function()
         assert(lfs.touch(base_stem .. ".o", future))
         assert(lfs.touch(app_stem .. ".o", future))
         local contents = read(base_stem .. ".o")
-        compiled("-c", "--incremental", APP)
+        local output = compiled("-c", "--incremental", "-v", APP)
+        assert.matches("Titan object hit " .. base .. ":", output, 1, true)
+        assert.matches("Titan object hit " .. APP .. ":", output, 1, true)
         assert.equal(future, lfs.attributes(base_stem .. ".o", "modification"))
         assert.equal(contents, read(base_stem .. ".o"))
-        assert.is_true(lfs.attributes(app_stem .. ".o", "modification") < future)
+        assert.equal(future, lfs.attributes(app_stem .. ".o", "modification"))
         compiled("--incremental", APP)
         exit_code(APP, 19)
     end)
@@ -391,7 +517,7 @@ describe("incremental and separate compilation (CLI)", function()
         exit_code(APP, 42)
     end)
 
-    it("rejects changed cached native bindings until Make recompiles the root", function()
+    it("recompiles consumers automatically when native provider bindings change", function()
         local base = NAMESPACE .. ".base"
         source(base, [[function answer(): integer return 23 end]])
         compiled(base)
@@ -403,18 +529,11 @@ describe("incremental and separate compilation (CLI)", function()
         compiled("-c", "--incremental", "--source-first", APP)
         compiled("--incremental", "--source-first", APP)
         exit_code(APP, 29)
-        local ok, output = compile("--incremental", APP)
-        assert.is_false(ok)
-        assert.matches("requires direct binding", output, 1, true)
-        assert.matches("rebuild it with the selected dependency providers", output, 1, true)
-        compiled("-c", "--incremental", APP)
-        compiled("--incremental", APP)
+        local output = compiled("--incremental", "-v", APP)
+        assert.matches("Titan object miss " .. APP .. ": import-binding", output, 1, true)
         exit_code(APP, 23)
-        ok, output = compile("--incremental", "--source-first", APP)
-        assert.is_false(ok)
-        assert.matches("requires handle binding", output, 1, true)
-        compiled("-c", "--incremental", "--source-first", APP)
-        compiled("--incremental", "--source-first", APP)
+        output = compiled("--incremental", "--source-first", "-v", APP)
+        assert.matches("Titan object miss " .. APP .. ": import-binding", output, 1, true)
         exit_code(APP, 29)
     end)
 
@@ -780,16 +899,16 @@ os.exit(result.ok and 0 or result.status or 1)
         end)
     end
 
-    it("builds a parallel Make DAG and propagates changed inline foreign bodies", function()
+    it("builds a module graph and propagates changed inline foreign bodies", function()
         if platform.windows then
-            pending("This Unix Make fixture publishes the unsupported Titan archive provider")
+            pending("Titan archive providers are unsupported on Windows")
             return
         end
         local base = NAMESPACE .. ".base"
         local left = NAMESPACE .. ".left"
         local right = NAMESPACE .. ".right"
         local base_stem = source(base, [[
-            foreign function bump(item: int): int return item + 1 end
+            local foreign function bump(item: int): int return item + 1 end
         ]])
         local stems = { base_stem }
         for index, name in ipairs({ left, right }) do
@@ -797,33 +916,9 @@ os.exit(result.ok and 0 or result.status or 1)
                 function number(): integer return base.bump(]] .. index .. [[) as integer end
             ]])
         end
-        local function invocation(...)
-            local argv = compiler_arguments()
-            argv[#argv + 1] = "--source-first"
-            argv[#argv + 1] = "--incremental"
-            for _, value in ipairs({ ... }) do argv[#argv + 1] = value end
-            return command(argv)
-        end
-        local makefile = workspace .. "/build.mk"
-        write(makefile, table.concat({
-            ".DELETE_ON_ERROR:",
-            ".PHONY: all",
-            "all: " .. NAMESPACE .. ".so",
-            base_stem .. ".o: " .. base_stem .. ".titan " .. makefile,
-            "\t" .. invocation("-c", base),
-            stems[2] .. ".o: " .. stems[2] .. ".titan " .. base_stem .. ".o " .. makefile,
-            "\t" .. invocation("-c", left),
-            stems[3] .. ".o: " .. stems[3] .. ".titan " .. base_stem .. ".o " .. makefile,
-            "\t" .. invocation("-c", right),
-            NAMESPACE .. ".so: " .. table.concat(stems, ".o ") .. ".o " .. makefile,
-            "\t" .. invocation(base, left, right),
-            "",
-        }, "\n"))
-        local function make(...)
-            local argv = { "make", "-f", makefile, "-j2" }
-            for _, value in ipairs({ ... }) do argv[#argv + 1] = value end
-            local ok, output = run(argv)
-            assert.is_true(ok, output)
+        local function build()
+            return compiled("--source-first", "--incremental", "-j", "2",
+                "-v", base, left, right)
         end
         local function values(expected_left, expected_right)
             local script = string.format(
@@ -833,7 +928,7 @@ os.exit(result.ok and 0 or result.status or 1)
             local ok, output = run({ LUA, "-E", "-e", script })
             assert.is_true(ok, output)
         end
-        make()
+        build()
         assert.is_true(exists(NAMESPACE .. ".a"))
         values(2, 3)
         local observations = {}
@@ -844,16 +939,580 @@ os.exit(result.ok and 0 or result.status or 1)
         end
         observations[base_stem .. ".titan.h"] =
             lfs.attributes(base_stem .. ".titan.h", "modification")
-        make("-q")
-        make()
+        local warm = build()
+        for _, name in ipairs({ base, left, right }) do
+            assert.matches("Titan object hit " .. name .. ":", warm, 1, true)
+        end
         for path, modified in pairs(observations) do
             assert.equal(modified, lfs.attributes(path, "modification"), path)
         end
         write(base_stem .. ".titan", [[
-            foreign function bump(item: int): int return item + 5 end
+            local foreign function bump(item: int): int return item + 5 end
         ]])
-        make()
+        local output = build()
+        assert.matches("Titan object miss " .. base .. ": source-content", output, 1, true)
+        for _, name in ipairs({ left, right }) do
+            assert.matches("Titan object miss " .. name .. ": import-interface", output, 1, true)
+        end
         values(6, 7)
-        make("-q")
+        build()
+    end)
+
+    describe("certified input decisions", function()
+        for _, publication in ipairs({ "copy", "hardlink", "symlink" }) do
+            it("reuses objects after identical " .. publication .. " SDK publication", function()
+                if publication == "symlink" then
+                    local available, message = filesystem.symlink_capability()
+                    if not available then pending(message); return end
+                end
+                local sdk = private_sdk()
+                local republished = {
+                    {
+                        path = sdk .. "/include/titan.h",
+                        target = sdk .. "/published-titan.h",
+                    },
+                    {
+                        path = sdk .. "/include/titan/ffi.h",
+                        target = sdk .. "/published-ffi.h",
+                    },
+                    {
+                        path = sdk .. "/lib/titan/0.6/titan" .. SHARED_SUFFIX,
+                        target = sdk .. "/published-titan" .. SHARED_SUFFIX,
+                    },
+                }
+                if not platform.windows and exists(sdk .. "/lib/titan/0.6/titan.a") then
+                    republished[#republished + 1] = {
+                        path = sdk .. "/lib/titan/0.6/titan.a",
+                        target = sdk .. "/published-titan.a",
+                    }
+                end
+                if publication == "symlink" then
+                    for _, item in ipairs(republished) do
+                        write(item.target, read(item.path))
+                        assert(os.remove(item.path))
+                        assert(lfs.link(item.target, item.path, true))
+                    end
+                end
+                local base = NAMESPACE .. ".base"
+                local base_stem = source(base, [[
+                    foreign import "titan/ffi.h"
+                    local math = import "math"
+                    function answer(): integer return math.abs(-11) end
+                ]])
+                local app_stem = source(APP, 'local base = import "' .. base .. [[.titan"
+                    function main(args: {string}): integer return base.answer() end
+                ]])
+                local stems = { [base] = base_stem, [APP] = app_stem }
+                certified(APP)
+                local saved = remember_objects(stems)
+                for _, item in ipairs(republished) do
+                    local bytes = read(item.path)
+                    assert(os.remove(item.path))
+                    if publication == "copy" then
+                        write(item.path, bytes)
+                        assert(lfs.touch(item.path, os.time() + 60))
+                    elseif publication == "hardlink" then
+                        write(item.target, bytes)
+                        assert(lfs.link(item.target, item.path))
+                    else
+                        assert(lfs.link(item.target, item.path, true))
+                    end
+                end
+                local output = certified(APP)
+                decisions(output, saved, {})
+                no_native_compile(output)
+                assert.is_nil(output:find("C include candidate changed after module header resolution", 1, true))
+                certified_exit(11)
+            end)
+        end
+
+        for _, change in ipairs({ "content", "missing", "candidate", "unreadable" }) do
+            it("rechecks a " .. change .. " C header without external prerequisites", function()
+                if change == "unreadable" and platform.windows then
+                    pending("POSIX permission bits are not an NTFS access contract")
+                    return
+                end
+                local base = NAMESPACE .. ".base"
+                local stem = source(base, [[
+                    foreign import "value.h"
+                    function answer(): integer return ffi.INCREMENTAL_VALUE end
+                ]])
+                local directory = stem:match("^(.*)/")
+                local selected = directory .. "/value.h"
+                local early, late = workspace .. "/early", workspace .. "/late"
+                mkdir(early)
+                write(late .. "/value.h", change == "candidate" and
+                    "#define INCREMENTAL_VALUE 31\n" or "#define INCREMENTAL_VALUE 32\n")
+                if change ~= "candidate" then
+                    write(selected, "#define INCREMENTAL_VALUE 31\n")
+                end
+                local stems = { [base] = stem, [APP] = source(APP,
+                    'local base = import "' .. base .. [["
+                    function main(args: {string}): integer return base.answer() end
+                ]]) }
+                certified("-I", early, "-I", late, APP)
+                certified_exit(31)
+                local saved = remember_objects(stems)
+                local changed_path = selected
+                if change == "content" then
+                    local modified = lfs.attributes(selected, "modification")
+                    write(selected, "#define INCREMENTAL_VALUE 32\n")
+                    assert(lfs.touch(selected, modified, modified))
+                elseif change == "missing" then
+                    assert(os.remove(selected))
+                elseif change == "candidate" then
+                    changed_path = early .. "/value.h"
+                    write(changed_path, "#define INCREMENTAL_VALUE 32\n")
+                else
+                    local ok, text = run({ "chmod", "000", selected })
+                    assert.is_true(ok, text)
+                    local readable = io.open(selected, "rb")
+                    if readable then
+                        readable:close()
+                        assert(run({ "chmod", "600", selected }))
+                        pending("the current user can read chmod-000 files")
+                        return
+                    end
+                end
+                local completed, failure = xpcall(function()
+                    local output = certified("-I", early, "-I", late, APP)
+                    decisions(output, saved, {
+                        [base] = "c-input " .. changed_path .. ": " .. change,
+                    })
+                    certified_exit(32)
+                end, debug.traceback)
+                if change == "unreadable" then
+                    local ok, text = run({ "chmod", "600", selected })
+                    assert.is_true(ok, text)
+                end
+                assert.is_true(completed, failure)
+            end)
+        end
+
+        it("refreshes a retained C environment before checking a fresh source importer", function()
+            local base = NAMESPACE .. ".base"
+            local stem = source(base, [[
+                foreign import "value.h"
+                function answer(): integer return ffi.INCREMENTAL_VALUE end
+            ]])
+            local early, late = workspace .. "/early", workspace .. "/late"
+            mkdir(early)
+            write(late .. "/value.h", "#define INCREMENTAL_VALUE 41\n")
+            certified("-c", "-I", early, "-I", late, base)
+            local saved = remember_objects({ [base] = stem })
+            write(early .. "/value.h", "#define INCREMENTAL_VALUE 42\n")
+            source(APP, 'local base = import "' .. base .. [[.titan"
+                function main(args: {string}): integer
+                    return base.answer() + (ffi.INCREMENTAL_VALUE as integer) - 42
+                end
+            ]])
+            local output = certified("-I", early, "-I", late, APP)
+            decisions(output, saved, { [base] = "c-input " .. early .. "/value.h: candidate" })
+            assert.is_nil(output:find("C include candidate changed after module header resolution", 1, true))
+            certified_exit(42)
+        end)
+
+        it("cuts off ordinary consumers after producer body edits", function()
+            local base = NAMESPACE .. ".base"
+            local stem = source(base, "function answer(): integer return 21 end\n")
+            local stems = { [base] = stem, [APP] = source(APP,
+                'local base = import "' .. base .. [["
+                function main(args: {string}): integer return base.answer() end
+            ]]) }
+            certified(APP)
+            local saved = remember_objects(stems)
+            write(stem .. ".titan", "function answer(): integer return 22 end\n")
+            local output = certified(APP)
+            decisions(output, saved, { [base] = "source-content" })
+            certified_exit(22)
+        end)
+
+        it("rechecks exactly the importers after a public signature changes", function()
+            local base = NAMESPACE .. ".base"
+            local stem = source(base, "function answer(): integer return 21 end\n")
+            local stems = { [base] = stem, [APP] = source(APP,
+                'local base = import "' .. base .. [["
+                function main(args: {string}): integer return base.answer() as integer end
+            ]]), [OTHER] = source(OTHER, "function unrelated(): integer return 7 end\n") }
+            certified("-c", APP, OTHER)
+            local saved = remember_objects(stems)
+            write(stem .. ".titan", "function answer(): float return 23.0 end\n")
+            local output = certified(APP, OTHER)
+            decisions(output, saved, {
+                [base] = "source-content", [APP] = "import-interface " .. base .. " (public)",
+            })
+            certified_exit(23)
+            write(stem .. ".titan", "function answer(): string return \"changed\" end\n")
+            local ok, rejected = compile("-o", workspace .. "/build",
+                "--incremental", "--source-first", "-v", APP)
+            assert.is_false(ok)
+            assert.matches("Titan object miss " .. APP .. ": import-interface " .. base .. " (public)",
+                rejected, 1, true)
+            assert.matches("string", rejected, 1, true)
+        end)
+
+        it("certifies the private layout of a public record", function()
+            local base = NAMESPACE .. ".base"
+            local stem = source(base, [[
+                record Item local hidden: integer; value: integer end
+                function make(): Item return Item.new(1, 24) end
+            ]])
+            local stems = { [base] = stem, [APP] = source(APP,
+                'local base = import "' .. base .. [["
+                function main(args: {string}): integer return base.make().value end
+            ]]) }
+            certified(APP)
+            local saved = remember_objects(stems)
+            write(stem .. ".titan", [[
+                record Item local hidden: string; local extra: integer; value: integer end
+                function make(): Item return Item.new("private", 1, 25) end
+            ]])
+            local output = certified(APP)
+            decisions(output, saved, {
+                [base] = "source-content", [APP] = "import-interface " .. base .. " (public)",
+            })
+            certified_exit(25)
+        end)
+
+        it("distinguishes source-private surface changes from private function bodies", function()
+            local base = NAMESPACE .. ".base"
+            local stem = source(base, "local function answer(): integer return 26 end\n")
+            local stems = { [base] = stem, [APP] = source(APP,
+                'local base = import "' .. base .. [[.titan"
+                function main(args: {string}): integer return base.answer() as integer end
+            ]]) }
+            certified(APP)
+            local saved = remember_objects(stems)
+            write(stem .. ".titan", "local function answer(): integer return 27 end\n")
+            decisions(certified(APP), saved, { [base] = "source-content" })
+            certified_exit(27)
+            saved = remember_objects(stems)
+            write(stem .. ".titan", "local function answer(): float return 28.0 end\n")
+            decisions(certified(APP), saved, {
+                [base] = "source-content", [APP] = "import-interface " .. base .. " (source)",
+            })
+            certified_exit(28)
+        end)
+
+        it("recompiles importers when a copied local foreign helper body changes", function()
+            local base = NAMESPACE .. ".base"
+            local stem = source(base, "local foreign function answer(): int return 51 end\n")
+            local stems = { [base] = stem, [APP] = source(APP,
+                'local base = import "' .. base .. [[.titan"
+                function main(args: {string}): integer return base.answer() as integer end
+            ]]) }
+            certified(APP)
+            local saved = remember_objects(stems)
+            write(stem .. ".titan", "local foreign function answer(): int return 52 end\n")
+            decisions(certified(APP), saved, {
+                [base] = "source-content", [APP] = "import-interface " .. base .. " (source)",
+            })
+            certified_exit(52)
+        end)
+
+        it("fingerprints modules independently inside one binary provider", function()
+            local base, other = NAMESPACE .. ".base", NAMESPACE .. ".other"
+            local stem = source(base, "function answer(): integer return 41 end\n")
+            local other_stem = source(other, "function other(): integer return 1 end\n")
+            local out = workspace .. "/build"
+            compiled("-o", out, base, other)
+            compiler_environment.TITAN_PATH_0_6 = out .. ";" .. prefix .. "/lib/titan/0.6"
+            local app_stem = source(APP, 'local base = import "' .. base .. [["
+                function main(args: {string}): integer return base.answer() as integer end
+            ]])
+            local function binary_build()
+                return compiled("-o", out, "--incremental", "-v", APP)
+            end
+            binary_build()
+            local saved = remember_objects({ [APP] = app_stem })
+            write(other_stem .. ".titan", "function other(): string return \"unrelated\" end\n")
+            compiled("-o", out, base, other)
+            decisions(binary_build(), saved, {})
+            certified_exit(41)
+            write(stem .. ".titan", "function answer(): integer return 42 end\n")
+            compiled("-o", out, base, other)
+            decisions(binary_build(), saved, {})
+            certified_exit(42)
+            write(stem .. ".titan", "function answer(): float return 43.0 end\n")
+            compiled("-o", out, base, other)
+            decisions(binary_build(), saved, { [APP] = "import-interface " .. base .. " (public)" })
+            certified_exit(43)
+            write(stem .. ".titan", "function answer(): string return \"changed\" end\n")
+            compiled("-o", out, base, other)
+            local ok, rejected = compile("-o", out, "--incremental", "-v", APP)
+            assert.is_false(ok)
+            assert.matches("Titan object miss " .. APP .. ": import-interface " .. base .. " (public)",
+                rejected, 1, true)
+            assert.matches("string", rejected, 1, true)
+        end)
+
+        it("certifies contributor membership and source bytes rather than timestamps", function()
+            local folder = NAMESPACE .. ".folder"
+            local stem = source(folder, "function answer(): integer return 61 end\n", true)
+            local stems = { [folder] = stem, [APP] = source(APP,
+                'local folder = import "' .. folder .. [["
+                function main(args: {string}): integer return folder.answer() end
+            ]]) }
+            certified(APP)
+            local saved = remember_objects(stems)
+            local part = stem:match("^(.*)/") .. "/private.titan"
+            write(part, "local function unused(): integer return 1 end\n")
+            decisions(certified(APP), saved, { [folder] = "source-set added " .. part })
+            saved = remember_objects(stems)
+            assert(os.remove(part))
+            decisions(certified(APP), saved, { [folder] = "source-set removed " .. part })
+            saved = remember_objects(stems)
+            local modified = lfs.attributes(stem .. ".titan", "modification")
+            write(stem .. ".titan", "function answer(): integer return 62 end\n")
+            assert(lfs.touch(stem .. ".titan", modified, modified))
+            decisions(certified(APP), saved, { [folder] = "source-content " .. stem .. ".titan" })
+            certified_exit(62)
+        end)
+
+        it("keeps plain compile-only roots forced while incremental roots certify", function()
+            local stem = source(APP, main(63))
+            local stems = { [APP] = stem }
+            certified("-c", APP)
+            local saved = remember_objects(stems)
+            local output = certified("-c", APP)
+            decisions(output, saved, {})
+            no_native_compile(output)
+            compiled("-o", workspace .. "/build", "-c", "-v", APP)
+            assert.not_equal(saved[APP].timestamp, lfs.attributes(object_path(stem), "modification"))
+            saved = remember_objects(stems)
+            write(stem .. ".titan", main(64))
+            decisions(certified("-c", APP), saved, { [APP] = "source-content" })
+            certified(APP)
+            certified_exit(64)
+        end)
+
+        it("certifies contextual owners that are not direct imports", function()
+            local owner, facade = NAMESPACE .. ".owner", OTHER .. ".facade"
+            local out = workspace .. "/build"
+            compiler_environment.TITAN_PATH_0_6 = out .. ";" .. prefix .. "/lib/titan/0.6"
+            local function publish_owner(body)
+                local owner_stem = source(owner, body)
+                compiled("-o", out, owner)
+                remove(owner_stem .. ".titan")
+            end
+            publish_owner([[
+                record Item
+                    local hidden: integer
+                    value: integer
+                end
+                function Item:read(): integer return 0 end
+                function make(): Item return Item.new(1, 71) end
+            ]])
+            local facade_stem = source(facade, 'local owner = import "' .. owner .. [["
+                function make(): owner.Item return owner.make() end
+            ]])
+            local app_stem = source(APP, 'local facade = import "' .. facade .. [["
+                function main(args: {string}): integer
+                    local item = facade.make()
+                    return item.value + item:read()
+                end
+            ]])
+            local stems = { [facade] = facade_stem, [APP] = app_stem }
+            local function binary_build(...)
+                local arguments = { "-o", out, "--incremental", "--source-first", "-v", ... }
+                arguments[#arguments + 1] = APP
+                return compiled(table.unpack(arguments))
+            end
+            binary_build()
+            certified_exit(71)
+            local saved = remember_objects(stems)
+            publish_owner([[
+                record Item
+                    local hidden: string
+                    local extra: integer
+                    value: integer
+                end
+                function Item:read(): integer return 0 end
+                function make(): Item return Item.new("private", 1, 72) end
+            ]])
+            decisions(binary_build(), saved, {
+                [facade] = "import-interface " .. owner .. " (public)",
+                [APP] = "owner-interface " .. owner,
+            })
+            certified_exit(72)
+            if not platform.windows then
+                saved = remember_objects(stems)
+                decisions(binary_build("--static"), saved, {
+                    [facade] = "import-binding " .. owner,
+                    [APP] = "owner-binding " .. owner .. ": global -> direct",
+                })
+                certified_exit(72)
+                saved = remember_objects(stems)
+                decisions(binary_build(), saved, {
+                    [facade] = "import-binding " .. owner,
+                    [APP] = "owner-binding " .. owner .. ": direct -> global",
+                })
+                certified_exit(72)
+            end
+        end)
+
+        for _, component in ipairs({ "compiler", "preamble", "options", "toolchain" }) do
+            it("classifies changed configuration " .. component .. " inputs", function()
+                if component == "compiler" then private_compiler() end
+                if component == "preamble" then private_sdk() end
+                if component == "toolchain" then
+                    for _, cc in ipairs({ "gcc", "clang" }) do
+                        local available, text = run({ cc, "--version" })
+                        if not available then pending(cc .. " is unavailable: " .. text); return end
+                    end
+                    compiler_environment.CC = "gcc"
+                end
+                local stem = source(APP, main(73))
+                certified(APP)
+                local saved = remember_objects({ [APP] = stem })
+                if component == "compiler" then
+                    local path = compiler_root .. "/titan-compiler/coder.lua"
+                    write(path, read(path) .. "\n-- configuration identity fixture\n")
+                elseif component == "preamble" then
+                    local path = sdk_root .. "/include/titan.h"
+                    write(path, read(path) .. "\n/* configuration identity fixture */\n")
+                elseif component == "options" then
+                    compiler_environment.TITAN_EXTRA_CFLAGS = "-O1 -fno-lto"
+                else
+                    compiler_environment.CC = "clang"
+                end
+                decisions(certified(APP), saved, { [APP] = "configuration " .. component })
+                certified_exit(73)
+            end)
+        end
+
+        it("certifies split policy as a code-generation input", function()
+            local stem = source(APP, [[
+                function first(): integer return 37 end
+                function second(): integer return 37 end
+                function main(args: {string}): integer return first() + second() end
+            ]])
+            certified("--c-parts", "1", APP)
+            local saved = remember_objects({ [APP] = stem })
+            decisions(certified("--c-parts", "2", APP),
+                saved, { [APP] = "codegen-options c_parts" })
+            certified_exit(74)
+        end)
+
+        it("certifies test-owner native flags without invalidating production modules", function()
+            local base = NAMESPACE .. ".base"
+            local stems = { [base] = source(base,
+                "function answer(): integer return 75 end\n"), [APP] = source(APP,
+                'local base = import "' .. base .. [["
+                local test = import "test"
+                function test_answer(context: test.Context)
+                    test.assert(base.answer() == 75)
+                end
+            ]]) }
+            certified("-c", APP)
+            local saved = remember_objects(stems)
+            local output = certified("--test", APP)
+            decisions(output, saved, { [APP] = "codegen-options test_flags" })
+            local result = certified_exit(0)
+            assert.matches("[  PASSED  ] 1 test.", result, 1, true)
+            saved = remember_objects(stems)
+            output = certified("--test", APP)
+            decisions(output, saved, {})
+            no_native_compile(output)
+        end)
+
+        for _, publication in ipairs({ "retarget", "hardlink" }) do
+            it("rechecks declaring provenance in a mixed " .. publication .. " build", function()
+                local available, message = filesystem.symlink_capability()
+                if not available then pending(message); return end
+                local base = NAMESPACE .. ".base"
+                local stem = source(base, [[
+                    foreign import "inc/wrapper.h"
+                    function identity(item: foreign *Item): foreign *Item return item end
+                ]])
+                local directory = stem:match("^(.*)/")
+                local header = directory .. "/inc/foo.h"
+                local first, second = directory .. "/first/item.h", directory .. "/second/item.h"
+                local bytes = "typedef struct Item { int value; } Item;\n"
+                write(first, bytes)
+                write(second, bytes)
+                write(directory .. "/inc/wrapper.h", '#include "foo.h"\n')
+                assert(lfs.link(first, header, true))
+                local app_stem = source(APP, 'local base = import "' .. base .. [["
+                    foreign import "]] .. directory .. [[/inc/wrapper.h"
+                    function main(args: {string}): integer
+                        local item = foreign Item.new()
+                        item.value = 76
+                        return base.identity(item).value as integer
+                    end
+                ]])
+                certified(APP)
+                local saved = remember_objects({ [base] = stem, [APP] = app_stem })
+                local before = assert(objectmetadata.read(read(object_path(stem)), object_path(stem)))
+                assert(os.remove(header))
+                assert(lfs.link(second, header, publication == "retarget"))
+                write(app_stem .. ".titan", read(app_stem .. ".titan") .. "\n-- fresh importer\n")
+                local output = certified(APP)
+                local after = assert(objectmetadata.read(read(object_path(stem)), object_path(stem)))
+                local function identity(entry, kind)
+                    for _, input in ipairs(entry.c_header_dependencies) do
+                        if input.kind == kind and input.path == header then return input.identity end
+                    end
+                    error("missing " .. kind .. " header input")
+                end
+                if platform.windows then
+                    decisions(output, saved, { [APP] = "source-content" })
+                    assert.equal(identity(before, "origin"), identity(after, "origin"))
+                else
+                    decisions(output, saved, {
+                        [base] = "c-input " .. header .. ": provenance", [APP] = "source-content",
+                    })
+                    assert.not_equal(identity(before, "origin"), identity(after, "origin"))
+                end
+                assert.equal(identity(before, "file"), identity(after, "file"))
+                assert.is_nil(output:find("not visible with its original identity", 1, true))
+                certified_exit(76)
+            end)
+        end
+
+        for _, input in ipairs({ "forced", "shadow", "runtime", "presence" }) do
+            it("certifies " .. input .. " preamble inputs without a foreign import", function()
+                local flags, changed = {}, nil
+                if input == "runtime" then
+                    private_sdk()
+                    changed = sdk_root .. "/include/transfer.h"
+                elseif input == "shadow" then
+                    local directory = workspace .. "/system"
+                    mkdir(directory)
+                    flags = { "--cflag=-isystem", "--cflag=" .. directory }
+                    changed = directory .. "/float.h"
+                else
+                    local forced = workspace .. "/forced.h"
+                    flags = { "--cflag=-include", "--cflag=" .. forced }
+                    if input == "presence" then
+                        write(forced, [[
+#if __has_include("optional.h")
+#define INCREMENTAL_PRESENCE 1
+#else
+#define INCREMENTAL_PRESENCE 0
+#endif
+]])
+                        changed = workspace .. "/optional.h"
+                    else
+                        write(forced, "#define INCREMENTAL_FORCED 1\n")
+                        changed = forced
+                    end
+                end
+                local stem = source(APP, main(77))
+                local arguments = { table.unpack(flags) }
+                arguments[#arguments + 1] = APP
+                certified(table.unpack(arguments))
+                local saved = remember_objects({ [APP] = stem })
+                if input == "shadow" then
+                    write(changed, "#include_next <float.h>\n#define INCREMENTAL_SHADOW 1\n")
+                elseif input == "presence" then
+                    write(changed, "/* presence alone changes the preprocessed branch */\n")
+                else
+                    write(changed, read(changed) .. "\n/* changed preamble input */\n")
+                end
+                decisions(certified(table.unpack(arguments)), saved, { [APP] = "configuration preamble" })
+                certified_exit(77)
+            end)
+        end
     end)
 end)
