@@ -58,7 +58,7 @@ local function read_process_output(pipe: system.InputOutputStream): string
   return result
 end
 
-function test_io_process_transfer_recovers_second_dup_failure(context: test.Context)
+function test_os_shell_transfer_recovers_second_dup_failure(context: test.Context)
   if common.is_windows() then
     test.skip("platform: controlled dup wrapping requires Linux syscall support")
     return
@@ -88,7 +88,7 @@ function test_io_process_transfer_recovers_second_dup_failure(context: test.Cont
   end)
 end
 
-function test_io_process_interactive_merged_output_and_status(
+function test_os_shell_interactive_merged_output_and_status(
     _context: test.Context)
   runtime_test.run(function ()
     local rejected_nul = false
@@ -132,7 +132,7 @@ function test_io_process_interactive_merged_output_and_status(
   end)
 end
 
-function test_io_process_binary_delimiters(_context: test.Context)
+function test_os_shell_binary_delimiters(_context: test.Context)
   runtime_test.run(function ()
     local payload = "head\0middle\r\n\26\255trail"
     local pipe = system.popen(popen_quote(process_support.child_path()) ..
@@ -152,7 +152,7 @@ function test_io_process_binary_delimiters(_context: test.Context)
   end)
 end
 
-function test_io_process_close_terminates_and_reaps(
+function test_os_shell_close_terminates_and_reaps(
     _context: test.Context)
   runtime_test.run(function ()
     local pipe = system.popen(
@@ -176,7 +176,7 @@ function test_io_process_close_terminates_and_reaps(
   end)
 end
 
-function test_io_process_quoted_unicode_arguments(_context: test.Context)
+function test_os_shell_quoted_unicode_arguments(_context: test.Context)
   runtime_test.run(function ()
     local child = process_support.child_path()
     local cwd = system.cwd()
@@ -205,7 +205,7 @@ function test_io_process_quoted_unicode_arguments(_context: test.Context)
   end)
 end
 
-function test_io_process_shell_pipeline_and_redirection(_context: test.Context)
+function test_os_shell_pipeline_and_redirection(_context: test.Context)
   runtime_test.run(function ()
     local temporary = fs.tmpname()
     local path = temporary .. " output ação 東京.bin"
@@ -245,7 +245,7 @@ function test_io_process_shell_pipeline_and_redirection(_context: test.Context)
   end)
 end
 
-function test_io_process_nonzero_and_missing_command_status(_context: test.Context)
+function test_os_shell_nonzero_and_missing_command_status(_context: test.Context)
   runtime_test.run(function ()
     local failed = system.popen(shell_syntax("exit 126", "exit /b 126"))
     defer failed:close()
@@ -289,15 +289,15 @@ local function popen_cancellation_case(waiting: boolean)
   end)
 end
 
-function test_io_process_wait_cancellation_preserves_child(_context: test.Context)
+function test_os_shell_wait_cancellation_preserves_child(_context: test.Context)
   popen_cancellation_case(true)
 end
 
-function test_io_process_read_cancellation_preserves_child(_context: test.Context)
+function test_os_shell_read_cancellation_preserves_child(_context: test.Context)
   popen_cancellation_case(false)
 end
 
-function test_io_process_fixed_system_shell(_context: test.Context)
+function test_os_shell_fixed_system_shell(_context: test.Context)
   runtime_test.run(function ()
     local name = shell_syntax("SHELL", "COMSPEC")
     local previous? = system.getenv(name)
@@ -314,7 +314,7 @@ function test_io_process_fixed_system_shell(_context: test.Context)
   end)
 end
 
-function test_io_stream_transfer_keeps_process_ownership_at_origin(
+function test_os_shell_transfer_keeps_process_ownership_at_origin(
     _context: test.Context)
   runtime_test.run(function ()
     local source = system.popen(popen_quote(process_support.child_path()) ..
@@ -355,7 +355,7 @@ function test_io_stream_transfer_keeps_process_ownership_at_origin(
   end)
 end
 
-function test_io_stream_transfer_rejects_pending_reader_before_detachment(
+function test_os_shell_transfer_rejects_pending_reader_before_detachment(
     _context: test.Context)
   runtime_test.run(function ()
     local source = system.popen(popen_quote(process_support.child_path()) ..
@@ -379,7 +379,7 @@ function test_io_stream_transfer_rejects_pending_reader_before_detachment(
   end)
 end
 
-function test_io_stream_transfer_crosses_states_with_origin_reaping(
+function test_os_shell_transfer_crosses_states_with_origin_reaping(
     _context: test.Context)
   if common.is_windows() then
     test.skip("platform: Windows shell pipes start an eager pending native read")
@@ -424,7 +424,7 @@ function test_io_stream_transfer_crosses_states_with_origin_reaping(
   end)
 end
 
-function test_io_stream_transfer_rejects_malformed_payloads(_context: test.Context)
+function test_os_shell_transfer_rejects_malformed_payloads(_context: test.Context)
   common.assert_raises(function () system.InputOutputStream.from_transfer_payload("") end)
   common.assert_raises(function ()
     system.InputOutputStream.from_transfer_payload("\255")

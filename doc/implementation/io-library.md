@@ -59,4 +59,3 @@ order, conversion before output, one write, and late lookup of a reassigned
 above. Shell-stream behavior, including its conversions to all seven
 Interfaces, is tested by `os.process_tests`
 ([shell tests](os-library.md#shell-and-disposal-tests)).
-

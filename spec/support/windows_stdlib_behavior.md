@@ -67,7 +67,8 @@ suite. The common suite retains that coverage as follows:
 | --- | --- |
 | `coroutine.tests`, `timer.tests` | Same owners; values, yields, injection, lifecycle, GC, sleeps, ticks, cancellation |
 | `os.windows_process_tests` | `os.process_tests` and `os.tests`; native argv/environment/cwd, Unicode and empty values, binary/merged pipes, repeated waits, UTC calendar, exits 1/126/127/9009 |
-| `io.windows_tests` | `io.tests`; fixed native shell, NUL rejection, quoted Unicode arguments, binary duplex, shell operators/redirection, status, close, read/wait cancellation |
+| `io.windows_tests` | `os.process_tests` (`shell_test.titan`); fixed native shell, NUL rejection, quoted Unicode arguments, binary duplex, shell operators/redirection, status, close, read/wait cancellation |
+| `io.tests` | `io.tests`; Interface conversion, `print`, and owned `lines` iteration |
 | `fs.windows_tests` | `fs.tests`; exact binary bytes/append, Unicode paths, stat/lstat, rename/identity, directory entries, canonical file and directory watcher paths |
 | `sqlite3.windows_tests` | `sqlite3.tests`; typed row snapshots after close, Unicode persistence, commit/rollback, and recoverable native `SQLITE_BUSY` |
 | `net.tests`, `ssl.tests` | Same owners; binary loopback, half-close, pending accept, explicit test CA, hostname verification, truncation, and PEM errors |

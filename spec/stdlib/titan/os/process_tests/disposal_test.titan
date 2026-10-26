@@ -71,7 +71,9 @@ local function dispose_captured_streams(retired: boolean)
       return status
     ]], "=captured-output-disposal", async.TransferValue.is_string(input_packet))
     test.assert(discarded:to_value() == 0)
-    test.assert(output:read() == nil, "discarding detached stdin did not deliver child EOF")
+    if common.is_windows() then
+      test.assert(output:read() == nil, "disposed stdin did not deliver child EOF")
+    end
     process_support.assert_normal(process:wait(), "origin reaps disposed stream child")
     if output_packet == nil then output_packet = output:to_transfer_payload() end
     discarded = state:run([[
@@ -128,5 +130,67 @@ function test_stream_disposal_rejects_malformed_discriminators(context: test.Con
     common.assert_raises_contains(function ()
       system.InputStream.discard_transfer_payload(parent_buffered)
     end, "invalid standard input transfer payload")
+  end)
+  context:run("live_input_without_pipe", function (_child: test.Context)
+    local initial: {string} = {}
+    local live_without_pipe = protobuf.serialize_fields(
+      input_disposal_fields, -1, "", 0, nil, nil, initial)
+    common.assert_raises_contains(function ()
+      system.InputStream.discard_transfer_payload(live_without_pipe)
+    end, "live input stream transfer has no pipe")
+    common.assert_raises_contains(function ()
+      system.InputStream.from_transfer_payload(live_without_pipe)
+    end, "live input stream transfer has no pipe")
+  end)
+end
+
+local function disposal_descriptor_count(): integer?
+  if common.is_windows() then return nil end
+  local count: integer? = nil
+  runtime_test.run(function ()
+    if fs.stat("/dev/fd") ~= nil then count = #fs.list("/dev/fd") end
+  end)
+  return count
+end
+
+local function transfer_terminal_input(adopt: boolean)
+  local before? = disposal_descriptor_count()
+  runtime_test.run(function ()
+    local process = system.spawn(process_support.child_path(), {"echo"})
+    defer cleanup_process(process)
+    local input = process_support.required_output(process.stdin, "terminal transfer stdin")
+    local output = process_support.required_input(process.stdout, "terminal transfer stdout")
+    local bytes = "terminal\0transfer\255"
+    input:write(bytes)
+    input:close()
+    test.assert(process_support.read_all(output) == bytes,
+                "terminal transfer lost child output before EOF")
+    local payload = output:to_transfer_payload()
+    if adopt then
+      local restored = system.InputStream.from_transfer_payload(payload)
+      defer restored:close()
+      test.assert(restored:read() == nil and restored:read() == nil,
+                  "adopted terminal input did not retain EOF")
+    else
+      test.assert(system.InputStream.discard_transfer_payload(payload) == 0,
+                  "terminal input disposal failed")
+    end
+    process_support.assert_normal(process:wait(), "terminal transfer child")
+    test.assert(not process:is_running(), "terminal transfer left its child running")
+    process_support.assert_normal(process:wait(), "terminal transfer retained child status")
+  end)
+  if before ~= nil then
+    test.assert(disposal_descriptor_count() == before,
+                "terminal input transfer leaked a descriptor")
+  end
+end
+
+function test_transfer_terminal_input_preserves_eof_and_process_status(
+    context: test.Context)
+  context:run("dispose", function (_child: test.Context)
+    transfer_terminal_input(false)
+  end)
+  context:run("adopt", function (_child: test.Context)
+    transfer_terminal_input(true)
   end)
 end

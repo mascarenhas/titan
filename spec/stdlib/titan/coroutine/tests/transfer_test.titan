@@ -46,13 +46,19 @@ local function transfer_error_case(context: test.Context, name: string, payload:
       return "missed"
     catch
       test.assert(error == expected_error, "injected error identity changed")
-      return payload
+      return coroutine.yield(payload, "transfer")
     end, "transfer")
     failed, result, trace = caught:transfer(nil, nil, false)
     test.assert(not failed and result == "ready" and trace == nil)
     failed, result, trace = caught:transfer(payload, nil, true)
     test.assert(not failed and result == payload and trace == nil,
                 "handled injection was reported as failure")
+    test.assert(caught:status() == "suspended",
+                "handled injection did not remain suspended at its next yield")
+    failed, result, trace = caught:transfer("after injection", nil, false)
+    test.assert(not failed and result == "after injection" and trace == nil and
+                caught:status() == "dead",
+                "normal transfer after a handled injection did not complete")
   end)
 end
 
@@ -238,4 +244,37 @@ function test_transfer_roots_receiver_after_its_container_drops_it(
   failed, result, trace = holder["co"]:transfer("retained", nil, false)
   test.assert(not failed and result == "retained" and trace == nil)
   test.assert(holder["co"]:status() == "dead")
+end
+
+local function stacked_transfer_failure(_: value): value
+  coroutine.yield("stacked failure ready", "outer transfer")
+  raise "stacked transfer failure"
+  return nil
+end
+
+function test_transfer_failed_stacked_chain_consumes_its_trace(_context: test.Context)
+  local inner = coroutine.create(stacked_transfer_failure, "inner transfer")
+  local outer = coroutine.create(function (_: value): value
+    return inner:resume(nil)
+  end, "outer transfer")
+  local failed, result, trace? = outer:transfer(nil, nil, false)
+  test.assert(not failed and result == "stacked failure ready" and trace == nil)
+  test.assert(outer:status() == "suspended" and inner:status() == "stacked")
+  failed, result, trace = outer:transfer(nil, nil, false)
+  test.assert(failed and result == "stacked transfer failure" and trace ~= nil)
+  test.assert(common.contains(trace, "stacked_transfer_failure"),
+              "stacked failure trace lost its inner frame")
+  test.assert(outer:status() == "dead" and inner:status() == "dead")
+
+  local fresh = coroutine.create(second_transfer_failure, "fresh transfer")
+  local caught = false
+  do fresh:resume(nil)
+  catch
+    caught = true
+    test.assert(error == "second transfer failure")
+    test.assert(common.contains(traceback, "second_transfer_failure"))
+    test.assert(not common.contains(traceback, "stacked_transfer_failure"),
+                "stacked transfer contaminated the next raising resume")
+  end
+  test.assert(caught)
 end

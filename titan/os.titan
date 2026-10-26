@@ -2186,11 +2186,8 @@ function OutputStream.discard_transfer_payload(payload: string): integer
   return uv.pipe_t.discard_transfer_payload(native)
 end
 
---- Dispose an unadopted captured input payload without a Runtime or Task.
--- @param payload Exactly-once manual capability; parent identities are no-ops.
--- @return Native close status; a close attempt consumes ownership even on error.
--- @usage standard-library-os.md#transferring-process-streams
-function InputStream.discard_transfer_payload(payload: string): integer
+local function decode_input_transfer_payload(payload: string):
+    (integer, string, integer, async.OperationError?, string?, {string})
   local descriptor: integer, excess: string, terminal_kind: integer,
     failure: async.OperationError?, native: string?, initial: {string} =
     protobuf.deserialize_fields(payload, input_transfer_fields)
@@ -2202,9 +2199,20 @@ function InputStream.discard_transfer_payload(payload: string): integer
     if #excess ~= 0 or native ~= nil or #initial ~= 0 or terminal_kind ~= 3 then
       raise "invalid standard input transfer payload"
     end
-    return 0
+  elseif descriptor ~= -1 then
+    raise "invalid input stream descriptor"
+  elseif terminal_kind == 0 and native == nil then
+    raise "live input stream transfer has no pipe"
   end
-  if descriptor ~= -1 then raise "invalid retained input stream descriptor" end
+  return descriptor, excess, terminal_kind, failure, native, initial
+end
+
+--- Dispose an unadopted captured input payload without a Runtime or Task.
+-- @param payload Exactly-once manual capability; parent identities are no-ops.
+-- @return Native close status; a close attempt consumes ownership even on error.
+-- @usage standard-library-os.md#transferring-process-streams
+function InputStream.discard_transfer_payload(payload: string): integer
+  local _, _, _, _?, native? = decode_input_transfer_payload(payload)
   if native == nil then return 0 end
   return uv.pipe_t.discard_transfer_payload(native)
 end
@@ -2371,20 +2379,9 @@ end
 --- Reconstruct buffered input and adopt its optional pipe on this Runtime.
 -- @usage standard-library-os.md#transferring-process-streams
 function InputStream.from_transfer_payload(payload: string): InputStream
-  local descriptor: integer, excess: string, terminal_kind: integer,
-    failure: async.OperationError?, native: string?, initial: {string} =
-    protobuf.deserialize_fields(payload, input_transfer_fields)
-  if terminal_kind < 0 or terminal_kind > 3 or
-      (terminal_kind == 2) ~= (failure ~= nil) then
-    raise "invalid input stream terminal payload"
-  end
-  if descriptor == 0 then
-    if #excess ~= 0 or native ~= nil or #initial ~= 0 or terminal_kind ~= 3 then
-      raise "invalid standard input transfer payload"
-    end
-    return InputStream(nil, 0, "")
-  end
-  if descriptor ~= -1 then raise "invalid input stream descriptor" end
+  local descriptor, excess, terminal_kind, failure?, native?, initial =
+    decode_input_transfer_payload(payload)
+  if descriptor == 0 then return InputStream(nil, 0, "") end
   local terminal: async.SubscriptionResult<|string, async.OperationError|>? = nil
   if terminal_kind == 1 then terminal = async.SubscriptionResult<|string, async.OperationError|>.ended()
   elseif terminal_kind == 2 then terminal = async.SubscriptionResult<|string, async.OperationError|>.error(failure)
@@ -2394,9 +2391,6 @@ function InputStream.from_transfer_payload(payload: string): InputStream
   local stream = restored_stdio(native)
   local published = false
   defer if not published then discard_unpublished_stdio(stream) end
-  if terminal == nil and stream:is_closed() then
-    raise "live input stream transfer has no pipe"
-  end
   start_stream_read(stream, "stdio.transfer.read_start", initial, terminal)
   result.handle = stream
   published = true

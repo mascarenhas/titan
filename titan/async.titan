@@ -972,12 +972,10 @@ local function resume_root(task: Task, failed: boolean,
   defer task.runtime.current_task = nil
   local dead, result, trace? = task.root:transfer(payload, ASYNC_TAG, failed)
   if dead and task.cancel_value == nil and task.terminal_kind ~= TERMINAL_FAILED then
-    do
-      raise result
-    catch
-      if trace ~= nil then trace = trace .. "\n" .. traceback
-      else trace = traceback end
-    end
+    raise result
+  catch
+    if trace ~= nil then trace = trace .. "\n" .. traceback
+    else trace = traceback end
   end
   return dead, result, trace
 end

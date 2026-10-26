@@ -112,7 +112,6 @@ interface ReaderWriterCloser
   function close()
 end
 
-
 --- Write tab-separated Lua-rendered values and a newline to os.stdout in one write.
 -- @param ... Values rendered with string.tostring; the write may suspend.
 -- @usage standard-library-io.md
@@ -149,4 +148,3 @@ function lines(reader: ReaderCloser):
      function (ReaderCloser): ())
   return next_line, reader, nil, close_reader
 end
-
