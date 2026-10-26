@@ -8,13 +8,14 @@ local util = require "titan-compiler.util"
 local types = require "titan-compiler.types"
 local objectmetadata = require "titan-compiler.objectmetadata"
 local staticmetadata = require "titan-compiler.staticmetadata"
+local graphcodec = require "titan-compiler.graphcodec"
 local incremental = {}
 
 local function state(context)
     if not context.incremental then
         context.incremental = { files = {}, aliases = {}, providers = {},
             counters = { file_hashes = 0, file_reads = 0, file_bytes = 0,
-                digest_calls = 0, files = {} } }
+                observation_reuses = 0, digest_calls = 0, files = {} } }
     end
     return context.incremental
 end
@@ -87,7 +88,43 @@ local function absolute(context, path)
     return required(platform.absolute(path, required(context.io:cwd())))
 end
 
-local function observation(context, path)
+local OBSERVATION_FIELDS = { "kind", "dev", "ino", "size", "mode", "mtime_ns", "ctime_ns" }
+
+local function precise_observation(stat)
+    if type(stat) ~= "table" or getmetatable(stat) ~= nil or stat.precision ~= "ns"
+        or type(stat.kind) ~= "string" or type(stat.dev) ~= "string" or stat.dev == ""
+        or type(stat.ino) ~= "string" or stat.ino == "" then return nil end
+    for _, field in ipairs({ "size", "mode", "mtime_ns", "ctime_ns" }) do
+        if math.type(stat[field]) ~= "integer" then return nil end
+    end
+    if stat.size < 0 then return nil end
+    local result = { precision = "ns" }
+    for _, field in ipairs(OBSERVATION_FIELDS) do result[field] = stat[field] end
+    return result
+end
+
+function incremental.observation(context, path, follow)
+    local ok, stat, err = pcall(follow == false and context.io.lstat or context.io.stat,
+        context.io, path)
+    if not ok then
+        if type(stat) ~= "string" then error(stat, 0) end
+        return nil, stat
+    end
+    if err ~= nil and type(err) ~= "string" then error(err, 0) end
+    if err ~= nil then return nil, err end
+    return precise_observation(stat), err
+end
+
+function incremental.observations_equal(left, right)
+    left, right = precise_observation(left), precise_observation(right)
+    if not left or not right then return false end
+    for _, field in ipairs(OBSERVATION_FIELDS) do
+        if left[field] ~= right[field] then return false end
+    end
+    return true
+end
+
+local function read_observation(context, path)
     local stat, err = context.io:stat(path)
     stat = required(stat, err, path)
     assert(stat.kind == "file", path .. ": input is not a regular file")
@@ -100,45 +137,138 @@ local function observation(context, path)
             modified_nanoseconds = value.modified_nanoseconds,
             changed_seconds = value.changed_seconds,
             changed_nanoseconds = value.changed_nanoseconds,
-            time_precision = value.time_precision }
+            time_precision = value.time_precision, precision = value.precision,
+            dev = value.dev, ino = value.ino, mtime_ns = value.mtime_ns, ctime_ns = value.ctime_ns }
     end
-    return canonical({ fields(stat), fields(link) }, {})
+    return canonical({ fields(stat), fields(link) }, {}),
+        err == nil and linkerr == nil and precise_observation(stat) or nil
 end
 
-function incremental.file_digest(context, path, bytes)
+local function file_count(memo, key)
+    local count = memo.counters.files[key]
+    if not count then
+        count = { hashes = 0, reads = 0, bytes = 0, observation_reuses = 0 }
+        memo.counters.files[key] = count
+    end
+    return count
+end
+
+local function cache_file(context, path, digest, observation)
+    local cache = state(context).persistent
+    if not cache or not observation then return end
+    path = absolute(context, path)
+    local previous = cache.files[path]
+    if not previous or previous.digest ~= digest
+        or not incremental.observations_equal(previous.observation, observation) then
+        cache.files[path] = { digest = digest, observation = observation }
+        cache.dirty = true
+    end
+end
+
+local function read_evidence(context, path, key, count, max_bytes)
+    local before, observed = read_observation(context, path)
+    local bytes = required(context.io:read_file(path, max_bytes))
+    state(context).counters.file_reads = state(context).counters.file_reads + 1
+    count.reads = count.reads + 1
+    if max_bytes and #bytes > max_bytes then error(path .. ": file exceeds read limit", 0) end
+    local after = read_observation(context, path)
+    if before ~= after or (observed and #bytes ~= observed.size)
+        or key ~= required(context.io:realpath(path)) then
+        error(path .. ": file changed while it was read", 0)
+    end
+    return bytes, observed
+end
+
+local function hash_file(context, path, key, bytes, observed, count)
+    local memo = state(context)
+    local digest = hash(context, bytes)
+    memo.counters.file_hashes = memo.counters.file_hashes + 1
+    memo.counters.file_bytes = memo.counters.file_bytes + #bytes
+    count.hashes, count.bytes = count.hashes + 1, count.bytes + #bytes
+    memo.files[key] = { digest = digest, bytes = bytes, observation = observed }
+    cache_file(context, path, digest, observed)
+    context.io:yield()
+    return digest, bytes, observed
+end
+
+local function digest_file(context, path, bytes, max_bytes)
     local memo = state(context)
     local key = memo.aliases[path]
     if not key then
         key = required(context.io:realpath(path))
         memo.aliases[path] = key
     end
+    local count = file_count(memo, key)
     local saved = memo.files[key]
     if saved then
-        if bytes ~= nil and bytes ~= saved.bytes then
+        if bytes ~= nil then
+            if saved.bytes == nil then
+                local digest = hash(context, bytes)
+                if digest ~= saved.digest then error(path .. ": file changed during build", 0) end
+                memo.counters.file_hashes = memo.counters.file_hashes + 1
+                memo.counters.file_bytes = memo.counters.file_bytes + #bytes
+                count.hashes, count.bytes = count.hashes + 1, count.bytes + #bytes
+                saved.bytes = bytes
+            elseif bytes ~= saved.bytes then
+                error(path .. ": file changed during build", 0)
+            end
+        end
+        return saved.digest, saved.bytes, saved.observation
+    end
+    local cache = memo.persistent
+    if bytes == nil and cache and not memo.refresh then
+        local previous = cache.files[absolute(context, path)]
+        local current = previous and incremental.observation(context, path)
+        if previous and current and current.kind == "file"
+            and incremental.observations_equal(current, previous.observation)
+            and context.io:readable(path) then
+            memo.files[key] = { digest = previous.digest, observation = current }
+            memo.counters.observation_reuses = memo.counters.observation_reuses + 1
+            count.observation_reuses = count.observation_reuses + 1
+            return previous.digest, nil, current
+        end
+    end
+    local observed
+    if bytes == nil then bytes, observed = read_evidence(context, path, key, count, max_bytes) end
+    assert(type(bytes) == "string", "file digest requires byte contents")
+    return hash_file(context, path, key, bytes, observed, count)
+end
+
+function incremental.file_digest(context, path, bytes)
+    return digest_file(context, path, bytes)
+end
+
+-- A digest cache hit deliberately has no bytes. Byte-demand consumers use this
+-- operation to materialize them once under the same read-race guard.
+function incremental.file_contents(context, path, max_bytes)
+    if max_bytes ~= nil then
+        assert(math.type(max_bytes) == "integer" and max_bytes >= 0, "invalid file read limit")
+        local stat, err = context.io:stat(path)
+        stat = required(stat, err, path)
+        if stat.size > max_bytes then error(path .. ": file exceeds read limit", 0) end
+    end
+    local _, bytes, observed = digest_file(context, path, nil, max_bytes)
+    if bytes == nil then
+        local memo = state(context)
+        local key = memo.aliases[path]
+        local current
+        bytes, current = read_evidence(context, path, key, file_count(memo, key), max_bytes)
+        if not incremental.observations_equal(observed, current) then
             error(path .. ": file changed during build", 0)
         end
-        return saved.digest, saved.bytes
+        memo.files[key].bytes = bytes
     end
-    local counters = memo.counters
-    local count = counters.files[key] or { hashes = 0, reads = 0, bytes = 0 }
-    counters.files[key] = count
-    if bytes == nil then
-        local before = observation(context, path)
-        bytes = required(context.io:read_file(path))
-        counters.file_reads = counters.file_reads + 1
-        count.reads = count.reads + 1
-        if before ~= observation(context, path) or key ~= required(context.io:realpath(path)) then
-            error(path .. ": file changed while it was read", 0)
-        end
-    end
-    assert(type(bytes) == "string", "file digest requires byte contents")
-    local digest = hash(context, bytes)
-    counters.file_hashes = counters.file_hashes + 1
-    counters.file_bytes = counters.file_bytes + #bytes
-    count.hashes, count.bytes = count.hashes + 1, count.bytes + #bytes
-    memo.files[key] = { digest = digest, bytes = bytes }
-    context.io:yield()
-    return digest, bytes
+    if max_bytes and #bytes > max_bytes then error(path .. ": file exceeds read limit", 0) end
+    return bytes
+end
+
+-- Publication must re-read/hash, but its verified evidence should prime the
+-- coordinator's persistent cache for the very next invocation.
+function incremental.fresh_context(context)
+    local fresh = { io = context.io, cache_adapter = context.cache_adapter }
+    state(fresh).persistent = state(context).persistent
+    state(fresh).refresh = true
+    return fresh
 end
 
 -- Only a publisher may retire evidence for an output it has replaced. Fresh
@@ -146,10 +276,18 @@ end
 function incremental.invalidate_file(context, path)
     local memo = state(context)
     local key = memo.aliases[path]
-    if not key then return end
-    memo.files[key] = nil
-    for alias, target in pairs(memo.aliases) do
-        if target == key then memo.aliases[alias] = nil end
+    if key then
+        memo.files[key] = nil
+        for alias, target in pairs(memo.aliases) do
+            if target == key then memo.aliases[alias] = nil end
+        end
+    end
+    local cache = memo.persistent
+    if cache then
+        local spelling = absolute(context, path)
+        if cache.files[spelling] then
+            cache.files[spelling], cache.dirty = nil, true
+        end
     end
 end
 
@@ -170,8 +308,9 @@ local function compiler_inventory(context, value)
         for _, name in ipairs(names) do
             if name:match("%.lua$") then
                 local relative = directory .. "/" .. name
-                local digest, bytes = incremental.file_digest(context, paths.join(root, relative))
-                inventory[#inventory + 1] = { path = relative, length = #bytes, sha256 = digest }
+                local digest, bytes, observed = incremental.file_digest(context, paths.join(root, relative))
+                inventory[#inventory + 1] = { path = relative,
+                    length = bytes and #bytes or observed.size, sha256 = digest }
             end
         end
     end
@@ -179,8 +318,9 @@ local function compiler_inventory(context, value)
     if frontend == "api" then
         inventory[#inventory + 1] = { path = "titanc", api = true }
     else
-        local digest, bytes = incremental.file_digest(context, frontend)
-        inventory[#inventory + 1] = { path = "titanc", length = #bytes, sha256 = digest }
+        local digest, bytes, observed = incremental.file_digest(context, frontend)
+        inventory[#inventory + 1] = { path = "titanc",
+            length = bytes and #bytes or observed.size, sha256 = digest }
     end
     table.sort(inventory, function(a, b) return util.bytewise_less(a.path, b.path) end)
     return incremental.digest(context, "compiler", inventory), inventory
@@ -236,6 +376,8 @@ function incremental.physical_executable(context, command)
                 modified_nanoseconds = stat.modified_nanoseconds,
                 changed_seconds = stat.changed_seconds,
                 changed_nanoseconds = stat.changed_nanoseconds,
+                precision = stat.precision, dev = stat.dev, ino = stat.ino,
+                mtime_ns = stat.mtime_ns, ctime_ns = stat.ctime_ns,
                 time_precision = stat.time_precision or "coarse" }
         end
     end
@@ -269,10 +411,12 @@ function incremental.toolchain_identity(context, descriptor)
     if not description then
         local null = platform.windows and "NUL" or "/dev/null"
         description = {
-            preprocessor = descriptor.preprocessor_identity or run(context,
-                append({ table.unpack(description_argv) }, { "-E", "-dM", "-x", "c", null })),
-            banner = descriptor.banner or run(context, append({ table.unpack(description_argv) },
-                { "-E", "-v", "-x", "c", null, "-o", null })),
+            preprocessor = descriptor.preprocessor_identity or required(
+                require("c-parser.cpp").cached_command(append({ table.unpack(description_argv) },
+                    { "-dM", "-E", "-x", "c", null }), false, context.io)),
+            banner = descriptor.banner or required(require("c-parser.cpp").cached_command(
+                append({ table.unpack(description_argv) },
+                    { "-E", "-v", "-x", "c", null, "-o", null }), true, context.io)),
         }
         memo.toolchain_descriptions[description_key] = description
     end
@@ -322,6 +466,155 @@ local function mkdir(context, directory)
     required(context.io:mkdir(directory))
 end
 
+local DIGEST_CACHE_LIMIT = 32 * 1024 * 1024
+
+local function cache_codec_options(context)
+    return { max_bytes = DIGEST_CACHE_LIMIT, max_nodes = 300000, max_entries = 2000000,
+        max_string_bytes = DIGEST_CACHE_LIMIT, yield = function() context.io:yield() end,
+        sha256_binary = context.cache_adapter and context.cache_adapter.sha256_binary }
+end
+
+local function closed_cache_table(value, fields)
+    if type(value) ~= "table" or getmetatable(value) ~= nil then return false end
+    for key in pairs(value) do if not fields[key] then return false end end
+    return true
+end
+
+local function digest_string(value)
+    return type(value) == "string" and #value == 64 and not value:find("[^0-9a-f]")
+end
+
+local function valid_fingerprint(value)
+    if not closed_cache_table(value, { format = true, class = true, word_size = true,
+        endian = true, machine = true, flags = true, cputype = true, cpusubtype = true }) then
+        return false
+    end
+    if value.endian ~= "little" and value.endian ~= "big" then return false end
+    local width = value.format == "elf" and value.class or value.word_size
+    if width ~= 32 and width ~= 64 then return false end
+    local fields = value.format == "elf" and { "machine", "flags" }
+        or value.format == "macho" and { "cputype", "cpusubtype" }
+        or value.format == "coff" and { "machine" }
+    if not fields then return false end
+    for _, key in ipairs(fields) do if math.type(value[key]) ~= "integer" then return false end end
+    return true
+end
+
+local function valid_digest_cache(record)
+    if not closed_cache_table(record, { schema = true, digest = true, canonicalization = true,
+        abi = true, files = true, objects = true })
+        or record.schema ~= version.DIGEST_CACHE_SCHEMA or record.digest ~= version.CERTIFICATE_DIGEST
+        or record.canonicalization ~= version.CERTIFICATE_CANONICALIZATION
+        or record.abi ~= version.TITAN_ABI_VERSION
+        or type(record.files) ~= "table" or getmetatable(record.files) ~= nil
+        or type(record.objects) ~= "table" or getmetatable(record.objects) ~= nil then return false end
+    for path, entry in pairs(record.files) do
+        if type(path) ~= "string" or not platform.is_absolute(path) or path:find("\0", 1, true)
+            or not closed_cache_table(entry, { digest = true, observation = true })
+            or not digest_string(entry.digest) or not precise_observation(entry.observation)
+            or entry.observation.kind ~= "file" then return false end
+    end
+    for digest, fact in pairs(record.objects) do
+        if not digest_string(digest) or not closed_cache_table(fact, { fingerprint = true })
+            or not valid_fingerprint(fact.fingerprint) then return false end
+    end
+    return true
+end
+
+-- Only the coordinator calls these two functions, while holding its output
+-- lock. Cache transport failure never makes a correct build depend on storage.
+function incremental.load_digest_cache(context, output_root)
+    local memo = state(context)
+    if output_root == nil then return true end
+    local filename = paths.join(absolute(context, output_root), ".titan", "digests")
+    if memo.persistent then
+        if memo.persistent.path == filename then return true end
+        return nil, "digest cache already belongs to another output tree"
+    end
+    local cache = { path = filename, owner = context, files = {}, objects = {}, dirty = true }
+    memo.persistent = cache
+    local ok, record = pcall(function()
+        local stat, staterr = context.io:lstat(filename)
+        if staterr ~= nil and type(staterr) ~= "string" then error(staterr, 0) end
+        if not stat or stat.kind ~= "file" or stat.size > DIGEST_CACHE_LIMIT then return end
+        local bytes, err = context.io:read_file(filename, DIGEST_CACHE_LIMIT)
+        if err ~= nil and type(err) ~= "string" then error(err, 0) end
+        if not bytes or #bytes > DIGEST_CACHE_LIMIT then return end
+        return graphcodec.decode(bytes, cache_codec_options(context))
+    end)
+    if not ok then
+        if type(record) ~= "string" then error(record, 0) end
+        return true
+    end
+    if valid_digest_cache(record) then
+        cache.files, cache.objects, cache.dirty = record.files, record.objects, false
+    end
+    return true
+end
+
+function incremental.save_digest_cache(context)
+    local cache = state(context).persistent
+    if not cache or cache.owner ~= context or not cache.dirty then return true end
+    local staging
+    local ok, result = pcall(function()
+        local directory = paths.dirname(cache.path)
+        local stat, err = context.io:lstat(directory)
+        if err then required(nil, err, directory) end
+        if stat then
+            assert(stat.kind == "directory", directory .. ": digest cache directory must not be a link")
+        else
+            mkdir(context, directory)
+        end
+        local bytes = required(graphcodec.encode({ schema = version.DIGEST_CACHE_SCHEMA,
+            digest = version.CERTIFICATE_DIGEST, canonicalization = version.CERTIFICATE_CANONICALIZATION,
+            abi = version.TITAN_ABI_VERSION, files = cache.files, objects = cache.objects },
+            cache_codec_options(context)))
+        local reserved = required(context.io:tmpname())
+        staging = cache.path .. ".tmp." .. paths.basename(reserved)
+        required(context.io:unlink(reserved))
+        required(context.io:write_file(staging, bytes))
+        required(context.io:rename(staging, cache.path))
+        staging = nil
+        cache.dirty = false
+        return true
+    end)
+    if staging then pcall(context.io.unlink, context.io, staging) end
+    if not ok then
+        if type(result) ~= "string" then error(result, 0) end
+        return nil, result
+    end
+    return result
+end
+
+-- A part scan is a pure content fact: no paths, observations, module views or
+-- target selections enter the persisted value. Callers compare its target.
+function incremental.part_fingerprint(context, path)
+    local ok, fingerprint, err = pcall(function()
+        local digest = incremental.file_digest(context, path)
+        local cache = state(context).persistent
+        local fact = cache and cache.objects[digest]
+        if fact then return fact.fingerprint end
+        local bytes = incremental.file_contents(context, path)
+        local part, scan_error = staticmetadata.scan_bytes(bytes, path,
+            { expected_abi = version.TITAN_ABI_VERSION })
+        if not part then return nil, scan_error end
+        if part.kind ~= "object" then return nil, "not a single-architecture relocatable object" end
+        if part.metadata ~= nil or objectmetadata.read(bytes, path) ~= nil then
+            return nil, "unexpectedly contains Titan module metadata"
+        end
+        local result = part.fingerprint
+        if cache and valid_fingerprint(result) then
+            cache.objects[digest], cache.dirty = { fingerprint = result }, true
+        end
+        return result
+    end)
+    if not ok then
+        if type(fingerprint) ~= "string" then error(fingerprint, 0) end
+        return nil, "cannot read native input '" .. path .. "': " .. fingerprint
+    end
+    return fingerprint, err
+end
+
 function incremental.preamble_identity(context, value)
     local opts = options(context, value)
     local source = absolute(context, assert(opts.preamble_path, "stable preamble_path is required"))
@@ -339,7 +632,7 @@ function incremental.preamble_identity(context, value)
                 "-x", "c", source })
         local expanded = run(context, argv)
         local dependencies = required(require("titan-compiler.depfile").parse(
-            required(context.io:read_file(dep))))
+            incremental.file_contents(context, dep)))
         local inputs = {}
         local synthetic = required(context.io:realpath(source))
         for _, path in ipairs(dependencies) do
@@ -354,6 +647,7 @@ function incremental.preamble_identity(context, value)
         return incremental.digest(context, "preamble", { expanded = expanded, inputs = inputs }), inputs
     end)
     local removed, removeerr = context.io:unlink(dep)
+    incremental.invalidate_file(context, dep)
     if not ok then error(result, 0) end
     required(removed, removeerr, dep)
     return result, inventory
@@ -600,14 +894,9 @@ local function check_parts(context, record, stem, bytes)
         if not stat or stat.kind ~= "file" then
             return miss("parts", staterr or ("missing or nonregular part object: " .. path))
         end
-        local _, partbytes = incremental.file_digest(context, path)
-        local part, parterr = staticmetadata.scan_bytes(partbytes, path,
-            { expected_abi = version.TITAN_ABI_VERSION })
-        if not part or part.kind ~= "object" then return miss("parts", parterr or path) end
-        if part.metadata ~= nil or objectmetadata.read(partbytes, path) ~= nil then
-            return miss("parts", "sidecar part object contains metadata: " .. path)
-        end
-        local matches, mismatch = staticmetadata.fingerprint_matches(part.fingerprint, primary.fingerprint)
+        local fingerprint, part_error = incremental.part_fingerprint(context, path)
+        if not fingerprint then return miss("parts", path .. ": " .. tostring(part_error)) end
+        local matches, mismatch = staticmetadata.fingerprint_matches(fingerprint, primary.fingerprint)
         if not matches then return miss("parts", "part object target mismatch: " .. tostring(mismatch)) end
         objects[index] = path
     end
@@ -679,7 +968,7 @@ function incremental.certify_local(context, modname, source)
         if err ~= nil and type(err) ~= "string" then error(err, 0) end
         if err then return miss("record-unreadable", err) end
         if not stat or stat.kind ~= "file" then return miss("no-object") end
-        local _, bytes = incremental.file_digest(context, path)
+        local bytes = incremental.file_contents(context, path)
         local readerr, readreason
         record, readerr, readreason = objectmetadata.read(bytes, path)
         if not record then return miss(readreason or "record-unreadable", readerr) end
@@ -735,8 +1024,8 @@ function incremental.revalidate_record(context, modname, source, record)
     if not valid_certificate(cert, modname) or not record.type or record.type.name ~= modname then
         return miss("record-schema", "missing or invalid certificate")
     end
-    local fresh = { io = context.io, cache_adapter = context.cache_adapter,
-        header_validation = {}, header_observations = {} }
+    local fresh = incremental.fresh_context(context)
+    fresh.header_validation, fresh.header_observations = {}, {}
     local descriptor = { kind = source.kind, main = source.main, files = source.files }
     local ok, result = pcall(function()
         local sources = source_verdict(fresh, descriptor, cert)
@@ -745,17 +1034,17 @@ function incremental.revalidate_record(context, modname, source, record)
     end)
     local counters = incremental.counters(context)
     local total = counters.revalidation or { passes = 0, file_hashes = 0,
-        file_reads = 0, file_bytes = 0, digest_calls = 0, files = {} }
+        file_reads = 0, file_bytes = 0, observation_reuses = 0, digest_calls = 0, files = {} }
     counters.revalidation = total
     total.passes = total.passes + 1
     local current = incremental.counters(fresh)
-    for _, key in ipairs({ "file_hashes", "file_reads", "file_bytes", "digest_calls" }) do
+    for _, key in ipairs({ "file_hashes", "file_reads", "file_bytes", "observation_reuses", "digest_calls" }) do
         total[key] = total[key] + current[key]
     end
     for path, counts in pairs(current.files) do
-        local saved = total.files[path] or { hashes = 0, reads = 0, bytes = 0 }
+        local saved = total.files[path] or { hashes = 0, reads = 0, bytes = 0, observation_reuses = 0 }
         total.files[path] = saved
-        for _, key in ipairs({ "hashes", "reads", "bytes" }) do
+        for _, key in ipairs({ "hashes", "reads", "bytes", "observation_reuses" }) do
             saved[key] = saved[key] + counts[key]
         end
     end
