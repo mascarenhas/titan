@@ -1496,6 +1496,21 @@ function driver.probe_batch_jobs(context)
     return cap
 end
 
+-- The invocation's content-digest memo, shared by object certification and
+-- every C header/preamble read of a fresh check, so each distinct file is
+-- hashed at most once per resolver context.
+local function context_file_digest(context)
+    if not context.file_digest then
+        context.file_digest = function(path, bytes)
+            local digest, digest_error =
+                incremental.file_digest(context, path, bytes)
+            if digest == nil then return nil, digest_error end
+            return digest
+        end
+    end
+    return context.file_digest
+end
+
 function driver.get_probe_service(context)
     if context.foreign_c_configuration_id ~=
        driver.FOREIGN_C_CONFIGURATION_ID then
@@ -1583,6 +1598,7 @@ function driver.get_probe_service(context)
         io = context.io,
         cache_adapter = context.cache_adapter,
         header_observations = context.header_observations,
+        file_digest = context_file_digest(context),
         process_trace = context.c_header_process_trace,
         process_analysis = context.c_header_analysis,
         persistent_cache_trace = persistent_cache_trace,
@@ -4086,6 +4102,7 @@ local function check_source_module(
         completion = completion_request,
         cache_adapter = context.cache_adapter,
         header_observations = context.header_observations,
+        file_digest = context_file_digest(context),
         target_profile_provider = function()
             return driver.get_target_profile(context)
         end,
@@ -4101,6 +4118,10 @@ local function check_source_module(
     return checker.check(
         modname, ast, input, filename, loader, check_options)
 end
+
+-- Certification facts; only `incremental_options` escapes this block.
+local incremental_options
+do
 
 -- The directory holding the loaded `titan-compiler/` and `c-parser/` trees:
 -- a source checkout root or an installed LuaRocks share directory. The
@@ -4186,7 +4207,7 @@ end
 -- for `titan-compiler.incremental`): the loaded compiler, the real frontend,
 -- the exact generated-object native prefix and toolchain, code-generation
 -- settings, and the per-module stem and expected-codegen callbacks.
-local function incremental_options(context)
+function incremental_options(context)
     local root, root_error = loaded_compiler_root(context.io)
     if not root then
         return nil, "cannot certify compiler configuration: " ..
@@ -4216,6 +4237,8 @@ local function incremental_options(context)
         end,
     }
 end
+
+end -- certification facts
 
 -- Compute this invocation's configuration certificate once per resolver
 -- context. Every certification and every record written through the context
@@ -5941,6 +5964,10 @@ function driver.resolve_source(context, modname, source_path)
         context)
 end
 
+-- Coordinator and worker entry points; their private helpers stay local to
+-- this block.
+do
+
 -- A module's current source descriptor exactly as this invocation's loader
 -- would select it: relocated under the output root, and coverage-relocated
 -- when sources are instrumented. Publication revalidates against it.
@@ -6503,6 +6530,8 @@ function driver.publish_staged_module(context, result)
         imports = record.object_metadata.imports,
     }
 end
+
+end -- coordinator and worker entry points
 
 -- Resolve the physical identity of already-known external dependencies without
 -- parsing source or retaining compiler state. Language-server clients use this
