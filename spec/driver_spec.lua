@@ -592,23 +592,31 @@ describe("Windows launcher filenames", function()
         assert.equal("custom.EXE", driver.windows_launcher_name("app.main", "custom.EXE"))
         local original = assert(driver.windows_program_paths("app.main"))
         local renamed = assert(driver.windows_program_paths("app.main", "renamed"))
+        local in_bin = assert(driver.windows_program_paths("app.main", "bin/renamed"))
         assert.equal("bin/app.main.exe", original.executable)
-        assert.equal("bin/renamed.exe", renamed.executable)
+        assert.equal("renamed.exe", renamed.executable)
+        assert.equal("bin/renamed.exe", in_bin.executable)
         assert.equal(original.provider, renamed.provider)
+        assert.equal(original.provider, in_bin.provider)
         assert.equal("lib/titan/0.6/app/main.dll", original.provider)
         assert.equal("app/main.dll", original.relative_provider)
+        assert.equal("app/main.dll", in_bin.relative_provider)
         local suite = assert(driver.windows_program_paths("titan.test_runner", nil, "app.tests"))
         assert.equal("bin/app.tests.exe", suite.executable)
         assert.equal("app/tests.dll", suite.relative_provider)
     end)
 
-    it("relocates both Windows program artifacts under an optional output root", function()
+    it("relocates Windows program artifacts under an optional output root and explicit --exe", function()
         local root = temporary.name("-coverage-output")
-        local original = assert(driver.windows_program_paths("app.main", "display"))
-        local covered = assert(driver.windows_program_paths("app.main", "display", nil, root))
+        local original = assert(driver.windows_program_paths("app.main", "bin/display"))
+        local covered = assert(driver.windows_program_paths(
+            "app.main", paths.join(root, "bin/display"), nil, root))
         assert.equal(paths.join(root, original.executable), covered.executable)
         assert.equal(paths.join(root, original.provider), covered.provider)
         assert.equal(original.relative_provider, covered.relative_provider)
+        local direct = assert(driver.windows_program_paths("app.main", "display", nil, root))
+        assert.equal("display.exe", direct.executable)
+        assert.equal(paths.join(root, original.provider), direct.provider)
         local suite = assert(driver.windows_program_paths("titan.test_runner", nil, "app.tests", root))
         assert.equal(paths.join(root, "bin/app.tests.exe"), suite.executable)
         assert.equal(paths.join(root, "lib/titan/0.6/app/tests.dll"), suite.provider)
@@ -623,7 +631,7 @@ describe("Windows launcher filenames", function()
             "app" .. string.char(127), string.char(255) }) do
             local value, err = driver.windows_launcher_name("app", name)
             assert.is_nil(value, name)
-            assert.matches("--launcher-name", err, 1, true)
+            assert.matches("--exe", err, 1, true)
         end
     end)
 
@@ -687,8 +695,15 @@ describe("Windows launcher filenames", function()
         end
         local ran, failure = pcall(function()
             assert(lfs.chdir(directory))
+            local real_sync = previous_sync()
             compiler_io.new_sync = function()
-                return { stat = function() return { kind = "directory" } end }
+                return {
+                    stat = function() return { kind = "directory" } end,
+                    tmpname = function() return real_sync:tmpname() end,
+                    unlink = function(_, path, missing_ok)
+                        return real_sync:unlink(path, missing_ok)
+                    end,
+                }
             end
             platform.windows = true
             local options = { module_names = { "app", "archive" },
@@ -2289,8 +2304,10 @@ describe("loader resolver ownership", function()
     function()
         local close_calls = 0
         local fake_driver = {
+            TITAN_SOURCE_PATH = ".",
             deduplicate_module_names = function(modules) return modules end,
-            new_resolver_context = function() return {} end,
+            new_resolver_context = function() return { io = {} } end,
+            apply_native_inputs = function() end,
             configure_foreign_c = function() end,
             default_c_parts = function() return 1 end,
             defaultloader = function()
@@ -2306,6 +2323,7 @@ describe("loader resolver ownership", function()
         local chain = {
             args = function(self) return self end,
             count = function(self) return self end,
+            action = function(self) return self end,
         }
         function argument_parser:argument() return chain end
         function argument_parser:flag() return chain end
@@ -2316,19 +2334,38 @@ describe("loader resolver ownership", function()
                 extra_object = {},
                 coverage_module = {},
                 coverage_format = {},
+                test_dir = {},
+                test_exclude = {},
+                c_source = {},
+                link = {},
+                library_dir = {},
+                ldflag = {},
             }
         end
         local fake_argparse = setmetatable({}, {
             __call = function() return argument_parser end,
         })
         local modules = {
-            titan = titan,
             argparse = fake_argparse,
+            ["titan-compiler.build"] = {
+                lock_outputs = function()
+                    return { release = function() end }
+                end,
+                run = function()
+                    error("injected titanc loader failure")
+                end,
+            },
             ["titan-compiler.checker"] = {},
             ["titan-compiler.coder"] = {},
             ["titan-compiler.coverage"] = {},
             ["titan-compiler.parser"] = {},
+            ["titan-compiler.path"] = paths,
             ["titan-compiler.driver"] = fake_driver,
+            ["titan-compiler.incremental"] = {},
+            ["titan-compiler.nativeinputs"] = {
+                normalize = function() return {} end,
+            },
+            ["titan-compiler.linkcertificate"] = {},
             ["titan-compiler.platform"] = {
                 windows = false,
                 getenv = function() return nil end,
@@ -3810,15 +3847,17 @@ describe("compiler module loader", function()
 
         local function capture_stderr(action)
             local chunks = {}
-            local original_write = io.stderr.write
-            io.stderr.write = function(_, ...)
-                for index = 1, select("#", ...) do
-                    chunks[#chunks + 1] = tostring(select(index, ...))
-                end
-                return true
-            end
+            local original_stderr = io.stderr
+            io.stderr = {
+                write = function(_, ...)
+                    for index = 1, select("#", ...) do
+                        chunks[#chunks + 1] = tostring(select(index, ...))
+                    end
+                    return true
+                end,
+            }
             local ok, result = xpcall(action, debug.traceback)
-            io.stderr.write = original_write
+            io.stderr = original_stderr
             assert.is_true(ok, result)
             return result, table.concat(chunks)
         end
@@ -3926,9 +3965,9 @@ describe("compiler module loader", function()
             if payload == nil then payload = assert(objectmetadata.encode(entry, native)) end
             local code = payload == false and "int ordinary_object;\n"
                 or assert(objectmetadata.render(payload, "source_metadata"))
-            write_file(stem .. ".metadata.c", code)
+            write_file(stem .. ".c", code)
             local argv = assert(driver.generated_compile_prefix())
-            for _, argument in ipairs({ "-c", stem .. ".metadata.c", "-o", object }) do
+            for _, argument in ipairs({ "-c", stem .. ".c", "-o", object }) do
                 argv[#argv + 1] = argument
             end
             local result = compiler_io.new_sync():run(argv)
@@ -4323,11 +4362,11 @@ describe("compiler module loader", function()
             assert.is_nil(counters.revalidation)
             for path_key, counts in pairs(counters.files) do
                 assert.equal(1, counts.hashes, path_key)
-                assert.equal(1, counts.reads, path_key)
+                assert.is_true(counts.reads <= 1, path_key)
             end
             local shared_real = assert(hit_ctx.io:realpath(shared_header))
             assert.equal(1, counters.files[shared_real].hashes)
-            assert.equal(1, counters.files[shared_real].reads)
+            assert.equal(1, require("c-parser.cpp").header_input_stats(hit_ctx.io).file_reads)
             for _, source_path in ipairs({ first_file, second_file, app_file }) do
                 local real = assert(hit_ctx.io:realpath(source_path))
                 assert.equal(1, counters.files[real].hashes, source_path)
