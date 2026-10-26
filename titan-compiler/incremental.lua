@@ -384,6 +384,33 @@ function incremental.physical_executable(context, command)
     error("cannot resolve native tool executable: " .. executable, 0)
 end
 
+local function stable_toolchain_banner(output)
+    local cpp = require "c-parser.cpp"
+    local lines = {}
+    for line in (output .. "\n"):gmatch("(.-)\r?\n") do
+        -- Clang prints its generated cc1 action as well as its stable banner.
+        -- These two directory operands describe the caller, not the compiler.
+        -- Preserve every other action argument and all version/search metadata.
+        local argv = line:find("-cc1", 1, true) and cpp.split_shell_words(line)
+        if argv and argv[2] == "-cc1" and argv[3] and argv[3]:sub(1, 1) == "-" then
+            local quoted, index = {}, 1
+            while index <= #argv do
+                local argument = argv[index]
+                local option = argument:match("^(%-f[%w%-]+)=") or argument
+                if option == "-fdebug-compilation-dir" or option == "-fcoverage-compilation-dir" then
+                    if argument == option and argv[index + 1] then index = index + 1 end
+                    argument = option .. "=<compilation-directory>"
+                end
+                quoted[#quoted + 1] = assert(cpp.shell_quote(argument))
+                index = index + 1
+            end
+            line = " " .. table.concat(quoted, " ")
+        end
+        lines[#lines + 1] = line
+    end
+    return table.concat(lines, "\n")
+end
+
 -- Tool identity policy: self-description plus physical driver/named-stage
 -- identity. Keep this policy in one boundary, shared with native/link inputs.
 function incremental.toolchain_identity(context, descriptor)
@@ -414,9 +441,9 @@ function incremental.toolchain_identity(context, descriptor)
             preprocessor = descriptor.preprocessor_identity or required(
                 require("c-parser.cpp").cached_command(append({ table.unpack(description_argv) },
                     { "-dM", "-E", "-x", "c", null }), false, context.io)),
-            banner = descriptor.banner or required(require("c-parser.cpp").cached_command(
-                append({ table.unpack(description_argv) },
-                    { "-E", "-v", "-x", "c", null, "-o", null }), true, context.io)),
+            banner = stable_toolchain_banner(descriptor.banner or required(
+                require("c-parser.cpp").cached_command(append({ table.unpack(description_argv) },
+                    { "-E", "-v", "-x", "c", null, "-o", null }), true, context.io))),
         }
         memo.toolchain_descriptions[description_key] = description
     end
