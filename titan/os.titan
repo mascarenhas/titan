@@ -748,8 +748,8 @@ function OutputStream:write(data: string)
   os_stdio_write(output_handle(self), data)
 end
 
---- Finish earlier writes and half-close a TCP-backed standard-output stream.
--- @usage standard-library-os.md
+--- Finish earlier writes and half-close TCP-backed parent output; other kinds raise ENOTSUP.
+-- @usage standard-library-os.md#tcp-backed-parent-streams
 function OutputStream:shutdown()
   os_stdio_shutdown(output_handle(self))
 end
@@ -847,7 +847,6 @@ local record StreamStdio
   handle: uv.handle_t
   alloc_read: uv.alloc_cb?
   deliver_read: uv.read_cb?
-  shut_down: boolean
 end
 
 local record FileStdio
@@ -1111,7 +1110,7 @@ end
 
 local function new_pipe_stdio(loop: uv.loop_t): (integer, Stdio?)
   local pipe = uv.pipe_t.new()
-  local backing = StreamStdio(pipe:as_stream_t(), pipe:as_handle_t(), nil, nil, false)
+  local backing = StreamStdio(pipe:as_stream_t(), pipe:as_handle_t(), nil, nil)
   local stream = Stdio(StdioBacking.stream(backing), loop, nil, 0)
   local status = uv.pipe_init(loop, pipe, 0)
   if status < 0 then return status, nil end
@@ -1120,7 +1119,7 @@ end
 
 local function new_tcp_stdio(loop: uv.loop_t): (integer, Stdio?)
   local tcp = uv.tcp_t.new()
-  local backing = StreamStdio(tcp:as_stream_t(), tcp:as_handle_t(), nil, nil, false)
+  local backing = StreamStdio(tcp:as_stream_t(), tcp:as_handle_t(), nil, nil)
   local stream = Stdio(StdioBacking.stream(backing), loop, nil, 0)
   local status = uv.tcp_init(loop, tcp)
   if status < 0 then return status, nil end
@@ -1306,7 +1305,6 @@ end
 local function stdio_shut_down(request: uv.shutdown_t, status: integer)
   local context = request:get_data() as StreamShutdownOperation
   context.stream.pending_writes = context.stream.pending_writes - 1
-  if status >= 0 then context.backing.shut_down = true end
   local completion = context.completion as async.Completion<|StreamShutdownOperation, nil, async.OperationError|>
   local number = context.number
   request:set_data(nil)
@@ -1322,7 +1320,10 @@ local function start_stream_shutdown(
     number: integer): uv.req_t?
   local context = completion:context(number)
   if context.backing:is_closed() then raise "cannot shut down a closed stream" end
-  if context.backing.shut_down then completion:resolve(number, nil); return nil end
+  if not uv.is_writable(context.backing.native) then
+    completion:resolve(number, nil)
+    return nil
+  end
   local request = uv.shutdown_t.new()
   context.completion = completion
   context.number = number
@@ -1689,10 +1690,6 @@ local function parent_stdio_kind(descriptor: integer): uv.handle_type
     return guessed
   when file() then return guessed
   when tcp() then
-    if ffi.TITAN_OS_WINDOWS ~= 0 then
-      raise parent_stdio_kind_error(uv.ENOTSUP, descriptor,
-        "socket-backed parent stdio is not supported on Windows")
-    end
     local probe = foreign ParentStdioProbe.new()
     ffi.titan_inspect_parent_tcp(fd, probe)
     if probe.status ~= 0 then
@@ -1706,10 +1703,6 @@ local function parent_stdio_kind(descriptor: integer): uv.handle_type
     if probe.is_connected == 0 then
       raise parent_stdio_kind_error(uv.ENOTSUP, descriptor,
                                      "unconnected TCP socket")
-    end
-    if probe.is_inet == 0 then
-      raise parent_stdio_kind_error(uv.ENOTSUP, descriptor,
-        "getpeername reported family " .. (probe.family as integer))
     end
     return guessed
   when unknown() then
@@ -1796,7 +1789,7 @@ local function initialize_parent_stdio(loop: uv.loop_t, descriptor: integer): St
   case kind
   when tty() then
     local native = uv.tty_t.new()
-    local backing = StreamStdio(native:as_stream_t(), native:as_handle_t(), nil, nil, false)
+    local backing = StreamStdio(native:as_stream_t(), native:as_handle_t(), nil, nil)
     local owner = Stdio(StdioBacking.stream(backing), loop, nil, 0)
     check_status(uv.tty_init(loop, native, duplicate as integer, 0), "stdio.parent.init")
     stream = owner
@@ -2358,7 +2351,7 @@ local function stream_transfer_preflight(stream: Stdio, reading: boolean)
     raise "stdio stream belongs to a different async Runtime"
   end
   if async.is_closing() then raise "cannot transfer a stream while async Runtime is shutting down" end
-  if stream.pending_writes ~= 0 then raise "stream has a pending write" end
+  if stream.pending_writes ~= 0 then raise "stream has pending output" end
   if stream.reads ~= nil and stream.reads:has_waiter() then
     raise "stream has a pending read"
   end
@@ -2392,7 +2385,7 @@ local function restored_stdio(packet: string?): Stdio
   local loop = async.current_loop()
   if async.is_closing() then raise "cannot transfer a stream while async Runtime is shutting down" end
   local native = uv.pipe_t.new()
-  local backing = StreamStdio(native:as_stream_t(), native:as_handle_t(), nil, nil, false)
+  local backing = StreamStdio(native:as_stream_t(), native:as_handle_t(), nil, nil)
   local stream = Stdio(StdioBacking.stream(backing), loop, nil, 0)
   if packet == nil then return stream end
   native = uv.pipe_t.from_transfer_payload(packet)
@@ -2412,7 +2405,7 @@ function OutputStream:to_transfer_payload(): string
   local stream? = self.handle
   if self.parent_descriptor >= 0 then
     if stream ~= nil and stream.pending_writes ~= 0 then
-      raise "stream has a pending write"
+      raise "stream has pending output"
     end
     return protobuf.serialize_fields(output_transfer_fields, self.parent_descriptor, nil)
   end

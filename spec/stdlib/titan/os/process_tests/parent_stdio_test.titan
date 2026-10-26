@@ -262,27 +262,121 @@ function test_parent_tcp_stdio_sessions_shutdown_inheritance_and_lifecycle(
     program = compile_file_stdio_fixture(workspace)
   end)
 
-  context:run("inetd_launchd_ipv6_and_child_inheritance_sessions", function (_child: test.Context)
+  context:run("ipv4_inetd_session", function (_child: test.Context)
     runtime_test.run(function ()
-      local result_path = workspace .. "/tcp-sessions.result"
+      local result_path = workspace .. "/tcp-ipv4.result"
       local output, why, status = command.capture(
-        {program, "tcp-sessions", workspace, result_path, program},
+        {program, "tcp-ipv4-session", workspace, result_path, program},
         workspace)
       test.assert(why == "exit" and status == 0 and
-                  fs.read_file(result_path) == "TCP_SESSIONS_OK",
-                  "TCP parent stdio sessions failed (" .. why .. "/" .. status .. "): " .. output)
+                  fs.read_file(result_path) == "TCP_IPV4_SESSION_OK",
+                  "TCP IPv4 inetd session failed (" .. why .. "/" .. status .. "): " .. output)
     end)
   end)
 
-  context:run("backpressure_cancellation_peer_reset_transfers_and_runtime_reuse", function (_child: test.Context)
+  context:run("ipv6_inetd_session", function (_child: test.Context)
+    local skipped = false
     runtime_test.run(function ()
-      local result_path = workspace .. "/tcp-lifecycle.result"
+      local result_path = workspace .. "/tcp-ipv6.result"
       local output, why, status = command.capture(
-        {program, "tcp-backpressure-cancel-reset-reuse", workspace, result_path},
+        {program, "tcp-ipv6-session", workspace, result_path, program},
+        workspace)
+      test.assert(why == "exit" and status == 0,
+                  "TCP IPv6 inetd session failed (" .. why .. "/" .. status .. "): " .. output)
+      local report = fs.read_file(result_path)
+      if report == "SKIP:capability: IPv6 loopback unavailable" then
+        skipped = true
+        return
+      end
+      test.assert(report == "TCP_IPV6_SESSION_OK",
+                  "TCP IPv6 inetd session unexpected report: " .. report)
+    end)
+    if skipped then
+      test.skip("capability: IPv6 loopback unavailable")
+    end
+  end)
+
+  context:run("launchd_aliased_session", function (_child: test.Context)
+    runtime_test.run(function ()
+      local result_path = workspace .. "/tcp-launchd-session.result"
+      local output, why, status = command.capture(
+        {program, "tcp-launchd-session", workspace, result_path, program},
         workspace)
       test.assert(why == "exit" and status == 0 and
-                  fs.read_file(result_path) == "TCP_BACKPRESSURE_CANCEL_RESET_REUSE_OK",
-                  "TCP parent stdio lifecycle test failed (" .. why .. "/" .. status .. "): " .. output)
+                  fs.read_file(result_path) == "TCP_LAUNCHD_SESSION_OK",
+                  "TCP launchd aliased session failed (" .. why .. "/" .. status .. "): " .. output)
+    end)
+  end)
+
+  context:run("child_inheritance", function (_child: test.Context)
+    runtime_test.run(function ()
+      local result_path = workspace .. "/tcp-inheritance.result"
+      local output, why, status = command.capture(
+        {program, "tcp-inheritance", workspace, result_path, program},
+        workspace)
+      test.assert(why == "exit" and status == 0 and
+                  fs.read_file(result_path) == "TCP_INHERITANCE_OK",
+                  "TCP child inheritance failed (" .. why .. "/" .. status .. "): " .. output)
+    end)
+  end)
+
+  context:run("read_cancellation_and_replacement", function (_child: test.Context)
+    runtime_test.run(function ()
+      local result_path = workspace .. "/tcp-read-cancel.result"
+      local output, why, status = command.capture(
+        {program, "tcp-read-cancel-replace", workspace, result_path},
+        workspace)
+      test.assert(why == "exit" and status == 0 and
+                  fs.read_file(result_path) == "TCP_READ_CANCEL_REPLACE_OK",
+                  "TCP read cancellation/replacement failed (" .. why .. "/" .. status .. "): " .. output)
+    end)
+  end)
+
+  context:run("backpressure_and_write_shutdown_cancellation", function (_child: test.Context)
+    runtime_test.run(function ()
+      local result_path = workspace .. "/tcp-backpressure.result"
+      local output, why, status = command.capture(
+        {program, "tcp-backpressure-shutdown", workspace, result_path},
+        workspace)
+      test.assert(why == "exit" and status == 0 and
+                  fs.read_file(result_path) == "TCP_BACKPRESSURE_SHUTDOWN_OK",
+                  "TCP backpressure/shutdown failed (" .. why .. "/" .. status .. "): " .. output)
+    end)
+  end)
+
+  context:run("peer_reset_errors", function (_child: test.Context)
+    runtime_test.run(function ()
+      local result_path = workspace .. "/tcp-peer-reset.result"
+      local output, why, status = command.capture(
+        {program, "tcp-peer-reset", workspace, result_path},
+        workspace)
+      test.assert(why == "exit" and status == 0 and
+                  fs.read_file(result_path) == "TCP_PEER_RESET_OK",
+                  "TCP peer reset failed (" .. why .. "/" .. status .. "): " .. output)
+    end)
+  end)
+
+  context:run("emfile_and_runtime_reuse", function (_child: test.Context)
+    runtime_test.run(function ()
+      local result_path = workspace .. "/tcp-emfile-reuse.result"
+      local output, why, status = command.capture(
+        {program, "tcp-emfile-runtime-reuse", workspace, result_path},
+        workspace)
+      test.assert(why == "exit" and status == 0 and
+                  fs.read_file(result_path) == "TCP_EMFILE_RUNTIME_REUSE_OK",
+                  "TCP EMFILE/Runtime reuse failed (" .. why .. "/" .. status .. "): " .. output)
+    end)
+  end)
+
+  context:run("cross_state_transfers", function (_child: test.Context)
+    runtime_test.run(function ()
+      local result_path = workspace .. "/tcp-transfers.result"
+      local output, why, status = command.capture(
+        {program, "tcp-transfers", workspace, result_path},
+        workspace)
+      test.assert(why == "exit" and status == 0 and
+                  fs.read_file(result_path) == "TCP_TRANSFERS_OK",
+                  "TCP cross-state transfers failed (" .. why .. "/" .. status .. "): " .. output)
     end)
   end)
 end

@@ -321,7 +321,7 @@ function test_parent_socket_stdio_rejection_does_not_leak(
       workspace, "tcp-listener", "parent-tcp-listener-rejected",
       ffi.TITAN_UV_TEST_STDIO_TCP_LISTENER_STDOUT, 0, "", "")
     assert_stdio_fixture(
-      workspace, "udp-connected", "parent-udp-connected-rejected",
+      workspace, "udp-unconnected", "parent-udp-unconnected-rejected",
       ffi.TITAN_UV_TEST_STDIO_INET_DATAGRAM_STDOUT, 0, "", "")
     assert_stdio_fixture(
       workspace, "udp-connected", "parent-udp-connected-rejected",
@@ -341,6 +341,7 @@ function test_parent_windows_socket_stdio_rejection_preserves_pipes(
       "pipe-stdout", "pipe-stderr")
   end)
 end
+
 function test_parent_unix_stream_stdio_classification_and_transfer(
     _context: test.Context)
   if ffi.titan_uv_test_stdio_mode_supported(ffi.TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL as integer) == 0 then

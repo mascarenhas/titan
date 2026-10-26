@@ -321,6 +321,9 @@ local function run_case(mode: string): string
   elseif mode == "tcp-listener" then
     return reject_parent_stdout("parent-tcp-listener-rejected", "ENOTSUP",
                                 "listening TCP socket")
+  elseif mode == "udp-unconnected" then
+    return reject_parent_stdout("parent-udp-unconnected-rejected", "ENOTSUP",
+                                "uv_guess_handle classified unsupported kind udp")
   elseif mode == "udp-connected" then
     return reject_parent_stdout("parent-udp-connected-rejected", "ENOTSUP",
                                 "uv_guess_handle classified unsupported kind udp")

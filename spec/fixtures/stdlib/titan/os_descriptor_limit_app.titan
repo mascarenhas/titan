@@ -799,7 +799,7 @@ local function run_write_fifo_cancel_gc(workspace: string, result_path: string):
                 "cancelled file writes unwound before settlement")
     assert_raises_substring(function ()
       async.TransferValue.from_value(system.stdout)
-    end, "stream has a pending write")
+    end, "stream has pending output")
     resolve(nil)
   end)
 
@@ -1567,7 +1567,7 @@ local function exercise_tcp_inetd_session(
   local spawn_status = ffi.titan_test_tcp_stdio_spawn_child(
     program_path, "tcp-inetd-child", child_result, tag,
     ipv6 as foreign int, 0 as foreign int, peer_fd_out, pid_out) as integer
-  if ipv6 ~= 0 and spawn_status ~= 0 then
+  if ipv6 ~= 0 and spawn_status == -2 then
     return false
   end
   test.assert(spawn_status == 0,
@@ -1590,60 +1590,348 @@ local function exercise_tcp_inetd_session(
   return true
 end
 
-local function run_tcp_sessions(
+local function run_tcp_ipv4_session(
     workspace: string, result_path: string, program_path: string): integer
-  local ipv4_result = workspace .. "/tcp-inetd-ipv4.result"
-  test.assert(exercise_tcp_inetd_session(program_path, ipv4_result, 0, "ipv4"),
+  local child_result = workspace .. "/tcp-inetd-ipv4.result"
+  test.assert(exercise_tcp_inetd_session(program_path, child_result, 0, "ipv4"),
               "IPv4 tcp-inetd-child session did not run")
+  fs.write_file(result_path, "TCP_IPV4_SESSION_OK")
+  return 0
+end
 
-  local ipv6_result = workspace .. "/tcp-inetd-ipv6.result"
-  exercise_tcp_inetd_session(program_path, ipv6_result, 1, "ipv6")
+local function run_tcp_ipv6_session(
+    workspace: string, result_path: string, program_path: string): integer
+  local child_result = workspace .. "/tcp-inetd-ipv6.result"
+  if not exercise_tcp_inetd_session(program_path, child_result, 1, "ipv6") then
+    fs.write_file(result_path, "SKIP:capability: IPv6 loopback unavailable")
+    return 0
+  end
+  fs.write_file(result_path, "TCP_IPV6_SESSION_OK")
+  return 0
+end
 
-  -- Launchd / classic inetd aliased fd 0, 1, 2 session
-  do
-    local launchd_result = workspace .. "/tcp-launchd.result"
-    local peer_fd_out = foreign int.new_array(1)
-    local pid_out = foreign int.new_array(1)
-    test.assert(ffi.titan_test_tcp_stdio_spawn_child(
-      program_path, "tcp-launchd-child", launchd_result, "unused",
-      0 as foreign int, 1 as foreign int, peer_fd_out, pid_out) == 0,
-      "could not spawn tcp-launchd-child")
-    local peer = PeerTcp.adopt(peer_fd_out[0] as integer)
-    defer peer:close()
-    local combined = peer:read_all()
-    test.assert(combined == "LAUNCHD_STDOUT;LAUNCHD_STDERR;",
-                "launchd aliased stdout/stderr output mismatched: " .. combined)
-    peer:write("PEER_AFTER_LAUNCHD_FIN!")
-    peer:shutdown()
-    local exit_code = wait_tcp_child(pid_out[0] as integer)
-    test.assert(exit_code == 0 and fs.read_file(launchd_result) == "TCP_LAUNCHD_OK",
-                "tcp-launchd-child failed (" .. exit_code .. ")")
+local function run_tcp_launchd_session(
+    workspace: string, result_path: string, program_path: string): integer
+  local launchd_result = workspace .. "/tcp-launchd.result"
+  local peer_fd_out = foreign int.new_array(1)
+  local pid_out = foreign int.new_array(1)
+  test.assert(ffi.titan_test_tcp_stdio_spawn_child(
+    program_path, "tcp-launchd-child", launchd_result, "unused",
+    0 as foreign int, 1 as foreign int, peer_fd_out, pid_out) == 0,
+    "could not spawn tcp-launchd-child")
+  local peer = PeerTcp.adopt(peer_fd_out[0] as integer)
+  defer peer:close()
+  local combined = peer:read_all()
+  test.assert(combined == "LAUNCHD_STDOUT;LAUNCHD_STDERR;",
+              "launchd aliased stdout/stderr output mismatched: " .. combined)
+  peer:write("PEER_AFTER_LAUNCHD_FIN!")
+  peer:shutdown()
+  local exit_code = wait_tcp_child(pid_out[0] as integer)
+  test.assert(exit_code == 0 and fs.read_file(launchd_result) == "TCP_LAUNCHD_OK",
+              "tcp-launchd-child failed (" .. exit_code .. ")")
+  fs.write_file(result_path, "TCP_LAUNCHD_SESSION_OK")
+  return 0
+end
+
+local function run_tcp_inheritance_session(
+    workspace: string, result_path: string, program_path: string): integer
+  local inherit_result = workspace .. "/tcp-inherit.result"
+  local peer_fd_out = foreign int.new_array(1)
+  local pid_out = foreign int.new_array(1)
+  test.assert(ffi.titan_test_tcp_stdio_spawn_child(
+    program_path, "tcp-inherit-parent", inherit_result, program_path,
+    0 as foreign int, 1 as foreign int, peer_fd_out, pid_out) == 0,
+    "could not spawn tcp-inherit-parent")
+  local peer = PeerTcp.adopt(peer_fd_out[0] as integer)
+  defer peer:close()
+  peer:write("GRANDCHILD_LINE\n")
+  local inherited_out = peer:read_all()
+  test.assert(inherited_out ==
+              "PARENT_PRE\nGC1_OUT:GRANDCHILD_LINE\nGC1_ERR\nPARENT_POST\nGC2_FINAL\n",
+              "inherited TCP output mismatched: " .. inherited_out)
+  peer:write("AFTER_GC2_FIN_ACK\n")
+  peer:shutdown()
+  local exit_code = wait_tcp_child(pid_out[0] as integer)
+  test.assert(exit_code == 0 and fs.read_file(inherit_result) == "TCP_INHERIT_OK",
+              "tcp-inherit-parent failed (" .. exit_code .. ")")
+  fs.write_file(result_path, "TCP_INHERITANCE_OK")
+  return 0
+end
+
+local function run_tcp_read_cancel_and_replace(
+    _workspace: string, result_path: string): integer
+  local saved_in = ffi.titan_test_dup_fd(0)
+  local saved_out = ffi.titan_test_dup_fd(1)
+  test.assert(saved_in >= 0 and saved_out >= 0, "save stdio fds for read cancel")
+  defer do
+    ffi.titan_test_restore_fd(saved_in, 0)
+    ffi.titan_test_restore_fd(saved_out, 1)
   end
 
-  -- Child inheritance session (fd 0, 1, 2 inherited across two grandchildren)
-  do
-    local inherit_result = workspace .. "/tcp-inherit.result"
-    local peer_fd_out = foreign int.new_array(1)
-    local pid_out = foreign int.new_array(1)
-    test.assert(ffi.titan_test_tcp_stdio_spawn_child(
-      program_path, "tcp-inherit-parent", inherit_result, program_path,
-      0 as foreign int, 1 as foreign int, peer_fd_out, pid_out) == 0,
-      "could not spawn tcp-inherit-parent")
-    local peer = PeerTcp.adopt(peer_fd_out[0] as integer)
-    defer peer:close()
-    peer:write("GRANDCHILD_LINE\n")
-    local inherited_out = peer:read_all()
-    test.assert(inherited_out ==
-                "PARENT_PRE\nGC1_OUT:GRANDCHILD_LINE\nGC1_ERR\nPARENT_POST\nGC2_FINAL\n",
-                "inherited TCP output mismatched: " .. inherited_out)
-    peer:write("AFTER_GC2_FIN_ACK\n")
+  local acc = foreign int.new_array(1)
+  local peer_raw = foreign int.new_array(1)
+  test.assert(ffi.titan_test_tcp_stdio_pair(0 as foreign int, acc, peer_raw) == 0,
+              "create tcp pair for read cancel")
+  test.assert(ffi.titan_test_tcp_stdio_install_fd(acc[0], 0) == 0 and
+              ffi.titan_test_tcp_stdio_install_fd(acc[0], 1) == 0,
+              "install tcp pair onto 0 and 1")
+  ffi.titan_test_tcp_stdio_close_fd(acc[0])
+  local peer = PeerTcp.adopt(peer_raw[0] as integer)
+  defer peer:close()
+
+  test.assert(system.stdin:kind() == "tcp" and system.stdout:kind() == "tcp",
+              "read-cancel stdio was not tcp")
+
+  -- 1. Pre-cancelled Tasks submit no read, write, or shutdown
+  local pre_r = async.CancellationReason.simple("cancel-before-tcp-op")
+  for mode_idx = 1, 3 do
+    local obs: value = nil
+    local pre_task = async.run<|nil, value|>(function (): nil
+      async.running():cancel(pre_r)
+      do
+        if mode_idx == 1 then
+          system.stdin:read()
+        elseif mode_idx == 2 then
+          system.stdout:write("MUST_NOT_SEND")
+        else
+          system.stdout:shutdown()
+        end
+      catch
+        obs = error
+      end
+      return nil
+    end)
+    async.join(pre_task)
+    test.assert(pre_task:status():has_cancelled() and obs == pre_r,
+                "pre-cancelled TCP operation " .. mode_idx .. " lost cancellation reason")
+  end
+  async.TransferValue.from_value(system.stdin)
+  async.TransferValue.from_value(system.stdout)
+
+  -- 2. In-flight read cancellation + competing reader rejection + immediate replacement
+  local r_reason = async.CancellationReason.simple("replace-tcp-stdin-reader")
+  local r_obs: value = nil
+  local old_reader = async.run<|nil, value|>(function (): nil
+    do system.stdin:read() catch r_obs = error end
+    return nil
+  end)
+  wait_until_task_waiting(old_reader, "TCP old reader")
+  assert_raises_substring(function ()
+    system.stdin:read()
+  end, "stream already has a waiting reader")
+  assert_raises_substring(function ()
+    async.TransferValue.from_value(system.stdin)
+  end, "standard input has active or buffered read state")
+
+  local sender = async.run<|nil, value|>(function (): nil
+    async.join(old_reader)
+    gc.collect()
+    peer:write("REPLACED_TCP_READER_OK")
     peer:shutdown()
-    local exit_code = wait_tcp_child(pid_out[0] as integer)
-    test.assert(exit_code == 0 and fs.read_file(inherit_result) == "TCP_INHERIT_OK",
-                "tcp-inherit-parent failed (" .. exit_code .. ")")
+    return nil
+  end)
+  old_reader:cancel(r_reason)
+  test.assert(r_obs == nil and old_reader:status():as_string() == "waiting",
+              "cancelled TCP reader unwound before replacement")
+  local replaced_chunk = system.stdin:read()
+  local eof_chunk? = system.stdin:read()
+  async.join(sender)
+  test.assert(old_reader:status():has_cancelled() and r_obs == r_reason,
+              "cancelled TCP reader lost cancellation reason")
+  test.assert(replaced_chunk == "REPLACED_TCP_READER_OK" and eof_chunk == nil,
+              "replacement TCP reader lost chunk or EOF")
+
+  fs.write_file(result_path, "TCP_READ_CANCEL_REPLACE_OK")
+  return 0
+end
+
+function exercise_tcp_isolated_shutdown_and_overlap()
+  local saved_in = ffi.titan_test_dup_fd(0)
+  local saved_out = ffi.titan_test_dup_fd(1)
+  test.assert(saved_in >= 0 and saved_out >= 0, "save fds for isolated shutdown")
+  defer do
+    ffi.titan_test_restore_fd(saved_in, 0)
+    ffi.titan_test_restore_fd(saved_out, 1)
+  end
+  local acc = foreign int.new_array(1)
+  local peer_raw = foreign int.new_array(1)
+  test.assert(ffi.titan_test_tcp_stdio_pair(0 as foreign int, acc, peer_raw) == 0,
+              "create tcp pair for isolated shutdown")
+  test.assert(ffi.titan_test_tcp_stdio_install_fd(acc[0], 0) == 0 and
+              ffi.titan_test_tcp_stdio_install_fd(acc[0], 1) == 0,
+              "install tcp pair for isolated shutdown")
+  ffi.titan_test_tcp_stdio_close_fd(acc[0])
+  local peer_fd = peer_raw[0] as integer
+
+  local done = false
+  local task = async.run<|nil, value|>(function (): nil
+    local peer = PeerTcp.adopt(peer_fd)
+    defer peer:close()
+    test.assert(system.stdout:kind() == "tcp", "isolated shutdown stdout was not tcp")
+    system.stdout:write("BEFORE_OVERLAP_SHUTDOWN;")
+
+    local s1_gate: (function (nil): ())? = nil
+    local s2_gate: (function (nil): ())? = nil
+    local s2_returned = false
+    local s1 = async.run<|nil, value|>(function (): nil
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal) s1_gate = resolve end)
+      system.stdout:shutdown()
+      return nil
+    end)
+    local s2 = async.run<|nil, value|>(function (): nil
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal) s2_gate = resolve end)
+      system.stdout:shutdown()
+      s2_returned = true
+      return nil
+    end)
+    while s1_gate == nil or s2_gate == nil do async.yield() end
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+      local r1, r2 = s1_gate, s2_gate
+      s1_gate, s2_gate = nil, nil
+      r1(nil)
+      test.assert(s1:status():as_string() == "waiting",
+                  "first TCP shutdown task did not park")
+      -- C2: shutdown is the sole pending output; transfer must be rejected.
+      assert_raises_substring(function ()
+        async.TransferValue.from_value(system.stdout)
+      end, "stream has pending output")
+      -- C1: overlapping second shutdown returns immediately while s1 is still waiting.
+      r2(nil)
+      test.assert(s2_returned and s2:status():has_succeeded() and
+                  s1:status():as_string() == "waiting",
+                  "overlapping second shutdown did not return immediately while first was waiting")
+      resolve(nil)
+    end)
+    async.join(s1)
+    async.join(s2)
+    test.assert(s1:status():has_succeeded() and s2:status():has_succeeded(),
+                "overlapping TCP shutdown tasks failed")
+    local received = peer:read_all()
+    test.assert(received == "BEFORE_OVERLAP_SHUTDOWN;",
+                "peer did not receive earlier bytes and EOF after overlapping shutdown: " .. received)
+    done = true
+    return nil
+  end)
+  async.loop()
+  local failed, err? = task:status():has_failed()
+  if failed and err ~= nil then err:raise() end
+  test.assert(done and task:status():has_succeeded(),
+              "isolated shutdown and overlap task failed")
+end
+
+local function run_tcp_backpressure_and_shutdown(
+    _workspace: string, result_path: string): integer
+  do
+    local overlap_state = tlua.new()
+    defer overlap_state:close()
+    overlap_state:run([[require("os_descriptor_limit_app").exercise_tcp_isolated_shutdown_and_overlap()]],
+      "=tcp-isolated-shutdown-overlap")
   end
 
-  fs.write_file(result_path, "TCP_SESSIONS_OK")
+  local saved_in = ffi.titan_test_dup_fd(0)
+  local saved_out = ffi.titan_test_dup_fd(1)
+  test.assert(saved_in >= 0 and saved_out >= 0, "save stdio fds for backpressure")
+  defer do
+    ffi.titan_test_restore_fd(saved_in, 0)
+    ffi.titan_test_restore_fd(saved_out, 1)
+  end
+
+  local acc = foreign int.new_array(1)
+  local peer_raw = foreign int.new_array(1)
+  test.assert(ffi.titan_test_tcp_stdio_pair(0 as foreign int, acc, peer_raw) == 0,
+              "create tcp pair for backpressure")
+  test.assert(ffi.titan_test_tcp_stdio_install_fd(acc[0], 0) == 0 and
+              ffi.titan_test_tcp_stdio_install_fd(acc[0], 1) == 0,
+              "install tcp pair onto 0 and 1")
+  ffi.titan_test_tcp_stdio_close_fd(acc[0])
+  local peer = PeerTcp.adopt(peer_raw[0] as integer)
+  defer peer:close()
+
+  test.assert(system.stdin:kind() == "tcp" and system.stdout:kind() == "tcp",
+              "backpressure stdio was not tcp")
+
+  -- Multi-MiB concurrent TCP writes (8 Tasks * 8 chunks * 32 KiB = 2 MiB) + in-flight write & shutdown cancellation
+  local received_all = ""
+  local drain_task = async.run<|nil, value|>(function (): nil
+    received_all = peer:read_all()
+    return nil
+  end)
+  local expected_chunks: {string} = {}
+  local writers: {async.Task<|nil, value|>} = {}
+  for task_id = 1, 8 do
+    writers[task_id] = async.run<|nil, value|>(function (): nil
+      for step = 1, 8 do
+        local tag = strings.format("TCP-%02d-%02d:", task_id, step)
+        local block = strings.rep(tag, 3276) .. "12345678"
+        expected_chunks[#expected_chunks + 1] = block
+        system.stdout:write(block)
+      end
+      return nil
+    end)
+  end
+  for task_id = 1, 8 do
+    async.join(writers[task_id])
+    test.assert(writers[task_id]:status():has_succeeded(), "TCP bulk writer failed")
+  end
+
+  -- In-flight write and shutdown cancellation behind accepted requests
+  local w_gate: (function (nil): ())? = nil
+  local s_gate: (function (nil): ())? = nil
+  local w_reason = async.CancellationReason.simple("cancel-accepted-tcp-write")
+  local s_reason = async.CancellationReason.simple("cancel-accepted-tcp-shutdown")
+  local w_obs: value = nil
+  local s_obs: value = nil
+  local tail_payload = strings.rep("FINAL_CANCELLED_WRITE\0\r\n", 4096)
+  expected_chunks[#expected_chunks + 1] = tail_payload
+
+  local cw = async.run<|nil, value|>(function (): nil
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal) w_gate = resolve end)
+    local copy = strings.rep("FINAL_CANCELLED_WRITE\0\r\n", 4096)
+    do system.stdout:write(copy) catch w_obs = error end
+    return nil
+  end)
+  local cs = async.run<|nil, value|>(function (): nil
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal) s_gate = resolve end)
+    do system.stdout:shutdown() catch s_obs = error end
+    return nil
+  end)
+  while w_gate == nil or s_gate == nil do async.yield() end
+  async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+    local rw, rs = w_gate, s_gate
+    w_gate, s_gate = nil, nil
+    rw(nil)
+    rs(nil)
+    test.assert(cw:status():as_string() == "waiting" and
+                cs:status():as_string() == "waiting",
+                "TCP write/shutdown tasks did not park")
+    assert_raises_substring(function ()
+      async.TransferValue.from_value(system.stdout)
+    end, "stream has pending output")
+    cw:cancel(w_reason)
+    cs:cancel(s_reason)
+    gc.collect()
+    gc.collect()
+    resolve(nil)
+  end)
+  async.join(cw)
+  async.join(cs)
+  async.join(drain_task)
+  test.assert(cw:status():has_cancelled() and w_obs == w_reason,
+              "cancelled TCP write lost its cancellation reason")
+  test.assert(cs:status():has_cancelled() and s_obs == s_reason,
+              "cancelled TCP shutdown lost its cancellation reason")
+  test.assert(drain_task:status():has_succeeded(), "peer drain task failed")
+
+  local builder = strings.writer()
+  for index = 1, #expected_chunks do
+    builder:write(expected_chunks[index])
+  end
+  local expected_total = builder:drain()
+  test.assert(#received_all == #expected_total and received_all == expected_total,
+              "TCP multi-MiB + cancelled write/shutdown bytes mismatched: " ..
+              #received_all .. " vs " .. #expected_total)
+
+  fs.write_file(result_path, "TCP_BACKPRESSURE_SHUTDOWN_OK")
   return 0
 end
 
@@ -1677,6 +1965,12 @@ function exercise_tcp_peer_reset()
         function () system.stdin:read() end,
         "stdio.read", "TCP stdin read after peer RST attempt " .. attempt)
     end
+    -- C1: shutdown after peer reset raises OperationError(stdio.shutdown) with negative code,
+    -- and a subsequent shutdown() returns without error.
+    assert_stdio_operation_error(
+      function () system.stdout:shutdown() end,
+      "stdio.shutdown", "TCP stdout shutdown after peer RST")
+    system.stdout:shutdown()
     done = true
     return nil
   end)
@@ -1686,54 +1980,17 @@ function exercise_tcp_peer_reset()
   test.assert(done and task:status():has_succeeded(), "tcp reset task failed")
 end
 
-function exercise_transferred_tcp_stdio_dest(
-    stdin_val: value, stdout_val: value, stderr_val: value): value
-  local in_stream = stdin_val as system.InputStream
-  local out_stream = stdout_val as system.OutputStream
-  local err_stream = stderr_val as system.OutputStream
-  local post_shutdown_tv: async.TransferValue? = nil
-  local task = async.run<|nil, value|>(function (): nil
-    test.assert(in_stream:kind() == "tcp" and not in_stream:is_tty() and
-                out_stream:kind() == "tcp" and not out_stream:is_tty() and
-                err_stream:kind() == "tcp" and not err_stream:is_tty(),
-                "transferred TCP parent facades lost tcp kind")
-    local line = in_stream:read_until("\n", true)
-    test.assert(line == "TRANSFER_TCP_IN",
-                "transferred TCP stdin read wrong bytes")
-    out_stream:write("TRANSFER_TCP_OUT:" .. (line as string) .. ";")
-    err_stream:write("TRANSFER_TCP_ERR;")
-    out_stream:shutdown()
-    post_shutdown_tv = async.TransferValue.from_value(out_stream)
-    return nil
-  end)
-  async.loop()
-  local failed, err? = task:status():has_failed()
-  if failed and err ~= nil then err:raise() end
-  test.assert(post_shutdown_tv ~= nil and task:status():has_succeeded(),
-              "transferred TCP stdio dest task failed")
-  return post_shutdown_tv as async.TransferValue
+local function run_tcp_peer_reset(
+    _workspace: string, result_path: string): integer
+  local reset_state = tlua.new()
+  defer reset_state:close()
+  reset_state:run([[require("os_descriptor_limit_app").exercise_tcp_peer_reset()]],
+    "=tcp-peer-reset")
+  fs.write_file(result_path, "TCP_PEER_RESET_OK")
+  return 0
 end
 
-function exercise_transferred_post_shutdown_tcp_stdout(stdout_val: value)
-  local out_stream = stdout_val as system.OutputStream
-  local done = false
-  local task = async.run<|nil, value|>(function (): nil
-    test.assert(out_stream:kind() == "tcp",
-                "post-shutdown transferred TCP stdout lost tcp kind")
-    assert_stdio_operation_error(
-      function () out_stream:write("WRITE_IN_THIRD_STATE_AFTER_SHUTDOWN") end,
-      "stdio.write", "post-shutdown transferred TCP stdout write in another state")
-    done = true
-    return nil
-  end)
-  async.loop()
-  local failed, err? = task:status():has_failed()
-  if failed and err ~= nil then err:raise() end
-  test.assert(done and task:status():has_succeeded(),
-              "post-shutdown transferred TCP stdout check failed")
-end
-
-function exercise_tcp_transfers_emfile_and_runtime_reuse()
+function exercise_tcp_emfile_and_runtime_reuse()
   local saved_in = ffi.titan_test_dup_fd(0)
   local saved_out = ffi.titan_test_dup_fd(1)
   local saved_err = ffi.titan_test_dup_fd(2)
@@ -1823,16 +2080,85 @@ function exercise_tcp_transfers_emfile_and_runtime_reuse()
     test.assert(ffi.titan_test_open_fd_count() == fd_count_baseline,
                 "Runtime " .. round .. " leaked a file descriptor")
   end
+end
 
-  -- Fresh TCP pair for cross-state TransferValue handoff (untouched + post-shutdown)
+local function run_tcp_emfile_and_runtime_reuse(
+    _workspace: string, result_path: string): integer
+  local reuse_state = tlua.new()
+  defer reuse_state:close()
+  reuse_state:run([[require("os_descriptor_limit_app").exercise_tcp_emfile_and_runtime_reuse()]],
+    "=tcp-emfile-runtime-reuse")
+  fs.write_file(result_path, "TCP_EMFILE_RUNTIME_REUSE_OK")
+  return 0
+end
+
+function exercise_transferred_tcp_stdio_dest(
+    stdin_val: value, stdout_val: value, stderr_val: value): value
+  local in_stream = stdin_val as system.InputStream
+  local out_stream = stdout_val as system.OutputStream
+  local err_stream = stderr_val as system.OutputStream
+  local post_shutdown_tv: async.TransferValue? = nil
+  local task = async.run<|nil, value|>(function (): nil
+    test.assert(in_stream:kind() == "tcp" and not in_stream:is_tty() and
+                out_stream:kind() == "tcp" and not out_stream:is_tty() and
+                err_stream:kind() == "tcp" and not err_stream:is_tty(),
+                "transferred TCP parent facades lost tcp kind")
+    local line = in_stream:read_until("\n", true)
+    test.assert(line == "TRANSFER_TCP_IN",
+                "transferred TCP stdin read wrong bytes")
+    out_stream:write("TRANSFER_TCP_OUT:" .. (line as string) .. ";")
+    err_stream:write("TRANSFER_TCP_ERR;")
+    out_stream:shutdown()
+    post_shutdown_tv = async.TransferValue.from_value(out_stream)
+    return nil
+  end)
+  async.loop()
+  local failed, err? = task:status():has_failed()
+  if failed and err ~= nil then err:raise() end
+  test.assert(post_shutdown_tv ~= nil and task:status():has_succeeded(),
+              "transferred TCP stdio dest task failed")
+  return post_shutdown_tv as async.TransferValue
+end
+
+function exercise_transferred_post_shutdown_tcp_stdout(stdout_val: value)
+  local out_stream = stdout_val as system.OutputStream
+  local done = false
+  local task = async.run<|nil, value|>(function (): nil
+    test.assert(out_stream:kind() == "tcp",
+                "post-shutdown transferred TCP stdout lost tcp kind")
+    assert_stdio_operation_error(
+      function () out_stream:write("WRITE_IN_THIRD_STATE_AFTER_SHUTDOWN") end,
+      "stdio.write", "post-shutdown transferred TCP stdout write in another state")
+    done = true
+    return nil
+  end)
+  async.loop()
+  local failed, err? = task:status():has_failed()
+  if failed and err ~= nil then err:raise() end
+  test.assert(done and task:status():has_succeeded(),
+              "post-shutdown transferred TCP stdout check failed")
+end
+
+function exercise_tcp_cross_state_transfers()
+  local saved_in = ffi.titan_test_dup_fd(0)
+  local saved_out = ffi.titan_test_dup_fd(1)
+  local saved_err = ffi.titan_test_dup_fd(2)
+  test.assert(saved_in >= 0 and saved_out >= 0 and saved_err >= 0,
+              "save fds for tcp transfers")
+  defer do
+    ffi.titan_test_restore_fd(saved_in, 0)
+    ffi.titan_test_restore_fd(saved_out, 1)
+    ffi.titan_test_restore_fd(saved_err, 2)
+  end
+
   local acc2 = foreign int.new_array(1)
   local peer2_raw = foreign int.new_array(1)
   test.assert(ffi.titan_test_tcp_stdio_pair(0 as foreign int, acc2, peer2_raw) == 0,
-              "create second tcp pair for transfer")
+              "create tcp pair for transfer")
   test.assert(ffi.titan_test_tcp_stdio_install_fd(acc2[0], 0) == 0 and
               ffi.titan_test_tcp_stdio_install_fd(acc2[0], 1) == 0 and
               ffi.titan_test_tcp_stdio_install_fd(acc2[0], 2) == 0,
-              "install second tcp pair onto 0, 1, 2")
+              "install tcp pair onto 0, 1, 2")
   ffi.titan_test_tcp_stdio_close_fd(acc2[0])
   local peer2_fd = peer2_raw[0] as integer
 
@@ -1874,187 +2200,13 @@ function exercise_tcp_transfers_emfile_and_runtime_reuse()
               "TCP transfer task failed")
 end
 
-local function run_tcp_backpressure_cancel_reset_and_reuse(
+local function run_tcp_transfers(
     _workspace: string, result_path: string): integer
-  local saved_in = ffi.titan_test_dup_fd(0)
-  local saved_out = ffi.titan_test_dup_fd(1)
-  test.assert(saved_in >= 0 and saved_out >= 0, "save stdio fds")
-  defer do
-    ffi.titan_test_restore_fd(saved_in, 0)
-    ffi.titan_test_restore_fd(saved_out, 1)
-  end
-
-  local acc = foreign int.new_array(1)
-  local peer_raw = foreign int.new_array(1)
-  test.assert(ffi.titan_test_tcp_stdio_pair(0 as foreign int, acc, peer_raw) == 0,
-              "create tcp pair for backpressure/cancel")
-  test.assert(ffi.titan_test_tcp_stdio_install_fd(acc[0], 0) == 0 and
-              ffi.titan_test_tcp_stdio_install_fd(acc[0], 1) == 0,
-              "install tcp pair onto 0 and 1")
-  ffi.titan_test_tcp_stdio_close_fd(acc[0])
-  local peer = PeerTcp.adopt(peer_raw[0] as integer)
-  defer peer:close()
-
-  test.assert(system.stdin:kind() == "tcp" and system.stdout:kind() == "tcp",
-              "backpressure/cancel stdio was not tcp")
-
-  -- 1. Pre-cancelled Tasks submit no read, write, or shutdown
-  local pre_r = async.CancellationReason.simple("cancel-before-tcp-op")
-  for mode_idx = 1, 3 do
-    local obs: value = nil
-    local pre_task = async.run<|nil, value|>(function (): nil
-      async.running():cancel(pre_r)
-      do
-        if mode_idx == 1 then
-          system.stdin:read()
-        elseif mode_idx == 2 then
-          system.stdout:write("MUST_NOT_SEND")
-        else
-          system.stdout:shutdown()
-        end
-      catch
-        obs = error
-      end
-      return nil
-    end)
-    async.join(pre_task)
-    test.assert(pre_task:status():has_cancelled() and obs == pre_r,
-                "pre-cancelled TCP operation " .. mode_idx .. " lost cancellation reason")
-  end
-  async.TransferValue.from_value(system.stdin)
-  async.TransferValue.from_value(system.stdout)
-
-  -- 2. In-flight read cancellation + competing reader rejection + immediate replacement
-  local r_reason = async.CancellationReason.simple("replace-tcp-stdin-reader")
-  local r_obs: value = nil
-  local old_reader = async.run<|nil, value|>(function (): nil
-    do system.stdin:read() catch r_obs = error end
-    return nil
-  end)
-  wait_until_task_waiting(old_reader, "TCP old reader")
-  assert_raises_substring(function ()
-    system.stdin:read()
-  end, "stream already has a waiting reader")
-  assert_raises_substring(function ()
-    async.TransferValue.from_value(system.stdin)
-  end, "standard input has active or buffered read state")
-
-  local sender = async.run<|nil, value|>(function (): nil
-    async.join(old_reader)
-    gc.collect()
-    peer:write("REPLACED_TCP_READER_OK")
-    peer:shutdown()
-    return nil
-  end)
-  old_reader:cancel(r_reason)
-  test.assert(r_obs == nil and old_reader:status():as_string() == "waiting",
-              "cancelled TCP reader unwound before replacement")
-  local replaced_chunk = system.stdin:read()
-  local eof_chunk? = system.stdin:read()
-  async.join(sender)
-  test.assert(old_reader:status():has_cancelled() and r_obs == r_reason,
-              "cancelled TCP reader lost cancellation reason")
-  test.assert(replaced_chunk == "REPLACED_TCP_READER_OK" and eof_chunk == nil,
-              "replacement TCP reader lost chunk or EOF")
-
-  -- 3. Multi-MiB concurrent TCP writes (8 Tasks * 8 chunks * 32 KiB = 2 MiB) + in-flight write & shutdown cancellation
-  local received_all = ""
-  local drain_task = async.run<|nil, value|>(function (): nil
-    received_all = peer:read_all()
-    return nil
-  end)
-  local expected_chunks: {string} = {}
-  local writers: {async.Task<|nil, value|>} = {}
-  for task_id = 1, 8 do
-    writers[task_id] = async.run<|nil, value|>(function (): nil
-      for step = 1, 8 do
-        local tag = strings.format("TCP-%02d-%02d:", task_id, step)
-        local block = strings.rep(tag, 3276) .. "12345678"
-        expected_chunks[#expected_chunks + 1] = block
-        system.stdout:write(block)
-      end
-      return nil
-    end)
-  end
-  for task_id = 1, 8 do
-    async.join(writers[task_id])
-    test.assert(writers[task_id]:status():has_succeeded(), "TCP bulk writer failed")
-  end
-
-  -- In-flight write and shutdown cancellation behind accepted requests
-  local w_gate: (function (nil): ())? = nil
-  local s_gate: (function (nil): ())? = nil
-  local w_reason = async.CancellationReason.simple("cancel-accepted-tcp-write")
-  local s_reason = async.CancellationReason.simple("cancel-accepted-tcp-shutdown")
-  local w_obs: value = nil
-  local s_obs: value = nil
-  local tail_payload = strings.rep("FINAL_CANCELLED_WRITE\0\r\n", 4096)
-  expected_chunks[#expected_chunks + 1] = tail_payload
-
-  local cw = async.run<|nil, value|>(function (): nil
-    async.await<|nil, nil|>(function (resolve, _reject, _fatal) w_gate = resolve end)
-    local copy = strings.rep("FINAL_CANCELLED_WRITE\0\r\n", 4096)
-    do system.stdout:write(copy) catch w_obs = error end
-    return nil
-  end)
-  local cs = async.run<|nil, value|>(function (): nil
-    async.await<|nil, nil|>(function (resolve, _reject, _fatal) s_gate = resolve end)
-    do system.stdout:shutdown() catch s_obs = error end
-    return nil
-  end)
-  while w_gate == nil or s_gate == nil do async.yield() end
-  async.await<|nil, nil|>(function (resolve, _reject, _fatal)
-    local rw, rs = w_gate, s_gate
-    w_gate, s_gate = nil, nil
-    rw(nil)
-    rs(nil)
-    test.assert(cw:status():as_string() == "waiting" and
-                cs:status():as_string() == "waiting",
-                "TCP write/shutdown tasks did not park")
-    assert_raises_substring(function ()
-      async.TransferValue.from_value(system.stdout)
-    end, "stream has a pending write")
-    cw:cancel(w_reason)
-    cs:cancel(s_reason)
-    gc.collect()
-    gc.collect()
-    resolve(nil)
-  end)
-  async.join(cw)
-  async.join(cs)
-  async.join(drain_task)
-  test.assert(cw:status():has_cancelled() and w_obs == w_reason,
-              "cancelled TCP write lost its cancellation reason")
-  test.assert(cs:status():has_cancelled() and s_obs == s_reason,
-              "cancelled TCP shutdown lost its cancellation reason")
-  test.assert(drain_task:status():has_succeeded(), "peer drain task failed")
-
-  local builder = strings.writer()
-  for index = 1, #expected_chunks do
-    builder:write(expected_chunks[index])
-  end
-  local expected_total = builder:drain()
-  test.assert(#received_all == #expected_total and received_all == expected_total,
-              "TCP multi-MiB + cancelled write/shutdown bytes mismatched: " ..
-              #received_all .. " vs " .. #expected_total)
-
-  -- 4. Peer TCP reset error propagation in a fresh state
-  do
-    local reset_state = tlua.new()
-    defer reset_state:close()
-    reset_state:run([[require("os_descriptor_limit_app").exercise_tcp_peer_reset()]],
-      "=tcp-peer-reset")
-  end
-
-  -- 5. EMFILE recovery, cross-state TransferValue handoff, and multi-Runtime reuse
-  do
-    local reuse_state = tlua.new()
-    defer reuse_state:close()
-    reuse_state:run([[require("os_descriptor_limit_app").exercise_tcp_transfers_emfile_and_runtime_reuse()]],
-      "=tcp-transfers-emfile-reuse")
-  end
-
-  fs.write_file(result_path, "TCP_BACKPRESSURE_CANCEL_RESET_REUSE_OK")
+  local tr_state = tlua.new()
+  defer tr_state:close()
+  tr_state:run([[require("os_descriptor_limit_app").exercise_tcp_cross_state_transfers()]],
+    "=tcp-cross-state-transfers")
+  fs.write_file(result_path, "TCP_TRANSFERS_OK")
   return 0
 end
 
@@ -2089,10 +2241,24 @@ function main(args: {string}): integer
     return run_tcp_grandchild(args)
   elseif mode == "tcp-inherit-parent" then
     return run_tcp_inherit_parent(args[2], args[3])
-  elseif mode == "tcp-sessions" then
-    return run_tcp_sessions(args[2], args[3], args[4])
-  elseif mode == "tcp-backpressure-cancel-reset-reuse" then
-    return run_tcp_backpressure_cancel_reset_and_reuse(args[2], args[3])
+  elseif mode == "tcp-ipv4-session" then
+    return run_tcp_ipv4_session(args[2], args[3], args[4])
+  elseif mode == "tcp-ipv6-session" then
+    return run_tcp_ipv6_session(args[2], args[3], args[4])
+  elseif mode == "tcp-launchd-session" then
+    return run_tcp_launchd_session(args[2], args[3], args[4])
+  elseif mode == "tcp-inheritance" then
+    return run_tcp_inheritance_session(args[2], args[3], args[4])
+  elseif mode == "tcp-read-cancel-replace" then
+    return run_tcp_read_cancel_and_replace(args[2], args[3])
+  elseif mode == "tcp-backpressure-shutdown" then
+    return run_tcp_backpressure_and_shutdown(args[2], args[3])
+  elseif mode == "tcp-peer-reset" then
+    return run_tcp_peer_reset(args[2], args[3])
+  elseif mode == "tcp-emfile-runtime-reuse" then
+    return run_tcp_emfile_and_runtime_reuse(args[2], args[3])
+  elseif mode == "tcp-transfers" then
+    return run_tcp_transfers(args[2], args[3])
   end
   raise "unknown os_descriptor_limit_app mode: " .. mode
 end

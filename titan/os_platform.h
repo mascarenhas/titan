@@ -26,7 +26,6 @@ typedef struct titan_parent_stdio_probe {
   int is_socket;
   int is_listening;
   int is_connected;
-  int is_inet;
   int family;
   int is_unix;
   int is_stream;
@@ -126,30 +125,16 @@ static inline int titan_close_parent_duplicate(int descriptor) {
 
 static inline void titan_inspect_parent_socket_windows(
     HANDLE handle, titan_parent_stdio_probe *probe) {
-  WSADATA wsa_data;
   int socket_type = 0;
   int type_size = (int)sizeof(socket_type);
   int error;
+  /* The Runtime's libuv loop has already started Winsock via uv_loop_init. */
   if (getsockopt((SOCKET)(uintptr_t)handle, SOL_SOCKET, SO_TYPE,
                  (char *)&socket_type, &type_size) == 0) {
     probe->is_socket = 1;
     return;
   }
   error = WSAGetLastError();
-  if (error == WSANOTINITIALISED) {
-    error = WSAStartup(MAKEWORD(2, 2), &wsa_data);
-    if (error != 0) {
-      probe->operation = "WSAStartup";
-      probe->status = error;
-      return;
-    }
-    if (getsockopt((SOCKET)(uintptr_t)handle, SOL_SOCKET, SO_TYPE,
-                   (char *)&socket_type, &type_size) == 0) {
-      probe->is_socket = 1;
-      return;
-    }
-    error = WSAGetLastError();
-  }
   if (error != WSAENOTSOCK) {
     probe->operation = "getsockopt(SO_TYPE)";
     probe->status = error != 0 ? error : TITAN_OS_UNKNOWN;
@@ -184,11 +169,13 @@ static inline void titan_probe_parent_stdio(int descriptor,
     probe->status = TITAN_OS_ENOTSUP;
 }
 
+/* Present only because foreign imports are unconditional; Windows libuv never
+ * classifies a parent descriptor as UV_TCP. */
 static inline void titan_inspect_parent_tcp(int descriptor,
                                             titan_parent_stdio_probe *probe) {
   (void)descriptor;
   probe->status = TITAN_OS_ENOTSUP;
-  probe->operation = "uv_guess_handle";
+  probe->operation = "socket-backed parent stdio is not supported on Windows";
 }
 #else
 #define TITAN_OS_WINDOWS 0
@@ -274,8 +261,6 @@ static inline void titan_inspect_parent_tcp(int descriptor,
   probe->operation = NULL;
   probe->is_listening = 0;
   probe->is_connected = 0;
-  probe->is_inet = 0;
-  probe->family = 0;
   if (getsockopt(descriptor, SOL_SOCKET, SO_ACCEPTCONN,
                  &listening, &listening_size) == 0) {
     if (listening_size == sizeof(listening) && listening != 0) {
@@ -295,8 +280,6 @@ static inline void titan_inspect_parent_tcp(int descriptor,
     return;
   }
   probe->is_connected = 1;
-  probe->family = peer.ss_family;
-  probe->is_inet = peer.ss_family == AF_INET || peer.ss_family == AF_INET6;
 }
 #endif
 

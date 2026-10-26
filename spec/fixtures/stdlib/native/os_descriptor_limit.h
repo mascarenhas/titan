@@ -29,11 +29,9 @@ int titan_test_restore_fd(int saved_fd, int target_fd);
 int titan_test_rewind_fd(int fd);
 int titan_test_open_fd_count(void);
 
-int titan_test_tcp_stdio_supported(void);
 int titan_test_tcp_stdio_pair(int ipv6, int *accepted_fd, int *peer_fd);
 int titan_test_tcp_stdio_install_fd(int source_fd, int target_fd);
 int titan_test_tcp_stdio_close_fd(int fd);
-int titan_test_tcp_stdio_shutdown_write(int fd);
 int titan_test_tcp_stdio_reset_close(int fd);
 int titan_test_tcp_stdio_spawn_child(
     const char *program, const char *mode, const char *arg1, const char *arg2,

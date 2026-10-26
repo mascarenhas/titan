@@ -164,8 +164,6 @@ int titan_test_open_fd_count(void) {
     return GetProcessHandleCount(GetCurrentProcess(), &count) ? (int)count : -1;
 }
 
-int titan_test_tcp_stdio_supported(void) { return 0; }
-
 int titan_test_tcp_stdio_pair(int ipv6, int *accepted_fd, int *peer_fd) {
     (void)ipv6;
     if (accepted_fd != NULL) *accepted_fd = -1;
@@ -180,11 +178,6 @@ int titan_test_tcp_stdio_install_fd(int source_fd, int target_fd) {
 }
 
 int titan_test_tcp_stdio_close_fd(int fd) {
-    (void)fd;
-    return -1;
-}
-
-int titan_test_tcp_stdio_shutdown_write(int fd) {
     (void)fd;
     return -1;
 }
@@ -405,8 +398,6 @@ int titan_test_open_fd_count(void) {
     return count;
 }
 
-int titan_test_tcp_stdio_supported(void) { return 1; }
-
 int titan_test_tcp_stdio_pair(int ipv6, int *accepted_fd, int *peer_fd) {
     int listener = -1;
     int client = -1;
@@ -420,13 +411,18 @@ int titan_test_tcp_stdio_pair(int ipv6, int *accepted_fd, int *peer_fd) {
         struct sockaddr_in6 addr6;
         socklen_t len6 = sizeof(addr6);
         listener = socket(AF_INET6, SOCK_STREAM, 0);
-        if (listener < 0) return errno;
+        if (listener < 0) {
+            return (errno == EAFNOSUPPORT || errno == EADDRNOTAVAIL) ? -2 : errno;
+        }
         memset(&addr6, 0, sizeof(addr6));
         addr6.sin6_family = AF_INET6;
         addr6.sin6_addr = in6addr_loopback;
         addr6.sin6_port = 0;
-        if (bind(listener, (struct sockaddr *)&addr6, sizeof(addr6)) != 0 ||
-            listen(listener, 1) != 0 ||
+        if (bind(listener, (struct sockaddr *)&addr6, sizeof(addr6)) != 0) {
+            saved_errno = (errno == EAFNOSUPPORT || errno == EADDRNOTAVAIL) ? -2 : errno;
+            goto fail;
+        }
+        if (listen(listener, 1) != 0 ||
             getsockname(listener, (struct sockaddr *)&addr6, &len6) != 0) {
             saved_errno = errno;
             goto fail;
@@ -496,10 +492,6 @@ int titan_test_tcp_stdio_install_fd(int source_fd, int target_fd) {
 int titan_test_tcp_stdio_close_fd(int fd) {
     if (fd < 0) return 0;
     return close(fd) == 0 ? 0 : -1;
-}
-
-int titan_test_tcp_stdio_shutdown_write(int fd) {
-    return shutdown(fd, SHUT_WR) == 0 ? 0 : -1;
 }
 
 int titan_test_tcp_stdio_reset_close(int fd) {
