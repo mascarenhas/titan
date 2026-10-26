@@ -816,7 +816,7 @@ end
 function Scheduler:flush(node)
     if node.flushed then return end
     node.flushed = true
-    write_stream(io.stdout, node.stdout)
+    write_stream(io.stderr, node.stdout)
     write_stream(io.stderr, node.stderr)
     append_all(self.diagnostics, node.messages)
 end

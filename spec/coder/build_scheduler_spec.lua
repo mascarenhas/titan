@@ -422,7 +422,7 @@ describe("module build scheduler", function()
         return
     end
 
-    local workspace, state, log, saved_path, saved_stdout, captured
+    local workspace, state, log, saved_path, saved_stderr, captured
 
     before_each(function()
         workspace = new_workspace()
@@ -433,9 +433,9 @@ describe("module build scheduler", function()
         write_file(workspace .. "/counter.sh", COUNTER)
         saved_path = package.path
         package.path = workspace .. "/?.lua;" .. package.path
-        saved_stdout = io.stdout
+        saved_stderr = io.stderr
         captured = {}
-        io.stdout = {
+        io.stderr = {
             write = function(_, ...)
                 for index = 1, select("#", ...) do
                     captured[#captured + 1] = tostring(select(index, ...))
@@ -447,7 +447,7 @@ describe("module build scheduler", function()
     end)
 
     after_each(function()
-        io.stdout = saved_stdout
+        io.stderr = saved_stderr
         package.path = saved_path
         remove_tree(workspace)
     end)
