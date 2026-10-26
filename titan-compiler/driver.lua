@@ -99,6 +99,15 @@ local function lua_cpath_suffix()
         (platform.windows and "/?.dll" or "/?.so")
 end
 
+local function compiler_file_contents(context, filename)
+    local read_ok, contents = pcall(incremental.file_contents, context, filename)
+    if not read_ok then
+        if type(contents) ~= "string" then error(contents, 0) end
+        return nil, contents
+    end
+    return contents
+end
+
 local function normalize_absolute_path(path)
     if platform.windows then return platform.path.normalize(path) end
     local components = {}
@@ -142,7 +151,7 @@ end
 -- Canonicalize the longest existing pathname prefix through the filesystem.
 -- This preserves POSIX symlink/.. resolution for alias and containment checks
 -- while retaining every not-yet-created destination component.
-local function physical_absolute_filename(filename)
+local function physical_absolute_filename(filename, observe)
     if platform.windows then return normalized_absolute_filename(filename) end
     local raw = absolute_filename(filename)
     local previous = lfs.currentdir()
@@ -153,7 +162,9 @@ local function physical_absolute_filename(filename)
     local link_hops = 0
     while candidate and candidate ~= "" and not seen[candidate] do
         seen[candidate] = true
-        local attributes = lfs.symlinkattributes(candidate)
+        local attributes
+        if observe then attributes = observe(candidate)
+        else attributes = lfs.symlinkattributes(candidate) end
         if attributes and attributes.mode == "link" and attributes.target then
             link_hops = link_hops + 1
             local identity = attributes.dev ~= nil and
@@ -990,6 +1001,8 @@ function driver.new_resolver_context(options)
         transient_caches = options.transient_caches == true,
         completion_closed_world = options.completion_closed_world == true,
         provider_cache = {},
+        decoded_provider_cache = {},
+        provider_cache_identity = {},
         contextual_types = {},
         contextual_resolutions = {},
         native_interface_types = {},
@@ -1408,30 +1421,26 @@ function driver.link_extra_flags()
     return driver.NATIVE_LINK_FLAGS or driver.EXTRA_LDFLAGS or {}
 end
 
--- Which linker dependency report a final program link can request, probed
--- once per resolver context: `darwin` (ld64 -dependency_info), `gnu` or `lld`
--- when the linker accepts --dependency-file, else `none`
--- (the final-link certificate then uses compiler-resolved -l paths).
+-- Dependency-report support is memoized in this resolver and persisted by the
+-- shared link-certificate owner under the observed native tool identities.
 function driver.native_link_backend(context)
     if context.native_link_backend then return context.native_link_backend end
-    local backend = "none"
-    if driver.IS_DARWIN then
-        backend = "darwin"
-    elseif not platform.windows then
-        local argv = compiler_argv(false, context)
-        local report = argv and context.io:tmpname()
-        if report then
-            append_argv(argv, {
-                "-Wl,--dependency-file=" .. report, "-Wl,--version",
-            })
-            local result = context.io:run(argv, { stderr_to_stdout = true })
-            if type(result) == "table" and result.started and result.ok then
-                backend = (result.output or result.diagnostic or ""):find("LLD", 1, true)
-                    and "lld" or "gnu"
-            end
-            if context.io:lstat(report) then context.io:unlink(report) end
-        end
-    end
+    local argv, argv_error = compiler_argv(false, context)
+    if not argv then return nil, argv_error end
+    local descriptor, descriptor_error = driver.toolchain_descriptor(context)
+    if not descriptor then return nil, descriptor_error end
+    local toolchain = incremental.toolchain_identity(context, descriptor)
+    local backend, backend_error = require("titan-compiler.linkcertificate")
+        .linker_backend(context, {
+            compiler_argv = argv,
+            link_flags = driver.link_extra_flags(),
+            toolchain = toolchain,
+            directory = context.output_root or
+                driver.TITAN_SOURCE_PATH:match("[^;]+") or ".",
+            darwin = driver.IS_DARWIN == true,
+            windows = platform.windows,
+        })
+    if not backend then return nil, backend_error end
     context.native_link_backend = backend
     return backend
 end
@@ -3718,10 +3727,60 @@ local function remember_nominal_layouts(context, inventory, filename)
     end
 end
 
+-- Decoded metadata is invocation-local and belongs to one observed physical
+-- provider, not to the logical module name or one spelling of its pathname.
+local function provider_decoding_cache(context, filename)
+    if not (context and context._resolver_context and context.io) then return nil end
+    local stat, stat_error = context.io:stat(filename)
+    if stat_error and type(stat_error) ~= "string" then error(stat_error, 0) end
+    if not stat or stat.kind ~= "file" then return nil end
+    local physical, physical_error = context.io:realpath(filename)
+    if physical_error and type(physical_error) ~= "string" then
+        error(physical_error, 0)
+    end
+    if not physical then return nil end
+    local key = stat.device ~= nil and stat.inode ~= nil and
+        ("inode:" .. tostring(stat.device) .. ":" .. tostring(stat.inode)) or
+        ("path:" .. physical)
+    local observation = table.concat({
+        tostring(stat.size), tostring(stat.mode),
+        tostring(stat.modified_seconds), tostring(stat.modified_nanoseconds),
+        tostring(stat.changed_seconds), tostring(stat.changed_nanoseconds),
+        tostring(stat.time_precision),
+    }, ":")
+    local cache = context.decoded_provider_cache[key]
+    if not cache or cache.observation ~= observation then
+        cache = { observation = observation, types = {}, layouts = {} }
+        context.decoded_provider_cache[key] = cache
+    end
+    return cache
+end
+
+local function decode_provider_interface(cache, modname, serialized, origin)
+    local saved = cache and cache.types[modname]
+    if saved and saved.serialized == serialized then return saved.type end
+    local modtype, err = driver.decode_module_interface(serialized, modname, origin)
+    if modtype and cache then
+        cache.types[modname] = { serialized = serialized, type = modtype }
+    end
+    return modtype, err
+end
+
+local function decode_provider_layouts(cache, modname, serialized)
+    local saved = cache and cache.layouts[modname]
+    if saved and saved.serialized == serialized then return saved.inventory end
+    local inventory, err = decode_nominal_layouts(modname, serialized)
+    if inventory and cache then
+        cache.layouts[modname] = { serialized = serialized, inventory = inventory }
+    end
+    return inventory, err
+end
+
 -- Probe one existing container for a logical module. A missing dlsym entry is
 -- a membership absence; an open failure is terminal. Callers decide whether a
 -- clean nonclaim is skippable (ancestor) or an error (exact candidate).
 local function probe_compiled_interface(modname, binf, options)
+    local decoded = provider_decoding_cache(options, binf)
     local prefix = driver.mangle_module_name(modname)
     local support = require("titan")
     local loadlib = support._loadlib
@@ -3790,8 +3849,8 @@ local function probe_compiled_interface(modname, binf, options)
     local types_or_err, types_call_err = one_metadata_result(
         typesf, "compiled module type metadata '" .. typesname .. "'")
     if not types_or_err then return "error", types_call_err end
-    local modt_or_err, validation_err = driver.decode_module_interface(
-        types_or_err, modname, binf .. ":" .. typesname)
+    local modt_or_err, validation_err = decode_provider_interface(
+        decoded, modname, types_or_err, binf .. ":" .. typesname)
     if not modt_or_err then
         return "error", "compiled container '" .. binf ..
             "' has invalid metadata for module '" .. modname .. "': " ..
@@ -3812,20 +3871,25 @@ local function probe_compiled_interface(modname, binf, options)
             layoutsf, "compiled module layout metadata '" .. layoutsname .. "'")
         if not serialized_layouts then return "error", layouts_call_err end
         local layout_err
-        layout_inventory, layout_err = decode_nominal_layouts(modname, serialized_layouts)
+        layout_inventory, layout_err =
+            decode_provider_layouts(decoded, modname, serialized_layouts)
         if not layout_inventory then
             return "error", "compiled container '" .. binf ..
                 "' has invalid nominal layout metadata for module '" ..
                 modname .. "': " .. tostring(layout_err)
         end
     end
-    return "valid", modt_or_err, {
+    -- Provider-relative binding lives on the module view. Keep it separate
+    -- from the shared decoded graph, including when two paths name one inode.
+    local module_view = {}
+    for key, value in pairs(modt_or_err) do module_view[key] = value end
+    return "valid", module_view, {
         module = modname,
         abi = abi_or_err,
         types = types_or_err,
         layouts = serialized_layouts,
         layout_inventory = layout_inventory,
-        type = modt_or_err,
+        type = module_view,
         origin = binf,
     }
 end
@@ -3899,8 +3963,9 @@ function driver.find_compiled_interface(paths, modname, context)
 end
 
 local function inspect_static_provider(context, filename, relative)
+    local decoded = provider_decoding_cache(context, filename)
     local cached = context.provider_cache[filename]
-    if cached then
+    if cached and context.provider_cache_identity[filename] == decoded then
         if cached.error then return nil, cached.error end
         return cached
     end
@@ -3909,12 +3974,14 @@ local function inspect_static_provider(context, filename, relative)
         io = context.io,
         expected_abi = driver.TITAN_ABI_VERSION,
         require_layouts = not context.analysis_only,
-        validate_layouts = not context.analysis_only and decode_nominal_layouts or nil,
+        validate_layouts = not context.analysis_only and function(name, serialized)
+            return decode_provider_layouts(decoded, name, serialized)
+        end or nil,
         validate_types = function(name, serialized, origin)
-            return driver.decode_module_interface(
-                serialized, name, origin)
+            return decode_provider_interface(decoded, name, serialized, origin)
         end,
     })
+    context.provider_cache_identity[filename] = decoded
     if not provider then
         local err = "cannot inspect static provider '" .. filename ..
             "': " .. tostring(scan_err)
@@ -3928,8 +3995,8 @@ local function inspect_static_provider(context, filename, relative)
         local modtype = entry.decoded_types
         local type_err
         if not modtype then
-            modtype, type_err = driver.decode_module_interface(
-                entry.types, name, entry.origin or filename)
+            modtype, type_err = decode_provider_interface(
+                decoded, name, entry.types, entry.origin or filename)
         end
         if not modtype then
             local err = "static provider '" .. filename ..
@@ -5245,7 +5312,7 @@ function driver.defaultloader(static_deps, options)
             return false, "build plan divergence: module '" .. modname ..
                 "' has no accepted object"
         end
-        local bytes, read_error = context.io:read_file(object)
+        local bytes, read_error = compiler_file_contents(context, object)
         if not bytes then
             return false, "cannot read planned object for module '" ..
                 modname .. "': " .. tostring(read_error)
@@ -5357,7 +5424,7 @@ function driver.defaultloader(static_deps, options)
                            source.certified_contents[filename] ~= nil then
                         input = source.certified_contents[filename]
                     else
-                        input, err = context.io:read_file(filename)
+                        input, err = compiler_file_contents(context, filename)
                         if not input then return nil, err end
                     end
                     inputs[index] = input
@@ -5867,7 +5934,7 @@ function driver.defaultloader(static_deps, options)
                 -- from that exact provider before reusing its interface.
                 if mod.kind == "dynamic" and not mod.layout_inventory then
                     local status, value, metadata =
-                        probe_compiled_interface(modname, mod.filename)
+                        probe_compiled_interface(modname, mod.filename, context)
                     if status ~= "valid" then
                         return false, status == "error" and value or
                             ("cached provider no longer claims module '" .. modname .. "'")
@@ -6222,6 +6289,7 @@ function driver.plan_descriptor(plan, modname)
         protocol = version.BUILD_WORKER_PROTOCOL,
         modname = modname,
         modules = modules,
+        reservations = plan.reservations,
     }
 end
 
@@ -6372,7 +6440,7 @@ function driver.invalidate_source_object(context, modname, source)
     end
     local prior = {}
     if attributes.kind == "file" then
-        local bytes = context.io:read_file(primary)
+        local bytes = compiler_file_contents(context, primary)
         local record = bytes and objectmetadata.read(bytes, primary)
         local native = record and record.object_metadata
         if native and native.parts and objectmetadata.validate_parts(native) then
@@ -6436,6 +6504,16 @@ function driver.compile_planned_module(context, modname, options)
     local ok, errors = checker.checkimport(modname, loader)
     if not ok then return nil, tostring(errors) end
     if #errors > 0 then return nil, table.concat(errors, "\n") end
+    local mod = driver.imported[modname]
+    local header_inputs = {}
+    for _, dependency in ipairs(mod.c_header_dependencies or {}) do
+        if dependency.kind ~= "search" then
+            header_inputs[#header_inputs + 1] = dependency.filename or dependency.path
+        end
+    end
+    local reserved_ok, reserved_error = driver.validate_reserved_output_inputs(
+        plan.reservations, header_inputs)
+    if not reserved_ok then return nil, reserved_error end
     local finalized, finalize_errors = driver.finalize_resolver_context(context)
     if not finalized then return nil, table.concat(finalize_errors, "\n") end
     for name, planned in pairs(plan.modules) do
@@ -6449,7 +6527,6 @@ function driver.compile_planned_module(context, modname, options)
         end
     end
 
-    local mod = driver.imported[modname]
     local extra_flags = {}
     local coverage_selected = false
     if coverage_build then
@@ -6566,7 +6643,8 @@ function driver.publish_staged_module(context, result)
         return discard("worker result for module '" .. tostring(modname) ..
             "' has no primary object")
     end
-    local bytes, read_error = context.io:read_file(primary.from)
+    local bytes, read_error = compiler_file_contents(
+        incremental.fresh_context(context), primary.from)
     if not bytes then
         return discard("cannot read staged object for module '" .. modname ..
             "': " .. tostring(read_error))
@@ -6756,9 +6834,69 @@ function driver.dependency_closure(modname)
     return closure
 end
 
+local FINAL_SELECTION_FIELDS = {
+    "kind", "compiled", "ast", "type", "filename", "relative",
+    "static_archive", "static_provider", "embedded_provider",
+    "object_metadata", "layout_inventory", "layouts",
+}
+
+local function resolver_selection(context, previous)
+    if previous and
+       (previous.loader ~= context.loader or
+        previous.analysis_only ~= context.analysis_only or
+        previous.embedded_provider ~= context.embedded_interface_provider or
+        previous.embedded_rejected ~= context.embedded_interface_provider_rejected or
+        previous.embedded_overlap ~= context.embedded_interface_provider_overlap) then
+        return false
+    end
+    local snapshot = not previous and {
+        modules = {}, resolutions = {},
+        loader = context.loader, analysis_only = context.analysis_only,
+        embedded_provider = context.embedded_interface_provider,
+        embedded_rejected = context.embedded_interface_provider_rejected,
+        embedded_overlap = context.embedded_interface_provider_overlap,
+    } or nil
+    local count = 0
+    for name, mod in pairs(driver.imported) do
+        count = count + 1
+        local saved = previous and previous.modules[name]
+        if previous and (not saved or saved.entry ~= mod) then return false end
+        local entry = not previous and { entry = mod } or nil
+        if mod ~= CIRCULAR_MARK then
+            for _, field in ipairs(FINAL_SELECTION_FIELDS) do
+                if previous then
+                    if saved[field] ~= mod[field] then return false end
+                else entry[field] = mod[field] end
+            end
+            local provider_file = mod.type and mod.type.file
+            if previous then
+                if saved.provider_file ~= provider_file then return false end
+            else entry.provider_file = provider_file end
+        end
+        if snapshot then snapshot.modules[name] = entry end
+    end
+    if previous and previous.module_count ~= count then return false end
+    if snapshot then snapshot.module_count = count end
+    count = 0
+    for key, resolution in pairs(context.contextual_resolutions or {}) do
+        count = count + 1
+        if previous then
+            if previous.resolutions[key] ~= resolution then return false end
+        else snapshot.resolutions[key] = resolution end
+    end
+    if previous then return previous.resolution_count == count end
+    snapshot.resolution_count = count
+    return snapshot
+end
+
 function driver.finalize_resolver_context(context)
     context = context or driver.new_resolver_context()
     reconcile_embedded_import_cache(context)
+    if context.finalized_selection and
+       resolver_selection(context, context.finalized_selection) then
+        return context
+    end
+    context.finalized_selection = nil
     local source_names = {}
     local dynamic_names = {}
     local selected_embedded_modules = {}
@@ -7096,6 +7234,7 @@ function driver.finalize_resolver_context(context)
     end
 
     if #errors ~= 0 then return nil, errors end
+    context.finalized_selection = resolver_selection(context)
     return context
 end
 
@@ -7949,6 +8088,8 @@ function driver.prepare_foreign_headers(
     return driver.write_foreign_header_plans(plans, verbose, pretty_print)
 end
 
+driver.GENERATED_C_MARKER = "/* Generated by Titan: module C translation unit. */"
+
 local function prepare_compile(
         modname, ast, sourcef, static_deps, verbose, options, source_entry,
         header_plan)
@@ -8285,7 +8426,7 @@ local function prepare_compile(
 
         for _, part in ipairs(generated_parts) do
             local part_c = driver.part_c_filename(stem, part.index)
-            local part_code = part.code
+            local part_code = driver.GENERATED_C_MARKER .. "\n" .. part.code
             if not (options and options.coverage) and part.index == 0 then
                 local metadata, metadata_error = metadata_code()
                 if not metadata then return nil, metadata_error end
@@ -9636,7 +9777,8 @@ function driver.derive_target_fingerprint(filename, expected_module)
     return parsed.fingerprint, parsed
 end
 
-function driver.validate_generated_objects(objects, target, entries)
+function driver.validate_generated_objects(objects, target, entries, context)
+    context = context or { io = compiler_io.new_sync() }
     for _, input in ipairs(objects or {}) do
         local filename = type(input) == "table" and input.filename or input
         local expected_module =
@@ -9660,20 +9802,14 @@ function driver.validate_generated_objects(objects, target, entries)
         local part_objects = type(input) == "table" and input.objects or nil
         for part_idx = 2, #(part_objects or {}) do
             local part_file = part_objects[part_idx]
-            local part_parsed, part_err = scan_native_file(part_file, nil, false)
-            if not part_parsed then return nil, part_err end
-            if part_parsed.kind ~= "object" then
+            local part_fingerprint, part_err =
+                incremental.part_fingerprint(context, part_file)
+            if not part_fingerprint then
                 return nil, "generated module part object '" ..
-                    tostring(part_file) ..
-                    "' is not a single-architecture relocatable object"
-            end
-            if part_parsed.metadata then
-                return nil, "generated module part object '" ..
-                    tostring(part_file) ..
-                    "' unexpectedly contains Titan module metadata"
+                    tostring(part_file) .. "': " .. tostring(part_err)
             end
             local part_matches, part_mismatch =
-                staticmetadata.fingerprint_matches(part_parsed.fingerprint, target)
+                staticmetadata.fingerprint_matches(part_fingerprint, target)
             if not part_matches then
                 return nil, "generated module part object '" ..
                     tostring(part_file) .. "' target mismatch: " ..
@@ -11180,6 +11316,188 @@ local function same_file_tree(left, right)
     return true
 end
 
+-- One filesystem observation per pathname, with prefix indexes for both
+-- spelling and physical identity. No collision query performs filesystem I/O.
+local function new_output_path_index(label, reservations)
+    local observations, attributes, outputs = {}, {}, {}
+    local fields = { "normalized", "physical", "portable" }
+    local exact, trees, identities = {}, {}, {}
+    for _, field in ipairs(fields) do
+        exact[field], trees[field] = {}, {}
+    end
+
+    local function attrs(path)
+        local cached = attributes[path]
+        if cached == nil then
+            cached = lfs.symlinkattributes(path) or false
+            attributes[path] = cached
+        end
+        return cached or nil
+    end
+
+    local function observe(path)
+        local raw = absolute_filename(path)
+        local cached = observations[raw]
+        if cached then return cached end
+        local attr = attrs(raw)
+        local followed = attr
+        if attr and attr.mode == "link" then
+            followed = lfs.attributes(raw)
+        end
+        cached = {
+            path = path,
+            raw = raw,
+            normalized = normalize_absolute_path(raw),
+            physical = physical_absolute_filename(raw, attrs),
+            existing_mode = attr and attr.mode or nil,
+            device = not platform.windows and followed and followed.dev or nil,
+            inode = not platform.windows and followed and followed.ino or nil,
+        }
+        cached.portable = cached.physical:lower()
+        observations[raw] = cached
+        return cached
+    end
+
+    local function earlier(left, right)
+        if not left or (right and right.index < left.index) then return right end
+        return left
+    end
+
+    local function components(path)
+        if platform.windows then path = path:gsub("\\", "/") end
+        return path:gmatch("[^/]+")
+    end
+
+    local function tree_match(tree, path)
+        local found = tree.terminal
+        for component in components(path) do
+            tree = tree.children and tree.children[component]
+            if not tree then return found end
+            found = earlier(found, tree.terminal)
+        end
+        return earlier(found, tree.first)
+    end
+
+    local function tree_insert(tree, path, output)
+        tree.first = earlier(tree.first, output)
+        for component in components(path) do
+            if not tree.children then tree.children = {} end
+            local child = tree.children[component]
+            if not child then child = {}; tree.children[component] = child end
+            tree = child
+            tree.first = earlier(tree.first, output)
+        end
+        tree.terminal = output
+    end
+
+    local function match(observation)
+        local found, alias
+        local function consider(candidate, candidate_alias)
+            if candidate and (not found or candidate.index < found.index) then
+                found, alias = candidate, candidate_alias
+            elseif candidate == found and candidate_alias then
+                alias = true
+            end
+        end
+        for _, field in ipairs(fields) do
+            consider(exact[field][observation[field]], true)
+            consider(tree_match(trees[field], observation[field]), false)
+        end
+        local device = observation.device and identities[observation.device]
+        consider(device and device[observation.inode], true)
+        return found, alias
+    end
+
+    local function insert(output)
+        output.index = #outputs + 1
+        outputs[#outputs + 1] = output
+        for _, field in ipairs(fields) do
+            exact[field][output[field]] = output
+            tree_insert(trees[field], output[field], output)
+        end
+        if output.device ~= nil and output.inode ~= nil then
+            local device = identities[output.device]
+            if not device then device = {}; identities[output.device] = device end
+            device[output.inode] = output
+        end
+    end
+
+    local checked_parents = {}
+    local function ancestors(path)
+        local current = platform.windows and platform.parent(path) or
+            path:match("^(.*)/[^/]+$")
+        if not current or current == "" or checked_parents[current] then
+            return true
+        end
+        local ok, err = ancestors(current)
+        if not ok then return nil, err end
+        local attr = attrs(current)
+        local followed = attr
+        if attr and attr.mode == "link" then followed = lfs.attributes(current) end
+        if attr and (not followed or followed.mode ~= "directory") then
+            return nil, "output parent '" .. current .. "' is not a directory"
+        end
+        checked_parents[current] = true
+        return true
+    end
+
+    local index = { outputs = outputs }
+    function index.add(path, owner, mode)
+        local observation = observe(path)
+        local ok, err = ancestors(observation.normalized)
+        if not ok then return nil, err end
+        if observation.existing_mode and observation.existing_mode ~= mode then
+            local expected = mode == "directory" and
+                "a nonlink directory" or "a regular nonlink file"
+            return nil, label .. " '" .. observation.normalized .. "' for " ..
+                owner .. " is not " .. expected
+        end
+        local previous, alias = match(observation)
+        if previous then
+            if alias then
+                return nil, label .. " '" .. observation.normalized ..
+                    "' for " .. owner .. " aliases output for " .. previous.owner
+            end
+            return nil, label .. " '" .. observation.normalized ..
+                "' for " .. owner ..
+                " has a path hierarchy conflict with output '" ..
+                previous.normalized .. "' for " .. previous.owner
+        end
+        insert({
+            path = path, owner = owner, mode = mode,
+            raw = observation.raw, normalized = observation.normalized,
+            physical = observation.physical, portable = observation.portable,
+            existing_mode = observation.existing_mode,
+            device = observation.device, inode = observation.inode,
+        })
+        return true
+    end
+    function index.check_inputs(inputs)
+        for _, input in ipairs(inputs or {}) do
+            local path = archive_input_path(input)
+            if type(path) == "string" then
+                local observation = observe(path)
+                local output, alias = match(observation)
+                if output then
+                    return nil, label .. " '" .. output.normalized ..
+                        "' for " .. output.owner ..
+                        (alias and " aliases input '" or
+                            " has a path hierarchy conflict with input '") ..
+                        observation.normalized .. "'"
+                end
+            end
+        end
+        return true
+    end
+    for _, output in ipairs(reservations or {}) do insert(output) end
+    return index
+end
+
+function driver.validate_reserved_output_inputs(reservations, inputs)
+    return new_output_path_index("native provider output", reservations)
+        .check_inputs(inputs)
+end
+
 function driver.validate_program_output_paths(
         source_outputs, executable, entrypoint_c, native_inputs, extra_outputs,
         planned_outputs)
@@ -11190,59 +11508,8 @@ function driver.validate_program_output_paths(
        not entrypoint_c:match("[.]c$") then
         return nil, "standalone entrypoint path must end in .c"
     end
-    local outputs = {}
-
-    local function below(path, parent)
-        return #path > #parent and
-            path:sub(1, #parent + 1) == parent .. "/"
-    end
-
-    local function add_output(path, owner, mode)
-        local ancestors_ok, ancestors_err =
-            validate_output_ancestors(path)
-        if not ancestors_ok then return nil, ancestors_err end
-        local attr = lfs.symlinkattributes(path)
-        if attr and attr.mode ~= mode then
-            local expected = mode == "directory" and
-                "a nonlink directory" or "a regular nonlink file"
-            return nil, "program output '" ..
-                normalized_absolute_filename(path) .. "' for " .. owner ..
-                " is not " .. expected
-        end
-
-        local output = {
-            path = path,
-            owner = owner,
-            mode = mode,
-            raw = absolute_filename(path),
-            normalized = normalized_absolute_filename(path),
-            physical = physical_absolute_filename(path),
-        }
-        output.portable = output.physical:lower()
-        for _, previous in ipairs(outputs) do
-            if output.normalized == previous.normalized or
-               output.physical == previous.physical or
-               output.portable == previous.portable or
-               same_existing_file(output.raw, previous.raw) then
-                return nil, "program output '" .. output.normalized ..
-                    "' for " .. owner .. " aliases output for " ..
-                    previous.owner
-            end
-            if below(output.normalized, previous.normalized) or
-               below(previous.normalized, output.normalized) or
-               below(output.physical, previous.physical) or
-               below(previous.physical, output.physical) or
-               below(output.portable, previous.portable) or
-               below(previous.portable, output.portable) then
-                return nil, "program output '" .. output.normalized ..
-                    "' for " .. owner ..
-                    " has a path hierarchy conflict with output '" ..
-                    previous.normalized .. "' for " .. previous.owner
-            end
-        end
-        outputs[#outputs + 1] = output
-        return true
-    end
+    local index = new_output_path_index("program output")
+    local add_output = index.add
 
     if planned_outputs then
         for _, output in ipairs(planned_outputs) do
@@ -11311,37 +11578,7 @@ function driver.validate_program_output_paths(
         if not ok then return nil, err end
     end
 
-    for _, input in ipairs(native_inputs or {}) do
-        local path = archive_input_path(input)
-        if type(path) == "string" then
-            local raw_input = absolute_filename(path)
-            local normalized_input = normalized_absolute_filename(path)
-            local physical_input = physical_absolute_filename(path)
-            local portable_input = physical_input:lower()
-            for _, output in ipairs(outputs) do
-                if normalized_input == output.normalized or
-                   physical_input == output.physical or
-                   portable_input == output.portable or
-                   same_existing_file(raw_input, output.raw) then
-                    return nil, "program output '" .. output.normalized ..
-                        "' for " .. output.owner .. " aliases input '" ..
-                        normalized_input .. "'"
-                end
-                if below(normalized_input, output.normalized) or
-                   below(output.normalized, normalized_input) or
-                   below(physical_input, output.physical) or
-                   below(output.physical, physical_input) or
-                   below(portable_input, output.portable) or
-                   below(output.portable, portable_input) then
-                    return nil, "program output '" .. output.normalized ..
-                        "' for " .. output.owner ..
-                        " has a path hierarchy conflict with input '" ..
-                        normalized_input .. "'"
-                end
-            end
-        end
-    end
-    return true
+    return index.check_inputs(native_inputs)
 end
 
 function driver.validate_provider_output_paths(
@@ -11354,54 +11591,8 @@ function driver.validate_provider_output_paths(
             "' does not end in .so"
     end
 
-    local outputs = {}
-    local function below(path, parent)
-        return #path > #parent
-            and path:sub(1, #parent + 1) == parent .. "/"
-    end
-    local function add_output(path, owner, mode)
-        local ancestors_ok, ancestors_err = validate_output_ancestors(path)
-        if not ancestors_ok then return nil, ancestors_err end
-        local attr = lfs.symlinkattributes(path)
-        if attr and attr.mode ~= mode then
-            local expected = mode == "directory"
-                and "a nonlink directory" or "a regular nonlink file"
-            return nil, "native provider output '" ..
-                normalized_absolute_filename(path) .. "' for " .. owner ..
-                " is not " .. expected
-        end
-        local output = {
-            raw = absolute_filename(path),
-            normalized = normalized_absolute_filename(path),
-            physical = physical_absolute_filename(path),
-            owner = owner,
-            mode = mode,
-        }
-        output.portable = output.physical:lower()
-        for _, previous in ipairs(outputs) do
-            if output.normalized == previous.normalized
-               or output.physical == previous.physical
-               or output.portable == previous.portable
-               or same_existing_file(output.raw, previous.raw) then
-                return nil, "native provider output '" .. output.normalized ..
-                    "' for " .. owner .. " aliases output for " ..
-                    previous.owner
-            end
-            if below(output.normalized, previous.normalized)
-               or below(previous.normalized, output.normalized)
-               or below(output.physical, previous.physical)
-               or below(previous.physical, output.physical)
-               or below(output.portable, previous.portable)
-               or below(previous.portable, output.portable) then
-                return nil, "native provider output '" .. output.normalized ..
-                    "' for " .. owner ..
-                    " has a path hierarchy conflict with output '" ..
-                    previous.normalized .. "' for " .. previous.owner
-            end
-        end
-        outputs[#outputs + 1] = output
-        return true
-    end
+    local index = new_output_path_index("native provider output")
+    local add_output = index.add
 
     local ok, err
     if public_dso then
@@ -11423,82 +11614,45 @@ function driver.validate_provider_output_paths(
             assert(generated.owner), generated.mode or "file")
         if not ok then return nil, err end
     end
-    for _, input in ipairs(native_inputs or {}) do
-        local path = archive_input_path(input)
-        if type(path) == "string" then
-            local raw_input = absolute_filename(path)
-            local normalized_input = normalized_absolute_filename(path)
-            local physical_input = physical_absolute_filename(path)
-            local portable_input = physical_input:lower()
-            for _, output in ipairs(outputs) do
-                if normalized_input == output.normalized
-                   or physical_input == output.physical
-                   or portable_input == output.portable
-                   or same_existing_file(raw_input, output.raw) then
-                    return nil, "native provider output '" ..
-                        output.normalized .. "' for " .. output.owner ..
-                        " aliases input '" .. normalized_input .. "'"
-                end
-                if below(normalized_input, output.normalized)
-                   or below(output.normalized, normalized_input)
-                   or below(physical_input, output.physical)
-                   or below(output.physical, physical_input)
-                   or below(portable_input, output.portable)
-                   or below(output.portable, portable_input) then
-                    return nil, "native provider output '" ..
-                        output.normalized .. "' for " .. output.owner ..
-                        " has a path hierarchy conflict with input '" ..
-                        normalized_input .. "'"
-                end
-            end
-        end
-    end
-    return true, public_archive
+    ok, err = index.check_inputs(native_inputs)
+    if not ok then return nil, err end
+    return true, public_archive, index.outputs
 end
 
 -- Reserve the whole invocation before the scheduler invalidates any object.
 -- The maximum split inventory is compiler-owned even if code generation later
--- chooses fewer parts. This pass parses declarations and preprocesses headers,
--- but never typechecks, generates C, or starts a generated-code compilation.
+-- chooses fewer parts. The coordinator reads Titan declarations and existing
+-- ownership markers only; fresh C-header discovery belongs to the workers.
 function driver.preflight_build_outputs(context, plan, options)
     local inputs, input_seen, outputs, modules = {}, {}, {}, {}
-    local output_owners = {}
+    local output_owners, c_outputs = {}, {}
     local function input(filename)
         if filename and not input_seen[filename] then
             input_seen[filename] = true
             inputs[#inputs + 1] = filename
         end
     end
-    local function output(filename, owner, mode)
+    local function output(filename, owner, mode, c_stem)
         if output_owners[filename] ~= owner then
             outputs[#outputs + 1] = { path = filename, owner = owner, mode = mode }
             output_owners[filename] = owner
         end
+        if c_stem then c_outputs[filename] = c_stem end
     end
     for _, filename in ipairs(options.native_inputs or {}) do input(filename) end
     local max_parts, parts_error = driver.effective_c_parts(options.c_parts)
     if not max_parts then return nil, parts_error end
-    local service_options
-    local function header_options()
-        if not service_options then
-            local service, err = driver.get_probe_service(context)
-            if not service then return nil, err end
-            service_options = service:cdriver_process_options()
-        end
-        return service_options
-    end
     for _, name in ipairs(plan.order) do
         local selected = plan.modules[name]
         if selected.kind == "source" then
             local source, certified = selected.source, selected.certified
             local saved = certified and certified.status == "hit" and certified.record
-            local info = { source = source, aliases = {}, imports = {}, includes = {},
-                saved = saved, fresh = not saved }
+            local info = { source = source, aliases = {}, imports = {}, saved = saved }
             modules[name] = info
             local stem = driver.module_output_stem(source.native_output or source.main, name)
             local owner = "logical module '" .. name .. "'"
             for index = 0, max_parts - 1 do
-                output(driver.part_c_filename(stem, index), owner)
+                output(driver.part_c_filename(stem, index), owner, nil, stem)
                 output(driver.part_object_filename(stem, index), owner)
                 local part_stem = driver.part_object_filename(stem, index):gsub("[.]o$", "")
                 output(part_stem .. ".gcno", owner)
@@ -11507,14 +11661,14 @@ function driver.preflight_build_outputs(context, plan, options)
             -- A smaller new split policy can still retire the old inventory.
             local prior = certified and certified.record
             if not prior and context.io:lstat(stem .. ".o") then
-                local bytes, read_error = context.io:read_file(stem .. ".o")
+                local bytes, read_error = compiler_file_contents(context, stem .. ".o")
                 if not bytes then return nil, read_error end
                 prior = objectmetadata.read(bytes, stem .. ".o")
             end
             local native = prior and prior.object_metadata
             if native and native.parts and objectmetadata.validate_parts(native) then
                 for _, part in ipairs(native.parts) do
-                    output(stem .. part.c_suffix, owner)
+                    output(stem .. part.c_suffix, owner, nil, stem)
                     output(stem .. part.object_suffix, owner)
                     local part_stem = (stem .. part.object_suffix):gsub("[.]o$", "")
                     output(part_stem .. ".gcno", owner)
@@ -11537,53 +11691,31 @@ function driver.preflight_build_outputs(context, plan, options)
             if saved then
                 info.has_main = saved.object_metadata.has_main
                 info.type = saved.type
-                info.includes = saved.ffi_header_descriptor and
-                    saved.ffi_header_descriptor.direct_includes or {}
-                info.source_imports = saved.source_imports or {}
                 for _, dependency in ipairs(saved.c_header_dependencies or {}) do
                     if dependency.kind ~= "search" then input(dependency.path) end
                 end
             else
-                local headers, nodes = {}, {}
+                local nodes = {}
                 for _, filename in ipairs(source.files) do
                     local contents = source.contents and source.contents[filename] or
                         source.certified_contents and source.certified_contents[filename]
                     if not contents then
                         local read_error
-                        contents, read_error = context.io:read_file(filename)
+                        contents, read_error = compiler_file_contents(context, filename)
                         if not contents then return nil, read_error end
                     end
                     local parsed, parse_error = parser.parse(filename, contents)
                     if not parsed then return nil, parser.error_to_string(parse_error, filename) end
                     for _, node in ipairs(parsed) do
                         nodes[#nodes + 1] = node
-                        if node._tag == "Ast.TopLevelForeignImport" then
-                            headers[#headers + 1] = node.headername
-                        elseif node._tag == "Ast.TopLevelTypeAlias" then
+                        if node._tag == "Ast.TopLevelTypeAlias" then
                             info.aliases[node.name] = node.type
                         elseif node._tag == "Ast.TopLevelImport" then
                             info.imports[node.localname] = node
                         end
                     end
                 end
-                info.nodes, info.source_imports = nodes, {}
-                for _, import in ipairs(selected.imports or {}) do
-                    if import.source_required then
-                        info.source_imports[#info.source_imports + 1] = import.name
-                    end
-                end
-                if #headers > 0 then
-                    local config, config_error = header_options()
-                    if not config then return nil, config_error end
-                    config.source_dir = path.dirname(source.main)
-                    local includes, include_error = cdriver.resolve_includes(headers, config)
-                    if not includes then return nil, include_error end
-                    for _, include in ipairs(includes) do
-                        info.includes[#info.includes + 1] = include.include_kind == "quote"
-                            and assert(ffiheaders.quote_header(include.resolved))
-                            or ("<" .. include.include_name .. ">")
-                    end
-                end
+                info.nodes = nodes
             end
         end
     end
@@ -11706,52 +11838,42 @@ function driver.preflight_build_outputs(context, plan, options)
         for _, shim in ipairs(shims) do output(shim.filename, "generated Lua shim") end
     end
 
-    local function changed(name, visiting)
-        local info = modules[name]
-        if not info or visiting[name] then return false end
-        if info.fresh then return true end
-        visiting[name] = true
-        for _, dependency in ipairs(info.source_imports) do
-            if changed(dependency, visiting) then visiting[name] = nil; return true end
-        end
-        visiting[name] = nil
-        return false
-    end
-    local function header_text(name, emitted, lines)
-        local info = modules[name]
-        if not info or emitted[name] then return end
-        emitted[name] = true
-        for _, dependency in ipairs(info.source_imports) do header_text(dependency, emitted, lines) end
-        for _, include in ipairs(info.includes) do lines[#lines + 1] = "#include " .. include end
-    end
-    for _, name in ipairs(plan.order) do
-        local info = modules[name]
-        if info and changed(name, {}) then
-            local lines = {}
-            header_text(name, {}, lines)
-            if #lines > 0 then
-                local config, config_error = header_options()
-                if not config then return nil, config_error end
-                local cpp = require("c-parser.cpp")
-                local headers, header_error = cpp.new_context({
-                    io = context.io, compiler = config.compiler,
-                    language_mode = config.language_mode, language_flag = config.language_flag,
-                    compile_flags = config.compile_flags, cppflags = config.cppflags,
-                    fixed_include_dirs = config.compiler_include_dirs,
-                })
-                if not headers then return nil, header_error end
-                local synthetic = info.source.main .. ".preflight"
-                headers.header_dependency_observer = function(filename)
-                    if filename ~= synthetic then input(filename) end
-                    return true
-                end
-                for _, dependency in ipairs(headers.forced_header_dependencies or {}) do input(dependency.path) end
-                local preprocessed, preprocess_error = cpp.parse_contents(synthetic, table.concat(lines, "\n") .. "\n", headers)
-                if not preprocessed then return nil, preprocess_error end
+    local valid, validation_error, reservations =
+        driver.validate_provider_output_paths(nil, inputs, outputs)
+    if not valid then return nil, validation_error end
+
+    -- Old generated translation units predate the explicit marker. Recognize
+    -- their exact fixed helper or split-header prefix without parsing C.
+    local fixed = require("titan-compiler.cpreamble").fixed_prefix
+    local fixed_helper = assert(fixed:match("(static TITAN_UNUSED inline int.-\n})"))
+        :gsub("%s+", "")
+    for _, reserved in ipairs(reservations) do
+        local stem = c_outputs[reserved.path]
+        if stem and reserved.existing_mode == "file" then
+            local contents, read_error = context.io:read_file(reserved.path, 16384)
+            if not contents then return nil, read_error end
+            local owned = contents:sub(1, #driver.GENERATED_C_MARKER) ==
+                driver.GENERATED_C_MARKER
+            if not owned then
+                local compact = contents:gsub("%s+", "")
+                local private_include = "#include" ..
+                    assert(ffiheaders.quote_header(
+                        normalized_absolute_filename(stem .. ".priv.h")))
+                private_include = private_include:gsub("%s+", "")
+                local split_prefix = private_include ..
+                    "#ifdefined(__ELF__)#pragmaGCCvisibilitypush(protected)#endif"
+                owned = compact:find(fixed_helper, 1, true) ~= nil or
+                    compact:sub(1, #split_prefix) == split_prefix
+            end
+            if not owned then
+                return nil, "native provider output '" .. reserved.normalized ..
+                    "' for " .. reserved.owner .. " aliases input '" ..
+                    reserved.normalized .. "' (not compiler-generated C)"
             end
         end
     end
-    return driver.validate_provider_output_paths(nil, inputs, outputs)
+    plan.reservations = reservations
+    return true
 end
 
 -- Implementation notes: doc/implementation/multi-module-libraries.md#validated-publication-and-generated-shims

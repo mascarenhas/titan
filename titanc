@@ -81,15 +81,24 @@ local function release_locks()
         locks:release()
     end
 end
+local function close_coordinator_context()
+    if not resolver_context then return true end
+    -- Digest persistence is only a hint. Ordinary cache-write errors must not
+    -- replace compilation diagnostics; cancellation still propagates.
+    if output_locks then incremental.save_digest_cache(resolver_context) end
+    local closed, close_error = driver.close_resolver_context(resolver_context)
+    resolver_context = nil
+    return closed, close_error
+end
+
 local resolver_cleanup <close> = setmetatable({}, {
     __close = function()
         if resolver_context then
-            local context = resolver_context
-            resolver_context = nil
+            local close = close_coordinator_context
             -- Preserve the original exceptional-exit diagnostic. Ordinary
             -- exits use exit() or the explicit success close below and can
             -- report a cleanup failure directly.
-            pcall(driver.close_resolver_context, context)
+            pcall(close)
         end
         pcall(release_locks)
     end,
@@ -98,9 +107,7 @@ local resolver_cleanup <close> = setmetatable({}, {
 -- Work like assert, but don't print the stack trace
 local function exit(msg)
     if resolver_context then
-        local closed, close_err =
-            driver.close_resolver_context(resolver_context)
-        resolver_context = nil
+        local closed, close_err = close_coordinator_context()
         if not closed then
             msg = tostring(msg) .. "\nfailed to clean C probe service: " ..
                 tostring(close_err)
@@ -112,8 +119,7 @@ local function exit(msg)
 end
 
 local function finish()
-    local closed, close_err = driver.close_resolver_context(resolver_context)
-    resolver_context = nil
+    local closed, close_err = close_coordinator_context()
     if not closed then
         exit("failed to clean C probe service: " .. tostring(close_err))
     end
@@ -327,6 +333,7 @@ local lock_error
 output_locks, lock_error = build.lock_outputs(
     resolver_context.io, lock_directories, { verbose = args.verbose })
 if not output_locks then exit(lock_error) end
+incremental.load_digest_cache(resolver_context, args.output)
 
 local loader
 if args.print_ast then
@@ -381,8 +388,7 @@ else
         end,
     })
     if signal then
-        driver.close_resolver_context(resolver_context)
-        resolver_context = nil
+        close_coordinator_context()
         require("titan-compiler.jobs").propagate(signal)
     end
     if not built then exit(table.concat(diagnostics, "\n")) end
@@ -558,6 +564,8 @@ if not args.compile_only and not args.print_ast then
     if not descriptor then exit(descriptor_error) end
     local compile_prefix, prefix_error = driver.generated_compile_prefix()
     if not compile_prefix then exit(prefix_error) end
+    local backend, backend_error = driver.native_link_backend(resolver_context)
+    if not backend then exit(backend_error) end
     local spec = {
         output_root = lock_directories[1],
         outputs = outputs,
@@ -599,7 +607,7 @@ if not args.compile_only and not args.print_ast then
         archives = archives,
         runtime = runtime,
         native_libraries = {
-            backend = driver.native_link_backend(resolver_context),
+            backend = backend,
             compiler_argv = compile_prefix,
         },
     }
@@ -958,7 +966,8 @@ if not native_target then
 end
 local generated_entries = platform.windows and {} or nil
 local objects_valid, objects_err =
-    driver.validate_generated_objects(generated_objects, native_target, generated_entries)
+    driver.validate_generated_objects(
+        generated_objects, native_target, generated_entries, resolver_context)
 if not objects_valid then exit(objects_err) end
 local providers_valid, providers_err =
     driver.prepare_static_providers_for_target(
@@ -1107,8 +1116,7 @@ else
         })
         if pair_signal then
             -- Remove the resolver's temporaries before re-raising.
-            driver.close_resolver_context(resolver_context)
-            resolver_context = nil
+            close_coordinator_context()
             require("titan-compiler.jobs").propagate(pair_signal)
             exit(pair_err)
         elseif not pair then
