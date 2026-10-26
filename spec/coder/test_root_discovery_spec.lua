@@ -352,8 +352,11 @@ describe("automatic test-root discovery", function()
             assert.is_nil(missing)
             assert.truthy(message:find("shadowed by", 1, true))
             assert.truthy(message:find("'shadow_test'", 1, true))
-            assert.truthy(message:find(slashed(joined(a, "shadow_test.titan")),
+            assert.truthy(slashed(message):find(slashed(joined(a, "shadow_test.titan")),
                 1, true))
+            assert.truthy(slashed(message):find(slashed(joined(b, "shadow_test.titan")),
+                1, true))
+            assert.truthy(message:find("reorder --tree roots or narrow --test-dir", 1, true))
 
             local roots, sources = testroots.discover(discovery_context(),
                 { b }, {}, {}, b .. ";" .. a)
@@ -374,6 +377,12 @@ describe("automatic test-root discovery", function()
                 joined(root, "earlier") .. ";" .. joined(root, "later"))
             assert.is_nil(roots)
             assert.truthy(message:find("shadowed by folder module 'pkg'", 1, true))
+            assert.truthy(message:find("'pkg.alpha_tests'", 1, true))
+            assert.truthy(slashed(message):find(slashed(joined(root,
+                "later/pkg/alpha_tests.titan")), 1, true))
+            assert.truthy(slashed(message):find(slashed(joined(root,
+                "earlier/pkg/pkg.titan")), 1, true))
+            assert.truthy(message:find("reorder --tree roots or narrow --test-dir", 1, true))
         end)
 
         it("deduplicates one logical module claimed by two discovery areas",
@@ -860,6 +869,11 @@ end
     end
 
     local function compile_with(bootstrap, ...)
+        local arguments = { ... }
+        local compile_only = false
+        for _, argument in ipairs(arguments) do
+            if argument == "-c" or argument == "--compile-only" then compile_only = true end
+        end
         local extension = platform.windows and ".dll" or ".so"
         local argv = {
             "env", "TITAN_RUNTIME_PREBUILT=1", "CCACHE_DISABLE=1",
@@ -871,9 +885,10 @@ end
                 REPO .. "/?.lua;" .. REPO .. "/?/init.lua;",
                 REPO .. "/titan-runtime/bootstrap/?" .. extension .. ";") .. (bootstrap or ""),
             REPO .. "/titanc", "--tree", tree, "--output", output,
-            "--no-uv-bootstrap", "-v",
+            "-v",
         }
-        for _, argument in ipairs({ ... }) do argv[#argv + 1] = argument end
+        if not compile_only then argv[#argv + 1] = "--no-uv-bootstrap" end
+        for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
         return run(argv)
     end
 
