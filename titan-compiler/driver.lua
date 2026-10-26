@@ -1135,6 +1135,9 @@ local function run_argv(argv, verbose)
     local cmd, err = command_argv(argv)
     if not cmd then return nil, err end
     if verbose then print(cmd) end
+    if platform.windows and jobs.is_remote() then
+        return require("titan-compiler.process").run(argv)
+    end
     return os.execute(cmd)
 end
 
@@ -1406,8 +1409,8 @@ function driver.link_extra_flags()
 end
 
 -- Which linker dependency report a final program link can request, probed
--- once per resolver context: `darwin` (ld64 -dependency_info), `gnu` when
--- the linker accepts --dependency-file (GNU ld 2.35+, lld), else `none`
+-- once per resolver context: `darwin` (ld64 -dependency_info), `gnu` or `lld`
+-- when the linker accepts --dependency-file, else `none`
 -- (the final-link certificate then uses compiler-resolved -l paths).
 function driver.native_link_backend(context)
     if context.native_link_backend then return context.native_link_backend end
@@ -1423,7 +1426,8 @@ function driver.native_link_backend(context)
             })
             local result = context.io:run(argv, { stderr_to_stdout = true })
             if type(result) == "table" and result.started and result.ok then
-                backend = "gnu"
+                backend = (result.output or result.diagnostic or ""):find("LLD", 1, true)
+                    and "lld" or "gnu"
             end
             if context.io:lstat(report) then context.io:unlink(report) end
         end
@@ -4393,7 +4397,7 @@ function driver.defaultloader(static_deps, options)
     -- against; compilation requests of the same invocation use these values.
     context.codegen_policy = {
         c_parts = options.c_parts,
-        split_threshold = options.split_threshold,
+        split_threshold = options.split_threshold or coder.DEFAULT_SPLIT_THRESHOLD,
         test = options.test == true,
         coverage = options.coverage,
     }
@@ -6243,6 +6247,7 @@ function driver.worker_configuration(context)
             lua_source_path = driver.LUA_SOURCE_PATH,
             emit_line_directives = driver.EMIT_LINE_DIRECTIVES,
             output_root = driver.OUTPUT_ROOT,
+            clang_format = driver.CLANG_FORMAT,
             extra_cppflags = copy_strings(driver.EXTRA_CPPFLAGS),
             extra_cflags = copy_strings(driver.EXTRA_CFLAGS),
             native_compile_flags = driver.NATIVE_COMPILE_FLAGS and
@@ -6286,6 +6291,7 @@ function driver.new_worker_context(configuration, io_strategy)
     driver.LUA_SOURCE_PATH = settings.lua_source_path
     driver.EMIT_LINE_DIRECTIVES = settings.emit_line_directives
     driver.OUTPUT_ROOT = settings.output_root
+    driver.CLANG_FORMAT = settings.clang_format
     driver.EXTRA_CPPFLAGS = copy_strings(settings.extra_cppflags)
     driver.EXTRA_CFLAGS = copy_strings(settings.extra_cflags)
     driver.NATIVE_COMPILE_FLAGS = settings.native_compile_flags and
@@ -11450,6 +11456,293 @@ function driver.validate_provider_output_paths(
     return true, public_archive
 end
 
+-- Reserve the whole invocation before the scheduler invalidates any object.
+-- The maximum split inventory is compiler-owned even if code generation later
+-- chooses fewer parts. This pass parses declarations and preprocesses headers,
+-- but never typechecks, generates C, or starts a generated-code compilation.
+function driver.preflight_build_outputs(context, plan, options)
+    local inputs, input_seen, outputs, modules = {}, {}, {}, {}
+    local output_owners = {}
+    local function input(filename)
+        if filename and not input_seen[filename] then
+            input_seen[filename] = true
+            inputs[#inputs + 1] = filename
+        end
+    end
+    local function output(filename, owner, mode)
+        if output_owners[filename] ~= owner then
+            outputs[#outputs + 1] = { path = filename, owner = owner, mode = mode }
+            output_owners[filename] = owner
+        end
+    end
+    for _, filename in ipairs(options.native_inputs or {}) do input(filename) end
+    local max_parts, parts_error = driver.effective_c_parts(options.c_parts)
+    if not max_parts then return nil, parts_error end
+    local service_options
+    local function header_options()
+        if not service_options then
+            local service, err = driver.get_probe_service(context)
+            if not service then return nil, err end
+            service_options = service:cdriver_process_options()
+        end
+        return service_options
+    end
+    for _, name in ipairs(plan.order) do
+        local selected = plan.modules[name]
+        if selected.kind == "source" then
+            local source, certified = selected.source, selected.certified
+            local saved = certified and certified.status == "hit" and certified.record
+            local info = { source = source, aliases = {}, imports = {}, includes = {},
+                saved = saved, fresh = not saved }
+            modules[name] = info
+            local stem = driver.module_output_stem(source.native_output or source.main, name)
+            local owner = "logical module '" .. name .. "'"
+            for index = 0, max_parts - 1 do
+                output(driver.part_c_filename(stem, index), owner)
+                output(driver.part_object_filename(stem, index), owner)
+                local part_stem = driver.part_object_filename(stem, index):gsub("[.]o$", "")
+                output(part_stem .. ".gcno", owner)
+                output(part_stem .. ".gcda", owner)
+            end
+            -- A smaller new split policy can still retire the old inventory.
+            local prior = certified and certified.record
+            if not prior and context.io:lstat(stem .. ".o") then
+                local bytes, read_error = context.io:read_file(stem .. ".o")
+                if not bytes then return nil, read_error end
+                prior = objectmetadata.read(bytes, stem .. ".o")
+            end
+            local native = prior and prior.object_metadata
+            if native and native.parts and objectmetadata.validate_parts(native) then
+                for _, part in ipairs(native.parts) do
+                    output(stem .. part.c_suffix, owner)
+                    output(stem .. part.object_suffix, owner)
+                    local part_stem = (stem .. part.object_suffix):gsub("[.]o$", "")
+                    output(part_stem .. ".gcno", owner)
+                    output(part_stem .. ".gcda", owner)
+                end
+            end
+            for _, header in ipairs({
+                { suffix = ".priv.h", marker = driver.PRIVATE_HEADER_MARKER },
+                { suffix = ".titan.h", marker = driver.FOREIGN_HEADER_MARKER },
+                { suffix = ".ffi.h", marker = driver.FFI_HEADER_MARKER },
+            }) do
+                local filename = stem .. header.suffix
+                output(filename, owner)
+                local valid, header_error = validate_generated_header_entry({
+                    filename = filename, marker = header.marker, contents = "",
+                })
+                if not valid then return nil, header_error end
+            end
+            for _, filename in ipairs(source.files) do input(filename) end
+            if saved then
+                info.has_main = saved.object_metadata.has_main
+                info.type = saved.type
+                info.includes = saved.ffi_header_descriptor and
+                    saved.ffi_header_descriptor.direct_includes or {}
+                info.source_imports = saved.source_imports or {}
+                for _, dependency in ipairs(saved.c_header_dependencies or {}) do
+                    if dependency.kind ~= "search" then input(dependency.path) end
+                end
+            else
+                local headers, nodes = {}, {}
+                for _, filename in ipairs(source.files) do
+                    local contents = source.contents and source.contents[filename] or
+                        source.certified_contents and source.certified_contents[filename]
+                    if not contents then
+                        local read_error
+                        contents, read_error = context.io:read_file(filename)
+                        if not contents then return nil, read_error end
+                    end
+                    local parsed, parse_error = parser.parse(filename, contents)
+                    if not parsed then return nil, parser.error_to_string(parse_error, filename) end
+                    for _, node in ipairs(parsed) do
+                        nodes[#nodes + 1] = node
+                        if node._tag == "Ast.TopLevelForeignImport" then
+                            headers[#headers + 1] = node.headername
+                        elseif node._tag == "Ast.TopLevelTypeAlias" then
+                            info.aliases[node.name] = node.type
+                        elseif node._tag == "Ast.TopLevelImport" then
+                            info.imports[node.localname] = node
+                        end
+                    end
+                end
+                info.nodes, info.source_imports = nodes, {}
+                for _, import in ipairs(selected.imports or {}) do
+                    if import.source_required then
+                        info.source_imports[#info.source_imports + 1] = import.name
+                    end
+                end
+                if #headers > 0 then
+                    local config, config_error = header_options()
+                    if not config then return nil, config_error end
+                    config.source_dir = path.dirname(source.main)
+                    local includes, include_error = cdriver.resolve_includes(headers, config)
+                    if not includes then return nil, include_error end
+                    for _, include in ipairs(includes) do
+                        info.includes[#info.includes + 1] = include.include_kind == "quote"
+                            and assert(ffiheaders.quote_header(include.resolved))
+                            or ("<" .. include.include_name .. ">")
+                    end
+                end
+            end
+        end
+    end
+    local binary_names = {}
+    for name, selected in pairs(plan.modules) do
+        if selected.kind == "dynamic" or selected.kind == "static" then
+            binary_names[#binary_names + 1] = name
+        end
+    end
+    table.sort(binary_names, util.bytewise_less)
+    for _, name in ipairs(binary_names) do
+        local selected = plan.modules[name]
+        input(selected.file or selected.archive)
+    end
+
+    -- Resolve just the transparent signature shapes needed for main selection,
+    -- including local/imported aliases; the ordinary checker remains authority
+    -- for all declaration validity and function bodies.
+    local function shape(name, typ, seen)
+        if not typ then return nil end
+        seen = seen or {}
+        if seen[typ] then return nil end
+        seen[typ] = true
+        local tag, info = typ._tag, modules[name]
+        if tag == "Ast.TypeInteger" or tag == "Type.Integer" then return "integer"
+        elseif tag == "Ast.TypeString" or tag == "Type.String" then return "string"
+        elseif (tag == "Ast.TypeArray" or tag == "Type.Array") and typ.isconst.tag == "no" then
+            if shape(name, typ.subtype or typ.elem, seen) == "string" then return "{string}" end
+        elseif tag == "Ast.TypeName" and #(typ.typeargs or {}) == 0 then
+            return shape(name, info and info.aliases[typ.name], seen)
+        elseif tag == "Ast.TypeQualName" and #(typ.typeargs or {}) == 0 then
+            local import = info and info.imports[typ.module]
+            local dependency = typ.module == "M" and name or import and import.modname
+            local target = dependency and modules[dependency]
+            if target and not target.saved then
+                return shape(dependency, target.aliases[typ.name], seen)
+            end
+            local selected = dependency and driver.imported[dependency]
+            local modtype = target and target.type or selected and selected.type
+            if modtype then
+                return shape(dependency, types.module_type_member(modtype, typ.name,
+                    import and import.source_required), seen)
+            end
+        end
+    end
+    local main
+    for _, name in ipairs(options.roots) do
+        local info = modules[name]
+        if info and not info.saved then
+            for _, node in ipairs(info.nodes) do
+                if node._tag == "Ast.TopLevelFunc" and node.name == "main"
+                   and #node.params == 1 and node.params[1].name ~= "..."
+                   and not node.flexrettype and #node.rettypes == 1
+                   and shape(name, node.params[1].type) == "{string}"
+                   and shape(name, node.rettypes[1]) == "integer" then
+                    info.has_main = true
+                end
+            end
+        end
+        if not options.test and info and info.has_main and not options.compile_only then
+            if main then
+                return nil, name .. ": multiple main functions found (already declared in " .. main .. ")"
+            end
+            main = name
+        end
+    end
+    local builds_program = not options.compile_only and (options.test or main ~= nil)
+    if options.exe and not builds_program then
+        return nil, "--exe is only valid when compiling a standalone or test executable"
+    elseif options.no_uv_bootstrap and not builds_program then
+        return nil, "--no-uv-bootstrap is only valid when compiling a standalone executable"
+    elseif options.coverage and not options.compile_only and not builds_program then
+        return nil, "--coverage requires a test or standalone executable; use -c for coverage objects"
+    end
+    if builds_program then
+        local root = options.test and options.roots[1] or main
+        if platform.windows then
+            local paths, err = driver.windows_program_paths(
+                options.test and require("titan-compiler.test_runner").MODULE_NAME or main,
+                options.exe, options.test and root or nil, options.output_root)
+            if not paths then return nil, err end
+            output(paths.executable, "standalone executable")
+            output(paths.provider, "standalone provider")
+        else
+            local executable = options.exe or modules[root].source.program_output or root:gsub("[.]", "/")
+            output(executable, "standalone executable")
+            if driver.IS_DARWIN then output(executable .. ".dSYM", "standalone dSYM", "directory") end
+        end
+    elseif not options.compile_only then
+        local provider, _, left, right = driver.common_module_provider(options.roots)
+        if not provider then
+            return nil, "cannot link modules into one shared library: '" ..
+                tostring(left) .. "' and '" .. tostring(right) .. "' have no common module prefix"
+        end
+        local names, seen = {}, {}
+        for name in pairs(modules) do seen[name] = true end
+        for _, selected in ipairs(context.selected_static_providers) do
+            for name in pairs(selected.entries) do seen[name] = true end
+        end
+        for name in pairs(seen) do names[#names + 1] = name end
+        table.sort(names, util.bytewise_less)
+        local shims, library = driver.plan_module_shims(provider, names, options.output_root)
+        if not shims then return nil, library end
+        output(library, "provider DSO")
+        if not platform.windows then
+            output((library:gsub("[.]so$", ".a")), "provider archive")
+            if driver.IS_DARWIN then output(library .. ".dSYM", "provider dSYM", "directory") end
+        end
+        for _, shim in ipairs(shims) do output(shim.filename, "generated Lua shim") end
+    end
+
+    local function changed(name, visiting)
+        local info = modules[name]
+        if not info or visiting[name] then return false end
+        if info.fresh then return true end
+        visiting[name] = true
+        for _, dependency in ipairs(info.source_imports) do
+            if changed(dependency, visiting) then visiting[name] = nil; return true end
+        end
+        visiting[name] = nil
+        return false
+    end
+    local function header_text(name, emitted, lines)
+        local info = modules[name]
+        if not info or emitted[name] then return end
+        emitted[name] = true
+        for _, dependency in ipairs(info.source_imports) do header_text(dependency, emitted, lines) end
+        for _, include in ipairs(info.includes) do lines[#lines + 1] = "#include " .. include end
+    end
+    for _, name in ipairs(plan.order) do
+        local info = modules[name]
+        if info and changed(name, {}) then
+            local lines = {}
+            header_text(name, {}, lines)
+            if #lines > 0 then
+                local config, config_error = header_options()
+                if not config then return nil, config_error end
+                local cpp = require("c-parser.cpp")
+                local headers, header_error = cpp.new_context({
+                    io = context.io, compiler = config.compiler,
+                    language_mode = config.language_mode, language_flag = config.language_flag,
+                    compile_flags = config.compile_flags, cppflags = config.cppflags,
+                    fixed_include_dirs = config.compiler_include_dirs,
+                })
+                if not headers then return nil, header_error end
+                local synthetic = info.source.main .. ".preflight"
+                headers.header_dependency_observer = function(filename)
+                    if filename ~= synthetic then input(filename) end
+                    return true
+                end
+                for _, dependency in ipairs(headers.forced_header_dependencies or {}) do input(dependency.path) end
+                local preprocessed, preprocess_error = cpp.parse_contents(synthetic, table.concat(lines, "\n") .. "\n", headers)
+                if not preprocessed then return nil, preprocess_error end
+            end
+        end
+    end
+    return driver.validate_provider_output_paths(nil, inputs, outputs)
+end
+
 -- Implementation notes: doc/implementation/multi-module-libraries.md#validated-publication-and-generated-shims
 local function validate_generated_shim_destination(filename)
     local parents_ok, parents_err = validate_output_ancestors(filename)
@@ -12114,7 +12407,6 @@ function driver.compile_program(modname, libnames, link, verbose, extra_objects,
         driver.generated_output_path(modname:gsub("[.]", "/") .. "__entrypoint.c", options.output_root)
     output_ok, output_err = ensure_output_parent(entrypoint_name)
     if not output_ok then return nil, output_err end
-    os.remove(execname)
     local entrypoint_o = entrypoint_name:gsub("[.]c$", ".o")
     os.remove(entrypoint_o)
 
@@ -12133,7 +12425,12 @@ function driver.compile_program(modname, libnames, link, verbose, extra_objects,
     local args
     args, err = compiler_argv(false)
     if not args then return nil, err end
-    append_argv(args, { "-o", execname, entrypoint_o })
+    local staged, stage_directory = driver.staged_library_output(execname)
+    if not staged then return nil, stage_directory end
+    local stage_cleanup <close> = setmetatable({}, {
+        __close = function() remove_path(stage_directory) end,
+    })
+    append_argv(args, { "-o", staged, entrypoint_o })
     for _, libname in ipairs(libnames) do
         table.insert(args, libname)
     end
@@ -12149,9 +12446,73 @@ function driver.compile_program(modname, libnames, link, verbose, extra_objects,
     append_argv(args, driver.link_extra_flags())
     -- The final-link certificate's linker dependency report, final image only.
     append_argv(args, options.final_link_flags)
-    local ok, term, code = driver.run_link_command(args, verbose, execname)
-    if ok then run_dsymutil(execname, verbose) end
-    return ok, term, code
+    local ok, term, code = driver.run_link_command(args, verbose, staged)
+    if not ok then return nil, term, code end
+    if lfs.symlinkattributes(staged, "mode") ~= "file" then
+        return nil, "staged executable '" .. staged .. "' is not a regular file"
+    end
+    ok, term, code = run_dsymutil(staged, verbose, true)
+    if not ok then return nil, term, code end
+    local staged_dsym, public_dsym = staged .. ".dSYM", execname .. ".dSYM"
+    if driver.IS_DARWIN and
+       (lfs.symlinkattributes(staged_dsym, "mode") ~= "directory" or
+        lfs.symlinkattributes(path.join(staged_dsym, "Contents", "Resources",
+            "DWARF", path.basename(staged)), "mode") ~= "file") then
+        return nil, "staged executable '" .. staged .. "' has no complete companion dSYM"
+    end
+    if options.before_commit then
+        local ready, commit_error = options.before_commit()
+        if not ready then return nil, commit_error end
+    end
+
+    -- The image rename is the commit point. Darwin's companion moves first;
+    -- a caught publication failure restores its predecessor without touching
+    -- the old executable. A failed rollback retains the only backup.
+    local backup
+    if driver.IS_DARWIN then
+        local previous = lfs.symlinkattributes(public_dsym, "mode")
+        if previous and previous ~= "directory" then
+            return nil, "executable dSYM output '" .. public_dsym ..
+                "' is not a nonlink directory"
+        end
+        if previous then
+            local reserve_error
+            backup, reserve_error = driver.sibling_temporary_path(public_dsym .. ".old")
+            if not backup then return nil, reserve_error end
+            local moved, move_error = rename_output(public_dsym, backup)
+            if not moved then return nil, move_error end
+        end
+        local moved, move_error = rename_output(staged_dsym, public_dsym)
+        if not moved then
+            if backup then
+                local restored, restore_error = rename_output(backup, public_dsym)
+                if not restored then
+                    return nil, tostring(move_error) .. "\ncannot restore dSYM: " ..
+                        tostring(restore_error) .. "; predecessor retained at " .. backup
+                end
+            end
+            return nil, move_error
+        end
+    end
+    local published, publish_error = rename_output(staged, execname)
+    if not published then
+        if driver.IS_DARWIN then
+            remove_path(public_dsym)
+            if backup then
+                local restored, restore_error = rename_output(backup, public_dsym)
+                if not restored then
+                    return nil, tostring(publish_error) .. "\ncannot restore dSYM: " ..
+                        tostring(restore_error) .. "; predecessor retained at " .. backup
+                end
+            end
+        end
+        return nil, publish_error
+    end
+    if backup then
+        local removed, remove_error = remove_path(backup)
+        if not removed then return nil, remove_error end
+    end
+    return true
 end
 
 return driver
