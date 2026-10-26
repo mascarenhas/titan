@@ -741,10 +741,10 @@ requested job bound through the native completion transport described above.
 Windows error traces use libbacktrace and generated DWARF to
 interleave Lua frames with native Titan filenames, lines, and function names.
 The separate static libbacktrace archive and static unwind linkage avoid an
-additional runtime DLL. `titan.io.popen`
+additional runtime DLL. `titan.os.popen`
 uses the system `cmd.exe` with `/d /s /c`, writable stdin, and merged output.
 Its command string must use native Windows shell syntax; see
-[shell commands](../language/standard-library-io.md#shell-commands). Use
+[shell commands](../language/standard-library-os.md#shell-commands). Use
 `titan.os.spawn` for direct executable and argument control. Both retain the
 existing process ownership rules, without a descendant-termination guarantee.
 

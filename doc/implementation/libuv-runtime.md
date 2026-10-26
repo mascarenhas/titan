@@ -318,20 +318,20 @@ an `Error` with the caught Lua error value and raw trace; it does not by itself
 fail the Runtime. Raised nil follows the ordinary
 [Lua error normalization](error-handling.md#runtime-trace-model).
 
-`advance_task` resumes the root through `resume_root`, which calls the private
-non-raising `Coroutine:transfer_outcome` (see
-[coroutine entry](coroutines.md#entry-function)). A root that dies with an
-uncaught error returns that error instead of raising it. `resume_root` then
-appends the driver's propagation trace to the root's own trace, by raising
-through `raise_with_appended_trace`, only when the failure will be reported:
-when the Task has no cancellation reason and has not already recorded a
-failure. A cancellation is sticky and takes precedence at publication, and a
-`run_with_cleanup` wrapper has already recorded its body's failure with the
-body's trace, so neither ever reports a propagation trace. Both drop the
-staged trace. A cancelled root's failure is recorded without a trace, and a
-`run_with_cleanup` root keeps the failure and trace that its wrapper recorded.
-This saves one traceback capture of the scheduler stack per cancelled parked
-Task. `advance_task` treats a raised and a returned root failure alike.
+`advance_task` resumes the root through `resume_root`, which calls the public
+`Coroutine:transfer` through ordinary `import "coroutine"` (see
+[coroutine entry](coroutines.md#entry-function)). The fixed tuple returns an
+uncaught-error flag, value, and optional already captured callee trace;
+coroutine consumes its private pending-trace handoff before returning.
+`resume_root` raises/catches locally once and concatenates the driver's
+propagation trace only when the failure will be reported: the Task has no
+cancellation reason and has not already recorded a failure. A cancellation is
+sticky and wins publication; `run_with_cleanup` already recorded its body's
+failure and trace. Neither captures a propagation trace. The optional trace
+travels through `resume_root` to `advance_task`, whose catch still handles
+transfer/infrastructure exceptions. No per-switch outcome object is allocated.
+The native trace-count regression remains one capture for parked cancellation,
+two for ordinary reported failure, and one for already recorded body failure.
 
 The 17 combinators (`join`, `join_two`..`join_five`, and
 `any_`/`race_`/`all_` at arities two through five) keep independent

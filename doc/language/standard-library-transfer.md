@@ -135,13 +135,23 @@ these modules is transferable:
 | [`net.Connection`](standard-library-net.md#transferring-connections), [`ssl.Connection`](standard-library-ssl.md#transferring-connections) | Idle connected transport plus buffered TCP/TLS state. Each has `discard_transfer_payload(payload): integer`. Listeners and arbitrary UV handles are not included. |
 | [`http.Exchange`, `http.UpgradedStream`](standard-library-http.md#resource-handoff), [`websocket.Connection`](standard-library-websocket.md#transferring-connections) | The documented eligible exchange/session state plus its child transport. Each has `discard_transfer_payload(payload): integer`; individual HTTP request/response objects are not independent owners to move. |
 | [`fs.File`](standard-library-fs.md#transferring-files) | Open idle descriptor plus retained read bytes; no pending operation. No public `discard_transfer_payload`: recover with `File.from_transfer_payload` and explicitly close the adopted File. Filesystem Watchers do not implement these hooks. |
-| [`os.InputStream`, `os.OutputStream`](standard-library-os.md#transferring-process-streams) | Eligible captured pipes plus buffered/terminal state. Unused standard-stream facades preserve their stable process descriptor identity rather than moving it. No public `discard_transfer_payload`; use the documented adoption/close recovery. `os.Process` never moves. |
-| [`io.InputOutputStream`](standard-library-io.md#transferring-shell-streams) | Eligible shell communication pipes only, not child-process ownership. No public `discard_transfer_payload`; recover through adoption/close. |
+| [`os.InputStream`, `os.OutputStream`](standard-library-os.md#transferring-process-streams) | Eligible captured pipes plus buffered/terminal state. Unused standard-stream facades preserve their stable descriptor identity. Each has `discard_transfer_payload(payload): integer`, requiring neither Task nor Runtime; parent identities are no-ops. `os.Process` never moves. |
+| [`os.InputOutputStream`](standard-library-os.md#transferring-shell-streams) | Eligible shell communication pipes only, not child-process ownership. No public composite `discard_transfer_payload`; recover through adoption/close. |
 | [`sqlite3.Connection`](standard-library-sqlite3.md#transferring-connections) | Idle database handle with no open Statement or Cursor. No public `discard_transfer_payload`: recover with `Connection.from_transfer_payload` (or the retained policy's `to_value`) and close it. Statements and Cursors do not implement handoff. |
 
 Adoption/close recovery retains each resource's usual Runtime and Task
 requirements. Do not invent a generic discard hook for types that do not
 export one, or abandon their payloads in a lossy transport.
+
+OS endpoint disposers are ordinary Titan functions requiring a live Lua state,
+not C-only packet-resource release callbacks. They validate the owning schema
+and discriminators before closing, and a native close attempt consumes ownership
+even on a negative status. Their availability does not register OS pipes as
+packet resources or make a lossy/coalescing transport safe for manual handoffs.
+The shell composite's nominal identity is `titan.os.InputOutputStream`;
+recompile concrete shell consumers and retire old in-flight handoffs before
+switching providers. The inner two-string payload format does not preserve a
+previous outer nominal identity.
 
 ### Shared manual-handoff rules
 
@@ -168,7 +178,7 @@ exceptions.
 4. **Serialization failure after detachment.** If serializing the enclosing value
    fails after a hook has detached a resource, the built-in hooks close the
    detached resource themselves and leave the source closed or detached.
-   `io.InputOutputStream` has one documented exception for a failed second pipe.
+   `os.InputOutputStream` has one documented exception for a failed second pipe.
 5. **Runtime and Task requirements.** The hooks are synchronous and do not need a
    running Task. Higher-level UV adapters (`net`, `ssl`, HTTP, WebSocket, and
    captured process/shell streams) require an active, non-closing Runtime for

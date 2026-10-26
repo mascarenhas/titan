@@ -641,10 +641,31 @@ that wrapper detaches both source aliases.
 
 The payload follows the
 [shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules).
-These types have no public `discard_transfer_payload`: recover a payload that
-was not delivered by adopting it locally and closing the stream. Native payload
-copies do not create additional owners, and discarded payloads do not close
-resources.
+Copies do not create additional owners, and dropping the bytes does not close
+resources. For failed delivery, adopt and close the stream, or dispose the
+unadopted payload directly:
+
+```text
+function InputStream.discard_transfer_payload(payload: string): integer
+function OutputStream.discard_transfer_payload(payload: string): integer
+```
+
+These ordinary Titan APIs decode the owning type's opaque schema and close its
+optional detached captured pipe without adopting it. They need a live Lua/Titan
+state but no current Task or active Runtime, and still work after Runtime
+shutdown has closed adoption. Input descriptor 0 and output descriptors 1/2
+are identity-only no-ops: disposal never resolves, initializes, or closes parent
+stdio, including file-backed parent streams. Inert captured payloads also
+return zero without a native close.
+
+Malformed schemas, terminal markers, or descriptor discriminators raise before
+touching native ownership. A native close attempt consumes the capability even
+if its returned status is negative: clear retained payload state before
+reporting that status, and never retry, re-adopt, or double-discard those bytes.
+Raw payloads are trusted process-local manual capabilities, not authenticated or
+replay-safe data. Disposal neither terminates nor reaps the originating Process.
+It does not register OS streams as packet resources or make
+`transfer.discard_message` dispose them automatically.
 
 ### Process lifecycle
 
@@ -683,9 +704,106 @@ child's lifecycle. `uv_close` retires the watcher but does not signal, wait for,
 the child; the child may outlive the Runtime. Programs that require termination
 or reaping must explicitly call `kill` and `wait` while that Runtime is active.
 
-For the shell-command convenience API with writable stdin and one merged
-output stream, see [`io.popen`](standard-library-io.md#shell-commands).
-`os.spawn` remains the direct executable/argv API for separate stream control.
+
+## Shell commands
+
+```text
+record InputOutputStream
+
+function InputOutputStream:read(): string?
+function InputOutputStream:read_until(delimiter: string,
+                                      chop: boolean?): string?
+function InputOutputStream:write(data: string)
+function InputOutputStream:close()
+function InputOutputStream:wait(): ExitStatus
+function InputOutputStream:to_transfer_payload(): string
+function InputOutputStream.from_transfer_payload(payload: string): InputOutputStream
+
+function popen(command: string): InputOutputStream
+```
+
+`popen` is the standard library's shell-string convenience. On Linux and
+macOS it invokes `/bin/sh -c command`. On Windows it selects `cmd.exe` from the
+Windows system directory and invokes it with `/d /s /c`. Command strings use
+the selected shell's syntax, including its quoting, expansion, operators, and
+redirection rules; POSIX shell commands are not portable to `cmd.exe`.
+
+Use `os.spawn` when an executable and arguments must be passed directly or
+stdout and stderr must remain separate. The command is text and rejects an
+embedded NUL before native process creation. `popen` has no mode argument; its
+captured pipes carry byte strings without CRT text-mode translation. A child
+program still chooses its own text encoding.
+
+The child gets a captured stdin pipe and one captured pipe shared by stdout and
+stderr. `InputOutputStream:write` writes the child's stdin, while `read` and
+`read_until` consume that one merged output stream. There is exactly one
+high-level facade over the merged pipe, so no second reader can race through a
+separate stderr object. The record satisfies all seven `io` Interfaces
+structurally at the consumer's conversion site and adds `wait`; OS does not
+import IO to declare conformance.
+
+`wait` reaps the child and stores its complete `os.ExitStatus`. Later calls
+return the stored status without waiting again; normal and signal termination
+retain the same representation documented by `os.Process:wait`.
+
+`close` is idempotent. Its first call closes stdin, requests `term` only when
+the child is still running, and waits for that termination when necessary.
+After stdin close succeeds, a final cleanup closes the one merged InputStream
+and discards unread buffered output even when signalling or waiting raises.
+The composite facade reaches its terminal closed state only after process
+cleanup completes, so a later `close` can retry work that did not reach that
+point. If `wait` has already stored a status, `close` does not signal the exited
+child. A later `wait` returns the cached or already-retained process status;
+after output disposal, later `read` and `read_until` calls return nil.
+Signalling targets the launched shell process; neither `close` nor Task
+cancellation guarantees termination of its descendants.
+
+For large bidirectional traffic, schedule writing and reading concurrently so
+neither operating-system pipe can fill while the other direction is waiting.
+Read merged output through EOF before an ordinary `wait` when the child may
+produce more than one pipe buffer. Errors and cancellation follow the same
+Task and native-owner cleanup rules as direct process streams.
+
+## Transferring shell streams
+
+`InputOutputStream:to_transfer_payload()` transfers the idle writable stdin and
+merged readable stdout/stderr pipes. Pending wrapper operations and underlying
+pipe reads or writes are rejected before either pipe is detached. Native pipe
+handoff follows the platform restrictions of
+[`os.InputStream` and `os.OutputStream`](standard-library-os.md#transferring-process-streams).
+`InputOutputStream.from_transfer_payload(payload)` adopts both pipes on the
+current destination Runtime, including buffered output.
+
+Captured shell output starts reading as soon as `popen` creates the process.
+On Windows this normally leaves an overlapped read pending even before the
+first `read()` call. Such live shell pipes reject transfer with `EBUSY`;
+yielding alone does not make them idle. Rejection preserves the original
+wrapper's writes, reads, and child `wait()`.
+
+Child-process ownership remains at the origin. Keep the original Runtime
+running to receive and reap the child's exit. The original wrapper's `wait()`
+still returns the child status, and its `close()` still terminates a running
+child when needed. Its transferred read side returns EOF and its writes
+raise. The destination owns communication only: `wait()` raises
+`transferred InputOutputStream has no child process owner`, while `close()`
+closes its pipes without signalling or waiting for the child. Closing the
+origin wrapper can therefore terminate a child still communicating through the
+destination.
+
+If native handoff of the second pipe fails after the first succeeded, the
+source retains the first pipe's payload. A later transfer retries with that
+payload; `write()` re-adopts it locally, while `close()` directly retires its
+descriptor even after Runtime shutdown has closed transfer admission. If
+serializing the payload after both pipes detach fails, the hook closes both
+detached pipes and leaves the source communication facades closed; the original
+child remains available through `wait()` and `close()`.
+
+The payload follows the
+[shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules):
+deliver and adopt it exactly once within this process, recover failed delivery,
+and explicitly close the destination. There is no public
+`discard_transfer_payload`. Copying or dropping a payload does not duplicate or
+close the owned pipes.
 
 ## Errors
 

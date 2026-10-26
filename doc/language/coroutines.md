@@ -25,6 +25,8 @@ function create(func: function (value): (value), default_tag: value): Coroutine
 function running(): Coroutine?
 function Coroutine:resume(arg: value, tag: value): value
 function Coroutine:error(err: value, tag: value): value
+function Coroutine:transfer(payload: value, tag: value,
+                            inject_error: boolean): (boolean, value, string?)
 function Coroutine:status(): string
 
 function yield(arg: value, tag: value): value
@@ -194,6 +196,33 @@ same error value in the caller while preserving the coroutine traceback.
 
 Calling `co:error(err, tag)` before the first normal `resume` raises
 `err` without calling the entry function.
+
+## Non-raising transfer outcomes
+
+`co:transfer(payload, tag, inject_error)` uses the same tags, stacked-chain
+routing, and input rules as `resume` when `inject_error` is false and `error`
+when it is true. Error injection before first entry never calls the body.
+The fixed result tuple is:
+
+- `(false, payload, nil)` for a successful yield or normal return; inspect
+  `status()` to distinguish suspension from normal completion.
+- `(true, error, traceback)` for an uncaught callee error. The boolean means
+  **failed**, not dead. Nil and false are ordinary payloads and error values.
+
+As with `resume`/`error`, actually raising nil follows Lua 5.5's
+[`"<no error object>"` normalization](error-handling.md#raising-errors).
+This does not affect successful nil payloads or turn false into success.
+
+The optional trace is the callee's already captured traceback. Coroutine
+consumes its pending handoff internally and returns the trace as an ordinary
+rooted string; the caller has no hidden trace slot to clear. Successful
+switches allocate no outcome wrapper and capture or copy no traceback.
+A scheduler may append its own propagation trace only when it will report the
+failure; cancellation and already recorded body failures need not pay for it.
+
+Only uncaught callee errors become outcomes. Invalid tags/states, switching
+from finalizers, native transfer failures, and allocation/stack failures still
+raise normally in the caller. Abandoned-coroutine unwind remains noncatchable.
 
 ## Status
 

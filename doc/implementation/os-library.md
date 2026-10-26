@@ -158,12 +158,106 @@ The exit watcher, `ProcessOwner`, and the reap obligation never move.
 Transferring a stream leaves the source Process's field as an inert facade, so
 process cleanup cannot close the adopted descriptor.
 
-The private helpers `discard_input_transfer_payload` and
-`discard_output_transfer_payload` decode these schemas and close an unadopted
-pipe through `uv.pipe_t.discard_transfer_payload`, without a Runtime. `io`
-uses them for shell-stream cleanup; callers clear their retained packet after
-the native close attempt and before reporting its status, because a close
-attempt is terminal even on `EINTR`.
+The public `InputStream.discard_transfer_payload` and
+`OutputStream.discard_transfer_payload` statics decode their own schemas and
+close an unadopted pipe through `uv.pipe_t.discard_transfer_payload`, without a
+Runtime or Task. They are ordinary stateful Titan APIs, not no-Lua C release
+callbacks. Schema, input terminal-marker, and descriptor validation precede
+native disposal. Parent descriptor identities and inert captured payloads
+return zero without resolving parent stdio or initializing a Runtime.
+Callers clear their retained packet after the native close attempt and before
+reporting its status, because that attempt is terminal even on `EINTR`.
+Manual capabilities remain exactly-once and are never automatically disposed by
+native packet discard.
+
+## Shell process stream
+
+`popen` builds the platform shell command and directly calls `spawn` with
+captured writable stdin plus one merged stdout/stderr pipe. Shell selection and
+Windows argument transport are described in
+[spawn transaction and exit delivery](#spawn-transaction-and-exit-delivery).
+There are no CRT mode flags or text-mode conversions. `popen` narrows the
+optional Process stream fields and constructs one `InputOutputStream`:
+
+| Field | Meaning |
+| --- | --- |
+| `process` | Originating `os.Process`; nil on a transferred destination. |
+| `input` / `output` | The writable and merged-readable stream facades. `os.spawn` stores the same InputStream in both `stdout` and `stderr`, so no second facade exists. |
+| `input_packet` | A staged writable-pipe transfer payload (see below). |
+| `status` | Cached `ExitStatus`. |
+| `closed` | Set only after close has completed. |
+| `pending_operations` | Count of running `read`, `read_until`, `write`, `wait`, and `close` calls. |
+
+`read`, `read_until`, and `write` delegate directly to the facades, so the
+record structurally satisfies all seven I/O Interfaces without another buffer
+or dispatch layer. `wait` calls `Process:wait` only while `status` is nil and
+returns the cached normal-or-signal result afterwards.
+
+`close` returns early only when `closed` is set. It discards a staged input
+packet, closes stdin, and, if no status is cached and `Process:is_running`
+still reports a live child, sends `term` and calls the caching `wait`. A
+`defer` closes the merged InputStream even if signalling or waiting raises,
+and sets `closed` only when process cleanup succeeded, so a later call can
+retry what did not complete. Signals address the launched shell; the facade
+does not own a process tree or terminate descendants on close or Task
+cancellation.
+
+## Shell-stream transfer
+
+The generic manual-handoff rules are in
+[manual resource handoff](transfer-library.md#manual-resource-handoff). This
+section covers only the shell-stream gate and schema.
+
+The hooks move only the two captured pipes. The originating `Process` and its
+UV exit callback stay in the source Runtime; that callback keeps the private
+`ProcessOwner` rooted until exit even if the source `InputOutputStream` becomes
+unreachable. After a successful transfer the source has no communication
+facades but still owns wait and termination. The destination has no Process:
+its `wait` raises, and its `close` only closes its two streams.
+
+`to_transfer_payload` rejects a closed facade and a nonzero
+`pending_operations`, then runs the OS module's `stream_transfer_preflight` on
+both Stdio owners before detaching either, so a pending operation on the second
+pipe cannot detach the first. Process creation starts the captured output read
+before publishing the facade, so on Windows a fresh shell pipe commonly has a
+pending overlapped read and preflight rejects it (`stdio.transfer`, `EBUSY`)
+even after a yield. Live cross-state shell-pipe handoff therefore has a
+classified Windows skip.
+
+The writable pipe is detached first into `input_packet`. If detaching the
+readable pipe then fails, that packet stays on the source facade:
+`to_transfer_payload` can be retried, `write` reconstructs the owner through
+`restore_input` (also updating `Process.stdin` and clearing the field only after
+adoption succeeds), and `close` discards it with
+`OutputStream.discard_transfer_payload`. `close` clears the field after that native
+close attempt and before reporting its status, so a close error is never
+retried against a possibly reused descriptor. After both detach, the payload is
+the private `stream_transfer_fields` protobuf schema holding the two OS child
+payloads; a lexical guard discards both if final serialization raises.
+
+`from_transfer_payload` decodes both strings and allocates the composite before
+adopting either pipe. If the readable pipe fails to adopt, a guard calls the OS
+module's `discard_unpublished_stdio` on the already adopted writable owner,
+which starts native close without waiting and so keeps the hook nonyielding.
+
+## Shell and disposal tests
+
+`spec/stdlib/titan/os/process_tests/shell_test.titan` exercises all seven IO
+Interface conversions, merged output, binary delimiter reads, shell selection,
+Unicode/quoting, retained exit status, repeated close, termination, cancellation,
+and cross-state pipe handoff with the Process retained at origin.
+`disposal_test.titan` checks endpoint disposal without a Task or adoptable
+Runtime, identity-only parents, inert captures, and invalid schema/discriminators.
+
+`spec/support/check_io_transfer_failure.sh` (Linux only; other platforms report
+a classified skip) takes an absolute installed SDK prefix and a new absolute
+output directory. It compiles `spec/fixtures/stdlib/native/io_transfer_dup_failure.c`
+into an object, links the `io_transfer_failure_app` fixture with that object
+passed through `-X`, and adds `-Wl,--wrap=dup,--wrap=close` through
+`TITAN_EXTRA_LDFLAGS`
+to make the second pipe duplication fail, then checks write, retry, close,
+terminal close-error consumption without retry, and exit cleanup of the staged
+descriptor. The close-error guard never closes a potentially reused descriptor.
 
 ## Stable parent streams and platform facts
 
@@ -217,8 +311,8 @@ Process configuration applies options in order and owns every unpublished
 stdio endpoint. Public UV process options carry the final argv, environment,
 and stdio records. The environment is inherited by default; overlays are built
 from a copied environment snapshot using the platform's name-comparison
-policy. `os_shell_command` builds the shell command used by `io.popen` (through
-the private `spawn_shell`): `/bin/sh -c COMMAND` on POSIX, and on Windows the
+policy. `os_shell_command` builds the shell command used directly by `os.popen`:
+`/bin/sh -c COMMAND` on POSIX, and on Windows the
 `cmd.exe` in the `GetSystemDirectoryW` directory with `/d /s /c` and the command
 in outer quotes. `COMSPEC` is not consulted. The private `with_shell_arguments`
 option sets `uv.PROCESS_WINDOWS_VERBATIM_ARGUMENTS` on Windows only, so ordinary

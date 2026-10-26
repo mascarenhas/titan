@@ -239,14 +239,19 @@ the propagation-side trace, combines it with the staged coroutine trace, pins
 it, and re-raises the same payload. The registry protocol is canonical in
 [Error handling](error-handling.md#trace-pinning).
 
-The async driver resumes Task roots through the private
-`Coroutine:transfer_outcome` instead, which `titan/async.titan` reaches through
-`import "coroutine.titan"`. It performs `resume` or `error` but returns `true`
-and the payload for `ok=false`, leaving the staged trace in place. The driver's
-`resume_root` calls `raise_with_appended_trace` only for a failure that the
-Task will report. For a cancelled Task, or a `run_with_cleanup` Task that has
-already recorded its body's failure, it drops the staged trace with
-`pop_trace_for_append` and captures no propagation trace. See
+The public `Coroutine:transfer(payload, tag, inject_error)` shares the raising
+methods' switch and reachability protocol but returns a fixed
+`(boolean, value, string?)` tuple: failed flag, result/error, and optional trace.
+On failure it calls the private `pop_trace_for_append`, consuming the registry
+handoff into a traced local before returning. Success has no trace lookup,
+capture, copying, or outcome allocation. Tag/state/native/stack failures still
+raise in the caller. The producer's staging and raising helpers remain private.
+
+The async driver uses ordinary `import "coroutine"` and owns report policy.
+It appends one driver-side trace only for reportable failures, ignores the
+callee trace for sticky cancellation, and preserves the already recorded
+body trace for `run_with_cleanup`. `resume_root` passes the optional trace to
+`advance_task`; the latter still catches infrastructure failures normally. See
 [Task status](libuv-runtime.md#explicit-suspend-task-status-listeners-and-combinators).
 
 `Coroutine:error` before the first `resume` is handled without calling the
