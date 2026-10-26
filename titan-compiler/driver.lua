@@ -1358,12 +1358,16 @@ local function compiler_argv(include_extra_compile_flags, context)
     if not cflags then return nil, err end
     local argv = {}
     append_argv(argv, cc)
-    if include_extra_compile_flags then
+    -- Normalized invocation extras (TITAN_EXTRA_* then CLI switches, in
+    -- order) follow the profile defaults; without them the ambient
+    -- environment flags keep their historical placement.
+    local native = driver.NATIVE_COMPILE_FLAGS
+    if include_extra_compile_flags and not native then
         append_argv(argv, driver.EXTRA_CPPFLAGS)
     end
     append_argv(argv, cflags)
     if include_extra_compile_flags then
-        append_argv(argv, driver.EXTRA_CFLAGS)
+        append_argv(argv, native or driver.EXTRA_CFLAGS)
     end
     return argv
 end
@@ -1383,6 +1387,49 @@ function driver.generated_compile_prefix()
     if not args then return nil, err end
     append_compile_includes(args)
     return args
+end
+
+-- Install one invocation's `nativeinputs.normalize` result: its ordered
+-- compile extras follow the profile defaults in every generated-object,
+-- probe and header-checking command (SDK include roots stay last), and its
+-- ordered link extras keep their exact flag/library interleaving on every
+-- link. Call before `driver.configure_foreign_c`.
+function driver.apply_native_inputs(normalized)
+    driver.NATIVE_COMPILE_FLAGS = { table.unpack(normalized.compile_argv or {}) }
+    driver.NATIVE_LINK_FLAGS = { table.unpack(normalized.link_argv or {}) }
+end
+
+-- The link extras every native link appends: the normalized invocation
+-- extras when installed, else the ambient TITAN_EXTRA_LDFLAGS.
+function driver.link_extra_flags()
+    return driver.NATIVE_LINK_FLAGS or driver.EXTRA_LDFLAGS or {}
+end
+
+-- Which linker dependency report a final program link can request, probed
+-- once per resolver context: `darwin` (ld64 -dependency_info), `gnu` when
+-- the linker accepts --dependency-file (GNU ld 2.35+, lld), else `none`
+-- (the final-link certificate then uses compiler-resolved -l paths).
+function driver.native_link_backend(context)
+    if context.native_link_backend then return context.native_link_backend end
+    local backend = "none"
+    if driver.IS_DARWIN then
+        backend = "darwin"
+    elseif not platform.windows then
+        local argv = compiler_argv(false, context)
+        local report = argv and context.io:tmpname()
+        if report then
+            append_argv(argv, {
+                "-Wl,--dependency-file=" .. report, "-Wl,--version",
+            })
+            local result = context.io:run(argv, { stderr_to_stdout = true })
+            if type(result) == "table" and result.started and result.ok then
+                backend = "gnu"
+            end
+            if context.io:lstat(report) then context.io:unlink(report) end
+        end
+    end
+    context.native_link_backend = backend
+    return backend
 end
 
 -- One immutable description of the native compiler prefix used for generated
@@ -1686,7 +1733,9 @@ function driver.language_server_cache_identity(options)
         item = tostring(item)
         pieces[#pieces + 1] = #item .. ":" .. item
     end
-    for _, values in ipairs({ driver.EXTRA_CPPFLAGS or {}, driver.EXTRA_CFLAGS or {},
+    for _, values in ipairs({
+        driver.NATIVE_COMPILE_FLAGS or driver.EXTRA_CPPFLAGS or {},
+        not driver.NATIVE_COMPILE_FLAGS and driver.EXTRA_CFLAGS or {},
         driver.foreign_include_dirs(), context.extra_ffi_include_dirs or {} }) do
         pieces[#pieces + 1] = "[" .. #values .. ":"
         for _, item in ipairs(values) do pieces[#pieces + 1] = #item .. ":" .. item end
@@ -6196,6 +6245,8 @@ function driver.worker_configuration(context)
             output_root = driver.OUTPUT_ROOT,
             extra_cppflags = copy_strings(driver.EXTRA_CPPFLAGS),
             extra_cflags = copy_strings(driver.EXTRA_CFLAGS),
+            native_compile_flags = driver.NATIVE_COMPILE_FLAGS and
+                copy_strings(driver.NATIVE_COMPILE_FLAGS) or nil,
         },
         resolver = {
             prefer_static = context.prefer_static,
@@ -6237,6 +6288,8 @@ function driver.new_worker_context(configuration, io_strategy)
     driver.OUTPUT_ROOT = settings.output_root
     driver.EXTRA_CPPFLAGS = copy_strings(settings.extra_cppflags)
     driver.EXTRA_CFLAGS = copy_strings(settings.extra_cflags)
+    driver.NATIVE_COMPILE_FLAGS = settings.native_compile_flags and
+        copy_strings(settings.native_compile_flags) or nil
     local support_loaded, support = pcall(require, "titan")
     if not support_loaded or type(support) ~= "table" or
        type(support._sha256_binary) ~= "function" then
@@ -7987,10 +8040,11 @@ local function prepare_compile(
         native.coverage = { enabled = options.coverage == true,
             backend = options.coverage_backend }
     end
-    local certificate_error
+    local certificate_attempted = false
     local function metadata_code()
-        if certify and native.certificate == nil and not certificate_error then
-            native.certificate, certificate_error = incremental.make_certificate(
+        if certify and not certificate_attempted then
+            certificate_attempted = true
+            local made, certificate = pcall(incremental.make_certificate,
                 context, source_entry, native, {
                     source = source_entry.source_certificate,
                     stem = normalized_absolute_filename(stem),
@@ -8008,10 +8062,18 @@ local function prepare_compile(
                     generated_parts = generated_parts,
                     private_header = generated.private_header,
                 })
-        end
-        if certify and not native.certificate then
-            return nil, "cannot certify object for module '" .. modname ..
-                "': " .. tostring(certificate_error)
+            if made then
+                native.certificate = certificate
+            elseif type(certificate) ~= "string" then
+                error(certificate, 0)
+            elseif context.probe_verbose then
+                -- A dependency digest this resolver cannot supply (for
+                -- example a producer compiled out of order by an API caller)
+                -- leaves the object uncertified: it is correct but can only
+                -- miss later.
+                io.stderr:write("Titan object uncertified ", modname, ": ",
+                    certificate, "\n")
+            end
         end
         local payload, metadata_error = objectmetadata.encode(entry, native)
         if not payload then return nil, metadata_error end
@@ -8787,39 +8849,71 @@ function driver.windows_launcher_name(modname, override)
     local name = override or modname
     if type(name) ~= "string" or name == "" or
        name:find('[%z\1-\31\127<>:"/\\|?*]') or name:find('[. ]$') then
-        return nil, "--launcher-name requires a valid Windows filename without a path"
+        return nil, "--exe requires a valid Windows filename"
     end
     local length = utf8.len(name)
-    if not length then return nil, "--launcher-name requires valid UTF-8" end
+    if not length then return nil, "--exe requires valid UTF-8" end
     local stem = name:match("^[^.]*"):gsub(" +$", ""):upper()
     if stem == "CON" or stem == "PRN" or stem == "AUX" or stem == "NUL" or
        stem == "CONIN$" or stem == "CONOUT$" or
        stem:match("^COM[1-9]$") or stem:match("^LPT[1-9]$") or
        stem == "COM¹" or stem == "COM²" or stem == "COM³" or
        stem == "LPT¹" or stem == "LPT²" or stem == "LPT³" then
-        return nil, "--launcher-name cannot use a reserved Windows device name"
+        return nil, "--exe cannot use a reserved Windows device name"
     end
     if name:sub(-4):lower() ~= ".exe" then name = name .. ".exe" end
     local units = 0
     for _, value in utf8.codes(name) do units = units + (value > 0xffff and 2 or 1) end
-    if units > 255 then return nil, "--launcher-name exceeds a Windows filename component" end
+    if units > 255 then return nil, "--exe exceeds a Windows filename component" end
     return name
 end
 
-function driver.windows_program_paths(modname, override, output_module, output_root)
+-- Windows launcher and provider paths. Without `exe` the launcher is
+-- `<output>/bin/<logical>.exe`; `exe` is an exact destination relative to the
+-- invocation directory (`.exe` appended when absent). The provider DLL always
+-- stays under the output tree's `lib/titan/<version>`; the launcher names it
+-- relative to its own default library directory `<exe dir>/../lib/titan/<version>`,
+-- which must be on the provider's volume.
+function driver.windows_program_paths(modname, exe, output_module, output_root)
     output_module = output_module or modname
-    local name, err = driver.windows_launcher_name(output_module, override)
-    if not name then return nil, err end
     local relative = output_module:gsub("[.]", "/") .. ".dll"
     local result = {
-        executable = "bin/" .. name,
         provider = "lib/titan/" .. driver.TITAN_LIBRARY_VERSION .. "/" .. relative,
         relative_provider = relative,
     }
-    if output_root then
-        result.executable = path.join(output_root, result.executable)
-        result.provider = path.join(output_root, result.provider)
+    if output_root then result.provider = path.join(output_root, result.provider) end
+    if exe == nil then
+        local name, err = driver.windows_launcher_name(output_module)
+        if not name then return nil, err end
+        result.executable = "bin/" .. name
+        if output_root then
+            result.executable = path.join(output_root, result.executable)
+        end
+        return result
     end
+    local name, err = driver.windows_launcher_name(output_module, path.basename(exe))
+    if not name then return nil, err end
+    local directory = path.dirname(exe)
+    result.executable = path.join(directory, name)
+    local library = normalized_absolute_filename(path.join(directory,
+        "../lib/titan/" .. driver.TITAN_LIBRARY_VERSION))
+    local provider = normalized_absolute_filename(result.provider)
+    if (path.volume(library) or ""):lower() ~= (path.volume(provider) or ""):lower() then
+        return nil, "--exe '" .. exe .. "' is on another volume than its " ..
+            "provider '" .. provider .. "'"
+    end
+    local from, to = {}, {}
+    for component in path.to_slash(library):gmatch("[^/]+") do from[#from + 1] = component end
+    for component in path.to_slash(provider):gmatch("[^/]+") do to[#to + 1] = component end
+    local common = 0
+    while common < #from and common < #to - 1 and
+          from[common + 1]:lower() == to[common + 1]:lower() do
+        common = common + 1
+    end
+    local pieces = {}
+    for _ = common + 1, #from do pieces[#pieces + 1] = ".." end
+    for index = common + 1, #to do pieces[#pieces + 1] = to[index] end
+    result.relative_provider = table.concat(pieces, "/")
     return result
 end
 
@@ -10223,7 +10317,7 @@ local function prepare_library_link(soname, libnames, link, verbose,
             table.insert(args, "-l" .. lib)
         end
     end
-    append_argv(args, driver.EXTRA_LDFLAGS)
+    append_argv(args, driver.link_extra_flags())
     return {
         argv = args,
         soname = soname,
@@ -11813,7 +11907,7 @@ function driver.run_standalone_archive_probe(
             table.insert(args, "-l" .. lib)
         end
     end
-    append_argv(args, driver.EXTRA_LDFLAGS)
+    append_argv(args, driver.link_extra_flags())
     local linked, link_term, link_code = driver.run_link_command(args, verbose, executable)
     if not linked then
         cleanup()
@@ -11834,7 +11928,7 @@ end
 local function compile_windows_program(modname, libnames, link, verbose,
         extra_objects, static_archives, entrypoint_name, program_name, options)
     local paths, err = driver.windows_program_paths(
-        modname, options.launcher_name, options.output_module, options.output_root)
+        modname, options.exe, options.output_module, options.output_root)
     if not paths then return nil, err end
     local ok
     ok, err = ensure_output_parent(paths.executable)
@@ -11920,7 +12014,7 @@ __declspec(dllexport) int _titan_coverage_dump(lua_State *L) {
     if not args then return nil, err end
     append_argv(args, { "-o", paths.executable, entrypoint_o, resource })
     append_runtime_libraries(args)
-    append_argv(args, driver.EXTRA_LDFLAGS)
+    append_argv(args, driver.link_extra_flags())
     return driver.run_link_command(args, verbose, paths.executable)
 end
 
@@ -11976,7 +12070,9 @@ function driver.compile_program(modname, libnames, link, verbose, extra_objects,
             table.insert(args, "-l" .. lib)
         end
     end
-    append_argv(args, driver.EXTRA_LDFLAGS)
+    append_argv(args, driver.link_extra_flags())
+    -- The final-link certificate's linker dependency report, final image only.
+    append_argv(args, options.final_link_flags)
     local ok, term, code = driver.run_link_command(args, verbose, execname)
     if ok then run_dsymutil(execname, verbose) end
     return ok, term, code
