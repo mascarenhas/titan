@@ -11680,8 +11680,19 @@ function driver.preflight_build_outputs(context, plan, options)
         end
         local names, seen = {}, {}
         for name in pairs(modules) do seen[name] = true end
-        for _, selected in ipairs(context.selected_static_providers) do
-            for name in pairs(selected.entries) do seen[name] = true end
+        -- Finalization has not populated context.selected_static_providers.
+        -- Planning has already inspected each explicitly selected archive;
+        -- reserve its known carried shims now. The finalized publication
+        -- preflight remains authoritative for any later contextual selection.
+        for _, name in ipairs(binary_names) do
+            if plan.modules[name].kind == "static" then
+                seen[name] = true
+                local imported = driver.imported[name]
+                local selected = imported and imported.static_provider
+                for carried in pairs(selected and selected.entries or {}) do
+                    seen[carried] = true
+                end
+            end
         end
         for name in pairs(seen) do names[#names + 1] = name end
         table.sort(names, util.bytewise_less)
