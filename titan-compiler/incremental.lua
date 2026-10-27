@@ -372,9 +372,14 @@ end
 function incremental.physical_executable(context, command)
     local executable = type(command) == "table" and command[1] or command
     assert(type(executable) == "string" and executable ~= "", "tool executable is required")
+    -- Compiler stage names may omit .exe even when their basename has dots.
+    local add_exe_suffix = platform.windows and executable:sub(-4):lower() ~= ".exe"
     local candidates = {}
     if executable:find("[/\\]") or executable:match("^%a:") then
         candidates[1] = absolute(context, executable)
+        if add_exe_suffix then
+            candidates[2] = candidates[1] .. ".exe"
+        end
     else
         local separator = platform.windows and ";" or ":"
         local search = context.executable_path or platform.getenv("PATH") or ""
@@ -384,7 +389,7 @@ function incremental.physical_executable(context, command)
             local candidate = (platform.windows and paths.join or platform.join)(
                 directory ~= "" and directory or ".", executable)
             candidates[#candidates + 1] = candidate
-            if platform.windows and not executable:match("%.[^/\\]+$") then
+            if add_exe_suffix then
                 candidates[#candidates + 1] = candidate .. ".exe"
             end
         end
