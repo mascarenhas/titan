@@ -954,7 +954,11 @@ whose request carries the exact compiler argv, ordered link flags, compiler
 toolchain identity, compile prefix, the ordered linked inputs, and the
 auxiliary tool roles the output kind actually uses (`ar` and `ranlib` for
 Unix libraries, `rc` for Windows programs, `dsymutil` on Darwin), selected by
-`driver.output_tool_descriptors`. The result records:
+`driver.output_tool_descriptors`. On Darwin it resolves `dsymutil` once in
+the coordinator's working directory and records the admitted absolute
+spelling; the program and provider-pair `dsymutil` runs then use that same
+spelling after their staged `chdir`, so the certified tool is the one that
+runs, and a symlinked multicall tool keeps its `argv[0]`. The result records:
 
 * `linker`: the linker the compiler driver really selects, with its exact
   driver argv and physical identity. Unless `-fuse-ld=`/`--ld-path` names it,

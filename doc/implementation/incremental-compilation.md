@@ -371,7 +371,9 @@ reports the exact component:
      `-fcoverage-compilation-dir`, to `=<compilation-directory>`, so Apple
      Clang identities do not depend on the working directory; every other line
      and argument is kept; and
-   * `incremental.physical_executable` records (`{ path = realpath, size,
+   * `incremental.physical_executable` records (it also returns, second, the
+     admitted absolute command spelling, not its realpath, for callers that
+     must run exactly the certified tool) (`{ path = realpath, size,
      device, inode, mode, modified_*, changed_*, precision, dev, ino,
      mtime_ns, ctime_ns, time_precision }`) for the resolved compiler driver
      (`cc[1]`), any explicit compiler wrapped by `ccache`, `sccache`, or
