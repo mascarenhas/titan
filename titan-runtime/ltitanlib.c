@@ -1319,6 +1319,55 @@ static int stat_precise(lua_State *L) {
   lua_setfield(L, -2, "ctime_ns");
   return 1;
 }
+#if defined(_WIN32)
+/* Contain the compiler before it can create a child. Windows 8+ inherits
+** every non-breakaway ancestor job at CreateProcess time, even when libuv
+** subsequently adds the child to its own silent-breakaway job. Assigning a
+** running child instead would leave a window for an uncontained grandchild.
+**
+** This noninheritable handle deliberately lasts until OS process teardown.
+** A Lua finalizer must not close it: the compiler itself belongs to the job,
+** so closing the last handle would terminate the current process as well.
+** Process teardown closes it after Lua cleanup, preserving normal exit
+** status while terminating descendants, including nested worker jobs. */
+static HANDLE native_process_tree_job;
+
+static int native_process_tree_guard(lua_State *L) {
+  HANDLE job;
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
+  DWORD error;
+  const char *operation;
+  if (native_process_tree_job != NULL) {
+    lua_pushboolean(L, 1);
+    return 1;
+  }
+  job = CreateJobObjectW(NULL, NULL);
+  if (job == NULL) {
+    error = GetLastError();
+    operation = "cannot create native process-tree job";
+  } else {
+    memset(&limits, 0, sizeof limits);
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation,
+                                 &limits, sizeof limits)) {
+      error = GetLastError();
+      operation = "cannot configure non-breakaway native process-tree job";
+    } else if (!AssignProcessToJobObject(job, GetCurrentProcess())) {
+      error = GetLastError();
+      operation = "cannot assign compiler to non-breakaway native process-tree job";
+    } else {
+      native_process_tree_job = job;
+      lua_pushboolean(L, 1);
+      return 1;
+    }
+    CloseHandle(job);
+  }
+  lua_pushnil(L);
+  titan_win_loader_error(L, operation, "current compiler process", error);
+  return 2;
+}
+#endif
+
 static const luaL_Reg titanlib[] = {
   { "backtrace", getbacktrace },
   { "pin", pintrace },
@@ -1330,6 +1379,7 @@ static const luaL_Reg titanlib[] = {
   { "_stat_precise", stat_precise },
 #if defined(_WIN32)
   { "_abivalue", abivalue },
+  { "_native_process_tree_guard", native_process_tree_guard },
 #else
   { "_jobserver_open", jobserver_open },
   { "_jobserver_wait", jobserver_wait },

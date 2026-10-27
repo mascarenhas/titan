@@ -552,3 +552,248 @@ end
         assert.truthy(exists(workspace .. "/build/slow.part1.o"))
     end)
 end)
+
+describe("native process launch policy", function()
+    local function with_transport(guard, check)
+        local names = { "titan-compiler.process", "titan-compiler.platform", "titan", "luv" }
+        local saved, registry = {}, debug.getregistry()
+        local anchor = "titan-compiler.process: luv"
+        local previous_loop = registry[anchor]
+        for _, name in ipairs(names) do saved[name] = package.loaded[name] end
+        local events, pending, stdio = {}, nil, nil
+        local uv = {
+            os_environ = function() return {} end,
+            fs_open = function() return 100 end,
+            fs_close = function() end,
+            spawn = function(_, options, completed)
+                events[#events + 1] = "spawn"
+                stdio = options.stdio
+                pending = function() completed(0, 0) end
+                return { close = function(_, callback) callback() end }, 42
+            end,
+            run = function()
+                if pending then local callback = pending; pending = nil; callback() end
+            end,
+        }
+        registry[anchor] = uv
+        package.loaded["titan-compiler.process"] = nil
+        package.loaded["titan-compiler.platform"] = { windows = true }
+        package.loaded.titan = guard and {
+            _native_process_tree_guard = function()
+                events[#events + 1] = "contain"
+                return guard()
+            end,
+        } or {}
+        package.loaded.luv = uv
+        local ok, err = pcall(function()
+            check(require("titan-compiler.process"), events, function() return stdio end)
+        end)
+        registry[anchor] = previous_loop
+        for _, name in ipairs(names) do package.loaded[name] = saved[name] end
+        assert.truthy(ok, err)
+    end
+
+    it("establishes containment before spawning and preserves inherited leases", function()
+        with_transport(function() return true end, function(process, events, stdio)
+            assert(process.run({ "cc", "input.c" }, { inherit = { 71, 72 } }))
+            assert.same({ "contain", "spawn" }, events)
+            assert.same({ 0, 1, 2, 71, 72 }, stdio())
+            assert(process.run({ "cc", "other.c" }))
+            assert.same({ "contain", "spawn", "spawn" }, events)
+        end)
+    end)
+
+    it("does not launch when strict containment cannot be established", function()
+        with_transport(function() return nil, "job assignment refused" end,
+            function(process, events)
+                local child, err = process.new_batch():spawn({ "cc" }, "out", "err", 1)
+                assert.is_nil(child)
+                assert.equal("job assignment refused", err)
+                assert.same({ "contain" }, events)
+            end)
+    end)
+
+    it("does not fall back when the installed runtime lacks containment", function()
+        with_transport(nil, function(process, events)
+            local child, err = process.new_batch():spawn({ "cc" }, "out", "err", 1)
+            assert.is_nil(child)
+            assert.matches("runtime lacks _native_process_tree_guard", err, 1, true)
+            assert.same({}, events)
+        end)
+    end)
+end)
+
+describe("Windows native descendant containment", function()
+    if not platform.windows then return end
+    local process = require "titan-compiler.process"
+    local uv = process.library()
+    local repository = assert(platform.path.normalize(lfs.currentdir()))
+    local prefix = assert(platform.path.normalize(
+        require("spec.support.installed_prefix").active()))
+    local lua = prefix .. "/bin/lua.exe"
+    local workspace, wrapper, children, writer_pid, real_command
+
+    local function write_file(path, contents)
+        local file = assert(io.open(path, "wb"))
+        assert(file:write(contents)); assert(file:close())
+    end
+
+    local function read_file(path)
+        local file = io.open(path, "rb")
+        if not file then return nil end
+        local contents = assert(file:read("a")); assert(file:close())
+        return contents
+    end
+
+    local function remove_tree(path)
+        local mode = lfs.symlinkattributes(path, "mode")
+        if mode == "directory" then
+            for entry in lfs.dir(path) do
+                if entry ~= "." and entry ~= ".." then remove_tree(path .. "/" .. entry) end
+            end
+            assert(lfs.rmdir(path))
+        elseif mode then assert(os.remove(path)) end
+    end
+
+    local function wait_until(condition, milliseconds)
+        local deadline = uv.hrtime() + milliseconds * 1000000
+        repeat
+            uv.run("nowait")
+            if condition() then return true end
+            uv.sleep(10)
+        until uv.hrtime() >= deadline
+        return false
+    end
+
+    local function compiler_environment(match)
+        local values = {}
+        for name, value in pairs(uv.os_environ()) do
+            local key = name:upper()
+            if key ~= "MAKEFLAGS" and key ~= "MFLAGS" and key ~= "MAKELEVEL" and
+               key ~= "TITAN_JOBS" then values[key] = name .. "=" .. value end
+        end
+        for name, value in pairs({
+            CC = assert(platform.windows_process_command({ wrapper })),
+            PATH = prefix .. "/bin;" .. (platform.getenv("PATH") or ""),
+            TITAN_ROCKS_ROOT = prefix, TITAN_RUNTIME_PREBUILT = "1",
+            TITAN_EXTRA_CPPFLAGS = "", TITAN_EXTRA_CFLAGS = "-O0 -fno-lto",
+            TITAN_EXTRA_LDFLAGS = "-fno-lto", CCACHE_DISABLE = "1",
+            TITAN_TREE_REAL_CC = real_command, TITAN_TREE_MATCH = match or "",
+            TITAN_TREE_READY = workspace .. "/writer.ready",
+            TITAN_TREE_RELEASE = workspace .. "/writer.release",
+            TITAN_TREE_FINISHED = workspace .. "/writer.finished",
+        }) do values[name] = name .. "=" .. value end
+        local result = {}
+        for _, value in pairs(values) do result[#result + 1] = value end
+        return result
+    end
+
+    local function start_compiler(role, match, jobs)
+        local log = assert(uv.fs_open(workspace .. "/" .. role .. ".log", "w", 420))
+        local child = {}
+        local arguments = {
+            "-E", "-e", string.format(
+                "package.path=%q..package.path;package.cpath=%q..package.cpath",
+                repository .. "/?.lua;" .. repository .. "/?/init.lua;",
+                repository .. "/titan-runtime/bootstrap/?.dll;"),
+            repository .. "/titanc", "-v", "--incremental", "--tree", workspace,
+            "-o", workspace .. "/build", "--exe", workspace .. "/application",
+            "--jobs", tostring(jobs), "--c-parts", tostring(jobs), "app",
+        }
+        local handle, err = uv.spawn(lua, { args = arguments, cwd = workspace,
+            env = compiler_environment(match), stdio = { nil, log, log } },
+            function(code, signal)
+                child.code, child.signal, child.exited = code, signal, true
+                child.handle:close()
+            end)
+        uv.fs_close(log)
+        assert.truthy(handle, err)
+        child.handle = handle
+        children[#children + 1] = child
+        return child
+    end
+
+    before_each(function()
+        children, writer_pid = {}, nil
+        workspace = assert(platform.path.normalize(
+            require("titan-compiler.io").new_sync():tmpname()))
+        assert(os.remove(workspace)); assert(lfs.mkdir(workspace))
+        wrapper = workspace .. "/native wrapper.exe"
+        local compiler = assert(cdriver.split_shell_words(platform.getenv("CC") or "clang"))
+        real_command = assert(platform.windows_process_command(compiler))
+        local argv = {}
+        for _, word in ipairs(compiler) do argv[#argv + 1] = word end
+        for _, word in ipairs({ "-std=c99", "-Wall", "-Wextra", "-Werror", "-municode",
+                repository .. "/spec/fixtures/windows/native_writer_tree.c", "-o", wrapper }) do
+            argv[#argv + 1] = word
+        end
+        local built = process.capture(argv)
+        assert.truthy(built.ok, built.diagnostic)
+        local payload = string.rep("x", 1100 * 1024)
+        write_file(workspace .. "/app.titan", string.format([[
+function first(): string return %q end
+function second(): string return %q end
+function main(args: {string}): integer
+  if #first() + #second() == %d then return 0 else return 1 end
+end
+]], payload, payload, #payload * 2))
+    end)
+
+    after_each(function()
+        for _, child in ipairs(children or {}) do
+            if not child.exited then child.handle:kill("sigkill") end
+        end
+        if workspace and not writer_pid then
+            writer_pid = tonumber((read_file(workspace .. "/writer.ready") or ""):match("^(%d+)"))
+        end
+        if writer_pid then process.capture({ wrapper, "--stop", tostring(writer_pid) }) end
+        wait_until(function()
+            for _, child in ipairs(children or {}) do if not child.exited then return false end end
+            return true
+        end, 10000)
+        uv.run("nowait")
+        if workspace then remove_tree(workspace) end
+        workspace = nil
+    end)
+
+    local function killed_coordinator(match, jobs)
+        local holder = start_compiler("holder", match, jobs)
+        assert.truthy(wait_until(function()
+            return read_file(workspace .. "/writer.ready") ~= nil or holder.exited
+        end, 90000), read_file(workspace .. "/holder.log"))
+        local ready = read_file(workspace .. "/writer.ready")
+        assert.truthy(ready, read_file(workspace .. "/holder.log"))
+        local pid, output = ready:match("^(%d+)\n([^\n]+)\n$")
+        writer_pid = assert(tonumber(pid), ready)
+        assert.truthy(output, ready)
+        local alive = process.capture({ wrapper, "--wait-dead", pid, "0" })
+        assert.equal(1, alive.status, alive.diagnostic)
+        assert(holder.handle:kill("sigkill"))
+        assert.truthy(wait_until(function() return holder.exited end, 10000))
+
+        -- Start the successor before releasing the old native writer. If it
+        -- escaped, it will overwrite the output only after this build succeeds.
+        local successor = start_compiler("successor", nil, jobs)
+        assert.truthy(wait_until(function() return successor.exited end, 90000),
+            read_file(workspace .. "/successor.log"))
+        assert.equal(0, successor.code, read_file(workspace .. "/successor.log"))
+        assert.equal("file", lfs.attributes(workspace .. "/build/app.o", "mode"))
+        local before = read_file(output)
+        write_file(workspace .. "/writer.release", "continue\n")
+        local dead = process.capture({ wrapper, "--wait-dead", pid, "10000" })
+        assert.truthy(dead.ok, dead.diagnostic)
+        assert.is_nil(lfs.attributes(workspace .. "/writer.finished"))
+        assert.equal(before, read_file(output), "old native writer changed the output")
+        local application = process.capture({ workspace .. "/application.exe" })
+        assert.truthy(application.ok, application.diagnostic)
+    end
+
+    it("kills a synchronous entrypoint wrapper and its native grandchild", function()
+        killed_coordinator("app__entrypoint.c", 1)
+    end)
+
+    it("kills coordinator-dispatched split compilers and their native grandchildren", function()
+        -- Two large functions force the existing remote native-batch path.
+        killed_coordinator("app.c", 2)
+    end)
+end)
