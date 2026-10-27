@@ -1997,7 +1997,8 @@ certifies, compiles, and restores the module closure. `titanc` then compiles
 any `--c-source` nodes via `nativeinputs.compile` and—for linking
 invocations—gates runner/entrypoint synthesis, archive probing, and linking
 with `linkcertificate.prepare`, `linkcertificate.check`,
-`linkcertificate.invalidate`, and `linkcertificate.commit`
+`linkcertificate.invalidate`, and `linkcertificate.commit`. On Windows it
+calls `driver.cleanup_stale_staging` between `prepare` and `check`
 ([End-to-end invocation sequence](build-coordinator.md#end-to-end-invocation-sequence)).
 The digest cache is saved before the locks are released.
 

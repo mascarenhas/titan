@@ -684,12 +684,52 @@ reports the exact path that failed. A cleanup failure after a successful
 publication is reported as such: the public images stay committed and are not
 rolled back, but the invocation fails and records no final-link certificate.
 A failed validation or publication keeps its own diagnostic and also reports
-any cleanup failure. On the next linking invocation, while it still holds the
-output locks and before preparing or accepting the final-link certificate,
-`titanc` removes leftover stage directories for its known final outputs. Only
-non-link directories named exactly `<final-basename>.stage.tmp.<nonempty>`
-inside a locked output domain qualify; unrelated names, other temporary
-namespaces, and matching files or links are left alone.
+any cleanup failure.
+
+On the next linking invocation, while it still holds the output locks,
+`titanc` retires leftover stage directories for its known final outputs
+(`driver.cleanup_stale_staging`). It does so after `linkcertificate.prepare`
+has resolved the final link's inputs and before generated headers are
+restored, the final-link certificate is checked, or a final-link hit returns.
+Only non-link directories named exactly
+`<final-basename>.stage.tmp.<nonempty>` qualify; unrelated names, other
+temporary namespaces, and matching files or links are left alone. Each final
+output must lie in a held lock domain: either its parent is lexically inside a
+held lock directory, or the parent or one of its ancestors contains a regular
+`.titan-build.lock` with the same volume serial number and file ID as a held
+lock file. An `--output` or `--exe` spelled through a junction of a held
+directory is therefore covered, because lock acquisition deduplicates the two
+spellings to one physical lock file. A missing identity, a linked lock file, or
+the unavailable pair `("0", "0")` never proves coverage.
+
+Before removing anything, cleanup lists every candidate's complete tree
+without following links and checks it through `perf.new_output_path_index`
+against everything the invocation accepted or reserved: the preflight's
+`plan.reservations` and `plan.inputs` ([Pre-dispatch output
+preflight](build-coordinator.md#pre-dispatch-output-preflight)), the source
+files and non-`search` C headers that the build recorded for each module in
+`plan.order`, each `--c-source` file with every dependency its one
+preprocessing run recorded (the `nativeinputs.compile` result's
+`dependencies`), and the final link's inputs: its objects, compiled C objects,
+`-X` payloads, providers, archives, and runtime inputs, plus the files the
+[native library policy](build-coordinator.md#recipe-file-digests-and-native-library-policy)
+resolved from the linker arguments, such as a raw `--ldflag` archive or an
+`-L`/`-l` library. Exact, case-folded, component-hierarchy, and
+physical-identity matches all count, so an input reached through another
+spelling of a staged file is caught, and a stage file hard-linked to an input
+is refused as well. A link inside a stage is unlinked, never followed, so its
+target does not block retirement. Any match or observation error fails the
+invocation with `refusing to retire stale Windows staging: <conflict>` and
+retains every candidate, including unrelated abandoned ones; the user must
+move the input. When no candidate exists, no protected path is observed. A
+call without the preflighted plan, the native C results with their `source`
+and `dependencies`, or the final-link inputs fails closed before scanning.
+
+When the final link is uncertified or its linker arguments use a mechanism the
+policy does not recognize, the policy resolves no files. Explicit inputs stay
+protected, but a file named only inside such linker arguments (for example an
+`--ldflag` path under an opaque compiler prefix) is not, so keep linker inputs
+outside `<final-basename>.stage.tmp.*` directories.
 
 Stale-shim retirement is not implemented on Windows: the prior DLL does not
 carry the old physical membership inventory, and a matching banner or

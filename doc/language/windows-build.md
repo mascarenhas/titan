@@ -100,6 +100,19 @@ remain relative to the compiler's working directory. Library consumers must
 select their output directory through the usual provider/Lua search paths;
 `--output` changes write locations without changing lookup.
 
+While linking, `titanc` builds each launcher and provider in a sibling
+`<file>.stage.tmp.<suffix>` directory beside its destination (for example
+`bin/app.exe.stage.tmp.<suffix>`) and removes it after publishing. If an
+interrupted build leaves one behind, the next link with the same outputs
+removes it, including when `--exe` reaches the locked output directory through
+a junction. These directory names belong to the compiler: if a leftover one
+contains a Titan source, C header, `--c-source` file, `-X` object, linker input,
+or output of the current build, linking fails with `refusing to retire stale
+Windows staging` and deletes nothing. Move that file elsewhere and build again.
+Files named only inside linker flags that `titanc` cannot interpret, such as
+`--ldflag` paths under an opaque compiler prefix, are not checked, so keep all
+build inputs out of these directories.
+
 Deliver the matching `lua55.dll` and native dependency DLLs beside the
 executables. Lua's Windows `!` path expansion means the running executable's
 directory. See [Windows loading and launchers](binary-compatibility.md#experimental-windows-loading-and-launchers)

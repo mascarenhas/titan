@@ -67,7 +67,10 @@ instead of dispatching workers:
    plan, and still computes the toolchain identity and preprocesses and
    certifies each C node.
 6. **Gate the final link.** Unless `-c` is active, `linkcertificate.prepare`
-   builds the target's recipe and output inventory,
+   builds the target's recipe and output inventory. On Windows,
+   `driver.cleanup_stale_staging` then retires leftover stage directories of
+   the final outputs unless they hold an input of this invocation ([Windows
+   DLL publication](windows-build.md#windows-dll-publication)).
    `driver.prepare_foreign_headers` restores any missing `.ffi.h`/`.titan.h`
    companions, and `linkcertificate.check` verifies the existing link record,
    output files, and native library inputs. A hit prints `Titan link hit
@@ -266,16 +269,24 @@ pass itself never runs the checker, code generator, or C preprocessor:
   collide. The ordinary checker remains the authority for declaration
   validity.
 
+On success the pass stores its reservations in `plan.reservations` and the
+validated inputs in `plan.inputs`. Only the reservations reach workers through
+`driver.plan_descriptor`; Windows stale-stage retirement checks against both
+([Windows DLL publication](windows-build.md#windows-dll-publication)).
+
 `driver.validate_provider_output_paths` checks the whole set through
 `perf.new_output_path_index`. The index observes each pathname once (`lstat`,
 then `stat` for links) and keys it by normalized spelling, physical path
 (existing ancestors resolved through `realpath` on POSIX), lowercased physical
-path, and, on POSIX, device and inode. Exact maps and component-prefix trees
-detect aliases, hierarchy conflicts (an output that is an ancestor of another
-output or input), and wrong existing kinds without further filesystem
-queries. On Windows the index reads file status through the compiler I/O
-strategy's `lstat`/`stat`, the same native observations the rest of the
-compiler uses, rather than LuaFileSystem.
+path, and device and inode (on Windows, the volume serial number and file ID).
+Exact maps and component-prefix trees detect aliases, hierarchy conflicts (an
+output that is an ancestor of another output or input), and wrong existing
+kinds without further filesystem queries. On Windows the index reads file
+status through a compiler I/O strategy's `lstat`/`stat`, the same native
+observations the rest of the compiler uses, rather than LuaFileSystem. A caller
+may pass its own strategy as the optional third argument, as stale-stage
+retirement does with its resolver's; that strategy then also resolves relative
+input spellings. Otherwise the index uses a new host strategy.
 
 Fresh modules discover their C headers only in their worker. After checking
 and before writing generated module artifacts (C, headers, and objects),
@@ -830,15 +841,19 @@ coverage flags) and shared `toolchain_identity`:
    `record.input == input`, and `<stem>.o` is a regular file whose
    `incremental.file_digest` equals `record.object`, `compile_node` returns
    `{ path = object, identity = identity, source = source, hit = true,
-   cacheable = true }` without invoking `-c`. Under `-v`, `titanc` writes
-   `Titan native hit <source>` to `stderr`.
+   cacheable = true, dependencies = files }` without invoking `-c`. Under
+   `-v`, `titanc` writes `Titan native hit <source>` to `stderr`.
 4. **Miss compilation and publication (`native-compile`).** On a miss (`Titan
    native miss <source>` under `-v`), `compile_node` reserves a sibling stage
    `<staged>`, runs `<compile_argv...> -c <source> -o <staged>`, re-reads and
    rehashes `source` and all `recipe.dependencies` in a fresh context to reject
    mid-compile edits, hashes `<staged>`, unlinks `<stem>.o` **first**, writes
    `<stem>.record` (or unlinks it if uncacheable), and renames `<staged>` to
-   `<stem>.o` **last**.
+   `<stem>.o` **last**. It returns the same shape with `hit = false` and the
+   node's `cacheable` value. Every result's `dependencies` is the raw `files`
+   list parsed from this invocation's `<stem>.d` (absolute or relative to the
+   working directory, possibly including the source itself), so callers such
+   as Windows stale-stage retirement see the files the preprocessor opened.
 5. **Scratch retirement.** On hits, misses, preprocessing or compile
    failures, and cancellation, one protected cleanup removes `<stem>.i`,
    `<stem>.d`, and any staged object. Committed `.o`/`.record` nodes are
