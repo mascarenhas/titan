@@ -440,15 +440,24 @@ describe("final link certification through the CLI", function()
         return bytes
     end
     local function compile(arguments, expected, environment)
-        local argv = { platform.windows and "env.exe" or "env", "TITAN_RUNTIME_PREBUILT=1",
+        local argv = { "env", "TITAN_RUNTIME_PREBUILT=1",
             "CCACHE_DISABLE=1", "TITAN_PROBE_CACHE_DISABLE=1",
             "TITAN_ROCKS_ROOT=" .. prefix, "TITAN_EXTRA_CPPFLAGS=",
             "TITAN_EXTRA_CFLAGS=-O0 -fno-lto", "TITAN_EXTRA_LDFLAGS=-fno-lto" }
         for name, value in pairs(environment or {}) do argv[#argv + 1] = name .. "=" .. value end
+        local options
+        if platform.windows then
+            local variables = {}
+            for index = 2, #argv do
+                local name, value = argv[index]:match("^([^=]+)=(.*)$")
+                variables[name] = value
+            end
+            argv, options = {}, { env = variables }
+        end
         for _, value in ipairs({ lua, "-E", frontend, "--incremental",
             "--tree", root, "--output", root .. "/out" }) do argv[#argv + 1] = value end
         for _, value in ipairs(arguments) do argv[#argv + 1] = value end
-        local result = context().io:run(argv)
+        local result = context().io:run(argv, options)
         assert.equal(expected ~= false, result.started and result.ok, result.output or result.diagnostic)
         return result.output or ""
     end
@@ -479,6 +488,16 @@ dofile(%q .. "/titanc")
         write(root .. "/app.titan", "function main(args: {string}): integer return 0 end\n")
     end)
     after_each(function() remove(root) end)
+
+    it("preserves a PATH override in the compiler process", function()
+        local directory = root .. "/native PATH Ω"
+        assert(lfs.mkdir(directory))
+        local inherited = platform.getenv("PATH") or ""
+        local path = directory .. (platform.windows and ";" or ":") .. inherited
+        write(frontend, 'io.write(assert(os.getenv("PATH")))\n')
+        assert.equal(path, compile({}, nil, { PATH = path }))
+        assert.equal(inherited, platform.getenv("PATH") or "")
+    end)
 
     it("skips all final native work on a repeated executable build", function()
         local arguments = { "--exe", exe("program Ω"), "app" }
