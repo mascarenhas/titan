@@ -333,9 +333,10 @@ end
 
 -- A build worker: `argv` spawned directly (never through a shell or a PATH
 -- launcher) in `options.cwd` with the parent's environment. Standard output
--- and error are captured whole for deterministic replay, and descriptor 3 is
--- a private duplex pipe carrying length-prefixed control records. POSIX
--- descriptors in `options.inherit` follow as descriptors 4, 5, ... (the
+-- and error are captured whole for deterministic replay; descriptor 3 carries
+-- coordinator-to-worker requests and descriptor 4 carries worker-to-coordinator
+-- replies, so neither direction shares a synchronous Windows pipe FILE_OBJECT.
+-- POSIX descriptors in `options.inherit` follow as descriptors 5, 6, ... (the
 -- build coordinator's output-tree locks). Handlers: `record(payload)` per
 -- complete record, `failed(err)` on a read or framing failure (reading then
 -- stops), `exited(code, signal)` once reaped, and `settled()` once the child
@@ -346,7 +347,7 @@ function process.start_worker(argv, options, handlers)
         stdout = {}, stderr = {}, frames = process.new_frames(), open = 0,
     }, Worker)
     local pipes = {}
-    local names = { "stdin_pipe", "stdout_pipe", "stderr_pipe", "control" }
+    local names = { "stdin_pipe", "stdout_pipe", "stderr_pipe", "request_pipe", "control" }
     for index, name in ipairs(names) do
         local pipe, err = uv.new_pipe(false)
         if not pipe then
@@ -359,6 +360,9 @@ function process.start_worker(argv, options, handlers)
     end
     local function check_settled()
         if worker.exited and worker.open == 0 and not worker.settled then
+            if not worker.request_pipe:is_closing() then
+                worker.request_pipe:close()
+            end
             worker.settled = true
             handlers.settled()
         end
@@ -367,19 +371,25 @@ function process.start_worker(argv, options, handlers)
         if pipe:is_closing() then return end
         worker.open = worker.open - 1
         pipe:close()
+        if pipe == worker.control and not worker.request_pipe:is_closing() then
+            worker.request_pipe:close()
+        end
         check_settled()
     end
     -- Standard input is an empty pipe whose writer closes at once, so the
     -- array has no hole before the inherited descriptors.
     local stdio = { worker.stdin_pipe, worker.stdout_pipe, worker.stderr_pipe,
-        worker.control }
+        worker.request_pipe, worker.control }
     for index, descriptor in ipairs(options.inherit or {}) do
-        stdio[4 + index] = descriptor
+        stdio[5 + index] = descriptor
     end
     local child, err = spawn(argv, stdio,
         { cwd = options.cwd, inherit_environment = true },
         function(code, signal)
             worker.exited, worker.code, worker.signal = true, code, signal
+            if not worker.request_pipe:is_closing() then
+                worker.request_pipe:close()
+            end
             handlers.exited(code, signal)
             check_settled()
         end)
@@ -438,8 +448,10 @@ end
 
 -- Queue one record for the worker. Returns true, or nil and an error.
 function Worker:send(payload)
-    if self.control:is_closing() then return nil, "the control channel is closed" end
-    local called, ok, err = pcall(self.control.write, self.control,
+    if self.request_pipe:is_closing() or self.control:is_closing() then
+        return nil, "the control channel is closed"
+    end
+    local called, ok, err = pcall(self.request_pipe.write, self.request_pipe,
         process.frame(payload))
     if not called then return nil, tostring(ok) end
     if not ok then return nil, tostring(err) end
@@ -455,22 +467,34 @@ function Worker:kill(signal)
     return ok ~= nil or nil, err
 end
 
--- The worker's end of its control pipe (descriptor 3 by default).
-function process.open_control(descriptor)
+-- The worker's end of its control channel (descriptors 3 and 4 by default:
+-- descriptor 3 reads coordinator requests, descriptor 4 writes worker replies).
+function process.open_control(read_descriptor, write_descriptor)
     library()
-    local pipe, err = uv.new_pipe(false)
-    if not pipe then return nil, err end
+    local reader, err = uv.new_pipe(false)
+    if not reader then return nil, err end
+    local writer
+    writer, err = uv.new_pipe(false)
+    if not writer then
+        reader:close()
+        uv.run("nowait")
+        return nil, err
+    end
     local opened
-    opened, err = pipe:open(descriptor or 3)
+    opened, err = reader:open(read_descriptor or 3)
+    if opened then
+        opened, err = writer:open(write_descriptor or 4)
+    end
     if not opened then
-        pipe:close()
+        reader:close()
+        writer:close()
         uv.run("nowait")
         return nil, "cannot open the build control channel: " .. tostring(err)
     end
     local control = setmetatable({
-        pipe = pipe, frames = process.new_frames(), queue = {},
+        reader = reader, pipe = writer, frames = process.new_frames(), queue = {},
     }, Control)
-    local started, read_err = pipe:read_start(function(stream_err, data)
+    local started, read_err = reader:read_start(function(stream_err, data)
         if data then
             local payloads, frame_err = control.frames:push(data)
             if not payloads then
@@ -485,26 +509,33 @@ function process.open_control(descriptor)
         else
             control.ended = true
         end
-        if control.error or control.ended then pipe:read_stop() end
+        if control.error or control.ended then reader:read_stop() end
     end)
     if not started then
-        pipe:close()
+        reader:close()
+        writer:close()
         uv.run("nowait")
         return nil, "cannot read the build control channel: " .. tostring(read_err)
     end
+    reader:unref()
+    writer:unref()
     return control
 end
 
 -- Write one record and wait until the bytes were handed to the kernel.
 function Control:send(payload)
     local done, write_err = false, nil
+    self.pipe:ref()
     local called, ok, err = pcall(self.pipe.write, self.pipe, process.frame(payload),
         function(callback_err)
             done, write_err = true, callback_err
         end)
-    if not called then return nil, tostring(ok) end
-    if not ok then return nil, tostring(err) end
+    if not called or not ok then
+        self.pipe:unref()
+        return nil, tostring(not called and ok or err)
+    end
     while not done do uv.run("once") end
+    self.pipe:unref()
     if write_err then return nil, "control channel write failed: " .. tostring(write_err) end
     return true
 end
@@ -512,17 +543,24 @@ end
 -- Wait for the next complete record; nil and an error at end of file or on
 -- a framing failure.
 function Control:receive()
+    self.reader:ref()
     while #self.queue == 0 do
-        if self.error then return nil, self.error end
+        if self.error then
+            self.reader:unref()
+            return nil, self.error
+        end
         if self.ended then
+            self.reader:unref()
             return nil, "the build coordinator closed the control channel"
         end
         uv.run("once")
     end
+    self.reader:unref()
     return table.remove(self.queue, 1)
 end
 
 function Control:close()
+    if not self.reader:is_closing() then self.reader:close() end
     if not self.pipe:is_closing() then self.pipe:close() end
     uv.run("nowait")
 end
