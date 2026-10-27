@@ -1491,6 +1491,8 @@ function driver.output_tool_descriptors(context, kind)
         link_flags = driver.link_extra_flags(),
         toolchain = toolchain,
         compiler_stage_policy = toolchain and details.stage_policy or nil,
+        -- The certified compiler and stage executables; uncertified names none.
+        compiler_tools = toolchain and details.tools or nil,
         uncacheable = status == "uncertified" and details or uncacheable,
         directory = context.output_root or
             driver.TITAN_SOURCE_PATH:match("[^;]+") or ".",
@@ -9921,7 +9923,9 @@ end
 -- preflighted build plan, whose source modules the build has restored into
 -- driver.imported; `protection.native_objects` are this invocation's
 -- `nativeinputs.compile` results; `protection.link_inputs` lists the prepared
--- final link's inputs, including native libraries its policy resolved.
+-- final link's inputs, including native libraries its policy resolved;
+-- `protection.compiler_tools` and `protection.output_tools` are the certified
+-- compiler identities and the selected output tools (empty when uncertified).
 function driver.cleanup_stale_staging(context, outputs, locks, protection)
     if not platform.windows then return true end
     if not locks or not locks.entries or #locks.entries == 0 then
@@ -10014,6 +10018,10 @@ function driver.cleanup_stale_staging(context, outputs, locks, protection)
     if type(protection.link_inputs) ~= "table" then
         return nil, "stale staging cleanup requires the invocation's final-link inputs"
     end
+    if type(protection.compiler_tools) ~= "table" or
+            type(protection.output_tools) ~= "table" then
+        return nil, "stale staging cleanup requires the invocation's native tool identities"
+    end
 
     -- Observe every candidate's complete no-follow footprint before removing
     -- anything: one conflict retains all candidates, abandoned ones included.
@@ -10076,9 +10084,10 @@ function driver.cleanup_stale_staging(context, outputs, locks, protection)
 
     -- Accepted inputs and reserved outputs, plus the source constituents and
     -- C headers the build recorded after preflight, each --c-source with the
-    -- dependencies its one native preprocessing run recorded, and the final
-    -- link's inputs. Spelling, hierarchy and physical-file aliases of any
-    -- footprint entry refuse every candidate.
+    -- dependencies its one native preprocessing run recorded, the final link's
+    -- inputs, and every active native tool already identified by path.
+    -- Spelling, hierarchy and physical-file aliases of any footprint entry
+    -- refuse every candidate.
     local protected = {}
     for _, reserved in ipairs(plan.reservations) do protected[#protected + 1] = reserved.path end
     for _, input in ipairs(plan.inputs) do protected[#protected + 1] = input end
@@ -10102,6 +10111,20 @@ function driver.cleanup_stale_staging(context, outputs, locks, protection)
         end
     end
     for _, input in ipairs(protection.link_inputs) do protected[#protected + 1] = input end
+    for _, identity in ipairs(protection.compiler_tools) do
+        protected[#protected + 1] = identity.path
+    end
+    local roles = {}
+    for role, tool in pairs(protection.output_tools) do
+        if type(tool) == "table" then roles[#roles + 1] = role end
+    end
+    table.sort(roles)
+    for _, role in ipairs(roles) do
+        local tool = protection.output_tools[role]
+        for _, selected in ipairs(role == "lto_plugins" and tool or { tool }) do
+            protected[#protected + 1] = selected.identity and selected.identity.path
+        end
+    end
     local accepted, conflict = perf.new_output_path_index(
         "staging path", footprint, strategy).check_inputs(protected)
     if not accepted then

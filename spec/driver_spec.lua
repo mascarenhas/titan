@@ -551,7 +551,8 @@ describe("Windows compiler path integration", function()
         }
         assert(driver.cleanup_stale_staging({ io = strategy },
             { { path = directory .. "/app.dll" } }, locks,
-            { plan = plan, native_objects = {}, link_inputs = {} }))
+            { plan = plan, native_objects = {}, link_inputs = {},
+                compiler_tools = {}, output_tools = {} }))
         assert.same({ stage .. "/APP.dll", stage .. "/nested/outside-link",
             stage .. "/nested", stage }, removed)
         assert.equal("directory", kinds[directory .. "/app.dll.stage.tmp."])
@@ -593,6 +594,10 @@ describe("Windows compiler path integration", function()
             { plan = plan, native_objects = {} })
         assert.is_nil(ok)
         assert.matches("requires the invocation's final-link inputs", err, 1, true)
+        ok, err = driver.cleanup_stale_staging(context, outputs, held,
+            { plan = plan, native_objects = {}, link_inputs = {} })
+        assert.is_nil(ok)
+        assert.matches("requires the invocation's native tool identities", err, 1, true)
     end)
 
     -- A closed Windows strategy for stale-staging retirement. Nodes are keyed
@@ -635,13 +640,15 @@ describe("Windows compiler path integration", function()
     end
 
     -- The protection inventory titanc supplies: its preflighted plan, the
-    -- native C nodes, and the prepared final link's inputs.
+    -- native C nodes, the prepared final link's inputs, and its native tools.
     local function staging_protection(fields)
         return {
             plan = { inputs = fields.inputs or {}, reservations = fields.reservations or {},
                 order = fields.order or {} },
             native_objects = fields.native or {},
             link_inputs = fields.links or {},
+            compiler_tools = fields.compiler_tools or {},
+            output_tools = fields.output_tools or {},
         }
     end
 
@@ -706,6 +713,20 @@ describe("Windows compiler path integration", function()
                 protection = staging_protection({
                     links = { "C:/out/bin/app.o", authored .. "/libhelper.a" },
                 }) },
+            { name = "the certified compiler executable", leaf = "clang.exe",
+                protection = staging_protection({ compiler_tools = {
+                    { path = "C:/llvm/bin/ccache.exe" }, { path = authored .. "/clang.exe" },
+                } }) },
+            { name = "a selected output tool", leaf = "llvm-rc.exe",
+                protection = staging_protection({ output_tools = {
+                    linker = { argv = { "ld.lld" }, identity = { path = "C:/llvm/bin/ld.lld.exe" } },
+                    rc = { argv = { "llvm-rc" }, identity = { path = authored .. "/llvm-rc.exe" } },
+                } }) },
+            { name = "a selected LTO plugin", leaf = "LLVMgold.dll",
+                protection = staging_protection({ output_tools = {
+                    lto_plugins = { { argv = { authored .. "/LLVMgold.dll" },
+                        identity = { path = authored .. "/LLVMgold.dll" } } },
+                } }) },
             { name = "a physical alias of a staged file", leaf = "helper.o",
                 protection = staging_protection({ inputs = { "C:/elsewhere/helper.o" } }),
                 aliases = {
@@ -782,6 +803,9 @@ describe("Windows compiler path integration", function()
                     native = { { source = "C:/src/helper.c", path = "C:/out/.native/helper.o",
                         dependencies = { "C:/src/helper.c", "C:/src/target.h" } } },
                     links = { "C:/out/bin/app.o", "C:/src/libtarget.a" },
+                    compiler_tools = { { path = "C:/llvm/bin/clang.exe" } },
+                    output_tools = { linker = { argv = { "ld.lld" },
+                        identity = { path = "C:/llvm/bin/ld.lld.exe" } } },
                 })))
             assert.same({
                 abandoned .. "/app.exe", abandoned,
@@ -4969,13 +4993,16 @@ describe("compiler module loader", function()
         it("forwards proven compiler stage policy and explicit output uncertainty without another query", function()
             local context = tracked_context()
             local calls = 0
+            local tools = { { path = "C:/llvm/bin/clang.exe" } }
             incremental.toolchain_identity = function()
                 calls = calls + 1
-                return "observed-toolchain", { stage_policy = "llvm" }
+                return "observed-toolchain", { stage_policy = "llvm", tools = tools }
             end
             local request = assert(driver.output_tool_descriptors(context))
             assert.equal("observed-toolchain", request.toolchain)
             assert.equal("llvm", request.compiler_stage_policy)
+            -- Stale-stage retirement protects these already observed binaries.
+            assert.equal(tools, request.compiler_tools)
             assert.is_nil(request.uncacheable)
             assert.equal(1, calls)
 
@@ -4983,6 +5010,7 @@ describe("compiler module loader", function()
             request = assert(driver.output_tool_descriptors(context))
             assert.is_nil(request.toolchain)
             assert.is_nil(request.compiler_stage_policy)
+            assert.is_nil(request.compiler_tools)
             assert.equal("native delegate selection is unknown", request.uncacheable)
             incremental.toolchain_identity = function()
                 return nil, "cannot read native executable"
