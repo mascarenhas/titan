@@ -51,6 +51,7 @@ local function run_titanc(arguments, environment_jobs)
         BUILD_PROFILE = "validation",
     }
     local resolver
+    local output_request, selected_tools
 
     function driver.close_resolver_context(context)
         context.closed = true
@@ -75,6 +76,20 @@ local function run_titanc(arguments, environment_jobs)
     function driver.generated_compile_prefix() return { "cc" } end
     function driver.link_extra_flags() return {} end
     function driver.native_link_backend() return "none" end
+    function driver.output_tool_descriptors(context, kind)
+        assert.equal(resolver, context)
+        assert.equal("library", kind)
+        local tools = {}
+        if not platform.windows then
+            tools.ar, tools.ranlib = { driver.AR }, { driver.RANLIB }
+        end
+        output_request = {
+            compiler_argv = { "cc" }, link_flags = {}, toolchain = "toolchain",
+            directory = ".", darwin = driver.IS_DARWIN == true,
+            windows = platform.windows, tools = tools,
+        }
+        return output_request
+    end
     function driver.windows_launcher_manifest() return "" end
     function driver.prepare_foreign_headers() return true end
     function driver.preflight_build_outputs() return true end
@@ -209,7 +224,28 @@ local function run_titanc(arguments, environment_jobs)
             end,
         },
         ["titan-compiler.linkcertificate"] = {
-            prepare = function()
+            output_tools = function(context, request)
+                assert.equal(resolver, context)
+                assert.equal(output_request, request)
+                assert.same({ "cc" }, request.compiler_argv)
+                assert.same({ "cc" }, request.compile_argv)
+                assert.same({
+                    "pkg/one.o", "pkg/three.o", "pkg/two.o",
+                }, request.inputs)
+                selected_tools = {
+                    linker = { argv = { "ld" }, driver_argv = { "cc" },
+                        identity = { path = "ld", size = 1, time_precision = "coarse" } },
+                }
+                for role, argv in pairs(request.tools) do
+                    selected_tools[role] = { argv = argv,
+                        identity = { path = argv[1], size = 1, time_precision = "coarse" } }
+                end
+                return selected_tools
+            end,
+            prepare = function(context, spec)
+                assert.equal(resolver, context)
+                assert.is_table(selected_tools)
+                assert.equal(selected_tools, spec.toolchain.output_tools)
                 return { directory = "link", synthetic_directory = "syn" }
             end,
             check = function() return false, "no-record" end,
