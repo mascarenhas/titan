@@ -2566,12 +2566,30 @@ describe("loader resolver ownership", function()
                 io = {
                     cwd = function() return "/project" end,
                 },
+                selected_static_providers = {},
+                source_names = { app = true },
+                dynamic_names = {},
+                native_bindings = {},
+                native_static_names = { app = true },
+                native_interface_types = {},
             }
             local fake_driver = {
                 TITAN_SOURCE_PATH = ".",
                 EXTRA_CPPFLAGS = {},
                 EXTRA_CFLAGS = {},
                 EXTRA_LDFLAGS = {},
+                imported = {
+                    app = {
+                        kind = "source",
+                        filename = "/project/app.titan",
+                        source_files = { "/project/app.titan" },
+                        compiled = "/out/app.o",
+                        compiled_objects = { "/out/app.o" },
+                        external_symbols = {},
+                        private_symbols = {},
+                        native_references = {},
+                    },
+                },
                 deduplicate_module_names = function(modules) return modules end,
                 new_resolver_context = function() return fake_context end,
                 prepare_output_root = function(dir) return dir end,
@@ -2601,6 +2619,25 @@ describe("loader resolver ownership", function()
                 end,
                 generated_compile_prefix = function() return { "cc" } end,
                 toolchain_descriptor = function() return { compiler_argv = { "cc" } } end,
+                output_tool_descriptors = function() return {} end,
+                finalize_resolver_context = function(context)
+                    assert.equal(fake_context, context)
+                    return true
+                end,
+                plan_foreign_headers = function() return {} end,
+                mangle_module_name = function(name) return name end,
+                record_module_symbols = function() end,
+                plan_compile_requests = function(_, _, inputs)
+                    return { inputs = inputs or {}, outputs = {} }
+                end,
+                write_foreign_header_plans = function() return true end,
+                compile_modules = function(requests)
+                    local results = {}
+                    for index in ipairs(requests) do
+                        results[index] = { ok = true, libname = "/out/app.o" }
+                    end
+                    return results
+                end,
                 close_resolver_context = function(context)
                     assert.equal(fake_context, context)
                     events.close_context = events.close_context + 1
@@ -2688,7 +2725,7 @@ describe("loader resolver ownership", function()
                     absolute = function(path) return path end,
                 },
                 ["titan-compiler.test_runner"] = {},
-                ["titan-compiler.util"] = {},
+                ["titan-compiler.util"] = util,
                 titan = { _sha256_binary = function() return string.rep("\0", 32) end },
             }
             local fake_io = setmetatable({
