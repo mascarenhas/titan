@@ -266,16 +266,24 @@ pass itself never runs the checker, code generator, or C preprocessor:
   collide. The ordinary checker remains the authority for declaration
   validity.
 
+On success the pass stores its reservations in `plan.reservations` and the
+validated inputs in `plan.inputs`. Only the reservations reach workers through
+`driver.plan_descriptor`; Windows stale-stage retirement checks against both
+([Windows DLL publication](windows-build.md#windows-dll-publication)).
+
 `driver.validate_provider_output_paths` checks the whole set through
 `perf.new_output_path_index`. The index observes each pathname once (`lstat`,
 then `stat` for links) and keys it by normalized spelling, physical path
 (existing ancestors resolved through `realpath` on POSIX), lowercased physical
-path, and, on POSIX, device and inode. Exact maps and component-prefix trees
-detect aliases, hierarchy conflicts (an output that is an ancestor of another
-output or input), and wrong existing kinds without further filesystem
-queries. On Windows the index reads file status through the compiler I/O
-strategy's `lstat`/`stat`, the same native observations the rest of the
-compiler uses, rather than LuaFileSystem.
+path, and device and inode (on Windows, the volume serial number and file ID).
+Exact maps and component-prefix trees detect aliases, hierarchy conflicts (an
+output that is an ancestor of another output or input), and wrong existing
+kinds without further filesystem queries. On Windows the index reads file
+status through a compiler I/O strategy's `lstat`/`stat`, the same native
+observations the rest of the compiler uses, rather than LuaFileSystem. A caller
+may pass its own strategy as the optional third argument, as stale-stage
+retirement does with its resolver's; that strategy then also resolves relative
+input spellings. Otherwise the index uses a new host strategy.
 
 Fresh modules discover their C headers only in their worker. After checking
 and before writing generated module artifacts (C, headers, and objects),
