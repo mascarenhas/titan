@@ -372,8 +372,10 @@ reports the exact component:
      Clang identities do not depend on the working directory; every other line
      and argument is kept; and
    * `incremental.physical_executable` records (it also returns, second, the
-     admitted absolute command spelling, not its realpath, for callers that
-     must run exactly the certified tool) (`{ path = realpath, size,
+     admitted absolute command spelling, neither realpath-resolved nor
+     lexically normalized, since POSIX `PATH` candidates keep their raw
+     spelling through symlinked directories and `..`, for callers that must
+     run exactly the certified tool) (`{ path = realpath, size,
      device, inode, mode, modified_*, changed_*, precision, dev, ino,
      mtime_ns, ctime_ns, time_precision }`) for the resolved compiler driver
      (`cc[1]`), any explicit compiler wrapped by `ccache`, `sccache`, or
