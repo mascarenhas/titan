@@ -1278,6 +1278,35 @@ describe("linker dependency-feature memo", function()
         assert.equal(old, lfs.attributes(filename, "modification"))
     end)
 
+    it("reprobes feature records made under a different classification policy", function()
+        local ctx = invocation()
+        local compiler = assert(incremental.physical_executable(ctx, request.compiler_argv))
+        local linker = assert(incremental.physical_executable(ctx, root .. "/ld",
+            request.compiler_stage_policy))
+        local legacy_key = incremental.digest(ctx, "linker-dependency-feature", {
+            argv = request.compiler_argv, toolchain = request.toolchain,
+            compiler = compiler, linker = linker,
+            compiler_identity = ctx.incremental_configuration.compiler,
+        })
+        local filename = root .. "/.titan/linker-feature"
+        certificate.make_directory(ctx, root .. "/.titan")
+        assert(certificate.write_record(ctx, filename, {
+            key = legacy_key, backend = "lld", digest = version.CERTIFICATE_DIGEST,
+            canonicalization = version.CERTIFICATE_CANONICALIZATION,
+        }))
+        local legacy = assert(certificate.read_record(ctx, filename))
+        assert.equal(legacy_key, legacy.key)
+        assert.equal("lld", legacy.backend)
+        assert.equal(0, probes)
+        assert.equal("gnu", detect())
+        assert.equal(1, probes)
+        local current = assert(certificate.read_record(model:context(), filename))
+        assert.is_not.equal(legacy_key, current.key)
+        assert.equal("gnu", current.backend)
+        assert.equal("gnu", detect())
+        assert.equal(1, probes)
+    end)
+
     it("identifies GNU ld independently of echoed probe paths", function()
         local directory = root .. "/permission build"
         assert(lfs.mkdir(directory))
@@ -1300,7 +1329,7 @@ describe("linker dependency-feature memo", function()
         assert(certificate.commit(ctx, ticket))
         local record = assert(certificate.read_record(ctx, ticket.record))
         assert.equal(1, #record.native)
-        assert.equal(object, record.native[1].path)
+        assert.equal(native_spelling(object), record.native[1].path)
         assert.is_true(certificate.check(model:context(), ticket))
         write(object, "changed reported object")
         assert.is_false(certificate.check(model:context(), ticket))

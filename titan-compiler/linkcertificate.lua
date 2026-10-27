@@ -268,7 +268,7 @@ local function selected_linker(context, request)
         argv = argv, name = explicit_linker, description = description,
         compiler = compiler, linker = linker,
     }
-    selected.key = incremental.digest(context, "linker-dependency-feature", {
+    selected.key = incremental.digest(context, "linker-version-line-dependency-feature", {
         argv = argv, toolchain = request.toolchain, compiler = selected.compiler,
         linker = selected.linker, compiler_identity = compiler_identity,
     })
