@@ -1236,6 +1236,42 @@ describe("linker dependency-feature memo", function()
         assert.equal(old, lfs.attributes(filename, "modification"))
     end)
 
+    it("identifies GNU ld independently of echoed probe paths", function()
+        local directory = root .. "/permission build"
+        assert(lfs.mkdir(directory))
+        local object = directory .. "/permission_library.o"
+        write(object, "reported object")
+        banner = "collect2 version 16.1.1\n " .. root ..
+            "/ld --dependency-file=" .. root .. "/lua_LLDr7x --version\nGNU ld 2.45\n"
+        local backend = detect()
+        assert.equal("gnu", backend)
+        assert.equal("gnu", detect())
+        assert.equal(1, probes)
+        local report = root .. "/link.d"
+        write(report, gnu_report(root .. "/program", { object }))
+        local ctx = model:context()
+        local ticket = certificate.prepare(ctx, {
+            output_root = root, outputs = { root .. "/program" }, roots = { "app" },
+            kind = "program", objects = { root .. "/main.o" }, toolchain = "toolchain",
+            native_libraries = { backend = backend, dependency_file = report },
+        })
+        assert(certificate.commit(ctx, ticket))
+        local record = assert(certificate.read_record(ctx, ticket.record))
+        assert.equal(1, #record.native)
+        assert.equal(object, record.native[1].path)
+        assert.is_true(certificate.check(model:context(), ticket))
+        write(object, "changed reported object")
+        assert.is_false(certificate.check(model:context(), ticket))
+    end)
+
+    it("identifies vendor LLD version lines independently of echoed paths", function()
+        banner = "collect2 version 16.1.1\n " .. root ..
+            "/GNU ld/ld --version\nDebian LLD 22.1.8 (compatible with GNU linkers)\n"
+        assert.equal("lld", detect())
+        assert.equal("lld", detect())
+        assert.equal(1, probes)
+    end)
+
     it("invalidates feature detection for same-path linker replacement and changed flags", function()
         assert.equal("gnu", detect())
         local editor = model:context()
