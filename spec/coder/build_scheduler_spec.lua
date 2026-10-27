@@ -343,34 +343,67 @@ os.exit(0)
             while not eof_settled do process.library().run("once") end
             assert.equal(3, eof_code)
 
-            -- Also verify Session:abandoned() (uv.run("nowait") with
+            -- Also verify Session:abandoned() (Control:poll() with
             -- control.reader as the sole handle) observes coordinator EOF.
+            local uv = process.library()
+            local ready_marker = workspace .. "/abandoned.ready"
             local abandoned_code, abandoned_settled
-            local abandoned_worker
-            abandoned_worker = assert(process.start_worker({
-                interpreter, "-E", "-e",
-                string.format("package.path = %q; package.cpath = %q; ", package.path, package.cpath) .. [[
+            local abandoned_worker, ready_timer, deadline_timer
+            local function cleanup_abandoned()
+                if ready_timer and not ready_timer:is_closing() then ready_timer:close() end
+                if deadline_timer and not deadline_timer:is_closing() then deadline_timer:close() end
+                if abandoned_worker and not abandoned_worker.exited then
+                    abandoned_worker:kill("sigkill")
+                end
+                uv.run("nowait")
+            end
+            local ran_abandoned, abandoned_err = xpcall(function()
+                abandoned_worker = assert(process.start_worker({
+                    interpreter, "-E", "-e",
+                    string.format("package.path = %q; package.cpath = %q; ", package.path, package.cpath) ..
+                    string.format([[
 local process = require "titan-compiler.process"
 local session = assert(require("titan-compiler.build_worker").connect())
-for _ = 1, 500 do
+local file = assert(io.open(%q, "wb"))
+assert(file:write("ready\n"))
+assert(file:close())
+for _ = 1, 1000 do
     if session:abandoned() then os.exit(3) end
     process.library().sleep(10)
 end
 os.exit(0)
-]],
-            }, {}, {
-                record = function() end,
-                failed = function() end,
-                exited = function(code) abandoned_code = code end,
-                settled = function() abandoned_settled = true end,
-            }))
-            assert(abandoned_worker:send(assert(process.encode_record({
-                kind = "compile",
-                protocol = require("titan-compiler.version").BUILD_WORKER_PROTOCOL,
-                request = { module = "abandoned" },
-            }))))
-            abandoned_worker.request_pipe:close()
-            while not abandoned_settled do process.library().run("once") end
+]], ready_marker),
+                }, {}, {
+                    record = function() end,
+                    failed = function() end,
+                    exited = function(code) abandoned_code = code end,
+                    settled = function() abandoned_settled = true end,
+                }))
+                assert(abandoned_worker:send(assert(process.encode_record({
+                    kind = "compile",
+                    protocol = require("titan-compiler.version").BUILD_WORKER_PROTOCOL,
+                    request = { module = "abandoned" },
+                }))))
+                uv.update_time()
+                ready_timer = uv.new_timer()
+                ready_timer:start(5, 5, function()
+                    if exists(ready_marker) then
+                        ready_timer:stop()
+                        ready_timer:close()
+                        if not abandoned_worker.request_pipe:is_closing() then
+                            abandoned_worker.request_pipe:close()
+                        end
+                    end
+                end)
+                deadline_timer = uv.new_timer()
+                deadline_timer:start(15000, 0, function()
+                    if not abandoned_worker.exited then abandoned_worker:kill("sigkill") end
+                end)
+                deadline_timer:unref()
+                while not abandoned_settled do uv.run("once") end
+            end, debug.traceback)
+            cleanup_abandoned()
+            assert.is_true(ran_abandoned, abandoned_err)
             assert.equal(3, abandoned_code)
         end, debug.traceback)
         package.path = saved_path
