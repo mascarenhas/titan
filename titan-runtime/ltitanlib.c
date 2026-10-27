@@ -314,7 +314,7 @@ static int cleartrace(lua_State *L) {
 
 /* Private compiler helper: SHA-256 of a Lua byte string, returned as the
 ** 32-byte binary digest. Byte-for-byte equal to titan-compiler.sha256.
-** Implementation notes: doc/implementation/driver.md#native-compiler-support */
+** Implementation notes: doc/implementation/driver.md#the-runtime-support-library-titan-runtime */
 #define TITAN_SHA_ROTR(x, n) ((uint32_t)(((x) >> (n)) | ((x) << (32 - (n)))))
 
 static const uint32_t titan_sha256_k[64] = {
