@@ -517,6 +517,7 @@ function process.open_control(read_descriptor, write_descriptor)
         uv.run("nowait")
         return nil, "cannot read the build control channel: " .. tostring(read_err)
     end
+    reader:unref()
     writer:unref()
     return control
 end
@@ -533,9 +534,7 @@ function Control:send(payload)
         self.pipe:unref()
         return nil, tostring(not called and ok or err)
     end
-    self.reader:unref()
     while not done do uv.run("once") end
-    self.reader:ref()
     self.pipe:unref()
     if write_err then return nil, "control channel write failed: " .. tostring(write_err) end
     return true
@@ -544,14 +543,31 @@ end
 -- Wait for the next complete record; nil and an error at end of file or on
 -- a framing failure.
 function Control:receive()
+    self.reader:ref()
     while #self.queue == 0 do
-        if self.error then return nil, self.error end
+        if self.error then
+            self.reader:unref()
+            return nil, self.error
+        end
         if self.ended then
+            self.reader:unref()
             return nil, "the build coordinator closed the control channel"
         end
         uv.run("once")
     end
+    self.reader:unref()
     return table.remove(self.queue, 1)
+end
+
+-- Nonblocking check for coordinator EOF or a control-channel read error while
+-- the reader stays unreferenced outside active waits.
+function Control:poll()
+    if not self.reader:is_closing() then
+        self.reader:ref()
+        uv.run("nowait")
+        if not self.reader:is_closing() then self.reader:unref() end
+    end
+    return self.ended or self.error ~= nil
 end
 
 function Control:close()

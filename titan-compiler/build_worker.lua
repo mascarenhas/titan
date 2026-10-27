@@ -88,8 +88,7 @@ end
 
 -- True once the coordinator closed its end of the control channel.
 function Session:abandoned()
-    process.library().run("nowait")
-    return self.control.ended or self.control.error ~= nil
+    return self.control:poll()
 end
 
 local function diagnostic_list(value)
