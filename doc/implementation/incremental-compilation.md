@@ -335,10 +335,26 @@ does not reject unknown extra keys:
 per resolver context. The resulting table `{ digest, compiler, preamble,
 toolchain, options }` is memoized at `context.incremental_configuration`. In a
 multi-module build, the coordinator computes it once and passes it to workers
-via `driver.worker_configuration(context)`; each worker recomputes only
-`compiler` (`incremental.compiler_component`) in `driver.new_worker_context` to
-verify that the loaded compiler Lua files did not change after the coordinator
-started.
+via `driver.worker_configuration(context)`. That closed worker configuration
+always carries a top-level `compiler`, the installed compiler inventory
+digest, and each worker recomputes that inventory
+(`incremental.compiler_component`) in `driver.new_worker_context`, rejecting a
+mismatch or an unreadable inventory, to verify that the loaded compiler Lua
+files did not change after the coordinator started.
+
+Only the explicit third result `"uncertified"` from the configuration or
+toolchain identity (for example a Windows tool whose launcher policy cannot
+be proven) selects raw compilation. The resolver then keeps
+`incremental_configuration` nil and stores the reason separately as
+`incremental_uncertified`, and the worker configuration carries
+`uncertified = reason` instead of `configuration`. In that mode existing
+objects are never reused: planning parses and selects fresh source, and
+generated objects carry their ordinary metadata but no producer interface
+digests and no certificate, so a later unchanged invocation still cannot hit.
+The final link and `--c-source` nodes are likewise marked uncacheable.
+`driver.native_link_backend` keeps an uncertain backend status rather than
+memoizing a guessed backend. Any other configuration failure is still an
+invocation error, and non-string cancellations propagate unchanged.
 
 The four component digests are stored separately in the record so a mismatch
 reports the exact component:

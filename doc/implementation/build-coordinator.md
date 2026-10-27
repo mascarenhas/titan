@@ -731,6 +731,22 @@ coordinator publishes module objects:
    If any rename fails, `<stem>.o` and all remaining temporaries are unlinked,
    leaving no primary commit marker.
 
+When the native configuration is uncertified (see [Configuration, toolchain,
+and preamble certificates](incremental-compilation.md#configuration-toolchain-and-preamble-certificates)),
+the staged object carries no certificate, so step 3 cannot use
+`revalidate_record`. The worker instead returns an invocation-only
+`source_snapshot` taken from the exact own-source certificate it parsed; the
+snapshot is never embedded in an object or persisted. Before publication the
+coordinator freshly resolves current flat/folder membership and path
+spellings, rehashes the current source bytes through
+`incremental.fresh_context`, compares them with the snapshot, and revalidates
+the module's header dependencies and FFI search inputs through
+`driver.restat_c_header_dependencies` with fresh header state. A changed
+source or header, or a newly appearing earlier include candidate, rejects the
+module and unlinks its staged artifacts. Otherwise publication proceeds parts
+first and primary last as above and reports `status = "built"`, never a
+certificate hit.
+
 ## Native inputs and `--c-source` nodes
 
 ### Normalization order
