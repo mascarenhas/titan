@@ -118,13 +118,18 @@ function Process:wait()
 end
 Process.close = Process.wait
 
+-- Start without waiting, sharing standard streams and any inherited leases.
+-- The returned process's :close()/:wait() reaps it with os.execute status.
+function process.start(argv, options)
+    library()
+    return spawn(argv, { 0, 1, 2 }, options)
+end
 
 -- Run `argv` directly with the C locale and wait for it, sharing the
 -- caller's standard streams; returns os.execute-shaped results. On Windows
 -- the strict native ancestor job also contains wrappers' descendants.
 function process.run(argv, options)
-    library()
-    local child, err = spawn(argv, { 0, 1, 2 }, options)
+    local child, err = process.start(argv, options)
     if not child then
         uv.run("nowait")
         pcall(io.stderr.write, io.stderr,
