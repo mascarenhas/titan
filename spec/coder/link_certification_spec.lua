@@ -21,6 +21,13 @@ end
 local function context() return { io = compiler_io.new_sync() } end
 local function write(path, bytes) assert(context().io:write_file(path, bytes)) end
 local function escape(path) return path:gsub("%$", "$$"):gsub("([ #])", "\\%1") end
+local function native_spelling(path)
+    return platform.windows and assert(platform.path.normalize(path)) or path
+end
+local function observation_key(path)
+    return platform.windows and path:gsub("\\", "/") or path
+end
+
 local function gnu_report(output, inputs)
     local phony = {}
     for _, filename in ipairs(inputs) do phony[#phony + 1] = filename .. ":\n" end
@@ -40,7 +47,6 @@ end
 -- same-size replacement exercises the ctime gate rather than an inode miss.
 local function precise_model(root)
     local model = { root = root, ctime = {}, ids = {}, executables = {}, clock = 1000000000, sequence = 0 }
-    local function key(path) return platform.windows and path:gsub("\\", "/") or path end
     function model:context()
         local strategy = compiler_io.new_sync()
         local stat, lstat, read_file = strategy.stat, strategy.lstat, strategy.read_file
@@ -48,7 +54,7 @@ local function precise_model(root)
         strategy.reads = {}
         local function decorate(metadata, err, path)
             if not metadata then return nil, err end
-            path = key(path)
+            path = observation_key(path)
             if not model.ids[path] then
                 model.sequence = model.sequence + 1
                 model.ids[path] = tostring(model.sequence)
@@ -73,19 +79,19 @@ local function precise_model(root)
             return decorate(metadata, err, path)
         end
         function strategy:executable(path)
-            return model.executables[key(path)] == true
+            return model.executables[observation_key(path)] == true
         end
         function strategy:executable_search_cwd()
             return model.search_cwd ~= false
         end
         function strategy:read_file(path, bound)
-            local name = key(path)
+            local name = observation_key(path)
             self.reads[name] = (self.reads[name] or 0) + 1
             return read_file(self, path, bound)
         end
         local function changed(path)
             model.clock = model.clock + 1
-            model.ctime[key(path)] = model.clock
+            model.ctime[observation_key(path)] = model.clock
         end
         function strategy:write_file(path, bytes)
             local ok, err = write_file(self, path, bytes)
@@ -298,7 +304,8 @@ describe("final link certificates", function()
             local record = assert(certificate.read_record(context(), ticket.record))
             local names = {}
             for _, member in ipairs(record.outputs[1].entries) do names[#names + 1] = member.path end
-            assert.same({ directory .. "/A", directory .. "/z", directory .. "/é" }, names)
+            assert.same({ native_spelling(directory .. "/A"), native_spelling(directory .. "/z"),
+                native_spelling(directory .. "/é") }, names)
             for _, locale in ipairs({ "en_US.UTF-8", "pt_BR.UTF-8", "C.UTF-8" }) do
                 if os.setlocale(locale, "collate") then
                     local ctx, next_ticket = prepare()
@@ -490,8 +497,41 @@ dofile(%q .. "/titanc")
         write(log, "")
         compile({ "--test", "--exe", exe("tests-one"), "checks" })
         assert.equal("", read(log))
+        local function companion_snapshot(executable)
+            local ctx = context()
+            local paths = assert(require("titan-compiler.driver").windows_program_paths(
+                "checks", executable, nil, root .. "/out"))
+            local target = certificate.canonical_path(ctx, paths.executable)
+            local provider = certificate.canonical_path(ctx, paths.provider)
+            local directory = root .. "/out/.titan-links"
+            for key in lfs.dir(directory) do
+                if key ~= "." and key ~= ".." then
+                    local record = certificate.read_record(ctx, directory .. "/" .. key .. "/record")
+                    if record then
+                        local owns_target, companion
+                        for _, output in ipairs(record.outputs) do
+                            if output.path == target then owns_target = true end
+                            if output.path == provider then companion = output end
+                        end
+                        if owns_target then return assert(companion, "missing provider snapshot") end
+                    end
+                end
+            end
+            error("missing final output record for " .. executable)
+        end
+        local first_companion = platform.windows and companion_snapshot(exe("tests-one"))
+        local companion_changed = false
         compile({ "--test", "--exe", exe("tests-two"), "checks" })
         assert.matches("render", read(log), 1, true)
+        if first_companion then
+            local second_companion = companion_snapshot(exe("tests-two"))
+            assert.equal(first_companion.path, second_companion.path)
+            companion_changed = first_companion.identity ~= second_companion.identity
+        end
+        write(log, "")
+        compile({ "--test", "--exe", exe("tests-one"), "checks" })
+        if companion_changed then assert.matches("render", read(log), 1, true)
+        else assert.equal("", read(log)) end
         write(log, "")
         compile({ "--test", "--exe", exe("tests-one"), "checks" })
         assert.equal("", read(log))
@@ -568,6 +608,7 @@ dofile(%q .. "/titanc")
                 -- Exercise the real default Windows fallback, not an injected
                 -- capability. Each import archive names a different live DLL.
                 environment.CC = driver.CC
+                environment.PATH = root .. ";" .. (platform.getenv("PATH") or "")
             elseif driver.IS_DARWIN then
                 -- Darwin always has dependency_info. Select the fallback policy
                 -- for this fixture while keeping all compilation/linking real.
@@ -776,7 +817,8 @@ describe("native library coverage policy", function()
             },
         })
         assert.is_true(policy.cacheable)
-        assert.same({ root .. "/libfirst.a", root .. "/libsecond.a", root .. "/libfirst.a" }, policy.files)
+        assert.same({ native_spelling(root .. "/libfirst.a"), native_spelling(root .. "/libsecond.a"),
+            native_spelling(root .. "/libfirst.a") }, policy.files)
     end)
 
     it("retains POSIX library-search traversal when a lexical competitor already exists", function()
@@ -843,7 +885,7 @@ describe("native library coverage policy", function()
                 })
             end
             local ctx, ticket = prepare()
-            assert.same({ selected }, ticket.native_policy.files)
+            assert.same({ native_spelling(selected) }, ticket.native_policy.files)
             assert(certificate.commit(ctx, ticket))
             assert(incremental.save_digest_cache(ctx))
             ctx, ticket = prepare()
@@ -852,7 +894,7 @@ describe("native library coverage policy", function()
             assert(model:context().io:write_file(selected, image(2, case.selected:match("%.dll$"))))
             assert(lfs.touch(selected, old, old))
             ctx, ticket = prepare()
-            assert.same({ selected }, ticket.native_policy.files)
+            assert.same({ native_spelling(selected) }, ticket.native_policy.files)
             assert.is_false(certificate.check(ctx, ticket))
             assert.is_nil(ctx.io.reads[object])
             assert.equal(old, lfs.attributes(selected, "modification"))
@@ -894,7 +936,7 @@ describe("native library coverage policy", function()
             },
         })
         assert.is_true(policy.cacheable, policy.reason)
-        assert.same({ files[1], root .. "/libfirst.a", files[2], files[3], files[4] }, policy.files)
+        assert.same({ files[1], native_spelling(root .. "/libfirst.a"), files[2], files[3], files[4] }, policy.files)
     end)
 
     it("tracks direct file-taking switches without interpreting symbol files as native objects", function()
@@ -1099,7 +1141,7 @@ describe("persistent precise file certification", function()
         local object_changed = model:context()
         local repaired = compile(object_changed)
         assert.is_false(repaired.hit)
-        assert.is_true((object_changed.io.reads[fourth.path] or 0) > 0)
+        assert.is_true((object_changed.io.reads[observation_key(fourth.path)] or 0) > 0)
         assert.equal(fourth.identity, repaired.identity)
     end)
 end)
@@ -1317,12 +1359,12 @@ describe("linker dependency-feature memo", function()
         local ctx = invocation()
         assert.equal("gnu", certificate.linker_backend(ctx, request))
         local tools = assert(certificate.output_tools(ctx, request))
-        assert.equal(root .. "/ld", tools.linker.identity.path)
+        assert.equal(native_spelling(root .. "/ld"), tools.linker.identity.path)
         assert.equal(1, probes)
         assert.equal(1, resolves)
         assert.equal(1, descriptions)
         assert.is_nil(tools.lto_compiler)
-        assert.equal(root .. "/collect2", tools.link_driver.identity.path)
+        assert.equal(native_spelling(root .. "/collect2"), tools.link_driver.identity.path)
     end)
 
     for _, fixed in ipairs({ "native", "darwin", "windows" }) do
@@ -1343,7 +1385,7 @@ describe("linker dependency-feature memo", function()
     it("uses the compiler-described default linker rather than a same-name PATH guess", function()
         description = ' "' .. root .. '/ld.lld" "-o" "/dev/null"\n'
         local ctx, ticket, tools = final_ticket({ windows = true })
-        assert.equal(root .. "/ld.lld", tools.linker.identity.path)
+        assert.equal(native_spelling(root .. "/ld.lld"), tools.linker.identity.path)
         assert.equal(0, resolves)
         assert(certificate.commit(ctx, ticket))
         assert(incremental.save_digest_cache(ctx))
@@ -1483,8 +1525,8 @@ describe("linker dependency-feature memo", function()
             end
             function ctx.io:realpath(path) return realpath(self, is_alias(path) and target or path) end
             local identity, admitted = incremental.physical_executable(ctx, alias, mode == "llvm" and "llvm" or nil)
-            assert.equal(target, identity.path)
-            assert.equal(alias, admitted)
+            assert.equal(native_spelling(target), identity.path)
+            assert.equal(native_spelling(alias), admitted)
         end
     end)
 
@@ -1525,8 +1567,8 @@ describe("linker dependency-feature memo", function()
                     assert.is_string(identity)
                 else
                     assert.is_true(ok, identity)
-                    assert.equal(alias .. ".exe", identity.path)
-                    assert.equal(alias .. ".exe", reason)
+                    assert.equal(native_spelling(alias .. ".exe"), identity.path)
+                    assert.equal(native_spelling(alias .. ".exe"), reason)
                 end
             end
         end)
@@ -1733,10 +1775,10 @@ describe("linker dependency-feature memo", function()
         seed_final(options, shadow)
         local ctx, ticket, tools = final_ticket(options, shadow)
         assert.is_true(certificate.check(ctx, ticket))
-        assert.equal(selected, tools.linker.identity.path)
+        assert.equal(native_spelling(selected), tools.linker.identity.path)
         assert.same({ reported }, tools.linker.argv)
         local _, admitted = incremental.physical_executable(ctx, tools.linker.argv, options.compiler_stage_policy or "llvm")
-        assert.equal(selected, admitted)
+        assert.equal(native_spelling(selected), admitted)
         assert.is_nil(ctx.io.reads[root .. "/main.o"])
         assert(model:context().io:write_file(shadow .. "/ld.lld.exe", "edit"))
         ctx, ticket = final_ticket(options, shadow)
@@ -1792,9 +1834,9 @@ describe("linker dependency-feature memo", function()
             seed_final(options)
             local ctx, ticket, tools = final_ticket(options)
             assert.is_true(certificate.check(ctx, ticket))
-            assert.equal(root .. "/collect2", tools.link_driver.identity.path)
+            assert.equal(native_spelling(root .. "/collect2"), tools.link_driver.identity.path)
             if case.stage == "liblto_plugin.so" then
-                assert.equal(root .. "/liblto_plugin.so", tools.lto_plugins[1].identity.path)
+                assert.equal(native_spelling(root .. "/liblto_plugin.so"), tools.lto_plugins[1].identity.path)
             else assert.is_nil(tools.lto_plugins) end
             assert.is_nil(tools.lto_wrapper)
             assert.is_nil(tools.lto_compiler)
@@ -1821,8 +1863,8 @@ describe("linker dependency-feature memo", function()
             seed_final(options)
             local ctx, ticket, tools = final_ticket(options)
             assert.is_true(certificate.check(ctx, ticket))
-            assert.equal(root .. "/lto-wrapper", tools.lto_wrapper.identity.path)
-            assert.equal(root .. "/lto1", tools.lto_compiler.identity.path)
+            assert.equal(native_spelling(root .. "/lto-wrapper"), tools.lto_wrapper.identity.path)
+            assert.equal(native_spelling(root .. "/lto1"), tools.lto_compiler.identity.path)
             assert.is_nil(ctx.io.reads[root .. "/main.o"])
         end)
     end
@@ -1836,9 +1878,9 @@ describe("linker dependency-feature memo", function()
             seed_final(options)
             local ctx, ticket, tools = final_ticket(options)
             assert.is_true(certificate.check(ctx, ticket))
-            assert.equal(root .. "/liblto_plugin.so", tools.lto_plugins[1].identity.path)
-            assert.equal(root .. "/lto-wrapper", tools.lto_wrapper.identity.path)
-            assert.equal(root .. "/lto1", tools.lto_compiler.identity.path)
+            assert.equal(native_spelling(root .. "/liblto_plugin.so"), tools.lto_plugins[1].identity.path)
+            assert.equal(native_spelling(root .. "/lto-wrapper"), tools.lto_wrapper.identity.path)
+            assert.equal(native_spelling(root .. "/lto1"), tools.lto_compiler.identity.path)
             assert.is_nil(ctx.io.reads[root .. "/main.o"])
             assert(model:context().io:write_file(root .. "/" .. stage, "edit"))
             ctx, ticket = final_ticket(options)
@@ -1857,7 +1899,7 @@ describe("linker dependency-feature memo", function()
         local options = clone(request)
         options.inputs = { root .. "/bitcode.o" }
         tools = assert(certificate.output_tools(ctx, options))
-        assert.equal(root .. "/ld.lld", tools.linker.identity.path)
+        assert.equal(native_spelling(root .. "/ld.lld"), tools.linker.identity.path)
         local before = resolves
         options.compiler_argv = { root .. "/cc", "-flto", "-fno-lto" }
         tools = assert(certificate.output_tools(invocation(), options))
@@ -1872,7 +1914,7 @@ describe("linker dependency-feature memo", function()
         seed_final(options)
         local ctx, ticket, tools = final_ticket(options)
         assert.is_true(certificate.check(ctx, ticket))
-        assert.equal(root .. "/libLTO.dylib", tools.lto_plugins[1].identity.path)
+        assert.equal(native_spelling(root .. "/libLTO.dylib"), tools.lto_plugins[1].identity.path)
         assert.is_nil(tools.lto_compiler)
         assert(model:context().io:write_file(root .. "/libLTO.dylib", "edit"))
         ctx, ticket = final_ticket(options)
