@@ -169,13 +169,97 @@ function certificate.write_record(context, filename, record)
     return written, write_error
 end
 
--- Cache the dependency-report capability, not linker outputs. Re-resolve the
--- named linker each invocation and include its physical identity, so replacing
--- a same-path tool cannot retain an obsolete feature verdict.
+local compiler_libraries
+
+local function link_job_name(name)
+    return name == "collect2" or name == "link" or name == "lld" or name == "lld-link"
+        or name == "ld" or name:match("^ld[.%-]") or name:match("^ld64[.%-]") or name:match("%-ld$")
+end
+
+local function describe_link(context, argv, windows)
+    local query = { table.unpack(argv) }
+    local null = windows and "NUL" or "/dev/null"
+    for _, word in ipairs({ "-###", "-x", "c", null, "-o", null }) do query[#query + 1] = word end
+    local result = context.io:run(query, { stderr_to_stdout = true })
+    need(type(result) == "table" and result.started and result.ok,
+        type(result) == "table" and (result.diagnostic or result.output) or "cannot describe selected native link job")
+    return result.output or ""
+end
+
+-- Resolve once per coordinator, but again in every invocation. Both the final
+-- recipe and dependency-feature memo consume this same physical selection.
+local function selected_linker(context, request)
+    need(type(request.compiler_argv) == "table" and #request.compiler_argv > 0,
+        "linker inventory requires compiler argv")
+    need(type(request.toolchain) == "string", "linker inventory requires toolchain identity")
+    local argv = { table.unpack(request.compiler_argv) }
+    for _, flag in ipairs(request.link_flags or {}) do argv[#argv + 1] = flag end
+    local compiler_identity = request.compiler_identity or
+        (context.incremental_configuration and context.incremental_configuration.compiler)
+    local request_key = incremental.digest(context, "selected-linker-request", {
+        argv = argv, toolchain = request.toolchain, compiler_identity = compiler_identity,
+        darwin = request.darwin, windows = request.windows,
+        executable_path = context.executable_path or platform.getenv("PATH"),
+    })
+    context.link_certificate_tools = context.link_certificate_tools or {}
+    local saved = context.link_certificate_tools[request_key]
+    if saved then return saved end
+    local linker_name, explicit_linker, fused_path = "ld"
+    for index, flag in ipairs(argv) do
+        local selected = flag:match("^%-fuse%-ld=(.+)$")
+        if selected then
+            if selected:find("[/\\]") then fused_path = selected
+            else linker_name, fused_path = "ld." .. selected, nil end
+        elseif flag:match("^%-%-ld%-path=") then
+            explicit_linker = flag:match("^%-%-ld%-path=(.*)$")
+        elseif flag == "--ld-path" then
+            explicit_linker = need(argv[index + 1], "--ld-path requires a linker path")
+        end
+    end
+    explicit_linker = explicit_linker or fused_path
+    local description
+    if not explicit_linker and linker_name == "ld" then
+        -- Clang's -print-prog-name=ld is a program search, not its configured
+        -- default linker selection (notably CLANG64's ld.lld). Read the job.
+        description = describe_link(context, argv, request.windows)
+        local split, collect2 = require("c-parser.cpp").split_shell_words, false
+        for line in (description .. "\n"):gmatch("(.-)\r?\n") do
+            local job = line:match("^%s") and split(line)
+            if job and job[1] then
+                local name = paths.basename(job[1]):lower():gsub("%.exe$", "")
+                if name == "collect2" then collect2 = true
+                elseif link_job_name(name) then explicit_linker = job[1] end
+            end
+        end
+        -- GCC's collect2 delegates to the compiler's named ld; Clang names the
+        -- actual linker directly. Never substitute a guessed default.
+        need(explicit_linker or collect2, "compiler did not name a selected native linker")
+    end
+    if not explicit_linker then
+        local query = { table.unpack(argv) }
+        query[#query + 1] = "-print-prog-name=" .. linker_name
+        local result = context.io:run(query, { stderr_to_stdout = true })
+        need(type(result) == "table" and result.started and result.ok,
+            type(result) == "table" and (result.diagnostic or result.output) or "cannot resolve native linker")
+        explicit_linker = need((result.output or ""):match("^%s*(.-)%s*$"))
+        need(explicit_linker ~= "" and not explicit_linker:find("[\r\n]"),
+            "compiler did not name one native linker")
+    end
+    local selected = {
+        argv = argv, name = explicit_linker, description = description,
+        compiler = incremental.physical_executable(context, request.compiler_argv),
+        linker = incremental.physical_executable(context, explicit_linker),
+    }
+    selected.key = incremental.digest(context, "linker-dependency-feature", {
+        argv = argv, toolchain = request.toolchain, compiler = selected.compiler,
+        linker = selected.linker, compiler_identity = compiler_identity,
+    })
+    context.link_certificate_tools[request_key] = selected
+    return selected
+end
+
 function certificate.linker_backend(context, request)
     request = request or {}
-    if request.darwin then return "darwin" end
-    if request.windows then return "none" end
     local report
     local function discard_report()
         if not report then return end
@@ -189,71 +273,42 @@ function certificate.linker_backend(context, request)
         report = nil
     end
     local completed, backend = pcall(function()
-        need(type(request.compiler_argv) == "table" and #request.compiler_argv > 0,
-            "linker probe requires compiler argv")
-        need(type(request.toolchain) == "string", "linker probe requires toolchain identity")
+        local selected = selected_linker(context, request)
+        if request.darwin then return "darwin" end
+        if request.windows then return "none" end
+        if selected.backend then return selected.backend end
         need(type(request.directory) == "string", "linker probe requires an output directory")
-        local argv = { table.unpack(request.compiler_argv) }
-        for _, flag in ipairs(request.link_flags or {}) do argv[#argv + 1] = flag end
-        local linker_name, explicit_linker, fused_path = "ld"
-        for index, flag in ipairs(argv) do
-            local selected = flag:match("^%-fuse%-ld=(.+)$")
-            if selected then
-                if selected:find("[/\\]") then fused_path = selected
-                else linker_name, fused_path = "ld." .. selected, nil end
-            elseif flag:match("^%-%-ld%-path=") then
-                explicit_linker = flag:match("^%-%-ld%-path=(.*)$")
-            elseif flag == "--ld-path" then
-                explicit_linker = need(argv[index + 1], "--ld-path requires a linker path")
-            end
-        end
-        explicit_linker = explicit_linker or fused_path
-        if not explicit_linker then
-            local query = { table.unpack(argv) }
-            query[#query + 1] = "-print-prog-name=" .. linker_name
-            local result = context.io:run(query, { stderr_to_stdout = true })
-            need(type(result) == "table" and result.started and result.ok,
-                type(result) == "table" and (result.diagnostic or result.output) or "cannot resolve native linker")
-            explicit_linker = need((result.output or ""):match("^%s*(.-)%s*$"))
-            need(explicit_linker ~= "" and not explicit_linker:find("[\r\n]"),
-                "compiler did not name one native linker")
-        end
-        local key = incremental.digest(context, "linker-dependency-feature", {
-            argv = argv, toolchain = request.toolchain,
-            compiler = incremental.physical_executable(context, request.compiler_argv),
-            linker = incremental.physical_executable(context, explicit_linker),
-            compiler_identity = request.compiler_identity or
-                (context.incremental_configuration and context.incremental_configuration.compiler),
-        })
         local directory = paths.join(absolute(context, request.directory), ".titan")
         local filename = paths.join(directory, "linker-feature")
         local record = certificate.read_record(context, filename)
         if closed(record, { key = true, backend = true, digest = true, canonicalization = true }) and
-            record.key == key and record.digest == version.CERTIFICATE_DIGEST and
+            record.key == selected.key and record.digest == version.CERTIFICATE_DIGEST and
             record.canonicalization == version.CERTIFICATE_CANONICALIZATION and
             (record.backend == "gnu" or record.backend == "lld" or record.backend == "none") then
+            selected.backend = record.backend
             return record.backend
         end
         report = need(context.io:tmpname())
-        local probe = { table.unpack(argv) }
+        local probe = { table.unpack(selected.argv) }
         probe[#probe + 1] = "-Wl,--dependency-file=" .. report
         probe[#probe + 1] = "-Wl,--version"
         local result = context.io:run(probe, { stderr_to_stdout = true })
         need(type(result) == "table" and result.started and not result.interrupted and result.why ~= "signal",
             type(result) == "table" and (result.diagnostic or result.output) or "linker feature probe failed")
-        local selected = "none"
+        local backend = "none"
         if result.ok then
             local banner = result.output or result.diagnostic or ""
-            if banner:find("LLD", 1, true) then selected = "lld"
-            elseif banner:find("GNU ld", 1, true) then selected = "gnu" end
+            if banner:find("LLD", 1, true) then backend = "lld"
+            elseif banner:find("GNU ld", 1, true) then backend = "gnu" end
         end
         discard_report()
         mkdir(context, directory)
         need(certificate.write_record(context, filename, {
-            key = key, backend = selected, digest = version.CERTIFICATE_DIGEST,
+            key = selected.key, backend = backend, digest = version.CERTIFICATE_DIGEST,
             canonicalization = version.CERTIFICATE_CANONICALIZATION,
         }))
-        return selected
+        selected.backend = backend
+        return backend
     end)
     local cleaned, cleanup_error = pcall(discard_report)
     if not completed and type(backend) ~= "string" then error(backend, 0) end
@@ -261,6 +316,112 @@ function certificate.linker_backend(context, request)
     if not completed then return nil, backend end
     if not cleaned then return nil, cleanup_error end
     return backend
+end
+
+local function lto_setting(argv)
+    local enabled
+    for _, flag in ipairs(argv or {}) do
+        if flag == "-flto" or flag:match("^%-flto=") then enabled = true
+        elseif flag == "-fno-lto" then enabled = false end
+    end
+    return enabled
+end
+
+local function selected_lto(context, request, selected, tools)
+    local setting = lto_setting(selected.argv)
+    if setting == false then return end
+    local enabled = setting == true or lto_setting(request.compile_argv) == true
+    if not enabled then
+        local inputs = { table.unpack(request.inputs or {}) }
+        local native_files = compiler_libraries(context, {
+            compiler_argv = request.compiler_argv, argv = request.link_flags,
+            darwin = request.darwin, windows = request.windows,
+        })
+        if not native_files then enabled = true
+        else for _, path in ipairs(native_files) do inputs[#inputs + 1] = path end end
+        for _, input in ipairs(inputs) do
+            local kind, _, lto = incremental.native_input_kind(context,
+                type(input) == "table" and input.path or input)
+            -- An opaque payload may select IR indirectly. Inventory its
+            -- compiler-selected pipeline rather than assuming it is native.
+            if not kind or lto then enabled = true; break end
+        end
+    end
+    if not enabled then return end
+    local description = selected.description or describe_link(context, selected.argv, request.windows)
+    local split = require("c-parser.cpp").split_shell_words
+    local wrapper, collect2, found, declared_wrapper
+    local function executable(role, path)
+        tools[role] = { argv = { path }, identity = incremental.physical_executable(context, path) }
+    end
+    local function plugin(path)
+        tools.lto_plugins = tools.lto_plugins or {}
+        tools.lto_plugins[#tools.lto_plugins + 1] = {
+            argv = { path }, identity = incremental.physical_tool_file(context, path),
+        }
+    end
+    local selected_name = paths.basename(selected.linker.path):lower():gsub("%.exe$", "")
+    for line in (description .. "\n"):gmatch("(.-)\r?\n") do
+        declared_wrapper = line:match("^COLLECT_LTO_WRAPPER=(.+)$") or declared_wrapper
+        local argv = line:match("^%s") and split(line)
+        if argv and argv[1] then
+            local name = paths.basename(argv[1]):lower():gsub("%.exe$", "")
+            if link_job_name(name) or name == selected_name then
+                found = true
+                if name == "collect2" then collect2 = argv[1] end
+                local index = 2
+                while index <= #argv do
+                    local flag = argv[index]
+                    if flag == "-plugin" or flag == "--plugin" or flag == "-lto_library" then
+                        index = index + 1
+                        plugin(need(argv[index], "selected LTO plugin path is missing"))
+                    elseif flag:match("^%-%-?plugin=") then
+                        plugin(flag:match("=(.*)$"))
+                    elseif flag:match("^%-plugin%-opt=") then
+                        local path = flag:match("^%-plugin%-opt=(.+)$")
+                        if path:sub(1, 1) ~= "-" and paths.basename(path):match("^lto%-wrapper") then wrapper = path end
+                    end
+                    index = index + 1
+                end
+            end
+        end
+    end
+    need(found, "compiler did not describe a selected native link job for LTO")
+    if collect2 then
+        executable("link_driver", collect2)
+        local function named_stage(name)
+            local command = { table.unpack(selected.argv) }
+            command[#command + 1] = "-print-prog-name=" .. name
+            local stage = context.io:run(command, { stderr_to_stdout = true })
+            need(type(stage) == "table" and stage.started and stage.ok,
+                "cannot resolve selected LTO stage: " .. name)
+            local path = (stage.output or ""):match("^%s*(.-)%s*$")
+            need(path ~= "" and not path:find("[\r\n]"), "compiler did not name one LTO stage: " .. name)
+            return path
+        end
+        executable("lto_wrapper", wrapper or declared_wrapper or named_stage("lto-wrapper"))
+        executable("lto_compiler", named_stage("lto1"))
+    end
+end
+
+function certificate.output_tools(context, request)
+    local ok, tools = pcall(function()
+        local selected = selected_linker(context, request)
+        local result = { linker = { argv = { selected.name },
+            driver_argv = selected.argv, identity = selected.linker } }
+        for role, argv in pairs(request.tools or {}) do
+            need(role ~= "linker", "the native linker is selected by the compiler")
+            result[role] = { argv = { table.unpack(argv) },
+                identity = incremental.physical_executable(context, argv) }
+        end
+        selected_lto(context, request, selected, result)
+        return result
+    end)
+    if not ok then
+        if type(tools) ~= "string" then error(tools, 0) end
+        return nil, tools
+    end
+    return tools
 end
 
 function certificate.files(context, files)
@@ -298,44 +459,102 @@ local function output_snapshot(context, output)
     return result
 end
 
-local function compiler_libraries(context, request)
+-- Fallback deliberately has a finite grammar: an unknown option may name a
+-- file (or make a tool read one), so skipping it cannot certify a complete set.
+local INPUT_FREE_LINK_FLAGS = {
+    ["-pthread"] = true, ["-pthreads"] = true, ["-shared"] = true, ["-pie"] = true,
+    ["-no-pie"] = true, ["-static-pie"] = true, ["-rdynamic"] = true, ["-s"] = true,
+    ["-g"] = true, ["-nostdlib"] = true, ["-nodefaultlibs"] = true, ["-nostartfiles"] = true,
+    ["-static-libgcc"] = true, ["-shared-libgcc"] = true, ["-static-libstdc++"] = true,
+    ["-fno-lto"] = true, ["-flto"] = true, ["-fuse-linker-plugin"] = true,
+    ["-fno-use-linker-plugin"] = true, ["-m32"] = true, ["-m64"] = true,
+    ["--as-needed"] = true, ["--no-as-needed"] = true, ["--whole-archive"] = true,
+    ["--no-whole-archive"] = true, ["--start-group"] = true, ["--end-group"] = true,
+    ["-("] = true, ["-)"] = true, ["--gc-sections"] = true, ["--no-gc-sections"] = true,
+    ["--strip-all"] = true, ["--strip-debug"] = true, ["--export-dynamic"] = true,
+    ["--no-undefined"] = true, ["--allow-shlib-undefined"] = true,
+    ["--exclude-all-symbols"] = true,
+}
+local LINK_VALUE_FLAGS = {
+    ["-u"] = true, ["--undefined"] = true, ["-e"] = true, ["--entry"] = true,
+    ["-soname"] = true, ["--soname"] = true, ["-install_name"] = true,
+    ["-z"] = true, ["--ld-path"] = true,
+}
+local LINK_FILE_FLAGS = { ["--just-symbols"] = true, ["--retain-symbols-file"] = true }
+
+local function link_arguments(arguments)
+    local argv, forwarded = {}, {}
+    for _, flag in ipairs(arguments or {}) do
+        if flag:sub(1, 4) == "-Wl," then
+            for part in (flag:sub(5) .. ","):gmatch("(.-),") do
+                argv[#argv + 1], forwarded[#argv + 1] = part, true
+            end
+        else argv[#argv + 1] = flag end
+    end
+    return argv, forwarded
+end
+
+compiler_libraries = function(context, request)
     if type(request.compiler_argv) ~= "table" or #request.compiler_argv == 0 then
         return nil, "native library fallback requires compiler argv"
     end
-    local directories, libraries, static = {}, {}, request.static or false
-    local argv, index = {}, 1
-    for _, flag in ipairs(request.argv or {}) do
-        if flag:sub(1, 4) == "-Wl," then
-            for part in flag:sub(5):gmatch("[^,]+") do argv[#argv + 1] = part end
-        else argv[#argv + 1] = flag end
-    end
+    local directories, inputs, static = {}, {}, request.static or false
+    local argv, forwarded = link_arguments(request.argv)
+    local index = 1
     while index <= #argv do
         local flag = argv[index]
+        local option, attached = flag:match("^(%-%-[%w%-]+)=(.*)$")
         if flag == "-L" or flag == "-l" then
             index = index + 1
             local value = argv[index]
-            if not value then return nil, "incomplete native library option" end
+            if not value or value == "" then return nil, "incomplete native library option" end
             if flag == "-L" then directories[#directories + 1] = value
-            else libraries[#libraries + 1] = { name = value, static = static } end
+            else inputs[#inputs + 1] = { name = value, static = static } end
         elseif flag:sub(1, 2) == "-L" then directories[#directories + 1] = flag:sub(3)
-        elseif flag:sub(1, 2) == "-l" then libraries[#libraries + 1] = { name = flag:sub(3), static = static }
-        elseif flag == "-static" or flag == "-Bstatic" then static = true
-        elseif flag == "-Bdynamic" then static = false
-        elseif flag == "-T" or flag:sub(1, 2) == "-T" or flag:find("--script", 1, true) then
-            return nil, "linker scripts require dependency output"
+        elseif flag:sub(1, 2) == "-l" then inputs[#inputs + 1] = { name = flag:sub(3), static = static }
+        elseif flag == "-static" then static = true
+        elseif forwarded[index] and flag == "-Bstatic" then static = true
+        elseif forwarded[index] and flag == "-Bdynamic" then static = false
+        elseif LINK_FILE_FLAGS[option or flag] then
+            if attached == nil then index = index + 1; attached = argv[index] end
+            if not attached or attached == "" then return nil, "incomplete native file option: " .. flag end
+            inputs[#inputs + 1] = { path = attached, binary = false }
+        elseif LINK_VALUE_FLAGS[option or flag] then
+            if attached == nil then index = index + 1; attached = argv[index] end
+            if not attached or attached == "" then return nil, "incomplete native linker option: " .. flag end
+        elseif INPUT_FREE_LINK_FLAGS[flag] or flag:match("^%-O[0-3sgz]$")
+            or flag == "-Ofast" or flag:match("^%-flto=[%w%-]+$")
+            or flag:match("^%-fuse%-ld=.+$") or flag:match("^%-%-build%-id[=]?[%w%-]*$")
+            or flag:match("^%-%-hash%-style=[%w]+$") then
+            -- Its complete effect is already in the ordered recipe argv.
+        elseif flag:sub(1, 1) ~= "-" and flag ~= "" then
+            inputs[#inputs + 1] = { path = flag, binary = true }
+        else
+            return nil, "unsupported native linker input mechanism: " .. flag
         end
         index = index + 1
     end
     for _, directory in ipairs(request.library_dirs or {}) do directories[#directories + 1] = directory end
     for _, library in ipairs(request.libraries or {}) do
-        libraries[#libraries + 1] = { name = library, static = static }
+        inputs[#inputs + 1] = { name = library, static = static }
     end
     local files = {}
-    for _, item in ipairs(libraries) do
+    for _, item in ipairs(inputs) do
+        if item.path then
+            local filename = absolute(context, item.path)
+            local stat, err = context.io:stat(filename)
+            if err ~= nil then error(err, 0) end
+            if not stat or stat.kind ~= "file" then return nil, "cannot resolve native file: " .. item.path end
+            if item.binary then
+                local kind, kind_error = incremental.native_input_kind(context, filename)
+                if not kind then return nil, filename .. ": " .. tostring(kind_error) end
+            end
+            files[#files + 1] = filename
+        else
         local library, candidates = item.name
         if library:sub(1, 1) == ":" then candidates = { library:sub(2) }
         elseif item.static then candidates = { "lib" .. library .. ".a" }
-        elseif platform.windows then
+        elseif request.windows or platform.windows then
             candidates = { "lib" .. library .. ".dll.a", library .. ".lib", "lib" .. library .. ".a" }
         elseif request.darwin then candidates = { "lib" .. library .. ".dylib", "lib" .. library .. ".a" }
         else candidates = { "lib" .. library .. ".so", "lib" .. library .. ".a" } end
@@ -352,6 +571,7 @@ local function compiler_libraries(context, request)
         if not selected then
             for _, candidate in ipairs(candidates) do
                 local command = { table.unpack(request.compiler_argv) }
+                for _, flag in ipairs(request.argv or {}) do command[#command + 1] = flag end
                 command[#command + 1] = "-print-file-name=" .. candidate
                 local result = context.io:run(command)
                 if result.started and result.ok then
@@ -365,7 +585,10 @@ local function compiler_libraries(context, request)
             end
         end
         if not selected then return nil, "cannot resolve native library: " .. library end
+        local kind, kind_error = incremental.native_input_kind(context, selected)
+        if not kind then return nil, selected .. ": " .. tostring(kind_error) end
         files[#files + 1] = selected
+        end
     end
     return files
 end
@@ -379,10 +602,11 @@ function certificate.native_library_policy(context, request)
     if request.uncacheable then
         return { cacheable = false, backend = backend or "none", argv = {}, reason = request.uncacheable }
     end
-    for _, flag in ipairs(request.argv or {}) do
-        if flag:sub(1, 1) == "@" or flag:find(",@", 1, true) or
-            flag:match("^%-fplugin") or flag:match("^%-%-?plugin") or
-            flag:find(",-plugin", 1, true) or flag == "-Xlinker" then
+    for _, flag in ipairs(link_arguments(request.argv)) do
+        if flag:sub(1, 1) == "@" or flag:match("^%-fplugin") or
+            flag:match("^%-%-?plugin") or flag == "-Xlinker" or
+            flag:match("^%-%-?specs") or flag == "-wrapper" or
+            flag == "-filelist" or flag:match("^%-filelist=") or flag == "--filelist" then
             return { cacheable = false, backend = backend or "none", argv = {},
                 reason = "opaque linker input mechanism: " .. flag }
         end
