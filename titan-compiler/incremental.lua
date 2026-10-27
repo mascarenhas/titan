@@ -623,11 +623,11 @@ function incremental.toolchain_identity(context, descriptor)
         memo.toolchain_descriptions[description_key] = description
     end
     local preprocessor, banner = description.preprocessor, description.banner
-    local clang = banner:lower():find("clang", 1, true)
-    -- Incidental "clang" in an installation path does not prove LLVM launching.
-    local llvm_banner = banner:match("^[%w ()+._-]*clang version %d") or
+    -- Inventory and launch policy share a compiler version-line classification;
+    -- an incidental "clang" installation path must not omit GCC's stages.
+    local clang = banner:match("^[%w ()+._-]*clang version %d") or
         banner:match("\n[%w ()+._-]*clang version %d")
-    local stage_policy = llvm_banner and "llvm" or nil
+    local stage_policy = clang and "llvm" or nil
     local primary, primary_error, primary_status =
         incremental.physical_executable(context, cc)
     if not primary then return nil, primary_error, primary_status end

@@ -853,6 +853,145 @@ describe("incremental configuration", function()
         assert.equal(0, incremental.counters(ctx).file_hashes)
     end)
 
+    local function described_family_identity(banner, flags, changed_stage)
+        local ctx = native_context({
+            [native_tool("cc")] = "driver",
+            [native_tool("cc1")] = "compiler stage",
+            [native_tool("as")] = "assembler",
+        })
+        local stat = ctx.io.stat
+        function ctx.io:stat(path)
+            local value, err = stat(self, path)
+            if value and changed_stage and path == native_tool(changed_stage) then
+                value.changed_seconds = value.changed_seconds + 1
+            end
+            return value, err
+        end
+        function ctx.io:run(argv)
+            self.commands[#self.commands + 1] = argv
+            local stage = argv[#argv]:match("^-print%-prog%-name=(.*)$")
+            assert.is_true(stage == "cc1" or stage == "as")
+            local expected = { native_tool("cc") }
+            for _, flag in ipairs(flags) do expected[#expected + 1] = flag end
+            expected[#expected + 1] = "-print-prog-name=" .. stage
+            assert.same(expected, argv)
+            return { started = true, ok = true, output = native_tool(stage) .. "\n" }
+        end
+        local digest, details, status = incremental.toolchain_identity(ctx, {
+            compiler_argv = { native_tool("cc") },
+            preprocessor_identity = "#define COMPILER_FAMILY_FIXTURE 1\n",
+            banner = banner, compile_flags = flags,
+        })
+        assert.equal(0, incremental.counters(ctx).file_hashes)
+        assert.same({}, ctx.io.reads)
+        return digest, details, status, ctx
+    end
+
+    local gcc_in_clang_path = table.concat({
+        "Using built-in specs.",
+        "COLLECT_GCC=/opt/clang-tools/bin/gcc",
+        "COLLECT_LTO_WRAPPER=/opt/clang-tools/libexec/gcc/lto-wrapper",
+        "gcc version 15.2.0 (fixture)",
+    }, "\n")
+
+    it("inventories GCC stages independently of incidental clang installation paths", function()
+        local digest, details, status, ctx =
+            described_family_identity(gcc_in_clang_path, {})
+        assert.same({
+            { native_tool("cc"), "-print-prog-name=cc1" },
+            { native_tool("cc"), "-print-prog-name=as" },
+        }, ctx.io.commands)
+        if platform.windows then
+            assert.is_nil(digest)
+            assert.is_string(details)
+            assert.equal("uncertified", status)
+        else
+            assert.is_string(digest)
+            assert.is_nil(status)
+            assert.is_nil(details.stage_policy)
+            assert.equal(3, #details.tools)
+            assert.equal(native_tool("cc"), details.tools[1].path)
+            assert.equal(native_tool("cc1"), details.tools[2].path)
+            assert.equal(native_tool("as"), details.tools[3].path)
+        end
+    end)
+
+    for _, stage in ipairs({ "cc1", "as" }) do
+        it("keeps selected GCC " .. stage .. " replacement observable with incidental clang paths", function()
+            local before, before_details, before_status, before_ctx =
+                described_family_identity(gcc_in_clang_path, {})
+            local after, after_details, after_status, after_ctx =
+                described_family_identity(gcc_in_clang_path, {}, stage)
+            assert.same(before_ctx.io.commands, after_ctx.io.commands)
+            assert.equal(2, #after_ctx.io.commands)
+            if platform.windows then
+                assert.is_nil(before)
+                assert.is_nil(after)
+                assert.is_string(before_details)
+                assert.is_string(after_details)
+                assert.equal("uncertified", before_status)
+                assert.equal("uncertified", after_status)
+            else
+                assert.is_nil(before_status)
+                assert.is_nil(after_status)
+                assert.is_not.equal(before, after)
+                assert.equal(before_details.banner, after_details.banner)
+                assert.equal(before_details.preprocessor, after_details.preprocessor)
+                assert.equal(3, #before_details.tools)
+                assert.equal(3, #after_details.tools)
+                for index, identity in ipairs(before_details.tools) do
+                    local changed = after_details.tools[index]
+                    assert.equal(identity.path, changed.path)
+                    if identity.path == native_tool(stage) then
+                        assert.equal(identity.changed_seconds + 1, changed.changed_seconds)
+                    else
+                        assert.same(identity, changed)
+                    end
+                end
+            end
+        end)
+    end
+
+    it("retains Clang integrated and external assembler selection from its version line", function()
+        for _, banner in ipairs({
+            "clang version 22.1.8 (fixture)",
+            "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+        }) do
+            for _, mode in ipairs({
+                { flags = {}, external = false },
+                { flags = { "-fintegrated-as" }, external = false },
+                { flags = { "-fno-integrated-as" }, external = true },
+                { flags = { "-fno-integrated-as", "-fintegrated-as" }, external = false },
+                { flags = { "-fintegrated-as", "-fno-integrated-as" }, external = true },
+            }) do
+                local digest, details, status, ctx =
+                    described_family_identity(banner, mode.flags)
+                assert.is_string(digest)
+                assert.is_nil(status)
+                assert.equal("llvm", details.stage_policy)
+                assert.equal(mode.external and 2 or 1, #details.tools)
+                assert.equal(mode.external and 1 or 0, #ctx.io.commands)
+                assert.equal(native_tool("cc"), details.tools[1].path)
+                if mode.external then
+                    assert.equal(native_tool("as"), details.tools[2].path)
+                    assert.equal("-print-prog-name=as", ctx.io.commands[1][#mode.flags + 2])
+                end
+                local replaced_as, replaced_details =
+                    described_family_identity(banner, mode.flags, "as")
+                assert.same(details.tools[1], replaced_details.tools[1])
+                if mode.external then
+                    assert.is_not.equal(digest, replaced_as)
+                    assert.equal(details.tools[2].changed_seconds + 1,
+                        replaced_details.tools[2].changed_seconds)
+                else
+                    assert.equal(digest, replaced_as)
+                end
+                local replaced_cc1 = described_family_identity(banner, mode.flags, "cc1")
+                assert.equal(digest, replaced_cc1)
+            end
+        end
+    end)
+
     it("separates stable tool metadata from verbose compiler action commands", function()
         local header = table.concat({
             "Apple clang version 21.0.0 (clang-2100.3.34.2)",
