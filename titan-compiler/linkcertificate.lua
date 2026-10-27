@@ -570,7 +570,9 @@ compiler_libraries = function(context, request)
         local selected
         for _, directory in ipairs(directories) do
             for _, candidate in ipairs(candidates) do
-                local filename = paths.join(directory, candidate)
+                -- Resolve POSIX symlink/.. traversal as the native linker does,
+                -- rather than folding it into a different existing directory.
+                local filename = (platform.windows and paths.join or platform.join)(directory, candidate)
                 local stat, err = context.io:stat(filename)
                 if err then error(err, 0) end
                 if stat and stat.kind == "file" and context.io:readable(filename) then selected = filename; break end

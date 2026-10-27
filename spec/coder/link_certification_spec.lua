@@ -518,11 +518,14 @@ dofile(%q .. "/titanc")
         compile({ "-c", "--c-source", root .. "/helper.c", "-DVALUE=2" })
     end)
 
-    for _, spelling in ipairs({ "CLI", "environment", "Windows -l archive", "Windows -l import", "Windows -l static" }) do
+    for _, spelling in ipairs({ "CLI", "environment", "Windows -l archive", "Windows -l import",
+        "Windows -l static", "POSIX -L traversal" }) do
         local raw = spelling == "CLI" or spelling == "environment"
         local label = raw and ("raw " .. spelling) or spelling
         it("relinks unchanged objects after a preserved-mtime " .. label .. " native archive replacement", function()
-            if not raw and not platform.windows then pending("Windows MinGW library selection"); return end
+            local traversed = spelling == "POSIX -L traversal"
+            if not raw and not traversed and not platform.windows then pending("Windows MinGW library selection"); return end
+            if traversed and platform.windows then pending("POSIX symlink-directory traversal"); return end
             local cdriver = require "c-parser.cdriver"
             local driver = require "titan-compiler.driver"
             local cc = assert(cdriver.split_shell_words(driver.CC))
@@ -533,7 +536,15 @@ dofile(%q .. "/titanc")
             end
             local selected = root .. "/selected vendor Ω" .. (platform.windows and ".dll.a" or ".a")
             local native_directory, later_directory, competitor
-            if not raw then
+            if traversed then
+                local route, physical = root .. "/lexical route", root .. "/physical target"
+                for _, directory in ipairs({ route, physical, route .. "/lib", physical .. "/inner", physical .. "/lib" }) do
+                    assert(lfs.mkdir(directory))
+                end
+                assert(lfs.link(physical .. "/inner", route .. "/link", true))
+                native_directory = route .. "/link/../lib"
+                selected, competitor = physical .. "/lib/libhelper.a", route .. "/lib/libhelper.a"
+            elseif not raw then
                 native_directory = root .. "/native vendor Ω"
                 assert(lfs.mkdir(native_directory))
                 if spelling == "Windows -l archive" then
@@ -615,6 +626,16 @@ dofile(%q .. "/titanc")
             compile(arguments, nil, environment)
             assert.equal("", read(log))
             assert.equal(old, lfs.attributes(object, "modification"))
+            if traversed then
+                local competitor_time = assert(lfs.attributes(competitor)).modification
+                write(competitor, first)
+                assert(lfs.touch(competitor, competitor_time, competitor_time))
+                compile(arguments, nil, environment)
+                assert.equal("", read(log))
+                assert.equal(old, lfs.attributes(object, "modification"))
+                assert.equal(object_bytes, read(object))
+                assert.equal(17, context().io:run({ program }).status)
+            end
             write(selected, second)
             assert(lfs.touch(selected, old, old))
             compile(arguments, nil, environment)
@@ -750,6 +771,27 @@ describe("native library coverage policy", function()
         })
         assert.is_true(policy.cacheable)
         assert.same({ root .. "/libfirst.a", root .. "/libsecond.a", root .. "/libfirst.a" }, policy.files)
+    end)
+
+    it("retains POSIX library-search traversal when a lexical competitor already exists", function()
+        if platform.windows then pending("POSIX symlink-directory traversal"); return end
+        local route, physical = root .. "/route", root .. "/physical"
+        for _, directory in ipairs({ route, physical, route .. "/lib", physical .. "/inner", physical .. "/lib" }) do
+            assert(lfs.mkdir(directory))
+        end
+        assert(lfs.link(physical .. "/inner", route .. "/link", true))
+        write(route .. "/lib/libfirst.a", "!<arch>\n")
+        write(physical .. "/lib/libfirst.a", "!<arch>\n")
+        local directory = route .. "/link/../lib"
+        local ctx = context()
+        function ctx.io:run() error("existing explicit library must not require compiler lookup") end
+        local policy = certificate.native_library_policy(ctx, {
+            backend = "none", compiler_argv = { "selected-cc" }, argv = { "-L", directory, "-lfirst" },
+        })
+        assert.is_true(policy.cacheable, policy.reason)
+        assert.same({ directory .. "/libfirst.a" }, policy.files)
+        assert.equal(ctx.io:realpath(physical .. "/lib/libfirst.a"), ctx.io:realpath(policy.files[1]))
+        assert.not_equal(ctx.io:realpath(route .. "/lib/libfirst.a"), ctx.io:realpath(policy.files[1]))
     end)
 
     for _, case in ipairs({
