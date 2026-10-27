@@ -1018,6 +1018,11 @@ keeps the raw `{ "dsymutil" }` argv and marks only the final-link request
 command runs from the original working directory with the full output
 pathname and never enters the staging directory before its unresolved
 lookup. Missing tools, I/O errors, and cancellation still fail as before.
+For a certified toolchain the request also carries `compiler_tools`, the
+identity records (with realpath `path`) that the toolchain identity already
+observed for the compiler, any wrapper delegate, and its `cc1`/`as` stages;
+an uncertified toolchain carries none. `linkcertificate.output_tools` does not
+read it; Windows stale-stage retirement protects those paths.
 The result records:
 
 * `linker`: the linker the compiler driver really selects, with its exact
