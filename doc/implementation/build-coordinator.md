@@ -223,8 +223,10 @@ Immediately after `driver.resolution_plan`, and before any scheduler decision,
 invalidation, or worker launch, `build.run` calls the coordinator-only
 `request.preflight(plan)` closure, which `titanc` binds to
 `driver.preflight_build_outputs(context, plan, options)`. A failure aborts the
-invocation with every existing file untouched. The pass never runs the
-checker, code generator, or C preprocessor:
+invocation before any planned module output or final target is invalidated or
+written. Earlier planning may already have refreshed compiler bookkeeping such
+as `.titan/preamble.c`, and the exit path still saves the digest cache. The
+pass itself never runs the checker, code generator, or C preprocessor:
 
 * **Reserved outputs.** Every planned source module, cached or fresh, reserves
   `<stem>.c`/`.o` and every potential split part
