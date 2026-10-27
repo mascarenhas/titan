@@ -142,7 +142,7 @@ function generic_validate_recovered_application(
 
     if owner.scope ~= nil then
         local reconstructed, reconstruction_error = pcall(
-            types.substitute, owner, owner.scope, arguments)
+            types.validate_substitution, owner, owner.scope, arguments)
         if not reconstructed then
             return nil, "recovered nominal '" .. nominal.fqtn ..
                 "' is not a canonical application: " ..
