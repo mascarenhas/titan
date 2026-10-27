@@ -836,11 +836,11 @@ end
 -- Include both what the configured compiler was asked and the authoritative
 -- include/macro world it reported. The latter makes cdriver's higher-level
 -- cache key describe C interpretation inputs, not merely an argv spelling.
-local function preprocessor_semantic_digest(incdirs, defines)
+local function preprocessor_semantic_digest(incdirs, defines, adapter)
     local parts = { "titan-cpp-semantic-context-v1" }
     append_canonical(parts, incdirs, {})
     append_canonical(parts, defines, {})
-    return "sha256:" .. sha256.hex(key_argv(parts))
+    return "sha256:" .. sha256.hex_via(adapter and adapter.sha256_binary, key_argv(parts))
 end
 
 -- A process may host more than one compiler context (the language server does
@@ -1076,7 +1076,7 @@ local function base_probe(config)
     defines, err = probe_default_defines(config)
     if not defines then return nil, err end
     probed = { incdirs = incdirs, defines = defines, banner = banner,
-        semantic_digest = preprocessor_semantic_digest(incdirs, defines) }
+        semantic_digest = preprocessor_semantic_digest(incdirs, defines, config.cache_adapter) }
     probe_cache[key] = probed
     return probed
 end
@@ -1318,7 +1318,7 @@ local function completed_forced_configuration(configuration)
     defines, err = probe_default_defines(config)
     if not defines then return nil, err end
     local probed = { incdirs = copy_incdirs(base.incdirs), defines = defines, banner = base.banner,
-        semantic_digest = preprocessor_semantic_digest(base.incdirs, defines) }
+        semantic_digest = preprocessor_semantic_digest(base.incdirs, defines, config.cache_adapter) }
     local entry = { owner = "titan-forced-preprocessor", version = 1, key = key,
         forced = scanned, probed = probed }
     if not forced_entry_is_current(entry, config) then
@@ -1365,7 +1365,7 @@ function cpp.new_context(options)
         defines, err = probe_default_defines(config)
         if not defines then return nil, err end
         probed = { incdirs = incdirs, defines = defines, banner = banner,
-            semantic_digest = preprocessor_semantic_digest(incdirs, defines) }
+            semantic_digest = preprocessor_semantic_digest(incdirs, defines, config.cache_adapter) }
     end
     cache[key] = probed
     local ctx = {
