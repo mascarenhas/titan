@@ -286,6 +286,153 @@ describe("incremental certificate identities", function()
     end)
 end)
 
+describe("content-only native input facts", function()
+    local scan, read
+    before_each(function() scan, read = staticmetadata.scan_bytes, objectmetadata.read end)
+    after_each(function() staticmetadata.scan_bytes, objectmetadata.read = scan, read end)
+    local function coff()
+        return string.pack("<I2I2I4I4I4I2I2", 0x8664, 0, 0, 0, 0, 0, 0)
+    end
+    local function elf(kind, lto)
+        local names = "\0.shstrtab\0.gnu.lto_.opts\0"
+        local header = "\127ELF\2\1\1" .. string.rep("\0", 9) ..
+            string.pack("<I2I2I4I8I8I8I4I2I2I2I2I2I2",
+                kind, 62, 1, 0, 0, lto and 64 or 0, 0, 64, 0, 0, 64, lto and 3 or 0, lto and 1 or 0)
+        if not lto then return header end
+        local section = "<I4I4I8I8I8I8I4I4I8I8"
+        return header .. string.rep("\0", 64) ..
+            string.pack(section, 1, 3, 0, 0, 256, #names, 0, 0, 1, 0) ..
+            string.pack(section, 11, 1, 0, 0, 256 + #names, 1, 0, 0, 1, 0) .. names .. "\0"
+    end
+    local function archive(member)
+        return "!<arch>\n" .. string.format("%-16s%-12d%-6d%-6d%-8s%-10d`\n",
+            "helper.o/", 0, 0, 0, "100644", #member) .. member .. (#member % 2 == 1 and "\n" or "")
+    end
+
+    it("recognizes import archives and shared images without restoring Titan metadata", function()
+        staticmetadata.scan_bytes = function() error("unexpected object metadata scan") end
+        objectmetadata.read = function() error("unexpected metadata restoration") end
+        local import = string.pack("<I2I2I2I2I4I4I2I2", 0, 0xffff, 0, 0x8664, 0, 0, 0, 0)
+        local macho = "\207\250\237\254" .. string.pack("<I4I4I4I4I4I4I4", 0x1000007, 3, 6, 0, 0, 0, 0)
+        local pe = "MZ" .. string.rep("\0", 58) .. string.pack("<I4", 64) ..
+            "PE\0\0" .. string.pack("<I2I2I4I4I4I2I2", 0x8664, 0, 0, 0, 0, 0, 0x2000)
+        for _, case in ipairs({
+            { archive(import), "archive" }, { coff(), "object" },
+            { elf(1), "object" }, { elf(3), "shared" }, { macho, "shared" }, { pe, "shared" },
+        }) do
+            local ctx = context({ ["/native"] = case[1] })
+            assert.equal(case[2], incremental.native_input_kind(ctx, "/native"))
+        end
+    end)
+
+    it("recognizes bitcode and LTO sections inside ordinary and universal archives", function()
+        local member = elf(1, true)
+        local universal = "\202\254\186\190" .. string.pack(">I4I4I4I4I4I4",
+            1, 0x1000007, 3, 28, #archive(member), 2) .. archive(member)
+        for _, bytes in ipairs({ "BC\192\222payload", "\222\192\023\011payload", member,
+            archive(member), universal }) do
+            local ctx = context({ ["/native"] = bytes })
+            local kind, err, lto = incremental.native_input_kind(ctx, "/native")
+            assert.truthy(kind, err)
+            assert.is_true(lto)
+        end
+    end)
+
+    it("persists positive and opaque facts without warm payload reads", function()
+        local files = { ["/native"] = archive(coff()), ["/thin"] = "!<thin>\n",
+            ["/script"] = "INPUT(other.a)\n", ["/truncated"] = "\127ELF" }
+        local cold = precise_context(files)
+        assert(incremental.load_digest_cache(cold, "/out"))
+        assert.equal("archive", incremental.native_input_kind(cold, "/native"))
+        for _, path in ipairs({ "/thin", "/script", "/truncated" }) do
+            local kind, err = incremental.native_input_kind(cold, path)
+            assert.is_nil(kind); assert.is_string(err)
+        end
+        assert(incremental.save_digest_cache(cold))
+        local warm = precise_context(files)
+        assert(incremental.load_digest_cache(warm, "/out"))
+        assert.equal("archive", incremental.native_input_kind(warm, "/native"))
+        for _, path in ipairs({ "/thin", "/script", "/truncated" }) do
+            assert.is_nil(incremental.native_input_kind(warm, path))
+            assert.is_nil(warm.io.reads[path])
+        end
+        assert.is_nil(warm.io.reads["/native"])
+        assert.equal(0, incremental.counters(warm).file_hashes)
+    end)
+
+    it("keeps native kind and metadata-free part fingerprints independent", function()
+        local files = { ["/part.o"] = coff() }
+        local ctx = precise_context(files)
+        assert(incremental.load_digest_cache(ctx, "/out"))
+        assert.equal("object", incremental.native_input_kind(ctx, "/part.o"))
+        local scans, fingerprint = 0, { format = "coff", word_size = 64, endian = "little", machine = 0x8664 }
+        staticmetadata.scan_bytes = function()
+            scans = scans + 1
+            return { kind = "object", fingerprint = fingerprint }
+        end
+        objectmetadata.read = function() return { type = {} } end
+        local part, err = incremental.part_fingerprint(ctx, "/part.o")
+        assert.is_nil(part)
+        assert.matches("Titan module metadata", err, 1, true)
+        objectmetadata.read = function() return nil end
+        assert.same(fingerprint, incremental.part_fingerprint(ctx, "/part.o"))
+        assert.equal(2, scans)
+        assert(incremental.save_digest_cache(ctx))
+        local warm = precise_context(files)
+        assert(incremental.load_digest_cache(warm, "/out"))
+        assert.same(fingerprint, incremental.part_fingerprint(warm, "/part.o"))
+        assert.equal("object", incremental.native_input_kind(warm, "/part.o"))
+        assert.equal(2, scans)
+        assert.is_nil(warm.io.reads["/part.o"])
+    end)
+
+    it("recomputes missing kind facts without changing the digest-cache schema", function()
+        local files = { ["/native"] = coff() }
+        local cold = precise_context(files)
+        assert(incremental.load_digest_cache(cold, "/out"))
+        assert.equal("object", incremental.native_input_kind(cold, "/native"))
+        local digest = incremental.file_digest(cold, "/native")
+        local fingerprint = { format = "coff", word_size = 64, endian = "little", machine = 0x8664 }
+        cold.incremental.persistent.objects[digest] = { fingerprint = fingerprint }
+        assert(incremental.save_digest_cache(cold))
+        local warm = precise_context(files)
+        assert(incremental.load_digest_cache(warm, "/out"))
+        assert.equal("object", incremental.native_input_kind(warm, "/native"))
+        assert.equal(1, warm.io.reads["/native"])
+        assert.equal(0, incremental.counters(warm).file_hashes)
+        assert.same(fingerprint, incremental.part_fingerprint(warm, "/native"))
+    end)
+
+    it("discards malformed native facts rather than treating them as format evidence", function()
+        for _, invalid in ipairs({ { kind = "script", lto = false }, { kind = "object", lto = "yes" },
+            { kind = "object", lto = false, external = "/hidden.o" } }) do
+            local files = { ["/native"] = coff() }
+            local cold = precise_context(files)
+            assert(incremental.load_digest_cache(cold, "/out"))
+            assert.equal("object", incremental.native_input_kind(cold, "/native"))
+            local digest = incremental.file_digest(cold, "/native")
+            cold.incremental.persistent.objects[digest] = invalid
+            assert(incremental.save_digest_cache(cold))
+            local warm = precise_context(files)
+            assert(incremental.load_digest_cache(warm, "/out"))
+            assert.equal("object", incremental.native_input_kind(warm, "/native"))
+            assert.equal(1, warm.io.reads["/native"])
+            assert.equal(1, incremental.counters(warm).file_hashes)
+        end
+    end)
+
+    it("reports native read errors and preserves cancellation identity", function()
+        local ctx = context({})
+        local kind, err = incremental.native_input_kind(ctx, "/missing")
+        assert.is_nil(kind); assert.matches("/missing", err, 1, true)
+        ctx = context({ ["/native"] = coff() })
+        local cancelled = {}
+        function ctx.io:read_file() error(cancelled, 0) end
+        local ok, raised = pcall(incremental.native_input_kind, ctx, "/native")
+        assert.is_false(ok); assert.equal(cancelled, raised)
+    end)
+end)
+
 describe("persistent precise digest cache", function()
     local path, cache_path = "/src/main.titan", "/out/.titan/digests"
     local function prime(files)

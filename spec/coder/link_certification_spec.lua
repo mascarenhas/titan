@@ -425,11 +425,14 @@ describe("final link certification through the CLI", function()
         local bytes = assert(file:read("a")); assert(file:close())
         return bytes
     end
-    local function compile(arguments, expected)
-        local argv = { "env", "TITAN_RUNTIME_PREBUILT=1", "CCACHE_DISABLE=1", "TITAN_PROBE_CACHE_DISABLE=1",
+    local function compile(arguments, expected, environment)
+        local argv = { platform.windows and "env.exe" or "env", "TITAN_RUNTIME_PREBUILT=1",
+            "CCACHE_DISABLE=1", "TITAN_PROBE_CACHE_DISABLE=1",
             "TITAN_ROCKS_ROOT=" .. prefix, "TITAN_EXTRA_CPPFLAGS=",
-            "TITAN_EXTRA_CFLAGS=-O0 -fno-lto", "TITAN_EXTRA_LDFLAGS=-fno-lto",
-            lua, "-E", frontend, "--incremental", "--tree", root, "--output", root .. "/out" }
+            "TITAN_EXTRA_CFLAGS=-O0 -fno-lto", "TITAN_EXTRA_LDFLAGS=-fno-lto" }
+        for name, value in pairs(environment or {}) do argv[#argv + 1] = name .. "=" .. value end
+        for _, value in ipairs({ lua, "-E", frontend, "--incremental",
+            "--tree", root, "--output", root .. "/out" }) do argv[#argv + 1] = value end
         for _, value in ipairs(arguments) do argv[#argv + 1] = value end
         local result = context().io:run(argv)
         assert.equal(expected ~= false, result.started and result.ok, result.output or result.diagnostic)
@@ -514,6 +517,94 @@ dofile(%q .. "/titanc")
         assert.equal(3, result.status, result.output)
         compile({ "-c", "--c-source", root .. "/helper.c", "-DVALUE=2" })
     end)
+
+    for _, spelling in ipairs({ "CLI", "environment" }) do
+        it("relinks unchanged objects after a preserved-mtime raw " .. spelling .. " native archive replacement", function()
+            local cdriver = require "c-parser.cdriver"
+            local driver = require "titan-compiler.driver"
+            local cc = assert(cdriver.split_shell_words(driver.CC))
+            if cc[1] == "exec" then table.remove(cc, 1) end
+            local function run(argv)
+                local result = context().io:run(argv)
+                assert.is_true(result.started and result.ok, result.output or result.diagnostic)
+            end
+            local selected = root .. "/selected vendor Ω" .. (platform.windows and ".dll.a" or ".a")
+            local environment = {}
+            if platform.windows then
+                -- Exercise the real default Windows fallback, not an injected
+                -- capability. Each import archive names a different live DLL.
+                environment.CC = driver.CC
+            elseif driver.IS_DARWIN then
+                -- Darwin always has dependency_info. Select the fallback policy
+                -- for this fixture while keeping all compilation/linking real.
+                local source = read(frontend)
+                source = source:gsub("\ndofile%(",
+                    "\ndriver.native_link_backend = function() return 'none' end\ndofile(", 1)
+                write(frontend, source)
+            else
+                local quoted = {}
+                for _, word in ipairs(cc) do quoted[#quoted + 1] = assert(cdriver.shell_quote(word)) end
+                local wrapper = root .. "/unsupported-dependency-linker.sh"
+                write(wrapper, "#!/bin/sh\nfor argument do\ncase \"$argument\" in\n" ..
+                    "-Wl,--dependency-file=*) exit 1;;\nesac\ndone\nexec " ..
+                    table.concat(quoted, " ") .. " \"$@\"\n")
+                run({ "chmod", "+x", wrapper })
+                environment.CC = assert(cdriver.shell_quote(wrapper))
+            end
+            local function build(label, value)
+                local source, archive = root .. "/helper.c", root .. "/vendor-" .. label .. ".a"
+                write(source, "#ifdef _WIN32\n__declspec(dllexport)\n#endif\n" ..
+                    "int helper(void) { return " .. value .. "; }\n")
+                local argv = { table.unpack(cc) }
+                for _, flag in ipairs({ "-O0", "-fno-lto", "-fPIC" }) do argv[#argv + 1] = flag end
+                if platform.windows then
+                    for _, flag in ipairs({ "-shared", source, "-Wl,--out-implib=" .. archive,
+                        "-o", root .. "/vendor-" .. label .. ".dll" }) do argv[#argv + 1] = flag end
+                    run(argv)
+                else
+                    local object = root .. "/helper.o"
+                    for _, flag in ipairs({ "-c", source, "-o", object }) do argv[#argv + 1] = flag end
+                    run(argv)
+                    local ar = assert(cdriver.split_shell_words(driver.AR or "ar"))
+                    for _, flag in ipairs({ "rcs", archive, object }) do ar[#ar + 1] = flag end
+                    run(ar)
+                end
+                return read(archive)
+            end
+            local first, second = build("one", 17), build("two", 29)
+            assert.not_equal(first, second)
+            write(selected, first)
+            local old = os.time() - 60
+            assert(lfs.touch(selected, old, old))
+            write(root .. "/helper.h", "int helper(void);\n")
+            write(root .. "/app.titan", 'foreign import "helper.h"\nfunction main(args: {string}): integer return ffi.helper() as integer end\n')
+            local program = exe("raw-input")
+            local arguments = { "--exe", program }
+            if spelling == "CLI" then arguments[#arguments + 1] = "--ldflag=" .. selected
+            else environment.TITAN_EXTRA_LDFLAGS = "-fno-lto " .. assert(cdriver.shell_quote(selected)) end
+            arguments[#arguments + 1] = "app"
+            compile(arguments, nil, environment)
+            assert.equal(17, context().io:run({ program }).status)
+            local object = root .. "/out/app.o"
+            local object_bytes = read(object)
+            assert(lfs.touch(object, old, old))
+            write(log, "")
+            compile(arguments, nil, environment)
+            assert.equal("", read(log))
+            assert.equal(old, lfs.attributes(object, "modification"))
+            write(selected, second)
+            assert(lfs.touch(selected, old, old))
+            compile(arguments, nil, environment)
+            assert.matches("compile_program", read(log), 1, true)
+            assert.equal(old, lfs.attributes(selected, "modification"))
+            assert.equal(old, lfs.attributes(object, "modification"))
+            assert.equal(object_bytes, read(object))
+            assert.equal(29, context().io:run({ program }).status)
+            write(log, "")
+            compile(arguments, nil, environment)
+            assert.equal("", read(log))
+        end)
+    end
 
     it("preserves the previous POSIX executable and dSYM after a partial failed link", function()
         if platform.windows then pending("POSIX executable staging"); return end
@@ -600,8 +691,8 @@ describe("native library coverage policy", function()
     local root
     before_each(function()
         root = temporary.name(); assert(os.remove(root)); assert(lfs.mkdir(root))
-        write(root .. "/libfirst.a", "archive bytes")
-        write(root .. "/libsecond.a", "other archive bytes")
+        write(root .. "/libfirst.a", "!<arch>\n")
+        write(root .. "/libsecond.a", "!<arch>\n")
     end)
     after_each(function() remove(root) end)
 
@@ -621,7 +712,9 @@ describe("native library coverage policy", function()
         assert.is_true(policy.cacheable)
         assert.equal("compiler", policy.backend)
         assert.same({ root .. "/libfirst.a" }, policy.files)
-        assert.same({ "-print-file-name=libfirst.so", "-print-file-name=libfirst.a" }, calls)
+        assert.same(platform.windows and {
+            "-print-file-name=libfirst.dll.a", "-print-file-name=first.lib", "-print-file-name=libfirst.a",
+        } or { "-print-file-name=libfirst.so", "-print-file-name=libfirst.a" }, calls)
     end)
 
     it("retains static and dynamic library selection in ordered fallback arguments", function()
@@ -634,8 +727,51 @@ describe("native library coverage policy", function()
         assert.same({ root .. "/libfirst.a", root .. "/libsecond.a", root .. "/libfirst.a" }, policy.files)
     end)
 
+    it("retains raw archive object and import-library operands in their original order", function()
+        local object = root .. "/helper.o"
+        write(object, string.pack("<I2I2I4I4I4I2I2", 0x8664, 0, 0, 0, 0, 0, 0))
+        write(root .. "/vendor.dll.a", "!<arch>\n")
+        write(root .. "/vendor.lib", "!<arch>\n")
+        local files = { root .. "/vendor.dll.a", object, root .. "/vendor.lib", object }
+        local policy = certificate.native_library_policy(context(), {
+            compiler_argv = { "selected-cc" }, argv = {
+                files[1], "-L" .. root, "-lfirst", files[2], "-Wl,--whole-archive",
+                files[3], "-Wl,--no-whole-archive", files[4], "-O0", "-fno-lto",
+            },
+        })
+        assert.is_true(policy.cacheable, policy.reason)
+        assert.same({ files[1], root .. "/libfirst.a", files[2], files[3], files[4] }, policy.files)
+    end)
+
+    it("tracks direct file-taking switches without interpreting symbol files as native objects", function()
+        local symbols = root .. "/symbols"
+        write(symbols, "helper\n")
+        local policy = certificate.native_library_policy(context(), {
+            compiler_argv = { "selected-cc" },
+            argv = { "-Wl,--retain-symbols-file," .. symbols, "-Wl,--just-symbols=" .. root .. "/libfirst.a" },
+        })
+        assert.is_true(policy.cacheable, policy.reason)
+        assert.same({ symbols, root .. "/libfirst.a" }, policy.files)
+    end)
+
+    it("does not certify thin archives scripts or unknown file mechanisms as an empty set", function()
+        write(root .. "/thin.a", "!<thin>\n")
+        write(root .. "/script.so", "INPUT(other.a)\n")
+        for _, argv in ipairs({
+            { root .. "/thin.a" }, { root .. "/script.so" }, { "--unrecognized-files=hidden" },
+            { "-Wl,-T," .. root .. "/script.so" }, { "-Wl,--retain-symbols-file" },
+        }) do
+            local policy = certificate.native_library_policy(context(), {
+                compiler_argv = { "selected-cc" }, argv = argv,
+            })
+            assert.is_false(policy.cacheable)
+            assert.is_string(policy.reason)
+        end
+    end)
+
     it("makes unsupported response and plugin mechanisms explicitly uncacheable", function()
-        for _, flag in ipairs({ "@response", "-Wl,@response", "-Wl,-plugin,plugin.so" }) do
+        for _, flag in ipairs({ "@response", "-Wl,@response", "-Wl,-plugin,plugin.so",
+            "-Wl,--plugin,plugin.so", "-Wl,-filelist,objects.list" }) do
             local policy = certificate.native_library_policy(context(), {
                 backend = "gnu", dependency_file = root .. "/link.d", argv = { flag },
             })
@@ -815,10 +951,16 @@ describe("persistent precise file certification", function()
 end)
 
 describe("linker dependency-feature memo", function()
-    local root, model, request, probes, resolves, reports, banner, supported, signal
+    local root, model, request, probes, resolves, reports, banner, supported, signal, description, descriptions
     local function invocation()
         local ctx = model:context()
         function ctx.io:run(argv)
+            for _, argument in ipairs(argv) do
+                if argument == "-###" then
+                    descriptions = descriptions + 1
+                    return { started = true, ok = true, output = description }
+                end
+            end
             local named = argv[#argv]:match("^%-print%-prog%-name=(.+)$")
             if named then
                 resolves = resolves + 1
@@ -842,13 +984,41 @@ describe("linker dependency-feature memo", function()
         assert(incremental.save_digest_cache(ctx))
         return backend, ctx
     end
+    local function final_ticket(overrides, search)
+        local ctx, options = invocation(), clone(request)
+        ctx.executable_path = search
+        for key, value in pairs(overrides or {}) do options[key] = value end
+        options.inputs = options.inputs or { root .. "/main.o" }
+        local tools, err = certificate.output_tools(ctx, options)
+        assert.truthy(tools, err)
+        local ticket = certificate.prepare(ctx, {
+            output_root = root, outputs = { root .. "/program" }, roots = { "app" }, kind = "program",
+            objects = { root .. "/main.o" }, argv = options.link_flags or {},
+            toolchain = { compiler = options.toolchain, output_tools = tools },
+            native_libraries = { backend = "none", compiler_argv = options.compiler_argv },
+        })
+        return ctx, ticket, tools
+    end
+    local function seed_final(overrides, search)
+        local ctx, ticket = final_ticket(overrides, search)
+        assert(certificate.commit(ctx, ticket))
+        assert(incremental.save_digest_cache(ctx))
+    end
+
     before_each(function()
         root = temporary.name(); assert(os.remove(root)); assert(lfs.mkdir(root))
+        root = certificate.canonical_path(context(), root)
         model = precise_model(root)
-        for _, tool in ipairs({ "cc", "ld", "ld.lld" }) do
+        for _, tool in ipairs({ "cc", "ld", "ld.lld", "collect2", "lto-wrapper", "lto1" }) do
             write(root .. "/" .. tool, "tool")
             model.executables[root .. "/" .. tool] = true
         end
+        write(root .. "/liblto_plugin.so", "tool")
+        write(root .. "/libLTO.dylib", "tool")
+        write(root .. "/main.o", string.pack("<I2I2I4I4I4I2I2", 0x8664, 0, 0, 0, 0, 0, 0))
+        write(root .. "/program", "image")
+        description = ' "' .. root .. '/collect2"\n'
+        descriptions = 0
         request = { compiler_argv = { root .. "/cc" }, toolchain = "toolchain", directory = root }
         probes, resolves, reports, banner, supported, signal = 0, 0, {}, "GNU ld 2.45", true, nil
     end)
@@ -902,9 +1072,138 @@ describe("linker dependency-feature memo", function()
         assert.is_nil(lfs.symlinkattributes(root .. "/.titan/linker-feature"))
     end)
 
-    it("does not probe fixed Darwin and Windows policies", function()
-        assert.equal("darwin", certificate.linker_backend({}, { darwin = true }))
-        assert.equal("none", certificate.linker_backend({}, { windows = true }))
+    it("resolves fixed Darwin and Windows linkers without dependency-feature probes", function()
+        assert.equal("darwin", detect({ darwin = true }))
+        assert.equal("none", detect({ windows = true }))
         assert.equal(0, probes)
+        assert.equal(2, resolves)
+    end)
+
+    it("shares linker resolution between feature detection and final tool inventory", function()
+        local ctx = invocation()
+        assert.equal("gnu", certificate.linker_backend(ctx, request))
+        local tools = assert(certificate.output_tools(ctx, request))
+        assert.equal(root .. "/ld", tools.linker.identity.path)
+        assert.equal(1, probes)
+        assert.equal(1, resolves)
+        assert.equal(1, descriptions)
+        assert.is_nil(tools.lto_compiler)
+    end)
+
+    for _, fixed in ipairs({ "native", "darwin", "windows" }) do
+        it("invalidates the final certificate for a same-backend " .. fixed .. " linker replacement", function()
+            local options = { darwin = fixed == "darwin", windows = fixed == "windows" }
+            seed_final(options)
+            local ctx, ticket = final_ticket(options)
+            assert.is_true(certificate.check(ctx, ticket))
+            assert.is_nil(ctx.io.reads[root .. "/main.o"])
+            assert(model:context().io:write_file(root .. "/ld", "edit"))
+            ctx, ticket = final_ticket(options)
+            assert.is_false(certificate.check(ctx, ticket))
+            assert.is_nil(ctx.io.reads[root .. "/main.o"])
+            assert.equal("GNU ld 2.45", banner)
+        end)
+    end
+
+    it("uses the compiler-described default linker rather than a same-name PATH guess", function()
+        description = ' "' .. root .. '/ld.lld" "-o" "/dev/null"\n'
+        local ctx, ticket, tools = final_ticket({ windows = true })
+        assert.equal(root .. "/ld.lld", tools.linker.identity.path)
+        assert.equal(0, resolves)
+        assert(certificate.commit(ctx, ticket))
+        assert(incremental.save_digest_cache(ctx))
+        assert(model:context().io:write_file(root .. "/ld.lld", "edit"))
+        ctx, ticket = final_ticket({ windows = true })
+        assert.is_false(certificate.check(ctx, ticket))
+        assert.is_nil(ctx.io.reads[root .. "/main.o"])
+    end)
+
+    for _, case in ipairs({
+        { "ar", { "ar" } }, { "ranlib", { "ranlib" } }, { "default RC", { "llvm-rc" } },
+        { "explicit RC", { "llvm-rc", "/nologo" } }, { "dsymutil", { "dsymutil" } },
+    }) do
+        it("invalidates final output when unchanged " .. case[1] .. " argv selects another PATH tool", function()
+            for _, directory in ipairs({ root .. "/one", root .. "/two" }) do
+                assert(lfs.mkdir(directory))
+                write(directory .. "/" .. case[2][1], "tool")
+                model.executables[directory .. "/" .. case[2][1]] = true
+            end
+            local options = { tools = { auxiliary = case[2] }, compiler_argv = { root .. "/cc", "-fno-lto" } }
+            seed_final(options, root .. "/one")
+            local ctx, ticket, tools = final_ticket(options, root .. "/one")
+            assert.is_true(certificate.check(ctx, ticket))
+            assert.same(case[2], tools.auxiliary.argv)
+            assert.is_nil(ctx.io.reads[root .. "/main.o"])
+            ctx, ticket = final_ticket(options, root .. "/two")
+            assert.is_false(certificate.check(ctx, ticket))
+            assert.is_nil(ctx.io.reads[root .. "/main.o"])
+        end)
+    end
+
+    for _, stage in ipairs({ "liblto_plugin.so", "lto-wrapper", "lto1" }) do
+        it("invalidates final output after selected GCC LTO stage replacement: " .. stage, function()
+            description = "COLLECT_LTO_WRAPPER=" .. root .. '/lto-wrapper\n "' .. root ..
+                '/collect2" "-plugin" "' .. root .. '/liblto_plugin.so" "-plugin-opt=' ..
+                root .. '/lto-wrapper"\n'
+            local options = { compiler_argv = { root .. "/cc", "-flto=auto" } }
+            seed_final(options)
+            local ctx, ticket, tools = final_ticket(options)
+            assert.is_true(certificate.check(ctx, ticket))
+            assert.equal(root .. "/liblto_plugin.so", tools.lto_plugins[1].identity.path)
+            assert.equal(root .. "/lto-wrapper", tools.lto_wrapper.identity.path)
+            assert.equal(root .. "/lto1", tools.lto_compiler.identity.path)
+            assert.is_nil(ctx.io.reads[root .. "/main.o"])
+            assert(model:context().io:write_file(root .. "/" .. stage, "edit"))
+            ctx, ticket = final_ticket(options)
+            assert.is_false(certificate.check(ctx, ticket))
+            assert.is_nil(ctx.io.reads[root .. "/main.o"])
+        end)
+    end
+
+    it("selects LTO from compile-only flags and bitcode payloads without probing disabled stages", function()
+        description = ' "' .. root .. '/ld.lld" "-o" "/dev/null"\n'
+        local _, _, tools = final_ticket({ compile_argv = { root .. "/cc", "-flto" } })
+        assert.is_nil(tools.lto_compiler)
+        assert.equal(0, resolves)
+        write(root .. "/bitcode.o", "BC\192\222payload")
+        local ctx = invocation()
+        local options = clone(request)
+        options.inputs = { root .. "/bitcode.o" }
+        tools = assert(certificate.output_tools(ctx, options))
+        assert.equal(root .. "/ld.lld", tools.linker.identity.path)
+        local before = resolves
+        options.compiler_argv = { root .. "/cc", "-flto", "-fno-lto" }
+        tools = assert(certificate.output_tools(invocation(), options))
+        assert.is_nil(tools.lto_plugins)
+        assert.is_nil(tools.lto_wrapper)
+        assert.equal(before, resolves)
+    end)
+
+    it("invalidates a replaced Darwin LTO library without requiring executable mode", function()
+        description = ' "' .. root .. '/ld" "-lto_library" "' .. root .. '/libLTO.dylib"\n'
+        local options = { darwin = true, compiler_argv = { root .. "/cc", "-flto" } }
+        seed_final(options)
+        local ctx, ticket, tools = final_ticket(options)
+        assert.is_true(certificate.check(ctx, ticket))
+        assert.equal(root .. "/libLTO.dylib", tools.lto_plugins[1].identity.path)
+        assert.is_nil(tools.lto_compiler)
+        assert(model:context().io:write_file(root .. "/libLTO.dylib", "edit"))
+        ctx, ticket = final_ticket(options)
+        assert.is_false(certificate.check(ctx, ticket))
+        assert.is_nil(ctx.io.reads[root .. "/main.o"])
+    end)
+
+    it("rejects unresolved selected LTO stages and preserves cancellation identity", function()
+        description = ' "' .. root .. '/collect2" "-plugin" "' .. root .. '/missing-plugin.so"\n'
+        local options = clone(request)
+        options.compiler_argv = { root .. "/cc", "-flto" }
+        local tools, err = certificate.output_tools(invocation(), options)
+        assert.is_nil(tools)
+        assert.matches("missing-plugin.so", err, 1, true)
+        local cancelled, ctx = {}, invocation()
+        function ctx.io:run() error(cancelled, 0) end
+        local ok, failure = pcall(certificate.output_tools, ctx, options)
+        assert.is_false(ok)
+        assert.equal(cancelled, failure)
     end)
 end)

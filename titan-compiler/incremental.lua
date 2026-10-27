@@ -348,6 +348,25 @@ local function append(target, values)
     return target
 end
 
+local function physical_tool_identity(context, filename, stat)
+    return { path = required(context.io:realpath(filename)), size = stat.size,
+        device = stat.device, inode = stat.inode, mode = stat.mode,
+        modified_seconds = stat.modified_seconds, modified_nanoseconds = stat.modified_nanoseconds,
+        changed_seconds = stat.changed_seconds, changed_nanoseconds = stat.changed_nanoseconds,
+        precision = stat.precision, dev = stat.dev, ino = stat.ino,
+        mtime_ns = stat.mtime_ns, ctime_ns = stat.ctime_ns,
+        time_precision = stat.time_precision or "coarse" }
+end
+
+function incremental.physical_tool_file(context, path)
+    local filename = absolute(context, path)
+    local stat, err = context.io:stat(filename)
+    stat = required(stat, err, filename)
+    assert(stat.kind == "file" and context.io:readable(filename),
+        "cannot resolve loadable native tool: " .. path)
+    return physical_tool_identity(context, filename, stat)
+end
+
 function incremental.physical_executable(context, command)
     local executable = type(command) == "table" and command[1] or command
     assert(type(executable) == "string" and executable ~= "", "tool executable is required")
@@ -370,15 +389,7 @@ function incremental.physical_executable(context, command)
         if err then required(nil, err, candidate) end
         if stat and stat.kind == "file" and context.io:readable(candidate)
             and (platform.windows or (stat.mode and stat.mode & 0x49 ~= 0)) then
-            return { path = required(context.io:realpath(candidate)), size = stat.size,
-                device = stat.device, inode = stat.inode, mode = stat.mode,
-                modified_seconds = stat.modified_seconds,
-                modified_nanoseconds = stat.modified_nanoseconds,
-                changed_seconds = stat.changed_seconds,
-                changed_nanoseconds = stat.changed_nanoseconds,
-                precision = stat.precision, dev = stat.dev, ino = stat.ino,
-                mtime_ns = stat.mtime_ns, ctime_ns = stat.ctime_ns,
-                time_precision = stat.time_precision or "coarse" }
+            return physical_tool_identity(context, candidate, stat)
         end
     end
     error("cannot resolve native tool executable: " .. executable, 0)
@@ -528,6 +539,8 @@ local function valid_fingerprint(value)
     return true
 end
 
+local NATIVE_KINDS = { archive = true, object = true, shared = true, thin = true, unknown = true }
+
 local function valid_digest_cache(record)
     if not closed_cache_table(record, { schema = true, digest = true, canonicalization = true,
         abi = true, files = true, objects = true })
@@ -543,8 +556,12 @@ local function valid_digest_cache(record)
             or entry.observation.kind ~= "file" then return false end
     end
     for digest, fact in pairs(record.objects) do
-        if not digest_string(digest) or not closed_cache_table(fact, { fingerprint = true })
-            or not valid_fingerprint(fact.fingerprint) then return false end
+        if not digest_string(digest) or not closed_cache_table(fact,
+            { fingerprint = true, kind = true, lto = true }) then return false end
+        if fact.fingerprint ~= nil and not valid_fingerprint(fact.fingerprint) then return false end
+        if fact.kind ~= nil and not NATIVE_KINDS[fact.kind] then return false end
+        if fact.lto ~= nil and (fact.kind == nil or type(fact.lto) ~= "boolean") then return false end
+        if fact.fingerprint == nil and fact.kind == nil then return false end
     end
     return true
 end
@@ -614,6 +631,169 @@ function incremental.save_digest_cache(context)
     return result
 end
 
+local NATIVE_MACH = {
+    ["\206\250\237\254"] = { true, 28 }, ["\254\237\250\206"] = { false, 28 },
+    ["\207\250\237\254"] = { true, 32 }, ["\254\237\250\207"] = { false, 32 },
+}
+local NATIVE_FAT = {
+    ["\202\254\186\190"] = { false, 4 }, ["\190\186\254\202"] = { true, 4 },
+    ["\202\254\186\191"] = { false, 8 }, ["\191\186\254\202"] = { true, 8 },
+}
+
+-- Only binary headers and section names are inspected here. In particular,
+-- native archives/import libraries must not enter Titan metadata restoration.
+-- The result is a pure content fact, shared by fallback links and LTO selection.
+local function native_format(bytes, first, last, depth)
+    if depth > 8 or last - first + 1 < 4 then return "unknown", false end
+    local function uint(position, width, little)
+        if position < first or position + width - 1 > last then return nil end
+        local value = 0
+        for index = 0, width - 1 do
+            if value > math.maxinteger // 256 then return nil end
+            value = value * 256 + bytes:byte(position + (little and width - index - 1 or index))
+        end
+        return value
+    end
+    local magic = bytes:sub(first, first + 3)
+    if magic == "BC\192\222" or magic == "\222\192\023\011" then return "object", true end
+    local archive = bytes:sub(first, math.min(last, first + 7))
+    if archive == "!<thin>\n" then return "thin", false end
+    if archive == "!<arch>\n" then
+        local position, lto = first + 8, false
+        while position <= last do
+            if position + 59 > last or bytes:sub(position + 58, position + 59) ~= "`\n" then
+                return "unknown", false
+            end
+            local size = tonumber(bytes:sub(position + 48, position + 57):match("^%s*(%d+)%s*$"))
+            if not size or size > last - position - 59 then return "unknown", false end
+            local start, finish = position + 60, position + 59 + size
+            local name_size = tonumber(bytes:sub(position, position + 15):match("^#1/(%d+)"))
+            if name_size then
+                if name_size > size then return "unknown", false end
+                start = start + name_size
+            end
+            local _, member_lto = native_format(bytes, start, finish, depth + 1)
+            lto = lto or member_lto
+            position = finish + 1 + size % 2
+        end
+        return "archive", lto
+    end
+    if magic == "\127ELF" then
+        local class, order = bytes:byte(first + 4, first + 5)
+        if (class ~= 1 and class ~= 2) or (order ~= 1 and order ~= 2)
+            or last - first + 1 < (class == 1 and 52 or 64) then return "unknown", false end
+        local little, wide = order == 1, class == 2
+        local kind = uint(first + 16, 2, little)
+        kind = kind == 1 and "object" or kind == 3 and "shared" or "unknown"
+        local offset = uint(first + (wide and 40 or 32), wide and 8 or 4, little)
+        local stride = uint(first + (wide and 58 or 46), 2, little)
+        local count = uint(first + (wide and 60 or 48), 2, little)
+        local strings_index = uint(first + (wide and 62 or 50), 2, little)
+        if not offset then return "unknown", false end
+        if offset == 0 then return kind, false end
+        if stride < (wide and 64 or 40) or offset > last - first then return "unknown", false end
+        if count == 0 then count = uint(first + offset + (wide and 32 or 20), wide and 8 or 4, little) end
+        if strings_index == 0xffff then strings_index = uint(first + offset + (wide and 40 or 24), 4, little) end
+        if not count or count > (last - first + 1 - offset) // stride
+            or not strings_index or strings_index >= count then return "unknown", false end
+        local header = first + offset + stride * strings_index
+        local strings = uint(header + (wide and 24 or 16), wide and 8 or 4, little)
+        local size = uint(header + (wide and 32 or 20), wide and 8 or 4, little)
+        if not strings or not size or strings > last - first + 1
+            or size > last - first + 1 - strings then return "unknown", false end
+        for index = 0, count - 1 do
+            local name = uint(first + offset + stride * index, 4, little)
+            if name and name + 9 <= size
+                and bytes:sub(first + strings + name, first + strings + name + 8) == ".gnu.lto_" then
+                return kind, true
+            end
+        end
+        return kind, false
+    end
+    if NATIVE_MACH[magic] then
+        if last - first + 1 < NATIVE_MACH[magic][2] then return "unknown", false end
+        local kind = uint(first + 12, 4, NATIVE_MACH[magic][1])
+        return kind == 1 and "object" or (kind == 6 or kind == 8) and "shared" or "unknown", false
+    end
+    if NATIVE_FAT[magic] then
+        local little, width = table.unpack(NATIVE_FAT[magic])
+        local count, stride = uint(first + 4, 4, little), width == 4 and 20 or 32
+        if not count or count == 0 or count > (last - first - 7) // stride then return "unknown", false end
+        local kind, lto
+        for index = 0, count - 1 do
+            local header = first + 8 + stride * index
+            local offset, size = uint(header + 8, width, little), uint(header + 8 + width, width, little)
+            if not offset or not size or size == 0 or offset > last - first
+                or size > last - first + 1 - offset then return "unknown", false end
+            local member, member_lto = native_format(bytes, first + offset, first + offset + size - 1, depth + 1)
+            if member == "unknown" or member == "thin" or (kind and kind ~= member) then return "unknown", false end
+            kind, lto = member, lto or member_lto
+        end
+        return kind, not not lto
+    end
+    if bytes:sub(first, first + 1) == "MZ" then
+        local offset = uint(first + 60, 4, true)
+        if offset and offset <= last - first - 23
+            and bytes:sub(first + offset, first + offset + 3) == "PE\0\0" then
+            local flags = uint(first + offset + 22, 2, true)
+            if flags & 0x2000 ~= 0 then return "shared", false end
+        end
+        return "unknown", false
+    end
+    local machine, sections = uint(first, 2, true), uint(first + 2, 2, true)
+    local header, symbols, symbol_count, symbol_width = first + 20, nil, nil, 18
+    if magic == "\0\0\255\255" then
+        machine = uint(first + 6, 2, true)
+        if machine ~= 0x14c and machine ~= 0x8664 and machine ~= 0xaa64 then return "unknown", false end
+        if uint(first + 4, 2, true) == 0 and last - first + 1 >= 20 then return "object", false end
+        if bytes:sub(first + 12, first + 27) ~=
+            "\199\161\186\209\238\186\169\75\175\32\250\246\106\164\220\184" then return "unknown", false end
+        sections, symbols, symbol_count = uint(first + 44, 4, true), uint(first + 48, 4, true), uint(first + 52, 4, true)
+        header, symbol_width = first + 56, 20
+    elseif machine == 0x14c or machine == 0x8664 or machine == 0xaa64 then
+        local optional = uint(first + 16, 2, true)
+        if not optional then return "unknown", false end
+        header, symbols, symbol_count = header + optional, uint(first + 8, 4, true), uint(first + 12, 4, true)
+    else return "unknown", false end
+    if not sections or sections > (last - header + 1) // 40 then return "unknown", false end
+    local strings = symbols and symbol_count and first + symbols + symbol_count * symbol_width
+    local string_size = strings and uint(strings, 4, true)
+    for index = 0, sections - 1 do
+        local position = header + index * 40
+        local name = bytes:sub(position, position + 7)
+        local offset = tonumber(name:match("^/(%d+)%z*$"))
+        if offset and string_size and offset >= 4 and offset + 9 <= string_size
+            and strings + string_size - 1 <= last then
+            name = bytes:sub(strings + offset, strings + offset + 8)
+        end
+        if name == ".gnu.lto_" or name == ".llvm.lto" then return "object", true end
+    end
+    return "object", false
+end
+
+function incremental.native_input_kind(context, path)
+    local ok, kind, err, lto = pcall(function()
+        local digest = incremental.file_digest(context, path)
+        local cache = state(context).persistent
+        local fact = cache and cache.objects[digest]
+        if not fact or fact.kind == nil or fact.lto == nil then
+            local bytes = incremental.file_contents(context, path)
+            local format, has_lto = native_format(bytes, 1, #bytes, 0)
+            fact = fact or {}
+            fact.kind, fact.lto = format, has_lto
+            if cache then cache.objects[digest], cache.dirty = fact, true end
+        end
+        if fact.kind == "thin" then return nil, "thin native archives require external member tracking" end
+        if fact.kind == "unknown" then return nil, "native input is not a recognized object, archive or shared library" end
+        return fact.kind, nil, fact.lto
+    end)
+    if not ok then
+        if type(kind) ~= "string" then error(kind, 0) end
+        return nil, "cannot read native input '" .. path .. "': " .. kind
+    end
+    return kind, err, lto
+end
+
 -- A part scan is a pure content fact: no paths, observations, module views or
 -- target selections enter the persisted value. Callers compare its target.
 function incremental.part_fingerprint(context, path)
@@ -621,7 +801,7 @@ function incremental.part_fingerprint(context, path)
         local digest = incremental.file_digest(context, path)
         local cache = state(context).persistent
         local fact = cache and cache.objects[digest]
-        if fact then return fact.fingerprint end
+        if fact and fact.fingerprint then return fact.fingerprint end
         local bytes = incremental.file_contents(context, path)
         local part, scan_error = staticmetadata.scan_bytes(bytes, path,
             { expected_abi = version.TITAN_ABI_VERSION })
@@ -632,7 +812,9 @@ function incremental.part_fingerprint(context, path)
         end
         local result = part.fingerprint
         if cache and valid_fingerprint(result) then
-            cache.objects[digest], cache.dirty = { fingerprint = result }, true
+            fact = fact or {}
+            fact.fingerprint = result
+            cache.objects[digest], cache.dirty = fact, true
         end
         return result
     end)
