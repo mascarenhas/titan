@@ -440,6 +440,16 @@ reports the exact component:
      exact path when it exists, otherwise the path with `.exe` appended. An
      existing non-file at either name is an error, and a bare LLVM stage name
      cannot be certified.
+   * **Link entries**, under either policy: each existing candidate is also
+     examined with `lstat`. An ordinary entry uses that metadata. A symbolic
+     link or reparse-point entry is certifiable only when its target can be
+     followed and its entry's raw `windows_attributes` DWORD is a valid value
+     whose `FILE_ATTRIBUTE_DIRECTORY` bit agrees with the target's kind; a
+     valid file link records the target's physical identity under the
+     original admitted spelling. A dangling, unprovable, or kind-changing link
+     entry makes the tool uncertified rather than falling through to the next
+     suffix or `PATH` directory; only a genuinely absent candidate falls
+     through.
    * **Any other selection policy**, such as an unknown producer or wrapper
      delegate, cannot be certified.
 

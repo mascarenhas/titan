@@ -913,7 +913,9 @@ The synchronous strategy uses the runtime's native `titan._stat_precise` when
 the `titan` support library loads: its results also carry `precision = "ns"`,
 integer `mtime_ns` and `ctime_ns`, and opaque `dev`/`ino` strings (POSIX
 `st_dev`/`st_ino`; on Windows the volume serial number and `FileIdInfo` file
-ID), copied into `device`/`inode`. Without that library it falls back to
+ID), copied into `device`/`inode`. On Windows they also carry
+`windows_attributes`, the raw `FileAttributes` DWORD from the same
+`FileBasicInfo` query. Without that library it falls back to
 LuaFileSystem with `time_precision = "coarse"` and, on Windows, no
 `device`/`inode`, because LuaFileSystem provides no useful Windows file
 identity. Host strategies may supply `"ns"` observations of their own. When
