@@ -10769,7 +10769,6 @@ describe("Darwin dSYM execution selection", function()
             cwd = assert(lfs.currentdir()),
         }
         root = temporary.name("-darwin-selection")
-        assert(os.remove(root))
         assert(lfs.mkdir(root))
         root = assert(compiler_io.new_sync():realpath(root))
         local loaded_driver = package.loaded["titan-compiler.driver"]
