@@ -235,6 +235,9 @@ io.stdout:write("released\n"); io.stdout:flush()
                 end
             end)
         end
+        -- Blocking work between loop runs leaves libuv's cached clock stale.
+        -- Refresh it before calculating this invocation's deadline.
+        uv.update_time()
         deadline:start(options.timeout or 15000, 0, function()
             failures[#failures + 1] = "output lock subprocess deadline"
             close(readiness)
