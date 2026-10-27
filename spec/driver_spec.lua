@@ -2562,7 +2562,11 @@ describe("loader resolver ownership", function()
                 release_locks = 0,
                 stdout = {},
             }
-            local fake_context = { io = {} }
+            local fake_context = {
+                io = {
+                    cwd = function() return "/project" end,
+                },
+            }
             local fake_driver = {
                 TITAN_SOURCE_PATH = ".",
                 EXTRA_CPPFLAGS = {},
@@ -2673,10 +2677,15 @@ describe("loader resolver ownership", function()
                         return out
                     end,
                 },
-                ["titan-compiler.linkcertificate"] = {},
+                ["titan-compiler.linkcertificate"] = {
+                    canonical_path = function(_, path)
+                        return "/project/" .. tostring(path)
+                    end,
+                },
                 ["titan-compiler.platform"] = {
                     windows = false,
                     getenv = function() return nil end,
+                    absolute = function(path) return path end,
                 },
                 ["titan-compiler.test_runner"] = {},
                 ["titan-compiler.util"] = {},
@@ -10191,6 +10200,7 @@ end
 end)
 
 describe("Windows link response files", function()
+    local process = require "titan-compiler.process"
     local previous, response
 
     before_each(function()
@@ -10199,7 +10209,8 @@ describe("Windows link response files", function()
         previous = {
             windows = platform.windows, cc = driver.CC, getenv = platform.getenv,
             reserve = driver.sibling_temporary_path,
-            execute = os.execute, print = _G.print, stderr = io.stderr,
+            execute = os.execute, process_run = process.run,
+            print = _G.print, stderr = io.stderr,
             remove = os.remove,
         }
         platform.windows = true
@@ -10212,6 +10223,7 @@ describe("Windows link response files", function()
         driver.CC = previous.cc
         driver.sibling_temporary_path = previous.reserve
         os.execute = previous.execute
+        process.run = previous.process_run
         _G.print = previous.print
         io.stderr = previous.stderr
         os.remove = previous.remove
@@ -10252,6 +10264,7 @@ describe("Windows link response files", function()
     it("rejects invalid argv and a different CC prefix before publication", function()
         driver.sibling_temporary_path = function() error("response must not be reserved") end
         os.execute = function() error("link must not launch") end
+        process.run = function() error("link must not launch") end
         for _, case in ipairs({
             { "nonempty argument array", nil },
             { "nonempty argument array", false },
@@ -10291,7 +10304,9 @@ describe("Windows link response files", function()
                     return true
                 end,
             }
-            os.execute = function(command)
+            os.execute = function() error("Windows link must use process.run") end
+            process.run = function(launched_argv)
+                local command = assert(platform.windows_command(launched_argv, false))
                 assert.is_true(#command < 1024)
                 assert.truthy(command:find("@", 1, true))
                 assert.truthy(command:find("compiler", 1, true))
@@ -10315,7 +10330,8 @@ describe("Windows link response files", function()
 
     for _, case in ipairs({ { "successful", true, 0 }, { "failed", false, 23 } }) do
         it("reports response removal failure after a " .. case[1] .. " link", function()
-            os.execute = function() return case[2] or nil, "exit", case[3] end
+            os.execute = function() error("Windows link must use process.run") end
+            process.run = function() return case[2] or nil, "exit", case[3] end
             os.remove = function(filename)
                 if filename == response then return nil, "injected removal failure" end
                 return previous.remove(filename)
@@ -10337,7 +10353,8 @@ describe("Windows link response files", function()
         if not previous.windows then platform.getenv = os.getenv end
         local output = paths.basename(response) .. ".dll"
         local prefix = output .. ".link.rsp.tmp."
-        os.execute = function(command)
+        os.execute = function() error("Windows link must use process.run") end
+        process.run = function(launched_argv)
             local found
             for filename in lfs.dir(".") do
                 if filename:sub(1, #prefix) == prefix then
@@ -10348,9 +10365,9 @@ describe("Windows link response files", function()
             assert.is_string(found)
             response = found
             assert.equal("file", lfs.attributes(response, "mode"))
-            assert.equal(assert(platform.windows_command({
+            assert.same({
                 "ccache", "C:/compiler tools/clang.exe", "@" .. response,
-            }, false)), command)
+            }, launched_argv)
             return true, "exit", 0
         end
         assert.is_true(driver.run_link_command({
@@ -10360,7 +10377,8 @@ describe("Windows link response files", function()
     end)
 
     it("removes the response file when execution throws", function()
-        os.execute = function() error("injected link launch error") end
+        os.execute = function() error("Windows link must use process.run") end
+        process.run = function() error("injected link launch error") end
         local ok, err = driver.run_link_command({
             "ccache", "C:/compiler tools/clang.exe", "input.o",
         }, false, "result.dll")
@@ -10372,6 +10390,7 @@ describe("Windows link response files", function()
     it("reports response publication failure before launching", function()
         driver.sibling_temporary_path = function() return response .. "/missing.rsp" end
         os.execute = function() error("link must not launch") end
+        process.run = function() error("link must not launch") end
         local ok, err = driver.run_link_command({
             "ccache", "C:/compiler tools/clang.exe", "input.o",
         }, false, "result.dll")
@@ -10442,6 +10461,7 @@ end)
 
 describe("Windows driver dispatch", function()
     local platform = require "titan-compiler.platform"
+    local process = require "titan-compiler.process"
     local previous
 
     before_each(function()
@@ -10454,6 +10474,7 @@ describe("Windows driver dispatch", function()
             compile_module = driver.compile_module,
             new_sync = compiler_io.new_sync,
             execute = os.execute,
+            process_run = process.run,
         }
         platform.windows = true
     end)
@@ -10467,6 +10488,7 @@ describe("Windows driver dispatch", function()
         driver.compile_module = previous.compile_module
         compiler_io.new_sync = previous.new_sync
         os.execute = previous.execute
+        process.run = previous.process_run
     end)
 
     it("initializes without requiring uname or native support", function()
@@ -10504,8 +10526,9 @@ describe("Windows driver dispatch", function()
                 end,
             }
         end
-        os.execute = function(command)
-            local name = assert(command:match("windows_serial%.[a-z]+"))
+        os.execute = function() error("Windows compile must use process.run") end
+        process.run = function(argv)
+            local name = assert(argv[1]:match("windows_serial%.[a-z]+"))
             calls[#calls + 1] = name
             if name == "windows_serial.failed" then return nil, "compile rejected" end
             return true
