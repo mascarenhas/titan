@@ -355,6 +355,7 @@ os.exit(0)
                 if abandoned_worker and not abandoned_worker.exited then
                     abandoned_worker:kill("sigkill")
                 end
+                while abandoned_worker and not abandoned_settled do uv.run("once") end
                 uv.run("nowait")
             end
             local ran_abandoned, abandoned_err = xpcall(function()
