@@ -710,26 +710,32 @@ preflight](build-coordinator.md#pre-dispatch-output-preflight)), the source
 files and non-`search` C headers that the build recorded for each module in
 `plan.order`, each `--c-source` file with every dependency its one
 preprocessing run recorded (the `nativeinputs.compile` result's
-`dependencies`), and the final link's inputs: its objects, compiled C objects,
+`dependencies`), the final link's inputs (its objects, compiled C objects,
 `-X` payloads, providers, archives, and runtime inputs, plus the files the
 [native library policy](build-coordinator.md#recipe-file-digests-and-native-library-policy)
 resolved from the linker arguments, such as a raw `--ldflag` archive or an
-`-L`/`-l` library. Exact, case-folded, component-hierarchy, and
-physical-identity matches all count, so an input reached through another
-spelling of a staged file is caught, and a stage file hard-linked to an input
-is refused as well. A link inside a stage is unlinked, never followed, so its
-target does not block retirement. Any match or observation error fails the
-invocation with `refusing to retire stale Windows staging: <conflict>` and
-retains every candidate, including unrelated abandoned ones; the user must
-move the input. When no candidate exists, no protected path is observed. A
-call without the preflighted plan, the native C results with their `source`
-and `dependencies`, or the final-link inputs fails closed before scanning.
+`-L`/`-l` library), and the native tools already identified by path. Those
+tools are the certified compiler with any ccache, sccache, or distcc delegate
+and its `cc1`/`as` stages (`compiler_tools` on the output-tool request), and
+every selected output tool: the linker, resource compiler, archiver, link
+driver, LTO wrapper and compiler, and each LTO plugin. Exact, case-folded,
+component-hierarchy, and physical-identity matches all count, so an input
+reached through another spelling of a staged file is caught, and a stage file
+hard-linked to an input is refused as well. A link inside a stage is unlinked,
+never followed, so its target does not block retirement. Any match or
+observation error fails the invocation with `refusing to retire stale Windows
+staging: <conflict>` and retains every candidate, including unrelated
+abandoned ones; the user must move the input. When no candidate exists, no
+protected path is observed. A call without the preflighted plan, the native C
+results with their `source` and `dependencies`, the final-link inputs, or the
+two native tool inventories fails closed before scanning.
 
 When the final link is uncertified or its linker arguments use a mechanism the
 policy does not recognize, the policy resolves no files. Explicit inputs stay
 protected, but a file named only inside such linker arguments (for example an
 `--ldflag` path under an opaque compiler prefix) is not, so keep linker inputs
-outside `<final-basename>.stage.tmp.*` directories.
+outside `<final-basename>.stage.tmp.*` directories. Likewise, an uncertified
+toolchain or output-tool selection names no tool paths, and none are guessed.
 
 Stale-shim retirement is not implemented on Windows: the prior DLL does not
 carry the old physical membership inventory, and a matching banner or
