@@ -945,8 +945,25 @@ jobs:
             env TITAN_PROBE_CACHE_DISABLE=1 .lua/bin/busted -o gtest -v spec/minicoro_spec.lua
           bash spec/support/ci_sanitizer_capture.sh uv-task-tests \
             make titan-stdlib-test-run TITAN_FILTER='^uv%.task_tests%.'
-          bash spec/support/ci_sanitizer_capture.sh uv-runtime-tests \
-            make titan-stdlib-test-run TITAN_FILTER='^uv%.runtime_tests%.'
+          # Fresh child compilers count against each run's unchanged deadline.
+          # Use the built owner's canonical inventory, not a second case list.
+          runtime_cases="$RUNNER_TEMP/titan-sanitizer-uv-runtime-cases.txt"
+          "$PREFIX/bin/lua" -E -e '
+            local util = require "titan-compiler.util"
+            local objectmetadata = require "titan-compiler.objectmetadata"
+            local filename = "out/tests/uv/runtime_tests.o"
+            local entry = assert(objectmetadata.read(
+              assert(util.get_file_contents(filename, "rb")), filename))
+            local names = entry.object_metadata.test_functions
+            assert(type(names) == "table" and #names > 0,
+              "built UV runtime owner has no test functions")
+            table.sort(names, util.bytewise_less)
+            for _, name in ipairs(names) do print(name) end
+          ' > "$runtime_cases"
+          while IFS= read -r runtime_case; do
+            bash spec/support/ci_sanitizer_capture.sh "uv-runtime-$runtime_case" \
+              make titan-stdlib-test-run TITAN_FILTER="^uv%.runtime_tests%.$runtime_case%f[^%w_]"
+          done < "$runtime_cases"
           bash spec/support/ci_sanitizer_capture.sh async-completion-tests \
             make titan-stdlib-test-run TITAN_FILTER='test_completion_'
           bash spec/support/ci_sanitizer_capture.sh async-ready-queue-tests \
