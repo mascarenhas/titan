@@ -245,6 +245,172 @@ describe("process transport", function()
         assert.equal("exit", bad_term)
         assert.equal(7, bad_code)
     end)
+
+    it("round-trips a build worker's native batch, terminal result, and coordinator EOF across platforms", function()
+        local workspace = new_workspace()
+        local saved_path = package.path
+        local ok, failure = xpcall(function()
+            local process = require "titan-compiler.process"
+            local interpreter = assert(process.library().exepath())
+            write_file(workspace .. "/cross_platform_worker.lua", [=[
+local build_worker = require "titan-compiler.build_worker"
+local process = require "titan-compiler.process"
+
+local worker = {}
+
+function worker.main()
+    local session = assert(build_worker.connect())
+    local request = session.request
+    local captured = process.capture({ request.interpreter, "-E", "-e", "io.stdout:write('pre-ok')" })
+    assert(captured.ok and captured.output == "pre-ok", tostring(captured.diagnostic))
+    local results, failure, cancelled = session:run_batch(request.batch)
+    assert(not failure and not cancelled, tostring(failure or cancelled))
+    assert(type(results) == "table" and results[1] and results[1].ok == true)
+    assert(session:finish({
+        ok = true,
+        result = {
+            module = request.module,
+            captured = captured.output,
+            batch_code = results[1].code,
+        },
+    }))
+    os.exit(0)
+end
+
+return worker
+]=])
+            package.path = workspace .. "/?.lua;" .. package.path
+            local completed = {}
+            local out_log = workspace .. "/batch.out"
+            local err_log = workspace .. "/batch.err"
+            local scheduler = build.new_scheduler({ { name = "m", deps = {} } }, {
+                decide = function() return "build" end,
+                request = function(node)
+                    return {
+                        module = node.name,
+                        interpreter = interpreter,
+                        batch = {
+                            {
+                                argv = { interpreter, "-E", "-e", "io.stdout:write('native-batch-ran\\n')" },
+                                stdout = out_log,
+                                stderr = err_log,
+                            },
+                        },
+                    }
+                end,
+                complete = function(node, result)
+                    completed[node.name] = result
+                    return true
+                end,
+            }, {
+                jobs = 2,
+                worker_entry = "cross_platform_worker",
+                makeflags = false,
+            })
+            local built, diagnostics = scheduler:run()
+            assert.is_true(built, diagnostics and table.concat(diagnostics, "\n"))
+            assert.same({
+                module = "m",
+                captured = "pre-ok",
+                batch_code = 0,
+            }, completed.m)
+            assert.equal("native-batch-ran\n", (read_file(out_log):gsub("\r\n", "\n")))
+
+            local eof_code, eof_settled
+            local eof_worker
+            eof_worker = assert(process.start_worker({
+                interpreter, "-E", "-e",
+                string.format("package.path = %q; package.cpath = %q; ", package.path, package.cpath) .. [[
+local session = assert(require("titan-compiler.build_worker").connect())
+session:run_batch({ { argv = { "unused" }, stdout = "out", stderr = "err" } })
+os.exit(0)
+]],
+            }, {}, {
+                record = function(payload)
+                    local record = assert(process.decode_record(payload))
+                    assert.equal("native", record.kind)
+                    eof_worker.request_pipe:close()
+                end,
+                failed = function() end,
+                exited = function(code) eof_code = code end,
+                settled = function() eof_settled = true end,
+            }))
+            assert(eof_worker:send(assert(process.encode_record({
+                kind = "compile",
+                protocol = require("titan-compiler.version").BUILD_WORKER_PROTOCOL,
+                request = { module = "eof" },
+            }))))
+            while not eof_settled do process.library().run("once") end
+            assert.equal(3, eof_code)
+
+            -- Also verify Session:abandoned() (Control:poll() with
+            -- control.reader as the sole handle) observes coordinator EOF.
+            local uv = process.library()
+            local ready_marker = workspace .. "/abandoned.ready"
+            local abandoned_code, abandoned_settled
+            local abandoned_worker, ready_timer, deadline_timer
+            local function cleanup_abandoned()
+                if ready_timer and not ready_timer:is_closing() then ready_timer:close() end
+                if deadline_timer and not deadline_timer:is_closing() then deadline_timer:close() end
+                if abandoned_worker and not abandoned_worker.exited then
+                    abandoned_worker:kill("sigkill")
+                end
+                while abandoned_worker and not abandoned_settled do uv.run("once") end
+                uv.run("nowait")
+            end
+            local ran_abandoned, abandoned_err = xpcall(function()
+                abandoned_worker = assert(process.start_worker({
+                    interpreter, "-E", "-e",
+                    string.format("package.path = %q; package.cpath = %q; ", package.path, package.cpath) ..
+                    string.format([[
+local process = require "titan-compiler.process"
+local session = assert(require("titan-compiler.build_worker").connect())
+local file = assert(io.open(%q, "wb"))
+assert(file:write("ready\n"))
+assert(file:close())
+for _ = 1, 1000 do
+    if session:abandoned() then os.exit(3) end
+    process.library().sleep(10)
+end
+os.exit(0)
+]], ready_marker),
+                }, {}, {
+                    record = function() end,
+                    failed = function() end,
+                    exited = function(code) abandoned_code = code end,
+                    settled = function() abandoned_settled = true end,
+                }))
+                assert(abandoned_worker:send(assert(process.encode_record({
+                    kind = "compile",
+                    protocol = require("titan-compiler.version").BUILD_WORKER_PROTOCOL,
+                    request = { module = "abandoned" },
+                }))))
+                uv.update_time()
+                ready_timer = uv.new_timer()
+                ready_timer:start(5, 5, function()
+                    if exists(ready_marker) then
+                        ready_timer:stop()
+                        ready_timer:close()
+                        if not abandoned_worker.request_pipe:is_closing() then
+                            abandoned_worker.request_pipe:close()
+                        end
+                    end
+                end)
+                deadline_timer = uv.new_timer()
+                deadline_timer:start(15000, 0, function()
+                    if not abandoned_worker.exited then abandoned_worker:kill("sigkill") end
+                end)
+                deadline_timer:unref()
+                while not abandoned_settled do uv.run("once") end
+            end, debug.traceback)
+            cleanup_abandoned()
+            assert.is_true(ran_abandoned, abandoned_err)
+            assert.equal(3, abandoned_code)
+        end, debug.traceback)
+        package.path = saved_path
+        remove_tree(workspace)
+        assert.is_true(ok, failure)
+    end)
 end)
 
 describe("native precise stat", function()

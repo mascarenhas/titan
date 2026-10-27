@@ -1,6 +1,6 @@
 -- One short-lived build worker of a titanc coordinator (titan-compiler.build).
 -- The coordinator starts it with the exact Lua interpreter and module paths
--- it runs itself; descriptor 3 carries closed control records. The worker
+-- it runs itself; descriptors 3 and 4 carry closed control records. The worker
 -- compiles exactly the one planned module it is sent, routes every native
 -- batch to the coordinator's job-slot ledger, reports one result record and
 -- exits. It never publishes: the coordinator alone does that.
@@ -17,8 +17,8 @@ Session.__index = Session
 -- Open the control channel and read the coordinator's compile request.
 -- Returns the session (`session.request` is the request's payload), or nil
 -- and an error.
-function build_worker.connect(descriptor)
-    local control, err = process.open_control(descriptor)
+function build_worker.connect(read_descriptor, write_descriptor)
+    local control, err = process.open_control(read_descriptor, write_descriptor)
     if not control then return nil, err end
     local payload
     payload, err = control:receive()
@@ -88,8 +88,7 @@ end
 
 -- True once the coordinator closed its end of the control channel.
 function Session:abandoned()
-    process.library().run("nowait")
-    return self.control.ended or self.control.error ~= nil
+    return self.control:poll()
 end
 
 local function diagnostic_list(value)
