@@ -79,15 +79,16 @@ keeps the provider's build flags. Select `OPENSSL_MODE=bundled` to build the
 pinned OpenSSL source with the selected native profile.
 
 An installed SDK records its selected profile in `etc/titan/build-profile`.
-On Unix, run `make clean-stdlib` before changing the standard provider's flags,
-tools, profile, or OpenSSL mode. On Windows, clean the selected private build
-directory and generated provider outputs. On Unix, the bundled libbacktrace and
-libuv builds record their profile, compiler, and flags and rebuild once when
-they change ([configuration
+The standard provider's Titan modules and link are certified by
+`titanc --incremental`, so changing their flags, tools, or profile rebuilds
+only what changed. On Unix, the bundled libbacktrace and libuv builds record
+their profile, compiler, and flags and rebuild once when they change
+([configuration
 stamps](../implementation/build-script-audit.md#native-dependency-configuration-stamps)).
-Clean the other native build directories (llhttp, SQLite, OpenSSL, and every
-Windows native build) when changing their inputs; Make does not save or
-reconcile those settings.
+Clean the authored runtime objects and the other native build directories
+(llhttp, SQLite, OpenSSL, and every Windows native build) when changing their
+tools, flags, profile, or OpenSSL mode; Make does not save or reconcile those
+settings.
 Native outputs remain adjacent to their sources, so builds using the same
 checkout must run sequentially even when their installed prefixes differ. Use
 separate source copies for concurrent builds.

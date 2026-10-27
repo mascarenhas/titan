@@ -18,6 +18,7 @@ Control.__index = Control
 local Frames = {}
 Frames.__index = Frames
 local uv
+local contained
 
 -- luv owns its native loop through its first module table. Anchor that table
 -- for the process lifetime, so a host that restores package.loaded (Busted
@@ -58,8 +59,35 @@ local function environment(overrides)
     return result
 end
 
+-- Assign this process before CreateProcess can run any descendant. A strict
+-- ancestor job prevents grandchildren escaping luv's silent-breakaway job.
+-- The native guard owns a noninheritable, OS-process-lifetime handle.
+local function contain_native_processes()
+    if not platform.windows or contained then return true end
+    local loaded, support = pcall(require, "titan")
+    if not loaded then
+        return nil, "cannot contain Windows native process tree: " .. tostring(support)
+    end
+    if type(support) ~= "table" or
+       type(support._native_process_tree_guard) ~= "function" then
+        return nil, "cannot contain Windows native process tree: " ..
+            "installed Titan runtime lacks _native_process_tree_guard"
+    end
+    local ok, err = support._native_process_tree_guard()
+    if not ok then return nil, err end
+    contained = true
+    return true
+end
+
 -- `options.inherit_environment` passes the parent's environment unchanged.
 local function spawn(argv, stdio, options, completed)
+    local ready, containment_error = contain_native_processes()
+    if not ready then return nil, containment_error end
+    -- Synchronous/captured commands inherit held POSIX output-lock leases.
+    -- Workers and dispatched native jobs already lay out their descriptors.
+    for index, descriptor in ipairs(options and options.inherit or {}) do
+        stdio[3 + index] = descriptor
+    end
     local child = setmetatable({}, Process)
     local arguments = {}
     for index = 2, #argv do arguments[#arguments + 1] = argv[index] end
@@ -90,13 +118,18 @@ function Process:wait()
 end
 Process.close = Process.wait
 
+-- Start without waiting, sharing standard streams and any inherited leases.
+-- The returned process's :close()/:wait() reaps it with os.execute status.
+function process.start(argv, options)
+    library()
+    return spawn(argv, { 0, 1, 2 }, options)
+end
 
 -- Run `argv` directly with the C locale and wait for it, sharing the
 -- caller's standard streams; returns os.execute-shaped results. On Windows
--- luv places the child in this process's kill-on-close Job Object.
+-- the strict native ancestor job also contains wrappers' descendants.
 function process.run(argv, options)
-    library()
-    local child, err = spawn(argv, { 0, 1, 2 }, options)
+    local child, err = process.start(argv, options)
     if not child then
         uv.run("nowait")
         pcall(io.stderr.write, io.stderr,
