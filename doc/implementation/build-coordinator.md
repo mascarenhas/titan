@@ -966,7 +966,9 @@ are never part of `spec.outputs`. Each target owns
     operands (each must be a regular file whose `incremental.native_input_kind`
     is an archive, object, or shared library), and the file-taking
     `--just-symbols` and `--retain-symbols-file` operands. Value-taking options
-    such as `-u`, `-e`, `-soname`, `-install_name`, `-z`, and `--ld-path`, and
+    such as `-u`, `-e`, `-soname`, `-install_name`, `-z`, and `--ld-path`
+    (and, for Windows PE targets only, `--stack <reserve>[,<commit>]`, whose
+    single operand is a value, never a file), and
     input-free flags such as `-O<level>`, `-flto=<mode>`, and `-fuse-ld=`,
     are covered by the ordered recipe `argv`. Each `-l` library is searched
     directory by directory through the explicit `-L` directories (on POSIX
