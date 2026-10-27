@@ -220,7 +220,7 @@ bytewise-sorted `test_functions` inventory from the built
 `out/tests/uv/runtime_tests.o` record, fails if it is empty or unreadable, and
 runs each parent as its own
 `TITAN_FILTER="^uv%.runtime_tests%.<case>%f[^%w_]"` gate. The value-transfer
-gate keeps the old literal, case-sensitive `transfer` match, which selects
+gate uses a literal, case-sensitive `transfer` match, which selects
 every parent whose full `<owner>.<function>` name contains `transfer`. It reads
 the 30 expected owners from `make -f spec/support/stdlib_test_modules.mk
 print-stdlib-test-roots` and the `test_functions` of every built primary object
