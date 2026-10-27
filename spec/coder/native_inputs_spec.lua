@@ -1,6 +1,7 @@
 local assert = require "luassert"
 local compiler_io = require "titan-compiler.io"
 local cdriver = require "c-parser.cdriver"
+local depfile = require "titan-compiler.depfile"
 local driver = require "titan-compiler.driver"
 local incremental = require "titan-compiler.incremental"
 local native = require "titan-compiler.nativeinputs"
@@ -75,7 +76,7 @@ describe("certified app-owned C sources", function()
             run = function(command, phase)
                 phases[#phases + 1] = phase
                 local result = ctx.io:run(command)
-                if on_run then on_run(phase, result) end
+                if on_run then on_run(phase, result, command) end
                 return result
             end,
         }
@@ -91,12 +92,30 @@ describe("certified app-owned C sources", function()
     after_each(function() remove(root) end)
 
     it("preprocesses every invocation but compiles an unchanged node only once", function()
-        local first = assert(build())[1]
+        local observed
+        local function observe(phase, result, command)
+            if phase == "native-preprocess" and result.ok then
+                for index, argument in ipairs(command) do
+                    if argument == "-MF" then
+                        observed = assert(depfile.parse(assert(context().io:read_file(command[index + 1]))))
+                    end
+                end
+            end
+        end
+        local first = assert(build(nil, true, nil, observe))[1]
+        assert.is_table(observed)
+        assert.is_true(#observed >= 2)
+        assert.same(observed, first.dependencies)
+        assert.is_nil(getmetatable(first.dependencies))
+        for _, filename in ipairs(first.dependencies) do assert.is_string(filename) end
         assert.is_false(first.hit)
         local old = os.time() - 60
         assert(lfs.touch(first.path, old, old))
         phases = {}
-        local second = assert(build())[1]
+        observed = nil
+        local second = assert(build(nil, true, nil, observe))[1]
+        assert.is_table(observed)
+        assert.same(observed, second.dependencies)
         assert.is_true(second.hit)
         assert.equal(first.path, second.path)
         assert.equal(first.identity, second.identity)
@@ -219,9 +238,11 @@ int helper(void) { return 2; }
     end)
 
     it("forces native compilation for a non-incremental request", function()
-        assert(build())
+        local first = assert(build())[1]
         phases = {}
-        assert.is_false(assert(build(nil, false))[1].hit)
+        local second = assert(build(nil, false))[1]
+        assert.is_false(second.hit)
+        assert.same(first.dependencies, second.dependencies)
         assert.same({ "native-preprocess", "native-compile" }, phases)
     end)
 
@@ -256,6 +277,7 @@ int helper(void) { return 2; }
                 assert.equal(first.path, object.path)
                 assert.is_false(object.cacheable)
                 assert.is_false(object.hit)
+                assert.same(first.dependencies, object.dependencies)
                 assert.same({ "native-preprocess", "native-compile" }, phases)
                 assert.equal("file", lfs.attributes(object.path, "mode"))
                 assert.is_nil(lfs.symlinkattributes(sidecar))

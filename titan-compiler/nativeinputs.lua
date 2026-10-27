@@ -176,7 +176,8 @@ local function compile_node(context, request, source, stem)
         if cacheable and request.incremental and native_record(record) and record.input == input and regular(context, object) then
             local identity = incremental.file_digest(context, object)
             if identity == record.object then
-                return { path = object, identity = identity, source = source, hit = true, cacheable = true }
+                return { path = object, identity = identity, source = source, hit = true, cacheable = true,
+                    dependencies = files }
             end
         end
         staged = reserve(context, object)
@@ -212,7 +213,8 @@ local function compile_node(context, request, source, stem)
         -- to catch publication races and to prime immediate native-only reuse.
         need(incremental.file_digest(incremental.fresh_context(context), object) == identity,
             "native object changed during publication: " .. object)
-        return { path = object, identity = identity, source = source, hit = false, cacheable = cacheable }
+        return { path = object, identity = identity, source = source, hit = false, cacheable = cacheable,
+            dependencies = files }
     end)
     -- Only invocation scratch is retired. Committed .o/.record nodes may be
     -- shared by other final targets and remain reusable when this source is
