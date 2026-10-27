@@ -482,7 +482,10 @@ installation layout from the compiler launcher filename.
 * `--tree <srcroot>` sets the source tree root (default `.`); module
   `foo.bar` is looked up first at the folder main
   `<srcroot>/foo/bar/bar.titan`, then at flat source
-  `<srcroot>/foo/bar.titan`.
+  `<srcroot>/foo/bar.titan`. The value may be an ordered, semicolon-separated
+  list of roots (quote it in the shell, as in `--tree 'src;tests'`); each
+  module is looked up in the roots in order, and the first root that has it
+  wins.
 * `-o/--output <directory>` creates the destination and missing parents, then
   writes generated files beneath it. Generated C, objects, and headers recreate
   the selected source root's hierarchy there; final providers, loaders,

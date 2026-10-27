@@ -2392,7 +2392,7 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `--no-uv-bootstrap` | Call `main` directly instead of the registered async bootstrap hook. | Requires a standalone or test main; not with `-c`. |
 | `--no-line-directives` | Omit generated Titan `#line` directives. | |
 | `-u`, `--lua <dir>` | Lua source tree (`driver.LUA_SOURCE_PATH`). | Source checkouts only. |
-| `-t`, `--tree <dir>` | Source root (`driver.TITAN_SOURCE_PATH`, default `.`). | |
+| `-t`, `--tree <dir>` | Source root, or an ordered `;`-separated list of roots searched in order (`driver.TITAN_SOURCE_PATH`, default `.`). | |
 | `-o`, `--output <dir>` | Folder for generated files, preserving the source hierarchy. | |
 | `-I`, `--include-dir <dir>` | Native include directory for C headers, probes, generated C, and `--c-source`; repeatable, order kept, searched before the SDK. | |
 | `-D`, `--define <def>` | Native preprocessor definition `NAME[=VALUE]`; repeatable, order kept. | |
