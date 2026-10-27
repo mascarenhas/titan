@@ -372,6 +372,7 @@ os.exit(0)
             abandoned_worker.request_pipe:close()
             while not abandoned_settled do process.library().run("once") end
             assert.equal(3, abandoned_code)
+        end, debug.traceback)
         package.path = saved_path
         remove_tree(workspace)
         assert.is_true(ok, failure)
