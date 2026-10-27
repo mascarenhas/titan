@@ -1090,7 +1090,8 @@ describe("synchronous compiler I/O batches", function()
         function strategy:tmpname()
             logs = logs + 1
             local filename = root .. "/capture-" .. logs
-            assert(self:write_file(filename, ""))
+            local file = assert(io.open(filename, "wb"))
+            assert(file:close())
             return filename
         end
         local results = with_overrides(jobs, {
@@ -1109,7 +1110,9 @@ describe("synchronous compiler I/O batches", function()
                 assert.is_nil(before_start)
                 assert.equal(leases, options.inherit)
                 launches[index] = argv
-                assert(strategy:write_file(stdout, "child " .. index))
+                local file = assert(io.open(stdout, "wb"))
+                assert(file:write("child " .. index))
+                assert(file:close())
                 return { ok = true, term = "exit", code = 0, finish_errors = {} }
             end,
             drive = function(_, actual, count, launch)
