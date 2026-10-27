@@ -66,7 +66,7 @@ local function run_titanc(arguments, environment_jobs)
     function driver.default_c_parts() return 4 end
     function driver.prepare_output_root(dir) return dir end
     function driver.module_compiled_objects(mod)
-        return { mod.filename:gsub("[.]titan$", ".o") }
+        return { (mod.filename:gsub("[.]titan$", ".o")) }
     end
     function driver.source_link_inputs() return {} end
     function driver.incremental_configuration()
