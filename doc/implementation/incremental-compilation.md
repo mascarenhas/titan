@@ -395,9 +395,14 @@ reports the exact component:
    `true` (effective-user `X_OK`, so owner-only or group-only execute bits
    are judged as the kernel would, and an execute-only file need not be
    readable); a missing capability or an indeterminate answer fails the
-   selection rather than guessing from mode bits. On Windows the first
-   regular file is admitted whether or not it is readable. Admission never
-   reads tool contents, and the physical identity it records is unchanged.
+   selection rather than guessing from mode bits. On Windows each explicit
+   path, and each `PATH` directory in order, tries the exact spelling and then
+   the same spelling with `.exe` appended, even when the name already contains
+   dots (compilers name stages such as `ld.lld` without the suffix); a name
+   that already ends in `.exe`, in any case, gets no second suffix. The first
+   regular file is admitted whether or not it is readable, and the second
+   return names the candidate actually selected. Admission never reads tool
+   contents, and the physical identity it records is unchanged.
 
    Tool executables are certified by self-description plus physical metadata
    rather than by hashing the compiler binary bytes. The change timestamp
