@@ -1155,7 +1155,8 @@ static const luaL_Reg output_lock_methods[] = {
 
 /* Private compiler helper: precise file metadata for incremental observation
 ** reuse. Returns { kind, dev, ino, size, mode, mtime_ns, ctime_ns }, plus
-** windows_attributes on Windows, or nil, errmsg, errno_code on missing paths. */
+** windows_attributes on Windows; on failure (missing paths included), returns
+** nil, errmsg, errno_code without raising. */
 static int stat_precise(lua_State *L) {
   size_t path_len = 0;
   const char *path = luaL_checklstring(L, 1, &path_len);
