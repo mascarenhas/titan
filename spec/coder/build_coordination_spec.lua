@@ -368,6 +368,227 @@ dofile(%q .. "/titanc")
         assert.equal("file", lfs.attributes(executable, "mode"))
     end)
 
+    local function synthetic_phase_contention(phase)
+        if platform.windows then pending("POSIX synthetic compiler lifetime"); return end
+        root = assert(compiler_io.new_sync():realpath(root))
+        local first, second, output = root .. "/first", root .. "/second", root .. "/objects"
+        assert(lfs.mkdir(first)); assert(lfs.mkdir(second))
+        local is_test = phase ~= "program-entrypoint"
+        if is_test then
+            write(first .. "/app.titan", [[
+local test = import "test"
+local timer = import "timer"
+function test_held(context: test.Context) test.assert(false) end
+]])
+            write(second .. "/app.titan", [[
+local test = import "test"
+local timer = import "timer"
+function test_current(context: test.Context) test.assert(true) end
+]])
+        else
+            write(first .. "/app.titan", [[
+local timer = import "timer"
+function main(args: {string}): integer return 11 end
+]])
+            write(second .. "/app.titan", [[
+local timer = import "timer"
+function main(args: {string}): integer return 22 end
+]])
+        end
+        local executable, release = root .. "/shared-image", root .. "/release-native"
+        local stage_log, wrapper = root .. "/native-object", root .. "/synthetic-cc"
+        local cdriver = require "c-parser.cdriver"
+        local function quote(value) return assert(cdriver.shell_quote(value)) end
+        local words = assert(cdriver.split_shell_words(require("titan-compiler.driver").CC))
+        if words[1] == "exec" then table.remove(words, 1) end
+        local real = {}
+        for _, word in ipairs(words) do real[#real + 1] = quote(word) end
+        real = table.concat(real, " ")
+        local pattern = phase == "runner" and "*__test_runner.c|*__test_runner.part*.c" or
+            phase == "test-entrypoint" and "*__test_entrypoint.c" or "*__entrypoint.c"
+        write(wrapper, string.format([[#!/bin/sh
+compile=no
+selected=no
+output=
+next=no
+for argument in "$@"; do
+    case "$argument" in -c) compile=yes ;; esac
+    case "$argument" in %s) selected=yes ;; esac
+    if [ "$next" = yes ]; then output=$argument; next=no
+    elif [ "$argument" = -o ]; then next=yes; fi
+done
+if [ "$compile" = yes ] && [ "$selected" = yes ] && mkdir %s 2>/dev/null; then
+    printf '%%s' "$output" > %s
+    %s
+    attempts=0
+    while [ ! -e %s ]; do
+        attempts=$((attempts + 1))
+        [ "$attempts" -lt 800 ] || exit 97
+        sleep 0.05
+    done
+    %s "$@"
+    status=$?
+    printf 'native-done\n'
+    exit "$status"
+fi
+exec %s "$@"
+]], pattern, quote(root .. "/claimed-native"), quote(stage_log),
+            phase == "runner" and ":" or "printf 'acquired\\n'",
+            quote(release), real, real))
+        assert(compiler_io.new_sync():run({ "chmod", "u+x", wrapper }).ok)
+        write(frontend, string.format([[
+package.path = %q .. "/?.lua;" .. package.path
+package.cpath = %q .. "/titan-runtime/bootstrap/?.so;" .. package.cpath
+local hold = arg[1] == "hold"
+local phase = %q
+require("titan-compiler.coder").DEFAULT_SPLIT_THRESHOLD = 1
+if hold and phase == "runner" then
+    local jobs = require "titan-compiler.jobs"
+    local launch, announced = jobs.launch, false
+    jobs.launch = function(channel, argv, ...)
+        local child, err = launch(channel, argv, ...)
+        if child and not announced then
+            for _, argument in ipairs(argv) do
+                if argument:match("__test_runner[.]c$") or
+                   argument:match("__test_runner[.]part[0-9]+[.]c$") then
+                    announced = true
+                    io.stdout:write("acquired\n"); io.stdout:flush()
+                    break
+                end
+            end
+        end
+        return child, err
+    end
+elseif not hold then
+    local build = require "titan-compiler.build"
+    local run = build.run
+    build.run = function(...)
+        io.stdout:write("acquired\n"); io.stdout:flush()
+        return run(...)
+    end
+end
+arg = { [0] = %q .. "/titanc", "-v", "--incremental",
+    "--jobs", phase == "runner" and "2" or "1",
+    "--c-parts", phase == "runner" and "2" or "1",
+    "--tree", hold and %q or %q, "--output", %q, "--exe", %q }
+if not hold then arg[#arg + 1] = "--no-uv-bootstrap" end
+if %s then arg[#arg + 1] = "--test" end
+arg[#arg + 1] = "app"
+dofile(%q .. "/titanc")
+]], repository, repository, phase, repository, first, second, output, executable,
+            tostring(is_test), repository))
+        local function snapshot()
+            local files = { [executable] = read(executable) }
+            local function visit(directory)
+                for name in lfs.dir(directory) do
+                    if name ~= "." and name ~= ".." then
+                        local filename = directory .. "/" .. name
+                        if lfs.symlinkattributes(filename, "mode") == "directory" then visit(filename)
+                        else files[filename] = read(filename) end
+                    end
+                end
+            end
+            visit(output .. "/.titan-links")
+            return files
+        end
+        local successor_files
+        local function release_native() write(release, "release") end
+        contend(lua, frontend, {}, {}, true, {
+            timeout = 60000, defer_waiter = true,
+            env = compiler_environment({ CC = wrapper }),
+            after_holder_exit = function()
+                local lock = assert(require("titan")._output_lock_open(output .. "/.titan-build.lock"))
+                local held, err = lock:try()
+                lock:close()
+                assert.is_false(held, tostring(err))
+            end,
+            release_orphan = release_native,
+            after_waiter_exit = function()
+                local captured, capture_error = pcall(function() successor_files = snapshot() end)
+                release_native()
+                assert.is_true(captured, tostring(capture_error))
+            end,
+        })
+        assert.same(successor_files, snapshot())
+        assert.matches("/.titan-links/", read(stage_log), 1, true)
+        if phase == "runner" then
+            local split
+            for filename in pairs(successor_files) do
+                if filename:match("__test_runner[.]part1[.]o$") then split = true end
+            end
+            assert.is_true(split, "the runner must exercise the local parallel native batch")
+        end
+        local result = compiler_io.new_sync():run({ executable })
+        assert.equal(is_test and 0 or 22, result.status, result.output or result.diagnostic)
+    end
+
+    it("retains the output lease for a killed standalone entrypoint compiler", function()
+        synthetic_phase_contention("program-entrypoint")
+    end)
+
+    it("retains the output lease for a killed test entrypoint compiler", function()
+        synthetic_phase_contention("test-entrypoint")
+    end)
+
+    it("retains output leases through a killed coordinator's parallel runner batch", function()
+        synthetic_phase_contention("runner")
+    end)
+
+    it("rejects lock and metadata destinations before replacing valid source outputs", function()
+        local source, output = root .. "/source", root .. "/objects"
+        assert(lfs.mkdir(source))
+        write(source .. "/app.titan", "function main(args: {string}): integer return 0 end\n")
+        write(frontend, string.format([[
+package.path = %q .. "/?.lua;" .. package.path
+package.cpath = %q .. "/titan-runtime/bootstrap/?" .. %q .. ";" .. package.cpath
+dofile(%q .. "/titanc")
+]], repository, repository, platform.windows and ".dll" or ".so", repository))
+        local function compile(extra)
+            local argv = { lua, "-E", frontend, "--incremental", "--tree", source,
+                "--output", output, "--c-parts", "1", "--jobs", "1" }
+            for _, argument in ipairs(extra) do argv[#argv + 1] = argument end
+            argv[#argv + 1] = "app"
+            return compiler_io.new_sync():run(argv, {
+                env = compiler_environment(), stderr_to_stdout = true,
+            })
+        end
+        local initial = compile({ "-c" })
+        assert.is_true(initial.ok, initial.output or initial.diagnostic)
+        local lock = output .. "/.titan-build.lock"
+        local lock_info = assert(lfs.attributes(lock))
+        local lock_bytes, c_bytes, object_bytes = read(lock), read(output .. "/app.c"), read(output .. "/app.o")
+        local destinations = {}
+        if not platform.windows then
+            destinations[#destinations + 1] = lock
+            local alias = output .. "/lock-image"
+            assert(lfs.link(lock, alias))
+            destinations[#destinations + 1] = alias
+        end
+        for _, namespace in ipairs({ ".titan", ".titan-links", ".native" }) do
+            local directory = output .. "/" .. namespace
+            if not lfs.attributes(directory) then assert(lfs.mkdir(directory)) end
+            local destination = directory .. "/reserved-image.exe"
+            write(destination, "retained metadata")
+            destinations[#destinations + 1] = destination
+        end
+        -- A missed preflight would regenerate these objects before failing
+        -- publication, even if the OS refuses replacement of an open lock.
+        write(source .. "/app.titan", "function main(args: {string}): integer return 1 end\n")
+        for _, destination in ipairs(destinations) do
+            local bytes = read(destination)
+            local rejected = compile({ "--exe", destination })
+            assert.is_false(rejected.ok, destination .. ": " .. tostring(rejected.output))
+            assert.matches("input", rejected.output or rejected.diagnostic, 1, true)
+            assert.equal(bytes, read(destination))
+            assert.equal(lock_bytes, read(lock))
+            assert.equal(c_bytes, read(output .. "/app.c"))
+            assert.equal(object_bytes, read(output .. "/app.o"))
+            local current = assert(lfs.attributes(lock))
+            assert.equal(lock_info.dev, current.dev)
+            assert.equal(lock_info.ino, current.ino)
+        end
+    end)
+
     it("keeps a killed final-link coordinator from overwriting an external successor", function()
         if platform.windows then pending("POSIX final-link process lifetime"); return end
         -- Output routing resolves physical ancestors. Match the wrapper's

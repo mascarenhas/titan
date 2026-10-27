@@ -34,7 +34,7 @@ p:flag('--print-ast', 'Print the AST.')
 p:flag('--pretty-print', 'Format generated C and headers with clang-format.')
 p:flag('-v --verbose', 'Be verbose about compiler invocations.')
 p:option('-j --jobs',
-    'Maximum concurrent native compiler jobs: generated-C compilations and batched C probes (default: TITAN_JOBS or 4).')
+    'Maximum concurrent compiler jobs: module-frontend workers and native compiler jobs share these slots (default: TITAN_JOBS or 4).')
 p:option('--c-parts',
     'Maximum generated-C translation units per module above the split threshold (default: TITAN_C_PARTS, 4 on Linux, or 1 on macOS/Windows).')
 p:option('--exe', 'Exact executable destination, relative to the current directory (Windows appends .exe when absent; the DLL provider stays under --output).')
@@ -79,6 +79,7 @@ local function release_locks()
     if output_locks then
         local locks = output_locks
         output_locks = nil
+        driver.OUTPUT_LOCKS = nil
         locks:release()
     end
 end
@@ -258,8 +259,16 @@ local normalized_native, native_error = nativeinputs.normalize({
 })
 if not normalized_native then exit(native_error) end
 driver.apply_native_inputs(normalized_native)
-local configured, configure_error =
-    driver.configure_foreign_c(resolver_context)
+local c_source_only = args.compile_only and #args.module == 0 and
+    #args.test_dir == 0 and #args.c_source > 0
+local configured, configure_error
+if c_source_only then
+    -- Native C nodes need layout, platform and toolchain identity, but no
+    -- Titan foreign-type profile or module graph.
+    configured, configure_error = driver.initialize_platform(resolver_context)
+else
+    configured, configure_error = driver.configure_foreign_c(resolver_context)
+end
 if not configured and configure_error then exit(configure_error) end
 if not c_parts then
     c_parts = driver.default_c_parts()
@@ -343,10 +352,34 @@ local lock_error
 output_locks, lock_error = build.lock_outputs(
     resolver_context.io, lock_directories, { verbose = args.verbose })
 if not output_locks then exit(lock_error) end
+driver.OUTPUT_LOCKS = output_locks
 incremental.load_digest_cache(resolver_context, args.output)
 
+local function preflight_outputs(plan)
+    local native_inputs = { table.unpack(args.extra_object or {}) }
+    for _, filename in ipairs(normalized_native.c_sources) do
+        native_inputs[#native_inputs + 1] = filename
+    end
+    return driver.preflight_build_outputs(resolver_context, plan, {
+        roots = requested_modules,
+        compile_only = args.compile_only,
+        test = args.test,
+        c_parts = c_parts,
+        output_root = args.output,
+        exe = args.exe,
+        no_uv_bootstrap = args.no_uv_bootstrap,
+        coverage = coverage_build ~= nil,
+        native_inputs = native_inputs,
+        locks = output_locks,
+        metadata_root = lock_directories[1],
+    })
+end
+
 local loader
-if args.print_ast then
+if c_source_only then
+    local ready, preflight_error = preflight_outputs({ order = {}, modules = {} })
+    if not ready then exit(preflight_error) end
+elseif args.print_ast then
     -- A debugging view of each root's checked AST: check in this process,
     -- where the ASTs live, and compile through the ordinary batch below.
     loader = driver.defaultloader({}, loader_options)
@@ -379,23 +412,7 @@ else
         coverage = coverage_build ~= nil,
         output_root = args.output,
         locks = output_locks,
-        preflight = function(plan)
-            local native_inputs = { table.unpack(args.extra_object or {}) }
-            for _, filename in ipairs(normalized_native.c_sources) do
-                native_inputs[#native_inputs + 1] = filename
-            end
-            return driver.preflight_build_outputs(resolver_context, plan, {
-                roots = requested_modules,
-                compile_only = args.compile_only,
-                test = args.test,
-                c_parts = c_parts,
-                output_root = args.output,
-                exe = args.exe,
-                no_uv_bootstrap = args.no_uv_bootstrap,
-                coverage = coverage_build ~= nil,
-                native_inputs = native_inputs,
-            })
-        end,
+        preflight = preflight_outputs,
     })
     if signal then
         close_coordinator_context()
@@ -471,6 +488,34 @@ if #normalized_native.c_sources > 0 then
         c_objects[#c_objects + 1] = object
     end
 end
+local function finish_compile_only()
+    local listed_paths
+    if args.print_c_objects then
+        local cwd, cwd_error = resolver_context.io:cwd()
+        if not cwd then exit(cwd_error) end
+        local object_paths = {}
+        for _, object in ipairs(c_objects) do
+            local absolute, absolute_error =
+                platform.absolute(object.path, cwd, resolver_context.io)
+            if not absolute then exit(absolute_error) end
+            object_paths[linkcertificate.canonical_path(
+                resolver_context, object.source)] = absolute
+        end
+        listed_paths = {}
+        for _, source in ipairs(args.c_source) do
+            local canonical = linkcertificate.canonical_path(resolver_context, source)
+            listed_paths[#listed_paths + 1] = assert(object_paths[canonical],
+                "certified native object is missing for C source '" .. source .. "'")
+        end
+    end
+    finish()
+    if listed_paths then io.stdout:write(table.concat(listed_paths, "\n"), "\n") end
+end
+if c_source_only then
+    finish_compile_only()
+    return
+end
+
 local extra_objects = {}
 for _, object in ipairs(c_objects) do extra_objects[#extra_objects + 1] = object.path end
 for _, input in ipairs(args.extra_object or {}) do
@@ -576,6 +621,20 @@ if not args.compile_only and not args.print_ast then
     if not compile_prefix then exit(prefix_error) end
     local backend, backend_error = driver.native_link_backend(resolver_context)
     if not backend then exit(backend_error) end
+    local output_request, output_request_error =
+        driver.output_tool_descriptors(resolver_context, kind)
+    if not output_request then exit(output_request_error) end
+    output_request.compile_argv = compile_prefix
+    output_request.inputs = {}
+    for _, inputs in ipairs({
+            objects, extra_objects or {}, providers, archives, runtime }) do
+        for _, filename in ipairs(inputs) do
+            output_request.inputs[#output_request.inputs + 1] = filename
+        end
+    end
+    local output_tools, output_tools_error =
+        linkcertificate.output_tools(resolver_context, output_request)
+    if not output_tools then exit(output_tools_error) end
     local spec = {
         output_root = lock_directories[1],
         outputs = outputs,
@@ -589,8 +648,7 @@ if not args.compile_only and not args.print_ast then
         argv = driver.link_extra_flags(),
         toolchain = {
             compiler = (incremental.toolchain_identity(resolver_context, descriptor)),
-            ar = driver.AR, ranlib = driver.RANLIB,
-            rc = platform.getenv("RC") or "",
+            output_tools = output_tools,
         },
         test_cases = test_cases,
         templates = configuration.compiler,
@@ -949,27 +1007,7 @@ end
 if #errors > 0 then exit(table.concat(errors, "\n")) end
 
 if args.compile_only then
-    local listed_paths
-    if args.print_c_objects then
-        local cwd, cwd_error = resolver_context.io:cwd()
-        if not cwd then exit(cwd_error) end
-        local object_paths = {}
-        for _, object in ipairs(c_objects) do
-            local absolute, absolute_error =
-                platform.absolute(object.path, cwd, resolver_context.io)
-            if not absolute then exit(absolute_error) end
-            object_paths[linkcertificate.canonical_path(
-                resolver_context, object.source)] = absolute
-        end
-        listed_paths = {}
-        for _, source in ipairs(args.c_source) do
-            local canonical = linkcertificate.canonical_path(resolver_context, source)
-            listed_paths[#listed_paths + 1] = assert(object_paths[canonical],
-                "certified native object is missing for C source '" .. source .. "'")
-        end
-    end
-    finish()
-    if listed_paths then io.stdout:write(table.concat(listed_paths, "\n"), "\n") end
+    finish_compile_only()
     return
 end
 

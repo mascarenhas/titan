@@ -509,7 +509,7 @@ end
 -- there). The caller removes its logs when this returns nil. A build worker
 -- only records `argv` and the logs for its coordinator; `drive` sends them.
 function jobs.launch(channel, argv, command, stdout_path, stderr_path,
-                     completion_index, before_start)
+                     completion_index, before_start, options)
     if channel.remote then
         if before_start then
             local ready, ready_err = before_start()
@@ -556,16 +556,27 @@ function jobs.launch(channel, argv, command, stdout_path, stderr_path,
     -- compiler keeps its default actions). A process-group signal therefore
     -- cannot end the wrapper before its compiler exits: reaping the wrapper
     -- proves the compiler's lifetime ended, and the completion is still sent.
-    local notified_command = "trap : INT TERM HUP; " ..
+    -- Keep the FIFO open read/write for this wrapper's lifetime too. If its
+    -- coordinator dies, sending completion must not block on a missing reader
+    -- and retain the writer's output locks forever. The compiler's stdout is
+    -- separately redirected below, so only the completion line uses fd 1.
+    local notified_command = "(trap : INT TERM HUP; " ..
         "(trap : INT TERM HUP; " .. command .. ") >" .. quoted_stdout ..
         " " .. stderr_redirect ..
         "; _titan_compile_status=$?; printf '%s\\n' " .. quoted_index ..
-        " >" .. channel.quoted_path ..
-        "; exit $_titan_compile_status"
-    local popen_called, pipe, popen_err =
-        pcall(io.popen, notified_command, "r")
-    if not popen_called then return nil, pipe end
-    if not pipe then return nil, popen_err end
+        "; exit $_titan_compile_status) 1<>" .. channel.quoted_path
+    local started, pipe, start_error
+    if options and options.inherit then
+        -- Keep the same FIFO notification and status wrapper, but give the
+        -- native writer the coordinator's close-on-exec lock descriptors.
+        started, pipe, start_error = pcall(
+            require("titan-compiler.process").start,
+            { "/bin/sh", "-c", notified_command }, options)
+    else
+        started, pipe, start_error = pcall(io.popen, notified_command, "r")
+    end
+    if not started then return nil, pipe end
+    if not pipe then return nil, start_error end
     return { pipe = pipe }
 end
 

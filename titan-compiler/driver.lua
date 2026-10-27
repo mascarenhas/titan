@@ -1049,7 +1049,9 @@ local function remember_used_compiled_interface(context, modname, modtype)
         used = {}
         context.used_compiled_interfaces[modname] = used
     end
-    used[types.serialize_semantic(modtype)] = true
+    -- Most lookups revisit the same selected view. Keep every distinct view
+    -- and pay for its semantic serialization only if source replaces it.
+    used[modtype] = true
 end
 
 -- Implementation notes: doc/implementation/source-import-visibility.md#loader-result-and-module-views
@@ -1060,8 +1062,8 @@ local function check_used_compiled_interface(
         context.used_compiled_interfaces[modname]
     if not used then return end
     local source_interface = types.serialize_semantic(source_type)
-    for compiled_interface in pairs(used) do
-        if compiled_interface ~= source_interface then
+    for compiled_type in pairs(used) do
+        if types.serialize_semantic(compiled_type) ~= source_interface then
             errors[#errors + 1] = "source module '" .. modname ..
                 "' does not match a compiled interface already used in " ..
                 "this compilation"
@@ -1131,15 +1133,15 @@ local function parsed_words(value, label)
     return words
 end
 
-function perf.compiler_command()
-    local command, err = parsed_words(driver.CC, "CC")
+function perf.tool_command(configured, label)
+    local command, err = parsed_words(configured, label)
     if not command then return nil, err end
-    -- POSIX CC may use the shell builtin to replace its command shell. It is
-    -- not an executable, and argv-based compiler queries must omit it too.
+    -- A POSIX tool prefix may replace its command shell with this builtin.
+    -- It is not an executable, so execution and identity use the same argv.
     if not platform.windows and command[1] == "exec" then
         table.remove(command, 1)
     end
-    if #command == 0 then return nil, "CC command is empty" end
+    if #command == 0 then return nil, label .. " command is empty" end
     return command
 end
 
@@ -1162,8 +1164,14 @@ local function run_argv(argv, verbose)
     local cmd, err = command_argv(argv)
     if not cmd then return nil, err end
     if verbose then io.stderr:write(cmd, "\n") end
-    if platform.windows and jobs.is_remote() then
-        return require("titan-compiler.process").run(argv)
+    if platform.windows then return require("titan-compiler.process").run(argv) end
+    if driver.OUTPUT_LOCKS then
+        -- The coordinator's descriptors are close-on-exec. Give synchronous
+        -- native writers the same leases as scheduler jobs, including shell
+        -- wrappers and their descendants after the coordinator has died.
+        return require("titan-compiler.process").run({ "/bin/sh", "-c", cmd }, {
+            inherit = driver.OUTPUT_LOCKS:descriptors(),
+        })
     end
     return os.execute(cmd)
 end
@@ -1187,7 +1195,7 @@ function driver.run_link_command(argv, verbose, output)
             return nil, "link command must be a dense argument array"
         end
     end
-    local command, err = perf.compiler_command()
+    local command, err = perf.tool_command(driver.CC, "CC")
     if not command then return nil, err end
     for index = 1, #command do
         if argv[index] ~= command[index] then
@@ -1366,7 +1374,7 @@ local function compiler_argv(include_extra_compile_flags, context)
         if not ok then return nil, err end
         if not closed then return nil, close_error end
     end
-    local cc, err = perf.compiler_command()
+    local cc, err = perf.tool_command(driver.CC, "CC")
     if not cc then return nil, err end
     if driver.BUILD_PROFILE == "production" and driver.CFLAGS == default_cflags then
         local strategy = supplied_context and supplied_context.io
@@ -1433,25 +1441,47 @@ function driver.link_extra_flags()
     return driver.NATIVE_LINK_FLAGS or driver.EXTRA_LDFLAGS or {}
 end
 
--- Dependency-report support is memoized in this resolver and persisted by the
--- shared link-certificate owner under the observed native tool identities.
-function driver.native_link_backend(context)
-    if context.native_link_backend then return context.native_link_backend end
+-- Describe only tools the requested output actually uses. Keep exact wrapper
+-- arguments and share parsing with their execution sites.
+function driver.output_tool_descriptors(context, kind)
     local argv, argv_error = compiler_argv(false, context)
     if not argv then return nil, argv_error end
     local descriptor, descriptor_error = driver.toolchain_descriptor(context)
     if not descriptor then return nil, descriptor_error end
-    local toolchain = incremental.toolchain_identity(context, descriptor)
+    local tools = {}
+    if kind == "library" and not platform.windows then
+        local ar, ar_error = perf.tool_command(driver.AR, "AR")
+        if not ar then return nil, ar_error end
+        local ranlib, ranlib_error = perf.tool_command(driver.RANLIB, "RANLIB")
+        if not ranlib then return nil, ranlib_error end
+        tools.ar, tools.ranlib = ar, ranlib
+    elseif (kind == "program" or kind == "test") and platform.windows then
+        local rc, rc_error =
+            perf.tool_command(platform.getenv("RC") or "llvm-rc", "RC")
+        if not rc then return nil, rc_error end
+        tools.rc = rc
+    end
+    if kind and driver.IS_DARWIN then tools.dsymutil = { "dsymutil" } end
+    return {
+        compiler_argv = argv,
+        link_flags = driver.link_extra_flags(),
+        toolchain = incremental.toolchain_identity(context, descriptor),
+        directory = context.output_root or
+            driver.TITAN_SOURCE_PATH:match("[^;]+") or ".",
+        darwin = driver.IS_DARWIN == true,
+        windows = platform.windows,
+        tools = tools,
+    }
+end
+
+-- Dependency-report support is memoized in this resolver and persisted by the
+-- shared link-certificate owner under the observed native tool identities.
+function driver.native_link_backend(context)
+    if context.native_link_backend then return context.native_link_backend end
+    local request, request_error = driver.output_tool_descriptors(context)
+    if not request then return nil, request_error end
     local backend, backend_error = require("titan-compiler.linkcertificate")
-        .linker_backend(context, {
-            compiler_argv = argv,
-            link_flags = driver.link_extra_flags(),
-            toolchain = toolchain,
-            directory = context.output_root or
-                driver.TITAN_SOURCE_PATH:match("[^;]+") or ".",
-            darwin = driver.IS_DARWIN == true,
-            windows = platform.windows,
-        })
+        .linker_backend(context, request)
     if not backend then return nil, backend_error end
     context.native_link_backend = backend
     return backend
@@ -1463,7 +1493,7 @@ end
 -- cprobe is told not to synthesize a second `-std` spelling.
 function driver.toolchain_descriptor(context)
     if driver.TOOLCHAIN_ERROR then return nil, driver.TOOLCHAIN_ERROR end
-    local cc, err = perf.compiler_command()
+    local cc, err = perf.tool_command(driver.CC, "CC")
     if not cc then return nil, err end
 
     local effective, compile_err = compiler_argv(true, context)
@@ -7530,6 +7560,16 @@ local function runtime_archive_has_expected_members(runtime_lib)
     local cmd
     cmd, err = command_argv(ar)
     if not cmd then return false, err end
+    if platform.windows or driver.OUTPUT_LOCKS then
+        local options
+        if not platform.windows then
+            ar = { "/bin/sh", "-c", cmd }
+            options = { inherit = driver.OUTPUT_LOCKS:descriptors() }
+        end
+        local result = require("titan-compiler.process").capture(ar, options)
+        local output = result.output or result.diagnostic or ""
+        return result.ok and driver.runtime_archive_members_are_exact(output), output
+    end
     local pipe, popen_err = io.popen(cmd .. " 2>&1", "r")
     if not pipe then return false, popen_err end
     local output = pipe:read("*a")
@@ -8681,7 +8721,10 @@ local function launch_prepared_compile(
     end
     local process, launch_err = jobs.launch(notification, job.argv, command,
         stdout_path, stderr_path, completion_index,
-        verbose and function() return show_parallel_command(command) end)
+        verbose and function() return show_parallel_command(command) end,
+        not platform.windows and driver.OUTPUT_LOCKS and {
+            inherit = driver.OUTPUT_LOCKS:descriptors(),
+        } or nil)
     if not process then
         protected_remove(stdout_path)
         protected_remove(stderr_path)
@@ -10106,12 +10149,6 @@ local function parsed_archive_input(input, target)
     return nil, "invalid static archive input descriptor"
 end
 
-local function tool_argv(configured, label)
-    local argv, err = parsed_words(configured, label)
-    if not argv then return nil, err end
-    if #argv == 0 then return nil, label .. " command is empty" end
-    return argv
-end
 
 local function copy_argv(argv)
     local copy = {}
@@ -10318,9 +10355,9 @@ function driver.build_static_archive(
         end
     end
 
-    local ar, ar_err = tool_argv(driver.AR, "AR")
+    local ar, ar_err = perf.tool_command(driver.AR, "AR")
     if not ar then return abort(ar_err) end
-    local ranlib, ranlib_err = tool_argv(driver.RANLIB, "RANLIB")
+    local ranlib, ranlib_err = perf.tool_command(driver.RANLIB, "RANLIB")
     if not ranlib then return abort(ranlib_err) end
     local capability, capability_err = archive_tool_capabilities(
         ar, ranlib, probe, staged_paths[1], verbose)
@@ -11389,8 +11426,10 @@ function perf.new_output_path_index(label, reservations)
             normalized = normalize_absolute_path(raw),
             physical = physical_absolute_filename(raw, attrs),
             existing_mode = file_mode(attr),
-            device = not platform.windows and followed and followed.dev or nil,
-            inode = not platform.windows and followed and followed.ino or nil,
+            -- The Windows I/O boundary omits weak LFS IDs but preserves the
+            -- precise native IDs, which also identify aliases of held locks.
+            device = followed and (windows_io and followed.device or followed.dev) or nil,
+            inode = followed and (windows_io and followed.inode or followed.ino) or nil,
         }
         cached.portable = cached.physical:lower()
         observations[raw] = cached
@@ -11685,6 +11724,17 @@ function driver.preflight_build_outputs(context, plan, options)
         if c_stem then c_outputs[filename] = c_stem end
     end
     for _, filename in ipairs(options.native_inputs or {}) do input(filename) end
+    -- Coordination and metadata paths are invocation inputs, never legal
+    -- destinations. The shared index rejects spelling, physical-file and
+    -- hierarchy aliases before a worker invalidates any existing object.
+    for _, entry in ipairs(options.locks and options.locks.entries or {}) do
+        input(entry.path)
+    end
+    if options.metadata_root then
+        for _, name in ipairs({ ".titan", ".titan-links", ".native" }) do
+            input(path.join(options.metadata_root, name))
+        end
+    end
     local max_parts, parts_error = driver.effective_c_parts(options.c_parts)
     if not max_parts then return nil, parts_error end
     for _, name in ipairs(plan.order) do
@@ -12608,9 +12658,8 @@ __declspec(dllexport) int _titan_coverage_dump(lua_State *L) {
         driver.windows_launcher_resource(absolute_filename(manifest)))
     if not ok then return discard(err) end
     local rc
-    rc, err = parsed_words(platform.getenv("RC") or "llvm-rc", "RC")
+    rc, err = perf.tool_command(platform.getenv("RC") or "llvm-rc", "RC")
     if not rc then return discard(err) end
-    if #rc == 0 then return discard("RC command is empty") end
     append_argv(rc, { "-FO", resource, resource_source })
     compiled, cterm, ccode = run_argv(rc, verbose)
     if not compiled then return discard(cterm, ccode) end
