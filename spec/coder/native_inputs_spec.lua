@@ -471,7 +471,7 @@ int wmain(int argc, wchar_t **argv) {
     if (argc < 2) return 126;
     const wchar_t *events = _wgetenv(L"TITAN_TEST_CC_EVENTS");
     if (!events) return 125;
-    FILE *stream = _wfopen(events, L"a");
+    FILE *stream = _wfopen(events, L"ab");
     if (!stream) return 125;
     int phase = 'L';
     for (int i = 2; i < argc; ++i) {

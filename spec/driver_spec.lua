@@ -841,7 +841,7 @@ describe("Windows launcher filenames", function()
         local in_bin = assert(driver.windows_program_paths("app.main", "bin/renamed"))
         assert.equal("bin/app.main.exe", original.executable)
         assert.equal("renamed.exe", renamed.executable)
-        assert.equal("bin/renamed.exe", in_bin.executable)
+        assert.equal(paths.normalize("bin/renamed.exe"), in_bin.executable)
         assert.equal(original.provider, renamed.provider)
         assert.equal(original.provider, in_bin.provider)
         assert.equal("lib/titan/0.6/app/main.dll", original.provider)
@@ -1021,8 +1021,8 @@ describe("Windows launcher filenames", function()
             util.set_file_contents = function() return true end
             publication.publish_program = function(images)
                 assert.is_true(fresh)
-                assert.equal("C:/build/lib/titan/0.6/app.dll", images.provider.destination)
-                assert.equal("C:/build/bin/app.exe", images.executable.destination)
+                assert.equal(paths.normalize("C:/build/lib/titan/0.6/app.dll"), images.provider.destination)
+                assert.equal(paths.normalize("C:/build/bin/app.exe"), images.executable.destination)
                 committed = true
                 return true
             end
@@ -1038,8 +1038,8 @@ describe("Windows launcher filenames", function()
             assert.matches("Windows program publication committed but staging cleanup failed", err, 1, true)
             assert.matches(retired[1] .. "/app.dll", err, 1, true)
             assert.matches("access denied", err, 1, true)
-            assert.same({ "C:/build/lib/titan/0.6/app.dll.stage.tmp.model",
-                "C:/build/bin/app.exe.stage.tmp.model" }, retired)
+            assert.same({ paths.normalize("C:/build/lib/titan/0.6/app.dll.stage.tmp.model"),
+                paths.normalize("C:/build/bin/app.exe.stage.tmp.model") }, retired)
         end, debug.traceback)
         platform.windows, platform.getenv, platform.native =
             previous.windows, previous.getenv, previous.native
@@ -4091,8 +4091,8 @@ describe("compiler module loader", function()
             entries = {},
             key_order = {},
         }
+        -- Static metadata reconstructs canonical logical .so paths on every host.
         for name, modtype in pairs(module_types) do
-            modtype.file = provider_path(modtype.file)
             provider.entries[name] = {
                 abi = driver.TITAN_ABI_VERSION,
                 type = modtype,
@@ -9399,7 +9399,7 @@ typedef double titan_driver_symlink_value;
         assert.truthy(ok)
         assert.equal(0, #errors)
         assert.equal("static", driver.imported.choice.kind)
-        assert.equal(provider_path("choice.so"), modtype.file)
+        assert.equal("choice.so", modtype.file)
         assert.equal(archive, driver.imported.choice.static_archive)
     end)
 
@@ -9429,7 +9429,7 @@ typedef double titan_driver_symlink_value;
         })("a.b.c")
         assert.truthy(ok)
         assert.equal(0, #errors)
-        assert.equal(provider_path("a/b/c.so"), modtype.file)
+        assert.equal("a/b/c.so", modtype.file)
         assert.equal(earlier_exact,
             driver.imported["a.b.c"].static_archive)
         assert.equal("a/b/c.a", driver.imported["a.b.c"].relative)
@@ -9462,7 +9462,7 @@ typedef double titan_driver_symlink_value;
         })("a.b")
         assert.truthy(ok)
         assert.equal(0, #errors)
-        assert.equal(provider_path("a/b.so"), modtype.file)
+        assert.equal("a/b.so", modtype.file)
         assert.equal(unshadowed_claim,
             driver.imported["a.b"].static_archive)
         assert.equal("a/b.a", driver.imported["a.b"].relative)
@@ -9497,7 +9497,7 @@ typedef double titan_driver_symlink_value;
         assert.equal("static", driver.imported["mixed.child"].kind)
         assert.equal(archive,
             driver.imported["mixed.child"].static_archive)
-        assert.equal(provider_path("mixed/child.so"), modtype.file)
+        assert.equal("mixed/child.so", modtype.file)
     end)
 
     it("treats an exact archive nonclaim as terminal", function()
@@ -9668,7 +9668,7 @@ typedef double titan_driver_symlink_value;
         assert.equal(0, #errors)
         assert.equal("static", driver.imported["bundle.left"].kind)
         assert.is_nil(driver.imported["bundle.right"])
-        assert.equal(provider_path("bundle/left.so"), modtype.file)
+        assert.equal("bundle/left.so", modtype.file)
         assert.is_nil(types.serialize(modtype):find(archive, 1, true))
 
         local finalized, final_errors =
@@ -10769,7 +10769,6 @@ describe("Darwin dSYM execution selection", function()
             cwd = assert(lfs.currentdir()),
         }
         root = temporary.name("-darwin-selection")
-        assert(os.remove(root))
         assert(lfs.mkdir(root))
         root = assert(compiler_io.new_sync():realpath(root))
         local loaded_driver = package.loaded["titan-compiler.driver"]
