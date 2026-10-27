@@ -95,7 +95,9 @@ when `--output` is omitted), `titanc` also owns:
 
 Before any worker starts, the coordinator reserves every generated path a
 planned module may write, including split parts up to the configured
-`--c-parts` maximum, and rejects aliases with inputs or other outputs
+`--c-parts` maximum, and rejects aliases with inputs or other outputs; each
+worker then checks the C headers its fresh module discovered against the
+same reservations before writing
 ([Pre-dispatch output preflight](build-coordinator.md#pre-dispatch-output-preflight)).
 
 Coverage applies its `.coverage` transform after ordinary output mapping

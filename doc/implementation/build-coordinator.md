@@ -45,8 +45,8 @@ When `titanc` runs (`titanc`, excluding `--print-root` and
    record is read: the `--output` directory, or without `--output` every
    `--tree` source root plus the working directory, and the `--exe`
    directory when one is given. The first domain also hosts `.native/`,
-   `.titan-links/`, and `.titan/`. `incremental.load_digest_cache` then loads
-   `<output>/.titan/digests`
+   `.titan-links/`, and `.titan/`. With `--output`,
+   `incremental.load_digest_cache` then loads `<output>/.titan/digests`
    ([Persistent digest cache](incremental-compilation.md#persistent-digest-cache)).
 4. **Coordinate the module closure.** `build.run` resolves the transitive
    import closure, runs the [pre-dispatch output
@@ -520,7 +520,12 @@ Worker lifetime is bounded even if the coordinator terminates abnormally:
   process. Teardown closes it after Lua cleanup, preserving the exit status
   while terminating every remaining descendant, including workers' nested
   jobs. A missing guard function or a failed job creation, configuration, or
-  assignment launches no child and is reported as a spawn error.
+  assignment launches no child and is reported as a spawn error. The job
+  bounds descendant lifetime only. After a forced coordinator termination on
+  Windows, Titan does not guarantee that every descendant has exited before
+  the operating system releases the coordinator's `.titan-build.lock`, so a
+  waiting invocation is not promised the POSIX lock-inheritance ordering
+  above.
 
 ## Slot ledger and jobserver rules
 
