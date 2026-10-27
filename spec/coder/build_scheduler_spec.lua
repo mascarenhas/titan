@@ -224,6 +224,7 @@ describe("process transport", function()
     it("retains one anchored luv loop across package.loaded resets and GC", function()
         local process = require "titan-compiler.process"
         local first = process.library()
+        assert.is_userdata(first._loop)
         package.loaded.luv = nil
         package.loaded["titan-compiler.process"] = nil
         collectgarbage("collect")
@@ -231,6 +232,41 @@ describe("process transport", function()
         local second = require("titan-compiler.process").library()
         assert.equal(first, second)
         assert.equal(first, package.loaded.luv)
+        assert.is_userdata(second._loop)
+
+        -- Also verify in a fresh Lua VM where platform.getenv (under
+        -- platform.windows = true) is the very first luv load before
+        -- package.loaded is reset and GC runs prior to process.run/uv.spawn.
+        local interpreter = assert(second.exepath())
+        local ok, term, code = require("titan-compiler.process").run({
+            interpreter, "-E", "-e",
+            string.format("package.path = %q; package.cpath = %q; local interpreter = %q; ",
+                package.path, package.cpath, interpreter) .. [[
+assert(package.loaded.luv == nil)
+local platform = require "titan-compiler.platform"
+platform.windows = true
+platform.getenv("PATH")
+local first_uv = assert(package.loaded.luv)
+assert(type(first_uv._loop) == "userdata")
+package.loaded.luv = nil
+package.loaded["titan-compiler.process"] = nil
+collectgarbage("collect")
+collectgarbage("collect")
+local process = require "titan-compiler.process"
+local second_uv = process.library()
+assert(second_uv == first_uv)
+assert(type(second_uv._loop) == "userdata")
+package.loaded.luv = nil
+package.loaded["titan-compiler.process"] = nil
+collectgarbage("collect")
+collectgarbage("collect")
+local ok, term, code = require("titan-compiler.process").run({ interpreter, "-E", "-e", "os.exit(0)" })
+assert(ok == true and term == "exit" and code == 0)
+]],
+        })
+        assert.is_true(ok)
+        assert.equal("exit", term)
+        assert.equal(0, code)
     end)
 
     it("runs worker-local argv commands through luv spawn", function()

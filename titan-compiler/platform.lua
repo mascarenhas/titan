@@ -7,9 +7,30 @@ local platform = {
 
 -- Windows' CRT getenv snapshot does not see updates made through libuv's
 -- Win32 process environment. Keep native loading lazy so importing this
--- lexical platform module still performs no native operations.
+-- lexical platform module still performs no native operations, and share the
+-- process module's registry anchor whenever the real luv module (carrying the
+-- loop userdata `_loop`) is loaded first here.
+local LUV_ANCHOR = "titan-compiler.process: luv"
+
+local function windows_luv()
+    local uv = package.loaded.luv
+    if not uv then
+        local registry = debug.getregistry()
+        uv = registry[LUV_ANCHOR]
+        if uv then
+            package.loaded.luv = uv
+        else
+            uv = require "luv"
+        end
+    end
+    if type(uv) == "table" and uv._loop ~= nil then
+        debug.getregistry()[LUV_ANCHOR] = uv
+    end
+    return uv
+end
+
 function platform.getenv(name)
-    if platform.windows then return (require("luv").os_getenv(name)) end
+    if platform.windows then return (windows_luv().os_getenv(name)) end
     return os.getenv(name)
 end
 
