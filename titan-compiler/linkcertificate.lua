@@ -451,6 +451,7 @@ end
 
 function certificate.output_tools(context, request)
     local ok, tools = pcall(function()
+        if request.uncacheable then return { uncertified = request.uncacheable } end
         local function uncertified(reason, status)
             need(status == "uncertified", reason)
             return { uncertified = reason }

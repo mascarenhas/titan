@@ -1167,11 +1167,13 @@ describe("linker dependency-feature memo", function()
         local function normalized(path)
             return assert(platform.path.normalize(assert(platform.absolute(path, assert(ctx.io:cwd()))))):lower()
         end
-        local stat = ctx.io.stat
-        function ctx.io:stat(path)
-            local value, err = stat(self, path)
-            if value then metadata[normalized(path)] = value end
-            return value, err
+        for _, method in ipairs({ "stat", "lstat" }) do
+            local observe = ctx.io[method]
+            ctx.io[method] = function(self, path)
+                local value, err = observe(self, path)
+                if value then metadata[normalized(path)] = value end
+                return value, err
+            end
         end
         function ctx.io:readable() error("Windows executable lookup must not test readability") end
         function ctx.io:executable() error("Windows executable lookup must not test POSIX execution access") end
@@ -1375,6 +1377,143 @@ describe("linker dependency-feature memo", function()
         windows_lookup("already.EXE", first .. "/already.EXE.exe", first .. ";" .. later)
     end)
 
+    for _, case in ipairs({
+        { name = "exact", requested = "compiler.stage", missing = "compiler.stage" },
+        { name = ".com", requested = "compiler-stage", missing = "compiler-stage.com" },
+        { name = "PATH", requested = "compiler.stage", missing = "compiler.stage", search = true },
+        { name = "LLVM exact", requested = "compiler.stage", missing = "compiler.stage", selection = "llvm" },
+    }) do
+        it("does not certify past an existing Windows " .. case.name .. " entry with no followed metadata", function()
+            if not platform.windows then pending("Windows non-following tool entry observation"); return end
+            local first, later = root .. "/first tools", root .. "/later tools"
+            assert(lfs.mkdir(first)); assert(lfs.mkdir(later))
+            write(first .. "/" .. case.requested .. ".exe", "suffix")
+            write(later .. "/" .. case.requested, "later")
+            local ctx = model:context()
+            ctx.executable_path = first .. ";" .. later
+            function ctx.io:executable_search_cwd() return false end
+            local lstat, missing = ctx.io.lstat, first .. "/" .. case.missing
+            function ctx.io:lstat(path)
+                if path:gsub("\\", "/"):lower() == missing:lower() then
+                    return { kind = "symlink", windows_attributes = 0x400 }
+                end
+                return lstat(self, path)
+            end
+            local command = case.search and case.requested or first .. "/" .. case.requested
+            local identity, reason, status = incremental.physical_executable(ctx, command, case.selection)
+            assert.is_nil(identity)
+            assert.is_string(reason)
+            assert.equal("uncertified", status)
+        end)
+    end
+
+    it("continues from absent Windows tool entries to a real suffix candidate", function()
+        if not platform.windows then pending("Windows non-following tool entry observation"); return end
+        local path = root .. "/absent.stage"
+        write(path .. ".exe", "tool")
+        windows_lookup(path, path .. ".exe")
+        windows_lookup(path, path .. ".exe", nil, "llvm")
+    end)
+
+    it("preserves non-following Windows tool observation errors and cancellation", function()
+        if not platform.windows then pending("Windows non-following tool entry observation"); return end
+        for _, failure in ipairs({ "tool entry observation failed", {} }) do
+            for _, thrown in ipairs({ false, true }) do
+                local ctx = model:context()
+                function ctx.io:lstat()
+                    if thrown then error(failure, 0) end
+                    return nil, failure
+                end
+                local ok, err = pcall(incremental.physical_executable, ctx, root .. "/absent.stage")
+                assert.is_false(ok)
+                if type(failure) == "string" then assert.matches(failure, err, 1, true)
+                else assert.equal(failure, err) end
+            end
+        end
+    end)
+
+    it("keeps a followed Windows tool link and its admitted spelling", function()
+        if not platform.windows then pending("Windows followed tool link observation"); return end
+        local target, alias = root .. "/tool-target.exe", root .. "/tool-alias.stage"
+        write(target, "tool")
+        for _, mode in ipairs({ "direct", "llvm" }) do
+            local ctx = model:context()
+            local stat, lstat, realpath = ctx.io.stat, ctx.io.lstat, ctx.io.realpath
+            local function is_alias(path) return path:gsub("\\", "/"):lower() == alias:lower() end
+            function ctx.io:stat(path) return stat(self, is_alias(path) and target or path) end
+            function ctx.io:lstat(path)
+                if is_alias(path) then return { kind = "symlink", windows_attributes = 0x400 } end
+                return lstat(self, path)
+            end
+            function ctx.io:realpath(path) return realpath(self, is_alias(path) and target or path) end
+            local identity, admitted = incremental.physical_executable(ctx, alias, mode == "llvm" and "llvm" or nil)
+            assert.equal(target, identity.path)
+            assert.equal(alias, admitted)
+        end
+    end)
+
+    for _, case in ipairs({
+        { name = "file link with directory target", attributes = 0x400, directory = true },
+        { name = "directory link with file target", attributes = 0x410 },
+        { name = "missing link attributes" },
+        { name = "noninteger link attributes", attributes = 1.5 },
+        { name = "string link attributes", attributes = "1024" },
+        { name = "negative link attributes", attributes = -1 },
+        { name = "invalid Windows attribute sentinel", attributes = 0xffffffff },
+        { name = "out-of-range link attributes", attributes = 0x100000000 },
+        { name = "directory link with directory target", attributes = 0x410, directory = true, valid = true },
+    }) do
+        it("retains entry evidence for a Windows " .. case.name, function()
+            if not platform.windows then pending("Windows tool entry attributes"); return end
+            local target, alias = root .. "/entry-target", root .. "/entry-alias.stage"
+            if case.directory then assert(lfs.mkdir(target)) else write(target, "target") end
+            write(alias .. ".exe", "fallback")
+            for _, mode in ipairs({ "direct", "llvm" }) do
+                local ctx = model:context()
+                local stat, lstat = ctx.io.stat, ctx.io.lstat
+                local function is_alias(path) return path:gsub("\\", "/"):lower() == alias:lower() end
+                function ctx.io:lstat(path)
+                    if is_alias(path) then return { kind = "symlink", windows_attributes = case.attributes } end
+                    return lstat(self, path)
+                end
+                function ctx.io:stat(path) return stat(self, is_alias(path) and target or path) end
+                local ok, identity, reason, status = pcall(incremental.physical_executable, ctx, alias,
+                    mode == "llvm" and "llvm" or nil)
+                if not case.valid then
+                    assert.is_true(ok, identity)
+                    assert.is_nil(identity)
+                    assert.is_string(reason)
+                    assert.equal("uncertified", status)
+                elseif mode == "llvm" then
+                    assert.is_false(ok)
+                    assert.is_string(identity)
+                else
+                    assert.is_true(ok, identity)
+                    assert.equal(alias .. ".exe", identity.path)
+                    assert.equal(alias .. ".exe", reason)
+                end
+            end
+        end)
+    end
+
+    it("preserves followed Windows tool observation errors and cancellation", function()
+        if not platform.windows then pending("Windows followed tool observation"); return end
+        for _, failure in ipairs({ "tool target observation failed", {} }) do
+            for _, thrown in ipairs({ false, true }) do
+                local ctx = model:context()
+                function ctx.io:lstat() return { kind = "symlink", windows_attributes = 0x400 } end
+                function ctx.io:stat()
+                    if thrown then error(failure, 0) end
+                    return nil, failure
+                end
+                local ok, err = pcall(incremental.physical_executable, ctx, root .. "/unobserved.stage")
+                assert.is_false(ok)
+                if type(failure) == "string" then assert.matches(failure, err, 1, true)
+                else assert.equal(failure, err) end
+            end
+        end
+    end)
+
     it("distinguishes direct Windows .com selection from an explicit LLVM stage", function()
         if not platform.windows then pending("Windows execution selection policies"); return end
         local path = root .. "/compiler-stage"
@@ -1498,13 +1637,15 @@ describe("linker dependency-feature memo", function()
     it("preserves physical-stage I/O errors and cancellation instead of treating them as policy uncertainty", function()
         for _, failure in ipairs({ "stage metadata failed", {} }) do
             local ctx = invocation()
-            local stat = ctx.io.stat
-            function ctx.io:stat(path)
-                if path:gsub("\\", "/"):lower() == (root .. "/ld"):lower() then
-                    if type(failure) == "string" then return nil, failure end
-                    error(failure, 0)
+            for _, method in ipairs({ "stat", "lstat" }) do
+                local observe = ctx.io[method]
+                ctx.io[method] = function(self, path)
+                    if path:gsub("\\", "/"):lower() == (root .. "/ld"):lower() then
+                        if type(failure) == "string" then return nil, failure end
+                        error(failure, 0)
+                    end
+                    return observe(self, path)
                 end
-                return stat(self, path)
             end
             if type(failure) == "string" then
                 local tools, err = certificate.output_tools(ctx, request)
@@ -1524,6 +1665,23 @@ describe("linker dependency-feature memo", function()
         local tools, err = certificate.output_tools(invocation(), options)
         assert.is_nil(tools)
         assert.matches("reserved native tool role", err, 1, true)
+    end)
+
+    it("uses a preclassified uncertain output request without further tool queries", function()
+        local ctx, options = invocation(), clone(request)
+        options.toolchain, options.uncacheable = nil, "compiler inventory is uncertified"
+        function ctx.io:run() error("uncertified output request must not query native stages") end
+        local tools = assert(certificate.output_tools(ctx, options))
+        assert.same({ uncertified = options.uncacheable }, tools)
+        local ticket = certificate.prepare(ctx, {
+            output_root = root, outputs = { root .. "/program" }, objects = { root .. "/main.o" },
+            toolchain = { output_tools = tools }, native_libraries = { backend = "gnu" },
+        })
+        assert.is_false(ticket.cacheable)
+        assert.same({}, ticket.dependency_argv)
+        assert.is_false(certificate.check(ctx, ticket))
+        assert(certificate.commit(ctx, ticket))
+        assert.is_nil(lfs.symlinkattributes(ticket.record))
     end)
 
     it("certifies the .exe selected from an absolute unsuffixed Windows compiler linker description", function()

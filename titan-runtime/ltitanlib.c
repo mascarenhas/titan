@@ -1154,8 +1154,8 @@ static const luaL_Reg output_lock_methods[] = {
 
 
 /* Private compiler helper: precise file metadata for incremental observation
-** reuse. Returns { kind, dev, ino, size, mode, mtime_ns, ctime_ns } or
-** nil, errmsg, errno_code without raising on missing paths. */
+** reuse. Returns { kind, dev, ino, size, mode, mtime_ns, ctime_ns }, plus
+** windows_attributes on Windows, or nil, errmsg, errno_code on missing paths. */
 static int stat_precise(lua_State *L) {
   size_t path_len = 0;
   const char *path = luaL_checklstring(L, 1, &path_len);
@@ -1163,6 +1163,9 @@ static int stat_precise(lua_State *L) {
   const char *kind;
   char dev_buf[32], ino_buf[64];
   lua_Integer size_val, mode_val, mtime_ns, ctime_ns;
+#if defined(_WIN32)
+  lua_Integer windows_attributes;
+#endif
   if (strlen(path) != path_len) {
     lua_pushnil(L);
     lua_pushliteral(L, "path contains a NUL byte");
@@ -1238,6 +1241,7 @@ static int stat_precise(lua_State *L) {
       lua_pushinteger(L, (lua_Integer)error);
       return 3;
     }
+    windows_attributes = (lua_Integer)basic_info.FileAttributes;
     if (file_type != FILE_TYPE_DISK) {
       kind = "other";
     } else if (!follow &&
@@ -1326,7 +1330,13 @@ static int stat_precise(lua_State *L) {
     ctime_ns = (lua_Integer)(ctime_sec * 1000000000LL + ctime_nsec);
   }
 #endif
+#if defined(_WIN32)
+  lua_createtable(L, 0, 8);
+  lua_pushinteger(L, windows_attributes);
+  lua_setfield(L, -2, "windows_attributes");
+#else
   lua_createtable(L, 0, 7);
+#endif
   lua_pushstring(L, kind);
   lua_setfield(L, -2, "kind");
   lua_pushstring(L, dev_buf);

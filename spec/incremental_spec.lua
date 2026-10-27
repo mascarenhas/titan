@@ -6,9 +6,19 @@ local sha256 = require "titan-compiler.sha256"
 local cpreamble = require "titan-compiler.cpreamble"
 local cpp = require "c-parser.cpp"
 local version = require "titan-compiler.version"
+local platform = require "titan-compiler.platform"
+
+local function fixture_path(path)
+    return platform.windows and "C:" .. path or path
+end
+
+local function native_tool(name)
+    return fixture_path("/tool/" .. name .. (platform.windows and ".exe" or ""))
+end
 
 local function context(files)
-    local dirs = { ["/"] = true }
+    local root = fixture_path("/")
+    local dirs = { [root] = true }
     for path in pairs(files) do
         local parent = path:match("^(.*)/[^/]+$")
         while parent and parent ~= "" do
@@ -17,7 +27,7 @@ local function context(files)
         end
     end
     local io = { reads = {}, commands = {}, writes = {}, aliases = {}, clock = 1 }
-    function io:cwd() return "/" end
+    function io:cwd() return root end
     function io:realpath(path)
         path = self.aliases[path] or path
         if files[path] ~= nil or dirs[path] then return path end
@@ -55,7 +65,11 @@ local function context(files)
         return entries
     end
     function io:mkdir(path) dirs[path] = true; return true end
-    function io:tmpname() files["/temporary.d"] = ""; return "/temporary.d" end
+    function io:tmpname()
+        local filename = root .. "temporary.d"
+        files[filename] = ""
+        return filename
+    end
     function io:unlink(path) files[path] = nil; return true end
     function io:rename(from, to)
         files[to], files[from] = files[from], nil
@@ -68,12 +82,22 @@ local function context(files)
         local dep
         for index, arg in ipairs(argv) do if arg == "-MF" then dep = argv[index + 1] end end
         if dep then
-            files[dep] = "titan-preamble: " .. argv[#argv] .. " /sdk/common.h\n"
+            local source, header = argv[#argv], root .. "sdk/common.h"
+            if platform.windows then
+                source, header = source:gsub(":", "\\:"), header:gsub(":", "\\:")
+            end
+            files[dep] = "titan-preamble: " .. source .. " " .. header .. "\n"
             return { ok = true, output = self.expanded or "#define NATIVE_OPTION 1\n" }
         end
         error("unexpected native command")
     end
     local ctx = { io = io, cache_adapter = { sha256_binary = sha256.binary } }
+    return ctx, files
+end
+
+local function native_context(files)
+    local ctx = context(files)
+    function ctx.io:executable_search_cwd() return false end
     return ctx, files
 end
 
@@ -100,8 +124,8 @@ end
 
 local function certificate()
     return { configuration = configuration(), layout = "flat",
-        sources = { { path = "/src/main.titan", sha256 = sha256.hex("source") } },
-        stem = "/out/main", codegen = { c_parts = 1, split_threshold = 0, test_flags = false },
+        sources = { { path = fixture_path("/src/main.titan"), sha256 = sha256.hex("source") } },
+        stem = fixture_path("/out/main"), codegen = { c_parts = 1, split_threshold = 0, test_flags = false },
         imports = {}, owners = {}, bindings = {}, providers = {},
         interface = { public = "public", source = "source-private" }, object_identity = "recipe" }
 end
@@ -127,8 +151,8 @@ end
 local function source_entry(name)
     local modtype = types.Module(name, {}, {})
     modtype._source = true
-    return { kind = "source", type = modtype, filename = "/src/main.titan",
-        source_files = { "/src/main.titan" }, source_manifest = "private surface",
+    return { kind = "source", type = modtype, filename = fixture_path("/src/main.titan"),
+        source_files = { fixture_path("/src/main.titan") }, source_manifest = "private surface",
         c_header_dependencies = {}, deps = {}, declared_registry = {} }
 end
 
@@ -154,47 +178,48 @@ describe("incremental certificate identities", function()
     end)
 
     it("hashes each canonical file once and retains the exact source bytes", function()
-        local ctx = context({ ["/src/main.titan"] = "source" })
-        ctx.io.aliases["/alias.titan"] = "/src/main.titan"
-        local source = { kind = "flat", main = "/src/main.titan", files = { "/src/main.titan" } }
+        local ctx = context({ [fixture_path("/src/main.titan")] = "source" })
+        ctx.io.aliases[fixture_path("/alias.titan")] = fixture_path("/src/main.titan")
+        local source = { kind = "flat", main = fixture_path("/src/main.titan"),
+            files = { fixture_path("/src/main.titan") } }
         local first = incremental.source_certificate(ctx, source)
         assert.same(first, incremental.source_certificate(ctx, source))
-        assert.equal(first.sources[1].sha256, incremental.file_digest(ctx, "/alias.titan"))
-        assert.equal("source", source.certified_contents["/src/main.titan"])
+        assert.equal(first.sources[1].sha256, incremental.file_digest(ctx, fixture_path("/alias.titan")))
+        assert.equal("source", source.certified_contents[fixture_path("/src/main.titan")])
         assert.is_nil(source.contents)
         local counters = incremental.counters(ctx)
         assert.equal(1, counters.file_hashes)
         assert.equal(1, counters.file_reads)
         assert.equal(6, counters.file_bytes)
-        assert.equal(1, counters.files["/src/main.titan"].hashes)
-        assert.has_error(function() incremental.file_digest(ctx, "/src/main.titan", "edited") end,
-            "/src/main.titan: file changed during build")
+        assert.equal(1, counters.files[fixture_path("/src/main.titan")].hashes)
+        assert.has_error(function() incremental.file_digest(ctx, fixture_path("/src/main.titan"), "edited") end,
+            fixture_path("/src/main.titan") .. ": file changed during build")
     end)
 
     it("retires a replaced owned output memo without resetting its counters", function()
-        local ctx, files = context({ ["/out/main.o"] = "old" })
-        local old = incremental.file_digest(ctx, "/out/main.o")
-        files["/out/main.o"] = "new"
-        incremental.invalidate_file(ctx, "/out/main.o")
-        assert.is_not.equal(old, incremental.file_digest(ctx, "/out/main.o"))
+        local ctx, files = context({ [fixture_path("/out/main.o")] = "old" })
+        local old = incremental.file_digest(ctx, fixture_path("/out/main.o"))
+        files[fixture_path("/out/main.o")] = "new"
+        incremental.invalidate_file(ctx, fixture_path("/out/main.o"))
+        assert.is_not.equal(old, incremental.file_digest(ctx, fixture_path("/out/main.o")))
         assert.equal(2, incremental.counters(ctx).file_hashes)
     end)
 
     it("detects changed-read observations and propagates non-string cancellation", function()
-        local ctx = context({ ["/src/main.titan"] = "source" })
+        local ctx = context({ [fixture_path("/src/main.titan")] = "source" })
         local read = ctx.io.read_file
         function ctx.io:read_file(path) self.clock = self.clock + 1; return read(self, path) end
-        assert.has_error(function() incremental.file_digest(ctx, "/src/main.titan") end,
-            "/src/main.titan: file changed while it was read")
+        assert.has_error(function() incremental.file_digest(ctx, fixture_path("/src/main.titan")) end,
+            fixture_path("/src/main.titan") .. ": file changed while it was read")
         local cancelled = {}
         function ctx.io:read_file() error(cancelled, 0) end
-        local ok, err = pcall(incremental.file_digest, ctx, "/src/main.titan")
+        local ok, err = pcall(incremental.file_digest, ctx, fixture_path("/src/main.titan"))
         assert.is_false(ok)
         assert.equal(cancelled, err)
     end)
 
     it("preserves failed-read diagnostics and cancellation values", function()
-        local path = "/src/main.titan"
+        local path = fixture_path("/src/main.titan")
         local message = path .. ": forced read failure"
         for _, reader in ipairs({ incremental.file_digest, incremental.file_contents }) do
             for _, failure in ipairs({ "nil", "false" }) do
@@ -247,11 +272,11 @@ describe("incremental certificate identities", function()
     end)
 
     it("memoizes binary interfaces by logical module rather than combined-provider bytes", function()
-        local ctx = context({ ["/sdk/titan.so"] = "provider bytes" })
+        local ctx = context({ [fixture_path("/sdk/titan.so")] = "provider bytes" })
         local function binary(name, layouts)
             local modtype = types.Module(name, {}, {})
-            modtype.file = "/sdk/titan.so"
-            return { kind = "binary", type = modtype, filename = "/sdk/titan.so", layouts = layouts }
+            modtype.file = fixture_path("/sdk/titan.so")
+            return { kind = "binary", type = modtype, filename = fixture_path("/sdk/titan.so"), layouts = layouts }
         end
         local a, b = binary("a", "a-layout"), binary("b", "b-layout")
         local before = incremental.interface_digest(ctx, a, "public")
@@ -265,7 +290,7 @@ describe("incremental certificate identities", function()
     end)
 
     it("records contextual owners from both usage and binding keys", function()
-        local ctx = context({ ["/src/main.titan"] = "source" })
+        local ctx = context({ [fixture_path("/src/main.titan")] = "source" })
         ctx.incremental_configuration = configuration()
         local entry = source_entry("main")
         entry.interface_digests = { public = "self-public", source = "self-private" }
@@ -274,7 +299,7 @@ describe("incremental certificate identities", function()
         local source = { kind = "flat", main = entry.filename, files = entry.source_files }
         local cert = incremental.make_certificate(ctx, entry, native, {
             source = incremental.source_certificate(ctx, source),
-            stem = "/out/main", codegen = certificate().codegen,
+            stem = fixture_path("/out/main"), codegen = certificate().codegen,
             plan = plan({ direct = { source = "direct-private" }, owner = "owner-public", used = "used-public" }),
             binary_usage = { main = true, direct = true, used = true },
             generated_parts = { { index = 0, code = "generated C" } }, private_header = "private C" })
@@ -321,8 +346,8 @@ describe("content-only native input facts", function()
             { archive(import), "archive" }, { coff(), "object" },
             { elf(1), "object" }, { elf(3), "shared" }, { macho, "shared" }, { pe, "shared" },
         }) do
-            local ctx = context({ ["/native"] = case[1] })
-            assert.equal(case[2], incremental.native_input_kind(ctx, "/native"))
+            local ctx = context({ [fixture_path("/native")] = case[1] })
+            assert.equal(case[2], incremental.native_input_kind(ctx, fixture_path("/native")))
         end
     end)
 
@@ -332,113 +357,113 @@ describe("content-only native input facts", function()
             1, 0x1000007, 3, 28, #archive(member), 2) .. archive(member)
         for _, bytes in ipairs({ "BC\192\222payload", "\222\192\023\011payload", member,
             archive(member), universal }) do
-            local ctx = context({ ["/native"] = bytes })
-            local kind, err, lto = incremental.native_input_kind(ctx, "/native")
+            local ctx = context({ [fixture_path("/native")] = bytes })
+            local kind, err, lto = incremental.native_input_kind(ctx, fixture_path("/native"))
             assert.truthy(kind, err)
             assert.is_true(lto)
         end
     end)
 
     it("persists positive and opaque facts without warm payload reads", function()
-        local files = { ["/native"] = archive(coff()), ["/thin"] = "!<thin>\n",
-            ["/script"] = "INPUT(other.a)\n", ["/truncated"] = "\127ELF" }
+        local files = { [fixture_path("/native")] = archive(coff()), [fixture_path("/thin")] = "!<thin>\n",
+            [fixture_path("/script")] = "INPUT(other.a)\n", [fixture_path("/truncated")] = "\127ELF" }
         local cold = precise_context(files)
-        assert(incremental.load_digest_cache(cold, "/out"))
-        assert.equal("archive", incremental.native_input_kind(cold, "/native"))
-        for _, path in ipairs({ "/thin", "/script", "/truncated" }) do
+        assert(incremental.load_digest_cache(cold, fixture_path("/out")))
+        assert.equal("archive", incremental.native_input_kind(cold, fixture_path("/native")))
+        for _, path in ipairs({ fixture_path("/thin"), fixture_path("/script"), fixture_path("/truncated") }) do
             local kind, err = incremental.native_input_kind(cold, path)
             assert.is_nil(kind); assert.is_string(err)
         end
         assert(incremental.save_digest_cache(cold))
         local warm = precise_context(files)
-        assert(incremental.load_digest_cache(warm, "/out"))
-        assert.equal("archive", incremental.native_input_kind(warm, "/native"))
-        for _, path in ipairs({ "/thin", "/script", "/truncated" }) do
+        assert(incremental.load_digest_cache(warm, fixture_path("/out")))
+        assert.equal("archive", incremental.native_input_kind(warm, fixture_path("/native")))
+        for _, path in ipairs({ fixture_path("/thin"), fixture_path("/script"), fixture_path("/truncated") }) do
             assert.is_nil(incremental.native_input_kind(warm, path))
             assert.is_nil(warm.io.reads[path])
         end
-        assert.is_nil(warm.io.reads["/native"])
+        assert.is_nil(warm.io.reads[fixture_path("/native")])
         assert.equal(0, incremental.counters(warm).file_hashes)
     end)
 
     it("keeps native kind and metadata-free part fingerprints independent", function()
-        local files = { ["/part.o"] = coff() }
+        local files = { [fixture_path("/part.o")] = coff() }
         local ctx = precise_context(files)
-        assert(incremental.load_digest_cache(ctx, "/out"))
-        assert.equal("object", incremental.native_input_kind(ctx, "/part.o"))
+        assert(incremental.load_digest_cache(ctx, fixture_path("/out")))
+        assert.equal("object", incremental.native_input_kind(ctx, fixture_path("/part.o")))
         local scans, fingerprint = 0, { format = "coff", word_size = 64, endian = "little", machine = 0x8664 }
         staticmetadata.scan_bytes = function()
             scans = scans + 1
             return { kind = "object", fingerprint = fingerprint }
         end
         objectmetadata.read = function() return { type = {} } end
-        local part, err = incremental.part_fingerprint(ctx, "/part.o")
+        local part, err = incremental.part_fingerprint(ctx, fixture_path("/part.o"))
         assert.is_nil(part)
         assert.matches("Titan module metadata", err, 1, true)
         objectmetadata.read = function() return nil end
-        assert.same(fingerprint, incremental.part_fingerprint(ctx, "/part.o"))
+        assert.same(fingerprint, incremental.part_fingerprint(ctx, fixture_path("/part.o")))
         assert.equal(2, scans)
         assert(incremental.save_digest_cache(ctx))
         local warm = precise_context(files)
-        assert(incremental.load_digest_cache(warm, "/out"))
-        assert.same(fingerprint, incremental.part_fingerprint(warm, "/part.o"))
-        assert.equal("object", incremental.native_input_kind(warm, "/part.o"))
+        assert(incremental.load_digest_cache(warm, fixture_path("/out")))
+        assert.same(fingerprint, incremental.part_fingerprint(warm, fixture_path("/part.o")))
+        assert.equal("object", incremental.native_input_kind(warm, fixture_path("/part.o")))
         assert.equal(2, scans)
-        assert.is_nil(warm.io.reads["/part.o"])
+        assert.is_nil(warm.io.reads[fixture_path("/part.o")])
     end)
 
     it("recomputes missing kind facts without changing the digest-cache schema", function()
-        local files = { ["/native"] = coff() }
+        local files = { [fixture_path("/native")] = coff() }
         local cold = precise_context(files)
-        assert(incremental.load_digest_cache(cold, "/out"))
-        assert.equal("object", incremental.native_input_kind(cold, "/native"))
-        local digest = incremental.file_digest(cold, "/native")
+        assert(incremental.load_digest_cache(cold, fixture_path("/out")))
+        assert.equal("object", incremental.native_input_kind(cold, fixture_path("/native")))
+        local digest = incremental.file_digest(cold, fixture_path("/native"))
         local fingerprint = { format = "coff", word_size = 64, endian = "little", machine = 0x8664 }
         cold.incremental.persistent.objects[digest] = { fingerprint = fingerprint }
         assert(incremental.save_digest_cache(cold))
         local warm = precise_context(files)
-        assert(incremental.load_digest_cache(warm, "/out"))
-        assert.equal("object", incremental.native_input_kind(warm, "/native"))
-        assert.equal(1, warm.io.reads["/native"])
+        assert(incremental.load_digest_cache(warm, fixture_path("/out")))
+        assert.equal("object", incremental.native_input_kind(warm, fixture_path("/native")))
+        assert.equal(1, warm.io.reads[fixture_path("/native")])
         assert.equal(0, incremental.counters(warm).file_hashes)
-        assert.same(fingerprint, incremental.part_fingerprint(warm, "/native"))
+        assert.same(fingerprint, incremental.part_fingerprint(warm, fixture_path("/native")))
     end)
 
     it("discards malformed native facts rather than treating them as format evidence", function()
         for _, invalid in ipairs({ { kind = "script", lto = false }, { kind = "object", lto = "yes" },
-            { kind = "object", lto = false, external = "/hidden.o" } }) do
-            local files = { ["/native"] = coff() }
+            { kind = "object", lto = false, external = fixture_path("/hidden.o") } }) do
+            local files = { [fixture_path("/native")] = coff() }
             local cold = precise_context(files)
-            assert(incremental.load_digest_cache(cold, "/out"))
-            assert.equal("object", incremental.native_input_kind(cold, "/native"))
-            local digest = incremental.file_digest(cold, "/native")
+            assert(incremental.load_digest_cache(cold, fixture_path("/out")))
+            assert.equal("object", incremental.native_input_kind(cold, fixture_path("/native")))
+            local digest = incremental.file_digest(cold, fixture_path("/native"))
             cold.incremental.persistent.objects[digest] = invalid
             assert(incremental.save_digest_cache(cold))
             local warm = precise_context(files)
-            assert(incremental.load_digest_cache(warm, "/out"))
-            assert.equal("object", incremental.native_input_kind(warm, "/native"))
-            assert.equal(1, warm.io.reads["/native"])
+            assert(incremental.load_digest_cache(warm, fixture_path("/out")))
+            assert.equal("object", incremental.native_input_kind(warm, fixture_path("/native")))
+            assert.equal(1, warm.io.reads[fixture_path("/native")])
             assert.equal(1, incremental.counters(warm).file_hashes)
         end
     end)
 
     it("reports native read errors and preserves cancellation identity", function()
         local ctx = context({})
-        local kind, err = incremental.native_input_kind(ctx, "/missing")
-        assert.is_nil(kind); assert.matches("/missing", err, 1, true)
-        ctx = context({ ["/native"] = coff() })
+        local kind, err = incremental.native_input_kind(ctx, fixture_path("/missing"))
+        assert.is_nil(kind); assert.matches(fixture_path("/missing"), err, 1, true)
+        ctx = context({ [fixture_path("/native")] = coff() })
         local cancelled = {}
         function ctx.io:read_file() error(cancelled, 0) end
-        local ok, raised = pcall(incremental.native_input_kind, ctx, "/native")
+        local ok, raised = pcall(incremental.native_input_kind, ctx, fixture_path("/native"))
         assert.is_false(ok); assert.equal(cancelled, raised)
     end)
 end)
 
 describe("persistent precise digest cache", function()
-    local path, cache_path = "/src/main.titan", "/out/.titan/digests"
+    local path, cache_path = fixture_path("/src/main.titan"), fixture_path("/out/.titan/digests")
     local function prime(files)
         local ctx = precise_context(files)
-        assert(incremental.load_digest_cache(ctx, "/out"))
+        assert(incremental.load_digest_cache(ctx, fixture_path("/out")))
         local digest = incremental.file_digest(ctx, path)
         assert(incremental.save_digest_cache(ctx))
         return digest
@@ -448,7 +473,7 @@ describe("persistent precise digest cache", function()
         local files = { [path] = "source" }
         local digest = prime(files)
         local ctx = precise_context(files)
-        assert(incremental.load_digest_cache(ctx, "/out"))
+        assert(incremental.load_digest_cache(ctx, fixture_path("/out")))
         local current, bytes, observed = incremental.file_digest(ctx, path)
         assert.equal(digest, current)
         assert.is_nil(bytes)
@@ -465,7 +490,7 @@ describe("persistent precise digest cache", function()
     it("materializes bytes once without rehashing a precise cache hit", function()
         local files = { [path] = "source" }; prime(files)
         local ctx = precise_context(files)
-        assert(incremental.load_digest_cache(ctx, "/out"))
+        assert(incremental.load_digest_cache(ctx, fixture_path("/out")))
         assert.equal("source", incremental.file_contents(ctx, path, 6))
         assert.equal("source", incremental.file_contents(ctx, path, 6))
         assert.equal(1, ctx.io.reads[path])
@@ -483,7 +508,7 @@ describe("persistent precise digest cache", function()
             local ctx = precise_context(files)
             ctx.io.observation_changes[path] = { [change[1]] = change[2] }
             if change[1] == "size" then files[path] = "sources" end
-            assert(incremental.load_digest_cache(ctx, "/out"))
+            assert(incremental.load_digest_cache(ctx, fixture_path("/out")))
             assert.equal(sha256.hex(files[path]), (incremental.file_digest(ctx, path)))
             assert.equal(1, ctx.io.reads[path])
             assert.equal(0, incremental.counters(ctx).observation_reuses)
@@ -500,11 +525,11 @@ describe("persistent precise digest cache", function()
             if name == path and value then value.ctime_ns = nil end
             return value, err
         end
-        assert(incremental.load_digest_cache(ctx, "/out"))
+        assert(incremental.load_digest_cache(ctx, fixture_path("/out")))
         assert.equal(sha256.hex("source"), (incremental.file_digest(ctx, path)))
         assert.equal(1, incremental.counters(ctx).file_hashes)
         local unreadable = precise_context(files)
-        assert(incremental.load_digest_cache(unreadable, "/out"))
+        assert(incremental.load_digest_cache(unreadable, fixture_path("/out")))
         function unreadable.io:readable() return false end
         function unreadable.io:read_file(name)
             if name == path then return nil, "permission denied" end
@@ -514,7 +539,7 @@ describe("persistent precise digest cache", function()
         assert.equal(0, incremental.counters(unreadable).observation_reuses)
         local changed_kind = precise_context(files)
         changed_kind.io.observation_changes[path] = { kind = "directory" }
-        assert(incremental.load_digest_cache(changed_kind, "/out"))
+        assert(incremental.load_digest_cache(changed_kind, fixture_path("/out")))
         assert.has_error(function() incremental.file_digest(changed_kind, path) end)
         assert.equal(0, incremental.counters(changed_kind).observation_reuses)
     end)
@@ -522,7 +547,7 @@ describe("persistent precise digest cache", function()
     it("falls back after an observation error and propagates cancellation", function()
         local files = { [path] = "source" }; prime(files)
         local ctx = precise_context(files)
-        assert(incremental.load_digest_cache(ctx, "/out"))
+        assert(incremental.load_digest_cache(ctx, fixture_path("/out")))
         local stat, failed = ctx.io.stat, false
         function ctx.io:stat(name)
             if name == path and not failed then failed = true; return nil, "temporary stat failure" end
@@ -532,7 +557,7 @@ describe("persistent precise digest cache", function()
         assert.equal(1, incremental.counters(ctx).file_hashes)
         local cancelled = {}
         local other = precise_context(files)
-        assert(incremental.load_digest_cache(other, "/out"))
+        assert(incremental.load_digest_cache(other, fixture_path("/out")))
         function other.io:stat() error(cancelled, 0) end
         local ok, err = pcall(incremental.file_digest, other, path)
         assert.is_false(ok); assert.equal(cancelled, err)
@@ -541,9 +566,9 @@ describe("persistent precise digest cache", function()
     it("does not reuse an observation through a different path spelling", function()
         local files = { [path] = "source" }; prime(files)
         local ctx = precise_context(files)
-        ctx.io.aliases["/alias.titan"] = path
-        assert(incremental.load_digest_cache(ctx, "/out"))
-        incremental.file_digest(ctx, "/alias.titan")
+        ctx.io.aliases[fixture_path("/alias.titan")] = path
+        assert(incremental.load_digest_cache(ctx, fixture_path("/out")))
+        incremental.file_digest(ctx, fixture_path("/alias.titan"))
         assert.equal(1, incremental.counters(ctx).file_hashes)
         assert.equal(0, incremental.counters(ctx).observation_reuses)
     end)
@@ -559,7 +584,7 @@ describe("persistent precise digest cache", function()
         }) do
             local files = { [path] = "source", [cache_path] = payload }
             local ctx = precise_context(files)
-            assert(incremental.load_digest_cache(ctx, "/out"))
+            assert(incremental.load_digest_cache(ctx, fixture_path("/out")))
             incremental.file_digest(ctx, path)
             assert.equal(1, incremental.counters(ctx).file_hashes)
             assert(incremental.save_digest_cache(ctx))
@@ -571,7 +596,7 @@ describe("persistent precise digest cache", function()
         local files = { [path] = "source" }; prime(files)
         local previous = files[cache_path]
         local ctx = precise_context(files)
-        assert(incremental.load_digest_cache(ctx, "/out"))
+        assert(incremental.load_digest_cache(ctx, fixture_path("/out")))
         ctx.io.clock, files[path] = 2, "edited"
         incremental.file_digest(ctx, path)
         function ctx.io:rename() return nil, "rename denied" end
@@ -597,7 +622,7 @@ describe("persistent precise digest cache", function()
     it("forces publication rehashes while sharing their verified cache evidence", function()
         local files = { [path] = "source" }; prime(files)
         local ctx = precise_context(files)
-        assert(incremental.load_digest_cache(ctx, "/out"))
+        assert(incremental.load_digest_cache(ctx, fixture_path("/out")))
         local fresh = incremental.fresh_context(ctx)
         assert.equal(sha256.hex("source"), (incremental.file_digest(fresh, path)))
         assert.equal(1, incremental.counters(fresh).file_hashes)
@@ -610,16 +635,16 @@ end)
 
 describe("incremental configuration", function()
     local function configured()
-        local ctx, files = context({ ["/compiler/titan-compiler/driver.lua"] = "driver",
-            ["/compiler/titan-compiler/checker/entry.lua"] = "checker",
-            ["/compiler/titan-compiler/coder/generate.lua"] = "coder",
-            ["/compiler/c-parser/cpp.lua"] = "parser", ["/real/titanc"] = "real frontend",
-            ["/bin/titanc"] = "wrapper", ["/sdk/common.h"] = "header", ["/tool/cc"] = "tool" })
-        ctx.incremental_options = { compiler_root = "/compiler", frontend = "/real/titanc",
-            preamble_path = "/out/.titan/preamble.c", compile_prefix = { "/tool/cc", "-O2" },
-            toolchain_descriptor = { compiler_argv = { "/tool/cc" },
-                preprocessor_identity = "macros", banner = "clang vendor target", stage_tools = {} },
-            build_profile = "validation", emit_line_directives = true, titan_root = "/sdk" }
+        local ctx, files = native_context({ [fixture_path("/compiler/titan-compiler/driver.lua")] = "driver",
+            [fixture_path("/compiler/titan-compiler/checker/entry.lua")] = "checker",
+            [fixture_path("/compiler/titan-compiler/coder/generate.lua")] = "coder",
+            [fixture_path("/compiler/c-parser/cpp.lua")] = "parser", [fixture_path("/real/titanc")] = "real frontend",
+            [fixture_path("/bin/titanc")] = "wrapper", [fixture_path("/sdk/common.h")] = "header", [native_tool("cc")] = "tool" })
+        ctx.incremental_options = { compiler_root = fixture_path("/compiler"), frontend = fixture_path("/real/titanc"),
+            preamble_path = fixture_path("/out/.titan/preamble.c"), compile_prefix = { native_tool("cc"), "-O2" },
+            toolchain_descriptor = { compiler_argv = { native_tool("cc") },
+                preprocessor_identity = "macros", banner = "clang version 22.1.8 (fixture)", stage_tools = {} },
+            build_profile = "validation", emit_line_directives = true, titan_root = fixture_path("/sdk") }
         return ctx, files
     end
 
@@ -628,12 +653,12 @@ describe("incremental configuration", function()
         local cert = incremental.configuration(ctx)
         assert.equal(cert, incremental.configuration(ctx))
         assert.equal(1, #ctx.io.commands)
-        assert.equal(1, ctx.io.reads["/real/titanc"])
-        assert.is_nil(ctx.io.reads["/bin/titanc"])
-        assert.is_nil(ctx.io.reads["/tool/cc"])
+        assert.equal(1, ctx.io.reads[fixture_path("/real/titanc")])
+        assert.is_nil(ctx.io.reads[fixture_path("/bin/titanc")])
+        assert.is_nil(ctx.io.reads[native_tool("cc")])
         for _, file in pairs(incremental.counters(ctx).files) do assert.equal(1, file.hashes) end
-        assert.equal(cpreamble.certification_includes, ctx.io.writes["/out/.titan/preamble.c"] and
-            select(2, incremental.file_digest(ctx, "/out/.titan/preamble.c")))
+        assert.equal(cpreamble.certification_includes, ctx.io.writes[fixture_path("/out/.titan/preamble.c")] and
+            select(2, incremental.file_digest(ctx, fixture_path("/out/.titan/preamble.c"))))
     end)
 
     it("verifies the worker compiler component without native probes", function()
@@ -804,24 +829,24 @@ describe("incremental configuration", function()
     end)
 
     it("probes one flagless toolchain description independently of effective options", function()
-        local ctx = context({ ["/tool/cc"] = "driver" })
+        local ctx = native_context({ [native_tool("cc")] = "driver" })
         local null = require("titan-compiler.platform").windows and "NUL" or "/dev/null"
         function ctx.io:run(argv)
             self.commands[#self.commands + 1] = argv
             if argv[2] == "-dM" then
-                assert.same({ "/tool/cc", "-dM", "-E", "-x", "c", null }, argv)
+                assert.same({ native_tool("cc"), "-dM", "-E", "-x", "c", null }, argv)
                 return { started = true, ok = true, output = "#define __COMPILER_VERSION__ 1\n" }
             end
-            assert.same({ "/tool/cc", "-E", "-v", "-x", "c", null, "-o", null }, argv)
-            return { started = true, ok = true, output = "clang fixed vendor banner" }
+            assert.same({ native_tool("cc"), "-E", "-v", "-x", "c", null, "-o", null }, argv)
+            return { started = true, ok = true, output = "clang version 22.1.8 fixed vendor banner" }
         end
-        local descriptor = { compiler_argv = { "/tool/cc" },
-            compile_flags = { "-O1", "-DEFFECTIVE_OPTION=1" }, include_dirs = { "/first-sdk" },
+        local descriptor = { compiler_argv = { native_tool("cc") },
+            compile_flags = { "-O1", "-DEFFECTIVE_OPTION=1" }, include_dirs = { fixture_path("/first-sdk") },
             profile_identity = "first-effective-profile", stage_tools = {} }
         local first = incremental.toolchain_identity(ctx, descriptor)
         descriptor.cppflags = { "-DCHANGED_CPP_OPTION=1" }
         descriptor.compile_flags = { "-O3", "-DEFFECTIVE_OPTION=2" }
-        descriptor.include_dirs = { "/second-sdk" }
+        descriptor.include_dirs = { fixture_path("/second-sdk") }
         descriptor.profile_identity = "second-effective-profile"
         assert.equal(first, incremental.toolchain_identity(ctx, descriptor))
         assert.equal(2, #ctx.io.commands)
@@ -844,14 +869,14 @@ describe("incremental configuration", function()
             "End of search list.",
         }, "\n") .. "\n"
         local function identity(cwd, change, clock)
-            local ctx = context({ ["/tool/cc"] = "driver", ["/tool/as"] = "assembler" })
+            local ctx = native_context({ [native_tool("cc")] = "driver", [native_tool("as")] = "assembler" })
             ctx.io.clock = clock or 1
-            local action = ' "/tool/compiler with spaces" "-cc1" "-triple" "arm64-apple-darwin" ' ..
+            local action = ' "' .. native_tool("compiler with spaces") .. '" "-cc1" "-triple" "arm64-apple-darwin" ' ..
                 '"-E" "-fdebug-compilation-dir=' .. cwd .. '" "-fcoverage-compilation-dir=' .. cwd .. '"'
             local banner = header .. "\n" .. action .. "\n" .. footer
-            local descriptor = { compiler_argv = { "/tool/cc" },
+            local descriptor = { compiler_argv = { native_tool("cc") },
                 preprocessor_identity = "#define __COMPILER_VERSION__ 1\n",
-                banner = banner, stage_tools = { "/tool/as" } }
+                banner = banner, stage_tools = { native_tool("as") } }
             if change then change(descriptor, ctx) end
             local digest, details = incremental.toolchain_identity(ctx, descriptor)
             assert.equal(0, #ctx.io.commands)
@@ -885,33 +910,33 @@ describe("incremental configuration", function()
             local stat = ctx.io.stat
             function ctx.io:stat(path)
                 local result, err = stat(self, path)
-                if result and path == "/tool/as" then result.changed_seconds = result.changed_seconds + 1 end
+                if result and path == native_tool("as") then result.changed_seconds = result.changed_seconds + 1 end
                 return result, err
             end
         end)))
     end)
 
     it("shares only identical null-input compiler descriptions with the preprocessor", function()
-        local ctx = context({ ["/tool/cc"] = "driver" })
+        local ctx = native_context({ [native_tool("cc")] = "driver" })
         local null = require("titan-compiler.platform").windows and "NUL" or "/dev/null"
         function ctx.io:run(argv, options)
             self.commands[#self.commands + 1] = { argv = argv, capture = options.stderr_to_stdout }
             local macro = argv[#argv - 3] == "-E"
             return { started = true, ok = true,
-                output = macro and ("#define VALUE " .. #self.commands .. "\n") or "clang vendor" }
+                output = macro and ("#define VALUE " .. #self.commands .. "\n") or "clang version 22.1.8 vendor" }
         end
-        local macros = { "/tool/cc", "-dM", "-E", "-x", "c", null }
-        local banner = { "/tool/cc", "-E", "-v", "-x", "c", null, "-o", null }
+        local macros = { native_tool("cc"), "-dM", "-E", "-x", "c", null }
+        local banner = { native_tool("cc"), "-E", "-v", "-x", "c", null, "-o", null }
         assert(cpp.cached_command(macros, false, ctx.io))
         assert(cpp.cached_command(banner, true, ctx.io))
-        incremental.toolchain_identity(ctx, { compiler_argv = { "/tool/cc" }, stage_tools = {} })
+        assert(incremental.toolchain_identity(ctx, { compiler_argv = { native_tool("cc") }, stage_tools = {} }))
         assert.equal(2, #ctx.io.commands)
-        local effective = { "/tool/cc", "-O2", "-dM", "-E", "-x", "c", null }
+        local effective = { native_tool("cc"), "-O2", "-dM", "-E", "-x", "c", null }
         assert(cpp.cached_command(effective, false, ctx.io))
         assert.equal(3, #ctx.io.commands)
         assert(cpp.cached_command(macros, true, ctx.io))
         assert.equal(4, #ctx.io.commands)
-        local forced = { "/tool/cc", "-include", "/forced.h", "-dM", "-E", "-x", "c", null }
+        local forced = { native_tool("cc"), "-include", fixture_path("/forced.h"), "-dM", "-E", "-x", "c", null }
         assert(cpp.cached_command(forced, false, ctx.io))
         assert(cpp.cached_command(forced, false, ctx.io))
         assert.equal(6, #ctx.io.commands)
@@ -922,12 +947,12 @@ describe("incremental configuration", function()
     end)
 
     for _, command in ipairs({
-        { "/tool/lua", "/wrappers/compiler script.lua" },
-        { "/tool/sh", "/wrappers/compiler script.sh" },
+        { native_tool("lua"), fixture_path("/wrappers/compiler script.lua") },
+        { native_tool("sh"), fixture_path("/wrappers/compiler script.sh") },
     }) do
         it("preserves the complete " .. command[1] .. " wrapper command in toolchain probes", function()
-            local ctx = context({ [command[1]] = "interpreter",
-                ["/tool/cc1"] = "compiler stage", ["/tool/as"] = "assembler" })
+            local ctx = native_context({ [command[1]] = "interpreter",
+                [native_tool("cc1")] = "compiler stage", [native_tool("as")] = "assembler" })
             local null = require("titan-compiler.platform").windows and "NUL" or "/dev/null"
             local function expected(tail)
                 local argv = { table.unpack(command) }
@@ -946,34 +971,57 @@ describe("incremental configuration", function()
                 local stage = argv[#argv]:match("^-print%-prog%-name=(.*)$")
                 assert.is_not_nil(stage)
                 assert.same(expected({ "-O2", "-print-prog-name=" .. stage }), argv)
-                return { ok = true, output = "/tool/" .. stage .. "\n" }
+                return { ok = true, output = native_tool(stage) .. "\n" }
             end
             local descriptor = { compiler_argv = command, compile_flags = { "-O2" } }
-            local digest, details = incremental.toolchain_identity(ctx, descriptor)
-            assert.equal(3, #details.tools)
-            assert.equal(command[1], details.tools[1].path)
-            assert.equal(digest, incremental.toolchain_identity(ctx, descriptor))
-            assert.equal(4, #ctx.io.commands)
+            local digest, details, status = incremental.toolchain_identity(ctx, descriptor)
+            if platform.windows then
+                assert.is_nil(digest)
+                assert.is_string(details)
+                assert.equal("uncertified", status)
+                assert.equal(4, #ctx.io.commands)
+                local repeated, reason, repeated_status = incremental.toolchain_identity(ctx, descriptor)
+                assert.is_nil(repeated)
+                assert.is_string(reason)
+                assert.equal("uncertified", repeated_status)
+                assert.equal(6, #ctx.io.commands)
+            else
+                assert.equal(3, #details.tools)
+                assert.equal(command[1], details.tools[1].path)
+                assert.equal(digest, incremental.toolchain_identity(ctx, descriptor))
+                assert.equal(4, #ctx.io.commands)
+            end
             assert.equal(0, incremental.counters(ctx).file_hashes)
             assert.is_nil(ctx.io.reads[command[2]])
         end)
     end
 
-    it("certifies explicit wrappers and named compiler stages once per configuration", function()
-        local ctx = context({ ["/tool/ccache"] = "wrapper", ["/tool/gcc"] = "driver",
-            ["/tool/cc1"] = "compiler stage", ["/tool/as"] = "assembler" })
+    it("keeps explicit wrapper-stage certification separate from an unknown producer policy", function()
+        local ctx = native_context({ [native_tool("ccache")] = "wrapper", [native_tool("gcc")] = "driver",
+            [native_tool("cc1")] = "compiler stage", [native_tool("as")] = "assembler" })
         function ctx.io:run(argv)
             self.commands[#self.commands + 1] = argv
             local name = argv[#argv]:match("^-print%-prog%-name=(.*)$")
             assert.is_not_nil(name)
-            return { ok = true, output = "/tool/" .. name .. "\n" }
+            return { ok = true, output = native_tool(name) .. "\n" }
         end
-        local descriptor = { compiler_argv = { "/tool/ccache", "/tool/gcc" },
+        local descriptor = { compiler_argv = { native_tool("ccache"), native_tool("gcc") },
             preprocessor_identity = "macros", banner = "gcc version vendor" }
-        local digest, details = incremental.toolchain_identity(ctx, descriptor)
-        assert.equal(4, #details.tools)
-        assert.equal(digest, incremental.toolchain_identity(ctx, descriptor))
-        assert.equal(2, #ctx.io.commands)
+        local digest, details, status = incremental.toolchain_identity(ctx, descriptor)
+        if platform.windows then
+            assert.is_nil(digest)
+            assert.is_string(details)
+            assert.equal("uncertified", status)
+            local repeated, reason, repeated_status = incremental.toolchain_identity(ctx, descriptor)
+            assert.is_nil(repeated)
+            assert.is_string(reason)
+            assert.equal("uncertified", repeated_status)
+            assert.equal(0, #ctx.io.commands)
+        else
+            assert.equal(4, #details.tools)
+            assert.equal(digest, incremental.toolchain_identity(ctx, descriptor))
+            assert.equal(2, #ctx.io.commands)
+        end
         assert.equal(0, incremental.counters(ctx).file_hashes)
     end)
 
@@ -992,13 +1040,13 @@ describe("incremental configuration", function()
         local before, after = incremental.configuration(first), incremental.configuration(second)
         assert.is_not.equal(before.toolchain, after.toolchain)
         assert.equal(before.compiler, after.compiler)
-        assert.is_nil(first.io.reads["/tool/cc"])
-        assert.is_nil(second.io.reads["/tool/cc"])
+        assert.is_nil(first.io.reads[native_tool("cc")])
+        assert.is_nil(second.io.reads[native_tool("cc")])
     end)
 
     it("reports inventory errors and preserves cancellation values", function()
         local ctx, files = configured()
-        files["/real/titanc"] = nil
+        files[fixture_path("/real/titanc")] = nil
         local ok, err = pcall(incremental.configuration, ctx)
         assert.is_false(ok)
         assert.matches("cannot certify compiler configuration:", err, 1, true)
@@ -1016,13 +1064,13 @@ describe("incremental dependency verdicts", function()
         cert.imports = { { name = "producer", source_required = source_required == true,
             view = source_required and "source" or "public", interface = "same" } }
         cert.bindings = { producer = "handle" }
-        cert.providers = { producer = "/sdk/producer.so" }
+        cert.providers = { producer = fixture_path("/sdk/producer.so") }
         return record(cert)
     end
 
     it("accepts an unchanged semantic interface despite a rebuilt producer", function()
         assert.same({ status = "hit" }, incremental.verdict(imported(),
-            plan({ producer = "same" }, nil, { producer = "/sdk/producer.so" })))
+            plan({ producer = "same" }, nil, { producer = fixture_path("/sdk/producer.so") })))
     end)
 
     it("distinguishes unavailable changed public and changed source interfaces", function()
@@ -1039,7 +1087,7 @@ describe("incremental dependency verdicts", function()
         saved.object_metadata.certificate.owners = { { name = "contextual", interface = "old" } }
         assert.same({ status = "pending", names = { "contextual", "producer" } },
             incremental.verdict(saved, plan({ producer = "pending", contextual = "pending" }, nil,
-                { producer = "/sdk/producer.so" })))
+                { producer = fixture_path("/sdk/producer.so") })))
     end)
 
     it("checks contextual owners not present in direct imports", function()
@@ -1056,11 +1104,11 @@ describe("incremental dependency verdicts", function()
         assert.equal("import-binding", incremental.verdict(imported(),
             plan(current, { producer = true })).reason)
         assert.equal("import-binding", incremental.verdict(imported(),
-            plan(current, nil, { producer = "/sdk/replacement.so" })).reason)
+            plan(current, nil, { producer = fixture_path("/sdk/replacement.so") })).reason)
         local saved = imported()
         saved.object_metadata.certificate.bindings.producer = "global"
         assert.equal("import-binding", incremental.verdict(saved,
-            plan(current, nil, { producer = "/sdk/producer.so" })).reason)
+            plan(current, nil, { producer = fixture_path("/sdk/producer.so") })).reason)
     end)
 
     it("certifies self as direct without an owner-interface dependency", function()
@@ -1079,7 +1127,7 @@ describe("incremental dependency verdicts", function()
         imports[2] = { name = "producer", source_required = true, view = "source", interface = "private" }
         assert.equal("hit", incremental.verdict(saved,
             plan({ producer = { public = "same", source = "private" } }, nil,
-                { producer = "/sdk/producer.so" })).status)
+                { producer = fixture_path("/sdk/producer.so") })).status)
     end)
 
     it("rejects missing certificates before consulting a plan", function()
@@ -1096,15 +1144,16 @@ describe("incremental local certification", function()
         objectmetadata.read, staticmetadata.scan_bytes, cpp.revalidate_header_input = read, scan, revalidate
     end)
     local function fixture()
-        local ctx, files = context({ ["/out/main.o"] = "object", ["/out/main.c"] = "generated",
-            ["/src/main.titan"] = "source" })
+        local ctx, files = context({ [fixture_path("/out/main.o")] = "object", [fixture_path("/out/main.c")] = "generated",
+            [fixture_path("/src/main.titan")] = "source" })
         ctx.incremental_configuration = configuration()
-        ctx.incremental_options = { stem = function() return "/out/main" end,
+        ctx.incremental_options = { stem = function() return fixture_path("/out/main") end,
             codegen_options = function() return certificate().codegen end }
         local saved = record()
         objectmetadata.read = function() return saved end
         staticmetadata.scan_bytes = function() return { kind = "object", fingerprint = {} } end
-        local source = { kind = "flat", main = "/src/main.titan", files = { "/src/main.titan" } }
+        local source = { kind = "flat", main = fixture_path("/src/main.titan"),
+            files = { fixture_path("/src/main.titan") } }
         return ctx, saved, source, files
     end
 
@@ -1112,8 +1161,8 @@ describe("incremental local certification", function()
         local ctx, _, source = fixture()
         local result = incremental.certify_local(ctx, "main", source)
         assert.equal("hit", result.status)
-        assert.equal("/out/main.o", result.object)
-        assert.same({ "/out/main.o" }, result.objects)
+        assert.equal(fixture_path("/out/main.o"), result.object)
+        assert.same({ fixture_path("/out/main.o") }, result.objects)
         assert.same({}, result.imports)
         assert.same({}, ctx.io.commands)
     end)
@@ -1151,30 +1200,30 @@ describe("incremental local certification", function()
 
     it("detects same-time source content edits and exact folder addition and removal", function()
         local ctx, _, source, files = fixture()
-        files["/src/main.titan"] = "edited"
+        files[fixture_path("/src/main.titan")] = "edited"
         local changed = incremental.certify_local(ctx, "main", source)
-        assert.equal("source-content", changed.reason); assert.equal("/src/main.titan", changed.detail)
+        assert.equal("source-content", changed.reason); assert.equal(fixture_path("/src/main.titan"), changed.detail)
         assert.is_nil(changed.imports)
         local added, _, folder, more = fixture()
-        more["/src/extra.titan"] = "extra"
-        folder.kind, folder.files[2] = "folder", "/src/extra.titan"
+        more[fixture_path("/src/extra.titan")] = "extra"
+        folder.kind, folder.files[2] = "folder", fixture_path("/src/extra.titan")
         local addition = incremental.certify_local(added, "main", folder)
-        assert.equal("source-set", addition.reason); assert.equal("added /src/extra.titan", addition.detail)
+        assert.equal("source-set", addition.reason); assert.equal("added " .. fixture_path("/src/extra.titan"), addition.detail)
         local removed, saved, single = fixture()
-        saved.object_metadata.certificate.sources[2] = { path = "/src/old.titan", sha256 = "old" }
+        saved.object_metadata.certificate.sources[2] = { path = fixture_path("/src/old.titan"), sha256 = "old" }
         local removal = incremental.certify_local(removed, "main", single)
-        assert.equal("source-set", removal.reason); assert.equal("removed /src/old.titan", removal.detail)
+        assert.equal("source-set", removal.reason); assert.equal("removed " .. fixture_path("/src/old.titan"), removal.detail)
     end)
 
     it("classifies envelope absence and output movement", function()
         local ctx, _, source, files = fixture()
-        files["/out/main.o"] = nil
+        files[fixture_path("/out/main.o")] = nil
         assert.equal("no-object", incremental.certify_local(ctx, "main", source).reason)
         local old, _, old_source = fixture()
         objectmetadata.read = function() return nil, "old schema", "record-schema" end
         assert.equal("record-schema", incremental.certify_local(old, "main", old_source).reason)
         local moved, saved, moved_source = fixture()
-        saved.object_metadata.certificate.stem = "/old/main"
+        saved.object_metadata.certificate.stem = fixture_path("/old/main")
         assert.equal("output-moved", incremental.certify_local(moved, "main", moved_source).reason)
     end)
 
@@ -1189,20 +1238,20 @@ describe("incremental local certification", function()
         assert.equal("record-schema", result.reason)
         assert.matches("canonicalization=obsolete", result.detail, 1, true)
         assert.is_nil(result.imports)
-        assert.is_nil(ctx.io.reads["/src/main.titan"])
+        assert.is_nil(ctx.io.reads[fixture_path("/src/main.titan")])
     end)
 
     it("checks descriptor search inputs before restoring any graph", function()
         local ctx, saved, source = fixture()
         saved.ffi_header_descriptor = { search_inputs = {
-            { kind = "search", path = "/sdk/header.h", identity = "old" } } }
+            { kind = "search", path = fixture_path("/sdk/header.h"), identity = "old" } } }
         local calls = 0
         cpp.revalidate_header_input = function(input)
             calls = calls + 1
             return input, nil, true, "candidate"
         end
         local result = incremental.certify_local(ctx, "main", source)
-        assert.equal("c-input", result.reason); assert.equal("/sdk/header.h: candidate", result.detail)
+        assert.equal("c-input", result.reason); assert.equal(fixture_path("/sdk/header.h") .. ": candidate", result.detail)
         assert.equal(1, calls)
         assert.same({}, result.imports)
         assert.is_nil(saved.compiled)
@@ -1213,16 +1262,16 @@ describe("incremental local certification", function()
         local native = saved.object_metadata
         native.parts[2] = { index = 1, c_suffix = ".part1.c", object_suffix = ".part1.o" }
         native.private_header = ".priv.h"
-        files["/out/main.part1.c"], files["/out/main.priv.h"] = "generated part", "private header"
+        files[fixture_path("/out/main.part1.c")], files[fixture_path("/out/main.priv.h")] = "generated part", "private header"
         local result = incremental.certify_local(ctx, "main", source)
         assert.equal("parts", result.reason)
-        assert.matches("/out/main.part1.o", result.detail, 1, true)
+        assert.matches(fixture_path("/out/main.part1.o"), result.detail, 1, true)
         local covered, cover_record, cover_source, cover_files = fixture()
-        cover_record.object_metadata.coverage = { enabled = true, files = { "/out/main.c" } }
+        cover_record.object_metadata.coverage = { enabled = true, files = { fixture_path("/out/main.c") } }
         local missing = incremental.certify_local(covered, "main", cover_source)
         assert.equal("coverage-artifacts", missing.reason)
-        assert.equal("/out/main.gcno", missing.detail)
-        cover_files["/out/main.gcno"] = "coverage notes"
+        assert.equal(fixture_path("/out/main.gcno"), missing.detail)
+        cover_files[fixture_path("/out/main.gcno")] = "coverage notes"
         assert.equal("hit", incremental.certify_local(covered, "main", cover_source).status)
     end)
 
@@ -1231,26 +1280,26 @@ describe("incremental local certification", function()
         local native = saved.object_metadata
         native.parts[2] = { index = 1, c_suffix = ".part1.c", object_suffix = ".part1.o" }
         native.private_header = ".priv.h"
-        files["/out/main.part1.o"] = "part object"
+        files[fixture_path("/out/main.part1.o")] = "part object"
         local missing_c = incremental.certify_local(ctx, "main", source)
         assert.equal("parts", missing_c.reason)
-        assert.matches("/out/main.part1.c", missing_c.detail, 1, true)
-        files["/out/main.part1.c"] = "generated part"
+        assert.matches(fixture_path("/out/main.part1.c"), missing_c.detail, 1, true)
+        files[fixture_path("/out/main.part1.c")] = "generated part"
         local missing_h = incremental.certify_local(ctx, "main", source)
         assert.equal("parts", missing_h.reason)
-        assert.matches("/out/main.priv.h", missing_h.detail, 1, true)
+        assert.matches(fixture_path("/out/main.priv.h"), missing_h.detail, 1, true)
     end)
 
     it("uses precise source digests and cached content-only sidecar scan facts", function()
         local ctx, saved, source, files = fixture()
-        local part = "/out/main.part1.o"
-        files[part], files["/out/main.part1.c"], files["/out/main.priv.h"] =
+        local part = fixture_path("/out/main.part1.o")
+        files[part], files[fixture_path("/out/main.part1.c")], files[fixture_path("/out/main.priv.h")] =
             "sidecar object", "generated part", "private header"
         saved.object_metadata.parts[2] = { index = 1, c_suffix = ".part1.c", object_suffix = ".part1.o" }
         saved.object_metadata.private_header = ".priv.h"
         ctx.io = precise_context(files).io
         objectmetadata.read = function(_, path)
-            if path == "/out/main.o" then return saved end
+            if path == fixture_path("/out/main.o") then return saved end
         end
         local scans = {}
         staticmetadata.scan_bytes = function(_, path)
@@ -1258,7 +1307,7 @@ describe("incremental local certification", function()
             return { kind = "object", fingerprint = {
                 format = "coff", word_size = 64, endian = "little", machine = 0x8664 } }
         end
-        assert(incremental.load_digest_cache(ctx, "/out"))
+        assert(incremental.load_digest_cache(ctx, fixture_path("/out")))
         assert.equal("hit", incremental.certify_local(ctx, "main", source).status)
         assert(incremental.save_digest_cache(ctx))
         assert.equal(1, scans[part])
@@ -1266,10 +1315,10 @@ describe("incremental local certification", function()
         warm.incremental_configuration, warm.incremental_options =
             ctx.incremental_configuration, ctx.incremental_options
         local fresh_source = { kind = source.kind, main = source.main, files = source.files }
-        assert(incremental.load_digest_cache(warm, "/out"))
+        assert(incremental.load_digest_cache(warm, fixture_path("/out")))
         assert.equal("hit", incremental.certify_local(warm, "main", fresh_source).status)
         assert.is_nil(warm.io.reads[part])
-        assert.is_nil(warm.io.reads["/src/main.titan"])
+        assert.is_nil(warm.io.reads[fixture_path("/src/main.titan")])
         assert.equal(1, scans[part])
         assert.equal(0, incremental.counters(warm).file_hashes)
         assert.equal(3, incremental.counters(warm).observation_reuses)
@@ -1277,8 +1326,8 @@ describe("incremental local certification", function()
 
     it("shares source object and C-input hash memos across certifications", function()
         local ctx, saved, source, files = fixture()
-        files["/sdk/header.h"] = "header"
-        saved.c_header_dependencies = { { kind = "file", path = "/sdk/header.h", identity = "header" } }
+        files[fixture_path("/sdk/header.h")] = "header"
+        saved.c_header_dependencies = { { kind = "file", path = fixture_path("/sdk/header.h"), identity = "header" } }
         saved.ffi_header_descriptor = { search_inputs = saved.c_header_dependencies }
         local passes = 0
         cpp.revalidate_header_input = function(input, opts)
@@ -1300,7 +1349,7 @@ describe("incremental local certification", function()
         assert.equal("hit", incremental.certify_local(ctx, "main", source).status)
         local hashes = incremental.counters(ctx).file_hashes
         assert.equal("hit", incremental.revalidate_record(ctx, "main", source, saved).status)
-        files["/src/main.titan"] = "edited"
+        files[fixture_path("/src/main.titan")] = "edited"
         local result = incremental.revalidate_record(ctx, "main", source, saved)
         assert.equal("source-content", result.reason)
         local counters = incremental.counters(ctx)
