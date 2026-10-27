@@ -220,8 +220,9 @@ static-archive validation probes, and native linking. It certifies:
   `--no-uv-bootstrap`, effective link argv (`-L`, `-l`, `--ldflag`,
   `TITAN_EXTRA_LDFLAGS`), the compiler identity and the physical identities of
   the linker the compiler actually selects, the archiver, ranlib,
-  resource-compiler, or `dsymutil` tools that target uses, and, with LTO, the
-  selected linker plugins and GCC LTO stages, discovered test cases, compiler
+  resource-compiler, or `dsymutil` tools that target uses, every linker stage
+  and plugin the compiler names for the link, and, with LTO, GCC's LTO
+  compiler stages, discovered test cases, compiler
   template digest, coverage runtime
   inventory, Windows launcher manifest and relative provider path, Darwin
   `.dSYM` policy, native bindings, and target/deployment environment;

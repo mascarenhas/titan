@@ -941,13 +941,15 @@ Unix libraries, `rc` for Windows programs, `dsymutil` on Darwin), selected by
   Windows dependency-report policies skip only the capability probe, not
   linker resolution;
 * each requested auxiliary role, with its exact argv and physical identity;
-  and
-* when LTO is enabled by the final flags, by compile-only `-flto`, or by an
-  input whose recorded format is LLVM bitcode (or unknown), the loadable
-  `-plugin`/`-lto_library` files from the same job description and, for GCC,
-  the physical `collect2`, `lto-wrapper`, and `lto1` stages. An explicit
-  final `-fno-lto` skips those LTO-stage probes. A missing selected tool is
-  an error.
+* every linker-stage program and plugin the job description names, whether
+  or not LTO is enabled: GCC's `collect2` and any `-plugin`/`-lto_library`
+  file it advertises (GCC passes `liblto_plugin.so` even to ordinary non-LTO
+  links, and selects `collect2` even under `-fno-lto`); and
+* only when LTO is enabled by the final flags, by compile-only `-flto`, or by
+  an input whose recorded format is LLVM bitcode (or unknown), GCC's
+  `lto-wrapper` and `lto1` stages, which an LTO-free link never runs.
+
+A missing selected tool is an error.
 
 Native input kind and LTO facts are cached by content digest in the
 [persistent digest cache](incremental-compilation.md#persistent-digest-cache)
