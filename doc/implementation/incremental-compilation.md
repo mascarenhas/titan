@@ -395,14 +395,38 @@ reports the exact component:
    `true` (effective-user `X_OK`, so owner-only or group-only execute bits
    are judged as the kernel would, and an execute-only file need not be
    readable); a missing capability or an indeterminate answer fails the
-   selection rather than guessing from mode bits. On Windows each explicit
-   path, and each `PATH` directory in order, tries the exact spelling and then
-   the same spelling with `.exe` appended, even when the name already contains
-   dots (compilers name stages such as `ld.lld` without the suffix); a name
-   that already ends in `.exe`, in any case, gets no second suffix. The first
-   regular file is admitted whether or not it is readable, and the second
-   return names the candidate actually selected. Admission never reads tool
-   contents, and the physical identity it records is unchanged.
+   selection rather than guessing from mode bits.
+
+   On Windows, admission follows the launcher that will actually run the tool,
+   and readability is never consulted:
+
+   * **Direct launches** (the compiler driver and tools `titanc` starts
+     itself) follow bundled libuv's spawn search. In each searched directory
+     the exact name is tried only when its basename has a nonempty extension,
+     then `<name>.com`, then `<name>.exe`; the suffixes are appended even to a
+     name that already has one. An explicit path searches only its own
+     directory. A bare name checks the current directory and then each `PATH`
+     directory in order. The optional I/O capability
+     `executable_search_cwd()` (native `NeedCurrentDirectoryForExePathW`)
+     reports whether the launcher searches the current directory: `true`
+     makes a current-directory hit win, `false` skips it, and when the answer
+     is unavailable a current-directory hit that differs from the `PATH` hit
+     cannot be certified. Directories are skipped; any other non-regular
+     candidate cannot be certified.
+   * **Compiler-reported LLVM stages** (selection `"llvm"`, an explicit path
+     that Clang names in its job description) follow LLVM's own launcher: the
+     exact path when it exists, otherwise the path with `.exe` appended. An
+     existing non-file at either name is an error, and a bare LLVM stage name
+     cannot be certified.
+   * **Any other selection policy**, such as an unknown producer or wrapper
+     delegate, cannot be certified.
+
+   A tool that cannot be certified makes `physical_executable` return
+   `nil, reason, "uncertified"` instead of an identity; the build still runs
+   with that tool but is not cacheable, so it neither hits nor records a
+   certificate. A successful selection always returns the physical identity
+   and, second, the admitted spelling of the candidate actually selected.
+   Admission never reads tool contents.
 
    Tool executables are certified by self-description plus physical metadata
    rather than by hashing the compiler binary bytes. The change timestamp
