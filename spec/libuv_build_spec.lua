@@ -1128,6 +1128,190 @@ esac
         end
     end)
 
+    it("runs every built transfer parent and subtree under separate sanitizer deadlines", function()
+        local workflow = read_file(".github/workflows/ci.yml")
+        local start = assert(workflow:find(
+            "- name: Run dense Array and value transfer sanitizer gate", 1, true))
+        local finish = assert(workflow:find("\n      - name:", start + 1, true))
+        local step = workflow:sub(start, finish - 1)
+        assert_ordered(step,
+            "ci_sanitizer_capture.sh dense-array",
+            "spec/dense_array_runtime_spec.lua",
+            "make --no-print-directory -s -f spec/support/stdlib_test_modules.mk",
+            'print-stdlib-test-roots > "$transfer_owners"',
+            "for owner in io.lines() do",
+            "assert(expected_count == 30,",
+            "objectmetadata.read(",
+            "entry.object_metadata.test_functions",
+            'full_name:find("transfer", 1, true)',
+            'walk("out/tests")',
+            'assert(owners[owner], "missing built native owner: "',
+            'assert(#filters > 0, "no native transfer parent functions")',
+            "table.sort(filters, util.bytewise_less)",
+            "for _, filter in ipairs(filters) do print(filter) end",
+            'while IFS= read -r transfer_filter; do',
+            'ci_sanitizer_capture.sh "value-transfer-$transfer_index"',
+            'make titan-stdlib-test-run TITAN_FILTER="$transfer_filter"',
+            'done < "$transfer_cases"')
+        assert.falsy(step:find("TITAN_FILTER=transfer", 1, true))
+        assert.falsy(step:find("TITAN_TEST_TIMEOUT", 1, true))
+        assert.falsy(step:find("titan-stdlib-test-build", 1, true))
+        assert.truthy(read_file("Makefile"):find("TITAN_TEST_TIMEOUT ?= 600", 1, true))
+
+        local inventory_source = assert(step:match(
+            [=["%$PREFIX/bin/lua" %-E %-e '(.-)' < "%$transfer_owners" > "%$transfer_cases"]=]))
+        local util = require "titan-compiler.util"
+        local directories = {
+            ["out/tests"] = { ".", "..", "nested", ".native" },
+            ["out/tests/nested"] = { ".", ".." },
+            ["out/tests/.native"] = {},
+        }
+        local files, records, owners, paths = {}, {}, {}, {}
+        local function object(directory, leaf, owner, names)
+            local filename = directory .. "/" .. leaf
+            table.insert(directories[directory], 1, leaf)
+            files[filename] = true
+            if owner then
+                records[filename] = {
+                    type = { name = owner },
+                    object_metadata = { test_functions = names },
+                }
+            end
+            return filename
+        end
+        for index = 1, 30 do
+            local owner = string.format("owner_%02d.tests", index)
+            local names = { "test_plain" }
+            if index == 1 then
+                names = { "test_transfer_extra", "test_transfer", "test_plain",
+                    "test_Transfer_only", "test_non_transferable", "test_transferred_payload" }
+            elseif index == 2 then names = { "test_a_transfer", "test_Z_transfer" } end
+            owners[index] = owner
+            paths[index] = object(index % 2 == 0 and "out/tests/nested" or "out/tests",
+                string.format("owner_%02d.o", index), owner, names)
+        end
+        object("out/tests", "native_helper.o")
+        object("out/tests", "support.o", "support.shared", {})
+        object("out/tests/.native", "ignored.o", "hidden.unexpected", { "test_transfer" })
+        object("out/tests/nested", "owner_02.part1.o", "split.unexpected", { "test_transfer" })
+
+        local function inventory(manifest, entries, read_failure)
+            manifest, entries = manifest or owners, entries or records
+            local printed = {}
+            local environment = {
+                assert = assert, ipairs = ipairs, pairs = pairs, table = table, type = type,
+                print = function(filter) printed[#printed + 1] = filter end,
+                io = { lines = function()
+                    local index = 0
+                    return function() index = index + 1; return manifest[index] end
+                end },
+                require = function(name)
+                    if name == "lfs" then
+                        return {
+                            dir = function(directory)
+                                local children = assert(directories[directory], directory)
+                                local index = 0
+                                return function() index = index + 1; return children[index] end
+                            end,
+                            attributes = function(filename, attribute)
+                                assert.equal("mode", attribute)
+                                if directories[filename] then return "directory" end
+                                assert(files[filename], filename)
+                                return "file"
+                            end,
+                        }
+                    elseif name == "titan-compiler.util" then
+                        return {
+                            bytewise_less = util.bytewise_less,
+                            get_file_contents = function(filename, mode)
+                                assert.equal("rb", mode)
+                                assert(files[filename], filename)
+                                if filename == read_failure then return nil, "owner object read failed" end
+                                return filename
+                            end,
+                        }
+                    end
+                    assert.equal("titan-compiler.objectmetadata", name)
+                    return { read = function(bytes, filename)
+                        assert.equal(filename, bytes)
+                        return entries[filename]
+                    end }
+                end,
+            }
+            local ok, failure = pcall(assert(load(
+                inventory_source, "@sanitizer-transfer-inventory", "t", environment)))
+            return ok, failure, printed
+        end
+        local function check_union(manifest, entries)
+            local ok, failure, filters = inventory(manifest, entries)
+            assert.is_true(ok, tostring(failure))
+            local sorted = { table.unpack(filters) }
+            table.sort(sorted, util.bytewise_less)
+            assert.same(sorted, filters)
+            local function selected_count(name)
+                local count = 0
+                for _, filter in ipairs(filters) do
+                    if name:find(filter) then count = count + 1 end
+                end
+                return count
+            end
+            local expected_count = 0
+            for _, filename in ipairs(paths) do
+                local entry = entries[filename]
+                for _, name in ipairs(entry.object_metadata.test_functions) do
+                    local parent = entry.type.name .. "." .. name
+                    local expected = parent:find("transfer", 1, true) and 1 or 0
+                    expected_count = expected_count + expected
+                    for _, suffix in ipairs({ "", ".child", ".child.nested" }) do
+                        assert.equal(expected, selected_count(parent .. suffix), parent .. suffix)
+                    end
+                end
+            end
+            assert.equal(expected_count, #filters)
+            assert.equal(0, selected_count("owner_01.tests.test_transferSuffix"))
+            assert.equal(0, selected_count("owner_01Xtests.test_transfer"))
+            assert.equal(0, selected_count("owner_01.tests.test_plain.child_transfer"))
+        end
+        check_union(owners, records)
+        local function changed(index, entry)
+            local copy = {}
+            for filename, record in pairs(records) do copy[filename] = record end
+            copy[paths[index]] = entry
+            return copy
+        end
+        local renamed = { table.unpack(owners) }
+        renamed[3] = "transfer_owner.tests"
+        check_union(renamed, changed(3, {
+            type = { name = renamed[3] }, object_metadata = { test_functions = { "test_plain" } },
+        }))
+        local function rejected(message, manifest, entries, read_failure)
+            local ok, failure, printed = inventory(manifest, entries, read_failure)
+            assert.is_false(ok)
+            assert.matches(message, tostring(failure), 1, true)
+            assert.same({}, printed)
+        end
+        local missing = { table.unpack(owners) }
+        table.remove(missing)
+        rejected("expected 30 canonical native owners", missing)
+        local duplicate = { table.unpack(owners) }
+        duplicate[#duplicate + 1] = owners[1]
+        rejected("duplicate canonical native owner", duplicate)
+        rejected("missing built native owner", nil, changed(2, nil))
+        rejected("unexpected built native owner", nil, changed(2, {
+            type = { name = "outside.tests" }, object_metadata = { test_functions = { "test_transfer" } },
+        }))
+        rejected("duplicate built native owner", nil, changed(2, records[paths[1]]))
+        rejected("owner object read failed", nil, nil, paths[1])
+        local empty = {}
+        for filename, entry in pairs(records) do empty[filename] = entry end
+        for index, owner in ipairs(owners) do
+            empty[paths[index]] = {
+                type = { name = owner }, object_metadata = { test_functions = { "test_plain" } },
+            }
+        end
+        rejected("no native transfer parent functions", nil, empty)
+    end)
+
     for _, consumer in ipairs({ "async", "io" }) do
         it("composes source " .. consumer .. " with a compiled-only public producer", function()
             local root = make_temp_dir()
@@ -6148,11 +6332,12 @@ printf '%s\n' "${schedule[@]}"
                 "TITAN_FILTER='test_lua_host_roots_coroutine_" ..
                 "payloads_and_tags_across_gc$'",
                 "TITAN_FILTER='test_timer_'",
+                'TITAN_FILTER="$transfer_filter"',
                 "TITAN_FILTER='test_lua_close_'",
                 "TITAN_FILTER='test_unwind_'",
                 "TITAN_FILTER='test_fs_'",
                 "TITAN_FILTER='^uv%.task_tests%.'",
-                "TITAN_FILTER='^uv%.runtime_tests%.'",
+                'TITAN_FILTER="^uv%.runtime_tests%.$runtime_case%f[^%w_]"',
                 "TITAN_FILTER='test_completion_'",
                 "TITAN_FILTER='test_ready_queue_'",
                 "TITAN_FILTER='wake_failure_'",
@@ -6194,6 +6379,43 @@ printf '%s\n' "${schedule[@]}"
             }) do
                 assert.equal(1, count_literal(sanitizer_job, filter), filter)
             end
+            local transfer_sanitizer_step = named_step(sanitizer_job,
+                "Run dense Array and value transfer sanitizer gate")
+            assert_ordered(transfer_sanitizer_step,
+                "ci_sanitizer_capture.sh dense-array",
+                "spec/dense_array_runtime_spec.lua",
+                "print-stdlib-test-roots",
+                "for owner in io.lines() do",
+                "assert(expected_count == 30,",
+                "objectmetadata.read(",
+                'full_name:find("transfer", 1, true)',
+                'assert(owners[owner], "missing built native owner: "',
+                'assert(#filters > 0, "no native transfer parent functions")',
+                "table.sort(filters, util.bytewise_less)",
+                "while IFS= read -r transfer_filter; do",
+                'ci_sanitizer_capture.sh "value-transfer-$transfer_index"',
+                'make titan-stdlib-test-run TITAN_FILTER="$transfer_filter"',
+                'done < "$transfer_cases"')
+            assert.falsy(transfer_sanitizer_step:find("TITAN_FILTER=transfer", 1, true))
+            assert.falsy(transfer_sanitizer_step:find("TITAN_TEST_TIMEOUT", 1, true))
+            local runtime_sanitizer_step = named_step(sanitizer_job,
+                "Run native async sanitizer gate (core-uv)")
+            assert_ordered(runtime_sanitizer_step,
+                'local filename = "out/tests/uv/runtime_tests.o"',
+                "objectmetadata.read(",
+                'assert(util.get_file_contents(filename, "rb"))',
+                "entry.object_metadata.test_functions",
+                'assert(type(names) == "table" and #names > 0,',
+                "table.sort(names, util.bytewise_less)",
+                "for _, name in ipairs(names) do print(name) end",
+                "while IFS= read -r runtime_case; do",
+                'ci_sanitizer_capture.sh "uv-runtime-$runtime_case"',
+                'make titan-stdlib-test-run TITAN_FILTER="^uv%.runtime_tests%.$runtime_case%f[^%w_]"',
+                'done < "$runtime_cases"')
+            assert.falsy(runtime_sanitizer_step:find(
+                "TITAN_FILTER='^uv%.runtime_tests%.'", 1, true))
+            assert.falsy(runtime_sanitizer_step:find(
+                "TITAN_TEST_TIMEOUT", 1, true))
             local nominal_sanitizer_step = named_step(sanitizer_job,
                 "Run native nominal storage sanitizer gate")
             for _, required in ipairs({

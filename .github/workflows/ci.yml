@@ -875,8 +875,73 @@ jobs:
           bash spec/support/ci_sanitizer_capture.sh dense-array \
             env TITAN_PROBE_CACHE_DISABLE=1 .lua/bin/busted -o gtest -v \
               spec/dense_array_runtime_spec.lua
-          bash spec/support/ci_sanitizer_capture.sh value-transfer \
-            make titan-stdlib-test-run TITAN_FILTER=transfer
+          # Keep the literal transfer union, with a fresh deadline per parent.
+          transfer_owners="$RUNNER_TEMP/titan-sanitizer-transfer-owners.txt"
+          make --no-print-directory -s -f spec/support/stdlib_test_modules.mk \
+            print-stdlib-test-roots > "$transfer_owners"
+          transfer_cases="$RUNNER_TEMP/titan-sanitizer-transfer-cases.txt"
+          "$PREFIX/bin/lua" -E -e '
+            local lfs = require "lfs"
+            local util = require "titan-compiler.util"
+            local objectmetadata = require "titan-compiler.objectmetadata"
+            local expected, expected_count = {}, 0
+            for owner in io.lines() do
+              assert(not expected[owner], "duplicate canonical native owner: " .. owner)
+              expected[owner] = true
+              expected_count = expected_count + 1
+            end
+            assert(expected_count == 30,
+              "expected 30 canonical native owners, found " .. expected_count)
+            local filters, owners = {}, {}
+            local function escaped(value)
+              return (value:gsub("([^%w_])", "%%%1"))
+            end
+            local function walk(directory)
+              local entries = {}
+              for name in lfs.dir(directory) do
+                if name ~= "." and name ~= ".." and name:sub(1, 1) ~= "." then
+                  entries[#entries + 1] = name
+                end
+              end
+              table.sort(entries, util.bytewise_less)
+              for _, name in ipairs(entries) do
+                local filename = directory .. "/" .. name
+                if lfs.attributes(filename, "mode") == "directory" then
+                  walk(filename)
+                elseif name:match("%.o$") and not name:match("%.part%d+%.o$") then
+                  local entry = objectmetadata.read(
+                    assert(util.get_file_contents(filename, "rb")), filename)
+                  local names = entry and entry.object_metadata
+                    and entry.object_metadata.test_functions
+                  if type(names) == "table" and #names > 0 then
+                    local owner = assert(entry.type.name)
+                    assert(expected[owner], "unexpected built native owner: " .. owner)
+                    assert(not owners[owner], "duplicate built native owner: " .. owner)
+                    owners[owner] = true
+                    for _, name in ipairs(names) do
+                      local full_name = owner .. "." .. name
+                      if full_name:find("transfer", 1, true) then
+                        filters[#filters + 1] = "^" .. escaped(full_name) .. "%f[^%w_]"
+                      end
+                    end
+                  end
+                end
+              end
+            end
+            walk("out/tests")
+            for owner in pairs(expected) do
+              assert(owners[owner], "missing built native owner: " .. owner)
+            end
+            assert(#filters > 0, "no native transfer parent functions")
+            table.sort(filters, util.bytewise_less)
+            for _, filter in ipairs(filters) do print(filter) end
+          ' < "$transfer_owners" > "$transfer_cases"
+          transfer_index=0
+          while IFS= read -r transfer_filter; do
+            transfer_index=$((transfer_index + 1))
+            bash spec/support/ci_sanitizer_capture.sh "value-transfer-$transfer_index" \
+              make titan-stdlib-test-run TITAN_FILTER="$transfer_filter"
+          done < "$transfer_cases"
 
       - name: Run immediate function compiler sanitizer gate
         run: |
