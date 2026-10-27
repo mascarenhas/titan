@@ -101,7 +101,9 @@ a non-breakaway `KILL_ON_JOB_CLOSE` Job Object through
 `titan._native_process_tree_guard()`. Every descendant inherits that strict
 ancestor job before it runs, even inside libuv's own breakaway-permitting
 job, so workers, native compilers, and anything a compiler wrapper starts
-terminate when the coordinator exits, including abruptly
+terminate when the coordinator's process ends, including abruptly. This
+bounds their lifetime but does not order their exit before the release of the
+coordinator's output lock after a forced termination
 ([orphan lifetime](build-coordinator.md#planned-worker-resolution-and-orphan-lifetime)).
 The containment requires Windows 8 or later; if it cannot be established,
 no child is launched.

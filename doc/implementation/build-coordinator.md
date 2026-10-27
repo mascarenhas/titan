@@ -520,7 +520,12 @@ Worker lifetime is bounded even if the coordinator terminates abnormally:
   process. Teardown closes it after Lua cleanup, preserving the exit status
   while terminating every remaining descendant, including workers' nested
   jobs. A missing guard function or a failed job creation, configuration, or
-  assignment launches no child and is reported as a spawn error.
+  assignment launches no child and is reported as a spawn error. The job
+  bounds descendant lifetime only. After a forced coordinator termination on
+  Windows, Titan does not guarantee that every descendant has exited before
+  the operating system releases the coordinator's `.titan-build.lock`, so a
+  waiting invocation is not promised the POSIX lock-inheritance ordering
+  above.
 
 ## Slot ledger and jobserver rules
 
