@@ -10586,6 +10586,227 @@ end
     end)
 end)
 
+describe("Darwin dSYM execution selection", function()
+    local subject, context, root, previous, commands, selections, dsym_result
+    local cpp = require "c-parser.cpp"
+
+    before_each(function()
+        previous = nil
+        if platform.windows then return end
+        previous = {
+            execute = os.execute, getenv = platform.getenv,
+            physical = incremental.physical_executable,
+            toolchain = incremental.toolchain_identity,
+            cwd = assert(lfs.currentdir()),
+        }
+        root = temporary.name("-darwin-selection")
+        assert(os.remove(root))
+        assert(lfs.mkdir(root))
+        root = assert(compiler_io.new_sync():realpath(root))
+        local loaded_driver = package.loaded["titan-compiler.driver"]
+        package.loaded["titan-compiler.driver"] = nil
+        local loaded, value = pcall(require, "titan-compiler.driver")
+        package.loaded["titan-compiler.driver"] = loaded_driver
+        assert.is_true(loaded, value)
+        subject = value
+        context = subject.new_resolver_context()
+        context._platform_initialized, context.uname, context.is_darwin =
+            true, "Darwin", true
+        subject.UNAME, subject.IS_DARWIN = "Darwin", true
+        subject.CC, subject.CFLAGS = "native-compiler", ""
+        -- This isolated driver models commands, not runtime preparation.
+        subject.INSTALLED, subject.OUTPUT_LOCKS = true, nil
+        commands, selections, dsym_result = {}, {}, nil
+        incremental.toolchain_identity = function()
+            return "independent-compiler-proof", { stage_policy = "llvm" }
+        end
+        incremental.physical_executable = function(_, command)
+            assert.equal("dsymutil", command)
+            selections[#selections + 1] = assert(lfs.currentdir())
+            return nil, "Darwin executable search policy is unknown", "uncertified"
+        end
+        os.execute = function(command)
+            local argv = assert(cpp.split_shell_words(command))
+            local invocation = { argv = argv, cwd = assert(lfs.currentdir()) }
+            commands[#commands + 1] = invocation
+            if argv[1] == "native-compiler" then
+                for index, argument in ipairs(argv) do
+                    if argument == "-o" then
+                        invocation.output = argv[index + 1]
+                        write_file(invocation.output, "native image fixture\n")
+                        return true, "exit", 0
+                    end
+                end
+                error("native command has no output")
+            end
+            assert.is_true(argv[1] == "dsymutil" or
+                argv[1] == root .. "/tools with spaces/dsymutil")
+            if dsym_result then return table.unpack(dsym_result, 1, 3) end
+            local output = argv[2]
+            if not platform.is_absolute(output) then
+                output = paths.join(invocation.cwd, output)
+            end
+            local bundle = output .. ".dSYM"
+            assert(lfs.mkdir(bundle))
+            assert(lfs.mkdir(bundle .. "/Contents"))
+            assert(lfs.mkdir(bundle .. "/Contents/Resources"))
+            assert(lfs.mkdir(bundle .. "/Contents/Resources/DWARF"))
+            write_file(bundle .. "/Contents/Resources/DWARF/" ..
+                paths.basename(output), "debug fixture\n")
+            return true, "exit", 0
+        end
+    end)
+
+    after_each(function()
+        if not previous then return end
+        if subject and context then subject.close_resolver_context(context) end
+        os.execute, platform.getenv = previous.execute, previous.getenv
+        incremental.physical_executable = previous.physical
+        incremental.toolchain_identity = previous.toolchain
+        assert(lfs.chdir(previous.cwd))
+        remove_tree(root)
+        subject, context = nil, nil
+    end)
+
+    local function compile_program(executable)
+        return subject.compile_program("darwin_selection", {}, nil, false, {},
+            root .. "/program", {}, root .. "/entry.c", nil, {
+                no_uv_bootstrap = true, dsymutil = executable,
+            })
+    end
+
+    local function assert_raw_execution()
+        local invocation = commands[#commands]
+        assert.equal("dsymutil", invocation.argv[1])
+        assert.equal(previous.cwd, invocation.cwd)
+        assert.is_true(platform.is_absolute(invocation.argv[2]))
+        assert.equal(previous.cwd, lfs.currentdir())
+    end
+
+    it("keeps an unset PATH uncertified through output planning and standalone publication", function()
+        if platform.windows then pending("Darwin POSIX launch behavior"); return end
+        incremental.physical_executable = previous.physical
+        platform.getenv = function(name)
+            if name == "PATH" then return nil end
+            return previous.getenv(name)
+        end
+        local request = assert(subject.output_tool_descriptors(context, "program"))
+        assert.same({ "dsymutil" }, request.tools.dsymutil)
+        assert.is_string(request.uncacheable)
+        assert.equal("independent-compiler-proof", request.toolchain)
+        assert.is_nil(context.incremental_uncertified)
+        local tools = assert(require("titan-compiler.linkcertificate").output_tools(
+            context, request))
+        assert.equal(request.uncacheable, tools.uncertified)
+        local ok, term, code = compile_program(request.tools.dsymutil[1])
+        assert.is_true(ok, tostring(term) .. ": " .. tostring(code))
+        assert_raw_execution()
+        assert.equal("file", lfs.attributes(root .. "/program", "mode"))
+        assert.equal("file", lfs.attributes(root ..
+            "/program.dSYM/Contents/Resources/DWARF/program", "mode"))
+    end)
+
+    it("runs a directly requested uncertified standalone dSYM without changing lookup cwd", function()
+        if platform.windows then pending("Darwin POSIX launch behavior"); return end
+        local ok, term, code = compile_program()
+        assert.is_true(ok, tostring(term) .. ": " .. tostring(code))
+        assert.same({ previous.cwd }, selections)
+        assert_raw_execution()
+    end)
+
+    for _, case in ipairs({
+        { name = "ordinary library", stable = false },
+        { name = "staged provider", stable = true },
+    }) do
+        it("keeps raw " .. case.name .. " dSYM lookup in the original cwd", function()
+            if platform.windows then pending("Darwin POSIX launch behavior"); return end
+            local output = root .. "/private/provider.so"
+            local ok, term, code = subject.compile_library_output(
+                output, {}, nil, false, {}, {}, nil,
+                case.stable and root .. "/public.so" or nil, { "provider" })
+            assert.is_true(ok, tostring(term) .. ": " .. tostring(code))
+            assert.same({ previous.cwd }, selections)
+            assert_raw_execution()
+            assert.equal(output, commands[#commands].argv[2])
+        end)
+    end
+
+    it("retains the admitted absolute spelling and stable leaf for certified execution", function()
+        if platform.windows then pending("Darwin POSIX launch behavior"); return end
+        local admitted = root .. "/tools with spaces/dsymutil"
+        incremental.physical_executable = function(_, command)
+            assert.equal("dsymutil", command)
+            selections[#selections + 1] = assert(lfs.currentdir())
+            return "canonical-physical-tool-identity", admitted
+        end
+        local request = assert(subject.output_tool_descriptors(context, "program"))
+        assert.same({ admitted }, request.tools.dsymutil)
+        assert.is_nil(request.uncacheable)
+        local ok, term, code = compile_program(request.tools.dsymutil[1])
+        assert.is_true(ok, tostring(term) .. ": " .. tostring(code))
+        assert.same({ previous.cwd }, selections)
+        local invocation = commands[#commands]
+        local linked = commands[#commands - 1]
+        assert.equal(admitted, invocation.argv[1])
+        assert.equal(paths.dirname(linked.output), invocation.cwd)
+        assert.equal(paths.basename(linked.output), invocation.argv[2])
+        assert.equal(previous.cwd, lfs.currentdir())
+    end)
+
+    for _, case in ipairs({
+        { name = "ordinary returned failure", select = function()
+            return nil, "cannot read the dSYM executable"
+        end },
+        { name = "raised I/O failure", select = function()
+            error("cannot read the dSYM executable", 0)
+        end },
+    }) do
+        it("does not turn a dSYM " .. case.name .. " into raw execution", function()
+            if platform.windows then pending("Darwin POSIX launch behavior"); return end
+            incremental.physical_executable = case.select
+            local request, descriptor_error =
+                subject.output_tool_descriptors(context, "program")
+            assert.is_nil(request)
+            assert.equal("cannot read the dSYM executable", descriptor_error)
+            local ok, execution_error = compile_program()
+            assert.is_nil(ok)
+            assert.equal("cannot read the dSYM executable", execution_error)
+            for _, invocation in ipairs(commands) do
+                assert.equal("native-compiler", invocation.argv[1])
+            end
+            assert.equal(previous.cwd, lfs.currentdir())
+            assert.is_nil(lfs.attributes(root .. "/program"))
+        end)
+    end
+
+    it("preserves selector cancellation identity at descriptor and standalone boundaries", function()
+        if platform.windows then pending("Darwin POSIX launch behavior"); return end
+        local cancellation = {}
+        incremental.physical_executable = function() error(cancellation, 0) end
+        local completed, raised = pcall(subject.output_tool_descriptors,
+            context, "program")
+        assert.is_false(completed)
+        assert.equal(cancellation, raised)
+        completed, raised = pcall(compile_program)
+        assert.is_false(completed)
+        assert.equal(cancellation, raised)
+        assert.equal(previous.cwd, lfs.currentdir())
+        assert.is_nil(lfs.attributes(root .. "/program"))
+    end)
+
+    it("preserves operational failure of a legitimately raw dSYM command", function()
+        if platform.windows then pending("Darwin POSIX launch behavior"); return end
+        dsym_result = { false, "exit", 23 }
+        local ok, term, code = compile_program()
+        assert.is_nil(ok)
+        assert.equal("exit", term)
+        assert.equal(23, code)
+        assert_raw_execution()
+        assert.is_nil(lfs.attributes(root .. "/program"))
+        assert.is_nil(lfs.attributes(root .. "/program.dSYM"))
+    end)
+end)
+
 describe("Windows link response files", function()
     local process = require "titan-compiler.process"
     local previous, response

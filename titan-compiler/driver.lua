@@ -1442,12 +1442,13 @@ function driver.link_extra_flags()
 end
 
 function perf.dsymutil_executable(context)
-    local ok, identity, selected = pcall(incremental.physical_executable,
+    local ok, identity, selected, status = pcall(incremental.physical_executable,
         context or { io = compiler_io.new_sync() }, "dsymutil")
     if not ok then
         if type(identity) ~= "string" then error(identity, 0) end
         return nil, identity
     end
+    if not identity then return nil, selected, status end
     -- Keep the admitted executable spelling: a symlink target may dispatch
     -- differently when invoked under its canonical basename.
     return selected
@@ -1460,7 +1461,7 @@ function driver.output_tool_descriptors(context, kind)
     if not argv then return nil, argv_error end
     local descriptor, descriptor_error = driver.toolchain_descriptor(context)
     if not descriptor then return nil, descriptor_error end
-    local tools = {}
+    local tools, uncacheable = {}, nil
     if kind == "library" and not platform.windows then
         local ar, ar_error = perf.tool_command(driver.AR, "AR")
         if not ar then return nil, ar_error end
@@ -1474,8 +1475,12 @@ function driver.output_tool_descriptors(context, kind)
         tools.rc = rc
     end
     if kind and driver.IS_DARWIN then
-        local dsymutil, dsymutil_error = perf.dsymutil_executable(context)
-        if not dsymutil then return nil, dsymutil_error end
+        local dsymutil, dsymutil_error, dsymutil_status =
+            perf.dsymutil_executable(context)
+        if not dsymutil then
+            if dsymutil_status ~= "uncertified" then return nil, dsymutil_error end
+            dsymutil, uncacheable = "dsymutil", dsymutil_error
+        end
         tools.dsymutil = { dsymutil }
     end
     local toolchain, details, status =
@@ -1486,7 +1491,7 @@ function driver.output_tool_descriptors(context, kind)
         link_flags = driver.link_extra_flags(),
         toolchain = toolchain,
         compiler_stage_policy = toolchain and details.stage_policy or nil,
-        uncacheable = status == "uncertified" and details or nil,
+        uncacheable = status == "uncertified" and details or uncacheable,
         directory = context.output_root or
             driver.TITAN_SOURCE_PATH:match("[^;]+") or ".",
         darwin = driver.IS_DARWIN == true,
@@ -2066,11 +2071,16 @@ end
 local function run_dsymutil(output, verbose, stable_input_basename, executable)
     if not driver.IS_DARWIN then return true end
     if not executable then
-        local executable_error
-        executable, executable_error = perf.dsymutil_executable()
-        if not executable then return nil, executable_error end
+        local executable_error, status
+        executable, executable_error, status = perf.dsymutil_executable()
+        if not executable then
+            if status ~= "uncertified" then return nil, executable_error end
+            executable = "dsymutil"
+        end
     end
-    if not stable_input_basename then
+    -- An uncertified bare command has no absolute pin. Preserve its original
+    -- launch cwd instead of resolving it after entering the private stage.
+    if not stable_input_basename or not platform.is_absolute(executable) then
         return run_argv({ executable, output }, verbose)
     end
 
