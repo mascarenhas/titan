@@ -481,14 +481,38 @@ dofile(%q .. "/titanc")
     after_each(function() remove(root) end)
 
     it("skips all final native work on a repeated executable build", function()
-        compile({ "--exe", exe("program Ω"), "app" })
+        local arguments = { "--exe", exe("program Ω"), "app" }
+        if platform.windows then table.insert(arguments, 1, "--ldflag=-Wl,--stack,8388608") end
+        compile(arguments)
         assert.not_equal("", read(log))
+        local object = root .. "/out/app.o"
+        local object_bytes = platform.windows and read(object)
         local old = os.time() - 60
         assert(lfs.touch(exe("program Ω"), old, old))
+        if platform.windows then
+            assert.not_equal("", object_bytes)
+            assert(lfs.touch(object, old, old))
+        end
         write(log, "")
-        compile({ "--exe", exe("program Ω"), "app" })
+        compile(arguments)
         assert.equal("", read(log))
         assert.equal(old, lfs.attributes(exe("program Ω"), "modification"))
+        if platform.windows then
+            local function reused_object()
+                assert.equal(object_bytes, read(object))
+                assert.equal(old, lfs.attributes(object, "modification"))
+            end
+            reused_object()
+            arguments[1] = "--ldflag=-Wl,--stack,16777216"
+            write(log, "")
+            compile(arguments)
+            assert.matches("compile_program", read(log), 1, true)
+            reused_object()
+            write(log, "")
+            compile(arguments)
+            assert.equal("", read(log))
+            reused_object()
+        end
     end)
 
     it("skips runner generation on a repeated test image and separates final targets", function()
@@ -813,6 +837,89 @@ describe("native library coverage policy", function()
             "-print-file-name=libfirst.dll.a", "-print-file-name=first.dll.a", "-print-file-name=libfirst.a",
             "-print-file-name=first.lib", "-print-file-name=libfirst.dll", "-print-file-name=first.dll",
         } or { "-print-file-name=libfirst.so", "-print-file-name=libfirst.a" }, calls)
+    end)
+
+    it("keeps PE stack reserve and commit values out of the native file inventory", function()
+        for _, stack in ipairs({
+            { "-Wl,--stack,8388608" }, { "-Wl,--stack=8388608" },
+            { "--stack", "8388608,4096" }, { "--stack=8388608,4096" },
+        }) do
+            local argv = { table.unpack(stack) }
+            argv[#argv + 1], argv[#argv + 2] = "-L" .. root, "-lfirst"
+            local original, ctx = clone(argv), context()
+            function ctx.io:run() error("explicit PE library must not require compiler lookup") end
+            local policy = certificate.native_library_policy(ctx, {
+                backend = "none", compiler_argv = { "selected-cc" }, windows = true, argv = argv,
+            })
+            assert.is_true(policy.cacheable, policy.reason)
+            assert.equal("compiler", policy.backend)
+            assert.same({ native_spelling(root .. "/libfirst.a") }, policy.files)
+            assert.same(original, argv)
+        end
+        if not platform.windows then
+            local policy = certificate.native_library_policy(context(), {
+                compiler_argv = { "selected-cc" }, argv = { "-Wl,--stack,8388608" },
+            })
+            assert.is_false(policy.cacheable)
+            assert.matches("unsupported native linker input mechanism: --stack", policy.reason, 1, true)
+        end
+    end)
+
+    it("retains raw PE stack values and ordering in final certificate inputs", function()
+        local object = root .. "/helper.o"
+        write(object, string.pack("<I2I2I4I4I4I2I2", 0x8664, 0, 0, 0, 0, 0, 0))
+        write(root .. "/program", "image")
+        local function prepare(argv)
+            local ctx = context()
+            function ctx.io:run() error("stack-only fallback must not require compiler lookup") end
+            local ticket = certificate.prepare(ctx, {
+                output_root = root, outputs = { root .. "/program" }, objects = { object },
+                roots = { "app" }, kind = "program", toolchain = "toolchain", argv = argv,
+                native_libraries = { backend = "none", compiler_argv = { "selected-cc" }, windows = true },
+            })
+            assert.is_true(ticket.cacheable, ticket.native_policy.reason)
+            return ctx, ticket
+        end
+        local argv = { "-Wl,--stack,8388608", "-Wl,--stack=16777216" }
+        local original = clone(argv)
+        local ctx, ticket = prepare(argv)
+        assert.same(original, ticket.recipe.argv)
+        assert(certificate.commit(ctx, ticket))
+        local warm, unchanged = prepare(argv)
+        assert.equal(ticket.key, unchanged.key)
+        assert.is_true(certificate.check(warm, unchanged))
+        for _, changed in ipairs({
+            { "-Wl,--stack,8388608", "-Wl,--stack=33554432" }, { argv[2], argv[1] },
+        }) do
+            local current, replacement = prepare(changed)
+            assert.equal(ticket.key, replacement.key)
+            assert.is_not.equal(ticket.input, replacement.input)
+            assert.is_false(certificate.check(current, replacement))
+        end
+        assert.same(original, argv)
+    end)
+
+    it("keeps files after the one PE stack argument and declines opaque or missing operands", function()
+        local object = root .. "/stack-input.o"
+        write(object, string.pack("<I2I2I4I4I4I2I2", 0x8664, 0, 0, 0, 0, 0, 0))
+        local ctx = context()
+        function ctx.io:run() error("explicit stack input must not require compiler lookup") end
+        local policy = certificate.native_library_policy(ctx, {
+            compiler_argv = { "selected-cc" }, windows = true,
+            argv = { "-Wl,--stack,8388608," .. object },
+        })
+        assert.is_true(policy.cacheable, policy.reason)
+        assert.same({ object }, policy.files)
+        for _, argv in ipairs({
+            { "-Wl,--stack" }, { "--stack=" },
+            { "-Wl,--stack,8388608,--unrecognized-files=" .. object },
+        }) do
+            local incomplete = certificate.native_library_policy(context(), {
+                compiler_argv = { "selected-cc" }, windows = true, argv = argv,
+            })
+            assert.is_false(incomplete.cacheable)
+            assert.is_string(incomplete.reason)
+        end
     end)
 
     it("retains static and dynamic library selection in ordered fallback arguments", function()

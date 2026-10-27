@@ -575,7 +575,9 @@ compiler_libraries = function(context, request)
             if attached == nil then index = index + 1; attached = argv[index] end
             if not attached or attached == "" then return nil, "incomplete native file option: " .. flag end
             inputs[#inputs + 1] = { path = attached, binary = false }
-        elseif LINK_VALUE_FLAGS[option or flag] then
+        elseif LINK_VALUE_FLAGS[option or flag] or
+            ((request.windows or platform.windows) and (option or flag) == "--stack") then
+            -- PE reserve[,commit] is one scalar argument, never a file.
             if attached == nil then index = index + 1; attached = argv[index] end
             if not attached or attached == "" then return nil, "incomplete native linker option: " .. flag end
         elseif INPUT_FREE_LINK_FLAGS[flag] or flag:match("^%-O[0-3sgz]$")
