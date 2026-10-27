@@ -2727,8 +2727,17 @@ case $1 in
   --version) echo "fixture Clang"; exit 0 ;;
 esac
 printf '%s\n' "$*" >> "$WINDOWS_NATIVE_LOG"
+source=
 while [[ $# -gt 0 ]]; do
+  case $1 in
+    */cwd/spec/fixtures/stdlib/native/os_process_host_child.c|\
+    */cwd/spec/fixtures/stdlib/native/windows_test_supervisor.c) source=$1 ;;
+  esac
   if [[ $1 == -o ]]; then
+    [[ -n $source && -f $source ]] || {
+      echo 'expected an existing native helper C source before -o' >&2
+      exit 2
+    }
     printf '%s\n' "pure C executable" > "$2"
     exit 0
   fi
