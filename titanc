@@ -542,7 +542,7 @@ if #extra_objects == 0 then extra_objects = nil end
 
 -- The final-link certificate gates every runner/entrypoint generation,
 -- archive probe, validation link and final link. A hit changes nothing.
-local link_ticket, program_path, windows_paths, coverage_runtime
+local link_ticket, program_path, windows_paths, coverage_runtime, dsymutil
 if not args.compile_only and not args.print_ast then
     local planned, plan_errors = driver.finalize_resolver_context(resolver_context)
     if not planned then exit(table.concat(plan_errors, "\n")) end
@@ -652,6 +652,7 @@ if not args.compile_only and not args.print_ast then
     local output_tools, output_tools_error =
         linkcertificate.output_tools(resolver_context, output_request)
     if not output_tools then exit(output_tools_error) end
+    dsymutil = output_request.tools.dsymutil and output_request.tools.dsymutil[1]
     local spec = {
         output_root = lock_directories[1],
         outputs = outputs,
@@ -1103,6 +1104,7 @@ if main_module then
                 pretty_print = args.pretty_print,
                 exe = args.exe,
                 final_link_flags = link_ticket and link_ticket.dependency_argv,
+                dsymutil = dsymutil,
                 before_commit = link_ticket and function()
                     return linkcertificate.invalidate(resolver_context, link_ticket)
                 end or nil,
@@ -1190,6 +1192,7 @@ else
             provider = provider,
             public_dso = provider_output,
             final_link_flags = link_ticket and link_ticket.dependency_argv,
+            dsymutil = dsymutil,
             libnames = ofiles,
             verbose = args.verbose,
             static_archives = selected_static_archives,

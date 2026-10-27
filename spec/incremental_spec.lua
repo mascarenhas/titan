@@ -656,6 +656,30 @@ describe("incremental configuration", function()
         assert.is_not.equal(before.options, incremental.configuration(third).options)
     end)
 
+    it("retains selected executable spelling separately from canonical identity", function()
+        local platform = require "titan-compiler.platform"
+        if platform.windows then pending("POSIX relative PATH selection"); return end
+        local ctx = context({ ["/target/llvm-multicall"] = "selected",
+            ["/shadow/dsymutil"] = "shadow" })
+        local candidate = require("titan-compiler.path").join(".", "dsymutil")
+        ctx.io.aliases[candidate] = "/target/llvm-multicall"
+        function ctx.io:cwd() return "/coordinator" end
+        ctx.executable_path = ".:/shadow"
+        local observed, stat = {}, ctx.io.stat
+        function ctx.io:stat(path)
+            observed[#observed + 1] = path
+            return stat(self, path)
+        end
+        local identity, selected = incremental.physical_executable(ctx, "dsymutil")
+        assert.same({ candidate }, observed)
+        assert.equal("/target/llvm-multicall", identity.path)
+        assert.equal("/coordinator/dsymutil", selected)
+        local direct = incremental.physical_executable(ctx, "/target/llvm-multicall")
+        assert.same(direct, identity)
+        assert.equal(0, #ctx.io.commands)
+        assert.is_nil(ctx.io.reads["/target/llvm-multicall"])
+    end)
+
     it("probes one flagless toolchain description independently of effective options", function()
         local ctx = context({ ["/tool/cc"] = "driver" })
         local null = require("titan-compiler.platform").windows and "NUL" or "/dev/null"

@@ -367,6 +367,8 @@ function incremental.physical_tool_file(context, path)
     return physical_tool_identity(context, filename, stat)
 end
 
+-- Return canonical physical identity plus the admitted absolute command
+-- spelling, retaining symlink/multicall names when execution changes cwd.
 function incremental.physical_executable(context, command)
     local executable = type(command) == "table" and command[1] or command
     assert(type(executable) == "string" and executable ~= "", "tool executable is required")
@@ -389,7 +391,8 @@ function incremental.physical_executable(context, command)
         if err then required(nil, err, candidate) end
         if stat and stat.kind == "file" and context.io:readable(candidate)
             and (platform.windows or (stat.mode and stat.mode & 0x49 ~= 0)) then
-            return physical_tool_identity(context, candidate, stat)
+            return physical_tool_identity(context, candidate, stat),
+                platform.is_absolute(candidate) and candidate or absolute(context, candidate)
         end
     end
     error("cannot resolve native tool executable: " .. executable, 0)
@@ -460,7 +463,7 @@ function incremental.toolchain_identity(context, descriptor)
         memo.toolchain_descriptions[description_key] = description
     end
     local preprocessor, banner = description.preprocessor, description.banner
-    local tools = { incremental.physical_executable(context, cc) }
+    local tools = { (incremental.physical_executable(context, cc)) }
     if wrapped then
         assert(cc[2] and cc[2]:sub(1, 1) ~= "-", "wrapped compiler must be explicit")
         tools[#tools + 1] = incremental.physical_executable(context, cc[2])

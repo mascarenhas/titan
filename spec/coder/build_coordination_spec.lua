@@ -656,6 +656,136 @@ dofile(%q .. "/titanc")
         local ran = compiler_io.new_sync():run({ executable })
         assert.equal(22, ran.status, ran.output or ran.diagnostic)
     end)
+    for _, kind in ipairs({ "program", "library" }) do
+        it("pins the certified Darwin dSYM tool across " .. kind .. " staging", function()
+            local driver = require "titan-compiler.driver"
+            local context = driver.new_resolver_context()
+            local initialized, initialize_error = driver.initialize_platform(context)
+            assert(driver.close_resolver_context(context))
+            assert.is_true(initialized, initialize_error)
+            if not driver.IS_DARWIN then pending("Darwin dSYM dispatch"); return end
+            root = assert(compiler_io.new_sync():realpath(root))
+            local coordinator, tools = root .. "/coordinator", root .. "/tools"
+            local source, output = root .. "/source", root .. "/objects"
+            for _, directory in ipairs({ coordinator, tools, source }) do assert(lfs.mkdir(directory)) end
+            local executable = root .. "/delivery/app"
+            local selected, target = coordinator .. "/dsymutil", coordinator .. "/llvm-multicall"
+            local shadow, tool_log = tools .. "/dsymutil", root .. "/dsymutil-calls"
+            local _, real = require("titan-compiler.incremental").physical_executable(
+                { io = compiler_io.new_sync() }, "dsymutil")
+            local cdriver = require "c-parser.cdriver"
+            local function quote(value) return assert(cdriver.shell_quote(value)) end
+            local function wrapper(marker)
+                return string.format([[#!/bin/sh
+case "$0" in */dsymutil) ;; *) exit 94 ;; esac
+printf '%%s|%%s|%%s\n' %s "$PWD" "$1" >> %s
+exec %s "$@"
+]], quote(marker), quote(tool_log), quote(real))
+            end
+            local function install(filename, marker, replace)
+                local destination = replace and filename .. ".new" or filename
+                local previous = replace and assert(lfs.attributes(filename))
+                write(destination, wrapper(marker))
+                assert(compiler_io.new_sync():run({ "chmod", "u+x", destination }).ok)
+                if previous then
+                    assert(lfs.touch(destination, previous.access, previous.modification))
+                    assert(os.rename(destination, filename))
+                end
+            end
+            install(target, "selected-one")
+            install(shadow, "shadow-one")
+            assert(lfs.link(target, selected, true))
+            write(source .. "/app.titan", kind == "program" and
+                "function main(args: {string}): integer return 37 end\n" or
+                "function value(): integer return 37 end\n")
+            write(frontend, string.format([[
+package.path = %q .. "/?.lua;" .. package.path
+package.cpath = %q .. "/titan-runtime/bootstrap/?.so;" .. package.cpath
+assert(require("lfs").chdir(%q))
+dofile(%q .. "/titanc")
+]], repository, repository, coordinator, repository))
+            local ordinary_path = compiler_environment().PATH
+            local function compile(search)
+                local argv = { "env" }
+                for name, value in pairs(compiler_environment({ PATH = search })) do
+                    argv[#argv + 1] = name .. "=" .. value
+                end
+                for _, argument in ipairs({ lua, "-E", frontend, "-v", "--incremental",
+                        "--jobs", "1", "--c-parts", "1", "--tree", source, "--output", output }) do
+                    argv[#argv + 1] = argument
+                end
+                if kind == "program" then
+                    argv[#argv + 1] = "--exe"; argv[#argv + 1] = executable
+                end
+                argv[#argv + 1] = "app"
+                local result = compiler_io.new_sync():run(argv)
+                assert.is_true(result.ok, result.output or result.diagnostic)
+                return result.output
+            end
+            local first_path, second_path = ".:" .. tools .. ":" .. ordinary_path,
+                tools .. ":.:" .. ordinary_path
+            local leaf = kind == "program" and "app" or "app.so"
+            local function calls_since(previous, marker)
+                local calls, count, stable = read(tool_log), 0, false
+                assert.equal(previous, calls:sub(1, #previous))
+                for line in calls:sub(#previous + 1):gmatch("[^\n]+") do
+                    local actual, directory, input = line:match("^([^|]+)|([^|]+)|(.+)$")
+                    assert.equal(marker, actual, line)
+                    count = count + 1
+                    if input == leaf then
+                        assert.matches(".stage.tmp.", directory, 1, true)
+                        stable = true
+                    end
+                end
+                assert.equal(kind == "program" and 1 or 2, count, calls)
+                assert.is_true(stable, calls)
+                return calls
+            end
+            local cold = compile(first_path)
+            assert.matches(quote(selected) .. " " .. quote(leaf), cold, 1, true)
+            local calls = calls_since("", "selected-one")
+            local object = output .. "/app.o"
+            local object_bytes, c_bytes = read(object), read(output .. "/app.c")
+            local object_info = assert(lfs.attributes(object))
+            local function reused_object()
+                assert.equal(object_bytes, read(object))
+                assert.equal(c_bytes, read(output .. "/app.c"))
+                local current = assert(lfs.attributes(object))
+                assert.equal(object_info.dev, current.dev)
+                assert.equal(object_info.ino, current.ino)
+                assert.equal(object_info.modification, current.modification)
+            end
+            local warm = compile(first_path)
+            assert.matches("Titan link hit ", warm, 1, true)
+            assert.equal(calls, read(tool_log))
+            reused_object()
+            install(target, "selected-two", true)
+            local replaced = compile(first_path)
+            assert.matches("Titan link miss ", replaced, 1, true)
+            assert.matches(quote(selected) .. " " .. quote(leaf), replaced, 1, true)
+            calls = calls_since(calls, "selected-two")
+            reused_object()
+            assert.matches("Titan link hit ", compile(first_path), 1, true)
+            assert.equal(calls, read(tool_log))
+            install(shadow, "shadow-two", true)
+            assert.matches("Titan link hit ", compile(first_path), 1, true)
+            assert.equal(calls, read(tool_log))
+            reused_object()
+            local changed_path = compile(second_path)
+            assert.matches("Titan link miss ", changed_path, 1, true)
+            assert.matches(quote(shadow) .. " " .. quote(leaf), changed_path, 1, true)
+            calls = calls_since(calls, "shadow-two")
+            reused_object()
+            assert.matches("Titan link hit ", compile(second_path), 1, true)
+            assert.equal(calls, read(tool_log))
+            reused_object()
+            if kind == "program" then
+                local ran = compiler_io.new_sync():run({ executable })
+                assert.equal(37, ran.status, ran.output or ran.diagnostic)
+            end
+        end)
+    end
+
 
     it("preflights lock and metadata destinations for ordinary and AST builds", function()
         local source, output = root .. "/source", root .. "/objects"

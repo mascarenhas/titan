@@ -1441,6 +1441,18 @@ function driver.link_extra_flags()
     return driver.NATIVE_LINK_FLAGS or driver.EXTRA_LDFLAGS or {}
 end
 
+function perf.dsymutil_executable(context)
+    local ok, identity, selected = pcall(incremental.physical_executable,
+        context or { io = compiler_io.new_sync() }, "dsymutil")
+    if not ok then
+        if type(identity) ~= "string" then error(identity, 0) end
+        return nil, identity
+    end
+    -- Keep the admitted executable spelling: a symlink target may dispatch
+    -- differently when invoked under its canonical basename.
+    return selected
+end
+
 -- Describe only tools the requested output actually uses. Keep exact wrapper
 -- arguments and share parsing with their execution sites.
 function driver.output_tool_descriptors(context, kind)
@@ -1461,7 +1473,11 @@ function driver.output_tool_descriptors(context, kind)
         if not rc then return nil, rc_error end
         tools.rc = rc
     end
-    if kind and driver.IS_DARWIN then tools.dsymutil = { "dsymutil" } end
+    if kind and driver.IS_DARWIN then
+        local dsymutil, dsymutil_error = perf.dsymutil_executable(context)
+        if not dsymutil then return nil, dsymutil_error end
+        tools.dsymutil = { dsymutil }
+    end
     return {
         compiler_argv = argv,
         link_flags = driver.link_extra_flags(),
@@ -2041,10 +2057,15 @@ end
 -- without `dsymutil` the native Titan frames are unsymbolized and dropped. Run
 -- `dsymutil` after every final link on Darwin only; on Linux DWARF is embedded in
 -- the binary and dsymutil may be absent, so it must be a no-op there.
-local function run_dsymutil(output, verbose, stable_input_basename)
+local function run_dsymutil(output, verbose, stable_input_basename, executable)
     if not driver.IS_DARWIN then return true end
+    if not executable then
+        local executable_error
+        executable, executable_error = perf.dsymutil_executable()
+        if not executable then return nil, executable_error end
+    end
     if not stable_input_basename then
-        return run_argv({ "dsymutil", output }, verbose)
+        return run_argv({ executable, output }, verbose)
     end
 
     -- A bundled dSYM records dsymutil's input spelling in
@@ -2056,13 +2077,13 @@ local function run_dsymutil(output, verbose, stable_input_basename)
     -- changing dsymutil's working directory does not change object discovery.
     local directory, basename = path.split(output)
     if directory == "" or basename == "" then
-        return run_argv({ "dsymutil", output }, verbose)
+        return run_argv({ executable, output }, verbose)
     end
     local previous, current_err = lfs.currentdir()
     if not previous then return nil, current_err end
     local changed, change_err = lfs.chdir(directory)
     if not changed then return nil, change_err end
-    local ok, term, code = run_argv({ "dsymutil", basename }, verbose)
+    local ok, term, code = run_argv({ executable, basename }, verbose)
     local restored, restore_err = lfs.chdir(previous)
     if not restored then
         return nil, "could not restore working directory after dsymutil: " ..
@@ -10478,7 +10499,7 @@ do
 local function prepare_library_link(soname, libnames, link, verbose,
                                     extra_objects, static_archives,
                                     ordered_payload, install_name,
-                                    module_names)
+                                    module_names, dsymutil)
     if platform.windows and (not module_names or #module_names == 0) then
         return nil, "Windows DLL linking requires its logical module inventory"
     end
@@ -10557,6 +10578,7 @@ local function prepare_library_link(soname, libnames, link, verbose,
         soname = soname,
         export_file = export_file,
         install_name = install_name,
+        dsymutil = dsymutil,
     }
 end
 
@@ -10564,7 +10586,7 @@ local function finish_library_link(prepared, verbose, ok, term, code)
     if prepared.export_file then os.remove(prepared.export_file) end
     if ok then
         local dsym_ok, dsym_term, dsym_code = run_dsymutil(
-            prepared.soname, verbose, prepared.install_name ~= nil)
+            prepared.soname, verbose, prepared.install_name ~= nil, prepared.dsymutil)
         if not dsym_ok then
             os.remove(prepared.soname)
             remove_path(prepared.soname .. ".dSYM")
@@ -10716,7 +10738,7 @@ function driver.link_provider_pair(request)
 
         local dso_link, dso_err = prepare_library_link(dso, request.libnames,
             request.link, verbose, nil, request.static_archives,
-            request.ordered_payload, request.public_dso)
+            request.ordered_payload, request.public_dso, module_names, request.dsymutil)
         -- The final-link certificate's linker dependency report belongs to
         -- the public DSO link only, never to the archive validation image.
         if dso_link then append_argv(dso_link.argv, request.final_link_flags) end
@@ -10737,7 +10759,8 @@ function driver.link_provider_pair(request)
         local image_link, image_err
         local function prepare_image()
             image_link, image_err = prepare_library_link(
-                image, {}, request.link, verbose, nil, { archive })
+                image, {}, request.link, verbose, nil, { archive },
+                nil, nil, module_names, request.dsymutil)
             if not image_link then
                 image_err = link_failure(
                     "archive validation image", provider, image_err)
@@ -12748,7 +12771,7 @@ function driver.compile_program(modname, libnames, link, verbose, extra_objects,
     if lfs.symlinkattributes(staged, "mode") ~= "file" then
         return nil, "staged executable '" .. staged .. "' is not a regular file"
     end
-    ok, term, code = run_dsymutil(staged, verbose, true)
+    ok, term, code = run_dsymutil(staged, verbose, true, options.dsymutil)
     if not ok then return nil, term, code end
     local staged_dsym, public_dsym = staged .. ".dSYM", execname .. ".dSYM"
     if driver.IS_DARWIN and
