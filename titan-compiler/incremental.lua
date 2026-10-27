@@ -392,10 +392,23 @@ function incremental.physical_executable(context, command)
     for _, candidate in ipairs(candidates) do
         local stat, err = context.io:stat(candidate)
         if err then required(nil, err, candidate) end
-        if stat and stat.kind == "file" and context.io:readable(candidate)
-            and (platform.windows or (stat.mode and stat.mode & 0x49 ~= 0)) then
-            return physical_tool_identity(context, candidate, stat),
-                platform.is_absolute(candidate) and candidate or absolute(context, candidate)
+        if stat and stat.kind == "file" then
+            local eligible = true
+            if not platform.windows then
+                assert(type(context.io.executable) == "function",
+                    "cannot determine native tool execution eligibility: " ..
+                    "compiler I/O strategy lacks executable")
+                local allowed, access_error = context.io:executable(candidate)
+                if access_error ~= nil then required(nil, access_error, candidate) end
+                if allowed ~= true and allowed ~= false then
+                    required(nil, "cannot determine native tool execution eligibility", candidate)
+                end
+                eligible = allowed
+            end
+            if eligible then
+                return physical_tool_identity(context, candidate, stat),
+                    platform.is_absolute(candidate) and candidate or absolute(context, candidate)
+            end
         end
     end
     error("cannot resolve native tool executable: " .. executable, 0)

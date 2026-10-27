@@ -332,6 +332,18 @@ function Sync:readable(path)
     return true
 end
 
+-- Optional strategy capability: effective POSIX X_OK, not file readability.
+-- Tool selection must fail closed when a strategy cannot supply this query.
+function Sync:executable(path)
+    local valid, path_err = checked_path(path)
+    if not valid then return nil, path_err end
+    local support = require "titan"
+    if type(support) ~= "table" or type(support._executable_access) ~= "function" then
+        return nil, "installed Titan native support lacks _executable_access; reinstall Titan"
+    end
+    return support._executable_access(path)
+end
+
 function Sync:read_file(path, max_bytes)
     local valid, path_err = checked_path(path)
     if not valid then return nil, path_err end

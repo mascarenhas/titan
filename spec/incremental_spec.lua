@@ -33,6 +33,7 @@ local function context(files)
     end
     function io:lstat(path) return self:stat(path) end
     function io:readable(path) return files[self.aliases[path] or path] ~= nil end
+    function io:executable(path) return files[self.aliases[path] or path] ~= nil end
     function io:read_file(path)
         self.reads[path] = (self.reads[path] or 0) + 1
         return files[self.aliases[path] or path], "missing " .. path
@@ -694,6 +695,111 @@ describe("incremental configuration", function()
         assert.equal(0, #ctx.io.commands)
         assert.is_nil(ctx.io.reads["/a/bin/dsymutil"])
         assert.is_nil(ctx.io.reads["/b/bin/dsymutil"])
+    end)
+
+    it("selects an execute-only tool without reading its contents", function()
+        local platform = require "titan-compiler.platform"
+        if platform.windows then pending("POSIX effective execution access"); return end
+        local ctx = context({ ["/first/tool"] = "execute only", ["/later/tool"] = "later" })
+        ctx.executable_path = "/first:/later"
+        local stat = ctx.io.stat
+        function ctx.io:stat(path)
+            local value = stat(self, path)
+            value.mode = 0x8049 -- 0111, with no read permission.
+            return value
+        end
+        function ctx.io:readable() error("tool identity must not test readability") end
+        function ctx.io:read_file() error("tool identity must not read contents") end
+        local checked = {}
+        function ctx.io:executable(path) checked[#checked + 1] = path; return true end
+        local identity, selected = incremental.physical_executable(ctx, "tool")
+        assert.equal("/first/tool", identity.path)
+        assert.equal("/first/tool", selected)
+        assert.same({ "/first/tool" }, checked)
+        assert.equal(0, #ctx.io.commands)
+    end)
+
+    for _, mode in ipairs({ 0x81ac, 0x8101 }) do -- Same-owner 0654 and 0401.
+        it("skips a definitely ineligible tool despite another class's execute bit " .. mode, function()
+            local platform = require "titan-compiler.platform"
+            if platform.windows then pending("POSIX effective execution access"); return end
+            local ctx = context({ ["/first/tool"] = "not executable", ["/later/tool"] = "selected" })
+            ctx.executable_path = "/first:/later"
+            local stat = ctx.io.stat
+            function ctx.io:stat(path)
+                local value = stat(self, path)
+                if path == "/first/tool" then value.mode = mode end
+                return value
+            end
+            function ctx.io:readable() error("tool admission must not test readability") end
+            local checked = {}
+            function ctx.io:executable(path)
+                checked[#checked + 1] = path
+                return path == "/later/tool"
+            end
+            assert.equal("/later/tool", incremental.physical_executable(ctx, "tool").path)
+            assert.same({ "/first/tool", "/later/tool" }, checked)
+            assert.equal(0, #ctx.io.commands)
+        end)
+    end
+
+    for _, result in ipairs({ "missing", "error", "unknown", "invalid", "false-error" }) do
+        it("fails closed for " .. result .. " execution eligibility", function()
+            local platform = require "titan-compiler.platform"
+            if platform.windows then pending("POSIX effective execution access"); return end
+            local ctx = context({ ["/first/tool"] = "first", ["/later/tool"] = "later" })
+            ctx.executable_path = "/first:/later"
+            local checked = {}
+            ctx.io.executable = result ~= "missing" and function(_, path)
+                checked[#checked + 1] = path
+                if result == "error" then return nil, "injected access failure" end
+                if result == "false-error" then return false, "injected access failure" end
+                if result == "invalid" then return "not a boolean" end
+            end or nil
+            function ctx.io:readable() error("eligibility must not fall back to readability") end
+            local ok, err = pcall(incremental.physical_executable, ctx, "tool")
+            assert.is_false(ok)
+            assert.is_string(err)
+            if result == "error" or result == "false-error" then
+                assert.matches("injected access failure", err, 1, true)
+            else
+                assert.matches("cannot determine native tool execution eligibility", err, 1, true)
+            end
+            assert.same(result == "missing" and {} or { "/first/tool" }, checked)
+            assert.equal(0, #ctx.io.commands)
+        end)
+    end
+
+    it("propagates execution eligibility cancellation unchanged", function()
+        local platform = require "titan-compiler.platform"
+        if platform.windows then pending("POSIX effective execution access"); return end
+        local ctx = context({ ["/first/tool"] = "first", ["/later/tool"] = "later" })
+        ctx.executable_path = "/first:/later"
+        local cancelled = {}
+        function ctx.io:executable() return nil, cancelled end
+        local ok, err = pcall(incremental.physical_executable, ctx, "tool")
+        assert.is_false(ok)
+        assert.equal(cancelled, err)
+        function ctx.io:executable() error(cancelled, 0) end
+        ok, err = pcall(incremental.physical_executable, ctx, "tool")
+        assert.is_false(ok)
+        assert.equal(cancelled, err)
+    end)
+
+    it("does not skip a Windows tool because it is unreadable", function()
+        local platform = require "titan-compiler.platform"
+        local original = platform.windows
+        local ctx = context({ ["C:/first/tool.exe"] = "selected", ["C:/later/tool.exe"] = "later" })
+        ctx.executable_path = "C:/first;C:/later"
+        function ctx.io:readable() error("Windows selection must not test readability") end
+        function ctx.io:executable() error("Windows selection must not query POSIX eligibility") end
+        platform.windows = true
+        local ok, identity, selected = pcall(incremental.physical_executable, ctx, "tool.exe")
+        platform.windows = original
+        assert.is_true(ok, identity)
+        assert.equal("C:/first/tool.exe", identity.path)
+        assert.equal("C:/first/tool.exe", selected)
+        assert.equal(0, #ctx.io.commands)
     end)
 
     it("probes one flagless toolchain description independently of effective options", function()

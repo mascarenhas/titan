@@ -103,6 +103,69 @@ describe("compiler I/O strategy", function()
         end, "compiler I/O strategy method 'read_file' must be callable")
     end)
 
+    it("keeps execution eligibility an optional strategy capability", function()
+        local strategy = compiler_io.new_sync()
+        strategy.executable = false
+        assert.equal(strategy, compiler_io.validate(strategy))
+    end)
+
+    it("delegates effective execution eligibility without opening the file", function()
+        local support, strategy = require "titan", compiler_io.new_sync()
+        local checked, result, diagnostic = {}, true, nil
+        with_overrides(support, { _executable_access = function(path)
+            checked[#checked + 1] = path
+            return result, diagnostic
+        end }, function()
+            with_overrides(io, { open = function()
+                error("execution eligibility must not open or read a file")
+            end }, function()
+                assert.is_true(strategy:executable("/route/link/../tool"))
+                result = false
+                assert.is_false(strategy:executable("/route/link/../tool"))
+                result, diagnostic = nil, "native eligibility query failed"
+                local allowed, err = strategy:executable("/route/link/../tool")
+                assert.is_nil(allowed)
+                assert.equal(diagnostic, err)
+                assert.same({ "/route/link/../tool", "/route/link/../tool",
+                    "/route/link/../tool" }, checked)
+            end)
+        end)
+    end)
+
+    it("fails closed when native execution eligibility is unavailable", function()
+        with_overrides(require "titan", { _executable_access = false }, function()
+            local allowed, err = compiler_io.new_sync():executable("tool")
+            assert.is_nil(allowed)
+            assert.matches("native support lacks _executable_access", err, 1, true)
+        end)
+    end)
+
+    it("validates execution query paths before calling native support", function()
+        with_overrides(require "titan", { _executable_access = function()
+            error("malformed paths must not reach native support")
+        end }, function()
+            local strategy = compiler_io.new_sync()
+            local allowed, err = strategy:executable(false)
+            assert.is_nil(allowed)
+            assert.equal("path must be a string", err)
+            allowed, err = strategy:executable("bad\0path")
+            assert.is_nil(allowed)
+            assert.equal("path contains a NUL byte", err)
+        end)
+    end)
+
+    it("propagates native execution query cancellation unchanged", function()
+        local cancelled = {}
+        with_overrides(require "titan", { _executable_access = function()
+            error(cancelled, 0)
+        end }, function()
+            local strategy = compiler_io.new_sync()
+            local ok, err = pcall(strategy.executable, strategy, "tool")
+            assert.is_false(ok)
+            assert.equal(cancelled, err)
+        end)
+    end)
+
     it("keeps the synchronous yield checkpoint a no-op", function()
         local strategy = compiler_io.new_sync()
         local co = coroutine.create(function()

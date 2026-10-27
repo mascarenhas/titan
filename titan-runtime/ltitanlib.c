@@ -421,6 +421,30 @@ static int push_errno(lua_State *L, const char *what, int error_number) {
   return 2;
 }
 
+/* Effective execution permission is independent of file readability and of
+** execute bits granted to some other credential class. */
+static int executable_access(lua_State *L) {
+  size_t length;
+  const char *path = luaL_checklstring(L, 1, &length);
+  int result, error_number;
+  if (memchr(path, '\0', length) != NULL)
+    return luaL_argerror(L, 1, "path contains a NUL byte");
+  do result = faccessat(AT_FDCWD, path, X_OK, AT_EACCESS);
+  while (result != 0 && errno == EINTR);
+  if (result == 0) {
+    lua_pushboolean(L, 1);
+    return 1;
+  }
+  error_number = errno;
+  if (error_number == EACCES || error_number == ENOENT ||
+      error_number == ENOTDIR) {
+    lua_pushboolean(L, 0);
+    return 1;
+  }
+  return push_errno(L, "cannot check effective execution permission",
+                    error_number);
+}
+
 static int push_failure(lua_State *L, const char *message) {
   lua_pushnil(L);
   lua_pushstring(L, message);
@@ -1381,6 +1405,7 @@ static const luaL_Reg titanlib[] = {
   { "_abivalue", abivalue },
   { "_native_process_tree_guard", native_process_tree_guard },
 #else
+  { "_executable_access", executable_access },
   { "_jobserver_open", jobserver_open },
   { "_jobserver_wait", jobserver_wait },
   { "_signal_guard", signal_guard },
