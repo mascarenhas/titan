@@ -59,7 +59,11 @@ When `titanc` runs (`titanc`, excluding `--print-root` and
    misses and prepending the resulting `.o` paths before `-X` payloads. A
    compile-only invocation stops here; with `--print-c-objects` it writes one
    absolute object path per `--c-source` argument to stdout after releasing
-   its locks.
+   its locks. A `-c` invocation with `--c-source` files and no Titan roots or
+   `--test-dir` skips the module graph and the Titan foreign-type profile: it
+   initializes only the platform, runs the output preflight with an empty
+   plan, and still computes the toolchain identity and preprocesses and
+   certifies each C node.
 6. **Gate the final link.** Unless `-c` is active, `linkcertificate.prepare`
    builds the target's recipe and output inventory,
    `driver.prepare_foreign_headers` restores any missing `.ffi.h`/`.titan.h`
@@ -238,9 +242,13 @@ checker, code generator, or C preprocessor:
   `.dSYM`, the Windows launcher and provider DLL, or the library provider,
   archive, `.dSYM`, and generated Lua shims, including shims of modules
   carried by already-selected static archives.
-* **Protected inputs.** `--c-source` files, every source constituent, the
-  non-`search` C headers recorded by cached modules, and selected binary
-  providers and archives are inputs that no output may alias.
+* **Protected inputs.** `--c-source` files and `-X` payloads, every source
+  constituent, the non-`search` C headers recorded by cached modules, selected
+  binary providers and archives, every held `.titan-build.lock` file, and the
+  metadata roots `.titan/`, `.titan-links/`, and `.native/` of the first lock
+  domain are inputs that no output may alias. Final outputs that would replace
+  a lock file or a metadata root are therefore rejected before any
+  invalidation.
 * **Graph-dependent CLI checks.** For roots without a certified record, the
   pass parses declarations only and follows transparent local and imported
   aliases to find an exact `main(args: {string}): integer`. It then rejects
@@ -501,11 +509,18 @@ Worker lifetime is bounded even if the coordinator terminates abnormally:
   `uv.run("nowait")` testing whether `fd 3` reached EOF or error). Both
   `yield` and `Session:run_batch` exit immediately with status 3 (`titanc build
   worker: the build coordinator exited`) if the coordinator closed `fd 3`.
-* **POSIX lock inheritance.** Because workers inherit the open `.titan-build.lock`
-  file descriptors (`fds 4..`), an abrupt `SIGKILL` of the coordinator leaves
-  the kernel `flock` held until every surviving worker and its child compilers
-  have exited. A subsequent `titanc` invocation waiting in `build.lock_outputs`
-  cannot enter the output tree while an orphaned worker is still writing.
+* **POSIX lock inheritance.** Workers inherit the open `.titan-build.lock`
+  file descriptors (`fds 4..`), and every native writer the coordinator starts
+  receives them too: synchronous `process.run`/`process.capture` commands and
+  the shell wrappers of local FIFO-notified native batches are launched with
+  `options.inherit = driver.OUTPUT_LOCKS:descriptors()`. An abrupt `SIGKILL`
+  of the coordinator therefore leaves the kernel `flock` held until every
+  surviving worker, native job, and child compiler has exited, and a
+  subsequent `titanc` invocation waiting in `build.lock_outputs` cannot enter
+  the output tree while an orphan is still writing. Each FIFO wrapper keeps
+  the completion FIFO open read-write for its own lifetime, so writing its
+  completion line never blocks on a vanished reader while it holds those
+  leases.
 * **Windows process-tree job.** Before the first spawn through
   `process.lua`, `contain_native_processes` calls the runtime's
   `titan._native_process_tree_guard()`, which creates a Job Object with

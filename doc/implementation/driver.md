@@ -2477,9 +2477,12 @@ object's authoritative target fingerprint.
 
 Configured tool names reach the process transport unchanged. Titan does not
 resolve executables, append extensions, or inspect binary formats before launch.
-The operating system reports lookup and execution failures. Serial
-inherited-output commands retain `os.execute`; their renderer applies C-runtime
-quoting followed by `cmd` escaping and sets `LANG=C` and `LC_ALL=C`.
+The operating system reports lookup and execution failures. On Windows,
+serial inherited-output commands, including native links, launch through
+`process.run` with the parsed argument array, sharing the compiler's standard
+streams under the same process-tree guard as worker and batch launches. The
+Windows renderer (C-runtime quoting followed by `cmd` escaping) only formats
+the verbose command echo.
 
 Windows native links use `driver.run_link_command` to avoid the `cmd.exe`
 command-length limit as the number or length of object paths grows. It first
