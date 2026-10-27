@@ -593,6 +593,43 @@ describe("Windows compiler path integration", function()
         assert.is_nil(ok)
         assert.matches("output parent 'C:/project/link_parent' is not a directory", err, 1, true)
 
+        stat_entries["C:/project/link_parent"] = {
+            kind = "directory", mode = 0x41ff, size = 0,
+            device = "100", inode = "5",
+        }
+        lstat_entries["C:/project/build/app.o"] = {
+            kind = "file", mode = 0x81b6, size = 64,
+            device = "100", inode = "99",
+        }
+        lstat_entries["C:/project/hardlinked_input.o"] = {
+            kind = "file", mode = 0x81b6, size = 64,
+            device = "100", inode = "99",
+        }
+        ok, err = driver.validate_program_output_paths(
+            sources, "C:/project/build/bin/app.exe",
+            "C:/project/build/synthetic/app__entrypoint.c",
+            { "C:/project/hardlinked_input.o" })
+        assert.is_nil(ok)
+        assert.matches("aliases input 'C:/project/hardlinked_input.o'", err, 1, true)
+
+        lstat_entries["C:/project/build/app.o"] = {
+            kind = "file", mode = 0x81b6, size = 64,
+        }
+        lstat_entries["C:/project/hardlinked_input.o"] = {
+            kind = "file", mode = 0x81b6, size = 64,
+        }
+        ok, err = driver.validate_program_output_paths(
+            sources, "C:/project/build/bin/app.exe",
+            "C:/project/build/synthetic/app__entrypoint.c",
+            { "C:/project/hardlinked_input.o" })
+        assert.is_true(ok, err)
+        ok, err = driver.validate_program_output_paths(
+            sources, "C:/project/build/bin/app.exe",
+            "C:/project/build/synthetic/app__entrypoint.c",
+            { [[c:\PROJECT\build\APP.O]] })
+        assert.is_nil(ok)
+        assert.matches("aliases input", err, 1, true)
+
         io_error_method = "lstat"
         io_error_path = "C:/project"
         ok, err = driver.validate_program_output_paths(
@@ -2414,10 +2451,11 @@ describe("loader resolver ownership", function()
     it("closes the titanc resolver when an unexpected error unwinds the chunk",
     function()
         local close_calls = 0
+        local fake_context = { io = {} }
         local fake_driver = {
             TITAN_SOURCE_PATH = ".",
             deduplicate_module_names = function(modules) return modules end,
-            new_resolver_context = function() return { io = {} } end,
+            new_resolver_context = function() return fake_context end,
             apply_native_inputs = function() end,
             configure_foreign_c = function() end,
             default_c_parts = function() return 1 end,
@@ -2425,7 +2463,7 @@ describe("loader resolver ownership", function()
                 error("injected titanc loader failure")
             end,
             close_resolver_context = function(context)
-                assert.is_table(context)
+                assert.equal(fake_context, context)
                 close_calls = close_calls + 1
                 return true
             end,
@@ -2460,9 +2498,13 @@ describe("loader resolver ownership", function()
             argparse = fake_argparse,
             ["titan-compiler.build"] = {
                 lock_outputs = function()
-                    return { release = function() end }
+                    return {
+                        descriptors = function() return { 17 } end,
+                        release = function() end,
+                    }
                 end,
                 run = function()
+                    assert.same({ 17 }, fake_context.io._process_inherit)
                     error("injected titanc loader failure")
                 end,
             },
@@ -2501,6 +2543,220 @@ describe("loader resolver ownership", function()
         assert.matches("injected titanc loader failure", tostring(err),
             1, true)
         assert.equal(1, close_calls)
+        assert.is_nil(fake_context.io._process_inherit)
+    end)
+
+    it("skips Titan FFI and module graph setup for C-only compile-only invocations",
+    function()
+        local function run_cli(parsed_args)
+            local events = {
+                initialize_platform = 0,
+                configure_foreign_c = 0,
+                build_run = 0,
+                defaultloader = 0,
+                preflight = 0,
+                native_compile = 0,
+                load_digest_cache = 0,
+                save_digest_cache = 0,
+                close_context = 0,
+                release_locks = 0,
+                stdout = {},
+            }
+            local fake_context = { io = {} }
+            local fake_driver = {
+                TITAN_SOURCE_PATH = ".",
+                EXTRA_CPPFLAGS = {},
+                EXTRA_CFLAGS = {},
+                EXTRA_LDFLAGS = {},
+                deduplicate_module_names = function(modules) return modules end,
+                new_resolver_context = function() return fake_context end,
+                prepare_output_root = function(dir) return dir end,
+                apply_native_inputs = function() end,
+                initialize_platform = function(context)
+                    assert.equal(fake_context, context)
+                    events.initialize_platform = events.initialize_platform + 1
+                    return true
+                end,
+                configure_foreign_c = function(context)
+                    assert.equal(fake_context, context)
+                    events.configure_foreign_c = events.configure_foreign_c + 1
+                    return true
+                end,
+                default_c_parts = function() return 1 end,
+                defaultloader = function()
+                    events.defaultloader = events.defaultloader + 1
+                    return function() return true end
+                end,
+                preflight_build_outputs = function(context, plan, opts)
+                    assert.equal(fake_context, context)
+                    assert.same({ 19 }, context.io._process_inherit)
+                    events.preflight = events.preflight + 1
+                    events.preflight_plan = plan
+                    events.preflight_options = opts
+                    return true
+                end,
+                generated_compile_prefix = function() return { "cc" } end,
+                toolchain_descriptor = function() return { compiler_argv = { "cc" } } end,
+                close_resolver_context = function(context)
+                    assert.equal(fake_context, context)
+                    events.close_context = events.close_context + 1
+                    return true
+                end,
+            }
+            local argument_parser = {}
+            local chain = {
+                args = function(self) return self end,
+                count = function(self) return self end,
+                action = function(self) return self end,
+            }
+            function argument_parser:argument() return chain end
+            function argument_parser:flag() return chain end
+            function argument_parser:option() return chain end
+            function argument_parser:parse() return parsed_args end
+            local fake_argparse = setmetatable({}, {
+                __call = function() return argument_parser end,
+            })
+            local modules = {
+                argparse = fake_argparse,
+                ["titan-compiler.build"] = {
+                    lock_outputs = function()
+                        return {
+                            descriptors = function() return { 19 } end,
+                            release = function()
+                                events.release_locks = events.release_locks + 1
+                            end,
+                        }
+                    end,
+                    run = function(context, request)
+                        assert.equal(fake_context, context)
+                        events.build_run = events.build_run + 1
+                        if request.preflight then
+                            assert(request.preflight({ order = {}, modules = {} }))
+                        end
+                        return true
+                    end,
+                },
+                ["titan-compiler.checker"] = {},
+                ["titan-compiler.coder"] = {},
+                ["titan-compiler.coverage"] = {},
+                ["titan-compiler.parser"] = {},
+                ["titan-compiler.path"] = paths,
+                ["titan-compiler.driver"] = fake_driver,
+                ["titan-compiler.incremental"] = {
+                    load_digest_cache = function()
+                        events.load_digest_cache = events.load_digest_cache + 1
+                        return true
+                    end,
+                    save_digest_cache = function()
+                        events.save_digest_cache = events.save_digest_cache + 1
+                        return true
+                    end,
+                },
+                ["titan-compiler.nativeinputs"] = {
+                    normalize = function(request)
+                        return {
+                            c_sources = request.cli.c_sources or {},
+                        }
+                    end,
+                    compile = function(context, request)
+                        assert.equal(fake_context, context)
+                        assert.same({ 19 }, context.io._process_inherit)
+                        events.native_compile = events.native_compile + 1
+                        local out = {}
+                        for index, src in ipairs(request.sources) do
+                            out[index] = {
+                                source = src,
+                                path = "/out/.native/obj" .. index .. ".o",
+                                hit = true,
+                            }
+                        end
+                        return out
+                    end,
+                },
+                ["titan-compiler.linkcertificate"] = {},
+                ["titan-compiler.platform"] = {
+                    windows = false,
+                    getenv = function() return nil end,
+                },
+                ["titan-compiler.test_runner"] = {},
+                ["titan-compiler.util"] = {},
+                titan = { _sha256_binary = function() return string.rep("\0", 32) end },
+            }
+            local fake_io = setmetatable({
+                stdout = {
+                    write = function(_, ...)
+                        for i = 1, select("#", ...) do
+                            events.stdout[#events.stdout + 1] = tostring(select(i, ...))
+                        end
+                        return true
+                    end,
+                },
+            }, { __index = io })
+            local environment = setmetatable({
+                arg = {},
+                io = fake_io,
+                require = function(name)
+                    return assert(modules[name], "unexpected module " .. name)
+                end,
+            }, { __index = _G })
+            local chunk = assert(loadfile("titanc", "t", environment))
+            local ok, err = pcall(chunk)
+            assert.is_true(ok, tostring(err))
+            assert.is_nil(fake_context.io._process_inherit)
+            return events
+        end
+
+        local c_only = run_cli({
+            module = {},
+            compile_only = true,
+            print_c_objects = true,
+            output = "/out",
+            extra_object = nil,
+            coverage_module = {},
+            coverage_format = {},
+            test_dir = {},
+            test_exclude = {},
+            c_source = { "first.c", "second.c" },
+            link = {},
+            library_dir = {},
+            ldflag = {},
+        })
+        assert.equal(1, c_only.initialize_platform)
+        assert.equal(0, c_only.configure_foreign_c)
+        assert.equal(0, c_only.build_run)
+        assert.equal(0, c_only.defaultloader)
+        assert.equal(1, c_only.preflight)
+        assert.same({ order = {}, modules = {} }, c_only.preflight_plan)
+        assert.same({}, c_only.preflight_options.roots)
+        assert.is_true(c_only.preflight_options.compile_only)
+        assert.same({ "first.c", "second.c" }, c_only.preflight_options.native_inputs)
+        assert.equal(1, c_only.native_compile)
+        assert.equal(1, c_only.load_digest_cache)
+        assert.equal(1, c_only.save_digest_cache)
+        assert.equal(1, c_only.close_context)
+        assert.equal(1, c_only.release_locks)
+        assert.equal("/out/.native/obj1.o\n/out/.native/obj2.o\n",
+            table.concat(c_only.stdout))
+
+        local mixed = run_cli({
+            module = { "app" },
+            compile_only = true,
+            print_c_objects = true,
+            output = "/out",
+            extra_object = nil,
+            coverage_module = {},
+            coverage_format = {},
+            test_dir = {},
+            test_exclude = {},
+            c_source = { "first.c" },
+            link = {},
+            library_dir = {},
+            ldflag = {},
+        })
+        assert.equal(1, mixed.configure_foreign_c)
+        assert.equal(1, mixed.build_run)
+        assert.equal(1, mixed.preflight)
+        assert.equal(1, mixed.native_compile)
     end)
 
     it("closes internally owned default and table resolvers exactly once",
@@ -7120,6 +7376,165 @@ end
         assert.equal("source module 'provider' does not match a compiled " ..
             "interface already used in this compilation", errors[1])
         assert.equal("source", driver.imported.provider.kind)
+    end)
+
+    it("retains immutable snapshots of every consumed compiled view across source replacement and mutable tableloader descriptors",
+    function()
+        local first_dir = root .. "/first-bin"
+        local second_dir = root .. "/second-bin"
+        assert(lfs.mkdir(first_dir))
+        assert(lfs.mkdir(second_dir))
+        local first_so = first_dir .. provider_path("/provider.so")
+        local second_so = second_dir .. provider_path("/provider.so")
+        local integer_provider = types.Module("provider", {
+            types.ModuleMember("provider", "answer",
+                types.Function({}, { types.Integer() }, false, nil, nil), {}),
+        })
+        local string_provider = types.Module("provider", {
+            types.ModuleMember("provider", "answer",
+                types.Function({}, { types.String() }, false, nil, nil), {}),
+        })
+        write_file(first_so, "first dynamic provider\n")
+        write_file(second_so, "second dynamic provider\n")
+        mock_native_abi(first_so, { provider = driver.TITAN_ABI_VERSION })
+        mock_native_abi(second_so, { provider = driver.TITAN_ABI_VERSION })
+        titan._loadlib = function(filename, symbol)
+            local selected = filename == first_so and integer_provider
+                or filename == second_so and string_provider
+                or error("unexpected provider " .. tostring(filename))
+            if symbol == "provider_abi" then
+                return function() return driver.TITAN_ABI_VERSION end
+            elseif symbol == "provider_types" then
+                local serialized = types.serialize(selected)
+                return function() return serialized end
+            elseif symbol == "provider_layouts" then
+                return function() return empty_layouts("provider") end
+            end
+            error("unexpected symbol " .. symbol)
+        end
+
+        write_file(source .. "/first_consumer.titan", [[
+            local provider = import "provider"
+            function answer(): integer return provider.answer() end
+        ]])
+        write_file(source .. "/second_consumer.titan", [[
+            local provider = import "provider"
+            function answer(): integer return provider.answer() end
+        ]])
+        write_file(source .. "/provider.titan", [[
+            local function secret(): integer return 40 end
+            function answer(): integer return secret() + 2 end
+        ]])
+        write_file(source .. "/matching_source_root.titan", [[
+            local provider = import "provider.titan"
+            function answer(): integer return provider.secret() + provider.answer() end
+        ]])
+
+        driver.TITAN_BIN_PATH = first_dir
+        local context = driver.new_resolver_context()
+        local loader = driver.defaultloader({}, {
+            context = context,
+            source_roots = {
+                first_consumer = true,
+                second_consumer = true,
+                matching_source_root = true,
+            },
+        })
+        local loaded, result, errors = loader("first_consumer")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        loaded, result, errors = loader("second_consumer")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.equal("dynamic", driver.imported.provider.kind)
+        assert.equal(first_so, driver.imported.provider.filename)
+
+        loaded, result, errors = loader("matching_source_root")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.equal("source", driver.imported.provider.kind)
+        assert.is_table(driver.imported.provider.type.source_members.secret)
+        assert.is_true(driver.close_loader(loader))
+        assert.is_true(driver.close_resolver_context(context))
+
+        -- Consuming two distinct compiled views of `provider` in one resolver
+        -- context and then replacing `provider` with source matching only the
+        -- second view must still reject against the first recorded view.
+        write_file(source .. "/string_consumer.titan", [[
+            local provider = import "provider"
+            function answer(): string return provider.answer() end
+        ]])
+        write_file(source .. "/provider.titan", [[
+            function answer(): string return "matches second only" end
+        ]])
+        write_file(source .. "/mismatch_source_root.titan", [[
+            local provider = import "provider.titan"
+            function answer(): string return provider.answer() end
+        ]])
+        driver.imported, types.registry = {}, {}
+        local multi_ctx = driver.new_resolver_context()
+        local multi_loader = driver.defaultloader({}, {
+            context = multi_ctx,
+            source_roots = {
+                first_consumer = true,
+                string_consumer = true,
+                mismatch_source_root = true,
+            },
+        })
+        driver.TITAN_BIN_PATH = first_dir
+        loaded, result, errors = multi_loader("first_consumer")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+
+        driver.imported.provider = nil
+        driver.TITAN_BIN_PATH = second_dir
+        loaded, result, errors = multi_loader("string_consumer")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+
+        loaded, result, errors = multi_loader("mismatch_source_root")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(1, #errors)
+        assert.equal("source module 'provider' does not match a compiled " ..
+            "interface already used in this compilation", errors[1])
+        assert.is_true(driver.close_loader(multi_loader))
+        assert.is_true(driver.close_resolver_context(multi_ctx))
+
+        -- Mutating a caller-held tableloader Type.Module descriptor in-place
+        -- across A -> B -> A returns must snapshot each returned projection
+        -- so a later source replacement matching A still rejects B.
+        local mutable_fn = types.Function({}, { types.Integer() }, false, nil, nil)
+        local mutable_compiled = types.Module("cached", {
+            types.ModuleMember("cached", "answer", mutable_fn, {}),
+        })
+        local imported = {
+            cached = { kind = "dynamic", type = mutable_compiled },
+        }
+        local table_loader = driver.tableloader({
+            cached = [[
+                function answer(): integer return 7 end
+            ]],
+        }, imported)
+        loaded, result, errors = table_loader("cached")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors)
+
+        mutable_fn.rettypes[1] = types.String()
+        loaded, result, errors = table_loader("cached")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors)
+
+        mutable_fn.rettypes[1] = types.Integer()
+        loaded, result, errors = table_loader("cached")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors)
+
+        loaded, result, errors = table_loader("cached", { kind = "source-import" })
+        assert.truthy(loaded, tostring(result))
+        assert.equal(1, #errors)
+        assert.equal("source module 'cached' does not match a compiled " ..
+            "interface already used in this compilation", errors[1])
+        assert.is_true(driver.close_tableloader(table_loader))
     end)
 
     it("does not fall back to a cached compiled provider for an " ..
