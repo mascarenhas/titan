@@ -351,10 +351,16 @@ be proven) selects raw compilation. The resolver then keeps
 objects are never reused: planning parses and selects fresh source, and
 generated objects carry their ordinary metadata but no producer interface
 digests and no certificate, so a later unchanged invocation still cannot hit.
-The final link and `--c-source` nodes are likewise marked uncacheable.
-`driver.native_link_backend` keeps an uncertain backend status rather than
-memoizing a guessed backend. Any other configuration failure is still an
-invocation error, and non-string cancellations propagate unchanged.
+The final link and `--c-source` nodes are likewise marked uncacheable. Any
+other configuration failure is still an invocation error, and non-string
+cancellations propagate unchanged.
+
+Uncertainty limited to final output (an uncertain linker backend from
+`driver.native_link_backend`, which is never memoized as a guessed backend,
+or an uncertified final output tool) is a separate layer. It reaches only the
+final-link request as its `uncacheable` reason, so that target's link ticket
+neither hits nor records, while module objects and `--c-source` nodes keep
+their own valid certificates and can still hit.
 
 The four component digests are stored separately in the record so a mismatch
 reports the exact component:
@@ -438,11 +444,16 @@ reports the exact component:
      delegate, cannot be certified.
 
    A tool that cannot be certified makes `physical_executable` return
-   `nil, reason, "uncertified"` instead of an identity; the build still runs
-   with that tool but is not cacheable, so it neither hits nor records a
-   certificate. A successful selection always returns the physical identity
-   and, second, the admitted spelling of the candidate actually selected.
-   Admission never reads tool contents.
+   `nil, reason, "uncertified"` instead of an identity. The build still runs
+   with that tool; what loses reuse depends on which tool it is. An
+   uncertified compiler configuration selects raw compilation (above): no
+   module object, `--c-source` node, or final link can hit or record a
+   certificate. When only a final output tool or the linker policy is
+   uncertified, only that target's final-link ticket neither hits nor records;
+   independently certified module objects and C nodes can still hit. A
+   successful selection always returns the physical identity and, second, the
+   admitted spelling of the candidate actually selected. Admission never reads
+   tool contents.
 
    Tool executables are certified by self-description plus physical metadata
    rather than by hashing the compiler binary bytes. The change timestamp
