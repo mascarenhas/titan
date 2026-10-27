@@ -62,8 +62,19 @@ end
 
 local function run(argv)
     argv = { table.unpack(argv) }
-    if platform.windows and argv[1] == "env" then argv[1] = "env.exe" end
-    local result = compiler_io.new_sync():run(argv)
+    local options
+    if platform.windows and argv[1] == "env" then
+        local variables, rest = {}, {}
+        local index = 2
+        while argv[index] and argv[index]:find("=", 1, true) do
+            local name, value = argv[index]:match("^([^=]+)=(.*)$")
+            variables[name] = value
+            index = index + 1
+        end
+        for i = index, #argv do rest[#rest + 1] = argv[i] end
+        argv, options = rest, { env = variables }
+    end
+    local result = compiler_io.new_sync():run(argv, options)
     local output = result.output or result.diagnostic or ""
     if platform.windows then output = output:gsub("\r\n", "\n") end
     return result.started and result.ok, output, result.why, result.status
@@ -166,6 +177,9 @@ end
 
 local function private_sdk()
     sdk_root = workspace .. "/sdk"
+    if platform.windows then
+        copy_tree(prefix .. "/bin", sdk_root .. "/bin")
+    end
     copy_tree(prefix .. "/include", sdk_root .. "/include")
     if exists(prefix .. "/src/lua-5.5.1") then
         copy_tree(prefix .. "/src/lua-5.5.1", sdk_root .. "/src/lua-5.5.1")
@@ -242,10 +256,11 @@ local function certified_exit(expected)
         assert(driver.windows_program_paths(APP, nil, nil, workspace .. "/build")).executable
         or workspace .. "/build/" .. APP
     local argv = { "env",
-        "PATH=" .. prefix .. "/bin" .. (platform.windows and ";" or ":") ..
+        "PATH=" .. (sdk_root or prefix) .. "/bin" .. (platform.windows and ";" or ":") ..
             (os.getenv("PATH") or ""),
-        "TITAN_PATH_0_6=" .. workspace .. "/build" ..
-            (platform.windows and "/lib/titan/0.6" or "") .. ";" ..
+        "TITAN_PATH_0_6=" ..
+            (platform.windows and (workspace .. "/build/lib/titan/0.6;") or "") ..
+            workspace .. "/build;" ..
             (sdk_root or prefix) .. "/lib/titan/0.6;;", executable }
     if platform.windows then table.insert(argv, 2, "MSYS2_ENV_CONV_EXCL=TITAN_PATH_0_6") end
     local ok, output, why, status = run(argv)
