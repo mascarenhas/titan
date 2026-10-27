@@ -4,6 +4,7 @@ local certificate = require "titan-compiler.linkcertificate"
 local incremental = require "titan-compiler.incremental"
 local lfs = require "lfs"
 local platform = require "titan-compiler.platform"
+local paths = require "titan-compiler.path"
 local temporary = require "spec.support.temporary"
 local util = require "titan-compiler.util"
 local version = require "titan-compiler.version"
@@ -22,7 +23,7 @@ local function context() return { io = compiler_io.new_sync() } end
 local function write(path, bytes) assert(context().io:write_file(path, bytes)) end
 local function escape(path) return path:gsub("%$", "$$"):gsub("([ #])", "\\%1") end
 local function native_spelling(path)
-    return platform.windows and assert(platform.path.normalize(path)) or path
+    return platform.windows and paths.normalize(path) or path
 end
 local function observation_key(path)
     return platform.windows and path:gsub("\\", "/") or path
@@ -520,13 +521,17 @@ dofile(%q .. "/titanc")
             error("missing final output record for " .. executable)
         end
         local first_companion = platform.windows and companion_snapshot(exe("tests-one"))
+        local first_provider_bytes = first_companion and read(first_companion.path)
+        if first_companion then assert.not_equal("", first_provider_bytes) end
         local companion_changed = false
         compile({ "--test", "--exe", exe("tests-two"), "checks" })
         assert.matches("render", read(log), 1, true)
         if first_companion then
             local second_companion = companion_snapshot(exe("tests-two"))
             assert.equal(first_companion.path, second_companion.path)
-            companion_changed = first_companion.identity ~= second_companion.identity
+            local second_provider_bytes = read(second_companion.path)
+            assert.not_equal("", second_provider_bytes)
+            companion_changed = first_provider_bytes ~= second_provider_bytes
         end
         write(log, "")
         compile({ "--test", "--exe", exe("tests-one"), "checks" })
@@ -1300,7 +1305,7 @@ describe("linker dependency-feature memo", function()
         assert(certificate.commit(ctx, ticket))
         local record = assert(certificate.read_record(ctx, ticket.record))
         assert.equal(1, #record.native)
-        assert.equal(native_spelling(object), record.native[1].path)
+        assert.equal(object, record.native[1].path)
         assert.is_true(certificate.check(model:context(), ticket))
         write(object, "changed reported object")
         assert.is_false(certificate.check(model:context(), ticket))
@@ -1526,7 +1531,7 @@ describe("linker dependency-feature memo", function()
             function ctx.io:realpath(path) return realpath(self, is_alias(path) and target or path) end
             local identity, admitted = incremental.physical_executable(ctx, alias, mode == "llvm" and "llvm" or nil)
             assert.equal(native_spelling(target), identity.path)
-            assert.equal(native_spelling(alias), admitted)
+            assert.equal(alias, admitted)
         end
     end)
 
@@ -1568,7 +1573,7 @@ describe("linker dependency-feature memo", function()
                 else
                     assert.is_true(ok, identity)
                     assert.equal(native_spelling(alias .. ".exe"), identity.path)
-                    assert.equal(native_spelling(alias .. ".exe"), reason)
+                    assert.equal(alias .. ".exe", reason)
                 end
             end
         end)
@@ -1778,7 +1783,7 @@ describe("linker dependency-feature memo", function()
         assert.equal(native_spelling(selected), tools.linker.identity.path)
         assert.same({ reported }, tools.linker.argv)
         local _, admitted = incremental.physical_executable(ctx, tools.linker.argv, options.compiler_stage_policy or "llvm")
-        assert.equal(native_spelling(selected), admitted)
+        assert.equal(selected, admitted)
         assert.is_nil(ctx.io.reads[root .. "/main.o"])
         assert(model:context().io:write_file(shadow .. "/ld.lld.exe", "edit"))
         ctx, ticket = final_ticket(options, shadow)
