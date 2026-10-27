@@ -66,8 +66,9 @@ local function run(argv)
     if platform.windows and argv[1] == "env" then
         local variables, rest = {}, {}
         local index = 2
-        while argv[index] and argv[index]:find("=", 1, true) do
-            local name, value = argv[index]:match("^([^=]+)=(.*)$")
+        while argv[index] do
+            local name, value = argv[index]:match("^([%a_][%w_]*)=(.*)$")
+            if not name then break end
             variables[name] = value
             index = index + 1
         end
@@ -94,9 +95,6 @@ local function run_program(name, ...)
         ".;" .. prefix .. "/lib/titan/0.6",
         "PATH=" .. prefix .. "/bin" .. (platform.windows and ";" or ":") ..
             (os.getenv("PATH") or ""), program_path(name) }
-    if platform.windows then
-        table.insert(argv, 2, "MSYS2_ENV_CONV_EXCL=TITAN_PATH_0_6")
-    end
     for _, value in ipairs({ ... }) do argv[#argv + 1] = value end
     return run(argv)
 end
@@ -262,7 +260,6 @@ local function certified_exit(expected)
             (platform.windows and (workspace .. "/build/lib/titan/0.6;") or "") ..
             workspace .. "/build;" ..
             (sdk_root or prefix) .. "/lib/titan/0.6;;", executable }
-    if platform.windows then table.insert(argv, 2, "MSYS2_ENV_CONV_EXCL=TITAN_PATH_0_6") end
     local ok, output, why, status = run(argv)
     assert.equal("exit", why, output)
     assert.equal(expected, status, output)
@@ -335,7 +332,6 @@ describe("incremental and separate compilation (CLI)", function()
         local executable = platform.windows and
             assert(driver.windows_program_paths(APP, nil, nil, output)).executable or output .. "/" .. APP
         local command = { "env", "TITAN_PATH_0_6=" .. prefix .. "/lib/titan/0.6;;", executable }
-        if platform.windows then table.insert(command, 2, "MSYS2_ENV_CONV_EXCL=TITAN_PATH_0_6") end
         local ok, text, why, code = run(command)
         assert.equal("exit", why, text)
         assert.equal(42, code, text)
