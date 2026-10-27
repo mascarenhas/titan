@@ -936,6 +936,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "spec/support/run_with_timeout.sh",
             "spec/support/clean_generated_test_artifacts.sh",
             "spec/support/clean_generated_test_artifacts.lua",
+            "spec/support/build_windows_stdlib_native.sh",
             "spec/fixtures/stdlib/native/async_foreign_work.c",
             "spec/fixtures/stdlib/native/async_foreign_work.h",
             "spec/fixtures/stdlib/native/os_process_child.c",
@@ -2642,6 +2643,7 @@ printf '%s\n' "$TITAN_ROCKS_ROOT" "$TITAN_RUNTIME_PREBUILT" \
         for _, name in ipairs({
                 "Makefile.win", "scripts/windows_build_profile.sh",
                 "spec/support/windows_stdlib_tests.sh",
+                "spec/support/build_windows_stdlib_native.sh",
                 "scripts/windows_native_coverage.sh",
                 "spec/support/stdlib_test_modules.mk",
                 "spec/support/check_stdlib_test_output.lua" }) do
@@ -2775,6 +2777,9 @@ fi
         ok, output = harness("build")
         assert.truthy(ok, output)
         local raw_commands = read_file(native_log)
+        assert.truthy(raw_commands:find(work .. "/sdk/bin/process child ação 東京.exe", 1, true), raw_commands)
+        assert_file(work .. "/sdk/bin/process child ação 東京.exe")
+        assert.falsy(read_file(repository .. "/Makefile.win"):find("process child ação 東京.exe", 1, true))
         local native_compiles = read_file(c_compile_log)
         local links = read_file(link_log)
         local commands = read_file(compiler_log)
@@ -2870,6 +2875,72 @@ fi
         ok, output = harness("run", true)
         assert.truthy(ok, output)
         assert.equal(1000, lfs.attributes(notes, "modification"))
+    end)
+
+    it("builds and reuses the exact Unicode Windows host child through native Make", function()
+        if not platform.windows then
+            pending("native Windows Make UTF-8 output boundary")
+            return
+        end
+        workspace = temporary_directory("windows-native-child-name")
+        local repository = assert(lfs.currentdir())
+        local work = workspace .. "/native workspace"
+        local inputs = work .. "/cwd/spec/fixtures/stdlib/native"
+        local bin = work .. "/sdk/bin"
+        make_directory(inputs)
+        make_directory(bin)
+        write_file(work .. "/.titan-test-owner", "titan-windows-stdlib-tests-v1\n")
+        for _, name in ipairs({ "os_process_host_child.c", "os_process_host_child_windows.h",
+                "windows_test_supervisor.c" }) do
+            write_file(inputs .. "/" .. name,
+                read_file(repository .. "/spec/fixtures/stdlib/native/" .. name))
+        end
+        local compiler = assert(cdriver.split_shell_words(os.getenv("CC") or "clang.exe"))
+        assert.truthy(compiler[1])
+        write_file(work .. "/CC.argv", table.concat(compiler, "\0") .. "\0")
+        write_file(work .. "/cppflags.argv", "")
+        write_file(work .. "/cflags.argv", "-O0\0-fno-lto\0")
+        write_file(work .. "/ldflags.argv", "-fno-lto\0")
+        write_file(work .. "/native-flags.config", "native Unicode output contract\n")
+        local function build_native()
+            return run({
+                "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKEOVERRIDES",
+                "-u", "MAKELEVEL", "-u", "GNUMAKEFLAGS",
+                "MSYSTEM=CLANG64", "MSYS2_ARG_CONV_EXCL=*",
+                selected_make(), "--no-print-directory", "-f", repository .. "/Makefile.win",
+                "TITAN_TEST_BUILD_DIR=" .. work, "windows-stdlib-test-native",
+            }, repository)
+        end
+        local ok, output = build_native()
+        assert.truthy(ok, output)
+        local child = bin .. "/process child ação 東京.exe"
+        local supervisor = bin .. "/windows-test-supervisor.exe"
+        assert_file(child)
+        assert_file(supervisor)
+        local names = {}
+        for name in lfs.dir(bin) do
+            if name ~= "." and name ~= ".." then names[#names + 1] = name end
+        end
+        table.sort(names)
+        assert.same({ "process child ação 東京.exe", "windows-test-supervisor.exe" }, names)
+        ok, output = run({ child, "output", "ação 東京", "" })
+        assert.truthy(ok, output)
+        assert.equal("ação 東京", output)
+        local contents = { read_file(child), read_file(supervisor) }
+        local future = os.time() + 86400
+        assert.truthy(lfs.touch(child, future, future))
+        assert.truthy(lfs.touch(supervisor, future, future))
+        ok, output = build_native()
+        assert.truthy(ok, output)
+        assert.equal(future, lfs.attributes(child, "modification"))
+        assert.equal(future, lfs.attributes(supervisor, "modification"))
+        assert.equal(contents[1], read_file(child))
+        assert.equal(contents[2], read_file(supervisor))
+        assert.truthy(os.remove(child))
+        ok, output = build_native()
+        assert.truthy(ok, output)
+        assert_file(child)
+        assert.equal(future, lfs.attributes(supervisor, "modification"))
     end)
 
     it("does not launch Windows compiler or test wrappers under Make observation modes", function()
