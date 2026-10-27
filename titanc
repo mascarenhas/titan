@@ -596,7 +596,7 @@ if not args.compile_only and not args.print_ast then
         for _, shim in ipairs(shims) do outputs[#outputs + 1] = { path = shim.filename } end
     end
     local staging_ready, staging_error = driver.cleanup_stale_staging(
-        resolver_context, outputs, output_locks, preflight_plan)
+        resolver_context, outputs, output_locks, preflight_plan, c_objects)
     if not staging_ready then exit(staging_error) end
 
     local module_order = {}

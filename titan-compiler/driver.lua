@@ -9918,8 +9918,9 @@ end
 -- final output. Retire abandoned reservations before even a final-link hit,
 -- but only while that output's domain remains exclusively locked, and never
 -- over a path this invocation accepted or reserved. `plan` is the preflighted
--- build plan, whose source modules the build has restored into driver.imported.
-function driver.cleanup_stale_staging(context, outputs, locks, plan)
+-- build plan, whose source modules the build has restored into driver.imported;
+-- `native_objects` are this invocation's `nativeinputs.compile` results.
+function driver.cleanup_stale_staging(context, outputs, locks, plan, native_objects)
     if not platform.windows then return true end
     if not locks or not locks.entries or #locks.entries == 0 then
         return nil, "stale staging cleanup requires held output locks"
@@ -9996,6 +9997,16 @@ function driver.cleanup_stale_staging(context, outputs, locks, plan)
         return nil, "stale staging cleanup requires the invocation's " ..
             "preflighted inputs and reservations"
     end
+    if type(native_objects) ~= "table" then
+        return nil, "stale staging cleanup requires the invocation's native C nodes"
+    end
+    for _, object in ipairs(native_objects) do
+        if type(object) ~= "table" or type(object.source) ~= "string" or
+                type(object.dependencies) ~= "table" then
+            return nil, "stale staging cleanup requires each native C node's " ..
+                "source and recorded dependencies"
+        end
+    end
 
     -- Observe every candidate's complete no-follow footprint before removing
     -- anything: one conflict retains all candidates, abandoned ones included.
@@ -10057,8 +10068,10 @@ function driver.cleanup_stale_staging(context, outputs, locks, plan)
     if #candidates == 0 then return true end
 
     -- Accepted inputs and reserved outputs, plus the source constituents and
-    -- C headers the build recorded after preflight. Spelling, hierarchy and
-    -- physical-file aliases of any footprint entry refuse every candidate.
+    -- C headers the build recorded after preflight, and each --c-source with
+    -- the dependencies its one native preprocessing run recorded. Spelling,
+    -- hierarchy and physical-file aliases of any footprint entry refuse every
+    -- candidate.
     local protected = {}
     for _, reserved in ipairs(plan.reservations) do protected[#protected + 1] = reserved.path end
     for _, input in ipairs(plan.inputs) do protected[#protected + 1] = input end
@@ -10073,6 +10086,12 @@ function driver.cleanup_stale_staging(context, outputs, locks, plan)
                     protected[#protected + 1] = dependency.filename or dependency.path
                 end
             end
+        end
+    end
+    for _, object in ipairs(native_objects) do
+        protected[#protected + 1] = object.source
+        for _, dependency in ipairs(object.dependencies) do
+            protected[#protected + 1] = dependency
         end
     end
     local accepted, conflict = perf.new_output_path_index(

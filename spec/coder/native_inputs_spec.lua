@@ -701,6 +701,7 @@ end
         { name = "an authored C source", leaf = "authored.c" },
         { name = "a Titan source", leaf = "protect_main.titan" },
         { name = "a local C header", leaf = "protect_header.h" },
+        { name = "a header included only by a C source", leaf = "protect_native.h" },
     }) do
         it("refuses Windows stale staging that contains " .. case.name .. " and keeps every stage", function()
             if not platform.windows then pending("Windows stale-staging protection"); return end
@@ -722,6 +723,14 @@ end
                 arguments[#arguments + 1], arguments[#arguments + 2] = "--c-source", protected
             elseif case.leaf == "protect_main.titan" then
                 tree = authored
+            elseif case.leaf == "protect_native.h" then
+                -- The C source lies outside every stage; only its native
+                -- preprocessing run records the staged header.
+                write(protected, "#define PROTECT_NATIVE_VALUE 5\n")
+                local helper = root .. "/stage_helper.c"
+                write(helper, '#include "' .. protected .. '"\n' ..
+                    "int stage_helper(void) { return PROTECT_NATIVE_VALUE; }\n")
+                arguments[#arguments + 1], arguments[#arguments + 2] = "--c-source", helper
             else
                 write(protected, "int protect_value(void);\n")
                 main = 'foreign import "' .. protected .. '"\n' .. main

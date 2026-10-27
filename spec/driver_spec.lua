@@ -550,7 +550,7 @@ describe("Windows compiler path integration", function()
             order = {},
         }
         assert(driver.cleanup_stale_staging({ io = strategy },
-            { { path = directory .. "/app.dll" } }, locks, plan))
+            { { path = directory .. "/app.dll" } }, locks, plan, {}))
         assert.same({ stage .. "/APP.dll", stage .. "/nested/outside-link",
             stage .. "/nested", stage }, removed)
         assert.equal("directory", kinds[directory .. "/app.dll.stage.tmp."])
@@ -577,6 +577,18 @@ describe("Windows compiler path integration", function()
         assert.is_nil(ok)
         assert.matches("requires the invocation's preflighted inputs and reservations",
             err, 1, true)
+        local plan = { inputs = {}, reservations = {}, order = {} }
+        ok, err = driver.cleanup_stale_staging(context, outputs,
+            { entries = { { directory = "C:/build" } } }, plan)
+        assert.is_nil(ok)
+        assert.matches("requires the invocation's native C nodes", err, 1, true)
+        -- A node from a nativeinputs result without its recorded dependency
+        -- list cannot be protected, so the cleanup fails closed.
+        ok, err = driver.cleanup_stale_staging(context, outputs,
+            { entries = { { directory = "C:/build" } } }, plan,
+            { { source = "C:/src/helper.c", path = "C:/build/.native/helper.o" } })
+        assert.is_nil(ok)
+        assert.matches("each native C node's source and recorded dependencies", err, 1, true)
     end)
 
     -- A closed Windows strategy for stale-staging retirement. Nodes are keyed
@@ -668,6 +680,14 @@ describe("Windows compiler path integration", function()
                 } } },
             { name = "a reserved output", leaf = "app.c",
                 plan = staging_plan({ reservations = { { path = authored .. "/app.c" } } }) },
+            { name = "a header recorded only by --c-source preprocessing", leaf = "native.h",
+                plan = staging_plan({ inputs = { "C:/src/helper.c" } }),
+                native = { { source = "C:/src/helper.c", path = "C:/out/.native/helper.o",
+                    dependencies = { "C:/src/helper.c", authored .. "/native.h" } } } },
+            { name = "a --c-source node's own source", leaf = "node.c",
+                plan = staging_plan({}),
+                native = { { source = authored .. "/node.c", path = "C:/out/.native/node.o",
+                    dependencies = { "C:/src/node.h" } } } },
             { name = "a physical alias of a staged file", leaf = "helper.o",
                 plan = staging_plan({ inputs = { "C:/elsewhere/helper.o" } }),
                 aliases = {
@@ -680,7 +700,7 @@ describe("Windows compiler path integration", function()
                 local model = staging_model(nodes)
                 driver.imported = case.imported or {}
                 local ok, err = driver.cleanup_stale_staging(
-                    { io = model.io }, outputs, locks, case.plan)
+                    { io = model.io }, outputs, locks, case.plan, case.native or {})
                 assert.is_nil(ok)
                 assert.matches("refusing to retire stale Windows staging: staging path '" ..
                     authored, err, 1, true)
@@ -702,7 +722,7 @@ describe("Windows compiler path integration", function()
                 return list(strategy, filename)
             end
             local ok, err = driver.cleanup_stale_staging({ io = model.io }, outputs, locks,
-                staging_plan({}))
+                staging_plan({}), {})
             assert.is_nil(ok)
             assert.matches("cannot list '" .. authored .. "': list: access denied", err, 1, true)
             assert.same({}, model.removed)
@@ -714,7 +734,7 @@ describe("Windows compiler path integration", function()
                 return lstat(strategy, filename)
             end
             ok, err = driver.cleanup_stale_staging({ io = model.io }, outputs, locks,
-                staging_plan({ inputs = { "C:/src/denied.h" } }))
+                staging_plan({ inputs = { "C:/src/denied.h" } }), {})
             assert.is_nil(ok)
             assert.matches("refusing to retire stale Windows staging: lstat: access denied",
                 err, 1, true)
@@ -740,7 +760,8 @@ describe("Windows compiler path integration", function()
                 order = { "app" },
                 reservations = { { path = bin .. "/app.exe" } },
                 inputs = { bin .. "/app.exe.stage.tmp.user-link/source.titan" },
-            })))
+            }), { { source = "C:/src/helper.c", path = "C:/out/.native/helper.o",
+                dependencies = { "C:/src/helper.c", "C:/src/target.h" } } }))
             assert.same({
                 abandoned .. "/app.exe", abandoned,
                 authored .. "/helper.o", authored .. "/target-link", authored,
@@ -774,7 +795,7 @@ describe("Windows compiler path integration", function()
         it("retires a stage reached through another spelling of the held lock file", function()
             local model = staging_model(layout(held))
             assert(driver.cleanup_stale_staging(
-                { io = model.io }, outputs, locks, staging_plan({})))
+                { io = model.io }, outputs, locks, staging_plan({}), {}))
             assert.same({ stage .. "/app.exe", stage }, model.removed)
         end)
 
@@ -795,7 +816,7 @@ describe("Windows compiler path integration", function()
                 end
                 local model = staging_model(nodes)
                 local ok, err = driver.cleanup_stale_staging(
-                    { io = model.io }, outputs, locks, staging_plan({}))
+                    { io = model.io }, outputs, locks, staging_plan({}), {})
                 assert.is_nil(ok)
                 assert.matches("no output lock for 'C:/alias/bin/app.exe'", err, 1, true)
                 assert.same({}, model.removed)
@@ -816,7 +837,7 @@ describe("Windows compiler path integration", function()
                 return lstat(strategy, filename)
             end
             local ok, err = driver.cleanup_stale_staging(
-                { io = model.io }, outputs, locks, staging_plan({}))
+                { io = model.io }, outputs, locks, staging_plan({}), {})
             assert.is_nil(ok)
             assert.matches("lstat: access denied", err, 1, true)
             assert.same({}, model.removed)
