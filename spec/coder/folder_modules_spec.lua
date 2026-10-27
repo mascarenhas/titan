@@ -592,11 +592,12 @@ end
             assert.equal("file", lfs.attributes(workspace .. "/" ..
                 assert(driver.windows_program_paths("programs.folderapp")).provider, "mode"))
             assert.is_nil(lfs.attributes(workspace .. "/programs/folderapp__main", "mode"))
+        else
+            assert.equal("directory", lfs.attributes(
+                workspace .. "/programs", "mode"))
+            assert.is_nil(lfs.attributes(
+                workspace .. "/programs/folderapp", "mode"))
         end
-        assert.equal("directory", lfs.attributes(
-            workspace .. "/programs", "mode"))
-        assert.is_nil(lfs.attributes(
-            workspace .. "/programs/folderapp", "mode"))
         assert.equal("file", lfs.attributes(
             synthetic_file(source_root, "folderapp__entrypoint.c"), "mode"))
         assert.equal("file", lfs.attributes(

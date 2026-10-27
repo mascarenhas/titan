@@ -2729,8 +2729,17 @@ case $1 in
   --version) echo "fixture Clang"; exit 0 ;;
 esac
 printf '%s\n' "$*" >> "$WINDOWS_NATIVE_LOG"
+source=
 while [[ $# -gt 0 ]]; do
+  case $1 in
+    */cwd/spec/fixtures/stdlib/native/os_process_host_child.c|\
+    */cwd/spec/fixtures/stdlib/native/windows_test_supervisor.c) source=$1 ;;
+  esac
   if [[ $1 == -o ]]; then
+    [[ -n $source && -f $source ]] || {
+      echo 'expected an existing native helper C source before -o' >&2
+      exit 2
+    }
     printf '%s\n' "pure C executable" > "$2"
     exit 0
   fi
@@ -2740,7 +2749,28 @@ exit 1
 ]=])
         local cygpath = fixture(tools, "cygpath", [=[#!/bin/sh
 set -eu
-printf '%s\n' "$2"
+format= codepage=
+while [ "$#" -gt 1 ]; do
+  case $1 in
+    -m|-w|-aw|-u) format=$1; shift ;;
+    -C) codepage=$2; shift 2 ;;
+    *) printf 'unexpected cygpath option: %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+[ "$#" -eq 1 ] && [ -n "$format" ] || exit 2
+require_utf8=0
+case $1 in
+  */os_process_host_child.c|*/windows_test_supervisor.c) require_utf8=1 ;;
+  */"process child ação 東京.exe"|*/windows-test-supervisor.exe)
+    [ "$format" != -m ] || require_utf8=1 ;;
+esac
+if [ "$require_utf8" = 1 ]; then
+  [ "$format" = -m ] && [ "$codepage" = UTF8 ] || {
+    echo 'native helper conversion requires -m -C UTF8' >&2
+    exit 2
+  }
+fi
+printf '%s\n' "$1"
 ]=])
         local powershell = fixture(tools, "powershell.exe", [=[#!/usr/bin/env bash
 set -euo pipefail
