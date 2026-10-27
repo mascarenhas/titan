@@ -1700,11 +1700,15 @@ path as `install_name`; the driver forwards it as the `LC_ID_DYLIB` value
 (`-install_name`) instead of allowing Darwin's linker to derive that identity
 from the unique staging path. That public-provider link also uses Darwin's
 `-reproducible` mode so its debug map does not encode volatile input-object
-properties. For this staged-provider case, the driver runs `dsymutil` from the
-unique stage directory with only the stable DSO leaf name; this keeps the
-dSYM's relocation-map `binary-path` metadata independent of the transaction's
-random directory. An unchanged relink can therefore retain byte-identical DSO,
-UUID, and dSYM contents.
+properties. For this staged-provider case, when `dsymutil` was certified,
+the driver runs that pinned absolute `dsymutil` from the unique stage
+directory with only the stable DSO leaf name; this keeps the dSYM's
+relocation-map `binary-path` metadata independent of the transaction's random
+directory, so an unchanged relink can retain byte-identical DSO, UUID, and
+dSYM contents. An uncertified `dsymutil` instead runs as plain `dsymutil` from
+the original working directory with the full output path, and its final link
+is uncacheable, so no stable-metadata guarantee applies
+([uncertified `dsymutil`](build-coordinator.md#recipe-file-digests-and-native-library-policy)).
 
 Validation, the unchanged-bundle equivalence check, and the
 `publish_provider_bundle` commit order (shims and dSYM, archive, then the DSO
