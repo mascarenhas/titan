@@ -1045,7 +1045,7 @@ end
 local popen, launches = io.popen, 0
 io.popen = function(command, mode)
     launches = launches + 1
-    local silent, count = command:gsub("printf '%%s\\n' '?%d+'? >[^;]+; ", "")
+    local silent, count = command:gsub("printf '%%s\\n' '?%d+'?; ", "")
     assert(count == 1, command)
     local pipe = popen(silent, mode)
     if launches == 2 then assert(support._signal_raise(15)) end
