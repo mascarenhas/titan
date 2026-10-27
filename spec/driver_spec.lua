@@ -9659,7 +9659,8 @@ typedef int titan_driver_symlink_value;
             assert(lfs.mkdir(second .. "/nested"))
             assert(lfs.mkdir(second .. "/include"))
             assert(lfs.mkdir(lexical))
-            assert(lfs.link("ffi-link-first/nested", link, true))
+            assert(lfs.link(platform.windows and first .. "/nested"
+                or "ffi-link-first/nested", link, true))
             write_file(outer, "#include <ffi-selected.h>\n")
             write_file(first .. "/include/ffi-selected.h", selected_contents)
             write_file(second .. "/include/ffi-selected.h", selected_contents)
@@ -9688,7 +9689,8 @@ typedef double titan_driver_symlink_value;
             else
                 assert(os.remove(link))
             end
-            assert(lfs.link("ffi-link-second/nested", link, true))
+            assert(lfs.link(platform.windows and second .. "/nested"
+                or "ffi-link-second/nested", link, true))
             local restatted, restat_error, changed, reason =
                 driver.restat_c_header_dependencies(observed)
             assert.is_nil(restat_error)
