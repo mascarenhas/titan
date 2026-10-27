@@ -715,6 +715,10 @@ end
             assert(lfs.mkdir(authored))
             write(abandoned .. "/protect-app.exe", "abandoned launcher transaction\n")
             local protected = authored .. "/" .. case.leaf
+            -- The realpath root uses native separators. Source text names the
+            -- same physical file with forward slashes, so neither the Titan
+            -- string literal nor the C include contains a backslash escape.
+            local spelled = require("titan-compiler.path").to_slash(protected)
             local tree, main = root, "function main(args: {string}): integer\n    return 0\nend\n"
             local arguments = { "--incremental", "-v", "--output", output, "--exe", executable }
             if case.leaf == "helper.o" or case.leaf == "link-helper.o" then
@@ -729,12 +733,12 @@ end
                 -- preprocessing run records the staged header.
                 write(protected, "#define PROTECT_NATIVE_VALUE 5\n")
                 local helper = root .. "/stage_helper.c"
-                write(helper, '#include "' .. protected .. '"\n' ..
+                write(helper, '#include "' .. spelled .. '"\n' ..
                     "int stage_helper(void) { return PROTECT_NATIVE_VALUE; }\n")
                 arguments[#arguments + 1], arguments[#arguments + 2] = "--c-source", helper
             else
                 write(protected, "int protect_value(void);\n")
-                main = 'foreign import "' .. protected .. '"\n' .. main
+                main = 'foreign import "' .. spelled .. '"\n' .. main
             end
             write(tree .. "/protect_main.titan", main)
             for _, word in ipairs({ "--tree", tree, "protect_main" }) do
