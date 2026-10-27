@@ -427,7 +427,8 @@ detects a content change. `os_process_host_child` is compiled directly by
 rules](build-script-audit.md#native-test-aggregate-and-c-fixture-rules)). After
 an identical `luarocks make --force` reinstall, `make titan-stdlib-test-build`
 certifies every module object, `--c-source` helper, and final link as a hit and
-performs zero compilations and zero links.
+performs zero object compilations and zero links; certification still runs its
+preprocessing and toolchain probes.
 
 `make titan-stdlib-test-run` returns to the repository root before executing,
 because several fixtures use repository-relative paths. `TITAN_FILTER` supplies

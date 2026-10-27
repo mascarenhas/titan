@@ -45,8 +45,8 @@ When `titanc` runs (`titanc`, excluding `--print-root` and
    record is read: the `--output` directory, or without `--output` every
    `--tree` source root plus the working directory, and the `--exe`
    directory when one is given. The first domain also hosts `.native/`,
-   `.titan-links/`, and `.titan/`. `incremental.load_digest_cache` then loads
-   `<output>/.titan/digests`
+   `.titan-links/`, and `.titan/`. With `--output`,
+   `incremental.load_digest_cache` then loads `<output>/.titan/digests`
    ([Persistent digest cache](incremental-compilation.md#persistent-digest-cache)).
 4. **Coordinate the module closure.** `build.run` resolves the transitive
    import closure, runs the [pre-dispatch output

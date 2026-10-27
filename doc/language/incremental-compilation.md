@@ -29,7 +29,8 @@ and [Driver and toolchain](../implementation/driver.md).
 `--incremental` forces every module in the requested source closure (and any
 `--c-source` input) to rebuild. Combining `-c --incremental` certifies explicit
 command-line roots by the same rules as source dependencies: an unchanged root
-is a certified hit and runs no native compiler command.
+is a certified hit and compiles no object. Certification itself may still run
+the C preprocessor and toolchain self-description probes.
 
 Whether linking or running with `-c`, one `titanc` invocation plans the
 complete source closure from the requested roots. Running module-frontend
@@ -172,11 +173,12 @@ following inputs before accepting `<stem>.o`:
   between application and `--test` builds when their resolved bindings and
   compile flags match.
 
-`titanc` reads file metadata with nanosecond precision and keeps a digest
-cache in `<output>/.titan/digests`, so a source, header, or object whose
-metadata is unchanged since the last invocation is not read again. The cache
-only avoids rereading; a changed file is always rehashed, and deleting the
-cache is safe.
+With `--output`, `titanc` reads file metadata with nanosecond precision and
+keeps a digest cache in `<output>/.titan/digests`, so a source, header, or
+split-part object whose metadata is unchanged since the last invocation is
+not read and hashed again; each module's primary object is still read for its
+certificate. A changed file is always rehashed, and deleting the cache is
+safe. Without `--output`, `titanc` keeps no persistent digest cache.
 
 ### Native `--c-source` nodes and final-link certification
 
@@ -297,9 +299,12 @@ linker input mechanism: <flag>`, `opaque native C input mechanism`,
 * **Always invoke `titanc`.** Certification runs only when `titanc` runs. A
   build script that skips invoking `titanc` based on incomplete timestamp lists
   can miss header, flag, or interface changes.
-* **Compiler-reserved output names.** Before any compilation starts, `titanc`
-  reserves every file the planned build may write and checks the whole set
-  for collisions with sources, headers, native inputs, and other outputs. For
+* **Compiler-reserved output names.** Before any module compilation starts,
+  `titanc` reserves every file the planned build may write and checks the
+  whole set for collisions with sources, native inputs, the C headers of
+  already certified modules, and other outputs; a module being recompiled
+  checks the C headers it discovers against the same set before it writes
+  anything. For
   each module this includes `<stem>.part1.c`/`.part1.o` through the configured
   `--c-parts` maximum, even when the module generates fewer parts, along with
   `<stem>.priv.h`, `<stem>.titan.h`, and `<stem>.ffi.h`. An authored file at a
@@ -439,7 +444,8 @@ In this layout:
 * `make app` and `make tests` always invoke `titanc`. On a warm build where
   nothing changed—including immediately after an identical SDK reinstall—all
   module objects, `src/native_helper.c`, and the final link record under
-  `build/.titan-links/` hit, so `titanc` performs no C compilation and no link.
+  `build/.titan-links/` hit, so `titanc` compiles no object and runs no link;
+  only certification probes such as preprocessing run.
 * Editing a function body in a dependency module recompiles only that module's
   `.o` and relinks; consumers whose imported public (or `.titan` source-private)
   interface did not change reuse their existing `.o` files.
@@ -500,7 +506,7 @@ TITAN_PATH_0_6='out/?.a;out/?.so;;' \
 ```
 
 Repeating either `-c --incremental` command when inputs are unchanged is a
-certified hit and runs no native compilation. The final invocation detects
+certified hit and compiles no object. The final invocation detects
 `main` from the certified object metadata, reuses both application objects,
 links the selected standard-library and external-library archives, and records
 the final link certificate under `out/.titan-links/`. Pass `--exe`, `-L`, `-l`,

@@ -1971,14 +1971,17 @@ applies normalized native inputs, and discovers any `--test-dir` roots. It
 locks the `--output` directory, or without `--output` every `--tree` source
 root plus the working directory (source-adjacent objects may belong to any
 root, and default providers and executables are CWD-relative), and adds the
-`--exe` directory when given, all through `build.lock_outputs`. It then loads
-the [persistent digest cache](incremental-compilation.md#persistent-digest-cache)
-and runs `build.run`, whose pre-dispatch
+`--exe` directory when given, all through `build.lock_outputs`. With
+`--output` it then loads the
+[persistent digest cache](incremental-compilation.md#persistent-digest-cache).
+It runs `build.run`, whose coordinator-side pre-dispatch
 [output preflight](build-coordinator.md#pre-dispatch-output-preflight)
 rejects output collisions and graph-dependent option errors (`--exe` or
 `--no-uv-bootstrap` without a standalone or test executable, `--coverage` on
 library-only builds unless `-c` is given, multiple `main` roots, and library
-roots without a common prefix) before any worker starts. `build.run`
+roots without a common prefix) before any worker starts; each worker checks
+the C headers its fresh module discovers against the same reservations before
+writing. `build.run`
 certifies, compiles, and restores the module closure. `titanc` then compiles
 any `--c-source` nodes via `nativeinputs.compile` and—for linking
 invocations—gates runner/entrypoint synthesis, archive probing, and linking

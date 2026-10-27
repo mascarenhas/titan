@@ -127,11 +127,12 @@ first, then tokenized `TITAN_EXTRA_CPPFLAGS`, `TITAN_EXTRA_CFLAGS`, and
 `TITAN_EXTRA_LDFLAGS` from the environment, and finally command-line switches in
 their written order, with SDK `-I` directories placed last. Compile-phase switches
 (`-I`, `-D`, `--cflag`, `TITAN_EXTRA_CPPFLAGS`, `TITAN_EXTRA_CFLAGS`) enter the
-module configuration certificate; link-only switches (`-L`, `-l`, `--ldflag`,
-`TITAN_EXTRA_LDFLAGS`, `-X`, `--exe`) are rejected with `-c` and enter only the
-final-link certificate. `-c` (with or without `--incremental`) may be used with
-`--c-source FILE` and no Titan module names to compile or certify standalone C
-helper objects.
+module configuration certificate. Link-only settings (`-L`, `-l`, `--ldflag`,
+`TITAN_EXTRA_LDFLAGS`, `-X`, `--exe`) enter only the final-link certificate.
+`-c` rejects the command-line link switches, while an environment
+`TITAN_EXTRA_LDFLAGS` is accepted and simply unused because nothing is linked.
+`-c` (with or without `--incremental`) may be used with `--c-source FILE` and
+no Titan module names to compile or certify standalone C helper objects.
 
 ## Separate compilation and coverage
 
@@ -153,10 +154,11 @@ Inside the selected output directory, `titanc` maintains:
   acquires the lock before certifying and reuses objects published by the
   first.
 * `out/.titan/`: compiler caches. `preamble.c` is the stable translation unit
-  used to certify the generated-C preamble headers, `digests` remembers file
-  digests by precise file metadata so unchanged files are not reread, and
-  `linker-feature` remembers whether the linker can report its inputs. All of
-  them are rebuilt when missing.
+  used to certify the generated-C preamble headers, `digests` (only with
+  `--output`) remembers file digests by precise file metadata so unchanged
+  inputs need not be read and hashed again, and `linker-feature` remembers
+  whether the linker can report its inputs. All of them are rebuilt when
+  missing.
 * `out/.native/<hash>.o` and `<hash>.record`: compiled objects and
   certificates for `--c-source` inputs, keyed by canonical source path.
   Preprocessed output and dependency files are temporary. Use
@@ -170,7 +172,8 @@ Inside the selected output directory, `titanc` maintains:
   unchanged production module objects.
 
 Without `--output`, `titanc` locks every `--tree` source root and the working
-directory, and keeps these metadata directories in the first source root.
+directory, and keeps preamble, linker-feature, native, and link metadata in
+the first source root; it keeps no persistent digest cache.
 
 Objects left beside sources do not satisfy reuse in another output directory.
 See [Incremental and separate compilation](incremental-compilation.md) for the
