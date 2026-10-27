@@ -102,7 +102,11 @@ the provider DLL at `<output>/lib/titan/0.6/<module>.dll`. The launcher embeds
 the relative path from `<exe-dir>/../lib/titan/0.6` to that provider DLL on the
 same volume, so `--exe out/app.exe`, `--exe out/bin/app.exe`, and external
 same-volume destinations all locate the provider without changing its identity;
-a destination on a different volume is rejected. Supply the matching controlled
+a destination on a different volume is rejected. A test executable's provider
+is named after its first root, so two Windows test executables with the same
+first root in one output directory share that DLL: building one replaces it
+and makes the other relink on its next build. Give them separate output
+directories when both must stay current. Supply the matching controlled
 Lua runtime DLL as described in the
 [Windows build guide](../implementation/windows-build.md).
 
