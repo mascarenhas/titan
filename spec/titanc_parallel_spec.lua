@@ -72,6 +72,7 @@ local function run_titanc(arguments, environment_jobs)
         local expected = { { path = "pkg.so" } }
         if not platform.windows then expected[2] = { path = "pkg.a" } end
         assert.same(expected, outputs)
+        observed.staging_outputs = outputs
         return true
     end
     function driver.module_compiled_objects(mod)
@@ -256,9 +257,17 @@ local function run_titanc(arguments, environment_jobs)
                 assert.equal(resolver, context)
                 assert.is_table(selected_tools)
                 assert.equal(selected_tools, spec.toolchain.output_tools)
+                assert.is_table(observed.staging_outputs)
+                assert.same(observed.staging_outputs, spec.outputs)
+                assert.falsy(observed.lock_released)
                 return { directory = "link", synthetic_directory = "syn" }
             end,
-            check = function() return false, "no-record" end,
+            check = function(context)
+                assert.equal(resolver, context)
+                assert.is_table(observed.staging_outputs)
+                assert.falsy(observed.lock_released)
+                return false, "no-record"
+            end,
             invalidate = function() return true end,
             commit = function() return true end,
         },
