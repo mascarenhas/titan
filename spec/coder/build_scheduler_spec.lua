@@ -342,7 +342,36 @@ os.exit(0)
             }))))
             while not eof_settled do process.library().run("once") end
             assert.equal(3, eof_code)
-        end, debug.traceback)
+
+            -- Also verify Session:abandoned() (uv.run("nowait") with
+            -- control.reader as the sole handle) observes coordinator EOF.
+            local abandoned_code, abandoned_settled
+            local abandoned_worker
+            abandoned_worker = assert(process.start_worker({
+                interpreter, "-E", "-e",
+                string.format("package.path = %q; package.cpath = %q; ", package.path, package.cpath) .. [[
+local process = require "titan-compiler.process"
+local session = assert(require("titan-compiler.build_worker").connect())
+for _ = 1, 500 do
+    if session:abandoned() then os.exit(3) end
+    process.library().sleep(10)
+end
+os.exit(0)
+]],
+            }, {}, {
+                record = function() end,
+                failed = function() end,
+                exited = function(code) abandoned_code = code end,
+                settled = function() abandoned_settled = true end,
+            }))
+            assert(abandoned_worker:send(assert(process.encode_record({
+                kind = "compile",
+                protocol = require("titan-compiler.version").BUILD_WORKER_PROTOCOL,
+                request = { module = "abandoned" },
+            }))))
+            abandoned_worker.request_pipe:close()
+            while not abandoned_settled do process.library().run("once") end
+            assert.equal(3, abandoned_code)
         package.path = saved_path
         remove_tree(workspace)
         assert.is_true(ok, failure)
