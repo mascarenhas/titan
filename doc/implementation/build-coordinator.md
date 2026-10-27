@@ -368,9 +368,13 @@ that the coordinator loaded. The child's descriptors are:
 Each direction has its own pipe. On Windows, synchronous pipe handles
 serialize I/O on one file object, so a single duplex pipe could let a pending
 read block the worker's first write. The worker's `process.open_control(3, 4)`
-keeps both handles unreferenced except while `Control.receive` or
-`Control.send` is waiting, so an idle control channel never keeps its event
-loop alive, and `Control:close` closes both.
+keeps both handles unreferenced except while they are in use: during a
+blocking `Control.receive` or `Control.send`, and during the nonblocking
+`Control:poll()`, which briefly references the reader, runs
+`uv.run("nowait")`, and unreferences it again so a coordinator EOF or read
+error is observed even when no other handle is active. An idle control
+channel therefore never keeps its event loop alive, and `Control:close`
+closes both.
 
 `process.start(argv, options)` launches a command that shares the caller's
 standard streams and returns its `Process` immediately (or `nil, error`);
@@ -524,11 +528,11 @@ never searches `TITAN_BIN_PATH` or `TITAN_SOURCE_PATH`:
 Worker lifetime is bounded even if the coordinator terminates abnormally:
 
 * **Cooperative abandonment check.** `worker_io(session)` wraps `Sync:yield`
-  (`build_worker.lua`) and checks `session:abandoned()` (non-blocking
-  `uv.run("nowait")` testing whether its request pipe, `fd 3`, reached EOF or
-  error). Both `yield` and `Session:run_batch` exit immediately with status 3
-  (`titanc build worker: the build coordinator exited`) if the coordinator
-  closed its end.
+  (`build_worker.lua`) and checks `session:abandoned()`, which calls
+  `control:poll()` to test without blocking whether its request pipe, `fd 3`,
+  reached EOF or error. Both `yield` and `Session:run_batch` exit immediately
+  with status 3 (`titanc build worker: the build coordinator exited`) if the
+  coordinator closed its end.
 * **POSIX lock inheritance.** Workers inherit the open `.titan-build.lock`
   file descriptors (`fds 5..`), and every native writer the coordinator starts
   receives them too: synchronous `process.run`/`process.capture` commands,
