@@ -327,28 +327,9 @@ local function lto_setting(argv)
     return enabled
 end
 
-local function selected_lto(context, request, selected, tools)
-    local setting = lto_setting(selected.argv)
-    if setting == false then return end
-    local enabled = setting == true or lto_setting(request.compile_argv) == true
-    if not enabled then
-        local inputs = { table.unpack(request.inputs or {}) }
-        local native_files = compiler_libraries(context, {
-            compiler_argv = request.compiler_argv, argv = request.link_flags,
-            darwin = request.darwin, windows = request.windows,
-        })
-        if not native_files then enabled = true
-        else for _, path in ipairs(native_files) do inputs[#inputs + 1] = path end end
-        for _, input in ipairs(inputs) do
-            local kind, _, lto = incremental.native_input_kind(context,
-                type(input) == "table" and input.path or input)
-            -- An opaque payload may select IR indirectly. Inventory its
-            -- compiler-selected pipeline rather than assuming it is native.
-            if not kind or lto then enabled = true; break end
-        end
-    end
-    if not enabled then return end
+local function selected_link_stages(context, request, selected, tools)
     local description = selected.description or describe_link(context, selected.argv, request.windows)
+    selected.description = description
     local split = require("c-parser.cpp").split_shell_words
     local wrapper, collect2, found, declared_wrapper
     local function executable(role, path)
@@ -386,9 +367,31 @@ local function selected_lto(context, request, selected, tools)
             end
         end
     end
-    need(found, "compiler did not describe a selected native link job for LTO")
+    need(found, "compiler did not describe a selected native link job")
     if collect2 then
         executable("link_driver", collect2)
+        -- collect2 and every advertised plugin are native link inputs even
+        -- when no IR is present. Only its conditional LTO delegates are gated.
+        local setting = lto_setting(selected.argv)
+        if setting == false then return end
+        local enabled = setting == true or lto_setting(request.compile_argv) == true
+        if not enabled then
+            local inputs = { table.unpack(request.inputs or {}) }
+            local native_files = compiler_libraries(context, {
+                compiler_argv = request.compiler_argv, argv = request.link_flags,
+                darwin = request.darwin, windows = request.windows,
+            })
+            if not native_files then enabled = true
+            else for _, path in ipairs(native_files) do inputs[#inputs + 1] = path end end
+            for _, input in ipairs(inputs) do
+                local kind, _, lto = incremental.native_input_kind(context,
+                    type(input) == "table" and input.path or input)
+                -- An opaque payload may select IR indirectly. Inventory its
+                -- compiler-selected pipeline rather than assuming it is native.
+                if not kind or lto then enabled = true; break end
+            end
+        end
+        if not enabled then return end
         local function named_stage(name)
             local command = { table.unpack(selected.argv) }
             command[#command + 1] = "-print-prog-name=" .. name
@@ -414,7 +417,7 @@ function certificate.output_tools(context, request)
             result[role] = { argv = { table.unpack(argv) },
                 identity = incremental.physical_executable(context, argv) }
         end
-        selected_lto(context, request, selected, result)
+        selected_link_stages(context, request, selected, result)
         return result
     end)
     if not ok then
@@ -553,9 +556,15 @@ compiler_libraries = function(context, request)
         else
         local library, candidates = item.name
         if library:sub(1, 1) == ":" then candidates = { library:sub(2) }
-        elseif item.static then candidates = { "lib" .. library .. ".a" }
         elseif request.windows or platform.windows then
-            candidates = { "lib" .. library .. ".dll.a", library .. ".lib", "lib" .. library .. ".a" }
+            -- MinGW searches every directory before advancing to the next;
+            -- .lib is a static candidate too, after the prefixed archive.
+            candidates = item.static and { "lib" .. library .. ".a", library .. ".lib" } or {
+                "lib" .. library .. ".dll.a", library .. ".dll.a",
+                "lib" .. library .. ".a", library .. ".lib",
+                "lib" .. library .. ".dll", library .. ".dll",
+            }
+        elseif item.static then candidates = { "lib" .. library .. ".a" }
         elseif request.darwin then candidates = { "lib" .. library .. ".dylib", "lib" .. library .. ".a" }
         else candidates = { "lib" .. library .. ".so", "lib" .. library .. ".a" } end
         local selected
@@ -569,6 +578,7 @@ compiler_libraries = function(context, request)
             if selected then break end
         end
         if not selected then
+            local implicit_directory
             for _, candidate in ipairs(candidates) do
                 local command = { table.unpack(request.compiler_argv) }
                 for _, flag in ipairs(request.argv or {}) do command[#command + 1] = flag end
@@ -579,7 +589,17 @@ compiler_libraries = function(context, request)
                     if filename ~= "" and filename ~= candidate and not filename:find("[\r\n]") then
                         local stat, err = context.io:stat(filename)
                         if err then error(err, 0) end
-                        if stat and stat.kind == "file" then selected = filename; break end
+                        if stat and stat.kind == "file" then
+                            -- Separate print-file-name queries do not expose
+                            -- directory order. Different candidate directories
+                            -- cannot safely be ranked by filename preference.
+                            local directory = canonical(context, paths.dirname(filename))
+                            if implicit_directory and implicit_directory ~= directory then
+                                return nil, "ambiguous compiler library search order: " .. library
+                            end
+                            implicit_directory = directory
+                            selected = selected or filename
+                        end
                     end
                 end
             end
