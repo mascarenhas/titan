@@ -720,17 +720,15 @@ if not args.compile_only and not args.print_ast then
         exit(ticket)
     end
     -- Stale stages are retired only after the prepared final link has resolved
-    -- its inputs, including policy-resolved native libraries, and its native
-    -- tools, and before any header restoration or final-link hit.
-    local link_inputs = {}
-    for _, filename in ipairs(output_request.inputs) do link_inputs[#link_inputs + 1] = filename end
-    for _, filename in ipairs(ticket.native_policy.files or {}) do
-        link_inputs[#link_inputs + 1] = filename
-    end
+    -- its inputs, native library policy and native tools, and before any
+    -- header restoration or final-link hit. An unresolved policy or uncertified
+    -- tool selection stays explicit: cleanup refuses, retaining every stage,
+    -- only when stale stages exist.
     local staging_ready, staging_error = driver.cleanup_stale_staging(
         resolver_context, outputs, output_locks, {
-            plan = preflight_plan, native_objects = c_objects, link_inputs = link_inputs,
-            compiler_tools = output_request.compiler_tools or {}, output_tools = output_tools,
+            plan = preflight_plan, native_objects = c_objects,
+            link_inputs = output_request.inputs, native_policy = ticket.native_policy,
+            compiler_tools = output_request.compiler_tools, output_tools = output_tools,
         })
     if not staging_ready then exit(staging_error) end
     -- Generated public headers are restored under the lock even when the

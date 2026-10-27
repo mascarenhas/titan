@@ -552,6 +552,7 @@ describe("Windows compiler path integration", function()
         assert(driver.cleanup_stale_staging({ io = strategy },
             { { path = directory .. "/app.dll" } }, locks,
             { plan = plan, native_objects = {}, link_inputs = {},
+                native_policy = { cacheable = true, backend = "compiler", files = {} },
                 compiler_tools = {}, output_tools = {} }))
         assert.same({ stage .. "/APP.dll", stage .. "/nested/outside-link",
             stage .. "/nested", stage }, removed)
@@ -597,6 +598,10 @@ describe("Windows compiler path integration", function()
         ok, err = driver.cleanup_stale_staging(context, outputs, held,
             { plan = plan, native_objects = {}, link_inputs = {} })
         assert.is_nil(ok)
+        assert.matches("requires the invocation's prepared native link policy", err, 1, true)
+        ok, err = driver.cleanup_stale_staging(context, outputs, held,
+            { plan = plan, native_objects = {}, link_inputs = {}, native_policy = { files = {} } })
+        assert.is_nil(ok)
         assert.matches("requires the invocation's native tool identities", err, 1, true)
     end)
 
@@ -640,14 +645,21 @@ describe("Windows compiler path integration", function()
     end
 
     -- The protection inventory titanc supplies: its preflighted plan, the
-    -- native C nodes, the prepared final link's inputs, and its native tools.
+    -- native C nodes, the prepared final link's inputs and native library
+    -- policy, and its native tools. `compiler_tools = false` models an
+    -- uncertified toolchain, which titanc passes as nil.
     local function staging_protection(fields)
+        local compiler_tools = fields.compiler_tools
+        if compiler_tools == nil then compiler_tools = {}
+        elseif compiler_tools == false then compiler_tools = nil end
         return {
             plan = { inputs = fields.inputs or {}, reservations = fields.reservations or {},
                 order = fields.order or {} },
             native_objects = fields.native or {},
             link_inputs = fields.links or {},
-            compiler_tools = fields.compiler_tools or {},
+            native_policy = fields.native_policy or
+                { cacheable = true, backend = "compiler", files = fields.native_files or {} },
+            compiler_tools = compiler_tools,
             output_tools = fields.output_tools or {},
         }
     end
@@ -711,7 +723,8 @@ describe("Windows compiler path integration", function()
                 protection = staging_protection({ links = { authored .. "/helper.a" } }) },
             { name = "a native library the link policy resolved", leaf = "libhelper.a",
                 protection = staging_protection({
-                    links = { "C:/out/bin/app.o", authored .. "/libhelper.a" },
+                    links = { "C:/out/bin/app.o" },
+                    native_files = { "C:/llvm/lib/libm.a", authored .. "/libhelper.a" },
                 }) },
             { name = "the certified compiler executable", leaf = "clang.exe",
                 protection = staging_protection({ compiler_tools = {
@@ -802,7 +815,8 @@ describe("Windows compiler path integration", function()
                     inputs = { bin .. "/app.exe.stage.tmp.user-link/source.titan" },
                     native = { { source = "C:/src/helper.c", path = "C:/out/.native/helper.o",
                         dependencies = { "C:/src/helper.c", "C:/src/target.h" } } },
-                    links = { "C:/out/bin/app.o", "C:/src/libtarget.a" },
+                    links = { "C:/out/bin/app.o" },
+                    native_files = { "C:/src/libtarget.a" },
                     compiler_tools = { { path = "C:/llvm/bin/clang.exe" } },
                     output_tools = { linker = { argv = { "ld.lld" },
                         identity = { path = "C:/llvm/bin/ld.lld.exe" } } },
@@ -814,6 +828,50 @@ describe("Windows compiler path integration", function()
             assert.equal("symlink", nodes[bin .. "/app.exe.stage.tmp.user-link"].kind)
             assert.equal("file", nodes["C:/src/target.h"].kind)
         end)
+
+        -- An unresolved native library policy or an uncertified tool selection
+        -- leaves no evidence for a raw operand or tool inside a stage.
+        for _, case in ipairs({
+            { name = "an opaque native library policy",
+                reason = "opaque linker input mechanism: @empty.rsp",
+                fields = { links = { "C:/out/bin/app.o" }, native_policy = {
+                    cacheable = false, backend = "none", argv = {},
+                    reason = "opaque linker input mechanism: @empty.rsp",
+                } } },
+            { name = "an uncertified compiler toolchain",
+                reason = "the compiler toolchain is uncertified",
+                fields = { compiler_tools = false } },
+            { name = "an uncertified output tool selection",
+                reason = "native linker selection is unknown",
+                fields = { output_tools = { uncertified = "native linker selection is unknown" } } },
+        }) do
+            it("retains every candidate while " .. case.name .. " leaves the inventory incomplete", function()
+                local nodes = layout("helper.o")
+                local model = staging_model(nodes)
+                local ok, err = driver.cleanup_stale_staging(
+                    { io = model.io }, outputs, locks, staging_protection(case.fields))
+                assert.is_nil(ok)
+                assert.matches("refusing to retire stale Windows staging '" .. abandoned ..
+                    "': the native link and tool inventory is incomplete (" .. case.reason .. ")",
+                    err, 1, true)
+                assert.same({}, model.removed)
+                assert.equal("file", nodes[abandoned .. "/app.exe"].kind)
+                assert.equal("file", nodes[authored .. "/helper.o"].kind)
+            end)
+
+            it("continues without stale candidates while " .. case.name .. " is incomplete", function()
+                local nodes = {
+                    ["C:/out"] = { kind = "directory" }, [bin] = { kind = "directory" },
+                    [bin .. "/app.exe"] = { kind = "file", device = "7", inode = "public" },
+                    [bin .. "/other.exe.stage.tmp.kept"] = { kind = "directory" },
+                }
+                local model = staging_model(nodes)
+                assert(driver.cleanup_stale_staging(
+                    { io = model.io }, outputs, locks, staging_protection(case.fields)))
+                assert.same({}, model.removed)
+                assert.equal("directory", nodes[bin .. "/other.exe.stage.tmp.kept"].kind)
+            end)
+        end
     end)
 
     describe("stale stages under a deduplicated output-lock alias", function()

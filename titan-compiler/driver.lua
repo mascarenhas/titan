@@ -9922,10 +9922,10 @@ end
 -- over a path this invocation accepted or reserved. `protection.plan` is the
 -- preflighted build plan, whose source modules the build has restored into
 -- driver.imported; `protection.native_objects` are this invocation's
--- `nativeinputs.compile` results; `protection.link_inputs` lists the prepared
--- final link's inputs, including native libraries its policy resolved;
--- `protection.compiler_tools` and `protection.output_tools` are the certified
--- compiler identities and the selected output tools (empty when uncertified).
+-- `nativeinputs.compile` results; `protection.link_inputs` are the prepared
+-- final link's explicit inputs and `protection.native_policy` its native
+-- library policy; `protection.compiler_tools` (nil when uncertified) and
+-- `protection.output_tools` are the compiler and output-tool identities.
 function driver.cleanup_stale_staging(context, outputs, locks, protection)
     if not platform.windows then return true end
     if not locks or not locks.entries or #locks.entries == 0 then
@@ -10018,7 +10018,10 @@ function driver.cleanup_stale_staging(context, outputs, locks, protection)
     if type(protection.link_inputs) ~= "table" then
         return nil, "stale staging cleanup requires the invocation's final-link inputs"
     end
-    if type(protection.compiler_tools) ~= "table" or
+    if type(protection.native_policy) ~= "table" then
+        return nil, "stale staging cleanup requires the invocation's prepared native link policy"
+    end
+    if (protection.compiler_tools ~= nil and type(protection.compiler_tools) ~= "table") or
             type(protection.output_tools) ~= "table" then
         return nil, "stale staging cleanup requires the invocation's native tool identities"
     end
@@ -10082,10 +10085,25 @@ function driver.cleanup_stale_staging(context, outputs, locks, protection)
     end
     if #candidates == 0 then return true end
 
+    -- Without a resolved native library inventory and known tool identities,
+    -- a candidate may hold an input or tool no evidence names. Retain them all.
+    local incomplete
+    if type(protection.native_policy.files) ~= "table" then
+        incomplete = protection.native_policy.reason or "native link libraries are unresolved"
+    elseif protection.compiler_tools == nil then
+        incomplete = "the compiler toolchain is uncertified"
+    elseif protection.output_tools.uncertified ~= nil then
+        incomplete = tostring(protection.output_tools.uncertified)
+    end
+    if incomplete then
+        return nil, "refusing to retire stale Windows staging '" .. candidates[1] ..
+            "': the native link and tool inventory is incomplete (" .. tostring(incomplete) .. ")"
+    end
+
     -- Accepted inputs and reserved outputs, plus the source constituents and
     -- C headers the build recorded after preflight, each --c-source with the
     -- dependencies its one native preprocessing run recorded, the final link's
-    -- inputs, and every active native tool already identified by path.
+    -- inputs and policy-resolved libraries, and every active native tool.
     -- Spelling, hierarchy and physical-file aliases of any footprint entry
     -- refuse every candidate.
     local protected = {}
@@ -10111,6 +10129,9 @@ function driver.cleanup_stale_staging(context, outputs, locks, protection)
         end
     end
     for _, input in ipairs(protection.link_inputs) do protected[#protected + 1] = input end
+    for _, filename in ipairs(protection.native_policy.files) do
+        protected[#protected + 1] = filename
+    end
     for _, identity in ipairs(protection.compiler_tools) do
         protected[#protected + 1] = identity.path
     end
