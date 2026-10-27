@@ -12442,9 +12442,21 @@ function driver.preflight_build_outputs(context, plan, options)
 
     -- Old generated translation units predate the explicit marker. Recognize
     -- their exact fixed helper or split-header prefix without parsing C.
+    -- Coverage conversion anchored each old generated line with a `#line`
+    -- directive. An old split unit names the absolute private header it was
+    -- generated beside, so a moved output tree keeps the old directory; that
+    -- name is owned only beside a marker-owned private header of its leaf.
     local fixed = require("titan-compiler.cpreamble").fixed_prefix
     local fixed_helper = assert(fixed:match("(static TITAN_UNUSED inline int.-\n})"))
         :gsub("%s+", "")
+    local split_push = "#ifdefined(__ELF__)#pragmaGCCvisibilitypush(protected)#endif"
+    local function generated_private_header(filename)
+        local marker = driver.PRIVATE_HEADER_MARKER
+        local attributes = context.io:lstat(filename)
+        local contents = attributes and attributes.kind == "file" and
+            context.io:read_file(filename, #marker)
+        return contents and contents:sub(1, #marker) == marker or false
+    end
     for _, reserved in ipairs(reservations) do
         local stem = c_outputs[reserved.path]
         if stem and reserved.existing_mode == "file" then
@@ -12456,20 +12468,27 @@ function driver.preflight_build_outputs(context, plan, options)
             local owned = contents:sub(marker_start,
                 marker_start + #driver.GENERATED_C_MARKER - 1) == driver.GENERATED_C_MARKER
             if not owned then
-                local compact = contents:gsub("%s+", "")
-                local private_include = "#include" ..
-                    assert(ffiheaders.quote_header(
-                        normalized_absolute_filename(stem .. ".priv.h")))
-                private_include = private_include:gsub("%s+", "")
-                local split_prefix = private_include ..
-                    "#ifdefined(__ELF__)#pragmaGCCvisibilitypush(protected)#endif"
-                owned = compact:find(fixed_helper, 1, true) ~= nil or
-                    compact:sub(1, #split_prefix) == split_prefix
+                local compact = ("\n" .. contents):gsub('\n#line %d+ "[^\r\n]*"', "")
+                    :gsub("%s+", "")
+                owned = compact:find(fixed_helper, 1, true) ~= nil
+            end
+            if not owned then
+                local header, after = contents:match(
+                    '^[ \t]*#[ \t]*include[ \t]*"([^"\r\n]*)"[ \t]*\r?\n()')
+                local private_header = stem .. ".priv.h"
+                owned = header ~= nil and
+                    contents:sub(after):gsub("%s+", ""):sub(1, #split_push) == split_push and
+                    (ffiheaders.quote_header(normalized_absolute_filename(private_header))
+                        == '"' .. header .. '"' or
+                     path.is_absolute(header) and
+                     path.basename(header) == path.basename(private_header) and
+                     generated_private_header(private_header))
             end
             if not owned then
                 return nil, "native provider output '" .. reserved.normalized ..
                     "' for " .. reserved.owner .. " aliases input '" ..
-                    reserved.normalized .. "' (not compiler-generated C)"
+                    reserved.normalized .. "' (not compiler-generated C; " ..
+                    "move it or use another output directory)"
             end
         end
     end

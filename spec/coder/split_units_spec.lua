@@ -562,6 +562,121 @@ do base_offset = 10 end
         assert.is_false(file_exists(out .. "/b.ffi.h"))
     end)
 
+    -- Pre-marker compilers emitted the same units without the generated-C
+    -- marker line. Split units included their private header by the absolute
+    -- path they were generated at, so a moved output tree retains the old one.
+    local function legacy_program(name)
+        local src = workspace .. "/" .. name .. "-src"
+        local frontend = cli_frontend(workspace .. "/" .. name .. "-frontend.lua")
+        write_file(src .. "/legacy.titan", MULTI_CONSTRUCT_SOURCE)
+        local function cli(out, parts)
+            return run_cmd({ LUA, "-E", frontend, "--tree", src, "-o", out,
+                "--c-parts", tostring(parts), "-c", "legacy" })
+        end
+        return src, cli
+    end
+
+    it("upgrades same-path, moved and coverage-anchored pre-marker generated C", function()
+        local src, cli = legacy_program("legacy")
+        local marker = driver.GENERATED_C_MARKER
+        local function unit_names(out)
+            local names = {}
+            for entry in lfs.dir(out) do
+                if entry == "legacy.c" or entry:match("^legacy%.part%d+%.c$") then
+                    names[#names + 1] = entry
+                end
+            end
+            table.sort(names)
+            return names
+        end
+        local function build_legacy(out, parts, anchor_lines)
+            local ok, output = cli(out, parts)
+            assert.truthy(ok, output)
+            local names = unit_names(out)
+            assert.equal(parts, #names)
+            for _, name in ipairs(names) do
+                local filename = out .. "/" .. name
+                local contents = read_file(filename)
+                assert.equal(marker, contents:sub(1, #marker), filename)
+                contents = contents:gsub("^[^\n]*\n", "", 1)
+                if anchor_lines then
+                    contents = assert(coverage_lines.convert(contents, filename))
+                end
+                write_file(filename, contents)
+            end
+            return names
+        end
+        local function private_include(filename)
+            return assert(read_file(filename):match('^[^\n]*\n?#include "([^"\n]*)"'))
+        end
+        local revision = 0
+        local function rebuild(out, parts, names)
+            revision = revision + 1
+            write_file(src .. "/legacy.titan", (MULTI_CONSTRUCT_SOURCE:gsub("\ndo\n",
+                "\nfunction legacy_revision(): integer return " .. revision .. " end\n\ndo\n", 1)))
+            local ok, output = cli(out, parts)
+            assert.truthy(ok, output)
+            for _, name in ipairs(names) do
+                assert.equal(marker, read_file(out .. "/" .. name):sub(1, #marker), name)
+            end
+        end
+
+        local same = workspace .. "/legacy-same"
+        local names = build_legacy(same, 4)
+        for _, name in ipairs(names) do
+            local header = private_include(same .. "/" .. name)
+            assert.equal("/legacy-same/legacy.priv.h", header:sub(-#"/legacy-same/legacy.priv.h"))
+        end
+        rebuild(same, 4, names)
+
+        local old, moved = workspace .. "/legacy-old", workspace .. "/legacy-moved"
+        names = build_legacy(old, 4)
+        assert(os.rename(old, moved))
+        for _, name in ipairs(names) do
+            local header = private_include(moved .. "/" .. name)
+            assert.equal("/legacy-old/legacy.priv.h", header:sub(-#"/legacy-old/legacy.priv.h"))
+        end
+        rebuild(moved, 4, names)
+        for _, name in ipairs(names) do
+            local header = private_include(moved .. "/" .. name)
+            assert.equal("/legacy-moved/legacy.priv.h", header:sub(-#"/legacy-moved/legacy.priv.h"))
+        end
+
+        local anchored = workspace .. "/legacy-anchored"
+        names = build_legacy(anchored, 1, true)
+        assert.truthy(read_file(anchored .. "/legacy.c"):find(
+            '#line %d+ "[^\n]*"\nstatic TITAN_UNUSED inline int '))
+        rebuild(anchored, 1, names)
+    end)
+
+    it("refuses authored and unproven split-shaped C at reserved C outputs", function()
+        local _, cli = legacy_program("refuse")
+        local out = workspace .. "/refuse-out"
+        local push = "\n\n#if defined(__ELF__)\n#pragma GCC visibility push(protected)\n#endif\n" ..
+            "int legacy_authored;\n"
+        for _, case in ipairs({
+            { "legacy.c", "int legacy_authored(void) { return 1; }\n" },
+            -- A split-shaped unit from another directory is owned only beside a
+            -- marker-owned private header whose leaf it names by absolute path.
+            { "legacy.part1.c", '#include "' .. workspace .. '/elsewhere/legacy.priv.h"' .. push },
+            { "legacy.part1.c", '#include "' .. workspace .. '/elsewhere/other.priv.h"' .. push, true },
+            { "legacy.part1.c", '#include "legacy.priv.h"' .. push, true },
+        }) do
+            remove_tree(out)
+            local filename = out .. "/" .. case[1]
+            write_file(filename, case[2])
+            if case[3] then
+                write_file(out .. "/legacy.priv.h", driver.PRIVATE_HEADER_MARKER .. "\n")
+            end
+            local ok, output = cli(out, 4)
+            assert.falsy(ok, output)
+            assert.truthy(output:find("(not compiler-generated C;", 1, true), output)
+            assert.equal(case[2], read_file(filename))
+            assert.is_false(file_exists(out .. "/legacy.o"))
+            assert.is_false(file_exists(out .. "/legacy.ffi.h"))
+        end
+    end)
+
     it("renders, writes and formats each CLI header once and releases materialized C", function()
         local log_path, format_log = workspace .. "/header_calls", workspace .. "/header_formats"
         local formatter = workspace .. "/header_formatter.lua"
