@@ -170,6 +170,7 @@ compiler spec/driver_spec.lua 9.998 89.022
 compiler spec/foreign_alias_headers_spec.lua 2.974 46.664
 compiler spec/foreigncache_spec.lua 26.974 413.885
 compiler spec/foreigntypes_spec.lua 0.043 0.181
+compiler spec/generic_validation_spec.lua 1.000 -
 compiler spec/graphcodec_spec.lua 0.291 9.459
 compiler spec/incremental_spec.lua 1.000 -
 compiler spec/installed_prefix_spec.lua 0.121 0.095
