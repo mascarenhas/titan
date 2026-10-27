@@ -577,7 +577,7 @@ end
                 end
             end
             local function no_link_records(directory)
-                if not lfs.symlinkattributes(directory) then return end
+                if not lfs.symlinkattributes(directory, "mode") then return end
                 for name in lfs.dir(directory) do
                     if name ~= "." and name ~= ".." then
                         local path = directory .. "/" .. name
