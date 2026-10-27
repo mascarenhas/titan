@@ -74,8 +74,12 @@ local args = p:parse()
 
 local resolver_context
 -- Output-domain locks; process exit also releases them.
-local output_locks
+local output_locks, locked_io
 local function release_locks()
+    if locked_io then
+        locked_io._process_inherit = nil
+        locked_io = nil
+    end
     if output_locks then
         local locks = output_locks
         output_locks = nil
@@ -353,6 +357,10 @@ output_locks, lock_error = build.lock_outputs(
     resolver_context.io, lock_directories, { verbose = args.verbose })
 if not output_locks then exit(lock_error) end
 driver.OUTPUT_LOCKS = output_locks
+if not platform.windows then
+    locked_io = resolver_context.io
+    locked_io._process_inherit = output_locks:descriptors()
+end
 incremental.load_digest_cache(resolver_context, args.output)
 
 local function preflight_outputs(plan)
@@ -382,6 +390,15 @@ if c_source_only then
 elseif args.print_ast then
     -- A debugging view of each root's checked AST: check in this process,
     -- where the ASTs live, and compile through the ordinary batch below.
+    local plan, plan_errors = build.plan(resolver_context, {
+        roots = requested_modules, loader_options = loader_options,
+    })
+    if not plan then exit(table.concat(plan_errors, "\n")) end
+    local ready, preflight_error = preflight_outputs(plan)
+    if not ready then exit(preflight_error) end
+    -- Planning admits placeholders, not checked ASTs. Every source must still
+    -- pass the ordinary in-process checker before its AST is printed.
+    driver.imported = {}
     loader = driver.defaultloader({}, loader_options)
     for _, modname in ipairs(requested_modules) do
         local ok, errs = checker.checkimport(modname, loader)

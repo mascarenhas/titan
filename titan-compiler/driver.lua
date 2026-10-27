@@ -1049,9 +1049,9 @@ local function remember_used_compiled_interface(context, modname, modtype)
         used = {}
         context.used_compiled_interfaces[modname] = used
     end
-    -- Most lookups revisit the same selected view. Keep every distinct view
-    -- and pay for its semantic serialization only if source replaces it.
-    used[modtype] = true
+    -- Programmatic loaders can reuse and mutate a type descriptor. Preserve
+    -- the semantics of every returned view, not only its current identity.
+    used[types.serialize_semantic(modtype)] = true
 end
 
 -- Implementation notes: doc/implementation/source-import-visibility.md#loader-result-and-module-views
@@ -1062,8 +1062,8 @@ local function check_used_compiled_interface(
         context.used_compiled_interfaces[modname]
     if not used then return end
     local source_interface = types.serialize_semantic(source_type)
-    for compiled_type in pairs(used) do
-        if types.serialize_semantic(compiled_type) ~= source_interface then
+    for compiled_interface in pairs(used) do
+        if compiled_interface ~= source_interface then
             errors[#errors + 1] = "source module '" .. modname ..
                 "' does not match a compiled interface already used in " ..
                 "this compilation"

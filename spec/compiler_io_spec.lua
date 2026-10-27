@@ -427,6 +427,76 @@ describe("compiler I/O strategy", function()
         end
     end)
 
+    posix_model_it("keeps captured shell semantics while inheriting coordinator leases", function()
+        local process = require "titan-compiler.process"
+        local argv = { "tool with spaces", "quoted'argument", "line\nbreak" }
+        for _, settings in ipairs({ {}, { stderr_to_stdout = false } }) do
+            for _, case in ipairs({
+                { ok = true, why = "exit", status = 0 },
+                { ok = false, why = "exit", status = 3 },
+                { ok = false, why = "exit", status = 126 },
+                { ok = false, why = "exit", status = 127 },
+                { ok = false, why = "exit", status = 143 },
+                { ok = false, why = "signal", status = 15 },
+            }) do
+                local strategy, popen_calls = compiler_io.new_sync(), 0
+                local leases, output = { 17, 41 }, "captured\0bytes"
+                with_overrides(io, { popen = function(_, mode)
+                    popen_calls = popen_calls + 1
+                    assert.equal("r", mode)
+                    return {
+                        read = function() return output end,
+                        close = function() return case.ok, case.why, case.status end,
+                    }
+                end }, function()
+                    local baseline = strategy:run(argv, settings)
+                    strategy._process_inherit = leases
+                    with_overrides(process, { capture = function(actual, options)
+                        assert.same({ "/bin/sh", "-c", baseline.command }, actual)
+                        assert.equal(leases, options.inherit)
+                        assert.is_true(options.inherit_environment)
+                        assert.is_false(options.stderr_to_stdout)
+                        return { started = true, ok = case.ok, why = case.why,
+                            status = case.status, output = output }
+                    end }, function()
+                        assert.same(baseline, strategy:run(argv, settings))
+                    end)
+                    assert.equal(1, popen_calls)
+                    strategy._process_inherit = nil
+                    assert.same(baseline, strategy:run(argv, settings))
+                    assert.equal(2, popen_calls)
+                end)
+            end
+        end
+    end)
+
+    posix_model_it("does not escape inherited leases after a capture infrastructure failure", function()
+        local process = require "titan-compiler.process"
+        local strategy = compiler_io.new_sync()
+        strategy._process_inherit = { 17 }
+        with_overrides(io, { popen = function()
+            error("an inherited command must not fall back to popen")
+        end }, function()
+            with_overrides(process, { capture = function() error("capture launch denied") end },
+            function()
+                local result = strategy:run({ "tool" })
+                assert.is_false(result.started)
+                assert.is_false(result.ok)
+                assert.matches("capture launch denied", result.diagnostic, 1, true)
+                assert.is_nil(result.status)
+            end)
+            local expected = { started = true, ok = false, output = "partial",
+                diagnostic = "could not capture command output: interrupted read" }
+            with_overrides(process, { capture = function() return expected end }, function()
+                local result = strategy:run({ "tool" })
+                assert.equal(expected, result)
+                assert.is_string(result.command)
+                assert.is_nil(result.status)
+                assert.matches("interrupted read", result.diagnostic, 1, true)
+            end)
+        end)
+    end)
+
     it("captures argv with deterministic locale and normalized status", function()
         root = workspace()
         local strategy = compiler_io.new_sync()
@@ -1009,6 +1079,52 @@ describe("synchronous compiler I/O batches", function()
                 end
                 assert_guard_restored()
             end)
+        end
+    end)
+
+    posix_model_it("forwards coordinator leases to every parallel captured child", function()
+        root = workspace()
+        local strategy, leases = compiler_io.new_sync(), { 17, 41 }
+        strategy._process_inherit = leases
+        local channel, launches, logs = {}, {}, 0
+        function strategy:tmpname()
+            logs = logs + 1
+            local filename = root .. "/capture-" .. logs
+            assert(self:write_file(filename, ""))
+            return filename
+        end
+        local results = with_overrides(jobs, {
+            open_slots = function()
+                return { limit = 2, close = function() return true end,
+                    cancelled = function() return nil end }
+            end,
+            open_channel = function() return channel end,
+            close_channel = function(actual)
+                assert.equal(channel, actual)
+                return true
+            end,
+            launch = function(actual, argv, _, stdout, stderr, index, before_start, options)
+                assert.equal(channel, actual)
+                assert.equal(stdout, stderr)
+                assert.is_nil(before_start)
+                assert.equal(leases, options.inherit)
+                launches[index] = argv
+                assert(strategy:write_file(stdout, "child " .. index))
+                return { ok = true, term = "exit", code = 0, finish_errors = {} }
+            end,
+            drive = function(_, actual, count, launch)
+                assert.equal(channel, actual)
+                for index = 1, count do assert(launch(index)) end
+                return count + 1
+            end,
+        }, function()
+            return strategy:run_batch({ { "first-tool" }, { "second-tool" } }, { jobs = 2 })
+        end)
+        assert.same({ { "first-tool" }, { "second-tool" } }, launches)
+        for index = 1, 2 do
+            assert.is_true(results[index].ok, results[index].diagnostic)
+            assert.equal("child " .. index, results[index].output)
+            assert.is_nil(lfs.attributes(root .. "/capture-" .. index))
         end
     end)
 
