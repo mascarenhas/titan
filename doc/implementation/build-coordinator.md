@@ -1099,9 +1099,13 @@ relink.
    provider bundle has been validated and published does `titanc` call
    `linkcertificate.commit`. Using a fresh context (`fresh(context)`), `commit`
    re-reads and rehashes every file in `FILE_FIELDS` (aborting with `link input
-   changed during build: <field>` on any race), snapshots every published output
-   in `ticket.outputs`, reads and hashes the linker dependency report
-   (`native_dependencies`), and writes `<ticket.record>` last.
+   changed during build: <field>` on any race). The only exception is a file in
+   the [installed SDK digest
+   manifest](incremental-compilation.md#installed-sdk-digest-manifest) whose
+   precise observation is unchanged; it is re-observed instead. `commit` then
+   snapshots every published output in `ticket.outputs`, reads and hashes the
+   linker dependency report (`native_dependencies`), and writes
+   `<ticket.record>` last.
 
 ## Automatic test-root discovery
 

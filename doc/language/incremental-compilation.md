@@ -179,7 +179,11 @@ keeps a digest cache in `<output>/.titan/digests`, so a source, header, or
 split-part object whose metadata is unchanged since the last invocation is
 not read and hashed again; each module's primary object is still read for its
 certificate. A changed file is always rehashed, and deleting the cache is
-safe. Without `--output`, `titanc` keeps no persistent digest cache.
+safe. Without `--output`, `titanc` keeps no persistent digest cache. An SDK
+installed by its installer also records the digests of its own providers and
+archives, so even a fresh output tree, or a build without `--output`, reuses
+them until those files change. If the SDK files are replaced any other way,
+they are simply read and hashed again.
 
 ### Native `--c-source` nodes and final-link certification
 

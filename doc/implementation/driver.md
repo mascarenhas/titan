@@ -2271,9 +2271,14 @@ boundary](windows-build.md#windows-loader-boundary).
 
 `titan._sha256_binary(bytes)` returns the 32-byte binary SHA-256 digest of a
 string, including embedded NUL and high bytes, and raises for any other
-argument. It is portable C over the public Lua API, with no OpenSSL or process
+argument. It is C over the public Lua API, with no OpenSSL or process
 dependency, so the private bootstrap provides it before the standard library
-exists. `titanc` refuses to start without it ([The `titanc` command
+exists. On x86 and x86-64 GCC/Clang builds it uses the SHA extensions when
+`cpuid` reports them (with SSSE3 and SSE4.1) and otherwise the portable block
+function. An AArch64 build whose target defines `__ARM_FEATURE_SHA2` always
+uses the ARMv8 SHA2 instructions, and every other target uses the portable
+function. All paths produce identical digests. `titanc` refuses to start
+without it ([The `titanc` command
 line](#the-titanc-command-line)), and a physical provider named `titan` is
 published only when a fresh Lua process finds it, beside `_loadlib` and
 `_loadlibglobal`, in the linked support table (`driver.lua`

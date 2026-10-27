@@ -229,11 +229,15 @@ hashes each distinct file at most once per resolver context:
    exists. If caller-supplied `bytes` differ from the saved bytes (or, for a
    digest-only entry, hash to a different digest), it raises
    `<path>: file changed during build`.
-2. When `bytes` is nil and the coordinator loaded a
-   [persistent digest cache](#persistent-digest-cache), a cached entry for the
-   absolute path is accepted without reading the file when the current
-   precise observation equals the stored one and the path is readable. The
-   memo then holds a digest without bytes.
+2. When `bytes` is nil and the invocation loaded an
+   [installed SDK digest manifest](#installed-sdk-digest-manifest) with an
+   entry for `key`, that digest is accepted without reading the file when
+   the current precise observation equals the recorded one and the path is
+   readable. This check also applies in fresh contexts. Otherwise, when the
+   coordinator loaded a
+   [persistent digest cache](#persistent-digest-cache) and the context is not
+   fresh, a cached entry for the absolute path is accepted in the same way.
+   Either hit leaves the memo with a digest without bytes.
 3. Otherwise it records a pre-read observation combining
    `context.io:stat(path)` (which must be `kind == "file"`) and
    `context.io:lstat(path)`, reads the file through `context.io:read_file(path)`,
@@ -243,7 +247,8 @@ hashes each distinct file at most once per resolver context:
 4. It hashes the bytes, records `{ digest, bytes, observation }` in
    `memo.files[key]`, stores precise observations in the persistent cache,
    updates `incremental.counters(context)` (`file_hashes`, `file_reads`,
-   `file_bytes`, `observation_reuses`, `digest_calls`, and `files[key]`),
+   `file_bytes`, `observation_reuses`, `sdk_reuses`, `digest_calls`, and
+   `files[key]`),
    calls `context.io:yield()`, and returns `digest, bytes`.
 
 A consumer that needs file bytes rather than a digest calls
@@ -261,9 +266,11 @@ C-header parsing and C probes may hash files independently. Only a publisher
 that replaces an owned output
 calls `incremental.invalidate_file(context, path)` to evict `path` and its
 aliases from the memo and the persistent cache. Pre-publication
-revalidation uses `incremental.fresh_context(context)`, which shares the
-persistent cache but sets `refresh`, so every input is re-read and rehashed
-while its verified observation primes the cache for the next invocation.
+revalidation uses `incremental.fresh_context(context)`. It shares the
+persistent cache and the SDK manifest but sets `refresh`, so every input is
+re-read and rehashed while its verified observation primes the cache for the
+next invocation; the only exception is an SDK-manifest file whose precise
+observation is unchanged.
 
 ### Persistent digest cache
 
@@ -303,6 +310,42 @@ renames it over the file, and removes the staging file on failure. `titanc`
 ignores save errors so they cannot replace compilation diagnostics. Entries
 are replaced in place and removed only by `invalidate_file`; there is no other
 pruning.
+
+### Installed SDK digest manifest
+
+An installed SDK carries `lib/titan/<ver>/sdk-digests`
+(`incremental.SDK_DIGESTS`, `driver.INSTALL_PATHS.sdk_digests`). It records
+content digests of the installation's own native link inputs, so a fresh
+output tree, or a build without `--output`, need not hash a large standard
+provider or archive that has not changed since installation. Only the
+installer writes it: `scripts/titan_install.lua` `publish` calls
+`incremental.write_sdk_digests` with the just-installed provider's
+`_sha256_binary` and `_stat_precise`. It covers every file directly under
+`lib/titan/<ver>/` and the top-level `lib/*.a` archives the installer itself
+installs; when Lua shares the prefix, its `liblua.a` is left out. Each
+file is read under the ordinary read-race guard, and a file without a precise
+observation gets no entry. The manifest is replaced through
+`sdk-digests.tmp.<unique>` and a rename. A payload without a loadable
+compiler and provider writes none. The installer records the manifest path as
+`digests` in its `installer/location.lua`, and uninstall removes it.
+
+The file is a `graphcodec` record with `schema = version.SDK_DIGEST_SCHEMA`
+(`"1"`), the same `digest`, `canonicalization`, and `abi` envelope as the
+per-output cache, and `files[realpath] = { digest, observation }` validated
+like the cache's `files`. An installed `titanc` loads it read-only with
+`incremental.load_sdk_digests` right after the per-output cache. A missing,
+unreadable, oversized, malformed, or foreign-schema manifest contributes no
+entries, and `titanc` never writes it.
+
+An entry is trusted exactly like a cache entry: same resolved path, equal
+precise observation (`dev`, `ino`, `size`, `mode`, and nanosecond `mtime` and
+`ctime`, which is `ChangeTime` on Windows), and a readable file. Unlike the
+per-output cache, it is also trusted in the fresh post-link recheck, which
+re-observes such a file instead of rereading it. A changed observation reads
+and hashes the file. If those bytes differ from what the ticket certified, the
+recheck still fails with `link input changed during build`. Objects, outputs,
+system libraries, and user payloads keep fresh post-link rehashing. Reuses
+count as `sdk_reuses`.
 
 ### Certificate layout
 
