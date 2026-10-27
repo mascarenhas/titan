@@ -65,6 +65,15 @@ local function run_titanc(arguments, environment_jobs)
     function driver.configure_foreign_c() return true end
     function driver.default_c_parts() return 4 end
     function driver.prepare_output_root(dir) return dir end
+    function driver.cleanup_stale_staging(context, outputs, locks)
+        assert.equal(resolver, context)
+        assert.equal(observed.output_locks, locks)
+        assert.falsy(observed.lock_released)
+        local expected = { { path = "pkg.so" } }
+        if not platform.windows then expected[2] = { path = "pkg.a" } end
+        assert.same(expected, outputs)
+        return true
+    end
     function driver.module_compiled_objects(mod)
         return { (mod.filename:gsub("[.]titan$", ".o")) }
     end
@@ -184,6 +193,7 @@ local function run_titanc(arguments, environment_jobs)
     function build.run(context, request)
         observed.build_jobs = request.jobs
         assert.is_table(request.locks)
+        observed.output_locks = request.locks
         if not platform.windows then
             assert.equal(inherited_descriptors, context.io._process_inherit)
         end
