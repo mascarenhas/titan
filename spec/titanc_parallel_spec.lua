@@ -700,13 +700,38 @@ describe("Windows native descendant containment", function()
         return result
     end
 
-    local function start_compiler(role, match, jobs)
+    local function start_compiler(role, match, jobs, c_source_only)
         local log = assert(uv.fs_open(workspace .. "/" .. role .. ".log", "w", 420))
         local child = {}
         local initialize = string.format(
             "package.path=%q..package.path;package.cpath=%q..package.cpath;",
             repository .. "/?.lua;" .. repository .. "/?/init.lua;",
             repository .. "/titan-runtime/bootstrap/?.dll;")
+        if c_source_only then
+            -- D2's native-only startup deliberately skips the Titan foreign
+            -- profile. Exercise the late guard, after all output locks exist.
+            initialize = initialize .. string.format([[
+local build = require "titan-compiler.build"
+local acquire = build.lock_outputs
+local locked = false
+build.lock_outputs = function(...)
+  local locks, err = acquire(...)
+  if locks then locked = true end
+  return locks, err
+end
+local native = require "titan"
+local guard = assert(native._native_process_tree_guard)
+native._native_process_tree_guard = function()
+  assert(locked, "C-only native launch unexpectedly preceded output lock admission")
+  local ready, err = guard()
+  if ready then
+    local receipt = assert(io.open(%q, "wb"))
+    assert(receipt:write("after-lock\n")); assert(receipt:close())
+  end
+  return ready, err
+end
+]], workspace .. "/" .. role .. ".guard")
+        end
         if role == "successor" then
             initialize = initialize .. string.format([[
 local factory = assert(package.loadlib(%q, "luaopen_native_writer_admission"))
@@ -733,9 +758,17 @@ end
         local arguments = {
             "-E", "-e", initialize,
             repository .. "/titanc", "-v", "--incremental", "--tree", workspace,
-            "-o", workspace .. "/build", "--exe", workspace .. "/application",
-            "--jobs", tostring(jobs), "--c-parts", tostring(jobs), "app",
+            "-o", workspace .. "/build", "--jobs", tostring(jobs),
         }
+        if c_source_only then
+            for _, word in ipairs({ "-c", "--c-source", workspace .. "/native_startup.c",
+                    "--print-c-objects" }) do arguments[#arguments + 1] = word end
+        else
+            for _, word in ipairs({ "--exe", workspace .. "/application",
+                    "--c-parts", tostring(jobs), "app" }) do
+                arguments[#arguments + 1] = word
+            end
+        end
         local handle, err = uv.spawn(lua, { args = arguments, cwd = workspace,
             env = compiler_environment(match), stdio = { nil, log, log } },
             function(code, signal)
@@ -776,14 +809,6 @@ end
         end
         local observer = process.capture(argv)
         assert.truthy(observer.ok, observer.diagnostic)
-        local payload = string.rep("x", 1100 * 1024)
-        write_file(workspace .. "/app.titan", string.format([[
-function first(): string return %q end
-function second(): string return %q end
-function main(args: {string}): integer
-  if #first() + #second() == %d then return 0 else return 1 end
-end
-]], payload, payload, #payload * 2))
     end)
 
     after_each(function()
@@ -803,8 +828,21 @@ end
         workspace = nil
     end)
 
-    local function killed_coordinator(match, jobs)
-        local holder = start_compiler("holder", match, jobs)
+    local function killed_coordinator(match, jobs, c_source_only)
+        if c_source_only then
+            write_file(workspace .. "/native_startup.c",
+                "int native_value(void) { return 73; }\n")
+        else
+            local payload = string.rep("x", 1100 * 1024)
+            write_file(workspace .. "/app.titan", string.format([[
+function first(): string return %q end
+function second(): string return %q end
+function main(args: {string}): integer
+  if #first() + #second() == %d then return 0 else return 1 end
+end
+]], payload, payload, #payload * 2))
+        end
+        local holder = start_compiler("holder", match, jobs, c_source_only)
         assert.truthy(wait_until(function()
             return read_file(workspace .. "/writer.ready") ~= nil or holder.exited
         end, 90000), read_file(workspace .. "/holder.log"))
@@ -813,12 +851,16 @@ end
         local pid, output = ready:match("^(%d+)\n([^\n]+)\n$")
         writer_pid = assert(tonumber(pid), ready)
         assert.truthy(output, ready)
+        if c_source_only then
+            assert.equal("after-lock\n", read_file(workspace .. "/holder.guard"),
+                read_file(workspace .. "/holder.log"))
+        end
         local alive = process.capture({ wrapper, "--wait-dead", pid, "0" })
         assert.equal(1, alive.status, alive.diagnostic)
         -- Pin the live writer in the successor before killing the holder. Its
         -- direct zero-time query runs at the full lock-set admission boundary,
         -- not after another process launch or a wait for writer termination.
-        local successor = start_compiler("successor", nil, jobs)
+        local successor = start_compiler("successor", nil, jobs, c_source_only)
         assert.truthy(wait_until(function()
             return read_file(workspace .. "/admission.waiting") ~= nil or successor.exited
         end, 90000), read_file(workspace .. "/successor.log"))
@@ -832,15 +874,40 @@ end
         assert.equal(0, successor.code, read_file(workspace .. "/successor.log"))
         assert.equal("terminated\n", read_file(workspace .. "/admission.checked"),
             read_file(workspace .. "/successor.log"))
-        assert.equal("file", lfs.attributes(workspace .. "/build/app.o", "mode"))
+        local native_object
+        if c_source_only then
+            assert.equal("after-lock\n", read_file(workspace .. "/successor.guard"),
+                read_file(workspace .. "/successor.log"))
+            local log = read_file(workspace .. "/successor.log"):gsub("\r\n", "\n")
+            native_object = assert(log:match("([^\n]+)\n*$"), log)
+            assert.truthy(native_object:match("[.]o$"), log)
+            assert.equal("file", lfs.attributes(native_object, "mode"), log)
+        else
+            assert.equal("file", lfs.attributes(workspace .. "/build/app.o", "mode"))
+        end
         local before = read_file(output)
         write_file(workspace .. "/writer.release", "continue\n")
         local dead = process.capture({ wrapper, "--wait-dead", pid, "10000" })
         assert.truthy(dead.ok, dead.diagnostic)
         assert.is_nil(lfs.attributes(workspace .. "/writer.finished"))
         assert.equal(before, read_file(output), "old native writer changed the output")
-        local application = process.capture({ workspace .. "/application.exe" })
-        assert.truthy(application.ok, application.diagnostic)
+        if c_source_only then
+            write_file(workspace .. "/native_consumer.c",
+                "int native_value(void);\n" ..
+                "int main(void) { return native_value() == 73 ? 0 : 1; }\n")
+            local argv = assert(cdriver.split_shell_words(platform.getenv("CC") or "clang"))
+            for _, word in ipairs({ workspace .. "/native_consumer.c", native_object,
+                    "-o", workspace .. "/native_consumer.exe" }) do
+                argv[#argv + 1] = word
+            end
+            local linked = process.capture(argv)
+            assert.truthy(linked.ok, linked.diagnostic)
+            local consumer = process.capture({ workspace .. "/native_consumer.exe" })
+            assert.truthy(consumer.ok, consumer.diagnostic)
+        else
+            local application = process.capture({ workspace .. "/application.exe" })
+            assert.truthy(application.ok, application.diagnostic)
+        end
     end
 
     it("kills a synchronous entrypoint wrapper and its native grandchild", function()
@@ -850,5 +917,9 @@ end
     it("kills coordinator-dispatched split compilers and their native grandchildren", function()
         -- Two large functions force the existing remote native-batch path.
         killed_coordinator("app.c", 2)
+    end)
+
+    it("contains C-only native writers when the first guard starts after lock admission", function()
+        killed_coordinator("native_startup.c", 1, true)
     end)
 end)
