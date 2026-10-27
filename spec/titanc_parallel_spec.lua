@@ -35,6 +35,7 @@ local function fake_argparse(arguments)
 end
 
 local function run_titanc(arguments, environment_jobs)
+    local inherited_descriptors = { 71, 72 }
     local observed = {}
     local driver = {
         imported = {},
@@ -87,6 +88,7 @@ local function run_titanc(arguments, environment_jobs)
     function driver.new_resolver_context(options)
         observed.resolver_jobs = options.jobs
         resolver = {
+            io = {},
             source_names = {},
             selected_static_providers = {},
             dynamic_names = {},
@@ -156,7 +158,9 @@ local function run_titanc(arguments, environment_jobs)
     function build.lock_outputs(_, directories)
         observed.locked = directories
         return {
+            descriptors = function() return inherited_descriptors end,
             release = function()
+                assert.is_nil(resolver.io._process_inherit)
                 observed.lock_released = true
                 return true
             end,
@@ -165,6 +169,9 @@ local function run_titanc(arguments, environment_jobs)
     function build.run(context, request)
         observed.build_jobs = request.jobs
         assert.is_table(request.locks)
+        if not platform.windows then
+            assert.equal(inherited_descriptors, context.io._process_inherit)
+        end
         for _, name in ipairs(request.roots) do check_root(name) end
         context.loader = function() end
         return true
