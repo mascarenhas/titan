@@ -2,6 +2,7 @@ local assert = require "luassert"
 local compiler_io = require "titan-compiler.io"
 local cdriver = require "c-parser.cdriver"
 local driver = require "titan-compiler.driver"
+local incremental = require "titan-compiler.incremental"
 local native = require "titan-compiler.nativeinputs"
 local lfs = require "lfs"
 local platform = require "titan-compiler.platform"
@@ -64,12 +65,12 @@ end)
 
 describe("certified app-owned C sources", function()
     local root, source, header, phases
-    local function build(extra, incremental_mode, sources, on_run)
+    local function build(extra, incremental_mode, sources, on_run, overrides)
         local ctx = context()
         local argv = assert(cdriver.split_shell_words(driver.CC))
         for _, flag in ipairs({ "-std=c99", "-fPIC", "-I" .. root }) do argv[#argv + 1] = flag end
         for _, flag in ipairs(extra or {}) do argv[#argv + 1] = flag end
-        return native.compile(ctx, { sources = sources or { source }, output_root = root,
+        local request = { sources = sources or { source }, output_root = root,
             compile_argv = argv, toolchain = "test-selected-toolchain", incremental = incremental_mode ~= false,
             run = function(command, phase)
                 phases[#phases + 1] = phase
@@ -77,7 +78,9 @@ describe("certified app-owned C sources", function()
                 if on_run then on_run(phase, result) end
                 return result
             end,
-        })
+        }
+        for key, value in pairs(overrides or {}) do request[key] = value end
+        return native.compile(ctx, request)
     end
     before_each(function()
         root = temporary.name(); assert(os.remove(root)); assert(lfs.mkdir(root))
@@ -220,6 +223,70 @@ int helper(void) { return 2; }
         phases = {}
         assert.is_false(assert(build(nil, false))[1].hit)
         assert.same({ "native-preprocess", "native-compile" }, phases)
+    end)
+
+    for _, publisher in ipairs({ "native", "coordinator" }) do
+        it("builds an uncertified Windows toolchain through " .. publisher .. " publication without accepting a record", function()
+            if not platform.windows then pending("Windows toolchain-selection uncertainty"); return end
+            local first = assert(build())[1]
+            local sidecar = first.path:gsub("%.o$", ".record")
+            assert.equal("file", lfs.attributes(sidecar, "mode"))
+            local options = { toolchain = {
+                compiler_argv = assert(cdriver.split_shell_words(driver.CC)),
+                preprocessor_identity = "#define __TEST_COMPILER__ 1\n",
+                banner = "opaque native compiler",
+                stage_tools = { root .. "/opaque-stage" },
+            } }
+            local publications = 0
+            if publisher == "coordinator" then
+                local filesystem = context().io
+                options.publish = function(publication)
+                    publications = publications + 1
+                    assert.is_false(publication.cacheable)
+                    assert.is_nil(publication.metadata)
+                    for _, path in ipairs({ publication.object, publication.record }) do
+                        if filesystem:lstat(path) then assert(filesystem:unlink(path)) end
+                    end
+                    return filesystem:rename(publication.staged, publication.object)
+                end
+            end
+            for _ = 1, 2 do
+                phases = {}
+                local object = assert(build(nil, true, nil, nil, options))[1]
+                assert.equal(first.path, object.path)
+                assert.is_false(object.cacheable)
+                assert.is_false(object.hit)
+                assert.same({ "native-preprocess", "native-compile" }, phases)
+                assert.equal("file", lfs.attributes(object.path, "mode"))
+                assert.is_nil(lfs.symlinkattributes(sidecar))
+            end
+            assert.equal(publisher == "coordinator" and 2 or 0, publications)
+        end)
+    end
+
+    it("preserves toolchain metadata I/O failures and cancellation before native compilation", function()
+        for _, failure in ipairs({ "toolchain metadata failed", {} }) do
+            local ctx = context()
+            function ctx.io:stat()
+                if type(failure) == "string" then return nil, failure end
+                error(failure, 0)
+            end
+            ctx.io.lstat = ctx.io.stat
+            function ctx.io:run() error("failed toolchain metadata must not start compilation") end
+            local request = { sources = { source }, output_root = root,
+                compile_argv = { "selected-compiler" }, incremental = true,
+                toolchain = { compiler_argv = { "selected-compiler" }, stage_tools = {},
+                    banner = "clang version 22.1.8", preprocessor_identity = "#define __clang__ 1\n" } }
+            if type(failure) == "string" then
+                local objects, err = native.compile(ctx, request)
+                assert.is_nil(objects)
+                assert.matches(failure, err, 1, true)
+            else
+                local ok, err = pcall(native.compile, ctx, request)
+                assert.is_false(ok)
+                assert.equal(failure, err)
+            end
+        end
     end)
 
     it("leaves no accepted new record after a compiler failure", function()
@@ -385,6 +452,157 @@ describe("native C object path CLI", function()
         assert.same({ paths[2] }, second_only)
         assert.equal("unrelated retained object\n", read(stale))
     end)
+
+    for _, kind in ipairs({ "C-only", "mixed" }) do
+        it("builds an uncertified Windows compiler prefix in " .. kind .. " mode without reuse", function()
+            if not platform.windows then pending("Windows compiler-prefix uncertainty"); return end
+            local compiler = assert(cdriver.split_shell_words(driver.CC))
+            if compiler[1] == "exec" then table.remove(compiler, 1) end
+            local identity, admitted = incremental.physical_executable(context(), compiler)
+            assert.truthy(identity, admitted)
+            compiler[1] = admitted
+            local wrapper, wrapper_source = root .. "/ccache.exe", root .. "/compiler-prefix.c"
+            write(wrapper_source, [[
+#include <windows.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <wchar.h>
+int wmain(int argc, wchar_t **argv) {
+    if (argc < 2) return 126;
+    const wchar_t *events = _wgetenv(L"TITAN_TEST_CC_EVENTS");
+    if (!events) return 125;
+    FILE *stream = _wfopen(events, L"a");
+    if (!stream) return 125;
+    int phase = 'L';
+    for (int i = 2; i < argc; ++i) {
+        if (wcscmp(argv[i], L"-E") == 0) phase = 'P';
+        if (wcscmp(argv[i], L"-c") == 0) { phase = 'C'; break; }
+        if (wcscmp(argv[i], L"-###") == 0) { phase = 'Q'; break; }
+    }
+    int logged = fputc(phase, stream) != EOF && fputc('\n', stream) != EOF;
+    if (fclose(stream) != 0 || !logged) return 125;
+
+    /* Preserve the actual UTF-16 argument quoting supplied by libuv; remove
+       only this executable's argv[0], whose path cannot contain a quote. */
+    const wchar_t *command = GetCommandLineW();
+    while (*command == L' ' || *command == L'\t') ++command;
+    if (*command == L'"') {
+        ++command;
+        while (*command && *command != L'"') ++command;
+        if (*command) ++command;
+    } else {
+        while (*command && *command != L' ' && *command != L'\t') ++command;
+    }
+    while (*command == L' ' || *command == L'\t') ++command;
+    wchar_t *child_command = _wcsdup(command);
+    if (!child_command) return 125;
+    STARTUPINFOW startup;
+    GetStartupInfoW(&startup);
+    startup.cb = sizeof(startup);
+    startup.dwFlags |= STARTF_USESTDHANDLES;
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    PROCESS_INFORMATION child;
+    BOOL started = CreateProcessW(argv[1], child_command, NULL, NULL, TRUE, 0,
+        NULL, NULL, &startup, &child);
+    free(child_command);
+    if (!started) return 126;
+    CloseHandle(child.hThread);
+    DWORD status = 126;
+    BOOL finished = WaitForSingleObject(child.hProcess, INFINITE) == WAIT_OBJECT_0 &&
+        GetExitCodeProcess(child.hProcess, &status);
+    CloseHandle(child.hProcess);
+    return finished ? (int)status : 126;
+}
+]])
+            local command = { table.unpack(compiler) }
+            for _, word in ipairs({ "-std=c99", "-O0", "-fno-lto", "-municode", wrapper_source, "-o", wrapper }) do
+                command[#command + 1] = word
+            end
+            local built = context().io:run(command)
+            assert.is_true(built.started and built.ok, built.output or built.diagnostic)
+            assert.equal("MZ", read(wrapper):sub(1, 2))
+            local words, quoted = { wrapper }, {}
+            for _, word in ipairs(compiler) do words[#words + 1] = word end
+            for _, word in ipairs(words) do quoted[#quoted + 1] = string.format("%q", word) end
+            local configured = table.concat(quoted, " ")
+            assert.same(words, assert(cdriver.split_shell_words(configured)))
+            local events, output = root .. "/compiler-events", root .. "/uncertified build"
+            local environment = { CC = configured, TITAN_TEST_CC_EVENTS = events }
+            local arguments = { "--incremental", "-v", "--jobs", kind == "mixed" and "2" or "1",
+                "--output", output, "--c-source", first }
+            local executable
+            if kind == "C-only" then
+                arguments[#arguments + 1], arguments[#arguments + 2] = "-c", "--print-c-objects"
+            else
+                write(root .. "/first_helper.h", "int first_helper(void);\n")
+                write(root .. "/uncertified_dep.titan", [[
+foreign import "first_helper.h"
+local function native_value(): integer
+    return ffi.first_helper() - 17
+end
+]])
+                write(root .. "/uncertified_main.titan", [[
+local dependency = import "uncertified_dep.titan"
+function main(args: {string}): integer
+    return dependency.native_value()
+end
+]])
+                executable = root .. "/uncertified-program.exe"
+                for _, word in ipairs({ "--tree", root, "--exe", executable, "uncertified_main" }) do
+                    arguments[#arguments + 1] = word
+                end
+            end
+            local function no_link_records(directory)
+                if not lfs.symlinkattributes(directory) then return end
+                for name in lfs.dir(directory) do
+                    if name ~= "." and name ~= ".." then
+                        local path = directory .. "/" .. name
+                        assert.not_equal("record", name, path)
+                        if lfs.symlinkattributes(path, "mode") == "directory" then no_link_records(path) end
+                    end
+                end
+            end
+            local object, sentinel = nil, 946684800
+            for attempt = 1, 2 do
+                write(events, "")
+                local result = invoke(arguments, environment)
+                assert.is_true(result.ok, result.stderr)
+                assert.equal("exit", result.why, result.stderr)
+                assert.equal(0, result.status, result.stderr)
+                assert.matches("Titan native miss " .. first, result.stderr, 1, true)
+                assert.is_nil(result.stderr:find("Titan native hit ", 1, true), result.stderr)
+                assert.is_nil(result.stderr:find("Titan link hit ", 1, true), result.stderr)
+                assert.matches("C\n", read(events), 1, true)
+                if kind == "C-only" then
+                    local current = assert(result.stdout:match("^([^\n]+)\n$"), result.stdout)
+                    assert.is_true(platform.is_absolute(current))
+                    if object then assert.equal(object, current) end
+                    object = current
+                    assert.is_nil(lfs.symlinkattributes(object:gsub("%.o$", ".record")))
+                else
+                    assert.matches("Titan link miss ", result.stderr, 1, true)
+                    assert.matches("L\n", read(events), 1, true)
+                    object = output .. "/uncertified_main.o"
+                    local ran = context().io:run({ executable })
+                    assert.is_true(ran.started and ran.ok, ran.output or ran.diagnostic)
+                    assert.equal(0, ran.status)
+                    for name in lfs.dir(output .. "/.native") do
+                        assert.is_nil(name:match("%.record$"), name)
+                    end
+                    no_link_records(output .. "/.titan-links")
+                    local dependency = output .. "/uncertified_dep.o"
+                    assert.equal("file", lfs.attributes(dependency, "mode"))
+                    if attempt == 1 then assert(lfs.touch(dependency, sentinel, sentinel))
+                    else assert.not_equal(sentinel, lfs.attributes(dependency, "modification")) end
+                end
+                assert.equal("file", lfs.attributes(object, "mode"))
+                if attempt == 1 then assert(lfs.touch(object, sentinel, sentinel))
+                else assert.not_equal(sentinel, lfs.attributes(object, "modification")) end
+            end
+        end)
+    end
 
     for _, case in ipairs({
         { name = "requires compile-only mode before creating outputs",

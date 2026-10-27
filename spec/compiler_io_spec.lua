@@ -296,6 +296,24 @@ describe("compiler I/O strategy", function()
         end)
     end)
 
+    it("preserves optional native Windows entry attributes for both observation modes", function()
+        for _, attributes in ipairs({ false, 0, 0x80, 0x410 }) do
+            with_native_stat(function(_, follow)
+                return { kind = follow and "file" or "link", dev = "1", ino = "2",
+                    size = 0, mode = follow and 0x81A4 or 0xA1FF,
+                    mtime_ns = 0, ctime_ns = 0,
+                    windows_attributes = attributes ~= false and attributes or nil }
+            end, function()
+                local strategy = compiler_io.new_sync()
+                for _, method in ipairs({ "stat", "lstat" }) do
+                    local observed = assert(strategy[method](strategy, "tool-link.exe"))
+                    assert.equal(attributes ~= false and attributes or nil, observed.windows_attributes)
+                    assert.equal(method == "stat" and "file" or "symlink", observed.kind)
+                end
+            end)
+        end
+    end)
+
     it("preserves exact-second and pre-epoch native timestamps", function()
         for _, stamp in ipairs({ 0, -1, -1000000001 }) do
             with_native_stat(function()
@@ -425,6 +443,7 @@ describe("compiler I/O strategy", function()
                 "changed_seconds", "changed_nanoseconds", "ctime_ns", "mtime_ns", "dev", "ino",
             }) do expected_keys[#expected_keys + 1] = key end
         end
+        if precise and platform.windows then expected_keys[#expected_keys + 1] = "windows_attributes" end
         if precise or not platform.windows then
             expected_keys[#expected_keys + 1] = "device"
             expected_keys[#expected_keys + 1] = "inode"
@@ -446,6 +465,10 @@ describe("compiler I/O strategy", function()
             assert.equal(metadata.ino, metadata.inode)
             assert.equal("integer", math.type(metadata.mtime_ns))
             assert.equal("integer", math.type(metadata.ctime_ns))
+            if platform.windows then
+                assert.equal("integer", math.type(metadata.windows_attributes))
+                assert.equal(0, metadata.windows_attributes & 0x10)
+            else assert.is_nil(metadata.windows_attributes) end
         elseif platform.windows then
             assert.is_nil(metadata.device)
             assert.is_nil(metadata.inode)

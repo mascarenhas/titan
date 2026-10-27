@@ -388,8 +388,21 @@ local function windows_physical_executable(context, executable, selection)
             return uncertified_tool("cannot prove Windows tool path: " ..
                 tostring(resolve_error))
         end
+        local entry, entry_error = context.io:lstat(resolved)
+        if entry_error ~= nil then required(nil, entry_error, resolved) end
+        if not entry or entry.kind ~= "symlink" then return resolved, entry end
         local stat, err = context.io:stat(resolved)
         if err ~= nil then required(nil, err, resolved) end
+        if not stat then
+            return uncertified_tool("cannot prove existing Windows tool entry: " .. resolved)
+        end
+        local attributes = entry.windows_attributes
+        if math.type(attributes) ~= "integer" or attributes < 0 or attributes >= 0xffffffff then
+            return uncertified_tool("cannot prove Windows tool link attributes: " .. resolved)
+        end
+        if ((attributes & 0x10) ~= 0) ~= (stat.kind == "directory") then
+            return uncertified_tool("Windows tool link entry and target kinds differ: " .. resolved)
+        end
         return resolved, stat
     end
     if selection == "llvm" then
