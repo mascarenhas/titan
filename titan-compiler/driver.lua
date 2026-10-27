@@ -1478,10 +1478,15 @@ function driver.output_tool_descriptors(context, kind)
         if not dsymutil then return nil, dsymutil_error end
         tools.dsymutil = { dsymutil }
     end
+    local toolchain, details, status =
+        incremental.toolchain_identity(context, descriptor)
+    if not toolchain and status ~= "uncertified" then return nil, details end
     return {
         compiler_argv = argv,
         link_flags = driver.link_extra_flags(),
-        toolchain = incremental.toolchain_identity(context, descriptor),
+        toolchain = toolchain,
+        compiler_stage_policy = toolchain and details.stage_policy or nil,
+        uncacheable = status == "uncertified" and details or nil,
         directory = context.output_root or
             driver.TITAN_SOURCE_PATH:match("[^;]+") or ".",
         darwin = driver.IS_DARWIN == true,
@@ -1496,8 +1501,9 @@ function driver.native_link_backend(context)
     if context.native_link_backend then return context.native_link_backend end
     local request, request_error = driver.output_tool_descriptors(context)
     if not request then return nil, request_error end
-    local backend, backend_error = require("titan-compiler.linkcertificate")
+    local backend, backend_error, status = require("titan-compiler.linkcertificate")
         .linker_backend(context, request)
+    if status == "uncertified" then return backend, backend_error, status end
     if not backend then return nil, backend_error end
     context.native_link_backend = backend
     return backend
@@ -4423,9 +4429,9 @@ end
 end -- certification facts
 
 -- Compute this invocation's configuration certificate once per resolver
--- context. Every certification and every record written through the context
--- shares it. Any failure is an explicit invocation error: a compiler that
--- cannot inventory itself or its native configuration cannot compile either.
+-- context. Only explicit native-policy uncertainty disables certification
+-- without disabling compilation. Inventory and operational failures remain
+-- invocation errors; an uncertified context never contains a partial certificate.
 function driver.incremental_configuration(context)
     if type(context) ~= "table" or context.io == nil then
         error("configuration certification requires a resolver context", 2)
@@ -4433,14 +4439,24 @@ function driver.incremental_configuration(context)
     if context.incremental_configuration then
         return context.incremental_configuration
     end
+    if context.incremental_uncertified then
+        return nil, context.incremental_uncertified, "uncertified"
+    end
     local options, options_error = incremental_options(context)
     if not options then return nil, options_error end
     context.incremental_options = options
-    local configuration, configuration_error =
+    local configuration, configuration_error, status =
         incremental.configuration(context, options)
     if not configuration then
+        if status == "uncertified" then
+            context.incremental_uncertified = configuration_error
+            return nil, configuration_error, status
+        end
+        if type(configuration_error) ~= "string" then
+            error(configuration_error, 0)
+        end
         return nil, "cannot certify compiler configuration: " ..
-            tostring(configuration_error)
+            configuration_error
     end
     context.incremental_configuration = configuration
     return configuration
@@ -5276,9 +5292,14 @@ function driver.defaultloader(static_deps, options)
             end
             return nil
         end
-        local configuration, configuration_error =
+        local configuration, configuration_error, status =
             driver.incremental_configuration(context)
-        if not configuration then return false, configuration_error end
+        if not configuration then
+            if status == "uncertified" then
+                return miss(status, configuration_error)
+            end
+            return false, configuration_error
+        end
         local certified = incremental.certify_local(context, modname, source)
         if certified.status ~= "hit" then
             return miss(certified.reason, certified.detail)
@@ -5327,10 +5348,13 @@ function driver.defaultloader(static_deps, options)
     local function plan_source(modname, source, loader)
         local certified
         if options.incremental and not source.contents then
-            local configuration, configuration_error =
+            local configuration, configuration_error, status =
                 driver.incremental_configuration(context)
-            if not configuration then return false, configuration_error end
-            certified = incremental.certify_local(context, modname, source)
+            if configuration then
+                certified = incremental.certify_local(context, modname, source)
+            elseif status ~= "uncertified" then
+                return false, configuration_error
+            end
         end
         local imports, imports_error =
             options.imports_for(modname, source, certified)
@@ -6363,11 +6387,19 @@ end
 
 -- Everything a worker needs to reproduce this coordinator's compiler state,
 -- as closed data: driver paths and flags, resolver and code-generation
--- policy, and the configuration certificate computed once here.
+-- policy, actual compiler inventory, and a certificate only when certifiable.
 function driver.worker_configuration(context)
-    local configuration, configuration_error =
+    local configuration, configuration_error, status =
         driver.incremental_configuration(context)
-    if not configuration then return nil, configuration_error end
+    if not configuration and status ~= "uncertified" then
+        return nil, configuration_error
+    end
+    local compiler = configuration and configuration.compiler
+    if not compiler then
+        local compiler_error
+        compiler, compiler_error = incremental.compiler_component(context)
+        if not compiler then return nil, compiler_error end
+    end
     -- This is requested lazily, after graph/output preflight and before the
     -- first worker starts. Source-checkout runtime builds belong exclusively
     -- to the coordinator, including a certified hit that falls back to a miss.
@@ -6405,20 +6437,27 @@ function driver.worker_configuration(context)
             test = policy.test == true,
             coverage = policy.coverage,
         },
+        compiler = compiler,
+        uncertified = status == "uncertified" and configuration_error or nil,
         configuration = configuration,
     }
 end
 
 -- A worker's resolver context from `driver.worker_configuration` data. The
--- worker verifies only the compiler Lua it actually loaded against the
--- coordinator's certificate; preamble, toolchain and options are inherited.
+-- worker always verifies the compiler Lua it actually loaded. A complete
+-- certificate or the coordinator's explicit uncertified policy is inherited.
 function driver.new_worker_context(configuration, io_strategy)
     if type(configuration) ~= "table" or
        configuration.protocol ~= version.BUILD_WORKER_PROTOCOL or
        type(configuration.driver) ~= "table" or
        type(configuration.resolver) ~= "table" or
        type(configuration.policy) ~= "table" or
-       type(configuration.configuration) ~= "table" then
+       type(configuration.compiler) ~= "string" or
+       not ((type(configuration.configuration) == "table" and
+             configuration.configuration.compiler == configuration.compiler and
+             configuration.uncertified == nil) or
+            (configuration.configuration == nil and
+             type(configuration.uncertified) == "string")) then
         return nil, "incompatible build worker configuration"
     end
     local settings = configuration.driver
@@ -6472,11 +6511,12 @@ function driver.new_worker_context(configuration, io_strategy)
     if not compiler then
         return fail("cannot certify compiler configuration: " ..
             tostring(compiler_error))
-    elseif compiler ~= configuration.configuration.compiler then
+    elseif compiler ~= configuration.compiler then
         return fail("compiler installation changed during build")
     end
     context.incremental_options = options
     context.incremental_configuration = configuration.configuration
+    context.incremental_uncertified = configuration.uncertified
     perf.runtime_checked = settings.runtime_prepared == true
     return context
 end
@@ -6685,16 +6725,46 @@ function driver.compile_planned_module(context, modname, options)
         objects = compilation.objects,
         staged = staged,
         written = written,
+        -- Invocation-only input evidence, never an object certificate.
+        source_snapshot = context.incremental_uncertified and
+            mod.source_certificate or nil,
         diagnostics = {},
     }
+end
+
+local function revalidate_uncertified_module(context, modname, source, record, snapshot)
+    if not record.type or record.type.name ~= modname or
+       record.object_metadata.certificate ~= nil or type(snapshot) ~= "table" then
+        return nil, "invalid uncertified worker input snapshot"
+    end
+    local fresh = incremental.fresh_context(context)
+    fresh.header_validation, fresh.header_observations = {}, {}
+    local current = incremental.source_certificate(fresh, {
+        kind = source.kind, files = source.files,
+    })
+    if incremental.digest(fresh, "publication-sources", current) ~=
+       incremental.digest(fresh, "publication-sources", snapshot) then
+        return nil, "source-content"
+    end
+    for _, inputs in ipairs({
+            record.c_header_dependencies or {},
+            record.ffi_header_descriptor and
+                record.ffi_header_descriptor.search_inputs or {} }) do
+        local headers, header_error, changed, reason =
+            driver.restat_c_header_dependencies(inputs, { context = fresh })
+        if not headers or changed then return nil, reason or header_error end
+    end
+    return true
 end
 
 -- Parent-only publication of a worker's staged object. The module's current
 -- source descriptor is resolved afresh and its recorded own sources and C
 -- inputs are revalidated with a fresh pass, so an edit during the build is
--- an error rather than a certified mismatch. Parts are renamed first and
--- the primary object last; any failure leaves no primary. Returns the
--- certified result (`status`, `record`, `object`, `objects`, `imports`).
+-- an error rather than a certified mismatch. Uncertified workers supply only
+-- transient source evidence; their header inputs are still revalidated. Parts
+-- are renamed first and the primary last; any failure leaves no primary.
+-- Returns the published metadata (`status`, `record`, `object`, `objects`,
+-- `imports`), with status `built` rather than `hit` when uncertified.
 function driver.publish_staged_module(context, result)
     local modname = result.modname
     local primary, parts = nil, {}
@@ -6728,12 +6798,22 @@ function driver.publish_staged_module(context, result)
         return discard("cannot resolve module '" .. modname ..
             "' for publication: " .. tostring(source_error))
     end
-    local check = incremental.revalidate_record(context, modname, source, record)
-    if check.status ~= "hit" then
-        return discard("inputs of module '" .. modname ..
-            "' changed during the build: " .. tostring(check.reason) ..
-            (check.detail and check.detail ~= "" and
-                (" " .. tostring(check.detail)) or ""))
+    if context.incremental_uncertified then
+        local called, valid, input_error = pcall(revalidate_uncertified_module,
+            context, modname, source, record, result.source_snapshot)
+        if not called and type(valid) ~= "string" then error(valid, 0) end
+        if not called or not valid then
+            return discard("inputs of module '" .. modname ..
+                "' changed during the build: " .. tostring(called and input_error or valid))
+        end
+    else
+        local check = incremental.revalidate_record(context, modname, source, record)
+        if check.status ~= "hit" then
+            return discard("inputs of module '" .. modname ..
+                "' changed during the build: " .. tostring(check.reason) ..
+                (check.detail and check.detail ~= "" and
+                    (" " .. tostring(check.detail)) or ""))
+        end
     end
     if context.io:lstat(primary.to) then
         local removed, remove_error = context.io:unlink(primary.to)
@@ -6768,7 +6848,7 @@ function driver.publish_staged_module(context, result)
     end
     forget_digests(context, rewritten)
     return {
-        status = "hit",
+        status = context.incremental_uncertified and "built" or "hit",
         record = record,
         object = primary.to,
         objects = result.objects,
@@ -8238,16 +8318,20 @@ local function prepare_compile(
     local certify = context ~= nil and source_entry ~= nil and
         source_entry.source_certificate ~= nil
     if certify then
-        local configuration, configuration_error =
+        local configuration, configuration_error, status =
             driver.incremental_configuration(context)
-        if not configuration then return nil, configuration_error end
-        local digests, digest_error = incremental.producer_digests(
-            context, source_entry, encoded_layouts, ast._foreign_header_recipe)
-        if not digests then
-            return nil, "cannot certify object for module '" .. modname ..
-                "': " .. tostring(digest_error)
+        if not configuration then
+            if status ~= "uncertified" then return nil, configuration_error end
+            certify = false
+        else
+            local digests, digest_error = incremental.producer_digests(
+                context, source_entry, encoded_layouts, ast._foreign_header_recipe)
+            if not digests then
+                return nil, "cannot certify object for module '" .. modname ..
+                    "': " .. tostring(digest_error)
+            end
+            source_entry.interface_digests = digests
         end
-        source_entry.interface_digests = digests
     end
     local test_functions =
         require("titan-compiler.test_runner").function_names(ast)

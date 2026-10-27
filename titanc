@@ -629,18 +629,31 @@ if not args.compile_only and not args.print_ast then
             coverage.inventory(coverage_build, driver.imported)
         if not coverage_runtime then exit(inventory_error) end
     end
-    local configuration, configuration_error =
+    local configuration, configuration_error, configuration_status =
         driver.incremental_configuration(resolver_context)
-    if not configuration then exit(configuration_error) end
-    local descriptor, descriptor_error = driver.toolchain_descriptor(resolver_context)
-    if not descriptor then exit(descriptor_error) end
+    if not configuration and configuration_status ~= "uncertified" then
+        exit(configuration_error)
+    end
+    local compiler_inventory = configuration and configuration.compiler
+    if not compiler_inventory then
+        local inventory_error
+        compiler_inventory, inventory_error =
+            incremental.compiler_component(resolver_context)
+        if not compiler_inventory then exit(inventory_error) end
+    end
     local compile_prefix, prefix_error = driver.generated_compile_prefix()
     if not compile_prefix then exit(prefix_error) end
-    local backend, backend_error = driver.native_link_backend(resolver_context)
+    local backend, backend_error, backend_status =
+        driver.native_link_backend(resolver_context)
     if not backend then exit(backend_error) end
     local output_request, output_request_error =
         driver.output_tool_descriptors(resolver_context, kind)
     if not output_request then exit(output_request_error) end
+    if configuration_status == "uncertified" then
+        output_request.uncacheable = configuration_error
+    elseif backend_status == "uncertified" then
+        output_request.uncacheable = backend_error
+    end
     output_request.compile_argv = compile_prefix
     output_request.inputs = {}
     for _, inputs in ipairs({
@@ -665,11 +678,11 @@ if not args.compile_only and not args.print_ast then
         no_uv_bootstrap = args.no_uv_bootstrap == true,
         argv = driver.link_extra_flags(),
         toolchain = {
-            compiler = (incremental.toolchain_identity(resolver_context, descriptor)),
+            compiler = output_request.toolchain,
             output_tools = output_tools,
         },
         test_cases = test_cases,
-        templates = configuration.compiler,
+        templates = compiler_inventory,
         coverage = coverage_runtime,
         companions = windows_paths and {
             manifest = driver.windows_launcher_manifest(),

@@ -4280,11 +4280,40 @@ describe("compiler module loader", function()
     end)
 
     describe("incremental source objects", function()
-        local loaders
-        before_each(function() loaders = {} end)
-        after_each(function()
-            for _, loader in ipairs(loaders) do driver.close_loader(loader) end
+        local loaders, contexts, original_incremental
+        local original_linker_backend, original_cppflags
+        before_each(function()
+            original_linker_backend =
+                require("titan-compiler.linkcertificate").linker_backend
+            original_cppflags = driver.EXTRA_CPPFLAGS
+            loaders, contexts, original_incremental = {}, {}, {}
+            for _, name in ipairs({
+                    "configuration", "toolchain_identity", "make_certificate" }) do
+                original_incremental[name] = incremental[name]
+            end
         end)
+        after_each(function()
+            require("titan-compiler.linkcertificate").linker_backend =
+                original_linker_backend
+            driver.EXTRA_CPPFLAGS = original_cppflags
+            for name, implementation in pairs(original_incremental) do
+                incremental[name] = implementation
+            end
+            for _, loader in ipairs(loaders) do driver.close_loader(loader) end
+            for _, context in ipairs(contexts) do
+                driver.close_resolver_context(context)
+            end
+        end)
+
+        local function tracked_context()
+            local context = driver.new_resolver_context()
+            contexts[#contexts + 1] = context
+            return context
+        end
+
+        local function uncertain_toolchain()
+            return nil, "native delegate selection is unknown", "uncertified"
+        end
 
         local function fresh_loader(options)
             driver.imported, types.registry = {}, {}
@@ -4434,6 +4463,327 @@ describe("compiler module loader", function()
             assert.is_true(result.ok, result.output or result.diagnostic)
             return object, native
         end
+
+        it("propagates only explicit native policy uncertainty without a partial configuration", function()
+            incremental.toolchain_identity = uncertain_toolchain
+            local context = tracked_context()
+            local configuration, reason, status =
+                driver.incremental_configuration(context)
+            assert.is_nil(configuration)
+            assert.equal("native delegate selection is unknown", reason)
+            assert.equal("uncertified", status)
+            assert.is_nil(context.incremental_configuration)
+            assert.is_table(context.incremental_options)
+            assert.is_string(assert(incremental.compiler_component(context)))
+            local again, same_reason, same_status =
+                driver.incremental_configuration(context)
+            assert.is_nil(again)
+            assert.equal(reason, same_reason)
+            assert.equal(status, same_status)
+
+            incremental.configuration = function()
+                return nil, "native delegate selection is unknown"
+            end
+            local failed_context = tracked_context()
+            local failed, failure, failure_status =
+                driver.incremental_configuration(failed_context)
+            assert.is_nil(failed)
+            assert.matches("cannot certify compiler configuration:", failure, 1, true)
+            assert.is_nil(failure_status)
+            assert.is_nil(failed_context.incremental_uncertified)
+            local cancellation = {}
+            incremental.configuration = function() error(cancellation, 0) end
+            local completed, raised = pcall(driver.incremental_configuration,
+                failed_context)
+            assert.is_false(completed)
+            assert.equal(cancellation, raised)
+        end)
+
+        it("forwards proven compiler stage policy and explicit output uncertainty without another query", function()
+            local context = tracked_context()
+            local calls = 0
+            incremental.toolchain_identity = function()
+                calls = calls + 1
+                return "observed-toolchain", { stage_policy = "llvm" }
+            end
+            local request = assert(driver.output_tool_descriptors(context))
+            assert.equal("observed-toolchain", request.toolchain)
+            assert.equal("llvm", request.compiler_stage_policy)
+            assert.is_nil(request.uncacheable)
+            assert.equal(1, calls)
+
+            incremental.toolchain_identity = uncertain_toolchain
+            request = assert(driver.output_tool_descriptors(context))
+            assert.is_nil(request.toolchain)
+            assert.is_nil(request.compiler_stage_policy)
+            assert.equal("native delegate selection is unknown", request.uncacheable)
+            incremental.toolchain_identity = function()
+                return nil, "cannot read native executable"
+            end
+            local failed, failure = driver.output_tool_descriptors(context)
+            assert.is_nil(failed)
+            assert.equal("cannot read native executable", failure)
+            local cancellation = {}
+            incremental.toolchain_identity = function() error(cancellation, 0) end
+            local completed, raised = pcall(driver.output_tool_descriptors, context)
+            assert.is_false(completed)
+            assert.equal(cancellation, raised)
+        end)
+
+        it("preserves uncertain linker status without caching a guessed backend", function()
+            incremental.toolchain_identity = uncertain_toolchain
+            local context = tracked_context()
+            local calls = 0
+            local linkcertificate = require "titan-compiler.linkcertificate"
+            linkcertificate.linker_backend = function(_, request)
+                calls = calls + 1
+                assert.equal("native delegate selection is unknown", request.uncacheable)
+                return "none", request.uncacheable, "uncertified"
+            end
+            for _ = 1, 2 do
+                local backend, reason, status = driver.native_link_backend(context)
+                assert.equal("none", backend)
+                assert.equal("native delegate selection is unknown", reason)
+                assert.equal("uncertified", status)
+                assert.is_nil(context.native_link_backend)
+            end
+            assert.equal(2, calls)
+            linkcertificate.linker_backend = function()
+                return nil, "cannot inspect selected linker"
+            end
+            local failed, failure = driver.native_link_backend(context)
+            assert.is_nil(failed)
+            assert.equal("cannot inspect selected linker", failure)
+            local cancellation = {}
+            linkcertificate.linker_backend = function() error(cancellation, 0) end
+            local completed, raised = pcall(driver.native_link_backend, context)
+            assert.is_false(completed)
+            assert.equal(cancellation, raised)
+        end)
+
+        it("rebuilds a prior certified object without publishing a certificate under policy uncertainty", function()
+            local name = "incremental_driver_uncertain_native"
+            write_file(source .. "/" .. name .. ".titan",
+                "function answer(): integer return 42 end\n")
+            local initial = load_ok(fresh_loader(), name)
+            local object = write_source_object(initial)
+            incremental.toolchain_identity = uncertain_toolchain
+            incremental.make_certificate = function()
+                error("uncertified producer must not publish a certificate", 0)
+            end
+            local context = tracked_context()
+            local loader, dependencies = fresh_loader({
+                context = context, incremental = true,
+            })
+            local entry = load_ok(loader, name)
+            assert.is_table(entry.ast)
+            assert.is_nil(entry.compiled)
+            assert.is_table(entry.source_certificate)
+            assert(driver.prepare_foreign_headers(
+                { name }, driver.imported, false, false))
+            local compiled, compile_error, actual_object = driver.compile_module(
+                name, entry, dependencies, false, { context = context })
+            assert.is_true(compiled, compile_error)
+            assert.equal(object, actual_object)
+            assert.is_nil(context.incremental_configuration)
+            assert.is_nil(entry.interface_digests)
+            local bytes = assert(util.get_file_contents(object, "rb"))
+            local restored = assert(objectmetadata.read(bytes, object))
+            assert.equal(name, restored.type.name)
+            assert.is_nil(restored.object_metadata.certificate)
+            local next_loader = fresh_loader({
+                context = tracked_context(), incremental = true,
+            })
+            local next_entry = load_ok(next_loader, name)
+            assert.is_table(next_entry.ast)
+            assert.is_nil(next_entry.compiled)
+        end)
+
+        it("plans fresh source imports rather than restoring records under policy uncertainty", function()
+            local name = "incremental_driver_uncertain_plan"
+            write_file(source .. "/" .. name .. ".titan",
+                "function answer(): integer return 42 end\n")
+            write_source_object(load_ok(fresh_loader(), name))
+            incremental.toolchain_identity = uncertain_toolchain
+            local calls = 0
+            local loader = fresh_loader({
+                context = tracked_context(), incremental = true, plan_mode = true,
+                imports_for = function(modname, source_description, certified)
+                    calls = calls + 1
+                    assert.equal(name, modname)
+                    assert.equal(source .. "/" .. name .. ".titan",
+                        source_description.main)
+                    assert.is_nil(certified)
+                    return {}
+                end,
+            })
+            local ok, _, errors = loader(name)
+            assert.is_true(ok)
+            assert.equal(0, #errors)
+            assert.equal(1, calls)
+            assert.is_true(driver.imported[name]._planned)
+            assert.is_nil(driver.imported[name].compiled)
+        end)
+
+        it("keeps real worker compiler inventory validation when native policy is uncertified", function()
+            incremental.toolchain_identity = uncertain_toolchain
+            local context = tracked_context()
+            local configuration = assert(driver.worker_configuration(context))
+            assert.is_nil(configuration.configuration)
+            assert.equal("native delegate selection is unknown", configuration.uncertified)
+            assert.equal(assert(incremental.compiler_component(context)),
+                configuration.compiler)
+            local worker = assert(driver.new_worker_context(
+                configuration, compiler_io.new_sync()))
+            contexts[#contexts + 1] = worker
+            assert.is_nil(worker.incremental_configuration)
+            local certificate, reason, status =
+                driver.incremental_configuration(worker)
+            assert.is_nil(certificate)
+            assert.equal(configuration.uncertified, reason)
+            assert.equal("uncertified", status)
+            assert.is_true(incremental.counters(worker).file_hashes > 0)
+
+            configuration.compiler = configuration.compiler .. "-changed"
+            local mismatched, mismatch_error = driver.new_worker_context(
+                configuration, compiler_io.new_sync())
+            assert.is_nil(mismatched)
+            assert.equal("compiler installation changed during build", mismatch_error)
+            configuration.compiler = assert(incremental.compiler_component(context))
+            local strategy = compiler_io.new_sync()
+            local list = strategy.list
+            function strategy:list(directory)
+                if paths.basename(directory) == "titan-compiler" then
+                    return nil, "compiler inventory is unreadable"
+                end
+                return list(self, directory)
+            end
+            local unreadable, inventory_error =
+                driver.new_worker_context(configuration, strategy)
+            assert.is_nil(unreadable)
+            assert.matches("compiler inventory is unreadable", inventory_error, 1, true)
+            local cancellation = {}
+            function strategy:list() error(cancellation, 0) end
+            local completed, raised = pcall(driver.new_worker_context,
+                configuration, strategy)
+            assert.is_false(completed)
+            assert.equal(cancellation, raised)
+        end)
+
+        it("publishes raw worker dependencies while rejecting changed sources, headers and include candidates", function()
+            local producer = "incremental_driver_raw_producer"
+            local consumer = "incremental_driver_raw_consumer"
+            local producer_file = source .. "/" .. producer .. ".titan"
+            local consumer_file = source .. "/" .. consumer .. ".titan"
+            local consumer_source = 'local producer = import "' .. producer ..
+                '.titan"\nfunction answer(): integer return producer.answer() end\n'
+            local include = source .. "/late"
+            assert(lfs.mkdir(include))
+            local header = source .. "/raw_worker.h"
+            local header_contents = '#include "raw_worker_config.h"\n' ..
+                "#define TITAN_RAW_WORKER_VALUE RAW_WORKER_CONFIG\n"
+            local config_contents = "#define RAW_WORKER_CONFIG 42\n"
+            write_file(header, header_contents)
+            write_file(include .. "/raw_worker_config.h", config_contents)
+            driver.EXTRA_CPPFLAGS = { table.unpack(driver.EXTRA_CPPFLAGS) }
+            driver.EXTRA_CPPFLAGS[#driver.EXTRA_CPPFLAGS + 1] = "-I" .. include
+            write_file(producer_file,
+                'foreign import "raw_worker.h"\n' ..
+                "function answer(): integer return ffi.TITAN_RAW_WORKER_VALUE end\n")
+            write_file(consumer_file, consumer_source)
+            incremental.toolchain_identity = uncertain_toolchain
+            incremental.make_certificate = function()
+                error("raw worker must not publish a certificate", 0)
+            end
+            local context = tracked_context()
+            local loader = fresh_loader({
+                context = context, incremental = true, plan_mode = true,
+                imports_for = function(name)
+                    return name == consumer and {
+                        { name = producer, source_required = true },
+                    } or {}
+                end,
+            })
+            local loaded, _, diagnostics = loader(consumer)
+            assert.is_true(loaded)
+            assert.equal(0, #diagnostics)
+            local plan = driver.resolution_plan(context)
+            assert.same({ producer, consumer }, plan.order)
+            local configuration = assert(driver.worker_configuration(context))
+            local function stage(name)
+                local descriptor = driver.plan_descriptor(plan, name)
+                local imported, registry = driver.imported, types.registry
+                driver.imported, types.registry = {}, {}
+                local worker = assert(driver.new_worker_context(
+                    configuration, compiler_io.new_sync()))
+                contexts[#contexts + 1] = worker
+                local result, compile_error = driver.compile_planned_module(
+                    worker, name, {
+                        plan = descriptor, jobs = 2,
+                    })
+                driver.imported, types.registry = imported, registry
+                assert.truthy(result, compile_error)
+                assert.is_table(result.source_snapshot)
+                return result
+            end
+            local function reject_changed_inputs(result, expected)
+                local rejected, input_error =
+                    driver.publish_staged_module(context, result)
+                assert.is_nil(rejected)
+                assert.matches(expected, input_error, 1, true)
+                assert.is_nil(lfs.attributes(result.object))
+                for _, item in ipairs(result.staged) do
+                    assert.is_nil(lfs.attributes(item.from))
+                end
+                return input_error
+            end
+            for _, name in ipairs(plan.order) do
+                assert(driver.invalidate_source_object(
+                    context, name, plan.modules[name].source))
+                local result = stage(name)
+                if name == producer then
+                    write_file(header, header_contents .. "#define RAW_WORKER_EXTRA 1\n")
+                    local header_error = reject_changed_inputs(result, "c-input ")
+                    assert.matches("raw_worker.h", header_error, 1, true)
+                    write_file(header, header_contents)
+                    result = stage(name)
+                    local earlier = source .. "/raw_worker_config.h"
+                    write_file(earlier, config_contents)
+                    local candidate_error = reject_changed_inputs(result, "c-input ")
+                    assert.matches("raw_worker_config.h", candidate_error, 1, true)
+                    assert.matches("candidate", candidate_error, 1, true)
+                    assert(os.remove(earlier))
+                    result = stage(name)
+                elseif name == consumer then
+                    write_file(consumer_file, consumer_source .. "\n")
+                    reject_changed_inputs(result, "changed during the build: source-content")
+                    write_file(consumer_file, consumer_source)
+                    result = stage(name)
+                end
+                local published = assert(driver.publish_staged_module(context, result))
+                assert.equal("built", published.status)
+                assert.is_nil(published.record.object_metadata.certificate)
+                plan.update(name, published)
+                local entry = assert(driver.restore_source_object(
+                    context, name, plan.modules[name].source, published,
+                    { published = true }))
+                assert.is_nil(entry.ast)
+                assert.is_string(entry.compiled)
+                assert.is_nil(entry.interface_digests)
+            end
+            assert.is_true(driver.imported[consumer].deps[producer])
+            assert.is_nil(context.incremental_configuration)
+            local next_context = tracked_context()
+            load_ok(fresh_loader({
+                context = next_context, incremental = true,
+            }), consumer)
+            for _, name in ipairs({ producer, consumer }) do
+                assert.is_table(driver.imported[name].ast)
+                assert.is_nil(driver.imported[name].compiled)
+            end
+            assert.is_nil(next_context.incremental_configuration)
+        end)
+
         it("skips parsing, checking, generation and native compilation on an object hit", function()
             local name = "incremental_driver_warm"
             write_file(source .. "/" .. name .. ".titan",
