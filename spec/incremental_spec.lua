@@ -460,7 +460,9 @@ describe("content-only native input facts", function()
 end)
 
 describe("persistent precise digest cache", function()
-    local path, cache_path = fixture_path("/src/main.titan"), fixture_path("/out/.titan/digests")
+    local path = fixture_path("/src/main.titan")
+    -- The cache is a native output path, unlike authored source spellings.
+    local cache_path = require("titan-compiler.path").join(fixture_path("/out"), ".titan", "digests")
     local function prime(files)
         local ctx = precise_context(files)
         assert(incremental.load_digest_cache(ctx, fixture_path("/out")))
@@ -585,16 +587,25 @@ describe("persistent precise digest cache", function()
             local files = { [path] = "source", [cache_path] = payload }
             local ctx = precise_context(files)
             assert(incremental.load_digest_cache(ctx, fixture_path("/out")))
+            assert.equal(cache_path, ctx.incremental.persistent.path)
+            assert.equal(1, ctx.io.reads[cache_path])
             incremental.file_digest(ctx, path)
             assert.equal(1, incremental.counters(ctx).file_hashes)
             assert(incremental.save_digest_cache(ctx))
+            assert.equal(1, ctx.io.renames)
             assert.equal(version.DIGEST_CACHE_SCHEMA, assert(codec.decode(files[cache_path])).schema)
+            local warm = precise_context(files)
+            assert(incremental.load_digest_cache(warm, fixture_path("/out")))
+            assert.equal(sha256.hex("source"), (incremental.file_digest(warm, path)))
+            assert.is_nil(warm.io.reads[path])
+            assert.equal(0, incremental.counters(warm).file_hashes)
         end
     end)
 
     it("retains the previous complete cache if publication fails", function()
         local files = { [path] = "source" }; prime(files)
         local previous = files[cache_path]
+        assert.is_string(previous)
         local ctx = precise_context(files)
         assert(incremental.load_digest_cache(ctx, fixture_path("/out")))
         ctx.io.clock, files[path] = 2, "edited"
