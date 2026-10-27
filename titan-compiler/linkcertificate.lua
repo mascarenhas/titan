@@ -176,14 +176,23 @@ local function link_job_name(name)
         or name == "ld" or name:match("^ld[.%-]") or name:match("^ld64[.%-]") or name:match("%-ld$")
 end
 
+local function compiler_query(context, argv, message)
+    local result = context.io:run(argv, { stderr_to_stdout = true })
+    need(type(result) == "table" and result.started and not result.interrupted and result.why ~= "signal",
+        type(result) == "table" and (result.diagnostic or result.output) or message)
+    if not result.ok then
+        need(result.why == "exit" and math.type(result.status) == "integer" and result.status ~= 0,
+            result.diagnostic or result.output or message)
+        return nil, result.diagnostic or result.output or message, "uncertified"
+    end
+    return result.output or ""
+end
+
 local function describe_link(context, argv, windows)
     local query = { table.unpack(argv) }
     local null = windows and "NUL" or "/dev/null"
     for _, word in ipairs({ "-###", "-x", "c", null, "-o", null }) do query[#query + 1] = word end
-    local result = context.io:run(query, { stderr_to_stdout = true })
-    need(type(result) == "table" and result.started and result.ok,
-        type(result) == "table" and (result.diagnostic or result.output) or "cannot describe selected native link job")
-    return result.output or ""
+    return compiler_query(context, query, "cannot describe selected native link job")
 end
 
 -- Resolve once per coordinator, but again in every invocation. Both the final
@@ -198,7 +207,7 @@ local function selected_linker(context, request)
         (context.incremental_configuration and context.incremental_configuration.compiler)
     local request_key = incremental.digest(context, "selected-linker-request", {
         argv = argv, toolchain = request.toolchain, compiler_identity = compiler_identity,
-        darwin = request.darwin, windows = request.windows,
+        darwin = request.darwin, windows = request.windows, stage_policy = request.compiler_stage_policy,
         executable_path = context.executable_path or platform.getenv("PATH"),
     })
     context.link_certificate_tools = context.link_certificate_tools or {}
@@ -221,7 +230,9 @@ local function selected_linker(context, request)
     if not explicit_linker and linker_name == "ld" then
         -- Clang's -print-prog-name=ld is a program search, not its configured
         -- default linker selection (notably CLANG64's ld.lld). Read the job.
-        description = describe_link(context, argv, request.windows)
+        local reason, status
+        description, reason, status = describe_link(context, argv, request.windows)
+        if not description then return nil, reason, status end
         local split, collect2 = require("c-parser.cpp").split_shell_words, false
         for line in (description .. "\n"):gmatch("(.-)\r?\n") do
             local job = line:match("^%s") and split(line)
@@ -233,22 +244,29 @@ local function selected_linker(context, request)
         end
         -- GCC's collect2 delegates to the compiler's named ld; Clang names the
         -- actual linker directly. Never substitute a guessed default.
-        need(explicit_linker or collect2, "compiler did not name a selected native linker")
+        if not explicit_linker and not collect2 then
+            return nil, "compiler did not name a selected native linker", "uncertified"
+        end
     end
     if not explicit_linker then
         local query = { table.unpack(argv) }
         query[#query + 1] = "-print-prog-name=" .. linker_name
-        local result = context.io:run(query, { stderr_to_stdout = true })
-        need(type(result) == "table" and result.started and result.ok,
-            type(result) == "table" and (result.diagnostic or result.output) or "cannot resolve native linker")
-        explicit_linker = need((result.output or ""):match("^%s*(.-)%s*$"))
-        need(explicit_linker ~= "" and not explicit_linker:find("[\r\n]"),
-            "compiler did not name one native linker")
+        local output, reason, status = compiler_query(context, query, "cannot resolve native linker")
+        if not output then return nil, reason, status end
+        explicit_linker = output:match("^%s*(.-)%s*$")
+        if explicit_linker == "" or explicit_linker:find("[\r\n]") then
+            return nil, "compiler did not name one native linker", "uncertified"
+        end
     end
+    local compiler, reason, status = incremental.physical_executable(context, request.compiler_argv)
+    if not compiler then return nil, reason, status end
+    local linker
+    linker, reason, status = incremental.physical_executable(context, explicit_linker,
+        request.compiler_stage_policy or "unknown")
+    if not linker then return nil, reason, status end
     local selected = {
         argv = argv, name = explicit_linker, description = description,
-        compiler = incremental.physical_executable(context, request.compiler_argv),
-        linker = incremental.physical_executable(context, explicit_linker),
+        compiler = compiler, linker = linker,
     }
     selected.key = incremental.digest(context, "linker-dependency-feature", {
         argv = argv, toolchain = request.toolchain, compiler = selected.compiler,
@@ -272,8 +290,12 @@ function certificate.linker_backend(context, request)
         incremental.invalidate_file(context, report)
         report = nil
     end
-    local completed, backend = pcall(function()
-        local selected = selected_linker(context, request)
+    local completed, backend, reason, status = pcall(function()
+        local selected, reason, status = selected_linker(context, request)
+        if not selected then
+            need(status == "uncertified", reason)
+            return "none", reason, status
+        end
         if request.darwin then return "darwin" end
         if request.windows then return "none" end
         if selected.backend then return selected.backend end
@@ -315,7 +337,7 @@ function certificate.linker_backend(context, request)
     if not cleaned and type(cleanup_error) ~= "string" then error(cleanup_error, 0) end
     if not completed then return nil, backend end
     if not cleaned then return nil, cleanup_error end
-    return backend
+    return backend, reason, status
 end
 
 local function lto_setting(argv)
@@ -328,12 +350,20 @@ local function lto_setting(argv)
 end
 
 local function selected_link_stages(context, request, selected, tools)
-    local description = selected.description or describe_link(context, selected.argv, request.windows)
+    local description, reason, status = selected.description
+    if not description then
+        description, reason, status = describe_link(context, selected.argv, request.windows)
+        if not description then return nil, reason, status end
+    end
     selected.description = description
     local split = require("c-parser.cpp").split_shell_words
     local wrapper, collect2, found, declared_wrapper
     local function executable(role, path)
-        tools[role] = { argv = { path }, identity = incremental.physical_executable(context, path) }
+        local identity, reason, status = incremental.physical_executable(context, path,
+            request.compiler_stage_policy or "unknown")
+        if not identity then return nil, reason, status end
+        tools[role] = { argv = { path }, identity = identity }
+        return true
     end
     local function plugin(path)
         tools.lto_plugins = tools.lto_plugins or {}
@@ -367,13 +397,14 @@ local function selected_link_stages(context, request, selected, tools)
             end
         end
     end
-    need(found, "compiler did not describe a selected native link job")
+    if not found then return nil, "compiler did not describe a selected native link job", "uncertified" end
     if collect2 then
-        executable("link_driver", collect2)
+        local resolved, reason, status = executable("link_driver", collect2)
+        if not resolved then return nil, reason, status end
         -- collect2 and every advertised plugin are native link inputs even
         -- when no IR is present. Only its conditional LTO delegates are gated.
         local setting = lto_setting(selected.argv)
-        if setting == false then return end
+        if setting == false then return true end
         local enabled = setting == true or lto_setting(request.compile_argv) == true
         if not enabled then
             local inputs = { table.unpack(request.inputs or {}) }
@@ -391,33 +422,51 @@ local function selected_link_stages(context, request, selected, tools)
                 if not kind or lto then enabled = true; break end
             end
         end
-        if not enabled then return end
+        if not enabled then return true end
         local function named_stage(name)
             local command = { table.unpack(selected.argv) }
             command[#command + 1] = "-print-prog-name=" .. name
-            local stage = context.io:run(command, { stderr_to_stdout = true })
-            need(type(stage) == "table" and stage.started and stage.ok,
-                "cannot resolve selected LTO stage: " .. name)
-            local path = (stage.output or ""):match("^%s*(.-)%s*$")
-            need(path ~= "" and not path:find("[\r\n]"), "compiler did not name one LTO stage: " .. name)
+            local output, reason, status = compiler_query(context, command, "cannot resolve selected LTO stage: " .. name)
+            if not output then return nil, reason, status end
+            local path = output:match("^%s*(.-)%s*$")
+            if path == "" or path:find("[\r\n]") then
+                return nil, "compiler did not name one LTO stage: " .. name, "uncertified"
+            end
             return path
         end
-        executable("lto_wrapper", wrapper or declared_wrapper or named_stage("lto-wrapper"))
-        executable("lto_compiler", named_stage("lto1"))
+        local path = wrapper or declared_wrapper
+        if not path then
+            path, reason, status = named_stage("lto-wrapper")
+            if not path then return nil, reason, status end
+        end
+        resolved, reason, status = executable("lto_wrapper", path)
+        if not resolved then return nil, reason, status end
+        path, reason, status = named_stage("lto1")
+        if not path then return nil, reason, status end
+        resolved, reason, status = executable("lto_compiler", path)
+        if not resolved then return nil, reason, status end
     end
+    return true
 end
 
 function certificate.output_tools(context, request)
     local ok, tools = pcall(function()
-        local selected = selected_linker(context, request)
+        local function uncertified(reason, status)
+            need(status == "uncertified", reason)
+            return { uncertified = reason }
+        end
+        local selected, reason, status = selected_linker(context, request)
+        if not selected then return uncertified(reason, status) end
         local result = { linker = { argv = { selected.name },
             driver_argv = selected.argv, identity = selected.linker } }
         for role, argv in pairs(request.tools or {}) do
-            need(role ~= "linker", "the native linker is selected by the compiler")
-            result[role] = { argv = { table.unpack(argv) },
-                identity = incremental.physical_executable(context, argv) }
+            need(role ~= "linker" and role ~= "uncertified", "reserved native tool role: " .. tostring(role))
+            local identity, reason, status = incremental.physical_executable(context, argv)
+            if not identity then return uncertified(reason, status) end
+            result[role] = { argv = { table.unpack(argv) }, identity = identity }
         end
-        selected_link_stages(context, request, selected, result)
+        local resolved, reason, status = selected_link_stages(context, request, selected, result)
+        if not resolved then return uncertified(reason, status) end
         return result
     end)
     if not ok then
@@ -733,6 +782,10 @@ function certificate.prepare(context, spec)
     for name, value in pairs(spec.native_libraries or {}) do native_request[name] = value end
     native_request.argv = native_request.argv or spec.argv
     native_request.dependency_file = native_request.dependency_file or paths.join(directory, "link.d")
+    local output_tools = type(spec.toolchain) == "table" and spec.toolchain.output_tools
+    if type(output_tools) == "table" and output_tools.uncertified then
+        native_request.uncacheable = output_tools.uncertified
+    end
     for _, file in ipairs(spec.c_objects or {}) do
         if type(file) == "table" and file.cacheable == false then
             native_request.uncacheable = "opaque native C input mechanism"

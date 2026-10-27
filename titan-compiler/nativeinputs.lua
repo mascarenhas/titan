@@ -158,7 +158,7 @@ local function compile_node(context, request, source, stem)
     local object, sidecar = stem .. ".o", stem .. ".record"
     local staged
     local completed, result = pcall(function()
-        local cacheable = cacheable_policy(request.compile_argv)
+        local cacheable = not request.uncacheable and cacheable_policy(request.compile_argv)
         local argv = {}
         append(argv, request.compile_argv)
         append(argv, { "-E", "-MD", "-MF", dependencies, "-MT", "titan-native", source, "-o", preprocessed })
@@ -171,8 +171,8 @@ local function compile_node(context, request, source, stem)
             authored = incremental.file_digest(context, source),
             preprocessed = incremental.file_digest(context, preprocessed),
             dependencies = certificate.files(context, files) }
-        local input = incremental.digest(context, "native-c-input", recipe)
-        local record = certificate.read_record(context, sidecar)
+        local input = cacheable and incremental.digest(context, "native-c-input", recipe) or nil
+        local record = cacheable and certificate.read_record(context, sidecar) or nil
         if cacheable and request.incremental and native_record(record) and record.input == input and regular(context, object) then
             local identity = incremental.file_digest(context, object)
             if identity == record.object then
@@ -193,9 +193,9 @@ local function compile_node(context, request, source, stem)
             incremental.digest(context, "native-dependencies", recipe.dependencies),
             "native dependency changed during compilation: " .. source)
         local identity = incremental.file_digest(current, staged)
-        local next_record = { schema = version.TITAN_NATIVE_RECORD_SCHEMA,
+        local next_record = cacheable and { schema = version.TITAN_NATIVE_RECORD_SCHEMA,
             digest = version.CERTIFICATE_DIGEST, canonicalization = version.CERTIFICATE_CANONICALIZATION,
-            input = input, object = identity }
+            input = input, object = identity } or nil
         if request.publish then
             need(request.publish({ staged = staged, object = object, record = sidecar,
                 metadata = next_record, cacheable = cacheable }))
@@ -244,6 +244,7 @@ end
 -- compile_argv is the complete compiler + effective CPP/C policy, excluding
 -- Titan-only test-owner/coverage flags. run participates in the shared ledger;
 -- publish, if supplied, is coordinator-owned and commits the primary last.
+-- An explicitly uncertified toolchain still builds, without record metadata.
 function native.compile(context, request)
     return guarded(function()
         need(type(request.output_root) == "string", "native output root is required")
@@ -252,10 +253,15 @@ function native.compile(context, request)
         if type(request.toolchain) == "table" then
             local resolved = {}
             for key, value in pairs(request) do resolved[key] = value end
-            resolved.toolchain = incremental.toolchain_identity(context, request.toolchain)
+            local identity, reason, status = incremental.toolchain_identity(context, request.toolchain)
+            if not identity then
+                need(status == "uncertified", reason)
+                resolved.uncacheable = reason
+            end
+            resolved.toolchain = identity
             request = resolved
         end
-        need(type(request.toolchain) == "string", "native toolchain identity is required")
+        need(type(request.toolchain) == "string" or request.uncacheable, "native toolchain identity is required")
         local directory = paths.join(request.output_root, ".native")
         certificate.make_directory(context, directory)
         local result, seen = {}, {}

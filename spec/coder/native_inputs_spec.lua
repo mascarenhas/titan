@@ -64,12 +64,12 @@ end)
 
 describe("certified app-owned C sources", function()
     local root, source, header, phases
-    local function build(extra, incremental_mode, sources, on_run)
+    local function build(extra, incremental_mode, sources, on_run, overrides)
         local ctx = context()
         local argv = assert(cdriver.split_shell_words(driver.CC))
         for _, flag in ipairs({ "-std=c99", "-fPIC", "-I" .. root }) do argv[#argv + 1] = flag end
         for _, flag in ipairs(extra or {}) do argv[#argv + 1] = flag end
-        return native.compile(ctx, { sources = sources or { source }, output_root = root,
+        local request = { sources = sources or { source }, output_root = root,
             compile_argv = argv, toolchain = "test-selected-toolchain", incremental = incremental_mode ~= false,
             run = function(command, phase)
                 phases[#phases + 1] = phase
@@ -77,7 +77,9 @@ describe("certified app-owned C sources", function()
                 if on_run then on_run(phase, result) end
                 return result
             end,
-        })
+        }
+        for key, value in pairs(overrides or {}) do request[key] = value end
+        return native.compile(ctx, request)
     end
     before_each(function()
         root = temporary.name(); assert(os.remove(root)); assert(lfs.mkdir(root))
@@ -220,6 +222,69 @@ int helper(void) { return 2; }
         phases = {}
         assert.is_false(assert(build(nil, false))[1].hit)
         assert.same({ "native-preprocess", "native-compile" }, phases)
+    end)
+
+    for _, publisher in ipairs({ "native", "coordinator" }) do
+        it("builds an uncertified Windows toolchain through " .. publisher .. " publication without accepting a record", function()
+            if not platform.windows then pending("Windows toolchain-selection uncertainty"); return end
+            local first = assert(build())[1]
+            local sidecar = first.path:gsub("%.o$", ".record")
+            assert.equal("file", lfs.attributes(sidecar, "mode"))
+            local options = { toolchain = {
+                compiler_argv = assert(cdriver.split_shell_words(driver.CC)),
+                preprocessor_identity = "#define __TEST_COMPILER__ 1\n",
+                banner = "opaque native compiler",
+                stage_tools = { root .. "/opaque-stage" },
+            } }
+            local publications = 0
+            if publisher == "coordinator" then
+                local filesystem = context().io
+                options.publish = function(publication)
+                    publications = publications + 1
+                    assert.is_false(publication.cacheable)
+                    assert.is_nil(publication.metadata)
+                    for _, path in ipairs({ publication.object, publication.record }) do
+                        if filesystem:lstat(path) then assert(filesystem:unlink(path)) end
+                    end
+                    return filesystem:rename(publication.staged, publication.object)
+                end
+            end
+            for _ = 1, 2 do
+                phases = {}
+                local object = assert(build(nil, true, nil, nil, options))[1]
+                assert.equal(first.path, object.path)
+                assert.is_false(object.cacheable)
+                assert.is_false(object.hit)
+                assert.same({ "native-preprocess", "native-compile" }, phases)
+                assert.equal("file", lfs.attributes(object.path, "mode"))
+                assert.is_nil(lfs.symlinkattributes(sidecar))
+            end
+            assert.equal(publisher == "coordinator" and 2 or 0, publications)
+        end)
+    end
+
+    it("preserves toolchain metadata I/O failures and cancellation before native compilation", function()
+        for _, failure in ipairs({ "toolchain metadata failed", {} }) do
+            local ctx = context()
+            function ctx.io:stat()
+                if type(failure) == "string" then return nil, failure end
+                error(failure, 0)
+            end
+            function ctx.io:run() error("failed toolchain metadata must not start compilation") end
+            local request = { sources = { source }, output_root = root,
+                compile_argv = { "selected-compiler" }, incremental = true,
+                toolchain = { compiler_argv = { "selected-compiler" }, stage_tools = {},
+                    banner = "clang version 22.1.8", preprocessor_identity = "#define __clang__ 1\n" } }
+            if type(failure) == "string" then
+                local objects, err = native.compile(ctx, request)
+                assert.is_nil(objects)
+                assert.matches(failure, err, 1, true)
+            else
+                local ok, err = pcall(native.compile, ctx, request)
+                assert.is_false(ok)
+                assert.equal(failure, err)
+            end
+        end
     end)
 
     it("leaves no accepted new record after a compiler failure", function()

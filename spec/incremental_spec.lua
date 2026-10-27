@@ -791,6 +791,7 @@ describe("incremental configuration", function()
         local original = platform.windows
         local ctx = context({ ["C:/first/tool.exe"] = "selected", ["C:/later/tool.exe"] = "later" })
         ctx.executable_path = "C:/first;C:/later"
+        function ctx.io:executable_search_cwd() return false end
         function ctx.io:readable() error("Windows selection must not test readability") end
         function ctx.io:executable() error("Windows selection must not query POSIX eligibility") end
         platform.windows = true

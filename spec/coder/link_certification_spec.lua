@@ -75,6 +75,9 @@ local function precise_model(root)
         function strategy:executable(path)
             return model.executables[key(path)] == true
         end
+        function strategy:executable_search_cwd()
+            return model.search_cwd ~= false
+        end
         function strategy:read_file(path, bound)
             local name = key(path)
             self.reads[name] = (self.reads[name] or 0) + 1
@@ -1102,20 +1105,21 @@ describe("persistent precise file certification", function()
 end)
 
 describe("linker dependency-feature memo", function()
-    local root, model, request, probes, resolves, reports, banner, supported, signal, description, descriptions
+    local root, model, request, probes, resolves, reports, banner, supported, signal, description, descriptions, previous_cwd
+    local description_result, stage_paths
     local function invocation()
         local ctx = model:context()
         function ctx.io:run(argv)
             for _, argument in ipairs(argv) do
                 if argument == "-###" then
                     descriptions = descriptions + 1
-                    return { started = true, ok = true, output = description }
+                    return description_result or { started = true, ok = true, output = description }
                 end
             end
             local named = argv[#argv]:match("^%-print%-prog%-name=(.+)$")
             if named then
                 resolves = resolves + 1
-                return { started = true, ok = true, output = root .. "/" .. named .. "\n" }
+                return { started = true, ok = true, output = (stage_paths[named] or root .. "/" .. named) .. "\n" }
             end
             probes = probes + 1
             for _, argument in ipairs(argv) do
@@ -1156,24 +1160,65 @@ describe("linker dependency-feature memo", function()
         assert(incremental.save_digest_cache(ctx))
     end
 
+    local function windows_lookup(command, expected, search, selection, search_cwd)
+        local ctx, metadata = model:context(), {}
+        ctx.executable_path = search
+        function ctx.io:executable_search_cwd() return search_cwd ~= false end
+        local function normalized(path)
+            return assert(platform.path.normalize(assert(platform.absolute(path, assert(ctx.io:cwd()))))):lower()
+        end
+        local stat = ctx.io.stat
+        function ctx.io:stat(path)
+            local value, err = stat(self, path)
+            if value then metadata[normalized(path)] = value end
+            return value, err
+        end
+        function ctx.io:readable() error("Windows executable lookup must not test readability") end
+        function ctx.io:executable() error("Windows executable lookup must not test POSIX execution access") end
+        function ctx.io:read_file() error("physical executable identity must not read tool bytes") end
+        function ctx.io:run() error("physical executable identity must not run native commands") end
+        local ok, identity, admitted = pcall(incremental.physical_executable, ctx, command, selection)
+        if not expected then
+            assert.is_false(ok)
+            assert.is_string(identity)
+            return
+        end
+        assert.is_true(ok, identity)
+        assert.truthy(identity, admitted)
+        assert.is_true(platform.is_absolute(admitted))
+        assert.equal(normalized(expected), normalized(admitted))
+        assert.equal(expected:match("[^/\\]+$"), admitted:match("[^/\\]+$"))
+        assert.equal(normalized(assert(ctx.io:realpath(expected))), normalized(identity.path))
+        local selected_stat = assert(metadata[normalized(expected)])
+        for _, field in ipairs({ "size", "mode", "dev", "ino", "mtime_ns", "ctime_ns" }) do
+            assert.equal(selected_stat[field], identity[field], field)
+        end
+    end
+
     before_each(function()
+        previous_cwd = assert(lfs.currentdir())
         root = temporary.name(); assert(os.remove(root)); assert(lfs.mkdir(root))
         root = certificate.canonical_path(context(), root)
+        assert(lfs.chdir(root))
         model = precise_model(root)
         for _, tool in ipairs({ "cc", "ld", "ld.lld", "collect2", "lto-wrapper", "lto1" }) do
             write(root .. "/" .. tool, "tool")
             model.executables[root .. "/" .. tool] = true
         end
+        if platform.windows then write(root .. "/cc.exe", "tool") end
         write(root .. "/liblto_plugin.so", "tool")
         write(root .. "/libLTO.dylib", "tool")
         write(root .. "/main.o", string.pack("<I2I2I4I4I4I2I2", 0x8664, 0, 0, 0, 0, 0, 0))
         write(root .. "/program", "image")
         description = ' "' .. root .. '/collect2"\n'
         descriptions = 0
-        request = { compiler_argv = { root .. "/cc" }, toolchain = "toolchain", directory = root }
+        request = { compiler_argv = { root .. "/cc" }, toolchain = "toolchain", directory = root,
+            compiler_stage_policy = "llvm" }
+        description_result, stage_paths = nil, {}
         probes, resolves, reports, banner, supported, signal = 0, 0, {}, "GNU ld 2.45", true, nil
     end)
     after_each(function()
+        assert(lfs.chdir(previous_cwd))
         for _, path in ipairs(reports) do assert.is_nil(lfs.symlinkattributes(path), path) end
         remove(root)
     end)
@@ -1270,6 +1315,251 @@ describe("linker dependency-feature memo", function()
         assert.is_nil(ctx.io.reads[root .. "/main.o"])
     end)
 
+    for _, location in ipairs({ "absolute", "relative", "PATH" }) do
+        for _, dotted in ipairs({ false, true }) do
+            local kind = dotted and "dotted" or "undotted"
+            it("admits the Windows .exe file for an " .. location .. " " .. kind .. " tool spelling", function()
+                if not platform.windows then pending("Windows executable suffix selection"); return end
+                local directory = root .. "/Windows tools"
+                assert(lfs.mkdir(directory))
+                local name = dotted and "compiler.stage" or "compiler-stage"
+                local requested, selected = directory .. "/" .. name, directory .. "/" .. name .. ".exe"
+                write(selected, "tool")
+                local search
+                if location ~= "absolute" then
+                    assert(lfs.chdir(root))
+                    if location == "relative" then requested = "Windows tools\\" .. name
+                    else requested, search = name, "Windows tools" end
+                end
+                windows_lookup(requested, selected, search)
+            end)
+        end
+    end
+
+    it("keeps Windows exact-first candidates grouped within each PATH directory", function()
+        if not platform.windows then pending("Windows executable suffix selection"); return end
+        local first, later = root .. "/first tools", root .. "/later tools"
+        assert(lfs.mkdir(first)); assert(lfs.mkdir(later))
+        local name = "compiler.stage"
+        write(first .. "/" .. name .. ".exe", "tool")
+        write(later .. "/" .. name, "tool")
+        local search = first .. ";" .. later
+        windows_lookup(name, first .. "/" .. name .. ".exe", search)
+        write(first .. "/" .. name, "tool")
+        windows_lookup(name, first .. "/" .. name, search)
+    end)
+
+    for _, extension in ipairs({ ".exe", ".EXE" }) do
+        it("admits existing and appended Windows " .. extension .. " candidates under their execution policies", function()
+            if not platform.windows then pending("Windows executable suffix selection"); return end
+            local requested = root .. "/already" .. extension
+            write(requested, "tool")
+            write(requested .. ".com", "first")
+            write(requested .. ".exe", "second")
+            windows_lookup(requested, requested)
+            windows_lookup(requested, requested, nil, "llvm")
+            assert(os.remove(requested))
+            windows_lookup(requested, requested .. ".com")
+            windows_lookup(requested, requested .. ".exe", nil, "llvm")
+            assert(os.remove(requested .. ".com"))
+            windows_lookup(requested, requested .. ".exe")
+        end)
+    end
+
+    it("admits a double-suffixed Windows PATH file before a later exact spelling", function()
+        if not platform.windows then pending("Windows executable suffix selection"); return end
+        local first, later = root .. "/first tools", root .. "/later tools"
+        assert(lfs.mkdir(first)); assert(lfs.mkdir(later))
+        write(first .. "/already.EXE.exe", "tool")
+        write(later .. "/already.EXE", "later")
+        windows_lookup("already.EXE", first .. "/already.EXE.exe", first .. ";" .. later)
+    end)
+
+    it("distinguishes direct Windows .com selection from an explicit LLVM stage", function()
+        if not platform.windows then pending("Windows execution selection policies"); return end
+        local path = root .. "/compiler-stage"
+        write(path, "exact")
+        write(path .. ".com", "direct")
+        write(path .. ".exe", "llvm")
+        windows_lookup(path, path .. ".com")
+        windows_lookup(path, path, nil, "llvm")
+        assert(os.remove(path))
+        windows_lookup(path, path .. ".com")
+        windows_lookup(path, path .. ".exe", nil, "llvm")
+    end)
+
+    it("retains an exact Windows directory as an LLVM execution failure", function()
+        if not platform.windows then pending("Windows execution selection policies"); return end
+        local path = root .. "/compiler.stage"
+        assert(lfs.mkdir(path))
+        write(path .. ".exe", "tool")
+        windows_lookup(path, path .. ".exe")
+        windows_lookup(path, false, nil, "llvm")
+    end)
+
+    it("selects Windows current-directory candidates only when that search is enabled", function()
+        if not platform.windows then pending("Windows current-directory execution policy"); return end
+        local directory, name = root .. "/PATH tools", "compiler-stage"
+        assert(lfs.mkdir(directory))
+        write(root .. "/" .. name .. ".exe", "cwd")
+        write(directory .. "/" .. name .. ".exe", "path")
+        windows_lookup(name, root .. "/" .. name .. ".exe", directory, nil, true)
+        windows_lookup(name, directory .. "/" .. name .. ".exe", directory, nil, false)
+        windows_lookup(name, directory .. "/" .. name .. ".exe", ";" .. directory .. ";;", nil, false)
+    end)
+
+    for _, quote in ipairs({ '"', "'" }) do
+        it("retains a Windows PATH directory enclosed in " .. quote .. " quotes", function()
+            if not platform.windows then pending("Windows quoted PATH selection"); return end
+            local first, later = root .. "/quoted;tools", root .. "/later tools"
+            assert(lfs.mkdir(first)); assert(lfs.mkdir(later))
+            write(first .. "/compiler-stage.exe", "first")
+            write(later .. "/compiler-stage.exe", "later")
+            windows_lookup("compiler-stage", first .. "/compiler-stage.exe",
+                quote .. first .. quote .. ";" .. later)
+        end)
+    end
+
+    for _, stage in ipairs({ "unknown policy", "reported linker", "collect2", "lto-wrapper", "lto1" }) do
+        it("permits publication without a final certificate for an uncertified Windows " .. stage, function()
+            if not platform.windows then pending("Windows compiler-stage uncertainty"); return end
+            seed_final()
+            local options = { windows = true, compile_argv = { root .. "/cc", "-flto" } }
+            if stage == "unknown policy" then options.compiler_stage_policy = "unknown"
+            elseif stage == "reported linker" then options.link_flags = { "--ld-path=ld.lld" }
+            elseif stage == "collect2" then description = ' "collect2"\n'
+            elseif stage == "lto-wrapper" then
+                description = ' "' .. root .. '/collect2" "-plugin-opt=lto-wrapper"\n'
+            else stage_paths.lto1 = "lto1" end
+            local ctx, ticket, tools = final_ticket(options)
+            assert.is_string(tools.uncertified)
+            assert.is_nil(tools.linker)
+            assert.is_false(ticket.cacheable)
+            assert.is_false(certificate.check(ctx, ticket))
+            assert.same({}, ticket.dependency_argv)
+            assert.is_nil(ctx.io.reads[root .. "/main.o"])
+            assert(certificate.invalidate(ctx, ticket))
+            assert(ctx.io:write_file(root .. "/program", "opaque image"))
+            assert(certificate.commit(ctx, ticket))
+            assert.is_nil(lfs.symlinkattributes(ticket.record))
+            assert.is_nil(lfs.symlinkattributes(root .. "/.titan/linker-feature"))
+            assert.equal(0, probes)
+        end)
+    end
+
+    it("does not memoize a Windows linker verdict whose execution policy is unknown", function()
+        if not platform.windows then pending("Windows compiler-stage uncertainty"); return end
+        local options = clone(request)
+        options.compiler_stage_policy = "unknown"
+        local backend, reason, status = certificate.linker_backend(invocation(), options)
+        assert.equal("none", backend)
+        assert.is_string(reason)
+        assert.equal("uncertified", status)
+        assert.equal(0, probes)
+        assert.is_nil(lfs.symlinkattributes(root .. "/.titan/linker-feature"))
+    end)
+
+    for _, kind in ipairs({ "unsupported query", "unrecognized wrapper" }) do
+        it("keeps a normally running compiler with an " .. kind .. " explicitly uncacheable", function()
+            if kind == "unsupported query" then
+                description_result = { started = true, ok = false, why = "exit", status = 2,
+                    output = "unsupported self-description" }
+            else description = ' "' .. root .. '/opaque-wrapper"\n' end
+            local ctx, ticket, tools = final_ticket()
+            assert.is_string(tools.uncertified)
+            assert.is_false(ticket.cacheable)
+            assert(certificate.commit(ctx, ticket))
+            assert.is_nil(lfs.symlinkattributes(ticket.record))
+            local backend, reason, status = certificate.linker_backend(invocation(), request)
+            assert.equal("none", backend)
+            assert.is_string(reason)
+            assert.equal("uncertified", status)
+            assert.equal(0, probes)
+            assert.is_nil(lfs.symlinkattributes(root .. "/.titan/linker-feature"))
+        end)
+    end
+
+    for _, result in ipairs({
+        { started = false, ok = false },
+        { started = true, ok = false, why = "signal", status = 9 },
+        { started = true, ok = false, interrupted = true, why = "exit", status = 1 },
+        { started = true, ok = false, why = "unknown", status = 1 },
+        { started = true, ok = false, why = "exit", status = 0 },
+    }) do
+        it("preserves a failed self-description transport without an uncertified-policy result", function()
+            description_result = clone(result)
+            description_result.diagnostic = "self-description transport failed"
+            local tools, err = certificate.output_tools(invocation(), request)
+            assert.is_nil(tools)
+            assert.equal("self-description transport failed", err)
+        end)
+    end
+
+    it("preserves physical-stage I/O errors and cancellation instead of treating them as policy uncertainty", function()
+        for _, failure in ipairs({ "stage metadata failed", {} }) do
+            local ctx = invocation()
+            local stat = ctx.io.stat
+            function ctx.io:stat(path)
+                if path:gsub("\\", "/"):lower() == (root .. "/ld"):lower() then
+                    if type(failure) == "string" then return nil, failure end
+                    error(failure, 0)
+                end
+                return stat(self, path)
+            end
+            if type(failure) == "string" then
+                local tools, err = certificate.output_tools(ctx, request)
+                assert.is_nil(tools)
+                assert.matches(failure, err, 1, true)
+            else
+                local ok, err = pcall(certificate.output_tools, ctx, request)
+                assert.is_false(ok)
+                assert.equal(failure, err)
+            end
+        end
+    end)
+
+    it("keeps the uncertified marker separate from requested native tool roles", function()
+        local options = clone(request)
+        options.tools = { uncertified = { "ar" } }
+        local tools, err = certificate.output_tools(invocation(), options)
+        assert.is_nil(tools)
+        assert.matches("reserved native tool role", err, 1, true)
+    end)
+
+    it("certifies the .exe selected from an absolute unsuffixed Windows compiler linker description", function()
+        if not platform.windows then pending("Windows compiler-described executable suffix"); return end
+        local reported, selected = root .. "/ld.lld", root .. "/ld.lld.exe"
+        assert(os.remove(reported))
+        write(selected, "tool")
+        local shadow = root .. "/PATH shadow"
+        assert(lfs.mkdir(shadow))
+        write(shadow .. "/ld.lld.exe", "tool")
+        description = ' "' .. reported .. '" "-o" "NUL"\n'
+        local options = { windows = true }
+        seed_final(options, shadow)
+        local ctx, ticket, tools = final_ticket(options, shadow)
+        assert.is_true(certificate.check(ctx, ticket))
+        assert.equal(selected, tools.linker.identity.path)
+        assert.same({ reported }, tools.linker.argv)
+        local _, admitted = incremental.physical_executable(ctx, tools.linker.argv, options.compiler_stage_policy or "llvm")
+        assert.equal(selected, admitted)
+        assert.is_nil(ctx.io.reads[root .. "/main.o"])
+        assert(model:context().io:write_file(shadow .. "/ld.lld.exe", "edit"))
+        ctx, ticket = final_ticket(options, shadow)
+        assert.is_true(certificate.check(ctx, ticket))
+        assert.is_nil(ctx.io.reads[root .. "/main.o"])
+        local stat = assert(lfs.attributes(selected))
+        assert(model:context().io:write_file(selected, "edit"))
+        assert(lfs.touch(selected, stat.access, stat.modification))
+        ctx, ticket = final_ticket(options, shadow)
+        assert.is_false(certificate.check(ctx, ticket))
+        assert.is_nil(ctx.io.reads[root .. "/main.o"])
+        assert.equal(stat.modification, lfs.attributes(selected, "modification"))
+        assert.equal(stat.size, lfs.attributes(selected, "size"))
+        assert.equal(0, resolves)
+        assert.equal(0, probes)
+    end)
+
     for _, case in ipairs({
         { "ar", { "ar" } }, { "ranlib", { "ranlib" } }, { "default RC", { "llvm-rc" } },
         { "explicit RC", { "llvm-rc", "/nologo" } }, { "dsymutil", { "dsymutil" } },
@@ -1277,8 +1567,9 @@ describe("linker dependency-feature memo", function()
         it("invalidates final output when unchanged " .. case[1] .. " argv selects another PATH tool", function()
             for _, directory in ipairs({ root .. "/one", root .. "/two" }) do
                 assert(lfs.mkdir(directory))
-                write(directory .. "/" .. case[2][1], "tool")
-                model.executables[directory .. "/" .. case[2][1]] = true
+                local path = directory .. "/" .. case[2][1] .. (platform.windows and ".exe" or "")
+                write(path, "tool")
+                model.executables[path] = true
             end
             local options = { tools = { auxiliary = case[2] }, compiler_argv = { root .. "/cc", "-fno-lto" } }
             seed_final(options, root .. "/one")
