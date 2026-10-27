@@ -244,8 +244,10 @@ describe("process transport", function()
                 package.path, package.cpath, interpreter) .. [[
 assert(package.loaded.luv == nil)
 local platform = require "titan-compiler.platform"
+local saved_windows = platform.windows
 platform.windows = true
 platform.getenv("PATH")
+platform.windows = saved_windows
 local first_uv = assert(package.loaded.luv)
 assert(type(first_uv._loop) == "userdata")
 package.loaded.luv = nil
