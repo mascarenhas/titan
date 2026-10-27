@@ -2451,10 +2451,11 @@ describe("loader resolver ownership", function()
     it("closes the titanc resolver when an unexpected error unwinds the chunk",
     function()
         local close_calls = 0
+        local fake_context = { io = {} }
         local fake_driver = {
             TITAN_SOURCE_PATH = ".",
             deduplicate_module_names = function(modules) return modules end,
-            new_resolver_context = function() return { io = {} } end,
+            new_resolver_context = function() return fake_context end,
             apply_native_inputs = function() end,
             configure_foreign_c = function() end,
             default_c_parts = function() return 1 end,
@@ -2462,7 +2463,7 @@ describe("loader resolver ownership", function()
                 error("injected titanc loader failure")
             end,
             close_resolver_context = function(context)
-                assert.is_table(context)
+                assert.equal(fake_context, context)
                 close_calls = close_calls + 1
                 return true
             end,
@@ -2497,9 +2498,13 @@ describe("loader resolver ownership", function()
             argparse = fake_argparse,
             ["titan-compiler.build"] = {
                 lock_outputs = function()
-                    return { release = function() end }
+                    return {
+                        descriptors = function() return { 17 } end,
+                        release = function() end,
+                    }
                 end,
                 run = function()
+                    assert.same({ 17 }, fake_context.io._process_inherit)
                     error("injected titanc loader failure")
                 end,
             },
@@ -2538,6 +2543,7 @@ describe("loader resolver ownership", function()
         assert.matches("injected titanc loader failure", tostring(err),
             1, true)
         assert.equal(1, close_calls)
+        assert.is_nil(fake_context.io._process_inherit)
     end)
 
     it("skips Titan FFI and module graph setup for C-only compile-only invocations",
@@ -2583,6 +2589,7 @@ describe("loader resolver ownership", function()
                 end,
                 preflight_build_outputs = function(context, plan, opts)
                     assert.equal(fake_context, context)
+                    assert.same({ 19 }, context.io._process_inherit)
                     events.preflight = events.preflight + 1
                     events.preflight_plan = plan
                     events.preflight_options = opts
@@ -2614,6 +2621,7 @@ describe("loader resolver ownership", function()
                 ["titan-compiler.build"] = {
                     lock_outputs = function()
                         return {
+                            descriptors = function() return { 19 } end,
                             release = function()
                                 events.release_locks = events.release_locks + 1
                             end,
@@ -2652,6 +2660,7 @@ describe("loader resolver ownership", function()
                     end,
                     compile = function(context, request)
                         assert.equal(fake_context, context)
+                        assert.same({ 19 }, context.io._process_inherit)
                         events.native_compile = events.native_compile + 1
                         local out = {}
                         for index, src in ipairs(request.sources) do
@@ -2693,6 +2702,7 @@ describe("loader resolver ownership", function()
             local chunk = assert(loadfile("titanc", "t", environment))
             local ok, err = pcall(chunk)
             assert.is_true(ok, tostring(err))
+            assert.is_nil(fake_context.io._process_inherit)
             return events
         end
 
@@ -7368,7 +7378,7 @@ end
         assert.equal("source", driver.imported.provider.kind)
     end)
 
-    it("defers compiled-interface semantic serialization until source replacement and checks every consumed view",
+    it("retains immutable snapshots of every consumed compiled view across source replacement and mutable tableloader descriptors",
     function()
         local first_dir = root .. "/first-bin"
         local second_dir = root .. "/second-bin"
@@ -7420,94 +7430,111 @@ end
             function answer(): integer return provider.secret() + provider.answer() end
         ]])
 
-        local original_serialize_semantic = types.serialize_semantic
-        local semantic_calls = 0
-        types.serialize_semantic = function(...)
-            semantic_calls = semantic_calls + 1
-            return original_serialize_semantic(...)
-        end
-        local ok, failure = xpcall(function()
-            driver.TITAN_BIN_PATH = first_dir
-            local context = driver.new_resolver_context()
-            local loader = driver.defaultloader({}, {
-                context = context,
-                source_roots = {
-                    first_consumer = true,
-                    second_consumer = true,
-                    matching_source_root = true,
-                },
-            })
-            local loaded, result, errors = loader("first_consumer")
-            assert.truthy(loaded, tostring(result))
-            assert.equal(0, #errors, table.concat(errors, "\n"))
-            loaded, result, errors = loader("second_consumer")
-            assert.truthy(loaded, tostring(result))
-            assert.equal(0, #errors, table.concat(errors, "\n"))
-            assert.equal("dynamic", driver.imported.provider.kind)
-            assert.equal(first_so, driver.imported.provider.filename)
-            assert.equal(0, semantic_calls)
+        driver.TITAN_BIN_PATH = first_dir
+        local context = driver.new_resolver_context()
+        local loader = driver.defaultloader({}, {
+            context = context,
+            source_roots = {
+                first_consumer = true,
+                second_consumer = true,
+                matching_source_root = true,
+            },
+        })
+        local loaded, result, errors = loader("first_consumer")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        loaded, result, errors = loader("second_consumer")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.equal("dynamic", driver.imported.provider.kind)
+        assert.equal(first_so, driver.imported.provider.filename)
 
-            loaded, result, errors = loader("matching_source_root")
-            assert.truthy(loaded, tostring(result))
-            assert.equal(0, #errors, table.concat(errors, "\n"))
-            assert.equal("source", driver.imported.provider.kind)
-            assert.is_table(driver.imported.provider.type.source_members.secret)
-            assert.is_true(semantic_calls >= 2)
-            assert.is_true(driver.close_loader(loader))
-            assert.is_true(driver.close_resolver_context(context))
+        loaded, result, errors = loader("matching_source_root")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.equal("source", driver.imported.provider.kind)
+        assert.is_table(driver.imported.provider.type.source_members.secret)
+        assert.is_true(driver.close_loader(loader))
+        assert.is_true(driver.close_resolver_context(context))
 
-            -- Now consume two distinct compiled views of `provider` in one
-            -- resolver context, then replace `provider` with source matching
-            -- only the second view: the first recorded view must still reject.
-            write_file(source .. "/string_consumer.titan", [[
-                local provider = import "provider"
-                function answer(): string return provider.answer() end
-            ]])
-            write_file(source .. "/provider.titan", [[
-                function answer(): string return "matches second only" end
-            ]])
-            write_file(source .. "/mismatch_source_root.titan", [[
-                local provider = import "provider.titan"
-                function answer(): string return provider.answer() end
-            ]])
-            driver.imported, types.registry = {}, {}
-            local multi_ctx = driver.new_resolver_context()
-            local multi_loader = driver.defaultloader({}, {
-                context = multi_ctx,
-                source_roots = {
-                    first_consumer = true,
-                    string_consumer = true,
-                    mismatch_source_root = true,
-                },
-            })
-            driver.TITAN_BIN_PATH = first_dir
-            loaded, result, errors = multi_loader("first_consumer")
-            assert.truthy(loaded, tostring(result))
-            assert.equal(0, #errors, table.concat(errors, "\n"))
-            local first_view = driver.imported.provider.type
+        -- Consuming two distinct compiled views of `provider` in one resolver
+        -- context and then replacing `provider` with source matching only the
+        -- second view must still reject against the first recorded view.
+        write_file(source .. "/string_consumer.titan", [[
+            local provider = import "provider"
+            function answer(): string return provider.answer() end
+        ]])
+        write_file(source .. "/provider.titan", [[
+            function answer(): string return "matches second only" end
+        ]])
+        write_file(source .. "/mismatch_source_root.titan", [[
+            local provider = import "provider.titan"
+            function answer(): string return provider.answer() end
+        ]])
+        driver.imported, types.registry = {}, {}
+        local multi_ctx = driver.new_resolver_context()
+        local multi_loader = driver.defaultloader({}, {
+            context = multi_ctx,
+            source_roots = {
+                first_consumer = true,
+                string_consumer = true,
+                mismatch_source_root = true,
+            },
+        })
+        driver.TITAN_BIN_PATH = first_dir
+        loaded, result, errors = multi_loader("first_consumer")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
 
-            driver.imported.provider = nil
-            driver.TITAN_BIN_PATH = second_dir
-            loaded, result, errors = multi_loader("string_consumer")
-            assert.truthy(loaded, tostring(result))
-            assert.equal(0, #errors, table.concat(errors, "\n"))
-            local second_view = driver.imported.provider.type
-            assert.not_equal(first_view, second_view)
-            assert.is_true(multi_ctx.used_compiled_interfaces.provider[first_view])
-            assert.is_true(multi_ctx.used_compiled_interfaces.provider[second_view])
+        driver.imported.provider = nil
+        driver.TITAN_BIN_PATH = second_dir
+        loaded, result, errors = multi_loader("string_consumer")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
 
-            semantic_calls = 0
-            loaded, result, errors = multi_loader("mismatch_source_root")
-            assert.truthy(loaded, tostring(result))
-            assert.equal(1, #errors)
-            assert.equal("source module 'provider' does not match a compiled " ..
-                "interface already used in this compilation", errors[1])
-            assert.is_true(semantic_calls >= 2)
-            assert.is_true(driver.close_loader(multi_loader))
-            assert.is_true(driver.close_resolver_context(multi_ctx))
-        end, debug.traceback)
-        types.serialize_semantic = original_serialize_semantic
-        assert.is_true(ok, failure)
+        loaded, result, errors = multi_loader("mismatch_source_root")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(1, #errors)
+        assert.equal("source module 'provider' does not match a compiled " ..
+            "interface already used in this compilation", errors[1])
+        assert.is_true(driver.close_loader(multi_loader))
+        assert.is_true(driver.close_resolver_context(multi_ctx))
+
+        -- Mutating a caller-held tableloader Type.Module descriptor in-place
+        -- across A -> B -> A returns must snapshot each returned projection
+        -- so a later source replacement matching A still rejects B.
+        local mutable_fn = types.Function({}, { types.Integer() }, false, nil, nil)
+        local mutable_compiled = types.Module("cached", {
+            types.ModuleMember("cached", "answer", mutable_fn, {}),
+        })
+        local imported = {
+            cached = { kind = "dynamic", type = mutable_compiled },
+        }
+        local table_loader = driver.tableloader({
+            cached = [[
+                function answer(): integer return 7 end
+            ]],
+        }, imported)
+        loaded, result, errors = table_loader("cached")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors)
+
+        mutable_fn.rettypes[1] = types.String()
+        loaded, result, errors = table_loader("cached")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors)
+
+        mutable_fn.rettypes[1] = types.Integer()
+        loaded, result, errors = table_loader("cached")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors)
+
+        loaded, result, errors = table_loader("cached", { kind = "source-import" })
+        assert.truthy(loaded, tostring(result))
+        assert.equal(1, #errors)
+        assert.equal("source module 'cached' does not match a compiled " ..
+            "interface already used in this compilation", errors[1])
+        assert.is_true(driver.close_tableloader(table_loader))
     end)
 
     it("does not fall back to a cached compiled provider for an " ..
