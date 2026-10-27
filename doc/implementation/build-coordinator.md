@@ -944,8 +944,12 @@ are never part of `spec.outputs`. Each target owns
     and hashes every `0x10` file not in `policy.exclude`.
   * **`gnu` / `lld` backend.** Selected on non-Darwin Unix by
     `driver.native_link_backend(context)` (`driver.lua`), which runs
-    `<cc> -Wl,--dependency-file=<tmp> -Wl,--version` and recognizes `GNU ld`
-    or `LLD` in the banner. The result is memoized per resolver context and
+    `<cc> -Wl,--dependency-file=<tmp> -Wl,--version` and recognizes the
+    backend only from a version line: one beginning `GNU ld`, or an `LLD`
+    version line such as `LLD 18.1.8` or a vendor-prefixed `Ubuntu LLD 18.1.8`.
+    GCC's `collect2` treats `--version` as verbose and echoes the linker
+    command line, so `LLD` or `GNU ld` appearing elsewhere, for example in the
+    dependency-report path, is ignored. The result is memoized per resolver context and
     persisted in `<output>/.titan/linker-feature`, keyed by the compiler argv,
     link flags, toolchain identity, and physical compiler and linker
     identities, so warm invocations skip the probe. When supported, appends
