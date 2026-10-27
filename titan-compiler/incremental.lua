@@ -379,7 +379,10 @@ function incremental.physical_executable(context, command)
         local separator = platform.windows and ";" or ":"
         local search = context.executable_path or platform.getenv("PATH") or ""
         for directory in (search .. separator):gmatch("(.-)" .. separator) do
-            local candidate = paths.join(directory ~= "" and directory or ".", executable)
+            -- POSIX resolves symlinks before a following ".."; lexical path
+            -- normalization can therefore select a different executable.
+            local candidate = (platform.windows and paths.join or platform.join)(
+                directory ~= "" and directory or ".", executable)
             candidates[#candidates + 1] = candidate
             if platform.windows and not executable:match("%.[^/\\]+$") then
                 candidates[#candidates + 1] = candidate .. ".exe"

@@ -670,6 +670,7 @@ dofile(%q .. "/titanc")
             for _, directory in ipairs({ coordinator, tools, source }) do assert(lfs.mkdir(directory)) end
             local executable = root .. "/delivery/app"
             local selected, target = coordinator .. "/dsymutil", coordinator .. "/llvm-multicall"
+            local pinned = coordinator .. "/./dsymutil"
             local shadow, tool_log = tools .. "/dsymutil", root .. "/dsymutil-calls"
             local _, real = require("titan-compiler.incremental").physical_executable(
                 { io = compiler_io.new_sync() }, "dsymutil")
@@ -694,6 +695,10 @@ exec %s "$@"
             end
             install(target, "selected-one")
             install(shadow, "shadow-one")
+            local route = root .. "/route"
+            assert(lfs.mkdir(route)); assert(lfs.mkdir(tools .. "/inner"))
+            assert(lfs.link(tools .. "/inner", route .. "/link", true))
+            install(route .. "/dsymutil", "wrong-route")
             assert(lfs.link(target, selected, true))
             write(source .. "/app.titan", kind == "program" and
                 "function main(args: {string}): integer return 37 end\n" or
@@ -742,7 +747,7 @@ dofile(%q .. "/titanc")
                 return calls
             end
             local cold = compile(first_path)
-            assert.matches(quote(selected) .. " " .. quote(leaf), cold, 1, true)
+            assert.matches(quote(pinned) .. " " .. quote(leaf), cold, 1, true)
             local calls = calls_since("", "selected-one")
             local object = output .. "/app.o"
             local object_bytes, c_bytes = read(object), read(output .. "/app.c")
@@ -762,7 +767,7 @@ dofile(%q .. "/titanc")
             install(target, "selected-two", true)
             local replaced = compile(first_path)
             assert.matches("Titan link miss ", replaced, 1, true)
-            assert.matches(quote(selected) .. " " .. quote(leaf), replaced, 1, true)
+            assert.matches(quote(pinned) .. " " .. quote(leaf), replaced, 1, true)
             calls = calls_since(calls, "selected-two")
             reused_object()
             assert.matches("Titan link hit ", compile(first_path), 1, true)
@@ -777,6 +782,16 @@ dofile(%q .. "/titanc")
             calls = calls_since(calls, "shadow-two")
             reused_object()
             assert.matches("Titan link hit ", compile(second_path), 1, true)
+            assert.equal(calls, read(tool_log))
+            reused_object()
+            local traversed = route .. "/link/../dsymutil"
+            local traversed_path = route .. "/link/..:.:" .. ordinary_path
+            local traversed_output = compile(traversed_path)
+            assert.matches("Titan link miss ", traversed_output, 1, true)
+            assert.matches(quote(traversed) .. " " .. quote(leaf), traversed_output, 1, true)
+            calls = calls_since(calls, "shadow-two")
+            reused_object()
+            assert.matches("Titan link hit ", compile(traversed_path), 1, true)
             assert.equal(calls, read(tool_log))
             reused_object()
             if kind == "program" then

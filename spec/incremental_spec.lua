@@ -661,7 +661,7 @@ describe("incremental configuration", function()
         if platform.windows then pending("POSIX relative PATH selection"); return end
         local ctx = context({ ["/target/llvm-multicall"] = "selected",
             ["/shadow/dsymutil"] = "shadow" })
-        local candidate = require("titan-compiler.path").join(".", "dsymutil")
+        local candidate = platform.join(".", "dsymutil")
         ctx.io.aliases[candidate] = "/target/llvm-multicall"
         function ctx.io:cwd() return "/coordinator" end
         ctx.executable_path = ".:/shadow"
@@ -673,11 +673,27 @@ describe("incremental configuration", function()
         local identity, selected = incremental.physical_executable(ctx, "dsymutil")
         assert.same({ candidate }, observed)
         assert.equal("/target/llvm-multicall", identity.path)
-        assert.equal("/coordinator/dsymutil", selected)
+        assert.equal("/coordinator/./dsymutil", selected)
         local direct = incremental.physical_executable(ctx, "/target/llvm-multicall")
         assert.same(direct, identity)
         assert.equal(0, #ctx.io.commands)
         assert.is_nil(ctx.io.reads["/target/llvm-multicall"])
+    end)
+
+    it("preserves symlink-directory traversal in POSIX PATH candidates", function()
+        local platform = require "titan-compiler.platform"
+        if platform.windows then pending("POSIX symlink-directory PATH traversal"); return end
+        local ctx = context({ ["/a/bin/dsymutil"] = "lexically normalized",
+            ["/b/bin/dsymutil"] = "physically selected" })
+        local candidate = "/a/link/../bin/dsymutil"
+        ctx.io.aliases[candidate] = "/b/bin/dsymutil"
+        ctx.executable_path = "/a/link/../bin:/a/bin"
+        local identity, selected = incremental.physical_executable(ctx, "dsymutil")
+        assert.equal("/b/bin/dsymutil", identity.path)
+        assert.equal(candidate, selected)
+        assert.equal(0, #ctx.io.commands)
+        assert.is_nil(ctx.io.reads["/a/bin/dsymutil"])
+        assert.is_nil(ctx.io.reads["/b/bin/dsymutil"])
     end)
 
     it("probes one flagless toolchain description independently of effective options", function()
