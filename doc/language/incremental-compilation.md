@@ -218,8 +218,11 @@ static-archive validation probes, and native linking. It certifies:
 
 * the link recipe: ordered requested roots, entry module and
   `--no-uv-bootstrap`, effective link argv (`-L`, `-l`, `--ldflag`,
-  `TITAN_EXTRA_LDFLAGS`), compiler/archiver/ranlib/resource-compiler
-  identities, discovered test cases, compiler template digest, coverage runtime
+  `TITAN_EXTRA_LDFLAGS`), the compiler identity and the physical identities of
+  the linker the compiler actually selects, the archiver, ranlib,
+  resource-compiler, or `dsymutil` tools that target uses, and, with LTO, the
+  selected linker plugins and GCC LTO stages, discovered test cases, compiler
+  template digest, coverage runtime
   inventory, Windows launcher manifest and relative provider path, Darwin
   `.dSYM` policy, native bindings, and target/deployment environment;
 * the actual SHA-256 content digests of all linked module `.o` parts,
@@ -230,9 +233,12 @@ static-archive validation probes, and native linking. It certifies:
   bundles), checking file/directory kind, non-symlink status, content digests,
   and executable permission bits on Unix (mutable runtime `.gcda` counter files
   and coverage reports are not link outputs); and
-* the resolved native link libraries (via `-Wl,--dependency-file` on GNU/LLD,
-  `-Wl,-dependency_info` on Darwin ld64, or compiler `-print-file-name`
-  resolution where linker dependency output is unavailable).
+* the resolved native link libraries and file operands (via
+  `-Wl,--dependency-file` on GNU/LLD, `-Wl,-dependency_info` on Darwin ld64,
+  or, where linker dependency output is unavailable, the `-l` libraries
+  resolved through `-L` and compiler `-print-file-name` plus raw archive,
+  object, import-library, `--just-symbols`, and `--retain-symbols-file`
+  operands).
 
 When the link certificate hits, `titanc` restores any missing public `.ffi.h`
 or `.titan.h` headers and exits without generating synthetic C or invoking the
@@ -318,7 +324,8 @@ linker input mechanism: <flag>`, `opaque native C input mechanism`,
   whether a newly created file in an earlier `-L` directory would shadow a
   previously linked library. Opaque compiler or linker mechanisms (`@file`
   response files, `-fplugin`/`--plugin`, `--specs`, `-Xclang`, `-wrapper`,
-  `-Xlinker`, or linker scripts without linker dependency output) explicitly
+  `-Xlinker`, file lists, and, without linker dependency output, linker
+  scripts, thin archives, and any linker option outside the supported set)
   mark the `--c-source` node or final link uncacheable so it rebuilds cleanly.
 * **Toolchain physical identity.** Native tool identity combines the
   compiler's self-description (its `-E -v` banner and predefined macros) with

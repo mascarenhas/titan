@@ -866,7 +866,7 @@ are never part of `spec.outputs`. Each target owns
 * `RECIPE_FIELDS` (`linkcertificate.lua`): `roots`, `entry` (`{ module,
   no_uv_bootstrap }`), `kind` (`"program" | "test" | "library"`),
   `no_uv_bootstrap`, `argv` (`driver.link_extra_flags()`), `toolchain`
-  (`{ compiler = toolchain_identity, ar, ranlib, rc }`), `test_cases`
+  (`{ compiler = toolchain_identity, output_tools }`, see below), `test_cases`
   (deterministically sorted descriptors from `test_runner.discover`),
   `templates` (`configuration.compiler`, covering runner/entrypoint templates
   and `standalone_paths.lua`), `coverage` (`coverage.inventory`), `companions`
@@ -884,10 +884,12 @@ are never part of `spec.outputs`. Each target owns
   timestamp or module recipe hash alone; and
 * `native_policy` (`certificate.native_library_policy`,
   `linkcertificate.lua`):
-  * If any `--c-source` object has `cacheable == false`, or if `argv` contains
-    `@file`, `,@`, `-fplugin*`, `--plugin*`, `,-plugin`, or `-Xlinker`, the
-    link is marked `cacheable = false` (`reason = "opaque linker input
-    mechanism: ..."` or `"opaque native C input mechanism"`).
+  * If any `--c-source` object has `cacheable == false`, or if `argv`
+    (with `-Wl,` lists expanded) contains `@file`, `-fplugin*`, `-plugin`/
+    `--plugin*`, `-Xlinker`, `-specs*`/`--specs*`, `-wrapper`, or a
+    `-filelist` option, the link is marked `cacheable = false` (`reason =
+    "opaque linker input mechanism: ..."` or `"opaque native C input
+    mechanism"`).
   * **`darwin` backend (`driver.IS_DARWIN`).** Appends
     `ticket.dependency_argv = { "-Wl,-dependency_info," .. dependency_file }`
     to the final executable or public DSO link. On commit,
@@ -907,13 +909,49 @@ are never part of `spec.outputs`. Each target owns
     parsed with `depfile.parse`, while GNU ld's literal report is decoded from
     its trailing one-input-per-line phony-target stanza, preserving spaces,
     `#`, `$`, colons, and backslashes in paths.
-  * **`compiler` fallback (`backend == "none"`, including Windows).** Walks
-    `argv` (expanding `-Wl,` comma tokens, tracking `-Bstatic`/`-static` vs
-    `-Bdynamic`, and rejecting `-T`/`--script` linker scripts when dependency
-    output is unavailable) to resolve each `-l<name>` or `-l:<file>` candidate
-    against explicit `-L` directories and then `<compiler_argv>
-    -print-file-name=<candidate>`. If any library cannot be resolved to a
-    regular file, `cacheable` is `false`.
+  * **`compiler` fallback (`backend == "none"`, including Windows).** Parses
+    `argv` with a finite grammar (expanding `-Wl,` comma tokens): ordered and
+    repeated `-L`, `-l<name>`/`-l:<file>` with `-static` and forwarded
+    `-Bstatic`/`-Bdynamic` selection, raw archive/object/import-library
+    operands (each must be a regular file whose `incremental.native_input_kind`
+    is an archive, object, or shared library), and the file-taking
+    `--just-symbols` and `--retain-symbols-file` operands. Value-taking options
+    such as `-u`, `-e`, `-soname`, `-install_name`, `-z`, and `--ld-path`, and
+    input-free flags such as `-O<level>`, `-flto=<mode>`, and `-fuse-ld=`,
+    are covered by the ordered recipe `argv`. Each `-l` candidate resolves
+    against the explicit `-L` directories and then `<compiler_argv>
+    -print-file-name=<candidate>`. Any other option, a text linker script, a
+    thin archive, an unknown format, or an unresolvable library or file makes
+    the link uncacheable (for example `unsupported native linker input
+    mechanism: <flag>` or `cannot resolve native file: <path>`) instead of
+    certifying an incomplete input set.
+
+`output_tools` comes from `linkcertificate.output_tools(context, request)`,
+whose request carries the exact compiler argv, ordered link flags, compiler
+toolchain identity, compile prefix, the ordered linked inputs, and the
+auxiliary tool roles the output kind actually uses (`ar` and `ranlib` for
+Unix libraries, `rc` for Windows programs, `dsymutil` on Darwin), selected by
+`driver.output_tool_descriptors`. The result records:
+
+* `linker`: the linker the compiler driver really selects, with its exact
+  driver argv and physical identity. Unless `-fuse-ld=`/`--ld-path` names it,
+  `titanc` reads one read-only `<cc> -### -x c <null> -o <null>` job
+  description: Clang names its configured linker directly, while GCC's
+  `collect2` delegates to the linker named by the compiler. Fixed Darwin and
+  Windows dependency-report policies skip only the capability probe, not
+  linker resolution;
+* each requested auxiliary role, with its exact argv and physical identity;
+  and
+* when LTO is enabled by the final flags, by compile-only `-flto`, or by an
+  input whose recorded format is LLVM bitcode (or unknown), the loadable
+  `-plugin`/`-lto_library` files from the same job description and, for GCC,
+  the physical `collect2`, `lto-wrapper`, and `lto1` stages. An explicit
+  final `-fno-lto` skips those LTO-stage probes. A missing selected tool is
+  an error.
+
+Native input kind and LTO facts are cached by content digest in the
+[persistent digest cache](incremental-compilation.md#persistent-digest-cache)
+as optional additions to the existing schema; a missing fact is recomputed.
 
 On a link hit, `linkcertificate.check` rehashes the exact library files
 recorded in `record.native` (or `policy.files`). It does **not** rewalk

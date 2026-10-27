@@ -285,9 +285,14 @@ plus two tables:
   `precision = "ns"`. Only precise observations (integer nanosecond times and
   nonempty opaque `dev`/`ino` strings) are stored, so coarse metadata always
   rehashes.
-* `objects[content_digest] = { fingerprint }`, the content-derived target
-  fingerprint of a split-part object (`incremental.part_fingerprint`). It
-  contains no paths, observations, or module views; callers still compare it
+* `objects[content_digest] = { fingerprint?, kind?, lto? }`, pure content
+  facts: the target fingerprint of a split-part object
+  (`incremental.part_fingerprint`), and the binary format (`archive`, `object`,
+  `shared`, `thin`, or `unknown`) plus an LLVM-bitcode flag of a native link
+  input (`incremental.native_input_kind`). Each fact is optional and written
+  without disturbing the others; a missing fact is recomputed, and a kind fact
+  never substitutes for the metadata-free part scan. The facts contain no
+  paths, observations, or module views; callers still compare a fingerprint
   with the primary object's target.
 
 The cache is a hint, never evidence on its own. A missing, unreadable,
