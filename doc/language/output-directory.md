@@ -53,13 +53,14 @@ their longest common dotted prefix: `titanc -o out app.left app.right` emits
 A large module may be split into several C translation units
 ([split modules](build-profiles.md#split-modules)). Its first unit keeps the
 `app/main.c` and `app/main.o` names shown above, and only `app/main.o` carries
-the `.titan.source` metadata record and its authoritative `parts` inventory (no
-`.parts` sidecar file is written). Additional units are numbered from 1, as
-`app/main.part1.c` and `app/main.part1.o`, and every unit of that module
-includes a shared generated `app/main.priv.h`. All of these files stay in the
-module's output directory, and providers, archives, and programs link every
-object of the module. Modules that are not split have no `.part` files or
-`.priv.h`.
+the module's metadata, including the authoritative list of its parts.
+Additional units are numbered from 1, as `app/main.part1.c` and
+`app/main.part1.o`, and every unit of that module includes a shared generated
+`app/main.priv.h`. All of these files stay in the module's output directory,
+and providers, archives, and programs link every object of the module.
+Modules that are not split have no `.part` files or `.priv.h`, but the part
+names up to the configured `--c-parts` maximum stay reserved for the
+compiler, so do not place authored files there.
 
 The same destination contains generated `.ffi.h` and `.titan.h` companions,
 platform debug information, and compiler-managed metadata directories. Authored
@@ -119,6 +120,7 @@ directly on the command line:
 | `-l LIB` / `--link LIB` | Repeatable native library for final links; comma-separated lists and repeated flags preserve exact command-line order without deduplication. |
 | `--ldflag ARG` | Repeatable single native link argument (such as `--ldflag=-Wl,--as-needed`). |
 | `--c-source FILE` | Repeatable C source file compiled and certified by `titanc` under `<output>/.native/`, linked in command-line order before `-X` payloads. |
+| `--print-c-objects` | With `-c`, print the absolute path of each certified `--c-source` object on standard output, one line per `--c-source` argument in argument order. |
 
 For each native phase, `titanc` normalizes arguments once: profile defaults
 first, then tokenized `TITAN_EXTRA_CPPFLAGS`, `TITAN_EXTRA_CFLAGS`, and
@@ -141,29 +143,34 @@ titanc -o out --incremental --exe out/app app.main
 titanc -o out --incremental --test --exe out/app-tests --test-dir tests
 ```
 
-Inside the selected output directory (or the first configured `--tree` root when
-`--output` is omitted), `titanc` maintains:
+Inside the selected output directory, `titanc` maintains:
 
 * `out/.titan-build.lock`: an exclusive OS-backed lock file held from
   certification through publication (`flock` on Linux and macOS, `LockFileEx` on
-  Windows). When `--exe` names a directory outside `--output`, its parent
-  directory is locked in deterministic identity order as well. Concurrent
-  `titanc` invocations sharing `out/` serialize cleanly on local filesystems;
-  the waiting process acquires the lock before certifying and reuses objects
-  published by the first.
-* `out/.titan/preamble.c`: the stable synthetic translation unit used to probe
-  and certify the generated-C preamble header closure.
-* `out/.native/<hash>.o`, `<hash>.record`, `<hash>.i`, and `<hash>.d`:
-  compiled objects, `TITAN_NATIVE_RECORD_SCHEMA` (`"1"`) sidecar certificates,
-  preprocessed outputs, and dependency files for `--c-source` inputs, keyed by
-  canonical source path.
+  Windows). When `--exe` names a directory outside `--output`, that directory
+  is locked as well, in a deterministic order. Concurrent `titanc` invocations
+  sharing `out/` serialize cleanly on local filesystems; the waiting process
+  acquires the lock before certifying and reuses objects published by the
+  first.
+* `out/.titan/`: compiler caches. `preamble.c` is the stable translation unit
+  used to certify the generated-C preamble headers, `digests` remembers file
+  digests by precise file metadata so unchanged files are not reread, and
+  `linker-feature` remembers whether the linker can report its inputs. All of
+  them are rebuilt when missing.
+* `out/.native/<hash>.o` and `<hash>.record`: compiled objects and
+  certificates for `--c-source` inputs, keyed by canonical source path.
+  Preprocessed output and dependency files are temporary. Use
+  `--print-c-objects` to learn an object's path.
 * `out/.titan-links/<key>/record`, `link.d`, and `synthetic/`: per-target
-  `TITAN_LINK_RECORD_SCHEMA` (`"1"`) final-link certificates, linker dependency
-  files, and isolated synthetic entrypoint (`__entrypoint.c`/`.o`) and test
-  runner (`__test_runner.c`/`.o`, `__test_entrypoint.c`/`.o`) files, keyed by
-  the canonical final output set. Application and test binaries sharing `out/`
-  keep separate link records and synthetic intermediates while reusing unchanged
-  production module objects.
+  final-link certificates, linker dependency reports, and the generated test
+  runner (`<name>__test_runner.titan` and its C and object) and entrypoint
+  (`<name>__entrypoint.c` or `<name>__test_entrypoint.c`) for that target,
+  keyed by its set of final outputs. Application and test binaries sharing
+  `out/` keep separate link records and synthetic intermediates while reusing
+  unchanged production module objects.
+
+Without `--output`, `titanc` locks every `--tree` source root and the working
+directory, and keeps these metadata directories in the first source root.
 
 Objects left beside sources do not satisfy reuse in another output directory.
 See [Incremental and separate compilation](incremental-compilation.md) for the

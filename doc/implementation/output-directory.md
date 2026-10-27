@@ -63,21 +63,28 @@ coordinator renames non-primary parts before renaming `<stem>.o` last. Provider
 and archive publication stages sit beside their mapped final paths. The C probe
 cache keeps its own storage root.
 
+`titanc` locks `--output`, or without `--output` every `--tree` source root
+plus the working directory, and adds `dirname(--exe)` when `--exe` is used.
 Under the primary output domain (`--output`, or the first `--tree` source root
 when `--output` is omitted), `titanc` also owns:
 
 - `<domain>/.titan-build.lock` (`build.lock_outputs`): the permanent OS lock
   file (`O_NOFOLLOW | O_CLOEXEC` + `flock` on POSIX; `CreateFileW` with
   `FILE_FLAG_OPEN_REPARSE_POINT` and no `FILE_SHARE_DELETE` + `LockFileEx` on
-  Windows) held from certification through publication, plus
-  `dirname(--exe)/.titan-build.lock` when `--exe` is used;
+  Windows) held from certification through publication; every other lock
+  domain has its own;
 - `<domain>/.titan/preamble.c` (`incremental.preamble_identity`): the stable
   synthetic translation unit used to probe and certify the generated C preamble
   and transitive SDK/system headers;
-- `<domain>/.native/<sha256(canonical-source-path)>.{o,record,i,d}`
-  (`nativeinputs.compile`): preprocessed output, dependency file, sidecar
-  certificate (`TITAN_NATIVE_RECORD_SCHEMA`), and compiled object for each
-  `--c-source` input; and
+- `<domain>/.titan/digests` (`incremental.load_digest_cache`, only with
+  `--output`): the persistent observation-keyed digest cache
+  ([Persistent digest cache](incremental-compilation.md#persistent-digest-cache));
+- `<domain>/.titan/linker-feature` (`linkcertificate.linker_backend`): the
+  persisted GNU ld/LLD dependency-report probe result;
+- `<domain>/.native/<sha256(canonical-source-path)>.{o,record}`
+  (`nativeinputs.compile`): the compiled object and sidecar certificate
+  (`TITAN_NATIVE_RECORD_SCHEMA`) for each `--c-source` input, with
+  preprocessed output and dependency files as invocation scratch; and
 - `<domain>/.titan-links/<sha256(canonical-final-output-set)>/`
   (`linkcertificate.prepare`): the target's final-link certificate (`record`,
   `TITAN_LINK_RECORD_SCHEMA`), linker dependency output (`link.d`), and
@@ -85,6 +92,11 @@ when `--output` is omitted), `titanc` also owns:
   `<leaf>__[test_]entrypoint.{c,o}`, plus Windows `.manifest`/`.rc`/`.res` and
   `__coverage_dump.{c,o}` companions), isolating synthetic sources when several
   executables in one output tree share a first root.
+
+Before any worker starts, the coordinator reserves every generated path a
+planned module may write, including split parts up to the configured
+`--c-parts` maximum, and rejects aliases with inputs or other outputs
+([Pre-dispatch output preflight](build-coordinator.md#pre-dispatch-output-preflight)).
 
 Coverage applies its `.coverage` transform after ordinary output mapping
 (`titan-compiler/coverage.lua` `coverage.output_path`). This keeps the same

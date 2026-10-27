@@ -137,10 +137,11 @@ input module is ignored in test mode. Unless `--exe PATH` specifies the
 executable destination directly, the first resulting root (explicit roots first,
 then bytewise automatic roots) owns the default executable path, including the
 usual folder-root `__main` rule, so unrelated roots can form one test
-executable. No provider pair or Lua shim is emitted. Synthetic runner and
-entrypoint translation units (`__test_runner.c`/`.o` and
-`__test_entrypoint.c`/`.o`) are isolated per target under
-`<output>/.titan-links/<key>/synthetic/`. Ordinary test and dependency
+executable. No provider pair or Lua shim is emitted. The generated runner
+source (`<name>__test_runner.titan`, with its C and object) and entrypoint
+(`<name>__test_entrypoint.c`) are isolated per target under
+`<output>/.titan-links/<key>/synthetic/`, where `<name>` is the last component
+of the first root. Ordinary test and dependency
 translation units keep their normal generated-file locations: the selected
 [output directory](output-directory.md), or beside the source when none is
 selected.

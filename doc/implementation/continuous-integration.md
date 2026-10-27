@@ -194,6 +194,16 @@ shutdown check, which concurrent filtered runs would load. Host Lua/parser
 dependencies use instrumented O1; libbacktrace, libuv, generated images, and
 disposable fixtures use instrumented O0; LTO stays disabled throughout.
 
+Before the gates, the sanitizer job certifies an identical SDK reinstall. It
+reruns `luarocks make --force` with `TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT` cleared,
+so the diagnostic snapshot taken by the first sanitized install remains the
+description of the linked provider, and checks with `cmp` that the snapshot's
+`provider.so` still equals the installed `titan.so`. A following
+`make titan-stdlib-test-build TITAN_VERBOSE=1` must report object, native, and
+link hits and no `Titan ... miss` or `os_process_host_child.c` compilation.
+The Linux native coverage lane (through `make titan-native-coverage-build`)
+and the macOS lane run the same reinstall gate without the snapshot.
+
 A gate whose filter could silently select nothing, for example after a case
 rename, also greps each log for the runner's `[==========] N test(s) ran.`
 summary with N at least one; the `ci.yml` steps show which gates do. The
@@ -203,6 +213,15 @@ Runtime](libuv-runtime.md#lua-state-close-of-an-unretired-runtime), parked
 external waits, and thread endpoints) and every `test_unwind_` case
 ([abandoned-coroutine
 unwinding](coroutines.md#unwinding-an-abandoned-coroutine)).
+
+The UV runtime owner is split by built parent case rather than run as one
+filter. The step reads the bytewise-sorted `test_functions` inventory from the
+built `out/tests/uv/runtime_tests.o` record, fails if it is empty or
+unreadable, and runs each parent as its own
+`TITAN_FILTER="^uv%.runtime_tests%.<case>%f[^%w_]"` gate. A parent and its
+subtests, including fresh child compilers, then share one unchanged
+per-run deadline instead of the whole owner's cases sharing it, and no
+second case list can drift from the built owner.
 
 Keep ordinary per-node `#line` attribution during the run: traceback gates
 require exact user and standard-provider frames. `TITAN_NO_LINE_DIRECTIVES=1`

@@ -29,7 +29,7 @@ directories](../language/output-directory.md).
 
 ## End-to-end invocation sequence
 
-When `titanc` runs (`titanc:235-1122`, excluding `--print-root` and
+When `titanc` runs (`titanc`, excluding `--print-root` and
 `--print-ast`), it executes these phases in order:
 
 1. **Normalize native inputs.** `nativeinputs.normalize` combines platform and
@@ -41,17 +41,25 @@ When `titanc` runs (`titanc:235-1122`, excluding `--print-root` and
    enumerates matching source modules inside the configured `--tree` roots and
    merges them after explicit positional roots.
 3. **Lock output domains.** `build.lock_outputs` acquires an exclusive OS lock
-   on `<output or first source root>/.titan-build.lock` and, when `--exe` is
-   supplied, `<dirname(--exe)>/.titan-build.lock` before any object or link
-   record is read.
+   on `.titan-build.lock` in every output domain before any object or link
+   record is read: the `--output` directory, or without `--output` every
+   `--tree` source root plus the working directory, and the `--exe`
+   directory when one is given. The first domain also hosts `.native/`,
+   `.titan-links/`, and `.titan/`. `incremental.load_digest_cache` then loads
+   `<output>/.titan/digests`
+   ([Persistent digest cache](incremental-compilation.md#persistent-digest-cache)).
 4. **Coordinate the module closure.** `build.run` resolves the transitive
-   import closure, certifies hits in-process without parsing source, runs one
-   worker process per miss under the shared `--jobs` slot ledger, publishes
-   staged objects, restores every module into `driver.imported`, and calls
-   `driver.finalize_resolver_context`.
+   import closure, runs the [pre-dispatch output
+   preflight](#pre-dispatch-output-preflight), certifies hits in-process
+   without parsing source, runs one worker process per miss under the shared
+   `--jobs` slot ledger, publishes staged objects, restores every module into
+   `driver.imported`, and calls `driver.finalize_resolver_context`.
 5. **Compile `--c-source` nodes.** `nativeinputs.compile` preprocesses and
    certifies each requested C file under `<output>/.native/`, compiling only
-   misses and prepending the resulting `.o` paths before `-X` payloads.
+   misses and prepending the resulting `.o` paths before `-X` payloads. A
+   compile-only invocation stops here; with `--print-c-objects` it writes one
+   absolute object path per `--c-source` argument to stdout after releasing
+   its locks.
 6. **Gate the final link.** Unless `-c` is active, `linkcertificate.prepare`
    builds the target's recipe and output inventory,
    `driver.prepare_foreign_headers` restores any missing `.ffi.h`/`.titan.h`
@@ -66,14 +74,17 @@ When `titanc` runs (`titanc:235-1122`, excluding `--print-root` and
    validation, links and publishes the executable or provider bundle, and
    writes `<ticket.record>` last via `linkcertificate.commit`.
 
+Every exit path saves a changed digest cache before releasing the locks; a
+save failure never replaces the invocation's own diagnostics.
+
 ## Output-tree coordination
 
 Concurrent `titanc` invocations sharing an output tree or an external `--exe`
 destination—such as an application build and a `--test` build running in
 parallel under Make—are serialized across the entire certification, compilation,
 and publication window by `build.lock_outputs(strategy, directories, options)`
-(`titan-compiler/build.lua:102-156`) and `titan._output_lock_open(path)`
-(`titan-runtime/ltitanlib.c:887-1118`).
+(`titan-compiler/build.lua`) and `titan._output_lock_open(path)`
+(`titan-runtime/ltitanlib.c`).
 
 ### Lock file and OS primitives
 
@@ -133,7 +144,7 @@ coordination domains.
 
 ## Closure planning and import scanning
 
-`build.run(context, request)` (`titan-compiler/build.lua:902-1038`) discovers
+`build.run(context, request)` (`titan-compiler/build.lua`) discovers
 the module graph through `driver.defaultloader({}, loader_options)` with
 `plan_mode = true` and `imports_for = build.imports_for`:
 
@@ -146,11 +157,11 @@ the module graph through `driver.defaultloader({}, loader_options)` with
    by `--static`) before falling back to source. Selecting a later source
    module rebinds any overlapping static archive (`rebind_overlapping_static_providers`).
 2. **Stage-1 local certification.** When `request.incremental` is true and the
-   source descriptor is not in-memory, `plan_source` (`driver.lua:5195-5235`)
+   source descriptor is not in-memory, `plan_source` (`driver.lua`)
    calls `driver.incremental_configuration(context)` and
    `incremental.certify_local(context, modname, source)`.
 3. **Import list recovery or lexical scanning (`build.imports_for`,
-   `build.lua:184-216`).**
+   `build.lua`).**
    * If `certify_local` returned `certified.imports`—which happens whenever the
      existing `.o` record decodes with the current schema and its own-source
      membership and SHA-256 content hashes match, even if `configuration`,
@@ -159,12 +170,12 @@ the module graph through `driver.defaultloader({}, loader_options)` with
      `.titan` files again.
    * Otherwise, `build.imports_for` reads each constituent in canonical order
      (`source.main` first, then bytewise-sorted contributors) and calls
-     `parser.scan_imports(contents)` (`titan-compiler/parser.lua:85-120`).
+     `parser.scan_imports(contents)` (`titan-compiler/parser.lua`).
    * `parser.scan_imports` uses an LPeg grammar built from the compiler's own
      lexer tokens (`lexer.SPACE`, `lexer.COMMENT`, `lexer.LOCAL`, `lexer.NAME`,
      `lexer.ASSIGN`, `lexer.IMPORT`, `lexer.LPAREN`, `lexer.RPAREN`,
      `lexer.STRINGLIT`, and `lexer.any_token` in
-     `titan-compiler/lexer.lua:240-252`) to match `local <name> = import
+     `titan-compiler/lexer.lua`) to match `local <name> = import
      "<mod>"` and `local <name> = import ( "<mod>" )` while stepping over
      comments, long strings, and other tokens whole. Each matched string is
      normalized with `parser.normalize_import(modname)`, which strips a
@@ -185,7 +196,7 @@ the module graph through `driver.defaultloader({}, loader_options)` with
    discovery of sibling branches. Only a missing or blocked root fails before
    scheduling.
 5. **Closing the plan (`driver.resolution_plan(context)`,
-   `driver.lua:6053-6192`).** After all roots are traversed,
+   `driver.lua`).** After all roots are traversed,
    `driver.resolution_plan` closes the planning loader and constructs:
    * `plan.modules[name]`: `{ kind = "source", source, certified, imports,
      failed, cyclic? }`, `{ kind = "dynamic", file, relative, provider_file }`,
@@ -202,9 +213,64 @@ the module graph through `driver.defaultloader({}, loader_options)` with
 Only modules reachable in the import closure of `request.roots` are visited; an
 unimported malformed `.titan` file elsewhere in the source tree is never read.
 
+### Pre-dispatch output preflight
+
+Immediately after `driver.resolution_plan`, and before any scheduler decision,
+invalidation, or worker launch, `build.run` calls the coordinator-only
+`request.preflight(plan)` closure, which `titanc` binds to
+`driver.preflight_build_outputs(context, plan, options)`. A failure aborts the
+invocation with every existing file untouched. The pass never runs the
+checker, code generator, or C preprocessor:
+
+* **Reserved outputs.** Every planned source module, cached or fresh, reserves
+  `<stem>.c`/`.o` and every potential split part
+  `<stem>.part<k>.c`/`.part<k>.o` with `1 <= k < effective c_parts`, each
+  unit's `.gcno` and `.gcda`, any parts recorded by a validated prior primary
+  object (so a smaller split policy can still retire them), and
+  `<stem>.priv.h`, `<stem>.titan.h`, and `<stem>.ffi.h`. Potential part names
+  are reserved even when the module would generate fewer parts. An existing
+  generated header must carry its ownership marker, and an existing file at a
+  reserved `.c` path must begin with the generated-C marker (or the exact
+  legacy fixed-helper or split-header prefix); otherwise the build fails with
+  `native provider output '<path>' for <owner> aliases input '<path>' (not
+  compiler-generated C)` instead of overwriting authored source.
+* **Final outputs.** The pass reserves the actual program path and Darwin
+  `.dSYM`, the Windows launcher and provider DLL, or the library provider,
+  archive, `.dSYM`, and generated Lua shims, including shims of modules
+  carried by already-selected static archives.
+* **Protected inputs.** `--c-source` files, every source constituent, the
+  non-`search` C headers recorded by cached modules, and selected binary
+  providers and archives are inputs that no output may alias.
+* **Graph-dependent CLI checks.** For roots without a certified record, the
+  pass parses declarations only and follows transparent local and imported
+  aliases to find an exact `main(args: {string}): integer`. It then rejects
+  multiple `main` roots, `--exe` or `--no-uv-bootstrap` without a standalone
+  or test executable, `--coverage` on a library-only link, library roots with
+  no common module prefix, and logical modules whose C symbol prefixes
+  collide. The ordinary checker remains the authority for declaration
+  validity.
+
+`driver.validate_provider_output_paths` checks the whole set through
+`perf.new_output_path_index`. The index observes each pathname once (`lstat`,
+then `stat` for links) and keys it by normalized spelling, physical path
+(existing ancestors resolved through `realpath` on POSIX), lowercased physical
+path, and, on POSIX, device and inode. Exact maps and component-prefix trees
+detect aliases, hierarchy conflicts (an output that is an ancestor of another
+output or input), and wrong existing kinds without further filesystem
+queries. On Windows the index reads file status through the compiler I/O
+strategy's `lstat`/`stat`, the same native observations the rest of the
+compiler uses, rather than LuaFileSystem.
+
+Fresh modules discover their C headers only in their worker. Before writing
+any output, `driver.compile_planned_module` passes each non-`search` entry of
+the module's `c_header_dependencies` to
+`driver.validate_reserved_output_inputs(plan.reservations, inputs)`, so an
+authored header at a reserved path fails that module before anything is
+overwritten.
+
 ## Metadata-only hits and early cutoff
 
-`build.new_scheduler(nodes, hooks, options)` (`build.lua:239-344`) builds a
+`build.new_scheduler(nodes, hooks, options)` (`build.lua`) builds a
 dependency DAG over the planned source `nodes`. Cyclic nodes (`module.cyclic`)
 are given no DAG prerequisites (`node.remaining == 0`) so they are immediately
 scheduled as misses and their workers report the standard `"circular reference
@@ -212,7 +278,7 @@ to module"` checker error.
 
 Whenever a node has `node.remaining == 0`, it enters `scheduler.decisions`,
 which is kept sorted by `node.index` (`plan.order`). `Scheduler:drain_decisions()`
-invokes `decide(node)` (`build.lua:945-975`) in-process:
+invokes `decide(node)` (`build.lua`) in-process:
 
 1. If `module.error` is set, the node fails immediately.
 2. If `not request.incremental` or `module.cyclic`, the node transitions to
@@ -238,7 +304,7 @@ invokes `decide(node)` (`build.lua:945-975`) in-process:
    the node in `scheduler.ready`.
 
 On a warm build where every source module hits in `decide`, `scheduler.ready`
-remains empty after `drain_decisions()`. `Scheduler:run()` (`build.lua:824-883`)
+remains empty after `drain_decisions()`. `Scheduler:run()` (`build.lua`)
 then skips opening the jobserver ledger, skips installing signal or `SIGPIPE`
 guards, spawns zero workers, flushes buffered `-v` hit lines in `plan.order`,
 and returns `true`.
@@ -247,11 +313,11 @@ and returns `true`.
 
 When `scheduler.ready` is nonempty, the coordinator spawns one short-lived Lua
 worker process per missed module (`titan-compiler/build_worker.lua`, launched by
-`process.start_worker` in `titan-compiler/process.lua:286-380`).
+`process.start_worker` in `titan-compiler/process.lua`).
 
 ### Worker launch and descriptor layout
 
-`worker_argv` (`build.lua:355-363`) resolves the currently running Lua
+`worker_argv` (`build.lua`) resolves the currently running Lua
 interpreter via `luv.exepath()` and constructs:
 
 ```lua
@@ -279,15 +345,21 @@ that the coordinator loaded. The child's descriptors are:
 * `fds 4, 5, ...` (POSIX only): the open `.titan-build.lock` descriptors from
   `locks:descriptors()`.
 
+Synchronous `process.run` and captured `process.capture` commands accept the
+same `options.inherit` list and place those POSIX lock descriptors at `fd 3`
+and up, so a native tool started outside the job batches also keeps the
+output-tree lock alive while it runs. Dispatched native jobs keep their own
+layout.
+
 While the scheduler loop runs on POSIX, `titan._sigpipe_ignore()`
-(`ltitanlib.c:783-827`) sets `SIGPIPE` to `SIG_IGN` and restores the exact prior
+(`ltitanlib.c`) sets `SIGPIPE` to `SIG_IGN` and restores the exact prior
 `struct sigaction` afterwards, so sending a control record to a worker that
 crashed mid-flight fails cleanly with `EPIPE` instead of terminating the
 coordinator.
 
 ### Control protocol (`titan-build-worker-v1`)
 
-Control messages on `fd 3` (`process.lua:208-275`) consist of a 4-byte
+Control messages on `fd 3` (`process.lua`) consist of a 4-byte
 big-endian payload length (`string.pack(">s4", payload)`, bounded at
 `RECORD_LIMIT = 256 * 1024 * 1024 + 64` bytes) followed by a
 `titan-compiler/graphcodec` binary payload verified with SHA-256. Payloads may
@@ -319,10 +391,10 @@ The message exchange for one worker is:
    }
    ```
 2. **Worker <-> coordinator (`native` / `native-result`, zero or more rounds).**
-   `build_worker.main()` installs `jobs.use_remote(session)` (`jobs.lua:206-208`).
+   `build_worker.main()` installs `jobs.use_remote(session)` (`jobs.lua`).
    Whenever the worker runs a multi-job C-probe batch (`io:run_batch`) or a
    multi-part generated-C compile (`driver.run_prepared_compiles` with
-   `parallelism > 1` and `#jobs > 1`), `remote_drive` (`jobs.lua:591-632`)
+   `parallelism > 1` and `#jobs > 1`), `remote_drive` (`jobs.lua`)
    sends one batch request:
 
    ```lua
@@ -391,9 +463,9 @@ the worker is still alive, and fails the module.
 
 ### Planned worker resolution and orphan lifetime
 
-Inside the worker (`build_worker.lua:121-141`),
+Inside the worker (`build_worker.lua`),
 `driver.new_worker_context(request.configuration, worker_io(session))`
-(`driver.lua:6143-6212`) restores the coordinator's driver paths, flags,
+(`driver.lua`) restores the coordinator's driver paths, flags,
 resolver settings, and `codegen_policy`, then calls
 `incremental.compiler_component(context, options)` to hash the loaded compiler
 Lua files and frontend script. If the resulting digest differs from
@@ -402,17 +474,17 @@ Lua files and frontend script. If the resulting digest differs from
 compile-options digests are inherited from the coordinator without re-probing.
 
 `driver.compile_planned_module(context, modname, request.options)`
-(`driver.lua:6255-6388`) creates a loader with `worker_plan = options.plan`
+(`driver.lua`) creates a loader with `worker_plan = options.plan`
 (`driver.plan_descriptor(plan, modname)`). Under `worker_plan`, the loader
 never searches `TITAN_BIN_PATH` or `TITAN_SOURCE_PATH`:
 
 * requesting `modname` itself parses and checks the planned source descriptor;
 * requesting any other planned `source` module restores its parent-certified
-  `item.object` record via `restore_planned_source` (`driver.lua:5239-5278`)
+  `item.object` record via `restore_planned_source` (`driver.lua`)
   without re-running `certify_local` or `verdict`;
 * requesting a planned `dynamic` or `static` module loads the exact planned
   `item.file` or `item.archive` via `load_planned_binary`
-  (`driver.lua:5281-5330`); and
+  (`driver.lua`); and
 * requesting any module not in `plan.modules`, or observing a `native_static_names`
   linked set after `finalize_resolver_context` that disagrees with
   `planned.linked`, fails with `"build plan divergence: ..."`.
@@ -420,7 +492,7 @@ never searches `TITAN_BIN_PATH` or `TITAN_SOURCE_PATH`:
 Worker lifetime is bounded even if the coordinator terminates abnormally:
 
 * **Cooperative abandonment check.** `worker_io(session)` wraps `Sync:yield`
-  (`build_worker.lua:108-119`) and checks `session:abandoned()` (non-blocking
+  (`build_worker.lua`) and checks `session:abandoned()` (non-blocking
   `uv.run("nowait")` testing whether `fd 3` reached EOF or error). Both
   `yield` and `Session:run_batch` exit immediately with status 3 (`titanc build
   worker: the build coordinator exited`) if the coordinator closed `fd 3`.
@@ -429,16 +501,27 @@ Worker lifetime is bounded even if the coordinator terminates abnormally:
   the kernel `flock` held until every surviving worker and its child compilers
   have exited. A subsequent `titanc` invocation waiting in `build.lock_outputs`
   cannot enter the output tree while an orphaned worker is still writing.
-* **Windows Job Object.** On Windows, `luv`'s `uv.spawn` assigns every
-  non-detached child process to libuv's global
-  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` Job Object, so coordinator termination
-  automatically terminates all live workers and their children.
+* **Windows process-tree job.** Before the first spawn through
+  `process.lua`, `contain_native_processes` calls the runtime's
+  `titan._native_process_tree_guard()`, which creates a Job Object with
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and no breakaway permission and assigns
+  the current coordinator or worker process to it. Windows 8 and later nest
+  jobs, and every child inherits this strict ancestor job at `CreateProcess`
+  time, before it runs, even when libuv also places it in its own job that
+  permits silent breakaway; a grandchild started by a compiler wrapper
+  therefore cannot escape. The job handle is noninheritable and deliberately
+  stays open until operating-system process teardown: the compiler is itself
+  a member, so closing the handle from a Lua finalizer would kill the current
+  process. Teardown closes it after Lua cleanup, preserving the exit status
+  while terminating every remaining descendant, including workers' nested
+  jobs. A missing guard function or a failed job creation, configuration, or
+  assignment launches no child and is reported as a spawn error.
 
 ## Slot ledger and jobserver rules
 
 When one or more modules miss, `Scheduler:run()` opens a single slot ledger
 `jobs.open_slots(self.options.jobs or 1, { guard = true })`
-(`titan-compiler/jobs.lua:242-293`) shared by all worker frontends and all
+(`titan-compiler/jobs.lua`) shared by all worker frontends and all
 multi-job native batches.
 
 ### Concurrency invariant, lease handoff, and dispatch priority
@@ -453,7 +536,7 @@ With a shared POSIX GNU Make jobserver (`ledger.shared == true`), the first
 active slot uses the implicit slot Make granted to the `titanc` recipe, and
 every additional active slot (`active - 1` slots) holds one exact token byte
 read from the parent jobserver (`Slots:acquire_nowait` and `Slots:release` in
-`jobs.lua:297-317`). A slot is released only after its process has been reaped
+`jobs.lua`). A slot is released only after its process has been reaped
 (or a spawn failed before starting).
 
 Frontend and native slots hand off without deadlocking or exceeding the cap:
@@ -461,12 +544,12 @@ Frontend and native slots hand off without deadlocking or exceeding the cap:
 1. Starting a worker requires `ledger:acquire_nowait()` to succeed and grants
    the worker `worker.lease = true`.
 2. When that worker sends a `{ kind = "native", id, jobs }` batch of `count >=
-   1` commands (`Scheduler:worker_record`, `build.lua:475-504`), the worker
+   1` commands (`Scheduler:worker_record`, `build.lua`), the worker
    yields its frontend lease (`worker.lease = false`). Job 1 of the batch
    immediately inherits that slot via `Scheduler:start_native`, while jobs
    `2..count` are appended to `scheduler.native_queue` in the worker's own
    `cost_bytes`-descending launch order.
-3. As each native job completes (`Scheduler:native_done`, `build.lua:547-563`),
+3. As each native job completes (`Scheduler:native_done`, `build.lua`),
    if other jobs of the same batch are still running or queued, the completed
    job releases its slot back to the ledger (`Scheduler:release_slot()`). When
    the last job of the batch finishes (`batch.running == 0 and batch.queued ==
@@ -474,7 +557,7 @@ Frontend and native slots hand off without deadlocking or exceeding the cap:
    `worker.lease = true` again and the coordinator sends the `native-result`
    reply.
 
-`Scheduler:dispatch()` (`build.lua:635-670`) assigns available slots in strict
+`Scheduler:dispatch()` (`build.lua`) assigns available slots in strict
 priority order:
 
 1. `resume_queue` — workers whose queued native jobs were dropped when the
@@ -488,13 +571,16 @@ When work remains in one of those queues and `ledger:acquire_nowait()` returns
 `false` (waiting for a parent Make jobserver token), `Scheduler:update_token_poll`
 polls `ledger:token_descriptor()` (the private nonblocking read fd of the
 jobserver FIFO or Linux reopened pipe, exposed by `client:descriptor()` in
-`ltitanlib.c:612-619`) with `uv.new_poll` until a token byte becomes readable.
+`ltitanlib.c`) with `uv.new_poll` until a token byte becomes readable.
+Darwin's kqueue backend rejects named FIFO descriptors in `uv_poll_init`; when
+`uv.new_poll` fails, the scheduler instead arms a 5 ms timer so each loop turn
+retries the nonblocking `acquire_nowait()`.
 All `luv` poll, pipe, and process-exit callbacks enqueue events via
 `Scheduler:defer` and never run publication or certification inline.
 
 ### GNU Make jobserver modes and old-pipe local cap
 
-`jobs.make_policy(makeflags)` (`jobs.lua:111-138`) parses option words before
+`jobs.make_policy(makeflags)` (`jobs.lua`) parses option words before
 `--` in `MAKEFLAGS` and selects the last `--jobserver-auth=fifo:PATH`,
 `--jobserver-auth=R,W`, or `--jobserver-fds=R,W` entry:
 
@@ -502,7 +588,7 @@ All `luv` poll, pipe, and process-exit callbacks enqueue events via
 | --- | --- | --- |
 | `--jobserver-auth=fifo:PATH` (GNU Make >= 4.4) | Linux, macOS | Opens `PATH` privately read-only and write-only (`O_NONBLOCK \| O_CLOEXEC`); shares the parent pool up to `local_cap`. |
 | `--jobserver-auth=R,W` or `--jobserver-fds=R,W` (pipe) | Linux | Reopens `/proc/self/fd/R` and `/proc/self/fd/W` privately (`O_NONBLOCK \| O_CLOEXEC`) after `fstat` verifies one pipe; shares the parent pool up to `local_cap`. |
-| Valid inherited pipe `R,W` | macOS and other non-Linux POSIX | `_jobserver_open("pipe", R, W)` returns `nil, reason, "unsupported"`. `jobs.unshareable_pipe_limit` warns once and uses `titanc`'s own `local_cap` (`--jobs` or `TITAN_JOBS`, default 4) outside the parent pool without mutating the parent's shared pipe flags. Sharing the parent pool on macOS requires GNU Make >= 4.4's FIFO jobserver. |
+| Valid inherited pipe `R,W` | macOS and other non-Linux POSIX | `_jobserver_open("pipe", R, W)` checks that both descriptors are open FIFOs with readable and writable access modes (Darwin reports distinct inodes for a pipe's two ends, so the descriptors are not required to share one) and returns `nil, reason, "unsupported"`. `jobs.unshareable_pipe_limit` warns once and uses `titanc`'s own `local_cap` (`--jobs` or `TITAN_JOBS`, default 4) outside the parent pool without mutating the parent's shared pipe flags. Sharing the parent pool on macOS requires GNU Make >= 4.4's FIFO jobserver. |
 | Unmarked recipe (`-2,-2`), closed/mismatched fds, or unopenable FIFO | Linux, macOS | `warn_unusable` prints one warning per process and sets `limit = 1`. |
 | Explicit `-j1` with no jobserver auth | Linux, macOS | Sets `limit = 1`. |
 | No `MAKEFLAGS` or no `-j` / unlimited `-j` | Linux, macOS | Uses `local_cap`. |
@@ -513,15 +599,18 @@ All `luv` poll, pipe, and process-exit callbacks enqueue events via
 ### Deterministic diagnostics and failure handling
 
 Each scheduled node owns `node.stdout`, `node.stderr`, and `node.messages`
-arrays (`build.lua:250,797-814`). Certification `-v` lines, captured worker
+arrays (`build.lua`). Certification `-v` lines, captured worker
 stdout/stderr, and failure diagnostics are buffered on the node rather than
 written as workers finish. `Scheduler:emit()` advances `self.cursor` from `1`
 to `#self.nodes` in `plan.order`, flushing a node only after it reaches a
-settled state (`done`, `failed`, or `skipped`). Output and diagnostics are
-therefore deterministic and independent of worker completion order.
+settled state (`done`, `failed`, or `skipped`). `Scheduler:flush` writes both
+the captured worker stdout and stderr to the coordinator's stderr, keeping
+`titanc` stdout free for requested results such as `--print-c-objects`.
+Output and diagnostics are therefore deterministic and independent of worker
+completion order.
 
 When a module fails certification, worker compilation, or publication
-(`Scheduler:fail`, `build.lua:286-301`), the scheduler marks all of its
+(`Scheduler:fail`, `build.lua`), the scheduler marks all of its
 transitive `waiting` dependents as `skipped` without recording redundant
 cascade messages on those dependents. Independent branches of the DAG continue
 to run so a single invocation reports all root-cause errors in `plan.order`. A
@@ -532,7 +621,7 @@ failed build never proceeds to `--c-source` compilation or final linking.
 During `Scheduler:run()`:
 
 * on POSIX, `Scheduler:watch_signals()` polls `ledger:signal_descriptor()`
-  (`titan._signal_wake_descriptor()` in `ltitanlib.c:773-781`), which becomes
+  (`titan._signal_wake_descriptor()` in `ltitanlib.c`), which becomes
   readable when the `TitanSignalGuard` handler catches `SIGINT`, `SIGTERM`, or
   `SIGHUP`;
 * on Windows, `Scheduler:watch_signals()` starts `luv` signal handles for
@@ -540,14 +629,14 @@ During `Scheduler:run()`:
 
 When a signal arrives (`Scheduler:cancel(signo)`) or an internal/jobserver
 invariant fails (`Scheduler:fatal(message)`), `Scheduler:stop()`
-(`build.lua:698-721`) stops starting new modules and empties
+(`build.lua`) stops starting new modules and empties
 `scheduler.native_queue`. Live workers and already-running native compiler
 processes are **not** killed: they drain to completion so each worker's
 `driver.run_prepared_compiles` removes its own temporary files cleanly. Any
 outstanding batch receives `reply_stopped` (`cancelled = signo` or `failure =
 "the module build stopped after an earlier failure"`), and any worker that had
 already finished and reported `ok = true` after `stop()` has its staged object
-temporaries removed by `hooks.discard` (`build.lua:598-601,1018-1025`). Once
+temporaries removed by `hooks.discard` (`build.lua`). Once
 all live workers and native jobs settle, `ledger:close()` returns every
 borrowed jobserver token and restores signal dispositions, `titanc` closes the
 resolver context (releasing `.titan-build.lock`), and `jobs.propagate(signal)`
@@ -559,12 +648,12 @@ Workers never write committed `<stem>.o` or `<stem>.part<k>.o` files; only the
 coordinator publishes module objects:
 
 1. **Pre-worker invalidation (`driver.invalidate_source_object`,
-   `driver.lua:6218-6253`).** Immediately before spawning a worker for a missed
+   `driver.lua`).** Immediately before spawning a worker for a missed
    module, the coordinator reads any existing `<stem>.o`'s validated `parts`
    list, unlinks `<stem>.o` **first** (retiring the commit marker), and then
    unlinks every recorded `<stem>.part<k>.{o,c,gcno,gcda}` (`k >= 1`).
 2. **Worker staging (`driver.compile_planned_module`,
-   `driver.lua:6330-6388`).** Inside the worker, `prepare_compile` runs with
+   `driver.lua`).** Inside the worker, `prepare_compile` runs with
    `options.staged = true`: generated headers (`.ffi.h`, `.titan.h`) are
    written via sibling staging and rename, and `<stem>.c`, `<stem>.part<k>.c`,
    and `<stem>.priv.h` are written at their final paths under the locked output
@@ -572,7 +661,7 @@ coordinator publishes module objects:
    remapping. Each part's object is compiled to a unique sibling temporary
    (`job.temporary_object`) returned in `result.staged`.
 3. **Coordinator revalidation and commit (`driver.publish_staged_module`,
-   `driver.lua:6396-6467`).** When the worker reports `ok = true`, the
+   `driver.lua`).** When the worker reports `ok = true`, the
    coordinator reads the staged primary object, decodes its `.titan.source`
    record, resolves a fresh source descriptor (`current_source_descriptor`),
    and runs `incremental.revalidate_record(context, modname, source, record)`.
@@ -587,8 +676,8 @@ coordinator publishes module objects:
 
 ### Normalization order
 
-`nativeinputs.normalize(options)` (`titan-compiler/nativeinputs.lua:23-83`) and
-`driver.apply_native_inputs(normalized)` (`driver.lua:1398-1401`) establish one
+`nativeinputs.normalize(options)` (`titan-compiler/nativeinputs.lua`) and
+`driver.apply_native_inputs(normalized)` (`driver.lua`) establish one
 deterministic flag order across C-header parsing, C probes, preamble
 certification, generated module C, `--c-source` nodes, and final links:
 
@@ -617,11 +706,11 @@ certification, generated module C, `--c-source` nodes, and final links:
    `<root>/src/lua-5.5.1`.
 
 When `titanc --coverage` is active, `--coverage` and `-fno-lto` are appended to
-`driver.NATIVE_LINK_FLAGS` (`titanc:256-257`).
+`driver.NATIVE_LINK_FLAGS` (`titanc`).
 
 ### `--c-source` compilation and records
 
-`nativeinputs.compile(context, request)` (`titan-compiler/nativeinputs.lua:156-247`)
+`nativeinputs.compile(context, request)` (`titan-compiler/nativeinputs.lua`)
 compiles authored or pre-generated C files using the invocation's
 `driver.generated_compile_prefix()` (without Titan-only test-owner or module
 coverage flags) and shared `toolchain_identity`:
@@ -630,8 +719,9 @@ coverage flags) and shared `toolchain_identity`:
    canonicalized via `linkcertificate.canonical_path(context, source)` (resolving
    existing ancestor `realpath`s and folding slashes/case on Windows) and
    deduplicated in first-seen order. The authored spelling `source` is retained
-   for compiler diagnostics and `__FILE__`. Artifacts live under
-   `<output_root>/.native/<sha256("native-c-source-path", canonical)>.{o,record,i,d}`.
+   for compiler diagnostics and `__FILE__`. Committed artifacts are
+   `<output_root>/.native/<sha256("native-c-source-path", canonical)>.{o,record}`;
+   `<stem>.i`, `<stem>.d`, and any staged object are invocation scratch.
 2. **Unconditional preprocessing (`native-preprocess`).** On every invocation,
    `compile_node` runs:
 
@@ -674,25 +764,42 @@ coverage flags) and shared `toolchain_identity`:
    mid-compile edits, hashes `<staged>`, unlinks `<stem>.o` **first**, writes
    `<stem>.record` (or unlinks it if uncacheable), and renames `<staged>` to
    `<stem>.o` **last**.
+5. **Scratch retirement.** On hits, misses, preprocessing or compile
+   failures, and cancellation, one protected cleanup removes `<stem>.i`,
+   `<stem>.d`, and any staged object. Committed `.o`/`.record` nodes are
+   retained as shared cache entries; no invocation prunes nodes that it did
+   not request.
 
 In `titanc`, `-c --c-source <file>` is permitted without Titan module names for
-standalone C helper preparation (`titanc:136-140`). In linking invocations,
-compiled `--c-source` objects are placed at the start of `extra_objects`,
-before any `-X`/`--extra-object` arguments (`titanc:432-437`).
+standalone C helper preparation. Because the storage stem is derived from the
+canonical source path, a moved checkout leaves the old nodes in place and a
+consumer cannot select an object by enumerating `.native/`. With
+`--print-c-objects`, `titanc` maps each `--c-source` argument through
+`linkcertificate.canonical_path` to its certified node and, after releasing
+its locks, writes the absolute object paths to stdout, one per argument in
+argument order. In linking invocations, compiled `--c-source` objects are
+placed at the start of `extra_objects`, before any `-X`/`--extra-object`
+arguments.
 
 ## Final-link certificate and gate
 
 `titan-compiler/linkcertificate.lua` caches final executable and library links
-under `<output_root>/.titan-links/<key>/`, gated in `titanc:439-613,1110-1120`
+under `<output_root>/.titan-links/<key>/`, gated in `titanc`
 before any test-runner rendering, entrypoint generation, static-archive probe,
 or validation link.
 
 ### Output-set key and target directory
 
-`linkcertificate.prepare(context, spec)` (`linkcertificate.lua:331-373`)
+`linkcertificate.prepare(context, spec)` (`linkcertificate.lua`)
 canonicalizes every entry in `spec.outputs`, rejects duplicates, sorts the
 canonical paths, and hashes them with tag `"final-output-set"` to form the
-64-hex directory key `key`. The owned output set is:
+64-hex directory key `key`. Canonicalization resolves each output's existing
+ancestors through `realpath` but keeps the output's own leaf, so relative,
+absolute, and symlinked-parent spellings of one destination share a key while
+a symlink substituted for the output itself still fails the output snapshot.
+Windows keys are further normalized to forward slashes and lowercase. The
+record directory lives under the canonical output root. The owned output set
+is:
 
 * **Unix standalone or `--test` executable:** `{ path = program_path,
   executable = true }`, plus `{ path = program_path .. ".dSYM", kind =
@@ -715,17 +822,19 @@ are never part of `spec.outputs`. Each target owns
   `canonicalization = version.CERTIFICATE_CANONICALIZATION =
   "titan-certificate-v1"`);
 * `link.d` — the default linker dependency report path; and
-* `synthetic/` — the target-isolated directory where `<leaf>__test.c`,
-  `<leaf>__test_entrypoint.c`, `<leaf>__entrypoint.c`, and Windows
-  `.manifest`/`.rc`/`.res` files are generated on a link miss, so an
-  application and a test binary sharing an output root never overwrite each
-  other's synthetic intermediates.
+* `synthetic/` — the target-isolated directory for the generated test runner
+  source `<leaf>__test_runner.titan` and its generated C and object, the
+  `<leaf>__test_entrypoint.c` or `<leaf>__entrypoint.c` entrypoint, and the
+  Windows `.manifest`/`.rc`/`.res` resources named after that entrypoint,
+  where `<leaf>` is the last component of the test or `main` root. They are
+  generated only on a link miss, so an application and a test binary sharing
+  an output root never overwrite each other's synthetic intermediates.
 
 ### Recipe, file digests, and native library policy
 
 `prepare` hashes `input` with tag `"final-link"` over:
 
-* `RECIPE_FIELDS` (`linkcertificate.lua:12-16`): `roots`, `entry` (`{ module,
+* `RECIPE_FIELDS` (`linkcertificate.lua`): `roots`, `entry` (`{ module,
   no_uv_bootstrap }`), `kind` (`"program" | "test" | "library"`),
   `no_uv_bootstrap`, `argv` (`driver.link_extra_flags()`), `toolchain`
   (`{ compiler = toolchain_identity, ar, ranlib, rc }`), `test_cases`
@@ -736,7 +845,7 @@ are never part of `spec.outputs`. Each target owns
   darwin, profile, target }`), `bindings` (`resolver_context.native_bindings`),
   `target`, and `environment` (`{ runtime_flags, MACOSX_DEPLOYMENT_TARGET,
   SDKROOT }`);
-* `FILE_FIELDS` (`linkcertificate.lua:17,159-168`): `objects` (every linked
+* `FILE_FIELDS` (`linkcertificate.lua`): `objects` (every linked
   module's primary `.o` and `.part<k>.o` files in bytewise module and part
   order), `c_objects` (`--c-source` objects), `payloads` (`-X` arguments in CLI
   order), `providers` (selected dynamic provider files), `archives` (selected
@@ -745,7 +854,7 @@ are never part of `spec.outputs`. Each target owns
   actual SHA-256 content digest via `incremental.file_digest`, never by
   timestamp or module recipe hash alone; and
 * `native_policy` (`certificate.native_library_policy`,
-  `linkcertificate.lua:194-329`):
+  `linkcertificate.lua`):
   * If any `--c-source` object has `cacheable == false`, or if `argv` contains
     `@file`, `,@`, `-fplugin*`, `--plugin*`, `,-plugin`, or `-Xlinker`, the
     link is marked `cacheable = false` (`reason = "opaque linker input
@@ -756,13 +865,19 @@ are never part of `spec.outputs`. Each target owns
     `native_dependencies` parses the binary `ld64` dependency stream (version
     `0x00`, `input-found = 0x10`, `input-not-found = 0x11`, `output = 0x40`)
     and hashes every `0x10` file not in `policy.exclude`.
-  * **`gnu` / `lld` backend.** Probed once per resolver context on non-Darwin
-    Unix by `driver.native_link_backend(context)` (`driver.lua:1413-1434`)
-    running `<cc> -Wl,--dependency-file=<tmp> -Wl,--version`. When supported,
-    appends `ticket.dependency_argv = { "-Wl,--dependency-file=" ..
+  * **`gnu` / `lld` backend.** Selected on non-Darwin Unix by
+    `driver.native_link_backend(context)` (`driver.lua`), which runs
+    `<cc> -Wl,--dependency-file=<tmp> -Wl,--version` and recognizes `GNU ld`
+    or `LLD` in the banner. The result is memoized per resolver context and
+    persisted in `<output>/.titan/linker-feature`, keyed by the compiler argv,
+    link flags, toolchain identity, and physical compiler and linker
+    identities, so warm invocations skip the probe. When supported, appends
+    `ticket.dependency_argv = { "-Wl,--dependency-file=" ..
     dependency_file }` to the final executable or public DSO link (never to
-    archive-validation probe links) and parses `link.d` with `depfile.parse` on
-    commit.
+    archive-validation probe links). On commit, LLD's Make-escaped report is
+    parsed with `depfile.parse`, while GNU ld's literal report is decoded from
+    its trailing one-input-per-line phony-target stanza, preserving spaces,
+    `#`, `$`, colons, and backslashes in paths.
   * **`compiler` fallback (`backend == "none"`, including Windows).** Walks
     `argv` (expanding `-Wl,` comma tokens, tracking `-Bstatic`/`-static` vs
     `-Bdynamic`, and rejecting `-T`/`--script` linker scripts when dependency
@@ -784,7 +899,7 @@ relink.
    `driver.prepare_foreign_headers` before `linkcertificate.check`, so deleted
    `.ffi.h` or `.titan.h` files are restored from module records even when the
    final link hits.
-2. **Read-only check (`linkcertificate.check`, `linkcertificate.lua:375-400`).**
+2. **Read-only check (`linkcertificate.check`, `linkcertificate.lua`).**
    Verifies `ticket.cacheable`, decodes `<ticket.record>`, checks
    `record_valid` (`schema`, `digest`, `canonicalization`), checks
    `record.input == ticket.input` and `#record.outputs == #ticket.outputs`,
@@ -795,17 +910,17 @@ relink.
    returns `true`, `titanc` prints `Titan link hit <target>` under `-v`, and
    the invocation finishes.
 3. **Pre-mutation invalidation (`linkcertificate.invalidate`,
-   `linkcertificate.lua:402-407`).** On any miss, `titanc` prints `Titan link
+   `linkcertificate.lua`).** On any miss, `titanc` prints `Titan link
    miss <target>: <reason>` under `-v` and calls `linkcertificate.invalidate`
    to unlink `<ticket.record>` before creating `<ticket.directory>`, removing
    any stale `link.d`, or synthesizing runner/entrypoint sources. The same
    invalidation callback is passed as `before_commit` into
    `driver.compile_program`, `driver.publish_windows_provider`, and
-   `windows_publication.publish_program` (`titan-compiler/windows_publication.lua:110,170-181`,
+   `windows_publication.publish_program` (`titan-compiler/windows_publication.lua`,
    which stages and commits the Windows provider `.dll` before the `.exe`
    launcher and rolls back on caught failures).
 4. **Post-publication commit (`linkcertificate.commit`,
-   `linkcertificate.lua:409-434`).** Only after the final executable or
+   `linkcertificate.lua`).** Only after the final executable or
    provider bundle has been validated and published does `titanc` call
    `linkcertificate.commit`. Using a fresh context (`fresh(context)`), `commit`
    re-reads and rehashes every file in `FILE_FIELDS` (aborting with `link input
@@ -816,8 +931,8 @@ relink.
 ## Automatic test-root discovery
 
 `testroots.discover(context, dirs, excludes, explicit_roots, source_path)`
-(`titan-compiler/testroots.lua:142-394`, invoked by `titanc --test --test-dir`
-at `titanc:273-294`) discovers test root modules from the filesystem without
+(`titan-compiler/testroots.lua`, invoked by `titanc --test --test-dir`
+at `titanc`) discovers test root modules from the filesystem without
 reading or parsing `.titan` file contents. See also [Automatic test-root
 discovery](test-runner.md#automatic-test-root-discovery).
 
@@ -825,17 +940,17 @@ discovery](test-runner.md#automatic-test-root-discovery).
 
 * **CLI constraints.** `--test-dir <dir>` and `--test-exclude <module>` require
   `--test`, and `--test-exclude` requires at least one `--test-dir`
-  (`titanc:163-168`). Every `--test-exclude` and explicit root must satisfy
+  (`titanc`). Every `--test-exclude` and explicit root must satisfy
   `staticmetadata.valid_module_name`.
 * **Containment and prefix derivation.** Each `--test-dir` path must exist, be
   a directory (`context.io:stat`), and lie within at least one configured
   `--tree` root (`driver.TITAN_SOURCE_PATH`, checked lexically and via
   `context.io:realpath`). The **first** containing `--tree` root in
   `TITAN_SOURCE_PATH` order determines the directory's logical module prefix
-  (`areas` in `testroots.lua:199-244`); `--test-dir` never adds a new `--tree`
+  (`areas` in `testroots.lua`); `--test-dir` never adds a new `--tree`
   root or strips a leading `tests.` prefix. Repeated or equivalent directory
   spellings deduplicate by normalized relative base path.
-* **Recursive walk and symlink policy.** `walk` (`testroots.lua:313-364`) lists
+* **Recursive walk and symlink policy.** `walk` (`testroots.lua`) lists
   each directory with `context.io:list`, sorts entry names with
   `util.bytewise_less`, calls `context.io:yield(directory)` between entries,
   and inspects each entry with `context.io:lstat`:
@@ -848,7 +963,7 @@ discovery](test-runner.md#automatic-test-root-discovery).
     **not** a symbolic link (`not linked`), `walk` recurses into it; directory
     symlinks are never descended recursively (preventing symlink cycles),
     except when a symlinked directory is explicitly passed to `--test-dir`.
-* **Final-component naming filter (`is_root_name`, `testroots.lua:18-23`).** A
+* **Final-component naming filter (`is_root_name`, `testroots.lua`).** A
   candidate module is selected only when its final dotted component is `test`,
   `tests`, `spec`, or `specs`, or ends in `_test`, `_tests`, `_spec`, or
   `_specs`.
@@ -856,7 +971,7 @@ discovery](test-runner.md#automatic-test-root-discovery).
 ### Resolver authority, shadowing diagnostics, and ordering
 
 For every candidate matching `is_root_name` and not excluded (unless also
-listed in `explicit_roots`), `consider` (`testroots.lua:255-311`) delegates to
+listed in `explicit_roots`), `consider` (`testroots.lua`) delegates to
 `driver.resolve_source(context, logical, ...)`:
 
 1. **Local root check.** Calls `driver.resolve_source(context, logical,
@@ -878,7 +993,7 @@ listed in `explicit_roots`), `consider` (`testroots.lua:255-311`) delegates to
    * if two discovery areas resolve the same `logical` name to different source
      descriptors (`not same_source_descriptor`), discovery fails with
      `ambiguous test module '<logical>': '<main1>' and '<main2>'`.
-3. **Final root ordering and overrides (`testroots.lua:376-393`).**
+3. **Final root ordering and overrides (`testroots.lua`).**
    * Explicit positional CLI roots stay first in deduplicated CLI order, so an
      explicit first root (such as `test.tests` in the repository's native
      aggregate) continues to select the default executable/provider name when

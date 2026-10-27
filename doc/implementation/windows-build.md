@@ -96,9 +96,15 @@ workers (`titan-compiler.build_worker`) and native compiler commands launch
 through the stock LuaRocks `luv` dependency under a single coordinator-owned
 slot ledger (`titan-compiler/build.lua`, `titan-compiler/process.lua`); see
 [driver process transports](driver.md#experimental-windows-process-transports).
-Every non-detached `luv` child process runs inside libuv's `KILL_ON_JOB_CLOSE`
-Job Object, so worker processes and their native compiler children terminate
-automatically if the coordinator exits abruptly.
+Before its first child launch, each coordinator and worker assigns itself to
+a non-breakaway `KILL_ON_JOB_CLOSE` Job Object through
+`titan._native_process_tree_guard()`. Every descendant inherits that strict
+ancestor job before it runs, even inside libuv's own breakaway-permitting
+job, so workers, native compilers, and anything a compiler wrapper starts
+terminate when the coordinator exits, including abruptly
+([orphan lifetime](build-coordinator.md#planned-worker-resolution-and-orphan-lifetime)).
+The containment requires Windows 8 or later; if it cannot be established,
+no child is launched.
 
 `TITAN_JOBS` (default four, exported by `Makefile.win`) is the only native
 build-parallelism setting on Windows; raise it to the CPU count on a larger
@@ -293,11 +299,13 @@ that provider DLL and rejects destinations on a different volume (`--exe
 first requested logical root (`requested_modules[1]`) owns the provider path and
 default launcher name, while the embedded entry identity is the generated test
 runner (`titan.test.runner`). `driver.windows_launcher_name` validates the
-launcher basename, rejecting directory separators, alternate streams, control
+launcher basename—the logical module name by default, or the `--exe`
+basename—rejecting directory separators, alternate streams, control
 characters, reserved DOS device names (including `COM¹`/`²`/`³` and
 `LPT¹`/`²`/`³`), invalid UTF-8, trailing dots/spaces, and components exceeding
-255 UTF-16 code units. The CLI rejects `--exe` for `--compile-only` and
-library-only invocations, and locks both the output root and `dirname(--exe)`.
+255 UTF-16 code units, with `--exe`-prefixed diagnostics. The CLI rejects
+`--exe` for `--compile-only` and library-only invocations, and locks both the
+output root and `dirname(--exe)`.
 Program output preflight includes the provider, `.def`, manifest, resource
 source, and compiled resource.
 
@@ -694,7 +702,11 @@ dogfooding](test-runner.md#repository-dogfooding)).
 
 `spec/support/windows_stdlib_tests.sh` requires a local fixed NTFS workspace
 marked with `.titan-test-owner` (`titan-windows-stdlib-tests-v1`), with no
-directory reparse points and no overlap with the supplied SDK prefix:
+directory reparse points and no overlap with the supplied SDK prefix. The
+harness and the `Makefile.win` native rules use only Bash 3.2 features:
+NUL-delimited `read -r -d ''` loops rather than `mapfile`, `find -print0`
+rather than `globstar`, and a small Perl filter rather than associative arrays
+for manifest set differences:
 
 1. **Incremental input refresh on `build`:** the harness removes only
    `build.complete` and `build.log`, preserving `sdk/`, `source/`, `cwd/`,
@@ -722,17 +734,20 @@ directory reparse points and no overlap with the supplied SDK prefix:
    (from `windows_test_supervisor.c`). Both rules depend only on their authored
    sources and `native-flags.config`, with no compiler or provider timestamp
    prerequisites.
-3. **Child-only C fixture objects:** for each of `sqlite3_worker_fixture`,
+3. **Fixed C fixture objects:** for each of `uv_stdio_probe` (also an
+   aggregate `--c-source` helper), `sqlite3_worker_fixture`,
    `ssl_allocator_fixture`, `ssl_error_strings`, and `os_descriptor_limit`, the
    harness runs the workspace's `sdk/bin/lua.exe` and retained `titanc` script
-   with `-c --incremental -j "$TITAN_JOBS" --output "$work/native/$fixture"`,
-   `--cflag=-std=c99 --cflag=-Wall --cflag=-Wextra --cflag=-Werror -I
-   "$winprefix/src/lua-5.5.1"`, one `--cflag` per token of `cppflags` and
-   `cflags` (with `TITAN_EXTRA_*FLAGS` cleared in the environment so flags are
-   not applied twice), and `--c-source
-   "$work/source/spec/fixtures/stdlib/native/$fixture.c"`. It verifies that
-   `$work/native/$fixture/.native/*.o` contains one regular object and copies it
-   to `work/cwd/.titan-tests/$fixture.o` only when `cmp -s` reports a change.
+   with `-c --incremental --print-c-objects -j "$TITAN_JOBS" --output
+   "$work/native/$fixture"`, `--cflag=-std=c99 --cflag=-Wall --cflag=-Wextra
+   --cflag=-Werror -I "$winprefix/src/lua-5.5.1"`, one `--cflag` per token of
+   `cppflags` and `cflags` (with `TITAN_EXTRA_*FLAGS` cleared in the
+   environment so flags are not applied twice), and `--c-source
+   "$work/source/spec/fixtures/stdlib/native/$fixture.c"`. It strips a
+   trailing carriage return from the single reported path, requires it to name
+   a regular file, and copies it to `work/cwd/.titan-tests/$fixture.o` only
+   when `cmp -s` reports a change. Stale `.native` nodes from another checkout
+   location are never selected.
 4. **Aggregate compilation:** from `work/sdk`, the harness invokes `titanc`
    with `--output "$output" --test --incremental --no-uv-bootstrap -j
    "$TITAN_JOBS" --exe "$winprefix/bin/titan-stdlib-tests.exe" --tree

@@ -139,7 +139,7 @@ COFF long section names via the string table).
 
 ### Record envelope and version gates
 
-`objectmetadata.encode(entry, native)` (`titan-compiler/objectmetadata.lua:64-77`)
+`objectmetadata.encode(entry, native)` (`titan-compiler/objectmetadata.lua`)
 projects `entry` through `projectcache.project_declarations(entry)`, attaches
 `projected.object_metadata = native`, and serializes a table-allocating Lua
 chunk (`-- Titan object source metadata`) returning the envelope:
@@ -199,7 +199,7 @@ under `-v`); any later `--incremental` check rejects that object with
 
 ### Tagged canonicalization and invocation file memos
 
-`incremental.digest(context, tag, value)` (`titan-compiler/incremental.lua:33-76`)
+`incremental.digest(context, tag, value)` (`titan-compiler/incremental.lua`)
 serializes `{ version.CERTIFICATE_CANONICALIZATION, tag, value }` through
 `canonical` and hashes the resulting bytes with SHA-256 via
 `context.cache_adapter.sha256_binary` (`titan._sha256_binary`, falling back to
@@ -217,34 +217,85 @@ serializes `{ version.CERTIFICATE_CANONICALIZATION, tag, value }` through
 
 Cycles, non-finite numbers, and non-scalar table keys raise an assertion error.
 
-`incremental.file_digest(context, path, bytes)` (`incremental.lua:108-142`)
+`incremental.file_digest(context, path, bytes)` (`incremental.lua`)
 hashes each distinct file at most once per resolver context:
 
 1. It resolves `key = context.io:realpath(path)` (caching `path -> key` in
-   `memo.aliases`) and returns `saved.digest, saved.bytes` when `memo.files[key]`
-   already exists. If caller-supplied `bytes` differ from `saved.bytes`, it
-   raises `<path>: file changed during build`.
-2. When `bytes` is nil, it records a pre-read observation combining
+   `memo.aliases`) and returns the saved digest when `memo.files[key]` already
+   exists. If caller-supplied `bytes` differ from the saved bytes (or, for a
+   digest-only entry, hash to a different digest), it raises
+   `<path>: file changed during build`.
+2. When `bytes` is nil and the coordinator loaded a
+   [persistent digest cache](#persistent-digest-cache), a cached entry for the
+   absolute path is accepted without reading the file when the current
+   precise observation equals the stored one and the path is readable. The
+   memo then holds a digest without bytes.
+3. Otherwise it records a pre-read observation combining
    `context.io:stat(path)` (which must be `kind == "file"`) and
    `context.io:lstat(path)`, reads the file through `context.io:read_file(path)`,
    and checks that the post-read observation and `realpath(path)` are
-   identical; any mismatch raises `<path>: file changed while it was read`.
-3. It hashes the bytes, records `{ digest, bytes }` in `memo.files[key]`,
+   identical and that the byte count matches a precise observed size; any
+   mismatch raises `<path>: file changed while it was read`.
+4. It hashes the bytes, records `{ digest, bytes, observation }` in
+   `memo.files[key]`, stores precise observations in the persistent cache,
    updates `incremental.counters(context)` (`file_hashes`, `file_reads`,
-   `file_bytes`, `digest_calls`, and `files[key]`), calls `context.io:yield()`,
-   and returns `digest, bytes`.
+   `file_bytes`, `observation_reuses`, `digest_calls`, and `files[key]`),
+   calls `context.io:yield()`, and returns `digest, bytes`.
+
+A consumer that needs file bytes rather than a digest calls
+`incremental.file_contents(context, path, max_bytes?)`. It reuses memoized
+bytes, or reads once under the same race guard after a digest-only cache hit
+and raises `file changed during build` if the fresh observation differs from
+the one that authorized the digest.
 
 The driver wires `context_file_digest(context)` into `cdriver`, `cprobe`, and
 `check_source_module`, so C-header parsing and object certification share the
 same per-context file memo. Only a publisher that replaces an owned output
 calls `incremental.invalidate_file(context, path)` to evict `path` and its
-aliases from the memo.
+aliases from the memo and the persistent cache. Pre-publication
+revalidation uses `incremental.fresh_context(context)`, which shares the
+persistent cache but sets `refresh`, so every input is re-read and rehashed
+while its verified observation primes the cache for the next invocation.
+
+### Persistent digest cache
+
+`incremental.load_digest_cache(context, output_root)` and
+`incremental.save_digest_cache(context)` keep observation-keyed digests across
+invocations in `<output>/.titan/digests`. `titanc` loads the cache right after
+acquiring its output locks and saves it while closing the coordinator context,
+before releasing them. Workers, source-adjacent builds without `--output`, and
+programmatic contexts that never load a cache neither read nor write it.
+
+The file is a `graphcodec` record of at most 32 MiB whose envelope carries
+`schema = version.DIGEST_CACHE_SCHEMA` (`"1"`), `digest =
+version.CERTIFICATE_DIGEST`, `canonicalization =
+version.CERTIFICATE_CANONICALIZATION`, and `abi = version.TITAN_ABI_VERSION`,
+plus two tables:
+
+* `files[absolute_path] = { digest, observation }`, where `observation` holds
+  `kind`, `dev`, `ino`, `size`, `mode`, `mtime_ns`, and `ctime_ns` with
+  `precision = "ns"`. Only precise observations (integer nanosecond times and
+  nonempty opaque `dev`/`ino` strings) are stored, so coarse metadata always
+  rehashes.
+* `objects[content_digest] = { fingerprint }`, the content-derived target
+  fingerprint of a split-part object (`incremental.part_fingerprint`). It
+  contains no paths, observations, or module views; callers still compare it
+  with the primary object's target.
+
+The cache is a hint, never evidence on its own. A missing, unreadable,
+oversized, malformed, or wrong-schema file loads as an empty cache, which the
+next save replaces. A save runs only from the owning context and only when no
+valid cache was loaded or an entry changed; it writes `digests.tmp.<unique>`,
+renames it over the file, and removes the staging file on failure. `titanc`
+ignores save errors so they cannot replace compilation diagnostics. Entries
+are replaced in place and removed only by `invalidate_file`; there is no other
+pruning.
 
 ### Certificate layout
 
 `incremental.make_certificate(context, entry, native, inputs)`
-(`incremental.lua:434-475`) builds `native.certificate`, and
-`valid_certificate(value, modname)` (`incremental.lua:492-540`) validates its
+(`incremental.lua`) builds `native.certificate`, and
+`valid_certificate(value, modname)` (`incremental.lua`) validates its
 closed shape before any field is trusted:
 
 | Field | Shape | Meaning |
@@ -264,8 +315,8 @@ closed shape before any field is trusted:
 ## Configuration, toolchain, and preamble certificates
 
 `driver.incremental_configuration(context)` installs
-`context.incremental_options` (`driver.lua:4255-4315`) and calls
-`incremental.configuration(context, options)` (`incremental.lua:359-381`) once
+`context.incremental_options` (`driver.lua`) and calls
+`incremental.configuration(context, options)` (`incremental.lua`) once
 per resolver context. The resulting table `{ digest, compiler, preamble,
 toolchain, options }` is memoized at `context.incremental_configuration`. In a
 multi-module build, the coordinator computes it once and passes it to workers
@@ -277,7 +328,7 @@ started.
 The four component digests are stored separately in the record so a mismatch
 reports the exact component:
 
-1. **`compiler` (`incremental.compiler_component`, `incremental.lua:161-196`).**
+1. **`compiler` (`incremental.compiler_component`, `incremental.lua`).**
    Locates the loaded compiler root from `DRIVER_SOURCE` (the directory
    containing the loaded `titan-compiler/driver.lua`, never `package.searchpath`
    or `PATH`), lists every `*.lua` file directly inside `titan-compiler/`,
@@ -289,35 +340,47 @@ reports the exact component:
    outer wrapper; programmatic callers without `frontend` record `{ path =
    "titanc", api = true }`). Entries are sorted bytewise by `path` and hashed
    with tag `"compiler"`.
-2. **`toolchain` (`incremental.toolchain_identity`, `incremental.lua:247-308`).**
-   Combines:
-   * `cdriver.preprocessor_cache_identity(configured)` (`c-parser/cdriver.lua:457-464`,
-     `cpp.lua:1278-1303`), which covers the compiler argv, C99 language flags,
-     probed system include directories, a digest of all predefined macros, and
-     content identities of any forced `-include`/`-imacros` files;
-   * the raw output of the compiler's `-E -v` probe (`preprocessor_banner`),
-     capturing vendor, package release, target triple, and `InstalledDir`;
-   * the target profile identity (`driver.TARGET_PROFILE.identity`); and
+2. **`toolchain` (`incremental.toolchain_identity`, `incremental.lua`).**
+   Describes which compiler installation runs, independent of the effective
+   compile flags (those belong to `options`). The description argv is the
+   complete tokenized `CC` command, kept verbatim because later words may name
+   an interpreter script, wrapper arguments, or compiler options; on POSIX
+   `perf.compiler_command` first drops a leading shell `exec` word, which is
+   not an executable. The digest combines:
+   * the predefined-macro dump of `<CC...> -dM -E -x c /dev/null` (`NUL` on
+     Windows);
+   * the `<CC...> -E -v -x c /dev/null -o /dev/null` banner, capturing vendor,
+     package release, target triple, `InstalledDir`, and search directories.
+     `stable_toolchain_banner` rewrites only the caller-dependent operands of a
+     printed Clang `-cc1` action, `-fdebug-compilation-dir` and
+     `-fcoverage-compilation-dir`, to `=<compilation-directory>`, so Apple
+     Clang identities do not depend on the working directory; every other line
+     and argument is kept; and
    * `incremental.physical_executable` records (`{ path = realpath, size,
-     device, inode, mode, modified_seconds, modified_nanoseconds,
-     changed_seconds, changed_nanoseconds, time_precision }`) for the resolved
-     compiler driver (`cc[1]`), any explicit compiler wrapped by `ccache`,
-     `sccache`, or `distcc` (`cc[2]`), and the stage executables returned by
-     `<cc + flags> -print-prog-name=<stage>` (`cc1` and `as` for non-Clang
-     compilers; `as` for Clang only when `-fno-integrated-as` is active and not
-     overridden by a later `-fintegrated-as`).
+     device, inode, mode, modified_*, changed_*, precision, dev, ino,
+     mtime_ns, ctime_ns, time_precision }`) for the resolved compiler driver
+     (`cc[1]`), any explicit compiler wrapped by `ccache`, `sccache`, or
+     `distcc` (`cc[2]`), and the stage executables returned by
+     `<CC + effective flags> -print-prog-name=<stage>` (`cc1` and `as` for
+     non-Clang compilers; `as` for Clang only when `-fno-integrated-as` is
+     active and not overridden by a later `-fintegrated-as`).
+
+   Both probes run through `cpp.cached_command` and are memoized per resolver
+   context by description argv; the complete identity is memoized by command,
+   flags, target profile, and executable path.
 
    Tool executables are certified by self-description plus physical metadata
-   rather than by hashing the compiler binary bytes. On POSIX, `changed_seconds`
-   (`ctime`) catches preserved-mtime replacements (`cp -p`, `touch -r`). An
-   in-place, same-size binary overwrite within the same coarse timestamp tick
-   (or on Windows where LuaFileSystem `ctime` is creation time), or an
-   unrecognized wrapper script that hides a changed downstream binary without
-   changing `-E -v` or `-dM` output, is outside physical tool detection.
-3. **`preamble` (`incremental.preamble_identity`, `incremental.lua:322-357`).**
+   rather than by hashing the compiler binary bytes. The change timestamp
+   (`ctime` on POSIX, `ChangeTime` on Windows through the native precise stat)
+   catches preserved-mtime replacements (`cp -p`, `touch -r`). An in-place,
+   same-size binary overwrite that preserves both timestamps (possible within
+   one tick of the LuaFileSystem fallback's coarse clock), or an unrecognized
+   wrapper script that hides a changed downstream binary without changing
+   `-E -v` or `-dM` output, is outside physical tool detection.
+3. **`preamble` (`incremental.preamble_identity`, `incremental.lua`).**
    Every generated module includes the fixed C preamble from
    `titan-compiler/cpreamble.lua`, even when the Titan source contains no
-   `foreign import`. `cpreamble.include_constants` (`cpreamble.lua:10-35`) is
+   `foreign import`. `cpreamble.include_constants` (`cpreamble.lua`) is
    the single include list shared by emitted module preambles
    (`cpreamble.fixed_includes`, `module = true` entries) and the certification
    probe (`cpreamble.certification_includes`, which adds `"lua.h"`,
@@ -336,7 +399,7 @@ reports the exact component:
    (`titan.h`, `transfer.h`, `titan/ffi.h`, Lua internal headers), new
    shadowing headers in `-I`/`-isystem`, and `__has_include` branches that
    alter declarations or macros without adding a positive depfile entry.
-4. **`options` (`incremental.lua:366-371`).** Hashes `{ compile_prefix,
+4. **`options` (`incremental.lua`).** Hashes `{ compile_prefix,
    build_profile, emit_line_directives, pretty_print, extra_ffi_include_dirs,
    titan_root }` with tag `"compile-options"`. Module-resolution flags
    (`--source-first`, `--static`, `--test`'s source-first preference), `--jobs`,
@@ -348,14 +411,21 @@ reports the exact component:
 ## Own-source content and folder membership
 
 `incremental.source_certificate(context, source, contents_by_path)`
-(`incremental.lua:383-393`) records `layout = source.kind` (`"flat"` or
+(`incremental.lua`) records `layout = source.kind` (`"flat"` or
 `"folder"`) and `sources = { { path, sha256 }, ... }` in the tagged source
 resolver's canonical order: `source.main` first, followed by bytewise-sorted
 immediate folder contributors (`source.files`). Paths use the exact spelling
-that `driver.lua` embeds in `#line` directives.
+that `driver.lua` embeds in `#line` directives. That spelling comes from the
+selected `--tree` root and is deliberately not canonicalized: it reaches
+generated C, native debug information, and tracebacks, so a different spelling
+of the same source root misses with `source-set` and rebuilds. Output paths
+are different: `driver.prepare_output_root` makes `--output` and the `--exe`
+directory absolute and, on Linux and macOS, resolves existing ancestors
+through `realpath`, so relative, absolute, and symlinked-parent spellings of
+one destination reuse the same objects and link record.
 
 During stage 1 certification, `source_verdict(context, source, certificate)`
-(`incremental.lua:542-571`) compares the freshly resolved `source` descriptor
+(`incremental.lua`) compares the freshly resolved `source` descriptor
 against `certificate`:
 
 * any contributor path present in `certificate.sources` but absent from
@@ -367,10 +437,13 @@ against `certificate`:
   error or SHA-256 mismatch misses with `source-content <path>`.
 
 The bytes read during `source_verdict` are stored in
-`source.certified_contents[path]`. When a module misses and falls back to
-`parse_source_inner` (`driver.lua:5350-5355,5435-5443`), the parser consumes
-`source.certified_contents[filename]` rather than re-reading the file from disk,
-and `prepare_compile` passes that precomputed `entry.source_certificate` into
+`source.certified_contents[path]`; after a digest-only
+[persistent cache](#persistent-digest-cache) hit there are no stored bytes.
+When a module misses and falls back to `parse_source_inner` (`driver.lua`),
+the parser consumes `source.certified_contents[filename]` or materializes it
+once through `incremental.file_contents`, which rejects a file whose
+observation changed after its digest was accepted. `prepare_compile` passes
+the precomputed `entry.source_certificate` into
 `incremental.make_certificate`. The new object record therefore certifies the
 exact source bytes that were parsed and compiled.
 
@@ -387,11 +460,13 @@ content and nominal scope from physical observation metadata
   attributes (`precision = "ns" | "coarse"`, `size`, `physical_identity`,
   `modified_seconds`, `modified_nanoseconds`, `changed_seconds`,
   `changed_nanoseconds`) live in `input.observation`, where they serve only as
-  a metadata fast path when a host I/O strategy declares `precision == "ns"`
-  with valid `changed_seconds` (`ctime`) and as a before/after read-race guard.
-  Under synchronous `titanc` (`time_precision = "coarse"`), `revalidate_header_input`
-  reads and hashes each distinct header once per invocation through the shared
-  `context.header_validation` pass and `context.file_digest` memo.
+  a metadata fast path when the I/O strategy declares `precision == "ns"`
+  with valid `changed_seconds` and a physical file identity, and as a
+  before/after read-race guard. Synchronous `titanc` reads native
+  `titan._stat_precise` observations, so an unchanged header is accepted from
+  metadata; with the coarse LuaFileSystem fallback, `revalidate_header_input`
+  reads and hashes each distinct header once per invocation through the
+  shared `context.header_validation` pass and `context.file_digest` memo.
 * **`search` (`c-header-search-v2;exists=<yes|no>;kind=<kind|missing>;open=<readable|unreadable>`).**
   Records `lstat` existence, followed `stat` kind, and effective readability for
   every candidate path probed before and at the winning header, so a newly
@@ -405,7 +480,7 @@ content and nominal scope from physical observation metadata
   realpath with identical bytes misses with `c-input <path>: provenance` while
   republishing identical bytes at the same nominal origin hits.
 
-`check_headers(context, record)` (`incremental.lua:631-666`) validates the
+`check_headers(context, record)` (`incremental.lua`) validates the
 deduplicated union of `record.c_header_dependencies` and
 `record.ffi_header_descriptor.search_inputs` during `certify_local`, before any
 declarations or checking `.ffi.h` descriptors are restored. Any changed,
@@ -417,8 +492,8 @@ missing, unreadable, or racing input returns
 ### Producer self digests and per-module binary digests
 
 When a source module is prepared for compilation (`prepare_compile` in
-`driver.lua:7975-7989`), `incremental.producer_digests(context, source_entry,
-encoded_layouts, ast._foreign_header_recipe)` (`incremental.lua:395-408`)
+`driver.lua`), `incremental.producer_digests(context, source_entry,
+encoded_layouts, ast._foreign_header_recipe)` (`incremental.lua`)
 computes two self digests from the coder's exact outputs and stores them in
 `certificate.interface`:
 
@@ -459,7 +534,7 @@ importers of that module, and editing a documentation comment in a
 
 For a binary dependency (`kind == "dynamic"` or `"static"`),
 `incremental.interface_digest(context, entry, "public")`
-(`incremental.lua:410-432`) hashes `{ types.serialize_semantic(entry.type),
+(`incremental.lua`) hashes `{ types.serialize_semantic(entry.type),
 entry.layouts, "" }`, memoized per `(provider_path, module_name)`. Each logical
 module inside a combined provider such as `titan.so` or `titan.a` is
 fingerprinted individually from its own `_types` and `_layouts` symbols; whole
@@ -478,12 +553,12 @@ provider file bytes and timestamps never enter consumer module certificates.
   `ast._binary_usage` (`titan-compiler/checker/binary_usage.lua`) tracks every
   module whose functions, variables, or nominal types the checked code uses,
   including nominal owners recovered contextually through another module's
-  return or field types (`recover_contextual_owner` in `driver.lua:5577-5664`).
+  return or field types (`recover_contextual_owner` in `driver.lua`).
 * `certificate.bindings` and `certificate.providers`: the coder's native
   binding map (`"direct"`, `"handle"`, or `"global"`) and selected dynamic
   provider map (`provider_file` for direct dynamic imports).
 
-In stage 2, `incremental.verdict(record, plan)` (`incremental.lua:766-826`)
+In stage 2, `incremental.verdict(record, plan)` (`incremental.lua`)
 checks the decoded certificate against the final resolution `plan`:
 
 1. For every entry in `cert.imports` (using `item.view`) and `cert.owners`
@@ -513,7 +588,7 @@ checks the decoded certificate against the final resolution `plan`:
 
 ## Certification ordering and `-v` miss vocabulary
 
-`incremental.certify_local(context, modname, source)` (`incremental.lua:668-726`)
+`incremental.certify_local(context, modname, source)` (`incremental.lua`)
 evaluates local evidence in a fixed order before any dependency check:
 
 1. **Object presence and readability.** `context.io:lstat("<stem>.o")` must
@@ -579,7 +654,7 @@ The complete `-v` object-decision vocabulary written to `stderr` is:
 
 Before publishing a worker's newly compiled object, the coordinator calls
 `incremental.revalidate_record(context, modname, freshly_resolved_source,
-record)` (`incremental.lua:730-764`). It creates a private validation context
+record)` (`incremental.lua`). It creates a private validation context
 with empty `header_validation` and `header_observations` tables, strips
 `certified_contents`, re-runs `source_verdict` and `check_headers` from disk,
 and accumulates its I/O counts under `incremental.counters(context).revalidation`
@@ -595,8 +670,8 @@ complete unit or recompiled as a whole. The sole authority for split artifacts
 is the `parts` list in the primary object's `.titan.source` record
 (`record.object_metadata.parts`). After `codegen-options` verifies `c_parts`
 and `split_threshold`,
-`check_parts(context, record, stem, bytes)` (`incremental.lua:573-612`) and
-`check_coverage(context, native, stem)` (`incremental.lua:614-629`) require:
+`check_parts(context, record, stem, bytes)` (`incremental.lua`) and
+`check_coverage(context, native, stem)` (`incremental.lua`) require:
 
 1. `objectmetadata.validate_parts(native)` succeeds: `parts_version` is `1`,
    `parts` is a dense array whose entry `i` has `index = i - 1`,
@@ -611,11 +686,14 @@ and `split_threshold`,
 3. Primary `<stem>.o` scans via `staticmetadata.scan_bytes` as a valid native
    object for `version.TITAN_ABI_VERSION`.
 4. For each sidecar part `index = 2 .. #native.parts`: `<stem>.part<k>.o` is a
-   regular non-symlink file, is hashed via `incremental.file_digest` (so the
-   final-link certificate reuses its memoized digest without reading the part a
-   second time), scans as a valid object for `version.TITAN_ABI_VERSION`,
-   carries neither public `.titan.meta` nor `.titan.source`, and matches the
-   primary object's target fingerprint (`staticmetadata.fingerprint_matches`).
+   regular non-symlink file whose `incremental.part_fingerprint` is a valid
+   single-architecture object for `version.TITAN_ABI_VERSION`, carries neither
+   public `.titan.meta` nor `.titan.source`, and matches the primary object's
+   target fingerprint (`staticmetadata.fingerprint_matches`). The part is
+   hashed through `incremental.file_digest`, so the final-link certificate
+   reuses that digest, and its scan result is cached by content digest in the
+   [persistent digest cache](#persistent-digest-cache); an unchanged part is
+   neither read nor rescanned on a warm build.
 5. When `native.coverage` has `enabled = true`, `native.coverage.files` has
    `#native.parts` entries, and every part's `<stem><c_suffix>` and matching
    `.gcno` are regular non-symlink files.
@@ -675,7 +753,7 @@ their current paths while preserving helper bodies.
 
 Existing complete companions are left untouched on a hit. If a generated
 `.ffi.h` or `.titan.h` file was removed from the output tree,
-`driver.prepare_foreign_headers` (`titanc:587-589`) restores it from the
+`driver.prepare_foreign_headers` (`titanc`) restores it from the
 accepted record under the output-tree lock even when every module object and
 the final link hit. Because rendered `.titan.h` helper contents enter the
 producer's `interface.public` and `interface.source` digests, any change to a
