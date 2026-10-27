@@ -335,10 +335,32 @@ does not reject unknown extra keys:
 per resolver context. The resulting table `{ digest, compiler, preamble,
 toolchain, options }` is memoized at `context.incremental_configuration`. In a
 multi-module build, the coordinator computes it once and passes it to workers
-via `driver.worker_configuration(context)`; each worker recomputes only
-`compiler` (`incremental.compiler_component`) in `driver.new_worker_context` to
-verify that the loaded compiler Lua files did not change after the coordinator
-started.
+via `driver.worker_configuration(context)`. That closed worker configuration
+always carries a top-level `compiler`, the installed compiler inventory
+digest, and each worker recomputes that inventory
+(`incremental.compiler_component`) in `driver.new_worker_context`, rejecting a
+mismatch or an unreadable inventory, to verify that the loaded compiler Lua
+files did not change after the coordinator started.
+
+Only the explicit third result `"uncertified"` from the configuration or
+toolchain identity (for example a Windows tool whose launcher policy cannot
+be proven) selects raw compilation. The resolver then keeps
+`incremental_configuration` nil and stores the reason separately as
+`incremental_uncertified`, and the worker configuration carries
+`uncertified = reason` instead of `configuration`. In that mode existing
+objects are never reused: planning parses and selects fresh source, and
+generated objects carry their ordinary metadata but no producer interface
+digests and no certificate, so a later unchanged invocation still cannot hit.
+The final link and `--c-source` nodes are likewise marked uncacheable. Any
+other configuration failure is still an invocation error, and non-string
+cancellations propagate unchanged.
+
+Uncertainty limited to final output (an uncertain linker backend from
+`driver.native_link_backend`, which is never memoized as a guessed backend,
+or an uncertified final output tool) is a separate layer. It reaches only the
+final-link request as its `uncacheable` reason, so that target's link ticket
+neither hits nor records, while module objects and `--c-source` nodes keep
+their own valid certificates and can still hit.
 
 The four component digests are stored separately in the record so a mismatch
 reports the exact component:
@@ -395,9 +417,53 @@ reports the exact component:
    `true` (effective-user `X_OK`, so owner-only or group-only execute bits
    are judged as the kernel would, and an execute-only file need not be
    readable); a missing capability or an indeterminate answer fails the
-   selection rather than guessing from mode bits. On Windows the first
-   regular file is admitted whether or not it is readable. Admission never
-   reads tool contents, and the physical identity it records is unchanged.
+   selection rather than guessing from mode bits.
+
+   On Windows, admission follows the launcher that will actually run the tool,
+   and readability is never consulted:
+
+   * **Direct launches** (the compiler driver and tools `titanc` starts
+     itself) follow bundled libuv's spawn search. In each searched directory
+     the exact name is tried only when its basename has a nonempty extension,
+     then `<name>.com`, then `<name>.exe`; the suffixes are appended even to a
+     name that already has one. An explicit path searches only its own
+     directory. A bare name checks the current directory and then each `PATH`
+     directory in order. The optional I/O capability
+     `executable_search_cwd()` (native `NeedCurrentDirectoryForExePathW`)
+     reports whether the launcher searches the current directory: `true`
+     makes a current-directory hit win, `false` skips it, and when the answer
+     is unavailable a current-directory hit that differs from the `PATH` hit
+     cannot be certified. Directories are skipped; any other non-regular
+     candidate cannot be certified.
+   * **Compiler-reported LLVM stages** (selection `"llvm"`, an explicit path
+     that Clang names in its job description) follow LLVM's own launcher: the
+     exact path when it exists, otherwise the path with `.exe` appended. An
+     existing non-file at either name is an error, and a bare LLVM stage name
+     cannot be certified.
+   * **Link entries**, under either policy: each existing candidate is also
+     examined with `lstat`. An ordinary entry uses that metadata. A symbolic
+     link or reparse-point entry is certifiable only when its target can be
+     followed and its entry's raw `windows_attributes` DWORD is a valid value
+     whose `FILE_ATTRIBUTE_DIRECTORY` bit agrees with the target's kind; a
+     valid file link records the target's physical identity under the
+     original admitted spelling. A dangling, unprovable, or kind-changing link
+     entry makes the tool uncertified rather than falling through to the next
+     suffix or `PATH` directory; only a genuinely absent candidate falls
+     through.
+   * **Any other selection policy**, such as an unknown producer or wrapper
+     delegate, cannot be certified.
+
+   A tool that cannot be certified makes `physical_executable` return
+   `nil, reason, "uncertified"` instead of an identity. The build still runs
+   with that tool; what loses reuse depends on which tool it is. An
+   uncertified compiler configuration selects raw compilation (above): no
+   module object, `--c-source` node, or final link can hit or record a
+   certificate. When only a final output tool or the linker policy is
+   uncertified, only that target's final-link ticket neither hits nor records;
+   independently certified module objects and C nodes can still hit. A
+   successful selection always returns the physical identity and, second, the
+   admitted spelling of the candidate actually selected. Admission never reads
+   tool contents.
 
    Tool executables are certified by self-description plus physical metadata
    rather than by hashing the compiler binary bytes. The change timestamp

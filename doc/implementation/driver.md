@@ -894,6 +894,7 @@ backend-specific records, arrays, error objects, or task handles.
 | `lstat(path)` | The same result convention as `stat`, but describes the final symbolic link itself. |
 | `readable(path)` | One boolean. `true` means the path can be opened for binary reading; absence, invalid input, and ordinary open failures are `false`. |
 | `executable(path)` (optional) | `true`, `false`, or `nil, message`. Whether the current process may execute `path` under its effective user, groups, and ACLs; the synchronous POSIX strategy uses native `faccessat(AT_EACCESS, X_OK)` and neither opens nor reads the file. Tool selection (`incremental.physical_executable`) requires this capability on POSIX: a strategy without it, or an indeterminate `nil, message`, fails selection closed rather than guessing from mode bits or readability. |
+| `executable_search_cwd()` (optional, Windows) | `true`, `false`, or `nil, message`. Whether the native launcher searches the current directory for a bare executable name; the synchronous strategy asks `NeedCurrentDirectoryForExePathW`, the same policy libuv uses. Without a definite answer, a current-directory candidate that differs from the `PATH` candidate cannot be certified. |
 | `read_file(path, max_bytes?)` | `bytes, nil` or `nil, message`. Without a bound, reads the complete file as a binary-safe Lua string. A bound must be a nonnegative integer; the method returns the complete file when its size is at most that bound, or exactly the first `max_bytes + 1` bytes when it is larger. This optional form lets bounded decoders detect overflow without materializing an unbounded replacement. |
 | `write_file(path, bytes)` | `true, nil` or `nil, message`. Publishes only complete contents: an observer sees complete file contents. Windows replacement may briefly leave the destination absent between removal and rename. Failure and cancellation must not leak the strategy's sibling temporary. If cancellation races the final rename, the destination may contain either complete version. |
 | `list(path)` | A dense one-based array of entry basenames, or `nil, message`. `.` and `..` are excluded and order is unspecified. |
@@ -912,7 +913,9 @@ The synchronous strategy uses the runtime's native `titan._stat_precise` when
 the `titan` support library loads: its results also carry `precision = "ns"`,
 integer `mtime_ns` and `ctime_ns`, and opaque `dev`/`ino` strings (POSIX
 `st_dev`/`st_ino`; on Windows the volume serial number and `FileIdInfo` file
-ID), copied into `device`/`inode`. Without that library it falls back to
+ID), copied into `device`/`inode`. On Windows they also carry
+`windows_attributes`, the raw `FileAttributes` DWORD from the same
+`FileBasicInfo` query. Without that library it falls back to
 LuaFileSystem with `time_precision = "coarse"` and, on Windows, no
 `device`/`inode`, because LuaFileSystem provides no useful Windows file
 identity. Host strategies may supply `"ns"` observations of their own. When
