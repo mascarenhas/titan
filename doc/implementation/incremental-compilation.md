@@ -404,7 +404,11 @@ reports the exact component:
      `distcc` (`cc[2]`), and the stage executables returned by
      `<CC + effective flags> -print-prog-name=<stage>` (`cc1` and `as` for
      non-Clang compilers; `as` for Clang only when `-fno-integrated-as` is
-     active and not overridden by a later `-fintegrated-as`).
+     active and not overridden by a later `-fintegrated-as`). The compiler
+     counts as Clang only when a line of its `-E -v` banner is a
+     `clang version <n>` version line; a "clang" that merely appears in an
+     installation path does not. The same classification selects the
+     `"llvm"` stage launcher policy, so stage inventory and launching agree.
 
    Both probes run through `cpp.cached_command` and are memoized per resolver
    context by description argv; the complete identity is memoized by command,

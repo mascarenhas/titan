@@ -112,7 +112,8 @@ following inputs before accepting `<stem>.o`:
     identity (resolved path, size, file identity, mode, and modification and
     change times) of the compiler driver, an explicit compiler behind
     `ccache`, `sccache`, or `distcc`, and the named compiler stages (`cc1` and
-    `as` for GCC; `as` for Clang with `-fno-integrated-as`). The working
+    `as` for GCC; `as` for Clang with `-fno-integrated-as`, where Clang is
+    recognized from its `clang version` line, not from a path). The working
     directory that Clang prints in its banner does not take part, and on
     Linux and macOS a leading shell `exec` in `CC` is ignored.
   * `options`: the effective generated-C compile command (including profile
