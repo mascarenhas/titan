@@ -736,10 +736,12 @@ reused from metadata without reading only when both the saved/baseline
 observation and current observation declare `precision == "ns"`, include valid
 `changed_seconds` (`ctime`), and match in every field (`size`, `modified_*`,
 `changed_*`, and `physical_identity`), and the path remains `readable`.
-Strategies that report `time_precision = "coarse"` (including synchronous
-`titanc` via LuaFileSystem) always read the file once per validation pass,
-guarding before and after the read with physical observations and hashing the
-bytes; equal content refreshes observation metadata without invalidating
+Strategies that report `time_precision = "coarse"` (the LuaFileSystem fallback
+used when the native `titan` support library is unavailable) always read the
+file once per validation pass, guarding before and after the read with
+physical observations and hashing the bytes; synchronous `titanc` normally
+reads native nanosecond observations and takes the metadata path. Equal
+content refreshes observation metadata without invalidating
 declarations. `origin` inputs (`c-header-origin-v1;real=<realpath>`) are
 re-resolved via `realpath` on every validation pass, even when `file`
 observations take the `"ns"` fast path. Missing or malformed legacy
@@ -903,14 +905,19 @@ backend-specific records, arrays, error objects, or task handles.
 | `yield(module_name)` | No results. The cooperative post-module checkpoint receives the name of the module just checked; the synchronous implementation ignores it. |
 
 `stat` and `lstat` metadata has the Lua-facing fields `kind`, `size`,
-`mode`, `modified_seconds`, `modified_nanoseconds`, and `time_precision`
-(`"coarse"` in the synchronous LuaFileSystem strategy, `"ns"` when a host
-strategy supplies native nanosecond `st_mtim` and `st_ctim`), plus optional
-`changed_seconds`, `changed_nanoseconds`, `device`, and `inode`. When present,
-`device` and `inode` form an opaque physical-file identity pair: clients
-compare the pair only for equality and must not interpret either component. The
-synchronous Windows strategy omits them; LuaFileSystem does not provide useful
-Windows file identities. `kind` is `file`, `directory`, `symlink`, or `other`;
+`mode`, `modified_seconds`, `modified_nanoseconds`, and `time_precision`,
+plus optional `changed_seconds`, `changed_nanoseconds`, `device`, and `inode`.
+The synchronous strategy uses the runtime's native `titan._stat_precise` when
+the `titan` support library loads: its results also carry `precision = "ns"`,
+integer `mtime_ns` and `ctime_ns`, and opaque `dev`/`ino` strings (POSIX
+`st_dev`/`st_ino`; on Windows the volume serial number and `FileIdInfo` file
+ID), copied into `device`/`inode`. Without that library it falls back to
+LuaFileSystem with `time_precision = "coarse"` and, on Windows, no
+`device`/`inode`, because LuaFileSystem provides no useful Windows file
+identity. Host strategies may supply `"ns"` observations of their own. When
+present, `device` and `inode` form an opaque physical-file identity pair:
+clients compare the pair only for equality and must not interpret either
+component. `kind` is `file`, `directory`, `symlink`, or `other`;
 `size` and the timestamps are integers, nanoseconds are in `[0, 1000000000)`,
 and `mode` carries the POSIX file-type and permission bits used by
 filesystem/header identity code.
@@ -1347,9 +1354,9 @@ reinterpreted. A direct command ends in `os.execute`; batch transports are
 described in [Parallel generated-C compilation](#parallel-generated-c-compilation).
 Unterminated quotes, trailing escapes, NUL bytes, an empty configured command,
 and non-dense programmatic argument arrays produce configuration errors.
-A malformed `CLANG_FORMAT` is therefore inert in the default mode. `-v` prints
+A malformed `CLANG_FORMAT` is therefore inert in the default mode. `-v` writes
 the same safely quoted compiler/linker commands—and any opted-in formatter
-command—that are executed.
+command—that are executed to standard error.
 
 ### Compiler-owned module builds
 
@@ -1376,7 +1383,8 @@ discovery:
 | `driver.publish_staged_module(context, result)` | Coordinator post-worker step: decodes the staged primary `.o`, resolves a fresh source descriptor, runs `incremental.revalidate_record` in a fresh pass, and renames sidecar `.part<k>.o` files then `<stem>.o` last. |
 | `driver.apply_native_inputs(normalized)` | Installs `normalized.compile_argv` (`driver.NATIVE_COMPILE_FLAGS`) and `normalized.link_argv` (`driver.NATIVE_LINK_FLAGS`) from `nativeinputs.normalize`. |
 | `driver.link_extra_flags()` | Returns `driver.NATIVE_LINK_FLAGS` when installed, else `driver.EXTRA_LDFLAGS` or `{}`. |
-| `driver.native_link_backend(context)` | Returns `"darwin"` on macOS, probes `<cc> -Wl,--dependency-file=<tmp> -Wl,--version` once per context on other Unix hosts to return `"gnu"` or `"none"`, and returns `"none"` on Windows. |
+| `driver.native_link_backend(context)` | Returns `"darwin"` on macOS and `"none"` on Windows. On other Unix hosts it probes `<cc> -Wl,--dependency-file=<tmp> -Wl,--version` and returns `"gnu"`, `"lld"`, or `"none"`; the result is memoized per resolver context and persisted by `linkcertificate.linker_backend` in `<output>/.titan/linker-feature`, keyed by the compiler argv, link flags, toolchain identity, and physical compiler/linker identities. |
+| `driver.windows_launcher_name(modname, override?)` | Validates the Windows launcher basename: the logical module name by default, or the `--exe` basename. Rejects separators, control and reserved characters, trailing dots/spaces, reserved DOS device names, and components over 255 UTF-16 units, then appends `.exe` when absent. |
 | `driver.windows_program_paths(modname, exe, output_module, output_root)` | Computes Windows `.exe` launcher and `.dll` provider paths (`exe` overrides the default `<output>/bin/<logical>.exe`, appends `.exe` if absent, embeds the relative path from `<exe-dir>/../lib/titan/0.6` to the provider under `--output`, and rejects cross-volume paths). |
 | `driver.publish_windows_provider(staged, destination, shim_plans, provider, before_commit?)` | Publishes a validated Windows provider DLL and its Lua shims via `windows_publication.publish`, invoking `before_commit` to invalidate the link certificate before the first public mutation. |
 
@@ -1404,7 +1412,8 @@ publication:
 3. It refills a slot as soon as any child reports completion, so completion
    order is independent of launch order.
 4. After every child has been reaped, it replays each job's captured stdout and
-   stderr in module/part order, whatever the completion order was.
+   stderr to the compiler's stderr in module/part order, whatever the
+   completion order was.
 5. A module succeeds only when every one of its jobs succeeded. Its error and
    exit code are those of its first failing part, and every part's own result
    stays in the module result's `jobs` array (`jobs.summarize`). An ordinary
@@ -1571,7 +1580,7 @@ the three append-only environment variables (`TITAN_EXTRA_CPPFLAGS`,
 rules above. When `titanc` runs, `nativeinputs.normalize` and
 `driver.apply_native_inputs` combine defaults, environment variables, and
 repeatable CLI native switches in a single deterministic order
-([Native inputs and `--c-source` nodes](build-coordinator.md#native-inputs-and-c-source-nodes)):
+([Native inputs and `--c-source` nodes](build-coordinator.md#native-inputs-and---c-source-nodes)):
 
 * **Compilation (`driver.generated_compile_prefix()`).** Starts with parsed
   `CC` and profile-selected `driver.CFLAGS`. When `driver.NATIVE_COMPILE_FLAGS`
@@ -1880,7 +1889,8 @@ policy.
   [-t|--tree <srcroot>] [-o|--output <dir>] \
   [-I|--include-dir <dir>]... [-D|--define <def>]... [--cflag <arg>]... \
   [-L|--library-dir <dir>]... [-l|--link <libs>]... [--ldflag <arg>]... \
-  [--c-source <file>]... [-X|--extra-object <payload>...] [<module>...]
+  [--c-source <file>]... [--print-c-objects] \
+  [-X|--extra-object <payload>...] [<module>...]
 ```
 
 `titanc` (an `argparse` script at the repository root) takes dot-separated
@@ -1897,11 +1907,14 @@ output path relative to the current working directory on every platform
 under `--output` and embedding its relative path from `<exe-dir>/../lib/titan/0.6`).
 
 `--pretty-print` opts every emitted C/header boundary into the fixed
-`clang-format` pass; default builds do not invoke it. `-v` prints safely quoted
-native-tool and formatter commands plus incremental certification decisions:
+`clang-format` pass; default builds do not invoke it. `-v` writes safely quoted
+native-tool and formatter commands, replayed worker and native-job output, and
+incremental certification decisions to standard error:
 `Titan object hit <mod>: <object>`, `Titan object miss <mod>: <code>[ <detail>]`,
 `Titan native hit <source>`, `Titan native miss <source>`,
-`Titan link hit <target>`, and `Titan link miss <target>: <reason>`.
+`Titan link hit <target>`, and `Titan link miss <target>: <reason>`. Standard
+output carries only requested results: the `--print-root` root, `--print-ast`
+dumps, and `--print-c-objects` paths.
 `--print-ast` checks requested modules in-process and dumps each AST.
 `-j`/`--jobs` sets the positive local job cap (overriding `TITAN_JOBS`, default
 4), which bounds concurrent worker frontends, generated-C compilations, the
@@ -1920,7 +1933,12 @@ before the SDK include roots. Repeatable `-L`/`--library-dir`, `-l`/`--link`
 link flags after `TITAN_EXTRA_LDFLAGS` in exact command-line order. Repeatable
 `--c-source` options compile and certify C files into `<output>/.native/` with
 the invocation's generated-C compile prefix and link their objects before
-`-X`/`--extra-object` payloads.
+`-X`/`--extra-object` payloads. With `-c`, `--print-c-objects` writes the
+absolute path of each certified object, one line per `--c-source` argument in
+argument order, after the output locks are released. Native nodes are keyed by
+canonical source path, so a moved checkout leaves the old nodes behind;
+consumers that copy a node use the printed path instead of enumerating
+`.native/`.
 
 `--incremental` enables semantic certification for every source module in the
 closure (including explicit command-line roots, both in full builds and with
@@ -1941,23 +1959,33 @@ Before creating a resolver, `titanc` rejects:
 * `-c`/`--compile-only` with `--exe`, `-l`, `-L`, `--ldflag`, `-X`, or
   `--no-uv-bootstrap`;
 * `--test-dir` or `--test-exclude` without `--test`, or `--test-exclude`
-  without `--test-dir`; and
+  without `--test-dir`;
+* `--print-c-objects` without `-c` and at least one `--c-source`, or with
+  `--print-root` or `--print-ast`; and
 * a `--jobs`/`TITAN_JOBS` or `--c-parts`/`TITAN_C_PARTS` value that is not a
   positive integer.
 
 After those preflight checks, `titanc` loads `require "titan"`, requires
 `_sha256_binary`, creates its resolver context with `frontend = arg[0]`,
-applies normalized native inputs, discovers any `--test-dir` roots, and locks
-`<output or first source root>` (plus `dirname(--exe)` when `--exe` is set)
-with `build.lock_outputs`. It then runs `build.run` to certify, compile, and
-restore the module closure, checks `main` and `--coverage` constraints
-(rejecting `--exe` or `--no-uv-bootstrap` without a standalone or test
-executable, and `--coverage` on library-only builds unless `-c` is given),
-compiles any `--c-source` nodes via `nativeinputs.compile`, and—for linking
+applies normalized native inputs, and discovers any `--test-dir` roots. It
+locks the `--output` directory, or without `--output` every `--tree` source
+root plus the working directory (source-adjacent objects may belong to any
+root, and default providers and executables are CWD-relative), and adds the
+`--exe` directory when given, all through `build.lock_outputs`. It then loads
+the [persistent digest cache](incremental-compilation.md#persistent-digest-cache)
+and runs `build.run`, whose pre-dispatch
+[output preflight](build-coordinator.md#pre-dispatch-output-preflight)
+rejects output collisions and graph-dependent option errors (`--exe` or
+`--no-uv-bootstrap` without a standalone or test executable, `--coverage` on
+library-only builds unless `-c` is given, multiple `main` roots, and library
+roots without a common prefix) before any worker starts. `build.run`
+certifies, compiles, and restores the module closure. `titanc` then compiles
+any `--c-source` nodes via `nativeinputs.compile` and—for linking
 invocations—gates runner/entrypoint synthesis, archive probing, and linking
 with `linkcertificate.prepare`, `linkcertificate.check`,
 `linkcertificate.invalidate`, and `linkcertificate.commit`
 ([End-to-end invocation sequence](build-coordinator.md#end-to-end-invocation-sequence)).
+The digest cache is saved before the locks are released.
 
 ## Optional `clang-format` generated-source formatting
 
@@ -2181,7 +2209,8 @@ modules. Its table (`ltitanlib.c` `titanlib`) exports the user-facing
 `backtrace`, the internal testing helpers `pin` and `clear` used to exercise
 the traceback pin discipline, the loader helpers `_loadlib` and
 `_loadlibglobal`, the compiler digest `_sha256_binary`, the output-tree lock
-`_output_lock_open`, on Windows only `_abivalue`, and elsewhere the compiler's
+`_output_lock_open`, the precise file observation `_stat_precise`, on Windows
+only `_abivalue` and `_native_process_tree_guard`, and elsewhere the compiler's
 jobserver and signal helpers:
 
 ```lua
@@ -2248,7 +2277,7 @@ their use.
 
 #### Output-tree coordination
 
-`titan._output_lock_open(path)` (`ltitanlib.c:887-1118`) backs
+`titan._output_lock_open(path)` (`ltitanlib.c`) backs
 `build.lock_outputs`: it opens `<directory>/.titan-build.lock` without
 following a terminal symlink or reparse point (`O_NOFOLLOW | O_CLOEXEC` and
 `S_ISREG` on POSIX; `FILE_FLAG_OPEN_REPARSE_POINT` without `FILE_SHARE_DELETE`
@@ -2324,7 +2353,7 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `--print-root` | Print the selected installation root and exit. | No module names. |
 | `--print-ast` | Print each module's AST after checking. | Not with `--incremental`. |
 | `--pretty-print` | Format generated C and headers with `CLANG_FORMAT`. | |
-| `-v`, `--verbose` | Print native-tool/formatter commands and incremental object, native-C, and link hit/miss decisions. | |
+| `-v`, `--verbose` | Write native-tool/formatter commands, replayed worker output, and incremental object, native-C, and link hit/miss decisions to standard error. | |
 | `-j`, `--jobs <n>` | Local cap on concurrent worker frontends and native compiler processes; overrides `TITAN_JOBS`, default 4. `1` keeps every C probe synchronous. | Positive integer. |
 | `--c-parts <n>` | Maximum generated C translation units per module whose generated code reaches 2 MiB; overrides `TITAN_C_PARTS` (default 4 on Linux, otherwise 1); `1` disables splitting; independent of `--jobs`. See [Translation-unit parts](codegen-overview.md#translation-unit-parts). | Positive integer. |
 | `--exe <path>` | Exact executable destination relative to CWD (`.exe` appended on Windows when absent; Windows provider DLL stays under `--output`). | Requires a standalone or test executable; not with `-c` or library-only builds. |
@@ -2355,6 +2384,7 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `-l`, `--link <libs>` | Comma-separated or repeated libraries passed as `-l` to the final link; order and repeats kept. | Not with `-c`. |
 | `--ldflag <arg>` | One native link argument (for example `--ldflag=-Wl,--as-needed`); repeatable, order kept. | Not with `-c`. |
 | `--c-source <file>` | Authored/generated C file compiled and certified under `<output>/.native/`, linked before `-X` payloads; repeatable. | Allowed without `<module>` when combined with `-c`. |
+| `--print-c-objects` | Print the absolute certified object path for each `--c-source` argument, one per line in argument order; nothing else is written to stdout. | Requires `-c` and at least one `--c-source`; not with `--print-root` or `--print-ast`. |
 | `-X`, `--extra-object <payload>...` | Native objects/archives carried into the linked outputs after `--c-source` objects. | Not with `-c`; library mode accepts only relocatable objects and regular archives. |
 
 ### Environment variables
@@ -2478,6 +2508,13 @@ Exit callbacks queue the completed schedule position; `uv.run("once")`
 delivers whichever child finishes first. Larger generated-C units start first
 and each completion frees its slot immediately. Diagnostics still replay in
 original request order.
+
+Every `process.lua` spawn first calls `titan._native_process_tree_guard()`
+once per process, assigning the compiler process to a non-breakaway
+`KILL_ON_JOB_CLOSE` Job Object whose handle lives until process teardown.
+Children therefore inherit a strict ancestor job before executing, whatever
+job libuv adds them to; a failed guard reports an error and launches nothing
+([orphan lifetime](build-coordinator.md#planned-worker-resolution-and-orphan-lifetime)).
 
 The adapter closes process and pipe handles after completion and retains the
 native exit value, including 256 and 9009. Launch failures are distinct from

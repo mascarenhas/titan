@@ -150,22 +150,28 @@ three aggregate C helpers (`async_foreign_work.c`, `fs_fixture.c`, and
 `uv_stdio_probe.c`) are compiled into the aggregate via `--c-source` under
 `out/tests/.native/`.
 
-Child-only C fixtures (`sqlite3_worker_fixture`, `ssl_allocator_fixture`,
-`ssl_error_strings`, `os_descriptor_limit`, and on Linux
-`transfer_alloc_fault`, `uv_sync_alloc_fault`, and `thread_retirement_fault`)
-belong to fresh child processes launched by individual tests and are excluded
-from the aggregate link. Each `$(TITAN_TEST_BUILD_DIR)/<stem>.o` target
-(`titan_test_native_rule`) depends on `spec/fixtures/stdlib/native/<stem>.c`
-and `FORCE`, invokes `$(TEST_TITANC) -c --incremental --output
+The fixed fixture objects (`uv_stdio_probe`, which is also an aggregate
+`--c-source` helper, and the child-only `sqlite3_worker_fixture`,
+`ssl_allocator_fixture`, `ssl_error_strings`, `os_descriptor_limit`, and on
+Linux `transfer_alloc_fault`, `uv_sync_alloc_fault`, and
+`thread_retirement_fault`) are linked by fresh child processes launched by
+individual tests; the child-only helpers are excluded from the aggregate link.
+Each `$(TITAN_TEST_BUILD_DIR)/<stem>.o` target (`titan_test_native_rule`)
+depends on `spec/fixtures/stdlib/native/<stem>.c` and `FORCE`, invokes
+`$(TEST_TITANC) -c --incremental --output
 $(TITAN_TEST_BUILD_DIR)/native/<stem>.o -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG)
---cflag=-std=c99 --cflag=-Wall --cflag=-Wextra --cflag=-Werror --cflag=-fPIC
--I spec/fixtures/stdlib/native <per-helper flags> --c-source <stem>.c` with the
-helper's `TITAN_EXTRA_CPPFLAGS`/`CFLAGS`/`LDFLAGS`, verifies that
-`$(TITAN_TEST_BUILD_DIR)/native/<stem>.o/.native/*.o` contains exactly one
-regular object, and copies it to `$(TITAN_TEST_BUILD_DIR)/<stem>.o` with
-`cp -p` only when `cmp -s` reports a content difference. The installed compiler
-supplies its matching Lua and runtime SDK include directories automatically, and
-a certified hit leaves the fixed `.o` path and timestamp untouched.
+--print-c-objects --cflag=-std=c99 --cflag=-Wall --cflag=-Wextra
+--cflag=-Werror --cflag=-fPIC -I spec/fixtures/stdlib/native <per-helper
+flags> --c-source <stem>.c` with the helper's
+`TITAN_EXTRA_CPPFLAGS`/`CFLAGS`/`LDFLAGS`, requires the single reported path to
+be absolute and to name a file, and copies it to
+`$(TITAN_TEST_BUILD_DIR)/<stem>.o` with `cp -p` only when `cmp -s` reports a
+content difference. Native nodes are keyed by canonical source path, so a
+moved checkout leaves nodes for its old location in the per-helper output
+tree; only the compiler-reported path selects the fixed copy. The installed
+compiler supplies its matching Lua and runtime SDK include directories
+automatically, and a certified hit leaves the fixed `.o` path and timestamp
+untouched.
 
 The pure-C `$(TITAN_TEST_BUILD_DIR)/os_process_host_child` executable is a
 direct `$(CC)` rule that depends only on

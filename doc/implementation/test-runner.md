@@ -414,13 +414,14 @@ the test source hierarchy below `out/tests`, aggregate `--c-source` objects live
 in `out/tests/.native/`, and the link certificate and synthetic
 runner/entrypoint live under `out/tests/.titan-links/<key>/`.
 
-Child-only C fixture objects (`sqlite3_worker_fixture.o`,
+Fixed fixture objects (`uv_stdio_probe.o`, `sqlite3_worker_fixture.o`,
 `ssl_allocator_fixture.o`, `ssl_error_strings.o`, `os_descriptor_limit.o`, and
 on Linux `transfer_alloc_fault.o`, `uv_sync_alloc_fault.o`, and
 `thread_retirement_fault.o`) are certified by separate `$(TEST_TITANC) -c
---incremental --output $(TITAN_TEST_BUILD_DIR)/native/<stem>.o ... --c-source`
-rules and copied to `$(TITAN_TEST_BUILD_DIR)/<stem>.o` only when `cmp -s`
-detects a content change; `os_process_host_child` is compiled directly by
+--incremental --output $(TITAN_TEST_BUILD_DIR)/native/<stem>.o
+--print-c-objects ... --c-source` rules; each copies the object path that
+`titanc` reports to `$(TITAN_TEST_BUILD_DIR)/<stem>.o` only when `cmp -s`
+detects a content change. `os_process_host_child` is compiled directly by
 `$(CC)` from its C source and `$(TITAN_TEST_BUILD_DIR)/native-flags.config`
 ([native test aggregate and C fixture
 rules](build-script-audit.md#native-test-aggregate-and-c-fixture-rules)). After

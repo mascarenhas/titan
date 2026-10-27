@@ -128,7 +128,7 @@ version are misses.
 
 The C driver maps parsed declaration positions through the preprocessor's
 existing output origins (`cdriver.declaration_scope_resolver`,
-`c-parser/cdriver.lua:723-772`). Runtime identity is nominal: the declaring
+`c-parser/cdriver.lua`). Runtime identity is nominal: the declaring
 header's `realpath` (`"c-header-" .. sha256("physical-header\0" .. realpath)`)
 and the C declaration determine identity independently of the consuming Titan
 module, and `declaration_scope_resolver` records an `origin` dependency input
@@ -183,8 +183,8 @@ from physical filesystem observations, using canonical protocol constants from
   parse.
 
 Each `file` dependency may also carry a physical `observation` table validated
-by `cpp.copy_header_observation` (`cpp.lua:172-191`; schema in
-`titan-compiler/declarationschemas.lua:137-143`):
+by `cpp.copy_header_observation` (`cpp.lua`; schema in
+`titan-compiler/declarationschemas.lua`):
 
 ```lua
 {
@@ -198,14 +198,21 @@ by `cpp.copy_header_observation` (`cpp.lua:172-191`; schema in
 }
 ```
 
-`titan-compiler/io.lua` sets `time_precision = "coarse"` on the synchronous
-LuaFileSystem strategy because LuaFileSystem reports floating-point seconds
-rather than a guaranteed native nanosecond clock; a zero nanosecond fraction is
-never used to infer nanosecond precision. On Windows, `Sync` exposes no device
-or inode, so no reusable `observation` is saved (`reusable = false`), while a
-local `guard` observation still surrounds each read.
+The synchronous strategy in `titan-compiler/io.lua` reads metadata through the
+runtime's native `titan._stat_precise(path, follow)` whenever the `titan`
+support library loads, as it does in every installed `titanc`. The native call
+returns integer `mtime_ns` and `ctime_ns` and opaque `dev`/`ino` strings:
+POSIX `st_dev`/`st_ino`, or on Windows the volume serial number and the
+128-bit `FileIdInfo` file ID, with `ChangeTime` as the change time. Those
+observations declare `"ns"` precision and are reusable. Without the native
+library (pure-Lua harnesses), `Sync` falls back to LuaFileSystem and reports
+`"coarse"` precision, because LuaFileSystem exposes floating-point seconds
+rather than a guaranteed native nanosecond clock; a zero nanosecond fraction
+is never used to infer nanosecond precision. The Windows fallback exposes no
+device or inode, so no reusable `observation` is saved (`reusable = false`),
+while a local `guard` observation still surrounds each read.
 
-`cpp.revalidate_header_input(previous, options)` (`cpp.lua:278-355`, re-exported
+`cpp.revalidate_header_input(previous, options)` (`cpp.lua`, re-exported
 as `cdriver.revalidate_header_input`) returns
 `refreshed_input, err, changed, reason`:
 
@@ -217,7 +224,8 @@ as `cdriver.revalidate_header_input`) returns
   `changed_seconds`, `changed_nanoseconds`, and `physical_identity`, and
   `strategy:readable(path)` is true.
 * **Guarded fresh read (`file_reads`, `file_hashes`).** In all other cases
-  (including every synchronous `titanc` build), `revalidate_header_input` reads
+  (including every build that uses the coarse LuaFileSystem fallback),
+  `revalidate_header_input` reads
   the file once per `options.header_validation` pass, checks that `physical_header`
   and `guard` before and after the read are identical (returning
   `nil, "C header changed while it was read: <path>", true, "changed-during-read"`
