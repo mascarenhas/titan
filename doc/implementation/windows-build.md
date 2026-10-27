@@ -347,10 +347,16 @@ and live beside it under `<output>/.titan-links/<key>/synthetic/` on certified
 CLI builds (or at the mapped entrypoint stem for direct `driver.compile_program`
 callers).
 
-`compile_windows_program` stages and validates the provider DLL and launcher EXE
-in sibling staging directories, then commits both images as one recoverable set
-through `windows_publication.publish_program` ([Windows DLL
-publication](#windows-dll-publication)).
+`compile_windows_program` stages the provider DLL and launcher EXE in sibling
+`<final-basename>.stage.tmp.<unique>` directories beside their destinations,
+then commits both images as one recoverable set through
+`windows_publication.publish_program` ([Windows DLL
+publication](#windows-dll-publication)). The staged provider is validated in a
+fresh child Lua process, the same controlled runner the library branch uses,
+which runs the unchanged `validate_library_image` checks (ABI acceptance,
+type and layout decoding, and resolution of each logical module's init and
+`luaopen_*` entries without calling them). The coordinator never maps the
+staged DLL itself, so no process-lifetime loader handle can pin the stage.
 
 `spec/support/generate_windows_launcher_fixture.lua` emits the actual driver C,
 `.def`, manifest, and resource text for the native
@@ -671,6 +677,19 @@ changing its public pathname; caught failures restore only already committed
 files in reverse order. Failed restoration keeps its backup and reports the
 path's error. This is byte recovery, not metadata preservation, process-crash
 atomicity, or protection against concurrent publishers.
+
+After publication, both program staging directories (or the library's) are
+removed by one strategy-backed recursive helper that does not follow links and
+reports the exact path that failed. A cleanup failure after a successful
+publication is reported as such: the public images stay committed and are not
+rolled back, but the invocation fails and records no final-link certificate.
+A failed validation or publication keeps its own diagnostic and also reports
+any cleanup failure. On the next linking invocation, while it still holds the
+output locks and before preparing or accepting the final-link certificate,
+`titanc` removes leftover stage directories for its known final outputs. Only
+non-link directories named exactly `<final-basename>.stage.tmp.<nonempty>`
+inside a locked output domain qualify; unrelated names, other temporary
+namespaces, and matching files or links are left alone.
 
 Stale-shim retirement is not implemented on Windows: the prior DLL does not
 carry the old physical membership inventory, and a matching banner or

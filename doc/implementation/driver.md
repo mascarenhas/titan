@@ -1752,9 +1752,11 @@ dependency-report flag, appended only to the final Unix executable link),
 public outputs), `output_module`, `output_root`, `coverage_runtime`,
 `module_names`, `archive_entries`, `archive_names`, and
 `validate_titan_support`. On Windows, `compile_windows_program` stages both the
-provider `.dll` and launcher `.exe` and publishes them as one recoverable set
-via `windows_publication.publish_program` (committing the `.dll` before the
-`.exe` after `before_commit`).
+provider `.dll` and launcher `.exe`, validates the staged DLL in a fresh child
+process, and publishes them as one recoverable set via
+`windows_publication.publish_program` (committing the `.dll` before the `.exe`
+after `before_commit`); staging cleanup failures and stale-stage retirement
+are described in [Windows DLL publication](windows-build.md#windows-dll-publication).
 Filesystem source descriptors cache:
 
 | Form for `foo.bar` | `program_output` |
