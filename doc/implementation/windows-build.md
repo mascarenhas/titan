@@ -700,7 +700,11 @@ held lock directory, or the parent or one of its ancestors contains a regular
 lock file. An `--output` or `--exe` spelled through a junction of a held
 directory is therefore covered, because lock acquisition deduplicates the two
 spellings to one physical lock file. A missing identity, a linked lock file, or
-the unavailable pair `("0", "0")` never proves coverage.
+the unavailable pair `("0", "0")` never proves coverage. This requires Windows
+to let the process follow that junction: Redirection Guard can refuse a junction
+created by a non-administrator with `ERROR_UNTRUSTED_MOUNT_POINT` (448), and
+Titan does not bypass that policy. The real-junction CLI regression reports
+error 448 on its own junction as a pending capability, never as a pass.
 
 Before removing anything, cleanup lists every candidate's complete tree
 without following links. When the native inventory is complete, it checks

@@ -105,16 +105,19 @@ While linking, `titanc` builds each launcher and provider in a sibling
 `bin/app.exe.stage.tmp.<suffix>`) and removes it after publishing. If an
 interrupted build leaves one behind, the next link with the same outputs
 removes it, including when `--exe` reaches the locked output directory through
-a junction. These directory names belong to the compiler: if a leftover one
-contains a Titan source, C header, `--c-source` file, `-X` object, linker input,
-compiler or linker tool, or output of the current build, linking fails with
-`refusing to retire stale Windows staging` and deletes nothing. Move that file
-elsewhere and build again. When `titanc` cannot identify every file and tool
-the link uses (for example with an uncertified compiler or linker flags it
-cannot interpret), any leftover stage directory stops the link with the same
-message, followed by `the native link and tool inventory is incomplete
-(<reason>)`. Inspect that directory, move anything you need, delete it, and
-build again. Builds without leftover stage directories are unaffected.
+a junction that Windows allows the process to follow (Redirection Guard can
+refuse a junction created by a non-administrator with error 448, and Titan
+does not bypass that policy). These directory names belong to the compiler: if
+a leftover one contains a Titan source, C header, `--c-source` file, `-X`
+object, linker input, compiler or linker tool, or output of the current build,
+linking fails with `refusing to retire stale Windows staging` and deletes
+nothing. Move that file elsewhere and build again. When `titanc` cannot
+identify every file and tool the link uses (for example with an uncertified
+compiler or linker flags it cannot interpret), any leftover stage directory
+stops the link with the same message, followed by `the native link and tool
+inventory is incomplete (<reason>)`. Inspect that directory, move anything you
+need, delete it, and build again. Builds without leftover stage directories
+are unaffected.
 
 Deliver the matching `lua55.dll` and native dependency DLLs beside the
 executables. Lua's Windows `!` path expansion means the running executable's
