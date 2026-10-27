@@ -388,6 +388,17 @@ reports the exact component:
    context by description argv; the complete identity is memoized by command,
    flags, target profile, and executable path.
 
+   Executable admission follows the operating system's own choice. On POSIX,
+   an explicit path is checked directly and a bare command name walks `PATH`
+   in order; either admits the first regular
+   file for which the I/O strategy's `executable(path)` capability reports
+   `true` (effective-user `X_OK`, so owner-only or group-only execute bits
+   are judged as the kernel would, and an execute-only file need not be
+   readable); a missing capability or an indeterminate answer fails the
+   selection rather than guessing from mode bits. On Windows the first
+   regular file is admitted whether or not it is readable. Admission never
+   reads tool contents, and the physical identity it records is unchanged.
+
    Tool executables are certified by self-description plus physical metadata
    rather than by hashing the compiler binary bytes. The change timestamp
    (`ctime` on POSIX, `ChangeTime` on Windows through the native precise stat)

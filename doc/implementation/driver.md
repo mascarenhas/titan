@@ -893,6 +893,7 @@ backend-specific records, arrays, error objects, or task handles.
 | `stat(path)` | `metadata, nil`, `nil, nil` for a clean missing path, or `nil, message`. Follows the final symbolic link. |
 | `lstat(path)` | The same result convention as `stat`, but describes the final symbolic link itself. |
 | `readable(path)` | One boolean. `true` means the path can be opened for binary reading; absence, invalid input, and ordinary open failures are `false`. |
+| `executable(path)` (optional) | `true`, `false`, or `nil, message`. Whether the current process may execute `path` under its effective user, groups, and ACLs; the synchronous POSIX strategy uses native `faccessat(AT_EACCESS, X_OK)` and neither opens nor reads the file. Tool selection (`incremental.physical_executable`) requires this capability on POSIX: a strategy without it, or an indeterminate `nil, message`, fails selection closed rather than guessing from mode bits or readability. |
 | `read_file(path, max_bytes?)` | `bytes, nil` or `nil, message`. Without a bound, reads the complete file as a binary-safe Lua string. A bound must be a nonnegative integer; the method returns the complete file when its size is at most that bound, or exactly the first `max_bytes + 1` bytes when it is larger. This optional form lets bounded decoders detect overflow without materializing an unbounded replacement. |
 | `write_file(path, bytes)` | `true, nil` or `nil, message`. Publishes only complete contents: an observer sees complete file contents. Windows replacement may briefly leave the destination absent between removal and rename. Failure and cancellation must not leak the strategy's sibling temporary. If cancellation races the final rename, the destination may contain either complete version. |
 | `list(path)` | A dense one-based array of entry basenames, or `nil, message`. `.` and `..` are excluded and order is unspecified. |
@@ -2214,8 +2215,9 @@ modules. Its table (`ltitanlib.c` `titanlib`) exports the user-facing
 the traceback pin discipline, the loader helpers `_loadlib` and
 `_loadlibglobal`, the compiler digest `_sha256_binary`, the output-tree lock
 `_output_lock_open`, the precise file observation `_stat_precise`, on Windows
-only `_abivalue` and `_native_process_tree_guard`, and elsewhere the compiler's
-jobserver and signal helpers:
+only `_abivalue` and `_native_process_tree_guard`, and elsewhere the
+effective-permission query `_executable_access` (backing `Sync:executable`)
+and the compiler's jobserver and signal helpers:
 
 ```lua
 -- Lua
