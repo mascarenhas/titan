@@ -205,15 +205,14 @@ local function posix_model_it(name, callback)
         platform.windows = false
         if previous then
             -- Host module-load paths on Windows carry drive letters (`C:/...`).
-            -- Keep resolver context validation intact without reinterpreting
-            -- native host installation roots as relative POSIX paths.
+            -- Delegate to the real production `driver.initialize_layout` so its
+            -- context/strategy validation runs unchanged while skipping only
+            -- the host-root reinterpretation step.
             driver.initialize_layout = function(context)
-                if type(context) ~= "table" or context.io == nil then
-                    error("compiler layout initialization requires a resolver context", 2)
+                if type(context) == "table" and context.io ~= nil then
+                    context._layout_initialized = true
                 end
-                compiler_io.validate(context.io, 2)
-                context._layout_initialized = true
-                return true
+                return previous_driver.initialize_layout(context)
             end
         end
         local completed, failure = xpcall(callback, debug.traceback)
