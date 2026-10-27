@@ -705,7 +705,7 @@ dogfooding](test-runner.md#repository-dogfooding)).
 `spec/support/windows_stdlib_tests.sh` requires a local fixed NTFS workspace
 marked with `.titan-test-owner` (`titan-windows-stdlib-tests-v1`), with no
 directory reparse points and no overlap with the supplied SDK prefix. The
-harness and the `Makefile.win` native rules use only Bash 3.2 features:
+harness and its native-executable helper use only Bash 3.2 features:
 NUL-delimited `read -r -d ''` loops rather than `mapfile`, `find -print0`
 rather than `globstar`, and a small Perl filter rather than associative arrays
 for manifest set differences:
@@ -730,12 +730,20 @@ for manifest set differences:
    the harness writes `work/native-flags.config` (recording
    `TITAN_BUILD_PROFILE`, `CC`, `cppflags`, `cflags`, `ldflags`, and `CC
    --version`) via copy-if-different and invokes `make -f Makefile.win
-   windows-stdlib-test-native TITAN_TEST_BUILD_DIR=<work>`. That target builds
-   `sdk/bin/process child ação 東京.exe` (from `os_process_host_child.c` and
-   `os_process_host_child_windows.h`) and `sdk/bin/windows-test-supervisor.exe`
-   (from `windows_test_supervisor.c`). Both rules depend only on their authored
-   sources and `native-flags.config`, with no compiler or provider timestamp
-   prerequisites.
+   windows-stdlib-test-native TITAN_TEST_BUILD_DIR=<work>`. That phony target
+   depends on the authored `os_process_host_child.c`,
+   `os_process_host_child_windows.h`, and `windows_test_supervisor.c`,
+   `native-flags.config`, and the recipe script, and runs
+   `spec/support/build_windows_stdlib_native.sh <work>` in UTF-8 MSYS Bash.
+   Native Make's ANSI recipes and file checks never see the Unicode output
+   name. The script, which runs only under `CLANG64` in an owner-marked
+   workspace, reads the NUL-delimited compiler, preprocessor, compile, and link
+   argv files and builds `sdk/bin/process child ação 東京.exe` and
+   `sdk/bin/windows-test-supervisor.exe` with `-municode` and `cygpath -m`
+   paths. Each output is rebuilt only when it is missing or older than one of
+   its authored sources, `native-flags.config`, or the script itself, so an
+   unchanged workspace runs no compiler; a failed compile removes its partial
+   output. Neither executable depends on the Titan compiler or provider.
 3. **Fixed C fixture objects:** for each of `uv_stdio_probe` (also an
    aggregate `--c-source` helper), `sqlite3_worker_fixture`,
    `ssl_allocator_fixture`, `ssl_error_strings`, and `os_descriptor_limit`, the

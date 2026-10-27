@@ -652,9 +652,11 @@ workspace using NUL-delimited owned-input manifests (`sdk.inputs`,
 `source.inputs`, `fixtures.inputs`, `native-headers.inputs`) and copy-if-different
 comparisons, preserving generated objects, providers, certificates, and `.gcno`
 notes across builds. Pure-C `process child ação 東京.exe` and
-`windows-test-supervisor.exe` are built via `Makefile.win`
-`windows-stdlib-test-native` against `native-flags.config`, child-only C
-fixture `.o` files are certified via `titanc -c --incremental --c-source` in
+`windows-test-supervisor.exe` are built through `Makefile.win`
+`windows-stdlib-test-native`, which delegates to the UTF-8 Bash helper
+`spec/support/build_windows_stdlib_native.sh` and its timestamp freshness
+checks against `native-flags.config`. The fixed C fixture `.o` files are
+certified via `titanc -c --incremental --print-c-objects --c-source` in
 `work/native/<fixture>` and copied to `work/cwd/.titan-tests/<fixture>.o` when
 changed, and the aggregate is built with one `titanc --output ... --test
 --incremental --no-uv-bootstrap -j "$TITAN_JOBS" --exe
