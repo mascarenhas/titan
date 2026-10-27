@@ -2463,7 +2463,10 @@ are in [Lua interop internals](lua-interop-internals.md).
 
 `titan-compiler/process.lua` provides the cross-platform `luv` transport
 (`luv >= 1.52.1` on Linux, macOS, and Windows, anchored once per Lua state in
-the registry under `"titan-compiler.process: luv"`). On every platform, the
+the registry under `"titan-compiler.process: luv"`; on Windows,
+`platform.getenv` reads environment variables through the same anchored
+module, so both share one `luv` module table and native loop whichever loads
+it first). On every platform, the
 build coordinator uses `process.start_worker` (spawning `luv.exepath()` with a
 coordinator-to-worker request pipe on `fd 3`, a worker-to-coordinator pipe on
 `fd 4`, captured stdout/stderr pipes, and inherited POSIX `.titan-build.lock`
