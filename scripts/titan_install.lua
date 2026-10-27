@@ -184,6 +184,56 @@ local function prepare_windows_cleanup_launcher(destination)
         "\n"):gsub("\n", "\r\n")))
 end
 
+-- The installation's own native link inputs: the Titan library directory's
+-- providers and archives plus top-level archives this installer copied.
+local function sdk_link_inputs(inventory, common_prefix)
+    local release, inputs = nil, {}
+    for _, relative in ipairs(inventory) do
+        local directory = relative:match("^lib/titan/([^/]+)/[^/]+$")
+        if directory then
+            assert(release == nil or release == directory,
+                "SDK payload has several Titan library versions")
+            release = directory
+        end
+        if not lua_owned(relative, common_prefix) and
+           (directory or relative:match("^lib/[^/]+%.a$")) then
+            inputs[#inputs + 1] = relative
+        end
+    end
+    return release, inputs
+end
+
+-- Record content digests with precise observations for titanc, which reuses
+-- them only while every observation is unchanged. The just-installed provider
+-- supplies the digest and precise stat; the compiler owns the format. A
+-- payload without a loadable compiler and provider (installer fixtures)
+-- records nothing, and titanc then reads and hashes these inputs as usual.
+local function publish_sdk_digests(destination, inventory, common_prefix)
+    local release, inputs = sdk_link_inputs(inventory, common_prefix)
+    if not release then return nil end
+    local compiler, incremental = pcall(require, "titan-compiler.incremental")
+    if not compiler then return nil end
+    local relative = "lib/titan/" .. release .. "/" .. incremental.SDK_DIGESTS
+    local manifest = destination .. "/" .. relative
+    if lfs.symlinkattributes(manifest) then assert(os.remove(manifest)) end
+    local search = package.cpath
+    package.cpath = destination .. "/lib/titan/" .. release .. "/?." ..
+        (windows and "dll" or "so") .. ";" .. search
+    local loaded, support = pcall(require, "titan")
+    package.cpath = search
+    if not loaded or type(support) ~= "table" or type(support._sha256_binary) ~= "function" or
+       type(support._stat_precise) ~= "function" then
+        return nil
+    end
+    local compiler_io = require "titan-compiler.io"
+    local context = { io = compiler_io.new_sync(),
+        cache_adapter = { sha256_binary = support._sha256_binary } }
+    local paths = {}
+    for _, path in ipairs(inputs) do paths[#paths + 1] = destination .. "/" .. path end
+    assert(incremental.write_sdk_digests(context, manifest, paths))
+    return relative
+end
+
 function installer.publish(package_dir, destination, lua_prefix, program)
     assert(package_dir and destination and lua_prefix and program,
         "publish requires package directory, tree, Lua prefix and LuaRocks program")
@@ -226,11 +276,12 @@ function installer.publish(package_dir, destination, lua_prefix, program)
                 relative:match("[.]dll$"))
         end
     end
+    local digests = publish_sdk_digests(destination, inventory, common_prefix)
     mkdir(package_dir .. "/installer")
     local location <close> = assert(io.open(package_dir .. "/installer/location.lua", "wb"))
     assert(location:write(string.format(
-        "return { tree = %q, lua_dir = %q, luarocks = %q }\n",
-        destination, lua_prefix, program)))
+        "return { tree = %q, lua_dir = %q, luarocks = %q, digests = %s }\n",
+        destination, lua_prefix, program, digests and string.format("%q", digests) or "nil")))
     prepare_windows_cleanup_launcher(destination)
     return true
 end
@@ -265,6 +316,7 @@ function installer.uninstall(package_dir, program)
                     for _, relative in ipairs(files(candidate .. "/titan-sdk")) do
                         if titan_owned(relative) then inventory[relative] = true end
                     end
+                    if type(installed.digests) == "string" then inventory[installed.digests] = true end
                 end
             end
         end

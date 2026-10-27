@@ -91,6 +91,53 @@ describe("retained Titan SDK installation", function()
         assert.equal(prefix .. "/bin/luarocks", location.luarocks)
     end)
 
+    it("records SDK link-input digests that titanc reuses and removes them on uninstall", function()
+        local support = require "titan"
+        local compiler_io = require "titan-compiler.io"
+        local incremental = require "titan-compiler.incremental"
+        local sha256 = require "titan-compiler.sha256"
+        local private = workspace .. "/rocks/titan/0.6.0-1"
+        local prefix = workspace .. "/SDK"
+        local payload = private .. "/titan-sdk"
+        local recorded = { "lib/titan/0.6/titan.so", "lib/titan/0.6/titan.a",
+            "lib/titan/0.6/libtitan.a", "lib/libbacktrace.a" }
+        for _, name in ipairs(recorded) do write(payload .. "/" .. name, "payload " .. name) end
+        write(payload .. "/lib/titan/0.6/titan.so.dSYM/Contents/Resources/DWARF/titan.so", "debug")
+        write(payload .. "/lib/liblua.a", "packaged Lua archive")
+        write(payload .. "/include/titan.h", "Titan header")
+        write(prefix .. "/lib/liblua.a", "existing Lua owner")
+
+        assert(installer.publish(private, prefix, prefix, prefix .. "/bin/luarocks"))
+
+        local location = assert(loadfile(private .. "/installer/location.lua", "t", {}))()
+        assert.equal("lib/titan/0.6/sdk-digests", location.digests)
+        local function context()
+            return { io = compiler_io.new_sync(),
+                cache_adapter = { sha256_binary = support._sha256_binary } }
+        end
+        local ctx = context()
+        assert(incremental.load_sdk_digests(ctx, prefix .. "/" .. location.digests))
+        local entries = 0
+        for path in pairs(ctx.incremental.sdk.files) do
+            entries = entries + 1
+            assert.falsy(path:find("dSYM", 1, true), path)
+            assert.falsy(path:find("liblua", 1, true), path)
+        end
+        assert.equal(#recorded, entries)
+        for _, name in ipairs(recorded) do
+            local digest, bytes = incremental.file_digest(ctx, prefix .. "/" .. name)
+            assert.equal(sha256.hex("payload " .. name), digest)
+            assert.is_nil(bytes)
+        end
+        local counters = incremental.counters(ctx)
+        assert.equal(#recorded, counters.sdk_reuses)
+        assert.equal(0, counters.file_reads)
+
+        os.execute = function() return true, "exit", 0 end
+        assert(installer.uninstall(private))
+        assert.is_nil(lfs.symlinkattributes(prefix .. "/" .. location.digests))
+    end)
+
     it("preserves external files when LuaRocks refuses dependency-breaking removal", function()
         local private = workspace .. "/rocks/titan/0.6.0-1"
         local prefix = workspace .. "/SDK"

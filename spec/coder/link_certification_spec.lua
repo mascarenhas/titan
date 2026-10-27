@@ -1190,19 +1190,100 @@ describe("persistent precise file certification", function()
         assert.equal(0, ctx.io.reads[root .. "/main.o"] or 0)
     end)
 
-    it("keeps fresh post-link rehashing even with a warm persistent cache", function()
-        seed()
+    local function sdk_manifest(sdk)
+        local manifest = root .. "/sdk-digests"
+        local inputs = {}
+        for _, leaf in ipairs(sdk) do inputs[#inputs + 1] = root .. "/" .. leaf end
+        assert(incremental.write_sdk_digests(model:context(), manifest, inputs))
+        return manifest
+    end
+    local function sdk_context(manifest)
         local ctx = model:context()
+        assert(incremental.load_sdk_digests(ctx, manifest))
+        return ctx
+    end
+
+    it("keeps fresh post-link rehashing for every input outside the SDK digest manifest", function()
+        seed()
+        local sdk = { "provider.so", "archive.a" }
+        local ctx = sdk_context(sdk_manifest(sdk))
         local ticket = certificate.prepare(ctx, spec)
         assert.equal(0, ctx.io.reads[root .. "/main.o"] or 0)
         assert(certificate.commit(ctx, ticket))
         for _, leaf in ipairs(bulk) do
-            assert.is_true((ctx.io.reads[root .. "/" .. leaf] or 0) > 0, leaf)
+            local reads = ctx.io.reads[root .. "/" .. leaf] or 0
+            if leaf == sdk[1] or leaf == sdk[2] then
+                assert.equal(0, reads, leaf)
+            else
+                assert.is_true(reads > 0, leaf)
+            end
         end
+        assert.is_true(incremental.counters(ctx).sdk_reuses > 0)
         saved(ctx)
         local next_context = model:context()
         assert.is_true(certificate.check(next_context, certificate.prepare(next_context, spec)))
         assert.equal(0, next_context.io.reads[root .. "/program"] or 0)
+    end)
+
+    it("reuses SDK manifest digests before and after a fresh link without reading them", function()
+        local sdk = { "provider.so", "archive.a", "runtime.o" }
+        local ctx = sdk_context(sdk_manifest(sdk))
+        local ticket = certificate.prepare(ctx, spec)
+        assert.is_false(certificate.check(ctx, ticket))
+        assert(certificate.commit(ctx, ticket))
+        for _, leaf in ipairs(sdk) do assert.equal(0, ctx.io.reads[root .. "/" .. leaf] or 0, leaf) end
+        local record = assert(certificate.read_record(ctx, ticket.record))
+        local plain = model:context()
+        assert.equal(record.input, certificate.prepare(plain, spec).input)
+        assert.is_true((plain.io.reads[root .. "/provider.so"] or 0) > 0)
+    end)
+
+    it("rehashes an SDK input whose precise observation changed", function()
+        local manifest = sdk_manifest({ "provider.so" })
+        local filename = root .. "/provider.so"
+        assert(model:context().io:write_file(filename, "replaced provider bytes"))
+        local ctx = sdk_context(manifest)
+        local ticket = certificate.prepare(ctx, spec)
+        local prepared = ctx.io.reads[filename] or 0
+        assert.is_true(prepared > 0)
+        assert(certificate.commit(ctx, ticket))
+        assert.is_true((ctx.io.reads[filename] or 0) > prepared)
+        assert.equal(0, incremental.counters(ctx).sdk_reuses)
+        local plain = model:context()
+        assert.equal(ticket.input, certificate.prepare(plain, spec).input)
+    end)
+
+    it("fails a link whose manifest-backed input changes before the post-link recheck", function()
+        local ctx = sdk_context(sdk_manifest({ "provider.so" }))
+        local ticket = certificate.prepare(ctx, spec)
+        assert.equal(0, ctx.io.reads[root .. "/provider.so"] or 0)
+        assert(model:context().io:write_file(root .. "/provider.so", "tampered provider"))
+        local ok, err = pcall(certificate.commit, ctx, ticket)
+        assert.is_false(ok)
+        assert.matches("link input changed during build: providers", err, 1, true)
+        assert.is_nil(certificate.read_record(ctx, ticket.record))
+    end)
+
+    it("ignores malformed, foreign-schema and coarse SDK manifests", function()
+        local manifest = root .. "/sdk-digests"
+        local codec = require "titan-compiler.graphcodec"
+        local foreign = assert(codec.encode({ schema = version.DIGEST_CACHE_SCHEMA,
+            digest = version.CERTIFICATE_DIGEST, canonicalization = version.CERTIFICATE_CANONICALIZATION,
+            abi = version.TITAN_ABI_VERSION, files = {}, objects = {} }))
+        for _, bytes in ipairs({ "not a manifest", foreign }) do
+            write(manifest, bytes)
+            local ctx = sdk_context(manifest)
+            assert.is_nil(ctx.incremental.sdk)
+            certificate.prepare(ctx, spec)
+            assert.is_true((ctx.io.reads[root .. "/provider.so"] or 0) > 0)
+        end
+        model.coarse = true
+        sdk_manifest({ "provider.so" })
+        model.coarse = false
+        local ctx = sdk_context(manifest)
+        assert.same({}, ctx.incremental.sdk.files)
+        certificate.prepare(ctx, spec)
+        assert.is_true((ctx.io.reads[root .. "/provider.so"] or 0) > 0)
     end)
 
     it("falls back to reads with coarse observations", function()

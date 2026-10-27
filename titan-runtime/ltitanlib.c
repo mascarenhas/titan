@@ -333,6 +333,22 @@ static const uint32_t titan_sha256_k[64] = {
   0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u,
 };
 
+/* Certification hashes every final-link input, including the standard
+** provider of several hundred megabytes, so compression speed bounds fresh
+** links. Hardware SHA-256 (x86 SHA extensions selected at run time, or the
+** ARMv8 SHA2 extension when the target guarantees it) computes the identical
+** FIPS 180-4 compression; selection never changes a digest. */
+#if (defined(__x86_64__) || defined(__i386__)) && \
+    (defined(__GNUC__) || defined(__clang__))
+#include <cpuid.h>
+#include <immintrin.h>
+#define TITAN_SHA256_X86 1
+#elif defined(__aarch64__) && defined(__ARM_FEATURE_SHA2)
+#include <arm_neon.h>
+#define TITAN_SHA256_ARM 1
+#endif
+
+#if !defined(TITAN_SHA256_ARM)
 static void titan_sha256_block(uint32_t state[8], const unsigned char *block) {
   uint32_t w[64];
   uint32_t a, b, c, d, e, f, g, h;
@@ -362,6 +378,93 @@ static void titan_sha256_block(uint32_t state[8], const unsigned char *block) {
   state[0] += a; state[1] += b; state[2] += c; state[3] += d;
   state[4] += e; state[5] += f; state[6] += g; state[7] += h;
 }
+#endif
+
+#if defined(TITAN_SHA256_X86)
+
+static int titan_sha256_x86_available(void) {
+  unsigned int a, b, c, d;
+  if (__get_cpuid_max(0, NULL) < 7 || !__get_cpuid(1, &a, &b, &c, &d) ||
+      !(c & bit_SSSE3) || !(c & bit_SSE4_1))
+    return 0;
+  __cpuid_count(7, 0, a, b, c, d);
+  return (b & bit_SHA) != 0;
+}
+
+__attribute__((target("sha,sse4.1,ssse3")))
+static void titan_sha256_x86(uint32_t state[8], const unsigned char *data,
+                             size_t blocks) {
+  const __m128i swap = _mm_set_epi64x(0x0c0d0e0f08090a0bLL, 0x0405060700010203LL);
+  __m128i abef, cdgh, msg[4];
+  __m128i tmp = _mm_shuffle_epi32(_mm_loadu_si128((const __m128i *)&state[0]), 0xB1);
+  cdgh = _mm_shuffle_epi32(_mm_loadu_si128((const __m128i *)&state[4]), 0x1B);
+  abef = _mm_alignr_epi8(tmp, cdgh, 8);
+  cdgh = _mm_blend_epi16(cdgh, tmp, 0xF0);
+  for (; blocks > 0; blocks--, data += 64) {
+    __m128i abef_saved = abef, cdgh_saved = cdgh;
+    int j;
+    for (j = 0; j < 4; j++)
+      msg[j] = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)(data + 16 * j)), swap);
+    for (j = 0; j < 16; j++) {
+      __m128i wk = _mm_add_epi32(msg[j & 3],
+          _mm_loadu_si128((const __m128i *)&titan_sha256_k[4 * j]));
+      cdgh = _mm_sha256rnds2_epu32(cdgh, abef, wk);
+      abef = _mm_sha256rnds2_epu32(abef, cdgh, _mm_shuffle_epi32(wk, 0x0E));
+      if (j < 12) {
+        __m128i next = _mm_add_epi32(_mm_sha256msg1_epu32(msg[j & 3], msg[(j + 1) & 3]),
+            _mm_alignr_epi8(msg[(j + 3) & 3], msg[(j + 2) & 3], 4));
+        msg[j & 3] = _mm_sha256msg2_epu32(next, msg[(j + 3) & 3]);
+      }
+    }
+    abef = _mm_add_epi32(abef, abef_saved);
+    cdgh = _mm_add_epi32(cdgh, cdgh_saved);
+  }
+  tmp = _mm_shuffle_epi32(abef, 0x1B);
+  cdgh = _mm_shuffle_epi32(cdgh, 0xB1);
+  _mm_storeu_si128((__m128i *)&state[0], _mm_blend_epi16(tmp, cdgh, 0xF0));
+  _mm_storeu_si128((__m128i *)&state[4], _mm_alignr_epi8(cdgh, tmp, 8));
+}
+#elif defined(TITAN_SHA256_ARM)
+
+static void titan_sha256_arm(uint32_t state[8], const unsigned char *data,
+                             size_t blocks) {
+  uint32x4_t abcd = vld1q_u32(&state[0]), efgh = vld1q_u32(&state[4]), msg[4];
+  for (; blocks > 0; blocks--, data += 64) {
+    uint32x4_t abcd_saved = abcd, efgh_saved = efgh;
+    int j;
+    for (j = 0; j < 4; j++)
+      msg[j] = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data + 16 * j)));
+    for (j = 0; j < 16; j++) {
+      uint32x4_t wk = vaddq_u32(msg[j & 3], vld1q_u32(&titan_sha256_k[4 * j]));
+      uint32x4_t previous = abcd;
+      abcd = vsha256hq_u32(abcd, efgh, wk);
+      efgh = vsha256h2q_u32(efgh, previous, wk);
+      if (j < 12)
+        msg[j & 3] = vsha256su1q_u32(vsha256su0q_u32(msg[j & 3], msg[(j + 1) & 3]),
+                                     msg[(j + 2) & 3], msg[(j + 3) & 3]);
+    }
+    abcd = vaddq_u32(abcd, abcd_saved);
+    efgh = vaddq_u32(efgh, efgh_saved);
+  }
+  vst1q_u32(&state[0], abcd);
+  vst1q_u32(&state[4], efgh);
+}
+#endif
+
+static void titan_sha256_blocks(uint32_t state[8], const unsigned char *data,
+                                size_t blocks) {
+#if defined(TITAN_SHA256_ARM)
+  titan_sha256_arm(state, data, blocks);
+#else
+#if defined(TITAN_SHA256_X86)
+  if (titan_sha256_x86_available()) {
+    titan_sha256_x86(state, data, blocks);
+    return;
+  }
+#endif
+  for (; blocks > 0; blocks--, data += 64) titan_sha256_block(state, data);
+#endif
+}
 
 static int sha256_binary(lua_State *L) {
   uint32_t state[8] = {
@@ -374,8 +477,8 @@ static int sha256_binary(lua_State *L) {
   uint64_t bits;
   luaL_checktype(L, 1, LUA_TSTRING);
   data = (const unsigned char *)lua_tolstring(L, 1, &length);
-  for (offset = 0; length - offset >= 64; offset += 64)
-    titan_sha256_block(state, data + offset);
+  offset = length - length % 64;
+  titan_sha256_blocks(state, data, offset / 64);
   rest = length - offset;
   memcpy(tail, data + offset, rest);
   tail[rest] = 0x80;
@@ -384,8 +487,7 @@ static int sha256_binary(lua_State *L) {
   bits = (uint64_t)length << 3;
   for (i = 0; i < 8; i++)
     tail[tail_length - 1 - i] = (unsigned char)(bits >> (8 * i));
-  titan_sha256_block(state, tail);
-  if (tail_length == 128) titan_sha256_block(state, tail + 64);
+  titan_sha256_blocks(state, tail, tail_length / 64);
   for (i = 0; i < 8; i++) {
     digest[4 * i] = (unsigned char)(state[i] >> 24);
     digest[4 * i + 1] = (unsigned char)(state[i] >> 16);

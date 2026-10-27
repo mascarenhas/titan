@@ -2379,6 +2379,7 @@ describe("compiler installation discovery", function()
             liblua = "/opt/titan/lib/liblua.a",
             titan_bin = "/opt/titan/lib/titan/0.6",
             lua_cpath = "/opt/titan/lib/titan/0.6/?.so",
+            sdk_digests = "/opt/titan/lib/titan/0.6/sdk-digests",
         }, paths)
 
         assert.same({

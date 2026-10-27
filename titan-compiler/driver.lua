@@ -331,6 +331,7 @@ function driver.installed_paths(root)
             "lib/liblua55.a" or "lib/liblua.a"),
         titan_bin = titan_lib,
         lua_cpath = root_join(titan_lib, platform.windows and "?.dll" or "?.so"),
+        sdk_digests = root_join(titan_lib, incremental.SDK_DIGESTS),
     }
 end
 

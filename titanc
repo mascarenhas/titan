@@ -362,6 +362,9 @@ if not platform.windows then
     locked_io._process_inherit = output_locks:descriptors()
 end
 incremental.load_digest_cache(resolver_context, args.output)
+if driver.INSTALLED and driver.INSTALL_PATHS then
+    incremental.load_sdk_digests(resolver_context, driver.INSTALL_PATHS.sdk_digests)
+end
 
 -- Stale-staging retirement protects every input and reservation preflight
 -- accepted for this invocation.
