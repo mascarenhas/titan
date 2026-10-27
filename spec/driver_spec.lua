@@ -841,7 +841,7 @@ describe("Windows launcher filenames", function()
         local in_bin = assert(driver.windows_program_paths("app.main", "bin/renamed"))
         assert.equal("bin/app.main.exe", original.executable)
         assert.equal("renamed.exe", renamed.executable)
-        assert.equal("bin/renamed.exe", in_bin.executable)
+        assert.equal(paths.normalize("bin/renamed.exe"), in_bin.executable)
         assert.equal(original.provider, renamed.provider)
         assert.equal(original.provider, in_bin.provider)
         assert.equal("lib/titan/0.6/app/main.dll", original.provider)
@@ -1021,8 +1021,8 @@ describe("Windows launcher filenames", function()
             util.set_file_contents = function() return true end
             publication.publish_program = function(images)
                 assert.is_true(fresh)
-                assert.equal("C:/build/lib/titan/0.6/app.dll", images.provider.destination)
-                assert.equal("C:/build/bin/app.exe", images.executable.destination)
+                assert.equal(paths.normalize("C:/build/lib/titan/0.6/app.dll"), images.provider.destination)
+                assert.equal(paths.normalize("C:/build/bin/app.exe"), images.executable.destination)
                 committed = true
                 return true
             end
@@ -1038,8 +1038,8 @@ describe("Windows launcher filenames", function()
             assert.matches("Windows program publication committed but staging cleanup failed", err, 1, true)
             assert.matches(retired[1] .. "/app.dll", err, 1, true)
             assert.matches("access denied", err, 1, true)
-            assert.same({ "C:/build/lib/titan/0.6/app.dll.stage.tmp.model",
-                "C:/build/bin/app.exe.stage.tmp.model" }, retired)
+            assert.same({ paths.normalize("C:/build/lib/titan/0.6/app.dll.stage.tmp.model"),
+                paths.normalize("C:/build/bin/app.exe.stage.tmp.model") }, retired)
         end, debug.traceback)
         platform.windows, platform.getenv, platform.native =
             previous.windows, previous.getenv, previous.native
