@@ -36,7 +36,7 @@ compile_program() {
   pending_output=$output
   "${compiler[@]}" -std=c99 -Wall -Wextra -Werror \
     ${cppflags[@]+"${cppflags[@]}"} ${cflags[@]+"${cflags[@]}"} ${ldflags[@]+"${ldflags[@]}"} -municode \
-    "$(cygpath -m "$source")" -o "$(cygpath -m "$output")"
+    "$(cygpath -m -C UTF8 "$source")" -o "$(cygpath -m -C UTF8 "$output")"
   [[ -f $output ]]
   pending_output=
 }
