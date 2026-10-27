@@ -913,16 +913,10 @@ local function miss_line(context, node, reason, detail)
         (detail ~= nil and detail ~= "" and (" " .. tostring(detail)) or "") .. "\n"
 end
 
--- Build the requested closure. `request`: roots (ordered), loader_options
--- (the ordinary loader options), incremental, test, coverage, c_parts,
--- pretty_print, verbose, jobs (the local cap), locks (the invocation's
--- lock set from build.lock_outputs). On success every source module of the
--- closure is restored into driver.imported and the resolver context is
--- finalized. Returns true, or nil, diagnostics and the cancelling signal.
-function build.run(context, request)
+-- Resolve the complete closure without checking or compiling source modules.
+-- Callers run output preflight against this plan before any native writes.
+function build.plan(context, request)
     local driver = require "titan-compiler.driver"
-    local incremental = request.incremental and require "titan-compiler.incremental"
-
     local loader_options = {}
     for key, value in pairs(request.loader_options or {}) do loader_options[key] = value end
     loader_options.context = context
@@ -937,8 +931,23 @@ function build.run(context, request)
         if not ok then append_all(diagnostics, err) end
     end
     if #diagnostics > 0 then return nil, diagnostics end
-    local plan, plan_err = driver.resolution_plan(context)
-    if not plan then return nil, append_all({}, plan_err) end
+    local plan, plan_error = driver.resolution_plan(context)
+    if not plan then return nil, append_all({}, plan_error) end
+    return plan
+end
+
+-- Build the requested closure. `request`: roots (ordered), loader_options
+-- (the ordinary loader options), incremental, test, coverage, c_parts,
+-- pretty_print, verbose, jobs (the local cap), locks (the invocation's
+-- lock set from build.lock_outputs). On success every source module of the
+-- closure is restored into driver.imported and the resolver context is
+-- finalized. Returns true, or nil, diagnostics and the cancelling signal.
+function build.run(context, request)
+    local driver = require "titan-compiler.driver"
+    local incremental = request.incremental and require "titan-compiler.incremental"
+
+    local plan, diagnostics = build.plan(context, request)
+    if not plan then return nil, diagnostics end
     if request.preflight then
         local ready, preflight_err = request.preflight(plan)
         if not ready then return nil, append_all({}, preflight_err) end

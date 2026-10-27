@@ -625,6 +625,28 @@ function Sync:run(argv, options)
     end
     local command = captured_command(normalized)
     if options.stderr_to_stdout ~= false then command = command .. " 2>&1" end
+    if self._process_inherit then
+        -- Keep the ordinary shell/locale/redirection semantics, but make the
+        -- coordinator's output leases explicit across exec and descendants.
+        local captured, result = pcall(function()
+            return require("titan-compiler.process").capture(
+                { "/bin/sh", "-c", command }, {
+                    inherit = self._process_inherit,
+                    inherit_environment = true,
+                    stderr_to_stdout = false,
+                })
+        end)
+        if not captured then
+            return { started = false, ok = false, command = command,
+                diagnostic = "could not start captured command: " .. tostring(result) }
+        end
+        if result.started and result.why then
+            return shell_result(command, result.output or "",
+                result.ok, result.why, result.status)
+        end
+        result.command = command
+        return result
+    end
 
     local opened, pipe, popen_err = pcall(lua_io.popen, command,
         "r")
@@ -781,7 +803,10 @@ function Sync:run_batch(commands, options)
                     local log, log_err = self:tmpname()
                     if not log then return nil, log_err end
                     local called, process, launch_err = pcall(jobs.launch,
-                        channel, item.argv, item.command, log, log, position)
+                        channel, item.argv, item.command, log, log, position, nil,
+                        not platform.windows and self._process_inherit and {
+                            inherit = self._process_inherit,
+                        } or nil)
                     if not called or not process then
                         remove_log(log)
                         if not called then error(process, 0) end
