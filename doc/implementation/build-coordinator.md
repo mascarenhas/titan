@@ -244,11 +244,25 @@ pass itself never runs the checker, code generator, or C preprocessor:
   object (so a smaller split policy can still retire them), and
   `<stem>.priv.h`, `<stem>.titan.h`, and `<stem>.ffi.h`. Potential part names
   are reserved even when the module would generate fewer parts. An existing
-  generated header must carry its ownership marker, and an existing file at a
-  reserved `.c` path must begin with the generated-C marker (or the exact
-  legacy fixed-helper or split-header prefix); otherwise the build fails with
-  `native provider output '<path>' for <owner> aliases input '<path>' (not
-  compiler-generated C)` instead of overwriting authored source.
+  generated header must carry its ownership marker. An existing file at a
+  reserved `.c` path is compiler-owned only in these cases:
+  * It begins with the generated-C marker, optionally after a coverage
+    `#line 2 "..."` line.
+  * It contains the exact legacy fixed helper from `cpreamble.fixed_prefix`
+    (compared without whitespace, with `#line` directive lines removed).
+  * Its first line is `#include "<H>"` and the next text is the legacy split
+    unit's `__ELF__` visibility push. `<H>` must name the module's current
+    `<stem>.priv.h`. Because pre-marker split units name their private header
+    by the absolute path they were generated at, an output tree that has been
+    moved or copied may instead name any absolute path with the same
+    `<leaf>.priv.h`, but only while `<stem>.priv.h` is a regular file that
+    begins with the private-header marker.
+
+  Otherwise the build fails with `native provider output '<path>' for <owner>
+  aliases input '<path>' (not compiler-generated C; move it or use another
+  output directory)` instead of overwriting authored source. Recognition only
+  allows the compiler to overwrite the file; whether any object is reused is
+  still decided by its certificate.
 * **Final outputs.** The pass reserves the actual program path and Darwin
   `.dSYM`, the Windows launcher and provider DLL, or the library provider,
   archive, `.dSYM`, and generated Lua shims, including shims of modules
