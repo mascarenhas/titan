@@ -2359,7 +2359,11 @@ describe("compiler installation discovery", function()
         assert.equal(expected_parent,
             driver.resolve_installation_root(nil, alias .. "/.."))
 
-        assert(os.remove(alias))
+        if platform.windows then
+            assert(lfs.rmdir(alias))
+        else
+            assert(os.remove(alias))
+        end
         remove_tree(workspace)
     end)
 
@@ -4335,7 +4339,11 @@ describe("standalone output ownership", function()
         }, root .. "/program", root .. "/entrypoint.c", {})
         assert.truthy(ok, message)
 
-        assert(os.remove(linked))
+        if platform.windows then
+            assert(lfs.rmdir(linked))
+        else
+            assert(os.remove(linked))
+        end
         assert(lfs.rmdir(physical))
         assert(lfs.rmdir(root))
     end)
@@ -9634,7 +9642,10 @@ end
         local lexical = root .. "/include"
         local link = root .. "/ffi-sdk-link"
         local outer = root .. "/ffi-link-outer.h"
-        local selected_lookup = link .. "/../include/ffi-selected.h"
+        -- Win32 normalizes dots lexically; POSIX traverses the link before '..'.
+        local selected_lookup = platform.windows
+            and lexical .. "/ffi-selected.h"
+            or link .. "/../include/ffi-selected.h"
         local selected_contents = [[
 #define TITAN_LINK_VALUE 42
 typedef int titan_driver_symlink_value;
@@ -9672,7 +9683,11 @@ typedef double titan_driver_symlink_value;
             assert.is_string(first_search)
             assert.is_string(first_origin)
 
-            assert(os.remove(link))
+            if platform.windows then
+                assert(lfs.rmdir(link))
+            else
+                assert(os.remove(link))
+            end
             assert(lfs.link("ffi-link-second/nested", link, true))
             local restatted, restat_error, changed, reason =
                 driver.restat_c_header_dependencies(observed)
@@ -9693,7 +9708,8 @@ typedef double titan_driver_symlink_value;
                     header_input_identity(restatted, "origin", selected_lookup))
             end
 
-            write_file(second .. "/include/ffi-selected.h",
+            write_file(platform.windows and selected_lookup
+                or second .. "/include/ffi-selected.h",
                 "typedef long titan_driver_symlink_value;\n")
             local content_restatted, content_error, content_changed, content_reason =
                 driver.restat_c_header_dependencies(restatted)
@@ -9705,7 +9721,11 @@ typedef double titan_driver_symlink_value;
         end)
         local removed, remove_error = true
         if lfs.symlinkattributes(link, "mode") then
-            removed, remove_error = os.remove(link)
+            if platform.windows then
+                removed, remove_error = lfs.rmdir(link)
+            else
+                removed, remove_error = os.remove(link)
+            end
         end
         assert.truthy(completed, failure)
         assert.truthy(removed, remove_error)
