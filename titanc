@@ -591,6 +591,9 @@ if not args.compile_only and not args.print_ast then
         end
         for _, shim in ipairs(shims) do outputs[#outputs + 1] = { path = shim.filename } end
     end
+    local staging_ready, staging_error =
+        driver.cleanup_stale_staging(resolver_context, outputs, output_locks)
+    if not staging_ready then exit(staging_error) end
 
     local module_order = {}
     for name in pairs(resolver_context.source_names) do
@@ -1157,10 +1160,12 @@ else
             selected_static_archives, native_payload.inputs, provider_output,
             output_names)
         if not ok then
-            driver.remove_path(temporary)
-            driver.remove_path(temporary .. ".dSYM")
-            driver.remove_path(temporary_directory)
             table.insert(errors, link_failed("library", provider, term, code))
+            local cleaned, cleanup_error =
+                driver.cleanup_staging_directories({ temporary_directory })
+            if not cleaned then
+                table.insert(errors, "Windows library staging cleanup failed: " .. cleanup_error)
+            end
         else
             local valid, validation_err = driver.validate_library_image_fresh(
                 temporary, generated_entries, output_names, args.verbose)
@@ -1174,8 +1179,13 @@ else
                         return linkcertificate.invalidate(resolver_context, link_ticket)
                     end or nil)
             end
-            driver.remove_path(temporary)
-            driver.remove_path(temporary_directory)
+            local cleaned, cleanup_error =
+                driver.cleanup_staging_directories({ temporary_directory })
+            if not cleaned then
+                table.insert(errors, (valid and
+                    "Windows library publication committed but staging cleanup failed: " or
+                    "Windows library staging cleanup failed: ") .. cleanup_error)
+            end
             if not valid then table.insert(errors, validation_err) end
         end
     else

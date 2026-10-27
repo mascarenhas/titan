@@ -500,6 +500,101 @@ describe("Windows compiler path integration", function()
             "C:/new/child/provider.dll.stage.tmp.stage" }, created)
     end)
 
+    it("retires only matching stale directories under their held output domain", function()
+        local directory = "C:/build/lib"
+        local stage = directory .. "/APP.dll.stage.tmp.old"
+        local entries = {
+            [directory] = { "APP.dll.stage.tmp.old", "app.dll.stage.tmp.",
+                "other.dll.stage.tmp.old", "app.dll.tmp.old",
+                "app.dll.stage.tmp.link", "app.dll.stage.tmp.file" },
+            [stage] = { "APP.dll", "nested" },
+            [stage .. "/nested"] = { "outside-link" },
+        }
+        local kinds = {
+            [stage] = "directory", [stage .. "/APP.dll"] = "file",
+            [stage .. "/nested"] = "directory",
+            [stage .. "/nested/outside-link"] = "symlink",
+            [directory .. "/app.dll.stage.tmp."] = "directory",
+            [directory .. "/other.dll.stage.tmp.old"] = "directory",
+            [directory .. "/app.dll.tmp.old"] = "directory",
+            [directory .. "/app.dll.stage.tmp.link"] = "symlink",
+            [directory .. "/app.dll.stage.tmp.file"] = "file",
+        }
+        local removed, locks = {}, { entries = { { directory = "C:/BUILD" } } }
+        local strategy = {
+            stat = function(_, filename)
+                assert.equal(directory, filename)
+                return { kind = "directory" }
+            end,
+            lstat = function(_, filename)
+                return kinds[filename] and { kind = kinds[filename] }
+            end,
+            list = function(_, filename) return assert(entries[filename], filename) end,
+            unlink = function(_, filename)
+                assert.equal(1, #locks.entries)
+                removed[#removed + 1], kinds[filename] = filename, nil
+                return true
+            end,
+            rmdir = function(_, filename)
+                assert.equal(1, #locks.entries)
+                removed[#removed + 1], kinds[filename] = filename, nil
+                return true
+            end,
+        }
+        compiler_io.new_sync = function() error("unexpected host filesystem strategy") end
+        assert(driver.cleanup_stale_staging({ io = strategy },
+            { { path = directory .. "/app.dll" } }, locks))
+        assert.same({ stage .. "/APP.dll", stage .. "/nested/outside-link",
+            stage .. "/nested", stage }, removed)
+        assert.equal("directory", kinds[directory .. "/app.dll.stage.tmp."])
+        assert.equal("directory", kinds[directory .. "/other.dll.stage.tmp.old"])
+        assert.equal("directory", kinds[directory .. "/app.dll.tmp.old"])
+        assert.equal("symlink", kinds[directory .. "/app.dll.stage.tmp.link"])
+        assert.equal("file", kinds[directory .. "/app.dll.stage.tmp.file"])
+    end)
+
+    it("rejects stale cleanup without the matching output lock before touching disk", function()
+        local context = { io = setmetatable({}, {
+            __index = function() error("cleanup touched an unlocked filesystem") end,
+        }) }
+        local outputs = { { path = "C:/build/app.dll" } }
+        local ok, err = driver.cleanup_stale_staging(context, outputs)
+        assert.is_nil(ok)
+        assert.matches("requires held output locks", err, 1, true)
+        ok, err = driver.cleanup_stale_staging(context, outputs,
+            { entries = { { directory = "C:/build-other" } } })
+        assert.is_nil(ok)
+        assert.matches("no output lock for 'C:/build/app.dll'", err, 1, true)
+    end)
+
+    it("reports the failed staged file and still retires the other image directory", function()
+        local removed = {}
+        local strategy = {
+            lstat = function(_, filename)
+                return { kind = filename:match("%.dll$") and "file" or "directory" }
+            end,
+            list = function() return { "image.dll" } end,
+            unlink = function(_, filename)
+                removed[#removed + 1] = filename
+                if filename == "C:/scratch/provider/image.dll" then
+                    return nil, "image is still open"
+                end
+                return true
+            end,
+            rmdir = function(_, filename)
+                removed[#removed + 1] = filename
+                return true
+            end,
+        }
+        local ok, err = driver.cleanup_staging_directories(
+            { "C:/scratch/provider", "C:/scratch/launcher" }, strategy)
+        assert.is_nil(ok)
+        assert.matches("C:/scratch/provider/image.dll", err, 1, true)
+        assert.matches("image is still open", err, 1, true)
+        assert.same({ "C:/scratch/provider/image.dll",
+            "C:/scratch/launcher/image.dll", "C:/scratch/launcher" }, removed)
+    end)
+
     it("checks Windows output reservation ancestors through compiler_io without full-table LFS calls", function()
         lfs.symlinkattributes = function(path, request)
             if request == nil then
@@ -832,8 +927,13 @@ describe("Windows launcher filenames", function()
         local names = { "archive" }
         local fail_metadata = true
         driver.compile_library_output = function() return true end
-        driver.validate_library_image = function() return true end
+        driver.validate_library_image = function() error("coordinator mapped a staged DLL") end
         driver.validate_library_image_fresh = function(_, expected, required)
+            if expected == nil then
+                assert.same({ "app", "archive" }, required)
+                calls[#calls + 1] = "image"
+                return true
+            end
             assert.equal(entries, expected)
             assert.equal(names, required)
             calls[#calls + 1] = "metadata"
@@ -861,13 +961,13 @@ describe("Windows launcher filenames", function()
                 nil, nil, nil, "entrypoint.c", nil, options)
             assert.is_nil(ok)
             assert.equal("archive metadata mismatch", err)
-            assert.same({ "metadata" }, calls)
+            assert.same({ "image", "metadata" }, calls)
             fail_metadata = false
             ok, err = driver.compile_program("app", {}, nil, false,
                 nil, nil, nil, "entrypoint.c", nil, options)
             assert.is_nil(ok)
             assert.equal("invalid native support", err)
-            assert.same({ "metadata", "metadata", "support" }, calls)
+            assert.same({ "image", "metadata", "image", "metadata", "support" }, calls)
             assert.is_nil(lfs.attributes("entrypoint.c"))
             assert.is_nil(lfs.attributes("bin/app.exe"))
         end)
@@ -878,6 +978,75 @@ describe("Windows launcher filenames", function()
         for name, fn in pairs(saved) do driver[name] = fn end
         driver.remove_path(directory)
         assert.truthy(ran, failure)
+    end)
+
+    it("reports staging cleanup failure after committing a Windows program", function()
+        local subject = assert(loadfile("titan-compiler/driver.lua"))()
+        local process = require "titan-compiler.process"
+        local publication = require "titan-compiler.windows_publication"
+        local previous = { windows = platform.windows, getenv = platform.getenv,
+            native = platform.native, sync = compiler_io.new_sync,
+            run = process.run, write = util.set_file_contents,
+            publish = publication.publish_program }
+        local committed, retired, fresh = false, nil, false
+        local completed, failure = xpcall(function()
+            platform.windows = true
+            platform.getenv = function() return nil end
+            platform.native = function() error("unexpected native call in Windows publication model") end
+            compiler_io.new_sync = function()
+                return { stat = function() return { kind = "directory" } end }
+            end
+            subject.INSTALLED, subject.UNAME, subject.IS_DARWIN = true, "Windows", false
+            subject.INSTALL_PATHS = subject.installed_paths("C:/SDK")
+            subject.BUILD_PROFILE, subject.CFLAGS, subject.CC = "development", "-O0", "clang"
+            subject.TOOLCHAIN_ERROR = nil
+            subject.compile_library_output = function() return true end
+            subject.staged_library_output = function(filename)
+                local basename = filename:match("([^/\\]+)$")
+                local directory = filename .. ".stage.tmp.model"
+                return directory .. "/" .. basename, directory
+            end
+            subject.validate_library_image = function() error("coordinator mapped a staged DLL") end
+            subject.validate_library_image_fresh = function(_, expected, names)
+                assert.is_nil(expected)
+                assert.same({ "app" }, names)
+                fresh = true
+                return true
+            end
+            subject.generated_compile_prefix = function() return { "clang" } end
+            subject.entrypoint_contents = function() return "generated entrypoint" end
+            subject.format_generated_file = function() return true end
+            subject.run_link_command = function() return true end
+            process.run = function() return true, "exit", 0 end
+            util.set_file_contents = function() return true end
+            publication.publish_program = function(images)
+                assert.is_true(fresh)
+                assert.equal("C:/build/lib/titan/0.6/app.dll", images.provider.destination)
+                assert.equal("C:/build/bin/app.exe", images.executable.destination)
+                committed = true
+                return true
+            end
+            subject.cleanup_staging_directories = function(directories)
+                assert.is_true(committed)
+                retired = directories
+                return nil, "cannot remove '" .. directories[1] .. "/app.dll': access denied"
+            end
+            local ok, err = subject.compile_program("app", {}, nil, false,
+                nil, nil, nil, "C:/build/entrypoint.c", nil,
+                { output_root = "C:/build", module_names = { "app" } })
+            assert.is_nil(ok)
+            assert.matches("Windows program publication committed but staging cleanup failed", err, 1, true)
+            assert.matches(retired[1] .. "/app.dll", err, 1, true)
+            assert.matches("access denied", err, 1, true)
+            assert.same({ "C:/build/lib/titan/0.6/app.dll.stage.tmp.model",
+                "C:/build/bin/app.exe.stage.tmp.model" }, retired)
+        end, debug.traceback)
+        platform.windows, platform.getenv, platform.native =
+            previous.windows, previous.getenv, previous.native
+        compiler_io.new_sync, process.run, util.set_file_contents =
+            previous.sync, previous.run, previous.write
+        publication.publish_program = previous.publish
+        assert.is_true(completed, failure)
     end)
 end)
 

@@ -9861,6 +9861,119 @@ local function remove_path(path)
 end
 driver.remove_path = remove_path
 
+local function remove_staging_path(strategy, filename)
+    local info, err = strategy:lstat(filename)
+    if not info then
+        if err then return nil, "cannot inspect '" .. filename .. "': " .. tostring(err) end
+        return true
+    end
+    if info.kind == "directory" then
+        local entries
+        entries, err = strategy:list(filename)
+        if not entries then return nil, "cannot list '" .. filename .. "': " .. tostring(err) end
+        for _, name in ipairs(entries) do
+            local removed, remove_error = remove_staging_path(
+                strategy, append_path(filename, name))
+            if not removed then return nil, remove_error end
+        end
+        local removed
+        removed, err = strategy:rmdir(filename)
+        if removed then return true end
+    else
+        local removed
+        removed, err = strategy:unlink(filename)
+        if removed then return true end
+    end
+    return nil, "cannot remove '" .. filename .. "': " .. tostring(err)
+end
+
+-- Attempt every reserved directory even when another image remains locked.
+-- A successful publication is not rolled back when retiring its scratch fails.
+function driver.cleanup_staging_directories(directories, strategy)
+    strategy = strategy or compiler_io.new_sync()
+    local errors = {}
+    for _, directory in ipairs(directories) do
+        local removed, err = remove_staging_path(strategy, directory)
+        if not removed then errors[#errors + 1] = err end
+    end
+    if #errors > 0 then return nil, table.concat(errors, "\n") end
+    return true
+end
+
+-- The basename-preserving staging namespace belongs to the corresponding
+-- final output. Retire abandoned reservations before even a final-link hit,
+-- but only while that output's domain remains exclusively locked.
+function driver.cleanup_stale_staging(context, outputs, locks)
+    if not platform.windows then return true end
+    if not locks or not locks.entries or #locks.entries == 0 then
+        return nil, "stale staging cleanup requires held output locks"
+    end
+    local function key(filename)
+        return (filename:gsub("\\", "/"):gsub("/+$", ""):lower())
+    end
+    local domains, directories = {}, {}
+    for _, entry in ipairs(locks.entries) do
+        local directory, err = absolute_filename(entry.directory, context.io)
+        if not directory then return nil, err end
+        domains[#domains + 1] = key(directory)
+    end
+    for _, output in ipairs(outputs) do
+        if output.kind ~= "directory" then
+            local filename, err = absolute_filename(output.path, context.io)
+            if not filename then return nil, err end
+            local parent, basename = platform.parent(filename)
+            local parent_key, covered = key(parent), false
+            for _, domain in ipairs(domains) do
+                if parent_key == domain or
+                        parent_key:sub(1, #domain + 1) == domain .. "/" then
+                    covered = true
+                    break
+                end
+            end
+            if not covered then
+                return nil, "stale staging cleanup has no output lock for '" .. filename .. "'"
+            end
+            local directory = directories[parent_key]
+            if not directory then
+                directory = { path = parent, prefixes = {} }
+                directories[parent_key] = directory
+            end
+            directory.prefixes[#directory.prefixes + 1] = basename:lower() .. ".stage.tmp."
+        end
+    end
+    for _, directory in pairs(directories) do
+        local info, err = context.io:stat(directory.path)
+        if err then return nil, err end
+        if info then
+            local entries
+            entries, err = context.io:list(directory.path)
+            if not entries then return nil, err end
+            local stale = {}
+            for _, name in ipairs(entries) do
+                for _, prefix in ipairs(directory.prefixes) do
+                    if #name > #prefix and name:sub(1, #prefix):lower() == prefix then
+                        local filename = append_path(directory.path, name)
+                        local candidate
+                        candidate, err = context.io:lstat(filename)
+                        if err then return nil, err end
+                        -- Never traverse a matching user-authored link.
+                        if candidate and candidate.kind == "directory" then
+                            stale[#stale + 1] = filename
+                        end
+                        break
+                    end
+                end
+            end
+            local removed
+            removed, err = driver.cleanup_staging_directories(stale, context.io)
+            if not removed then
+                return nil, "cannot retire stale Windows staging: " .. tostring(err)
+            end
+        end
+    end
+    return true
+end
+
 local function absolute_native_path(filename)
     if platform.windows then return assert(absolute_filename(filename)) end
     if filename:sub(1, 1) == "/" then return filename end
@@ -11154,19 +11267,22 @@ end
 
 function driver.validate_library_image_fresh(
         filename, expected_entries, module_names, verbose)
-    local expected = {}
+    local expected, required = {}, {}
     for _, modname in ipairs(module_names) do
-        local entry = assert(expected_entries[modname])
-        expected[#expected + 1] = string.format(
-            "[%q] = { abi = %q, types = %q, layouts = %q }",
-            modname, entry.abi, entry.types, entry.layouts)
+        required[#required + 1] = string.format("%q", modname)
+        if expected_entries then
+            local entry = assert(expected_entries[modname])
+            expected[#expected + 1] = string.format(
+                "[%q] = { abi = %q, types = %q, layouts = %q }",
+                modname, entry.abi, entry.types, entry.layouts)
+        end
     end
     -- A source-rock build can select its private native support bootstrap.
     -- Retain that search path while loading support afresh in the child.
-    local script_source = "package.cpath = " ..
+    local script_source = "package.path = " ..
+        string.format("%q", package.path) .. "\npackage.cpath = " ..
         string.format("%q", package.cpath) .. "\n" .. [[
 local image, result = ...
-local expected = { ]] .. table.concat(expected, ",\n") .. [[ }
 
 local function finish(ok, message)
     local out = assert(io.open(result, "wb"))
@@ -11175,6 +11291,20 @@ local function finish(ok, message)
     os.exit(ok and 0 or 1)
 end
 
+]]
+    if not expected_entries then
+        -- Reuse the compiler's metadata decoder and entry checks unchanged.
+        -- Windows must never pin a staged DLL in the coordinator's loader.
+        script_source = script_source .. [[
+local validate = require("titan-compiler.driver").validate_library_image
+local completed, valid, message = pcall(validate, image, { ]] ..
+            table.concat(required, ", ") .. [[ })
+if not completed then finish(false, tostring(valid)) end
+finish(valid == true, valid and "ok" or tostring(message))
+]]
+    else
+        script_source = script_source .. "local expected = { " ..
+            table.concat(expected, ",\n") .. " }\n" .. [[
 local support = require "titan"
 for name, entry in pairs(expected) do
     local prefix = name:gsub("[.]", "_")
@@ -11217,6 +11347,7 @@ for name, entry in pairs(expected) do
 end
 finish(true, "ok")
 ]]
+    end
     local script, result = validation_temporary_pair()
     if not script then return nil, result end
     local wrote, write_err = util.set_file_contents(script, script_source)
@@ -12725,19 +12856,25 @@ __declspec(dllexport) int _titan_coverage_dump(lua_State *L) {
     if not staged_dll then return nil, dll_directory end
     local staged_exe, exe_directory = driver.staged_library_output(paths.executable)
     if not staged_exe then
-        remove_path(dll_directory)
+        local cleaned, cleanup_error = driver.cleanup_staging_directories({ dll_directory })
+        if not cleaned then
+            return nil, tostring(exe_directory) .. "\nstaging cleanup failed: " .. cleanup_error
+        end
         return nil, exe_directory
     end
-    local function discard(...)
-        remove_path(dll_directory)
-        remove_path(exe_directory)
-        return nil, ...
+    local function discard(term, code)
+        local cleaned, cleanup_error =
+            driver.cleanup_staging_directories({ dll_directory, exe_directory })
+        if not cleaned then
+            return nil, tostring(term) .. "\nstaging cleanup failed: " .. cleanup_error, code
+        end
+        return nil, term, code
     end
     local linked, term, code = driver.compile_library_output(staged_dll,
         libnames, link, verbose, extra_objects, static_archives,
         nil, paths.provider, module_names)
     if not linked then return discard(term, code) end
-    ok, err = driver.validate_library_image(staged_dll, module_names)
+    ok, err = driver.validate_library_image_fresh(staged_dll, nil, module_names, verbose)
     if not ok then return discard(err) end
     if options.archive_names and #options.archive_names > 0 then
         ok, err = driver.validate_library_image_fresh(staged_dll,
@@ -12795,9 +12932,16 @@ __declspec(dllexport) int _titan_coverage_dump(lua_State *L) {
             provider = { source = staged_dll, destination = paths.provider },
             executable = { source = staged_exe, destination = paths.executable },
         }, windows_publication_fs(), { before_commit = options.before_commit })
-    remove_path(dll_directory)
-    remove_path(exe_directory)
-    if not published then return nil, publish_error end
+    local cleaned, cleanup_error =
+        driver.cleanup_staging_directories({ dll_directory, exe_directory })
+    if not published then
+        return nil, tostring(publish_error) ..
+            (not cleaned and ("\nstaging cleanup failed: " .. cleanup_error) or "")
+    end
+    if not cleaned then
+        return nil, "Windows program publication committed but staging cleanup failed: " ..
+            cleanup_error
+    end
     return true
 end
 
