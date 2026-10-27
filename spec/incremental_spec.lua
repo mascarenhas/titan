@@ -645,6 +645,28 @@ describe("incremental configuration", function()
             toolchain_descriptor = { compiler_argv = { native_tool("cc") },
                 preprocessor_identity = "macros", banner = "clang version 22.1.8 (fixture)", stage_tools = {} },
             build_profile = "validation", emit_line_directives = true, titan_root = fixture_path("/sdk") }
+        -- Inventory joins use the host-native path module, independently of
+        -- controlled POSIX executable-name models below. Admit only alternate
+        -- separators for this fixture's compiler files and parent directories.
+        local paths = require "titan-compiler.path"
+        local root, inventory_paths = ctx.incremental_options.compiler_root, {}
+        for filename in pairs(files) do
+            if filename:sub(1, #root + 1) == root .. "/" then
+                local entry = filename
+                while entry and #entry > #root do
+                    local native = paths.join(root, entry:sub(#root + 2))
+                    if native ~= entry then
+                        inventory_paths[native] = entry
+                        ctx.io.aliases[native] = entry
+                    end
+                    entry = entry:match("^(.*)/[^/]+$")
+                end
+            end
+        end
+        local list = ctx.io.list
+        function ctx.io:list(directory)
+            return list(self, inventory_paths[directory] or directory)
+        end
         return ctx, files
     end
 
@@ -785,6 +807,7 @@ describe("incremental configuration", function()
     end
 
     it("leaves an unset POSIX executable default uncertified without guessing CWD", function()
+        local expected_reason, expected_status
         with_posix_search(nil, function()
             local ctx = posix_search_context("cc")
             function ctx.io:stat() error("unset PATH must not guess a candidate") end
@@ -800,15 +823,29 @@ describe("incremental configuration", function()
             assert.same({}, ctx.incremental.toolchains)
             assert.same({}, ctx.io.reads)
             assert.same({}, ctx.io.commands)
-            local configured_ctx = configured()
-            configured_ctx.incremental_options.toolchain_descriptor.compiler_argv = { "cc" }
-            local config, config_reason, config_status = incremental.configuration(configured_ctx)
-            assert.is_nil(config)
-            assert.equal(reason, config_reason)
-            assert.equal(status, config_status)
-            assert.is_nil(configured_ctx.incremental_configuration)
-            assert.same({}, configured_ctx.io.commands)
+            expected_reason, expected_status = reason, status
         end)
+        -- Keep real compiler inventory under host semantics; only the real
+        -- toolchain lookup receives the controlled POSIX PATH environment.
+        local configured_ctx = configured()
+        configured_ctx.incremental_options.toolchain_descriptor.compiler_argv = { "cc" }
+        local toolchain_identity = incremental.toolchain_identity
+        incremental.toolchain_identity = function(ctx, descriptor)
+            return with_posix_search(nil, function()
+                return toolchain_identity(ctx, descriptor)
+            end)
+        end
+        local called, config, config_reason, config_status =
+            pcall(incremental.configuration, configured_ctx)
+        incremental.toolchain_identity = toolchain_identity
+        assert.is_true(called, tostring(config))
+        assert.is_nil(config)
+        assert.equal(expected_reason, config_reason)
+        assert.equal(expected_status, config_status)
+        assert.is_nil(configured_ctx.incremental_configuration)
+        assert.same({}, configured_ctx.io.commands)
+        assert.equal(5, incremental.counters(configured_ctx).file_reads)
+        assert.equal(5, incremental.counters(configured_ctx).file_hashes)
     end)
 
     it("admits explicit POSIX paths without consulting an unset PATH", function()
