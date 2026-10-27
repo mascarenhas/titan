@@ -637,7 +637,8 @@ dofile(%q .. "/titanc")
         local preprocessed, dependencies = read(stage_log):match("^([^\n]+)\n([^\n]+)\n$")
         assert.matches("/.native/", preprocessed, 1, true)
         assert.matches("/.native/", dependencies, 1, true)
-        assert.matches("return 22", read(preprocessed), 1, true)
+        assert.is_nil(lfs.attributes(preprocessed))
+        assert.is_nil(lfs.attributes(dependencies))
         local object
         for _, event in ipairs(events) do
             local filename = event:match("^waiter:(/.+[.]o)$")
