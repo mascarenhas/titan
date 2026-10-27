@@ -29,8 +29,10 @@ directories](../language/output-directory.md).
 
 ## End-to-end invocation sequence
 
-When `titanc` runs (`titanc`, excluding `--print-root` and
-`--print-ast`), it executes these phases in order:
+When `titanc` runs (`titanc`, excluding `--print-root`), it executes these
+phases in order. `--print-ast` shares the planning and output preflight of
+step 4 through `build.plan`, then checks and prints its source ASTs in-process
+instead of dispatching workers:
 
 1. **Normalize native inputs.** `nativeinputs.normalize` combines platform and
    profile defaults, `TITAN_EXTRA_CPPFLAGS`/`CFLAGS`/`LDFLAGS`, and repeatable
@@ -59,7 +61,11 @@ When `titanc` runs (`titanc`, excluding `--print-root` and
    misses and prepending the resulting `.o` paths before `-X` payloads. A
    compile-only invocation stops here; with `--print-c-objects` it writes one
    absolute object path per `--c-source` argument to stdout after releasing
-   its locks.
+   its locks. A `-c` invocation with `--c-source` files and no Titan roots or
+   `--test-dir` skips the module graph and the Titan foreign-type profile: it
+   initializes only the platform, runs the output preflight with an empty
+   plan, and still computes the toolchain identity and preprocesses and
+   certifies each C node.
 6. **Gate the final link.** Unless `-c` is active, `linkcertificate.prepare`
    builds the target's recipe and output inventory,
    `driver.prepare_foreign_headers` restores any missing `.ffi.h`/`.titan.h`
@@ -215,12 +221,18 @@ unimported malformed `.titan` file elsewhere in the source tree is never read.
 
 ### Pre-dispatch output preflight
 
-Immediately after `driver.resolution_plan`, and before any scheduler decision,
-invalidation, or worker launch, `build.run` calls the coordinator-only
-`request.preflight(plan)` closure, which `titanc` binds to
-`driver.preflight_build_outputs(context, plan, options)`. A failure aborts the
-invocation with every existing file untouched. The pass never runs the
-checker, code generator, or C preprocessor:
+`build.plan(context, request)` loads the ordered roots with the planning
+loader and closes `driver.resolution_plan`. Immediately afterwards, and before
+any scheduler decision, invalidation, or worker launch, `build.run` calls the
+coordinator-only `request.preflight(plan)` closure, which `titanc` binds to
+`driver.preflight_build_outputs(context, plan, options)`. The `--print-ast`
+path calls the same `build.plan` and preflight before any native output, then
+clears the planning placeholders from `driver.imported` so its ordinary
+loader checks the real sources. A failure aborts the
+invocation before any planned module output or final target is invalidated or
+written. Earlier planning may already have refreshed compiler bookkeeping such
+as `.titan/preamble.c`, and the exit path still saves the digest cache. The
+pass itself never runs the checker, code generator, or C preprocessor:
 
 * **Reserved outputs.** Every planned source module, cached or fresh, reserves
   `<stem>.c`/`.o` and every potential split part
@@ -238,9 +250,13 @@ checker, code generator, or C preprocessor:
   `.dSYM`, the Windows launcher and provider DLL, or the library provider,
   archive, `.dSYM`, and generated Lua shims, including shims of modules
   carried by already-selected static archives.
-* **Protected inputs.** `--c-source` files, every source constituent, the
-  non-`search` C headers recorded by cached modules, and selected binary
-  providers and archives are inputs that no output may alias.
+* **Protected inputs.** `--c-source` files and `-X` payloads, every source
+  constituent, the non-`search` C headers recorded by cached modules, selected
+  binary providers and archives, every held `.titan-build.lock` file, and the
+  metadata roots `.titan/`, `.titan-links/`, and `.native/` of the first lock
+  domain are inputs that no output may alias. Final outputs that would replace
+  a lock file or a metadata root are therefore rejected before any
+  invalidation.
 * **Graph-dependent CLI checks.** For roots without a certified record, the
   pass parses declarations only and follows transparent local and imported
   aliases to find an exact `main(args: {string}): integer`. It then rejects
@@ -261,12 +277,14 @@ queries. On Windows the index reads file status through the compiler I/O
 strategy's `lstat`/`stat`, the same native observations the rest of the
 compiler uses, rather than LuaFileSystem.
 
-Fresh modules discover their C headers only in their worker. Before writing
-any output, `driver.compile_planned_module` passes each non-`search` entry of
-the module's `c_header_dependencies` to
+Fresh modules discover their C headers only in their worker. After checking
+and before writing generated module artifacts (C, headers, and objects),
+`driver.compile_planned_module` passes each non-`search` entry of the module's
+`c_header_dependencies` to
 `driver.validate_reserved_output_inputs(plan.reservations, inputs)`, so an
-authored header at a reserved path fails that module before anything is
-overwritten.
+authored header at a reserved path fails that module before any generated
+artifact overwrites it. Checker and C-probe scratch files may already exist by
+then.
 
 ## Metadata-only hits and early cutoff
 
@@ -501,11 +519,25 @@ Worker lifetime is bounded even if the coordinator terminates abnormally:
   `uv.run("nowait")` testing whether `fd 3` reached EOF or error). Both
   `yield` and `Session:run_batch` exit immediately with status 3 (`titanc build
   worker: the build coordinator exited`) if the coordinator closed `fd 3`.
-* **POSIX lock inheritance.** Because workers inherit the open `.titan-build.lock`
-  file descriptors (`fds 4..`), an abrupt `SIGKILL` of the coordinator leaves
-  the kernel `flock` held until every surviving worker and its child compilers
-  have exited. A subsequent `titanc` invocation waiting in `build.lock_outputs`
-  cannot enter the output tree while an orphaned worker is still writing.
+* **POSIX lock inheritance.** Workers inherit the open `.titan-build.lock`
+  file descriptors (`fds 4..`), and every native writer the coordinator starts
+  receives them too: synchronous `process.run`/`process.capture` commands,
+  the shell wrappers of local FIFO-notified native batches, and the
+  coordinator's bound `Sync:run` and `run_batch` commands (such as `--c-source`
+  preprocessing and foreign-C checks) are launched with the held lock
+  descriptors. `titanc` binds the acquired lock set to its coordinator `Sync`
+  strategy before digest loading and preflight and clears the binding when the
+  locks are released; a bound `Sync:run` runs the same locale-prefixed, quoted
+  command through `/bin/sh -c` and `process.capture` with the same status and
+  stderr contract, and never falls back to an unleased `io.popen`. An abrupt
+  `SIGKILL`
+  of the coordinator therefore leaves the kernel `flock` held until every
+  surviving worker, native job, and child compiler has exited, and a
+  subsequent `titanc` invocation waiting in `build.lock_outputs` cannot enter
+  the output tree while an orphan is still writing. Each FIFO wrapper keeps
+  the completion FIFO open read-write for its own lifetime, so writing its
+  completion line never blocks on a vanished reader while it holds those
+  leases.
 * **Windows process-tree job.** Before the first spawn through
   `process.lua`, `contain_native_processes` calls the runtime's
   `titan._native_process_tree_guard()`, which creates a Job Object with
@@ -847,7 +879,7 @@ are never part of `spec.outputs`. Each target owns
 * `RECIPE_FIELDS` (`linkcertificate.lua`): `roots`, `entry` (`{ module,
   no_uv_bootstrap }`), `kind` (`"program" | "test" | "library"`),
   `no_uv_bootstrap`, `argv` (`driver.link_extra_flags()`), `toolchain`
-  (`{ compiler = toolchain_identity, ar, ranlib, rc }`), `test_cases`
+  (`{ compiler = toolchain_identity, output_tools }`, see below), `test_cases`
   (deterministically sorted descriptors from `test_runner.discover`),
   `templates` (`configuration.compiler`, covering runner/entrypoint templates
   and `standalone_paths.lua`), `coverage` (`coverage.inventory`), `companions`
@@ -865,10 +897,12 @@ are never part of `spec.outputs`. Each target owns
   timestamp or module recipe hash alone; and
 * `native_policy` (`certificate.native_library_policy`,
   `linkcertificate.lua`):
-  * If any `--c-source` object has `cacheable == false`, or if `argv` contains
-    `@file`, `,@`, `-fplugin*`, `--plugin*`, `,-plugin`, or `-Xlinker`, the
-    link is marked `cacheable = false` (`reason = "opaque linker input
-    mechanism: ..."` or `"opaque native C input mechanism"`).
+  * If any `--c-source` object has `cacheable == false`, or if `argv`
+    (with `-Wl,` lists expanded) contains `@file`, `-fplugin*`, `-plugin`/
+    `--plugin*`, `-Xlinker`, `-specs*`/`--specs*`, `-wrapper`, or a
+    `-filelist` option, the link is marked `cacheable = false` (`reason =
+    "opaque linker input mechanism: ..."` or `"opaque native C input
+    mechanism"`).
   * **`darwin` backend (`driver.IS_DARWIN`).** Appends
     `ticket.dependency_argv = { "-Wl,-dependency_info," .. dependency_file }`
     to the final executable or public DSO link. On commit,
@@ -888,13 +922,58 @@ are never part of `spec.outputs`. Each target owns
     parsed with `depfile.parse`, while GNU ld's literal report is decoded from
     its trailing one-input-per-line phony-target stanza, preserving spaces,
     `#`, `$`, colons, and backslashes in paths.
-  * **`compiler` fallback (`backend == "none"`, including Windows).** Walks
-    `argv` (expanding `-Wl,` comma tokens, tracking `-Bstatic`/`-static` vs
-    `-Bdynamic`, and rejecting `-T`/`--script` linker scripts when dependency
-    output is unavailable) to resolve each `-l<name>` or `-l:<file>` candidate
-    against explicit `-L` directories and then `<compiler_argv>
-    -print-file-name=<candidate>`. If any library cannot be resolved to a
-    regular file, `cacheable` is `false`.
+  * **`compiler` fallback (`backend == "none"`, including Windows).** Parses
+    `argv` with a finite grammar (expanding `-Wl,` comma tokens): ordered and
+    repeated `-L`, `-l<name>`/`-l:<file>` with `-static` and forwarded
+    `-Bstatic`/`-Bdynamic` selection, raw archive/object/import-library
+    operands (each must be a regular file whose `incremental.native_input_kind`
+    is an archive, object, or shared library), and the file-taking
+    `--just-symbols` and `--retain-symbols-file` operands. Value-taking options
+    such as `-u`, `-e`, `-soname`, `-install_name`, `-z`, and `--ld-path`, and
+    input-free flags such as `-O<level>`, `-flto=<mode>`, and `-fuse-ld=`,
+    are covered by the ordered recipe `argv`. Each `-l` library is searched
+    directory by directory through the explicit `-L` directories, trying every
+    candidate name in one directory before the next: on Windows (MinGW)
+    `lib<name>.dll.a`, `<name>.dll.a`, `lib<name>.a`, `<name>.lib`,
+    `lib<name>.dll`, and `<name>.dll` for dynamic selection, or `lib<name>.a`
+    and `<name>.lib` for static selection. Otherwise the candidates are queried
+    through `<compiler_argv> -print-file-name=<candidate>`; because separate
+    queries do not reveal the compiler's directory order, candidates found in
+    different implicit directories fail with `ambiguous compiler library search
+    order: <name>`. Any other option, a text linker script, a
+    thin archive, an unknown format, or an unresolvable library or file makes
+    the link uncacheable (for example `unsupported native linker input
+    mechanism: <flag>` or `cannot resolve native file: <path>`) instead of
+    certifying an incomplete input set.
+
+`output_tools` comes from `linkcertificate.output_tools(context, request)`,
+whose request carries the exact compiler argv, ordered link flags, compiler
+toolchain identity, compile prefix, the ordered linked inputs, and the
+auxiliary tool roles the output kind actually uses (`ar` and `ranlib` for
+Unix libraries, `rc` for Windows programs, `dsymutil` on Darwin), selected by
+`driver.output_tool_descriptors`. The result records:
+
+* `linker`: the linker the compiler driver really selects, with its exact
+  driver argv and physical identity. Unless `-fuse-ld=`/`--ld-path` names it,
+  `titanc` reads one read-only `<cc> -### -x c <null> -o <null>` job
+  description: Clang names its configured linker directly, while GCC's
+  `collect2` delegates to the linker named by the compiler. Fixed Darwin and
+  Windows dependency-report policies skip only the capability probe, not
+  linker resolution;
+* each requested auxiliary role, with its exact argv and physical identity;
+* every linker-stage program and plugin the job description names, whether
+  or not LTO is enabled: GCC's `collect2` and any `-plugin`/`-lto_library`
+  file it advertises (GCC passes `liblto_plugin.so` even to ordinary non-LTO
+  links, and selects `collect2` even under `-fno-lto`); and
+* only when LTO is enabled by the final flags, by compile-only `-flto`, or by
+  an input whose recorded format is LLVM bitcode (or unknown), GCC's
+  `lto-wrapper` and `lto1` stages, which an LTO-free link never runs.
+
+A missing selected tool is an error.
+
+Native input kind and LTO facts are cached by content digest in the
+[persistent digest cache](incremental-compilation.md#persistent-digest-cache)
+as optional additions to the existing schema; a missing fact is recomputed.
 
 On a link hit, `linkcertificate.check` rehashes the exact library files
 recorded in `record.native` (or `policy.files`). It does **not** rewalk

@@ -149,6 +149,8 @@ chunk (`-- Titan object source metadata`) returning the envelope:
     abi = version.TITAN_ABI_VERSION,        -- "2"
     schema = version.OBJECT_RECORD_SCHEMA,  -- "1"
     digest = version.CERTIFICATE_DIGEST,    -- "sha256"
+    canonicalization = version.CERTIFICATE_CANONICALIZATION,
+                                            -- "titan-certificate-v1"
     module = projected.type.name,
     entry = projected,
 }
@@ -179,8 +181,10 @@ envelope before inspecting the projected entry:
 
 * chunk load or execution failure returns `nil, err, "record-unreadable"`;
 * a non-table envelope, `record.schema ~= version.OBJECT_RECORD_SCHEMA`,
-  `record.digest ~= version.CERTIFICATE_DIGEST`, `record.abi ~= expected_abi`,
-  or a non-table `record.entry` returns `nil, err, "record-schema"`;
+  `record.digest ~= version.CERTIFICATE_DIGEST`,
+  `record.canonicalization ~= version.CERTIFICATE_CANONICALIZATION`,
+  `record.abi ~= expected_abi`, or a non-table `record.entry` returns
+  `nil, err, "record-schema"`;
 * invalid split-part metadata in `objectmetadata.validate_parts(native)` returns
   `nil, err, "parts"`; and
 * invalid `native.layouts` in `nominallayout.decode(native.layouts,
@@ -248,9 +252,13 @@ bytes, or reads once under the same race guard after a digest-only cache hit
 and raises `file changed during build` if the fresh observation differs from
 the one that authorized the digest.
 
-The driver wires `context_file_digest(context)` into `cdriver`, `cprobe`, and
-`check_source_module`, so C-header parsing and object certification share the
-same per-context file memo. Only a publisher that replaces an owned output
+`incremental.check_headers` supplies the per-context file memo to
+`revalidate_header_input` during certification, so certification hashes each
+C header at most once per invocation. The driver also passes
+`context_file_digest(context)` to `cprobe.new_service` and to fresh checking
+options, but neither the probe service nor the checker retains it, so fresh
+C-header parsing and C probes may hash files independently. Only a publisher
+that replaces an owned output
 calls `incremental.invalidate_file(context, path)` to evict `path` and its
 aliases from the memo and the persistent cache. Pre-publication
 revalidation uses `incremental.fresh_context(context)`, which shares the
@@ -277,9 +285,14 @@ plus two tables:
   `precision = "ns"`. Only precise observations (integer nanosecond times and
   nonempty opaque `dev`/`ino` strings) are stored, so coarse metadata always
   rehashes.
-* `objects[content_digest] = { fingerprint }`, the content-derived target
-  fingerprint of a split-part object (`incremental.part_fingerprint`). It
-  contains no paths, observations, or module views; callers still compare it
+* `objects[content_digest] = { fingerprint?, kind?, lto? }`, pure content
+  facts: the target fingerprint of a split-part object
+  (`incremental.part_fingerprint`), and the binary format (`archive`, `object`,
+  `shared`, `thin`, or `unknown`) plus an LLVM-bitcode flag of a native link
+  input (`incremental.native_input_kind`). Each fact is optional and written
+  without disturbing the others; a missing fact is recomputed, and a kind fact
+  never substitutes for the metadata-free part scan. The facts contain no
+  paths, observations, or module views; callers still compare a fingerprint
   with the primary object's target.
 
 The cache is a hint, never evidence on its own. A missing, unreadable,
@@ -295,8 +308,10 @@ pruning.
 
 `incremental.make_certificate(context, entry, native, inputs)`
 (`incremental.lua`) builds `native.certificate`, and
-`valid_certificate(value, modname)` (`incremental.lua`) validates its
-closed shape before any field is trusted:
+`valid_certificate(value, modname)` (`incremental.lua`) checks the required
+fields before any of them is trusted: their types, dense ordered lists, and
+the name relationships among imports, owners, bindings, and providers. It
+does not reject unknown extra keys:
 
 | Field | Shape | Meaning |
 | --- | --- | --- |
@@ -594,7 +609,9 @@ evaluates local evidence in a fixed order before any dependency check:
 1. **Object presence and readability.** `context.io:lstat("<stem>.o")` must
    succeed (`record-unreadable <err>` on a string `lstat` error) and report
    `kind == "file"` (`no-object` when missing or non-regular). The object bytes
-   are read and hashed via `incremental.file_digest`.
+   are read for their metadata through `incremental.file_contents`; its digest
+   may come from the persistent cache under the precise-observation rules, and
+   the bytes are still read once under the same race guard.
 2. **Record envelope and schema.** `objectmetadata.read(bytes, path)` must
    decode a current-schema record (`record-unreadable` or `record-schema` or
    `parts`), `record.object_metadata.certificate` must pass
@@ -607,7 +624,7 @@ evaluates local evidence in a fixed order before any dependency check:
    if a configuration or downstream check misses.
 4. **Configuration components.** Compares `cert.configuration[component]`
    against `context.incremental_configuration[component]` in order `compiler`,
-   `preamble`, `toolchain`, `options`, returning
+   `toolchain`, `options`, `preamble`, returning
    `configuration <component>` on the first mismatch.
 5. **Own-source verdict and output location.** If step 3 failed or missed,
    returns `source-set added|removed <path>` or `source-content <path>`. Then
@@ -659,9 +676,12 @@ with empty `header_validation` and `header_observations` tables, strips
 `certified_contents`, re-runs `source_verdict` and `check_headers` from disk,
 and accumulates its I/O counts under `incremental.counters(context).revalidation`
 (`passes`, `file_hashes`, `file_reads`, `file_bytes`, `digest_calls`, `files`)
-without incrementing the warm hash-once counters. Any concurrent edit to a
-module's sources or C headers while its worker was compiling therefore fails
-publication instead of committing a mismatched certificate.
+without incrementing the warm hash-once counters. A source or C-header edit
+that this fresh end-of-compilation snapshot or a guarded read observes
+therefore fails publication instead of committing a mismatched certificate.
+It is not a check of every intermediate state: an edit that is reverted
+before revalidation goes unnoticed, which is why builds require stable inputs
+while `titanc` runs.
 
 ### Split modules
 

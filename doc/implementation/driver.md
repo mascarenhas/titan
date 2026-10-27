@@ -901,7 +901,7 @@ backend-specific records, arrays, error objects, or task handles.
 | `rmdir(path)` | `true, nil` or `nil, message`. Removes one empty directory. |
 | `rename(from, to)` | `true, nil` or `nil, message`. Renames within the filesystem using the platform's replacement semantics. |
 | `tmpname()` | `path, nil` or `nil, message`. On success `path` names an existing, process-unique, empty regular file owned by the caller. Ownership transfers only with the successful return; cancellation before that return must not leak the reservation. |
-| `run(argv, options?)` | One normalized result table. `argv` is a nonempty dense array of strings, not a shell-fragment interface. `LANG` and `LC_ALL` are fixed to `C`. `options.stderr_to_stdout` defaults to `true`; when false, only stdout is captured and stderr remains on the compiler process's stderr. |
+| `run(argv, options?)` | One normalized result table. `argv` is a nonempty dense array of strings, not a shell-fragment interface. `LANG` and `LC_ALL` are fixed to `C`. `options.stderr_to_stdout` defaults to `true`; when false, only stdout is captured and stderr remains on the compiler process's stderr. When `titanc` has bound its held output locks to the synchronous POSIX strategy, `run` and `run_batch` pass those lock descriptors to every child through `process.capture` with the same command, environment, stderr, and status contract ([POSIX lock inheritance](build-coordinator.md#planned-worker-resolution-and-orphan-lifetime)). |
 | `yield(module_name)` | No results. The cooperative post-module checkpoint receives the name of the module just checked; the synchronous implementation ignores it. |
 
 `stat` and `lstat` metadata has the Lua-facing fields `kind`, `size`,
@@ -1915,7 +1915,8 @@ incremental certification decisions to standard error:
 `Titan link hit <target>`, and `Titan link miss <target>: <reason>`. Standard
 output carries only requested results: the `--print-root` root, `--print-ast`
 dumps, and `--print-c-objects` paths.
-`--print-ast` checks requested modules in-process and dumps each AST.
+`--print-ast` runs the shared `build.plan` and output preflight, then checks
+requested modules in-process and dumps each AST.
 `-j`/`--jobs` sets the positive local job cap (overriding `TITAN_JOBS`, default
 4), which bounds concurrent worker frontends, generated-C compilations, the
 second provider link, and speculative C-probe batches ([GNU Make jobserver
@@ -1981,7 +1982,7 @@ rejects output collisions and graph-dependent option errors (`--exe` or
 library-only builds unless `-c` is given, multiple `main` roots, and library
 roots without a common prefix) before any worker starts; each worker checks
 the C headers its fresh module discovers against the same reservations before
-writing. `build.run`
+writing generated module artifacts. `build.run`
 certifies, compiles, and restores the module closure. `titanc` then compiles
 any `--c-source` nodes via `nativeinputs.compile` and—for linking
 invocations—gates runner/entrypoint synthesis, archive probing, and linking
@@ -2477,9 +2478,12 @@ object's authoritative target fingerprint.
 
 Configured tool names reach the process transport unchanged. Titan does not
 resolve executables, append extensions, or inspect binary formats before launch.
-The operating system reports lookup and execution failures. Serial
-inherited-output commands retain `os.execute`; their renderer applies C-runtime
-quoting followed by `cmd` escaping and sets `LANG=C` and `LC_ALL=C`.
+The operating system reports lookup and execution failures. On Windows,
+serial inherited-output commands, including native links, launch through
+`process.run` with the parsed argument array, sharing the compiler's standard
+streams under the same process-tree guard as worker and batch launches. The
+Windows renderer (C-runtime quoting followed by `cmd` escaping) only formats
+the verbose command echo.
 
 Windows native links use `driver.run_link_command` to avoid the `cmd.exe`
 command-length limit as the number or length of object paths grows. It first
