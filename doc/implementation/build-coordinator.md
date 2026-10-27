@@ -935,7 +935,9 @@ are never part of `spec.outputs`. Each target owns
     such as `-u`, `-e`, `-soname`, `-install_name`, `-z`, and `--ld-path`, and
     input-free flags such as `-O<level>`, `-flto=<mode>`, and `-fuse-ld=`,
     are covered by the ordered recipe `argv`. Each `-l` library is searched
-    directory by directory through the explicit `-L` directories, trying every
+    directory by directory through the explicit `-L` directories (on POSIX
+    joined without lexical normalization, so a symlinked directory followed by
+    `..` is traversed as the kernel would), trying every
     candidate name in one directory before the next: on Windows (MinGW)
     `lib<name>.dll.a`, `<name>.dll.a`, `lib<name>.a`, `<name>.lib`,
     `lib<name>.dll`, and `<name>.dll` for dynamic selection, or `lib<name>.a`
