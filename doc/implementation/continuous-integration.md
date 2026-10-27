@@ -214,14 +214,24 @@ external waits, and thread endpoints) and every `test_unwind_` case
 ([abandoned-coroutine
 unwinding](coroutines.md#unwinding-an-abandoned-coroutine)).
 
-The UV runtime owner is split by built parent case rather than run as one
-filter. The step reads the bytewise-sorted `test_functions` inventory from the
-built `out/tests/uv/runtime_tests.o` record, fails if it is empty or
-unreadable, and runs each parent as its own
-`TITAN_FILTER="^uv%.runtime_tests%.<case>%f[^%w_]"` gate. A parent and its
-subtests, including fresh child compilers, then share one unchanged
-per-run deadline instead of the whole owner's cases sharing it, and no
-second case list can drift from the built owner.
+The UV runtime owner and the value-transfer gate are split by built parent case
+rather than run as one filter. For the UV runtime owner, the step reads the
+bytewise-sorted `test_functions` inventory from the built
+`out/tests/uv/runtime_tests.o` record, fails if it is empty or unreadable, and
+runs each parent as its own
+`TITAN_FILTER="^uv%.runtime_tests%.<case>%f[^%w_]"` gate. The value-transfer
+gate keeps the old literal, case-sensitive `transfer` match, which selects
+every parent whose full `<owner>.<function>` name contains `transfer`. It reads
+the 30 expected owners from `make -f spec/support/stdlib_test_modules.mk
+print-stdlib-test-roots` and the `test_functions` of every built primary object
+under `out/tests`, skipping hidden entries and `.partN.o` companions. It fails
+before printing any filter if the built owners with tests are not exactly that
+set (missing, unexpected, or duplicated), or if no parent matches. Each
+matching parent then runs as its own escaped, anchored
+`TITAN_FILTER="^<owner>%.<function>%f[^%w_]"` gate, in bytewise order. Either
+way, a parent and its subtests, including fresh child compilers, share one
+unchanged per-run deadline instead of the whole selection sharing it, and no
+second case list can drift from the built owners.
 
 Keep ordinary per-node `#line` attribution during the run: traceback gates
 require exact user and standard-provider frames. `TITAN_NO_LINE_DIRECTIVES=1`
