@@ -2218,9 +2218,10 @@ modules. Its table (`ltitanlib.c` `titanlib`) exports the user-facing
 the traceback pin discipline, the loader helpers `_loadlib` and
 `_loadlibglobal`, the compiler digest `_sha256_binary`, the output-tree lock
 `_output_lock_open`, the precise file observation `_stat_precise`, on Windows
-only `_abivalue` and `_native_process_tree_guard`, and elsewhere the
-effective-permission query `_executable_access` (backing `Sync:executable`)
-and the compiler's jobserver and signal helpers:
+only `_abivalue`, `_native_process_tree_guard`, and the current-directory
+search query `_executable_search_cwd` (backing `Sync:executable_search_cwd`),
+and elsewhere the effective-permission query `_executable_access` (backing
+`Sync:executable`) and the compiler's jobserver and signal helpers:
 
 ```lua
 -- Lua
