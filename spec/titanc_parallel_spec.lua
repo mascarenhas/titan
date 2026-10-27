@@ -603,6 +603,18 @@ describe("native process launch policy", function()
         end)
     end)
 
+    it("starts lease-bearing commands asynchronously and reaps them on close", function()
+        with_transport(function() return true end, function(process, events, stdio)
+            local child = assert(process.start({ "sh", "-c", "compile" },
+                { inherit = { 81, 82 } }))
+            assert.same({ "contain", "spawn" }, events)
+            assert.same({ 0, 1, 2, 81, 82 }, stdio())
+            assert.is_nil(child.closed)
+            assert.same({ true, "exit", 0 }, { child:close() })
+            assert.is_true(child.closed)
+        end)
+    end)
+
     it("does not launch when strict containment cannot be established", function()
         with_transport(function() return nil, "job assignment refused" end,
             function(process, events)
