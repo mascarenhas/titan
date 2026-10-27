@@ -2738,7 +2738,28 @@ exit 1
 ]=])
         local cygpath = fixture(tools, "cygpath", [=[#!/bin/sh
 set -eu
-printf '%s\n' "$2"
+format= codepage=
+while [ "$#" -gt 1 ]; do
+  case $1 in
+    -m|-w|-aw|-u) format=$1; shift ;;
+    -C) codepage=$2; shift 2 ;;
+    *) printf 'unexpected cygpath option: %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+[ "$#" -eq 1 ] && [ -n "$format" ] || exit 2
+require_utf8=0
+case $1 in
+  */os_process_host_child.c|*/windows_test_supervisor.c) require_utf8=1 ;;
+  */"process child ação 東京.exe"|*/windows-test-supervisor.exe)
+    [ "$format" != -m ] || require_utf8=1 ;;
+esac
+if [ "$require_utf8" = 1 ]; then
+  [ "$format" = -m ] && [ "$codepage" = UTF8 ] || {
+    echo 'native helper conversion requires -m -C UTF8' >&2
+    exit 2
+  }
+fi
+printf '%s\n' "$1"
 ]=])
         local powershell = fixture(tools, "powershell.exe", [=[#!/usr/bin/env bash
 set -euo pipefail
