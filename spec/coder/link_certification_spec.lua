@@ -1857,6 +1857,21 @@ describe("linker dependency-feature memo", function()
         assert.matches("reserved native tool role", err, 1, true)
     end)
 
+    it("uses a preclassified uncertain linker request without further inventory", function()
+        local ctx, options = invocation(), clone(request)
+        options.toolchain, options.uncacheable = nil, "compiler inventory is uncertified"
+        for _, method in ipairs({ "run", "stat", "lstat", "realpath", "read_file" }) do
+            ctx.io[method] = function() error("uncertified linker request must not observe native stages") end
+        end
+        local backend, reason, status = certificate.linker_backend(ctx, options)
+        assert.equal("none", backend)
+        assert.equal(options.uncacheable, reason)
+        assert.equal("uncertified", status)
+        assert.is_nil(ctx.link_certificate_tools)
+        assert.is_nil(lfs.symlinkattributes(root .. "/.titan/linker-feature"))
+        assert.equal(0, probes)
+    end)
+
     it("uses a preclassified uncertain output request without further tool queries", function()
         local ctx, options = invocation(), clone(request)
         options.toolchain, options.uncacheable = nil, "compiler inventory is uncertified"

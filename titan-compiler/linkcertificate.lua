@@ -278,6 +278,7 @@ end
 
 function certificate.linker_backend(context, request)
     request = request or {}
+    if request.uncacheable then return "none", request.uncacheable, "uncertified" end
     local report
     local function discard_report()
         if not report then return end
