@@ -734,20 +734,21 @@ prepared native link policy, or the output-tool selection fails closed before
 scanning; an absent `compiler_tools` is valid and marks an uncertified
 toolchain.
 
-The inventory is incomplete when the native library policy resolved no files
-(the final link is uncertified, or its linker arguments or `--c-source`
-compile flags use a mechanism the policy does not recognize), when the
-toolchain is uncertified, or when the output-tool selection is uncertified. A
-candidate could then hold an input or tool that no evidence names, so if any
-candidate exists, cleanup fails the invocation with `refusing to retire stale
-Windows staging '<first candidate>': the native link and tool inventory is
-incomplete (<reason>)` before the protected-path check or any removal. Every
-candidate and its contents are kept, and no final-link hit or certificate
-follows. Without a candidate, such a build continues unchanged. To let
-`titanc` reclaim stages automatically, use a certifiable toolchain and linker
-arguments that the native library policy recognizes; otherwise inspect the
-stage directories, move any data you need, and delete the abandoned ones
-yourself. There is no flag to force or skip retirement.
+The inventory is incomplete when the native library policy produced no
+resolved-file list (`native_policy.files` is absent because the final link is
+uncertified, or its linker arguments or `--c-source` compile flags use a
+mechanism the policy does not recognize; a resolved but empty list is
+complete), when the toolchain is uncertified, or when the output-tool
+selection is uncertified. A candidate could then hold an input or tool that no
+evidence names, so if any candidate exists, cleanup fails the invocation with
+`refusing to retire stale Windows staging '<first candidate>': the native link
+and tool inventory is incomplete (<reason>)` before the protected-path check
+or any removal. Every candidate and its contents are kept, and no final-link
+hit or certificate follows. Without a candidate, such a build continues
+unchanged. To let `titanc` reclaim stages automatically, use a certifiable
+toolchain and linker arguments that the native library policy recognizes;
+otherwise inspect the stage directories, move any data you need, and delete
+the abandoned ones yourself. There is no flag to force or skip retirement.
 
 Stale-shim retirement is not implemented on Windows: the prior DLL does not
 carry the old physical membership inventory, and a matching banner or

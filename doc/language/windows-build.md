@@ -112,9 +112,9 @@ compiler or linker tool, or output of the current build, linking fails with
 elsewhere and build again. When `titanc` cannot identify every file and tool
 the link uses (for example with an uncertified compiler or linker flags it
 cannot interpret), any leftover stage directory stops the link with the same
-message, ending in `the native link and tool inventory is incomplete`. Inspect
-that directory, move anything you need, delete it, and build again. Builds
-without leftover stage directories are unaffected.
+message, followed by `the native link and tool inventory is incomplete
+(<reason>)`. Inspect that directory, move anything you need, delete it, and
+build again. Builds without leftover stage directories are unaffected.
 
 Deliver the matching `lua55.dll` and native dependency DLLs beside the
 executables. Lua's Windows `!` path expansion means the running executable's
