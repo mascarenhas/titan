@@ -203,10 +203,21 @@ local function posix_model_it(name, callback)
         local previous_driver = {}
         for key, value in pairs(driver) do previous_driver[key] = value end
         platform.windows = false
+        if previous then
+            -- Host module-load paths on Windows carry drive letters (`C:/...`).
+            -- Keep resolver context validation intact without reinterpreting
+            -- native host installation roots as relative POSIX paths.
+            driver.initialize_layout = function(context)
+                if type(context) ~= "table" or context.io == nil then
+                    error("compiler layout initialization requires a resolver context", 2)
+                end
+                compiler_io.validate(context.io, 2)
+                context._layout_initialized = true
+                return true
+            end
+        end
         local completed, failure = xpcall(callback, debug.traceback)
         platform.windows = previous
-        -- Layout initialization inside a POSIX model must not leave native
-        -- installed paths reinterpreted as POSIX relative paths afterwards.
         for key in pairs(driver) do driver[key] = nil end
         for key, value in pairs(previous_driver) do driver[key] = value end
         assert.truthy(completed, failure)
