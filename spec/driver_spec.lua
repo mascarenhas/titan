@@ -4091,8 +4091,8 @@ describe("compiler module loader", function()
             entries = {},
             key_order = {},
         }
+        -- Static metadata reconstructs canonical logical .so paths on every host.
         for name, modtype in pairs(module_types) do
-            modtype.file = provider_path(modtype.file)
             provider.entries[name] = {
                 abi = driver.TITAN_ABI_VERSION,
                 type = modtype,
@@ -9399,7 +9399,7 @@ typedef double titan_driver_symlink_value;
         assert.truthy(ok)
         assert.equal(0, #errors)
         assert.equal("static", driver.imported.choice.kind)
-        assert.equal(provider_path("choice.so"), modtype.file)
+        assert.equal("choice.so", modtype.file)
         assert.equal(archive, driver.imported.choice.static_archive)
     end)
 
@@ -9429,7 +9429,7 @@ typedef double titan_driver_symlink_value;
         })("a.b.c")
         assert.truthy(ok)
         assert.equal(0, #errors)
-        assert.equal(provider_path("a/b/c.so"), modtype.file)
+        assert.equal("a/b/c.so", modtype.file)
         assert.equal(earlier_exact,
             driver.imported["a.b.c"].static_archive)
         assert.equal("a/b/c.a", driver.imported["a.b.c"].relative)
@@ -9462,7 +9462,7 @@ typedef double titan_driver_symlink_value;
         })("a.b")
         assert.truthy(ok)
         assert.equal(0, #errors)
-        assert.equal(provider_path("a/b.so"), modtype.file)
+        assert.equal("a/b.so", modtype.file)
         assert.equal(unshadowed_claim,
             driver.imported["a.b"].static_archive)
         assert.equal("a/b.a", driver.imported["a.b"].relative)
@@ -9497,7 +9497,7 @@ typedef double titan_driver_symlink_value;
         assert.equal("static", driver.imported["mixed.child"].kind)
         assert.equal(archive,
             driver.imported["mixed.child"].static_archive)
-        assert.equal(provider_path("mixed/child.so"), modtype.file)
+        assert.equal("mixed/child.so", modtype.file)
     end)
 
     it("treats an exact archive nonclaim as terminal", function()
@@ -9668,7 +9668,7 @@ typedef double titan_driver_symlink_value;
         assert.equal(0, #errors)
         assert.equal("static", driver.imported["bundle.left"].kind)
         assert.is_nil(driver.imported["bundle.right"])
-        assert.equal(provider_path("bundle/left.so"), modtype.file)
+        assert.equal("bundle/left.so", modtype.file)
         assert.is_nil(types.serialize(modtype):find(archive, 1, true))
 
         local finalized, final_errors =
