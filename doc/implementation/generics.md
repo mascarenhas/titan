@@ -893,6 +893,21 @@ archive metadata, and prefix-container recovery validate the same schema.
 Version gating is described in
 [Compiled-module ABI](codegen-overview.md#compiled-module-abi).
 
+When interface recovery (`checker/imports.lua`) checks a recovered nominal
+application whose rebuilt owner it would only discard, it calls
+`types.validate_substitution(owner, owner.scope, arguments)` instead of
+`types.substitute`. Both share one rewrite tag dispatch and the same
+canonical, const, Interface, and namespace admission, so malformed metadata,
+arguments, scopes, and cycles fail with the same diagnostics. Validation mode
+keeps references to its inputs and only local traversal bookkeeping; it
+constructs no owner, member, container, list, map, or documentation copy
+(`documentation.validate` and `documentation.validate_map` replace the
+copying `documentation.copy`/`copy_map`). Canonical map keys, callable tails,
+and unusual namespace entries still rebuild the projections they consume,
+detached before scalar decoration so the arguments are not mutated.
+Constraints and other results that recovery actually uses still go through
+real substitution. There is no cache of successful validations.
+
 Metadata retains precise declared applications while native provenance remains
 owner-level. Selecting a static provider records its physical archive as one
 direct link input; it does not specialize every carried key. Dynamic and

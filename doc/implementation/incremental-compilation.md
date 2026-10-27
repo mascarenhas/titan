@@ -252,11 +252,13 @@ bytes, or reads once under the same race guard after a digest-only cache hit
 and raises `file changed during build` if the fresh observation differs from
 the one that authorized the digest.
 
-The driver wires `context_file_digest(context)` into `cdriver` header
-processing and `check_source_module`, so direct C-header parsing and object
-certification share the same per-context file memo. `driver.get_probe_service`
-also passes it to `cprobe.new_service`, but the probe service does not retain
-or forward it, so C probes hash independently. Only a publisher that replaces an owned output
+`incremental.check_headers` supplies the per-context file memo to
+`revalidate_header_input` during certification, so certification hashes each
+C header at most once per invocation. The driver also passes
+`context_file_digest(context)` to `cprobe.new_service` and to fresh checking
+options, but neither the probe service nor the checker retains it, so fresh
+C-header parsing and C probes may hash files independently. Only a publisher
+that replaces an owned output
 calls `incremental.invalidate_file(context, path)` to evict `path` and its
 aliases from the memo and the persistent cache. Pre-publication
 revalidation uses `incremental.fresh_context(context)`, which shares the
