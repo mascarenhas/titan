@@ -1034,6 +1034,100 @@ esac
         end
     end)
 
+    it("runs built UV runtime parents and descendants under separate sanitizer deadlines", function()
+        local workflow = read_file(".github/workflows/ci.yml")
+        local start = assert(workflow:find(
+            "- name: Run native async sanitizer gate (core-uv)", 1, true))
+        local finish = assert(workflow:find("\n      - name:", start + 1, true))
+        local step = workflow:sub(start, finish - 1)
+        assert_ordered(step,
+            "ci_sanitizer_capture.sh core-uv",
+            "ci_sanitizer_capture.sh uv-task-tests",
+            'runtime_cases="$RUNNER_TEMP/titan-sanitizer-uv-runtime-cases.txt"',
+            'local filename = "out/tests/uv/runtime_tests.o"',
+            "objectmetadata.read(",
+            "entry.object_metadata.test_functions",
+            "table.sort(names, util.bytewise_less)",
+            'for _, name in ipairs(names) do print(name) end',
+            'while IFS= read -r runtime_case; do',
+            'ci_sanitizer_capture.sh "uv-runtime-$runtime_case"',
+            'make titan-stdlib-test-run TITAN_FILTER="^uv%.runtime_tests%.$runtime_case%f[^%w_]"',
+            'done < "$runtime_cases"',
+            "ci_sanitizer_capture.sh async-completion-tests")
+        assert.falsy(step:find("TITAN_TEST_TIMEOUT", 1, true))
+        assert.falsy(step:find("titan-stdlib-test-build", 1, true))
+        assert.falsy(step:find("TITAN_FILTER='^uv%.runtime_tests%.'", 1, true))
+        assert.truthy(read_file("Makefile"):find("TITAN_TEST_TIMEOUT ?= 600", 1, true))
+
+        local inventory_source = assert(step:match(
+            [=["%$PREFIX/bin/lua" %-E %-e '(.-)' > "%$runtime_cases"]=]))
+        local util = require "titan-compiler.util"
+        local function inventory(names, read_error, decode_error)
+            local printed = {}
+            local environment = {
+                assert = assert, ipairs = ipairs, table = table, type = type,
+                print = function(name) printed[#printed + 1] = name end,
+                require = function(name)
+                    if name == "titan-compiler.util" then
+                        return {
+                            bytewise_less = util.bytewise_less,
+                            get_file_contents = function(filename, mode)
+                                assert.equal("out/tests/uv/runtime_tests.o", filename)
+                                assert.equal("rb", mode)
+                                if read_error then return nil, read_error end
+                                return "built owner object"
+                            end,
+                        }
+                    end
+                    assert.equal("titan-compiler.objectmetadata", name)
+                    return { read = function(bytes, filename)
+                        assert.equal("built owner object", bytes)
+                        assert.equal("out/tests/uv/runtime_tests.o", filename)
+                        if decode_error then return nil, decode_error end
+                        return { object_metadata = { test_functions = names } }
+                    end }
+                end,
+            }
+            local ok, failure = pcall(assert(load(
+                inventory_source, "@sanitizer-runtime-inventory", "t", environment)))
+            return ok, failure, printed
+        end
+        local ok, failure, printed = inventory({
+            "test_parent_z", "test_parent_a", "test_parent_A",
+        })
+        assert.is_true(ok, tostring(failure))
+        assert.same({ "test_parent_A", "test_parent_a", "test_parent_z" }, printed)
+        for _, invalid in ipairs({
+            { {}, nil, nil, "built UV runtime owner has no test functions" },
+            { {}, "owner object read failed", nil, "owner object read failed" },
+            { {}, nil, "owner metadata unreadable", "owner metadata unreadable" },
+        }) do
+            ok, failure, printed = inventory(invalid[1], invalid[2], invalid[3])
+            assert.is_false(ok)
+            assert.matches(invalid[4], tostring(failure), 1, true)
+            assert.same({}, printed)
+        end
+
+        local pattern = assert(step:match('TITAN_FILTER="([^"]+)"'))
+            :gsub("%$runtime_case", "test_parent_a")
+        for _, name in ipairs({
+            "uv.runtime_tests.test_parent_a",
+            "uv.runtime_tests.test_parent_a.pipe",
+            "uv.runtime_tests.test_parent_a.pipe.nested",
+        }) do
+            assert.truthy(name:find(pattern), name)
+        end
+        for _, name in ipairs({
+            "uv.runtime_tests.test_parent_a_extra",
+            "uv.runtime_tests.test_parent_ab",
+            "uv.runtime_tests.test_parent_a2",
+            "uv.runtime_tests.test_parent_z",
+            "uv.task_tests.test_parent_a",
+        }) do
+            assert.falsy(name:find(pattern), name)
+        end
+    end)
+
     for _, consumer in ipairs({ "async", "io" }) do
         it("composes source " .. consumer .. " with a compiled-only public producer", function()
             local root = make_temp_dir()
