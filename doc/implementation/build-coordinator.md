@@ -29,8 +29,10 @@ directories](../language/output-directory.md).
 
 ## End-to-end invocation sequence
 
-When `titanc` runs (`titanc`, excluding `--print-root` and
-`--print-ast`), it executes these phases in order:
+When `titanc` runs (`titanc`, excluding `--print-root`), it executes these
+phases in order. `--print-ast` shares the planning and output preflight of
+step 4 through `build.plan`, then checks and prints its source ASTs in-process
+instead of dispatching workers:
 
 1. **Normalize native inputs.** `nativeinputs.normalize` combines platform and
    profile defaults, `TITAN_EXTRA_CPPFLAGS`/`CFLAGS`/`LDFLAGS`, and repeatable
@@ -219,10 +221,14 @@ unimported malformed `.titan` file elsewhere in the source tree is never read.
 
 ### Pre-dispatch output preflight
 
-Immediately after `driver.resolution_plan`, and before any scheduler decision,
-invalidation, or worker launch, `build.run` calls the coordinator-only
-`request.preflight(plan)` closure, which `titanc` binds to
-`driver.preflight_build_outputs(context, plan, options)`. A failure aborts the
+`build.plan(context, request)` loads the ordered roots with the planning
+loader and closes `driver.resolution_plan`. Immediately afterwards, and before
+any scheduler decision, invalidation, or worker launch, `build.run` calls the
+coordinator-only `request.preflight(plan)` closure, which `titanc` binds to
+`driver.preflight_build_outputs(context, plan, options)`. The `--print-ast`
+path calls the same `build.plan` and preflight before any native output, then
+clears the planning placeholders from `driver.imported` so its ordinary
+loader checks the real sources. A failure aborts the
 invocation before any planned module output or final target is invalidated or
 written. Earlier planning may already have refreshed compiler bookkeeping such
 as `.titan/preamble.c`, and the exit path still saves the digest cache. The
@@ -515,9 +521,16 @@ Worker lifetime is bounded even if the coordinator terminates abnormally:
   worker: the build coordinator exited`) if the coordinator closed `fd 3`.
 * **POSIX lock inheritance.** Workers inherit the open `.titan-build.lock`
   file descriptors (`fds 4..`), and every native writer the coordinator starts
-  receives them too: synchronous `process.run`/`process.capture` commands and
-  the shell wrappers of local FIFO-notified native batches are launched with
-  `options.inherit = driver.OUTPUT_LOCKS:descriptors()`. An abrupt `SIGKILL`
+  receives them too: synchronous `process.run`/`process.capture` commands,
+  the shell wrappers of local FIFO-notified native batches, and the
+  coordinator's bound `Sync:run` and `run_batch` commands (such as `--c-source`
+  preprocessing and foreign-C checks) are launched with the held lock
+  descriptors. `titanc` binds the acquired lock set to its coordinator `Sync`
+  strategy before digest loading and preflight and clears the binding when the
+  locks are released; a bound `Sync:run` runs the same locale-prefixed, quoted
+  command through `/bin/sh -c` and `process.capture` with the same status and
+  stderr contract, and never falls back to an unleased `io.popen`. An abrupt
+  `SIGKILL`
   of the coordinator therefore leaves the kernel `flock` held until every
   surviving worker, native job, and child compiler has exited, and a
   subsequent `titanc` invocation waiting in `build.lock_outputs` cannot enter
