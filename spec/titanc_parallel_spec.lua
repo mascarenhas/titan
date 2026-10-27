@@ -703,11 +703,35 @@ describe("Windows native descendant containment", function()
     local function start_compiler(role, match, jobs)
         local log = assert(uv.fs_open(workspace .. "/" .. role .. ".log", "w", 420))
         local child = {}
+        local initialize = string.format(
+            "package.path=%q..package.path;package.cpath=%q..package.cpath;",
+            repository .. "/?.lua;" .. repository .. "/?/init.lua;",
+            repository .. "/titan-runtime/bootstrap/?.dll;")
+        if role == "successor" then
+            initialize = initialize .. string.format([[
+local factory = assert(package.loadlib(%q, "luaopen_native_writer_admission"))
+local observer = factory().watch(%d)
+local build = require "titan-compiler.build"
+local acquire = build.lock_outputs
+build.lock_outputs = function(...)
+  assert(not observer:dead(), "old writer exited before the contested lock wait")
+  local ready_path = %q
+  local ready = assert(io.open(ready_path .. ".tmp", "wb"))
+  assert(ready:write("waiting\n")); assert(ready:close())
+  assert(os.rename(ready_path .. ".tmp", ready_path))
+  local locks, err = acquire(...)
+  if locks then
+    assert(observer:dead(), "old native writer is alive at successor lock admission")
+    local checked = assert(io.open(%q, "wb"))
+    assert(checked:write("terminated\n")); assert(checked:close())
+  end
+  return locks, err
+end
+]], workspace .. "/native writer admission.dll", writer_pid,
+                workspace .. "/admission.waiting", workspace .. "/admission.checked")
+        end
         local arguments = {
-            "-E", "-e", string.format(
-                "package.path=%q..package.path;package.cpath=%q..package.cpath",
-                repository .. "/?.lua;" .. repository .. "/?/init.lua;",
-                repository .. "/titan-runtime/bootstrap/?.dll;"),
+            "-E", "-e", initialize,
             repository .. "/titanc", "-v", "--incremental", "--tree", workspace,
             "-o", workspace .. "/build", "--exe", workspace .. "/application",
             "--jobs", tostring(jobs), "--c-parts", tostring(jobs), "app",
@@ -741,6 +765,17 @@ describe("Windows native descendant containment", function()
         end
         local built = process.capture(argv)
         assert.truthy(built.ok, built.diagnostic)
+        argv = {}
+        for _, word in ipairs(compiler) do argv[#argv + 1] = word end
+        for _, word in ipairs({ "-std=c99", "-Wall", "-Wextra", "-Werror", "-shared",
+                "-Wl,--exclude-all-symbols", "-I", prefix .. "/include",
+                repository .. "/spec/fixtures/windows/native_writer_admission.c",
+                prefix .. "/lib/liblua55.a", "-o",
+                workspace .. "/native writer admission.dll" }) do
+            argv[#argv + 1] = word
+        end
+        local observer = process.capture(argv)
+        assert.truthy(observer.ok, observer.diagnostic)
         local payload = string.rep("x", 1100 * 1024)
         write_file(workspace .. "/app.titan", string.format([[
 function first(): string return %q end
@@ -780,15 +815,23 @@ end
         assert.truthy(output, ready)
         local alive = process.capture({ wrapper, "--wait-dead", pid, "0" })
         assert.equal(1, alive.status, alive.diagnostic)
+        -- Pin the live writer in the successor before killing the holder. Its
+        -- direct zero-time query runs at the full lock-set admission boundary,
+        -- not after another process launch or a wait for writer termination.
+        local successor = start_compiler("successor", nil, jobs)
+        assert.truthy(wait_until(function()
+            return read_file(workspace .. "/admission.waiting") ~= nil or successor.exited
+        end, 90000), read_file(workspace .. "/successor.log"))
+        assert.equal("waiting\n", read_file(workspace .. "/admission.waiting"),
+            read_file(workspace .. "/successor.log"))
+        assert.is_nil(read_file(workspace .. "/admission.checked"))
         assert(holder.handle:kill("sigkill"))
         assert.truthy(wait_until(function() return holder.exited end, 10000))
-
-        -- Start the successor before releasing the old native writer. If it
-        -- escaped, it will overwrite the output only after this build succeeds.
-        local successor = start_compiler("successor", nil, jobs)
         assert.truthy(wait_until(function() return successor.exited end, 90000),
             read_file(workspace .. "/successor.log"))
         assert.equal(0, successor.code, read_file(workspace .. "/successor.log"))
+        assert.equal("terminated\n", read_file(workspace .. "/admission.checked"),
+            read_file(workspace .. "/successor.log"))
         assert.equal("file", lfs.attributes(workspace .. "/build/app.o", "mode"))
         local before = read_file(output)
         write_file(workspace .. "/writer.release", "continue\n")
