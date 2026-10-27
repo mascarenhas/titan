@@ -931,9 +931,16 @@ are never part of `spec.outputs`. Each target owns
     `--just-symbols` and `--retain-symbols-file` operands. Value-taking options
     such as `-u`, `-e`, `-soname`, `-install_name`, `-z`, and `--ld-path`, and
     input-free flags such as `-O<level>`, `-flto=<mode>`, and `-fuse-ld=`,
-    are covered by the ordered recipe `argv`. Each `-l` candidate resolves
-    against the explicit `-L` directories and then `<compiler_argv>
-    -print-file-name=<candidate>`. Any other option, a text linker script, a
+    are covered by the ordered recipe `argv`. Each `-l` library is searched
+    directory by directory through the explicit `-L` directories, trying every
+    candidate name in one directory before the next: on Windows (MinGW)
+    `lib<name>.dll.a`, `<name>.dll.a`, `lib<name>.a`, `<name>.lib`,
+    `lib<name>.dll`, and `<name>.dll` for dynamic selection, or `lib<name>.a`
+    and `<name>.lib` for static selection. Otherwise the candidates are queried
+    through `<compiler_argv> -print-file-name=<candidate>`; because separate
+    queries do not reveal the compiler's directory order, candidates found in
+    different implicit directories fail with `ambiguous compiler library search
+    order: <name>`. Any other option, a text linker script, a
     thin archive, an unknown format, or an unresolvable library or file makes
     the link uncacheable (for example `unsupported native linker input
     mechanism: <flag>` or `cannot resolve native file: <path>`) instead of
