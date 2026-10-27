@@ -354,14 +354,27 @@ therefore loads the exact compiler Lua files and native `titan` support library
 that the coordinator loaded. The child's descriptors are:
 
 * `fd 0` (`stdin`): an empty pipe whose write end the coordinator closes
-  immediately after `uv.spawn`, ensuring `fd 3` and `fds 4..` occupy fixed
-  descriptor numbers;
+  immediately after `uv.spawn`, ensuring `fd 3`, `fd 4`, and `fds 5..` occupy
+  fixed descriptor numbers;
 * `fd 1` (`stdout`) and `fd 2` (`stderr`): pipes read to EOF by the coordinator
   into `worker.stdout` and `worker.stderr` for deterministic replay;
-* `fd 3`: a private duplex pipe (`uv.new_pipe(false)`) carrying length-prefixed
-  control records; and
-* `fds 4, 5, ...` (POSIX only): the open `.titan-build.lock` descriptors from
+* `fd 3`: a private pipe (`worker.request_pipe`) carrying coordinator-to-worker
+  request records, read by the worker's `control.reader`;
+* `fd 4`: a private pipe (`worker.control`) carrying worker-to-coordinator
+  records, written by the worker's `control.pipe`; and
+* `fds 5, 6, ...` (POSIX only): the open `.titan-build.lock` descriptors from
   `locks:descriptors()`.
+
+Each direction has its own pipe. On Windows, synchronous pipe handles
+serialize I/O on one file object, so a single duplex pipe could let a pending
+read block the worker's first write. The worker's `process.open_control(3, 4)`
+keeps both handles unreferenced except while they are in use: during a
+blocking `Control.receive` or `Control.send`, and during the nonblocking
+`Control:poll()`, which briefly references the reader, runs
+`uv.run("nowait")`, and unreferences it again so a coordinator EOF or read
+error is observed even when no other handle is active. An idle control
+channel therefore never keeps its event loop alive, and `Control:close`
+closes both.
 
 `process.start(argv, options)` launches a command that shares the caller's
 standard streams and returns its `Process` immediately (or `nil, error`);
@@ -382,7 +395,7 @@ coordinator.
 
 ### Control protocol (`titan-build-worker-v1`)
 
-Control messages on `fd 3` (`process.lua`) consist of a 4-byte
+Control messages on `fd 3` and `fd 4` (`process.lua`) consist of a 4-byte
 big-endian payload length (`string.pack(">s4", payload)`, bounded at
 `RECORD_LIMIT = 256 * 1024 * 1024 + 64` bytes) followed by a
 `titan-compiler/graphcodec` binary payload verified with SHA-256. Payloads may
@@ -452,7 +465,7 @@ The message exchange for one worker is:
    module compiles execute directly inside the worker under its active frontend
    slot lease.
 3. **Worker -> coordinator (`result`).** Before exiting with status 0, the
-   worker sends exactly one terminal record and closes `fd 3`:
+   worker sends exactly one terminal record and closes its control handles:
 
    ```lua
    -- Success:
@@ -515,12 +528,13 @@ never searches `TITAN_BIN_PATH` or `TITAN_SOURCE_PATH`:
 Worker lifetime is bounded even if the coordinator terminates abnormally:
 
 * **Cooperative abandonment check.** `worker_io(session)` wraps `Sync:yield`
-  (`build_worker.lua`) and checks `session:abandoned()` (non-blocking
-  `uv.run("nowait")` testing whether `fd 3` reached EOF or error). Both
-  `yield` and `Session:run_batch` exit immediately with status 3 (`titanc build
-  worker: the build coordinator exited`) if the coordinator closed `fd 3`.
+  (`build_worker.lua`) and checks `session:abandoned()`, which calls
+  `control:poll()` to test without blocking whether its request pipe, `fd 3`,
+  reached EOF or error. Both `yield` and `Session:run_batch` exit immediately
+  with status 3 (`titanc build worker: the build coordinator exited`) if the
+  coordinator closed its end.
 * **POSIX lock inheritance.** Workers inherit the open `.titan-build.lock`
-  file descriptors (`fds 4..`), and every native writer the coordinator starts
+  file descriptors (`fds 5..`), and every native writer the coordinator starts
   receives them too: synchronous `process.run`/`process.capture` commands,
   the shell wrappers of local FIFO-notified native batches, and the
   coordinator's bound `Sync:run` and `run_batch` commands (such as `--c-source`

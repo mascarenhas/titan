@@ -2462,8 +2462,9 @@ are in [Lua interop internals](lua-interop-internals.md).
 (`luv >= 1.52.1` on Linux, macOS, and Windows, anchored once per Lua state in
 the registry under `"titan-compiler.process: luv"`). On every platform, the
 build coordinator uses `process.start_worker` (spawning `luv.exepath()` with a
-duplex control pipe on `fd 3`, captured stdout/stderr pipes, and inherited
-POSIX `.titan-build.lock` descriptors on `fds 4..`), `process.open_control`,
+coordinator-to-worker request pipe on `fd 3`, a worker-to-coordinator pipe on
+`fd 4`, captured stdout/stderr pipes, and inherited POSIX `.titan-build.lock`
+descriptors on `fds 5..`), `process.open_control(3, 4)`,
 `process.frame`/`process.new_frames` (4-byte big-endian length framing up to
 256 MiB + 64 bytes), `process.encode_record`/`process.decode_record`
 (`graphcodec` with native SHA-256), and `process.start_job` for worker-submitted
