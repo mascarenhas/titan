@@ -527,10 +527,14 @@ function incremental.physical_executable(context, command, selection)
         return windows_physical_executable(context, executable, selection)
     end
     local candidates = {}
-    if executable:find("[/\\]") or executable:match("^%a:") then
+    if executable:find("/", 1, true) then
         candidates[1] = absolute(context, executable)
     else
-        local search = context.executable_path or platform.getenv("PATH") or ""
+        local search = context.executable_path or platform.getenv("PATH")
+        if search == nil then
+            -- An unset PATH uses the launcher's default, not an empty CWD entry.
+            return uncertified_tool("cannot determine POSIX default executable search path")
+        end
         for directory in (search .. ":"):gmatch("(.-):") do
             -- Preserve POSIX symlink/.. spelling through admission and execution.
             candidates[#candidates + 1] = platform.join(

@@ -682,6 +682,177 @@ describe("incremental configuration", function()
         assert.is_not.equal(before.options, incremental.configuration(third).options)
     end)
 
+    local function with_posix_search(path, body)
+        local windows, getenv = platform.windows, platform.getenv
+        platform.windows = false
+        platform.getenv = function(name)
+            assert.equal("PATH", name)
+            return path
+        end
+        local results = table.pack(pcall(body))
+        platform.windows, platform.getenv = windows, getenv
+        if not results[1] then error(results[2], 0) end
+        return table.unpack(results, 2, results.n)
+    end
+
+    local function posix_search_context(command, changed)
+        local winner, shadow, later =
+            "/winner/" .. command, "/coordinator/" .. command, "/later/" .. command
+        local ctx = context({ [winner] = "selected", [shadow] = "cwd shadow", [later] = "later shadow" })
+        function ctx.io:cwd() return "/coordinator" end
+        ctx.io.aliases["./" .. command] = shadow
+        ctx.io.aliases["/coordinator/./" .. command] = shadow
+        local stat = ctx.io.stat
+        function ctx.io:stat(path)
+            local value, err = stat(self, path)
+            if value and (self.aliases[path] or path) == changed then
+                value.changed_seconds = value.changed_seconds + 1
+            end
+            return value, err
+        end
+        return ctx, winner, shadow, later
+    end
+
+    local function posix_search_descriptor(command)
+        return { compiler_argv = { command }, stage_tools = {},
+            preprocessor_identity = "#define POSIX_SEARCH_FIXTURE 1\n",
+            banner = "clang version 22.1.8 (fixture)" }
+    end
+
+    for _, case in ipairs({
+        { name = "c:cc", kind = "colon" },
+        { name = "c\\cc", kind = "backslash" },
+    }) do
+        it("searches PATH for a slash-free POSIX name containing a " .. case.kind, function()
+            with_posix_search("/ambient", function()
+                local function identity(changed)
+                    local ctx, winner, shadow, later = posix_search_context(case.name, changed)
+                    ctx.executable_path = "/winner:/later"
+                    local digest, details, status =
+                        incremental.toolchain_identity(ctx, posix_search_descriptor(case.name))
+                    assert.is_string(digest)
+                    assert.is_nil(status)
+                    assert.equal(winner, details.tools[1].path)
+                    local physical, selected = incremental.physical_executable(ctx, case.name)
+                    assert.same(details.tools[1], physical)
+                    assert.equal(winner, selected)
+                    assert.equal(0, incremental.counters(ctx).file_hashes)
+                    assert.same({}, ctx.io.reads)
+                    assert.same({}, ctx.io.commands)
+                    return digest, details, winner, shadow, later
+                end
+                local first, details, winner, shadow, later = identity()
+                local replaced, replaced_details = identity(winner)
+                assert.is_not.equal(first, replaced)
+                assert.equal(details.preprocessor, replaced_details.preprocessor)
+                assert.equal(details.banner, replaced_details.banner)
+                assert.equal(details.tools[1].path, replaced_details.tools[1].path)
+                assert.equal(details.tools[1].changed_seconds + 1,
+                    replaced_details.tools[1].changed_seconds)
+                assert.equal(first, (identity(shadow)))
+                assert.equal(first, (identity(later)))
+            end)
+        end)
+    end
+
+    for _, case in ipairs({
+        { name = "ambient", environment = "" },
+        { name = "explicit", override = "" },
+    }) do
+        it("retains CWD search for an " .. case.name .. " empty POSIX PATH", function()
+            with_posix_search(case.environment, function()
+                local function identity(changed)
+                    local ctx, winner, shadow = posix_search_context("cc", changed)
+                    ctx.executable_path = case.override
+                    local digest, details, status =
+                        incremental.toolchain_identity(ctx, posix_search_descriptor("cc"))
+                    assert.is_string(digest)
+                    assert.is_nil(status)
+                    assert.equal(shadow, details.tools[1].path)
+                    local physical, selected = incremental.physical_executable(ctx, "cc")
+                    assert.same(details.tools[1], physical)
+                    assert.equal("/coordinator/./cc", selected)
+                    assert.equal(0, incremental.counters(ctx).file_hashes)
+                    assert.same({}, ctx.io.reads)
+                    assert.same({}, ctx.io.commands)
+                    return digest, shadow, winner
+                end
+                local first, shadow, winner = identity()
+                assert.is_not.equal(first, (identity(shadow)))
+                assert.equal(first, (identity(winner)))
+            end)
+        end)
+    end
+
+    it("leaves an unset POSIX executable default uncertified without guessing CWD", function()
+        with_posix_search(nil, function()
+            local ctx = posix_search_context("cc")
+            function ctx.io:stat() error("unset PATH must not guess a candidate") end
+            local physical, reason, status = incremental.physical_executable(ctx, "cc")
+            assert.is_nil(physical)
+            assert.matches("POSIX default executable search path", reason, 1, true)
+            assert.equal("uncertified", status)
+            local digest, toolchain_reason, toolchain_status =
+                incremental.toolchain_identity(ctx, posix_search_descriptor("cc"))
+            assert.is_nil(digest)
+            assert.equal(reason, toolchain_reason)
+            assert.equal(status, toolchain_status)
+            assert.same({}, ctx.incremental.toolchains)
+            assert.same({}, ctx.io.reads)
+            assert.same({}, ctx.io.commands)
+            local configured_ctx = configured()
+            configured_ctx.incremental_options.toolchain_descriptor.compiler_argv = { "cc" }
+            local config, config_reason, config_status = incremental.configuration(configured_ctx)
+            assert.is_nil(config)
+            assert.equal(reason, config_reason)
+            assert.equal(status, config_status)
+            assert.is_nil(configured_ctx.incremental_configuration)
+            assert.same({}, configured_ctx.io.commands)
+        end)
+    end)
+
+    it("admits explicit POSIX paths without consulting an unset PATH", function()
+        with_posix_search(nil, function()
+            local ctx, _, shadow = posix_search_context("cc")
+            platform.getenv = function() error("explicit paths must not query PATH") end
+            for _, command in ipairs({ shadow, "./cc" }) do
+                local physical, selected = incremental.physical_executable(ctx, command)
+                assert.equal(shadow, physical.path)
+                assert.equal(command == shadow and shadow or "/coordinator/./cc", selected)
+            end
+            assert.same({}, ctx.io.reads)
+            assert.same({}, ctx.io.commands)
+        end)
+    end)
+
+    it("preserves POSIX PATH lookup errors and cancellation for literal command names", function()
+        with_posix_search("/winner", function()
+            local cancelled = {}
+            for _, command in ipairs({ "c:cc", "c\\cc" }) do
+                local ctx, winner = posix_search_context(command)
+                local stat = ctx.io.stat
+                local failure = "injected PATH lookup failure"
+                function ctx.io:stat(path)
+                    if path == winner then return nil, failure end
+                    return stat(self, path)
+                end
+                local called, err = pcall(incremental.physical_executable, ctx, command)
+                assert.is_false(called)
+                assert.matches(failure, err, 1, true)
+                failure = cancelled
+                called, err = pcall(incremental.physical_executable, ctx, command)
+                assert.is_false(called)
+                assert.equal(cancelled, err)
+                ctx.executable_path = nil
+                platform.getenv = function() error(cancelled, 0) end
+                called, err = pcall(incremental.physical_executable, ctx, command)
+                assert.is_false(called)
+                assert.equal(cancelled, err)
+                platform.getenv = function() return "/winner" end
+            end
+        end)
+    end)
+
     it("retains selected executable spelling separately from canonical identity", function()
         local platform = require "titan-compiler.platform"
         if platform.windows then pending("POSIX relative PATH selection"); return end
