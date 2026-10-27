@@ -275,20 +275,23 @@ end)
 describe("native C object path CLI", function()
     local root, sources, first, second, prefix, repository
     local function read(path) return assert(context().io:read_file(path)) end
-    local function invoke(arguments)
+    local function invoke(arguments, environment)
         local argv = {
             platform.windows and "env.exe" or "env",
             "TITAN_RUNTIME_PREBUILT=1", "CCACHE_DISABLE=1",
             "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_ROCKS_ROOT=" .. prefix,
             "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=-O0 -fno-lto",
             "TITAN_EXTRA_LDFLAGS=",
+        }
+        for name, value in pairs(environment or {}) do argv[#argv + 1] = name .. "=" .. value end
+        for _, value in ipairs({
             prefix .. "/bin/lua" .. (platform.windows and ".exe" or ""), "-E", "-e",
             string.format("package.path=%q..package.path; package.cpath=%q..package.cpath",
                 repository .. "/?.lua;" .. repository .. "/?/init.lua;",
                 repository .. "/titan-runtime/bootstrap/?" ..
                     (platform.windows and ".dll" or ".so") .. ";"),
             repository .. "/titanc",
-        }
+        }) do argv[#argv + 1] = value end
         for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
         local stdout, stderr = root .. "/stdout", root .. "/stderr"
         local batch = process.new_batch()
@@ -406,4 +409,150 @@ describe("native C object path CLI", function()
             assert.is_nil(lfs.symlinkattributes(output))
         end)
     end
+
+    describe("native output tool effective execution", function()
+        for _, case in ipairs({
+            { name = "execute-only ELF", mode = "111", selected = "first", readable = false },
+            { name = "owner 0654", mode = "654", selected = "later", readable = true },
+            { name = "owner 0401", mode = "401", selected = "later", readable = true },
+        }) do
+            it("certifies the actual non-root " .. case.name .. " producer and reuses source objects", function()
+                if platform.windows then pending("POSIX ELF execution permissions"); return end
+                local function run(argv)
+                    local result = context().io:run(argv)
+                    assert.is_true(result.started and result.ok, result.output or result.diagnostic)
+                    return result
+                end
+                if run({ "uname", "-s" }).output:match("^%s*(.-)%s*$") ~= "Linux" then
+                    pending("Linux ELF execution permissions"); return
+                end
+                local uid = tonumber(run({ "id", "-u" }).output)
+                assert.is_number(uid)
+                if uid == 0 then pending("requires a non-root effective user"); return end
+                local directories = { first = root .. "/first tool", later = root .. "/later tool" }
+                for _, directory in pairs(directories) do assert(lfs.mkdir(directory)) end
+                local tool_name, events = "titan-permission-ar", root .. "/actual-archiver"
+                local real_ar = assert(cdriver.split_shell_words(driver.AR))
+                if real_ar[1] == "exec" then table.remove(real_ar, 1) end
+                assert.not_equal(tool_name, real_ar[1])
+                local function c_string(value)
+                    return '"' .. value:gsub('[%z\1-\31\127-\255\\"]', function(byte)
+                        return string.format("\\%03o", byte:byte())
+                    end) .. '"'
+                end
+                local initializers = {}
+                for index, word in ipairs(real_ar) do
+                    initializers[#initializers + 1] = string.format(
+                        "    child[%d] = (char *)%s;", index - 1, c_string(word))
+                end
+                local function executable_bytes(marker)
+                    local source, executable = root .. "/archiver.c", root .. "/elf-" .. marker
+                    write(source, string.format([[
+#define _POSIX_C_SOURCE 200809L
+#include <fcntl.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+    static const char event[] = %s;
+    int fd = open(%s, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0) return 125;
+    ssize_t written = write(fd, event, sizeof(event) - 1);
+    int closed = close(fd);
+    if (written != (ssize_t)(sizeof(event) - 1) || closed != 0) return 125;
+    char *child[argc + %d];
+%s
+    for (int i = 1; i < argc; ++i) child[%d + i] = argv[i];
+    child[%d + argc] = 0;
+    execvp(child[0], child);
+    return 126;
+}
+]], c_string(marker .. "\n"), c_string(events), #real_ar,
+                        table.concat(initializers, "\n"), #real_ar - 1, #real_ar - 1))
+                    local argv = assert(cdriver.split_shell_words(driver.CC))
+                    if argv[1] == "exec" then table.remove(argv, 1) end
+                    for _, word in ipairs({ "-std=c99", "-O0", "-fno-lto", source, "-o", executable }) do
+                        argv[#argv + 1] = word
+                    end
+                    run(argv)
+                    local bytes = read(executable)
+                    assert.equal("\127ELF", bytes:sub(1, 4))
+                    return bytes
+                end
+                local binaries = { first = executable_bytes("first"), later = executable_bytes("later") }
+                local candidates = { first = directories.first .. "/" .. tool_name,
+                    later = directories.later .. "/" .. tool_name }
+                local function install(which, replace)
+                    local candidate = candidates[which]
+                    local previous = replace and assert(lfs.attributes(candidate))
+                    local staged = replace and candidate .. ".replacement" or candidate
+                    write(staged, binaries[which] .. (replace and "\1" or "\0"))
+                    run({ "chmod", which == "first" and case.mode or "755", staged })
+                    if previous then
+                        assert(lfs.touch(staged, previous.access, previous.modification))
+                        assert(os.rename(staged, candidate))
+                        local current = assert(lfs.attributes(candidate))
+                        assert.equal(previous.modification, current.modification)
+                        assert.equal(previous.size, current.size)
+                    end
+                    assert.equal(uid, lfs.attributes(candidate, "uid"))
+                end
+                install("first"); install("later")
+                assert.equal(case.readable, context().io:readable(candidates.first))
+                local output = root .. "/permission build"
+                write(root .. "/permission_library.titan", "function value(): integer return 37 end\n")
+                local environment = { AR = tool_name,
+                    PATH = directories.first .. ":" .. directories.later .. ":" .. (platform.getenv("PATH") or "") }
+                local arguments = { "--incremental", "-v", "--jobs", "1",
+                    "--tree", root, "--output", output, "permission_library" }
+                local function compile()
+                    local result = invoke(arguments, environment)
+                    assert.is_true(result.ok, result.stderr)
+                    assert.equal("exit", result.why, result.stderr)
+                    assert.equal(0, result.status, result.stderr)
+                    return result
+                end
+                local function actual_producer()
+                    local bytes = read(events)
+                    assert.not_equal("", bytes)
+                    for marker in bytes:gmatch("[^\n]+") do assert.equal(case.selected, marker, bytes) end
+                end
+                local cold = compile()
+                assert.matches("Titan link miss ", cold.stderr, 1, true)
+                actual_producer()
+                local object, generated = output .. "/permission_library.o", output .. "/permission_library.c"
+                local sentinel = 946684800
+                assert(lfs.touch(object, sentinel, sentinel))
+                local object_bytes, c_bytes = read(object), read(generated)
+                local object_info = assert(lfs.attributes(object))
+                local c_info = assert(lfs.attributes(generated))
+                local function reused_object()
+                    assert.equal(object_bytes, read(object))
+                    assert.equal(c_bytes, read(generated))
+                    local current = assert(lfs.attributes(object))
+                    assert.equal(object_info.dev, current.dev)
+                    assert.equal(object_info.ino, current.ino)
+                    assert.equal(sentinel, current.modification)
+                    local current_c = assert(lfs.attributes(generated))
+                    assert.equal(c_info.dev, current_c.dev)
+                    assert.equal(c_info.ino, current_c.ino)
+                    assert.equal(c_info.modification, current_c.modification)
+                end
+                write(events, "")
+                assert.matches("Titan link hit ", compile().stderr, 1, true)
+                assert.equal("", read(events))
+                reused_object()
+                install(case.selected == "first" and "later" or "first", true)
+                assert.matches("Titan link hit ", compile().stderr, 1, true)
+                assert.equal("", read(events))
+                reused_object()
+                install(case.selected, true)
+                assert.matches("Titan link miss ", compile().stderr, 1, true)
+                actual_producer()
+                reused_object()
+                write(events, "")
+                assert.matches("Titan link hit ", compile().stderr, 1, true)
+                assert.equal("", read(events))
+                reused_object()
+            end)
+        end
+    end)
 end)

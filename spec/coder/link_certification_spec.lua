@@ -72,6 +72,9 @@ local function precise_model(root)
             local metadata, err = lstat(self, path)
             return decorate(metadata, err, path)
         end
+        function strategy:executable(path)
+            return model.executables[key(path)] == true
+        end
         function strategy:read_file(path, bound)
             local name = key(path)
             self.reads[name] = (self.reads[name] or 0) + 1
