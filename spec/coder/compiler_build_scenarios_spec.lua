@@ -75,9 +75,30 @@ local function shell_command(argv)
     return table.concat(quoted, " ")
 end
 
-local function run_command(argv, cwd)
+local function run_command(argv, cwd, env)
     argv = { table.unpack(argv) }
-    if platform.windows and argv[1] == "env" then argv[1] = "env.exe" end
+    if platform.windows then
+        local ok_call, result = pcall(function()
+            return compiler_io.new_sync():run(argv, { cwd = cwd, env = env })
+        end)
+        assert(ok_call, result)
+        local output = result.output or result.diagnostic or ""
+        output = output:gsub("\r\n", "\n")
+        return result.started and result.ok, output, result.why, result.status
+    end
+    if env then
+        local keys = {}
+        for key in pairs(env) do keys[#keys + 1] = key end
+        table.sort(keys)
+        local prefixed = { "env" }
+        for _, key in ipairs(keys) do
+            prefixed[#prefixed + 1] = key .. "=" .. tostring(env[key])
+        end
+        for _, arg in ipairs(argv) do
+            prefixed[#prefixed + 1] = arg
+        end
+        argv = prefixed
+    end
     local previous_cwd
     if cwd then
         previous_cwd = assert(lfs.currentdir())
@@ -91,7 +112,6 @@ local function run_command(argv, cwd)
     end
     assert(ok_call, result)
     local output = result.output or result.diagnostic or ""
-    if platform.windows then output = output:gsub("\r\n", "\n") end
     return result.started and result.ok, output, result.why, result.status
 end
 
@@ -137,17 +157,19 @@ local function parse_verbose_output(output)
             and not line:match("^Titan ")
             and not line:match("^titanc:")
             and not line:match("^%[cprobe%]") then
-            local normalized = normalize_slashes(line)
+            local normalized = normalize_slashes(line):gsub('%^"', '"')
             local has_e_flag = normalized:find(" -E ", 1, true) ~= nil
                 or normalized:find("'-E'", 1, true) ~= nil
                 or normalized:find('"-E"', 1, true) ~= nil
             local is_preprocess = normalized:find("-print-prog-name", 1, true) ~= nil
                 or normalized:find("-print-file-name", 1, true) ~= nil
+                or normalized:find("-###", 1, true) ~= nil
                 or (has_e_flag and (
                     normalized:find("-dD", 1, true) ~= nil
                     or normalized:find("-MD", 1, true) ~= nil
                     or normalized:find(" -x ", 1, true) ~= nil
                     or normalized:find("'-x'", 1, true) ~= nil
+                    or normalized:find('"-x"', 1, true) ~= nil
                 ))
             local is_compile = not is_preprocess and (
                 normalized:find(" -c ", 1, true) ~= nil
@@ -173,7 +195,9 @@ local function parse_verbose_output(output)
                 end
             elseif normalized:find("dsymutil", 1, true)
                 or normalized:find(" -FO ", 1, true)
-                or normalized:find("'-FO'", 1, true) then
+                or normalized:find("'-FO'", 1, true)
+                or normalized:find('"-FO"', 1, true)
+                or normalized:find('"@', 1, true) then
                 parsed.other_native_commands[#parsed.other_native_commands + 1] = normalized
             elseif normalized:find(" -o ", 1, true)
                 or normalized:find("'-o'", 1, true)
@@ -382,31 +406,32 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
         options = options or {}
         local env = options.env or {}
         local frontend = options.frontend or (REPOSITORY .. "/titanc")
-        local argv = {
-            "env",
-            "TITAN_RUNTIME_PREBUILT=1",
-            "CCACHE_DISABLE=1",
-            "TITAN_PROBE_CACHE_DISABLE=1",
-            "TITAN_ROCKS_ROOT=" .. (env.TITAN_ROCKS_ROOT or prefix),
-            "TITAN_BUILD_PROFILE=" .. (env.TITAN_BUILD_PROFILE or "validation"),
-            "TITAN_EXTRA_CPPFLAGS=" .. (env.TITAN_EXTRA_CPPFLAGS or ""),
-            "TITAN_EXTRA_CFLAGS=" .. (env.TITAN_EXTRA_CFLAGS or "-O0 -fno-lto"),
-            "TITAN_EXTRA_LDFLAGS=" .. (env.TITAN_EXTRA_LDFLAGS or "-fno-lto"),
+        local env_table = {
+            TITAN_RUNTIME_PREBUILT = "1",
+            CCACHE_DISABLE = "1",
+            TITAN_PROBE_CACHE_DISABLE = "1",
+            TITAN_ROCKS_ROOT = env.TITAN_ROCKS_ROOT or prefix,
+            TITAN_BUILD_PROFILE = env.TITAN_BUILD_PROFILE or "validation",
+            TITAN_EXTRA_CPPFLAGS = env.TITAN_EXTRA_CPPFLAGS or "",
+            TITAN_EXTRA_CFLAGS = env.TITAN_EXTRA_CFLAGS or "-O0 -fno-lto",
+            TITAN_EXTRA_LDFLAGS = env.TITAN_EXTRA_LDFLAGS or "-fno-lto",
         }
-        if env.CC then argv[#argv + 1] = "CC=" .. env.CC end
-        if env.TITAN_C_PARTS then argv[#argv + 1] = "TITAN_C_PARTS=" .. env.TITAN_C_PARTS end
-        argv[#argv + 1] = LUA
-        argv[#argv + 1] = "-E"
-        argv[#argv + 1] = "-e"
-        argv[#argv + 1] = string.format(
-            "package.path = %q .. package.path; package.cpath = %q .. package.cpath",
-            REPOSITORY .. "/?.lua;" .. REPOSITORY .. "/?/init.lua;",
-            REPOSITORY .. "/titan-runtime/bootstrap/?" .. SHARED_SUFFIX .. ";")
-        argv[#argv + 1] = frontend
+        if env.CC then env_table.CC = env.CC end
+        if env.TITAN_C_PARTS then env_table.TITAN_C_PARTS = env.TITAN_C_PARTS end
+        local argv = {
+            LUA,
+            "-E",
+            "-e",
+            string.format(
+                "package.path = %q .. package.path; package.cpath = %q .. package.cpath",
+                REPOSITORY .. "/?.lua;" .. REPOSITORY .. "/?/init.lua;",
+                REPOSITORY .. "/titan-runtime/bootstrap/?" .. SHARED_SUFFIX .. ";"),
+            frontend,
+        }
         for _, arg in ipairs(options.args or {}) do
             argv[#argv + 1] = arg
         end
-        return argv
+        return argv, env_table
     end
 
     local function invoke_titanc(options)
@@ -416,8 +441,8 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
             ["test-executable"] = test_exe,
         }
         local before = collect_artifacts(build_dir, tracked_exes, sentinel)
-        local argv = compiler_argv(options)
-        local ok, output, why, status = run_command(argv, options.cwd)
+        local argv, env_table = compiler_argv(options)
+        local ok, output, why, status = run_command(argv, options.cwd, env_table)
         local after = collect_artifacts(build_dir, tracked_exes, nil)
         local step = parse_verbose_output(output)
         step.ok = ok
@@ -477,10 +502,10 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
         end
         assert.is_true(step.rewritten[object_rel] == true,
             "expected object " .. object_rel .. " to be rewritten on disk:\n" .. step.raw)
-        local stem_c = object_rel:gsub("%.o$", ".c")
+        local stem_c = object_rel:gsub("%.o$", ".c"):lower()
         local compiled_c = false
         for _, cmd in ipairs(step.module_compiles) do
-            if cmd:find(stem_c, 1, true) then
+            if cmd:lower():find(stem_c, 1, true) then
                 compiled_c = true
                 break
             end
@@ -497,9 +522,9 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
             "missing 'Titan object hit " .. modname .. "' line in:\n" .. step.raw)
         assert.is_false(step.rewritten[object_rel] == true,
             "expected object " .. object_rel .. " not to be rewritten on disk:\n" .. step.raw)
-        local stem_c = object_rel:gsub("%.o$", ".c")
+        local stem_c = object_rel:gsub("%.o$", ".c"):lower()
         for _, cmd in ipairs(step.module_compiles) do
-            assert.is_nil(cmd:find(stem_c, 1, true),
+            assert.is_nil(cmd:lower():find(stem_c, 1, true),
                 "unexpected native -c command for reused module " .. modname .. ": " .. cmd)
         end
     end
@@ -550,26 +575,22 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
     local function run_executable(exe_full_path, extra_args, env_overrides)
         env_overrides = env_overrides or {}
         local standard_titan_path = (platform.windows and (build_dir .. "/lib/titan/0.6;") or "")
-            .. prefix .. "/lib/titan/0.6"
+            .. prefix .. "/lib/titan/0.6;;"
         local titan_path_0_6 = env_overrides.TITAN_PATH_0_6 or standard_titan_path
-        local argv = {
-            "env",
-            "TITAN_PATH_0_6=" .. titan_path_0_6,
-            "PATH=" .. prefix .. "/bin" .. (platform.windows and ";" or ":") .. (os.getenv("PATH") or ""),
+        local env_table = {
+            TITAN_PATH_0_6 = titan_path_0_6,
+            PATH = prefix .. "/bin" .. (platform.windows and ";" or ":") .. (os.getenv("PATH") or ""),
         }
-        if platform.windows then
-            table.insert(argv, 2, "MSYS2_ENV_CONV_EXCL=TITAN_PATH_0_6;TITAN_PATH")
-        end
         for key, value in pairs(env_overrides) do
             if key ~= "TITAN_PATH_0_6" then
-                argv[#argv + 1] = key .. "=" .. value
+                env_table[key] = value
             end
         end
-        argv[#argv + 1] = exe_full_path
+        local argv = { exe_full_path }
         for _, arg in ipairs(extra_args or {}) do
             argv[#argv + 1] = arg
         end
-        return run_command(argv)
+        return run_command(argv, nil, env_table)
     end
 
     local function verify_runtime(expected_app_code, expected_test_names, env_overrides)
@@ -629,15 +650,23 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
             end
             write(cc_wrapper, string.format([=[
 package.path = %q .. package.path
+package.cpath = %q .. package.cpath
 local command = { %s }
 local is_compile_or_preprocess = false
 local output_path
 for index, value in ipairs(arg) do
-    if value == "-c" or value == "-E" or value:find("^-print-", 1) then
+    if value == "-c" or value == "-E" or value == "-###"
+        or value:find("^-print-", 1)
+        or value:find("--version", 1, true) then
         is_compile_or_preprocess = true
     end
     if arg[index - 1] == "-o" then
         output_path = value
+    else
+        local rsp_pos = value:find(".link.rsp", 1, true)
+        if value:sub(1, 1) == "@" and rsp_pos then
+            output_path = value:sub(2, rsp_pos - 1)
+        end
     end
     command[#command + 1] = value
 end
@@ -645,24 +674,22 @@ local marker = %q
 local marker_file = io.open(marker, "rb")
 if marker_file then
     marker_file:close()
-    if not is_compile_or_preprocess and output_path
-        and not output_path:find(".titan-temporary", 1, true)
-        and not output_path:find("static_executable", 1, true) then
+    local normalized_out = output_path and output_path:gsub("\\", "/"):lower() or ""
+    local suffix = "/titan-language-server.exe"
+    if not is_compile_or_preprocess
+        and normalized_out:sub(-#suffix) == suffix then
         os.remove(marker)
         local out = io.open(output_path, "wb")
         if out then out:write(""); out:close() end
         io.stderr:write("injected linker failure after creating empty output\n")
+        io.stderr:flush()
         os.exit(91)
     end
 end
-local io_sync = require("titan-compiler.io").new_sync()
-local result = io_sync:run(command)
-if result.output and result.output ~= "" then io.stdout:write(result.output) end
-if result.diagnostic and result.diagnostic ~= "" and result.diagnostic ~= result.output then
-    io.stderr:write(result.diagnostic)
-end
-os.exit(result.ok and 0 or result.status or 1)
+local ok, _, code = require("titan-compiler.process").run(command)
+os.exit(ok and 0 or code or 1)
 ]=], REPOSITORY .. "/?.lua;" .. REPOSITORY .. "/?/init.lua;",
+                REPOSITORY .. "/titan-runtime/bootstrap/?" .. SHARED_SUFFIX .. ";",
                 table.concat(quoted_cc, ", "), fail_link_marker))
             wrapper_cc_command = shell_command({ LUA, cc_wrapper })
         else
@@ -675,14 +702,13 @@ os.exit(result.ok and 0 or result.status or 1)
                 "    prev=",
                 "    for a do",
                 "        case \"$a\" in",
-                "            -c|-E|-print-*) is_comp=yes ;;",
+                "            -c|-E|-###|-print-*|*--version*) is_comp=yes ;;",
                 "        esac",
                 "        if [ \"$prev\" = -o ]; then out=$a; fi",
                 "        prev=$a",
                 "    done",
                 "    case \"$out\" in",
-                "        *.titan-temporary*|*static_executable*) ;;",
-                "        ?*)",
+                "        */titan-language-server|titan-language-server)",
                 "            if [ \"$is_comp\" = no ]; then",
                 "                rm -f " .. assert(cdriver.shell_quote(fail_link_marker)),
                 "                : > \"$out\"",
@@ -762,7 +788,7 @@ os.exit(result.ok and 0 or result.status or 1)
         else
             hostile_env.TITAN_PATH_0_6 = build_dir .. "/lib/titan/0.6;"
                 .. prefix .. "/lib/titan/0.6;"
-                .. workspace .. "/unrelated-versioned-sdk"
+                .. workspace .. "/unrelated-versioned-sdk;;"
         end
         verify_runtime(5, test_names, hostile_env)
 
