@@ -775,6 +775,25 @@ end
                 tostring(junction.output or junction.diagnostic))
             return
         end
+        -- Traverse the fresh alias with the compiler's own following native
+        -- stat. Only the OS refusal to traverse a non-administrator mount point
+        -- (ERROR_UNTRUSTED_MOUNT_POINT, 448) is a capability limit; any other
+        -- outcome must be a traversable directory or this test fails. The
+        -- owned junction is removed before pending, outside any pcall.
+        local traversed, traverse_error, traverse_code =
+            require("titan")._stat_precise(alias, true)
+        if not (traversed and traversed.kind == "directory") then
+            local unlinked, unlink_error = lfs.rmdir(alias)
+            assert(unlinked, unlink_error)
+            if not traversed and traverse_code == 448 then
+                pending("this process may not traverse a non-administrator junction " ..
+                    "(ERROR_UNTRUSTED_MOUNT_POINT 448): " .. tostring(traverse_error))
+                return
+            end
+            error("fresh junction is not a traversable directory: " ..
+                tostring(traverse_error or (traversed and traversed.kind)) ..
+                " (" .. tostring(traverse_code) .. ")", 0)
+        end
         local completed, failure = pcall(function()
             write(root .. "/alias_main.titan", "function main(args: {string}): integer\n    return 0\nend\n")
             -- One physical lock is held through the --output spelling; the
