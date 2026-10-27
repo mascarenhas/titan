@@ -823,6 +823,53 @@ end
         assert(unlinked, unlink_error)
     end)
 
+    it("refuses stale staging while an opaque link policy hides a raw operand, then builds without stages", function()
+        if not platform.windows then pending("Windows stale-staging protection"); return end
+        local output, launchers = root .. "/opaque build", root .. "/opaque launchers"
+        local executable = launchers .. "/opaque-app.exe"
+        local abandoned = executable .. ".stage.tmp.abandoned"
+        local authored = executable .. ".stage.tmp.authored"
+        assert(lfs.mkdir(launchers))
+        assert(lfs.mkdir(abandoned))
+        assert(lfs.mkdir(authored))
+        write(abandoned .. "/opaque-app.exe", "abandoned launcher transaction\n")
+        local object = read(objects(root .. "/object build", { first })[1])
+        local staged = authored .. "/link-helper.o"
+        write(staged, object)
+        -- A valid empty response file makes the native library policy opaque,
+        -- so no policy inventory names the raw operand that follows it.
+        local response = root .. "/empty.rsp"
+        write(response, "")
+        write(root .. "/opaque_main.titan", "function main(args: {string}): integer\n    return 0\nend\n")
+        local function arguments(operand)
+            return { "--incremental", "-v", "--output", output, "--exe", executable,
+                "--tree", root, "opaque_main", "--ldflag=@" .. response, "--ldflag=" .. operand }
+        end
+        local refused = invoke(arguments(staged))
+        assert.is_false(refused.ok, refused.stderr)
+        assert.equal("exit", refused.why, refused.stderr)
+        assert.not_equal(0, refused.status, refused.stderr)
+        assert.matches("refusing to retire stale Windows staging", refused.stderr, 1, true)
+        assert.matches("inventory is incomplete", refused.stderr, 1, true)
+        assert.equal(object, read(staged))
+        assert.equal("directory", lfs.symlinkattributes(authored, "mode"))
+        assert.equal("abandoned launcher transaction\n", read(abandoned .. "/opaque-app.exe"))
+        assert.is_nil(lfs.symlinkattributes(executable))
+
+        -- With no stale stage, the same opaque policy is not a build rejection.
+        local relocated = root .. "/link-helper.o"
+        write(relocated, object)
+        remove(authored)
+        remove(abandoned)
+        local built = invoke(arguments(relocated))
+        assert.is_true(built.ok, built.stderr)
+        assert.equal("exit", built.why, built.stderr)
+        assert.equal(0, built.status, built.stderr)
+        local ran = context().io:run({ executable })
+        assert.is_true(ran.started and ran.ok, ran.output or ran.diagnostic)
+        assert.equal(0, ran.status)
+    end)
+
     for _, case in ipairs({
         { name = "requires compile-only mode before creating outputs",
             arguments = function() return { "--c-source", first } end },
