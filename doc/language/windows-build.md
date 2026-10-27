@@ -107,11 +107,14 @@ interrupted build leaves one behind, the next link with the same outputs
 removes it, including when `--exe` reaches the locked output directory through
 a junction. These directory names belong to the compiler: if a leftover one
 contains a Titan source, C header, `--c-source` file, `-X` object, linker input,
-or output of the current build, linking fails with `refusing to retire stale
-Windows staging` and deletes nothing. Move that file elsewhere and build again.
-Files named only inside linker flags that `titanc` cannot interpret, such as
-`--ldflag` paths under an opaque compiler prefix, are not checked, so keep all
-build inputs out of these directories.
+compiler or linker tool, or output of the current build, linking fails with
+`refusing to retire stale Windows staging` and deletes nothing. Move that file
+elsewhere and build again. When `titanc` cannot identify every file and tool
+the link uses (for example with an uncertified compiler or linker flags it
+cannot interpret), any leftover stage directory stops the link with the same
+message, ending in `the native link and tool inventory is incomplete`. Inspect
+that directory, move anything you need, delete it, and build again. Builds
+without leftover stage directories are unaffected.
 
 Deliver the matching `lua55.dll` and native dependency DLLs beside the
 executables. Lua's Windows `!` path expansion means the running executable's
