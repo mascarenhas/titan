@@ -554,6 +554,18 @@ end
                     arguments[#arguments + 1] = word
                 end
             end
+            local function assert_staging_retired(directory)
+                for name in lfs.dir(directory) do
+                    if name ~= "." and name ~= ".." then
+                        local filename = directory .. "/" .. name
+                        assert.is_nil(name:find(".stage.tmp.", 1, true),
+                            "retained Windows image staging: " .. filename)
+                        if lfs.symlinkattributes(filename, "mode") == "directory" then
+                            assert_staging_retired(filename)
+                        end
+                    end
+                end
+            end
             local function no_link_records(directory)
                 if not lfs.symlinkattributes(directory) then return end
                 for name in lfs.dir(directory) do
@@ -596,6 +608,8 @@ end
                     assert.equal("file", lfs.attributes(dependency, "mode"))
                     if attempt == 1 then assert(lfs.touch(dependency, sentinel, sentinel))
                     else assert.not_equal(sentinel, lfs.attributes(dependency, "modification")) end
+                    assert_staging_retired(output)
+                    assert_staging_retired(assert(platform.parent(executable)))
                 end
                 assert.equal("file", lfs.attributes(object, "mode"))
                 if attempt == 1 then assert(lfs.touch(object, sentinel, sentinel))
@@ -603,6 +617,82 @@ end
             end
         end)
     end
+
+    it("retires Windows image staging and self-heals abandoned stages before a final hit", function()
+        if not platform.windows then pending("Windows image staging retirement"); return end
+        local output, launchers = root .. "/clean build Ω", root .. "/launchers"
+        local executable = launchers .. "/cleanup-app.exe"
+        write(root .. "/first_helper.h", "int first_helper(void);\n")
+        write(root .. "/cleanup_main.titan", [[
+foreign import "first_helper.h"
+function main(args: {string}): integer
+    return ffi.first_helper() - 17
+end
+]])
+        local arguments = { "--incremental", "-v", "--jobs", "2",
+            "--tree", root, "--output", output, "--exe", executable,
+            "--c-source", first, "cleanup_main" }
+        local cold = invoke(arguments)
+        assert.is_true(cold.ok, cold.stderr)
+        assert.equal("exit", cold.why, cold.stderr)
+        assert.equal(0, cold.status, cold.stderr)
+        local images = assert(driver.windows_program_paths("cleanup_main", executable, nil, output))
+        assert.equal("file", lfs.attributes(images.provider, "mode"))
+        assert.equal("file", lfs.attributes(images.executable, "mode"))
+        local function inventory()
+            local entries = {}
+            local function visit(directory, relative)
+                for name in lfs.dir(directory) do
+                    if name ~= "." and name ~= ".." then
+                        local filename = directory .. "/" .. name
+                        local kind = assert(lfs.symlinkattributes(filename, "mode"))
+                        assert.is_nil(name:find(".stage.tmp.", 1, true),
+                            "retained Windows image staging: " .. filename)
+                        local member = relative .. "/" .. name
+                        entries[#entries + 1] = kind .. ":" .. member
+                        if kind == "directory" then visit(filename, member) end
+                    end
+                end
+            end
+            visit(output, "output")
+            visit(launchers, "launchers")
+            table.sort(entries)
+            return entries
+        end
+        local expected = inventory()
+        local provider_bytes, executable_bytes = read(images.provider), read(images.executable)
+        local sentinel = 946684800
+        assert(lfs.touch(images.provider, sentinel, sentinel))
+        assert(lfs.touch(images.executable, sentinel, sentinel))
+        local abandoned_provider, provider_directory = assert(driver.staged_library_output(images.provider))
+        local abandoned_launcher, launcher_directory = assert(driver.staged_library_output(images.executable))
+        write(abandoned_provider, provider_bytes)
+        assert(driver.validate_library_image_fresh(
+            abandoned_provider, nil, { "cleanup_main" }, false))
+        local accepted, validation_error = driver.validate_library_image_fresh(
+            abandoned_provider, nil, { "cleanup_missing" }, false)
+        assert.is_nil(accepted)
+        assert.matches("cleanup_missing", validation_error, 1, true)
+        write(abandoned_provider .. ".def", "abandoned export inventory\n")
+        write(abandoned_launcher, "abandoned launcher transaction\n")
+        local warm = invoke(arguments)
+        assert.is_true(warm.ok, warm.stderr)
+        assert.equal("exit", warm.why, warm.stderr)
+        assert.equal(0, warm.status, warm.stderr)
+        assert.matches("Titan native hit " .. first, warm.stderr, 1, true)
+        assert.matches("Titan link hit " .. images.executable, warm.stderr, 1, true)
+        assert.is_nil(warm.stderr:find("Titan link miss ", 1, true), warm.stderr)
+        assert.is_nil(lfs.symlinkattributes(provider_directory))
+        assert.is_nil(lfs.symlinkattributes(launcher_directory))
+        assert.same(expected, inventory())
+        assert.equal(provider_bytes, read(images.provider))
+        assert.equal(executable_bytes, read(images.executable))
+        assert.equal(sentinel, lfs.attributes(images.provider, "modification"))
+        assert.equal(sentinel, lfs.attributes(images.executable, "modification"))
+        local ran = context().io:run({ images.executable })
+        assert.is_true(ran.started and ran.ok, ran.output or ran.diagnostic)
+        assert.equal(0, ran.status)
+    end)
 
     for _, case in ipairs({
         { name = "requires compile-only mode before creating outputs",
