@@ -9900,76 +9900,189 @@ function driver.cleanup_staging_directories(directories, strategy)
     return true
 end
 
+-- A held lock file's physical identity, observed without following its leaf.
+-- The native pair reported when no file ID is available ("0", "0") identifies
+-- nothing, so it never authorizes a domain.
+local function staging_lock_identity(strategy, filename)
+    local info, err = strategy:lstat(filename)
+    if err then return nil, err end
+    if not info or info.kind ~= "file" or info.device == nil or info.inode == nil then
+        return false
+    end
+    local device, inode = tostring(info.device), tostring(info.inode)
+    if device == "0" and inode == "0" then return false end
+    return device .. "\0" .. inode
+end
+
 -- The basename-preserving staging namespace belongs to the corresponding
 -- final output. Retire abandoned reservations before even a final-link hit,
--- but only while that output's domain remains exclusively locked.
-function driver.cleanup_stale_staging(context, outputs, locks)
+-- but only while that output's domain remains exclusively locked, and never
+-- over a path this invocation accepted or reserved. `plan` is the preflighted
+-- build plan, whose source modules the build has restored into driver.imported.
+function driver.cleanup_stale_staging(context, outputs, locks, plan)
     if not platform.windows then return true end
     if not locks or not locks.entries or #locks.entries == 0 then
         return nil, "stale staging cleanup requires held output locks"
     end
+    local strategy = context.io
     local function key(filename)
         return (filename:gsub("\\", "/"):gsub("/+$", ""):lower())
     end
-    local domains, directories = {}, {}
+    local domains = {}
     for _, entry in ipairs(locks.entries) do
-        local directory, err = absolute_filename(entry.directory, context.io)
+        local directory, err = absolute_filename(entry.directory, strategy)
         if not directory then return nil, err end
         domains[#domains + 1] = key(directory)
     end
-    for _, output in ipairs(outputs) do
-        if output.kind ~= "directory" then
-            local filename, err = absolute_filename(output.path, context.io)
-            if not filename then return nil, err end
-            local parent, basename = platform.parent(filename)
-            local parent_key, covered = key(parent), false
-            for _, domain in ipairs(domains) do
-                if parent_key == domain or
-                        parent_key:sub(1, #domain + 1) == domain .. "/" then
-                    covered = true
-                    break
+    -- Lock deduplication keeps one spelling per physical lock file. Any other
+    -- admitted spelling of a held domain, such as a junction, reaches that
+    -- very file from the output's parent or one of its ancestors.
+    local held
+    local function locked(parent)
+        local parent_key = key(parent)
+        for _, domain in ipairs(domains) do
+            if parent_key == domain or
+                    parent_key:sub(1, #domain + 1) == domain .. "/" then
+                return true
+            end
+        end
+        if not held then
+            held = {}
+            for _, entry in ipairs(locks.entries) do
+                if entry.path then
+                    local identity, err = staging_lock_identity(strategy, entry.path)
+                    if identity == nil then return nil, err end
+                    if identity then held[identity] = true end
                 end
             end
+        end
+        if next(held) == nil then return false end
+        local lock_name = require("titan-compiler.build").LOCK_NAME
+        local directory = parent
+        while directory do
+            local identity, err = staging_lock_identity(
+                strategy, append_path(directory, lock_name))
+            if identity == nil then return nil, err end
+            if identity and held[identity] then return true end
+            directory = platform.parent(directory)
+        end
+        return false
+    end
+    local directories, order = {}, {}
+    for _, output in ipairs(outputs) do
+        if output.kind ~= "directory" then
+            local filename, err = absolute_filename(output.path, strategy)
+            if not filename then return nil, err end
+            local parent, basename = platform.parent(filename)
+            local covered
+            covered, err = locked(parent)
+            if covered == nil then return nil, err end
             if not covered then
                 return nil, "stale staging cleanup has no output lock for '" .. filename .. "'"
             end
+            local parent_key = key(parent)
             local directory = directories[parent_key]
             if not directory then
-                directory = { path = parent, prefixes = {} }
+                directory = { path = parent, prefixes = {}, owners = {} }
                 directories[parent_key] = directory
+                order[#order + 1] = directory
             end
             directory.prefixes[#directory.prefixes + 1] = basename:lower() .. ".stage.tmp."
+            directory.owners[#directory.owners + 1] = filename
         end
     end
-    for _, directory in pairs(directories) do
-        local info, err = context.io:stat(directory.path)
+    if type(plan) ~= "table" or type(plan.inputs) ~= "table" or
+            type(plan.reservations) ~= "table" then
+        return nil, "stale staging cleanup requires the invocation's " ..
+            "preflighted inputs and reservations"
+    end
+
+    -- Observe every candidate's complete no-follow footprint before removing
+    -- anything: one conflict retains all candidates, abandoned ones included.
+    local candidates, footprint = {}, {}
+    local function observe(filename, info, owner)
+        local physical = physical_absolute_filename(filename)
+        footprint[#footprint + 1] = {
+            path = filename, owner = owner, mode = info.kind,
+            raw = filename, normalized = normalize_absolute_path(filename),
+            physical = physical, portable = physical:lower(),
+            existing_mode = info.kind, device = info.device, inode = info.inode,
+        }
+        if info.kind ~= "directory" then return true end
+        local entries, err = strategy:list(filename)
+        if not entries then
+            return nil, "cannot list '" .. filename .. "': " .. tostring(err)
+        end
+        for _, name in ipairs(entries) do
+            local child = append_path(filename, name)
+            local child_info
+            child_info, err = strategy:lstat(child)
+            if err then return nil, "cannot inspect '" .. child .. "': " .. tostring(err) end
+            if child_info then
+                local observed
+                observed, err = observe(child, child_info, owner)
+                if not observed then return nil, err end
+            end
+        end
+        return true
+    end
+    for _, directory in ipairs(order) do
+        local info, err = strategy:stat(directory.path)
         if err then return nil, err end
         if info then
             local entries
-            entries, err = context.io:list(directory.path)
+            entries, err = strategy:list(directory.path)
             if not entries then return nil, err end
-            local stale = {}
             for _, name in ipairs(entries) do
-                for _, prefix in ipairs(directory.prefixes) do
+                for index, prefix in ipairs(directory.prefixes) do
                     if #name > #prefix and name:sub(1, #prefix):lower() == prefix then
                         local filename = append_path(directory.path, name)
                         local candidate
-                        candidate, err = context.io:lstat(filename)
+                        candidate, err = strategy:lstat(filename)
                         if err then return nil, err end
                         -- Never traverse a matching user-authored link.
                         if candidate and candidate.kind == "directory" then
-                            stale[#stale + 1] = filename
+                            candidates[#candidates + 1] = filename
+                            local observed
+                            observed, err = observe(filename, candidate,
+                                "final output '" .. directory.owners[index] .. "'")
+                            if not observed then return nil, err end
                         end
                         break
                     end
                 end
             end
-            local removed
-            removed, err = driver.cleanup_staging_directories(stale, context.io)
-            if not removed then
-                return nil, "cannot retire stale Windows staging: " .. tostring(err)
+        end
+    end
+    if #candidates == 0 then return true end
+
+    -- Accepted inputs and reserved outputs, plus the source constituents and
+    -- C headers the build recorded after preflight. Spelling, hierarchy and
+    -- physical-file aliases of any footprint entry refuse every candidate.
+    local protected = {}
+    for _, reserved in ipairs(plan.reservations) do protected[#protected + 1] = reserved.path end
+    for _, input in ipairs(plan.inputs) do protected[#protected + 1] = input end
+    for _, name in ipairs(plan.order or {}) do
+        local mod = driver.imported[name]
+        if mod and mod ~= CIRCULAR_MARK then
+            for _, filename in ipairs(mod.source_files or {}) do
+                protected[#protected + 1] = filename
+            end
+            for _, dependency in ipairs(mod.c_header_dependencies or {}) do
+                if dependency.kind ~= "search" then
+                    protected[#protected + 1] = dependency.filename or dependency.path
+                end
             end
         end
+    end
+    local accepted, conflict = perf.new_output_path_index(
+        "staging path", footprint, strategy).check_inputs(protected)
+    if not accepted then
+        return nil, "refusing to retire stale Windows staging: " .. tostring(conflict)
+    end
+    local removed, err = driver.cleanup_staging_directories(candidates, strategy)
+    if not removed then
+        return nil, "cannot retire stale Windows staging: " .. tostring(err)
     end
     return true
 end
@@ -11619,9 +11732,11 @@ end
 
 -- One filesystem observation per pathname, with prefix indexes for both
 -- spelling and physical identity. No collision query performs filesystem I/O.
-function perf.new_output_path_index(label, reservations)
+-- A closed Windows caller may supply the resolver strategy that observes its
+-- inputs and resolves their relative spellings; the host strategy is the default.
+function perf.new_output_path_index(label, reservations, strategy)
     local observations, attributes, outputs = {}, {}, {}
-    local windows_io = platform.windows and compiler_io.new_sync()
+    local windows_io = platform.windows and (strategy or compiler_io.new_sync())
     local fields = { "normalized", "physical", "portable" }
     local exact, trees, identities = {}, {}, {}
     for _, field in ipairs(fields) do
@@ -11660,7 +11775,8 @@ function perf.new_output_path_index(label, reservations)
     end
 
     local function observe(path)
-        local raw = absolute_filename(path)
+        local raw, raw_error = absolute_filename(path, strategy)
+        if not raw then return nil, raw_error end
         local cached = observations[raw]
         if cached then return cached end
         local attr, err = attrs(raw)
@@ -11955,6 +12071,7 @@ end
 -- The maximum split inventory is compiler-owned even if code generation later
 -- chooses fewer parts. The coordinator reads Titan declarations and existing
 -- ownership markers only; fresh C-header discovery belongs to the workers.
+-- Success records `plan.reservations` and the validated `plan.inputs`.
 function driver.preflight_build_outputs(context, plan, options)
     local inputs, input_seen, outputs, modules = {}, {}, {}, {}
     local output_owners, c_outputs = {}, {}
@@ -12285,7 +12402,8 @@ function driver.preflight_build_outputs(context, plan, options)
             end
         end
     end
-    plan.reservations = reservations
+    -- Stale-staging retirement protects the same accepted inputs.
+    plan.reservations, plan.inputs = reservations, inputs
     return true
 end
 

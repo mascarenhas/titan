@@ -363,7 +363,11 @@ if not platform.windows then
 end
 incremental.load_digest_cache(resolver_context, args.output)
 
+-- Stale-staging retirement protects every input and reservation preflight
+-- accepted for this invocation.
+local preflight_plan
 local function preflight_outputs(plan)
+    preflight_plan = plan
     local native_inputs = { table.unpack(args.extra_object or {}) }
     for _, filename in ipairs(normalized_native.c_sources) do
         native_inputs[#native_inputs + 1] = filename
@@ -591,8 +595,8 @@ if not args.compile_only and not args.print_ast then
         end
         for _, shim in ipairs(shims) do outputs[#outputs + 1] = { path = shim.filename } end
     end
-    local staging_ready, staging_error =
-        driver.cleanup_stale_staging(resolver_context, outputs, output_locks)
+    local staging_ready, staging_error = driver.cleanup_stale_staging(
+        resolver_context, outputs, output_locks, preflight_plan)
     if not staging_ready then exit(staging_error) end
 
     local module_order = {}
