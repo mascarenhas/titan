@@ -363,7 +363,11 @@ if not platform.windows then
 end
 incremental.load_digest_cache(resolver_context, args.output)
 
+-- Stale-staging retirement protects every input and reservation preflight
+-- accepted for this invocation.
+local preflight_plan
 local function preflight_outputs(plan)
+    preflight_plan = plan
     local native_inputs = { table.unpack(args.extra_object or {}) }
     for _, filename in ipairs(normalized_native.c_sources) do
         native_inputs[#native_inputs + 1] = filename
@@ -591,9 +595,6 @@ if not args.compile_only and not args.print_ast then
         end
         for _, shim in ipairs(shims) do outputs[#outputs + 1] = { path = shim.filename } end
     end
-    local staging_ready, staging_error =
-        driver.cleanup_stale_staging(resolver_context, outputs, output_locks)
-    if not staging_ready then exit(staging_error) end
 
     local module_order = {}
     for name in pairs(resolver_context.source_names) do
@@ -718,6 +719,20 @@ if not args.compile_only and not args.print_ast then
         if type(ticket) ~= "string" then error(ticket, 0) end
         exit(ticket)
     end
+    -- Stale stages are retired only after the prepared final link has resolved
+    -- its inputs, including policy-resolved native libraries, and its native
+    -- tools, and before any header restoration or final-link hit.
+    local link_inputs = {}
+    for _, filename in ipairs(output_request.inputs) do link_inputs[#link_inputs + 1] = filename end
+    for _, filename in ipairs(ticket.native_policy.files or {}) do
+        link_inputs[#link_inputs + 1] = filename
+    end
+    local staging_ready, staging_error = driver.cleanup_stale_staging(
+        resolver_context, outputs, output_locks, {
+            plan = preflight_plan, native_objects = c_objects, link_inputs = link_inputs,
+            compiler_tools = output_request.compiler_tools or {}, output_tools = output_tools,
+        })
+    if not staging_ready then exit(staging_error) end
     -- Generated public headers are restored under the lock even when the
     -- final link hits; existing owned headers are preserved untouched.
     local headers_ready, headers_error = driver.prepare_foreign_headers(

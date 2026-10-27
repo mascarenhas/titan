@@ -716,6 +716,113 @@ end
         assert.equal(0, ran.status)
     end)
 
+    -- An accepted input inside a matching stage directory is refused before
+    -- any stage is retired, including the genuinely abandoned sibling.
+    for _, case in ipairs({
+        { name = "a declared native object", leaf = "helper.o" },
+        { name = "an authored C source", leaf = "authored.c" },
+        { name = "a Titan source", leaf = "protect_main.titan" },
+        { name = "a local C header", leaf = "protect_header.h" },
+        { name = "a header included only by a C source", leaf = "protect_native.h" },
+        { name = "a raw native linker input", leaf = "link-helper.o" },
+    }) do
+        it("refuses Windows stale staging that contains " .. case.name .. " and keeps every stage", function()
+            if not platform.windows then pending("Windows stale-staging protection"); return end
+            local output, launchers = root .. "/protected build", root .. "/protected launchers"
+            local executable = launchers .. "/protect-app.exe"
+            local abandoned = executable .. ".stage.tmp.abandoned"
+            local authored = executable .. ".stage.tmp.authored"
+            assert(lfs.mkdir(launchers))
+            assert(lfs.mkdir(abandoned))
+            assert(lfs.mkdir(authored))
+            write(abandoned .. "/protect-app.exe", "abandoned launcher transaction\n")
+            local protected = authored .. "/" .. case.leaf
+            local tree, main = root, "function main(args: {string}): integer\n    return 0\nend\n"
+            local arguments = { "--incremental", "-v", "--output", output, "--exe", executable }
+            if case.leaf == "helper.o" or case.leaf == "link-helper.o" then
+                write(protected, read(objects(root .. "/object build", { first })[1]))
+            elseif case.leaf == "authored.c" then
+                write(protected, "int authored_helper(void) { return 3; }\n")
+                arguments[#arguments + 1], arguments[#arguments + 2] = "--c-source", protected
+            elseif case.leaf == "protect_main.titan" then
+                tree = authored
+            elseif case.leaf == "protect_native.h" then
+                -- The C source lies outside every stage; only its native
+                -- preprocessing run records the staged header.
+                write(protected, "#define PROTECT_NATIVE_VALUE 5\n")
+                local helper = root .. "/stage_helper.c"
+                write(helper, '#include "' .. protected .. '"\n' ..
+                    "int stage_helper(void) { return PROTECT_NATIVE_VALUE; }\n")
+                arguments[#arguments + 1], arguments[#arguments + 2] = "--c-source", helper
+            else
+                write(protected, "int protect_value(void);\n")
+                main = 'foreign import "' .. protected .. '"\n' .. main
+            end
+            write(tree .. "/protect_main.titan", main)
+            for _, word in ipairs({ "--tree", tree, "protect_main" }) do
+                arguments[#arguments + 1] = word
+            end
+            if case.leaf == "helper.o" then
+                arguments[#arguments + 1], arguments[#arguments + 2] = "-X", protected
+            elseif case.leaf == "link-helper.o" then
+                -- Not an -X payload: only the prepared link policy resolves it.
+                arguments[#arguments + 1] = "--ldflag=" .. protected
+            end
+            local bytes = read(protected)
+            local result = invoke(arguments)
+            assert.is_false(result.ok, result.stderr)
+            assert.equal("exit", result.why, result.stderr)
+            assert.not_equal(0, result.status, result.stderr)
+            assert.matches("refusing to retire stale Windows staging", result.stderr, 1, true)
+            assert.matches("protect-app.exe.stage.tmp.authored", result.stderr, 1, true)
+            assert.equal(bytes, read(protected))
+            assert.equal("directory", lfs.symlinkattributes(authored, "mode"))
+            assert.equal("abandoned launcher transaction\n", read(abandoned .. "/protect-app.exe"))
+            assert.is_nil(lfs.symlinkattributes(executable))
+        end)
+    end
+
+    it("retires stale staging under a junction spelling of the held output lock", function()
+        if not platform.windows then pending("Windows directory-junction output alias"); return end
+        local real, alias = root .. "/real-output", root .. "/alias-output"
+        assert(lfs.mkdir(real))
+        local junction = context().io:run({ "cmd.exe", "/d", "/c", "mklink", "/J",
+            (alias:gsub("/", "\\")), (real:gsub("/", "\\")) })
+        if not (junction.started and junction.ok) or lfs.attributes(alias, "mode") ~= "directory" then
+            pending("same-volume directory junction creation is unavailable: " ..
+                tostring(junction.output or junction.diagnostic))
+            return
+        end
+        local completed, failure = pcall(function()
+            write(root .. "/alias_main.titan", "function main(args: {string}): integer\n    return 0\nend\n")
+            -- One physical lock is held through the --output spelling; the
+            -- executable's junction spelling deduplicates onto it.
+            local executable = alias .. "/alias-app.exe"
+            local arguments = { "--incremental", "-v", "--tree", root,
+                "--output", real, "--exe", executable, "alias_main" }
+            local cold = invoke(arguments)
+            assert.is_true(cold.ok, cold.stderr)
+            assert.equal("exit", cold.why, cold.stderr)
+            assert.equal(0, cold.status, cold.stderr)
+            assert.equal("file", lfs.attributes(real .. "/alias-app.exe", "mode"))
+            local images = assert(driver.windows_program_paths("alias_main", executable, nil, real))
+            local abandoned, directory = assert(driver.staged_library_output(images.executable))
+            write(abandoned, "abandoned launcher transaction\n")
+            local warm = invoke(arguments)
+            assert.is_true(warm.ok, warm.stderr)
+            assert.equal("exit", warm.why, warm.stderr)
+            assert.equal(0, warm.status, warm.stderr)
+            assert.is_nil(lfs.symlinkattributes(directory))
+            local ran = context().io:run({ images.executable })
+            assert.is_true(ran.started and ran.ok, ran.output or ran.diagnostic)
+            assert.equal(0, ran.status)
+        end)
+        -- Removing the junction itself never touches its target's contents.
+        local unlinked, unlink_error = lfs.rmdir(alias)
+        assert(completed, failure)
+        assert(unlinked, unlink_error)
+    end)
+
     for _, case in ipairs({
         { name = "requires compile-only mode before creating outputs",
             arguments = function() return { "--c-source", first } end },

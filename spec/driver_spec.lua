@@ -542,8 +542,17 @@ describe("Windows compiler path integration", function()
             end,
         }
         compiler_io.new_sync = function() error("unexpected host filesystem strategy") end
+        -- Neither a reserved sibling nor an input below a matching link, which
+        -- is never a candidate, blocks retirement of the genuine stage.
+        local plan = {
+            reservations = { { path = directory .. "/app.dll" } },
+            inputs = { directory .. "/app.dll.stage.tmp.link/source.titan" },
+            order = {},
+        }
         assert(driver.cleanup_stale_staging({ io = strategy },
-            { { path = directory .. "/app.dll" } }, locks))
+            { { path = directory .. "/app.dll" } }, locks,
+            { plan = plan, native_objects = {}, link_inputs = {},
+                compiler_tools = {}, output_tools = {} }))
         assert.same({ stage .. "/APP.dll", stage .. "/nested/outside-link",
             stage .. "/nested", stage }, removed)
         assert.equal("directory", kinds[directory .. "/app.dll.stage.tmp."])
@@ -565,6 +574,319 @@ describe("Windows compiler path integration", function()
             { entries = { { directory = "C:/build-other" } } })
         assert.is_nil(ok)
         assert.matches("no output lock for 'C:/build/app.dll'", err, 1, true)
+        ok, err = driver.cleanup_stale_staging(context, outputs,
+            { entries = { { directory = "C:/build" } } })
+        assert.is_nil(ok)
+        assert.matches("requires the invocation's preflighted inputs and reservations",
+            err, 1, true)
+        local held = { entries = { { directory = "C:/build" } } }
+        local plan = { inputs = {}, reservations = {}, order = {} }
+        ok, err = driver.cleanup_stale_staging(context, outputs, held, { plan = plan })
+        assert.is_nil(ok)
+        assert.matches("requires the invocation's native C nodes", err, 1, true)
+        -- A node from a nativeinputs result without its recorded dependency
+        -- list cannot be protected, so the cleanup fails closed.
+        ok, err = driver.cleanup_stale_staging(context, outputs, held, { plan = plan,
+            native_objects = { { source = "C:/src/helper.c", path = "C:/build/.native/helper.o" } } })
+        assert.is_nil(ok)
+        assert.matches("each native C node's source and recorded dependencies", err, 1, true)
+        ok, err = driver.cleanup_stale_staging(context, outputs, held,
+            { plan = plan, native_objects = {} })
+        assert.is_nil(ok)
+        assert.matches("requires the invocation's final-link inputs", err, 1, true)
+        ok, err = driver.cleanup_stale_staging(context, outputs, held,
+            { plan = plan, native_objects = {}, link_inputs = {} })
+        assert.is_nil(ok)
+        assert.matches("requires the invocation's native tool identities", err, 1, true)
+    end)
+
+    -- A closed Windows strategy for stale-staging retirement. Nodes are keyed
+    -- by normalized absolute spelling; every call is recorded, so a test can
+    -- prove that a refusal precedes every removal.
+    local function staging_model(nodes)
+        local model = { calls = {}, removed = {} }
+        local function record(operation, filename)
+            model.calls[#model.calls + 1] = operation .. " " .. filename
+        end
+        local function remove(operation, filename)
+            record(operation, filename)
+            model.removed[#model.removed + 1], nodes[filename] = filename, nil
+            return true
+        end
+        model.io = {
+            cwd = function() return "C:/work" end,
+            stat = function(_, filename)
+                record("stat", filename)
+                return nodes[filename]
+            end,
+            lstat = function(_, filename)
+                record("lstat", filename)
+                return nodes[filename]
+            end,
+            list = function(_, filename)
+                record("list", filename)
+                local names = {}
+                for candidate in pairs(nodes) do
+                    local parent, leaf = candidate:match("^(.*)/([^/]+)$")
+                    if parent == filename then names[#names + 1] = leaf end
+                end
+                table.sort(names)
+                return names
+            end,
+            unlink = function(_, filename) return remove("unlink", filename) end,
+            rmdir = function(_, filename) return remove("rmdir", filename) end,
+        }
+        return model
+    end
+
+    -- The protection inventory titanc supplies: its preflighted plan, the
+    -- native C nodes, the prepared final link's inputs, and its native tools.
+    local function staging_protection(fields)
+        return {
+            plan = { inputs = fields.inputs or {}, reservations = fields.reservations or {},
+                order = fields.order or {} },
+            native_objects = fields.native or {},
+            link_inputs = fields.links or {},
+            compiler_tools = fields.compiler_tools or {},
+            output_tools = fields.output_tools or {},
+        }
+    end
+
+    describe("stale stages over protected invocation paths", function()
+        local bin = "C:/out/bin"
+        local abandoned = bin .. "/app.exe.stage.tmp.abandoned"
+        local authored = bin .. "/app.exe.stage.tmp.authored"
+        local outputs = { { path = bin .. "/app.exe" }, { path = "C:/out/lib/titan/0.6/app.dll" } }
+        local locks = { entries = { { directory = "C:/out", path = "C:/out/.titan-build.lock" } } }
+        local previous_imported
+        before_each(function()
+            previous_imported = driver.imported
+            compiler_io.new_sync = function() error("unexpected host filesystem strategy") end
+        end)
+        after_each(function() driver.imported = previous_imported end)
+
+        -- The earlier candidate is genuinely abandoned; the later one holds the
+        -- protected file, so validation must precede every removal.
+        local function layout(leaf)
+            return {
+                ["C:/out"] = { kind = "directory" }, [bin] = { kind = "directory" },
+                [abandoned] = { kind = "directory" },
+                [abandoned .. "/app.exe"] = { kind = "file", device = "7", inode = "abandoned" },
+                [authored] = { kind = "directory" },
+                [authored .. "/" .. leaf] = { kind = "file", device = "7", inode = "authored" },
+            }
+        end
+
+        for _, case in ipairs({
+            { name = "a declared native object", leaf = "helper.o",
+                protection = staging_protection({ inputs = { authored .. "/helper.o" } }) },
+            { name = "an authored C source", leaf = "authored.c",
+                protection = staging_protection({ inputs = { authored .. "/authored.c" } }) },
+            { name = "a case-folded native spelling of an input", leaf = "helper.o",
+                protection = staging_protection({
+                    inputs = { [[c:\OUT\BIN\APP.EXE.STAGE.TMP.AUTHORED\HELPER.O]] },
+                }) },
+            { name = "a Titan source restored by the build", leaf = "app.titan",
+                protection = staging_protection({ order = { "app" } }),
+                imported = { app = { source_files = { authored .. "/app.titan" } } } },
+            { name = "a C header a worker recorded after preflight", leaf = "local.h",
+                protection = staging_protection({ order = { "app" } }),
+                imported = { app = {
+                    source_files = { "C:/src/app.titan" },
+                    c_header_dependencies = { { kind = "file", path = authored .. "/local.h" } },
+                } } },
+            { name = "a reserved output", leaf = "app.c",
+                protection = staging_protection({
+                    reservations = { { path = authored .. "/app.c" } },
+                }) },
+            { name = "a header recorded only by --c-source preprocessing", leaf = "native.h",
+                protection = staging_protection({ inputs = { "C:/src/helper.c" },
+                    native = { { source = "C:/src/helper.c", path = "C:/out/.native/helper.o",
+                        dependencies = { "C:/src/helper.c", authored .. "/native.h" } } } }) },
+            { name = "a --c-source node's own source", leaf = "node.c",
+                protection = staging_protection({
+                    native = { { source = authored .. "/node.c", path = "C:/out/.native/node.o",
+                        dependencies = { "C:/src/node.h" } } } }) },
+            { name = "a raw final-link input outside -X", leaf = "helper.a",
+                protection = staging_protection({ links = { authored .. "/helper.a" } }) },
+            { name = "a native library the link policy resolved", leaf = "libhelper.a",
+                protection = staging_protection({
+                    links = { "C:/out/bin/app.o", authored .. "/libhelper.a" },
+                }) },
+            { name = "the certified compiler executable", leaf = "clang.exe",
+                protection = staging_protection({ compiler_tools = {
+                    { path = "C:/llvm/bin/ccache.exe" }, { path = authored .. "/clang.exe" },
+                } }) },
+            { name = "a selected output tool", leaf = "llvm-rc.exe",
+                protection = staging_protection({ output_tools = {
+                    linker = { argv = { "ld.lld" }, identity = { path = "C:/llvm/bin/ld.lld.exe" } },
+                    rc = { argv = { "llvm-rc" }, identity = { path = authored .. "/llvm-rc.exe" } },
+                } }) },
+            { name = "a selected LTO plugin", leaf = "LLVMgold.dll",
+                protection = staging_protection({ output_tools = {
+                    lto_plugins = { { argv = { authored .. "/LLVMgold.dll" },
+                        identity = { path = authored .. "/LLVMgold.dll" } } },
+                } }) },
+            { name = "a physical alias of a staged file", leaf = "helper.o",
+                protection = staging_protection({ inputs = { "C:/elsewhere/helper.o" } }),
+                aliases = {
+                    ["C:/elsewhere/helper.o"] = { kind = "file", device = "7", inode = "authored" },
+                } },
+        }) do
+            it("retains every candidate when one contains " .. case.name, function()
+                local nodes = layout(case.leaf)
+                for filename, node in pairs(case.aliases or {}) do nodes[filename] = node end
+                local model = staging_model(nodes)
+                driver.imported = case.imported or {}
+                local ok, err = driver.cleanup_stale_staging(
+                    { io = model.io }, outputs, locks, case.protection)
+                assert.is_nil(ok)
+                assert.matches("refusing to retire stale Windows staging: staging path '" ..
+                    authored, err, 1, true)
+                assert.matches("for final output '" .. bin .. "/app.exe'", err, 1, true)
+                assert.same({}, model.removed)
+                assert.equal("directory", nodes[abandoned].kind)
+                assert.equal("file", nodes[abandoned .. "/app.exe"].kind)
+                assert.equal("directory", nodes[authored].kind)
+                assert.equal("file", nodes[authored .. "/" .. case.leaf].kind)
+            end)
+        end
+
+        it("retains every candidate when a later footprint or protected path cannot be observed", function()
+            local nodes = layout("helper.o")
+            local model = staging_model(nodes)
+            local list = model.io.list
+            model.io.list = function(strategy, filename)
+                if filename == authored then return nil, "list: access denied" end
+                return list(strategy, filename)
+            end
+            local ok, err = driver.cleanup_stale_staging({ io = model.io }, outputs, locks,
+                staging_protection({}))
+            assert.is_nil(ok)
+            assert.matches("cannot list '" .. authored .. "': list: access denied", err, 1, true)
+            assert.same({}, model.removed)
+
+            model.io.list = list
+            local lstat = model.io.lstat
+            model.io.lstat = function(strategy, filename)
+                if filename == "C:/src/denied.h" then return nil, "lstat: access denied" end
+                return lstat(strategy, filename)
+            end
+            ok, err = driver.cleanup_stale_staging({ io = model.io }, outputs, locks,
+                staging_protection({ inputs = { "C:/src/denied.h" } }))
+            assert.is_nil(ok)
+            assert.matches("refusing to retire stale Windows staging: lstat: access denied",
+                err, 1, true)
+            assert.same({}, model.removed)
+            assert.equal("file", nodes[abandoned .. "/app.exe"].kind)
+        end)
+
+        it("retires every candidate when protected paths only meet links or siblings", function()
+            local nodes = layout("helper.o")
+            -- A link inside an abandoned stage is removed, never followed; a
+            -- matching link beside the stages is never a candidate.
+            nodes[authored .. "/target-link"] = { kind = "symlink", device = "7", inode = "link" }
+            nodes["C:/src/target.h"] = { kind = "file", device = "7", inode = "target" }
+            nodes[bin .. "/app.exe.stage.tmp.user-link"] = {
+                kind = "symlink", device = "7", inode = "user-link",
+            }
+            local model = staging_model(nodes)
+            driver.imported = {
+                app = { source_files = { "C:/src/app.titan" },
+                    c_header_dependencies = { { kind = "file", path = "C:/src/target.h" } } },
+            }
+            assert(driver.cleanup_stale_staging({ io = model.io }, outputs, locks,
+                staging_protection({
+                    order = { "app" },
+                    reservations = { { path = bin .. "/app.exe" } },
+                    inputs = { bin .. "/app.exe.stage.tmp.user-link/source.titan" },
+                    native = { { source = "C:/src/helper.c", path = "C:/out/.native/helper.o",
+                        dependencies = { "C:/src/helper.c", "C:/src/target.h" } } },
+                    links = { "C:/out/bin/app.o", "C:/src/libtarget.a" },
+                    compiler_tools = { { path = "C:/llvm/bin/clang.exe" } },
+                    output_tools = { linker = { argv = { "ld.lld" },
+                        identity = { path = "C:/llvm/bin/ld.lld.exe" } } },
+                })))
+            assert.same({
+                abandoned .. "/app.exe", abandoned,
+                authored .. "/helper.o", authored .. "/target-link", authored,
+            }, model.removed)
+            assert.equal("symlink", nodes[bin .. "/app.exe.stage.tmp.user-link"].kind)
+            assert.equal("file", nodes["C:/src/target.h"].kind)
+        end)
+    end)
+
+    describe("stale stages under a deduplicated output-lock alias", function()
+        local held = { kind = "file", device = "2864434397",
+            inode = "000000000000000000010000000004d2" }
+        local locks = { entries = { { directory = "C:/real", path = "C:/real/.titan-build.lock" } } }
+        local outputs = {
+            { path = "C:/alias/bin/app.exe" }, { path = "C:/real/lib/titan/0.6/app.dll" },
+        }
+        local stage = "C:/alias/bin/app.exe.stage.tmp.old"
+        local function layout(alias_lock)
+            return {
+                ["C:/real"] = { kind = "directory" }, ["C:/real/.titan-build.lock"] = held,
+                ["C:/alias"] = { kind = "directory" }, ["C:/alias/.titan-build.lock"] = alias_lock,
+                ["C:/alias/bin"] = { kind = "directory" },
+                [stage] = { kind = "directory" },
+                [stage .. "/app.exe"] = { kind = "file", device = "2864434397", inode = "stage" },
+            }
+        end
+        before_each(function()
+            compiler_io.new_sync = function() error("unexpected host filesystem strategy") end
+        end)
+
+        it("retires a stage reached through another spelling of the held lock file", function()
+            local model = staging_model(layout(held))
+            assert(driver.cleanup_stale_staging(
+                { io = model.io }, outputs, locks, staging_protection({})))
+            assert.same({ stage .. "/app.exe", stage }, model.removed)
+        end)
+
+        for _, case in ipairs({
+            { name = "another domain's lock", lock = { kind = "file", device = "2864434397",
+                inode = "000000000000000000010000000004d3" } },
+            { name = "a lock file linked to the held one",
+                lock = { kind = "symlink", device = held.device, inode = held.inode } },
+            { name = "no lock file" },
+            { name = "the native unavailable-identity pair", unavailable = true },
+        }) do
+            it("rejects an alias proven only by " .. case.name .. " before any listing", function()
+                local nodes = layout(case.lock)
+                if case.unavailable then
+                    local unknown = { kind = "file", device = "0", inode = "0" }
+                    nodes["C:/real/.titan-build.lock"] = unknown
+                    nodes["C:/alias/.titan-build.lock"] = unknown
+                end
+                local model = staging_model(nodes)
+                local ok, err = driver.cleanup_stale_staging(
+                    { io = model.io }, outputs, locks, staging_protection({}))
+                assert.is_nil(ok)
+                assert.matches("no output lock for 'C:/alias/bin/app.exe'", err, 1, true)
+                assert.same({}, model.removed)
+                for _, call in ipairs(model.calls) do
+                    assert.matches("^lstat .*/%.titan%-build%.lock$", call)
+                end
+                assert.equal("file", nodes[stage .. "/app.exe"].kind)
+            end)
+        end
+
+        it("reports an ancestor lock inspection failure without retiring anything", function()
+            local model = staging_model(layout(held))
+            local lstat = model.io.lstat
+            model.io.lstat = function(strategy, filename)
+                if filename == "C:/alias/.titan-build.lock" then
+                    return nil, "lstat: access denied"
+                end
+                return lstat(strategy, filename)
+            end
+            local ok, err = driver.cleanup_stale_staging(
+                { io = model.io }, outputs, locks, staging_protection({}))
+            assert.is_nil(ok)
+            assert.matches("lstat: access denied", err, 1, true)
+            assert.same({}, model.removed)
+        end)
     end)
 
     it("reports the failed staged file and still retires the other image directory", function()
@@ -4671,13 +4993,16 @@ describe("compiler module loader", function()
         it("forwards proven compiler stage policy and explicit output uncertainty without another query", function()
             local context = tracked_context()
             local calls = 0
+            local tools = { { path = "C:/llvm/bin/clang.exe" } }
             incremental.toolchain_identity = function()
                 calls = calls + 1
-                return "observed-toolchain", { stage_policy = "llvm" }
+                return "observed-toolchain", { stage_policy = "llvm", tools = tools }
             end
             local request = assert(driver.output_tool_descriptors(context))
             assert.equal("observed-toolchain", request.toolchain)
             assert.equal("llvm", request.compiler_stage_policy)
+            -- Stale-stage retirement protects these already observed binaries.
+            assert.equal(tools, request.compiler_tools)
             assert.is_nil(request.uncacheable)
             assert.equal(1, calls)
 
@@ -4685,6 +5010,7 @@ describe("compiler module loader", function()
             request = assert(driver.output_tool_descriptors(context))
             assert.is_nil(request.toolchain)
             assert.is_nil(request.compiler_stage_policy)
+            assert.is_nil(request.compiler_tools)
             assert.equal("native delegate selection is unknown", request.uncacheable)
             incremental.toolchain_identity = function()
                 return nil, "cannot read native executable"
