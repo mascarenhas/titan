@@ -33,7 +33,7 @@ function documentation.parse(text)
     return {summary = summary, description = trim(rest), tags = tags}
 end
 
-function documentation.copy(doc)
+local function checked_documentation(doc, copying)
     if type(doc) ~= "table" or getmetatable(doc) ~= nil
        or type(doc.summary) ~= "string" or type(doc.description) ~= "string"
        or type(doc.tags) ~= "table" or getmetatable(doc.tags) ~= nil then
@@ -51,7 +51,10 @@ function documentation.copy(doc)
         end
         count = count + 1
     end
-    local result = {summary = doc.summary, description = doc.description, tags = {}}
+    local result
+    if copying then
+        result = {summary = doc.summary, description = doc.description, tags = {}}
+    end
     for index = 1, count do
         local tag = doc.tags[index]
         if type(tag) ~= "table" or getmetatable(tag) ~= nil
@@ -64,21 +67,38 @@ function documentation.copy(doc)
                 error("unexpected documentation tag field " .. tostring(key), 2)
             end
         end
-        result.tags[index] = {name = tag.name, value = tag.value}
+        if copying then result.tags[index] = {name = tag.name, value = tag.value} end
     end
-    return result
+    return copying and result or true
 end
 
-function documentation.copy_map(map)
+function documentation.copy(doc)
+    return checked_documentation(doc, true)
+end
+
+function documentation.validate(doc)
+    return checked_documentation(doc, false)
+end
+
+local function checked_documentation_map(map, copying)
     if type(map) ~= "table" or getmetatable(map) ~= nil then
         error("invalid type documentation map", 2)
     end
-    local result = {}
+    local result = copying and {} or nil
     for name, doc in pairs(map) do
         if type(name) ~= "string" then error("invalid type documentation name", 2) end
-        result[name] = documentation.copy(doc)
+        local doc_copy = checked_documentation(doc, copying)
+        if copying then result[name] = doc_copy end
     end
-    return result
+    return copying and result or true
+end
+
+function documentation.copy_map(map)
+    return checked_documentation_map(map, true)
+end
+
+function documentation.validate_map(map)
+    return checked_documentation_map(map, false)
 end
 
 local function has_tag(doc, name)

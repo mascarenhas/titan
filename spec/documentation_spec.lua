@@ -74,6 +74,46 @@ end
 -- @return An extra value.
 function echo(value: Count): integer return value end
 ]]
+    it("validates documentation without changing its tables", function()
+        local doc = documentation.parse("A summary.\n@param item The item.")
+        local tags, tag = doc.tags, doc.tags[1]
+        assert.is_true(documentation.validate(doc))
+        assert.is_true(documentation.validate_map({Item = doc}))
+        assert.equal(tags, doc.tags)
+        assert.equal(tag, doc.tags[1])
+        local copied = documentation.copy(doc)
+        assert.same(doc, copied)
+        assert.not_equal(doc, copied)
+        assert.not_equal(tags, copied.tags)
+        assert.not_equal(tag, copied.tags[1])
+    end)
+
+    it("uses the same documentation admission for copies and validation", function()
+        local cases = {
+            {{summary = "missing"}, "invalid documentation metadata"},
+            {{summary = "", description = "", tags = {}, extra = true},
+                "unexpected documentation field extra"},
+            {{summary = "", description = "", tags = {named = {}}},
+                "invalid documentation tag index"},
+            {{summary = "", description = "", tags = {[2] = {name = "param", value = ""}}},
+                "invalid documentation tag"},
+            {{summary = "", description = "", tags = {{name = "bad-name", value = ""}}},
+                "invalid documentation tag"},
+            {{summary = "", description = "", tags = {{name = "param", value = "", extra = true}}},
+                "unexpected documentation tag field extra"},
+        }
+        for _, case in ipairs(cases) do
+            for _, operation in ipairs({documentation.copy, documentation.validate}) do
+                assert.has_error(function() operation(case[1]) end, case[2])
+            end
+        end
+        for _, operation in ipairs({documentation.copy_map, documentation.validate_map}) do
+            assert.has_error(function() operation(false) end, "invalid type documentation map")
+            assert.has_error(function() operation({[1] = {}}) end, "invalid type documentation name")
+            assert.has_error(function() operation({Item = {}}) end, "invalid documentation metadata")
+        end
+    end)
+
     it("parses summaries, paragraphs, repeated tags and multiline examples", function()
         local doc = documentation.parse("Summary? More detail.\n\nAnother paragraph.\n@param[opt] input first\n  continued\n@return one\n@return two\n@usage\n    echo(1)\n@custom unknown")
         assert.equal("Summary?", doc.summary)

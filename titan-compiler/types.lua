@@ -69,11 +69,15 @@ function types.Array(elem, isconst)
     return raw_Array(elem, isconst)
 end
 
+local function boolean_constness(value, role)
+    if type(value) ~= "boolean" then
+        error(role .. " const qualifier must be a boolean", 3)
+    end
+end
+
 local raw_Field = types.Field
 function types.Field(fqtn, name, typ, index, isconst)
-    if type(isconst) ~= "boolean" then
-        error("Field const qualifier must be a boolean", 2)
-    end
+    boolean_constness(isconst, "Field")
     local field = raw_Field(fqtn, name, typ, index, isconst)
     field.dynamic_plan = maybe3.unknown()
     return field
@@ -81,9 +85,7 @@ end
 
 local raw_ModuleVariable = types.ModuleVariable
 function types.ModuleVariable(modname, name, typ, isconst)
-    if type(isconst) ~= "boolean" then
-        error("ModuleVariable const qualifier must be a boolean", 2)
-    end
+    boolean_constness(isconst, "ModuleVariable")
     return raw_ModuleVariable(modname, name, typ, isconst)
 end
 
@@ -183,24 +185,29 @@ local function interface_constructor_error(message)
     error("invalid Interface members: " .. message, 3)
 end
 
-local function validate_interface_member_input(name, list, kind, names)
-    if type(list) ~= "table" then
-        interface_constructor_error(
-            kind .. " must be a dense numeric list")
-    end
-
+local function validate_interface_member_input(name, list, kind, names, project)
     local count = 0
-    for key in pairs(list) do
-        if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
+    if project then
+        -- Rewriting consumes only the numeric prefix and discards lookup keys.
+        for _ in ipairs(list or {}) do count = count + 1 end
+    else
+        if type(list) ~= "table" then
             interface_constructor_error(
-                kind .. " input must contain numeric list keys only")
+                kind .. " must be a dense numeric list")
         end
-        count = count + 1
+        for key in pairs(list) do
+            if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
+                interface_constructor_error(
+                    kind .. " input must contain numeric list keys only")
+            end
+            count = count + 1
+        end
     end
 
     local wanted_tag = kind == "fields" and "Type.Field" or "Type.Method"
     for index = 1, count do
         local member = list[index]
+        if project then member = project(member, wanted_tag) end
         if member == nil then
             interface_constructor_error(kind .. " input list must be dense")
         elseif type(member) ~= "table" or member._tag ~= wanted_tag then
@@ -229,15 +236,15 @@ local function validate_interface_member_input(name, list, kind, names)
     return count
 end
 
-local function validate_interface_constructor_input(name, fields, methods)
+local function validate_interface_constructor_input(name, fields, methods, project)
     if type(name) ~= "string" then
         interface_constructor_error("owner name must be a string")
     end
     local names = {}
     local nfields = validate_interface_member_input(
-        name, fields, "fields", names)
+        name, fields, "fields", names, project)
     local nmethods = validate_interface_member_input(
-        name, methods, "methods", names)
+        name, methods, "methods", names, project)
     if nfields + nmethods == 0 then
         interface_constructor_error("at least one member is required")
     end
@@ -2548,24 +2555,32 @@ local function deoptionized(typ)
     return typ
 end
 
-function types.canonical_option(typ)
+local function canonical_option_base(typ)
     assert(type(typ) == "table" and typ._tag,
         "option base must be a type")
+end
+
+function types.canonical_option(typ)
+    canonical_option_base(typ)
     if typ._tag == "Type.Option" or typ._tag == "Type.Value" then
         return typ
     end
     return types.Option(typ)
 end
 
-function types.canonical_array(elem, isconst)
+local function canonical_array_element(elem, isconst)
     assert(type(elem) == "table" and elem._tag,
         "array element must be a type")
     assert(types.valid_array_constness(isconst),
         "array const qualifier must be a tagged no, yes, or maybe value")
-    return types.Array(deoptionized(elem), isconst)
+    return deoptionized(elem)
 end
 
-function types.canonical_map(keys, values)
+function types.canonical_array(elem, isconst)
+    return types.Array(canonical_array_element(elem, isconst), isconst)
+end
+
+local function canonical_map_components(keys, values)
     assert(type(keys) == "table" and keys._tag
         and type(values) == "table" and values._tag,
         "map components must be types")
@@ -2574,7 +2589,12 @@ function types.canonical_map(keys, values)
     elseif keys._tag == "Type.Option" then
         error("type of map key cannot be option type", 2)
     end
-    return types.Map(keys, deoptionized(values))
+    return keys, deoptionized(values)
+end
+
+function types.canonical_map(keys, values)
+    keys, values = canonical_map_components(keys, values)
+    return types.Map(keys, values)
 end
 
 -- Input variadics and flexible-result tails share the TitanVargX carrier
@@ -2624,58 +2644,102 @@ function types.canonical_function(
         canonical_callable_tail(flexrettype, "flexible return"))
 end
 
-local function copy_scalar_metadata(source, target)
+local function validate_scalar_metadata(source)
+    if source._documentation then documentation.validate(source._documentation) end
+    if source._type_documentation then documentation.validate_map(source._type_documentation) end
+end
+
+local function copy_scalar_metadata(source, target, validation_projection)
+    local detached = not validation_projection
     for key, value in pairs(source) do
         if key ~= "_tag" and target[key] == nil
            and type(key) == "string" and type(value) ~= "table" then
+            -- A canonical collapse or parameter replacement can return an
+            -- argument object. Consumed validation projections must not
+            -- decorate that input while preserving the diagnostic metadata.
+            if not detached then
+                local copy = {}
+                for field, member in pairs(target) do copy[field] = member end
+                target, detached = copy, true
+            end
             target[key] = value
         end
     end
-    if source._documentation then target._documentation = documentation.copy(source._documentation) end
-    if source._type_documentation then target._type_documentation = documentation.copy_map(source._type_documentation) end
+    if validation_projection then
+        validate_scalar_metadata(source)
+    else
+        if source._documentation then target._documentation = documentation.copy(source._documentation) end
+        if source._type_documentation then target._type_documentation = documentation.copy_map(source._type_documentation) end
+    end
     return target
 end
 
-local function rewrite_map(map, rewrite)
-    local out = {}
+local function rewrite_map(map, rewrite, validating)
+    local out = not validating and {} or nil
     for key, value in pairs(map or {}) do
         if type(key) ~= "number" then
-            out[key] = rewrite(value)
+            local rewritten = rewrite(value)
+            if out then out[key] = rewritten end
         end
     end
-    return out
+    return validating and map or out
 end
 
-local function rewrite_list(list, rewrite)
-    local out = {}
+local function rewrite_list(list, rewrite, validating)
+    local out = not validating and {} or nil
     for index, value in ipairs(list or {}) do
-        out[index] = rewrite(value)
+        local rewritten = rewrite(value)
+        if out then out[index] = rewritten end
     end
-    return out
+    return validating and list or out
 end
 
-local function rewrite_type(root, policy)
+local function rewrite_type(root, policy, validating)
     local memo, active = {}, {}
+    local result_tags = validating and {} or nil
 
+    -- Only canonical map keys and callable tails consume a rewritten shape.
+    -- The validation walk otherwise keeps input references, not descriptors.
+    -- Noncanonical namespace entries also need their actual projected names.
+    local function project(typ, wanted_tag, alternate_tag)
+        if typ == nil then return nil end
+        if wanted_tag and
+           (typ._tag == wanted_tag or typ._tag == alternate_tag) then
+            return memo[typ]
+        end
+        return rewrite_type(typ, policy)
+    end
+    local function validate_names(list, wanted_tag, alternate_tag)
+        local names = {}
+        for index, member in ipairs(list or {}) do
+            names[index] = project(member, wanted_tag, alternate_tag)
+        end
+        -- Match the constructors' hybrid projection, including numeric names
+        -- in malformed graphs, without decorating the input list.
+        for _, member in ipairs(names) do
+            names[member.name] = member
+        end
+    end
     local function rewrite(typ)
         if typ == nil then return nil end
         if type(typ) ~= "table" or type(typ._tag) ~= "string" then
             error("generic type rewrite expected a Type descriptor", 3)
         end
-        if memo[typ] then return memo[typ] end
+        if memo[typ] then
+            return memo[typ], result_tags and result_tags[typ] or memo[typ]._tag
+        end
         if active[typ] then
             error("cyclic structural type in generic type rewrite", 3)
         end
         active[typ] = true
 
-        local tag, out = typ._tag
+        local tag, out, result_tag = typ._tag
         if tag == "Type.Parameter" then
             out = policy.parameter(typ, rewrite)
             if out == nil then
-                local erased = typ.erased_constraint
-                out = types.Parameter(typ.scope, typ.index,
-                    typ.diagnostic_name,
-                    rewrite(erased))
+                local erased = rewrite(typ.erased_constraint)
+                out = validating and typ or types.Parameter(
+                    typ.scope, typ.index, typ.diagnostic_name, erased)
             end
         elseif tag == "Type.GenericScope" then
             out = typ
@@ -2684,60 +2748,97 @@ local function rewrite_type(root, policy)
                 out = typ.constraint == nil and types.Value()
                     or rewrite(typ.constraint)
             else
-                out = types.TypeParameter(typ.name,
-                    rewrite(typ.constraint))
+                local constraint = rewrite(typ.constraint)
+                out = validating and typ or types.TypeParameter(typ.name, constraint)
             end
         elseif tag == "Type.FunctionScheme" then
             if policy.drop_generic or policy.closes(typ.scope) then
-                out = rewrite(typ.signature)
+                out, result_tag = rewrite(typ.signature)
             else
-                out = types.FunctionScheme(typ.scope,
-                    rewrite_list(typ.typeparams, rewrite),
-                    rewrite(typ.signature))
+                local typeparams = rewrite_list(typ.typeparams, rewrite, validating)
+                local signature = rewrite(typ.signature)
+                out = validating and typ or types.FunctionScheme(
+                    typ.scope, typeparams, signature)
             end
         elseif tag == "Type.GenericAlias" then
             if policy.drop_generic then
                 out = types.Nominal(typ.target_owner_fqtn)
             elseif policy.closes(typ.target_scope) then
-                out = types.Nominal(typ.target_owner_fqtn,
-                    policy.arguments)
+                out = validating and typ or types.Nominal(
+                    typ.target_owner_fqtn, policy.arguments)
+                result_tag = "Type.Nominal"
             else
-                out = types.GenericAlias(typ.module, typ.name,
-                    typ.locality, typ.target_owner_fqtn,
-                    typ.target_alias_fqtn, typ.target_scope,
-                    rewrite_list(typ.typeparams, rewrite))
+                local typeparams = rewrite_list(typ.typeparams, rewrite, validating)
+                out = validating and typ or types.GenericAlias(
+                    typ.module, typ.name, typ.locality, typ.target_owner_fqtn,
+                    typ.target_alias_fqtn, typ.target_scope, typeparams)
             end
         elseif tag == "Type.Nominal" then
             if policy.drop_generic
                and not policy.keep_nominal_arguments then
                 out = types.Nominal(typ.fqtn)
             else
-                out = types.Nominal(typ.fqtn,
-                    rewrite_list(typ.args or {}, rewrite))
+                local arguments = rewrite_list(typ.args, rewrite, validating)
+                out = validating and typ or types.Nominal(typ.fqtn, arguments)
             end
         elseif tag == "Type.Option" then
-            out = types.canonical_option(rewrite(typ.base))
+            local base, base_tag = rewrite(typ.base)
+            if validating then
+                canonical_option_base(base)
+                if base_tag == "Type.Option" or base_tag == "Type.Value" then
+                    out, result_tag = base, base_tag
+                else
+                    out = typ
+                end
+            else
+                out = types.canonical_option(base)
+            end
         elseif tag == "Type.Array" then
-            out = types.canonical_array(rewrite(typ.elem), typ.isconst)
-            if typ.linear then out.linear = true end
+            local elem = rewrite(typ.elem)
+            if validating then
+                canonical_array_element(elem, typ.isconst)
+                out = typ
+            else
+                out = types.canonical_array(elem, typ.isconst)
+                if typ.linear then out.linear = true end
+            end
         elseif tag == "Type.Map" then
-            out = types.canonical_map(
-                rewrite(typ.keys), rewrite(typ.values))
+            local keys, values = rewrite(typ.keys), rewrite(typ.values)
+            if validating then
+                canonical_map_components(project(typ.keys), values)
+                out = typ
+            else
+                out = types.canonical_map(keys, values)
+            end
         elseif tag == "Type.Function" then
             if typ.vararg ~= false then
                 error("Type.Function reserved vararg field must be false", 3)
             end
-            out = types.canonical_function(
-                rewrite_list(typ.params, rewrite),
-                rewrite_list(typ.rettypes, rewrite),
-                rewrite(typ.varargtype),
-                rewrite(typ.flexrettype))
+            local params = rewrite_list(typ.params, rewrite, validating)
+            local rettypes = rewrite_list(typ.rettypes, rewrite, validating)
+            local varargtype = rewrite(typ.varargtype)
+            local flexrettype = rewrite(typ.flexrettype)
+            if validating then
+                canonical_callable_tail(project(typ.varargtype), "variadic parameter")
+                canonical_callable_tail(project(typ.flexrettype), "flexible return")
+                out = typ
+            else
+                out = types.canonical_function(
+                    params, rettypes, varargtype, flexrettype)
+            end
         elseif tag == "Type.Field" then
-            out = types.Field(typ.fqtn, typ.name,
-                rewrite(typ.type), typ.index, typ.isconst)
+            local field_type = rewrite(typ.type)
+            if validating then
+                boolean_constness(typ.isconst, "Field")
+                out = typ
+            else
+                out = types.Field(
+                    typ.fqtn, typ.name, field_type, typ.index, typ.isconst)
+            end
         elseif tag == "Type.Variant" then
-            out = types.Variant(typ.fqtn, typ.name,
-                rewrite_list(typ.parts, rewrite), typ.index)
+            local parts = rewrite_list(typ.parts, rewrite, validating)
+            out = validating and typ or types.Variant(
+                typ.fqtn, typ.name, parts, typ.index)
         elseif tag == "Type.Method" or tag == "Type.StaticMethod" then
             local constructor = tag == "Type.Method"
                 and types.Method or types.StaticMethod
@@ -2745,59 +2846,90 @@ local function rewrite_type(root, policy)
                 or (typ.scope ~= nil and policy.closes(typ.scope))
             local varargtype = rewrite(typ.varargtype)
             local flexrettype = rewrite(typ.flexrettype)
-            canonical_callable_tail(varargtype, "variadic parameter")
-            canonical_callable_tail(flexrettype, "flexible return")
-            out = constructor(typ.fqtn, typ.name,
-                rewrite_list(typ.params, rewrite),
-                rewrite_list(typ.rettypes, rewrite),
-                varargtype, flexrettype, typ.paramnames,
-                (not closes and typ.scope) or nil,
-                closes and {} or rewrite_list(
-                    typ.typeparams or {}, rewrite))
+            canonical_callable_tail(validating and project(typ.varargtype)
+                or varargtype, "variadic parameter")
+            canonical_callable_tail(validating and project(typ.flexrettype)
+                or flexrettype, "flexible return")
+            local params = rewrite_list(typ.params, rewrite, validating)
+            local rettypes = rewrite_list(typ.rettypes, rewrite, validating)
+            local typeparams = not closes and rewrite_list(
+                typ.typeparams, rewrite, validating) or nil
+            out = validating and typ or constructor(typ.fqtn, typ.name,
+                params, rettypes, varargtype, flexrettype, typ.paramnames,
+                (not closes and typ.scope) or nil, typeparams or {})
         elseif tag == "Type.Record" then
-            local fields = rewrite_list(typ.fields, rewrite)
+            local fields = rewrite_list(typ.fields, rewrite, validating)
             local closes = policy.drop_generic
                 or (typ.scope ~= nil and policy.closes(typ.scope))
-            out = types.Record(typ.name, fields,
-                rewrite_map(typ.functions, rewrite),
-                rewrite_map(typ.methods, rewrite), typ.nfields,
-                (not closes and typ.scope) or nil,
-                closes and {} or rewrite_list(
-                    typ.typeparams or {}, rewrite), typ.custom_constructor)
+            local functions = rewrite_map(typ.functions, rewrite, validating)
+            local methods = rewrite_map(typ.methods, rewrite, validating)
+            local typeparams = not closes and rewrite_list(
+                typ.typeparams, rewrite, validating) or nil
+            out = validating and typ or types.Record(
+                typ.name, fields, functions, methods, typ.nfields,
+                (not closes and typ.scope) or nil, typeparams or {},
+                typ.custom_constructor)
         elseif tag == "Type.Union" then
-            local variants = rewrite_list(typ.variants, rewrite)
+            local variants = rewrite_list(typ.variants, rewrite, validating)
             local closes = policy.drop_generic
                 or (typ.scope ~= nil and policy.closes(typ.scope))
-            out = types.Union(typ.name, variants,
-                rewrite_map(typ.functions, rewrite),
-                rewrite_map(typ.methods, rewrite), typ.nvariants,
-                (not closes and typ.scope) or nil,
-                closes and {} or rewrite_list(
-                    typ.typeparams or {}, rewrite))
+            local functions = rewrite_map(typ.functions, rewrite, validating)
+            local methods = rewrite_map(typ.methods, rewrite, validating)
+            local typeparams = not closes and rewrite_list(
+                typ.typeparams, rewrite, validating) or nil
+            if validating then
+                validate_names(variants, "Type.Variant")
+                out = typ
+            else
+                out = types.Union(typ.name, variants, functions, methods,
+                    typ.nvariants, (not closes and typ.scope) or nil,
+                    typeparams or {})
+            end
         elseif tag == "Type.Interface" then
             local closes = policy.drop_generic
                 or (typ.scope ~= nil and policy.closes(typ.scope))
-            out = types.Interface(typ.name,
-                rewrite_list(typ.fields, rewrite),
-                rewrite_list(typ.methods, rewrite),
-                (not closes and typ.scope) or nil,
-                closes and {} or rewrite_list(
-                    typ.typeparams or {}, rewrite))
+            local fields = rewrite_list(typ.fields, rewrite, validating)
+            local methods = rewrite_list(typ.methods, rewrite, validating)
+            local typeparams = not closes and rewrite_list(
+                typ.typeparams, rewrite, validating) or nil
+            if validating then
+                validate_interface_constructor_input(
+                    typ.name, fields, methods, project)
+                out = typ
+            else
+                out = types.Interface(typ.name, fields, methods,
+                    (not closes and typ.scope) or nil, typeparams or {})
+            end
         elseif tag == "Type.ModuleMember" then
-            out = types.ModuleMember(typ.modname, typ.name,
-                rewrite(typ.type), typ.paramnames)
+            local member_type = rewrite(typ.type)
+            out = validating and typ or types.ModuleMember(
+                typ.modname, typ.name, member_type, typ.paramnames)
         elseif tag == "Type.ModuleVariable" then
-            out = types.ModuleVariable(typ.modname, typ.name,
-                rewrite(typ.type), typ.isconst)
+            local member_type = rewrite(typ.type)
+            if validating then
+                boolean_constness(typ.isconst, "ModuleVariable")
+                out = typ
+            else
+                out = types.ModuleVariable(
+                    typ.modname, typ.name, member_type, typ.isconst)
+            end
         elseif tag == "Type.Module" then
-            out = types.Module(typ.name,
-                rewrite_list(typ.members, rewrite),
-                rewrite_map(typ.type_members, rewrite))
-            -- These transient provider-selection fields are deliberately not
-            -- serialized, but rewriting a recovered module must not silently
-            -- select a different physical DSO.
-            out.file = typ.file
-            out.prefix = typ.prefix
+            local members = rewrite_list(typ.members, rewrite, validating)
+            local type_members = rewrite_map(typ.type_members, rewrite, validating)
+            if validating then
+                validate_names(members, "Type.ModuleMember", "Type.ModuleVariable")
+                if type(typ.name) ~= "string" then
+                    typ.name:gsub("[%-.]", "_")
+                    typ.name:gsub("[.]", "/")
+                end
+                out = typ
+            else
+                out = types.Module(typ.name, members, type_members)
+                -- These transient provider-selection fields are deliberately not
+                -- serialized; rewriting must not select a different physical DSO.
+                out.file = typ.file
+                out.prefix = typ.prefix
+            end
         elseif tag == "Type.Invalid" or tag == "Type.Nil"
             or tag == "Type.Void" or tag == "Type.Boolean"
             or tag == "Type.Integer" or tag == "Type.Float"
@@ -2812,20 +2944,27 @@ local function rewrite_type(root, policy)
         end
 
         active[typ] = nil
-        if out._tag == typ._tag then
-            out = copy_scalar_metadata(typ, out)
+        result_tag = result_tag or out._tag
+        if result_tag == tag then
+            if validating then
+                validate_scalar_metadata(typ)
+            else
+                out = copy_scalar_metadata(typ, out, policy.validation_projection)
+            end
         end
         memo[typ] = out
-        return out
+        if result_tags then result_tags[typ] = result_tag end
+        return out, result_tag
     end
 
-    return rewrite(root)
+    local result = rewrite(root)
+    return result
 end
 
-local function substitution_arguments(arguments, require_roundtrip)
+local function substitution_arguments(arguments, require_roundtrip, validating)
     local count, list_error = dense_list_length(arguments)
     if not count then error(list_error, 3) end
-    local copy = {}
+    local copy = not validating and {} or nil
     for index = 1, count do
         local argument = arguments[index]
         if type(argument) ~= "table" or not argument._tag then
@@ -2836,13 +2975,14 @@ local function substitution_arguments(arguments, require_roundtrip)
                 types.tostring(argument) ..
                 "') has no sound transient round trip", 3)
         end
-        copy[index] = argument
+        if copy then copy[index] = argument end
     end
-    return copy
+    return copy or arguments
 end
 
-local function substitute_arguments(typ, scope, args)
+local function substitute_arguments(typ, scope, args, validating)
     return rewrite_type(typ, {
+        validation_projection = validating,
         arguments = args,
         drop_generic = false,
         closes = function(candidate)
@@ -2859,7 +2999,7 @@ local function substitute_arguments(typ, scope, args)
             end
             return replacement
         end,
-    })
+    }, validating)
 end
 
 -- Substitute one structural declaration scope. Repeated calls handle owner
@@ -2869,6 +3009,17 @@ function types.substitute(typ, scope, arguments)
         "substitution scope must be a GenericScope")
     return substitute_arguments(
         typ, scope, substitution_arguments(arguments, true))
+end
+
+-- Check the same rewrite without constructing its discarded owner graph.
+-- Every visit is local: mutable descriptors, scopes, arguments and visibility
+-- policies cannot reuse a proof from an earlier validation.
+function types.validate_substitution(typ, scope, arguments)
+    assert(type(scope) == "table" and scope._tag == "Type.GenericScope",
+        "substitution scope must be a GenericScope")
+    substitute_arguments(
+        typ, scope, substitution_arguments(arguments, true, true), true)
+    return true
 end
 
 -- Inference must retain the first selected surface type long enough to freeze
