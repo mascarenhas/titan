@@ -994,7 +994,14 @@ Unix libraries, `rc` for Windows programs, `dsymutil` on Darwin), selected by
 the coordinator's working directory and records the admitted absolute
 spelling; the program and provider-pair `dsymutil` runs then use that same
 spelling after their staged `chdir`, so the certified tool is the one that
-runs, and a symlinked multicall tool keeps its `argv[0]`. The result records:
+runs, and a symlinked multicall tool keeps its `argv[0]`. If `dsymutil`
+cannot be certified (for example because `PATH` is unset), the descriptor
+keeps the raw `{ "dsymutil" }` argv and marks only the final-link request
+`uncacheable`; compiler and native-C certificates are unaffected. That raw
+command runs from the original working directory with the full output
+pathname and never enters the staging directory before its unresolved
+lookup. Missing tools, I/O errors, and cancellation still fail as before.
+The result records:
 
 * `linker`: the linker the compiler driver really selects, with its exact
   driver argv and physical identity. Unless `-fuse-ld=`/`--ld-path` names it,

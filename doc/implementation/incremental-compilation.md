@@ -415,8 +415,12 @@ reports the exact component:
    flags, target profile, and executable path.
 
    Executable admission follows the operating system's own choice. On POSIX,
-   an explicit path is checked directly and a bare command name walks `PATH`
-   in order; either admits the first regular
+   a name containing `/` is an explicit path and is checked directly, while
+   any other name (backslashes and drive-letter prefixes are ordinary name
+   characters there) walks `PATH` in order. When `PATH` is unset the
+   launcher would use its own default search path, so the tool cannot be
+   certified rather than being searched in the current directory. Either way
+   admission takes the first regular
    file for which the I/O strategy's `executable(path)` capability reports
    `true` (effective-user `X_OK`, so owner-only or group-only execute bits
    are judged as the kernel would, and an execute-only file need not be
