@@ -166,6 +166,73 @@ describe("compiler I/O strategy", function()
         end)
     end)
 
+    it("keeps executable CWD search an optional strategy capability", function()
+        local strategy = compiler_io.new_sync()
+        strategy.executable_search_cwd = false
+        assert.equal(strategy, compiler_io.validate(strategy))
+    end)
+
+    it("delegates executable CWD search without environment or file fallbacks", function()
+        local support, strategy = require "titan", compiler_io.new_sync()
+        local result, diagnostic, checked = true, nil, 0
+        local function forbidden()
+            error("CWD search policy must come only from native support")
+        end
+        with_overrides(support, { _executable_search_cwd = function(...)
+            assert.equal(0, select("#", ...))
+            checked = checked + 1
+            return result, diagnostic
+        end }, function()
+            with_overrides(io, { open = forbidden }, function()
+                with_overrides(os, { getenv = forbidden }, function()
+                    with_overrides(platform, { getenv = forbidden }, function()
+                        assert.is_true(strategy:executable_search_cwd())
+                        result = false
+                        assert.is_false(strategy:executable_search_cwd())
+                        result, diagnostic = nil, "native CWD query unavailable"
+                        local allowed, err = strategy:executable_search_cwd()
+                        assert.is_nil(allowed)
+                        assert.equal(diagnostic, err)
+                        local cancelled = {}
+                        diagnostic = cancelled
+                        allowed, err = strategy:executable_search_cwd()
+                        assert.is_nil(allowed)
+                        assert.equal(cancelled, err)
+                        assert.equal(4, checked)
+                    end)
+                end)
+            end)
+        end)
+    end)
+
+    it("reports unavailable native executable CWD policy without guessing", function()
+        local strategy = compiler_io.new_sync()
+        local function forbidden()
+            error("unavailable CWD policy must not consult the host environment")
+        end
+        with_overrides(require "titan", { _executable_search_cwd = false }, function()
+            with_overrides(platform, { getenv = forbidden }, function()
+                with_overrides(os, { getenv = forbidden }, function()
+                    local allowed, err = strategy:executable_search_cwd()
+                    assert.is_nil(allowed)
+                    assert.matches("native support lacks _executable_search_cwd", err, 1, true)
+                end)
+            end)
+        end)
+    end)
+
+    it("propagates native executable CWD query cancellation unchanged", function()
+        local cancelled = {}
+        with_overrides(require "titan", { _executable_search_cwd = function()
+            error(cancelled, 0)
+        end }, function()
+            local strategy = compiler_io.new_sync()
+            local ok, err = pcall(strategy.executable_search_cwd, strategy)
+            assert.is_false(ok)
+            assert.equal(cancelled, err)
+        end)
+    end)
+
     it("keeps the synchronous yield checkpoint a no-op", function()
         local strategy = compiler_io.new_sync()
         local co = coroutine.create(function()

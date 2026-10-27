@@ -1344,6 +1344,12 @@ static int stat_precise(lua_State *L) {
   return 1;
 }
 #if defined(_WIN32)
+/* Query the same native policy as libuv instead of guessing from getenv. */
+static int executable_search_cwd(lua_State *L) {
+  lua_pushboolean(L, NeedCurrentDirectoryForExePathW(L""));
+  return 1;
+}
+
 /* Contain the compiler before it can create a child. Windows 8+ inherits
 ** every non-breakaway ancestor job at CreateProcess time, even when libuv
 ** subsequently adds the child to its own silent-breakaway job. Assigning a
@@ -1404,6 +1410,7 @@ static const luaL_Reg titanlib[] = {
 #if defined(_WIN32)
   { "_abivalue", abivalue },
   { "_native_process_tree_guard", native_process_tree_guard },
+  { "_executable_search_cwd", executable_search_cwd },
 #else
   { "_executable_access", executable_access },
   { "_jobserver_open", jobserver_open },

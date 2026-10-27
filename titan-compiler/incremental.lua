@@ -367,50 +367,176 @@ function incremental.physical_tool_file(context, path)
     return physical_tool_identity(context, filename, stat)
 end
 
+local function uncertified_tool(reason)
+    return nil, reason, "uncertified"
+end
+
+local function windows_physical_executable(context, executable, selection)
+    local explicit = executable:find("[/\\:]") ~= nil
+    if selection ~= nil and selection ~= "llvm" then
+        return uncertified_tool("unknown Windows native tool selection policy")
+    elseif selection == "llvm" and not explicit then
+        return uncertified_tool("bare Windows compiler stage has no proven selection policy")
+    end
+    local cwd
+    local function candidate(filename)
+        if not platform.is_absolute(filename) then
+            cwd = cwd or required(context.io:cwd())
+        end
+        local resolved, resolve_error = platform.absolute(filename, cwd)
+        if not resolved then
+            return uncertified_tool("cannot prove Windows tool path: " ..
+                tostring(resolve_error))
+        end
+        local stat, err = context.io:stat(resolved)
+        if err ~= nil then required(nil, err, resolved) end
+        return resolved, stat
+    end
+    if selection == "llvm" then
+        -- LLVM Execute uses the exact path when it exists, otherwise +".exe".
+        -- An existing directory must not be bypassed: LLVM would launch it.
+        for index = 1, 2 do
+            local filename, stat, status = candidate(
+                index == 1 and executable or executable .. ".exe")
+            if status then return nil, stat, status end
+            if stat then
+                if stat.kind ~= "file" then
+                    error("cannot resolve native tool executable: nonregular LLVM stage " ..
+                        filename, 0)
+                end
+                return physical_tool_identity(context, filename, stat), filename
+            end
+        end
+        error("cannot resolve native tool executable: " .. executable, 0)
+    end
+
+    -- Match bundled libuv's Windows spawn search, not LLVM's stage launcher.
+    -- With no exact-name flag, only a nonempty extension enables exact lookup;
+    -- .com and .exe are then appended even to an already-suffixed request.
+    local basename = executable:match("([^/\\:]*)$")
+    local dot = basename:find(".", 1, true)
+    local has_extension = dot ~= nil and dot < #basename
+    local suffix_dot = basename:sub(-1) == "." and "" or "."
+    local function probe(filename)
+        local resolved, stat, status = candidate(filename)
+        if status then return nil, stat, status end
+        if not stat or stat.kind == "directory" then return nil end
+        if stat.kind ~= "file" then
+            return uncertified_tool("cannot prove Windows executable file kind: " .. resolved)
+        end
+        return resolved, stat
+    end
+    local function in_directory(directory)
+        local filename = executable
+        if directory ~= nil and directory ~= "" then
+            local last = directory:sub(-1)
+            filename = directory ..
+                ((last == "/" or last == "\\" or last == ":") and "" or "/") ..
+                executable
+        end
+        if has_extension then
+            local found, stat, status = probe(filename)
+            if found or status then return found, stat, status end
+        end
+        local found, stat, status = probe(filename .. suffix_dot .. "com")
+        if found or status then return found, stat, status end
+        return probe(filename .. suffix_dot .. "exe")
+    end
+    local function in_path()
+        local search = context.executable_path or platform.getenv("PATH") or ""
+        local start = 1
+        while start <= #search do
+            local first = search:sub(start, start)
+            local quoted = first == '"' or first == "'"
+            local after_quote = quoted and
+                (search:find(first, start + 1, true) or #search + 1) or start
+            local finish = search:find(";", after_quote, true) or #search + 1
+            local directory = search:sub(start, finish - 1)
+            if directory ~= "" then
+                if quoted then
+                    if #directory == 1 then
+                        return uncertified_tool("cannot prove malformed Windows executable PATH")
+                    end
+                    directory = directory:sub(2)
+                end
+                local last = directory:sub(-1)
+                if last == '"' or last == "'" then directory = directory:sub(1, -2) end
+                local found, stat, status = in_directory(directory)
+                if found or status then return found, stat, status end
+            end
+            start = finish + 1
+        end
+    end
+    local function identity(filename, stat)
+        return physical_tool_identity(context, filename, stat), filename
+    end
+    if executable == "." then
+        error("cannot resolve native tool executable: " .. executable, 0)
+    elseif explicit then
+        local found, stat, status = in_directory(nil)
+        if status then return nil, stat, status end
+        if found then return identity(found, stat) end
+    else
+        local search_cwd
+        if type(context.io.executable_search_cwd) == "function" then
+            local allowed, err = context.io:executable_search_cwd()
+            if err ~= nil and type(err) ~= "string" then error(err, 0) end
+            if err == nil and (allowed == true or allowed == false) then
+                search_cwd = allowed
+            end
+        end
+        local current, current_stat, current_status
+        if search_cwd ~= false then
+            cwd = cwd or required(context.io:cwd())
+            current, current_stat, current_status = in_directory(cwd)
+            if current_status then return nil, current_stat, current_status end
+            if current and search_cwd == true then return identity(current, current_stat) end
+        end
+        local found, stat, status = in_path()
+        if status then return nil, stat, status end
+        if current and current ~= found then
+            return uncertified_tool("cannot determine Windows current-directory tool selection")
+        end
+        if found then return identity(found, stat) end
+    end
+    error("cannot resolve native tool executable: " .. executable, 0)
+end
+
 -- Return canonical physical identity plus the admitted absolute command
 -- spelling, retaining symlink/multicall names when execution changes cwd.
-function incremental.physical_executable(context, command)
+-- Windows defaults to bundled-libuv spawn lookup; "llvm" selects an explicit
+-- compiler-reported stage. Policy uncertainty returns nil, reason, "uncertified";
+-- callers must still execute valid raw commands without reusable records.
+function incremental.physical_executable(context, command, selection)
     local executable = type(command) == "table" and command[1] or command
     assert(type(executable) == "string" and executable ~= "", "tool executable is required")
-    -- Compiler stage names may omit .exe even when their basename has dots.
-    local add_exe_suffix = platform.windows and executable:sub(-4):lower() ~= ".exe"
+    if platform.windows then
+        return windows_physical_executable(context, executable, selection)
+    end
     local candidates = {}
     if executable:find("[/\\]") or executable:match("^%a:") then
         candidates[1] = absolute(context, executable)
-        if add_exe_suffix then
-            candidates[2] = candidates[1] .. ".exe"
-        end
     else
-        local separator = platform.windows and ";" or ":"
         local search = context.executable_path or platform.getenv("PATH") or ""
-        for directory in (search .. separator):gmatch("(.-)" .. separator) do
-            -- POSIX resolves symlinks before a following ".."; lexical path
-            -- normalization can therefore select a different executable.
-            local candidate = (platform.windows and paths.join or platform.join)(
+        for directory in (search .. ":"):gmatch("(.-):") do
+            -- Preserve POSIX symlink/.. spelling through admission and execution.
+            candidates[#candidates + 1] = platform.join(
                 directory ~= "" and directory or ".", executable)
-            candidates[#candidates + 1] = candidate
-            if add_exe_suffix then
-                candidates[#candidates + 1] = candidate .. ".exe"
-            end
         end
     end
     for _, candidate in ipairs(candidates) do
         local stat, err = context.io:stat(candidate)
         if err then required(nil, err, candidate) end
         if stat and stat.kind == "file" then
-            local eligible = true
-            if not platform.windows then
-                assert(type(context.io.executable) == "function",
-                    "cannot determine native tool execution eligibility: " ..
-                    "compiler I/O strategy lacks executable")
-                local allowed, access_error = context.io:executable(candidate)
-                if access_error ~= nil then required(nil, access_error, candidate) end
-                if allowed ~= true and allowed ~= false then
-                    required(nil, "cannot determine native tool execution eligibility", candidate)
-                end
-                eligible = allowed
+            assert(type(context.io.executable) == "function",
+                "cannot determine native tool execution eligibility: " ..
+                "compiler I/O strategy lacks executable")
+            local allowed, access_error = context.io:executable(candidate)
+            if access_error ~= nil then required(nil, access_error, candidate) end
+            if allowed ~= true and allowed ~= false then
+                required(nil, "cannot determine native tool execution eligibility", candidate)
             end
-            if eligible then
+            if allowed then
                 return physical_tool_identity(context, candidate, stat),
                     platform.is_absolute(candidate) and candidate or absolute(context, candidate)
             end
@@ -484,15 +610,25 @@ function incremental.toolchain_identity(context, descriptor)
         memo.toolchain_descriptions[description_key] = description
     end
     local preprocessor, banner = description.preprocessor, description.banner
-    local tools = { (incremental.physical_executable(context, cc)) }
+    local clang = banner:lower():find("clang", 1, true)
+    -- Incidental "clang" in an installation path does not prove LLVM launching.
+    local llvm_banner = banner:match("^[%w ()+._-]*clang version %d") or
+        banner:match("\n[%w ()+._-]*clang version %d")
+    local stage_policy = llvm_banner and "llvm" or nil
+    local primary, primary_error, primary_status =
+        incremental.physical_executable(context, cc)
+    if not primary then return nil, primary_error, primary_status end
+    local tools = { primary }
     if wrapped then
         assert(cc[2] and cc[2]:sub(1, 1) ~= "-", "wrapped compiler must be explicit")
-        tools[#tools + 1] = incremental.physical_executable(context, cc[2])
+        local delegate, delegate_error, delegate_status =
+            incremental.physical_executable(context, cc[2], "unknown")
+        if not delegate then return nil, delegate_error, delegate_status end
+        tools[#tools + 1] = delegate
     end
     local stages = descriptor.stage_tools
     if not stages then
         stages = {}
-        local clang = banner:lower():find("clang", 1, true)
         local query = append(append(append({ table.unpack(cc) }, descriptor.compile_flags),
             descriptor.cppflags), descriptor.cflags)
         local external_assembler = false
@@ -509,9 +645,13 @@ function incremental.toolchain_identity(context, descriptor)
         end
     end
     for _, stage in ipairs(stages) do
-        tools[#tools + 1] = incremental.physical_executable(context, stage)
+        local identity, identity_error, identity_status =
+            incremental.physical_executable(context, stage, stage_policy or "unknown")
+        if not identity then return nil, identity_error, identity_status end
+        tools[#tools + 1] = identity
     end
-    local details = { preprocessor = preprocessor, banner = banner, tools = tools }
+    local details = { preprocessor = preprocessor, banner = banner, tools = tools,
+        stage_policy = stage_policy }
     local digest = incremental.digest(context, "toolchain", details)
     memo.toolchains[key] = { digest = digest, details = details }
     return digest, details
@@ -890,9 +1030,16 @@ end
 function incremental.configuration(context, value)
     if context.incremental_configuration then return context.incremental_configuration end
     local opts = options(context, value)
-    local ok, result = pcall(function()
+    local ok, result, reason, status = pcall(function()
         local compiler = required(incremental.compiler_component(context, opts))
-        local toolchain = incremental.toolchain_identity(context, assert(opts.toolchain_descriptor))
+        local toolchain, toolchain_error, toolchain_status =
+            incremental.toolchain_identity(context, assert(opts.toolchain_descriptor))
+        if not toolchain then
+            if toolchain_status == "uncertified" then
+                return nil, toolchain_error, toolchain_status
+            end
+            required(nil, toolchain_error)
+        end
         local preamble = incremental.preamble_identity(context, opts)
         local compile_options = { compile_prefix = opts.compile_prefix,
             build_profile = opts.build_profile, emit_line_directives = opts.emit_line_directives,
@@ -907,6 +1054,7 @@ function incremental.configuration(context, value)
         if type(result) ~= "string" then error(result, 0) end
         error("cannot certify compiler configuration: " .. result, 0)
     end
+    if not result then return nil, reason, status end
     context.incremental_configuration = result
     return result
 end

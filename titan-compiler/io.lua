@@ -344,6 +344,16 @@ function Sync:executable(path)
     return support._executable_access(path)
 end
 
+-- Optional strategy capability: match libuv's Windows CWD search policy.
+function Sync:executable_search_cwd()
+    local support = require "titan"
+    if type(support) ~= "table" or
+       type(support._executable_search_cwd) ~= "function" then
+        return nil, "installed Titan native support lacks _executable_search_cwd; reinstall Titan"
+    end
+    return support._executable_search_cwd()
+end
+
 function Sync:read_file(path, max_bytes)
     local valid, path_err = checked_path(path)
     if not valid then return nil, path_err end
