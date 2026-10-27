@@ -320,8 +320,11 @@ function certificate.linker_backend(context, request)
         local backend = "none"
         if result.ok then
             local banner = result.output or result.diagnostic or ""
-            if banner:find("LLD", 1, true) then backend = "lld"
-            elseif banner:find("GNU ld", 1, true) then backend = "gnu" end
+            -- GCC's --version also echoes linker argv; paths are not banners.
+            for line in banner:gmatch("[^\r\n]+") do
+                if line:match("^%s*[%w_.%- ]*LLD%s+%d") then backend = "lld"; break
+                elseif line:match("^%s*GNU ld[%s%.]") then backend = "gnu"; break end
+            end
         end
         discard_report()
         mkdir(context, directory)
