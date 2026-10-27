@@ -6152,7 +6152,7 @@ printf '%s\n' "${schedule[@]}"
                 "TITAN_FILTER='test_unwind_'",
                 "TITAN_FILTER='test_fs_'",
                 "TITAN_FILTER='^uv%.task_tests%.'",
-                "TITAN_FILTER='^uv%.runtime_tests%.'",
+                'TITAN_FILTER="^uv%.runtime_tests%.$runtime_case%f[^%w_]"',
                 "TITAN_FILTER='test_completion_'",
                 "TITAN_FILTER='test_ready_queue_'",
                 "TITAN_FILTER='wake_failure_'",
@@ -6194,6 +6194,24 @@ printf '%s\n' "${schedule[@]}"
             }) do
                 assert.equal(1, count_literal(sanitizer_job, filter), filter)
             end
+            local runtime_sanitizer_step = named_step(sanitizer_job,
+                "Run native async sanitizer gate (core-uv)")
+            assert_ordered(runtime_sanitizer_step,
+                'local filename = "out/tests/uv/runtime_tests.o"',
+                "objectmetadata.read(",
+                'assert(util.get_file_contents(filename, "rb"))',
+                "entry.object_metadata.test_functions",
+                'assert(type(names) == "table" and #names > 0,',
+                "table.sort(names, util.bytewise_less)",
+                "for _, name in ipairs(names) do print(name) end",
+                "while IFS= read -r runtime_case; do",
+                'ci_sanitizer_capture.sh "uv-runtime-$runtime_case"',
+                'make titan-stdlib-test-run TITAN_FILTER="^uv%.runtime_tests%.$runtime_case%f[^%w_]"',
+                'done < "$runtime_cases"')
+            assert.falsy(runtime_sanitizer_step:find(
+                "TITAN_FILTER='^uv%.runtime_tests%.'", 1, true))
+            assert.falsy(runtime_sanitizer_step:find(
+                "TITAN_TEST_TIMEOUT", 1, true))
             local nominal_sanitizer_step = named_step(sanitizer_job,
                 "Run native nominal storage sanitizer gate")
             for _, required in ipairs({
