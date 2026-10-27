@@ -345,11 +345,16 @@ that the coordinator loaded. The child's descriptors are:
 * `fds 4, 5, ...` (POSIX only): the open `.titan-build.lock` descriptors from
   `locks:descriptors()`.
 
-Synchronous `process.run` and captured `process.capture` commands accept the
-same `options.inherit` list and place those POSIX lock descriptors at `fd 3`
-and up, so a native tool started outside the job batches also keeps the
-output-tree lock alive while it runs. Dispatched native jobs keep their own
-layout.
+`process.start(argv, options)` launches a command that shares the caller's
+standard streams and returns its `Process` immediately (or `nil, error`);
+`:wait()`/`:close()` reap it with `os.execute`-shaped results. Synchronous
+`process.run` is `start` followed by `wait`, and `process.capture` collects
+output through a pipe. All three accept the same `options.inherit` list and
+place those POSIX lock descriptors at `fd 3` and up, so a native tool started
+outside the dispatched job batches keeps the output-tree lock alive while it
+runs. Workers and
+dispatched native jobs keep their own layouts, and every launch passes the
+same Windows process-tree guard.
 
 While the scheduler loop runs on POSIX, `titan._sigpipe_ignore()`
 (`ltitanlib.c`) sets `SIGPIPE` to `SIG_IGN` and restores the exact prior
