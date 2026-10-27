@@ -1981,7 +1981,7 @@ rejects output collisions and graph-dependent option errors (`--exe` or
 library-only builds unless `-c` is given, multiple `main` roots, and library
 roots without a common prefix) before any worker starts; each worker checks
 the C headers its fresh module discovers against the same reservations before
-writing. `build.run`
+writing generated module artifacts. `build.run`
 certifies, compiles, and restores the module closure. `titanc` then compiles
 any `--c-source` nodes via `nativeinputs.compile` and—for linking
 invocations—gates runner/entrypoint synthesis, archive probing, and linking

@@ -303,8 +303,8 @@ linker input mechanism: <flag>`, `opaque native C input mechanism`,
   `titanc` reserves every file the planned build may write and checks the
   whole set for collisions with sources, native inputs, the C headers of
   already certified modules, and other outputs; a module being recompiled
-  checks the C headers it discovers against the same set before it writes
-  anything. For
+  checks the C headers it discovers against the same set before writing its
+  generated module artifacts. For
   each module this includes `<stem>.part1.c`/`.part1.o` through the configured
   `--c-parts` maximum, even when the module generates fewer parts, along with
   `<stem>.priv.h`, `<stem>.titan.h`, and `<stem>.ffi.h`. An authored file at a

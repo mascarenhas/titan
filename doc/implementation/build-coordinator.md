@@ -269,12 +269,14 @@ queries. On Windows the index reads file status through the compiler I/O
 strategy's `lstat`/`stat`, the same native observations the rest of the
 compiler uses, rather than LuaFileSystem.
 
-Fresh modules discover their C headers only in their worker. Before writing
-any output, `driver.compile_planned_module` passes each non-`search` entry of
-the module's `c_header_dependencies` to
+Fresh modules discover their C headers only in their worker. After checking
+and before writing generated module artifacts (C, headers, and objects),
+`driver.compile_planned_module` passes each non-`search` entry of the module's
+`c_header_dependencies` to
 `driver.validate_reserved_output_inputs(plan.reservations, inputs)`, so an
-authored header at a reserved path fails that module before anything is
-overwritten.
+authored header at a reserved path fails that module before any generated
+artifact overwrites it. Checker and C-probe scratch files may already exist by
+then.
 
 ## Metadata-only hits and early cutoff
 
