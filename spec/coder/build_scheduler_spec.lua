@@ -222,17 +222,23 @@ end)
 
 describe("process transport", function()
     it("retains one anchored luv loop across package.loaded resets and GC", function()
-        local process = require "titan-compiler.process"
-        local first = process.library()
-        assert.is_userdata(first._loop)
+        local weak = setmetatable({}, { __mode = "v" })
+        do
+            local process = require "titan-compiler.process"
+            local first = process.library()
+            assert.is_userdata(first._loop)
+            weak.uv, weak.loop = first, first._loop
+        end
         package.loaded.luv = nil
         package.loaded["titan-compiler.process"] = nil
         collectgarbage("collect")
         collectgarbage("collect")
+        assert.is_table(weak.uv)
+        assert.is_userdata(weak.loop)
         local second = require("titan-compiler.process").library()
-        assert.equal(first, second)
-        assert.equal(first, package.loaded.luv)
-        assert.is_userdata(second._loop)
+        assert.equal(weak.uv, second)
+        assert.equal(weak.uv, package.loaded.luv)
+        assert.equal(weak.loop, second._loop)
 
         -- Also verify in a fresh Lua VM where platform.getenv (under
         -- platform.windows = true) is the very first luv load before
@@ -244,22 +250,33 @@ describe("process transport", function()
                 package.path, package.cpath, interpreter) .. [[
 assert(package.loaded.luv == nil)
 local platform = require "titan-compiler.platform"
+local saved_windows = platform.windows
 platform.windows = true
 platform.getenv("PATH")
-local first_uv = assert(package.loaded.luv)
-assert(type(first_uv._loop) == "userdata")
+platform.windows = saved_windows
+local weak = setmetatable({}, { __mode = "v" })
+do
+    local first_uv = assert(package.loaded.luv)
+    assert(type(first_uv._loop) == "userdata")
+    weak.uv, weak.loop = first_uv, first_uv._loop
+end
 package.loaded.luv = nil
 package.loaded["titan-compiler.process"] = nil
 collectgarbage("collect")
 collectgarbage("collect")
-local process = require "titan-compiler.process"
-local second_uv = process.library()
-assert(second_uv == first_uv)
-assert(type(second_uv._loop) == "userdata")
+assert(weak.uv ~= nil and type(weak.loop) == "userdata")
+do
+    local process = require "titan-compiler.process"
+    local second_uv = process.library()
+    assert(second_uv == weak.uv)
+    assert(second_uv._loop == weak.loop)
+    assert(type(second_uv._loop) == "userdata")
+end
 package.loaded.luv = nil
 package.loaded["titan-compiler.process"] = nil
 collectgarbage("collect")
 collectgarbage("collect")
+assert(weak.uv ~= nil and type(weak.loop) == "userdata")
 local ok, term, code = require("titan-compiler.process").run({ interpreter, "-E", "-e", "os.exit(0)" })
 assert(ok == true and term == "exit" and code == 0)
 ]],
