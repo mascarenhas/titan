@@ -527,9 +527,12 @@ Worker lifetime is bounded even if the coordinator terminates abnormally:
   preprocessing and foreign-C checks) are launched with the held lock
   descriptors. `titanc` binds the acquired lock set to its coordinator `Sync`
   strategy before digest loading and preflight and clears the binding when the
-  locks are released; a bound `Sync:run` runs the same locale-prefixed, quoted
-  command through `/bin/sh -c` and `process.capture` with the same status and
-  stderr contract, and never falls back to an unleased `io.popen`. An abrupt
+  locks are released; a bound `Sync:run` (and a serial `run_batch`) runs the
+  same locale-prefixed, quoted command through `/bin/sh -c` and
+  `process.capture` with the same status and stderr contract, a parallel
+  `run_batch` launches its jobs through `jobs.launch` and `process.start_job`
+  with the same descriptors, and neither falls back to an unleased `io.popen`.
+  An abrupt
   `SIGKILL`
   of the coordinator therefore leaves the kernel `flock` held until every
   surviving worker, native job, and child compiler has exited, and a
