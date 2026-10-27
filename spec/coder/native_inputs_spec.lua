@@ -702,6 +702,7 @@ end
         { name = "a Titan source", leaf = "protect_main.titan" },
         { name = "a local C header", leaf = "protect_header.h" },
         { name = "a header included only by a C source", leaf = "protect_native.h" },
+        { name = "a raw native linker input", leaf = "link-helper.o" },
     }) do
         it("refuses Windows stale staging that contains " .. case.name .. " and keeps every stage", function()
             if not platform.windows then pending("Windows stale-staging protection"); return end
@@ -716,7 +717,7 @@ end
             local protected = authored .. "/" .. case.leaf
             local tree, main = root, "function main(args: {string}): integer\n    return 0\nend\n"
             local arguments = { "--incremental", "-v", "--output", output, "--exe", executable }
-            if case.leaf == "helper.o" then
+            if case.leaf == "helper.o" or case.leaf == "link-helper.o" then
                 write(protected, read(objects(root .. "/object build", { first })[1]))
             elseif case.leaf == "authored.c" then
                 write(protected, "int authored_helper(void) { return 3; }\n")
@@ -741,6 +742,9 @@ end
             end
             if case.leaf == "helper.o" then
                 arguments[#arguments + 1], arguments[#arguments + 2] = "-X", protected
+            elseif case.leaf == "link-helper.o" then
+                -- Not an -X payload: only the prepared link policy resolves it.
+                arguments[#arguments + 1] = "--ldflag=" .. protected
             end
             local bytes = read(protected)
             local result = invoke(arguments)

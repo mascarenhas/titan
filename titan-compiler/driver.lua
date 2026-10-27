@@ -9917,10 +9917,12 @@ end
 -- The basename-preserving staging namespace belongs to the corresponding
 -- final output. Retire abandoned reservations before even a final-link hit,
 -- but only while that output's domain remains exclusively locked, and never
--- over a path this invocation accepted or reserved. `plan` is the preflighted
--- build plan, whose source modules the build has restored into driver.imported;
--- `native_objects` are this invocation's `nativeinputs.compile` results.
-function driver.cleanup_stale_staging(context, outputs, locks, plan, native_objects)
+-- over a path this invocation accepted or reserved. `protection.plan` is the
+-- preflighted build plan, whose source modules the build has restored into
+-- driver.imported; `protection.native_objects` are this invocation's
+-- `nativeinputs.compile` results; `protection.link_inputs` lists the prepared
+-- final link's inputs, including native libraries its policy resolved.
+function driver.cleanup_stale_staging(context, outputs, locks, protection)
     if not platform.windows then return true end
     if not locks or not locks.entries or #locks.entries == 0 then
         return nil, "stale staging cleanup requires held output locks"
@@ -9992,11 +9994,13 @@ function driver.cleanup_stale_staging(context, outputs, locks, plan, native_obje
             directory.owners[#directory.owners + 1] = filename
         end
     end
+    local plan = type(protection) == "table" and protection.plan or nil
     if type(plan) ~= "table" or type(plan.inputs) ~= "table" or
             type(plan.reservations) ~= "table" then
         return nil, "stale staging cleanup requires the invocation's " ..
             "preflighted inputs and reservations"
     end
+    local native_objects = protection.native_objects
     if type(native_objects) ~= "table" then
         return nil, "stale staging cleanup requires the invocation's native C nodes"
     end
@@ -10006,6 +10010,9 @@ function driver.cleanup_stale_staging(context, outputs, locks, plan, native_obje
             return nil, "stale staging cleanup requires each native C node's " ..
                 "source and recorded dependencies"
         end
+    end
+    if type(protection.link_inputs) ~= "table" then
+        return nil, "stale staging cleanup requires the invocation's final-link inputs"
     end
 
     -- Observe every candidate's complete no-follow footprint before removing
@@ -10068,10 +10075,10 @@ function driver.cleanup_stale_staging(context, outputs, locks, plan, native_obje
     if #candidates == 0 then return true end
 
     -- Accepted inputs and reserved outputs, plus the source constituents and
-    -- C headers the build recorded after preflight, and each --c-source with
-    -- the dependencies its one native preprocessing run recorded. Spelling,
-    -- hierarchy and physical-file aliases of any footprint entry refuse every
-    -- candidate.
+    -- C headers the build recorded after preflight, each --c-source with the
+    -- dependencies its one native preprocessing run recorded, and the final
+    -- link's inputs. Spelling, hierarchy and physical-file aliases of any
+    -- footprint entry refuse every candidate.
     local protected = {}
     for _, reserved in ipairs(plan.reservations) do protected[#protected + 1] = reserved.path end
     for _, input in ipairs(plan.inputs) do protected[#protected + 1] = input end
@@ -10094,6 +10101,7 @@ function driver.cleanup_stale_staging(context, outputs, locks, plan, native_obje
             protected[#protected + 1] = dependency
         end
     end
+    for _, input in ipairs(protection.link_inputs) do protected[#protected + 1] = input end
     local accepted, conflict = perf.new_output_path_index(
         "staging path", footprint, strategy).check_inputs(protected)
     if not accepted then
@@ -11751,8 +11759,8 @@ end
 
 -- One filesystem observation per pathname, with prefix indexes for both
 -- spelling and physical identity. No collision query performs filesystem I/O.
--- A closed Windows caller may supply the resolver strategy that observes its
--- inputs and resolves their relative spellings; the host strategy is the default.
+-- A caller may supply the resolver strategy that resolves relative input
+-- spellings and, on Windows, observes them; the host strategy is the default.
 function perf.new_output_path_index(label, reservations, strategy)
     local observations, attributes, outputs = {}, {}, {}
     local windows_io = platform.windows and (strategy or compiler_io.new_sync())

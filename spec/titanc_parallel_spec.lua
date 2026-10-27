@@ -65,13 +65,16 @@ local function run_titanc(arguments, environment_jobs)
     function driver.configure_foreign_c() return true end
     function driver.default_c_parts() return 4 end
     function driver.prepare_output_root(dir) return dir end
-    function driver.cleanup_stale_staging(context, outputs, locks)
+    function driver.cleanup_stale_staging(context, outputs, locks, protection)
         assert.equal(resolver, context)
         assert.equal(observed.output_locks, locks)
         assert.falsy(observed.lock_released)
         local expected = { { path = "pkg.so" } }
         if not platform.windows then expected[2] = { path = "pkg.a" } end
         assert.same(expected, outputs)
+        -- Stale staging is retired after preparation resolves the link inputs.
+        assert.equal(observed.prepared_outputs, outputs)
+        assert.same({ "pkg/one.o", "pkg/three.o", "pkg/two.o" }, protection.link_inputs)
         observed.staging_outputs = outputs
         return true
     end
@@ -257,10 +260,10 @@ local function run_titanc(arguments, environment_jobs)
                 assert.equal(resolver, context)
                 assert.is_table(selected_tools)
                 assert.equal(selected_tools, spec.toolchain.output_tools)
-                assert.is_table(observed.staging_outputs)
-                assert.same(observed.staging_outputs, spec.outputs)
+                assert.is_nil(observed.staging_outputs)
                 assert.falsy(observed.lock_released)
-                return { directory = "link", synthetic_directory = "syn" }
+                observed.prepared_outputs = spec.outputs
+                return { directory = "link", synthetic_directory = "syn", native_policy = {} }
             end,
             check = function(context)
                 assert.equal(resolver, context)
