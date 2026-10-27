@@ -63,8 +63,8 @@ names up to the configured `--c-parts` maximum stay reserved for the
 compiler, so do not place authored files there. If an authored file occupies
 a reserved generated-C name, the build stops without overwriting it and asks
 you to move it or use another output directory. Generated C left by an
-earlier compiler, including in an output directory that was moved or copied,
-is recognized as compiler-owned and regenerated in place.
+earlier Titan 0.6 compiler, including in an output directory that was moved or
+copied, is recognized as compiler-owned and regenerated in place.
 
 The same destination contains generated `.ffi.h` and `.titan.h` companions,
 platform debug information, and compiler-managed metadata directories. Authored
