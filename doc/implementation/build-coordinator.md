@@ -560,7 +560,12 @@ never searches `TITAN_BIN_PATH` or `TITAN_SOURCE_PATH`:
   metadata makes the worker rescan the archive; an archive the worker cannot
   observe still fails. The resulting view has kind `"metadata"` and no members,
   so it selects interfaces but never reaches a link, and the final link still
-  certifies archive content; and
+  certifies archive content. The metadata is optional in transport as well:
+  `build.encode_request` first encodes the complete compile request. If that
+  exceeds any record-codec bound (string size, record size, or node or entry
+  count), it encodes the request once more without the plan's `archives`, and
+  that worker scans the archive itself. A request that exceeds a bound even
+  without the metadata still fails with its encoding error; and
 * requesting any module not in `plan.modules`, or observing a `native_static_names`
   linked set after `finalize_resolver_context` that disagrees with
   `planned.linked`, fails with `"build plan divergence: ..."`.
