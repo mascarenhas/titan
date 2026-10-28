@@ -5,7 +5,10 @@ local driver = require "titan-compiler.driver"
 local lfs = require "lfs"
 local objectmetadata = require "titan-compiler.objectmetadata"
 local platform = require "titan-compiler.platform"
-local sha256 = require "titan-compiler.sha256"
+-- Artifact snapshots hash every object and both ~11 MB static executables
+-- before and after each titanc run; use the installed native SHA-256 (the
+-- same digest as titan-compiler.sha256) instead of hashing them in Lua.
+local sha256_binary = require("titan")._sha256_binary
 local temporary = require "spec.support.temporary"
 
 local REPOSITORY = assert(lfs.currentdir())
@@ -224,7 +227,7 @@ local function collect_artifacts(build_dir, executables, sentinel_time)
         local attr = assert(lfs.attributes(full_path))
         snapshot[key] = {
             path = normalize_slashes(full_path),
-            digest = sha256.hex(bytes),
+            digest = sha256_binary(bytes),
             size = #bytes,
             mtime = attr.modification,
             ino = attr.ino,
