@@ -333,34 +333,146 @@ static const uint32_t titan_sha256_k[64] = {
   0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u,
 };
 
-static void titan_sha256_block(uint32_t state[8], const unsigned char *block) {
+/* Certification hashes every final-link input, including the standard
+** provider of several hundred megabytes, so compression speed bounds fresh
+** links. Hardware SHA-256 (x86 SHA extensions selected at run time, or the
+** ARMv8 SHA2 extension when a little-endian AArch64 target guarantees it)
+** computes the identical FIPS 180-4 compression; selection never changes a
+** digest. The ARM message load byte-reverses each word for little-endian
+** lanes, so big-endian AArch64 keeps the portable compressor. */
+#if (defined(__x86_64__) || defined(__i386__)) && \
+    (defined(__GNUC__) || defined(__clang__))
+#include <cpuid.h>
+#include <immintrin.h>
+#define TITAN_SHA256_X86 1
+#elif defined(__aarch64__) && defined(__ARM_FEATURE_SHA2) && \
+    defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#include <arm_neon.h>
+#define TITAN_SHA256_ARM 1
+#endif
+
+/* Compresses `blocks` consecutive 64-byte blocks into `state`. */
+typedef void (*titan_sha256_compressor)(uint32_t state[8],
+                                        const unsigned char *data,
+                                        size_t blocks);
+
+#if !defined(TITAN_SHA256_ARM)
+static void titan_sha256_portable(uint32_t state[8], const unsigned char *data,
+                                  size_t blocks) {
   uint32_t w[64];
   uint32_t a, b, c, d, e, f, g, h;
   int i;
-  for (i = 0; i < 16; i++)
-    w[i] = ((uint32_t)block[4 * i] << 24) | ((uint32_t)block[4 * i + 1] << 16) |
-           ((uint32_t)block[4 * i + 2] << 8) | (uint32_t)block[4 * i + 3];
-  for (i = 16; i < 64; i++) {
-    uint32_t s0 = TITAN_SHA_ROTR(w[i - 15], 7) ^ TITAN_SHA_ROTR(w[i - 15], 18) ^
-                  (w[i - 15] >> 3);
-    uint32_t s1 = TITAN_SHA_ROTR(w[i - 2], 17) ^ TITAN_SHA_ROTR(w[i - 2], 19) ^
-                  (w[i - 2] >> 10);
-    w[i] = (uint32_t)(w[i - 16] + s0 + w[i - 7] + s1);
+  for (; blocks > 0; blocks--, data += 64) {
+    for (i = 0; i < 16; i++)
+      w[i] = ((uint32_t)data[4 * i] << 24) | ((uint32_t)data[4 * i + 1] << 16) |
+             ((uint32_t)data[4 * i + 2] << 8) | (uint32_t)data[4 * i + 3];
+    for (i = 16; i < 64; i++) {
+      uint32_t s0 = TITAN_SHA_ROTR(w[i - 15], 7) ^ TITAN_SHA_ROTR(w[i - 15], 18) ^
+                    (w[i - 15] >> 3);
+      uint32_t s1 = TITAN_SHA_ROTR(w[i - 2], 17) ^ TITAN_SHA_ROTR(w[i - 2], 19) ^
+                    (w[i - 2] >> 10);
+      w[i] = (uint32_t)(w[i - 16] + s0 + w[i - 7] + s1);
+    }
+    a = state[0]; b = state[1]; c = state[2]; d = state[3];
+    e = state[4]; f = state[5]; g = state[6]; h = state[7];
+    for (i = 0; i < 64; i++) {
+      uint32_t sum1 = TITAN_SHA_ROTR(e, 6) ^ TITAN_SHA_ROTR(e, 11) ^ TITAN_SHA_ROTR(e, 25);
+      uint32_t choose = (e & f) ^ ((uint32_t)~e & g);
+      uint32_t temp1 = (uint32_t)(h + sum1 + choose + titan_sha256_k[i] + w[i]);
+      uint32_t sum0 = TITAN_SHA_ROTR(a, 2) ^ TITAN_SHA_ROTR(a, 13) ^ TITAN_SHA_ROTR(a, 22);
+      uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
+      uint32_t temp2 = (uint32_t)(sum0 + majority);
+      h = g; g = f; f = e; e = (uint32_t)(d + temp1);
+      d = c; c = b; b = a; a = (uint32_t)(temp1 + temp2);
+    }
+    state[0] += a; state[1] += b; state[2] += c; state[3] += d;
+    state[4] += e; state[5] += f; state[6] += g; state[7] += h;
   }
-  a = state[0]; b = state[1]; c = state[2]; d = state[3];
-  e = state[4]; f = state[5]; g = state[6]; h = state[7];
-  for (i = 0; i < 64; i++) {
-    uint32_t sum1 = TITAN_SHA_ROTR(e, 6) ^ TITAN_SHA_ROTR(e, 11) ^ TITAN_SHA_ROTR(e, 25);
-    uint32_t choose = (e & f) ^ ((uint32_t)~e & g);
-    uint32_t temp1 = (uint32_t)(h + sum1 + choose + titan_sha256_k[i] + w[i]);
-    uint32_t sum0 = TITAN_SHA_ROTR(a, 2) ^ TITAN_SHA_ROTR(a, 13) ^ TITAN_SHA_ROTR(a, 22);
-    uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
-    uint32_t temp2 = (uint32_t)(sum0 + majority);
-    h = g; g = f; f = e; e = (uint32_t)(d + temp1);
-    d = c; c = b; b = a; a = (uint32_t)(temp1 + temp2);
+}
+#endif
+
+#if defined(TITAN_SHA256_X86)
+
+static int titan_sha256_x86_available(void) {
+  unsigned int a, b, c, d;
+  if (__get_cpuid_max(0, NULL) < 7 || !__get_cpuid(1, &a, &b, &c, &d) ||
+      !(c & bit_SSSE3) || !(c & bit_SSE4_1))
+    return 0;
+  __cpuid_count(7, 0, a, b, c, d);
+  return (b & bit_SHA) != 0;
+}
+
+__attribute__((target("sha,sse4.1,ssse3")))
+static void titan_sha256_x86(uint32_t state[8], const unsigned char *data,
+                             size_t blocks) {
+  const __m128i swap = _mm_set_epi64x(0x0c0d0e0f08090a0bLL, 0x0405060700010203LL);
+  __m128i abef, cdgh, msg[4];
+  __m128i tmp = _mm_shuffle_epi32(_mm_loadu_si128((const __m128i *)&state[0]), 0xB1);
+  cdgh = _mm_shuffle_epi32(_mm_loadu_si128((const __m128i *)&state[4]), 0x1B);
+  abef = _mm_alignr_epi8(tmp, cdgh, 8);
+  cdgh = _mm_blend_epi16(cdgh, tmp, 0xF0);
+  for (; blocks > 0; blocks--, data += 64) {
+    __m128i abef_saved = abef, cdgh_saved = cdgh;
+    int j;
+    for (j = 0; j < 4; j++)
+      msg[j] = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)(data + 16 * j)), swap);
+    for (j = 0; j < 16; j++) {
+      __m128i wk = _mm_add_epi32(msg[j & 3],
+          _mm_loadu_si128((const __m128i *)&titan_sha256_k[4 * j]));
+      cdgh = _mm_sha256rnds2_epu32(cdgh, abef, wk);
+      abef = _mm_sha256rnds2_epu32(abef, cdgh, _mm_shuffle_epi32(wk, 0x0E));
+      if (j < 12) {
+        __m128i next = _mm_add_epi32(_mm_sha256msg1_epu32(msg[j & 3], msg[(j + 1) & 3]),
+            _mm_alignr_epi8(msg[(j + 3) & 3], msg[(j + 2) & 3], 4));
+        msg[j & 3] = _mm_sha256msg2_epu32(next, msg[(j + 3) & 3]);
+      }
+    }
+    abef = _mm_add_epi32(abef, abef_saved);
+    cdgh = _mm_add_epi32(cdgh, cdgh_saved);
   }
-  state[0] += a; state[1] += b; state[2] += c; state[3] += d;
-  state[4] += e; state[5] += f; state[6] += g; state[7] += h;
+  tmp = _mm_shuffle_epi32(abef, 0x1B);
+  cdgh = _mm_shuffle_epi32(cdgh, 0xB1);
+  _mm_storeu_si128((__m128i *)&state[0], _mm_blend_epi16(tmp, cdgh, 0xF0));
+  _mm_storeu_si128((__m128i *)&state[4], _mm_alignr_epi8(cdgh, tmp, 8));
+}
+#elif defined(TITAN_SHA256_ARM)
+
+static void titan_sha256_arm(uint32_t state[8], const unsigned char *data,
+                             size_t blocks) {
+  uint32x4_t abcd = vld1q_u32(&state[0]), efgh = vld1q_u32(&state[4]), msg[4];
+  for (; blocks > 0; blocks--, data += 64) {
+    uint32x4_t abcd_saved = abcd, efgh_saved = efgh;
+    int j;
+    for (j = 0; j < 4; j++)
+      msg[j] = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data + 16 * j)));
+    for (j = 0; j < 16; j++) {
+      uint32x4_t wk = vaddq_u32(msg[j & 3], vld1q_u32(&titan_sha256_k[4 * j]));
+      uint32x4_t previous = abcd;
+      abcd = vsha256hq_u32(abcd, efgh, wk);
+      efgh = vsha256h2q_u32(efgh, previous, wk);
+      if (j < 12)
+        msg[j & 3] = vsha256su1q_u32(vsha256su0q_u32(msg[j & 3], msg[(j + 1) & 3]),
+                                     msg[(j + 2) & 3], msg[(j + 3) & 3]);
+    }
+    abcd = vaddq_u32(abcd, abcd_saved);
+    efgh = vaddq_u32(efgh, efgh_saved);
+  }
+  vst1q_u32(&state[0], abcd);
+  vst1q_u32(&state[4], efgh);
+}
+#endif
+
+/* Probe the CPU once per digest call; the caller keeps the choice for both
+** its data and padding blocks, with no unsynchronized process-wide state. */
+static titan_sha256_compressor titan_sha256_select(void) {
+#if defined(TITAN_SHA256_ARM)
+  return titan_sha256_arm;
+#else
+#if defined(TITAN_SHA256_X86)
+  if (titan_sha256_x86_available()) return titan_sha256_x86;
+#endif
+  return titan_sha256_portable;
+#endif
 }
 
 static int sha256_binary(lua_State *L) {
@@ -372,10 +484,12 @@ static int sha256_binary(lua_State *L) {
   const unsigned char *data;
   size_t length, offset, rest, tail_length, i;
   uint64_t bits;
+  titan_sha256_compressor compress;
   luaL_checktype(L, 1, LUA_TSTRING);
   data = (const unsigned char *)lua_tolstring(L, 1, &length);
-  for (offset = 0; length - offset >= 64; offset += 64)
-    titan_sha256_block(state, data + offset);
+  compress = titan_sha256_select();
+  offset = length - length % 64;
+  if (offset > 0) compress(state, data, offset / 64);
   rest = length - offset;
   memcpy(tail, data + offset, rest);
   tail[rest] = 0x80;
@@ -384,8 +498,7 @@ static int sha256_binary(lua_State *L) {
   bits = (uint64_t)length << 3;
   for (i = 0; i < 8; i++)
     tail[tail_length - 1 - i] = (unsigned char)(bits >> (8 * i));
-  titan_sha256_block(state, tail);
-  if (tail_length == 128) titan_sha256_block(state, tail + 64);
+  compress(state, tail, tail_length / 64);
   for (i = 0; i < 8; i++) {
     digest[4 * i] = (unsigned char)(state[i] >> 24);
     digest[4 * i + 1] = (unsigned char)(state[i] >> 16);
@@ -1156,11 +1269,16 @@ static const luaL_Reg output_lock_methods[] = {
 /* Private compiler helper: precise file metadata for incremental observation
 ** reuse. Returns { kind, dev, ino, size, mode, mtime_ns, ctime_ns }, plus
 ** windows_attributes on Windows; on failure (missing paths included), returns
-** nil, errmsg, errno_code without raising. */
+** nil, errmsg, errno_code without raising. A Windows volume that reports no
+** ChangeTime omits ctime_ns, and a file that neither FileIdInfo nor
+** GetFileInformationByHandle identifies (a failed query or a zero file ID)
+** omits dev and ino; the compiler then treats the observation as coarse
+** instead of substituting either value. */
 static int stat_precise(lua_State *L) {
   size_t path_len = 0;
   const char *path = luaL_checklstring(L, 1, &path_len);
   int follow = lua_isnoneornil(L, 2) ? 1 : lua_toboolean(L, 2);
+  int has_ctime = 1, has_identity = 1;
   const char *kind;
   char dev_buf[32], ino_buf[64];
   lua_Integer size_val, mode_val, mtime_ns, ctime_ns;
@@ -1273,25 +1391,35 @@ static int stat_precise(lua_State *L) {
       mode_val |= (strcmp(kind, "directory") == 0) ? 0777 : 0666;
     write_ticks = (int64_t)basic_info.LastWriteTime.QuadPart;
     change_ticks = (int64_t)basic_info.ChangeTime.QuadPart;
-    if (change_ticks == 0) change_ticks = write_ticks;
     mtime_ns = (lua_Integer)((write_ticks - 116444736000000000LL) * 100LL);
-    ctime_ns = (lua_Integer)((change_ticks - 116444736000000000LL) * 100LL);
-    if (has_id_info) {
-      int i;
-      snprintf(dev_buf, sizeof dev_buf, "%llu",
-               (unsigned long long)id_info.VolumeSerialNumber);
-      for (i = 0; i < 16; i++)
-        snprintf(ino_buf + 2 * i, 3, "%02x",
-                 (unsigned int)id_info.FileId.Identifier[i]);
-    } else if (has_handle_info) {
-      snprintf(dev_buf, sizeof dev_buf, "%lu",
-               (unsigned long)handle_info.dwVolumeSerialNumber);
-      snprintf(ino_buf, sizeof ino_buf, "%08lx%08lx",
-               (unsigned long)handle_info.nFileIndexHigh,
-               (unsigned long)handle_info.nFileIndexLow);
+    if (change_ticks == 0) {
+      has_ctime = 0;
+      ctime_ns = 0;
     } else {
-      dev_buf[0] = '0'; dev_buf[1] = '\0';
-      ino_buf[0] = '0'; ino_buf[1] = '\0';
+      ctime_ns = (lua_Integer)((change_ticks - 116444736000000000LL) * 100LL);
+    }
+    {
+      /* A zero file ID identifies nothing; fall through to the next query. */
+      int i, id_known = 0;
+      if (has_id_info)
+        for (i = 0; i < 16 && !id_known; i++)
+          id_known = id_info.FileId.Identifier[i] != 0;
+      if (id_known) {
+        snprintf(dev_buf, sizeof dev_buf, "%llu",
+                 (unsigned long long)id_info.VolumeSerialNumber);
+        for (i = 0; i < 16; i++)
+          snprintf(ino_buf + 2 * i, 3, "%02x",
+                   (unsigned int)id_info.FileId.Identifier[i]);
+      } else if (has_handle_info && (handle_info.nFileIndexHigh != 0 ||
+                                     handle_info.nFileIndexLow != 0)) {
+        snprintf(dev_buf, sizeof dev_buf, "%lu",
+                 (unsigned long)handle_info.dwVolumeSerialNumber);
+        snprintf(ino_buf, sizeof ino_buf, "%08lx%08lx",
+                 (unsigned long)handle_info.nFileIndexHigh,
+                 (unsigned long)handle_info.nFileIndexLow);
+      } else {
+        has_identity = 0;
+      }
     }
   }
 #else
@@ -1340,18 +1468,22 @@ static int stat_precise(lua_State *L) {
 #endif
   lua_pushstring(L, kind);
   lua_setfield(L, -2, "kind");
-  lua_pushstring(L, dev_buf);
-  lua_setfield(L, -2, "dev");
-  lua_pushstring(L, ino_buf);
-  lua_setfield(L, -2, "ino");
+  if (has_identity) {
+    lua_pushstring(L, dev_buf);
+    lua_setfield(L, -2, "dev");
+    lua_pushstring(L, ino_buf);
+    lua_setfield(L, -2, "ino");
+  }
   lua_pushinteger(L, size_val);
   lua_setfield(L, -2, "size");
   lua_pushinteger(L, mode_val);
   lua_setfield(L, -2, "mode");
   lua_pushinteger(L, mtime_ns);
   lua_setfield(L, -2, "mtime_ns");
-  lua_pushinteger(L, ctime_ns);
-  lua_setfield(L, -2, "ctime_ns");
+  if (has_ctime) {
+    lua_pushinteger(L, ctime_ns);
+    lua_setfield(L, -2, "ctime_ns");
+  }
   return 1;
 }
 #if defined(_WIN32)

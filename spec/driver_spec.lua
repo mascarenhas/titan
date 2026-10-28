@@ -918,14 +918,14 @@ describe("Windows compiler path integration", function()
             { name = "a lock file linked to the held one",
                 lock = { kind = "symlink", device = held.device, inode = held.inode } },
             { name = "no lock file" },
-            { name = "the native unavailable-identity pair", unavailable = true },
+            { name = "lock files without a native file ID", unavailable = true },
         }) do
             it("rejects an alias proven only by " .. case.name .. " before any listing", function()
                 local nodes = layout(case.lock)
                 if case.unavailable then
-                    local unknown = { kind = "file", device = "0", inode = "0" }
-                    nodes["C:/real/.titan-build.lock"] = unknown
-                    nodes["C:/alias/.titan-build.lock"] = unknown
+                    -- Native stat omits dev/ino when no file ID is available.
+                    nodes["C:/real/.titan-build.lock"] = { kind = "file" }
+                    nodes["C:/alias/.titan-build.lock"] = { kind = "file" }
                 end
                 local model = staging_model(nodes)
                 local ok, err = driver.cleanup_stale_staging(
@@ -2379,6 +2379,7 @@ describe("compiler installation discovery", function()
             liblua = "/opt/titan/lib/liblua.a",
             titan_bin = "/opt/titan/lib/titan/0.6",
             lua_cpath = "/opt/titan/lib/titan/0.6/?.so",
+            sdk_digests = "/opt/titan/lib/titan/0.6/sdk-digests",
         }, paths)
 
         assert.same({
@@ -5774,8 +5775,10 @@ describe("compiler module loader", function()
             assert.equal(1, counters.files[first_real].hashes)
             assert.is_table(counters.revalidation)
             assert.equal(1, counters.revalidation.passes)
-            assert.equal(1, counters.revalidation.files[first_real].hashes)
-            assert.equal(1, counters.revalidation.files[first_real].reads)
+            -- Revalidation re-observes the unchanged source instead of rereading it.
+            assert.equal(0, counters.revalidation.files[first_real].hashes)
+            assert.equal(0, counters.revalidation.files[first_real].reads)
+            assert.equal(1, counters.revalidation.files[first_real].observation_reuses)
             local worker_cfg = assert(driver.worker_configuration(hit_ctx))
             local worker_ctx = assert(driver.new_worker_context(
                 worker_cfg, compiler_io.new_sync()))

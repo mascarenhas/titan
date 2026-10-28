@@ -460,6 +460,23 @@ describe("native SHA-256", function()
         assert.equal(sha256.hex(large), sha256.hex_via(support._sha256_binary, large))
     end)
 
+    it("matches the pure-Lua digest for non-periodic input at every block phase", function()
+        -- The selected compression backend (hardware or portable) must equal
+        -- FIPS 180-4 over data whose blocks never repeat.
+        local bytes, state = {}, 0x2545f491
+        for index = 1, 9000 do
+            state = (state * 1103515245 + 12345) & 0x7fffffff
+            bytes[index] = string.char((state >> 16) & 0xff)
+        end
+        local message = table.concat(bytes)
+        for _, length in ipairs({ 55, 56, 63, 64, 65, 119, 120, 127, 128, 129, 4095, 4097, 8990 }) do
+            for _, first in ipairs({ 1, 2, 7 }) do
+                local slice = message:sub(first, first + length - 1)
+                assert.equal(sha256.binary(slice), support._sha256_binary(slice), length .. "@" .. first)
+            end
+        end
+    end)
+
     it("accepts only strings", function()
         assert.has_error(function() support._sha256_binary(42) end)
         assert.has_error(function() support._sha256_binary(nil) end)

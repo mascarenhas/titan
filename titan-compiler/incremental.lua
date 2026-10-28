@@ -15,7 +15,7 @@ local function state(context)
     if not context.incremental then
         context.incremental = { files = {}, aliases = {}, providers = {},
             counters = { file_hashes = 0, file_reads = 0, file_bytes = 0,
-                observation_reuses = 0, digest_calls = 0, files = {} } }
+                observation_reuses = 0, sdk_reuses = 0, digest_calls = 0, files = {} } }
     end
     return context.incremental
 end
@@ -147,7 +147,7 @@ end
 local function file_count(memo, key)
     local count = memo.counters.files[key]
     if not count then
-        count = { hashes = 0, reads = 0, bytes = 0, observation_reuses = 0 }
+        count = { hashes = 0, reads = 0, bytes = 0, observation_reuses = 0, sdk_reuses = 0 }
         memo.counters.files[key] = count
     end
     return count
@@ -215,17 +215,33 @@ local function digest_file(context, path, bytes, max_bytes)
         end
         return saved.digest, saved.bytes, saved.observation
     end
-    local cache = memo.persistent
-    if bytes == nil and cache and not memo.refresh then
-        local previous = cache.files[absolute(context, path)]
-        local current = previous and incremental.observation(context, path)
-        if previous and current and current.kind == "file"
-            and incremental.observations_equal(current, previous.observation)
-            and context.io:readable(path) then
-            memo.files[key] = { digest = previous.digest, observation = current }
-            memo.counters.observation_reuses = memo.counters.observation_reuses + 1
-            count.observation_reuses = count.observation_reuses + 1
-            return previous.digest, nil, current
+    -- Content digests are file identity. Any recorded digest is reused while
+    -- the file's precise observation, change time included, still equals the
+    -- recorded one: the parent memo of a re-observing context, the installed
+    -- SDK's manifest, or the output tree's persistent cache. A changed or
+    -- coarse observation reads and rehashes the bytes.
+    if bytes == nil then
+        local parent = memo.parent and memo.parent.files[key]
+        local sdk = memo.sdk and memo.sdk.files[key]
+        local persisted = memo.persistent and memo.persistent.files[absolute(context, path)]
+        if parent or sdk or persisted then
+            local current = incremental.observation(context, path)
+            local recorded, counter
+            if current and current.kind == "file" then
+                if parent and incremental.observations_equal(current, parent.observation) then
+                    recorded, counter = parent, "observation_reuses"
+                elseif sdk and incremental.observations_equal(current, sdk.observation) then
+                    recorded, counter = sdk, "sdk_reuses"
+                elseif persisted and incremental.observations_equal(current, persisted.observation) then
+                    recorded, counter = persisted, "observation_reuses"
+                end
+            end
+            if recorded and context.io:readable(path) then
+                memo.files[key] = { digest = recorded.digest, observation = current }
+                memo.counters[counter] = memo.counters[counter] + 1
+                count[counter] = count[counter] + 1
+                return recorded.digest, nil, current
+            end
         end
     end
     local observed
@@ -262,12 +278,17 @@ function incremental.file_contents(context, path, max_bytes)
     return bytes
 end
 
--- Publication must re-read/hash, but its verified evidence should prime the
--- coordinator's persistent cache for the very next invocation.
+-- Post-build verification re-observes its inputs instead of trusting this
+-- invocation's memo: the fresh context starts with an empty memo and reuses a
+-- digest from the parent memo, SDK manifest or persistent cache only under an
+-- equal precise observation. Changed files are reread and rehashed, and that
+-- verified evidence primes the persistent cache for the next invocation.
 function incremental.fresh_context(context)
     local fresh = { io = context.io, cache_adapter = context.cache_adapter }
-    state(fresh).persistent = state(context).persistent
-    state(fresh).refresh = true
+    local memo = state(context)
+    state(fresh).parent = memo
+    state(fresh).persistent = memo.persistent
+    state(fresh).sdk = memo.sdk
     return fresh
 end
 
@@ -722,20 +743,24 @@ end
 
 local NATIVE_KINDS = { archive = true, object = true, shared = true, thin = true, unknown = true }
 
-local function valid_digest_cache(record)
-    if not closed_cache_table(record, { schema = true, digest = true, canonicalization = true,
-        abi = true, files = true, objects = true })
-        or record.schema ~= version.DIGEST_CACHE_SCHEMA or record.digest ~= version.CERTIFICATE_DIGEST
-        or record.canonicalization ~= version.CERTIFICATE_CANONICALIZATION
-        or record.abi ~= version.TITAN_ABI_VERSION
-        or type(record.files) ~= "table" or getmetatable(record.files) ~= nil
-        or type(record.objects) ~= "table" or getmetatable(record.objects) ~= nil then return false end
-    for path, entry in pairs(record.files) do
+local function valid_file_entries(files)
+    if type(files) ~= "table" or getmetatable(files) ~= nil then return false end
+    for path, entry in pairs(files) do
         if type(path) ~= "string" or not platform.is_absolute(path) or path:find("\0", 1, true)
             or not closed_cache_table(entry, { digest = true, observation = true })
             or not digest_string(entry.digest) or not precise_observation(entry.observation)
             or entry.observation.kind ~= "file" then return false end
     end
+    return true
+end
+
+local function valid_digest_cache(record)
+    if not closed_cache_table(record, { schema = true, digest = true, canonicalization = true,
+        abi = true, files = true, objects = true })
+        or record.schema ~= version.DIGEST_CACHE_SCHEMA or record.digest ~= version.CERTIFICATE_DIGEST
+        or record.canonicalization ~= version.CERTIFICATE_CANONICALIZATION
+        or record.abi ~= version.TITAN_ABI_VERSION or not valid_file_entries(record.files)
+        or type(record.objects) ~= "table" or getmetatable(record.objects) ~= nil then return false end
     for digest, fact in pairs(record.objects) do
         if not digest_string(digest) or not closed_cache_table(fact,
             { fingerprint = true, kind = true, lto = true }) then return false end
@@ -745,6 +770,25 @@ local function valid_digest_cache(record)
         if fact.fingerprint == nil and fact.kind == nil then return false end
     end
     return true
+end
+
+-- A missing, oversized, unreadable or undecodable record reads as nil;
+-- cancellation and other non-string errors propagate unchanged.
+local function read_cache_record(context, filename)
+    local ok, record = pcall(function()
+        local stat, staterr = context.io:lstat(filename)
+        if staterr ~= nil and type(staterr) ~= "string" then error(staterr, 0) end
+        if not stat or stat.kind ~= "file" or stat.size > DIGEST_CACHE_LIMIT then return end
+        local bytes, err = context.io:read_file(filename, DIGEST_CACHE_LIMIT)
+        if err ~= nil and type(err) ~= "string" then error(err, 0) end
+        if not bytes or #bytes > DIGEST_CACHE_LIMIT then return end
+        return graphcodec.decode(bytes, cache_codec_options(context))
+    end)
+    if not ok then
+        if type(record) ~= "string" then error(record, 0) end
+        return nil
+    end
+    return record
 end
 
 -- Only the coordinator calls these two functions, while holding its output
@@ -759,19 +803,7 @@ function incremental.load_digest_cache(context, output_root)
     end
     local cache = { path = filename, owner = context, files = {}, objects = {}, dirty = true }
     memo.persistent = cache
-    local ok, record = pcall(function()
-        local stat, staterr = context.io:lstat(filename)
-        if staterr ~= nil and type(staterr) ~= "string" then error(staterr, 0) end
-        if not stat or stat.kind ~= "file" or stat.size > DIGEST_CACHE_LIMIT then return end
-        local bytes, err = context.io:read_file(filename, DIGEST_CACHE_LIMIT)
-        if err ~= nil and type(err) ~= "string" then error(err, 0) end
-        if not bytes or #bytes > DIGEST_CACHE_LIMIT then return end
-        return graphcodec.decode(bytes, cache_codec_options(context))
-    end)
-    if not ok then
-        if type(record) ~= "string" then error(record, 0) end
-        return true
-    end
+    local record = read_cache_record(context, filename)
     if valid_digest_cache(record) then
         cache.files, cache.objects, cache.dirty = record.files, record.objects, false
     end
@@ -810,6 +842,57 @@ function incremental.save_digest_cache(context)
         return nil, result
     end
     return result
+end
+
+-- An installed SDK's digest manifest. The installer, never titanc, records
+-- the content digests of the installation's own native link inputs with
+-- their precise observations; titanc only reads it, as one more recorded
+-- digest source. An absent, malformed or foreign-schema manifest simply
+-- provides no entries.
+incremental.SDK_DIGESTS = "sdk-digests"
+
+local function valid_sdk_digests(record)
+    return closed_cache_table(record, { schema = true, digest = true,
+            canonicalization = true, abi = true, files = true })
+        and record.schema == version.SDK_DIGEST_SCHEMA
+        and record.digest == version.CERTIFICATE_DIGEST
+        and record.canonicalization == version.CERTIFICATE_CANONICALIZATION
+        and record.abi == version.TITAN_ABI_VERSION and valid_file_entries(record.files)
+end
+
+function incremental.load_sdk_digests(context, filename)
+    local memo = state(context)
+    memo.sdk = nil
+    local record = read_cache_record(context, filename)
+    if valid_sdk_digests(record) then memo.sdk = { path = filename, files = record.files } end
+    return true
+end
+
+-- Installer only: hash each input under the ordinary read-race guard and
+-- atomically replace the manifest. Inputs without a precise observation get
+-- no entry, so titanc always reads them.
+function incremental.write_sdk_digests(context, filename, inputs)
+    local memo, files = state(context), {}
+    for _, path in ipairs(inputs) do
+        local key = required(context.io:realpath(path))
+        local bytes, observed = read_evidence(context, path, key, file_count(memo, key))
+        if observed then files[key] = { digest = hash(context, bytes), observation = observed } end
+    end
+    local bytes = required(graphcodec.encode({ schema = version.SDK_DIGEST_SCHEMA,
+        digest = version.CERTIFICATE_DIGEST, canonicalization = version.CERTIFICATE_CANONICALIZATION,
+        abi = version.TITAN_ABI_VERSION, files = files }, cache_codec_options(context)))
+    local reserved = required(context.io:tmpname())
+    local staging = filename .. ".tmp." .. paths.basename(reserved)
+    required(context.io:unlink(reserved))
+    local ok, err = pcall(function()
+        required(context.io:write_file(staging, bytes))
+        required(context.io:rename(staging, filename))
+    end)
+    if not ok then
+        pcall(context.io.unlink, context.io, staging)
+        error(err, 0)
+    end
+    return true
 end
 
 local NATIVE_MACH = {
@@ -1432,18 +1515,20 @@ function incremental.revalidate_record(context, modname, source, record)
         return check_headers(fresh, record)
     end)
     local counters = incremental.counters(context)
-    local total = counters.revalidation or { passes = 0, file_hashes = 0,
-        file_reads = 0, file_bytes = 0, observation_reuses = 0, digest_calls = 0, files = {} }
+    local total = counters.revalidation or { passes = 0, file_hashes = 0, file_reads = 0,
+        file_bytes = 0, observation_reuses = 0, sdk_reuses = 0, digest_calls = 0, files = {} }
     counters.revalidation = total
     total.passes = total.passes + 1
     local current = incremental.counters(fresh)
-    for _, key in ipairs({ "file_hashes", "file_reads", "file_bytes", "observation_reuses", "digest_calls" }) do
+    for _, key in ipairs({ "file_hashes", "file_reads", "file_bytes", "observation_reuses",
+            "sdk_reuses", "digest_calls" }) do
         total[key] = total[key] + current[key]
     end
     for path, counts in pairs(current.files) do
-        local saved = total.files[path] or { hashes = 0, reads = 0, bytes = 0, observation_reuses = 0 }
+        local saved = total.files[path] or { hashes = 0, reads = 0, bytes = 0,
+            observation_reuses = 0, sdk_reuses = 0 }
         total.files[path] = saved
-        for _, key in ipairs({ "hashes", "reads", "bytes", "observation_reuses" }) do
+        for _, key in ipairs({ "hashes", "reads", "bytes", "observation_reuses", "sdk_reuses" }) do
             saved[key] = saved[key] + counts[key]
         end
     end

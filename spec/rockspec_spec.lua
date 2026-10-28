@@ -560,6 +560,30 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             assert.truthy(stdlib_lua_manifest and
                 stdlib_lua_manifest[module .. ".lua"], manifest)
         end
+
+        -- The installer recorded every approved SDK native link input,
+        -- including the selected Lua archive; titanc admits and reuses each
+        -- digest without reading the bytes.
+        local incremental = require "titan-compiler.incremental"
+        local location = assert(loadfile(PREFIX ..
+            "/lib/luarocks/rocks-5.5/titan/0.6.0-1/installer/location.lua", "t", {}))()
+        assert.equal("lib/titan/0.6/" .. incremental.SDK_DIGESTS, location.digests)
+        local support = require "titan"
+        local certified = { io = compiler_io.new_sync(),
+            cache_adapter = { sha256_binary = support._sha256_binary } }
+        assert(incremental.load_sdk_digests(certified, PREFIX .. "/" .. location.digests))
+        local sdk_inputs = { "lib/titan/0.6/titan" .. SHARED_SUFFIX, "lib/titan/0.6/libtitan.a",
+            "lib/libbacktrace.a", platform.windows and "lib/liblua55.a" or "lib/liblua.a" }
+        if not platform.windows then sdk_inputs[#sdk_inputs + 1] = "lib/titan/0.6/titan.a" end
+        local sha256 = require "titan-compiler.sha256"
+        for _, relative in ipairs(sdk_inputs) do
+            local digest, bytes = incremental.file_digest(certified, PREFIX .. "/" .. relative)
+            assert.is_nil(bytes, relative)
+            assert.equal(sha256.hex_via(support._sha256_binary,
+                read_file(PREFIX .. "/" .. relative)), digest, relative)
+        end
+        assert.equal(#sdk_inputs, incremental.counters(certified).sdk_reuses)
+        assert.equal(0, incremental.counters(certified).file_reads)
     end)
 
     it("packs and unpacks every vendored and standard-library source",

@@ -332,6 +332,81 @@ describe("compiler I/O strategy", function()
         end
     end)
 
+    -- A Windows volume may report no ChangeTime, or neither file-identity
+    -- query may succeed; the native result then omits those fields.
+    local incomplete_native = { { "ctime_ns" }, { "dev", "ino" } }
+    local function incomplete_stat(omitted, size)
+        return function()
+            local result = { kind = "file", dev = "7", ino = "8", size = size or 3, mode = 0x81A4,
+                mtime_ns = 100000000123, ctime_ns = 100000000456 }
+            for _, field in ipairs(omitted) do result[field] = nil end
+            return result
+        end
+    end
+
+    it("declares a native observation without a change time or file identity coarse", function()
+        for _, omitted in ipairs(incomplete_native) do
+            with_native_stat(incomplete_stat(omitted), function()
+                local stat = assert(compiler_io.new_sync():stat("fixture.h"))
+                assert.equal("coarse", stat.precision, omitted[1])
+                assert.equal("coarse", stat.time_precision, omitted[1])
+                assert.equal(100, stat.modified_seconds)
+                assert.equal(123, stat.modified_nanoseconds)
+                if omitted[1] == "ctime_ns" then
+                    assert.is_nil(stat.changed_seconds)
+                    assert.is_nil(stat.changed_nanoseconds)
+                    assert.equal("7", stat.device)
+                    assert.equal("8", stat.inode)
+                else
+                    assert.is_nil(stat.device)
+                    assert.is_nil(stat.inode)
+                    assert.equal(100, stat.changed_seconds)
+                    assert.equal(456, stat.changed_nanoseconds)
+                end
+            end)
+        end
+    end)
+
+    it("never reuses a recorded digest for a native observation without a change time or identity", function()
+        local codec = require "titan-compiler.graphcodec"
+        local incremental = require "titan-compiler.incremental"
+        local sha256 = require "titan-compiler.sha256"
+        local version = require "titan-compiler.version"
+        local root = workspace()
+        local ok, err = pcall(function()
+            local strategy = compiler_io.new_sync()
+            local input, manifest = root .. "/input.o", root .. "/sdk-digests"
+            local bytes = "object bytes"
+            assert(strategy:write_file(input, bytes))
+            -- A stale record matching what the former substitutions reported:
+            -- the change time copied from mtime, and dev = ino = "0".
+            assert(strategy:write_file(manifest, assert(codec.encode({
+                schema = version.SDK_DIGEST_SCHEMA, digest = version.CERTIFICATE_DIGEST,
+                canonicalization = version.CERTIFICATE_CANONICALIZATION, abi = version.TITAN_ABI_VERSION,
+                files = { [assert(strategy:realpath(input))] = { digest = sha256.hex("stale"),
+                    observation = { precision = "ns", kind = "file", dev = "0", ino = "0", size = #bytes,
+                        mode = 0x81A4, mtime_ns = 100000000123, ctime_ns = 100000000123 } } },
+            }))))
+            for _, omitted in ipairs(incomplete_native) do
+                local native = incomplete_stat(omitted, #bytes)
+                with_native_stat(function(path, follow)
+                    local result = native(path, follow)
+                    if result.dev then result.dev, result.ino = "0", "0" end
+                    if result.ctime_ns then result.ctime_ns = result.mtime_ns end
+                    return result
+                end, function()
+                    local ctx = { io = compiler_io.new_sync() }
+                    assert(incremental.load_sdk_digests(ctx, manifest))
+                    assert.equal(sha256.hex(bytes), (incremental.file_digest(ctx, input)), omitted[1])
+                    assert.equal(0, incremental.counters(ctx).sdk_reuses, omitted[1])
+                    assert.equal(1, incremental.counters(ctx).file_reads, omitted[1])
+                end)
+            end
+        end)
+        remove_tree(root)
+        if not ok then error(err, 0) end
+    end)
+
     it("distinguishes native missing paths and errors without querying coarse metadata", function()
         local calls = 0
         with_native_stat(function(path)

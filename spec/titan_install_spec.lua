@@ -91,6 +91,141 @@ describe("retained Titan SDK installation", function()
         assert.equal(prefix .. "/bin/luarocks", location.luarocks)
     end)
 
+    -- Loading the provider module first lets publish's require reuse it for
+    -- these fixtures' placeholder provider bytes.
+    local function digest_context()
+        return { io = require("titan-compiler.io").new_sync(),
+            cache_adapter = { sha256_binary = require("titan")._sha256_binary } }
+    end
+
+    it("records only the approved SDK link inputs, including the shared Lua archive", function()
+        local incremental = require "titan-compiler.incremental"
+        local sha256 = require "titan-compiler.sha256"
+        local private = workspace .. "/rocks/titan/0.6.0-1"
+        local prefix = workspace .. "/SDK"
+        local payload = private .. "/titan-sdk"
+        local lua_archive = package.config:sub(1, 1) == "\\" and "lib/liblua55.a" or "lib/liblua.a"
+        local copied = { "lib/titan/0.6/titan.so", "lib/titan/0.6/titan.a",
+            "lib/titan/0.6/libtitan.a", "lib/libbacktrace.a" }
+        for _, name in ipairs(copied) do write(payload .. "/" .. name, "payload " .. name) end
+        -- Copied or preserved payload files outside the approved inventory.
+        local excluded = { "lib/titan/0.6/application.a", "lib/libuv.dll.a", "include/titan.h",
+            "lib/titan/0.6/titan.so.dSYM/Contents/Resources/DWARF/titan.so" }
+        for _, name in ipairs(excluded) do write(payload .. "/" .. name, name) end
+        write(payload .. "/" .. lua_archive, "packaged Lua archive")
+        write(prefix .. "/" .. lua_archive, "existing Lua owner")
+        local ctx = digest_context()
+
+        assert(installer.publish(private, prefix, prefix, prefix .. "/bin/luarocks"))
+
+        local location = assert(loadfile(private .. "/installer/location.lua", "t", {}))()
+        assert.equal("lib/titan/0.6/sdk-digests", location.digests)
+        assert(incremental.load_sdk_digests(ctx, prefix .. "/" .. location.digests))
+        local entries = 0
+        for _ in pairs(ctx.incremental.sdk.files) do entries = entries + 1 end
+        assert.equal(#copied + 1, entries)
+        for _, name in ipairs(copied) do
+            local digest, bytes = incremental.file_digest(ctx, prefix .. "/" .. name)
+            assert.equal(sha256.hex("payload " .. name), digest, name)
+            assert.is_nil(bytes)
+        end
+        -- The shared Lua prefix keeps its own archive, recorded as it is.
+        local digest, bytes = incremental.file_digest(ctx, prefix .. "/" .. lua_archive)
+        assert.equal(sha256.hex("existing Lua owner"), digest)
+        assert.is_nil(bytes)
+        local counters = incremental.counters(ctx)
+        assert.equal(#copied + 1, counters.sdk_reuses)
+        assert.equal(0, counters.file_reads)
+
+        os.execute = function() return true, "exit", 0 end
+        assert(installer.uninstall(private))
+        assert.is_nil(lfs.symlinkattributes(prefix .. "/" .. location.digests))
+        assert.equal("existing Lua owner", read(prefix .. "/" .. lua_archive))
+        assert.equal("lib/titan/0.6/application.a", read(prefix .. "/lib/titan/0.6/application.a"))
+    end)
+
+    it("records the copied Lua archive of a separate Unix tree", function()
+        if package.config:sub(1, 1) == "\\" then
+            pending("Windows installations keep the Lua SDK and rock tree together")
+            return
+        end
+        local incremental = require "titan-compiler.incremental"
+        local sha256 = require "titan-compiler.sha256"
+        local private, lua = workspace .. "/rocks/titan/0.6.0-1", workspace .. "/Lua"
+        local separate = workspace .. "/separate tree"
+        write(private .. "/titan-sdk/lib/titan/0.6/titan.so", "provider")
+        write(private .. "/titan-sdk/lib/liblua.a", "packaged SDK")
+        write(lua .. "/lib/liblua.a", "Lua owner")
+        local ctx = digest_context()
+
+        assert(installer.publish(private, separate, lua, lua .. "/bin/luarocks"))
+
+        assert(incremental.load_sdk_digests(ctx, separate .. "/lib/titan/0.6/sdk-digests"))
+        assert.equal(sha256.hex("packaged SDK"),
+            (incremental.file_digest(ctx, separate .. "/lib/liblua.a")))
+        assert.equal(1, incremental.counters(ctx).sdk_reuses)
+        incremental.file_digest(ctx, lua .. "/lib/liblua.a")
+        assert.equal(1, incremental.counters(ctx).sdk_reuses)
+        assert.equal("Lua owner", read(lua .. "/lib/liblua.a"))
+    end)
+
+    it("removes only a recorded SDK digest manifest and ignores other recorded cleanup paths", function()
+        local private, prefix = workspace .. "/rocks/titan/0.6.0-1", workspace .. "/SDK"
+        local outside = workspace .. "/outside/victim"
+        write(private .. "/titan-sdk/include/titan.h", "header")
+        directory(prefix)
+        assert(installer.publish(private, prefix, prefix, prefix .. "/bin/luarocks"))
+        local function uninstall_recording(digests)
+            write(private .. "/installer/location.lua", string.format(
+                "return { tree = %q, lua_dir = %q, luarocks = %q, digests = %q }",
+                prefix, prefix, prefix .. "/bin/luarocks", digests))
+            assert(installer.uninstall(private))
+        end
+        os.execute = function() return true, "exit", 0 end
+        local backslashed = "lib\\titan\\0.6\\..\\..\\..\\..\\outside\\victim"
+        local victims = {
+            ["include/unrelated.h"] = prefix .. "/include/unrelated.h",
+            ["lib/titan/0.6/application.a"] = prefix .. "/lib/titan/0.6/application.a",
+            ["lib/titan/0.6/sdk-digests/../../../../outside/victim"] = outside,
+            ["../outside/victim"] = outside,
+            -- A traversal on Windows, an unrelated in-prefix name elsewhere.
+            [backslashed] = package.config:sub(1, 1) == "\\" and outside or prefix .. "/" .. backslashed,
+        }
+        for recorded, victim in pairs(victims) do
+            write(victim, "foreign")
+            uninstall_recording(recorded)
+            assert.equal("foreign", read(victim), recorded)
+        end
+        local manifest = prefix .. "/lib/titan/0.6/sdk-digests"
+        write(manifest, "manifest")
+        uninstall_recording("lib/titan/0.6/sdk-digests")
+        assert.is_nil(lfs.symlinkattributes(manifest))
+    end)
+
+    it("rejects Windows backslash traversal before copying SDK files", function()
+        if package.config:sub(1, 1) == "\\" then
+            pending("native Windows file names cannot contain backslashes")
+            return
+        end
+        local configuration = package.config
+        package.config = "\\" .. configuration:sub(2)
+        local loaded, windows_installer = pcall(function()
+            return assert(loadfile("scripts/titan_install.lua"))()
+        end)
+        package.config = configuration
+        assert.truthy(loaded, windows_installer)
+        local private, prefix = workspace .. "/rocks/titan/0.6.0-1", workspace .. "/SDK"
+        write(private .. "/titan-sdk/include/..\\..\\escape.h", "escape")
+        directory(prefix)
+
+        local published, message = pcall(windows_installer.publish,
+            private, prefix, prefix, prefix .. "/bin/luarocks")
+
+        assert.is_false(published)
+        assert.matches("invalid SDK path", message, 1, true)
+        assert.is_nil(lfs.symlinkattributes(prefix .. "/include"))
+    end)
+
     it("preserves external files when LuaRocks refuses dependency-breaking removal", function()
         local private = workspace .. "/rocks/titan/0.6.0-1"
         local prefix = workspace .. "/SDK"
