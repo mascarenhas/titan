@@ -242,15 +242,24 @@ hashes each distinct file at most once per resolver context:
    payloads, providers, archives, system libraries, and outputs. A hit leaves
    the memo with a digest without bytes and counts as `sdk_reuses` for a
    manifest entry and as `observation_reuses` otherwise.
-3. Otherwise (no record, a coarse or changed observation, or caller-supplied
-   bytes) it records a pre-read observation combining
+3. Otherwise, when `bytes` is nil (no record, or a coarse or changed
+   observation), it records a pre-read observation combining
    `context.io:stat(path)` (which must be `kind == "file"`) and
-   `context.io:lstat(path)`, reads the file through `context.io:read_file(path)`,
-   and checks that the post-read observation and `realpath(path)` are
-   identical and that the byte count matches a precise observed size; any
-   mismatch raises `<path>: file changed while it was read`.
-4. It hashes the bytes, records `{ digest, bytes, observation }` in
-   `memo.files[key]`, stores precise observations in the persistent cache,
+   `context.io:lstat(path)` and reads the file. A file larger than
+   `incremental.STREAM_CHUNK_BYTES` (4 MiB) whose digest alone is demanded is
+   hashed in chunks of that size when the strategy supplies the optional
+   `read_chunks` and the cache adapter supplies `sha256_stream`; its bytes are
+   never materialized or retained. Any other file is read whole through
+   `context.io:read_file(path)`. Either way it then checks that the post-read
+   observation and `realpath(path)` are identical and that the byte count
+   matches a precise observed size; any mismatch raises
+   `<path>: file changed while it was read`. Caller-supplied `bytes` are
+   neither observed nor read.
+4. It hashes the read or caller-supplied bytes (a streamed file is already
+   hashed) and records `{ digest, bytes, observation }` in `memo.files[key]`,
+   without bytes for a streamed file and without an observation for
+   caller-supplied bytes. Only a read with a precise observation is stored in
+   the persistent cache or serves later observation reuse. It then
    updates `incremental.counters(context)` (`file_hashes`, `file_reads`,
    `file_bytes`, `observation_reuses`, `sdk_reuses`, `digest_calls`, and
    `files[key]`),
@@ -259,10 +268,12 @@ hashes each distinct file at most once per resolver context:
    unchanged file still matches every digest certified for it.
 
 A consumer that needs file bytes rather than a digest calls
-`incremental.file_contents(context, path, max_bytes?)`. It reuses memoized
-bytes, or reads once under the same race guard after a digest-only cache hit
-and raises `file changed during build` if the fresh observation differs from
-the one that authorized the digest.
+`incremental.file_contents(context, path, max_bytes?)`, which always reads
+whole. It reuses memoized bytes, or, after a digest-only memo entry (a reuse
+from step 2 or a streamed digest), reads once under the same race guard,
+retains the bytes, and raises `file changed during build` if the fresh
+observation differs from the one that authorized the digest. A streamed
+digest recorded without a precise observation is checked by content instead.
 
 `incremental.check_headers` supplies the per-context file memo to
 `revalidate_header_input` during certification, so certification hashes each
@@ -343,7 +354,8 @@ output tree, or a build without `--output`, need not hash a large standard
 provider or archive that has not changed since installation. Only the
 installer writes it: `scripts/titan_install.lua` `publish` calls
 `incremental.write_sdk_digests` with the just-installed provider's
-`_sha256_binary` and `_stat_precise`. It covers exactly the approved SDK link
+`_sha256_binary`, `_stat_precise`, and, when that provider has it,
+`_sha256_stream`. It covers exactly the approved SDK link
 inputs (`sdk_link_inputs`): the Titan-owned `titan.so`, `titan.dll`,
 `titan.a`, and `libtitan.a` directly under `lib/titan/<ver>/`, the copied
 `lib/libbacktrace.a` when present, and the Lua archive that
@@ -353,7 +365,9 @@ the installer records that prefix's existing Lua archive in place, without
 copying, replacing, or taking cleanup ownership of it; a separate tree
 records the archive the installer copied. Preserved or foreign files, even
 inside the version directory, the `.dSYM` bundle, and headers are never
-recorded. Each file is read under the ordinary read-race guard, and a file
+recorded. Each file is read under the ordinary read-race guard, hashed in
+chunks when it is larger than `STREAM_CHUNK_BYTES` and the stream is
+available, and a file
 without a precise observation gets no entry. The manifest is replaced through
 `sdk-digests.tmp.<unique>` and a rename. A payload without a loadable
 compiler and provider writes none. The installer records the manifest path as

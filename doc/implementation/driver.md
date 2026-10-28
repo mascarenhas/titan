@@ -702,9 +702,18 @@ exception objects propagate unchanged through the graph boundary. Required
 header content hashing also uses this callback when available; a broken string
 result/error falls back to the ordinary Lua digest, while cancellation propagates.
 
-A **digest-only** adapter supplies `sha256_binary` alone, with no `get`, `put`,
-`refresh_inputs`, or `yield` (`titan-compiler/cacheadapter.lua` `validate`);
-`titanc` passes this shape. It offers no storage, so storage work is gated on the
+The cache adapter may also supply `sha256_stream()`, a dot constructor
+returning an incremental digest with `update(bytes)` and `finish()` (32 binary
+bytes); `cacheadapter.validate` rejects a non-function value. Certified-file
+digests use it, together with the strategy's optional `read_chunks`, to hash a
+digest-only file larger than one chunk without materializing it
+([Tagged canonicalization and invocation file
+memos](incremental-compilation.md#tagged-canonicalization-and-invocation-file-memos)).
+
+A **digest-only** adapter supplies `sha256_binary`, optionally with
+`sha256_stream`, and no `get`, `put`, `refresh_inputs`, or `yield`
+(`titan-compiler/cacheadapter.lua` `validate`); `titanc` and build workers
+pass this shape with both entries. It offers no storage, so storage work is gated on the
 actual capability (`cacheadapter.can_get`, `cacheadapter.can_put`), never on
 adapter presence. Header-cache restoration and observation refresh require
 `get`, header and FFI-conversion stores require `put`, and
@@ -896,6 +905,7 @@ backend-specific records, arrays, error objects, or task handles.
 | `executable(path)` (optional) | `true`, `false`, or `nil, message`. Whether the current process may execute `path` under its effective user, groups, and ACLs; the synchronous POSIX strategy uses native `faccessat(AT_EACCESS, X_OK)` and neither opens nor reads the file. Tool selection (`incremental.physical_executable`) requires this capability on POSIX: a strategy without it, or an indeterminate `nil, message`, fails selection closed rather than guessing from mode bits or readability. |
 | `executable_search_cwd()` (optional, Windows) | `true`, `false`, or `nil, message`. Whether the native launcher searches the current directory for a bare executable name; the synchronous strategy asks `NeedCurrentDirectoryForExePathW`, the same policy libuv uses. Without a definite answer, a current-directory candidate that differs from the `PATH` candidate cannot be certified. |
 | `read_file(path, max_bytes?)` | `bytes, nil` or `nil, message`. Without a bound, reads the complete file as a binary-safe Lua string. A bound must be a nonnegative integer; the method returns the complete file when its size is at most that bound, or exactly the first `max_bytes + 1` bytes when it is larger. This optional form lets bounded decoders detect overflow without materializing an unbounded replacement. |
+| `read_chunks(path, chunk_size, consumer)` (optional) | `total, nil` or `nil, message`. Calls `consumer(chunk)` with the file's bytes in order, in chunks of at most `chunk_size` bytes, without materializing the whole file, and returns the total byte count. A non-positive or non-integer `chunk_size` and open, read, or close failures return `nil, message`; path checks and open semantics match `read_file`. A consumer error is re-raised unchanged after the file is closed, so cancellation keeps its identity. Without this capability, certified files are read whole. |
 | `write_file(path, bytes)` | `true, nil` or `nil, message`. Publishes only complete contents: an observer sees complete file contents. Windows replacement may briefly leave the destination absent between removal and rename. Failure and cancellation must not leak the strategy's sibling temporary. If cancellation races the final rename, the destination may contain either complete version. |
 | `list(path)` | A dense one-based array of entry basenames, or `nil, message`. `.` and `..` are excluded and order is unspecified. |
 | `mkdir(path, remove_if_cancelled?)` | `true, nil` or `nil, message`. Creates one directory; its parent must already exist. The optional ownership rule is described below. |
@@ -1977,7 +1987,8 @@ Before creating a resolver, `titanc` rejects:
   positive integer.
 
 After those preflight checks, `titanc` loads `require "titan"`, requires
-`_sha256_binary`, creates its resolver context with `frontend = arg[0]`,
+`_sha256_binary` and `_sha256_stream` (a support library without either is
+reported as missing or stale), creates its resolver context with `frontend = arg[0]`,
 applies normalized native inputs, and discovers any `--test-dir` roots. It
 locks the `--output` directory, or without `--output` every `--tree` source
 root plus the working directory (source-adjacent objects may belong to any
@@ -2223,7 +2234,7 @@ It is *not* part of the runtime SDK's `libtitan.a` or ordinary generated
 modules. Its table (`ltitanlib.c` `titanlib`) exports the user-facing
 `backtrace`, the internal testing helpers `pin` and `clear` used to exercise
 the traceback pin discipline, the loader helpers `_loadlib` and
-`_loadlibglobal`, the compiler digest `_sha256_binary`, the output-tree lock
+`_loadlibglobal`, the compiler digests `_sha256_binary` and `_sha256_stream`, the output-tree lock
 `_output_lock_open`, the precise file observation `_stat_precise`, on Windows
 only `_abivalue`, `_native_process_tree_guard`, and the current-directory
 search query `_executable_search_cwd` (backing `Sync:executable_search_cwd`),
@@ -2273,18 +2284,29 @@ boundary](windows-build.md#windows-loader-boundary).
 string, including embedded NUL and high bytes, and raises for any other
 argument. It is C over the public Lua API, with no OpenSSL or process
 dependency, so the private bootstrap provides it before the standard library
-exists. Each call selects one compressor and uses it for both the data blocks
-and the padding, with no process-wide state. On x86 and x86-64 GCC/Clang
-builds that is the SHA extensions when a single `cpuid` probe reports them
-(with SSSE3 and SSE4.1), and otherwise the portable block function. A
-little-endian AArch64 build whose target defines `__ARM_FEATURE_SHA2` always
-uses the ARMv8 SHA2 instructions; big-endian AArch64 and every other target
-use the portable function. An input shorter than one 64-byte block makes no
-data-block call. All paths produce identical digests. `titanc` refuses to start
-without it ([The `titanc` command
-line](#the-titanc-command-line)), and a physical provider named `titan` is
-published only when a fresh Lua process finds it, beside `_loadlib` and
-`_loadlibglobal`, in the linked support table (`driver.lua`
+exists. A SHA-256 computation (`TitanSha256` init, update, and final) selects
+one compressor when it starts and uses it for every data and padding block,
+with no process-wide state; whole blocks are compressed straight from the
+caller's bytes and only a partial block is buffered. On x86 and x86-64
+GCC/Clang builds that compressor is the SHA extensions when one CPUID feature
+probe reports them (with SSSE3 and SSE4.1), and otherwise the portable block
+function. A little-endian AArch64 build whose target defines
+`__ARM_FEATURE_SHA2` always uses the ARMv8 SHA2 instructions; big-endian
+AArch64 and every other target use the portable function. An input shorter
+than one 64-byte block makes no data-block call. All paths produce identical
+digests.
+
+`titan._sha256_stream()` returns a new incremental digest over the same state.
+`stream:update(bytes)` absorbs a string and returns the stream, and
+`stream:finish()` returns the 32-byte digest of everything absorbed, equal to
+`_sha256_binary` of the concatenation; afterwards either method raises
+`attempt to use a finished SHA-256 stream`. The compiler uses it to hash large
+certified files in bounded chunks.
+
+`titanc` and build workers refuse to start without both entries ([The `titanc`
+command line](#the-titanc-command-line)), and a physical provider named
+`titan` is published only when a fresh Lua process finds both, beside
+`_loadlib` and `_loadlibglobal`, in the linked support table (`driver.lua`
 `support_validation_script`); a stale `ltitanlib.o` therefore fails before
 publication instead of producing an installation that `titanc` rejects.
 
