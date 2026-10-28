@@ -209,7 +209,8 @@ serializes `{ version.CERTIFICATE_CANONICALIZATION, tag, value }` through
 `context.cache_adapter.sha256_binary` (`titan._sha256_binary`, which `titanc`,
 build workers and every resolver context created without a caller adapter
 use; `titan-compiler/sha256.lua` remains only for hosts without the native
-support library and for caller adapters without a digest):
+support library, for caller adapters without a digest, and when a digest
+callback fails with a string error or returns no 32-byte digest):
 
 * `nil` encodes as `"n"`;
 * `boolean` encodes as `"b1"` or `"b0"`;

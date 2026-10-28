@@ -274,7 +274,7 @@ created.
 | `source_first` | `--test` or `--source-first`: try source before compiled formats for every dependency, keeping compiled fallback on a clean miss. |
 | `verbose`, `pretty_print` | Carry `-v` and `--pretty-print` into resolver-owned C-probe and checking-header work. |
 | `extra_ffi_include_dirs` | Analysis-local include roots, normalized here and appended to a fresh C-probe toolchain descriptor without changing the process-global foreign-C configuration. |
-| `cache_adapter`, `header_inputs`, `c_header_analysis` | Persistent cache callbacks, host-validated input observations, and the per-analysis header-validation token; see [Cache adapter and persistent payloads](#cache-adapter-and-persistent-payloads). |
+| `cache_adapter`, `header_inputs`, `c_header_analysis` | Persistent cache callbacks (default: the digest-only native adapter when available), host-validated input observations, and the per-analysis header-validation token; see [Cache adapter and persistent payloads](#cache-adapter-and-persistent-payloads). |
 | `embedded_interface_provider` | Trusted host ABI/type inventory; see [Embedded interface provider and target profile](#embedded-interface-provider-and-target-profile). |
 | `analysis_only`, `completion`, `completion_closed_world`, `transient_caches` | Semantic-analysis modes; see [Analysis loader options](#analysis-loader-options) and [Completion](completion.md). |
 | `source_process_trace`, `c_header_process_trace`, `c_probe_cache_trace`, `c_probe_semantic_trace`, `c_probe_execution_trace` | Best-effort observers; see [Observability callbacks](#observability-callbacks). |
@@ -693,7 +693,8 @@ preprocessing, parsing, conversion or source checking.
 Project encode/decode options and the cache adapter also accept an optional
 `sha256_binary(bytes)` dot callback returning exactly 32 binary SHA-256 bytes.
 Embeddings can use a synchronous native digest implementation for large graph
-payloads; omission retains the dependency-free Lua implementation. The callback
+payloads; omitting it from a supplied adapter (or from project encode/decode
+options) retains the dependency-free Lua implementation. The callback
 must hash the supplied complete string, including embedded NUL/high bytes,
 without changing compiler state. Its output uses the same wire checksum as the
 fallback, so payloads remain readable in either mode and the graph wire
