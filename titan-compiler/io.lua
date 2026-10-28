@@ -393,6 +393,10 @@ local ABSORB_CHUNK_BYTES = 1024 * 1024
 function Sync:absorb_file(path, stream)
     local valid, path_err = checked_path(path)
     if not valid then return nil, path_err end
+    -- Resolve the stream's methods before a handle exists, so a raising
+    -- lookup cannot strand an open file.
+    local absorb = stream.absorb
+    local update = absorb == nil and stream.update or nil
     local file, open_err = open_file(path, "rb")
     if not file then return nil, open_err end
     local function rethrow(err)
@@ -400,8 +404,8 @@ function Sync:absorb_file(path, stream)
         error(err, 0)
     end
     local total, failure = 0, nil
-    if stream.absorb then
-        local absorbed, count, absorb_err = pcall(stream.absorb, stream, file)
+    if absorb ~= nil then
+        local absorbed, count, absorb_err = pcall(absorb, stream, file)
         if not absorbed then rethrow(count) end
         if count == nil then failure = operation_error("read", absorb_err) end
         total = count
@@ -416,7 +420,7 @@ function Sync:absorb_file(path, stream)
                 break
             end
             total = total + #chunk
-            local updated, update_err = pcall(stream.update, stream, chunk)
+            local updated, update_err = pcall(update, stream, chunk)
             if not updated then rethrow(update_err) end
         end
     end

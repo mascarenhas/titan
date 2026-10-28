@@ -558,6 +558,19 @@ describe("compiler I/O strategy", function()
             { update = function() error(cancelled, 0) end })
         assert.is_false(ok)
         assert.equal(cancelled, err)
+
+        -- A stream whose method lookup raises fails before any file is opened.
+        local open, opens = io.open, 0
+        io.open = function(...)
+            opens = opens + 1
+            return open(...)
+        end
+        local raising = setmetatable({}, { __index = function() error(cancelled, 0) end })
+        local lookup_ok, lookup_err = pcall(strategy.absorb_file, strategy, source, raising)
+        io.open = open
+        assert.is_false(lookup_ok)
+        assert.equal(cancelled, lookup_err)
+        assert.equal(0, opens)
     end)
 
     it("distinguishes symlinks, dangling targets, and canonical paths", function()
