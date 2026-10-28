@@ -423,6 +423,71 @@ describe("build-worker native batches", function()
         end
         assert.is_true(slots:close())
     end)
+
+    it("bound jobs a worker runs itself by the local cap without borrowing tokens", function()
+        remote_jobs.use_remote({ run_batch = function() error("synchronous jobs stay in the worker") end })
+        local slots = assert(remote_jobs.open_slots(2,
+            { makeflags = "-j8 --jobserver-auth=fifo:/nonexistent" }))
+        assert.is_nil(slots.client)
+        assert.is_true(slots:acquire_nowait())
+        assert.is_true(slots:acquire_nowait())
+        assert.is_false(slots:acquire_nowait())
+        assert.is_true(slots:release())
+        assert.is_true(slots:acquire_nowait())
+        for _ = 1, 3 do assert.is_true(slots:release()) end
+        -- An extra release cannot create a third slot.
+        assert.is_true(slots:acquire_nowait())
+        assert.is_true(slots:acquire_nowait())
+        assert.is_false(slots:acquire_nowait())
+        assert.is_true(slots:close())
+    end)
+
+    it("send the jobs recorded before a raising launch and return what it raised", function()
+        local requests = {}
+        remote_jobs.use_remote({ run_batch = function(_, batch)
+            requests[#requests + 1] = batch
+            return { { ok = true, term = "exit", code = 0 } }
+        end })
+        local slots = assert(remote_jobs.open_slots(4))
+        local channel = assert(remote_jobs.open_channel())
+        local processes, failure_object = {}, {}
+        local next_position, failure, cancelled, raised = remote_jobs.drive(slots, channel, 3,
+            function(position)
+                if position == 2 then error(failure_object) end
+                processes[position] = assert(remote_jobs.launch(channel, { "cc", "part" .. position },
+                    "cc", "/out" .. position, "/err" .. position, position))
+                return processes[position]
+            end, function() error("no launch fails") end, "parallel C compiler")
+        assert.equal(2, next_position)
+        assert.is_nil(failure)
+        assert.is_nil(cancelled)
+        assert.equal(failure_object, raised.error)
+        assert.same({ { { argv = { "cc", "part1" }, stdout = "/out1", stderr = "/err1" } } }, requests)
+        assert.is_true(processes[1].ok)
+        assert.is_nil(processes[3])
+        assert.is_true(slots:close())
+    end)
+
+    it("fail every recorded job and return the error when the coordinator request raises", function()
+        local broken = {}
+        remote_jobs.use_remote({ run_batch = function() error(broken) end })
+        local slots = assert(remote_jobs.open_slots(2))
+        local channel = assert(remote_jobs.open_channel())
+        local processes = {}
+        local next_position, failure, _, raised = remote_jobs.drive(slots, channel, 2, function(position)
+            processes[position] = assert(remote_jobs.launch(channel, { "cc" }, "cc",
+                "/out", "/err", position))
+            return processes[position]
+        end, function() error("no launch fails") end, "C probe compiler")
+        assert.equal(3, next_position)
+        assert.equal("the build coordinator request failed", failure)
+        assert.equal(broken, raised.error)
+        for _, process in ipairs(processes) do
+            assert.is_nil(process.ok)
+            assert.equal("not started: the build coordinator request failed", process.finish_errors[1])
+        end
+        assert.is_true(slots:close())
+    end)
 end)
 
 describe("native SHA-256", function()

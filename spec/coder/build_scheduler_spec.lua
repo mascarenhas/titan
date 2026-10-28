@@ -40,6 +40,21 @@ local function lines(path)
     return result
 end
 
+-- Replace io.stderr until the returned restore function runs; `on_write`
+-- observes each write.
+local function capture_stderr(on_write)
+    local saved, written = io.stderr, {}
+    io.stderr = {
+        write = function(_, ...)
+            for index = 1, select("#", ...) do written[#written + 1] = tostring(select(index, ...)) end
+            if on_write then on_write() end
+            return true
+        end,
+        flush = function() return true end,
+    }
+    return written, function() io.stderr = saved end
+end
+
 local function remove_tree(path)
     local mode = lfs.symlinkattributes(path, "mode")
     if mode == "directory" then
@@ -530,6 +545,250 @@ os.exit(0)
         remove_tree(workspace)
         assert.is_true(ok, failure)
     end)
+
+    it("runs captured commands in the C locale with added and removed variables", function()
+        local process = require "titan-compiler.process"
+        local uv = process.library()
+        assert(uv.os_setenv("TITAN_SPEC_INHERITED", "parent"))
+        local captured = process.capture({ assert(uv.exepath()), "-E", "-e",
+            "io.write(tostring(os.getenv('TITAN_SPEC_INHERITED')), ' ', " ..
+            "tostring(os.getenv('TITAN_SPEC_ADDED')), ' ', tostring(os.getenv('LC_ALL')))" },
+            { env = { TITAN_SPEC_INHERITED = false, TITAN_SPEC_ADDED = "added" } })
+        uv.os_unsetenv("TITAN_SPEC_INHERITED")
+        assert.is_true(captured.ok, captured.diagnostic)
+        assert.equal("nil added C", captured.output)
+    end)
+
+    it("reports a command or worker that cannot start instead of raising", function()
+        local process = require "titan-compiler.process"
+        local workspace = new_workspace()
+        local missing = workspace .. "/missing-tool"
+        local written, restore = capture_stderr()
+        local ran, ok, term, code = pcall(process.run, { missing, "--version" })
+        restore()
+        local worker, worker_err = process.start_worker({ missing }, {}, {
+            record = function() end, failed = function() end,
+            exited = function() end, settled = function() end,
+        })
+        remove_tree(workspace)
+        assert.is_true(ran, ok)
+        assert.is_nil(ok)
+        assert.equal("exit", term)
+        assert.equal(127, code)
+        local text = table.concat(written)
+        assert.truthy(text:find("titanc: cannot start '" .. missing .. "': ", 1, true), text)
+        assert.is_nil(worker)
+        assert.is_string(worker_err)
+    end)
+
+    it("refuses to send to a worker whose control channel has closed", function()
+        local process = require "titan-compiler.process"
+        local uv = process.library()
+        local events = {}
+        local worker = assert(process.start_worker({ assert(uv.exepath()), "-E", "-e", "os.exit(0)" }, {}, {
+            record = function() events[#events + 1] = "record" end,
+            failed = function(failure) events[#events + 1] = "failed " .. tostring(failure) end,
+            exited = function(code) events[#events + 1] = "exited " .. tostring(code) end,
+            settled = function() events[#events + 1] = "settled" end,
+        }))
+        while events[#events] ~= "settled" do uv.run("once") end
+        assert.same({ "exited 0", "settled" }, events)
+        local sent, err = worker:send(assert(process.encode_record({ kind = "compile" })))
+        assert.is_nil(sent)
+        assert.equal("the control channel is closed", err)
+        -- Signalling a worker that already exited is not an error.
+        assert.is_true(worker:kill("sigterm"))
+    end)
+end)
+
+-- The worker's end of the control channel, driven in this process: two OS
+-- pipes stand in for a worker's descriptors 3 and 4, and the spec plays the
+-- coordinator by writing framed requests into one and reading the worker's
+-- framed replies from the other.
+describe("build worker control sessions", function()
+    local build_worker = require "titan-compiler.build_worker"
+    local process = require "titan-compiler.process"
+    local version = require "titan-compiler.version"
+    local uv = process.library()
+    local coordinator_ends
+
+    local function pipes()
+        local requests, replies = assert(uv.pipe()), assert(uv.pipe())
+        coordinator_ends[#coordinator_ends + 1] = requests.write
+        coordinator_ends[#coordinator_ends + 1] = replies.read
+        return requests, replies
+    end
+
+    -- The coordinator closes its request end: the worker sees end of file.
+    local function close_requests(requests)
+        for index, descriptor in ipairs(coordinator_ends) do
+            if descriptor == requests.write then
+                table.remove(coordinator_ends, index)
+                break
+            end
+        end
+        uv.fs_close(requests.write)
+    end
+
+    local function write_bytes(requests, bytes)
+        assert(uv.fs_write(requests.write, bytes, -1))
+    end
+
+    local function send(requests, record)
+        write_bytes(requests, process.frame(assert(process.encode_record(record))))
+    end
+
+    local function read_exact(replies, count)
+        local chunks, size = {}, 0
+        while size < count do
+            local chunk = assert(uv.fs_read(replies.read, count - size, -1))
+            assert(#chunk > 0, "the worker closed its reply channel early")
+            chunks[#chunks + 1] = chunk
+            size = size + #chunk
+        end
+        return table.concat(chunks)
+    end
+
+    local function receive(replies)
+        local length = string.unpack(">I4", read_exact(replies, 4))
+        return assert(process.decode_record(read_exact(replies, length)))
+    end
+
+    local function compile_request(request)
+        return { kind = "compile", protocol = version.BUILD_WORKER_PROTOCOL, request = request }
+    end
+
+    before_each(function() coordinator_ends = {} end)
+    after_each(function()
+        for _, descriptor in ipairs(coordinator_ends) do uv.fs_close(descriptor) end
+        uv.run("nowait")
+    end)
+
+    it("answers each native batch with the coordinator reply of the same id", function()
+        local requests, replies = pipes()
+        send(requests, compile_request({ module = "app", options = { jobs = 2 } }))
+        local session = assert(build_worker.connect(requests.read, replies.write))
+        assert.same({ module = "app", options = { jobs = 2 } }, session.request)
+
+        local batch = { { argv = { "cc", "-c", "app.c" }, stdout = "/logs/app.out", stderr = "/logs/app.err" } }
+        -- A reply whose bytes arrive in two writes, the second while the
+        -- worker already waits for it, is still one record.
+        local answer = process.frame(assert(process.encode_record({
+            kind = "native-result", id = 1, results = { { ok = true, term = "exit", code = 0 } },
+            cancelled = 15,
+        })))
+        write_bytes(requests, answer:sub(1, 3))
+        local timer = uv.new_timer()
+        timer:start(20, 0, function()
+            timer:close()
+            write_bytes(requests, answer:sub(4))
+        end)
+        local results, failure, cancelled = session:run_batch(batch)
+        assert.same({ { ok = true, term = "exit", code = 0 } }, results)
+        assert.is_nil(failure)
+        assert.equal(15, cancelled)
+        assert.same({ kind = "native", id = 1, jobs = batch }, receive(replies))
+
+        -- A reply to another batch or an undecodable reply is a protocol
+        -- failure that run_batch returns rather than raises.
+        send(requests, { kind = "native-result", id = 1, results = {} })
+        local stale, stale_err = session:run_batch(batch)
+        assert.is_nil(stale)
+        assert.equal("unexpected build coordinator reply", stale_err)
+        assert.equal(2, receive(replies).id)
+        write_bytes(requests, process.frame("\0not a control record"))
+        local garbled, garbled_err = session:run_batch(batch)
+        assert.is_nil(garbled)
+        assert.is_string(garbled_err)
+        assert.equal(3, receive(replies).id)
+
+        -- A batch the record codec cannot carry never reaches the coordinator.
+        local unencodable, encode_err = session:run_batch({ { argv = { function() end } } })
+        assert.is_nil(unencodable)
+        assert.truthy(encode_err:find("cannot encode a native batch", 1, true), encode_err)
+
+        assert.is_true(session:finish({ ok = true, result = { module = "app", staged = {} } }))
+        assert.same({ kind = "result", ok = true, result = { module = "app", staged = {} } },
+            receive(replies))
+        -- The session closed its channel with that one result.
+        local again, again_err = session:finish({ ok = true })
+        assert.is_nil(again)
+        assert.is_string(again_err)
+    end)
+
+    it("reports a result the record codec cannot carry as a failed build", function()
+        local requests, replies = pipes()
+        send(requests, compile_request({ module = "app" }))
+        local session = assert(build_worker.connect(requests.read, replies.write))
+        assert.is_true(session:finish({ ok = true, result = { callback = function() end } }))
+        local record = receive(replies)
+        assert.equal("result", record.kind)
+        assert.is_false(record.ok)
+        assert.is_nil(record.result)
+        assert.equal(1, #record.diagnostics)
+        assert.truthy(record.diagnostics[1]:find("^cannot encode the build result: "), record.diagnostics[1])
+    end)
+
+    it("notices the coordinator closing its end without blocking", function()
+        local requests, replies = pipes()
+        send(requests, compile_request({ module = "app" }))
+        local session = assert(build_worker.connect(requests.read, replies.write))
+        assert.is_false(session:abandoned())
+        assert.is_false(session:abandoned())
+        close_requests(requests)
+        local polls = 0
+        while not session:abandoned() do
+            polls = polls + 1
+            assert.truthy(polls < 1000, "coordinator EOF was never observed")
+            uv.sleep(1)
+        end
+        session.control:close()
+    end)
+
+    it("rejects a missing, broken or incompatible compile request", function()
+        local protocol = version.BUILD_WORKER_PROTOCOL
+        local function rejected(write)
+            local requests, replies = pipes()
+            write(requests)
+            local session, err = build_worker.connect(requests.read, replies.write)
+            assert.is_nil(session)
+            return err
+        end
+        local incompatible = "incompatible build coordinator request (expected protocol " ..
+            tostring(protocol) .. ")"
+        for _, record in ipairs({
+            { kind = "compile", protocol = "titan-build-worker-v0", request = {} },
+            { kind = "native", protocol = protocol, request = {} },
+            { kind = "compile", protocol = protocol, request = "app" },
+        }) do
+            assert.equal(incompatible, rejected(function(requests) send(requests, record) end))
+        end
+        local closed = "cannot read the build request: the build coordinator closed the control channel"
+        assert.equal(closed, rejected(close_requests))
+        assert.equal(closed, rejected(function(requests)
+            -- End of file inside a record.
+            write_bytes(requests, string.pack(">I4", 64) .. "partial")
+            close_requests(requests)
+        end))
+        assert.equal("cannot read the build request: control record of 4294967295 bytes exceeds its bound",
+            rejected(function(requests) write_bytes(requests, "\255\255\255\255") end))
+        local garbled = rejected(function(requests)
+            write_bytes(requests, process.frame("\0not a control record"))
+        end)
+        assert.truthy(garbled:find("^cannot read the build request: "), garbled)
+        assert.equal("cannot read the build request: control record is not a table",
+            rejected(function(requests)
+                write_bytes(requests, process.frame(assert(process.encode_record("compile"))))
+            end))
+
+        -- Descriptors that are not open cannot carry a control channel.
+        local dead = assert(uv.pipe())
+        uv.fs_close(dead.read)
+        uv.fs_close(dead.write)
+        local session, err = build_worker.connect(dead.read, dead.write)
+        assert.is_nil(session)
+        assert.truthy(err:find("^cannot open the build control channel: "), err)
+    end)
 end)
 
 describe("native precise stat", function()
@@ -596,7 +855,8 @@ end)
 
 -- The worker side of the protocol, driven by the request the test's hooks
 -- send: frontend accounting through a shared counter, native batches through
--- the coordinator, output, results, malformed records and orphan behavior.
+-- the coordinator, output, results, malformed records, scripted protocol
+-- violations, and orphan behavior.
 local FAKE_WORKER = [=[
 local build_worker = require "titan-compiler.build_worker"
 local process = require "titan-compiler.process"
@@ -618,6 +878,14 @@ local function counter(request, action)
     end
 end
 
+local function wait_for(path)
+    while true do
+        local file = io.open(path, "rb")
+        if file then file:close(); return end
+        process.library().sleep(10)
+    end
+end
+
 function fake.main()
     local session = assert(build_worker.connect())
     local request = session.request
@@ -628,8 +896,40 @@ function fake.main()
         end)
         process.library().run()
     end
+    if request.truncated then
+        -- A length prefix announcing more bytes than ever arrive.
+        session.control.pipe:write("\0\0\0\32truncated", function()
+            os.exit(0)
+        end)
+        process.library().run()
+    end
+    if request.steps then
+        -- Scripted records, waits for a marker file, a pid file for jobs that
+        -- outlive this worker, signals and exits. A rejected record makes the
+        -- coordinator terminate this worker while it waits for a reply.
+        for _, step in ipairs(request.steps) do
+            if step.wait then
+                wait_for(step.wait)
+            elseif step.pidfile then
+                local file = assert(io.open(step.pidfile, "wb"))
+                assert(file:write(string.format("%d", process.library().os_getpid())))
+                assert(file:close())
+            elseif step.exit then
+                os.exit(step.exit)
+            elseif step.signal then
+                local uv = process.library()
+                uv.kill(uv.os_getpid(), step.signal)
+                uv.sleep(5000)
+            else
+                assert(session.control:send(step.raw or assert(process.encode_record(step.send))))
+            end
+        end
+        session.control:receive()
+        os.exit(0)
+    end
     counter(request, "enter")
     local ok = request.ok ~= false
+    if request.batch_wait then wait_for(request.batch_wait) end
     for _, batch in ipairs(request.batches or {}) do
         counter(request, "leave")
         local results, failure, cancelled = session:run_batch(batch)
@@ -637,7 +937,8 @@ function fake.main()
         local outcomes = {}
         for index = 1, #batch do
             local result = results and results[index]
-            outcomes[index] = result and tostring(result.ok) or "unstarted"
+            outcomes[index] = result and (result.ok and "true" or "failed:" .. tostring(result.code)) or
+                "unstarted"
         end
         if request.log then
             append(request.log, "batch " .. request.module .. " " ..
@@ -661,6 +962,7 @@ function fake.main()
     end
     session:finish({ ok = ok, result = { module = request.module, staged = request.staged },
         diagnostics = request.diagnostics })
+    if request.exit_after_finish then os.exit(request.exit_after_finish) end
     os.exit(0)
 end
 
@@ -698,6 +1000,245 @@ case "$action" in
     job) enter; printf '%s\n' "$4" >> "$state/jobs"; sleep "$3"; leave ;;
 esac
 ]=]
+
+-- Scheduler nodes from { name, { dependency names } } in plan order.
+local function graph(spec)
+    local nodes, by_name = {}, {}
+    for _, entry in ipairs(spec) do
+        local node = { name = entry[1], deps = {} }
+        nodes[#nodes + 1] = node
+        by_name[entry[1]] = node
+    end
+    for index, entry in ipairs(spec) do
+        for _, dependency in ipairs(entry[2] or {}) do
+            nodes[index].deps[#nodes[index].deps + 1] = assert(by_name[dependency])
+        end
+    end
+    return nodes
+end
+
+-- Certification and request preparation run in the coordinator itself; no
+-- worker process starts in these cases.
+describe("module build scheduler decisions", function()
+    it("decides a module unblocked by a certified dependency in plan order", function()
+        local decided = {}
+        local scheduler = build.new_scheduler(graph({ { "a", { "b" } }, { "b" }, { "c" } }), {
+            decide = function(node)
+                decided[#decided + 1] = node.name
+                return "done"
+            end,
+        })
+        assert.is_true(scheduler:run())
+        -- c was already queued when b's hit unblocked a, which precedes it.
+        assert.same({ "b", "a", "c" }, decided)
+        assert.equal(0, scheduler.started)
+    end)
+
+    it("stops certifying after an internal error and skips the module's dependents", function()
+        local decided = {}
+        local nodes = graph({ { "a" }, { "b", { "a" } }, { "c" } })
+        local ok, diagnostics = build.new_scheduler(nodes, {
+            decide = function(node)
+                decided[#decided + 1] = node.name
+                if node.name == "a" then error("certificate reader crashed", 0) end
+                return "done"
+            end,
+        }):run()
+        assert.is_nil(ok)
+        assert.same({ "a" }, decided)
+        assert.same({
+            "internal error while certifying module 'a': certificate reader crashed",
+            "module certification stopped after an internal error",
+        }, diagnostics)
+        assert.equal("skipped", nodes[2].state)
+    end)
+
+    it("fails rejected modules and never reports an unbuilt plan as success", function()
+        local nodes = graph({ { "rejected" }, { "dependent", { "rejected" } } })
+        local ok, diagnostics = build.new_scheduler(nodes, {
+            decide = function() return "fail" end,
+        }):run()
+        assert.is_nil(ok)
+        assert.same({ "module 'rejected' cannot be built" }, diagnostics)
+        assert.equal("skipped", nodes[2].state)
+
+        -- A failure that carries no diagnostic of its own still fails.
+        ok, diagnostics = build.new_scheduler(graph({ { "quiet" } }), {
+            decide = function() return "fail", {} end,
+        }):run()
+        assert.is_nil(ok)
+        assert.same({ "module 'quiet' was not built" }, diagnostics)
+
+        -- Members of a dependency cycle never become decidable.
+        ok, diagnostics = build.new_scheduler(graph({ { "a", { "b" } }, { "b", { "a" } } }), {
+            decide = function() error("a cycle member must not be decided") end,
+        }):run()
+        assert.is_nil(ok)
+        assert.same({ "modules with unresolved dependencies: a, b" }, diagnostics)
+    end)
+
+    it("fails a module whose worker request cannot be prepared or encoded without starting a worker", function()
+        local nodes = graph({ { "unprepared" }, { "raising" }, { "unencodable" },
+            { "dependent", { "unprepared" } } })
+        local scheduler = build.new_scheduler(nodes, {
+            decide = function() return "build" end,
+            request = function(node, jobs_bound)
+                assert.equal(2, jobs_bound)
+                if node.name == "unprepared" then return nil, "cannot retire the committed object" end
+                if node.name == "raising" then error("plan descriptor crashed", 0) end
+                return { module = node.name, callback = function() end }
+            end,
+            complete = function() error("nothing is published") end,
+        }, { jobs = 2, makeflags = false })
+        local ok, diagnostics = scheduler:run()
+        assert.is_nil(ok)
+        assert.equal(0, scheduler.started)
+        assert.equal(3, #diagnostics)
+        assert.equal("cannot retire the committed object", diagnostics[1])
+        assert.equal("internal error while preparing module 'raising': plan descriptor crashed",
+            diagnostics[2])
+        assert.truthy(diagnostics[3]:find("^cannot encode the build request of module 'unencodable': "),
+            diagnostics[3])
+        assert.equal("skipped", nodes[4].state)
+    end)
+end)
+
+-- build.lock_outputs taken by this process; a second open file description
+-- of the same lock file stands in for another invocation's attempt.
+describe("output-tree locks in this process", function()
+    local support = require "titan"
+    local util = require "titan-compiler.util"
+    local strategy = compiler_io.new_sync()
+    local workspace
+    before_each(function() workspace = new_workspace() end)
+    after_each(function() remove_tree(workspace) end)
+
+    local function lockable(path)
+        local probe = assert(support._output_lock_open(path))
+        local held = probe:try()
+        probe:close()
+        return held
+    end
+
+    it("creates missing output directories and locks each physical directory once", function()
+        local nested, other = workspace .. "/out/release/objects", workspace .. "/other"
+        assert(lfs.mkdir(other))
+        local locks = assert(build.lock_outputs(strategy, { nested, other, other .. "/." }))
+        assert.equal("directory", lfs.attributes(nested, "mode"))
+        assert.equal(2, #locks.entries)
+        -- Acquired in physical identity order, whatever the request order.
+        assert.is_true(util.bytewise_less(locks.entries[1].identity, locks.entries[2].identity))
+        for _, entry in ipairs(locks.entries) do assert.is_false(lockable(entry.path)) end
+        assert.is_true(locks:release())
+        assert.is_true(locks:release())
+        assert.is_true(lockable(nested .. "/" .. build.LOCK_NAME))
+        assert.is_true(lockable(other .. "/" .. build.LOCK_NAME))
+    end)
+
+    it("accepts an output directory another invocation created first", function()
+        local raced = workspace .. "/raced"
+        local racing = setmetatable({
+            mkdir = function(_, path)
+                -- Another invocation wins between this one's stat and mkdir.
+                assert(lfs.mkdir(path))
+                return strategy:mkdir(path)
+            end,
+        }, { __index = strategy })
+        local locks = assert(build.lock_outputs(racing, { raced }))
+        assert.is_false(lockable(raced .. "/" .. build.LOCK_NAME))
+        assert.is_true(locks:release())
+    end)
+
+    it("names an output path that is not a directory or cannot become one", function()
+        local file = workspace .. "/file"
+        write_file(file, "not a directory")
+        local locks, err = build.lock_outputs(strategy, { workspace .. "/fine", file .. "/out" })
+        assert.is_nil(locks)
+        assert.equal("cannot lock output directory '" .. file .. "/out': '" .. file ..
+            "' is not a directory", err)
+        if not platform.windows then
+            -- A dangling link occupies the name without being a directory.
+            local dangling = workspace .. "/dangling"
+            assert(lfs.link(workspace .. "/absent", dangling, true))
+            locks, err = build.lock_outputs(strategy, { dangling })
+            assert.is_nil(locks)
+            assert.truthy(err:find("cannot lock output directory '" .. dangling .. "': ", 1, true), err)
+        end
+    end)
+
+    it("refuses to build unlocked without the native lock support", function()
+        local saved = package.loaded.titan
+        local stale, missing = {}, {}
+        local ran, failure = pcall(function()
+            -- An older installed runtime without the lock entry point.
+            package.loaded.titan = {}
+            stale = table.pack(build.lock_outputs(strategy, { workspace }))
+            package.loaded.titan = nil
+            package.preload.titan = function() error("titan runtime is not installed", 0) end
+            missing = table.pack(build.lock_outputs(strategy, { workspace }))
+        end)
+        package.preload.titan = nil
+        package.loaded.titan = saved
+        assert.is_true(ran, failure)
+        assert.is_nil(stale[1])
+        assert.equal("the installed Titan native support library lacks _output_lock_open; reinstall Titan",
+            stale[2])
+        assert.is_nil(missing[1])
+        assert.equal("cannot load the Titan native support library: titan runtime is not installed",
+            missing[2])
+        assert.is_nil(lfs.attributes(workspace .. "/" .. build.LOCK_NAME))
+    end)
+
+    it("waits for another invocation and relocks a lock file replaced meanwhile", function()
+        if platform.windows then pending("Windows denies removing an open build lock"); return end
+        local process = require "titan-compiler.process"
+        local uv = process.library()
+        local tree = workspace .. "/tree"
+        local lock_path = tree .. "/" .. build.LOCK_NAME
+        local ready, waiting = workspace .. "/holder.ready", workspace .. "/waiter.waiting"
+        assert(lfs.mkdir(tree))
+        write_file(workspace .. "/holder.lua", string.format([[
+package.path = %q
+package.cpath = %q
+local build = require "titan-compiler.build"
+local uv = require("titan-compiler.process").library()
+local locks = assert(build.lock_outputs(require("titan-compiler.io").new_sync(), { %q }))
+assert(assert(io.open(%q, "wb")):close())
+for _ = 1, 3000 do
+    local file = io.open(%q, "rb")
+    if file then file:close(); break end
+    uv.sleep(10)
+end
+-- The tree is replaced while this invocation still holds its old lock file.
+assert(os.remove(%q))
+os.exit(0)
+]], package.path, package.cpath, tree, ready, waiting, lock_path))
+        local holder = assert(process.start({ assert(uv.exepath()), "-E", workspace .. "/holder.lua" }))
+        for _ = 1, 1000 do
+            if exists(ready) then break end
+            uv.sleep(10)
+        end
+        local written, restore = capture_stderr(function()
+            -- Released only once this invocation has announced that it waits.
+            if not exists(waiting) then write_file(waiting, "waiting\n") end
+        end)
+        local ran, locks, err = pcall(build.lock_outputs, strategy, { tree }, { verbose = true })
+        restore()
+        local holder_ok, holder_term, holder_code = holder:wait()
+        assert.is_true(ran, locks)
+        assert.truthy(locks, err)
+        assert.is_true(holder_ok, tostring(holder_term) .. " " .. tostring(holder_code))
+        assert.same({ "titanc: waiting for build lock '" .. lock_path .. "'\n" }, written)
+        local entry = locks.entries[1]
+        assert.is_true(entry.lock:linked(lock_path))
+        local probe = assert(support._output_lock_open(lock_path))
+        assert.equal(entry.identity, probe:identity())
+        assert.is_false(probe:try())
+        probe:close()
+        assert.is_true(locks:release())
+        assert.is_true(lockable(lock_path))
+    end)
+end)
 
 describe("module build scheduler", function()
     if platform.windows then
@@ -753,22 +1294,6 @@ describe("module build scheduler", function()
         }
     end
 
-    -- Nodes from { name, { dependency names } } in plan order.
-    local function graph(spec)
-        local nodes, by_name = {}, {}
-        for _, entry in ipairs(spec) do
-            local node = { name = entry[1], deps = {} }
-            nodes[#nodes + 1] = node
-            by_name[entry[1]] = node
-        end
-        for index, entry in ipairs(spec) do
-            for _, dependency in ipairs(entry[2] or {}) do
-                nodes[index].deps[#nodes[index].deps + 1] = assert(by_name[dependency])
-            end
-        end
-        return nodes
-    end
-
     -- Hooks over a per-module request table; records completions/discards.
     local function hooks(requests, record)
         record.completed, record.discarded, record.requested = {}, {}, {}
@@ -788,6 +1313,10 @@ describe("module build scheduler", function()
             end,
             complete = function(node, result)
                 assert.equal(node.name, result.module)
+                local request = requests[node.name] or {}
+                if request.publish_marker then write_file(request.publish_marker, "published\n") end
+                if request.publish_raise then error(request.publish_raise, 0) end
+                if request.publish_error then return nil, request.publish_error end
                 record.completed[#record.completed + 1] = node.name
                 return true
             end,
@@ -865,6 +1394,174 @@ describe("module build scheduler", function()
             "without reporting a result", diagnostics[2])
     end)
 
+    it("fails a module for each control record outside the protocol", function()
+        local function native(id, batch) return { kind = "native", id = id, jobs = batch } end
+        local valid = { argv = { "true" }, stdout = workspace .. "/valid.out", stderr = workspace .. "/valid.err" }
+        local result = { kind = "result", ok = true, result = {} }
+        local ok, diagnostics, signo, record = run(graph({
+            { "bad_id" }, { "empty_argv" }, { "nul_argument" }, { "unknown_kind" },
+            { "two_results" }, { "undecodable" }, { "truncated" },
+        }), {
+            bad_id = { steps = { { send = native("first", { valid }) } } },
+            empty_argv = { steps = { { send = native(1, { { argv = {}, stdout = "o", stderr = "e" } }) } } },
+            nul_argument = { steps = { { send = native(1, {
+                valid, { argv = { "cc\0" }, stdout = "o", stderr = "e" },
+            }) } } },
+            unknown_kind = { steps = { { send = { kind = "progress" } } } },
+            two_results = { steps = { { send = result }, { send = result } } },
+            undecodable = { steps = { { raw = "\0not a control record" } } },
+            truncated = { truncated = true },
+        }, { jobs = 2 })
+        assert.is_nil(ok)
+        assert.is_nil(signo)
+        local function failed(module, reason)
+            return "build worker for module '" .. module .. "' failed: " .. reason
+        end
+        assert.equal(7, #diagnostics, table.concat(diagnostics, "\n"))
+        assert.equal(failed("bad_id", "unexpected native batch request"), diagnostics[1])
+        assert.equal(failed("empty_argv", "malformed native job 1"), diagnostics[2])
+        assert.equal(failed("nul_argument", "malformed native job 2"), diagnostics[3])
+        assert.equal(failed("unknown_kind", "unknown control record kind progress"), diagnostics[4])
+        assert.equal(failed("two_results", "unexpected result record"), diagnostics[5])
+        assert.truthy(diagnostics[6]:find(failed("undecodable", "invalid control record: "), 1, true),
+            diagnostics[6])
+        assert.equal(failed("truncated", "control channel ended inside a record"), diagnostics[7])
+        -- No rejected batch ran, and nothing was published.
+        assert.falsy(exists(workspace .. "/valid.out"))
+        assert.same({}, record.completed)
+    end)
+
+    it("reports a worker that dies before its result or exits nonzero after it", function()
+        local ok, diagnostics, _, record = run(graph({ { "killed" }, { "late_exit" } }), {
+            killed = { steps = { { signal = "sigkill" } } },
+            late_exit = { exit_after_finish = 5 },
+        }, { jobs = 2 })
+        assert.is_nil(ok)
+        assert.same({
+            "build worker for module 'killed' was terminated by signal 9 without reporting a result",
+            "build worker for module 'late_exit' exited with status 5 after reporting its result",
+        }, diagnostics)
+        assert.same({}, record.completed)
+        -- The reported result's staged files are discarded, not published.
+        assert.same({ "late_exit" }, record.discarded)
+    end)
+
+    -- A job that marks its start and then outlives the worker whose pid the
+    -- pid file names: it finishes only once that worker has been reaped, so
+    -- the coordinator has seen the worker end before the job ends.
+    local function outliving_job(marker, name, pidfile)
+        local script = ': > "$1"; i=0; ' ..
+            'while [ ! -s "$2" ] && [ "$i" -lt 2000 ]; do sleep 0.01; i=$((i + 1)); done; pid=$(cat "$2"); ' ..
+            'while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 4000 ]; do sleep 0.01; i=$((i + 1)); done; ' ..
+            'echo "$3" >> "$4"'
+        return {
+            argv = { "sh", "-c", script, "outliving", marker, pidfile, name, state .. "/jobs" },
+            stdout = workspace .. "/" .. name .. ".out", stderr = workspace .. "/" .. name .. ".err",
+        }
+    end
+
+    it("drops only the queued native jobs of a worker that exits mid-batch", function()
+        local pidfile = workspace .. "/quitter.pid"
+        local quitter_started, steady_started = workspace .. "/quitter.started", workspace .. "/steady.started"
+        local ok, diagnostics, _, record = run(graph({ { "quitter" }, { "steady" } }), {
+            quitter = { steps = {
+                { pidfile = pidfile },
+                { send = { kind = "native", id = 1, jobs = {
+                    outliving_job(quitter_started, "quitter-first", pidfile),
+                    job("quitter-second", 0), job("quitter-third", 0) } } },
+                -- Both batches are registered once both first jobs run.
+                { wait = quitter_started },
+                { wait = steady_started },
+                { exit = 4 },
+            } },
+            steady = { batches = { {
+                outliving_job(steady_started, "steady-first", pidfile), job("steady-second", 0),
+            } } },
+        }, { jobs = 2 })
+        assert.is_nil(ok)
+        assert.same({ "build worker for module 'quitter' exited with status 4 without reporting a result" },
+            diagnostics)
+        assert.same({ "steady" }, record.completed)
+        -- The exited worker's running job finished and its queued jobs never
+        -- started; the other worker's job queued behind it still ran.
+        local ran = lines(state .. "/jobs")
+        table.sort(ran)
+        assert.same({ "quitter-first", "steady-first", "steady-second" }, ran)
+    end)
+
+    it("abandons a running batch when its worker breaks the protocol", function()
+        local pidfile, started = workspace .. "/breaker.pid", workspace .. "/first.started"
+        local ok, diagnostics = run(graph({ { "breaker" } }), {
+            breaker = { steps = {
+                { pidfile = pidfile },
+                { send = { kind = "native", id = 1, jobs = {
+                    outliving_job(started, "first", pidfile), job("second", 0) } } },
+                { wait = started },
+                { send = { kind = "result", ok = true, result = { module = "breaker" } } },
+            } },
+        }, { jobs = 1 })
+        assert.is_nil(ok)
+        assert.same({ "build worker for module 'breaker' failed: unexpected result record" }, diagnostics)
+        assert.same({ "first" }, lines(state .. "/jobs"))
+    end)
+
+    it("reports a native job that cannot start like a shell that cannot execute it", function()
+        local missing = workspace .. "/missing-tool"
+        local ok, diagnostics = run(graph({ { "m" } }), {
+            m = { batches = { { { argv = { missing, "-c" }, stdout = workspace .. "/m.out",
+                stderr = workspace .. "/m.err" } } } },
+        }, { jobs = 2 })
+        assert.is_true(ok, diagnostics and table.concat(diagnostics, "\n"))
+        assert.truthy(table.concat(lines(log), "\n"):find("batch m failed:127 nil nil", 1, true),
+            table.concat(lines(log), "\n"))
+        local errors = read_file(workspace .. "/m.err")
+        assert.truthy(errors:find("^titanc: cannot start '" .. missing:gsub("%p", "%%%0") .. "': "), errors)
+    end)
+
+    it("fails a module whose publication fails and skips its dependents", function()
+        local ok, diagnostics, _, record = run(graph({ { "a" }, { "b" }, { "c", { "a" } } }), {
+            a = { publish_error = "cannot rename the staged object" },
+        }, { jobs = 2 })
+        assert.is_nil(ok)
+        assert.same({ "cannot rename the staged object" }, diagnostics)
+        assert.same({ "b" }, record.completed)
+        table.sort(record.requested)
+        assert.same({ "a", "b" }, record.requested)
+    end)
+
+    it("answers a later native batch as stopped after an internal publication error", function()
+        local published = workspace .. "/a.published"
+        local ok, diagnostics, signo, record = run(graph({ { "a" }, { "b" } }), {
+            a = { publish_raise = "publisher crashed", publish_marker = published },
+            b = { batch_wait = published, batches = { { job("never", 0) } } },
+        }, { jobs = 2 })
+        assert.is_nil(ok)
+        assert.is_nil(signo)
+        assert.same({
+            "internal error while publishing module 'a': publisher crashed",
+            "module publication stopped after an internal error",
+        }, diagnostics)
+        assert.same({}, record.completed)
+        assert.truthy(table.concat(lines(log), "\n"):find(
+            "batch b unstarted the module build stopped after an earlier failure nil", 1, true),
+            table.concat(lines(log), "\n"))
+        assert.falsy(exists(state .. "/jobs"))
+    end)
+
+    it("starts no worker when another job ledger owns the cancellation guard", function()
+        local jobs = require "titan-compiler.jobs"
+        local outer = assert(jobs.open_slots(2, { makeflags = false }))
+        local ran, ok, diagnostics, signo, record = pcall(run, graph({ { "a" } }), {}, { jobs = 2 })
+        assert(outer:close())
+        assert.is_true(ran, ok)
+        assert.is_nil(ok)
+        assert.is_nil(signo)
+        assert.equal(0, record.scheduler.started)
+        assert.same({}, record.requested)
+        assert.equal(1, #diagnostics)
+        assert.truthy(diagnostics[1]:find("already active", 1, true), diagnostics[1])
+    end)
+
     local function busy_requests(names, jobs_per_module)
         local requests = {}
         for _, name in ipairs(names) do
@@ -932,6 +1629,30 @@ describe("module build scheduler", function()
             local bytes = { holder:read(2):byte(1, -1) }
             table.sort(bytes)
             assert.same({ 0, 255 }, bytes)
+        end)
+
+        it("waits on the pool and wakes when another client returns a token", function()
+            -- Take both tokens, so the second job can start only after the
+            -- first returns one as another client of the same Make would.
+            assert.equal(2, #holder:read(2))
+            -- The first job returns a token, then keeps its own slot until the
+            -- second job has run on that token (bounded, so a coordinator that
+            -- never wakes fails the order assertion instead of hanging).
+            local first = {
+                argv = { "sh", "-c", 'printf x > "$1"; i=0; ' ..
+                    'until grep -qx second "$2" 2>/dev/null || [ "$i" -ge 1000 ]; do sleep 0.01; i=$((i + 1)); done; ' ..
+                    'echo first >> "$2"', "returner", fifo, state .. "/jobs" },
+                stdout = workspace .. "/first.out", stderr = workspace .. "/first.err",
+            }
+            local ok, diagnostics = run(graph({ { "m" } }), {
+                m = { batches = { { first, job("second", 0) } } },
+            }, { jobs = 8, makeflags = "-j3 --jobserver-auth=fifo:" .. fifo })
+            assert.is_true(ok, diagnostics and table.concat(diagnostics, "\n"))
+            -- The second job ran on the returned token while the first still ran.
+            assert.same({ "second", "first" }, lines(state .. "/jobs"))
+            -- Exactly the borrowed byte went back to the pool.
+            assert.equal(1, available())
+            assert.equal("x", holder:read(1))
         end)
 
         it("drains a cancelled batch and returns every token", function()

@@ -431,8 +431,9 @@ describe("content-only native input facts", function()
     local function coff()
         return string.pack("<I2I2I4I4I4I2I2", 0x8664, 0, 0, 0, 0, 0, 0)
     end
-    local function elf(kind, lto)
-        local names = "\0.shstrtab\0.gnu.lto_.opts\0"
+    -- `second_name` renames the second section, by default an LTO section.
+    local function elf(kind, lto, second_name)
+        local names = "\0.shstrtab\0" .. (second_name or ".gnu.lto_.opts") .. "\0"
         local header = "\127ELF\2\1\1" .. string.rep("\0", 9) ..
             string.pack("<I2I2I4I8I8I8I4I2I2I2I2I2I2",
                 kind, 62, 1, 0, 0, lto and 64 or 0, 0, 64, 0, 0, 64, lto and 3 or 0, lto and 1 or 0)
@@ -473,6 +474,50 @@ describe("content-only native input facts", function()
             local kind, err, lto = incremental.native_input_kind(ctx, fixture_path("/native"))
             assert.truthy(kind, err)
             assert.is_true(lto)
+        end
+    end)
+
+    it("classifies archive members, PE images and COFF section names from content alone", function()
+        local function bsd_archive(name, member, declared)
+            local size = declared or #name + #member
+            return "!<arch>\n" .. string.format("%-16s%-12d%-6d%-6d%-8s%-10d`\n",
+                "#1/" .. #name, 0, 0, 0, "100644", size) .. name .. member .. (size % 2 == 1 and "\n" or "")
+        end
+        -- One section whose long name lives in the string table after the
+        -- (empty) symbol table, as LLVM writes `.llvm.lto`.
+        local long_name = string.pack("<I4", 14) .. ".llvm.lto\0"
+        local section = "/4" .. string.rep("\0", 38)
+        local coff_lto = string.pack("<I2I2I4I4I4I2I2", 0x8664, 1, 0, 60, 0, 0, 0) .. section .. long_name
+        local coff_text = string.pack("<I2I2I4I4I4I2I2", 0x8664, 1, 0, 60, 0, 0, 0) ..
+            ".text" .. string.rep("\0", 35)
+        local bigobj_guid = "\199\161\186\209\238\186\169\75\175\32\250\246\106\164\220\184"
+        local function bigobj(guid)
+            return string.pack("<I2I2I2I2I4", 0, 0xffff, 2, 0x8664, 0) .. guid ..
+                string.pack("<I4I4I4I4I4I4I4", 0, 0, 0, 0, 1, 96, 0) .. section .. long_name
+        end
+        local executable = "MZ" .. string.rep("\0", 58) .. string.pack("<I4", 64) ..
+            "PE\0\0" .. string.pack("<I2I2I4I4I4I2I2", 0x8664, 0, 0, 0, 0, 0, 0x0002)
+        local member_name = "long_member_name.o"
+        for _, case in ipairs({
+            { "ELF sections without LTO", elf(1, true, ".text.startup"), "object", false },
+            { "COFF long LTO section name", coff_lto, "object", true },
+            { "COFF ordinary section", coff_text, "object", false },
+            { "big-object COFF", bigobj(bigobj_guid), "object", true },
+            { "BSD long member name", bsd_archive(member_name, elf(1, true)), "archive", true },
+            { "big-object COFF with another class", bigobj(string.rep("\0", 16)) },
+            { "BSD long name beyond its member", bsd_archive(member_name, "", 4) },
+            { "archive member without a header terminator", "!<arch>\n" .. string.rep(" ", 60) },
+            { "PE executable image", executable },
+        }) do
+            local ctx = context({ [fixture_path("/native")] = case[2] })
+            local kind, err, lto = incremental.native_input_kind(ctx, fixture_path("/native"))
+            if case[3] then
+                assert.equal(case[3], kind, case[1] .. ": " .. tostring(err))
+                assert.equal(case[4], lto, case[1])
+            else
+                assert.is_nil(kind, case[1])
+                assert.equal("native input is not a recognized object, archive or shared library", err, case[1])
+            end
         end
     end)
 
@@ -543,7 +588,9 @@ describe("content-only native input facts", function()
 
     it("discards malformed native facts rather than treating them as format evidence", function()
         for _, invalid in ipairs({ { kind = "script", lto = false }, { kind = "object", lto = "yes" },
-            { kind = "object", lto = false, external = fixture_path("/hidden.o") } }) do
+            { kind = "object", lto = false, external = fixture_path("/hidden.o") },
+            { fingerprint = { format = "coff", word_size = 64, endian = "little", machine = 0x8664,
+                section_count = 1 } } }) do
             local files = { [fixture_path("/native")] = coff() }
             local cold = precise_context(files)
             assert(incremental.load_digest_cache(cold, fixture_path("/out")))
@@ -680,6 +727,81 @@ describe("persistent precise digest cache", function()
         function other.io:stat() error(cancelled, 0) end
         local ok, err = pcall(incremental.file_digest, other, path)
         assert.is_false(ok); assert.equal(cancelled, err)
+    end)
+
+    it("falls back after a raised observation failure", function()
+        local files = { [path] = "source" }; prime(files)
+        local ctx = precise_context(files)
+        assert(incremental.load_digest_cache(ctx, fixture_path("/out")))
+        local stat, failed = ctx.io.stat, false
+        function ctx.io:stat(name)
+            if name == path and not failed then failed = true; error("stat interrupted", 0) end
+            return stat(self, name)
+        end
+        assert.equal(sha256.hex("source"), (incremental.file_digest(ctx, path)))
+        assert.equal(1, incremental.counters(ctx).file_hashes)
+        assert.equal(0, incremental.counters(ctx).observation_reuses)
+    end)
+
+    it("verifies caller-supplied bytes against a digest-only cache hit", function()
+        local files = { [path] = "source" }
+        local digest = prime(files)
+        local ctx = precise_context(files)
+        assert(incremental.load_digest_cache(ctx, fixture_path("/out")))
+        local _, bytes = incremental.file_digest(ctx, path)
+        assert.is_nil(bytes)
+        -- Bytes the caller read itself are checked once and then retained.
+        assert.equal(digest, (incremental.file_digest(ctx, path, "source")))
+        assert.equal("source", select(2, incremental.file_digest(ctx, path)))
+        assert.equal(1, incremental.counters(ctx).file_hashes)
+        assert.equal(6, incremental.counters(ctx).file_bytes)
+        assert.is_nil(ctx.io.reads[path])
+        local other = precise_context(files)
+        assert(incremental.load_digest_cache(other, fixture_path("/out")))
+        incremental.file_digest(other, path)
+        assert.has_error(function() incremental.file_digest(other, path, "edited") end,
+            path .. ": file changed during build")
+    end)
+
+    it("binds one invocation's persistent cache to one output tree", function()
+        local ctx = precise_context({ [path] = "source" })
+        assert(incremental.load_digest_cache(ctx, fixture_path("/out")))
+        assert.is_true(incremental.load_digest_cache(ctx, fixture_path("/out")))
+        local ok, err = incremental.load_digest_cache(ctx, fixture_path("/elsewhere"))
+        assert.is_nil(ok)
+        assert.equal("digest cache already belongs to another output tree", err)
+        assert.equal(cache_path, ctx.incremental.persistent.path)
+    end)
+
+    it("treats an unreadable cache as absent and propagates cancellation while reading it", function()
+        local files = { [path] = "source" }; prime(files)
+        local ctx = precise_context(files)
+        local lstat = ctx.io.lstat
+        function ctx.io:lstat(name)
+            if name == cache_path then error("cache read interrupted", 0) end
+            return lstat(self, name)
+        end
+        assert(incremental.load_digest_cache(ctx, fixture_path("/out")))
+        incremental.file_digest(ctx, path)
+        assert.equal(1, incremental.counters(ctx).file_hashes)
+        local cancelled = {}
+        local other = precise_context(files)
+        function other.io:lstat() error(cancelled, 0) end
+        local loaded, err = pcall(incremental.load_digest_cache, other, fixture_path("/out"))
+        assert.is_false(loaded)
+        assert.equal(cancelled, err)
+    end)
+
+    it("removes the staged SDK digest manifest when it cannot be published", function()
+        local files = { [path] = "source" }
+        local ctx = precise_context(files)
+        local manifest = fixture_path("/sdk/sdk-digests")
+        function ctx.io:rename() return nil, "manifest is busy" end
+        local ok, err = pcall(incremental.write_sdk_digests, ctx, manifest, { path })
+        assert.is_false(ok)
+        assert.equal("manifest is busy", err)
+        assert.is_nil(files[manifest])
+        for name in pairs(files) do assert.is_nil(name:find(".tmp.", 1, true), name) end
     end)
 
     it("does not reuse an observation through a different path spelling", function()
@@ -1545,6 +1667,33 @@ describe("incremental configuration", function()
         local success, failure = pcall(incremental.configuration, other)
         assert.is_false(success); assert.equal(cancelled, failure)
     end)
+
+    it("fails certification on a failing preamble probe and removes its dependency file", function()
+        local ctx, files = configured()
+        function ctx.io:run(argv)
+            self.commands[#self.commands + 1] = argv
+            return { ok = false, diagnostic = "cc: error: unrecognized command-line option" }
+        end
+        local ok, err = pcall(incremental.configuration, ctx)
+        assert.is_false(ok)
+        assert.equal("cannot certify compiler configuration: cc: error: unrecognized command-line option", err)
+        assert.equal(1, #ctx.io.commands)
+        assert.is_nil(files[fixture_path("/") .. "temporary.d"])
+        assert.is_nil(ctx.incremental_configuration)
+    end)
+
+    it("fails closed when no POSIX PATH entry holds an executable tool", function()
+        with_posix_search("/ambient", function()
+            local ctx = posix_search_context("cc")
+            ctx.executable_path = "/nowhere:/later"
+            -- /later/cc exists but this process may not execute it.
+            function ctx.io:executable() return false end
+            local ok, err = pcall(incremental.physical_executable, ctx, "cc")
+            assert.is_false(ok)
+            assert.equal("cannot resolve native tool executable: cc", err)
+            assert.same({}, ctx.io.reads)
+        end)
+    end)
 end)
 
 describe("incremental dependency verdicts", function()
@@ -1853,5 +2002,93 @@ describe("incremental local certification", function()
         function ctx.io:read_file() error(cancelled, 0) end
         local ok, err = pcall(incremental.certify_local, ctx, "main", source)
         assert.is_false(ok); assert.equal(cancelled, err)
+    end)
+
+    it("classifies source layout changes and unreadable sources as source misses", function()
+        local ctx, _, source = fixture()
+        source.kind = "folder"
+        local relaid = incremental.certify_local(ctx, "main", source)
+        assert.equal("source-set", relaid.reason)
+        assert.equal("added " .. fixture_path("/src/main.titan"), relaid.detail)
+        local unreadable, _, unreadable_source, files = fixture()
+        files[fixture_path("/src/main.titan")] = nil
+        local missing = incremental.certify_local(unreadable, "main", unreadable_source)
+        assert.equal("source-content", missing.reason)
+        assert.equal(fixture_path("/src/main.titan"), missing.detail)
+        assert.is_nil(missing.imports)
+    end)
+
+    it("rejects certificates that bind unknown modules or name another module", function()
+        local ctx, saved, source = fixture()
+        saved.object_metadata.certificate.bindings = { stranger = "direct" }
+        local unknown = incremental.certify_local(ctx, "main", source)
+        assert.equal("record-schema", unknown.reason)
+        assert.equal("missing or invalid certificate", unknown.detail)
+        local revalidated = incremental.revalidate_record(ctx, "main", source, saved)
+        assert.equal("record-schema", revalidated.reason)
+        assert.equal("missing or invalid certificate", revalidated.detail)
+        local renamed, renamed_saved, renamed_source = fixture()
+        renamed_saved.type = { name = "other" }
+        local mismatch = incremental.certify_local(renamed, "main", renamed_source)
+        assert.equal("record-schema", mismatch.reason)
+        assert.equal("module name mismatch", mismatch.detail)
+    end)
+
+    it("misses an unreadable or invalid primary object and incomplete coverage notes", function()
+        local ctx, _, source = fixture()
+        local read_file = ctx.io.read_file
+        function ctx.io:read_file(name, ...)
+            if name == fixture_path("/out/main.o") then return nil, "permission denied" end
+            return read_file(self, name, ...)
+        end
+        local unreadable = incremental.certify_local(ctx, "main", source)
+        assert.equal("record-unreadable", unreadable.reason)
+        assert.matches("permission denied", unreadable.detail, 1, true)
+        for _, case in ipairs({
+            { function() return nil, "truncated object header" end, "truncated object header" },
+            { function() return { kind = "archive", fingerprint = {} } end, "invalid primary object" },
+        }) do
+            local scanned, _, scanned_source = fixture()
+            staticmetadata.scan_bytes = case[1]
+            local result = incremental.certify_local(scanned, "main", scanned_source)
+            assert.equal("parts", result.reason)
+            assert.equal(case[2], result.detail)
+        end
+        local covered, cover_record, cover_source = fixture()
+        cover_record.object_metadata.coverage = { enabled = true }
+        local notes = incremental.certify_local(covered, "main", cover_source)
+        assert.equal("coverage-artifacts", notes.reason)
+        assert.equal(fixture_path("/out/main.gcno"), notes.detail)
+    end)
+
+    it("classifies conflicting and unreadable C inputs and propagates their cancellation", function()
+        local header = fixture_path("/sdk/header.h")
+        local ctx, saved, source = fixture()
+        saved.c_header_dependencies = { { kind = "file", path = header, identity = "first" } }
+        saved.ffi_header_descriptor = { search_inputs = {
+            { kind = "file", path = header, identity = "second" } } }
+        cpp.revalidate_header_input = function() error("conflicting inputs must not be revalidated") end
+        local conflict = incremental.certify_local(ctx, "main", source)
+        assert.equal("c-input", conflict.reason)
+        assert.equal(header .. ": content", conflict.detail)
+        for _, case in ipairs({
+            { header .. ": file changed while it was read", "changed-during-read" },
+            { header .. ": file changed during build", "changed-during-read" },
+            { "permission denied", "unreadable" },
+        }) do
+            local raced, raced_saved, raced_source = fixture()
+            raced_saved.c_header_dependencies = { { kind = "file", path = header, identity = "header" } }
+            cpp.revalidate_header_input = function() error(case[1], 0) end
+            local result = incremental.certify_local(raced, "main", raced_source)
+            assert.equal("c-input", result.reason)
+            assert.equal(header .. ": " .. case[2], result.detail)
+        end
+        local cancelled = {}
+        local interrupted, interrupted_saved, interrupted_source = fixture()
+        interrupted_saved.c_header_dependencies = { { kind = "file", path = header, identity = "header" } }
+        cpp.revalidate_header_input = function() error(cancelled, 0) end
+        local ok, err = pcall(incremental.certify_local, interrupted, "main", interrupted_source)
+        assert.is_false(ok)
+        assert.equal(cancelled, err)
     end)
 end)
