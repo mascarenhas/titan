@@ -529,10 +529,14 @@ Inside the worker (`build_worker.lua`),
 (`driver.lua`) restores the coordinator's driver paths, flags,
 resolver settings, and `codegen_policy`, then calls
 `incremental.compiler_component(context, options)` to hash the loaded compiler
-Lua files and frontend script. If the resulting digest differs from
-`configuration.configuration.compiler`, the worker fails immediately with
-`"compiler installation changed during build"`. The preamble, toolchain, and
-compile-options digests are inherited from the coordinator without re-probing.
+Lua files and frontend script. If the resulting digest differs from the
+top-level `configuration.compiler`, the worker fails immediately with
+`"compiler installation changed during build"`. The configuration must carry
+either a complete certified `configuration.configuration` whose `compiler`
+equals that digest, or no nested configuration and an `uncertified` reason
+string; anything else is rejected as an incompatible build worker
+configuration. The preamble, toolchain, and compile-options digests, or the
+uncertified policy, are inherited from the coordinator without re-probing.
 
 `driver.compile_planned_module(context, modname, request.options)`
 (`driver.lua`) creates a loader with `worker_plan = options.plan`
