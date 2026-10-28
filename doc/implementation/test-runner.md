@@ -402,17 +402,19 @@ set).
 
 On Unix, `titan-stdlib-test-objects` and `titan-stdlib-test-build` run from
 `TITAN_TEST_BUILD_DIR` (default `out/tests`) and invoke a single installed
-`$(TEST_TITANC)` command with `--output . --test --incremental --no-uv-bootstrap
+`$(TEST_TITANC)` command with `--output . --test --incremental
 -j$(TITAN_JOBS) --tree $(abspath spec/stdlib/titan) --test-dir $(abspath
 spec/stdlib/titan) test.tests` and the three aggregate C helpers
 (`async_foreign_work.c`, `fs_fixture.c`, and `uv_stdio_probe.c`) passed via
-`--c-source`. `test.tests` stays explicit and first so it owns the default
-provider identity and executable path (`out/tests/test/tests`, passed explicitly
-via `--exe` on `titan-stdlib-test-build`); `--test-dir` discovers the other 29
-owners and deduplicates `test.tests`. Module C, objects, and headers reproduce
-the test source hierarchy below `out/tests`, aggregate `--c-source` objects live
-in `out/tests/.native/`, and the link certificate and synthetic
-runner/entrypoint live under `out/tests/.titan-links/<key>/`.
+`--c-source`. `titan-stdlib-test-objects` adds `-c`;
+`titan-stdlib-test-build` adds the link-phase `--no-uv-bootstrap` and `--exe`
+options, which `-c` rejects. `test.tests` stays explicit and first so it owns
+the default provider identity and executable path (`out/tests/test/tests`,
+passed explicitly via `--exe` on `titan-stdlib-test-build`); `--test-dir`
+discovers the other 29 owners and deduplicates `test.tests`. Module C, objects,
+and headers reproduce the test source hierarchy below `out/tests`, aggregate
+`--c-source` objects live in `out/tests/.native/`, and the link certificate and
+synthetic runner/entrypoint live under `out/tests/.titan-links/<key>/`.
 
 Fixed fixture objects (`uv_stdio_probe.o`, `sqlite3_worker_fixture.o`,
 `ssl_allocator_fixture.o`, `ssl_error_strings.o`, `os_descriptor_limit.o`, and

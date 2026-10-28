@@ -124,7 +124,7 @@ with `titan.so` and creates the output directory:
 
 ```sh
 $(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --output . --test --incremental \
-  --no-uv-bootstrap -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) -c \
+  -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) -c \
   --tree $(abspath spec/stdlib/titan) --test-dir $(abspath spec/stdlib/titan) \
   test.tests --c-source $(abspath spec/fixtures/stdlib/native/async_foreign_work.c) \
   --c-source $(abspath spec/fixtures/stdlib/native/fs_fixture.c) \
@@ -138,6 +138,10 @@ $(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --output . --test --incremental \
   --c-source $(abspath spec/fixtures/stdlib/native/fs_fixture.c) \
   --c-source $(abspath spec/fixtures/stdlib/native/uv_stdio_probe.c)
 ```
+
+The compile-only recipe omits `--no-uv-bootstrap`: `titanc -c` rejects that
+link-phase option, which belongs to the final link that generates the
+entrypoint.
 
 `test.tests` is passed explicitly first so it remains the default executable
 and provider owner (`out/tests/test/tests`); `--test-dir` discovers all 30

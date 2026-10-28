@@ -1535,7 +1535,9 @@ printf '%s\n' "$*" >> ../../calls
                 "TITAN_TEST_INSTALL_ROOT=" .. root, "TITAN_TEST_FIXTURE_OUTPUTS=prepared" }
             local tree = root .. "/spec/stdlib/titan"
             for _, target in ipairs({ "titan-stdlib-test-build", "titan-stdlib-test-objects" }) do
-                local expected = "--output . --test --incremental --no-uv-bootstrap -j4 " ..
+                -- -c rejects the link-phase bootstrap option.
+                local expected = "--output . --test --incremental " ..
+                    (target == "titan-stdlib-test-build" and "--no-uv-bootstrap " or "") .. "-j4 " ..
                     (target == "titan-stdlib-test-objects" and "-c " or "") ..
                     "--tree " .. tree .. " --test-dir " .. tree .. " " ..
                     (target == "titan-stdlib-test-build" and
@@ -1567,6 +1569,61 @@ printf '%s\n' "$*" >> ../../calls
                     "TITAN_TEST_C_PARTS_STAMP", "define titan_test_object_rule", "stale=0" }) do
                 assert.falsy(makefile:find(retired, 1, true), retired)
             end
+        end, debug.traceback)
+        remove_tree(root)
+        if not tested then error(failure, 0) end
+    end)
+
+    it("builds a minimal aggregate through the real compile-only and final-link recipes", function()
+        if platform.windows then pending("Unix Make aggregate command contract"); return end
+        -- The recorder above pins argv text. Here the installed titanc
+        -- validates both recipes' options and the final link reuses every
+        -- object the compile-only target certified.
+        local root = make_temp_dir()
+        local tested, failure = xpcall(function()
+            local prefix = installed_prefix.active()
+            local native = root .. "/spec/fixtures/stdlib/native"
+            local ok, output = run_argv({ "mkdir", "-p", root .. "/scripts",
+                root .. "/spec/support", root .. "/spec/stdlib/titan/test", native })
+            assert.truthy(ok, output)
+            for _, path in ipairs({ "Makefile", "scripts/install_compiler.mk",
+                    "spec/support/stdlib_test_modules.mk" }) do
+                write_file(root .. "/" .. path, read_file(path))
+            end
+            write_file(root .. "/prepared", "native fixtures\n")
+            write_file(root .. "/spec/stdlib/titan/test/tests.titan", [[
+local test = import "test"
+
+function test_minimal(_context: test.Context)
+  test.assert(true)
+end
+]])
+            for _, name in ipairs({ "async_foreign_work", "fs_fixture", "uv_stdio_probe" }) do
+                write_file(native .. "/" .. name .. ".c", string.format(
+                    "int titan_minimal_%s(void);\nint titan_minimal_%s(void) { return 0; }\n", name, name))
+            end
+            local arguments = { "env", "-u", "MAKEFLAGS", "-u", "MFLAGS",
+                "-u", "GNUMAKEFLAGS", "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES",
+                "make", "--no-print-directory", "-C", root,
+                "PREFIX=" .. root, "TITAN_JOBS=2", "MAKE=false", "TEST_LUA=true", "TITAN_VERBOSE=1",
+                "TEST_TITANC=" .. quote(prefix .. "/bin/titanc"),
+                "TITAN_TEST_INSTALL_ROOT=" .. prefix, "TITAN_TEST_FIXTURE_OUTPUTS=prepared" }
+            local logs = {}
+            for _, target in ipairs({ "titan-stdlib-test-objects", "titan-stdlib-test-build" }) do
+                local argv = { table.unpack(arguments) }
+                argv[#argv + 1] = target
+                local built, log = run_argv(argv)
+                assert.truthy(built, log)
+                logs[target] = log
+            end
+            local objects_log, build_log = logs["titan-stdlib-test-objects"], logs["titan-stdlib-test-build"]
+            assert.truthy(objects_log:find("Titan object miss test.tests:", 1, true), objects_log)
+            assert.truthy(build_log:find("Titan object hit test.tests:", 1, true), build_log)
+            assert.falsy(build_log:find("Titan object miss", 1, true), build_log)
+            assert.falsy(build_log:find("Titan native miss", 1, true), build_log)
+            local ran, result = run_argv({ root .. "/out/tests/test/tests" })
+            assert.truthy(ran, result)
+            assert.truthy(result:find("[  PASSED  ] 1 test.", 1, true), result)
         end, debug.traceback)
         remove_tree(root)
         if not tested then error(failure, 0) end

@@ -1339,7 +1339,7 @@ titan-stdlib-test-objects: $(filter %.h,$(TITAN_TEST_FIXTURE_OUTPUTS)) | check-t
 	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) set -e; \
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 	cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); \
-	$(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --output . --test --incremental --no-uv-bootstrap -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) -c \
+	$(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --output . --test --incremental -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) -c \
 	  --tree $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
 	  --test-dir $(call make_shell_quote,$(abspath spec/stdlib/titan)) $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
 	  $(foreach source,$(TITAN_TEST_C_SOURCES),--c-source $(call make_shell_quote,$(abspath $(source))))
