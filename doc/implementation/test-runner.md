@@ -499,8 +499,10 @@ Titan-only filter leaves the partitioned run enabled.
 `spec/support/ci_compiler_test_groups.txt` (schema `titan-busted-timings-v2`) is
 the timing dataset. Its header records host, profile, date, and compiler; each
 row names one discovered `spec/**/*_spec.lua` file, its domain, its measured
-local validation seconds, and optional Linux CI covered seconds (`-` falls back
-to the local value). The `retained` domain is the runtime/packaging set
+local validation seconds, and optional covered seconds (`-` falls back to the
+local value): Linux CI covered+stress durations for `compiler` rows, and
+same-host serial four-CPU LuaCov diagnostic seconds of the CI step's files,
+not a CI run, for `stdlib` rows. The `retained` domain is the runtime/packaging set
 (`Makefile` `STDLIB_BUSTED_TESTS`, `Makefile.win`
 `TITAN_ROCK_TEST_STDLIB_SPECS`), `stdlib` is
 `spec/support/ci_stdlib_compiler_test_files.txt`, and everything else is

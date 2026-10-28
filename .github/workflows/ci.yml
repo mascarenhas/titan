@@ -429,7 +429,7 @@ jobs:
 
       # Two workers run the integrations concurrently, each in a private
       # extraction of the prepared tree with half of the job's -j4, sharing
-      # only this installed prefix; the exclusive files then run alone. Their
+      # this installed prefix; the exclusive files then run alone. Their
       # LuaCov stats merge into one report.
       - name: Run compiler integrations that require the installed stdlib
         env:

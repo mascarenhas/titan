@@ -109,7 +109,7 @@ merge into the workspace's `luacov.stats.out`. `plan_ci_stdlib` in
 `compiler_test_groups.lua` balances the ordinary files by LPT over the stdlib
 rows' covered seconds, from a same-host serial four-CPU diagnostic run of this
 step's files. Workers share
-only the installed prefix, which these specs read. Their stats name compiler
+the installed prefix, which these specs read. Their stats name compiler
 sources by prefix or checkout-relative paths, so the workspace report resolves
 them after the extractions are removed. Compiler integrations that
 import standard-library modules consume the installed provider rather than
