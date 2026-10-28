@@ -145,7 +145,7 @@ local function read_observation(context, path)
             dev = value.dev, ino = value.ino, mtime_ns = value.mtime_ns, ctime_ns = value.ctime_ns }
     end
     return canonical({ fields(stat), fields(link) }, {}),
-        err == nil and linkerr == nil and precise_observation(stat) or nil
+        err == nil and linkerr == nil and precise_observation(stat) or nil, stat.size
 end
 
 local function file_count(memo, key)
@@ -169,33 +169,60 @@ local function cache_file(context, path, digest, observation)
     end
 end
 
-local function read_evidence(context, path, key, count, max_bytes)
-    local before, observed = read_observation(context, path)
-    local bytes = required(context.io:read_file(path, max_bytes))
+-- A file larger than one chunk whose digest alone is demanded is hashed in
+-- bounded chunks when the adapter supplies the native `sha256_stream` and the
+-- strategy supplies `read_chunks`; its bytes are never materialized or
+-- retained. Anything else is read whole.
+local STREAM_CHUNK_BYTES = 4 * 1024 * 1024
+incremental.STREAM_CHUNK_BYTES = STREAM_CHUNK_BYTES
+
+local function read_evidence(context, path, key, count, max_bytes, stream)
+    local before, observed, size = read_observation(context, path)
+    local new_stream = stream and context.cache_adapter and context.cache_adapter.sha256_stream
+    local bytes, digest
+    if new_stream and context.io.read_chunks and math.type(size) == "integer"
+       and size > STREAM_CHUNK_BYTES then
+        local sha = new_stream()
+        size = required(context.io:read_chunks(path, STREAM_CHUNK_BYTES,
+            function(chunk) sha:update(chunk) end))
+        digest = sha:finish()
+        assert(type(digest) == "string" and #digest == 32,
+            "sha256_stream must finish with a 32-byte digest")
+        digest = sha256.to_hex(digest)
+    else
+        bytes = required(context.io:read_file(path, max_bytes))
+        size = #bytes
+    end
     state(context).counters.file_reads = state(context).counters.file_reads + 1
     count.reads = count.reads + 1
-    if max_bytes and #bytes > max_bytes then error(path .. ": file exceeds read limit", 0) end
+    if max_bytes and size > max_bytes then error(path .. ": file exceeds read limit", 0) end
     local after = read_observation(context, path)
-    if before ~= after or (observed and #bytes ~= observed.size)
+    if before ~= after or (observed and size ~= observed.size)
         or key ~= required(context.io:realpath(path)) then
         error(path .. ": file changed while it was read", 0)
     end
-    return bytes, observed
+    return bytes, observed, digest, size
 end
 
-local function hash_file(context, path, key, bytes, observed, count)
+-- Record a file's content digest: hashed here from whole `bytes`, or already
+-- streamed (`digest` and `size`, without bytes).
+local function hash_file(context, path, key, bytes, observed, count, digest, size)
     local memo = state(context)
-    local digest = hash(context, bytes)
+    if digest then
+        memo.counters.digest_calls = memo.counters.digest_calls + 1
+    else
+        digest, size = hash(context, bytes), #bytes
+    end
     memo.counters.file_hashes = memo.counters.file_hashes + 1
-    memo.counters.file_bytes = memo.counters.file_bytes + #bytes
-    count.hashes, count.bytes = count.hashes + 1, count.bytes + #bytes
+    memo.counters.file_bytes = memo.counters.file_bytes + size
+    count.hashes, count.bytes = count.hashes + 1, count.bytes + size
     memo.files[key] = { digest = digest, bytes = bytes, observation = observed }
     cache_file(context, path, digest, observed)
     context.io:yield()
     return digest, bytes, observed
 end
 
-local function digest_file(context, path, bytes, max_bytes)
+local function digest_file(context, path, bytes, max_bytes, want_bytes)
     local memo = state(context)
     local key = memo.aliases[path]
     if not key then
@@ -248,10 +275,13 @@ local function digest_file(context, path, bytes, max_bytes)
             end
         end
     end
-    local observed
-    if bytes == nil then bytes, observed = read_evidence(context, path, key, count, max_bytes) end
-    assert(type(bytes) == "string", "file digest requires byte contents")
-    return hash_file(context, path, key, bytes, observed, count)
+    local observed, digest, size
+    if bytes == nil then
+        bytes, observed, digest, size =
+            read_evidence(context, path, key, count, max_bytes, not want_bytes)
+    end
+    assert(digest ~= nil or type(bytes) == "string", "file digest requires byte contents")
+    return hash_file(context, path, key, bytes, observed, count, digest, size)
 end
 
 function incremental.file_digest(context, path, bytes)
@@ -267,13 +297,16 @@ function incremental.file_contents(context, path, max_bytes)
         stat = required(stat, err, path)
         if stat.size > max_bytes then error(path .. ": file exceeds read limit", 0) end
     end
-    local _, bytes, observed = digest_file(context, path, nil, max_bytes)
+    local digest, bytes, observed = digest_file(context, path, nil, max_bytes, true)
     if bytes == nil then
         local memo = state(context)
         local key = memo.aliases[path]
         local current
         bytes, current = read_evidence(context, path, key, file_count(memo, key), max_bytes)
-        if not incremental.observations_equal(observed, current) then
+        -- A streamed digest may lack a precise observation; its content then
+        -- has to match instead.
+        if not incremental.observations_equal(observed, current) and
+           (observed ~= nil or hash(context, bytes) ~= digest) then
             error(path .. ": file changed during build", 0)
         end
         memo.files[key].bytes = bytes
@@ -879,8 +912,9 @@ function incremental.write_sdk_digests(context, filename, inputs)
     local memo, files = state(context), {}
     for _, path in ipairs(inputs) do
         local key = required(context.io:realpath(path))
-        local bytes, observed = read_evidence(context, path, key, file_count(memo, key))
-        if observed then files[key] = { digest = hash(context, bytes), observation = observed } end
+        local bytes, observed, digest =
+            read_evidence(context, path, key, file_count(memo, key), nil, true)
+        if observed then files[key] = { digest = digest or hash(context, bytes), observation = observed } end
     end
     local bytes = required(graphcodec.encode({ schema = version.SDK_DIGEST_SCHEMA,
         digest = version.CERTIFICATE_DIGEST, canonicalization = version.CERTIFICATE_CANONICALIZATION,

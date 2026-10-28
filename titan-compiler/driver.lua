@@ -6526,14 +6526,16 @@ function driver.new_worker_context(configuration, io_strategy)
         copy_strings(settings.native_compile_flags) or nil
     local support_loaded, support = pcall(require, "titan")
     if not support_loaded or type(support) ~= "table" or
-       type(support._sha256_binary) ~= "function" then
+       type(support._sha256_binary) ~= "function" or
+       type(support._sha256_stream) ~= "function" then
         return nil, "the installed Titan native support library is " ..
-            "missing or stale (it lacks _sha256_binary)"
+            "missing or stale (it lacks _sha256_binary or _sha256_stream)"
     end
     local resolver = configuration.resolver
     local context = driver.new_resolver_context({
         io = io_strategy,
-        cache_adapter = { sha256_binary = support._sha256_binary },
+        cache_adapter = { sha256_binary = support._sha256_binary,
+            sha256_stream = support._sha256_stream },
         prefer_static = resolver.prefer_static,
         source_first = resolver.source_first,
         verbose = resolver.verbose,
@@ -11420,9 +11422,11 @@ if type(support._loadlib) ~= "function" or
    type(support._loadlibglobal) ~= "function" then
     finish(false, "luaopen_titan support table must expose _loadlib and _loadlibglobal")
 end
--- titanc hashes C inputs through this entry and refuses to start without it.
-if type(support._sha256_binary) ~= "function" then
-    finish(false, "luaopen_titan support table lacks _sha256_binary; " ..
+-- titanc hashes C inputs and certified files through these entries and
+-- refuses to start without them.
+if type(support._sha256_binary) ~= "function" or
+   type(support._sha256_stream) ~= "function" then
+    finish(false, "luaopen_titan support table lacks _sha256_binary or _sha256_stream; " ..
         "the linked native support object is stale (rebuild titan-runtime/ltitanlib.c)")
 end
 finish(true, "ok")

@@ -223,14 +223,16 @@ end
 -- Synchronous native publication APIs share the CLI's temporary-file root.
 driver.OUTPUT_ROOT = args.output
 
--- The CLI hashes C headers and probe sources natively. Digest-only: the
--- adapter has no storage, so no cache entries are built or serialized. An
--- older support library is a stale installation, not a slow fallback.
+-- The CLI hashes C headers, probe sources and certified files natively,
+-- streaming large files. Digest-only: the adapter has no storage, so no
+-- cache entries are built or serialized. An older support library is a
+-- stale installation, not a slow fallback.
 local support_loaded, support = pcall(require, "titan")
 if not support_loaded or type(support) ~= "table" or
-   type(support._sha256_binary) ~= "function" then
+   type(support._sha256_binary) ~= "function" or
+   type(support._sha256_stream) ~= "function" then
     exit("the installed Titan native support library is missing or stale " ..
-        "(it lacks _sha256_binary); reinstall Titan" ..
+        "(it lacks _sha256_binary or _sha256_stream); reinstall Titan" ..
         (support_loaded and "" or ": " .. tostring(support)))
 end
 
@@ -240,7 +242,8 @@ resolver_context = driver.new_resolver_context({
     verbose = args.verbose,
     pretty_print = args.pretty_print,
     output_root = args.output,
-    cache_adapter = { sha256_binary = support._sha256_binary },
+    cache_adapter = { sha256_binary = support._sha256_binary,
+        sha256_stream = support._sha256_stream },
     jobs = jobs,
     -- The real script, not a LuaRocks wrapper: object certificates hash the
     -- frontend that actually runs.

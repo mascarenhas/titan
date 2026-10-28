@@ -481,6 +481,47 @@ describe("native SHA-256", function()
         assert.has_error(function() support._sha256_binary(42) end)
         assert.has_error(function() support._sha256_binary(nil) end)
     end)
+
+    it("streams the one-shot digest across every chunk split", function()
+        if type(support._sha256_stream) ~= "function" then
+            pending("native _sha256_stream requires a reinstalled runtime")
+            return
+        end
+        local bytes, state = {}, 0x1b873593
+        for index = 1, 700 do
+            state = (state * 1103515245 + 12345) & 0x7fffffff
+            bytes[index] = string.char((state >> 16) & 0xff)
+        end
+        local message = table.concat(bytes)
+        for _, length in ipairs({ 0, 1, 55, 56, 63, 64, 65, 127, 128, 129, 700 }) do
+            local slice = message:sub(1, length)
+            local expected = sha256.binary(slice)
+            for _, size in ipairs({ 1, 3, 63, 64, 65, 200, 1000 }) do
+                local stream = support._sha256_stream()
+                for first = 1, length, size do
+                    assert.equal(stream, stream:update(slice:sub(first, first + size - 1)))
+                end
+                stream:update("")
+                assert.equal(expected, stream:finish(), length .. "/" .. size)
+            end
+        end
+        local large = string.rep("titan\0", 400000)
+        local stream = support._sha256_stream()
+        for first = 1, #large, 65536 + 7 do stream:update(large:sub(first, first + 65536 + 6)) end
+        assert.equal(support._sha256_binary(large), stream:finish())
+    end)
+
+    it("rejects non-string chunks and use after finish", function()
+        if type(support._sha256_stream) ~= "function" then
+            pending("native _sha256_stream requires a reinstalled runtime")
+            return
+        end
+        local stream = support._sha256_stream()
+        assert.has_error(function() stream:update(42) end)
+        assert.equal(sha256.binary(""), stream:finish())
+        assert.has_error(function() stream:update("x") end)
+        assert.has_error(function() stream:finish() end)
+    end)
 end)
 
 describe("generated-C batches under a parent Make", function()

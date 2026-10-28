@@ -517,6 +517,42 @@ describe("compiler I/O strategy", function()
         assert.is_true(strategy:unlink(temporary))
     end)
 
+    it("delivers bounded file chunks and keeps consumer failures unchanged", function()
+        root = workspace()
+        local strategy = compiler_io.new_sync()
+        local source = root .. "/chunked.bin"
+        local bytes = string.rep("prefix\0middle\255suffix", 50)
+        assert.is_true(strategy:write_file(source, bytes))
+        for _, size in ipairs({ 1, 7, #bytes - 1, #bytes, #bytes + 1 }) do
+            local chunks = {}
+            local total = assert(strategy:read_chunks(source, size, function(chunk)
+                assert.is_true(#chunk >= 1 and #chunk <= size)
+                chunks[#chunks + 1] = chunk
+            end))
+            assert.equal(#bytes, total)
+            assert.equal(bytes, table.concat(chunks))
+        end
+        local empty = root .. "/empty.bin"
+        assert.is_true(strategy:write_file(empty, ""))
+        assert.equal(0, assert(strategy:read_chunks(empty, 4, function()
+            error("an empty file has no chunks")
+        end)))
+
+        local missing, missing_error = strategy:read_chunks(root .. "/absent.bin", 4,
+            function() end)
+        assert.is_nil(missing)
+        assert.is_string(missing_error)
+        local invalid, invalid_error = strategy:read_chunks(source, 0, function() end)
+        assert.is_nil(invalid)
+        assert.matches("positive integer", invalid_error, 1, true)
+        local cancelled = {}
+        local ok, err = pcall(strategy.read_chunks, strategy, source, 8, function()
+            error(cancelled, 0)
+        end)
+        assert.is_false(ok)
+        assert.equal(cancelled, err)
+    end)
+
     it("distinguishes symlinks, dangling targets, and canonical paths", function()
         local available, message = filesystem.symlink_capability()
         if not available then pending(message); return end

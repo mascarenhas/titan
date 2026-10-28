@@ -1,13 +1,18 @@
 -- A compiler cache is a best-effort byte transport, never a storage dependency.
 -- Callbacks are dot functions. Non-string exceptions retain cancellation and
 -- foreign exception identity; ordinary transport errors become cache misses.
--- A digest-only adapter (`sha256_binary` alone, as titanc supplies) offers no
--- storage: callers gate key construction, encoding, and transport on the
--- actual `get`/`put` capabilities, never on mere adapter presence.
+-- A digest-only adapter (`sha256_binary` alone, optionally with the
+-- `sha256_stream` constructor, as titanc supplies) offers no storage: callers
+-- gate key construction, encoding, and transport on the actual `get`/`put`
+-- capabilities, never on mere adapter presence.
 local cacheadapter = {}
 
 function cacheadapter.validate(adapter)
     if adapter == nil then return true end
+    if type(adapter) == "table" and adapter.sha256_stream ~= nil
+       and type(adapter.sha256_stream) ~= "function" then
+        return nil, "cache_adapter sha256_stream must be a function"
+    end
     if type(adapter) == "table" and adapter.get == nil and adapter.put == nil
        and adapter.yield == nil and adapter.refresh_inputs == nil
        and type(adapter.sha256_binary) == "function" then

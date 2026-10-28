@@ -381,6 +381,42 @@ function Sync:read_file(path, max_bytes)
     return contents
 end
 
+-- Optional strategy capability: deliver a file's bytes to `consumer` in
+-- chunks of at most `chunk_size` bytes without materializing the whole file,
+-- and return the total byte count. Strategies without it are read whole. A
+-- consumer error propagates unchanged once the file is closed.
+function Sync:read_chunks(path, chunk_size, consumer)
+    local valid, path_err = checked_path(path)
+    if not valid then return nil, path_err end
+    if math.type(chunk_size) ~= "integer" or chunk_size <= 0 then
+        return nil, "chunk size must be a positive integer"
+    end
+    local file, open_err = open_file(path, "rb")
+    if not file then return nil, open_err end
+    local total, failure = 0, nil
+    while true do
+        local read_ok, chunk, read_err = pcall(file.read, file, chunk_size)
+        if not read_ok then
+            failure = tostring(chunk)
+            break
+        elseif chunk == nil then
+            if read_err ~= nil then failure = operation_error("read", read_err) end
+            break
+        end
+        total = total + #chunk
+        local consumed, consumer_err = pcall(consumer, chunk)
+        if not consumed then
+            pcall(file.close, file)
+            error(consumer_err, 0)
+        end
+    end
+    local close_ok, closed, close_err = pcall(file.close, file)
+    if failure then return nil, failure end
+    if not close_ok then return nil, tostring(closed) end
+    if not closed then return nil, operation_error("close", close_err) end
+    return total
+end
+
 local function write_file_direct(path, contents)
     local file, open_err = open_file(path, "wb")
     if not file then return nil, open_err end

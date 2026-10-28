@@ -3092,8 +3092,9 @@ describe("loader resolver ownership", function()
             },
             ["titan-compiler.test_runner"] = {},
             ["titan-compiler.util"] = {},
-            -- titanc requires the native digest before creating its resolver.
-            titan = { _sha256_binary = function() return string.rep("\0", 32) end },
+            -- titanc requires the native digests before creating its resolver.
+            titan = { _sha256_binary = function() return string.rep("\0", 32) end,
+                _sha256_stream = function() error("fixture never streams", 0) end },
         }
         local environment = setmetatable({
             arg = {},
@@ -3290,7 +3291,8 @@ describe("loader resolver ownership", function()
                 },
                 ["titan-compiler.test_runner"] = {},
                 ["titan-compiler.util"] = util,
-                titan = { _sha256_binary = function() return string.rep("\0", 32) end },
+                titan = { _sha256_binary = function() return string.rep("\0", 32) end,
+                    _sha256_stream = function() error("fixture never streams", 0) end },
             }
             local fake_io = setmetatable({
                 stdout = {

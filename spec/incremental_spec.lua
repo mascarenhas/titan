@@ -242,6 +242,118 @@ describe("incremental certificate identities", function()
         assert.equal("", incremental.file_contents(context({ [path] = "" }), path))
     end)
 
+    describe("streamed digests", function()
+        local support = require "titan"
+        local CHUNK = incremental.STREAM_CHUNK_BYTES
+        local large_path, small_path = fixture_path("/out/program"), fixture_path("/out/small.o")
+        local large = ("titan\0"):rep(CHUNK // 6 + 2):sub(1, CHUNK + 7)
+        local small = ("small\0"):rep(CHUNK // 6 + 1):sub(1, CHUNK)
+
+        -- The native stream and a chunk-counting strategy over in-memory files.
+        local function streaming(files, precise)
+            if type(support._sha256_stream) ~= "function" then
+                pending("native _sha256_stream requires a reinstalled runtime")
+                return nil
+            end
+            local ctx = precise and precise_context(files) or context(files)
+            ctx.cache_adapter = { sha256_binary = support._sha256_binary,
+                sha256_stream = support._sha256_stream }
+            ctx.io.chunks = {}
+            function ctx.io:read_chunks(path, size, consumer)
+                assert.equal(CHUNK, size)
+                local bytes = files[self.aliases[path] or path]
+                if bytes == nil then return nil, "missing " .. path end
+                self.chunks[path] = (self.chunks[path] or 0) + 1
+                for first = 1, #bytes, size do consumer(bytes:sub(first, first + size - 1)) end
+                return #bytes
+            end
+            return ctx
+        end
+        local function native_hex(bytes) return sha256.to_hex(support._sha256_binary(bytes)) end
+
+        it("hashes a large digest-only file in bounded chunks without retaining it", function()
+            local ctx = streaming({ [large_path] = large, [small_path] = small }, true)
+            if not ctx then return end
+            local digest, bytes = incremental.file_digest(ctx, large_path)
+            assert.equal(native_hex(large), digest)
+            assert.is_nil(bytes)
+            assert.is_nil(ctx.io.reads[large_path])
+            assert.equal(1, ctx.io.chunks[large_path])
+            local counters = incremental.counters(ctx)
+            assert.equal(1, counters.file_reads)
+            assert.equal(1, counters.file_hashes)
+            assert.equal(#large, counters.file_bytes)
+            assert.equal(digest, (incremental.file_digest(ctx, large_path)))
+            assert.equal(1, ctx.io.chunks[large_path])
+            -- Byte demand reads the file once and verifies it against the digest.
+            assert.equal(large, incremental.file_contents(ctx, large_path))
+            assert.equal(1, ctx.io.reads[large_path])
+            assert.equal(1, incremental.counters(ctx).file_hashes)
+
+            -- A file of at most one chunk keeps its single whole read.
+            local small_digest, small_bytes = incremental.file_digest(ctx, small_path)
+            assert.equal(native_hex(small), small_digest)
+            assert.equal(small, small_bytes)
+            assert.equal(1, ctx.io.reads[small_path])
+            assert.is_nil(ctx.io.chunks[small_path])
+        end)
+
+        it("reads whole files without the native stream or a chunked strategy read", function()
+            local ctx = streaming({ [large_path] = large })
+            if not ctx then return end
+            ctx.io.read_chunks = nil
+            assert.equal(native_hex(large), (incremental.file_digest(ctx, large_path)))
+            assert.equal(1, ctx.io.reads[large_path])
+            ctx = streaming({ [large_path] = large })
+            ctx.cache_adapter.sha256_stream = nil
+            assert.equal(native_hex(large), (incremental.file_digest(ctx, large_path)))
+            assert.equal(1, ctx.io.reads[large_path])
+            assert.is_nil(ctx.io.chunks[large_path])
+        end)
+
+        it("rejects a file that changes while it is streamed and keeps cancellation", function()
+            local files = { [large_path] = large }
+            local ctx = streaming(files, true)
+            if not ctx then return end
+            local read_chunks = ctx.io.read_chunks
+            function ctx.io:read_chunks(...) self.clock = self.clock + 1; return read_chunks(self, ...) end
+            assert.has_error(function() incremental.file_digest(ctx, large_path) end,
+                large_path .. ": file changed while it was read")
+            ctx = streaming(files, true)
+            function ctx.io:read_chunks(path, size, consumer)
+                consumer(large:sub(1, size))
+                return size
+            end
+            assert.has_error(function() incremental.file_digest(ctx, large_path) end,
+                large_path .. ": file changed while it was read")
+            ctx = streaming(files, true)
+            function ctx.io:read_chunks() return nil, large_path .. ": forced read failure" end
+            assert.has_error(function() incremental.file_digest(ctx, large_path) end,
+                large_path .. ": forced read failure")
+            assert.equal(0, incremental.counters(ctx).file_hashes)
+            local cancelled = {}
+            ctx = streaming(files, true)
+            function ctx.io:read_chunks(_, _, consumer) consumer("x"); error(cancelled, 0) end
+            local ok, err = pcall(incremental.file_digest, ctx, large_path)
+            assert.is_false(ok)
+            assert.equal(cancelled, err)
+        end)
+
+        it("verifies a coarse streamed digest by content before serving bytes", function()
+            local files = { [large_path] = large }
+            local ctx = streaming(files)
+            if not ctx then return end
+            local digest, _, observed = incremental.file_digest(ctx, large_path)
+            assert.is_nil(observed)
+            assert.equal(large, incremental.file_contents(ctx, large_path))
+            ctx = streaming(files)
+            assert.equal(digest, (incremental.file_digest(ctx, large_path)))
+            files[large_path] = large:sub(1, -2) .. "!"
+            assert.has_error(function() incremental.file_contents(ctx, large_path) end,
+                large_path .. ": file changed during build")
+        end)
+    end)
+
     it("uses stored producer digests without reconstructing a restored AST", function()
         local ctx = context({})
         local entry = source_entry("main")
