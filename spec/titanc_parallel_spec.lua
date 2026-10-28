@@ -1,23 +1,10 @@
 local assert = require "luassert"
+local argparse = require "argparse"
 local cdriver = require "c-parser.cdriver"
 local lfs = require "lfs"
 local platform = require "titan-compiler.platform"
 
 local EXIT = {}
-local MODULE_NAMES = {
-    "argparse",
-    "titan-compiler.build",
-    "titan-compiler.checker",
-    "titan-compiler.coder",
-    "titan-compiler.coverage",
-    "titan-compiler.parser",
-    "titan-compiler.driver",
-    "titan-compiler.incremental",
-    "titan-compiler.linkcertificate",
-    "titan-compiler.nativeinputs",
-    "titan-compiler.test_runner",
-    "titan-compiler.util",
-}
 
 local function fake_argparse(arguments)
     return function()
@@ -34,7 +21,20 @@ local function fake_argparse(arguments)
     end
 end
 
-local function run_titanc(arguments, environment_jobs)
+-- The real titanc option grammar over an explicit command line.
+local function command_line(argv)
+    return function(...)
+        local parser = argparse(...)
+        local parse = parser.parse
+        function parser.parse(self) return parse(self, argv) end
+        return parser
+    end
+end
+
+-- `arguments` is a parsed argument table or a `command_line` parser.
+-- `customize` adjusts the fakes before the chunk runs; `expect` is nil for an
+-- ordinary diagnostic exit, "success" or "raise".
+local function run_titanc(arguments, environment_jobs, customize, expect)
     local inherited_descriptors = { 71, 72 }
     local observed = {}
     local driver = {
@@ -207,7 +207,8 @@ local function run_titanc(arguments, environment_jobs)
     end
 
     local modules = {
-        ["argparse"] = fake_argparse(arguments),
+        ["argparse"] = type(arguments) == "function" and arguments or
+            fake_argparse(arguments),
         ["titan-compiler.build"] = build,
         ["titan-compiler.checker"] = checker,
         ["titan-compiler.coverage"] = {},
@@ -290,14 +291,29 @@ local function run_titanc(arguments, environment_jobs)
         },
     }
 
+    local printed = {}
+    if customize then
+        customize({
+            driver = driver, modules = modules, observed = observed,
+            checker = checker, build = build,
+            resolver = function() return resolver end,
+        })
+    end
     local saved_modules = {}
-    for _, name in ipairs(MODULE_NAMES) do
+    for name in pairs(modules) do
         saved_modules[name] = package.loaded[name]
         package.loaded[name] = modules[name]
     end
     local saved_getenv = platform.getenv
     local saved_exit = os.exit
     local saved_stderr = io.stderr
+    local environment = setmetatable({
+        print = function(...)
+            local values = {}
+            for index = 1, select("#", ...) do values[index] = tostring(select(index, ...)) end
+            printed[#printed + 1] = table.concat(values, "\t")
+        end,
+    }, { __index = _G })
     local diagnostics = {}
     platform.getenv = function(name)
         if name == "TITAN_JOBS" then return environment_jobs end
@@ -312,19 +328,27 @@ local function run_titanc(arguments, environment_jobs)
         end,
     }
 
-    local chunk = assert(loadfile("titanc"))
+    local chunk = assert(loadfile("titanc", "t", environment))
     local ok, failure = pcall(chunk)
 
     io.stderr = saved_stderr
     os.exit = saved_exit
     platform.getenv = saved_getenv
-    for _, name in ipairs(MODULE_NAMES) do
+    for name in pairs(modules) do
         package.loaded[name] = saved_modules[name]
     end
 
-    assert.is_false(ok)
-    assert.equal(EXIT, failure)
-    return table.concat(diagnostics), observed
+    local printed_text = table.concat(printed, "\n")
+    if expect == "success" then
+        assert.is_true(ok, tostring(failure))
+    elseif expect == "raise" then
+        assert.is_false(ok)
+        assert.not_equal(EXIT, failure)
+    else
+        assert.is_false(ok)
+        assert.equal(EXIT, failure)
+    end
+    return table.concat(diagnostics), observed, failure, printed_text
 end
 
 local function ordinary_arguments(jobs)
@@ -390,6 +414,499 @@ describe("titanc generated-C parallelism dispatch", function()
         assert.equal(
             "compile failure for pkg.one\ncompile failure for pkg.three\n",
             diagnostics)
+    end)
+end)
+
+local function arguments_with(overrides)
+    local arguments = ordinary_arguments(nil)
+    for key, value in pairs(overrides) do arguments[key] = value end
+    return arguments
+end
+
+local function stop_at_link_inputs(fakes)
+    fakes.modules["titan-compiler.linkcertificate"].output_tools = function(_, request)
+        fakes.observed.link_inputs = request.inputs
+        fakes.observed.uncacheable = request.uncacheable
+        return nil, "stopped at the final-link tool request"
+    end
+end
+
+local function record_propagation(fakes)
+    fakes.modules["titan-compiler.jobs"] = {
+        propagate = function(signal)
+            fakes.observed.propagated = signal
+            fakes.observed.closed_before_propagation = fakes.resolver().closed == true
+        end,
+    }
+end
+
+-- Every module compiles and the provider pair links and publishes.
+local function link_through(fakes)
+    local driver = fakes.driver
+    function driver.compile_modules(requests)
+        local results = {}
+        for index, request in ipairs(requests) do
+            local object = request.modname:gsub("[.]", "/") .. ".o"
+            results[index] = { ok = true, libname = object, objects = { object } }
+        end
+        return results
+    end
+    function driver.derive_target_fingerprint() return "target" end
+    function driver.validate_generated_objects() return true end
+    function driver.prepare_static_providers_for_target() return true end
+    function driver.classify_native_payloads() return { inputs = {} } end
+    function driver.link_provider_pair(request)
+        fakes.observed.pair = request
+        return { dso = "stage/pkg.so", archive = "stage/pkg.a", entries = {},
+            directory = "stage" }
+    end
+    function driver.publish_provider_bundle(_, _, provider_output)
+        fakes.observed.published = provider_output
+        return true
+    end
+    function driver.remove_path(directory)
+        fakes.observed.removed = directory
+        return true
+    end
+end
+
+describe("titanc command-line orchestration", function()
+    it("keeps native switches in exact command-line order across kinds", function()
+        local _, observed = run_titanc(command_line({
+            "-I", "first include", "-D", "NAME=1", "-l", "m,z", "-L", "lib",
+            "--cflag=-O1", "--ldflag=-Wl,--as-needed", "-I", "second",
+            "pkg.three", "pkg.two", "pkg.one",
+        }), nil, function(fakes)
+            local native = fakes.modules["titan-compiler.nativeinputs"]
+            local normalize = native.normalize
+            function native.normalize(request)
+                fakes.observed.native_cli = request.cli.ordered
+                return normalize(request)
+            end
+        end)
+        assert.same({
+            { kind = "include", value = "first include" },
+            { kind = "define", value = "NAME=1" },
+            { kind = "library", value = "m,z" },
+            { kind = "libdir", value = "lib" },
+            { kind = "cflag", value = "-O1" },
+            { kind = "ldflag", value = "-Wl,--as-needed" },
+            { kind = "include", value = "second" },
+        }, observed.native_cli)
+    end)
+
+    it("rejects contradictory command-line modes before creating a resolver", function()
+        local compile_only_conflict = "--compile-only cannot be combined with -l, -L, " ..
+            "--ldflag, -X, or --no-uv-bootstrap"
+        for _, case in ipairs({
+            { { "--print-c-objects", "app" },
+              "--print-c-objects requires --compile-only and at least one --c-source" },
+            { { "-c", "--c-source", "native.c", "--print-c-objects", "--print-ast", "app" },
+              "--print-c-objects cannot be combined with --print-root or --print-ast" },
+            { { "-c", "--exe", "bin/app", "app" }, "--exe cannot be combined with --compile-only" },
+            { { "-c", "-L", "lib", "app" }, compile_only_conflict },
+            { { "-c", "--ldflag=-pthread", "app" }, compile_only_conflict },
+            { { "--test-dir", "tests" }, "--test-dir and --test-exclude require --test" },
+            { { "--test-exclude", "app_test", "app" },
+              "--test-dir and --test-exclude require --test" },
+            { { "--test", "--test-exclude", "app_test", "app" },
+              "--test-exclude requires --test-dir" },
+        }) do
+            local diagnostics, observed = run_titanc(command_line(case[1]))
+            assert.equal(case[2] .. "\n", diagnostics)
+            assert.same({}, observed)
+        end
+    end)
+
+    it("rejects a stale native support library before creating a resolver", function()
+        local diagnostics, observed = run_titanc(ordinary_arguments(nil), nil, function(fakes)
+            fakes.modules.titan = { _sha256_binary = function() return "" end }
+        end)
+        assert.equal("the installed Titan native support library is missing or stale " ..
+            "(it lacks _sha256_binary or _sha256_stream); reinstall Titan\n", diagnostics)
+        assert.same({}, observed)
+    end)
+
+    it("roots discovered test modules with the sources discovery selected", function()
+        local descriptor = { kind = "flat", main = "tests/alpha_test.titan",
+            files = { "tests/alpha_test.titan" } }
+        local diagnostics, observed = run_titanc(arguments_with({
+            module = { "pkg.one" }, test = true, test_dir = { "tests" },
+            test_exclude = { "tests.skipped_test" },
+        }), nil, function(fakes)
+            fakes.modules["titan-compiler.testroots"] = {
+                discover = function(context, dirs, excludes, explicit)
+                    fakes.observed.discovery = {
+                        own_resolver = context == fakes.resolver(),
+                        dirs = dirs, excludes = excludes, explicit = explicit,
+                    }
+                    return { "pkg.one", "tests.alpha_test" },
+                        { ["tests.alpha_test"] = descriptor }
+                end,
+            }
+            function fakes.build.run(_, request)
+                fakes.observed.run = request
+                return false, { "stopped after root selection" }
+            end
+        end)
+        assert.equal("stopped after root selection\n", diagnostics)
+        assert.is_true(observed.discovery.own_resolver)
+        assert.same({ "tests" }, observed.discovery.dirs)
+        assert.same({ "tests.skipped_test" }, observed.discovery.excludes)
+        assert.same({ "pkg.one" }, observed.discovery.explicit)
+        assert.same({ "pkg.one", "tests.alpha_test" }, observed.run.roots)
+        assert.same({ ["pkg.one"] = true, ["tests.alpha_test"] = true },
+            observed.run.loader_options.source_roots)
+        assert.equal(descriptor,
+            observed.run.loader_options.source_overrides["tests.alpha_test"])
+        assert.is_true(observed.run.test)
+    end)
+
+    it("stops on failed or reserved test-root discovery", function()
+        local function discover(roots, sources)
+            return run_titanc(arguments_with({
+                module = {}, test = true, test_dir = { "tests" },
+            }), nil, function(fakes)
+                fakes.modules["titan-compiler.testroots"] = {
+                    discover = function() return roots, sources end,
+                }
+            end)
+        end
+        local diagnostics, observed = discover(nil, "no test modules found")
+        assert.equal("no test modules found\n", diagnostics)
+        assert.is_nil(observed.build_jobs)
+        diagnostics, observed = discover({ "tests.alpha_test", "__test.runner" }, {})
+        assert.equal("logical module '__test.runner' is reserved by --test\n", diagnostics)
+        assert.is_nil(observed.build_jobs)
+    end)
+
+    it("locks an explicit executable directory and rejects --exe for a library", function()
+        local diagnostics, observed = run_titanc(arguments_with({ exe = "bin/app" }))
+        assert.equal("--exe is only valid when compiling a standalone or test executable\n",
+            diagnostics)
+        assert.equal("bin", observed.locked[#observed.locked])
+        assert.is_true(observed.lock_released)
+        diagnostics, observed = run_titanc(arguments_with({ exe = "bin/app" }), nil,
+            function(fakes)
+                function fakes.driver.prepare_output_root(directory)
+                    return nil, "cannot create output directory '" .. directory .. "'"
+                end
+            end)
+        assert.equal("cannot create output directory 'bin'\n", diagnostics)
+        assert.is_nil(observed.locked)
+    end)
+
+    it("rejects program-only options for a library build", function()
+        local diagnostics = run_titanc(arguments_with({ no_uv_bootstrap = true }))
+        assert.equal(
+            "--no-uv-bootstrap is only valid when compiling a standalone executable\n",
+            diagnostics)
+        diagnostics = run_titanc(arguments_with({ coverage = true }), nil, function(fakes)
+            fakes.driver.NATIVE_LINK_FLAGS = {}
+            fakes.modules["titan-compiler.coverage"] = {
+                prepare = function() return { selected = {} } end,
+                select = function() return true end,
+            }
+        end)
+        assert.equal("--coverage requires a test or standalone executable; " ..
+            "use -c for coverage objects\n", diagnostics)
+    end)
+
+    it("rejects two requested roots that both define main", function()
+        local diagnostics = run_titanc(ordinary_arguments(nil), nil, function(fakes)
+            local run = fakes.build.run
+            function fakes.build.run(context, request)
+                local built = run(context, request)
+                fakes.driver.imported["pkg.three"].has_main = true
+                fakes.driver.imported["pkg.one"].has_main = true
+                return built
+            end
+        end)
+        assert.equal("pkg.one: multiple main functions found " ..
+            "(already declared in pkg.three)\n", diagnostics)
+    end)
+
+    it("closes the coordinator before propagating a build cancellation signal", function()
+        local diagnostics, observed = run_titanc(ordinary_arguments(nil), nil, function(fakes)
+            record_propagation(fakes)
+            function fakes.build.run() return false, { "build cancelled" }, 2 end
+        end)
+        assert.equal(2, observed.propagated)
+        assert.is_true(observed.closed_before_propagation)
+        assert.equal("build cancelled\n", diagnostics)
+        assert.is_true(observed.lock_released)
+    end)
+
+    it("reports native node reuse and links C-source objects before -X payloads", function()
+        local diagnostics, observed = run_titanc(arguments_with({
+            verbose = true, c_source = { "fresh.c", "cached.c" },
+            extra_object = { "payload.a" },
+        }), nil, function(fakes)
+            local native = fakes.modules["titan-compiler.nativeinputs"]
+            local normalize = native.normalize
+            function native.normalize(request)
+                local normalized = normalize(request)
+                normalized.c_sources = request.cli.c_sources
+                return normalized
+            end
+            function native.compile(_, request)
+                fakes.observed.native_sources = request.sources
+                return {
+                    { source = "fresh.c", path = "out/fresh.o", hit = false },
+                    { source = "cached.c", path = "out/cached.o", hit = true },
+                }
+            end
+            stop_at_link_inputs(fakes)
+        end)
+        assert.equal("Titan native miss fresh.c\nTitan native hit cached.c\n" ..
+            "stopped at the final-link tool request\n", diagnostics)
+        assert.same({ "fresh.c", "cached.c" }, observed.native_sources)
+        assert.same({ "pkg/one.o", "pkg/three.o", "pkg/two.o",
+            "out/fresh.o", "out/cached.o", "payload.a" }, observed.link_inputs)
+    end)
+
+    it("rejects library roots without a common provider prefix", function()
+        local diagnostics = run_titanc(ordinary_arguments(nil), nil, function(fakes)
+            function fakes.driver.common_module_provider() return nil, nil, "pkg.one", "other" end
+        end)
+        assert.equal("cannot link modules into one shared library: 'pkg.one' and " ..
+            "'other' have no common module prefix\n", diagnostics)
+    end)
+
+    it("reserves carried static-provider shims and links their archives", function()
+        local diagnostics, observed = run_titanc(ordinary_arguments(nil), nil, function(fakes)
+            local new_context = fakes.driver.new_resolver_context
+            function fakes.driver.new_resolver_context(options)
+                local context = new_context(options)
+                context.selected_static_providers = { {
+                    archive = "deps/libpkg_dep.a",
+                    entries = { ["pkg.dep"] = {}, ["pkg.carried"] = {} },
+                } }
+                return context
+            end
+            function fakes.driver.plan_module_shims(_, names)
+                fakes.observed.shim_names = names
+                return {}, "pkg.so"
+            end
+            stop_at_link_inputs(fakes)
+        end)
+        assert.equal("stopped at the final-link tool request\n", diagnostics)
+        assert.same({ "pkg.carried", "pkg.dep", "pkg.one", "pkg.three", "pkg.two" },
+            observed.shim_names)
+        assert.same({ "pkg/one.o", "pkg/three.o", "pkg/two.o", "deps/libpkg_dep.a" },
+            observed.link_inputs)
+    end)
+
+    it("keeps uncertified native policy explicit in the final-link tool request", function()
+        local diagnostics = run_titanc(ordinary_arguments(nil), nil, function(fakes)
+            function fakes.driver.incremental_configuration()
+                return nil, "compiler configuration is unreadable"
+            end
+        end)
+        assert.equal("compiler configuration is unreadable\n", diagnostics)
+
+        local function uncertain(configure)
+            local _, observed = run_titanc(ordinary_arguments(nil), nil, function(fakes)
+                configure(fakes.driver)
+                fakes.modules["titan-compiler.incremental"].compiler_component = function()
+                    fakes.observed.compiler_component = true
+                    return "compiler inventory"
+                end
+                stop_at_link_inputs(fakes)
+            end)
+            return observed
+        end
+        local observed = uncertain(function(driver)
+            function driver.incremental_configuration()
+                return nil, "native delegate selection is unknown", "uncertified"
+            end
+        end)
+        assert.equal("native delegate selection is unknown", observed.uncacheable)
+        assert.is_true(observed.compiler_component)
+        observed = uncertain(function(driver)
+            function driver.native_link_backend()
+                return "none", "linker selection is unknown", "uncertified"
+            end
+        end)
+        assert.equal("linker selection is unknown", observed.uncacheable)
+        assert.is_nil(observed.compiler_component)
+    end)
+
+    it("links a standalone program at its logical path unless --exe names one", function()
+        local function program(overrides)
+            local _, observed = run_titanc(arguments_with(overrides), nil, function(fakes)
+                local run = fakes.build.run
+                function fakes.build.run(context, request)
+                    local built = run(context, request)
+                    fakes.driver.imported["app.main"].has_main = true
+                    return built
+                end
+                function fakes.driver.output_tool_descriptors(_, kind)
+                    fakes.observed.kind = kind
+                    return { compiler_argv = { "cc" }, link_flags = {},
+                        toolchain = "toolchain", tools = {} }
+                end
+                local certificate = fakes.modules["titan-compiler.linkcertificate"]
+                certificate.output_tools = function() return {} end
+                certificate.prepare = function(_, spec)
+                    fakes.observed.outputs = spec.outputs
+                    fakes.observed.entry = spec.entry
+                    error("stopped at final-link preparation", 0)
+                end
+            end)
+            return observed
+        end
+        local observed = program({ module = { "app.main" } })
+        assert.equal("program", observed.kind)
+        assert.same({ { path = "app/main", executable = true } }, observed.outputs)
+        assert.same({ module = "app.main", no_uv_bootstrap = false }, observed.entry)
+        observed = program({ module = { "app.main" }, exe = "bin/app" })
+        assert.same({ { path = "bin/app", executable = true } }, observed.outputs)
+    end)
+
+    it("reports a failed final-link preparation and preserves its cancellation", function()
+        local diagnostics = run_titanc(ordinary_arguments(nil), nil, function(fakes)
+            fakes.modules["titan-compiler.linkcertificate"].prepare = function()
+                error("cannot certify link input pkg/one.o", 0)
+            end
+        end)
+        assert.equal("cannot certify link input pkg/one.o\n", diagnostics)
+        local cancellation = {}
+        local _, observed, failure = run_titanc(ordinary_arguments(nil), nil, function(fakes)
+            fakes.modules["titan-compiler.linkcertificate"].prepare = function()
+                error(cancellation, 0)
+            end
+        end, "raise")
+        assert.equal(cancellation, failure)
+        assert.is_true(observed.lock_released)
+    end)
+
+    it("reports final-link hits and misses and stops before an unrecorded relink", function()
+        local diagnostics, observed = run_titanc(arguments_with({ verbose = true }), nil,
+            function(fakes)
+                fakes.modules["titan-compiler.linkcertificate"].check = function() return true end
+                function fakes.driver.compile_modules()
+                    error("a final-link hit must not compile", 0)
+                end
+            end, "success")
+        assert.equal("Titan link hit pkg.so\n", diagnostics)
+        assert.is_true(observed.digest_cache_saved)
+        assert.is_true(observed.lock_released)
+
+        diagnostics = run_titanc(arguments_with({ verbose = true }), nil, function(fakes)
+            fakes.modules["titan-compiler.linkcertificate"].invalidate = function()
+                return nil, "record is read-only"
+            end
+        end)
+        assert.equal("Titan link miss pkg.so: no-record\n" ..
+            "cannot invalidate final link record: record is read-only\n", diagnostics)
+    end)
+
+    it("prints checked ASTs, including roots that only warn, and stops on errors", function()
+        local diagnostics, _, _, printed = run_titanc(arguments_with({
+            module = { "app", "lib" }, print_ast = true,
+        }), nil, function(fakes)
+            function fakes.build.plan() return { order = {}, modules = {} } end
+            fakes.modules["titan-compiler.parser"].pretty_print_ast = function(ast)
+                return "AST " .. ast.name
+            end
+            function fakes.checker.checkimport(name)
+                if name == "app" then return false, "app.titan:1:1: syntax error" end
+                fakes.driver.imported[name] = { ast = { name = name } }
+                return true, { "lib.titan:2:1: unused import" }
+            end
+        end)
+        assert.equal("app.titan:1:1: syntax error\nlib.titan:2:1: unused import\n", diagnostics)
+        assert.equal("AST lib", printed)
+    end)
+
+    it("plans a printed program's entrypoint beside its generated output", function()
+        local diagnostics, observed, _, printed = run_titanc(arguments_with({
+            module = { "app" }, print_ast = true,
+        }), nil, function(fakes)
+            function fakes.build.plan(_, request)
+                fakes.observed.planned_roots = request.roots
+                return { order = { "app" }, modules = {} }
+            end
+            function fakes.driver.preflight_build_outputs(_, plan, options)
+                fakes.observed.preflight = { plan = plan, roots = options.roots }
+                return true
+            end
+            fakes.modules["titan-compiler.parser"].pretty_print_ast = function(ast)
+                return "AST " .. ast.name
+            end
+            local check = fakes.checker.checkimport
+            function fakes.checker.checkimport(name, loader)
+                local ok, errors = check(name, loader)
+                fakes.driver.imported[name].ast = { name = name }
+                return ok, errors
+            end
+            function fakes.checker.has_main(ast) return ast.name == "app" end
+            function fakes.driver.generated_output_path(stem, output)
+                assert.is_nil(output)
+                return "generated/" .. stem
+            end
+            function fakes.driver.validate_program_output_paths(_, program, entrypoint)
+                fakes.observed.program = program
+                fakes.observed.entrypoint = entrypoint
+                return nil, "stopped at program output validation"
+            end
+        end)
+        assert.equal("stopped at program output validation\n", diagnostics)
+        assert.equal("AST app", printed)
+        assert.same({ "app" }, observed.planned_roots)
+        assert.same({ "app" }, observed.preflight.roots)
+        assert.same({ "app" }, observed.preflight.plan.order)
+        assert.equal("app", observed.program)
+        assert.equal("generated/app__entrypoint.c", observed.entrypoint)
+    end)
+
+    it("records a completed provider link and reports a failed final record", function()
+        local committed
+        local diagnostics, observed = run_titanc(ordinary_arguments(nil), nil, function(fakes)
+            link_through(fakes)
+            fakes.modules["titan-compiler.linkcertificate"].commit = function(_, ticket)
+                committed = ticket
+                return true
+            end
+        end, "success")
+        assert.equal("", diagnostics)
+        assert.equal("pkg.so", observed.published)
+        assert.equal("stage", observed.removed)
+        assert.same({ "pkg.one", "pkg.three", "pkg.two" }, observed.pair.module_names)
+        assert.equal("link", committed.directory)
+        assert.is_true(observed.lock_released)
+
+        for _, case in ipairs({
+            { function() error("link record write failed", 0) end, "link record write failed\n" },
+            { function() return nil, "disk full" end, "cannot record final link: disk full\n" },
+        }) do
+            diagnostics = run_titanc(ordinary_arguments(nil), nil, function(fakes)
+                link_through(fakes)
+                fakes.modules["titan-compiler.linkcertificate"].commit = case[1]
+            end)
+            assert.equal(case[2], diagnostics)
+        end
+        local cancellation = {}
+        local _, _, failure = run_titanc(ordinary_arguments(nil), nil, function(fakes)
+            link_through(fakes)
+            fakes.modules["titan-compiler.linkcertificate"].commit = function()
+                error(cancellation, 0)
+            end
+        end, "raise")
+        assert.equal(cancellation, failure)
+    end)
+
+    it("closes the coordinator before propagating a provider-link cancellation", function()
+        local diagnostics, observed = run_titanc(ordinary_arguments(nil), nil, function(fakes)
+            link_through(fakes)
+            function fakes.driver.link_provider_pair() return nil, "provider link interrupted", 15 end
+            record_propagation(fakes)
+        end)
+        assert.equal(15, observed.propagated)
+        assert.is_true(observed.closed_before_propagation)
+        assert.equal("provider link interrupted\n", diagnostics)
+        assert.is_nil(observed.published)
     end)
 end)
 

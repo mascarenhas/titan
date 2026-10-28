@@ -4,10 +4,12 @@ local cdriver = require "c-parser.cdriver"
 local depfile = require "titan-compiler.depfile"
 local driver = require "titan-compiler.driver"
 local incremental = require "titan-compiler.incremental"
+local certificate = require "titan-compiler.linkcertificate"
 local native = require "titan-compiler.nativeinputs"
 local lfs = require "lfs"
 local platform = require "titan-compiler.platform"
 local process = require "titan-compiler.process"
+local version = require "titan-compiler.version"
 local temporary = require "spec.support.temporary"
 
 local function context() return { io = compiler_io.new_sync() } end
@@ -61,6 +63,35 @@ describe("normalized native inputs", function()
         assert.same(before.cppflags, after.cppflags)
         assert.same(before.cflags, after.cflags)
         assert.not_same(before.link_argv, after.link_argv)
+    end)
+
+    it("links default libraries after default flags and before ambient and CLI policy", function()
+        local normalized = assert(native.normalize({
+            defaults = { ldflags = { "-Wl,default" }, libraries = { "m", "dl" } },
+            env = { TITAN_EXTRA_LDFLAGS = { "-Lambient" } },
+            cli = { ordered = { { kind = "library", value = "z" } } },
+        }))
+        assert.same({ "-Wl,default", "-lm", "-ldl", "-Lambient", "-lz" }, normalized.link_argv)
+        assert.same({ "m", "dl", "z" }, normalized.libraries)
+        assert.same({}, normalized.compile_argv)
+    end)
+
+    it("rejects malformed ordered command-line native arguments", function()
+        for _, case in ipairs({
+            { { kind = "define", value = "NAME\0VALUE" }, "native argument must be a NUL-free string" },
+            { { kind = "cflag", value = 7 }, "native argument must be a NUL-free string" },
+            { { kind = "library", value = "" }, "library list contains an empty name" },
+            { { kind = "library", value = ",m" }, "library list contains an empty name" },
+            { { kind = "library", value = "m," }, "library list contains an empty name" },
+            { { kind = "library", value = "a,,b" }, "library list contains an empty name" },
+            { { kind = "framework", value = "Cocoa" }, "unknown native argument kind: framework" },
+        }) do
+            local normalized, err = native.normalize({ cli = { ordered = {
+                { kind = "include", value = "accepted" }, case[1],
+            } } })
+            assert.is_nil(normalized)
+            assert.equal(case[2], err)
+        end
     end)
 end)
 
@@ -334,6 +365,107 @@ int helper(void) { return 2; }
         assert.matches("native dependency changed during compilation", err, 1, true)
         local accepted = assert(build())[1]
         assert.is_false(accepted.hit)
+    end)
+
+    it("publishes a certified node through the coordinator and reuses its record", function()
+        local filesystem, publications = context(), {}
+        local options = { publish = function(publication)
+            publications[#publications + 1] = publication
+            assert.is_true(publication.cacheable)
+            assert.equal(version.TITAN_NATIVE_RECORD_SCHEMA, publication.metadata.schema)
+            for _, path in ipairs({ publication.object, publication.record }) do
+                if filesystem.io:lstat(path) then assert(filesystem.io:unlink(path)) end
+            end
+            assert(certificate.write_record(filesystem, publication.record, publication.metadata))
+            return filesystem.io:rename(publication.staged, publication.object)
+        end }
+        local first = assert(build(nil, true, nil, nil, options))[1]
+        assert.is_false(first.hit)
+        assert.is_true(first.cacheable)
+        assert.equal(1, #publications)
+        assert.equal(first.path, publications[1].object)
+        assert.equal(first.identity, publications[1].metadata.object)
+        assert.is_nil(lfs.symlinkattributes(publications[1].staged))
+        phases = {}
+        local second = assert(build(nil, true, nil, nil, options))[1]
+        assert.is_true(second.hit)
+        assert.equal(first.identity, second.identity)
+        assert.equal(1, #publications)
+        assert.same({ "native-preprocess" }, phases)
+    end)
+
+    it("retires the stage when the coordinator refuses publication", function()
+        local staged
+        local objects, err = build(nil, true, nil, nil, { publish = function(publication)
+            staged = publication.staged
+            return nil, "coordinator refused publication"
+        end })
+        assert.is_nil(objects)
+        assert.equal("coordinator refused publication", err)
+        assert.is_string(staged)
+        assert.is_nil(lfs.symlinkattributes(staged))
+        for name in lfs.dir(root .. "/.native") do
+            assert.truthy(name == "." or name == "..", "retained refused native output: " .. name)
+        end
+    end)
+
+    it("reports native scratch cleanup failures and preserves cleanup cancellation", function()
+        for _, failure in ipairs({ "scratch unlink denied", {} }) do
+            local ctx = context()
+            local unlink = ctx.io.unlink
+            function ctx.io:unlink(filename)
+                if filename:match("%.i$") then
+                    if type(failure) == "string" then return nil, failure end
+                    error(failure, 0)
+                end
+                return unlink(self, filename)
+            end
+            local argv = assert(cdriver.split_shell_words(driver.CC))
+            argv[#argv + 1] = "-I" .. root
+            local request = { sources = { source }, output_root = root, compile_argv = argv,
+                toolchain = "test-selected-toolchain", incremental = true }
+            if type(failure) == "string" then
+                local objects, err = native.compile(ctx, request)
+                assert.is_nil(objects)
+                assert.equal("native scratch cleanup: scratch unlink denied", err)
+            else
+                local ok, err = pcall(native.compile, ctx, request)
+                assert.is_false(ok)
+                assert.equal(failure, err)
+            end
+        end
+    end)
+
+    it("certifies a toolchain descriptor and builds without a record when its search path is unknown", function()
+        local compiler = assert(cdriver.split_shell_words(driver.CC))
+        local descriptor = { compiler_argv = compiler, stage_tools = {},
+            banner = "gcc version 14.2.0", preprocessor_identity = "#define __GNUC__ 14\n" }
+        local first = assert(build(nil, true, nil, nil, { toolchain = descriptor }))[1]
+        assert.is_false(first.hit)
+        assert.is_true(first.cacheable)
+        local sidecar = first.path:gsub("%.o$", ".record")
+        assert.equal("file", lfs.attributes(sidecar, "mode"))
+        assert.is_true(assert(build(nil, true, nil, nil, { toolchain = descriptor }))[1].hit)
+        if platform.windows then return end
+
+        -- An unset PATH leaves a bare compiler name without a certifiable search.
+        local getenv = platform.getenv
+        platform.getenv = function(name)
+            if name == "PATH" then return nil end
+            return getenv(name)
+        end
+        local ok, objects, err = pcall(build, nil, true, nil, nil, { toolchain = {
+            compiler_argv = { compiler[1]:match("[^/\\]+$") }, stage_tools = {},
+            banner = descriptor.banner, preprocessor_identity = descriptor.preprocessor_identity,
+        } })
+        platform.getenv = getenv
+        assert.is_true(ok, tostring(objects))
+        local object = assert(objects, err)[1]
+        assert.is_false(object.hit)
+        assert.is_false(object.cacheable)
+        assert.equal(first.path, object.path)
+        assert.equal("file", lfs.attributes(object.path, "mode"))
+        assert.is_nil(lfs.symlinkattributes(sidecar))
     end)
 end)
 
