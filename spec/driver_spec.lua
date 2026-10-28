@@ -4226,6 +4226,15 @@ describe("standalone output ownership", function()
         assert.matches("aliases output", err, 1, true)
     end)
 
+    it("requires a named executable and a C entrypoint", function()
+        local ok, err = driver.validate_program_output_paths({}, "", "entrypoint.c", {})
+        assert.is_nil(ok)
+        assert.equal("standalone executable path must be a nonempty string", err)
+        ok, err = driver.validate_program_output_paths({}, "program", "entrypoint.cc", {})
+        assert.is_nil(ok)
+        assert.equal("standalone entrypoint path must end in .c", err)
+    end)
+
     posix_output_it("rejects source and synthetic output collisions before compilation",
        function()
         local stems = {
@@ -4450,6 +4459,224 @@ describe("standalone output ownership", function()
                 end
             end
         end)
+    end)
+end)
+
+describe("build output preflight", function()
+    local root, contexts, previous_imported, previous_registry
+    before_each(function()
+        root = temporary.name()
+        assert(os.remove(root))
+        assert(lfs.mkdir(root))
+        contexts = {}
+        previous_imported, previous_registry = driver.imported, types.registry
+        driver.imported, types.registry = {}, {}
+    end)
+    after_each(function()
+        driver.imported, types.registry = previous_imported, previous_registry
+        for _, context in ipairs(contexts) do driver.close_resolver_context(context) end
+        remove_tree(root)
+    end)
+
+    local function resolver()
+        local context = driver.new_resolver_context()
+        contexts[#contexts + 1] = context
+        return context
+    end
+
+    local function descriptor(name, contents)
+        local relative = name:gsub("[.]", "/")
+        local directory = root
+        for component in relative:gmatch("([^/]+)/") do
+            directory = directory .. "/" .. component
+            if not lfs.attributes(directory) then assert(lfs.mkdir(directory)) end
+        end
+        local filename = root .. "/" .. relative .. ".titan"
+        write_file(filename, contents)
+        return { kind = "flat", main = filename, files = { filename },
+            program_output = root .. "/" .. relative }
+    end
+
+    -- Fresh source modules in dependency order.
+    local function source_plan(sources)
+        local plan = { order = {}, modules = {} }
+        for _, entry in ipairs(sources) do
+            plan.order[#plan.order + 1] = entry[1]
+            plan.modules[entry[1]] = { kind = "source", source = descriptor(entry[1], entry[2]) }
+        end
+        return plan
+    end
+
+    local function preflight(plan, options)
+        options.c_parts = options.c_parts or 1
+        return driver.preflight_build_outputs(resolver(), plan, options)
+    end
+
+    local function reserved(plan, owner, suffix)
+        for _, reservation in ipairs(plan.reservations) do
+            if reservation.owner == owner and (suffix == nil or
+               paths.to_slash(reservation.path):sub(-#suffix) == suffix) then
+                return reservation
+            end
+        end
+    end
+
+    local function contains(values, expected)
+        for _, value in ipairs(values) do
+            if paths.to_slash(value) == paths.to_slash(expected) then return true end
+        end
+        return false
+    end
+
+    it("selects main through local, self-qualified and imported source aliases", function()
+        local plan = source_plan({
+            { "types", "type Args = {string}\n" },
+            { "app", [[
+local types = import "types"
+type Arguments = types.Args
+type Result = integer
+type Code = M.Result
+function main(args: Arguments): Code
+    return 0
+end
+]] },
+        })
+        assert(preflight(plan, { roots = { "app" } }))
+        assert.is_table(reserved(plan, "standalone executable"))
+        assert.is_nil(reserved(plan, "provider DSO"))
+
+        -- Without the alias target the signature is not a program entry.
+        plan = source_plan({ { "lib", "type Code = integer\nfunction main(args: Unknown): Code return 0 end\n" } })
+        assert(preflight(plan, { roots = { "lib" } }))
+        assert.is_nil(reserved(plan, "standalone executable"))
+        assert.is_table(reserved(plan, "provider DSO"))
+    end)
+
+    it("selects main through an alias of an already checked dependency interface", function()
+        local parser = require "titan-compiler.parser"
+        local checker = require "titan-compiler.checker"
+        local contents = "type Args = {string}\n"
+        local filename = root .. "/checked_types.titan"
+        write_file(filename, contents)
+        local ast = assert(parser.parse(filename, contents))
+        local modtype, errors = checker.check("checked_types", ast, contents, filename)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        driver.imported.checked_types = { kind = "dynamic", type = modtype }
+        local plan = source_plan({ { "app", [[
+local checked_types = import "checked_types"
+function main(args: checked_types.Args): integer
+    return 0
+end
+]] } })
+        assert(preflight(plan, { roots = { "app" } }))
+        assert.is_table(reserved(plan, "standalone executable"))
+    end)
+
+    it("rejects a second main and program-only options for a library", function()
+        local main = "function main(args: {string}): integer return 0 end\n"
+        local ok, err = preflight(source_plan({ { "app", main }, { "tool", main } }),
+            { roots = { "app", "tool" } })
+        assert.is_nil(ok)
+        assert.equal("tool: multiple main functions found (already declared in app)", err)
+        -- Test and compile-only builds never select a standalone main.
+        assert(preflight(source_plan({ { "app", main }, { "tool", main } }),
+            { roots = { "app", "tool" }, compile_only = true }))
+
+        local library = "function answer(): integer return 42 end\n"
+        ok, err = preflight(source_plan({ { "lib", library } }),
+            { roots = { "lib" }, exe = root .. "/bin/lib" })
+        assert.is_nil(ok)
+        assert.equal("--exe is only valid when compiling a standalone or test executable", err)
+        ok, err = preflight(source_plan({ { "lib", library } }),
+            { roots = { "lib" }, no_uv_bootstrap = true })
+        assert.is_nil(ok)
+        assert.equal("--no-uv-bootstrap is only valid when compiling a standalone executable", err)
+    end)
+
+    it("rejects unrelated library roots and colliding C symbol prefixes", function()
+        local library = "function answer(): integer return 42 end\n"
+        local ok, err = preflight(source_plan({ { "alpha", library }, { "beta", library } }),
+            { roots = { "alpha", "beta" } })
+        assert.is_nil(ok)
+        assert.equal("cannot link modules into one shared library: 'alpha' and 'beta' " ..
+            "have no common module prefix", err)
+        ok, err = preflight(source_plan({ { "clash.a-b", library }, { "clash.a.b", library } }),
+            { roots = { "clash.a-b", "clash.a.b" } })
+        assert.is_nil(ok)
+        assert.equal("cannot link logical modules 'clash.a-b' and 'clash.a.b': " ..
+            "both use C symbol prefix 'clash_a_b'", err)
+    end)
+
+    it("reserves shims for modules carried by a selected static provider", function()
+        local archive = root .. "/libpkg_dep.a"
+        write_file(archive, "!<arch>\n")
+        local plan = source_plan({ { "pkg.app", "function answer(): integer return 42 end\n" } })
+        plan.modules["pkg.dep"] = { kind = "static", archive = archive }
+        driver.imported["pkg.dep"] = {
+            kind = "static", static_archive = archive,
+            external_symbols = coder.interface_external_symbols("pkg.dep",
+                types.Module("pkg.dep", {})),
+            static_provider = { archive = archive, entries = {
+                ["pkg.dep"] = { type = types.Module("pkg.dep", {}) },
+                ["pkg.carried"] = { type = types.Module("pkg.carried", {}) },
+            } },
+        }
+        assert(preflight(plan, { roots = { "pkg.app" }, output_root = root .. "/out" }))
+        for _, name in ipairs({ "app", "dep", "carried" }) do
+            assert.is_table(reserved(plan, "generated Lua shim", "/out/pkg/" .. name .. ".lua"),
+                name)
+        end
+        assert.is_true(contains(plan.inputs, archive))
+    end)
+
+    it("certifies a saved module from its record's inventory and header inputs", function()
+        local plan = source_plan({ { "saved", "function answer(): integer return 42 end\n" } })
+        plan.modules.saved.certified = { status = "hit", record = {
+            type = types.Module("saved", {}),
+            object_metadata = { has_main = false },
+            c_header_dependencies = {
+                { kind = "quoted", path = root .. "/saved.h" },
+                { kind = "search", path = root .. "/candidate.h" },
+            },
+        } }
+        assert(preflight(plan, { roots = { "saved" } }))
+        assert.is_true(contains(plan.inputs, root .. "/saved.h"))
+        assert.is_false(contains(plan.inputs, root .. "/candidate.h"))
+        assert.is_table(reserved(plan, "provider DSO"))
+    end)
+
+    it("recognizes older compiler-generated C and refuses authored C at an output", function()
+        local cpreamble = require "titan-compiler.cpreamble"
+        local stem = root .. "/gen"
+        local split_push = "#if defined(__ELF__)\n#pragma GCC visibility push(protected)\n" ..
+            "#endif\nint split_unit;\n"
+        local cases = {
+            { "/* An older generated unit. */\n" .. cpreamble.fixed_prefix, true },
+            { "#include \"" .. root .. "/elsewhere/gen.priv.h\"\n" .. split_push, false },
+            { "int authored(void) { return 1; }\n", false },
+        }
+        if not platform.windows then
+            cases[#cases + 1] = { "#include " ..
+                assert(ffiheaders.quote_header(paths.normalize(stem .. ".priv.h"))) .. "\n" ..
+                split_push, true }
+            cases[#cases + 1] = { "#include \"/moved/output/gen.priv.h\"\n" .. split_push,
+                true, driver.PRIVATE_HEADER_MARKER .. "\n" }
+        end
+        for index, case in ipairs(cases) do
+            local plan = source_plan({ { "gen", "function answer(): integer return 42 end\n" } })
+            write_file(stem .. ".c", case[1])
+            if case[3] then write_file(stem .. ".priv.h", case[3]) end
+            local ok, err = preflight(plan, { roots = { "gen" }, compile_only = true })
+            if case[2] then
+                assert.truthy(ok, err)
+            else
+                assert.is_nil(ok, index)
+                assert.matches("for logical module 'gen' aliases input", err, 1, true)
+                assert.matches("(not compiler-generated C; move it or use another output directory)",
+                    err, 1, true)
+            end
+            if case[3] then assert(os.remove(stem .. ".priv.h")) end
+        end
     end)
 end)
 
@@ -5443,6 +5670,511 @@ describe("compiler module loader", function()
                 assert.is_nil(driver.imported[name].compiled)
             end
             assert.is_nil(next_context.incremental_configuration)
+        end)
+
+        -- A coordinator's planning loader over the given source modules, with
+        -- each module's ordinary or `.titan` imports supplied by name.
+        local function planning_loader(sources, imports, certified)
+            for name, contents in pairs(sources) do
+                write_file(source .. "/" .. name .. ".titan", contents)
+            end
+            if not certified then incremental.toolchain_identity = uncertain_toolchain end
+            local context = tracked_context()
+            local loader = fresh_loader({
+                context = context, incremental = true, plan_mode = true,
+                imports_for = function(name) return imports[name] or {} end,
+            })
+            return context, loader
+        end
+
+        -- One worker over closed configuration and descriptor data.
+        local function worker_compile(context, descriptor, name, options)
+            options = options or {}
+            local configuration = assert(driver.worker_configuration(context))
+            if options.configure then options.configure(configuration) end
+            local imported, registry = driver.imported, types.registry
+            local extra_cflags = driver.EXTRA_CFLAGS
+            driver.imported, types.registry = {}, {}
+            local worker = assert(driver.new_worker_context(
+                configuration, compiler_io.new_sync()))
+            contexts[#contexts + 1] = worker
+            local result, compile_error = driver.compile_planned_module(
+                worker, name, { plan = descriptor, jobs = options.jobs })
+            driver.imported, types.registry = imported, registry
+            driver.EXTRA_CFLAGS = extra_cflags
+            return result, compile_error
+        end
+
+        local function publish_planned(context, plan, name, options)
+            assert(driver.invalidate_source_object(
+                context, name, plan.modules[name].source))
+            local result = assert(worker_compile(context,
+                driver.plan_descriptor(plan, name), name, options))
+            local published = assert(driver.publish_staged_module(context, result))
+            plan.update(name, published)
+            return published, result
+        end
+
+        local function raised(action)
+            local ok, err = pcall(action)
+            assert.is_false(ok)
+            return tostring(err)
+        end
+
+        it("plans an unavailable import and reports it again from the worker", function()
+            local consumer = "planned_unavailable_consumer"
+            local missing = "planned_unavailable_dependency"
+            local context, loader = planning_loader({
+                [consumer] = 'local dependency = import "' .. missing .. '"\n' ..
+                    "function answer(): integer return dependency.answer() end\n",
+            }, { [consumer] = { { name = missing } } })
+            local loaded, _, diagnostics = loader(consumer)
+            assert.is_true(loaded)
+            assert.equal(0, #diagnostics)
+            local plan = driver.resolution_plan(context)
+            assert.same({ consumer }, plan.order)
+            local unavailable = plan.modules[missing]
+            assert.equal("unavailable", unavailable.kind)
+            assert.is_string(unavailable.error)
+            assert.equal(unavailable.error, plan.modules[consumer].failed[missing])
+            assert.is_nil(plan.linked(missing))
+            local digest, digest_error = plan.digest(missing)
+            assert.is_nil(digest)
+            assert.equal("unavailable", digest_error)
+            local descriptor = driver.plan_descriptor(plan, consumer)
+            assert.same({ kind = "unavailable", linked = false, error = unavailable.error },
+                descriptor.modules[missing])
+            local result, compile_error = worker_compile(context, descriptor, consumer)
+            assert.is_nil(result)
+            assert.matches(unavailable.error, compile_error, 1, true)
+
+            -- The plan and its resolver keep their documented preconditions.
+            assert.matches("the build plan has no source module '" .. missing .. "'",
+                raised(function() driver.plan_descriptor(plan, missing) end), 1, true)
+            assert.matches("only planned source modules accept a certified record",
+                raised(function() plan.update(missing, {}) end), 1, true)
+            assert.matches("a planned module update requires its certified record",
+                raised(function() plan.update(consumer, {}) end), 1, true)
+            assert.matches("a resolution plan requires an open planning loader bound to its " ..
+                "resolver context", raised(function() driver.resolution_plan(context) end), 1, true)
+            assert.matches("a resolution plan requires a resolver context",
+                raised(function() driver.resolution_plan({}) end), 1, true)
+            assert.matches("restoring an object requires a resolver context",
+                raised(function() driver.restore_source_object({}, consumer) end), 1, true)
+            assert.matches("restoring an object requires a loader bound to its resolver context",
+                raised(function()
+                    driver.restore_source_object(tracked_context(), consumer)
+                end), 1, true)
+            assert.matches("source lookup requires a resolver context",
+                raised(function() driver.resolve_source({}, consumer) end), 1, true)
+        end)
+
+        it("orders import cycles and their importers after acyclic planned modules", function()
+            local context, loader = planning_loader({
+                planned_cycle_a = "function a(): integer return 1 end\n",
+                planned_cycle_b = "function b(): integer return 2 end\n",
+                planned_cycle_leaf = "function leaf(): integer return 3 end\n",
+                planned_cycle_root = "function root(): integer return 4 end\n",
+                planned_cycle_self = "function itself(): integer return 5 end\n",
+            }, {
+                planned_cycle_root = {
+                    { name = "planned_cycle_a" }, { name = "planned_cycle_leaf" },
+                    { name = "planned_cycle_self" },
+                },
+                planned_cycle_a = { { name = "planned_cycle_b" } },
+                planned_cycle_b = { { name = "planned_cycle_a" } },
+                planned_cycle_self = { { name = "planned_cycle_self" } },
+            })
+            assert.is_true((loader("planned_cycle_root")))
+            local plan = driver.resolution_plan(context)
+            assert.same({
+                "planned_cycle_leaf", "planned_cycle_a", "planned_cycle_b",
+                "planned_cycle_root", "planned_cycle_self",
+            }, plan.order)
+            assert.is_nil(plan.modules.planned_cycle_leaf.cyclic)
+            for _, name in ipairs({ "planned_cycle_a", "planned_cycle_b",
+                    "planned_cycle_root", "planned_cycle_self" }) do
+                assert.is_true(plan.modules[name].cyclic, name)
+            end
+            assert.is_string(plan.modules.planned_cycle_b.failed.planned_cycle_a)
+            assert.is_string(plan.modules.planned_cycle_self.failed.planned_cycle_self)
+        end)
+
+        it("rejects worker descriptors that diverge from the coordinator's plan", function()
+            local base, middle = "planned_chain_base", "planned_chain_middle"
+            local top, direct = "planned_chain_top", "planned_chain_direct"
+            local context, loader = planning_loader({
+                [base] = "function answer(): integer return 40 end\n",
+                [middle] = 'local base = import "' .. base .. '"\n' ..
+                    "function answer(): integer return base.answer() + 1 end\n",
+                [top] = 'local middle = import "' .. middle .. '"\n' ..
+                    "function answer(): integer return middle.answer() + 1 end\n",
+                [direct] = 'local middle = import "' .. middle .. '.titan"\n' ..
+                    "function answer(): integer return middle.answer() + 2 end\n",
+            }, {
+                [middle] = { { name = base } },
+                [top] = { { name = middle } },
+                [direct] = { { name = middle, source_required = true } },
+            })
+            for _, root_name in ipairs({ top, direct }) do
+                local loaded, _, diagnostics = loader(root_name)
+                assert.is_true(loaded)
+                assert.equal(0, #diagnostics)
+            end
+            local plan = driver.resolution_plan(context)
+            assert.same({ base, middle, direct, top }, plan.order)
+            publish_planned(context, plan, base)
+            publish_planned(context, plan, middle)
+
+            local function diverged(name, change)
+                local descriptor = driver.plan_descriptor(plan, name)
+                change(descriptor.modules)
+                local result, compile_error = worker_compile(context, descriptor, name)
+                assert.is_nil(result)
+                return compile_error
+            end
+            assert.matches("build plan divergence: module '" .. middle ..
+                "' is not in the coordinator's plan",
+                diverged(top, function(modules) modules[middle] = nil end), 1, true)
+            assert.matches("build plan divergence: module '" .. middle .. "' has no accepted object",
+                diverged(top, function(modules) modules[middle].object = nil end), 1, true)
+            assert.matches("cannot read planned object for module '" .. middle .. "'",
+                diverged(top, function(modules)
+                    modules[middle].object = source .. "/missing.o"
+                end), 1, true)
+            write_file(source .. "/not-an-object.o", "not an object")
+            assert.matches("cannot decode planned object for module '" .. middle .. "'",
+                diverged(top, function(modules)
+                    modules[middle].object = source .. "/not-an-object.o"
+                end), 1, true)
+            assert.matches("build plan divergence: module '" .. middle ..
+                "' has unsupported planned kind 'archive'",
+                diverged(top, function(modules)
+                    modules[middle] = { kind = "archive", linked = true }
+                end), 1, true)
+            assert.matches("build plan divergence: source-imported module '" .. middle ..
+                "' is planned as a dynamic provider",
+                diverged(direct, function(modules)
+                    modules[middle] = { kind = "dynamic", linked = false }
+                end), 1, true)
+            -- A restored dependency's own recorded imports also come from the plan.
+            assert.matches("build plan divergence: module '" .. base ..
+                "' is not in the coordinator's plan",
+                diverged(top, function(modules) modules[base] = nil end), 1, true)
+            assert.matches("build plan divergence: module '" .. middle ..
+                "' is not linked in the plan but not in the worker's selection",
+                diverged(top, function(modules) modules[middle].linked = false end), 1, true)
+
+            local valid = driver.plan_descriptor(plan, top)
+            local result, compile_error = worker_compile(context, {
+                protocol = valid.protocol, modname = middle, modules = valid.modules,
+            }, top)
+            assert.is_nil(result)
+            assert.equal("invalid build plan for module '" .. top .. "'", compile_error)
+            result = assert(worker_compile(context, valid, top))
+            assert.equal(top, result.modname)
+
+            -- The coordinator restores only complete records whose imports it selected.
+            local accepted = plan.accepted(middle)
+            local metadata = {}
+            for key, value in pairs(accepted.record.object_metadata) do metadata[key] = value end
+            metadata.imports = { { name = "planned_chain_unselected" } }
+            local missing, code, detail = driver.restore_source_object(context, middle,
+                plan.modules[middle].source, setmetatable({ object_metadata = metadata },
+                    { __index = accepted.record }))
+            assert.is_nil(missing)
+            assert.equal("dependency-unavailable", code)
+            assert.equal("planned_chain_unselected", detail)
+            missing, code, detail = driver.restore_source_object(context, middle,
+                plan.modules[middle].source, { object_metadata = {} })
+            assert.is_nil(missing)
+            assert.equal("record-unreadable", code)
+            assert.equal("record has no object metadata", detail)
+            context.probe_verbose = true
+            local entry, hit = capture_stderr(function()
+                return assert(driver.restore_source_object(context, base,
+                    plan.modules[base].source, plan.accepted(base)))
+            end)
+            context.probe_verbose = nil
+            assert.equal("Titan object hit " .. base .. ": " .. entry.compiled .. "\n", hit)
+        end)
+
+        it("compiles planned split parts in parallel and retires their published inventory", function()
+            local name = "planned_split_parts"
+            local functions = {}
+            for index = 1, 8 do
+                functions[index] = ("function value%d(): integer return %d end\n"):format(index, index)
+            end
+            local context, loader = planning_loader({ [name] = table.concat(functions) }, {})
+            assert.is_true((loader(name)))
+            local plan = driver.resolution_plan(context)
+            local stem = source .. "/" .. name
+            local _, result = publish_planned(context, plan, name, {
+                jobs = 2,
+                configure = function(configuration)
+                    configuration.policy.c_parts = 4
+                    configuration.policy.split_threshold = 1
+                end,
+            })
+            assert.is_true(#result.objects > 1)
+            local wrote_private_header = false
+            for _, filename in ipairs(result.written) do
+                if paths.to_slash(filename) == paths.to_slash(paths.normalize(stem .. ".priv.h")) then
+                    wrote_private_header = true
+                end
+            end
+            assert.is_true(wrote_private_header)
+            for _, object in ipairs(result.objects) do
+                assert.equal("file", lfs.attributes(object, "mode"), object)
+            end
+            write_file(stem .. ".part1.gcda", "stale part counters")
+            assert(driver.invalidate_source_object(context, name, plan.modules[name].source))
+            for _, object in ipairs(result.objects) do
+                assert.is_nil(lfs.attributes(object), object)
+            end
+            for index = 1, #result.objects - 1 do
+                assert.is_nil(lfs.attributes(stem .. ".part" .. index .. ".c"))
+            end
+            assert.is_nil(lfs.attributes(stem .. ".part1.gcda"))
+            assert.equal("file", lfs.attributes(stem .. ".c", "mode"))
+        end)
+
+        it("refuses to invalidate a directory or an object it cannot remove", function()
+            local name = "planned_invalidation"
+            local context, loader = planning_loader({
+                [name] = "function answer(): integer return 42 end\n",
+            }, {})
+            assert.is_true((loader(name)))
+            local plan = driver.resolution_plan(context)
+            local planned = plan.modules[name].source
+            local primary = source .. "/" .. name .. ".o"
+            assert(lfs.mkdir(primary))
+            local ok, err = driver.invalidate_source_object(context, name, planned)
+            assert.is_nil(ok)
+            assert.equal("object output '" .. primary .. "' for module '" .. name ..
+                "' is a directory", err)
+            assert(lfs.rmdir(primary))
+            publish_planned(context, plan, name)
+            local unlink = context.io.unlink
+            function context.io:unlink() return nil, "object is busy" end
+            ok, err = driver.invalidate_source_object(context, name, planned)
+            context.io.unlink = unlink
+            assert.is_nil(ok)
+            assert.equal("cannot invalidate object for module '" .. name ..
+                "': object is busy", err)
+            assert.equal("file", lfs.attributes(primary, "mode"))
+        end)
+
+        it("removes a planned module's staged objects when its native compile fails", function()
+            local name = "planned_native_failure"
+            local context, loader = planning_loader({
+                [name] = "function answer(): integer return 42 end\n",
+            }, {})
+            assert.is_true((loader(name)))
+            local plan = driver.resolution_plan(context)
+            local result, compile_error = worker_compile(context,
+                driver.plan_descriptor(plan, name), name, {
+                    configure = function(configuration)
+                        local flags = configuration.driver.extra_cflags
+                        flags[#flags + 1] = "-include"
+                        flags[#flags + 1] = source .. "/missing-forced-header.h"
+                    end,
+                })
+            assert.is_nil(result)
+            assert.is_string(compile_error)
+            for entry in lfs.dir(source) do
+                if entry:find(name, 1, true) then
+                    assert.is_nil(entry:match("%.o$") or entry:match("%.o%."), entry)
+                end
+            end
+        end)
+
+        it("discards malformed or unpublishable worker results without an object", function()
+            local name = "planned_publication_failures"
+            local context, loader = planning_loader({
+                [name] = "function answer(): integer return 42 end\n",
+            }, {})
+            assert.is_true((loader(name)))
+            local plan = driver.resolution_plan(context)
+            local descriptor = driver.plan_descriptor(plan, name)
+            local stem = source .. "/" .. name
+            local function staged()
+                return assert(worker_compile(context, descriptor, name))
+            end
+            local function rejected(result, expected)
+                local published, err = driver.publish_staged_module(context, result)
+                assert.is_nil(published)
+                assert.matches(expected, err, 1, true)
+                for _, item in ipairs(result.staged or {}) do
+                    assert.is_nil(lfs.attributes(item.from), item.from)
+                end
+            end
+
+            write_file(stem .. ".orphan.tmp", "part bytes")
+            rejected({ modname = name, staged = {
+                { role = "part", from = stem .. ".orphan.tmp", to = stem .. ".part1.o" },
+            } }, "worker result for module '" .. name .. "' has no primary object")
+            rejected({ modname = name, staged = {
+                { role = "primary", from = stem .. ".missing.tmp", to = stem .. ".o" },
+            } }, "cannot read staged object for module '" .. name .. "'")
+            write_file(stem .. ".garbage.tmp", "not an object")
+            rejected({ modname = name, staged = {
+                { role = "primary", from = stem .. ".garbage.tmp", to = stem .. ".o" },
+            } }, "cannot decode staged object for module '" .. name .. "'")
+
+            local result = staged()
+            result.staged[#result.staged + 1] = {
+                role = "part", from = stem .. ".vanished.tmp", to = stem .. ".part9.o",
+            }
+            rejected(result, "cannot publish object part '" .. stem .. ".part9.o'")
+            assert.is_nil(lfs.attributes(stem .. ".o"))
+
+            result = staged()
+            local rename = context.io.rename
+            function context.io:rename(from, to)
+                if from == result.staged[1].from then return nil, "rename denied" end
+                return rename(self, from, to)
+            end
+            rejected(result, "cannot publish object '" .. stem .. ".o': rename denied")
+            context.io.rename = rename
+            assert.is_nil(lfs.attributes(stem .. ".o"))
+
+            -- A committed object is replaced, unless its removal is refused.
+            local published = assert(driver.publish_staged_module(context, staged()))
+            result = staged()
+            local unlink = context.io.unlink
+            function context.io:unlink(filename)
+                if filename == published.object then return nil, "unlink denied" end
+                return unlink(self, filename)
+            end
+            rejected(result, "cannot replace object for module '" .. name .. "': unlink denied")
+            context.io.unlink = unlink
+            assert.equal("file", lfs.attributes(published.object, "mode"))
+            assert(driver.publish_staged_module(context, staged()))
+
+            result = staged()
+            result.source_snapshot = nil
+            rejected(result, "inputs of module '" .. name .. "' changed during the build: " ..
+                "invalid uncertified worker input snapshot")
+
+            result = staged()
+            assert(os.remove(stem .. ".titan"))
+            rejected(result, "cannot resolve module '" .. name .. "' for publication: ")
+        end)
+
+        it("rejects a certified worker object whose source changed during the build", function()
+            local name = "planned_certified_edit"
+            local contents = "function answer(): integer return 42 end\n"
+            local context, loader = planning_loader({ [name] = contents }, {}, true)
+            assert.is_true((loader(name)))
+            local plan = driver.resolution_plan(context)
+            assert(driver.invalidate_source_object(context, name, plan.modules[name].source))
+            local result = assert(worker_compile(context,
+                driver.plan_descriptor(plan, name), name))
+            assert.is_nil(result.source_snapshot)
+            write_file(source .. "/" .. name .. ".titan", contents .. "\n")
+            local published, err = driver.publish_staged_module(context, result)
+            assert.is_nil(published)
+            assert.matches("inputs of module '" .. name .. "' changed during the build: ",
+                err, 1, true)
+            assert.is_nil(lfs.attributes(result.object))
+        end)
+
+        it("loads exactly the binary providers the coordinator planned in a worker", function()
+            local provider = "planned_binary_provider"
+            local consumer = "planned_binary_consumer"
+            local provider_file = provider_path(binary .. "/" .. provider .. ".so")
+            cache_dynamic_provider(provider_file,
+                { [provider] = result_module(provider, types.Integer()) })
+            local context, loader = planning_loader({
+                [consumer] = 'local provider = import "' .. provider .. '"\n' ..
+                    "function answer(): integer return provider.answer() + 1 end\n",
+            }, { [consumer] = { { name = provider } } })
+            local loaded, _, diagnostics = loader(consumer)
+            assert.is_true(loaded)
+            assert.equal(0, #diagnostics)
+            local plan = driver.resolution_plan(context)
+            assert.equal("dynamic", plan.modules[provider].kind)
+            local function compiled(change)
+                local descriptor = driver.plan_descriptor(plan, consumer)
+                if change then change(descriptor.modules[provider]) end
+                return worker_compile(context, descriptor, consumer)
+            end
+            local result = assert(compiled())
+            assert.equal(consumer, result.modname)
+            local _, divergence = compiled(function(item)
+                item.provider_file = "elsewhere/" .. provider .. ".so"
+            end)
+            assert.matches("build plan divergence: module '" .. provider ..
+                "' provider file is '", divergence, 1, true)
+            assert.matches("', planned 'elsewhere/" .. provider .. ".so'", divergence, 1, true)
+
+            local other = provider_path(binary .. "/planned_binary_other.so")
+            cache_dynamic_provider(other,
+                { planned_binary_other = result_module("planned_binary_other", types.Integer()) })
+            -- Like dlsym, the other provider has no symbols of the planned module.
+            local load = titan._loadlib
+            titan._loadlib = function(found, symbol)
+                local ok, value = pcall(load, found, symbol)
+                if ok then return value end
+                return nil, "undefined symbol: " .. symbol, "init"
+            end
+            local _, unclaimed = compiled(function(item) item.file = other end)
+            assert.matches("planned provider '" .. other .. "' no longer claims module '" ..
+                provider .. "'", unclaimed, 1, true)
+
+            if platform.windows then return end
+            local archive = binary .. "/libplanned_binary_other.a"
+            cache_static_provider(context, archive,
+                { planned_binary_other = result_module("planned_binary_other", types.Integer()) })
+            local _, absent = compiled(function(item)
+                item.kind, item.archive, item.relative = "static", archive, "libplanned_binary_other.a"
+                item.file, item.provider_file = nil, nil
+            end)
+            assert.matches("planned static provider '" .. archive .. "' contains no module '" ..
+                provider .. "'", absent, 1, true)
+        end)
+
+        it("rejects resolver, loader and worker entry points without their required inputs", function()
+            assert.matches("frontend must be a nonempty path",
+                raised(function() driver.new_resolver_context({ frontend = "" }) end), 1, true)
+            assert.matches("configuration certification requires a resolver context",
+                raised(function() driver.incremental_configuration({}) end), 1, true)
+            assert.matches("plan_mode requires an imports_for function",
+                raised(function()
+                    driver.defaultloader({}, { context = tracked_context(), plan_mode = true })
+                end), 1, true)
+            assert.matches("worker_plan must be a build plan descriptor",
+                raised(function()
+                    driver.defaultloader({}, { context = tracked_context(), worker_plan = {} })
+                end), 1, true)
+            local worker, worker_error = driver.new_worker_context(
+                { protocol = version.BUILD_WORKER_PROTOCOL }, compiler_io.new_sync())
+            assert.is_nil(worker)
+            assert.equal("incompatible build worker configuration", worker_error)
+
+            incremental.toolchain_identity = uncertain_toolchain
+            local configuration = assert(driver.worker_configuration(tracked_context()))
+            local support = package.loaded.titan
+            package.loaded.titan = { _sha256_binary = support._sha256_binary }
+            worker, worker_error = driver.new_worker_context(configuration, compiler_io.new_sync())
+            package.loaded.titan = support
+            assert.is_nil(worker)
+            assert.equal("the installed Titan native support library is missing or stale " ..
+                "(it lacks _sha256_binary or _sha256_stream)", worker_error)
+
+            incremental.configuration = function()
+                return nil, "compiler inventory is unreadable"
+            end
+            local failed, failure = driver.worker_configuration(tracked_context())
+            assert.is_nil(failed)
+            assert.equal("cannot certify compiler configuration: compiler inventory is unreadable",
+                failure)
+            local cancellation = {}
+            incremental.configuration = function() return nil, cancellation end
+            local ok, raised_value = pcall(driver.worker_configuration, tracked_context())
+            assert.is_false(ok)
+            assert.equal(cancellation, raised_value)
         end)
 
         it("reuses the coordinator's archive scan in a worker only under the same archive observation", function()
