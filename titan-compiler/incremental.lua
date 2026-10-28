@@ -103,6 +103,10 @@ local function precise_observation(stat)
     return result
 end
 
+-- The closed precise observation of an already-taken stat, or nil when it is
+-- coarse or lacks a physical identity.
+incremental.precise_observation = precise_observation
+
 function incremental.observation(context, path, follow)
     local ok, stat, err = pcall(follow == false and context.io.lstat or context.io.stat,
         context.io, path)

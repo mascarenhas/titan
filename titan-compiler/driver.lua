@@ -3831,7 +3831,9 @@ function perf.provider_decoding_cache(context, filename)
     }, ":")
     local cache = context.decoded_provider_cache[key]
     if not cache or cache.observation ~= observation then
-        cache = { observation = observation, types = {}, layouts = {} }
+        -- `precise` is nil for a coarse or incomplete observation.
+        cache = { observation = observation, types = {}, layouts = {},
+            precise = incremental.precise_observation(stat) }
         context.decoded_provider_cache[key] = cache
     end
     return cache
@@ -4051,7 +4053,7 @@ local function inspect_static_provider(context, filename, relative)
         return cached
     end
 
-    local provider, scan_err = staticmetadata.scan_archive(filename, {
+    local options = {
         io = context.io,
         expected_abi = driver.TITAN_ABI_VERSION,
         require_layouts = not context.analysis_only,
@@ -4061,7 +4063,21 @@ local function inspect_static_provider(context, filename, relative)
         validate_types = function(name, serialized, origin)
             return perf.decode_provider_interface(decoded, name, serialized, origin)
         end,
-    })
+    }
+    -- A build worker reuses its coordinator's scan of the exact planned
+    -- archive path only while it observes the same precise physical file
+    -- state. Absent, coarse, changed or rejected plan metadata leaves the
+    -- archive itself authoritative.
+    local provider, scan_err
+    local planned = decoded and decoded.precise and context.planned_archives
+        and context.planned_archives[filename]
+    if type(planned) == "table" and
+       incremental.observations_equal(planned.observation, decoded.precise) then
+        provider = staticmetadata.metadata_view(filename, planned.modules, options)
+    end
+    if not provider then
+        provider, scan_err = staticmetadata.scan_archive(filename, options)
+    end
     context.provider_cache_identity[filename] = decoded
     if not provider then
         local err = "cannot inspect static provider '" .. filename ..
@@ -6211,14 +6227,33 @@ local function current_source_descriptor(context, modname)
     return source
 end
 
+-- The coordinator's own scan of a selected archive as closed worker data: its
+-- per-module canonical metadata and the precise observation taken right
+-- before that scan. Nothing is returned when that observation is coarse or
+-- this context's cache no longer holds the selected provider under it.
+local function planned_archive_metadata(context, mod)
+    local archive, provider = mod.static_archive, mod.static_provider
+    local identity = context.provider_cache_identity[archive]
+    if not provider or provider.archive ~= archive or
+       context.provider_cache[archive] ~= provider or
+       type(identity) ~= "table" or not identity.precise then
+        return nil
+    end
+    return {
+        observation = identity.precise,
+        modules = staticmetadata.container_metadata(provider),
+    }
+end
+
 -- Close planning and return the coordinator's authoritative plan over the
 -- planning loader's selection. `modules[name]` is a planned source (its
 -- descriptor, stage-1 certification, ordered imports and failed import
 -- diagnostics), the exact selected dynamic or static provider, or an
--- unavailable name with its diagnostic. `order` lists source modules with
--- dependencies first and bytewise ties; import-cycle members follow,
--- bytewise, with `cyclic = true`. Interface digests of source modules exist
--- only once `update` accepts their certified record (hit or published).
+-- unavailable name with its diagnostic. `archives[path]` carries the
+-- coordinator's metadata scan of each selected archive. `order` lists source
+-- modules with dependencies first and bytewise ties; import-cycle members
+-- follow, bytewise, with `cyclic = true`. Interface digests of source modules
+-- exist only once `update` accepts their certified record (hit or published).
 -- Implementation notes: doc/implementation/incremental-compilation.md#resolver-and-cli-boundary
 function driver.resolution_plan(context)
     if type(context) ~= "table" or context.io == nil then
@@ -6232,7 +6267,7 @@ function driver.resolution_plan(context)
     end
     planning.open = false
 
-    local modules, linked = {}, {}
+    local modules, linked, archives = {}, {}, {}
     for name, mod in pairs(driver.imported) do
         if mod ~= CIRCULAR_MARK then
             local node = mod._planned and planning.nodes[name]
@@ -6258,6 +6293,10 @@ function driver.resolution_plan(context)
                 for carried in pairs(mod.static_provider and
                         mod.static_provider.entries or {}) do
                     linked[carried] = true
+                end
+                local archive = mod.static_archive
+                if archives[archive] == nil then
+                    archives[archive] = planned_archive_metadata(context, mod)
                 end
             end
         end
@@ -6315,7 +6354,7 @@ function driver.resolution_plan(context)
     end
 
     local accepted = {}
-    local plan = { modules = modules, order = order }
+    local plan = { modules = modules, order = order, archives = archives }
     function plan.linked(name)
         local module = modules[name]
         if module and module.kind == "unavailable" then return nil end
@@ -6358,7 +6397,7 @@ end
 -- The closed data a worker receives for one module: per planned name, the
 -- source descriptor (with the accepted object of every certified
 -- dependency), the exact selected provider, or the unavailable diagnostic,
--- each with its linked state.
+-- each with its linked state; and the coordinator's archive metadata scans.
 function driver.plan_descriptor(plan, modname)
     local target = plan.modules[modname]
     if not target or target.kind ~= "source" then
@@ -6388,6 +6427,7 @@ function driver.plan_descriptor(plan, modname)
         protocol = version.BUILD_WORKER_PROTOCOL,
         modname = modname,
         modules = modules,
+        archives = plan.archives,
         reservations = plan.reservations,
     }
 end
@@ -6612,6 +6652,9 @@ function driver.compile_planned_module(context, modname, options)
     local verbose = options.verbose == true
     local coverage_build = policy.coverage
     local source = copy_source_descriptor(plan.modules[modname].source)
+    -- Provider inspection reuses the coordinator's archive metadata scans.
+    context.planned_archives = type(plan.archives) == "table" and
+        plan.archives or nil
     local loader = driver.defaultloader({}, {
         context = context,
         worker_plan = plan,
