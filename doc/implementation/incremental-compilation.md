@@ -580,8 +580,10 @@ reports the exact component:
    (`ctime` on POSIX, `ChangeTime` on Windows through the native precise stat)
    catches preserved-mtime replacements (`cp -p`, `touch -r`). A Windows
    volume that reports no `ChangeTime` leaves the identity without a change
-   time (recorded with `"coarse"` precision), so such a replacement there is
-   undetected. An in-place,
+   time (recorded with `"coarse"` precision). There a preserved-mtime
+   replacement is caught only through a changed file ID or size, so an
+   in-place same-size overwrite, or any such replacement on a volume without
+   file IDs, is undetected. An in-place,
    same-size binary overwrite that preserves both timestamps (possible within
    one tick of the LuaFileSystem fallback's coarse clock or of a
    coarse-timestamp filesystem), or an unrecognized
