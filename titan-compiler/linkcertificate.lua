@@ -850,7 +850,9 @@ end
 
 function certificate.commit(context, ticket)
     -- Call only after the complete validated output set has been published.
-    -- Recheck input bytes afresh; a memo from before linking cannot bless a race.
+    -- Re-observe every input rather than trusting the pre-link memo: only an
+    -- input whose precise observation changed is reread and rehashed, and the
+    -- freshly published outputs are hashed once to record them.
     local current = incremental.fresh_context(context)
     for _, field in ipairs(FILE_FIELDS) do
         local files = certificate.files(current, ticket.recipe[field])

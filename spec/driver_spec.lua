@@ -5775,8 +5775,10 @@ describe("compiler module loader", function()
             assert.equal(1, counters.files[first_real].hashes)
             assert.is_table(counters.revalidation)
             assert.equal(1, counters.revalidation.passes)
-            assert.equal(1, counters.revalidation.files[first_real].hashes)
-            assert.equal(1, counters.revalidation.files[first_real].reads)
+            -- Revalidation re-observes the unchanged source instead of rereading it.
+            assert.equal(0, counters.revalidation.files[first_real].hashes)
+            assert.equal(0, counters.revalidation.files[first_real].reads)
+            assert.equal(1, counters.revalidation.files[first_real].observation_reuses)
             local worker_cfg = assert(driver.worker_configuration(hit_ctx))
             local worker_ctx = assert(driver.new_worker_context(
                 worker_cfg, compiler_io.new_sync()))

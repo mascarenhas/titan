@@ -215,32 +215,33 @@ local function digest_file(context, path, bytes, max_bytes)
         end
         return saved.digest, saved.bytes, saved.observation
     end
-    -- The installed SDK's manifest is the one observation-keyed source that
-    -- also serves fresh (post-link) contexts: the installer read and hashed
-    -- these bytes, so only an observation change can make them differ.
-    local sdk = bytes == nil and memo.sdk and memo.sdk.files[key]
-    if sdk then
-        local current = incremental.observation(context, path)
-        if current and current.kind == "file"
-            and incremental.observations_equal(current, sdk.observation)
-            and context.io:readable(path) then
-            memo.files[key] = { digest = sdk.digest, observation = current }
-            memo.counters.sdk_reuses = memo.counters.sdk_reuses + 1
-            count.sdk_reuses = count.sdk_reuses + 1
-            return sdk.digest, nil, current
-        end
-    end
-    local cache = memo.persistent
-    if bytes == nil and cache and not memo.refresh then
-        local previous = cache.files[absolute(context, path)]
-        local current = previous and incremental.observation(context, path)
-        if previous and current and current.kind == "file"
-            and incremental.observations_equal(current, previous.observation)
-            and context.io:readable(path) then
-            memo.files[key] = { digest = previous.digest, observation = current }
-            memo.counters.observation_reuses = memo.counters.observation_reuses + 1
-            count.observation_reuses = count.observation_reuses + 1
-            return previous.digest, nil, current
+    -- Content digests are file identity. Any recorded digest is reused while
+    -- the file's precise observation, change time included, still equals the
+    -- recorded one: the parent memo of a re-observing context, the installed
+    -- SDK's manifest, or the output tree's persistent cache. A changed or
+    -- coarse observation reads and rehashes the bytes.
+    if bytes == nil then
+        local parent = memo.parent and memo.parent.files[key]
+        local sdk = memo.sdk and memo.sdk.files[key]
+        local persisted = memo.persistent and memo.persistent.files[absolute(context, path)]
+        if parent or sdk or persisted then
+            local current = incremental.observation(context, path)
+            local recorded, counter
+            if current and current.kind == "file" then
+                if parent and incremental.observations_equal(current, parent.observation) then
+                    recorded, counter = parent, "observation_reuses"
+                elseif sdk and incremental.observations_equal(current, sdk.observation) then
+                    recorded, counter = sdk, "sdk_reuses"
+                elseif persisted and incremental.observations_equal(current, persisted.observation) then
+                    recorded, counter = persisted, "observation_reuses"
+                end
+            end
+            if recorded and context.io:readable(path) then
+                memo.files[key] = { digest = recorded.digest, observation = current }
+                memo.counters[counter] = memo.counters[counter] + 1
+                count[counter] = count[counter] + 1
+                return recorded.digest, nil, current
+            end
         end
     end
     local observed
@@ -277,13 +278,17 @@ function incremental.file_contents(context, path, max_bytes)
     return bytes
 end
 
--- Publication must re-read/hash, but its verified evidence should prime the
--- coordinator's persistent cache for the very next invocation.
+-- Post-build verification re-observes its inputs instead of trusting this
+-- invocation's memo: the fresh context starts with an empty memo and reuses a
+-- digest from the parent memo, SDK manifest or persistent cache only under an
+-- equal precise observation. Changed files are reread and rehashed, and that
+-- verified evidence primes the persistent cache for the next invocation.
 function incremental.fresh_context(context)
     local fresh = { io = context.io, cache_adapter = context.cache_adapter }
-    state(fresh).persistent = state(context).persistent
-    state(fresh).sdk = state(context).sdk
-    state(fresh).refresh = true
+    local memo = state(context)
+    state(fresh).parent = memo
+    state(fresh).persistent = memo.persistent
+    state(fresh).sdk = memo.sdk
     return fresh
 end
 
@@ -841,8 +846,9 @@ end
 
 -- An installed SDK's digest manifest. The installer, never titanc, records
 -- the content digests of the installation's own native link inputs with
--- their precise observations; titanc only reads it. An absent, malformed or
--- foreign-schema manifest simply provides no entries.
+-- their precise observations; titanc only reads it, as one more recorded
+-- digest source. An absent, malformed or foreign-schema manifest simply
+-- provides no entries.
 incremental.SDK_DIGESTS = "sdk-digests"
 
 local function valid_sdk_digests(record)
