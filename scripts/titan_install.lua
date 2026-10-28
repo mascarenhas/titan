@@ -40,10 +40,12 @@ local function same(left, right)
     return left == right
 end
 
+-- Windows also accepts backslash separators, so split on both there before
+-- rejecting dot components.
 local function contained(root, relative)
     local path = root
     local components = {}
-    for component in relative:gmatch("[^/]+") do
+    for component in relative:gmatch(windows and "[^/\\]+" or "[^/]+") do
         assert(component ~= "." and component ~= "..", "invalid SDK path: " .. relative)
         components[#components + 1] = component
     end
@@ -184,21 +186,42 @@ local function prepare_windows_cleanup_launcher(destination)
         "\n"):gsub("\n", "\r\n")))
 end
 
--- The installation's own native link inputs: the Titan library directory's
--- providers and archives plus top-level archives this installer copied.
-local function sdk_link_inputs(inventory, common_prefix)
+local function titan_owned(relative)
+    local library = relative:match("^lib/titan/%d+[.]%d+/(.+)$")
+    return library == "libtitan.a" or library == "titan.a" or
+        library == "titan.so" or library == "titan.dll" or
+        (library and library:match("^titan[.]so[.]dSYM/")) or
+        relative == "include/titan.h" or relative == "include/minicoro.h" or
+        relative == "include/transfer.h" or
+        relative == "include/titan/ffi.h" or
+        relative:match("^share/titan/") or relative == "etc/titan/build-profile"
+end
+
+-- The Lua archive driver.installed_paths links for this platform.
+local sdk_lua_archive = windows and "lib/liblua55.a" or "lib/liblua.a"
+
+-- The approved SDK native link inputs, and nothing else: the Titan-owned
+-- provider and runtime archive directly in the library version directory,
+-- the copied libbacktrace archive and the selected Lua archive. A shared Lua
+-- prefix keeps its own archive; it is recorded without being copied,
+-- replaced or taken into cleanup ownership. Preserved or foreign files, even
+-- inside the version directory, are never recorded.
+local function sdk_link_inputs(destination, inventory, common_prefix)
     local release, inputs = nil, {}
     for _, relative in ipairs(inventory) do
-        local directory = relative:match("^lib/titan/([^/]+)/[^/]+$")
-        if directory then
+        local directory = relative:match("^lib/titan/(%d+[.]%d+)/[^/]+$")
+        if directory and titan_owned(relative) then
             assert(release == nil or release == directory,
                 "SDK payload has several Titan library versions")
             release = directory
-        end
-        if not lua_owned(relative, common_prefix) and
-           (directory or relative:match("^lib/[^/]+%.a$")) then
+            inputs[#inputs + 1] = relative
+        elseif (relative == "lib/libbacktrace.a" or relative == sdk_lua_archive) and
+           not lua_owned(relative, common_prefix) then
             inputs[#inputs + 1] = relative
         end
+    end
+    if common_prefix and lfs.attributes(destination .. "/" .. sdk_lua_archive, "mode") == "file" then
+        inputs[#inputs + 1] = sdk_lua_archive
     end
     return release, inputs
 end
@@ -209,7 +232,7 @@ end
 -- payload without a loadable compiler and provider (installer fixtures)
 -- records nothing, and titanc then reads and hashes these inputs as usual.
 local function publish_sdk_digests(destination, inventory, common_prefix)
-    local release, inputs = sdk_link_inputs(inventory, common_prefix)
+    local release, inputs = sdk_link_inputs(destination, inventory, common_prefix)
     if not release then return nil end
     local compiler, incremental = pcall(require, "titan-compiler.incremental")
     if not compiler then return nil end
@@ -286,15 +309,13 @@ function installer.publish(package_dir, destination, lua_prefix, program)
     return true
 end
 
-local function titan_owned(relative)
-    local library = relative:match("^lib/titan/%d+[.]%d+/(.+)$")
-    return library == "libtitan.a" or library == "titan.a" or
-        library == "titan.so" or library == "titan.dll" or
-        (library and library:match("^titan[.]so[.]dSYM/")) or
-        relative == "include/titan.h" or relative == "include/minicoro.h" or
-        relative == "include/transfer.h" or
-        relative == "include/titan/ffi.h" or
-        relative:match("^share/titan/") or relative == "etc/titan/build-profile"
+-- The one recorded cleanup path uninstall accepts beyond the payload's
+-- Titan-owned files: the manifest publish_sdk_digests wrote for a Titan
+-- library version (incremental.SDK_DIGESTS). Any other name, including an
+-- unrelated in-prefix file or a dot or backslash traversal, is ignored.
+local function sdk_digests_path(relative)
+    return type(relative) == "string" and
+        relative:match("^lib/titan/%d+[.]%d+/sdk%-digests$") ~= nil
 end
 
 function installer.uninstall(package_dir, program)
@@ -316,7 +337,7 @@ function installer.uninstall(package_dir, program)
                     for _, relative in ipairs(files(candidate .. "/titan-sdk")) do
                         if titan_owned(relative) then inventory[relative] = true end
                     end
-                    if type(installed.digests) == "string" then inventory[installed.digests] = true end
+                    if sdk_digests_path(installed.digests) then inventory[installed.digests] = true end
                 end
             end
         end
