@@ -5065,6 +5065,62 @@ describe("compiler module loader", function()
             assert.is_nil(without.cache_adapter)
         end)
 
+        it("certifies streamed compiler and frontend inputs under coarse observations without a caller adapter", function()
+            local threshold = incremental.STREAM_THRESHOLD_BYTES
+            local compiler_root = root .. "/compiler"
+            for _, directory in ipairs({ "", "/titan-compiler", "/titan-compiler/checker",
+                    "/titan-compiler/coder", "/c-parser" }) do
+                assert(lfs.mkdir(compiler_root .. directory))
+            end
+            local large_lua = compiler_root .. "/titan-compiler/large.lua"
+            local frontend = root .. "/titanc-frontend"
+            write_file(compiler_root .. "/titan-compiler/small.lua", "return {}\n")
+            write_file(large_lua, "return " .. string.rep("0", threshold) .. "\n")
+            write_file(frontend, "-- " .. string.rep("f", threshold) .. "\n")
+            local absorbed = {}
+            local function coarse_io()
+                local strategy = compiler_io.new_sync()
+                for _, method in ipairs({ "stat", "lstat" }) do
+                    local observe = strategy[method]
+                    strategy[method] = function(self, path)
+                        local stat, err = observe(self, path)
+                        if not stat then return stat, err end
+                        local coarse = {}
+                        for field, value in pairs(stat) do coarse[field] = value end
+                        coarse.precision, coarse.time_precision = "coarse", "coarse"
+                        return coarse
+                    end
+                end
+                local absorb = strategy.absorb_file
+                function strategy:absorb_file(path, stream)
+                    absorbed[path] = (absorbed[path] or 0) + 1
+                    return absorb(self, path, stream)
+                end
+                return strategy
+            end
+            local options = { compiler_root = compiler_root, frontend = frontend }
+            local function component(cache_adapter)
+                local context = driver.new_resolver_context({
+                    io = coarse_io(), cache_adapter = cache_adapter,
+                })
+                contexts[#contexts + 1] = context
+                return assert(incremental.compiler_component(context, options))
+            end
+            -- A caller's digest without a stream reads each whole file.
+            local whole_read = { sha256_binary = titan._sha256_binary }
+
+            local streamed = component()
+            assert.same({ [large_lua] = 1, [frontend] = 1 }, absorbed)
+            absorbed = {}
+            assert.equal(component(whole_read), streamed)
+            assert.same({}, absorbed)
+
+            write_file(large_lua, "return " .. string.rep("1", threshold) .. "\n")
+            local changed = component()
+            assert.are_not.equal(streamed, changed)
+            assert.equal(component(whole_read), changed)
+        end)
+
         it("propagates only explicit native policy uncertainty without a partial configuration", function()
             incremental.toolchain_identity = uncertain_toolchain
             local context = tracked_context()
