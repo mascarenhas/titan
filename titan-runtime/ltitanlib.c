@@ -336,47 +336,58 @@ static const uint32_t titan_sha256_k[64] = {
 /* Certification hashes every final-link input, including the standard
 ** provider of several hundred megabytes, so compression speed bounds fresh
 ** links. Hardware SHA-256 (x86 SHA extensions selected at run time, or the
-** ARMv8 SHA2 extension when the target guarantees it) computes the identical
-** FIPS 180-4 compression; selection never changes a digest. */
+** ARMv8 SHA2 extension when a little-endian AArch64 target guarantees it)
+** computes the identical FIPS 180-4 compression; selection never changes a
+** digest. The ARM message load byte-reverses each word for little-endian
+** lanes, so big-endian AArch64 keeps the portable compressor. */
 #if (defined(__x86_64__) || defined(__i386__)) && \
     (defined(__GNUC__) || defined(__clang__))
 #include <cpuid.h>
 #include <immintrin.h>
 #define TITAN_SHA256_X86 1
-#elif defined(__aarch64__) && defined(__ARM_FEATURE_SHA2)
+#elif defined(__aarch64__) && defined(__ARM_FEATURE_SHA2) && \
+    defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 #include <arm_neon.h>
 #define TITAN_SHA256_ARM 1
 #endif
 
+/* Compresses `blocks` consecutive 64-byte blocks into `state`. */
+typedef void (*titan_sha256_compressor)(uint32_t state[8],
+                                        const unsigned char *data,
+                                        size_t blocks);
+
 #if !defined(TITAN_SHA256_ARM)
-static void titan_sha256_block(uint32_t state[8], const unsigned char *block) {
+static void titan_sha256_portable(uint32_t state[8], const unsigned char *data,
+                                  size_t blocks) {
   uint32_t w[64];
   uint32_t a, b, c, d, e, f, g, h;
   int i;
-  for (i = 0; i < 16; i++)
-    w[i] = ((uint32_t)block[4 * i] << 24) | ((uint32_t)block[4 * i + 1] << 16) |
-           ((uint32_t)block[4 * i + 2] << 8) | (uint32_t)block[4 * i + 3];
-  for (i = 16; i < 64; i++) {
-    uint32_t s0 = TITAN_SHA_ROTR(w[i - 15], 7) ^ TITAN_SHA_ROTR(w[i - 15], 18) ^
-                  (w[i - 15] >> 3);
-    uint32_t s1 = TITAN_SHA_ROTR(w[i - 2], 17) ^ TITAN_SHA_ROTR(w[i - 2], 19) ^
-                  (w[i - 2] >> 10);
-    w[i] = (uint32_t)(w[i - 16] + s0 + w[i - 7] + s1);
+  for (; blocks > 0; blocks--, data += 64) {
+    for (i = 0; i < 16; i++)
+      w[i] = ((uint32_t)data[4 * i] << 24) | ((uint32_t)data[4 * i + 1] << 16) |
+             ((uint32_t)data[4 * i + 2] << 8) | (uint32_t)data[4 * i + 3];
+    for (i = 16; i < 64; i++) {
+      uint32_t s0 = TITAN_SHA_ROTR(w[i - 15], 7) ^ TITAN_SHA_ROTR(w[i - 15], 18) ^
+                    (w[i - 15] >> 3);
+      uint32_t s1 = TITAN_SHA_ROTR(w[i - 2], 17) ^ TITAN_SHA_ROTR(w[i - 2], 19) ^
+                    (w[i - 2] >> 10);
+      w[i] = (uint32_t)(w[i - 16] + s0 + w[i - 7] + s1);
+    }
+    a = state[0]; b = state[1]; c = state[2]; d = state[3];
+    e = state[4]; f = state[5]; g = state[6]; h = state[7];
+    for (i = 0; i < 64; i++) {
+      uint32_t sum1 = TITAN_SHA_ROTR(e, 6) ^ TITAN_SHA_ROTR(e, 11) ^ TITAN_SHA_ROTR(e, 25);
+      uint32_t choose = (e & f) ^ ((uint32_t)~e & g);
+      uint32_t temp1 = (uint32_t)(h + sum1 + choose + titan_sha256_k[i] + w[i]);
+      uint32_t sum0 = TITAN_SHA_ROTR(a, 2) ^ TITAN_SHA_ROTR(a, 13) ^ TITAN_SHA_ROTR(a, 22);
+      uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
+      uint32_t temp2 = (uint32_t)(sum0 + majority);
+      h = g; g = f; f = e; e = (uint32_t)(d + temp1);
+      d = c; c = b; b = a; a = (uint32_t)(temp1 + temp2);
+    }
+    state[0] += a; state[1] += b; state[2] += c; state[3] += d;
+    state[4] += e; state[5] += f; state[6] += g; state[7] += h;
   }
-  a = state[0]; b = state[1]; c = state[2]; d = state[3];
-  e = state[4]; f = state[5]; g = state[6]; h = state[7];
-  for (i = 0; i < 64; i++) {
-    uint32_t sum1 = TITAN_SHA_ROTR(e, 6) ^ TITAN_SHA_ROTR(e, 11) ^ TITAN_SHA_ROTR(e, 25);
-    uint32_t choose = (e & f) ^ ((uint32_t)~e & g);
-    uint32_t temp1 = (uint32_t)(h + sum1 + choose + titan_sha256_k[i] + w[i]);
-    uint32_t sum0 = TITAN_SHA_ROTR(a, 2) ^ TITAN_SHA_ROTR(a, 13) ^ TITAN_SHA_ROTR(a, 22);
-    uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
-    uint32_t temp2 = (uint32_t)(sum0 + majority);
-    h = g; g = f; f = e; e = (uint32_t)(d + temp1);
-    d = c; c = b; b = a; a = (uint32_t)(temp1 + temp2);
-  }
-  state[0] += a; state[1] += b; state[2] += c; state[3] += d;
-  state[4] += e; state[5] += f; state[6] += g; state[7] += h;
 }
 #endif
 
@@ -451,18 +462,16 @@ static void titan_sha256_arm(uint32_t state[8], const unsigned char *data,
 }
 #endif
 
-static void titan_sha256_blocks(uint32_t state[8], const unsigned char *data,
-                                size_t blocks) {
+/* Probe the CPU once per digest call; the caller keeps the choice for both
+** its data and padding blocks, with no unsynchronized process-wide state. */
+static titan_sha256_compressor titan_sha256_select(void) {
 #if defined(TITAN_SHA256_ARM)
-  titan_sha256_arm(state, data, blocks);
+  return titan_sha256_arm;
 #else
 #if defined(TITAN_SHA256_X86)
-  if (titan_sha256_x86_available()) {
-    titan_sha256_x86(state, data, blocks);
-    return;
-  }
+  if (titan_sha256_x86_available()) return titan_sha256_x86;
 #endif
-  for (; blocks > 0; blocks--, data += 64) titan_sha256_block(state, data);
+  return titan_sha256_portable;
 #endif
 }
 
@@ -475,10 +484,12 @@ static int sha256_binary(lua_State *L) {
   const unsigned char *data;
   size_t length, offset, rest, tail_length, i;
   uint64_t bits;
+  titan_sha256_compressor compress;
   luaL_checktype(L, 1, LUA_TSTRING);
   data = (const unsigned char *)lua_tolstring(L, 1, &length);
+  compress = titan_sha256_select();
   offset = length - length % 64;
-  titan_sha256_blocks(state, data, offset / 64);
+  if (offset > 0) compress(state, data, offset / 64);
   rest = length - offset;
   memcpy(tail, data + offset, rest);
   tail[rest] = 0x80;
@@ -487,7 +498,7 @@ static int sha256_binary(lua_State *L) {
   bits = (uint64_t)length << 3;
   for (i = 0; i < 8; i++)
     tail[tail_length - 1 - i] = (unsigned char)(bits >> (8 * i));
-  titan_sha256_blocks(state, tail, tail_length / 64);
+  compress(state, tail, tail_length / 64);
   for (i = 0; i < 8; i++) {
     digest[4 * i] = (unsigned char)(state[i] >> 24);
     digest[4 * i + 1] = (unsigned char)(state[i] >> 16);
