@@ -303,7 +303,14 @@ and the digests computed there prime the persistent cache for the next
 invocation. Compilation is not treated as adversarial: digests exist to avoid
 rebuilding a file whose metadata changed while its content did not, so a
 content change that preserves the complete precise observation, change time
-included, is outside what verification detects.
+included, is outside what verification detects. "Precise" describes the
+observation API, which reports integer nanoseconds, not the filesystem's
+timestamp granularity, and no portable API reports that granularity. On a
+filesystem with coarse timestamps (one second on HFS+, ext3, and some NFS
+servers), a same-size in-place rewrite within one tick that keeps the inode
+therefore yields an equal observation and keeps the old digest. Titan
+publishes its own outputs by rename, so only user-edited inputs and
+externally rewritten libraries are exposed to this.
 
 ### Persistent digest cache
 

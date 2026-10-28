@@ -174,10 +174,11 @@ following inputs before accepting `<stem>.o`:
   between application and `--test` builds when their resolved bindings and
   compile flags match.
 
-With `--output`, `titanc` reads file metadata with nanosecond precision and
-keeps a digest cache in `<output>/.titan/digests`, so a source, header, or
-split-part object whose metadata is unchanged since the last invocation is
-not read and hashed again; each module's primary object is still read for its
+With `--output`, `titanc` reads file metadata (device, inode, size, mode, and
+nanosecond modification and change times) and keeps a digest cache in
+`<output>/.titan/digests`, so a file whose metadata is unchanged since the
+last invocation is not read and hashed again; each module's primary object is
+still read for its
 certificate. A changed file is always rehashed, and deleting the cache is
 safe. Without `--output`, `titanc` keeps no persistent digest cache. An SDK
 installed by its installer also records the digests of Titan's own providers
@@ -186,7 +187,11 @@ a fresh output tree, or a build without `--output`, reuses them until those
 files change. If the SDK files are replaced any other way, they are simply
 read and hashed again. After compiling and linking, `titanc` checks every
 input again by the same rule, so an edit made during the build is still
-caught without rereading files that did not change.
+caught without rereading files that did not change. Unchanged metadata is
+trusted. The times are reported in nanoseconds, but a filesystem may store
+them more coarsely: on HFS+, ext3, or some NFS servers, a same-size edit made
+in place within the same second as the previous write can go unnoticed until
+the file changes again.
 
 ### Native `--c-source` nodes and final-link certification
 

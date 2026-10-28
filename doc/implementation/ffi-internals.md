@@ -204,7 +204,10 @@ support library loads, as it does in every installed `titanc`. The native call
 returns integer `mtime_ns` and `ctime_ns` and opaque `dev`/`ino` strings:
 POSIX `st_dev`/`st_ino`, or on Windows the volume serial number and the
 128-bit `FileIdInfo` file ID, with `ChangeTime` as the change time. Those
-observations declare `"ns"` precision and are reusable. Without the native
+observations declare `"ns"` precision and are reusable. `"ns"` names the
+API's integer-nanosecond representation, not the filesystem's timestamp
+granularity, which no portable API reports (see [Fresh verification
+contexts](incremental-compilation.md#fresh-verification-contexts)). Without the native
 library (pure-Lua harnesses), `Sync` falls back to LuaFileSystem and reports
 `"coarse"` precision, because LuaFileSystem exposes floating-point seconds
 rather than a guaranteed native nanosecond clock; a zero nanosecond fraction
