@@ -545,7 +545,18 @@ never searches `TITAN_BIN_PATH` or `TITAN_SOURCE_PATH`:
   without re-running `certify_local` or `verdict`;
 * requesting a planned `dynamic` or `static` module loads the exact planned
   `item.file` or `item.archive` via `load_planned_binary`
-  (`driver.lua`); and
+  (`driver.lua`). For a static provider, `inspect_static_provider` first tries
+  the descriptor's `archives[item.archive]`. That is the coordinator's own scan
+  of that archive as closed data: each carried module's canonical metadata
+  payload and origin, plus the precise observation taken right before the
+  scan, with no member bytes, records, or decoded objects. The worker uses it
+  only for that exact path while its own precise observation of the archive is
+  equal, and validates every payload with the scan's member validator
+  (`staticmetadata.metadata_view`). Missing, coarse, changed, or rejected
+  metadata makes the worker rescan the archive; an archive the worker cannot
+  observe still fails. The resulting view has kind `"metadata"` and no members,
+  so it selects interfaces but never reaches a link, and the final link still
+  certifies archive content; and
 * requesting any module not in `plan.modules`, or observing a `native_static_names`
   linked set after `finalize_resolver_context` that disagrees with
   `planned.linked`, fails with `"build plan divergence: ..."`.
