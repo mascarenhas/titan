@@ -301,6 +301,39 @@ describe("automatic test-root discovery", function()
                 "test-root discovery requires at least one --test-dir " ..
                 "directory", message)
         end)
+
+        it("requires a resolver I/O context", function()
+            for _, context in ipairs({ false, {} }) do
+                local ok, message = pcall(testroots.discover, context or nil,
+                    { "." }, {}, {}, ".")
+                assert.is_false(ok)
+                assert.truthy(tostring(message):find(
+                    "testroots.discover requires an I/O context", 1, true))
+            end
+        end)
+
+        it("rejects an explicit root that is not a logical module name",
+           function()
+            local root = make({ ["a_test.titan"] = "" })
+
+            local missing, message = testroots.discover(discovery_context(),
+                { root }, {}, { "a_test", "not a module" }, root)
+
+            assert.is_nil(missing)
+            assert.equal('invalid logical Titan module name "not a module"',
+                message)
+        end)
+
+        it("rejects empty and NUL-bearing discovery directory spellings",
+           function()
+            local root = make({ ["a_test.titan"] = "" })
+            for _, dir in ipairs({ "", root .. "\0suffix" }) do
+                local missing, message = testroots.discover(discovery_context(),
+                    { root, dir }, {}, {}, root)
+                assert.is_nil(missing)
+                assert.equal("invalid --test-dir directory path", message)
+            end
+        end)
     end)
 
     describe("source roots", function()
@@ -688,6 +721,77 @@ describe("automatic test-root discovery", function()
             assert.is_nil(roots)
             assert.equal("cannot resolve test directory '" .. root ..
                 "': permission denied while inspecting directory", message)
+        end)
+
+        it("reports a requested directory whose physical path cannot be resolved",
+           function()
+            local root = make({ ["tests/one_test.titan"] = "" })
+            local tests = joined(root, "tests")
+            local base = compiler_io.new_sync()
+            local strategy = observed({
+                realpath = function(filename)
+                    if path.normalize(filename) == path.normalize(tests) then
+                        return nil, "realpath denied"
+                    end
+                    return base:realpath(filename)
+                end,
+            })
+            local roots, message = testroots.discover(
+                discovery_context(strategy), { tests }, {}, {}, root)
+            assert.is_nil(roots)
+            assert.equal("cannot resolve test directory '" .. tests ..
+                "': realpath denied", message)
+        end)
+
+        it("reports a selected source that disappears before resolution",
+           function()
+            local root = make({ ["one_test.titan"] = "" })
+            local base = compiler_io.new_sync()
+            local ghost = joined(root, "ghost_test.titan")
+            local listed = false
+            local strategy = observed({
+                list = function(directory)
+                    local entries, err = base:list(directory)
+                    if entries and path.normalize(directory) == path.normalize(root) then
+                        entries[#entries + 1] = "ghost_test.titan"
+                    end
+                    return entries, err
+                end,
+                lstat = function(filename)
+                    if path.normalize(filename) == path.normalize(ghost) and not listed then
+                        listed = true
+                        return { kind = "file", size = 0 }
+                    end
+                    return base:lstat(filename)
+                end,
+            })
+            local roots, message = testroots.discover(
+                discovery_context(strategy), { root }, {}, {}, root)
+            assert.is_true(listed)
+            assert.is_nil(roots)
+            assert.equal("cannot resolve test module 'ghost_test' at '" .. ghost ..
+                "': source disappeared during discovery", message)
+        end)
+
+        it("reports a symbolic link whose target cannot be inspected", function()
+            if not require_symlink_capability() then return end
+            local root = make({ ["target.titan"] = "" })
+            local link = joined(root, "linked_test.titan")
+            assert(lfs.link(joined(root, "target.titan"), link, true))
+            local base = compiler_io.new_sync()
+            local strategy = observed({
+                stat = function(filename)
+                    if path.normalize(filename) == path.normalize(link) then
+                        return nil, "permission denied"
+                    end
+                    return base:stat(filename)
+                end,
+            })
+            local roots, message = testroots.discover(
+                discovery_context(strategy), { root }, {}, {}, root)
+            assert.is_nil(roots)
+            assert.equal("cannot inspect symbolic link '" .. link ..
+                "': permission denied", message)
         end)
 
         it("reports an inspection failure instead of skipping an entry",

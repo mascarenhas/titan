@@ -420,6 +420,37 @@ describe("final link certificates", function()
         assert.is_false(hit())
     end)
 
+    it("treats a record whose output snapshot has an unknown kind as a miss", function()
+        local ticket = commit()
+        assert.is_true(hit())
+        local ctx = context()
+        local record = assert(certificate.read_record(ctx, ticket.record))
+        record.outputs[1].kind = "symlink"
+        assert(certificate.write_record(ctx, ticket.record, record))
+        assert.is_false(hit())
+    end)
+
+    it("reports an unreadable record file instead of decoding it", function()
+        local ticket = commit()
+        local ctx = context()
+        function ctx.io:read_file() return nil, "record read denied" end
+        local record, err = certificate.read_record(ctx, ticket.record)
+        assert.is_nil(record)
+        assert.matches("record read denied", err, 1, true)
+    end)
+
+    it("keeps a link with an opaque authored C object uncacheable", function()
+        local ctx, ticket = prepare({ c_objects = {
+            { path = root .. "/helper.o", cacheable = false },
+        } })
+        assert.is_false(ticket.cacheable)
+        assert.equal("opaque native C input mechanism", ticket.native_policy.reason)
+        assert(certificate.invalidate(ctx, ticket))
+        assert(certificate.commit(ctx, ticket))
+        assert.is_nil(lfs.symlinkattributes(ticket.record))
+        assert.is_false(certificate.check(ctx, ticket))
+    end)
+
     it("propagates non-string cancellation from file certification", function()
         commit()
         local signal = {}
@@ -950,6 +981,22 @@ describe("native library coverage policy", function()
         assert.is_true(policy.cacheable)
         assert.same({ native_spelling(root .. "/libfirst.a"), native_spelling(root .. "/libsecond.a"),
             native_spelling(root .. "/libfirst.a") }, policy.files)
+    end)
+
+    it("resolves separated -l operands and request libraries in their search order", function()
+        local policy = certificate.native_library_policy(context(), {
+            compiler_argv = { "selected-cc" }, argv = { "-L", root, "-l", "first" },
+            library_dirs = { root }, libraries = { "second", "first" },
+        })
+        assert.is_true(policy.cacheable, policy.reason)
+        assert.equal("compiler", policy.backend)
+        assert.same({ native_spelling(root .. "/libfirst.a"), native_spelling(root .. "/libsecond.a"),
+            native_spelling(root .. "/libfirst.a") }, policy.files)
+        local incomplete = certificate.native_library_policy(context(), {
+            compiler_argv = { "selected-cc" }, argv = { "-L", root, "-l" },
+        })
+        assert.is_false(incomplete.cacheable)
+        assert.equal("incomplete native library option", incomplete.reason)
     end)
 
     it("retains POSIX library-search traversal when a lexical competitor already exists", function()
@@ -1597,6 +1644,63 @@ describe("linker dependency-feature memo", function()
         assert.equal(1, descriptions)
         assert.is_nil(tools.lto_compiler)
         assert.equal(native_spelling(root .. "/collect2"), tools.link_driver.identity.path)
+    end)
+
+    it("selects a separated --ld-path linker and rejects a missing path", function()
+        assert.equal("gnu", detect({ link_flags = { "--ld-path", root .. "/ld.lld" } }))
+        assert.equal(0, descriptions)
+        assert.equal(0, resolves)
+        local options = clone(request)
+        options.link_flags = { "--ld-path" }
+        local backend, err = certificate.linker_backend(invocation(), options)
+        assert.is_nil(backend)
+        assert.equal("--ld-path requires a linker path", err)
+        assert.equal(1, probes)
+    end)
+
+    it("requires the compiler to name exactly one default linker", function()
+        for _, named in ipairs({ "", root .. "/ld\n" .. root .. "/ld.lld" }) do
+            stage_paths.ld = named
+            local backend, reason, status = certificate.linker_backend(invocation(), request)
+            assert.equal("none", backend)
+            assert.equal("compiler did not name one native linker", reason)
+            assert.equal("uncertified", status)
+            local tools = assert(certificate.output_tools(invocation(), request))
+            assert.equal("compiler did not name one native linker", tools.uncertified)
+        end
+        assert.equal(0, probes)
+        assert.is_nil(lfs.symlinkattributes(root .. "/.titan/linker-feature"))
+    end)
+
+    it("describes an explicitly selected linker's job before inventorying its stages", function()
+        local options = clone(request)
+        options.link_flags = { "-fuse-ld=lld" }
+        local tools = assert(certificate.output_tools(invocation(), options))
+        assert.equal(native_spelling(root .. "/ld.lld"), tools.linker.identity.path)
+        assert.equal(native_spelling(root .. "/collect2"), tools.link_driver.identity.path)
+        assert.equal(1, descriptions)
+        description_result = { started = true, ok = false, why = "exit", status = 1,
+            output = "selected linker job cannot be described" }
+        tools = assert(certificate.output_tools(invocation(), options))
+        assert.equal("selected linker job cannot be described", tools.uncertified)
+        assert.is_nil(tools.linker)
+    end)
+
+    it("inventories attached plugin paths and resolves undeclared LTO delegates by name", function()
+        description = ' "' .. root .. '/collect2" "--plugin=' .. root .. '/liblto_plugin.so"\n'
+        local options = clone(request)
+        options.compile_argv = { root .. "/cc", "-flto" }
+        local tools = assert(certificate.output_tools(invocation(), options))
+        assert.is_nil(tools.uncertified)
+        assert.equal(native_spelling(root .. "/liblto_plugin.so"), tools.lto_plugins[1].identity.path)
+        assert.equal(native_spelling(root .. "/lto-wrapper"), tools.lto_wrapper.identity.path)
+        assert.equal(native_spelling(root .. "/lto1"), tools.lto_compiler.identity.path)
+        for _, stage in ipairs({ "lto-wrapper", "lto1" }) do
+            stage_paths = { [stage] = "" }
+            tools = assert(certificate.output_tools(invocation(), options))
+            assert.equal("compiler did not name one LTO stage: " .. stage, tools.uncertified)
+            assert.is_nil(tools.lto_compiler)
+        end
     end)
 
     for _, fixed in ipairs({ "native", "darwin", "windows" }) do
