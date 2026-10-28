@@ -440,7 +440,8 @@ local function record_propagation(fakes)
     }
 end
 
--- Every module compiles and the provider pair links and publishes.
+-- Every module compiles and the provider links and publishes: a DSO/archive
+-- pair on POSIX, a staged DLL on Windows.
 local function link_through(fakes)
     local driver = fakes.driver
     function driver.compile_modules(requests)
@@ -456,7 +457,7 @@ local function link_through(fakes)
     function driver.prepare_static_providers_for_target() return true end
     function driver.classify_native_payloads() return { inputs = {} } end
     function driver.link_provider_pair(request)
-        fakes.observed.pair = request
+        fakes.observed.linked_modules = request.module_names
         return { dso = "stage/pkg.so", archive = "stage/pkg.a", entries = {},
             directory = "stage" }
     end
@@ -467,6 +468,36 @@ local function link_through(fakes)
     function driver.remove_path(directory)
         fakes.observed.removed = directory
         return true
+    end
+    function driver.staged_library_output() return "stage/pkg.dll", "stage" end
+    function driver.compile_library_output(_, _, _, _, _, _, _, _, module_names)
+        fakes.observed.linked_modules = module_names
+        return true
+    end
+    function driver.validate_library_image_fresh() return true end
+    function driver.publish_windows_provider(_, provider_output)
+        fakes.observed.published = provider_output
+        return true
+    end
+    function driver.cleanup_staging_directories(directories)
+        fakes.observed.removed = directories[1]
+        return true
+    end
+end
+
+-- The Windows program layout: a launcher EXE beside its DLL provider.
+local function windows_program_layout(fakes)
+    function fakes.driver.windows_program_paths(modname, exe, output_module, output_root)
+        fakes.observed.windows_program = { modname = modname, exe = exe,
+            output_module = output_module, output_root = output_root }
+        local executable = exe or ("bin/" .. modname:gsub(".*[.]", ""))
+        if not executable:match("%.exe$") then executable = executable .. ".exe" end
+        return { executable = executable, provider = "lib/" .. modname .. ".dll",
+            relative_provider = "../lib/" .. modname .. ".dll" }
+    end
+    function fakes.driver.windows_program_auxiliary_paths(entrypoint, provider)
+        fakes.observed.auxiliary = { entrypoint = entrypoint, provider = provider }
+        return { (entrypoint:gsub("%.c$", ".res.o")) }
     end
 end
 
@@ -741,6 +772,7 @@ describe("titanc command-line orchestration", function()
                     fakes.driver.imported["app.main"].has_main = true
                     return built
                 end
+                windows_program_layout(fakes)
                 function fakes.driver.output_tool_descriptors(_, kind)
                     fakes.observed.kind = kind
                     return { compiler_argv = { "cc" }, link_flags = {},
@@ -751,6 +783,7 @@ describe("titanc command-line orchestration", function()
                 certificate.prepare = function(_, spec)
                     fakes.observed.outputs = spec.outputs
                     fakes.observed.entry = spec.entry
+                    fakes.observed.companions = spec.companions
                     error("stopped at final-link preparation", 0)
                 end
             end)
@@ -758,10 +791,23 @@ describe("titanc command-line orchestration", function()
         end
         local observed = program({ module = { "app.main" } })
         assert.equal("program", observed.kind)
-        assert.same({ { path = "app/main", executable = true } }, observed.outputs)
+        if platform.windows then
+            assert.same({ modname = "app.main" }, observed.windows_program)
+            assert.same({ { path = "bin/main.exe" }, { path = "lib/app.main.dll" } },
+                observed.outputs)
+            assert.equal("../lib/app.main.dll", observed.companions.relative_provider)
+        else
+            assert.same({ { path = "app/main", executable = true } }, observed.outputs)
+        end
         assert.same({ module = "app.main", no_uv_bootstrap = false }, observed.entry)
         observed = program({ module = { "app.main" }, exe = "bin/app" })
-        assert.same({ { path = "bin/app", executable = true } }, observed.outputs)
+        if platform.windows then
+            assert.same({ modname = "app.main", exe = "bin/app" }, observed.windows_program)
+            assert.same({ { path = "bin/app.exe" }, { path = "lib/app.main.dll" } },
+                observed.outputs)
+        else
+            assert.same({ { path = "bin/app", executable = true } }, observed.outputs)
+        end
     end)
 
     it("reports a failed final-link preparation and preserves its cancellation", function()
@@ -842,13 +888,16 @@ describe("titanc command-line orchestration", function()
                 return ok, errors
             end
             function fakes.checker.has_main(ast) return ast.name == "app" end
+            windows_program_layout(fakes)
             function fakes.driver.generated_output_path(stem, output)
                 assert.is_nil(output)
                 return "generated/" .. stem
             end
-            function fakes.driver.validate_program_output_paths(_, program, entrypoint)
+            function fakes.driver.validate_program_output_paths(_, program, entrypoint, _,
+                    extra_outputs)
                 fakes.observed.program = program
                 fakes.observed.entrypoint = entrypoint
+                fakes.observed.extra_outputs = extra_outputs
                 return nil, "stopped at program output validation"
             end
         end)
@@ -857,7 +906,15 @@ describe("titanc command-line orchestration", function()
         assert.same({ "app" }, observed.planned_roots)
         assert.same({ "app" }, observed.preflight.roots)
         assert.same({ "app" }, observed.preflight.plan.order)
-        assert.equal("app", observed.program)
+        if platform.windows then
+            assert.same({ modname = "app" }, observed.windows_program)
+            assert.equal("bin/app.exe", observed.program)
+            assert.same({ entrypoint = "generated/app__entrypoint.c", provider = "lib/app.dll" },
+                observed.auxiliary)
+            assert.same({ "generated/app__entrypoint.res.o" }, observed.extra_outputs)
+        else
+            assert.equal("app", observed.program)
+        end
         assert.equal("generated/app__entrypoint.c", observed.entrypoint)
     end)
 
@@ -873,7 +930,7 @@ describe("titanc command-line orchestration", function()
         assert.equal("", diagnostics)
         assert.equal("pkg.so", observed.published)
         assert.equal("stage", observed.removed)
-        assert.same({ "pkg.one", "pkg.three", "pkg.two" }, observed.pair.module_names)
+        assert.same({ "pkg.one", "pkg.three", "pkg.two" }, observed.linked_modules)
         assert.equal("link", committed.directory)
         assert.is_true(observed.lock_released)
 
@@ -897,15 +954,30 @@ describe("titanc command-line orchestration", function()
         assert.equal(cancellation, failure)
     end)
 
-    it("closes the coordinator before propagating a provider-link cancellation", function()
+    it("stops an interrupted provider link before publishing it", function()
         local diagnostics, observed = run_titanc(ordinary_arguments(nil), nil, function(fakes)
             link_through(fakes)
             function fakes.driver.link_provider_pair() return nil, "provider link interrupted", 15 end
+            function fakes.driver.compile_library_output() return nil, "interrupted", 15 end
+            function fakes.driver.link_failure_message(kind, name, term, code)
+                return kind .. " '" .. name .. "' link failed: " .. tostring(term) ..
+                    " " .. tostring(code)
+            end
             record_propagation(fakes)
         end)
-        assert.equal(15, observed.propagated)
-        assert.is_true(observed.closed_before_propagation)
-        assert.equal("provider link interrupted\n", diagnostics)
+        if platform.windows then
+            -- A DLL link reports its failure without a cancellation signal and
+            -- retires its staging directory.
+            assert.equal("library 'pkg' link failed: interrupted 15\n", diagnostics)
+            assert.is_nil(observed.propagated)
+            assert.equal("stage", observed.removed)
+        else
+            -- The coordinator is closed before the POSIX pair link's signal
+            -- is propagated.
+            assert.equal(15, observed.propagated)
+            assert.is_true(observed.closed_before_propagation)
+            assert.equal("provider link interrupted\n", diagnostics)
+        end
         assert.is_nil(observed.published)
     end)
 end)

@@ -5899,7 +5899,7 @@ describe("compiler module loader", function()
             assert.equal("Titan object hit " .. base .. ": " .. entry.compiled .. "\n", hit)
         end)
 
-        it("compiles planned split parts in parallel and retires their published inventory", function()
+        it("compiles planned split parts and retires their published inventory", function()
             local name = "planned_split_parts"
             local functions = {}
             for index = 1, 8 do
