@@ -438,6 +438,7 @@ int helper(void) { return 2; }
 
     it("certifies a toolchain descriptor and builds without a record when its search path is unknown", function()
         local compiler = assert(cdriver.split_shell_words(driver.CC))
+        if compiler[1] == "exec" then table.remove(compiler, 1) end
         local descriptor = { compiler_argv = compiler, stage_tools = {},
             banner = "gcc version 14.2.0", preprocessor_identity = "#define __GNUC__ 14\n" }
         local first = assert(build(nil, true, nil, nil, { toolchain = descriptor }))[1]
@@ -448,14 +449,17 @@ int helper(void) { return 2; }
         assert.is_true(assert(build(nil, true, nil, nil, { toolchain = descriptor }))[1].hit)
         if platform.windows then return end
 
-        -- An unset PATH leaves a bare compiler name without a certifiable search.
+        -- An unset PATH leaves a bare compiler name without a certifiable
+        -- search. Wrapper delegates and compiler arguments stay as configured.
+        local bare = { table.unpack(compiler) }
+        bare[1] = bare[1]:match("[^/\\]+$")
         local getenv = platform.getenv
         platform.getenv = function(name)
             if name == "PATH" then return nil end
             return getenv(name)
         end
         local ok, objects, err = pcall(build, nil, true, nil, nil, { toolchain = {
-            compiler_argv = { compiler[1]:match("[^/\\]+$") }, stage_tools = {},
+            compiler_argv = bare, stage_tools = {},
             banner = descriptor.banner, preprocessor_identity = descriptor.preprocessor_identity,
         } })
         platform.getenv = getenv
