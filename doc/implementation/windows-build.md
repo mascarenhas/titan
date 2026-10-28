@@ -699,8 +699,8 @@ held lock directory, or the parent or one of its ancestors contains a regular
 `.titan-build.lock` with the same volume serial number and file ID as a held
 lock file. An `--output` or `--exe` spelled through a junction of a held
 directory is therefore covered, because lock acquisition deduplicates the two
-spellings to one physical lock file. A missing identity, a linked lock file, or
-the unavailable pair `("0", "0")` never proves coverage. This requires Windows
+spellings to one physical lock file. A lock file without a native file ID or
+a linked lock file never proves coverage. This requires Windows
 to let the process follow that junction: Redirection Guard can refuse a junction
 created by a non-administrator with `ERROR_UNTRUSTED_MOUNT_POINT` (448), and
 Titan does not bypass that policy. The real-junction CLI regression reports

@@ -398,7 +398,10 @@ more recorded digest, trusted exactly like a cache entry in every context,
 including the [fresh post-link recheck](#fresh-verification-contexts). The
 file must have the same resolved path, an equal precise observation (`dev`,
 `ino`, `size`, `mode`, and nanosecond `mtime` and `ctime`, which is
-`ChangeTime` on Windows), and be readable. A changed observation reads and
+`ChangeTime` on Windows), and be readable. A Windows volume without
+`ChangeTime` or file IDs yields only coarse observations, which never match
+an entry, so the installer records no entry for them and `titanc` rehashes
+them. A changed observation reads and
 hashes the file; if those bytes differ from what the ticket certified, the
 recheck fails with `link input changed during build`. Reuses count as
 `sdk_reuses`.
@@ -575,9 +578,13 @@ reports the exact component:
    Tool executables are certified by self-description plus physical metadata
    rather than by hashing the compiler binary bytes. The change timestamp
    (`ctime` on POSIX, `ChangeTime` on Windows through the native precise stat)
-   catches preserved-mtime replacements (`cp -p`, `touch -r`). An in-place,
+   catches preserved-mtime replacements (`cp -p`, `touch -r`). A Windows
+   volume that reports no `ChangeTime` leaves the identity without a change
+   time (recorded with `"coarse"` precision), so such a replacement there is
+   undetected. An in-place,
    same-size binary overwrite that preserves both timestamps (possible within
-   one tick of the LuaFileSystem fallback's coarse clock), or an unrecognized
+   one tick of the LuaFileSystem fallback's coarse clock or of a
+   coarse-timestamp filesystem), or an unrecognized
    wrapper script that hides a changed downstream binary without changing
    `-E -v` or `-dM` output, is outside physical tool detection.
 3. **`preamble` (`incremental.preamble_identity`, `incremental.lua`).**

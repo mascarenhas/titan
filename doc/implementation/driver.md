@@ -921,10 +921,17 @@ backend-specific records, arrays, error objects, or task handles.
 `mode`, `modified_seconds`, `modified_nanoseconds`, and `time_precision`,
 plus optional `changed_seconds`, `changed_nanoseconds`, `device`, and `inode`.
 The synchronous strategy uses the runtime's native `titan._stat_precise` when
-the `titan` support library loads: its results also carry `precision = "ns"`,
-integer `mtime_ns` and `ctime_ns`, and opaque `dev`/`ino` strings (POSIX
-`st_dev`/`st_ino`; on Windows the volume serial number and `FileIdInfo` file
-ID), copied into `device`/`inode`. On Windows they also carry
+the `titan` support library loads: its results also carry integer `mtime_ns`
+and, when available, integer `ctime_ns` and opaque `dev`/`ino` strings (POSIX
+`st_dev`/`st_ino`; on Windows the volume serial number and the first nonzero
+file ID from `FileIdInfo` or `GetFileInformationByHandle`), copied into
+`device`/`inode`. POSIX always supplies all three. A Windows volume that
+reports no `ChangeTime` omits `ctime_ns` and `changed_*`, and a file without a
+nonzero file ID omits `dev`/`ino`; the native call never substitutes either.
+The strategy sets `precision` and `time_precision` to `"ns"` only when the
+change time and both identity components are present, and otherwise to
+`"coarse"`, so such a file is read and hashed like a LuaFileSystem
+observation. On Windows the results also carry
 `windows_attributes`, the raw `FileAttributes` DWORD from the same
 `FileBasicInfo` query. Without that library it falls back to
 LuaFileSystem with `time_precision = "coarse"` and, on Windows, no
