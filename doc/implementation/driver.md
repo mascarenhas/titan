@@ -702,9 +702,19 @@ exception objects propagate unchanged through the graph boundary. Required
 header content hashing also uses this callback when available; a broken string
 result/error falls back to the ordinary Lua digest, while cancellation propagates.
 
-A **digest-only** adapter supplies `sha256_binary` alone, with no `get`, `put`,
-`refresh_inputs`, or `yield` (`titan-compiler/cacheadapter.lua` `validate`);
-`titanc` passes this shape. It offers no storage, so storage work is gated on the
+The cache adapter may also supply `sha256_stream()`, a dot constructor
+returning an incremental digest with `update(bytes)`, `finish()` (32 binary
+bytes), and optionally `absorb(file)`; `cacheadapter.validate` rejects a non-function value. Certified-file
+digests use it, together with the strategy's optional `absorb_file`, to hash a
+digest-only file larger than `incremental.STREAM_THRESHOLD_BYTES` without
+materializing it
+([Tagged canonicalization and invocation file
+memos](incremental-compilation.md#tagged-canonicalization-and-invocation-file-memos)).
+
+A **digest-only** adapter supplies `sha256_binary`, optionally with
+`sha256_stream`, and no `get`, `put`, `refresh_inputs`, or `yield`
+(`titan-compiler/cacheadapter.lua` `validate`); `titanc` and build workers
+pass this shape with both entries. It offers no storage, so storage work is gated on the
 actual capability (`cacheadapter.can_get`, `cacheadapter.can_put`), never on
 adapter presence. Header-cache restoration and observation refresh require
 `get`, header and FFI-conversion stores require `put`, and
@@ -896,6 +906,7 @@ backend-specific records, arrays, error objects, or task handles.
 | `executable(path)` (optional) | `true`, `false`, or `nil, message`. Whether the current process may execute `path` under its effective user, groups, and ACLs; the synchronous POSIX strategy uses native `faccessat(AT_EACCESS, X_OK)` and neither opens nor reads the file. Tool selection (`incremental.physical_executable`) requires this capability on POSIX: a strategy without it, or an indeterminate `nil, message`, fails selection closed rather than guessing from mode bits or readability. |
 | `executable_search_cwd()` (optional, Windows) | `true`, `false`, or `nil, message`. Whether the native launcher searches the current directory for a bare executable name; the synchronous strategy asks `NeedCurrentDirectoryForExePathW`, the same policy libuv uses. Without a definite answer, a current-directory candidate that differs from the `PATH` candidate cannot be certified. |
 | `read_file(path, max_bytes?)` | `bytes, nil` or `nil, message`. Without a bound, reads the complete file as a binary-safe Lua string. A bound must be a nonnegative integer; the method returns the complete file when its size is at most that bound, or exactly the first `max_bytes + 1` bytes when it is larger. This optional form lets bounded decoders detect overflow without materializing an unbounded replacement. |
+| `absorb_file(path, stream)` (optional) | `total, nil` or `nil, message`. Feeds the file's bytes, in order, into the incremental digest `stream` without materializing the whole file, and returns the total byte count. Open, read, and close failures return `nil, message`; path checks and open semantics match `read_file`. The synchronous strategy lets a native stream absorb the open file through `stream:absorb(file)`, and gives any other stream chunks of at most 1 MiB through `stream:update(bytes)`. It resolves the stream's methods before opening the file, so a raising lookup propagates unchanged and opens nothing. A stream error is re-raised unchanged after the file is closed, so cancellation keeps its identity. Without this capability, certified files are read whole. |
 | `write_file(path, bytes)` | `true, nil` or `nil, message`. Publishes only complete contents: an observer sees complete file contents. Windows replacement may briefly leave the destination absent between removal and rename. Failure and cancellation must not leak the strategy's sibling temporary. If cancellation races the final rename, the destination may contain either complete version. |
 | `list(path)` | A dense one-based array of entry basenames, or `nil, message`. `.` and `..` are excluded and order is unspecified. |
 | `mkdir(path, remove_if_cancelled?)` | `true, nil` or `nil, message`. Creates one directory; its parent must already exist. The optional ownership rule is described below. |
@@ -910,10 +921,17 @@ backend-specific records, arrays, error objects, or task handles.
 `mode`, `modified_seconds`, `modified_nanoseconds`, and `time_precision`,
 plus optional `changed_seconds`, `changed_nanoseconds`, `device`, and `inode`.
 The synchronous strategy uses the runtime's native `titan._stat_precise` when
-the `titan` support library loads: its results also carry `precision = "ns"`,
-integer `mtime_ns` and `ctime_ns`, and opaque `dev`/`ino` strings (POSIX
-`st_dev`/`st_ino`; on Windows the volume serial number and `FileIdInfo` file
-ID), copied into `device`/`inode`. On Windows they also carry
+the `titan` support library loads: its results also carry integer `mtime_ns`
+and, when available, integer `ctime_ns` and opaque `dev`/`ino` strings (POSIX
+`st_dev`/`st_ino`; on Windows the volume serial number and the first nonzero
+file ID from `FileIdInfo` or `GetFileInformationByHandle`), copied into
+`device`/`inode`. POSIX always supplies all three. A Windows volume that
+reports no `ChangeTime` omits `ctime_ns` and `changed_*`, and a file without a
+nonzero file ID omits `dev`/`ino`; the native call never substitutes either.
+The strategy sets `precision` and `time_precision` to `"ns"` only when the
+change time and both identity components are present, and otherwise to
+`"coarse"`, so such a file is read and hashed like a LuaFileSystem
+observation. On Windows the results also carry
 `windows_attributes`, the raw `FileAttributes` DWORD from the same
 `FileBasicInfo` query. Without that library it falls back to
 LuaFileSystem with `time_precision = "coarse"` and, on Windows, no
@@ -1378,10 +1396,10 @@ discovery:
 | `driver.restore_source_object(context, modname, source, record, options?)` | Restores an accepted `.titan.source` record into `driver.imported` and `types.registry` without parsing or checking (`options.published` suppresses the `-v` hit line). |
 | `driver.test_owner_flags(test_build, test_functions)` | Returns `test_runner.TEST_COMPILE_FLAGS` (`{"-fno-optimize-sibling-calls"}`) when `test_build` is true and `test_functions` is nonempty, else `{}`; shared by compilation and `codegen-options` certification. |
 | `driver.resolve_source(context, modname, source_path?)` | Runs the tagged source resolver over `source_path` (default `driver.TITAN_SOURCE_PATH`), returning a `flat`, `folder`, or `blocked` descriptor, `nil` on a clean miss, or `nil, err`. Used by `titan-compiler/testroots.lua`. |
-| `driver.resolution_plan(context)` | Closes a `plan_mode` loader and returns the authoritative `plan` (`modules`, topological/bytewise `order`, `linked`, `provider_file`, `digest`, `update`, `accepted`). |
-| `driver.plan_descriptor(plan, modname)` | Projects `plan` into the closed `titan-build-worker-v1` table sent to `modname`'s worker, carrying accepted dependency `.o` paths and exact selected binary providers. |
-| `driver.worker_configuration(context)` | Serializes driver paths/flags, resolver options, `codegen_policy`, and `context.incremental_configuration` as closed data for a worker. |
-| `driver.new_worker_context(configuration, io_strategy)` | Reconstructs a worker's resolver context from `worker_configuration` and verifies `incremental.compiler_component` against the coordinator's `configuration.compiler` (failing with `compiler installation changed during build` on mismatch). |
+| `driver.resolution_plan(context)` | Closes a `plan_mode` loader and returns the authoritative `plan` (`modules`, topological/bytewise `order`, `archives`, `linked`, `provider_file`, `digest`, `update`, `accepted`). `archives[path]` holds the coordinator's metadata scan of each selected static archive (per carried module its canonical payload and origin, plus the precise pre-scan observation), or nothing when that observation was coarse. |
+| `driver.plan_descriptor(plan, modname)` | Projects `plan` into the closed `titan-build-worker-v1` table sent to `modname`'s worker, carrying accepted dependency `.o` paths, exact selected binary providers, and the data-only archive metadata scans (`archives`). |
+| `driver.worker_configuration(context)` | Serializes driver paths/flags, resolver options, `codegen_policy`, the coordinator's compiler digest (`compiler`), and either `context.incremental_configuration` or the `uncertified` reason as closed data for a worker. |
+| `driver.new_worker_context(configuration, io_strategy)` | Reconstructs a worker's resolver context from `worker_configuration` and verifies `incremental.compiler_component` against the top-level `configuration.compiler` (failing with `compiler installation changed during build` on mismatch). A nested certified configuration must carry the same compiler digest; the uncertified form has none. |
 | `driver.invalidate_source_object(context, modname, source)` | Coordinator pre-dispatch step: reads any existing `<stem>.o`'s validated `parts` list, unlinks `<stem>.o` first, and unlinks recorded `.part<k>.{o,c,gcno,gcda}` files. |
 | `driver.compile_planned_module(context, modname, options)` | Worker entry: checks `modname` against `options.plan` (`worker_plan` loader mode, reporting `build plan divergence` on any discrepancy), writes generated headers and C files, compiles object parts to sibling temporaries (`staged = true`), and returns `{ modname, object, objects, staged, diagnostics }`. |
 | `driver.publish_staged_module(context, result)` | Coordinator post-worker step: decodes the staged primary `.o`, resolves a fresh source descriptor, runs `incremental.revalidate_record` in a fresh pass, and renames sidecar `.part<k>.o` files then `<stem>.o` last. |
@@ -1977,7 +1995,8 @@ Before creating a resolver, `titanc` rejects:
   positive integer.
 
 After those preflight checks, `titanc` loads `require "titan"`, requires
-`_sha256_binary`, creates its resolver context with `frontend = arg[0]`,
+`_sha256_binary` and `_sha256_stream` (a support library without either is
+reported as missing or stale), creates its resolver context with `frontend = arg[0]`,
 applies normalized native inputs, and discovers any `--test-dir` roots. It
 locks the `--output` directory, or without `--output` every `--tree` source
 root plus the working directory (source-adjacent objects may belong to any
@@ -2223,7 +2242,7 @@ It is *not* part of the runtime SDK's `libtitan.a` or ordinary generated
 modules. Its table (`ltitanlib.c` `titanlib`) exports the user-facing
 `backtrace`, the internal testing helpers `pin` and `clear` used to exercise
 the traceback pin discipline, the loader helpers `_loadlib` and
-`_loadlibglobal`, the compiler digest `_sha256_binary`, the output-tree lock
+`_loadlibglobal`, the compiler digests `_sha256_binary` and `_sha256_stream`, the output-tree lock
 `_output_lock_open`, the precise file observation `_stat_precise`, on Windows
 only `_abivalue`, `_native_process_tree_guard`, and the current-directory
 search query `_executable_search_cwd` (backing `Sync:executable_search_cwd`),
@@ -2271,12 +2290,34 @@ boundary](windows-build.md#windows-loader-boundary).
 
 `titan._sha256_binary(bytes)` returns the 32-byte binary SHA-256 digest of a
 string, including embedded NUL and high bytes, and raises for any other
-argument. It is portable C over the public Lua API, with no OpenSSL or process
+argument. It is C over the public Lua API, with no OpenSSL or process
 dependency, so the private bootstrap provides it before the standard library
-exists. `titanc` refuses to start without it ([The `titanc` command
-line](#the-titanc-command-line)), and a physical provider named `titan` is
-published only when a fresh Lua process finds it, beside `_loadlib` and
-`_loadlibglobal`, in the linked support table (`driver.lua`
+exists. A SHA-256 computation (`TitanSha256` init, update, and final) selects
+one compressor when it starts and uses it for every data and padding block,
+with no process-wide state; whole blocks are compressed straight from the
+caller's bytes and only a partial block is buffered. On x86 and x86-64
+GCC/Clang builds that compressor is the SHA extensions when one CPUID feature
+probe reports them (with SSSE3 and SSE4.1), and otherwise the portable block
+function. A little-endian AArch64 build whose target defines
+`__ARM_FEATURE_SHA2` always uses the ARMv8 SHA2 instructions; big-endian
+AArch64 and every other target use the portable function. An input shorter
+than one 64-byte block makes no data-block call. All paths produce identical
+digests.
+
+`titan._sha256_stream()` returns a new incremental digest over the same state.
+`stream:update(bytes)` absorbs a string and returns the stream.
+`stream:absorb(file)` hashes an open Lua file handle from its current position
+to end of file through one fixed 64 KiB C buffer, so no Lua string holds its
+bytes, and returns the byte count, or `nil, message, errno` on a read error; a
+closed handle raises `attempt to use a closed file`. `stream:finish()` returns
+the 32-byte digest of everything absorbed, equal to `_sha256_binary` of the
+concatenation; afterwards every method raises `attempt to use a finished
+SHA-256 stream`. The compiler uses it to hash large certified files.
+
+`titanc` and build workers refuse to start without both entries ([The `titanc`
+command line](#the-titanc-command-line)), and a physical provider named
+`titan` is published only when a fresh Lua process finds both, beside
+`_loadlib` and `_loadlibglobal`, in the linked support table (`driver.lua`
 `support_validation_script`); a stale `ltitanlib.o` therefore fails before
 publication instead of producing an installation that `titanc` rejects.
 

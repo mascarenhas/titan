@@ -519,8 +519,10 @@ transactional path.
 
 After `driver.publish_provider_bundle` (or `driver.compile_program` /
 `driver.publish_windows_provider`) succeeds, `titanc` calls
-`linkcertificate.commit`, which re-verifies all input file digests in a fresh
-context, snapshots the published outputs, records the linker-reported native
+`linkcertificate.commit`, which re-observes every input file in a
+[fresh context](incremental-compilation.md#fresh-verification-contexts),
+rehashing only files whose observation changed, snapshots the published
+outputs, records the linker-reported native
 library inputs from `link.d` (or the compiler fallback), and writes
 `<output>/.titan-links/<key>/record` last. Even when `publish_provider_bundle`
 finds the staged pair and shims byte-identical to the existing public outputs

@@ -229,28 +229,53 @@ hashes each distinct file at most once per resolver context:
    exists. If caller-supplied `bytes` differ from the saved bytes (or, for a
    digest-only entry, hash to a different digest), it raises
    `<path>: file changed during build`.
-2. When `bytes` is nil and the coordinator loaded a
-   [persistent digest cache](#persistent-digest-cache), a cached entry for the
-   absolute path is accepted without reading the file when the current
-   precise observation equals the stored one and the path is readable. The
-   memo then holds a digest without bytes.
-3. Otherwise it records a pre-read observation combining
+2. When `bytes` is nil, it looks for a recorded digest of the same file. A
+   [fresh context](#fresh-verification-contexts) first consults its parent
+   context's memo entry for `key`. Every context then consults the loaded
+   [installed SDK digest manifest](#installed-sdk-digest-manifest) entry for
+   `key`, then the coordinator's
+   [persistent digest cache](#persistent-digest-cache) entry for the absolute
+   path. If any of these exist, it re-observes the file once and accepts the
+   first record, in that order, whose precise observation equals the current
+   one, provided the path is readable. Content digests are file identity, so
+   these sources apply to every file role: sources, headers, objects,
+   payloads, providers, archives, system libraries, and outputs. A hit leaves
+   the memo with a digest without bytes and counts as `sdk_reuses` for a
+   manifest entry and as `observation_reuses` otherwise.
+3. Otherwise, when `bytes` is nil (no record, or a coarse or changed
+   observation), it records a pre-read observation combining
    `context.io:stat(path)` (which must be `kind == "file"`) and
-   `context.io:lstat(path)`, reads the file through `context.io:read_file(path)`,
-   and checks that the post-read observation and `realpath(path)` are
-   identical and that the byte count matches a precise observed size; any
-   mismatch raises `<path>: file changed while it was read`.
-4. It hashes the bytes, records `{ digest, bytes, observation }` in
-   `memo.files[key]`, stores precise observations in the persistent cache,
+   `context.io:lstat(path)` and reads the file. A file larger than
+   `incremental.STREAM_THRESHOLD_BYTES` (4 MiB) whose digest alone is
+   demanded is fed into a new `sha256_stream` from the cache adapter through
+   the strategy's optional `absorb_file` when both are available. The whole
+   file never becomes a single Lua string and its bytes are not retained; with
+   the native stream's `absorb` (as `titanc` supplies), no Lua string holds
+   any of its bytes. Any other file is read whole through
+   `context.io:read_file(path)`. Either way it then checks that the post-read
+   observation and `realpath(path)` are identical and that the byte count
+   matches a precise observed size; any mismatch raises
+   `<path>: file changed while it was read`. Caller-supplied `bytes` are
+   neither observed nor read.
+4. It hashes the read or caller-supplied bytes (a streamed file is already
+   hashed) and records `{ digest, bytes, observation }` in `memo.files[key]`,
+   without bytes for a streamed file and without an observation for
+   caller-supplied bytes. Only a read with a precise observation is stored in
+   the persistent cache or serves later observation reuse. It then
    updates `incremental.counters(context)` (`file_hashes`, `file_reads`,
-   `file_bytes`, `observation_reuses`, `digest_calls`, and `files[key]`),
-   calls `context.io:yield()`, and returns `digest, bytes`.
+   `file_bytes`, `observation_reuses`, `sdk_reuses`, `digest_calls`, and
+   `files[key]`),
+   calls `context.io:yield()`, and returns `digest, bytes`. Identical bytes
+   under a changed observation hash to the recorded digest, so a touched but
+   unchanged file still matches every digest certified for it.
 
 A consumer that needs file bytes rather than a digest calls
-`incremental.file_contents(context, path, max_bytes?)`. It reuses memoized
-bytes, or reads once under the same race guard after a digest-only cache hit
-and raises `file changed during build` if the fresh observation differs from
-the one that authorized the digest.
+`incremental.file_contents(context, path, max_bytes?)`, which always reads
+whole. It reuses memoized bytes, or, after a digest-only memo entry (a reuse
+from step 2 or a streamed digest), reads once under the same race guard,
+retains the bytes, and raises `file changed during build` if the fresh
+observation differs from the one that authorized the digest. A streamed
+digest recorded without a precise observation is checked by content instead.
 
 `incremental.check_headers` supplies the per-context file memo to
 `revalidate_header_input` during certification, so certification hashes each
@@ -260,10 +285,34 @@ options, but neither the probe service nor the checker retains it, so fresh
 C-header parsing and C probes may hash files independently. Only a publisher
 that replaces an owned output
 calls `incremental.invalidate_file(context, path)` to evict `path` and its
-aliases from the memo and the persistent cache. Pre-publication
-revalidation uses `incremental.fresh_context(context)`, which shares the
-persistent cache but sets `refresh`, so every input is re-read and rehashed
-while its verified observation primes the cache for the next invocation.
+aliases from the memo and the persistent cache.
+
+### Fresh verification contexts
+
+`incremental.fresh_context(context)` returns the context that every
+verification after a build step uses: `incremental.revalidate_record` and the
+uncertified source-snapshot check before staged module publication, the
+post-compile and post-publication checks of a `--c-source` object, and the
+post-link `linkcertificate.commit`. It starts with an empty memo whose parent
+is the caller's memo and shares the caller's persistent cache and SDK
+manifest. It therefore never trusts the caller's memo as is: each input is
+re-observed, a recorded digest from the parent memo, the SDK manifest, or the
+persistent cache is reused only under an equal precise observation, and a
+file whose observation changed is read and rehashed. A file that first
+appears during the step, such as a freshly linked output or staged object,
+has no record and is hashed once. Only a content change fails verification,
+and the digests computed there prime the persistent cache for the next
+invocation. Compilation is not treated as adversarial: digests exist to avoid
+rebuilding a file whose metadata changed while its content did not, so a
+content change that preserves the complete precise observation, change time
+included, is outside what verification detects. "Precise" describes the
+observation API, which reports integer nanoseconds, not the filesystem's
+timestamp granularity, and no portable API reports that granularity. On a
+filesystem with coarse timestamps (one second on HFS+, ext3, and some NFS
+servers), a same-size in-place rewrite within one tick that keeps the inode
+therefore yields an equal observation and keeps the old digest. Titan
+publishes its own outputs by rename, so only user-edited inputs and
+externally rewritten libraries are exposed to this.
 
 ### Persistent digest cache
 
@@ -295,7 +344,8 @@ plus two tables:
   paths, observations, or module views; callers still compare a fingerprint
   with the primary object's target.
 
-The cache is a hint, never evidence on its own. A missing, unreadable,
+A `files` entry vouches for its digest only while the file's precise
+observation is unchanged. A missing, unreadable,
 oversized, malformed, or wrong-schema file loads as an empty cache, which the
 next save replaces. A save runs only from the owning context and only when no
 valid cache was loaded or an entry changed; it writes `digests.tmp.<unique>`,
@@ -303,6 +353,60 @@ renames it over the file, and removes the staging file on failure. `titanc`
 ignores save errors so they cannot replace compilation diagnostics. Entries
 are replaced in place and removed only by `invalidate_file`; there is no other
 pruning.
+
+### Installed SDK digest manifest
+
+An installed SDK carries `lib/titan/<ver>/sdk-digests`
+(`incremental.SDK_DIGESTS`, `driver.INSTALL_PATHS.sdk_digests`). It records
+content digests of the installation's own native link inputs, so a fresh
+output tree, or a build without `--output`, need not hash a large standard
+provider or archive that has not changed since installation. Only the
+installer writes it: `scripts/titan_install.lua` `publish` calls
+`incremental.write_sdk_digests` with the just-installed provider's
+`_sha256_binary`, `_stat_precise`, and, when that provider has it,
+`_sha256_stream`. It covers exactly the approved SDK link
+inputs (`sdk_link_inputs`): the Titan-owned `titan.so`, `titan.dll`,
+`titan.a`, and `libtitan.a` directly under `lib/titan/<ver>/`, the copied
+`lib/libbacktrace.a` when present, and the Lua archive that
+`driver.installed_paths` links
+(`lib/liblua.a`, or `lib/liblua55.a` on Windows). When Lua shares the prefix,
+the installer records that prefix's existing Lua archive in place, without
+copying, replacing, or taking cleanup ownership of it; a separate tree
+records the archive the installer copied. Preserved or foreign files, even
+inside the version directory, the `.dSYM` bundle, and headers are never
+recorded. Each file is read under the ordinary read-race guard, streamed when
+it is larger than `STREAM_THRESHOLD_BYTES` and the stream is available, and a
+file
+without a precise observation gets no entry. The manifest is replaced through
+`sdk-digests.tmp.<unique>` and a rename. A payload without a loadable
+compiler and provider writes none. The installer records the manifest path as
+`digests` in its `installer/location.lua`. Uninstall removes that file only
+when the recorded value has the exact form
+`lib/titan/<major>.<minor>/sdk-digests`; any other value, including an
+unrelated in-prefix name or a traversal, is ignored and the file kept. Payload
+paths are contained by rejecting `.` and `..` components, splitting on both
+`/` and `\` on Windows.
+
+The file is a `graphcodec` record with `schema = version.SDK_DIGEST_SCHEMA`
+(`"1"`), the same `digest`, `canonicalization`, and `abi` envelope as the
+per-output cache, and `files[realpath] = { digest, observation }` validated
+like the cache's `files`. An installed `titanc` loads it read-only with
+`incremental.load_sdk_digests` right after the per-output cache. A missing,
+unreadable, oversized, malformed, or foreign-schema manifest contributes no
+entries, and `titanc` never writes it.
+
+`titanc` applies no admission filter of its own: every valid entry is one
+more recorded digest, trusted exactly like a cache entry in every context,
+including the [fresh post-link recheck](#fresh-verification-contexts). The
+file must have the same resolved path, an equal precise observation (`dev`,
+`ino`, `size`, `mode`, and nanosecond `mtime` and `ctime`, which is
+`ChangeTime` on Windows), and be readable. A Windows volume without
+`ChangeTime` or file IDs yields only coarse observations, which never match
+an entry, so the installer records no entry for them and `titanc` rehashes
+them. A changed observation reads and
+hashes the file; if those bytes differ from what the ticket certified, the
+recheck fails with `link input changed during build`. Reuses count as
+`sdk_reuses`.
 
 ### Certificate layout
 
@@ -476,9 +580,15 @@ reports the exact component:
    Tool executables are certified by self-description plus physical metadata
    rather than by hashing the compiler binary bytes. The change timestamp
    (`ctime` on POSIX, `ChangeTime` on Windows through the native precise stat)
-   catches preserved-mtime replacements (`cp -p`, `touch -r`). An in-place,
+   catches preserved-mtime replacements (`cp -p`, `touch -r`). A Windows
+   volume that reports no `ChangeTime` leaves the identity without a change
+   time (recorded with `"coarse"` precision). There a preserved-mtime
+   replacement is caught only through a changed file ID or size, so an
+   in-place same-size overwrite, or any such replacement on a volume without
+   file IDs, is undetected. An in-place,
    same-size binary overwrite that preserves both timestamps (possible within
-   one tick of the LuaFileSystem fallback's coarse clock), or an unrecognized
+   one tick of the LuaFileSystem fallback's coarse clock or of a
+   coarse-timestamp filesystem), or an unrecognized
    wrapper script that hides a changed downstream binary without changing
    `-E -v` or `-dM` output, is outside physical tool detection.
 3. **`preamble` (`incremental.preamble_identity`, `incremental.lua`).**
