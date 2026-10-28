@@ -246,10 +246,10 @@ hashes each distinct file at most once per resolver context:
    observation), it records a pre-read observation combining
    `context.io:stat(path)` (which must be `kind == "file"`) and
    `context.io:lstat(path)` and reads the file. A file larger than
-   `incremental.STREAM_CHUNK_BYTES` (4 MiB) whose digest alone is demanded is
-   hashed in chunks of that size when the strategy supplies the optional
-   `read_chunks` and the cache adapter supplies `sha256_stream`; its bytes are
-   never materialized or retained. Any other file is read whole through
+   `incremental.STREAM_THRESHOLD_BYTES` (4 MiB) whose digest alone is
+   demanded is fed into a new `sha256_stream` from the cache adapter through
+   the strategy's optional `absorb_file` when both are available; its bytes
+   never become a Lua string and are not retained. Any other file is read whole through
    `context.io:read_file(path)`. Either way it then checks that the post-read
    observation and `realpath(path)` are identical and that the byte count
    matches a precise observed size; any mismatch raises
@@ -372,9 +372,9 @@ the installer records that prefix's existing Lua archive in place, without
 copying, replacing, or taking cleanup ownership of it; a separate tree
 records the archive the installer copied. Preserved or foreign files, even
 inside the version directory, the `.dSYM` bundle, and headers are never
-recorded. Each file is read under the ordinary read-race guard, hashed in
-chunks when it is larger than `STREAM_CHUNK_BYTES` and the stream is
-available, and a file
+recorded. Each file is read under the ordinary read-race guard, streamed when
+it is larger than `STREAM_THRESHOLD_BYTES` and the stream is available, and a
+file
 without a precise observation gets no entry. The manifest is replaced through
 `sdk-digests.tmp.<unique>` and a rename. A payload without a loadable
 compiler and provider writes none. The installer records the manifest path as
