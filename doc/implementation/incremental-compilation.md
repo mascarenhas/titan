@@ -243,8 +243,9 @@ hashes each distinct file at most once per resolver context:
    one, provided the path is readable. Content digests are file identity, so
    these sources apply to every file role: sources, headers, objects,
    payloads, providers, archives, system libraries, and outputs. A hit leaves
-   the memo with a digest without bytes and counts as `sdk_reuses` for a
-   manifest entry and as `observation_reuses` otherwise.
+   the memo with a digest without bytes, recording the current observation and
+   its size, and counts as `sdk_reuses` for a manifest entry and as
+   `observation_reuses` otherwise.
 3. Otherwise, when `bytes` is nil (no record, or a coarse or changed
    observation), it records a pre-read observation combining
    `context.io:stat(path)` (which must be `kind == "file"`) and
@@ -261,14 +262,18 @@ hashes each distinct file at most once per resolver context:
    `<path>: file changed while it was read`. Caller-supplied `bytes` are
    neither observed nor read.
 4. It hashes the read or caller-supplied bytes (a streamed file is already
-   hashed) and records `{ digest, bytes, observation }` in `memo.files[key]`,
-   without bytes for a streamed file and without an observation for
-   caller-supplied bytes. Only a read with a precise observation is stored in
-   the persistent cache or serves later observation reuse. It then
+   hashed) and records `{ digest, bytes, observation, size }` in
+   `memo.files[key]`, without bytes for a streamed file and without an
+   observation for caller-supplied bytes or a coarse read. `size` is the
+   measured byte count of the whole read, the stream, or the caller's bytes,
+   kept whatever the observation's precision. Only a read with a precise
+   observation is stored in the persistent cache or serves later observation
+   reuse. It then
    updates `incremental.counters(context)` (`file_hashes`, `file_reads`,
    `file_bytes`, `observation_reuses`, `sdk_reuses`, `digest_calls`, and
    `files[key]`),
-   calls `context.io:yield()`, and returns `digest, bytes`. Identical bytes
+   calls `context.io:yield()`, and returns `digest, bytes, observation`.
+   `size` stays private to the memo and the compiler inventory. Identical bytes
    under a changed observation hash to the recorded digest, so a touched but
    unchanged file still matches every digest certified for it.
 
@@ -477,13 +482,19 @@ reports the exact component:
    containing the loaded `titan-compiler/driver.lua`, never `package.searchpath`
    or `PATH`), lists every `*.lua` file directly inside `titan-compiler/`,
    `titan-compiler/checker/`, `titan-compiler/coder/`, and `c-parser/`, and
-   hashes each file as `{ path = <relative>, length = #bytes, sha256 = <hex> }`.
+   hashes each file as `{ path = <relative>, length = <bytes>, sha256 = <hex> }`.
    It adds the executing frontend script passed as `context.frontend` (`arg[0]`
    from `titanc`, which in a LuaRocks installation is the real
    `lib/luarocks/rocks-5.5/titan/<version>/bin/titanc` script rather than the
    outer wrapper; programmatic callers without `frontend` record `{ path =
-   "titanc", api = true }`). Entries are sorted bytewise by `path` and hashed
-   with tag `"compiler"`.
+   "titanc", api = true }`). Each `length` is the file's measured byte count
+   from the invocation memo: the whole read, the streamed count, or a precise
+   reuse's current size. A file over the streaming threshold that is streamed
+   under a coarse observation (a Windows volume without `ChangeTime` or file
+   IDs, or a host strategy that reports coarse metadata) therefore keeps an
+   exact length although that observation authorizes no reuse. Entries are
+   sorted bytewise by `path` and
+   hashed with tag `"compiler"`.
 2. **`toolchain` (`incremental.toolchain_identity`, `incremental.lua`).**
    Describes which compiler installation runs, independent of the effective
    compile flags (those belong to `options`). The description argv is the
