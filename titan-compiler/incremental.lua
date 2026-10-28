@@ -215,10 +215,11 @@ local function hash_file(context, path, key, bytes, observed, count, digest, siz
     memo.counters.file_hashes = memo.counters.file_hashes + 1
     memo.counters.file_bytes = memo.counters.file_bytes + size
     count.hashes, count.bytes = count.hashes + 1, count.bytes + size
-    memo.files[key] = { digest = digest, bytes = bytes, observation = observed }
+    -- Length is content evidence even when no precise observation is reusable.
+    memo.files[key] = { digest = digest, bytes = bytes, observation = observed, size = size }
     cache_file(context, path, digest, observed)
     context.io:yield()
-    return digest, bytes, observed
+    return digest, bytes, observed, size
 end
 
 local function digest_file(context, path, bytes, max_bytes, want_bytes)
@@ -243,7 +244,7 @@ local function digest_file(context, path, bytes, max_bytes, want_bytes)
                 error(path .. ": file changed during build", 0)
             end
         end
-        return saved.digest, saved.bytes, saved.observation
+        return saved.digest, saved.bytes, saved.observation, saved.size
     end
     -- Content digests are file identity. Any recorded digest is reused while
     -- the file's precise observation, change time included, still equals the
@@ -267,10 +268,10 @@ local function digest_file(context, path, bytes, max_bytes, want_bytes)
                 end
             end
             if recorded and context.io:readable(path) then
-                memo.files[key] = { digest = recorded.digest, observation = current }
+                memo.files[key] = { digest = recorded.digest, observation = current, size = current.size }
                 memo.counters[counter] = memo.counters[counter] + 1
                 count[counter] = count[counter] + 1
-                return recorded.digest, nil, current
+                return recorded.digest, nil, current, current.size
             end
         end
     end
@@ -284,7 +285,8 @@ local function digest_file(context, path, bytes, max_bytes, want_bytes)
 end
 
 function incremental.file_digest(context, path, bytes)
-    return digest_file(context, path, bytes)
+    local digest, contents, observed = digest_file(context, path, bytes)
+    return digest, contents, observed
 end
 
 -- A digest cache hit deliberately has no bytes. Byte-demand consumers use this
@@ -365,9 +367,9 @@ local function compiler_inventory(context, value)
         for _, name in ipairs(names) do
             if name:match("%.lua$") then
                 local relative = directory .. "/" .. name
-                local digest, bytes, observed = incremental.file_digest(context, paths.join(root, relative))
+                local digest, _, _, size = digest_file(context, paths.join(root, relative))
                 inventory[#inventory + 1] = { path = relative,
-                    length = bytes and #bytes or observed.size, sha256 = digest }
+                    length = size, sha256 = digest }
             end
         end
     end
@@ -375,9 +377,9 @@ local function compiler_inventory(context, value)
     if frontend == "api" then
         inventory[#inventory + 1] = { path = "titanc", api = true }
     else
-        local digest, bytes, observed = incremental.file_digest(context, frontend)
+        local digest, _, _, size = digest_file(context, frontend)
         inventory[#inventory + 1] = { path = "titanc",
-            length = bytes and #bytes or observed.size, sha256 = digest }
+            length = size, sha256 = digest }
     end
     table.sort(inventory, function(a, b) return util.bytewise_less(a.path, b.path) end)
     return incremental.digest(context, "compiler", inventory), inventory
