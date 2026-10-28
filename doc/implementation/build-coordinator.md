@@ -531,12 +531,16 @@ resolver settings, and `codegen_policy`, then calls
 `incremental.compiler_component(context, options)` to hash the loaded compiler
 Lua files and frontend script. If the resulting digest differs from the
 top-level `configuration.compiler`, the worker fails immediately with
-`"compiler installation changed during build"`. The configuration must carry
-either a complete certified `configuration.configuration` whose `compiler`
-equals that digest, or no nested configuration and an `uncertified` reason
-string; anything else is rejected as an incompatible build worker
-configuration. The preamble, toolchain, and compile-options digests, or the
-uncertified policy, are inherited from the coordinator without re-probing.
+`"compiler installation changed during build"`. The coordinator sends either
+its complete certified configuration as `configuration.configuration` or,
+for an uncertified native configuration, no nested configuration and an
+`uncertified` reason string. The worker's own guard checks only that shape:
+a nested table must carry the same `compiler` digest and no `uncertified`
+reason, and without one the reason must be a string; any other shape is
+rejected as an incompatible build worker configuration. The nested
+certificate's remaining fields are not revalidated. The preamble, toolchain,
+and compile-options digests, or the uncertified policy, are inherited from the
+coordinator without re-probing.
 
 `driver.compile_planned_module(context, modname, request.options)`
 (`driver.lua`) creates a loader with `worker_plan = options.plan`
