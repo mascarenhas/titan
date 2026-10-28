@@ -169,22 +169,21 @@ local function cache_file(context, path, digest, observation)
     end
 end
 
--- A file larger than one chunk whose digest alone is demanded is hashed in
--- bounded chunks when the adapter supplies the native `sha256_stream` and the
--- strategy supplies `read_chunks`; its bytes are never materialized or
+-- A file larger than STREAM_THRESHOLD_BYTES whose digest alone is demanded is
+-- hashed through the native `sha256_stream` when the adapter supplies it and
+-- the strategy supplies `absorb_file`; its bytes are never materialized or
 -- retained. Anything else is read whole.
-local STREAM_CHUNK_BYTES = 4 * 1024 * 1024
-incremental.STREAM_CHUNK_BYTES = STREAM_CHUNK_BYTES
+local STREAM_THRESHOLD_BYTES = 4 * 1024 * 1024
+incremental.STREAM_THRESHOLD_BYTES = STREAM_THRESHOLD_BYTES
 
 local function read_evidence(context, path, key, count, max_bytes, stream)
     local before, observed, size = read_observation(context, path)
     local new_stream = stream and context.cache_adapter and context.cache_adapter.sha256_stream
     local bytes, digest
-    if new_stream and context.io.read_chunks and math.type(size) == "integer"
-       and size > STREAM_CHUNK_BYTES then
+    if new_stream and context.io.absorb_file and math.type(size) == "integer"
+       and size > STREAM_THRESHOLD_BYTES then
         local sha = new_stream()
-        size = required(context.io:read_chunks(path, STREAM_CHUNK_BYTES,
-            function(chunk) sha:update(chunk) end))
+        size = required(context.io:absorb_file(path, sha))
         digest = sha:finish()
         assert(type(digest) == "string" and #digest == 32,
             "sha256_stream must finish with a 32-byte digest")

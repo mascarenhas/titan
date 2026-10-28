@@ -517,38 +517,45 @@ describe("compiler I/O strategy", function()
         assert.is_true(strategy:unlink(temporary))
     end)
 
-    it("delivers bounded file chunks and keeps consumer failures unchanged", function()
+    it("absorbs files into digest streams and keeps stream failures unchanged", function()
         root = workspace()
         local strategy = compiler_io.new_sync()
-        local source = root .. "/chunked.bin"
-        local bytes = string.rep("prefix\0middle\255suffix", 50)
+        local source = root .. "/absorbed.bin"
+        local bytes = string.rep("prefix\0middle\255suffix", 200000)
         assert.is_true(strategy:write_file(source, bytes))
-        for _, size in ipairs({ 1, 7, #bytes - 1, #bytes, #bytes + 1 }) do
-            local chunks = {}
-            local total = assert(strategy:read_chunks(source, size, function(chunk)
-                assert.is_true(#chunk >= 1 and #chunk <= size)
-                chunks[#chunks + 1] = chunk
-            end))
-            assert.equal(#bytes, total)
-            assert.equal(bytes, table.concat(chunks))
-        end
+        -- A Lua stream receives bounded chunks in order.
+        local chunks = {}
+        local lua_stream = { update = function(self, chunk)
+            assert.is_true(#chunk >= 1 and #chunk <= 1024 * 1024)
+            chunks[#chunks + 1] = chunk
+            return self
+        end }
+        assert.equal(#bytes, assert(strategy:absorb_file(source, lua_stream)))
+        assert.is_true(#chunks > 1)
+        assert.equal(bytes, table.concat(chunks))
         local empty = root .. "/empty.bin"
         assert.is_true(strategy:write_file(empty, ""))
-        assert.equal(0, assert(strategy:read_chunks(empty, 4, function()
+        assert.equal(0, assert(strategy:absorb_file(empty, { update = function()
             error("an empty file has no chunks")
-        end)))
+        end })))
 
-        local missing, missing_error = strategy:read_chunks(root .. "/absent.bin", 4,
-            function() end)
+        -- A native stream absorbs the open file itself.
+        local support = require "titan"
+        if type(support._sha256_stream) == "function" then
+            local native = support._sha256_stream()
+            assert.equal(#bytes, assert(strategy:absorb_file(source, native)))
+            assert.equal(support._sha256_binary(bytes), native:finish())
+            assert.has_error(function() strategy:absorb_file(source, native) end,
+                "attempt to use a finished SHA-256 stream")
+        end
+
+        local missing, missing_error = strategy:absorb_file(root .. "/absent.bin",
+            { update = function() end })
         assert.is_nil(missing)
         assert.is_string(missing_error)
-        local invalid, invalid_error = strategy:read_chunks(source, 0, function() end)
-        assert.is_nil(invalid)
-        assert.matches("positive integer", invalid_error, 1, true)
         local cancelled = {}
-        local ok, err = pcall(strategy.read_chunks, strategy, source, 8, function()
-            error(cancelled, 0)
-        end)
+        local ok, err = pcall(strategy.absorb_file, strategy, source,
+            { update = function() error(cancelled, 0) end })
         assert.is_false(ok)
         assert.equal(cancelled, err)
     end)

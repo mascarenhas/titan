@@ -552,9 +552,12 @@ static int sha256_binary(lua_State *L) {
 }
 
 /* Private compiler helper: an incremental SHA-256 for bounded-chunk file
-** digests. `stream:update(bytes)` returns the stream; `stream:finish()`
-** returns the same 32-byte digest as _sha256_binary of the concatenated
-** bytes, after which the stream rejects further use. */
+** digests. `stream:update(bytes)` returns the stream; `stream:absorb(file)`
+** hashes an open Lua file from its position to end of file through one fixed
+** buffer, so no Lua string ever holds its bytes, and returns the byte count
+** (or nil, message, errno on a read error); `stream:finish()` returns the same
+** 32-byte digest as _sha256_binary of everything absorbed, after which the
+** stream rejects further use. */
 #define TITAN_SHA256_STREAM_TYPE "titan.sha256_stream"
 
 typedef struct {
@@ -589,6 +592,23 @@ static int sha256_stream_update(lua_State *L) {
   return 1;
 }
 
+static int sha256_stream_absorb(lua_State *L) {
+  TitanSha256Stream *stream = check_sha256_stream(L);
+  luaL_Stream *file = (luaL_Stream *)luaL_checkudata(L, 2, LUA_FILEHANDLE);
+  unsigned char buffer[65536];
+  lua_Integer total = 0;
+  size_t count;
+  if (file->closef == NULL) return luaL_error(L, "attempt to use a closed file");
+  clearerr(file->f);
+  while ((count = fread(buffer, 1, sizeof buffer, file->f)) > 0) {
+    titan_sha256_update(&stream->sha, buffer, count);
+    total += (lua_Integer)count;
+  }
+  if (ferror(file->f)) return luaL_fileresult(L, 0, NULL);
+  lua_pushinteger(L, total);
+  return 1;
+}
+
 static int sha256_stream_finish(lua_State *L) {
   TitanSha256Stream *stream = check_sha256_stream(L);
   unsigned char digest[32];
@@ -600,6 +620,7 @@ static int sha256_stream_finish(lua_State *L) {
 
 static const luaL_Reg sha256_stream_methods[] = {
   { "update", sha256_stream_update },
+  { "absorb", sha256_stream_absorb },
   { "finish", sha256_stream_finish },
   { NULL, NULL },
 };

@@ -522,6 +522,32 @@ describe("native SHA-256", function()
         assert.has_error(function() stream:update("x") end)
         assert.has_error(function() stream:finish() end)
     end)
+
+    it("absorbs an open file from its position through a fixed buffer", function()
+        if type(support._sha256_stream) ~= "function" then
+            pending("native _sha256_stream requires a reinstalled runtime")
+            return
+        end
+        local path = require("spec.support.temporary").name()
+        local bytes = string.rep("titan\0\255", 30000) .. "tail"
+        local writer = assert(io.open(path, "wb"))
+        assert(writer:write(bytes))
+        assert(writer:close())
+        local file = assert(io.open(path, "rb"))
+        local stream = support._sha256_stream()
+        assert.equal(#bytes, stream:absorb(file))
+        assert.equal(0, stream:absorb(file))
+        assert.equal(support._sha256_binary(bytes), stream:finish())
+        assert(file:seek("set", 7))
+        stream = support._sha256_stream():update(bytes:sub(1, 7))
+        assert.equal(#bytes - 7, stream:absorb(file))
+        assert.equal(support._sha256_binary(bytes), stream:finish())
+        assert(file:close())
+        assert.has_error(function() support._sha256_stream():absorb(file) end,
+            "attempt to use a closed file")
+        assert.has_error(function() support._sha256_stream():absorb("not a file") end)
+        assert(os.remove(path))
+    end)
 end)
 
 describe("generated-C batches under a parent Make", function()
