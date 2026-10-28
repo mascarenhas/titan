@@ -248,8 +248,10 @@ hashes each distinct file at most once per resolver context:
    `context.io:lstat(path)` and reads the file. A file larger than
    `incremental.STREAM_THRESHOLD_BYTES` (4 MiB) whose digest alone is
    demanded is fed into a new `sha256_stream` from the cache adapter through
-   the strategy's optional `absorb_file` when both are available; its bytes
-   never become a Lua string and are not retained. Any other file is read whole through
+   the strategy's optional `absorb_file` when both are available. The whole
+   file never becomes a single Lua string and its bytes are not retained; with
+   the native stream's `absorb` (as `titanc` supplies), no Lua string holds
+   any of its bytes. Any other file is read whole through
    `context.io:read_file(path)`. Either way it then checks that the post-read
    observation and `realpath(path)` are identical and that the byte count
    matches a precise observed size; any mismatch raises
