@@ -1269,11 +1269,16 @@ static const luaL_Reg output_lock_methods[] = {
 /* Private compiler helper: precise file metadata for incremental observation
 ** reuse. Returns { kind, dev, ino, size, mode, mtime_ns, ctime_ns }, plus
 ** windows_attributes on Windows; on failure (missing paths included), returns
-** nil, errmsg, errno_code without raising. */
+** nil, errmsg, errno_code without raising. A Windows volume that reports no
+** ChangeTime omits ctime_ns, and a file that neither FileIdInfo nor
+** GetFileInformationByHandle identifies (a failed query or a zero file ID)
+** omits dev and ino; the compiler then treats the observation as coarse
+** instead of substituting either value. */
 static int stat_precise(lua_State *L) {
   size_t path_len = 0;
   const char *path = luaL_checklstring(L, 1, &path_len);
   int follow = lua_isnoneornil(L, 2) ? 1 : lua_toboolean(L, 2);
+  int has_ctime = 1, has_identity = 1;
   const char *kind;
   char dev_buf[32], ino_buf[64];
   lua_Integer size_val, mode_val, mtime_ns, ctime_ns;
@@ -1386,25 +1391,35 @@ static int stat_precise(lua_State *L) {
       mode_val |= (strcmp(kind, "directory") == 0) ? 0777 : 0666;
     write_ticks = (int64_t)basic_info.LastWriteTime.QuadPart;
     change_ticks = (int64_t)basic_info.ChangeTime.QuadPart;
-    if (change_ticks == 0) change_ticks = write_ticks;
     mtime_ns = (lua_Integer)((write_ticks - 116444736000000000LL) * 100LL);
-    ctime_ns = (lua_Integer)((change_ticks - 116444736000000000LL) * 100LL);
-    if (has_id_info) {
-      int i;
-      snprintf(dev_buf, sizeof dev_buf, "%llu",
-               (unsigned long long)id_info.VolumeSerialNumber);
-      for (i = 0; i < 16; i++)
-        snprintf(ino_buf + 2 * i, 3, "%02x",
-                 (unsigned int)id_info.FileId.Identifier[i]);
-    } else if (has_handle_info) {
-      snprintf(dev_buf, sizeof dev_buf, "%lu",
-               (unsigned long)handle_info.dwVolumeSerialNumber);
-      snprintf(ino_buf, sizeof ino_buf, "%08lx%08lx",
-               (unsigned long)handle_info.nFileIndexHigh,
-               (unsigned long)handle_info.nFileIndexLow);
+    if (change_ticks == 0) {
+      has_ctime = 0;
+      ctime_ns = 0;
     } else {
-      dev_buf[0] = '0'; dev_buf[1] = '\0';
-      ino_buf[0] = '0'; ino_buf[1] = '\0';
+      ctime_ns = (lua_Integer)((change_ticks - 116444736000000000LL) * 100LL);
+    }
+    {
+      /* A zero file ID identifies nothing; fall through to the next query. */
+      int i, id_known = 0;
+      if (has_id_info)
+        for (i = 0; i < 16 && !id_known; i++)
+          id_known = id_info.FileId.Identifier[i] != 0;
+      if (id_known) {
+        snprintf(dev_buf, sizeof dev_buf, "%llu",
+                 (unsigned long long)id_info.VolumeSerialNumber);
+        for (i = 0; i < 16; i++)
+          snprintf(ino_buf + 2 * i, 3, "%02x",
+                   (unsigned int)id_info.FileId.Identifier[i]);
+      } else if (has_handle_info && (handle_info.nFileIndexHigh != 0 ||
+                                     handle_info.nFileIndexLow != 0)) {
+        snprintf(dev_buf, sizeof dev_buf, "%lu",
+                 (unsigned long)handle_info.dwVolumeSerialNumber);
+        snprintf(ino_buf, sizeof ino_buf, "%08lx%08lx",
+                 (unsigned long)handle_info.nFileIndexHigh,
+                 (unsigned long)handle_info.nFileIndexLow);
+      } else {
+        has_identity = 0;
+      }
     }
   }
 #else
@@ -1453,18 +1468,22 @@ static int stat_precise(lua_State *L) {
 #endif
   lua_pushstring(L, kind);
   lua_setfield(L, -2, "kind");
-  lua_pushstring(L, dev_buf);
-  lua_setfield(L, -2, "dev");
-  lua_pushstring(L, ino_buf);
-  lua_setfield(L, -2, "ino");
+  if (has_identity) {
+    lua_pushstring(L, dev_buf);
+    lua_setfield(L, -2, "dev");
+    lua_pushstring(L, ino_buf);
+    lua_setfield(L, -2, "ino");
+  }
   lua_pushinteger(L, size_val);
   lua_setfield(L, -2, "size");
   lua_pushinteger(L, mode_val);
   lua_setfield(L, -2, "mode");
   lua_pushinteger(L, mtime_ns);
   lua_setfield(L, -2, "mtime_ns");
-  lua_pushinteger(L, ctime_ns);
-  lua_setfield(L, -2, "ctime_ns");
+  if (has_ctime) {
+    lua_pushinteger(L, ctime_ns);
+    lua_setfield(L, -2, "ctime_ns");
+  }
   return 1;
 }
 #if defined(_WIN32)

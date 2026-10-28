@@ -185,9 +185,15 @@ local function stat_attributes(path, follow)
         attributes.device, attributes.inode = attributes.dev, attributes.ino
         attributes.modified_seconds = attributes.mtime_ns // 1000000000
         attributes.modified_nanoseconds = attributes.mtime_ns % 1000000000
-        attributes.changed_seconds = attributes.ctime_ns // 1000000000
-        attributes.changed_nanoseconds = attributes.ctime_ns % 1000000000
-        attributes.precision, attributes.time_precision = "ns", "ns"
+        if attributes.ctime_ns ~= nil then
+            attributes.changed_seconds = attributes.ctime_ns // 1000000000
+            attributes.changed_nanoseconds = attributes.ctime_ns % 1000000000
+        end
+        -- Without a change time or a file identity (a Windows volume that
+        -- reports neither) the observation cannot authorize reuse: coarse.
+        local precision = attributes.ctime_ns ~= nil and attributes.dev ~= nil
+            and attributes.ino ~= nil and "ns" or "coarse"
+        attributes.precision, attributes.time_precision = precision, precision
         return attributes
     end
     local attributes, err = lfs_attributes(path, follow)

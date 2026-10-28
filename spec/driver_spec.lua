@@ -918,14 +918,14 @@ describe("Windows compiler path integration", function()
             { name = "a lock file linked to the held one",
                 lock = { kind = "symlink", device = held.device, inode = held.inode } },
             { name = "no lock file" },
-            { name = "the native unavailable-identity pair", unavailable = true },
+            { name = "lock files without a native file ID", unavailable = true },
         }) do
             it("rejects an alias proven only by " .. case.name .. " before any listing", function()
                 local nodes = layout(case.lock)
                 if case.unavailable then
-                    local unknown = { kind = "file", device = "0", inode = "0" }
-                    nodes["C:/real/.titan-build.lock"] = unknown
-                    nodes["C:/alias/.titan-build.lock"] = unknown
+                    -- Native stat omits dev/ino when no file ID is available.
+                    nodes["C:/real/.titan-build.lock"] = { kind = "file" }
+                    nodes["C:/alias/.titan-build.lock"] = { kind = "file" }
                 end
                 local model = staging_model(nodes)
                 local ok, err = driver.cleanup_stale_staging(

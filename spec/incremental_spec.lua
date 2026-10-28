@@ -520,16 +520,21 @@ describe("persistent precise digest cache", function()
 
     it("requires every precise field and a readable regular file", function()
         local files = { [path] = "source" }; prime(files)
-        local ctx = precise_context(files)
-        local stat = ctx.io.stat
-        function ctx.io:stat(name)
-            local value, err = stat(self, name)
-            if name == path and value then value.ctime_ns = nil end
-            return value, err
+        for _, omitted in ipairs({ { "ctime_ns" }, { "dev", "ino" } }) do
+            local ctx = precise_context(files)
+            local stat = ctx.io.stat
+            function ctx.io:stat(name)
+                local value, err = stat(self, name)
+                if name == path and value then
+                    for _, field in ipairs(omitted) do value[field] = nil end
+                end
+                return value, err
+            end
+            assert(incremental.load_digest_cache(ctx, fixture_path("/out")))
+            assert.equal(sha256.hex("source"), (incremental.file_digest(ctx, path)))
+            assert.equal(1, incremental.counters(ctx).file_hashes, omitted[1])
+            assert.equal(0, incremental.counters(ctx).observation_reuses, omitted[1])
         end
-        assert(incremental.load_digest_cache(ctx, fixture_path("/out")))
-        assert.equal(sha256.hex("source"), (incremental.file_digest(ctx, path)))
-        assert.equal(1, incremental.counters(ctx).file_hashes)
         local unreadable = precise_context(files)
         assert(incremental.load_digest_cache(unreadable, fixture_path("/out")))
         function unreadable.io:readable() return false end

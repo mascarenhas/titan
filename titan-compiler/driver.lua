@@ -9904,17 +9904,14 @@ function driver.cleanup_staging_directories(directories, strategy)
 end
 
 -- A held lock file's physical identity, observed without following its leaf.
--- The native pair reported when no file ID is available ("0", "0") identifies
--- nothing, so it never authorizes a domain.
+-- A file without a native file ID never authorizes a domain.
 local function staging_lock_identity(strategy, filename)
     local info, err = strategy:lstat(filename)
     if err then return nil, err end
     if not info or info.kind ~= "file" or info.device == nil or info.inode == nil then
         return false
     end
-    local device, inode = tostring(info.device), tostring(info.inode)
-    if device == "0" and inode == "0" then return false end
-    return device .. "\0" .. inode
+    return tostring(info.device) .. "\0" .. tostring(info.inode)
 end
 
 -- The basename-preserving staging namespace belongs to the corresponding
