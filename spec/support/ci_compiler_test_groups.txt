@@ -8,16 +8,17 @@
 # Domains:
 #   retained - runtime/packaging specs (Makefile STDLIB_BUSTED_TESTS)
 #   stdlib   - installed-stdlib compiler integration specs (ci_stdlib_compiler_test_files.txt)
-#              Their ci_covered_seconds are a same-host LuaCov replica of the
-#              stdlib job's step on 4 CPUs (2026-10-28, issue 303), not a CI run.
+#              Their ci_covered_seconds come from a same-host serial 4-CPU
+#              LuaCov diagnostic run of this step's files (2026-10-28), not a CI run.
 #   compiler - compiler/language specs
 # Optional column ci_covered_seconds records Linux CI covered+stress durations
 # (run 37890691611 at b32db0c / 37887221316 at e9d3855, GCC 14, ubicloud-standard-2).
 # When ci_covered_seconds is '-', CI partitioning falls back to local_validation_seconds.
 # Shard assignments are never stored here; spec/support/compiler_test_groups.lua
 # computes deterministic LPT partitions for any worker count N.
-# Issue 303 additions use an unmeasured 1.000 scheduling weight and no covered
-# timing; these weights are not observations from the timing runs above.
+# Issue 303 additions use an unmeasured 1.000 local weight; except for the
+# stdlib rows above, they have no covered timing. Neither is an observation
+# from the timing runs above.
 compiler spec/abi_spec.lua 0.201 2.926
 retained spec/asan_generated_c_context_spec.lua 0.587 -
 compiler spec/binary_compatibility_spec.lua 0.017 0.107
