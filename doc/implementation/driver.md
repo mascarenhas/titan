@@ -2273,11 +2273,14 @@ boundary](windows-build.md#windows-loader-boundary).
 string, including embedded NUL and high bytes, and raises for any other
 argument. It is C over the public Lua API, with no OpenSSL or process
 dependency, so the private bootstrap provides it before the standard library
-exists. On x86 and x86-64 GCC/Clang builds it uses the SHA extensions when
-`cpuid` reports them (with SSSE3 and SSE4.1) and otherwise the portable block
-function. An AArch64 build whose target defines `__ARM_FEATURE_SHA2` always
-uses the ARMv8 SHA2 instructions, and every other target uses the portable
-function. All paths produce identical digests. `titanc` refuses to start
+exists. Each call selects one compressor and uses it for both the data blocks
+and the padding, with no process-wide state. On x86 and x86-64 GCC/Clang
+builds that is the SHA extensions when a single `cpuid` probe reports them
+(with SSSE3 and SSE4.1), and otherwise the portable block function. A
+little-endian AArch64 build whose target defines `__ARM_FEATURE_SHA2` always
+uses the ARMv8 SHA2 instructions; big-endian AArch64 and every other target
+use the portable function. An input shorter than one 64-byte block makes no
+data-block call. All paths produce identical digests. `titanc` refuses to start
 without it ([The `titanc` command
 line](#the-titanc-command-line)), and a physical provider named `titan` is
 published only when a fresh Lua process finds it, beside `_loadlib` and

@@ -180,10 +180,13 @@ split-part object whose metadata is unchanged since the last invocation is
 not read and hashed again; each module's primary object is still read for its
 certificate. A changed file is always rehashed, and deleting the cache is
 safe. Without `--output`, `titanc` keeps no persistent digest cache. An SDK
-installed by its installer also records the digests of its own providers and
-archives, so even a fresh output tree, or a build without `--output`, reuses
-them until those files change. If the SDK files are replaced any other way,
-they are simply read and hashed again.
+installed by its installer also records the digests of Titan's own providers
+and runtime archives, `libbacktrace.a`, and the Lua archive it links, so even
+a fresh output tree, or a build without `--output`, reuses them until those
+files change. If the SDK files are replaced any other way, they are simply
+read and hashed again. After compiling and linking, `titanc` checks every
+input again by the same rule, so an edit made during the build is still
+caught without rereading files that did not change.
 
 ### Native `--c-source` nodes and final-link certification
 

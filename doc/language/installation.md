@@ -402,7 +402,7 @@ All paths are under `ROCKS_TREE` (the same as `PREFIX` in the default layout).
 | `lib/titan/0.6/titan.so` | The dynamic standard-library provider. It holds every logical standard module (listed below) plus the native support that `require "titan"` loads. |
 | `lib/titan/0.6/titan.a` | The static form of the same modules, with their private native payload: LPegLabel, libuv, llhttp, SQLite, and OpenSSL in bundled mode. |
 | `lib/titan/0.6/titan.so.dSYM` | Debug information, on macOS only. |
-| `lib/titan/0.6/sdk-digests` | Content digests the installer recorded for the files in `lib/titan/0.6/` and its top-level `lib/*.a` archives, so `titanc` can skip rehashing them while they are unchanged. Removed by `titan-uninstall`. |
+| `lib/titan/0.6/sdk-digests` | Content digests the installer recorded for Titan's own `titan.so`, `titan.a`, and `libtitan.a` in `lib/titan/0.6/`, for `lib/libbacktrace.a`, and for the `lib/liblua.a` that Titan links, so `titanc` can skip rehashing them while they are unchanged. When Lua shares the prefix, its existing `liblua.a` is recorded without Titan taking ownership of it. Removed by `titan-uninstall`. |
 | `share/lua/5.5/titan/*.lua` | One generated loader per standard module. Each maps the canonical provider globally and calls that module's `luaopen_titan_*` entry. |
 | `share/titan/LICENSE`, `share/titan/THIRD_PARTY_NOTICES.md`, `share/titan/LICENSES/` | Titan's license and the licenses of bundled code. |
 | `etc/titan/build-profile` | The build profile (`production` or `validation`). |

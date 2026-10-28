@@ -783,8 +783,10 @@ the staged object carries no certificate, so step 3 cannot use
 `source_snapshot` taken from the exact own-source certificate it parsed; the
 snapshot is never embedded in an object or persisted. Before publication the
 coordinator freshly resolves current flat/folder membership and path
-spellings, rehashes the current source bytes through
-`incremental.fresh_context`, compares them with the snapshot, and revalidates
+spellings, re-observes the current sources through
+`incremental.fresh_context` (rehashing any whose observation changed; see
+[Fresh verification contexts](incremental-compilation.md#fresh-verification-contexts)),
+compares their digests with the snapshot, and revalidates
 the module's header dependencies and FFI search inputs through
 `driver.restat_c_header_dependencies` with fresh header state. A changed
 source or header, or a newly appearing earlier include candidate, rejects the
@@ -879,9 +881,10 @@ coverage flags) and shared `toolchain_identity`:
    `-v`, `titanc` writes `Titan native hit <source>` to `stderr`.
 4. **Miss compilation and publication (`native-compile`).** On a miss (`Titan
    native miss <source>` under `-v`), `compile_node` reserves a sibling stage
-   `<staged>`, runs `<compile_argv...> -c <source> -o <staged>`, re-reads and
-   rehashes `source` and all `recipe.dependencies` in a fresh context to reject
-   mid-compile edits, hashes `<staged>`, unlinks `<stem>.o` **first**, writes
+   `<staged>`, runs `<compile_argv...> -c <source> -o <staged>`, re-observes
+   `source` and all `recipe.dependencies` in a fresh context (rehashing any
+   whose observation changed) to reject mid-compile edits, hashes `<staged>`,
+   unlinks `<stem>.o` **first**, writes
    `<stem>.record` (or unlinks it if uncacheable), and renames `<staged>` to
    `<stem>.o` **last**. It returns the same shape with `hit = false` and the
    node's `cacheable` value. Every result's `dependencies` is the raw `files`
@@ -1081,8 +1084,8 @@ Native input kind and LTO facts are cached by content digest in the
 [persistent digest cache](incremental-compilation.md#persistent-digest-cache)
 as optional additions to the existing schema; a missing fact is recomputed.
 
-On a link hit, `linkcertificate.check` rehashes the exact library files
-recorded in `record.native` (or `policy.files`). It does **not** rewalk
+On a link hit, `linkcertificate.check` rechecks the digests of the exact
+library files recorded in `record.native` (or `policy.files`). It does **not** rewalk
 newly added files in earlier `-L` directories that were absent when the link
 succeeded; adding a new shadowing library in an earlier `-L` directory
  without changing flags or existing library files requires a clean or forced
@@ -1101,7 +1104,8 @@ relink.
    takes a fresh `output_snapshot` of every path in `ticket.outputs` (verifying
    non-symlink `file`/`directory` kind, `mode`, non-Windows executable bit
    `mode & 0x49 ~= 0`, recursive `.dSYM` directory entries, and SHA-256 content
-   digests), and rehashes `record.native`. When all digests match, `check`
+   digests), and rechecks the digests of `record.native` (a file whose precise
+   observation is unchanged reuses its recorded digest). When all digests match, `check`
    returns `true`, `titanc` prints `Titan link hit <target>` under `-v`, and
    the invocation finishes.
 3. **Pre-mutation invalidation (`linkcertificate.invalidate`,
@@ -1117,15 +1121,17 @@ relink.
 4. **Post-publication commit (`linkcertificate.commit`,
    `linkcertificate.lua`).** Only after the final executable or
    provider bundle has been validated and published does `titanc` call
-   `linkcertificate.commit`. Using a fresh context (`fresh(context)`), `commit`
-   re-reads and rehashes every file in `FILE_FIELDS` (aborting with `link input
-   changed during build: <field>` on any race). The only exception is a file in
-   the [installed SDK digest
-   manifest](incremental-compilation.md#installed-sdk-digest-manifest) whose
-   precise observation is unchanged; it is re-observed instead. `commit` then
-   snapshots every published output in `ticket.outputs`, reads and hashes the
-   linker dependency report (`native_dependencies`), and writes
-   `<ticket.record>` last.
+   `linkcertificate.commit`. Using a
+   [fresh context](incremental-compilation.md#fresh-verification-contexts),
+   `commit` re-observes every file in `FILE_FIELDS` instead of trusting the
+   pre-link memo. It reuses a recorded digest only under an equal precise
+   observation and rehashes the rest, aborting with `link input changed during
+   build: <field>` if a field's digests differ from the recipe. `commit` then
+   snapshots every published output in `ticket.outputs` (a newly linked output
+   is hashed once; a preserved, unchanged one is reused), digests the linker
+   dependency report (`native_dependencies`) under the same rule, failing with
+   `native library changed during build` if the compiler-fallback library set
+   changed, and writes `<ticket.record>` last.
 
 ## Automatic test-root discovery
 
