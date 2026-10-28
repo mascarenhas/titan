@@ -427,6 +427,10 @@ jobs:
           TITAN_TEST_EXTRA_LDFLAGS: "-fno-lto"
         run: make stdlib-busted-test EXTRA_TEST_FLAGS="-o gtest -v"
 
+      # Two workers run the integrations concurrently, each in a private
+      # extraction of the prepared tree with half of the job's -j4, sharing
+      # only this installed prefix; the exclusive files then run alone. Their
+      # LuaCov stats merge into one report.
       - name: Run compiler integrations that require the installed stdlib
         env:
           TITAN_EXTRA_CFLAGS: "-O0 -fno-lto"
@@ -437,7 +441,7 @@ jobs:
           TITAN_COVERAGE_TEST_REQUIRED: "1"
         run: |
           bash spec/support/ci_stdlib_snapshot.sh save "$RUNNER_TEMP/titan-stdlib.tar"
-          bash spec/support/ci_test_groups.sh stdlib-compiler
+          bash spec/support/ci_parallel_compiler_tests.sh stdlib
           bash spec/support/ci_stdlib_snapshot.sh restore "$RUNNER_TEMP/titan-stdlib.tar"
           luacov "titan%-compiler/" "titanc$"
           grep "Summary" -B1 -A1000 luacov.report.out

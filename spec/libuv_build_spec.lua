@@ -4136,15 +4136,36 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
                 local inventory = assert(groups_helper.load())
                 local ci_plan = assert(groups_helper.plan_ci(
                     inventory, 4, "ci_covered"))
-                local expected = { {}, {}, {}, {}, {} }
+                local stdlib_plan = assert(groups_helper.plan_ci_stdlib(
+                    inventory, 2, "ci_covered"))
+                local selections = {}
                 for shard = 1, 4 do
-                    for _, path in ipairs(ci_plan[shard].files) do
-                        expected[shard][#expected[shard] + 1] = path
-                    end
+                    selections[shard] = { group = "compiler-shard-" .. shard,
+                        files = ci_plan[shard].files }
                 end
+                local stdlib_files, stdlib_set = {}, {}
                 for _, item in ipairs(inventory.stdlib) do
-                    expected[5][#expected[5] + 1] = item.path
+                    stdlib_files[#stdlib_files + 1] = item.path
+                    stdlib_set[item.path] = true
                 end
+                selections[5] = { group = "stdlib-compiler", files = stdlib_files,
+                    stdlib = true }
+                -- The stdlib job's two workers partition that domain exactly.
+                assert.equal(2, #stdlib_plan)
+                local stdlib_union = {}
+                for worker = 1, 2 do
+                    local ordinary = 0
+                    for _, item in ipairs(stdlib_plan[worker].items) do
+                        assert.falsy(stdlib_union[item.path], item.path)
+                        stdlib_union[item.path] = true
+                        if not item.exclusive then ordinary = ordinary + 1 end
+                    end
+                    assert.is_true(ordinary > 0)
+                    selections[5 + worker] = {
+                        group = "stdlib-compiler-shard-" .. worker,
+                        files = stdlib_plan[worker].files, stdlib = true }
+                end
+                assert.same(stdlib_set, stdlib_union)
                 local stress = {}
                 for _, item in ipairs(inventory.items) do
                     if item.stress then stress[item.path] = true end
@@ -4178,15 +4199,14 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
                     return calls
                 end
 
-                for shard = 1, 5 do
-                    local log = root .. "/shard-" .. shard
+                for index, selection in ipairs(selections) do
+                    local log = root .. "/shard-" .. index
                     local ok, output = run_argv({
                         "env",
                         "BUSTED=" .. fake_busted,
                         "TITAN_SELECTOR_ARGV_LOG=" .. log,
                         "bash", "spec/support/ci_test_groups.sh",
-                        shard == 5 and "stdlib-compiler" or
-                            "compiler-shard-" .. shard,
+                        selection.group,
                     })
                     assert.truthy(ok, output)
                     assert.truthy(output:find("with LuaCov", 1, true), output)
@@ -4225,7 +4245,7 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
                                 end
                             end
                         end
-                        if shard == 5 and with_coverage then
+                        if selection.stdlib and with_coverage then
                             for _, isolated in ipairs({
                                 "spec/coder/multi_module_libraries_spec.lua",
                                 "spec/coder/native_coverage_spec.lua",
@@ -4241,7 +4261,7 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
 
                     local expected_covered = {}
                     local expected_stress = {}
-                    for _, path in ipairs(expected[shard]) do
+                    for _, path in ipairs(selection.files) do
                         expected_covered[path] = true
                         if stress[path] then expected_stress[path] = true end
                     end
@@ -4254,20 +4274,19 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
                     assert.same(expected_stress, uncovered_stress)
                 end
 
-                -- Compiler shards and the installed-stdlib domain each split
-                -- into ordinary and exclusive phases without changing their
-                -- complete covered inventory.
+                -- Compiler shards, the installed-stdlib domain and its CI
+                -- workers each split into ordinary and exclusive phases
+                -- without changing their complete covered inventory.
                 local exclusive_seen = {}
-                for shard = 1, 5 do
+                for index, selection in ipairs(selections) do
                     local phase_files = {}
                     for _, phase in ipairs({ "ordinary", "exclusive" }) do
-                        local log = root .. "/phase-" .. shard .. "-" .. phase
+                        local log = root .. "/phase-" .. index .. "-" .. phase
                         local ok, output = run_argv({
                             "env", "BUSTED=" .. fake_busted,
                             "TITAN_SELECTOR_ARGV_LOG=" .. log,
                             "bash", "spec/support/ci_test_groups.sh",
-                            shard == 5 and "stdlib-compiler" or
-                                "compiler-shard-" .. shard, phase,
+                            selection.group, phase,
                         })
                         assert.truthy(ok, output)
                         local calls = lfs.attributes(log) and
@@ -4290,7 +4309,7 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
                         end
                     end
                     local expected_covered = {}
-                    for _, path in ipairs(expected[shard]) do
+                    for _, path in ipairs(selection.files) do
                         expected_covered[path] = true
                     end
                     assert.same(expected_covered, phase_files)
@@ -5597,7 +5616,7 @@ printf '%s\n' "${schedule[@]}"
                 "Run compiler integrations that require the installed stdlib")
             local integration_previous = 0
             for _, contract in ipairs({
-                "ci_stdlib_snapshot.sh save", "ci_test_groups.sh stdlib-compiler",
+                "ci_stdlib_snapshot.sh save", "ci_parallel_compiler_tests.sh stdlib",
                 "ci_stdlib_snapshot.sh restore", 'luacov "titan%-compiler/"',
                 "lua spec/support/prepare_codecov_report.lua",
                 "grep -Fxq titanc.lua luacov.codecov.out",
@@ -5606,6 +5625,8 @@ printf '%s\n' "${schedule[@]}"
                 assert.is_true(integration_previous < index, contract)
                 integration_previous = index
             end
+            assert.falsy(integration_step:find("ci_test_groups.sh", 1, true),
+                integration_step)
             local covered_run = named_step(native_coverage_job,
                 "Run complete covered aggregate with fresh counters")
             assert.equal(1, count_literal(native_coverage_job,
@@ -5780,7 +5801,8 @@ printf '%s\n' "${schedule[@]}"
                 "run_isolated_compiler_coverage",
                 '"$BUSTED" -c -o gtest -v --exclude-tags=stress ' ..
                     '"$test_file"',
-                "compiler | compiler-shard-[1-4] | stdlib-compiler)",
+                "compiler | compiler-shard-[1-4] | stdlib-compiler | stdlib-compiler-shard-[1-2])",
+                "stdlib-compiler-shard-{1..2}",
                 "compiler-uncovered | stdlib-compiler-uncovered)",
                 "compiler-shard-{1..4}",
                 "ci_compiler_test_groups.txt",
@@ -5858,6 +5880,10 @@ printf '%s\n' "${schedule[@]}"
                 'shards=(1 2 3 4)',
                 '1-2) shards=(1 2)',
                 '3-4) shards=(3 4)',
+                'group=compiler-shard-',
+                'group=stdlib-compiler-shard-',
+                'worker_jobs=1',
+                'worker_jobs=2',
                 'for shard in "${shards[@]}"',
                 'mktemp -d "$runner_temp/titan-compiler-workers.XXXXXX"',
                 'tar --exclude="./.lua" --exclude="./.git"',
@@ -5866,16 +5892,15 @@ printf '%s\n' "${schedule[@]}"
                 'mkdir -p .tmp || exit 1',
                 'export TMPDIR="$PWD/.tmp"',
                 'unset LUACOV_CONFIG',
-                'MAKEFLAGS=-j1',
-                'TITAN_JOBS=1',
+                'MAKEFLAGS=-j$worker_jobs TITAN_JOBS=$worker_jobs',
                 'env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u TITAN_JOBS',
-                '"compiler-shard-$shard" "$phase"',
-                'sed -u "s/^/[compiler shard $shard] /"',
+                '"$group$shard" "$phase"',
+                'sed -u "s/^/[$label shard $shard] /"',
                 'tee -a "$log"',
                 'xargs -r -n1 -P1 bash -c "$run_shard_phase" _',
                 'pipeline_status=("${PIPESTATUS[@]}")',
-                "starting compiler covered+stress shard",
-                "finished compiler covered+stress shard",
+                "starting %s covered+stress shard",
+                "finished %s covered+stress shard",
                 "merge_luacov_stats.lua",
                 "luacov.stats.out",
             }) do
@@ -5923,6 +5948,25 @@ printf '%s\n' "${schedule[@]}"
                     assert.not_equal("spec/coder/unions_stdlib_spec.lua", item.path)
                 end
             end
+            -- The stdlib job's two workers split that domain exactly; the
+            -- exclusive file runs alone after both LPT-balanced halves.
+            local stdlib_plan = assert(groups_helper.plan_ci_stdlib(inventory))
+            assert.equal(groups_helper.CI_STDLIB_WORKERS, #stdlib_plan)
+            local stdlib_assigned, stdlib_count = {}, 0
+            for _, worker in ipairs(stdlib_plan) do
+                local ordinary = 0
+                for _, item in ipairs(worker.items) do
+                    assert.equal("stdlib", item.domain, item.path)
+                    assert.falsy(stdlib_assigned[item.path], item.path)
+                    stdlib_assigned[item.path] = true
+                    stdlib_count = stdlib_count + 1
+                    if not item.exclusive then ordinary = ordinary + 1 end
+                end
+                assert.is_true(ordinary > 0)
+            end
+            assert.equal(#inventory.stdlib, stdlib_count)
+            assert.is_true(inventory.by_path[
+                "spec/coder/build_coordination_spec.lua"].exclusive)
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")
             local stress_assigned = {}

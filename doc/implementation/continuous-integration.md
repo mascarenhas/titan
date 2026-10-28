@@ -29,7 +29,9 @@ recipes](build-script-audit.md#make-job-pool-and-titanc-recipes)), and each
 compiler process overlaps only its generated-C compilations inside it. The
 explicit caps keep the Makefile's default four-slot pool from oversubscribing
 the two-vCPU runners. Compiler shards override nested Make/Titan work to one
-slot outside their exclusive phase and run at most two workers per runner.
+slot outside their exclusive phase and run at most two workers per runner; the
+native coverage job's two installed-stdlib integration workers take two slots
+each.
 Dedicated parallelism regressions retain their explicit bounds. Recursive
 LuaRocks/CMake recipes preserve the Make jobserver; `ltitanlib.o` waits for the
 selected Lua installation's public headers. The generated-C completion protocol
@@ -97,8 +99,18 @@ gates. Immediately before installation, remove only the restored unregistered
 as `~` backups. Preserve dependencies and SDK/runtime files.
 
 Run `make stdlib-busted-test`, then the installed-stdlib integrations listed in
-`spec/support/ci_stdlib_compiler_test_files.txt` through
-`ci_test_groups.sh stdlib-compiler` with LuaCov. Compiler integrations that
+`spec/support/ci_stdlib_compiler_test_files.txt` with LuaCov through
+`ci_parallel_compiler_tests.sh stdlib`. As for a compiler shard pair, two
+workers run `ci_test_groups.sh stdlib-compiler-shard-1` and `-2` concurrently
+in private extractions of the prepared archive, each with
+`MAKEFLAGS=-j2`/`TITAN_JOBS=2` so together they fill the runner's four CPUs.
+The exclusive files then run alone without those caps, and both workers' stats
+merge into the workspace's `luacov.stats.out`. `plan_ci_stdlib` in
+`compiler_test_groups.lua` balances the ordinary files by LPT over the stdlib
+rows' covered seconds, a same-host four-CPU replica of this step. Workers share
+only the installed prefix, which these specs read. Their stats name compiler
+sources by prefix or checkout-relative paths, so the workspace report resolves
+them after the extractions are removed. Compiler integrations that
 import standard-library modules consume the installed provider rather than
 source-compiling those dependencies in compiler-only shards. This includes
 `spec/coder/split_units_spec.lua` (transfer, protobuf, and reflection) and

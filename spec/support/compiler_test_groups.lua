@@ -482,6 +482,55 @@ function M.plan_ci(inventory, requested_n, profile)
     return M.partition_lpt(inventory.compiler, n, profile or "ci_covered")
 end
 
+-- The stdlib job runs its installed-stdlib integrations as this many
+-- concurrent workers on one four-CPU runner.
+M.CI_STDLIB_WORKERS = 2
+
+-- Ordinary stdlib files are balanced by LPT. Exclusive files run alone after
+-- every ordinary worker finishes, so they do not count toward that balance;
+-- each joins the least-loaded worker only to share its extraction and LuaCov
+-- stats.
+function M.plan_ci_stdlib(inventory, requested_n, profile)
+    local n = M.parse_positive_integer(requested_n or M.CI_STDLIB_WORKERS)
+    if not n then
+        return nil, "CI stdlib worker count must be a positive integer"
+    end
+    profile = profile or "ci_covered"
+    local ordinary, exclusive = {}, {}
+    for _, item in ipairs(inventory.stdlib) do
+        if item.exclusive then
+            exclusive[#exclusive + 1] = item
+        else
+            ordinary[#ordinary + 1] = item
+        end
+    end
+    local workers, err = M.partition_lpt(ordinary, n, profile)
+    if not workers then
+        return nil, err
+    end
+    if #workers == 0 and #exclusive > 0 then
+        workers[1] = { index = 1, load = 0, items = {}, files = {} }
+    end
+    table.sort(exclusive, function(a, b) return a.path < b.path end)
+    for _, item in ipairs(exclusive) do
+        local best = workers[1]
+        for worker_index = 2, #workers do
+            if workers[worker_index].load < best.load then
+                best = workers[worker_index]
+            end
+        end
+        best.items[#best.items + 1] = item
+        best.load = best.load + cost_for_profile(item, profile)
+    end
+    for _, worker in ipairs(workers) do
+        table.sort(worker.items, function(a, b) return a.path < b.path end)
+        for index, item in ipairs(worker.items) do
+            worker.files[index] = item.path
+        end
+    end
+    return workers
+end
+
 if select("#", ...) == 0 then
     return M
 end
@@ -501,7 +550,8 @@ if command == "check" then
     end
     os.exit(0)
 elseif command == "ci-select" then
-    -- CI shard-pair jobs select from the generated four-way covered plan.
+    -- CI shard-pair jobs select from the generated four-way covered plan and
+    -- the stdlib job's workers from the two-way installed-stdlib plan.
     -- PHASE "ordinary" omits the exclusive files and "exclusive" selects only
     -- them, so a runner can execute them after its concurrent shards finish.
     local group = select(2, ...) or ""
@@ -528,13 +578,20 @@ elseif command == "ci-select" then
     elseif group == "stdlib-compiler" or group == "stdlib-compiler-uncovered" then
         selected_items = inventory.stdlib
     else
-        local shard_str = group:match("^compiler%-shard%-(%d+)$")
+        local stdlib_str = group:match("^stdlib%-compiler%-shard%-(%d+)$")
+        local shard_str = stdlib_str or group:match("^compiler%-shard%-(%d+)$")
         local shard = shard_str and M.parse_positive_integer(shard_str) or nil
-        if not shard or shard > M.CI_SHARDS then
+        local limit = stdlib_str and M.CI_STDLIB_WORKERS or M.CI_SHARDS
+        if not shard or shard > limit then
             io.stderr:write("invalid CI group selector: " .. tostring(group) .. "\n")
             os.exit(2)
         end
-        local workers, plan_err = M.plan_ci(inventory, M.CI_SHARDS, "ci_covered")
+        local workers, plan_err
+        if stdlib_str then
+            workers, plan_err = M.plan_ci_stdlib(inventory, limit, "ci_covered")
+        else
+            workers, plan_err = M.plan_ci(inventory, limit, "ci_covered")
+        end
         if not workers then
             io.stderr:write(plan_err .. "\n")
             os.exit(2)
