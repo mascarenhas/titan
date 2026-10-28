@@ -524,9 +524,11 @@ CI runs the installed-stdlib files only after installing the standard provider;
 local Unix and Windows unfiltered runs still schedule each file exactly once
 through the same per-file inventory.
 
-`EXCLUSIVE_SPECS` names the genuinely exclusive files:
-`spec/coder/parallel_compilation_spec.lua` and `spec/coder/jobserver_spec.lua`
-count overlapping real compiler processes against their own caps, drive real
+`EXCLUSIVE_SPECS` (`spec/support/compiler_test_groups.lua`) names the
+genuinely exclusive files: `spec/coder/parallel_compilation_spec.lua`,
+`spec/coder/jobserver_spec.lua`, `spec/coder/build_scheduler_spec.lua`, and
+the stdlib-domain `spec/coder/build_coordination_spec.lua`. They count
+overlapping real compiler processes against their own caps, drive real
 parent Make jobservers, or install process-global signal guards. They run
 alone in their own checkout copy after every ordinary worker and any
 overlapped native build have finished, with `MAKEFLAGS`, `MFLAGS`,
