@@ -475,39 +475,155 @@ static titan_sha256_compressor titan_sha256_select(void) {
 #endif
 }
 
-static int sha256_binary(lua_State *L) {
-  uint32_t state[8] = {
+/* One SHA-256 computation. The compressor selected at its start serves every
+** data and padding block; whole blocks are compressed straight from the
+** caller's bytes and only a partial block is buffered. */
+typedef struct {
+  titan_sha256_compressor compress;
+  uint32_t state[8];
+  unsigned char block[64];
+  size_t buffered;
+  uint64_t length;
+} TitanSha256;
+
+static void titan_sha256_init(TitanSha256 *sha) {
+  static const uint32_t initial[8] = {
     0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
     0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u,
   };
-  unsigned char tail[128], digest[32];
-  const unsigned char *data;
-  size_t length, offset, rest, tail_length, i;
-  uint64_t bits;
-  titan_sha256_compressor compress;
-  luaL_checktype(L, 1, LUA_TSTRING);
-  data = (const unsigned char *)lua_tolstring(L, 1, &length);
-  compress = titan_sha256_select();
-  offset = length - length % 64;
-  if (offset > 0) compress(state, data, offset / 64);
-  rest = length - offset;
-  memcpy(tail, data + offset, rest);
+  sha->compress = titan_sha256_select();
+  memcpy(sha->state, initial, sizeof initial);
+  sha->buffered = 0;
+  sha->length = 0;
+}
+
+static void titan_sha256_update(TitanSha256 *sha, const unsigned char *data,
+                                size_t length) {
+  size_t whole;
+  sha->length += length;
+  if (sha->buffered > 0) {
+    size_t take = 64 - sha->buffered;
+    if (take > length) take = length;
+    memcpy(sha->block + sha->buffered, data, take);
+    sha->buffered += take;
+    data += take;
+    length -= take;
+    if (sha->buffered < 64) return;
+    sha->compress(sha->state, sha->block, 1);
+    sha->buffered = 0;
+  }
+  whole = length - length % 64;
+  if (whole > 0) sha->compress(sha->state, data, whole / 64);
+  memcpy(sha->block, data + whole, length - whole);
+  sha->buffered = length - whole;
+}
+
+static void titan_sha256_final(TitanSha256 *sha, unsigned char digest[32]) {
+  unsigned char tail[128];
+  size_t rest = sha->buffered, tail_length, i;
+  uint64_t bits = sha->length << 3;
+  memcpy(tail, sha->block, rest);
   tail[rest] = 0x80;
   tail_length = rest < 56 ? 64 : 128;
   memset(tail + rest + 1, 0, tail_length - rest - 1);
-  bits = (uint64_t)length << 3;
   for (i = 0; i < 8; i++)
     tail[tail_length - 1 - i] = (unsigned char)(bits >> (8 * i));
-  compress(state, tail, tail_length / 64);
+  sha->compress(sha->state, tail, tail_length / 64);
   for (i = 0; i < 8; i++) {
-    digest[4 * i] = (unsigned char)(state[i] >> 24);
-    digest[4 * i + 1] = (unsigned char)(state[i] >> 16);
-    digest[4 * i + 2] = (unsigned char)(state[i] >> 8);
-    digest[4 * i + 3] = (unsigned char)state[i];
+    digest[4 * i] = (unsigned char)(sha->state[i] >> 24);
+    digest[4 * i + 1] = (unsigned char)(sha->state[i] >> 16);
+    digest[4 * i + 2] = (unsigned char)(sha->state[i] >> 8);
+    digest[4 * i + 3] = (unsigned char)sha->state[i];
   }
+}
+
+static int sha256_binary(lua_State *L) {
+  TitanSha256 sha;
+  unsigned char digest[32];
+  const unsigned char *data;
+  size_t length;
+  luaL_checktype(L, 1, LUA_TSTRING);
+  data = (const unsigned char *)lua_tolstring(L, 1, &length);
+  titan_sha256_init(&sha);
+  titan_sha256_update(&sha, data, length);
+  titan_sha256_final(&sha, digest);
   lua_pushlstring(L, (const char *)digest, sizeof digest);
   return 1;
 }
+
+/* Private compiler helper: an incremental SHA-256 for bounded-chunk file
+** digests. `stream:update(bytes)` returns the stream; `stream:absorb(file)`
+** hashes an open Lua file from its position to end of file through one fixed
+** buffer, so no Lua string ever holds its bytes, and returns the byte count
+** (or nil, message, errno on a read error); `stream:finish()` returns the same
+** 32-byte digest as _sha256_binary of everything absorbed, after which the
+** stream rejects further use. */
+#define TITAN_SHA256_STREAM_TYPE "titan.sha256_stream"
+
+typedef struct {
+  TitanSha256 sha;
+  int finished;
+} TitanSha256Stream;
+
+static TitanSha256Stream *check_sha256_stream(lua_State *L) {
+  TitanSha256Stream *stream =
+      (TitanSha256Stream *)luaL_checkudata(L, 1, TITAN_SHA256_STREAM_TYPE);
+  if (stream->finished) luaL_error(L, "attempt to use a finished SHA-256 stream");
+  return stream;
+}
+
+static int sha256_stream_new(lua_State *L) {
+  TitanSha256Stream *stream =
+      (TitanSha256Stream *)lua_newuserdatauv(L, sizeof(TitanSha256Stream), 0);
+  titan_sha256_init(&stream->sha);
+  stream->finished = 0;
+  luaL_setmetatable(L, TITAN_SHA256_STREAM_TYPE);
+  return 1;
+}
+
+static int sha256_stream_update(lua_State *L) {
+  TitanSha256Stream *stream = check_sha256_stream(L);
+  const unsigned char *data;
+  size_t length;
+  luaL_checktype(L, 2, LUA_TSTRING);
+  data = (const unsigned char *)lua_tolstring(L, 2, &length);
+  titan_sha256_update(&stream->sha, data, length);
+  lua_settop(L, 1);
+  return 1;
+}
+
+static int sha256_stream_absorb(lua_State *L) {
+  TitanSha256Stream *stream = check_sha256_stream(L);
+  luaL_Stream *file = (luaL_Stream *)luaL_checkudata(L, 2, LUA_FILEHANDLE);
+  unsigned char buffer[65536];
+  lua_Integer total = 0;
+  size_t count;
+  if (file->closef == NULL) return luaL_error(L, "attempt to use a closed file");
+  clearerr(file->f);
+  while ((count = fread(buffer, 1, sizeof buffer, file->f)) > 0) {
+    titan_sha256_update(&stream->sha, buffer, count);
+    total += (lua_Integer)count;
+  }
+  if (ferror(file->f)) return luaL_fileresult(L, 0, NULL);
+  lua_pushinteger(L, total);
+  return 1;
+}
+
+static int sha256_stream_finish(lua_State *L) {
+  TitanSha256Stream *stream = check_sha256_stream(L);
+  unsigned char digest[32];
+  stream->finished = 1;
+  titan_sha256_final(&stream->sha, digest);
+  lua_pushlstring(L, (const char *)digest, sizeof digest);
+  return 1;
+}
+
+static const luaL_Reg sha256_stream_methods[] = {
+  { "update", sha256_stream_update },
+  { "absorb", sha256_stream_absorb },
+  { "finish", sha256_stream_finish },
+  { NULL, NULL },
+};
 
 #if !defined(_WIN32)
 /* Private compiler helpers: GNU Make jobserver participation for native job
@@ -1548,6 +1664,7 @@ static const luaL_Reg titanlib[] = {
   { "_loadlib", lazyload },
   { "_loadlibglobal", lazyglobalload },
   { "_sha256_binary", sha256_binary },
+  { "_sha256_stream", sha256_stream_new },
   { "_output_lock_open", output_lock_open },
   { "_stat_precise", stat_precise },
 #if defined(_WIN32)
@@ -1575,6 +1692,11 @@ LUAMOD_API int luaopen_titan(lua_State *L) {
     lua_setfield(L, -2, "__gc");
     lua_pushcfunction(L, output_lock_gc);
     lua_setfield(L, -2, "__close");
+  }
+  lua_pop(L, 1);
+  if (luaL_newmetatable(L, TITAN_SHA256_STREAM_TYPE)) {
+    luaL_newlib(L, sha256_stream_methods);
+    lua_setfield(L, -2, "__index");
   }
   lua_pop(L, 1);
 #if !defined(_WIN32)

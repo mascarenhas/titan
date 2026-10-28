@@ -1306,6 +1306,49 @@ return {
             assert.match("ABI mismatch", err, 1, true)
             assert.match("unused.o", err, 1, true)
         end)
+
+        it("rebuilds data-only container metadata through the member validator", function()
+            local other = assert(staticmetadata.render(
+                "pkg.other", ABI, "Module(\"pkg.other\",{}, {})"))
+            local scanned = assert(scan(archive({
+                ar_member("module.o/", elf_object(PAYLOAD)),
+                ar_member("other.o/", elf_object(other)),
+            })))
+            local data = staticmetadata.container_metadata(scanned)
+            assert.same({
+                ["pkg.mod"] = { payload = PAYLOAD,
+                    origin = scanned.entries["pkg.mod"].origin },
+                ["pkg.other"] = { payload = other,
+                    origin = scanned.entries["pkg.other"].origin },
+            }, data)
+            local view = assert(staticmetadata.metadata_view(
+                "fixture with spaces", data, { expected_abi = ABI }))
+            assert.equal("metadata", view.kind)
+            assert.is_nil(view.members)
+            assert.same(scanned.key_order, view.key_order)
+            assert.same(scanned.entries, view.entries)
+
+            local cases = {
+                { "not a table", "container metadata is not a table" },
+                { { ["pkg.mod"] = { payload = PAYLOAD } }, "is malformed" },
+                { { ["pkg.other"] = data["pkg.mod"] }, "carries module" },
+                {
+                    { ["pkg.mod"] = { payload = PAYLOAD .. "\n",
+                        origin = data["pkg.mod"].origin } },
+                    "not in canonical form",
+                },
+            }
+            for _, case in ipairs(cases) do
+                local rejected, err = staticmetadata.metadata_view(
+                    "fixture with spaces", case[1], { expected_abi = ABI })
+                assert.falsy(rejected)
+                assert.match(case[2], err, 1, true)
+            end
+            local rejected, err = staticmetadata.metadata_view(
+                "fixture with spaces", data, { expected_abi = "1" })
+            assert.falsy(rejected)
+            assert.match("ABI mismatch", err, 1, true)
+        end)
     end)
 
     describe("streaming regular-archive manifest verification", function()

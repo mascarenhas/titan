@@ -387,6 +387,56 @@ function Sync:read_file(path, max_bytes)
     return contents
 end
 
+-- Optional strategy capability: feed a file's bytes, in order, into the
+-- incremental digest `stream` without materializing the whole file, and
+-- return the total byte count. A native stream absorbs the open file through
+-- one fixed buffer; any other stream receives chunks of at most
+-- ABSORB_CHUNK_BYTES through `stream:update(bytes)`. Strategies without this
+-- capability are read whole. A stream error propagates unchanged once the
+-- file is closed.
+local ABSORB_CHUNK_BYTES = 1024 * 1024
+
+function Sync:absorb_file(path, stream)
+    local valid, path_err = checked_path(path)
+    if not valid then return nil, path_err end
+    -- Resolve the stream's methods before a handle exists, so a raising
+    -- lookup cannot strand an open file.
+    local absorb = stream.absorb
+    local update = absorb == nil and stream.update or nil
+    local file, open_err = open_file(path, "rb")
+    if not file then return nil, open_err end
+    local function rethrow(err)
+        pcall(file.close, file)
+        error(err, 0)
+    end
+    local total, failure = 0, nil
+    if absorb ~= nil then
+        local absorbed, count, absorb_err = pcall(absorb, stream, file)
+        if not absorbed then rethrow(count) end
+        if count == nil then failure = operation_error("read", absorb_err) end
+        total = count
+    else
+        while true do
+            local read_ok, chunk, read_err = pcall(file.read, file, ABSORB_CHUNK_BYTES)
+            if not read_ok then
+                failure = tostring(chunk)
+                break
+            elseif chunk == nil then
+                if read_err ~= nil then failure = operation_error("read", read_err) end
+                break
+            end
+            total = total + #chunk
+            local updated, update_err = pcall(update, stream, chunk)
+            if not updated then rethrow(update_err) end
+        end
+    end
+    local close_ok, closed, close_err = pcall(file.close, file)
+    if failure then return nil, failure end
+    if not close_ok then return nil, tostring(closed) end
+    if not closed then return nil, operation_error("close", close_err) end
+    return total
+end
+
 local function write_file_direct(path, contents)
     local file, open_err = open_file(path, "wb")
     if not file then return nil, open_err end

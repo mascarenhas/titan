@@ -3092,8 +3092,9 @@ describe("loader resolver ownership", function()
             },
             ["titan-compiler.test_runner"] = {},
             ["titan-compiler.util"] = {},
-            -- titanc requires the native digest before creating its resolver.
-            titan = { _sha256_binary = function() return string.rep("\0", 32) end },
+            -- titanc requires the native digests before creating its resolver.
+            titan = { _sha256_binary = function() return string.rep("\0", 32) end,
+                _sha256_stream = function() error("fixture never streams", 0) end },
         }
         local environment = setmetatable({
             arg = {},
@@ -3290,7 +3291,8 @@ describe("loader resolver ownership", function()
                 },
                 ["titan-compiler.test_runner"] = {},
                 ["titan-compiler.util"] = util,
-                titan = { _sha256_binary = function() return string.rep("\0", 32) end },
+                titan = { _sha256_binary = function() return string.rep("\0", 32) end,
+                    _sha256_stream = function() error("fixture never streams", 0) end },
             }
             local fake_io = setmetatable({
                 stdout = {
@@ -5354,6 +5356,155 @@ describe("compiler module loader", function()
                 assert.is_nil(driver.imported[name].compiled)
             end
             assert.is_nil(next_context.incremental_configuration)
+        end)
+
+        it("reuses the coordinator's archive scan in a worker only under the same archive observation", function()
+            if platform.windows then
+                pending("Windows Titan archive-provider consumers are not implemented")
+                return
+            end
+            local process = require "titan-compiler.process"
+            local parser = require "titan-compiler.parser"
+            local checker = require "titan-compiler.checker"
+            local producer = "incremental_driver_archive_producer"
+            local consumer = "incremental_driver_archive_consumer"
+            local producer_file = source .. "/" .. producer .. ".titan"
+            local suffix = "/" .. producer .. ".a"
+            -- Publish a real producer archive, then hide its source so the
+            -- consumer selects the archive.
+            local function publish_producer(contents)
+                write_file(producer_file, contents)
+                local imported, registry = driver.imported, types.registry
+                driver.imported, types.registry = {}, {}
+                local ast, parse_error = parser.parse(producer_file, contents)
+                assert.truthy(ast, parse_error)
+                local _, check_errors = checker.check(
+                    producer, ast, contents, producer_file)
+                assert.equal(0, #check_errors, table.concat(check_errors, "\n"))
+                local compiled, compile_error, object = driver.compile(
+                    producer, ast, producer_file, {}, false)
+                driver.imported, types.registry = imported, registry
+                assert.is_true(compiled, compile_error)
+                local target = assert(driver.derive_target_fingerprint(object, producer))
+                assert(driver.build_static_archive(
+                    binary .. suffix, { object }, {}, target, false))
+                assert(os.remove(producer_file))
+            end
+            publish_producer("function answer(): integer return 41 end\n")
+            write_file(source .. "/" .. consumer .. ".titan",
+                'local producer = import "' .. producer .. '"\n' ..
+                "function answer(): integer return producer.answer() + 1 end\n")
+            incremental.toolchain_identity = uncertain_toolchain
+            incremental.make_certificate = function()
+                error("uncertified worker must not publish a certificate", 0)
+            end
+            local context = driver.new_resolver_context({ prefer_static = true })
+            contexts[#contexts + 1] = context
+            local loader = fresh_loader({
+                context = context, incremental = true, plan_mode = true,
+                imports_for = function(name)
+                    return name == consumer and { { name = producer } } or {}
+                end,
+            })
+            local loaded, _, diagnostics = loader(consumer)
+            assert.is_true(loaded)
+            assert.equal(0, #diagnostics)
+            local plan = driver.resolution_plan(context)
+            assert.equal("static", plan.modules[producer].kind)
+            local archive = plan.modules[producer].archive
+            local planned = assert(plan.archives[archive])
+            -- Closed data: canonical metadata strings plus the scan's precise
+            -- observation, never archive members or decoded objects.
+            assert.equal("ns", planned.observation.precision)
+            local planned_names = {}
+            for name, item in pairs(planned.modules) do
+                planned_names[#planned_names + 1] = name
+                local fields = {}
+                for field, value in pairs(item) do
+                    assert.is_string(value)
+                    fields[#fields + 1] = field
+                end
+                table.sort(fields)
+                assert.same({ "origin", "payload" }, fields)
+            end
+            assert.same({ producer }, planned_names)
+            local encoded = assert(process.encode_record(
+                driver.plan_descriptor(plan, consumer)))
+            local configuration = assert(driver.worker_configuration(context))
+            local generated_file = source .. "/" .. consumer .. ".c"
+
+            -- One worker over the transported descriptor, counting archive reads.
+            local function stage(mutate)
+                local descriptor = assert(process.decode_record(encoded))
+                if mutate then mutate(descriptor) end
+                local reads = 0
+                local strategy = compiler_io.new_sync()
+                local read_file = strategy.read_file
+                function strategy:read_file(path, ...)
+                    if path:sub(-#suffix) == suffix then reads = reads + 1 end
+                    return read_file(self, path, ...)
+                end
+                local imported, registry = driver.imported, types.registry
+                driver.imported, types.registry = {}, {}
+                local worker = assert(driver.new_worker_context(configuration, strategy))
+                contexts[#contexts + 1] = worker
+                local result, compile_error = driver.compile_planned_module(
+                    worker, consumer, { plan = descriptor })
+                local selected = driver.imported[producer]
+                driver.imported, types.registry = imported, registry
+                for _, item in ipairs(result and result.staged or {}) do
+                    os.remove(item.from)
+                end
+                return result, compile_error, reads, selected
+            end
+            local function staged_ok(mutate)
+                local result, compile_error, reads, selected = stage(mutate)
+                assert.truthy(result, compile_error)
+                return reads, assert(util.get_file_contents(generated_file, "rb")),
+                    selected
+            end
+
+            local reads, generated, selected = staged_ok()
+            assert.equal(0, reads)
+            assert.equal("metadata", selected.static_provider.kind)
+            assert.is_nil(selected.type.members.extra)
+            local fallbacks = {
+                { "absent", function(descriptor) descriptor.archives = nil end },
+                { "other path", function(descriptor)
+                    descriptor.archives = {
+                        [archive .. ".other"] = descriptor.archives[archive],
+                    }
+                end },
+                { "coarse", function(descriptor)
+                    descriptor.archives[archive].observation.precision = "coarse"
+                end },
+                { "rejected", function(descriptor)
+                    local item = descriptor.archives[archive].modules[producer]
+                    item.payload = item.payload .. "\n"
+                end },
+            }
+            for _, case in ipairs(fallbacks) do
+                local fallback_reads, fallback_generated, fallback_selected =
+                    staged_ok(case[2])
+                assert.equal(1, fallback_reads, case[1])
+                assert.equal(generated, fallback_generated, case[1])
+                assert.equal("archive", fallback_selected.static_provider.kind, case[1])
+            end
+
+            -- An archive changed after planning is rescanned, so the worker
+            -- never selects the stale planned interface.
+            publish_producer("function answer(): integer return 41 end\n" ..
+                "function extra(): integer return 7 end\n")
+            local changed_reads, _, changed = staged_ok()
+            assert.equal(1, changed_reads)
+            assert.equal("archive", changed.static_provider.kind)
+            assert.truthy(changed.type.members.extra)
+
+            -- Without an observable archive the worker fails closed.
+            assert(os.remove(binary .. suffix))
+            local missing, missing_error = stage()
+            assert.is_nil(missing)
+            assert.matches("cannot inspect static provider", missing_error, 1, true)
         end)
 
         it("skips parsing, checking, generation and native compilation on an object hit", function()

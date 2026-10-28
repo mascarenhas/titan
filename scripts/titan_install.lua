@@ -250,7 +250,8 @@ local function publish_sdk_digests(destination, inventory, common_prefix)
     end
     local compiler_io = require "titan-compiler.io"
     local context = { io = compiler_io.new_sync(),
-        cache_adapter = { sha256_binary = support._sha256_binary } }
+        cache_adapter = { sha256_binary = support._sha256_binary,
+            sha256_stream = support._sha256_stream } }
     local paths = {}
     for _, path in ipairs(inputs) do paths[#paths + 1] = destination .. "/" .. path end
     assert(incremental.write_sdk_digests(context, manifest, paths))

@@ -1998,4 +1998,52 @@ function staticmetadata.scan_archive(filename, options)
     return result
 end
 
+-- The data-only metadata of a scanned container: per logical module, its
+-- canonical payload and diagnostic origin. It carries no member bytes,
+-- records, or decoded objects.
+function staticmetadata.container_metadata(container)
+    local modules = {}
+    for name, entry in next, container.entries do
+        modules[name] = { payload = entry.payload, origin = entry.origin }
+    end
+    return modules
+end
+
+-- Rebuild a container's entries from `container_metadata` data, validating
+-- every payload exactly as an archive scan validates its members. The view
+-- has no members, so it can select interfaces but can never be linked.
+function staticmetadata.metadata_view(filename, modules, options)
+    options = options or {}
+    local origin = public_origin(filename)
+    return guarded(function()
+        if type(modules) ~= "table" then
+            fail(origin, "container metadata is not a table")
+        end
+        local entries = {}
+        for name, item in next, modules do
+            if type(item) ~= "table" or type(item.payload) ~= "string" or
+               type(item.origin) ~= "string" then
+                fail(origin, "container metadata for " ..
+                    diagnostic_value(name) .. " is malformed")
+            end
+            local entry = validate_metadata_or_fail(
+                item.payload, item.origin, options)
+            if entry.module ~= name then
+                fail(item.origin, "container metadata key " ..
+                    diagnostic_value(name) .. " carries module " ..
+                    format("%q", entry.module))
+            end
+            entries[name] = entry
+        end
+        return {
+            kind = "metadata",
+            format = "metadata",
+            origin = origin,
+            filename = filename,
+            entries = entries,
+            key_order = sorted_keys(entries),
+        }
+    end)
+end
+
 return staticmetadata

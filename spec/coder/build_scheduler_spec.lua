@@ -220,6 +220,72 @@ describe("planned import lists", function()
     end)
 end)
 
+describe("worker request records", function()
+    local graphcodec = require "titan-compiler.graphcodec"
+    local process = require "titan-compiler.process"
+    local encode = graphcodec.encode
+    after_each(function() graphcodec.encode = encode end)
+
+    -- Model the record codec's bounds at a small scale. The real bounds are
+    -- 64 MiB per string and 256 MiB per record, plus node and entry counts.
+    local function bounded(limits)
+        graphcodec.encode = function(record, options)
+            local scaled = {}
+            for key, value in pairs(options or {}) do scaled[key] = value end
+            for key, value in pairs(limits) do scaled[key] = value end
+            return encode(record, scaled)
+        end
+    end
+    local function request(archives, module)
+        return { module = module or "app", options = { plan = {
+            modname = module or "app",
+            modules = { app = { kind = "source" }, dep = { kind = "static", archive = "/sdk/dep.a" } },
+            archives = archives,
+        } } }
+    end
+    local function metadata(count, size)
+        local modules = {}
+        for index = 1, count do
+            modules["dep" .. index] = { payload = string.rep("p", size), origin = "member " .. index }
+        end
+        return { ["/sdk/dep.a"] = { observation = { precision = "ns" }, modules = modules } }
+    end
+    local function sent(payload)
+        local record = assert(process.decode_record(payload))
+        assert.equal("compile", record.kind)
+        assert.equal("app", record.request.options.plan.modname)
+        assert.equal("/sdk/dep.a", record.request.options.plan.modules.dep.archive)
+        return record.request.options.plan.archives
+    end
+
+    it("keeps archive metadata that fits every bound", function()
+        bounded({ max_string_bytes = 4096, max_bytes = 65536 })
+        local archives = metadata(2, 1024)
+        assert.same(archives, sent(assert(build.encode_request(request(archives)))))
+    end)
+
+    it("sends the request without archive metadata that exceeds a bound", function()
+        for _, case in ipairs({
+            { "string", { max_string_bytes = 4096 }, metadata(1, 4097) },
+            { "record bytes", { max_bytes = 16384 }, metadata(8, 4000) },
+            { "entries", { max_entries = 64 }, metadata(40, 1) },
+            { "nodes", { max_nodes = 32 }, metadata(40, 1) },
+        }) do
+            bounded(case[2])
+            local payload, err = build.encode_request(request(case[3]))
+            assert.truthy(payload, case[1] .. ": " .. tostring(err))
+            assert.is_nil(sent(payload), case[1])
+        end
+    end)
+
+    it("still reports a request that exceeds a bound without archive metadata", function()
+        bounded({ max_string_bytes = 64 })
+        local payload, err = build.encode_request(request(metadata(1, 128), string.rep("m", 65)))
+        assert.is_nil(payload)
+        assert.truthy(err:find("graph string limit exceeded", 1, true), err)
+    end)
+end)
+
 describe("process transport", function()
     it("retains one anchored luv loop across package.loaded resets and GC", function()
         local weak = setmetatable({}, { __mode = "v" })

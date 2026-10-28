@@ -592,6 +592,62 @@ describe("compiler I/O strategy", function()
         assert.is_true(strategy:unlink(temporary))
     end)
 
+    it("absorbs files into digest streams and keeps stream failures unchanged", function()
+        root = workspace()
+        local strategy = compiler_io.new_sync()
+        local source = root .. "/absorbed.bin"
+        local bytes = string.rep("prefix\0middle\255suffix", 200000)
+        assert.is_true(strategy:write_file(source, bytes))
+        -- A Lua stream receives bounded chunks in order.
+        local chunks = {}
+        local lua_stream = { update = function(self, chunk)
+            assert.is_true(#chunk >= 1 and #chunk <= 1024 * 1024)
+            chunks[#chunks + 1] = chunk
+            return self
+        end }
+        assert.equal(#bytes, assert(strategy:absorb_file(source, lua_stream)))
+        assert.is_true(#chunks > 1)
+        assert.equal(bytes, table.concat(chunks))
+        local empty = root .. "/empty.bin"
+        assert.is_true(strategy:write_file(empty, ""))
+        assert.equal(0, assert(strategy:absorb_file(empty, { update = function()
+            error("an empty file has no chunks")
+        end })))
+
+        -- A native stream absorbs the open file itself.
+        local support = require "titan"
+        if type(support._sha256_stream) == "function" then
+            local native = support._sha256_stream()
+            assert.equal(#bytes, assert(strategy:absorb_file(source, native)))
+            assert.equal(support._sha256_binary(bytes), native:finish())
+            assert.has_error(function() strategy:absorb_file(source, native) end,
+                "attempt to use a finished SHA-256 stream")
+        end
+
+        local missing, missing_error = strategy:absorb_file(root .. "/absent.bin",
+            { update = function() end })
+        assert.is_nil(missing)
+        assert.is_string(missing_error)
+        local cancelled = {}
+        local ok, err = pcall(strategy.absorb_file, strategy, source,
+            { update = function() error(cancelled, 0) end })
+        assert.is_false(ok)
+        assert.equal(cancelled, err)
+
+        -- A stream whose method lookup raises fails before any file is opened.
+        local open, opens = io.open, 0
+        io.open = function(...)
+            opens = opens + 1
+            return open(...)
+        end
+        local raising = setmetatable({}, { __index = function() error(cancelled, 0) end })
+        local lookup_ok, lookup_err = pcall(strategy.absorb_file, strategy, source, raising)
+        io.open = open
+        assert.is_false(lookup_ok)
+        assert.equal(cancelled, lookup_err)
+        assert.equal(0, opens)
+    end)
+
     it("distinguishes symlinks, dangling targets, and canonical paths", function()
         local available, message = filesystem.symlink_capability()
         if not available then pending(message); return end

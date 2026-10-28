@@ -370,6 +370,23 @@ local function exit_description(worker)
     return "exited with status " .. tostring(worker.code)
 end
 
+-- The control record of one compile request. A worker plan's archive
+-- metadata is optional reuse data: when the complete record exceeds any
+-- codec bound with it, the request goes without it and the worker scans the
+-- archive itself.
+function build.encode_request(request)
+    local message = {
+        kind = "compile", protocol = version.BUILD_WORKER_PROTOCOL, request = request,
+    }
+    local payload, err = process.encode_record(message)
+    if payload then return payload end
+    local options = type(request) == "table" and request.options
+    local plan = type(options) == "table" and options.plan
+    if type(plan) ~= "table" or plan.archives == nil then return nil, err end
+    plan.archives = nil
+    return process.encode_record(message)
+end
+
 function Scheduler:start_worker(node)
     local function abandon(message)
         self:release_slot()
@@ -385,9 +402,7 @@ function Scheduler:start_worker(node)
         return abandon(called and request_err or ("internal error while preparing module '" ..
             node.name .. "': " .. tostring(request)))
     end
-    local payload, encode_err = process.encode_record({
-        kind = "compile", protocol = version.BUILD_WORKER_PROTOCOL, request = request,
-    })
+    local payload, encode_err = build.encode_request(request)
     if not payload then
         return abandon("cannot encode the build request of module '" .. node.name ..
             "': " .. tostring(encode_err))
