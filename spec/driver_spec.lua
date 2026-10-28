@@ -5034,6 +5034,37 @@ describe("compiler module loader", function()
             return object, native
         end
 
+        it("digests through the native support library unless the caller supplies an adapter", function()
+            local sha256 = require "titan-compiler.sha256"
+            local context = tracked_context()
+            local adapter = context.cache_adapter
+            assert.equal(titan._sha256_binary, adapter.sha256_binary)
+            assert.equal(titan._sha256_stream, adapter.sha256_stream)
+            assert.is_nil(adapter.get)
+            assert.is_nil(adapter.put)
+            assert.are_not.equal(adapter, tracked_context().cache_adapter)
+            local value = { module = "identity", sizes = { 1, 2 } }
+            assert.equal(incremental.digest({}, "fixture", value),
+                incremental.digest(context, "fixture", value))
+            local filename = source .. "/digested.titan"
+            local contents = "function answer(): integer return 42 end\n"
+            write_file(filename, contents)
+            assert.equal(sha256.hex(contents), (incremental.file_digest(context, filename)))
+
+            local caller = { get = function() end }
+            local supplied = driver.new_resolver_context({ cache_adapter = caller })
+            contexts[#contexts + 1] = supplied
+            assert.equal(caller, supplied.cache_adapter)
+
+            local loaded = package.loaded.titan
+            package.loaded.titan = {}
+            local created, without = pcall(driver.new_resolver_context)
+            package.loaded.titan = loaded
+            assert.is_true(created, without)
+            contexts[#contexts + 1] = without
+            assert.is_nil(without.cache_adapter)
+        end)
+
         it("propagates only explicit native policy uncertainty without a partial configuration", function()
             incremental.toolchain_identity = uncertain_toolchain
             local context = tracked_context()

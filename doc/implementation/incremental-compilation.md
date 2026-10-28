@@ -206,8 +206,10 @@ under `-v`); any later `--incremental` check rejects that object with
 `incremental.digest(context, tag, value)` (`titan-compiler/incremental.lua`)
 serializes `{ version.CERTIFICATE_CANONICALIZATION, tag, value }` through
 `canonical` and hashes the resulting bytes with SHA-256 via
-`context.cache_adapter.sha256_binary` (`titan._sha256_binary`, falling back to
-`titan-compiler/sha256.lua` only in pure-Lua test harnesses):
+`context.cache_adapter.sha256_binary` (`titan._sha256_binary`, which `titanc`,
+build workers and every resolver context created without a caller adapter
+use; `titan-compiler/sha256.lua` remains only for hosts without the native
+support library and for caller adapters without a digest):
 
 * `nil` encodes as `"n"`;
 * `boolean` encodes as `"b1"` or `"b0"`;

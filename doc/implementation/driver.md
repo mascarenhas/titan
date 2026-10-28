@@ -714,7 +714,12 @@ memos](incremental-compilation.md#tagged-canonicalization-and-invocation-file-me
 A **digest-only** adapter supplies `sha256_binary`, optionally with
 `sha256_stream`, and no `get`, `put`, `refresh_inputs`, or `yield`
 (`titan-compiler/cacheadapter.lua` `validate`); `titanc` and build workers
-pass this shape with both entries. It offers no storage, so storage work is gated on the
+pass this shape with both entries. `driver.new_resolver_context` installs the
+same shape when its caller supplies no adapter and the native support library
+(`require "titan"`) exposes `_sha256_binary` (with `_sha256_stream` when
+present), so embedded and in-process contexts digest certified files natively
+as `titanc` does. A caller's adapter is used unchanged, and a host without the
+native library keeps the Lua digest. A digest-only adapter offers no storage, so storage work is gated on the
 actual capability (`cacheadapter.can_get`, `cacheadapter.can_put`), never on
 adapter presence. Header-cache restoration and observation refresh require
 `get`, header and FFI-conversion stores require `put`, and

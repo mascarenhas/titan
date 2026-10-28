@@ -889,6 +889,22 @@ function driver.new_c_header_analysis()
     return cdriver.new_process_analysis()
 end
 
+-- A context without a caller adapter digests through the native support
+-- library when it is loadable, as titanc does: certified-file identities
+-- otherwise rehash the compiler inventory in Lua for every context. A host
+-- without that library keeps the dependency-free Lua digest. The adapter is
+-- digest-only and offers no storage.
+local function default_digest_adapter()
+    local loaded, support = pcall(require, "titan")
+    if not loaded or type(support) ~= "table" or
+       type(support._sha256_binary) ~= "function" then
+        return nil
+    end
+    local stream = support._sha256_stream
+    return { sha256_binary = support._sha256_binary,
+        sha256_stream = type(stream) == "function" and stream or nil }
+end
+
 -- Implementation notes: doc/implementation/driver.md#drivernew_resolver_contextoptions
 function driver.new_resolver_context(options)
     options = options or {}
@@ -995,7 +1011,7 @@ function driver.new_resolver_context(options)
     local context = {
         _resolver_context = true,
         io = io_strategy,
-        cache_adapter = options.cache_adapter,
+        cache_adapter = options.cache_adapter or default_digest_adapter(),
         header_observations = cdriver.header_observation_index(options.header_inputs),
         prefer_static = options.prefer_static == true,
         source_first = options.source_first == true,
