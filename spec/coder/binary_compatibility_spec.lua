@@ -1642,7 +1642,6 @@ int main(void) {
 
         after_each(function()
             remove_tree(workspace)
-            remove_tree(scoped("bc180_consumer.lua"))
         end)
 
         it("retains dynamic slots and transitive checks through compile-only and warm final links", function()
