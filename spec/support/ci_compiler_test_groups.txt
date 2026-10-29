@@ -121,6 +121,7 @@ compiler spec/coder/map_metamethods_spec.lua 1.220 4.781
 stdlib spec/coder/multi_module_grouping_spec.lua 2.325 3.802
 stdlib spec/coder/multi_module_libraries_spec.lua 39.726 50.801
 compiler spec/coder/multi_module_path_runtime_spec.lua 7.148 17.301
+stdlib spec/coder/multi_module_path_stdlib_spec.lua 1.000 -
 compiler spec/coder/named_arguments_spec.lua 3.305 13.198
 stdlib spec/coder/native_coverage_spec.lua 13.058 42.177
 compiler spec/coder/native_inputs_spec.lua 1.000 -
