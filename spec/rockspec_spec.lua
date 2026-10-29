@@ -1942,9 +1942,12 @@ describe("automatic Lua prefix selection", function()
         tools_path = workspace .. "/tools"
         make_directory(tools_path)
         checked_run({ "ln", "-s", "/bin/sh", tools_path .. "/sh" })
-        local uname = assert(checked_run({ "sh", "-c", "command -v uname" })
-            :match("^(.-)\n$"))
-        checked_run({ "ln", "-s", uname, tools_path .. "/uname" })
+        -- The detector follows launcher symlinks with readlink.
+        for _, tool in ipairs({ "uname", "readlink" }) do
+            local path = assert(checked_run({ "sh", "-c", "command -v " .. tool })
+                :match("^(.-)\n$"))
+            checked_run({ "ln", "-s", path, tools_path .. "/" .. tool })
+        end
         inspection = workspace .. "/inspect.mk"
         -- The semicolons force Make through the shell's printf builtin, so
         -- this intentionally narrow PATH needs no external printf program.

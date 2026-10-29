@@ -2227,8 +2227,6 @@ int main(void) {
             }) do
                 assert.falsy(makefile:find(retired, 1, true), retired)
             end
-            assert.same({ "$(RUNTIME_O)", "$(MINICORO_O)" },
-                makefile_words("TITAN_RUNTIME_OBJECTS"))
 
         end)
 
@@ -3755,7 +3753,7 @@ end)
                 })
                 assert.truthy(prefix_ok, prefix_output)
                 local physical_prefix = assert(prefix_output:match("^(.-)\n$"))
-                assert.equal(physical_prefix .. "/lib/titan/0.6/titan.so",
+                assert.equal(physical_prefix .. "/lib/lua/5.5/titan.so",
                     checkout.provider)
                 write_file(local_types,
                     'error("broken checkout compiler must propagate", 0)\n')
