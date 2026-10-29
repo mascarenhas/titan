@@ -10,42 +10,15 @@ prefix=$(cd "$1" && pwd)
 mkdir -p "$2"
 build_root=$(cd "$2" && pwd)
 generated=$(cd "$3" && pwd)
-source_root=$(pwd)
 check_root=$(mktemp -d "$build_root/launcher.XXXXXX")
 runtime="$check_root/launcher ü space"
 mkdir -p "$runtime/bin" "$runtime/lib/titan/0.6/fixture" "$check_root/cwd"
 cp "$prefix/bin/lua55.dll" "$runtime/bin/"
-# The exact override destination is the invocation root, not a bin sibling,
-# so the controlled Lua DLL must also sit beside that launcher.
-cp "$prefix/bin/lua55.dll" "$runtime/"
 mapfile -t plan < "$generated/plan.txt"
 mapfile -t driver_libraries < "$generated/runtime-libraries.txt"
 [[ ${#plan[@]} == 3 ]]
-[[ ${plan[0]} == bin/fixture.launcher.exe && ${plan[1]} == custom.exe ]]
+[[ ${plan[0]} == bin/fixture.launcher.exe && ${plan[1]} == bin/custom.exe ]]
 [[ ${plan[2]} == lib/titan/0.6/fixture/launcher.dll ]]
-# --exe is relative to the invocation directory, so the exact override
-# destination is not a lib sibling: its entrypoint must embed the provider
-# path a driver build computes for this deployment root. Generate it here,
-# with the deployment root as the working directory, rather than reusing the
-# bin-relative entrypoint.
-override_dir="$check_root/override"
-mkdir -p "$override_dir"
-(
-  cd "$runtime"
-  TITAN_ROOT="$(cygpath -m "$prefix")" \
-  LUA_PATH="$(cygpath -m "$source_root")/?.lua;$(cygpath -m "$source_root")/?/init.lua;;" \
-    "$prefix/bin/lua.exe" - "$(cygpath -m "$override_dir")" <<'LUA'
-local driver = require "titan-compiler.driver"
-local platform = require "titan-compiler.platform"
-local util = require "titan-compiler.util"
-local output = assert(arg[1], "expected an output directory")
-platform.windows = true
-local paths = assert(driver.windows_program_paths("fixture.launcher", "custom"))
-assert(util.set_file_contents(output .. "/custom.c",
-    driver.entrypoint_contents("fixture.launcher", nil,
-        { provider = paths.relative_provider }), "wb"))
-LUA
-)
 CC=${CC:-clang} perl -MText::ParseWords=shellwords -e \
   'my @a = shellwords($ENV{CC}); die "Invalid CC command\n" unless @a; print "$_\0" for @a' \
   > "$check_root/compiler.argv"
@@ -95,7 +68,7 @@ llvm-rc -FO "$check_root/launcher.res" "$generated/launcher.rc"
 for variant in launcher direct; do
   "${compiler[@]}" "${common[@]}" -c "$generated/$variant.c" -o "$check_root/$variant.o"
 done
-"${compiler[@]}" "${common[@]}" -c "$override_dir/custom.c" -o "$check_root/custom.o"
+"${compiler[@]}" "${common[@]}" -c "$generated/custom.c" -o "$check_root/custom.o"
 "${compiler[@]}" "${ldflags[@]}" "${link_guard[@]}" "$check_root/launcher.o" \
   "$check_root/launcher.res" "${runtime_libraries[@]}" -o "$runtime/${plan[0]}"
 "${compiler[@]}" "${ldflags[@]}" "${link_guard[@]}" "$check_root/custom.o" \
@@ -104,7 +77,7 @@ done
   "$check_root/launcher.res" "${runtime_libraries[@]}" -o "$runtime/bin/direct.exe"
 cp "$runtime/${plan[0]}" "$runtime/bin/renamed.exe"
 cmp "$runtime/${plan[0]}" "$runtime/bin/renamed.exe"
-for file in "$runtime/bin/"*.exe "$runtime/${plan[1]}" "$runtime/lib/titan/0.6/fixture/launcher.dll"; do
+for file in "$runtime/bin/"*.exe "$runtime/lib/titan/0.6/fixture/launcher.dll"; do
   report="$check_root/$(basename "$file").imports"
   llvm-readobj --coff-imports "$file" > "$report"
   perl -0777 -e '
