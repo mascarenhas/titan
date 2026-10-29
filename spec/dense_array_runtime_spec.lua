@@ -1323,6 +1323,19 @@ local function compile_and_run(hard_memory, expose_lua_internals)
     end
     append_words(argv, os.getenv("TITAN_TEST_EXTRA_CFLAGS"),
         "TITAN_TEST_EXTRA_CFLAGS")
+    if platform.windows and not hard_memory then
+        -- The controlled Lua DLL's internals are named imports here; do not
+        -- rely on MinGW auto-import. Lua's own sources define LUA_CORE, so the
+        -- hard-memory build must keep the stock helper declarations.
+        for _, word in ipairs({
+            "-DLUA_BUILD_AS_DLL",
+            "-DLUAI_FUNC=__declspec(dllimport) extern",
+            "-DLUAI_DDEC(dec)=__declspec(dllimport) extern dec",
+            "-DLUAI_DDEF=",
+        }) do
+            argv[#argv + 1] = word
+        end
+    end
     argv[#argv + 1] = source
     argv[#argv + 1] = "titan-runtime/titan.c"
     argv[#argv + 1] = "titan-runtime/titan_path.c"
