@@ -687,6 +687,21 @@ printf '%%s\n' '%s'
         return host
     end
 
+    -- Compile one C file with the configured compiler.
+    local function compile_c(source, output, words)
+        local argv = { "env", "CCACHE_DISABLE=1" }
+        for _, word in ipairs(assert(cdriver.split_shell_words(driver.CC))) do
+            argv[#argv + 1] = word
+        end
+        argv[#argv + 1] = "-std=c99"
+        for _, word in ipairs(words or {}) do argv[#argv + 1] = word end
+        for _, word in ipairs({ source, "-o", output }) do
+            argv[#argv + 1] = word
+        end
+        local ok, cc_output = run(argv, workspace)
+        assert.truthy(ok, cc_output)
+    end
+
     setup(function()
         workspace = temporary_workspace()
         exact_one = root("exact-one")
@@ -800,20 +815,36 @@ function independent(cpath: string): (integer, integer, integer)
   return before, after, origin
 end
 
-function in_thread(): integer
+-- Run one chunk in a fresh independent state, which copies this state's
+-- native preloads (with their descriptors) but no initialized module.
+function in_new_state(chunk: string): integer
+  local state = lua.new()
+  defer state:close()
+  return transferred_integer(state:run(chunk))
+end
+
+-- A thread child loads the support module without gaining a second Titan
+-- searcher, then resolves a Titan module through its own Titan path.
+function in_thread(cpath: string): integer
   local result = 0
   async.run<|nil, value|>(function (): nil
     local child = thread.spawn(function (): integer
-      local count: value = lua.load(count_chunk)()
-      return count as integer
+      local before: value = lua.load(count_chunk)()
+      lua.load("package.cpath = ...; require('titan')")(cpath)
+      local after: value = lua.load(count_chunk)()
+      if (before as integer) ~= (after as integer) then
+        raise "loading the support module added a second Titan searcher"
+      end
+      local origin: value = lua.load("return require('search.item').origin()")()
+      return origin as integer
     end)
     case child:join()
-    when succeeded(count) then
-      result = count
+    when succeeded(origin) then
+      result = origin
     when failed(failure) then
       failure:raise()
     else
-      raise "searcher-count thread was cancelled"
+      raise "searcher thread was cancelled"
     end
     return nil
   end)
@@ -925,24 +956,13 @@ int search_item_abi(lua_State *L) { lua_pushstring(L, "0"); return 1; }
 int search_item_types(lua_State *L) { lua_pushstring(L, ""); return 1; }
 #endif
 ]])
-                local argv = { "env", "CCACHE_DISABLE=1" }
-                for _, word in ipairs(assert(cdriver.split_shell_words(driver.CC))) do
-                    argv[#argv + 1] = word
-                end
-                for _, word in ipairs({ "-std=c99", "-fPIC" }) do
-                    argv[#argv + 1] = word
-                end
-                for _, word in ipairs(assert(driver.shared_library_flags())) do
-                    argv[#argv + 1] = word
-                end
-                for _, word in ipairs(defines) do argv[#argv + 1] = word end
                 make_directory(path.join(directory, "search"))
-                for _, word in ipairs({ source, "-o",
-                    shared_path(directory, "search/item") }) do
-                    argv[#argv + 1] = word
+                local words = { "-fPIC" }
+                for _, word in ipairs(assert(driver.shared_library_flags())) do
+                    words[#words + 1] = word
                 end
-                local ok, cc_output = run(argv, workspace)
-                assert.truthy(ok, cc_output)
+                for _, word in ipairs(defines) do words[#words + 1] = word end
+                compile_c(source, shared_path(directory, "search/item"), words)
             end
             local partial = root("partial")
             fabricated(partial, {})
@@ -1110,6 +1130,80 @@ assert(provider:gsub("\\", "/"):find(%q, 1, true), provider)
         assert.equal(0, probe_count(log))
     end)
 
+    it("uses a stored Titan path verbatim, without expansion or fallback",
+       function()
+        local app = root("verbatim-app")
+        local host = copy_lua(path.join(app, "bin"))
+        -- Providers at both places an expansion of `!/providers;;` would
+        -- search, and in the fallback SDK the TITANC stand-in reports.
+        copy_file(shared_path(exact_one, "search/item"),
+            shared_path(path.join(app, "bin/providers"), "search/item"))
+        copy_file(shared_path(exact_one, "search/item"),
+            shared_path(path.join(app, "lib/titan/0.6"), "search/item"))
+        local log = root("verbatim.log")
+        local titanc = platform.windows and root("absent-titanc.exe") or
+            write_titanc_shim(root("shim-verbatim"), log, sdk)
+        local output = assert_runs(workspace, {
+            lua = host, env = { "TITANC=" .. titanc },
+        }, [[
+debug.getregistry()[TITAN_PATH_KEY] = "!/providers;;"
+local ok, message = pcall(require, "search.item")
+assert(not ok)
+io.write(message)
+]])
+        assert.truthy(output:find(
+            "no file '!/providers/search" .. SHARED_SUFFIX .. "'", 1, true), output)
+        -- Any fallback attempt, failed or not, would show here or resolve.
+        assert.falsy(output:find("no Titan SDK fallback", 1, true), output)
+        assert.equal(0, probe_count(log))
+    end)
+
+    if not platform.windows then
+        it("normalizes a TITAN_ROOT with `..` through realpath, else lexically",
+           function()
+            local base = root("dotdot")
+            make_directory(path.join(base, "real/sub"))
+            make_directory(path.join(base, "real/sdk"))
+            for _, link in ipairs({
+                { path.join(base, "real/sub"), path.join(base, "link") },
+                { path.join(base, "loop"), path.join(base, "loop") },
+            }) do
+                local ok, output = run({ "ln", "-s", link[1], link[2] }, workspace)
+                assert.truthy(ok, output)
+            end
+            local function compiler_root(value)
+                local output = assert_runs(workspace, {
+                    env = { "TITAN_ROOT=" .. value },
+                }, [[
+local root, message = titan._compiler_root()
+io.write(tostring(root), "\n", tostring(message), "\n")
+]])
+                return output:match("^([^\n]*)\n")
+            end
+
+            -- The kernel resolves link/.. to real/, so an existing target is
+            -- named through realpath, not lexically.
+            assert.equal(physical_dir(path.join(base, "real/sdk")),
+                compiler_root(base .. "/link/../sdk"))
+            -- A missing target, and any other realpath failure (a symlink
+            -- loop), normalize lexically.
+            assert.equal(base .. "/missing",
+                compiler_root(base .. "/link/../missing"))
+            assert.equal(base .. "/sdk", compiler_root(base .. "/loop/../sdk"))
+
+            -- The runtime SDK fallback uses the same resolved root.
+            copy_file(shared_path(exact_two, "search/item"),
+                shared_path(path.join(base, "real/sdk/lib/titan/0.6"),
+                    "search/item"))
+            assert_runs(workspace, {
+                titan_path = other .. ";;",
+                env = { "TITAN_ROOT=" .. base .. "/link/../sdk" },
+            }, [[
+assert(require("search.item").origin() == 2)
+]])
+        end)
+    end
+
     if not platform.windows then
         it("probes titanc lazily, once per state, and never after a hit",
            function()
@@ -1165,6 +1259,70 @@ assert(not pcall(require, "search.missing"))
         end)
     end
 
+    -- A native stand-in for titanc exercises each platform's spawn
+    -- (posix_spawnp, or CreateProcessW with a restricted handle list).
+    it("probes a compiled TITANC program once per state, and reports one that cannot start",
+       function()
+        local directory = root("probe-program")
+        local source = path.join(directory, "probe.c")
+        write_file(source, [[
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(int argc, char **argv) {
+    const char *log = getenv("TITAN_PROBE_LOG");
+    const char *root = getenv("TITAN_PROBE_ROOT");
+    FILE *file;
+    if (argc != 2 || strcmp(argv[1], "--print-root") != 0) return 2;
+    if (log == NULL || root == NULL) return 3;
+    file = fopen(log, "ab");
+    if (file == NULL) return 4;
+    fputs("probe\n", file);
+    fclose(file);
+    printf("%s\n", root);
+    return 0;
+}
+]])
+        local function native(name)
+            return platform.windows and (name:gsub("/", "\\")) or name
+        end
+        local program = path.join(directory, "titanc-probe" .. EXE_SUFFIX)
+        compile_c(source, program)
+        local log = root("program-probe.log")
+        assert_runs(workspace, {
+            titan_path = other .. ";;",
+            env = {
+                "TITANC=" .. native(program),
+                "TITAN_PROBE_LOG=" .. native(log),
+                "TITAN_PROBE_ROOT=" .. sdk,
+            },
+        }, [[
+local item, provider = require "search.item"
+assert(item.origin() == 2)
+assert(provider:gsub("\\", "/"):find("lib/titan/0.6", 1, true), provider)
+-- Later misses search the cached fallback without launching it again.
+assert(not pcall(require, "search.missing"))
+local ok, message = pcall(require, "search.other_missing")
+assert(not ok)
+assert(not message:find("no Titan SDK fallback", 1, true), message)
+]])
+        assert.equal(1, probe_count(log))
+
+        local not_program_path = path.join(directory, "not-a-program" .. EXE_SUFFIX)
+        write_file(not_program_path, "not a program\n")
+        local not_program = native(not_program_path)
+        local output = assert_runs(workspace, {
+            titan_path = other .. ";;", env = { "TITANC=" .. not_program },
+        }, [[
+local ok, message = pcall(require, "search.item")
+assert(not ok)
+io.write(message)
+]])
+        assert.truthy(output:find(
+            "no Titan SDK fallback: cannot start '" .. not_program, 1, true), output)
+    end)
+
     it("installs one searcher in each independent state and thread child",
        function()
         local log = root("states.log")
@@ -1175,17 +1333,55 @@ assert(not pcall(require, "search.missing"))
         assert_runs(workspace, {
             titan_path = statecheck .. ";" .. exact_one .. ";;", env = env,
         }, [[
-assert(#package.searchers == 5, #package.searchers)
+local count = #package.searchers
 package.loaded.titan = nil
 require "titan"
-assert(#package.searchers == 5, #package.searchers)
+assert(#package.searchers == count, #package.searchers .. " " .. count)
 
+-- Lua's own paths name no Titan root: only the Titan searcher resolves these.
 local statecheck = require "statecheck"
 local before, after, origin = statecheck.independent(package.cpath)
-assert(before == 5 and after == 5, before .. " " .. after)
+assert(before == after, before .. " " .. after)
 assert(origin == 1, origin)
-assert(statecheck.in_thread() == 5)
+assert(statecheck.in_thread(package.cpath) == 1)
 ]])
         assert.equal(0, probe_count(log))
+    end)
+
+    it("prefers a matching native preload and falls through without one",
+       function()
+        -- The host loads search.item from exact-two; each child's own Titan
+        -- path names exact-one, so a file hit and a preload hit differ.
+        local stored = table.concat({
+            statecheck, exact_two, path.join(PREFIX, "lib/titan/0.6"),
+        }, ";")
+        local file_suffix = "exact-one/search/item" .. SHARED_SUFFIX
+        local preload_hit = [[
+local loader, data = package.searchers[#package.searchers]("search.item")
+assert(data == ":preload:", tostring(data))
+assert(rawequal(loader, package.preload["search.item"]))
+return loader("search.item").origin()
+]]
+        local file_hit = string.format([[
+local loader, data = package.searchers[#package.searchers]("search.item")
+assert(type(loader) == "function" and not rawequal(loader, string.len))
+local provider = data:gsub("\\", "/")
+assert(provider:sub(-%d) == %q, data)
+return 1
+]], #file_suffix, file_suffix)
+        assert_runs(workspace, { titan_path = exact_one }, string.format([[
+debug.getregistry()[TITAN_PATH_KEY] = %q
+local statecheck = require "statecheck"
+assert(require("search.item").origin() == 2)
+-- The copied loader and its symbol descriptor win over the file.
+assert(statecheck.in_new_state(%q) == 2)
+-- A replaced loader no longer matches the copied descriptor.
+assert(statecheck.in_new_state(%q) == 1)
+-- A loader published without a descriptor never matches.
+package.preload["search.item"] = string.len
+assert(statecheck.in_new_state(%q) == 1)
+]], stored, preload_hit,
+            'package.preload["search.item"] = string.len\n' .. file_hit,
+            file_hit))
     end)
 end)
