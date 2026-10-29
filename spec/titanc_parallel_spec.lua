@@ -87,6 +87,7 @@ local function run_titanc(arguments, environment_jobs, customize, expect)
     end
     function driver.toolchain_descriptor() return {} end
     function driver.generated_compile_prefix() return { "cc" } end
+    function driver.authored_c_compile_prefix() return { "cc" } end
     function driver.link_extra_flags() return {} end
     function driver.native_link_backend() return "none" end
     function driver.output_tool_descriptors(context, kind)
