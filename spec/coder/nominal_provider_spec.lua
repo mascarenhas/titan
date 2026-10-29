@@ -60,7 +60,7 @@ end
 local function compiled(...)
     local arguments = {
         "env", "TITAN_RUNTIME_PREBUILT=1", "CCACHE_DISABLE=1",
-        "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_ROCKS_ROOT=" .. PREFIX,
+        "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_ROOT=" .. PREFIX,
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=-O0 -fno-lto",
         "TITAN_EXTRA_LDFLAGS=-fno-lto",
         LUA, "-E", "-e", string.format(
@@ -158,7 +158,6 @@ describe("nominal layout provider boundaries", function()
         end
         remove(source_root .. "/private.h")
         remove(name .. ".so")
-        remove(name .. ".lua")
         write(source_root .. "/archive_app.titan", [[
             local provider = import "nominal_archive_fixture"
             foreign import "lua.h"
@@ -197,7 +196,6 @@ describe("nominal layout provider boundaries", function()
         end
         remove(source_root .. "/private.h")
         remove(name .. ".a")
-        remove(name .. ".lua")
         write(source_root .. "/dso_app.titan", [[
             local provider = import "nominal_dso_fixture"
             foreign import "lua.h"

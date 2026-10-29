@@ -17,9 +17,8 @@ requested_profile=$TITAN_BUILD_PROFILE
 requested_coverage=${TITAN_TEST_COVERAGE:-0}
 if [[ $mode == build ]]; then
   prefix=$(cd "$3" && pwd)
-  [[ -f $prefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc && -f $prefix/bin/lua.exe &&
-     -f $prefix/lib/titan/0.6/titan.dll &&
-     -f $prefix/share/lua/5.5/titan/sqlite3.lua ]]
+  [[ -f $prefix/bin/titanc.exe && -f $prefix/bin/lua.exe &&
+     -f $prefix/lib/titan/0.6/titan.dll && -f $prefix/lib/lua/5.5/titan.dll ]]
   export TITAN_BEHAVIOR_SOURCE_SDK=$(cygpath -aw "$prefix")
 fi
 export TITAN_BEHAVIOR_WORK=$(cygpath -aw "$workspace") TITAN_BEHAVIOR_MODE=$mode
@@ -237,7 +236,7 @@ if [[ $mode == build ]]; then
     ( cd "$source_root"
       "${MAKE:-make}" --no-print-directory -f Makefile.win windows-stdlib-test-native \
         "TITAN_TEST_BUILD_DIR=$(cygpath -m "$work")" )
-    export TITAN_ROCKS_ROOT="$winprefix" TITAN_RUNTIME_PREBUILT=1 TITAN_JOBS="${TITAN_JOBS:-4}"
+    export TITAN_ROOT="$winprefix" TITAN_RUNTIME_PREBUILT=1 TITAN_JOBS="${TITAN_JOBS:-4}"
     export TITAN_PROBE_CACHE_DISABLE=1 TITAN_PATH_0_6="$winprefix/lib/titan/0.6"
     unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 LUA_INIT LUA_INIT_5_5 ROCKS_TREE
     export PATH="$work/sdk/bin:$PATH"
@@ -249,7 +248,7 @@ if [[ $mode == build ]]; then
     for fixture in uv_stdio_probe sqlite3_worker_fixture ssl_allocator_fixture ssl_error_strings os_descriptor_limit; do
       native_output="$work/native/$fixture"
       object=$(TITAN_EXTRA_CPPFLAGS= TITAN_EXTRA_CFLAGS= TITAN_EXTRA_LDFLAGS= \
-        "$work/sdk/bin/lua.exe" "$winprefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" \
+        "$work/sdk/bin/titanc.exe" \
           -c --incremental --print-c-objects -j "$TITAN_JOBS" --output "$(cygpath -m "$native_output")" \
           "${native_args[@]}" --c-source "$(cygpath -m "$work/source/spec/fixtures/stdlib/native/$fixture.c")")
       object=${object%$'\r'}
@@ -283,7 +282,8 @@ if [[ $mode == build ]]; then
       if [[ -n ${TITAN_COVERAGE_GCOVR:-} ]]; then
         coverage_args+=(--coverage-gcovr "$TITAN_COVERAGE_GCOVR")
       fi
-      payload+=("$winpayload/ltitanlib.o" "$winpayload/libtitan-lpeglabel.a")
+      # The support object belongs to the runtime archive, not the provider payload.
+      payload+=("$winpayload/libtitan-lpeglabel.a")
       export TITAN_EXTRA_CPPFLAGS="$TITAN_EXTRA_CPPFLAGS -I\"$winsource/vendor/lpeglabel\""
       for library in libuv libllhttp libssl libcrypto; do
         TITAN_EXTRA_LDFLAGS+=" \"$winprefix/lib/$library.dll.a\""
@@ -292,8 +292,9 @@ if [[ $mode == build ]]; then
     fi
     if [[ ${payload[0]+present} ]]; then payload=(-X "${payload[@]}"); fi
     cd "$work/sdk"
-    "$work/sdk/bin/lua.exe" "$winprefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" \
-      --output "$(cygpath -m "$output")" --test --incremental --no-uv-bootstrap -j "$TITAN_JOBS" \
+    "$work/sdk/bin/titanc.exe" \
+      --output "$(cygpath -m "$output")" --test --incremental --no-uv-bootstrap \
+      --ldflag=-Wl,--disable-auto-import -j "$TITAN_JOBS" \
       --exe "$winprefix/bin/titan-stdlib-tests.exe" --tree "$test_tree" \
       --test-dir "$(cygpath -m "$work/source/spec/stdlib/titan")" ${coverage_args[@]+"${coverage_args[@]}"} \
       --c-source "$(cygpath -m "$work/source/spec/fixtures/stdlib/native/async_foreign_work.c")" \
@@ -321,7 +322,7 @@ rm -rf "$work/scratch"
 mkdir "$work/scratch"
 rm -f "$work/stdout.log" "$work/stderr.log"
 winprefix=$(cygpath -m "$work/sdk")
-export TITAN_ROCKS_ROOT="$winprefix" TITAN_RUNTIME_PREBUILT=1 TITAN_JOBS=1
+export TITAN_ROOT="$winprefix" TITAN_RUNTIME_PREBUILT=1 TITAN_JOBS=1
 # Preserve the controlled provider first and each child launcher's default
 # executable-relative provider directory for fresh-process fixture programs.
 export TITAN_PROBE_CACHE_DISABLE=1 TITAN_PATH_0_6="$winprefix/lib/titan/0.6;;"

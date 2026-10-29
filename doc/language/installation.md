@@ -31,8 +31,8 @@ export PREFIX="$HOME/.local/titan/my-project"
 curl -fL -o lua-titan.tar.gz https://github.com/mascarenhas/lua-5.5.1/archive/refs/tags/v5.5.1-1.tar.gz
 tar zxf lua-titan.tar.gz
 (cd lua-5.5.1-5.5.1-1 &&
-  make linux-readline MYCFLAGS=-fPIC TITAN_LIBRARY_VERSION=0.6 PREFIX="$PREFIX" &&
-  make install TITAN_LIBRARY_VERSION=0.6 PREFIX="$PREFIX")
+  make linux-readline MYCFLAGS=-fPIC PREFIX="$PREFIX" &&
+  make install PREFIX="$PREFIX")
 
 # 2. Stock LuaRocks
 curl -fLO https://luarocks.github.io/luarocks/releases/luarocks-3.13.0.tar.gz
@@ -53,10 +53,7 @@ These are the commands that `make lua` and `make luarocks` run in a Titan checko
    archives, so the command downloads the `tar.gz` for the tag. It unpacks into
    `lua-5.5.1-5.5.1-1/`. The build compiles the fork with `-fPIC` and installs
    Lua under `PREFIX`, including its `.c` and `.h` sources in
-   `$PREFIX/src/lua-5.5.1/`. `make install` fails unless both `PREFIX` and
-   `TITAN_LIBRARY_VERSION` are set. `TITAN_LIBRARY_VERSION=0.6` must match Titan's
-   library version, and it puts `$PREFIX/lib/titan/0.6/?.so` into Lua's default
-   `package.cpath`.
+   `$PREFIX/src/lua-5.5.1/`. `make install` fails unless `PREFIX` is set.
 2. **The LuaRocks build** installs LuaRocks under `PREFIX`, configured to use that
    Lua and to use `PREFIX` as its rocks tree.
 3. **`luarocks install titan`** downloads Titan's source rock from the LuaRocks
@@ -81,13 +78,17 @@ library, so Titan needs the exact Lua build it was written for. The fork's insta
 puts the matching `liblua.a`, internal headers, and public headers in `PREFIX`
 together, and Titan's native targets use those headers.
 
-The fork changes one thing about how Lua finds modules. In POSIX module search paths
-it expands `!` to the parent of the actual executable's directory. An interpreter at
-`<root>/bin/lua` therefore finds its modules under `<root>`, including after you move
-the tree or run it through a symlink. Linux reads `/proc/self/exe`. macOS calls
+The fork changes one thing about how Lua finds modules on Linux and macOS. As
+stock Lua already does on Windows, it expands `!` in module search paths to the
+directory of the actual executable, and it roots the default paths at `!/../`. An
+interpreter at `<root>/bin/lua` therefore finds its modules under
+`<root>/share/lua/5.5` and `<root>/lib/lua/5.5`, including after you move the tree or
+run it through a symlink. Linux reads `/proc/self/exe`. macOS calls
 `_NSGetExecutablePath` and resolves the result with `realpath`. Windows keeps Lua's
 stock executable-directory expansion and DLL loading. These paths do not change how
-the operating system looks up dependent libraries.
+the operating system looks up dependent libraries. Lua's paths do not name Titan's
+library directory: Titan finds compiled modules itself (see
+[How Titan finds its installation](#how-titan-finds-its-installation)).
 
 LuaRocks is not modified. Its `configure` options above set both `--prefix` and
 `--rocks-tree` to `PREFIX` and point `--with-lua` at the same prefix. LuaRocks's
@@ -163,10 +164,15 @@ the other case.
 
 ### Moving a tree
 
-The `!` expansion described above makes Lua's module paths follow a moved tree. It
-covers Lua's module search paths only. LuaRocks configuration and installed command
-wrappers can still contain absolute paths, so moving a tree does not make every tool
-relocatable.
+The `!` expansion described above makes Lua's module paths follow a moved tree, and
+Titan computes its default root and library directory from the running executable in
+the same way. This covers module search only. LuaRocks configuration and installed
+command wrappers can still contain absolute paths, so moving a tree does not make
+every tool relocatable. In particular, LuaRocks' Unix `bin/titanc` wrapper embeds the
+absolute path of the interpreter and of the tree's Lua modules: in a copied tree it
+still runs the original installation's Lua, so `titanc` reports the original root.
+Reinstall Titan in the copy, or set `TITAN_ROOT` to the copy. The Windows
+`bin/titanc.exe` has no such paths: it runs the compiler of the SDK that contains it.
 
 ### Versions
 
@@ -176,6 +182,28 @@ library and compiler-data paths. `TITAN_ABI_VERSION` is the separate marker for
 compiled-module compatibility, currently `2`. Titan assumes a fresh installation: it
 provides no migration from earlier installations and no compatibility aliases.
 Install into a fresh tree after an ABI change.
+
+### Upgrading from a pre-release build
+
+Earlier development builds of Titan 0.6 wrote a generated Lua loader file (a "shim")
+beside each library provider, such as `out/greeting.lua` beside `out/greeting.so` and
+`share/lua/5.5/titan/*.lua` for the standard library, and Lua found providers through a
+`lib/titan/0.6` entry in `package.cpath`. Titan now writes no such files: Lua's
+`require` reaches compiled modules through Titan's package searcher, which
+`require "titan"` installs (see
+[Requiring a Titan module](lua-interop.md#requiring-a-titan-module)). When you upgrade:
+
+- Delete the old generated `*.lua` loaders from your output trees. Lua's own searchers
+  run before Titan's, so a stale loader would still be found first.
+- Rebuild pre-release output trees and providers with the current compiler. Titan
+  neither converts nor detects files from earlier builds.
+- Recreate a direct installation in a fresh prefix with the commands above, including
+  Lua. The earlier fork build puts `lib/titan/0.6` on `package.cpath`, where Lua's own
+  C searchers can open a provider without Titan's checks, and installing over an old
+  prefix leaves its `share/lua/5.5/titan` loaders in place.
+- Rename `TITAN_ROCKS_ROOT` to `TITAN_ROOT`, and replace `LUA_CPATH` entries that name
+  provider directories with `TITAN_PATH_0_6` entries (see
+  [The Titan path](modules.md#the-titan-path)).
 
 ## Other installation types
 
@@ -218,12 +246,12 @@ registry: run `make lua` and `make luarocks` as above, then
 different source, platform, compiler, or flags, clean Lua's objects and remove or
 replace `$PREFIX/bin/lua` yourself.
 
-When you pass no `PREFIX`, Make picks one itself. It first looks for a Titan Lua on
-`PATH` (it asks that `lua` for its module paths and ignores Lua init and path
-overrides) and uses that Lua's prefix, keeping the spelling you launched it with when
-a symlink such as `/home` names the same installation. If there is no Titan Lua, it
-uses `/usr/local`. So pass `PREFIX` to the first command, `make lua`; later commands
-can leave it out. An explicit `PREFIX` always wins.
+When you pass no `PREFIX`, Make picks one itself. It first looks for a Lua 5.5 `lua` on
+`PATH` (ignoring Lua init code) and uses the parent of the directory that really
+contains it, following symlinks, but keeping the spelling you launched it with when a
+symlink such as `/home` names the same installation. If there is no Lua 5.5, it uses
+`/usr/local`. So pass `PREFIX` to the first command, `make lua`; later commands can
+leave it out. An explicit `PREFIX` always wins.
 
 Titan's own Make targets use the headers in `$PREFIX/src/lua-5.5.1` and require the
 matching `$PREFIX/lib/liblua.a`. If those headers are missing, they fall back to the
@@ -257,10 +285,10 @@ add the include path:
 
 ```sh
 (cd lua-5.5.1-5.5.1-1 &&
-  make macosx TITAN_LIBRARY_VERSION=0.6 PREFIX="$PREFIX" \
+  make macosx PREFIX="$PREFIX" \
     MYCFLAGS="-fPIC -I$(brew --prefix readline)/include" \
     MYLDFLAGS="-L$(brew --prefix readline)/lib" &&
-  make install TITAN_LIBRARY_VERSION=0.6 PREFIX="$PREFIX")
+  make install PREFIX="$PREFIX")
 ```
 
 In a checkout, pass the same values to `make lua` as `LUA_MYCFLAGS` and
@@ -319,9 +347,10 @@ the tree you name:
 luarocks --tree "$HOME/titan-tree" install titan
 ```
 
-The rockspec records that tree as `ROCKS_TREE`. Lua's default search paths point at
-`PREFIX`, so tell Lua about the tree with the `LUA_PATH_5_5` and `LUA_CPATH_5_5`
-settings in [How Titan finds its installation](#how-titan-finds-its-installation). In
+The rockspec records that tree as `ROCKS_TREE`. Lua's default search paths, and the
+Titan root that `titanc` derives from the interpreter, point at `PREFIX`. Set
+`TITAN_ROOT` to the tree and tell Lua about it, as shown in
+[How Titan finds its installation](#how-titan-finds-its-installation). In
 a checkout, `ROCKS_TREE` is also a Make variable: when set, Make's publishing targets
 (`install-stdlib`, for example) write the SDK and library there, copying the Lua
 sources and `liblua.a` into the tree. This is not the default layout. Windows needs
@@ -393,17 +422,17 @@ All paths are under `ROCKS_TREE` (the same as `PREFIX` in the default layout).
 | `bin/titanc`, `bin/titan-uninstall` | The compiler and the uninstaller. |
 | `share/lua/5.5/titan-compiler/`, `share/lua/5.5/c-parser/` | The compiler's Lua modules. |
 | `src/lua-5.5.1/`, `lib/liblua.a`, and the public Lua headers in `include/` | The matching Lua sources, static library, and headers. |
-| `lib/titan/0.6/libtitan.a` | The runtime archive: exactly `titan.o` and `minicoro.o`. |
+| `lib/titan/0.6/libtitan.a` | The runtime archive: `titan.o`, `minicoro.o`, `titan_path.o`, and `ltitanlib.o`. A link pulls only the members it references, so a static host can link the support module's `luaopen_titan` from here. |
 | `lib/libbacktrace.a` | The native unwinder and symbolizer. |
 | `include/minicoro.h`, `titan.h`, `transfer.h` | Top-level SDK headers that are not Lua's. |
 | `include/titan/ffi.h` | The portable FFI header and the audited bridge to Lua internals. |
 | `include/uv.h`, `include/uv/`, `include/llhttp.h`, `include/sqlite3.h` | Headers for the bundled libuv, llhttp, and SQLite. |
 | `include/openssl/` | Headers for bundled OpenSSL, present only in bundled mode. |
-| `lib/titan/0.6/titan.so` | The dynamic standard-library provider. It holds every logical standard module (listed below) plus the native support that `require "titan"` loads. |
+| `lib/titan/0.6/titan.so` | The dynamic standard-library provider. It holds every logical standard module (listed below). |
 | `lib/titan/0.6/titan.a` | The static form of the same modules, with their private native payload: LPegLabel, libuv, llhttp, SQLite, and OpenSSL in bundled mode. |
 | `lib/titan/0.6/titan.so.dSYM` | Debug information, on macOS only. |
 | `lib/titan/0.6/sdk-digests` | Content digests the installer recorded for Titan's own `titan.so`, `titan.a`, and `libtitan.a` in `lib/titan/0.6/`, for `lib/libbacktrace.a`, and for the `lib/liblua.a` that Titan links, so `titanc` can skip rehashing them while they are unchanged. When Lua shares the prefix, its existing `liblua.a` is recorded without Titan taking ownership of it. Removed by `titan-uninstall`. |
-| `share/lua/5.5/titan/*.lua` | One generated loader per standard module. Each maps the canonical provider globally and calls that module's `luaopen_titan_*` entry. |
+| `lib/lua/5.5/titan.so` | The support module that `require "titan"` loads: an ordinary Lua C module, owned by the rock, that installs Titan's package searcher and serves the compiler. It is not a provider. |
 | `share/titan/LICENSE`, `share/titan/THIRD_PARTY_NOTICES.md`, `share/titan/LICENSES/` | Titan's license and the licenses of bundled code. |
 | `etc/titan/build-profile` | The build profile (`production` or `validation`). |
 
@@ -423,15 +452,16 @@ or LPegLabel module.
 ### How the rock installs
 
 The rock's `all` target builds everything in its source tree. A fresh tree needs no
-installed Titan, because the library build uses the compiler Lua sources in the rock, a
-private support-only bootstrap, and the matching Lua SDK. Each logical module owns an
-object and its generated headers, and unchanged objects are reused. One final
-incremental `titanc` invocation links all 26 roots, with the private LPegLabel, libuv,
-llhttp, SQLite, and TLS/OpenSSL payload.
+installed Titan, because the library build uses the compiler Lua sources in the rock,
+the support module built from the rock's runtime sources, and the matching Lua SDK.
+Each logical module owns an object and its generated headers, and unchanged objects
+are reused. One final incremental `titanc` invocation links all 26 roots, with the
+private LPegLabel, libuv, llhttp, SQLite, and TLS/OpenSSL payload.
 
-LuaRocks then runs the copy-only `install` target. It puts the compiler Lua modules and
-standard-library loaders in the rock's Lua directory, and `titanc` and `titan-uninstall`
-in its `bin` directory. It keeps a mirrored native SDK and provider payload at
+LuaRocks then runs the copy-only `install` target. It puts the compiler Lua modules in
+the rock's Lua directory, the support module in its library directory (LuaRocks
+deploys it to `lib/lua/5.5`), and `titanc` and `titan-uninstall` in its `bin`
+directory. It keeps a mirrored native SDK and provider payload at
 `<rock-prefix>/titan-sdk` and a copier at `<rock-prefix>/installer/titan_install.lua`.
 The rock's `post_install` hook runs that copier to place the SDK, providers, licenses,
 and (on macOS) the dSYM at their canonical locations. It compiles nothing and needs no
@@ -439,44 +469,69 @@ source directory or Makefile. The same copier handles source and binary rock ins
 
 ## How Titan finds its installation
 
-For the interpreter at `$PREFIX/bin/lua`:
+For the interpreter at `$PREFIX/bin/lua`, `!` in Lua's default paths is `$PREFIX/bin`:
 
-- The default `package.cpath` has `$PREFIX/lib/titan/0.6/?.so` before
-  `$PREFIX/lib/lua/5.5/?.so`. The first template lets the generated `titan.*` loaders
-  find the canonical provider. The second is the anchor from which the root is
-  discovered.
-- The default `package.path` finds all 26 loaders under
-  `$PREFIX/share/lua/5.5/titan/`.
-- `PREFIX` is resolved from the running interpreter, so these paths follow a moved
-  tree.
+- The default `package.path` searches `$PREFIX/bin/../share/lua/5.5`, which holds the
+  compiler's Lua modules.
+- The default `package.cpath` searches `$PREFIX/bin/../lib/lua/5.5`, which holds the
+  support module `titan.so`. `require "titan"` loads it and installs Titan's package
+  searcher.
+- The searcher finds compiled modules along the [Titan path](modules.md#the-titan-path).
+  Its run-time default, `!;!/../lib/titan/0.6`, includes `$PREFIX/lib/titan/0.6`, where
+  the standard library is installed.
 
-For an installed `titanc`, the SDK root comes from the first `/lib/titan/0.6/?.so`
-template in `package.cpath`, falling back to an ordinary `/lib/lua/5.5/?.so` template.
-`titanc --print-root` prints that root.
-It compiles nothing and reads the current `package.cpath`.
-
-A compiled executable discovers default library paths at startup: it tries
-`titanc --print-root` on `PATH`, then derives a root from the `package.cpath`
-printed by `lua` on `PATH`. Without either, it uses the physical directory
-containing the executable. It never uses the working directory as the root.
-Each explicit Lua or Titan path variable keeps its precedence; see
-[standalone module search](modules.md#where-modules-are-found) for the search order.
-
-An unmodified Lua 5.5 can use the same paths through environment variables:
+So a plain `lua` from the installation loads the standard library directly:
 
 ```sh
-export LUA_PATH_5_5="$ROCKS_TREE/share/lua/5.5/?.lua;$ROCKS_TREE/share/lua/5.5/?/init.lua;;"
-export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.6/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
+lua -e 'require "titan"; assert(require("titan.string"))'
 ```
+
+For an installed `titanc`, the root is `TITAN_ROOT` when that is set and non-empty,
+otherwise the parent of the directory that contains the Lua interpreter running
+`titanc`, with symlinks resolved: `$PREFIX/bin/lua` gives `$PREFIX`. On Windows it is
+the parent of the directory that contains `titanc.exe`.
+`titanc --print-root` prints that root and compiles nothing. The compiler takes the
+SDK headers, `liblua.a`, the runtime archive, and the standard library from below the
+root, and searches compiled modules along the compile-time Titan path
+`.;<root>/lib/titan/0.6`.
+
+A compiled executable sets up no paths at startup. When it loads a module from a DSO,
+it searches its own directory, then `../lib/titan/0.6` beside it, and finally, at
+most once per Lua state, the installed SDK: `<TITAN_ROOT>/lib/titan/0.6`, or the
+`lib/titan/0.6` below the root that `titanc --print-root` reports. It never searches
+the working directory. See [The Titan path](modules.md#the-titan-path) for the
+details and for deploying providers with a program.
+
+A Lua whose own paths do not lead to the tree, such as the `PREFIX` Lua of
+[a separate rocks tree](#a-separate-rocks-tree), can use the tree through environment
+variables:
+
+```sh
+export TITAN_ROOT="$ROCKS_TREE"
+export LUA_PATH_5_5="$ROCKS_TREE/share/lua/5.5/?.lua;$ROCKS_TREE/share/lua/5.5/?/init.lua;;"
+export LUA_CPATH_5_5="$ROCKS_TREE/lib/lua/5.5/?.so;;"
+```
+
+`TITAN_ROOT` selects the compiler's root, and Lua hosts and programs reach the
+standard library through the SDK fallback. Do not put `$ROCKS_TREE/lib/titan/0.6` on
+`package.cpath`: Lua's own C searchers run before Titan's and could open a provider
+without Titan's checks. [Running with a stock Lua](modules.md#running-with-a-stock-lua)
+shows the same setup for an unmodified interpreter.
 
 Overrides:
 
-- `TITAN_PATH_0_6` (or `TITAN_PATH`) sets the binary search path for compiled Titan
-  modules. The default is the current directory plus `<root>/lib/titan/0.6`. Short
+- `TITAN_PATH_0_6` (or `TITAN_PATH`) sets the directories searched for compiled Titan
+  modules. The compile-time default is the current directory plus
+  `<root>/lib/titan/0.6`; the run-time default is described above. Short
   standard-library imports expand before lookup: `import "timer"` becomes
   `import "titan.timer"` and resolves below `$ROCKS_TREE/lib/titan/0.6`.
-- `TITAN_ROCKS_ROOT` (internal) names the Titan tree directly, which selects a separate
-  Unix tree.
+- `TITAN_ROOT` names the Titan tree directly instead of deriving it from the
+  interpreter. A separate Unix tree needs it.
+- `TITANC` names the `titanc` program that programs and Lua hosts run for the SDK
+  fallback when `TITAN_ROOT` is unset. It is one program name or path, started without
+  a shell and with the single argument `--print-root`, not a command line. On Windows,
+  a name without a directory is looked up only in the `PATH` entries, with `.exe`
+  appended when it has no extension.
 - `--lua <path>` selects another complete Lua source and build tree for one compiler
   run. It works only in a source checkout. If the path matches the installed Lua SDK's
   `src/lua-5.5.1/`, linking uses the SDK's `lib/liblua.a`; otherwise it uses that tree's
@@ -547,14 +602,14 @@ use those forms unless the process has already made the provider global.
 If Lua loads the extension directly, load the provider first:
 
 ```lua
+require "titan"
 local uv = require "titan.uv"
 local extension = require "my.libuv_extension"
 ```
 
-The generated `titan/uv.lua` loader finds the physical provider `titan` with
-`package.searchpath("titan", package.cpath)`, gets the native support table with a bare
-`require "titan"`, and then promotes the same canonical `titan.so` with
-`RTLD_LAZY | RTLD_GLOBAL` and calls `luaopen_titan_uv`. On stock Lua 5.5 on Linux and
+`require "titan"` installs Titan's package searcher. For `titan.uv` the searcher finds
+the canonical `titan.so` provider along the Titan path, checks its ABI, promotes it with
+`RTLD_LAZY | RTLD_GLOBAL`, and calls `luaopen_titan_uv`. On stock Lua 5.5 on Linux and
 macOS, this first qualified `require` is what establishes the provider. Because it
 happens before the extension is mapped, it also supports eager libuv relocations and
 native constructors. A Lua-only extension that omitted the Titan `uv` import can use the
@@ -574,8 +629,8 @@ under [Bundled OpenSSL](#bundled-openssl).
 
 Run `titan-uninstall` from the installation. It asks LuaRocks to remove every installed
 Titan rock version in the selected tree, including the compiler scripts and modules,
-loaders, and private payloads. Only if that succeeds does it remove Titan's external
-headers, providers, runtime archive, notices, and build-profile record. Lua, LuaRocks,
+the support module, and private payloads. Only if that succeeds does it remove Titan's
+external headers, providers, runtime archive, notices, and build-profile record. Lua, LuaRocks,
 dependency Lua modules, and shared third-party headers and libraries stay. Titan's
 canonical paths are shared by all rock versions, so the command cleans the whole Titan
 installation in that tree. You cannot remove one version.
@@ -588,8 +643,8 @@ Titan's external files in place.
 
 - `make clean` removes the `out/` tree and generated native build and test artifacts
   (objects, generated C, compiled modules, coverage data). It also cleans legacy
-  source-adjacent compiler outputs and the generated standard-library loaders. It keeps
-  sources and downloaded dependency trees.
+  source-adjacent compiler outputs and the checkout's support module. It keeps sources
+  and downloaded dependency trees.
 - `make distclean` also removes the downloaded or cloned LuaRocks, libbacktrace, libuv,
   llhttp, SQLite, and OpenSSL source and build trees and their release tarballs. It
   cleans Lua's build artifacts, keeps the pinned submodule, and removes the

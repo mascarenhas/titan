@@ -108,7 +108,6 @@ describe("compiled-module ABI version", function()
             1, true))
         assert.truthy(makefile:find('if test ! -f "$(LUA_BIN)"', 1, true))
         assert.truthy(makefile:find('if test ! -f "$(LUAROCKS_BIN)"', 1, true))
-        assert.truthy(makefile:find('TITAN_LIBRARY_VERSION="$(TITAN_LIBRARY_VERSION)" PREFIX="$(PREFIX)"', 1, true))
         assert.falsy(makefile:find("READLINE_MODE", 1, true))
         assert.falsy(makefile:find("LUA_BUILD_CONFIG", 1, true))
         assert.falsy(makefile:find("LUAROCKS_INSTALL_STAMP", 1, true))
@@ -139,8 +138,6 @@ describe("compiled-module ABI version", function()
             "make luarocks", 1, true))
         assert.truthy(workflow:find(
             '"$PREFIX/bin/luarocks" remove titan --force', 1, true))
-        assert.truthy(workflow:find(
-            '"/lib/titan/0.6/?.so"', 1, true))
         assert.equal(3, count_plain(workflow,
             'runtime_archive="$PREFIX/lib/titan/0.6/libtitan.a"'))
         assert.equal(3, count_plain(workflow,

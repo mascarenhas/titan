@@ -26,8 +26,9 @@ make -f Makefile.win titan-stdlib-test-run \
 The convenience command `bash spec/support/check_windows_stdlib_behavior.sh
 /c/owned-ntfs-work /c/validated-sdk` creates a unique child workspace under an
 existing parent and performs both steps. The supplied SDK is copied before
-compilation. It must contain the native compiler, complete `titan.dll`, stdlib
-shims, matching controlled Lua, and native DLL dependencies/import libraries.
+compilation. It must contain the native compiler, the standard provider `lib/titan/0.6/titan.dll`, the
+`lib/lua/5.5/titan.dll` support module, matching controlled Lua, and native DLL
+dependencies/import libraries.
 The workspace and its logs remain available for inspection. Test compilation
 uses `-O0` by default on Windows; provider optimization is recorded separately.
 The aggregate launcher reserves 8 MiB of stack, matching the ordinary Unix

@@ -5,7 +5,7 @@ local h = require "spec.support.helpers"
 
 local function clean_module(name)
     for _, suffix in ipairs({
-        ".c", ".o", ".so", ".a", ".lua", "__entrypoint.c",
+        ".c", ".o", ".so", ".a", "__entrypoint.c",
         "__entrypoint.o",
     }) do
         os.remove(name .. suffix)

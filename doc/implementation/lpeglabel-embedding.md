@@ -149,7 +149,8 @@ parser/compiler helpers. `relabel_parser.titan` `_relabel_build_parser`
 assembles the self-hosted expression grammar from operations in that shared
 module scope. As with every [folder module](folder-modules.md), the ensemble
 produces one generated object, one `titan.peg` ABI/types protocol, and one
-`titan/peg.lua` shim, with no module, provider, or shim per contributor.
+`luaopen_titan_peg` entry, with no module, provider, or Lua entry per
+contributor.
 
 The wrapper keeps public types tighter than the native Lua API:
 
@@ -401,7 +402,7 @@ The archive is metadata-free `-X` payload of the standard provider. Its
 position in the payload order, and the rule that it contributes no logical
 key and is never installed in the SDK, are described in [the standard-library
 image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image).
-No `lpeglabel.so`, `relabel.lua`, child DSO, or extra shim is installed for
+No `lpeglabel.so`, `relabel.lua`, child DSO, or extra Lua file is installed for
 `titan.peg`.
 
 The rockspec's `lpeglabel >= 1.6.2` dependency serves only the compiler's own

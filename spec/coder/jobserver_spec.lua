@@ -293,6 +293,25 @@ describe("jobserver slots", function()
         assert(slots:close())
     end)
 
+    it("reports the first require line when the native support library is absent", function()
+        local saved = package.loaded.titan
+        local observed = {}
+        local completed, failure = pcall(function()
+            package.loaded.titan = nil
+            -- require appends every searched path; only the first line is reported.
+            package.preload.titan = function()
+                error("titan runtime is not installed\n\tno file 'titan.so'", 0)
+            end
+            observed = table.pack(jobs.open_slots(2, { makeflags = false }))
+        end)
+        package.preload.titan = nil
+        package.loaded.titan = saved
+        assert.is_true(completed, failure)
+        assert.is_nil(observed[1])
+        assert.equal("cannot load the Titan native support library: " ..
+            "titan runtime is not installed", observed[2])
+    end)
+
     it("reject a second concurrent signal guard and restore on close", function()
         local slots = assert(jobs.open_slots(2, { makeflags = false }))
         local second, err = jobs.open_slots(2, { makeflags = false })
@@ -634,7 +653,7 @@ describe("generated-C batches under a parent Make", function()
                 ' TITAN_PARALLEL_TEST_DELAY="${DELAY:-0.5}"' ..
                 ' TITAN_PARALLEL_TEST_EXPECTED="${EXPECTED:-1}"' ..
                 ' TITAN_PARALLEL_TEST_FAIL="${FAIL:-}"' ..
-                " TITAN_ROCKS_ROOT=" .. quote(PREFIX) ..
+                " TITAN_ROOT=" .. quote(PREFIX) ..
                 " TITAN_RUNTIME_PREBUILT=1 " .. quote(LUA) .. " -e " ..
                 quote("package.path = " .. string.format("%q",
                     ROOT .. "/?.lua;" .. ROOT .. "/?/init.lua;") ..
@@ -1249,7 +1268,7 @@ describe("speculative C probe batches under a parent Make", function()
             " CC=" .. quote(PROBES .. "/probe_cc.sh") ..
             " SPECULATIVE_PROBE_STATE=" .. quote(state) ..
             " TITAN_EXTRA_CPPFLAGS= TITAN_EXTRA_CFLAGS= TITAN_EXTRA_LDFLAGS=" ..
-            " TITAN_PROBE_CACHE_DISABLE=1 TITAN_ROCKS_ROOT=" .. quote(PREFIX) ..
+            " TITAN_PROBE_CACHE_DISABLE=1 TITAN_ROOT=" .. quote(PREFIX) ..
             " TITAN_RUNTIME_PREBUILT=1 " .. quote(TIMEOUT) .. " 90 " .. quote(LUA) ..
             " -e " .. quote("package.path = " .. string.format("%q",
                 ROOT .. "/?.lua;" .. ROOT .. "/?/init.lua;") .. " .. package.path") ..
@@ -1351,7 +1370,7 @@ describe("speculative C probe batches under a parent Make", function()
                 " SPECULATIVE_PROBE_EXPECTED=4 SPECULATIVE_PROBE_DELAY=2" ..
                 " MAKEFLAGS=" .. quote("-j4 --jobserver-auth=fifo:" .. fifo) ..
                 " TITAN_EXTRA_CPPFLAGS= TITAN_EXTRA_CFLAGS= TITAN_EXTRA_LDFLAGS=" ..
-                " TITAN_PROBE_CACHE_DISABLE=1 TITAN_ROCKS_ROOT=" .. quote(PREFIX) ..
+                " TITAN_PROBE_CACHE_DISABLE=1 TITAN_ROOT=" .. quote(PREFIX) ..
                 " TITAN_RUNTIME_PREBUILT=1 " .. quote(LUA) ..
                 " -e " .. quote("package.path = " .. string.format("%q",
                     ROOT .. "/?.lua;" .. ROOT .. "/?/init.lua;") .. " .. package.path") ..

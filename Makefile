@@ -280,8 +280,11 @@ TITAN_VERBOSE_FLAG = $(if $(filter 1,$(TITAN_VERBOSE)),-v)
 
 RUNTIME_O := titan-runtime/titan.o
 MINICORO_O := titan-runtime/minicoro.o
+TITAN_PATH_O := titan-runtime/titan_path.o
 LTITANLIB_O := titan-runtime/ltitanlib.o
-TITAN_RUNTIME_OBJECTS := $(RUNTIME_O) $(MINICORO_O)
+# ltitanlib.o is archived too, so static hosts can link and preload the
+# `titan` support module; ordinary links pull it only when referenced.
+TITAN_RUNTIME_OBJECTS := $(RUNTIME_O) $(MINICORO_O) $(TITAN_PATH_O) $(LTITANLIB_O)
 TITAN_RUNTIME_LIB := titan-runtime/libtitan.a
 TITAN_SDK_ROOT_HEADERS := titan-runtime/minicoro.h titan-runtime/titan.h titan-runtime/transfer.h
 TITAN_SDK_NAMESPACED_HEADERS := titan-runtime/titan/ffi.h
@@ -397,15 +400,10 @@ STDLIB_GENERATED_FOREIGN_HEADERS := $(STDLIB_GENERATED_FFI_HEADERS) \
 	titan/uv/uv.titan.h titan/async.titan.h titan/http/http.titan.h \
 	titan/sqlite3/sqlite3.titan.h titan/lua/lua.titan.h titan/protobuf/protobuf.titan.h \
 	titan/transfer.titan.h titan/thread/thread.titan.h)
-STDLIB_SHIMS := $(addprefix $(TITAN_OUTPUT_DIR)/,titan/coroutine.lua titan/uv.lua titan/async.lua \
-	titan/timer.lua titan/io.lua titan/fs.lua titan/net.lua titan/ssl.lua \
-	titan/url.lua titan/http.lua titan/websocket.lua titan/os.lua titan/path.lua \
-	titan/peg.lua titan/string.lua titan/math.lua titan/lua.lua \
-	titan/iteration.lua titan/gc.lua titan/test.lua titan/reflect.lua titan/sqlite3.lua titan/json.lua titan/protobuf.lua titan/transfer.lua titan/thread.lua)
 STDLIB_CONTAINER := $(TITAN_OUTPUT_DIR)/titan.so
 STDLIB_STATIC_ARCHIVE := $(TITAN_OUTPUT_DIR)/titan.a
 STDLIB_PROVIDER_OUTPUTS := $(STDLIB_CONTAINER) $(STDLIB_STATIC_ARCHIVE)
-STDLIB_EXTRA_OBJECTS := $(LTITANLIB_O) $(LPEGLABEL_ARCHIVE) \
+STDLIB_EXTRA_OBJECTS := $(LPEGLABEL_ARCHIVE) \
 	$(LIBUV_EXTRA_OBJECTS) $(LLHTTP_ARCHIVE) $(SQLITE3_ARCHIVE) $(OPENSSL_EXTRA_OBJECTS)
 STDLIB_LPEGLABEL_CPPFLAGS := $(LPEGLABEL_CPPFLAGS)
 STDLIB_HTTP_CPPFLAGS := $(LLHTTP_CPPFLAGS)
@@ -418,8 +416,19 @@ STDLIB_LICENSES := LICENSES/libuv-LICENSE LICENSES/libuv-LICENSE-extra \
 	LICENSES/lpeg-patterns-LICENSE \
 	LICENSES/ta-regex-LICENSE LICENSES/lua-LICENSE \
 	LICENSES/llhttp-LICENSE LICENSES/sqlite3-LICENSE LICENSES/openssl-LICENSE LICENSES/go-LICENSE LICENSES/libbacktrace-LICENSE
-TITAN_BOOTSTRAP_SO := titan-runtime/bootstrap/titan.so
-STDLIB_BOOTSTRAP_PREREQ := $(TITAN_BOOTSTRAP_SO)
+# The `titan` Lua support module: ltitanlib plus the shared path code. The
+# checkout compiler loads it from here; installs deploy it to lib/lua/5.5.
+TITAN_SUPPORT_MODULE := titan-runtime/bootstrap/titan.so
+STDLIB_BOOTSTRAP_PREREQ := $(TITAN_SUPPORT_MODULE)
+# The support module is an ordinary Lua C module exporting only luaopen_titan;
+# titan_path.o's globals stay local to this image so a process that also
+# preloads libtitan.a (the language server) cannot interpose them.
+TITAN_SUPPORT_EXPORTS := scripts/titan_support_exports.map
+ifeq ($(HOST_OS),Darwin)
+  TITAN_SUPPORT_EXPORT_FLAGS ?= -Wl,-exported_symbol,_luaopen_titan
+else
+  TITAN_SUPPORT_EXPORT_FLAGS ?= -Wl,--version-script=$(TITAN_SUPPORT_EXPORTS)
+endif
 ROCK_LUA_INCDIR ?= $(PREFIX)/include
 ROCK_LUA_HEADERS = $(addprefix $(ROCK_LUA_INCDIR)/,lua.h luaconf.h lauxlib.h)
 # Stock LuaRocks supplies optimized dependency flags. Apply the Titan payload
@@ -436,15 +445,15 @@ ROCKS_TREE      ?=
 ROCK_TITANC     ?=
 ROCK_LUA        ?= $(LUA_BIN)
 STDLIB_USE_INSTALLED_RUNTIME ?= $(if $(wildcard $(TITAN_INSTALL_TREE)/bin/titanc),1,0)
-TITAN_ROCKS_ROOT ?=
-export TITAN_ROCKS_ROOT
+TITAN_ROOT ?=
+export TITAN_ROOT
 TITAN_LUA ?= $(or $(realpath $(ROCK_LUA)),$(ROCK_LUA))
 # Stdlib development uses the deployed compiler and its matching SDK once
 # installed. The checkout compiler remains the bootstrap path and an explicit
 # option through STDLIB_USE_INSTALLED_RUNTIME=0. Canonicalize only these build
 # inputs, so a LuaRocks /var/home root and a PATH /home alias select one SDK.
 STDLIB_INSTALLED_ROOT = $(or $(realpath $(TITAN_INSTALL_TREE)),$(abspath $(TITAN_INSTALL_TREE)))
-STDLIB_ROCKS_ROOT = $(if $(strip $(TITAN_ROCKS_ROOT)),$(or $(realpath $(TITAN_ROCKS_ROOT)),$(abspath $(TITAN_ROCKS_ROOT))),$(if $(filter 1,$(STDLIB_USE_INSTALLED_RUNTIME)),$(STDLIB_INSTALLED_ROOT)))
+STDLIB_ROCKS_ROOT = $(if $(strip $(TITAN_ROOT)),$(or $(realpath $(TITAN_ROOT)),$(abspath $(TITAN_ROOT))),$(if $(filter 1,$(STDLIB_USE_INSTALLED_RUNTIME)),$(STDLIB_INSTALLED_ROOT)))
 # Dependencies may live in a separate LuaRocks tree. The source compiler and
 # its private native support must still take precedence over any installed Titan.
 SOURCE_COMPILER_SETUP = local root=os.getenv("ROCKS_TREE"); \
@@ -453,7 +462,9 @@ SOURCE_COMPILER_SETUP = local root=os.getenv("ROCKS_TREE"); \
 	package.cpath=root .. "/lib/lua/5.5/?.so;" .. package.cpath end; \
 	package.path="./?.lua;./?/init.lua;" .. package.path; \
 	package.cpath="./titan-runtime/bootstrap/?.so;" .. package.cpath
-TITANC ?= $(if $(filter 1,$(STDLIB_USE_INSTALLED_RUNTIME)),$(call make_shell_quote,$(STDLIB_INSTALLED_ROOT)/bin/titanc),$(call make_shell_quote,$(TITAN_LUA)) -E -e $(call make_shell_quote,$(SOURCE_COMPILER_SETUP)) ./titanc --lua $(call make_shell_quote,$(abspath $(TITAN_RUNTIME_LUA_SOURCE_PATH))))
+# Distinct from the runtime `TITANC` command that the SDK fallback spawns:
+# a command-line Make variable is exported into every recipe environment.
+STDLIB_TITANC ?= $(if $(filter 1,$(STDLIB_USE_INSTALLED_RUNTIME)),$(call make_shell_quote,$(STDLIB_INSTALLED_ROOT)/bin/titanc),$(call make_shell_quote,$(TITAN_LUA)) -E -e $(call make_shell_quote,$(SOURCE_COMPILER_SETUP)) ./titanc --lua $(call make_shell_quote,$(abspath $(TITAN_RUNTIME_LUA_SOURCE_PATH))))
 
 # Standard modules have one installed pathname. PREFIX owns Lua; ROCKS_TREE
 # owns these Titan artifacts when it is supplied. The source-tree
@@ -474,12 +485,8 @@ TITAN_VERSION_COMPONENTS   := $(subst ., ,$(TITAN_VERSION))
 TITAN_LIBRARY_VERSION      := $(word 1,$(TITAN_VERSION_COMPONENTS)).$(word 2,$(TITAN_VERSION_COMPONENTS))
 TITAN_LIBRARY_VERSION_SUFFIX := _$(subst .,_,$(TITAN_LIBRARY_VERSION))
 TITAN_STDLIB_VERSION_DIR   ?= $(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)
-TITAN_CANONICAL_SUPPORT_SO ?= $(TITAN_STDLIB_VERSION_DIR)/titan.so
+TITAN_CANONICAL_PROVIDER_SO ?= $(TITAN_STDLIB_VERSION_DIR)/titan.so
 TITAN_CANONICAL_STATIC_ARCHIVE ?= $(TITAN_STDLIB_VERSION_DIR)/titan.a
-TITAN_STDLIB_DIR           ?= $(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan
-TITAN_STDLIB_LUA_DIR       ?= $(TITAN_INSTALL_TREE)/share/lua/$(LUA_ABI_VERSION)/titan
-LUA_LIBDIR                 ?= $(TITAN_INSTALL_TREE)/lib/lua/$(LUA_ABI_VERSION)
-TITAN_STDLIB_LEGACY_DIR    ?= $(LUA_LIBDIR)/titan/stdlib$(TITAN_LIBRARY_VERSION_SUFFIX)
 TITAN_SHARE_DIR            ?= $(TITAN_INSTALL_TREE)/share/titan
 
 # libbacktrace is cloned + built into ./libbacktrace (gitignored), mirroring the
@@ -513,7 +520,7 @@ TITAN_JOBS_CHECK = case $(call make_shell_quote,$(TITAN_JOBS)) in ''|0*|*[!0-9]*
 	check-llhttp-tools sqlite3 check-sqlite3-tools openssl openssl-config check-openssl-tools \
 	check-system-openssl invalid-openssl-mode lpeglabel \
 	check-libuv-tools runtime \
-	stage-titan-bootstrap install-compiler-sdk install-titan-sdk publish-titan-sdk \
+	install-compiler-sdk install-titan-sdk publish-titan-sdk \
 	stdlib stdlib-objects install-stdlib \
 	install publish-stdlib \
 	rock-test test rock-build \
@@ -557,16 +564,14 @@ lua: ## Build and install Lua unless PREFIX/bin/lua already exists
 	    echo "ERROR: Lua source is missing; initialize the Lua submodule." >&2; \
 	    echo "Run: git submodule update --init --recursive" >&2; exit 1; \
 	  }; \
-	  $(MAKE) -C "$(LUA_DIR)" $(LUA_PLATFORM) \
-	    TITAN_LIBRARY_VERSION="$(TITAN_LIBRARY_VERSION)" PREFIX="$(PREFIX)" \
+	  $(MAKE) -C "$(LUA_DIR)" $(LUA_PLATFORM) PREFIX="$(PREFIX)" \
 	    CC=$(call make_shell_quote,$(LUA_CC)) \
 	    AR=$(call make_shell_quote,$(LUA_AR)) \
 	    RANLIB=$(call make_shell_quote,$(LUA_RANLIB)) \
 	    MYCFLAGS=$(call make_shell_quote,$(LUA_MYCFLAGS)) \
 	    MYLDFLAGS=$(call make_shell_quote,$(LUA_MYLDFLAGS)) \
 	    MYLIBS=$(call make_shell_quote,$(LUA_MYLIBS)); \
-	  $(MAKE) -C "$(LUA_DIR)" install \
-	    TITAN_LIBRARY_VERSION="$(TITAN_LIBRARY_VERSION)" PREFIX="$(PREFIX)"; \
+	  $(MAKE) -C "$(LUA_DIR)" install PREFIX="$(PREFIX)"; \
 	fi
 
 luarocks: lua ## Install LuaRocks unless PREFIX/bin/luarocks already exists
@@ -1036,57 +1041,71 @@ $(MINICORO_O): titan-runtime/minicoro.c \
 		-c titan-runtime/minicoro.c -I titan-runtime -I $(TITAN_RUNTIME_LUA_SOURCE_PATH) \
 		-I $(LIBBT_DIR) -o $@
 
-$(TITAN_RUNTIME_LIB): $(TITAN_RUNTIME_OBJECTS)
-	rm -f "$@"
-	$(AR) rcs "$@" $(TITAN_RUNTIME_OBJECTS)
-	$(RANLIB) "$@"
+# titan_path.c includes only the Lua SDK and titan.h (plus titan_winloader.h
+# for _WIN32), and the support module links nothing else. Ordering it behind
+# the runtime archive and libbacktrace would make a direct `make
+# install-compiler` rebuild unrelated native dependencies.
+$(TITAN_PATH_O): titan-runtime/titan_path.c titan-runtime/titan.h \
+		titan-runtime/transfer.h titan-runtime/titan/ffi.h \
+		$(TITAN_RUNTIME_LUA_HEADERS)
+	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(CFLAGS) $(TITAN_EXTRA_CFLAGS) \
+		-c titan-runtime/titan_path.c -I titan-runtime -I $(TITAN_RUNTIME_LUA_SOURCE_PATH) \
+		-o $@
 
+# ltitanlib.c includes titan.h and titan_winloader.h only for _WIN32, where
+# scripts/build_windows_runtime.sh tracks every titan-runtime/*.h header.
 $(LTITANLIB_O): titan-runtime/ltitanlib.c \
 		$(wildcard $(ROCK_LUA_HEADERS)) $(LUA_SDK_PREREQ)
 	$(CC) $(ROCK_CFLAGS) $(TITAN_EXTRA_CFLAGS) \
 		-I"$(ROCK_LUA_INCDIR)" -c "$<" -o "$@"
 
-$(TITAN_BOOTSTRAP_SO): $(LTITANLIB_O)
+$(TITAN_RUNTIME_LIB): $(TITAN_RUNTIME_OBJECTS)
+	rm -f "$@"
+	$(AR) rcs "$@" $(TITAN_RUNTIME_OBJECTS)
+	$(RANLIB) "$@"
+
+# An ordinary Lua C module exporting only luaopen_titan; it needs neither the
+# standard library nor the rest of the runtime.
+$(TITAN_SUPPORT_MODULE): $(LTITANLIB_O) $(TITAN_PATH_O) $(TITAN_SUPPORT_EXPORTS)
 	@mkdir -p "$(@D)"
 	@set -e; tmp="$@.tmp"; rm -f "$$tmp"; \
-	if $(ROCK_LD) $(ROCK_LIBFLAG) -o "$$tmp" "$<" \
-		$(TITAN_EXTRA_LDFLAGS); then \
+	if $(ROCK_LD) $(ROCK_LIBFLAG) $(TITAN_SUPPORT_EXPORT_FLAGS) -o "$$tmp" \
+		$(LTITANLIB_O) $(TITAN_PATH_O) $(TITAN_EXTRA_LDFLAGS); then \
 		mv -f "$$tmp" "$@"; \
 	else \
 		status=$$?; rm -f "$$tmp"; exit $$status; \
 	fi
 
-# Seed an absent canonical provider. Preserve an installed full standard library.
-stage-titan-bootstrap: $(TITAN_BOOTSTRAP_SO)
-	@mkdir -p "$(TITAN_STDLIB_VERSION_DIR)"
-	@if test ! -e "$(TITAN_CANONICAL_SUPPORT_SO)"; then \
-	  install -m 0755 "$(TITAN_BOOTSTRAP_SO)" "$(TITAN_CANONICAL_SUPPORT_SO)"; \
-	fi
+# The installed compiler loads the support module from lib/lua/5.5. Direct
+# installs build it first; the LuaRocks install pass (INST_PREFIX) only copies
+# what its build pass produced.
+ifeq ($(strip $(INST_PREFIX)),)
+install-compiler: $(TITAN_SUPPORT_MODULE)
+endif
 
 # Build with this source rock's compiler, even when another Titan is installed.
-# The private bootstrap supplies native compiler support without publishing an
-# incomplete provider into the destination tree.
-all: lpeglabel libbacktrace libuv openssl llhttp sqlite3 $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) ## Build the runtime and paired standard library (default)
-	$(MAKE) --no-print-directory stdlib STDLIB_USE_INSTALLED_RUNTIME=0 TITAN_ROCKS_ROOT=
+# The checkout support module supplies native compiler support without
+# publishing anything into the destination tree.
+all: lpeglabel libbacktrace libuv openssl llhttp sqlite3 $(TITAN_RUNTIME_LIB) $(TITAN_SUPPORT_MODULE) ## Build the runtime and paired standard library (default)
+	$(MAKE) --no-print-directory stdlib STDLIB_USE_INSTALLED_RUNTIME=0 TITAN_ROOT=
 
 # Implementation notes: doc/implementation/build-script-audit.md#installation-and-publication
 # LuaRocks runs this in the same source directory as the build pass. Compiler
-# files and shims enter its ordinary staging directories. The retained payload
-# is published by post_install for both source and binary rocks.
+# files and the support module enter its ordinary staging directories. The
+# retained payload is published by post_install for both source and binary rocks.
 ifneq ($(strip $(INST_PREFIX)),)
 install: install-compiler install-rock-tools stage-rock-payload ## Stage the built compiler, SDK and standard library
 .PHONY: stage-rock-payload
 stage-rock-payload:
 	+$(MAKE) --no-print-directory publish-titan-sdk publish-stdlib \
-	  TITAN_INSTALL_TREE="$(INST_PREFIX)/titan-sdk" \
-	  TITAN_STDLIB_LUA_DIR="$(INST_LUADIR)/titan"
+	  TITAN_INSTALL_TREE="$(INST_PREFIX)/titan-sdk"
 else
 install: install-compiler publish-titan-sdk publish-stdlib ## Copy the built compiler, SDK and standard library
 endif
 
 # PREFIX owns installed Lua. Stage that SDK into a separate ROCKS_TREE, while
 # leaving Lua-owned files in place when both installation roots are the same.
-TITAN_RUNTIME_SDK_PREREQS := $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) \
+TITAN_RUNTIME_SDK_PREREQS := $(TITAN_RUNTIME_LIB) \
 	$(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB) $(TITAN_SDK_ROOT_HEADERS) \
 	$(TITAN_SDK_NAMESPACED_HEADERS) LICENSE
 TITAN_RUNTIME_SDK_COPY = \
@@ -1113,16 +1132,15 @@ TITAN_RUNTIME_SDK_COPY = \
 	install -p -m 0644 $(TITAN_SDK_NAMESPACED_HEADERS) \
 		"$$rocks_tree/include/titan/"
 
-# The guarded bootstrap provides bare native compiler support without claiming
-# standard-module metadata, an archive provider, or generated Lua shims.
-install-compiler-sdk: install-compiler $(TITAN_RUNTIME_SDK_PREREQS) stage-titan-bootstrap ## Build and install the compiler/runtime SDK without the standard library
+# The compiler SDK carries no standard-module metadata or archive provider.
+install-compiler-sdk: install-compiler $(TITAN_RUNTIME_SDK_PREREQS) ## Build and install the compiler/runtime SDK without the standard library
 	@set -e; \
 	$(TITAN_RUNTIME_SDK_COPY); \
 	mkdir -p "$$rocks_tree/etc/titan"; \
 	printf '%s\n' $(call make_shell_quote,$(TITAN_BUILD_PROFILE)) > "$$rocks_tree/etc/titan/build-profile"
 
 install-titan-sdk: $(TITAN_RUNTIME_SDK_PREREQS) $(LIBUV_LIB) $(OPENSSL_LIBS) \
-	$(LLHTTP_HEADER) $(SQLITE3_HEADER) stage-titan-bootstrap
+	$(LLHTTP_HEADER) $(SQLITE3_HEADER)
 publish-titan-sdk: ## Copy the already built native compiler SDK
 install-titan-sdk publish-titan-sdk:
 	@set -e; \
@@ -1145,9 +1163,8 @@ install-titan-sdk publish-titan-sdk:
 # provider. The install recipe above removes copies left by older SDKs so
 # extensions cannot create a second native instance. Development stdlib builds
 # can consume the installed Titan runtime archive. Libuv headers come from that SDK,
-# and its private archive goes to titanc through the same -X payload as
-# ltitanlib.o and the private
-# LPegLabel archive.
+# and its private archive goes to titanc through the same -X payload as the
+# private LPegLabel archive.
 ifeq ($(STDLIB_USE_INSTALLED_RUNTIME),1)
   STDLIB_PLATFORM_PREREQS := libuv openssl
   STDLIB_NATIVE_PREREQS := $(STDLIB_EXTRA_OBJECTS) \
@@ -1184,7 +1201,7 @@ STDLIB_COMPILER_ENV = CC=$(call make_shell_quote,$(CC)) \
 	AR=$(call make_shell_quote,$(AR)) RANLIB=$(call make_shell_quote,$(RANLIB)) \
 	ROCKS_TREE=$(call make_shell_quote,$(TITAN_INSTALL_TREE)) \
 	TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
-	TITAN_ROCKS_ROOT=$(call make_shell_quote,$(STDLIB_ROCKS_ROOT)) TITAN_RUNTIME_PREBUILT=1 \
+	TITAN_ROOT=$(call make_shell_quote,$(STDLIB_ROCKS_ROOT)) TITAN_RUNTIME_PREBUILT=1 \
 	TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_SQLITE3_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
 	TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))) \
 	TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS) $(STDLIB_OPENSSL_LDFLAGS)))
@@ -1192,12 +1209,12 @@ STDLIB_COMPILER_ENV = CC=$(call make_shell_quote,$(CC)) \
 stdlib-objects: $(STDLIB_NATIVE_PREREQS) $(STDLIB_TOOL_PREREQS) $(STDLIB_BOOTSTRAP_PREREQ) $(STDLIB_RUNTIME_ARCHIVE_PREREQ) $(STDLIB_PLATFORM_PREREQS) ## Compile standard-library objects without linking a provider
 	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) \
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
-	$(STDLIB_COMPILER_ENV) $(TITANC) --output $(call make_shell_quote,$(TITAN_OUTPUT_DIR)) --source-first --incremental -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) -c $(STDLIB_ROOTS)
+	$(STDLIB_COMPILER_ENV) $(STDLIB_TITANC) --output $(call make_shell_quote,$(TITAN_OUTPUT_DIR)) --source-first --incremental -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) -c $(STDLIB_ROOTS)
 
 stdlib: $(STDLIB_NATIVE_PREREQS) $(STDLIB_TOOL_PREREQS) $(STDLIB_BOOTSTRAP_PREREQ) $(STDLIB_RUNTIME_ARCHIVE_PREREQ) $(STDLIB_PLATFORM_PREREQS) ## Build the paired standard-library provider
 	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) \
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
-	$(STDLIB_COMPILER_ENV) $(TITANC) --output $(call make_shell_quote,$(TITAN_OUTPUT_DIR)) --source-first --incremental -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) \
+	$(STDLIB_COMPILER_ENV) $(STDLIB_TITANC) --output $(call make_shell_quote,$(TITAN_OUTPUT_DIR)) --source-first --incremental -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) \
 	  $(STDLIB_ROOTS) -X $(STDLIB_EXTRA_OBJECTS)
 
 install-stdlib: stdlib ## Install the paired standard library from this source tree
@@ -1205,24 +1222,20 @@ publish-stdlib: ## Copy an already built standard library from STDLIB_INSTALL_ST
 install-stdlib publish-stdlib:
 	@set -e; \
 	stage=$(call make_shell_quote,$(STDLIB_INSTALL_STAGE)); \
-	mkdir -p "$(TITAN_STDLIB_VERSION_DIR)" "$(TITAN_STDLIB_LUA_DIR)" \
-	  "$(TITAN_SHARE_DIR)/LICENSES"; \
+	mkdir -p "$(TITAN_STDLIB_VERSION_DIR)" "$(TITAN_SHARE_DIR)/LICENSES"; \
 	if test -n $(call make_shell_quote,$(strip $(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT))); then \
 	  $(STDLIB_COMPILER_ENV) "$(TITAN_LUA)" -E \
 	    "$(CURDIR)/spec/support/ci_asan_generated_c_context.lua" snapshot \
 	    $(call make_shell_quote,$(strip $(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT))) \
 	    "$$stage/titan.so" "$$stage/titan" \
-	    "$(TITAN_CANONICAL_SUPPORT_SO)" "$(CURDIR)/titan"; \
+	    "$(TITAN_CANONICAL_PROVIDER_SO)" "$(CURDIR)/titan"; \
 	fi; \
-	install -p -m 0755 "$$stage/titan.so" "$(TITAN_CANONICAL_SUPPORT_SO)"; \
+	install -p -m 0755 "$$stage/titan.so" "$(TITAN_CANONICAL_PROVIDER_SO)"; \
 	install -p -m 0644 "$$stage/titan.a" "$(TITAN_CANONICAL_STATIC_ARCHIVE)"; \
-	for shim in $(notdir $(STDLIB_SHIMS)); do \
-	  install -p -m 0644 "$$stage/titan/$$shim" "$(TITAN_STDLIB_LUA_DIR)/"; \
-	done; \
 	rm -f "$(TITAN_SHARE_DIR)/$(TITAN_LIBRARY_VERSION)/src/titan/test.titan"; \
 	if test -d "$$stage/titan.so.dSYM"; then \
-	  rm -rf "$(TITAN_CANONICAL_SUPPORT_SO).dSYM"; \
-	  cp -pR "$$stage/titan.so.dSYM" "$(TITAN_CANONICAL_SUPPORT_SO).dSYM"; \
+	  rm -rf "$(TITAN_CANONICAL_PROVIDER_SO).dSYM"; \
+	  cp -pR "$$stage/titan.so.dSYM" "$(TITAN_CANONICAL_PROVIDER_SO).dSYM"; \
 	fi; \
 	install -p -m 0644 THIRD_PARTY_NOTICES.md "$(TITAN_SHARE_DIR)/THIRD_PARTY_NOTICES.md"; \
 	install -p -m 0644 $(STDLIB_LICENSES) "$(TITAN_SHARE_DIR)/LICENSES/"
@@ -1283,6 +1296,10 @@ TITAN_TEST_COMPILER_ENV = TITAN_BUILD_PROFILE=$(call make_shell_quote,$(TITAN_BU
 	TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_FEATURE_CPPFLAGS) -I.)) \
 	TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CFLAGS))) \
 	TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_LDFLAGS)))
+# Native launches additionally set TITAN_ROOT to TITAN_TEST_INSTALL_ROOT (the
+# installation selected by TEST_LUA), so the runtime's SDK fallback cannot
+# consult a titanc on PATH or a user root. TITAN_TEST_COMPILER_ENV stays
+# Busted-compatible: its specs choose their own provider paths.
 STDLIB_BUSTED_TESTS := \
 	spec/asan_generated_c_context_spec.lua spec/dense_array_runtime_spec.lua \
 	spec/libuv_build_spec.lua spec/lpeglabel_build_spec.lua \
@@ -1339,6 +1356,7 @@ titan-stdlib-test-objects: $(filter %.h,$(TITAN_TEST_FIXTURE_OUTPUTS)) | check-t
 	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) set -e; \
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 	cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); \
+	TITAN_ROOT=$(call make_shell_quote,$(TITAN_TEST_INSTALL_ROOT)) \
 	$(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --output . --test --incremental -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) -c \
 	  --tree $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
 	  --test-dir $(call make_shell_quote,$(abspath spec/stdlib/titan)) $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
@@ -1364,6 +1382,7 @@ $(TITAN_TEST_BUILD_DIR)/$(1).o: spec/fixtures/stdlib/native/$(1).c FORCE | check
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 	native_output=$$(call make_shell_quote,$$(TITAN_TEST_BUILD_DIR)/native/$(1).o); \
 	native_object=$$$$(CC=$$(call make_shell_quote,$$(CC)) \
+	TITAN_ROOT=$$(call make_shell_quote,$$(TITAN_TEST_INSTALL_ROOT)) \
 	TITAN_BUILD_PROFILE=$$(call make_shell_quote,$$(TITAN_BUILD_PROFILE)) \
 	TITAN_EXTRA_CPPFLAGS=$$(call make_shell_quote,$$(strip $$(TITAN_TEST_CPPFLAGS) $(3))) \
 	TITAN_EXTRA_CFLAGS=$$(call make_shell_quote,$$(TITAN_TEST_CFLAGS)) \
@@ -1394,6 +1413,7 @@ titan-stdlib-test-build: $(TITAN_TEST_FIXTURE_OUTPUTS) | check-titan-test-sdk ##
 	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) set -e; \
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 	cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); \
+	TITAN_ROOT=$(call make_shell_quote,$(TITAN_TEST_INSTALL_ROOT)) \
 	$(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --output . --test --incremental --no-uv-bootstrap -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) \
 	  --tree $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
 	  --test-dir $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
@@ -1416,6 +1436,7 @@ titan-stdlib-test-run: ## Run the built native suite, optionally with TITAN_FILT
 	TITAN_TEST_BUILD_DIR=$(call make_shell_quote,$(abspath $(TITAN_TEST_BUILD_DIR))) \
 	TITAN_TEST_SOURCE_ROOT=$(call make_shell_quote,$(CURDIR)) \
 	TITAN_TEST_SDK_ROOT=$(call make_shell_quote,$(TITAN_TEST_INSTALL_ROOT)) \
+	TITAN_ROOT=$(call make_shell_quote,$(TITAN_TEST_INSTALL_ROOT)) \
 	TITAN_PROCESS_CHILD=$(call make_shell_quote,$(abspath $(TITAN_TEST_BUILD_DIR)/os_process_host_child)) \
 	TITAN_FILTER=$(call make_shell_quote_value,TITAN_FILTER) \
 	bash -o pipefail -c ' \
@@ -1464,6 +1485,7 @@ titan-stdlib-test-run-parallel: ## Run the built native suite in parallel owner 
 	TITAN_TEST_BUILD_DIR=$(call make_shell_quote,$(abspath $(TITAN_TEST_BUILD_DIR))) \
 	TITAN_TEST_SOURCE_ROOT=$(call make_shell_quote,$(CURDIR)) \
 	TITAN_TEST_SDK_ROOT=$(call make_shell_quote,$(TITAN_TEST_INSTALL_ROOT)) \
+	TITAN_ROOT=$(call make_shell_quote,$(TITAN_TEST_INSTALL_ROOT)) \
 	TITAN_PROCESS_CHILD=$(call make_shell_quote,$(abspath $(TITAN_TEST_BUILD_DIR)/os_process_host_child)) \
 	bash spec/support/run_parallel_stdlib_tests.sh
 
@@ -1578,12 +1600,11 @@ clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 	rm -f $(LPEGLABEL_OBJECTS) $(LPEGLABEL_ARCHIVE)
 	rmdir "$(LPEGLABEL_BUILD_DIR)" 2>/dev/null || true
 	rm -rf "$(LLHTTP_BUILD_DIR)"
-	rm -f $(TITAN_BOOTSTRAP_SO)
-	rm -rf $(TITAN_BOOTSTRAP_SO).dSYM
+	rm -f $(TITAN_SUPPORT_MODULE)
+	rm -rf $(TITAN_SUPPORT_MODULE).dSYM
 	rmdir titan-runtime/bootstrap 2>/dev/null || true
 	rm -f $(STDLIB_GENERATED_FOREIGN_HEADERS)
 	rm -f $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_QUALIFIED_SOS) $(STDLIB_SOS)
-	rm -f $(STDLIB_SHIMS)
 	rm -rf $(STDLIB_CONTAINER).dSYM
 	rm -rf $(addsuffix .dSYM,$(STDLIB_SOS)) \
 		$(addsuffix .dSYM,$(STDLIB_QUALIFIED_SOS))

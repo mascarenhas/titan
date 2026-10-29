@@ -18,7 +18,7 @@ and the [Windows build guide](windows-build.md).
 
 Module lookup deals in dot-separated **module names**, never file paths.
 Every component matches `[A-Za-z_][A-Za-z0-9_-]*`; this is checked before
-source/binary lookup, code generation, generated-shim planning, and static
+source/binary lookup, code generation, provider-output planning, and static
 metadata acceptance. The alphabet is exactly what the native protocol can
 turn into a portable C identifier after its established dash-to-underscore
 mangling, and it keeps template metacharacters such as `$` out of generated
@@ -54,89 +54,217 @@ All modules, including the standard library, use the same two path strings:
 
 * **`driver.TITAN_SOURCE_PATH`** — where `.titan` sources live. Default
   `"."`; `titanc --tree <root>` overrides it.
-* **`driver.TITAN_BIN_PATH`** — where compiled provider `.so` and `.a` files
-  live.
-  `TITAN_PATH_0_6` wins over `TITAN_PATH`; with neither set, installed mode
-  uses `".;" .. root .. "/lib/titan/0.6"`.
+* **`driver.TITAN_BIN_PATH`** — the configured Titan path for compiled
+  provider `.so` and `.a` files: `TITAN_PATH_0_6` when set, otherwise
+  `TITAN_PATH`, otherwise `nil`. `nil` selects
+  `driver.DEFAULT_TITAN_BIN_PATH`, which follows layout initialization:
+  `".;" .. root .. "/lib/titan/0.6"`, or only `"."` when no root is known.
+  The compile-time default deliberately keeps `.`; the run-time default does
+  not ([below](#the-run-time-titan-path-and-sdk-fallback)).
 
-The compile-time path walk (`driver.expand_titan_bin_path`) expands `;;` with
-the same "insert the ordinary default here" convention as the run-time loader
-in `titan.c` `pushpath`, then skips empty separators.
+### Titan path syntax
+
+A Titan path is a list of directories separated by `;`. It has no `?`
+templates: every entry is a root below which the shallow-to-exact relative
+candidates are joined. Empty entries are skipped. Each non-overlapping `;;`
+in a variable inserts the applicable default at that position, and a variable
+that is set but empty is an empty search with no default. `!` in any entry is
+the realpath directory of the running executable: at compile time the
+directory of the interpreter that runs `titanc` (`<root>/bin` for an installed
+Unix compiler, the directory of `titanc.exe` on Windows), at run time the
+directory of the program or Lua host. Substitution is a single literal pass:
+bytes copied from the inserted default or from the substituted directory are
+never expanded again.
+
+`driver.titan_bin_path_entries(path, default?)` returns the entry list. A
+`nil` path yields the default, unexpanded. Otherwise the native support
+module's `_expand_titan_path(path, default)` performs the `;;` and `!`
+expansion and the driver splits the result on `;`, dropping empty entries. An
+expansion failure (for example `!` when the executable directory cannot be
+determined) or a missing support member returns `nil, err`, and the provider
+lookups that called it report that diagnostic. The run-time loader uses the same
+C expansion in `titan-runtime/titan_path.c`, so the two sides share one
+grammar and differ only in their defaults.
+
+### The compiler root
 
 Here and below, `root` is the Titan SDK/rocks-tree root, not the owner of the
 Lua or LuaRocks installation. The Makefile's `PREFIX` owns Lua and LuaRocks;
 `ROCKS_TREE` owns the Titan rock, SDK, and stdlib. The supported developer and
 CI installation currently sets `ROCKS_TREE == PREFIX`, but that is a layout
-policy rather than an inherent identity. The internal
-`TITAN_ROCKS_ROOT` setting identifies `ROCKS_TREE` for installed-compiler
-builds. Without that override, when the compiler is not
-running from the Titan source checkout, the driver scans `package.cpath` from
-left to right for the first literal template ending in
-`/lib/titan/0.6/?.so` (`?.dll` on Windows), stripping that suffix. If none exists,
-it repeats the scan for the ordinary `/lib/lua/5.5/?.so` template. Preferring
-Titan's current version avoids selecting LuaRocks' prepended user-tree path;
-other Titan versions and suffix lookalikes do not match. Lua-owned default paths
-follow the ordinary equal-root layout; an explicit root override can select a
-separate Unix rocks tree. The resulting Titan root selects the
-matching `src/lua-5.5.1`, `include`, `lib/liblua.a`,
-`lib/titan/0.6/libtitan.a`,
-`lib/libbacktrace.a`, and every compiled Titan module, including `titan.test`
-for native test executables. Bundled libuv headers
-are staged under `include`, but its static archive remains a private
-source-build input rather than part of the installed SDK. Checkout mode
+policy rather than an inherent identity.
+
+The root is a non-empty `TITAN_ROOT` (an empty value counts as unset).
+Otherwise it is the support module's `_compiler_root()`: the parent of the
+realpath directory of the running interpreter, so `<root>/bin/lua` (or
+`<root>/bin/titanc.exe` on Windows) yields `<root>`, including through a
+symlinked launcher. Selecting the root never starts a process and never reads
+`package.cpath`. `TITAN_ROOT` is normalized by `normalize_root`, and
+`_compiler_root()` applies the same rules in C: a relative value is joined to
+the current directory; a value with a `..` component goes through `realpath`
+and falls back to lexical normalization on every `realpath` failure; any other
+value is normalized lexically; Windows uses `GetFullPathNameW`.
+`driver.compiler_root(strategy?)` returns that normalized root or `nil, err`.
+
+Without `TITAN_ROOT`, loading `driver.lua` therefore calls a guarded
+`require "titan"`. The support module must be reachable through Lua's own
+`package.cpath`: the installed `<root>/lib/lua/5.5/titan.so` (`titan.dll` on
+Windows), the checkout's `titan-runtime/bootstrap/?.so` entry that checkout
+compiler invocations prepend (Makefile `SOURCE_COMPILER_SETUP`), or an
+explicit `LUA_CPATH`. Only the first line of a
+failed `require` enters the diagnostic (`cannot load the Titan support module:
+<first line>`); a support table without the member reports `installed Titan
+native support lacks _compiler_root; reinstall Titan`.
+
+A non-empty `TITAN_ROOT` selects installed mode even when `driver.lua` itself
+comes from a checkout; the checkout Busted profile relies on this. Without it,
+checkout detection by driver provenance is unchanged and checkout mode
 deliberately retains the repository paths for compiler/runtime development.
-Outside a checkout, failure to find that exact suffix becomes
-`driver.INSTALLATION_ERROR` and stops compiler/toolchain use instead of
-silently mixing installations.
+The resulting root selects the matching `src/lua-5.5.1`, `include`,
+`lib/liblua.a`, `lib/titan/0.6/libtitan.a`, `lib/libbacktrace.a`, and every
+compiled Titan module, including `titan.test` for native test executables.
+Bundled libuv headers are staged under `include`, but its static archive
+remains a private source-build input rather than part of the installed SDK.
+Outside a checkout, an unknown root becomes `driver.INSTALLATION_ERROR`,
+`cannot locate the Titan installation root[: <reason>]; set TITAN_ROOT to the
+installation prefix`, and stops compiler/toolchain use instead of silently
+mixing installations.
 
-The CLI's `--print-root` query calls the same
-`driver.resolve_installation_root(package.cpath, TITAN_ROCKS_ROOT)` function
-before creating a resolver or checking build options. It therefore reports the
-normalized SDK root without a C toolchain or any C-probe/cache work, including
-when compilation flags or `TITAN_JOBS` are invalid. Windows ordinary drive and
-UNC paths retain the driver's normalized forward-separator spelling; explicit
-extended paths retain their namespace and literal semantics. No installation
-prefix is embedded in the query, compiler, Lua, or native provider. Its only
-successful stdout is the root and one newline. Module names are rejected;
-without `--print-root`, `--test-dir`, or `-c --c-source`, the CLI requires at
-least one module name.
+`titanc --print-root` reports that root and one newline on stdout without a C
+toolchain or any C-probe/cache work. When argv is exactly `--print-root`,
+`titanc` loads only the support module before any compiler module and prints
+`_compiler_root()`; a root error is written as `cannot locate the Titan
+installation root: <reason>` with exit status 1. This fast path is the query
+that the run-time SDK fallback launches. Every other spelling, and a support
+module that cannot load or lacks `_compiler_root`, takes the full `argparse`
+path: module names are rejected (`--print-root cannot be combined with module
+names`), and `driver.compiler_root()` answers before a resolver is created or
+build options are checked, so it still succeeds when compilation flags or
+`TITAN_JOBS` are invalid. The full path honors a non-empty `TITAN_ROOT`
+without native support. Both paths print the same root whenever either
+succeeds. Windows ordinary drive and UNC paths retain the driver's normalized
+forward-separator spelling; explicit extended paths retain their namespace and
+literal semantics. No installation prefix is embedded in the query, compiler,
+Lua, or native provider. Without `--print-root`, `--test-dir`, or
+`-c --c-source`, the CLI requires at least one module name.
 
-### Standalone startup path discovery
+### The run-time Titan path and SDK fallback
 
-`driver.entrypoint_contents` embeds `titan-compiler/standalone_paths.lua` as a
-built-in-only Lua chunk. After `luaL_openlibs` and before `titan_init_paths` or
-any module initialization, the launcher supplies its executable
-directory, library version, and registry keys. Linux uses `/proc/self/exe`,
-macOS uses `_NSGetExecutablePath` plus `realpath`, and Windows uses
-`GetModuleFileNameW` with UTF-8 conversion. None uses CWD or `argv[0]`.
+`titan-runtime/titan_path.c` owns run-time module location for compiled
+imports and for the Titan package searcher. It is a member of `libtitan.a`
+and of the support module, uses only the public Lua C API, and keeps all of
+its state per Lua state in the registry. It never reads or writes
+`package.path` or `package.cpath`.
 
-For unset paths, the chunk probes `titanc --print-root`, then
-`lua -e "io.write(package.cpath)"`, suppressing probe stderr and requiring a
-successful exit. A root query must return one absolute root; the Lua fallback
-scans exact current-Titan templates before Lua 5.5 templates. Missing commands,
-failed queries, and unusable output fall back to the executable directory.
-The selected root replaces only unset Lua package paths and seeds
-`TITAN_ROOT_KEY` before ordinary runtime path initialization. An explicit
-Lua C path with a recognized anchor remains the runtime root source.
-Versioned environment variables retain precedence over unversioned variables;
-empty explicit values are still overrides. When all three paths are explicit,
-no probe runs. Lua's existing explicit-path and `;;` expansion is retained.
-Windows also keeps adjacent bundle provider/shim paths after discovered paths,
-so its DLL launcher can find the application's own provider. Its default Titan
-path is `.;<root>/lib/titan/0.6;<exe-dir>/../lib/titan/0.6`. The chunk stores
-that default under `TITAN_PATH_KEY`. When a Titan path variable is set, it
-stores the selected value instead, with each `;;` replaced by that same default
-the way `pushpath` substitutes it. An override such as
-`<sdk>/lib/titan/0.6;;` therefore still reaches the launcher's own DLL, while a
-value without `;;` replaces the default. When all three paths are explicit, the
-chunk returns early: `pushpath` then expands `;;` against the executable-relative
-root from `titan_win_push_root`, whose default names the same adjacent tree.
-A Unix executable links its main module, so the chunk leaves the Titan path to
-`pushpath`. Its root-only default, `.;<root>/lib/titan/0.6`, is the same for an
-unset variable and for `;;`.
+The effective Titan path (`titan_path_push_effective`) is computed on the
+first lookup in a state, not at state creation, and cached as a string under
+`TITAN_PATH_KEY`. A string already stored there, for example by an embedding
+application, is the directory list as-is: it is not expanded again and never
+gains the SDK fallback. Otherwise `TITAN_PATH_0_6`, then `TITAN_PATH`, then the
+run-time default `!;!/../lib/titan/0.6` (`TITAN_RUNTIME_DEFAULT_PATH`) select
+it, with the syntax [above](#titan-path-syntax). The run-time default has no
+`.`, so a working directory cannot supply providers to an installed program.
+An explicitly empty variable is an empty search.
 
-The chunk uses no compiler modules at runtime and embeds no build prefix.
-Ordinary Lua hosts keep the existing `titan_init_paths` behavior.
+The lazy SDK fallback (`titan_path_push_sdk_fallback`) is appended only to a
+path derived from the default (no variable, or a variable containing `;;`).
+That eligibility is bound to the exact computed string in a private registry
+record (`TITAN_SDK_FALLBACK_KEY`), so an application that stores another
+`TITAN_PATH_KEY` string loses it. The fallback is computed only after a lookup
+has missed the state's canonical module, a matching native preload, and every
+root of the effective path. Its source is a non-empty `TITAN_ROOT`, normalized
+with the compiler-root rules, plus `/lib/titan/0.6`. Without `TITAN_ROOT` it
+runs `$TITANC` (when non-empty) or `titanc` with argv `{program,
+"--print-root"}`, never through a shell. The child inherits the parent's
+environment except `LUA_INIT` and `LUA_INIT_5_5`: a startup chunk that
+installs the Titan searcher and requires a missing module would otherwise
+start the same query again in every child, without bound, and any output it
+printed would corrupt the one-line answer. All other entries, including
+`PATH`, `HOME`, and `TITAN_ROOT`, stay inherited.
+
+* Unix uses `posix_spawnp` (a `PATH` search for a bare name) with stdin and
+  stderr on `/dev/null`, stdout on a close-on-exec pipe, an empty signal
+  mask, `POSIX_SPAWN_CLOEXEC_DEFAULT` where available, and a filtered `envp`
+  array of the parent's own strings that a registry reference keeps alive
+  until the spawn has copied it; reads and `waitpid` retry on `EINTR`.
+* Windows looks up a bare name (the default `titanc`, or a `TITANC` value
+  containing no `\`, `/`, or `:`) only in the `PATH` entries, never in the
+  current or the application directory and without `SearchPathW`, appending
+  `.exe` when the name contains no `.`; a miss reports `'<name>' was not found
+  on PATH`. Any other `TITANC` is started as given. The child starts with
+  `CreateProcessW`, `CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT`, a wide
+  environment block without the two Lua startup names (compared
+  case-insensitively), and a `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` limited to
+  the `NUL` stdin/stderr and the pipe's write end. See [the Windows loader
+  boundary](windows-build.md#windows-loader-boundary).
+
+The query is accepted only on exit status 0 with exactly one line (a trailing
+`\n` or `\r\n`) holding an absolute path, at most 8192 bytes. A fallback equal
+to an earlier absolute entry after normalization (lexical on Unix; full path
+and ASCII case-insensitive on Windows) is skipped. Each state makes at most one
+attempt: the record is marked before the probe and caches the outcome,
+including "none" with its reason. A failed fallback adds one `no Titan SDK
+fallback: <reason>` line to the miss diagnostic. There is no time bound: the
+probe reads to end of file and then waits, so `TITANC` (or the `titanc` found
+on `PATH`) must name a program that terminates. A hanging one blocks that
+`require` or compiled-import load indefinitely.
+
+Any Lua host with the searcher, including the compiler process itself, that
+misses a module in its default roots may therefore start one `titanc
+--print-root` per state unless `TITAN_ROOT` is set or the path is explicit.
+Development executables whose providers are not executable-relative rely on
+`titanc` on `PATH`, `TITANC`, `TITAN_ROOT`, or a Titan path variable.
+
+### The Titan package searcher
+
+`titan_install_searcher(L)` (declared in `titan/ffi.h`, which `titan.h`
+includes) appends `titan_path_searcher` to the end of `package.searchers`,
+normally as slot 5 after Lua's preload, Lua-path, C-path, and all-in-one
+searchers. It requires the package library (`the Titan searcher requires the
+Lua package library`) and is idempotent per state through a registry marker
+(`TITAN_SEARCHER_KEY`) rather than function identity, because every image that
+links `titan_path.o` has its own copy. Installation computes no path and
+probes nothing. Every Lua state Titan creates installs it after its standard
+libraries and before user code: generated executables (`main` in the
+[entrypoint](#linking-a-standalone-program-drivercompile_program)),
+[independent states](lua-library.md#independent-state-ownership) and thread
+children (`lua_state_open_libraries` in `titan/lua/worker.titan`), and any host
+that loads the support module with `require "titan"`. No state inherits its
+creator's effective path.
+
+For `require(name)` the searcher, in order:
+
+1. returns the state's canonical module (`registry["Titan module " .. name]`)
+   through a loader closure, without opening another image; `require` then
+   returns the module and no loader data;
+2. returns a matching native preload loader with loader data `":preload:"`;
+3. ignores invalid logical names, a dotted name ending in `.titan`, and the
+   bare support name `titan` (it returns nothing);
+4. probes `a.so`, `a/b.so`, `a/b/c.so` (`.dll` on Windows) root-major and
+   shallow to exact through the effective path and then the SDK fallback. An
+   occupied relative name (`lstat`, `GetFileAttributesW` on Windows) shadows
+   the same name in later roots even when it was a clean nonclaim, exactly as
+   in [compile-time candidate
+   search](multi-module-libraries.md#compiled-module-candidate-search).
+
+A candidate claims the module when it exports both `<mangled>_abi` and
+`<mangled>_types`. Unix probes with `dlopen(realpath, RTLD_LAZY | RTLD_LOCAL)`
+(unless the state already holds the global handle) and promotes a valid claim
+with `RTLD_LAZY | RTLD_GLOBAL`; Windows uses the cached
+`titan_win_load_library` handle. The ABI is checked before any Lua opener
+runs (on Windows through the plain-C `<mangled>_abi_value` query). Success
+returns `luaopen_<mangled>` and the provider path as loader data, so `require`
+calls the opener with the requested name and that path, and the generated
+[file-load name guard](codegen-overview.md#lua-entries-and-abi-type-and-layout-metadata)
+rejects a provider for a different logical name with the same mangled spelling. These are terminal
+errors, never a miss: an occupied candidate that cannot be opened or
+inspected, one claim symbol without the other, an exact candidate with neither
+(`does not define module '<m>' (no ABI marker '<m>_abi')`), an ABI mismatch, and a
+claim without `luaopen_<mangled>`. An ancestor with neither symbol is a clean
+nonclaim. A clean miss returns Lua's usual searcher message, one `no file
+'<root>/<rel>'` line per absent candidate plus any fallback reason, `Titan path
+is empty`, or `no Titan provider claims module '<m>'`, so later searchers and
+`require`'s combined diagnostic keep working.
 
 ### Standard-library modules and short imports
 
@@ -205,7 +333,7 @@ binary for it was cached by an earlier import in the same compiler process.
 If its source is absent, compilation fails rather than treating an existing
 binary as an empty build root. Imports reached from that root remain binary
 first. This is why one standard-library invocation can force all standard roots
-through source even when a bootstrap or prior combined provider pair is
+through source even when a prior combined provider pair is
 visible. Their internal imports resolve to the already selected source cache
 entries and are linked statically into the replacement provider pair.
 
@@ -1349,7 +1477,7 @@ those exact outputs a second time, against the same input list, together with
 their final outputs: a program (including a `--test` runner) with
 `driver.validate_program_output_paths`, whose sixth `planned_outputs` argument
 replaces the per-module estimate, and a library with
-`driver.validate_provider_output_paths` over the provider and its Lua shims. A
+`driver.validate_provider_output_paths` over the provider pair. A
 compile-only (`-c`/`--compile-only`) invocation has no final output, so it
 skips this second check. Only then does the CLI write every planned header, as
 the batch's sole header writer, and call `driver.compile_modules(requests,
@@ -1414,7 +1542,7 @@ discovery:
 | `driver.native_link_backend(context)` | Returns `"darwin"` on macOS and `"none"` on Windows. On other Unix hosts it probes `<cc> -Wl,--dependency-file=<tmp> -Wl,--version` and returns `"gnu"`, `"lld"`, or `"none"`; the result is memoized per resolver context and persisted by `linkcertificate.linker_backend` in `<output>/.titan/linker-feature`, keyed by the compiler argv, link flags, toolchain identity, and physical compiler/linker identities. When the output tools are already uncertified (for example an opaque compiler prefix, whose final link is `uncacheable`), it returns `"none"`, the reason, and `"uncertified"` on every platform without probing, inventorying tools, reading or writing `linker-feature`, or memoizing the result. |
 | `driver.windows_launcher_name(modname, override?)` | Validates the Windows launcher basename: the logical module name by default, or the `--exe` basename. Rejects separators, control and reserved characters, trailing dots/spaces, reserved DOS device names, and components over 255 UTF-16 units, then appends `.exe` when absent. |
 | `driver.windows_program_paths(modname, exe, output_module, output_root)` | Computes Windows `.exe` launcher and `.dll` provider paths (`exe` overrides the default `<output>/bin/<logical>.exe`, appends `.exe` if absent, embeds the relative path from `<exe-dir>/../lib/titan/0.6` to the provider under `--output`, and rejects cross-volume paths). |
-| `driver.publish_windows_provider(staged, destination, shim_plans, provider, before_commit?)` | Publishes a validated Windows provider DLL and its Lua shims via `windows_publication.publish`, invoking `before_commit` to invalidate the link certificate before the first public mutation. |
+| `driver.publish_windows_provider(staged, destination, before_commit?)` | Publishes a validated Windows provider DLL via `windows_publication.publish`, invoking `before_commit` to invalidate the link certificate before the first public mutation. |
 
 ### Parallel generated-C compilation
 
@@ -1620,8 +1748,11 @@ repeatable CLI native switches in a single deterministic order
   Direct programmatic callers that do not call `driver.apply_native_inputs`
   keep `driver.EXTRA_CPPFLAGS` before `driver.CFLAGS` and `driver.EXTRA_CFLAGS`
   after it. The C parser, C probe service, preamble certification probe,
-  generated module C, standalone entrypoints, and `--c-source` nodes all use
-  this same prefix.
+  generated module C, and standalone entrypoints all use this same prefix.
+  `--c-source` nodes use `driver.authored_c_compile_prefix()`, which is
+  identical except that on Windows it omits Titan's Lua DLL import
+  definitions ([Windows consumer
+  definitions](windows-build.md#one-controlled-lua-dll-and-its-sdk)).
 * **Linking (`driver.link_extra_flags()`).** Appends `TITAN_EXTRA_LDFLAGS`
   followed by CLI `-L`/`--library-dir`, `-l`/`--link` (comma lists expanded,
   repeats and interleaving preserved), and `--ldflag` options in exact
@@ -1735,15 +1866,15 @@ is uncacheable, so no stable-metadata guarantee applies
 ([uncertified `dsymutil`](build-coordinator.md#recipe-file-digests-and-native-library-policy)).
 
 Validation, the unchanged-bundle equivalence check, and the
-`publish_provider_bundle` commit order (shims and dSYM, archive, then the DSO
-as the commit point, with caught failures restoring the prior owned set) are
-owned by [Three-way validation](static-compiled-modules.md#three-way-validation)
-and [Publication and installation](static-compiled-modules.md#publication-and-installation);
-generated shims are covered in [Validated publication and generated
-shims](multi-module-libraries.md#validated-publication-and-generated-shims).
+`publish_provider_bundle` commit order (dSYM, archive, then the DSO as the
+commit point, with caught failures restoring the prior owned set) are owned
+by [Three-way validation](static-compiled-modules.md#three-way-validation)
+and [Publication and installation](static-compiled-modules.md#publication-and-installation).
+Library mode publishes no Lua files: Lua reaches every carried logical module
+through the [Titan package searcher](#the-titan-package-searcher).
 Provider-validation child Lua processes preserve the compiler's
-`package.cpath`, so they can load the private bootstrap support image before a
-canonical provider exists.
+`package.path` and `package.cpath`, so they load the same support module as
+the compiler, including the checkout's `titan-runtime/bootstrap/titan.so`.
 
 Ordinary UV clients import the [public compiled module](../language/standard-library-uv.md)
 and do not foreign-import `uv.h`. The packaging loader fixture in
@@ -1774,8 +1905,8 @@ identity. The optional `options` table carries `no_uv_bootstrap`,
 dependency-report flag, appended only to the final Unix executable link),
 `before_commit` (invalidating the link certificate record before mutating
 public outputs), `output_module`, `output_root`, `coverage_runtime`,
-`module_names`, `archive_entries`, `archive_names`, and
-`validate_titan_support`. On Windows, `compile_windows_program` stages both the
+`module_names`, `archive_entries`, and `archive_names`. On Windows,
+`compile_windows_program` stages both the
 provider `.dll` and launcher `.exe`, validates the staged DLL in a fresh child
 process, and publishes them as one recoverable set via
 `windows_publication.publish_program` (committing the `.dll` before the `.exe`
@@ -1832,10 +1963,11 @@ The generated entrypoint, walked through (template substitutions:
 error alerts):
 
 * **`main`** creates a fresh `lua_State`, opens the standard libraries, and
-  runs `titan_init_standalone_paths`: the embedded
-  [startup path discovery](#standalone-startup-path-discovery) chunk, then
-  `titan_init_paths` (see [the dynamic loader](#titanc-the-dynamic-loader)). It
-  then registers the main module for `require` *without* loading it:
+  calls `titan_install_searcher(L)` ([the Titan package
+  searcher](#the-titan-package-searcher)). It does not rewrite `package.path`
+  or `package.cpath`, start a process, or seed `TITAN_PATH_KEY`: Lua's own
+  defaults apply, and the run-time Titan path is computed on the first lookup.
+  It then registers the main module for `require` *without* loading it:
 
   ```c
   lua_getglobal(L, "package");
@@ -2106,15 +2238,21 @@ commands.
 Every installed-mode compiled module and standalone program links
 `<root>/lib/titan/0.6/libtitan.a`; checkout mode links
 `titan-runtime/libtitan.a`. Neither mode links `titan.o` directly. Each archive
-contains exactly the dynamic loader/error runtime `titan.o` and reduced
-minicoro implementation/tag support `minicoro.o`. Source foreign callbacks
-live in generated standard-module objects instead. Static-archive selection
-pulls in only referenced objects. Vendored `libbacktrace.a` is a separate link
-input. `ltitanlib.o` is also separate: it is the only input to the private
-support bootstrap and is passed once as shared native payload when the
-standard logical modules are published in the full `titan.so`/`titan.a` pair.
-The private five-member LPegLabel archive follows it only in the standard
-provider payload and is not part of the runtime SDK.
+contains, in order, the dynamic loader/error runtime `titan.o`, the reduced
+minicoro implementation/tag support `minicoro.o`, module location
+`titan_path.o`, and the Lua support module `ltitanlib.o` (Makefile
+`TITAN_RUNTIME_OBJECTS`; the driver's checkout archive inputs match). Source
+foreign callbacks live in generated standard-module objects instead.
+Static-archive selection pulls in only referenced members, so ordinary
+programs and providers never carry `ltitanlib.o`, while a static host can
+declare `extern int luaopen_titan(lua_State *)`, link the archive, and preload
+the support module. Vendored `libbacktrace.a` is a separate link input.
+`ltitanlib.o` and `titan_path.o` also form the support module `titan.so`
+(`titan.dll` on Windows), installed as an ordinary Lua C module at
+`<root>/lib/lua/5.5/`; see [`ltitanlib.c`](#ltitanlibc-the-titan-lua-module).
+The standard `titan.so`/`titan.a` provider pair does not contain
+`ltitanlib.o`. The private five-member LPegLabel archive is part of only the
+standard provider payload, not the runtime SDK.
 The staged non-Lua SDK headers under `<root>/include` are `minicoro.h`,
 `titan.h`, `transfer.h`, `titan/ffi.h` (`Makefile` `TITAN_SDK_ROOT_HEADERS` and
 `TITAN_SDK_NAMESPACED_HEADERS`), `llhttp.h`, and `sqlite3.h`. Bundled libuv also
@@ -2136,13 +2274,12 @@ runtime edits can be tested before reinstalling.
 * **Constants** — the version and path constants (`TITAN_ABI_VERSION`,
   `TITAN_VERSION`, `TITAN_LIBRARY_VERSION`, `TITAN_LIBRARY_VERSION_SUFFIX`,
   `TITAN_PATH_VAR`; see [Compiled-module
-  ABI](codegen-overview.md#compiled-module-abi)), `TITAN_PATH_SEP "/"`,
-  `TITAN_ROOT_DEFAULT "/usr/local"`, `TITAN_LUA_CPATH_SUFFIX
-  "/lib/lua/5.5/?.so"`, and `TITAN_LUAINTEGER_NBITS` for shift code
-  generation. `titan.h` defines the loader's registry keys `TITAN_ROOT_KEY`,
-  `TITAN_PATH_KEY`, `TITAN_LIBS_KEY`, `TITAN_BT_STATE_KEY`, and
-  `TITAN_NAMES_KEY`; the trace, entrypoint, preload, and metatable keys are in
-  `titan/ffi.h`. [The registry
+  ABI](codegen-overview.md#compiled-module-abi)), `TITAN_PATH_SEP "/"`, and
+  `TITAN_LUAINTEGER_NBITS` for shift code generation. `titan.h` defines the
+  loader's registry keys `TITAN_PATH_KEY`, `TITAN_LIBS_KEY`,
+  `TITAN_BT_STATE_KEY`, and `TITAN_NAMES_KEY`; the trace, entrypoint, preload,
+  and metatable keys are in `titan/ffi.h`, and the searcher marker and SDK
+  fallback record are private to `titan_path.c`. [The registry
   footprint](lua-interop-internals.md#the-registry-footprint) owns every key's
   role.
 * **`titan_pushmodule(L, c)`** — pushes a `Udata*` (the module state
@@ -2165,62 +2302,45 @@ runtime edits can be tested before reinstalling.
   concatenation produces *exactly* the string Lua would produce for
   the same number, byte for byte.
 
-It also declares the dynamic-loading and error functions exported by
-`titan.c`: `loadlib`, `loadsym`, `loadglobalsym`, `titan_module_provider`,
-`titan_module_symbol`, the ABI/compatibility check helpers, and `errorhandler`.
-Generated imports use `titan_check_module_abi` and
-`titan_check_module_compatibility` with the selected logical provider.
+It also declares the dynamic-loading and error functions: `loadlib`,
+`titan_module_provider`, `titan_check_abi_entry`, and the support-module
+entries `titan_path_lua_executable_dir`, `titan_path_lua_compiler_root`, and
+`titan_path_lua_expand` (implemented in `titan_path.c`), plus `loadsym`,
+`loadglobalsym`, `titan_module_symbol`, the remaining ABI/compatibility check
+helpers, and `errorhandler` (in `titan.c`). `titan/ffi.h` declares
+`titan_install_searcher` beside the native preload helpers, because
+`titan/lua/worker.titan` calls it through the FFI. Generated imports use
+`titan_check_module_abi` and `titan_check_module_compatibility` with the
+selected logical provider.
 
-### `titan.c`: the dynamic loader
+### `titan.c` and `titan_path.c`: the dynamic loader
 
-* **`pushroot(L)` / `titan_init_paths(L)`** normalize and cache the Titan
-  SDK/rocks-tree root under `TITAN_ROOT_KEY`. A value already in the registry
-  wins; a generated executable's startup chunk seeds it as described under
-  [standalone startup path discovery](#standalone-startup-path-discovery).
-  Otherwise Unix scans the inherited
-  `package.cpath` for the first entry ending in `/lib/titan/0.6/?.so`, then
-  `/lib/lua/5.5/?.so` as a bootstrap fallback, falling
-  back to `/usr/local` only when no such entry exists. Windows uses
-  `titan_win_push_root`, the parent of the executable's directory.
-  `titan_init_paths` also
-  prepends the exact `<root>/lib/titan/0.6/?.so` template to `package.cpath`
-  when it is absent (`add_titan_package_cpath`) and eagerly initializes the
-  Titan loader path. The Titan Lua fork's POSIX default C path lists
-  `lib/lua/5.5/?.so` and `loadall.so` before `lib/titan/0.6/?.so`; generated
-  executables put the Titan template first through the [startup path
-  discovery](#standalone-startup-path-discovery) chunk.
-* **`pushpath(L)`** resolves the run-time module search path once per
-  Lua state and caches it in the registry under `TITAN_PATH_KEY`. A cached
-  value wins, including the complete path a Windows standalone launcher's
-  startup chunk stores. Otherwise the
-  order is: `getenv("TITAN_PATH_0_6")` (the versioned variable,
-  `TITAN_PATH_VAR TITAN_LIBRARY_VERSION_SUFFIX`), then `getenv("TITAN_PATH")`,
-  then `".;<root>/lib/titan/0.6"` with `pushroot`'s `<root>`. A `;;` in
-  the environment value is replaced by that default path (two
-  `luaL_gsub` passes through a `\1` placeholder), so
-  `TITAN_PATH="/opt/titan;;"` means "look in `/opt/titan`, then the
-  installation defaults". The compiler-side expansion
-  (`driver.expand_titan_bin_path`) follows the same contract.
-* **The libs registry** — a table under `TITAN_LIBS_KEY` maps `.so`
-  file names to light-userdata `dlopen` handles. The cache avoids repeated
-  `dlopen` calls within a state. Titan deliberately does not call `dlclose` at
+* **Module location** — `titan_path.c` computes the executable directory,
+  the compiler root, `;;`/`!` expansion, the per-state effective path with its
+  lazy SDK fallback, and the package searcher, as described under [the
+  run-time Titan path](#the-run-time-titan-path-and-sdk-fallback) and [the
+  Titan package searcher](#the-titan-package-searcher). It also owns the native
+  preload descriptors (`titan_module_preload`) and `titan_check_abi_entry`, so
+  the support module can use them without linking `titan.o`.
+* **The libs registry** — a table under `TITAN_LIBS_KEY` maps the realpath
+  of each opened image (the absolute `GetFullPathNameW` spelling on Windows)
+  to its light-userdata handle. `loadlib` and the searcher share it, which
+  avoids repeated `dlopen` calls within a state, and every new mapping clears
+  `TITAN_BT_STATE_KEY` so the next traceback resnapshots loaded objects. Titan
+  deliberately does not call `dlclose` at
   state shutdown: generated modules form a manually wired dependency graph for
   which neither insertion nor reverse-insertion order is universally safe, and
   finalizable Lua objects can still retain native entry pointers. The operating
   system reclaims the mapped images when the process exits.
-* **`loadlib(L, file)`** — returns the cached handle for `file` if
-  present; otherwise walks the path `;`-entry by entry, builds
-  `dir "/" file`, and tries `dlopen(filename, RTLD_LAZY | RTLD_GLOBAL)`; total
-  failure raises a Lua error with `dlerror()` (which describes only the last
-  attempt). Lazy binding lets a module's initializer load a provider before the
+* **`loadlib(L, file)`** — selects the first *occupied* `<entry>/<file>`
+  (`lstat`) along the effective path, then the SDK fallback, and opens it with
+  `dlopen(realpath, RTLD_LAZY | RTLD_GLOBAL)`. An occupied image that cannot be
+  opened raises instead of trying later roots. A miss raises `cannot load
+  module '<file>': search path is empty` or `cannot load module '<file>': not
+  found in Titan path '<path>'`, followed by any `no Titan SDK fallback`
+  reason. Lazy binding lets a module's initializer load a provider before the
   module's unresolved function calls bind, while global visibility lets that
   later provider satisfy them.
-* **Generated logical-module shims** — a Lua `require "titan.uv"` first finds
-  `titan/uv.lua`, whose `package.searchpath("titan", package.cpath)` selects the
-  physical provider. The shim calls `require "titan"`, then uses the support
-  table's separate `_loadlibglobal` helper to map/promote that provider with
-  lazy/global flags and resolve `luaopen_titan_uv`. The same template serves
-  every logical module; `titan.c` has no shim-specific or libuv-specific case.
 * **`titan_module_provider(L, module, file)`** and
   **`titan_module_symbol(L, provider, sym)`** — select a dependency's provider
   (registry module, copied native descriptor, or `file`) and resolve its
@@ -2240,19 +2360,34 @@ Generated imports use `titan_check_module_abi` and
 
 ### `ltitanlib.c`: the `titan` Lua module
 
-This companion is built separately from `libtitan.a`: Make compiles
-`ltitanlib.c` into `ltitanlib.o`, links only that object into the private
-bootstrap `titan-runtime/bootstrap/titan.so`, and passes it once as native
-payload when building the full standard `titan.so`/`titan.a` provider pair.
-It is *not* part of the runtime SDK's `libtitan.a` or ordinary generated
-modules. Its table (`ltitanlib.c` `titanlib`) exports the user-facing
-`backtrace`, the internal testing helpers `pin` and `clear` used to exercise
-the traceback pin discipline, the loader helpers `_loadlib` and
-`_loadlibglobal`, the compiler digests `_sha256_binary` and `_sha256_stream`, the output-tree lock
-`_output_lock_open`, the precise file observation `_stat_precise`, on Windows
-only `_abivalue`, `_native_process_tree_guard`, and the current-directory
-search query `_executable_search_cwd` (backing `Sync:executable_search_cwd`),
-and elsewhere the effective-permission query `_executable_access` (backing
+Make compiles `ltitanlib.c` into `ltitanlib.o` and links it with
+`titan_path.o` into the support module `titan-runtime/bootstrap/titan.so`
+(Makefile `TITAN_SUPPORT_MODULE`; `<WINDOWS_BUILD_ROOT>/runtime/titan.dll`
+on Windows). The checkout compiler loads it from there; installation copies it
+to `<root>/lib/lua/5.5/titan.so` (`titan.dll`), where LuaRocks owns it as an
+ordinary native module ([installation and
+publication](build-script-audit.md#installation-and-publication)). It exports
+only `luaopen_titan` and needs neither the standard library nor the rest of
+the runtime. On Unix it is built against the public Lua headers only and
+repeats the four `titan_path.c` prototypes it calls; on Windows the opener is
+explicitly `__declspec(dllexport)` (`TITAN_SUPPORT_API`), because stock
+`LUAMOD_API` is an import declaration under `LUA_BUILD_AS_DLL`. Both objects
+are also members of `libtitan.a`, so static hosts can preload the module. The
+standard provider does not carry it.
+
+`luaopen_titan` first calls `titan_install_searcher(L)`, so a plain Lua host
+that runs `require "titan"` can then `require` compiled Titan modules. It does
+not initialize any standard module or compute or probe a path. Its table
+(`ltitanlib.c` `titanlib`) exports the user-facing `backtrace`, the internal
+testing helpers `pin` and `clear` used to exercise the traceback pin
+discipline, the loader helpers `_loadlib` and `_loadlibglobal`, the compiler
+digests `_sha256_binary` and `_sha256_stream`, the output-tree lock
+`_output_lock_open`, the precise file observation `_stat_precise`, the module
+location queries `_executable_dir`, `_compiler_root`, and
+`_expand_titan_path`, on Windows only `_abivalue`,
+`_native_process_tree_guard`, and the current-directory search query
+`_executable_search_cwd` (backing `Sync:executable_search_cwd`), and elsewhere
+the effective-permission query `_executable_access` (backing
 `Sync:executable`) and the compiler's jobserver and signal helpers:
 
 ```lua
@@ -2280,15 +2415,25 @@ lets interface recovery inspect a DSO whose ordinary foreign function calls
 are intentionally unresolved without globally loading any dependency or
 running the module initializer.
 
-`titan._loadlibglobal(path, symbol)` is the generated-shim counterpart. It
-canonicalizes an existing path with `realpath`, uses a different per-state
-handle table keyed by that canonical absolute path, calls
+`titan._loadlibglobal(path, symbol)` is an internal lazy/global counterpart
+kept for direct native harnesses; production loading goes through the
+[Titan package searcher](#the-titan-package-searcher). It canonicalizes an
+existing path with `realpath`, uses a different per-state handle table keyed
+by that canonical absolute path, calls
 `dlopen(canonical, RTLD_LAZY | RTLD_GLOBAL)` on the first request in that
 table, and resolves the requested Lua entry with `dlsym`. It deliberately does
-not reuse `_loadlib`'s local cache or Lua's C-library cache; calling it after
-Lua's C searcher loaded the same standard `titan.so` eager/local performs the
-required promotion. Errors retain the originally requested pathname and use
-the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
+not reuse `_loadlib`'s local cache or Lua's C-library cache, so it can promote
+an image that was mapped locally beforehand. On Windows a third logical-name
+argument first returns an already initialized canonical module. Errors retain
+the originally requested pathname and use the same `nil, message, stage`
+result shape. Neither helper calls `dlclose`.
+
+`titan._executable_dir()` returns the realpath directory of the running
+executable, `titan._compiler_root()` the [compiler
+root](#the-compiler-root), each as `string` or `nil, message`.
+`titan._expand_titan_path(value, default)` returns the pure
+[`;;` and `!` expansion](#titan-path-syntax) of `value` (or `default` when
+`value` is `nil`); it does not compute a run-time default.
 
 `titan._abivalue(path, symbol)` (Windows only) is the compiler's ABI-marker
 query for PE providers; its contract is in [Windows loader
@@ -2297,7 +2442,7 @@ boundary](windows-build.md#windows-loader-boundary).
 `titan._sha256_binary(bytes)` returns the 32-byte binary SHA-256 digest of a
 string, including embedded NUL and high bytes, and raises for any other
 argument. It is C over the public Lua API, with no OpenSSL or process
-dependency, so the private bootstrap provides it before the standard library
+dependency, so the support module provides it before the standard library
 exists. A SHA-256 computation (`TitanSha256` init, update, and final) selects
 one compressor when it starts and uses it for every data and padding block,
 with no process-wide state; whole blocks are compressed straight from the
@@ -2321,11 +2466,8 @@ concatenation; afterwards every method raises `attempt to use a finished
 SHA-256 stream`. The compiler uses it to hash large certified files.
 
 `titanc` and build workers refuse to start without both entries ([The `titanc`
-command line](#the-titanc-command-line)), and a physical provider named
-`titan` is published only when a fresh Lua process finds both, beside
-`_loadlib` and `_loadlibglobal`, in the linked support table (`driver.lua`
-`support_validation_script`); a stale `ltitanlib.o` therefore fails before
-publication instead of producing an installation that `titanc` rejects.
+command line](#the-titanc-command-line)), so a stale support module fails
+before compiling anything.
 
 The POSIX-only `_jobserver_open`, `_jobserver_wait`, `_signal_guard`,
 `_signal_pending`, `_signal_raise`, `_signal_wake_descriptor`, and
@@ -2355,26 +2497,33 @@ orphaned worker keeps the output domain locked until exit), and `close()`. See
 
 `make lua` compiles the Titan Lua fork pinned by
 the `lua-5.5.1` Git submodule, without applying patches or rewriting source files.
-Windows copies the same submodule sources unchanged into its separate build tree. Its POSIX `luaconf.h` sets
-`LUA_ROOT "!/"` and includes a Titan provider template using the build-supplied
-`TITAN_VDIR` alongside the ordinary Lua C-module templates. In `loadlib.c`'s `LUA_USE_DLOPEN` branch, the fork replaces the no-op `setprogdir`
-macro with a function that expands every `LUA_EXEC_DIR` (`!`) occurrence in
-the string on top of the Lua stack, then removes the original string. This
-applies to both default module paths and environment overrides containing
-the marker, with ordinary Lua environment precedence and `;;` expansion.
+Windows copies the same submodule sources unchanged into its separate build
+tree. Its POSIX `luaconf.h` sets `LUA_ROOT "!/../"`, so the defaults are
+`!/../share/lua/5.5/?.lua`, `!/../share/lua/5.5/?/init.lua`,
+`!/../lib/lua/5.5/?.lua`, `!/../lib/lua/5.5/?/init.lua`, `./?.lua`, and
+`./?/init.lua` for Lua modules and `!/../lib/lua/5.5/?.so`,
+`!/../lib/lua/5.5/loadall.so`, and `./?.so` for C modules; it adds no Titan
+provider directory. In `loadlib.c`'s `LUA_USE_DLOPEN` branch, the fork
+replaces the no-op `setprogdir` macro with a function that substitutes the
+realpath directory of the running executable for every `LUA_EXEC_DIR` (`!`)
+occurrence in the string on top of the Lua stack, then removes the original
+string. This applies to both default module paths and environment overrides
+containing the marker, with ordinary Lua environment precedence and `;;`
+expansion.
 
 Linux obtains the actual executable through `/proc/self/exe`; macOS obtains
-it with `_NSGetExecutablePath` and canonicalizes it with `realpath` before
-stripping directory components. The parent of the executable's directory is
-the module-path root: `<root>/bin/lua` uses `<root>`. Symlink launch paths and
-the working directory do not select another installation. The POSIX change leaves
-Lua's native loader flags and Titan's separate lazy/local and lazy/global
-helpers unchanged.
+it with `_NSGetExecutablePath`; both canonicalize it with `realpath` and drop
+only the executable name, so Unix `!` means the executable directory, as it
+does on Windows and in Titan paths. `<root>/bin/lua` therefore finds
+`<root>/bin/../lib/lua/5.5/titan.so`. Symlink launch paths and the working
+directory do not select another installation. The POSIX change leaves Lua's
+native loader flags and Titan's separate lazy/local and lazy/global helpers
+unchanged.
 
 The Lua source bytes are identical across platforms and independent of `PREFIX`.
 The Windows implementation and DLL annotations are selected by the source's
 platform guards at compilation. `make lua` runs the fork's platform build and
-installation with `TITAN_LIBRARY_VERSION` and `PREFIX`; the fork's installer
+installation with `PREFIX`; the fork's installer
 copies the archive, public headers, and internal sources. Platform defaults
 (`linux-readline`, `macosx`) and the rule that preparation checks only the
 installed `$PREFIX/bin/lua` and `$PREFIX/bin/luarocks` programs, so callers
@@ -2468,14 +2617,15 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `TITAN_JOBS` | `titanc` | `4` | Local job cap when `--jobs` is absent. |
 | `MAKEFLAGS` | `jobs.lua` `open_slots` (Unix) | unset | A parent GNU Make's jobserver authorization and `-j1`; see [GNU Make jobserver participation](#gnu-make-jobserver-participation). |
 | `TITAN_C_PARTS` | `titanc`, `driver.lua` (`driver.effective_c_parts`) | `4` on Linux; `1` on Windows, macOS, and other platforms (`driver.default_c_parts`) | Maximum generated C translation units per module when `--c-parts` is absent; `1` disables splitting. A changed value makes reused objects miss. |
-| `TITAN_PATH_0_6`, `TITAN_PATH` | `driver.lua`, `titan.c` `pushpath`, `standalone_paths.lua` | unset | Compiled-module search path; the versioned name wins, and `;;` expands to the default. |
-| `TITAN_ROCKS_ROOT` | `driver.lua`, `titanc --print-root`, installed-compiler Make invocations | unset (empty means unset) | Internal `ROCKS_TREE` override for installation-root discovery; not a public deployment setting. |
+| `TITAN_PATH_0_6`, `TITAN_PATH` | `driver.lua` (`titan_bin_path_entries`), `titan_path.c` | unset | [Titan path](#titan-path-syntax): `;`-separated directories, `;;` inserts the default, `!` is the executable directory, an empty value searches nothing; the versioned name wins. |
+| `TITAN_ROOT` | `driver.lua`, `titanc --print-root`, `titan_path.c` (`_compiler_root()` and the run-time SDK fallback), Make | unset (empty means unset) | Explicit Titan SDK/rocks-tree root; otherwise the compiler uses the parent of its interpreter directory and the run-time fallback asks `titanc --print-root`. |
+| `TITANC` | `titan_path.c` (run-time SDK fallback) | unset (empty means unset) | One program name or path, run as `<TITANC> --print-root` without a shell and without `LUA_INIT`/`LUA_INIT_5_5`, instead of `titanc` from `PATH`; not a command line with arguments, and it must terminate. On Windows a name without `\`, `/`, or `:` is looked up only in the `PATH` entries, with `.exe` appended when it contains no `.`. Make's stdlib compiler command is the distinct `STDLIB_TITANC`. |
 | `TITAN_PREFIX` | `driver.lua` | installation root | Root of the persistent C-probe cache `var/cache/titan-probes/2`. |
 | `TITAN_PROBE_CACHE_DISABLE` | `driver.lua` | unset | Exact value `1` disables persistent C-probe reuse. |
 | `TITAN_RUNTIME_PREBUILT` | `driver.lua` `check_runtime` | unset | Exact value `1` skips the checkout `libtitan.a` rebuild. |
 | `GCOV`, `GCOVR` | `coverage.lua` | `gcov`/`llvm-cov gcov`, `gcovr` | Coverage readers when the matching `--coverage-*` flag is absent. |
 | `TEMP`, `TMP` | `io.lua` (Windows) | system default | Directory for `Sync:tmpname` reservations. |
-| `LUA_PATH_5_5`, `LUA_PATH`, `LUA_CPATH_5_5`, `LUA_CPATH` | `standalone_paths.lua`, Lua | unset | Explicit paths that generated executables keep; probing is skipped only when the Lua paths and `TITAN_PATH` are all set. |
+| `LUA_PATH_5_5`, `LUA_PATH`, `LUA_CPATH_5_5`, `LUA_CPATH` | Lua | unset | Lua's own module paths, including in generated executables, which do not rewrite them; `LUA_CPATH*` must keep the support module reachable when `TITAN_ROOT` is unset. |
 
 Make-level settings such as `PREFIX`, `ROCKS_TREE`, `OPENSSL_MODE`, and
 `STDLIB_USE_INSTALLED_RUNTIME` belong to the build; see [Build and installation
@@ -2487,10 +2637,10 @@ workflow sets them equal, but they are separate ownership concepts.
 
 | Name | Default / value | Meaning |
 | --- | --- | --- |
-| `driver.TITAN_ROOT` | internal override, otherwise first current Titan `package.cpath` template (`/lib/titan/0.6/?.so`), then the ordinary Lua template (`/lib/lua/5.5/?.so`); Windows uses `?.dll` | Titan SDK/rocks-tree root. Module loading only parses absolute roots lexically; resolver initialization normalizes relative roots through `context.io`. |
-| `driver.SOURCE_CHECKOUT` / `driver.INSTALLED` | detected from checkout files unless the internal root is set | Select the writable checkout SDK/archive inputs or read-only installed SDK inputs. Detection is lazy (`driver.initialize_layout`); before resolver initialization the module exposes only a provisional lexical checkout layout. |
-| `driver.INSTALL_PATHS` | `driver.installed_paths(root)` | `root`, `lua_source`, `include`, `lib`, `libtitan`, `libbacktrace`, `liblua` (`liblua55.a` on Windows), `titan_bin`, and `lua_cpath`; bundled `libuv.a` is deliberately not an installed SDK path. |
-| `driver.TITAN_BIN_PATH` | `TITAN_PATH_0_6`, `TITAN_PATH`, or `.;<root>/lib/titan/0.6` in installed mode | Roots for compiled-provider search; checkout mode retains the `/usr/local` fallback. |
+| `driver.TITAN_ROOT` | non-empty `TITAN_ROOT`, otherwise the support module's `_compiler_root()` (parent of the interpreter's realpath directory) | Titan SDK/rocks-tree root. Module loading only parses absolute roots lexically; resolver initialization normalizes relative roots through `context.io`. `driver.compiler_root()` returns it or the diagnostic. |
+| `driver.SOURCE_CHECKOUT` / `driver.INSTALLED` | detected from checkout files unless `TITAN_ROOT` is set | Select the writable checkout SDK/archive inputs or read-only installed SDK inputs. Detection is lazy (`driver.initialize_layout`); before resolver initialization the module exposes only a provisional lexical checkout layout. |
+| `driver.INSTALL_PATHS` | `driver.installed_paths(root)` | `root`, `lua_source`, `include`, `lib`, `libtitan`, `libbacktrace`, `liblua` (`liblua55.a` on Windows), `titan_bin`, and `sdk_digests`; bundled `libuv.a` is deliberately not an installed SDK path. |
+| `driver.TITAN_BIN_PATH` / `driver.DEFAULT_TITAN_BIN_PATH` | `TITAN_PATH_0_6`, then `TITAN_PATH`, else `nil` / `.;<root>/lib/titan/0.6`, or `.` without a root | Configured and default compile-time Titan paths; `driver.titan_bin_path_entries` expands them. |
 | `driver.TITAN_SOURCE_PATH` | `"."` (`titanc --tree`) | Semicolon-separated source roots. |
 | `driver.LUA_SOURCE_PATH` | `<root>/src/lua-5.5.1` installed; `lua-5.5.1/src` in checkout mode | Lua internal source/header tree; checkout-only override by `titanc --lua`. |
 | `driver.INCLUDE_PATH` | `<root>/include` in installed mode | SDK headers used by generated C and foreign imports; see [the runtime support library](#the-runtime-support-library-titan-runtime). |
@@ -2504,7 +2654,6 @@ workflow sets them equal, but they are separate ownership concepts.
 | shared-library flags | `driver.shared_library_flags` | `-shared`; Darwin adds `-undefined dynamic_lookup`, Windows `-Wl,--exclude-all-symbols`. |
 | installed link set | `driver.installed_link_inputs` | Unix: `libtitan.a`, `libbacktrace.a`, `liblua.a`, `-ldl` (non-Darwin), `-lm`; Windows: `libtitan.a`, `libbacktrace.a`, `liblua55.a`, `-static-libgcc`. Not copied into package archives. |
 | checkout link set | `driver.source_link_inputs` | Local `libtitan.a`, `libbacktrace.a`, matching `liblua.a` (`<prefix>/lib/liblua.a` when `LUA_SOURCE_PATH` physically matches the installed Lua SDK), `-ldl -lm`. |
-| `TITAN_ROOT_DEFAULT` / `TITAN_LUA_CPATH_SUFFIX` | `/usr/local` / `/lib/lua/5.5/?.so` | Run-time root fallback and Lua template suffix used for root discovery (`titan.h`). |
 
 The pieces upstream of the driver are described in
 [the type checker](checker.md) (which calls the loader) and the
@@ -2522,7 +2671,9 @@ the registry under `"titan-compiler.process: luv"`; on Windows,
 `platform.getenv` reads environment variables through the same anchored
 module, so both share one `luv` module table and native loop whichever loads
 it first). On every platform, the
-build coordinator uses `process.start_worker` (spawning `luv.exepath()` with a
+build coordinator uses `process.start_worker` (spawning `luv.exepath()` or, on
+Windows, the `lua.exe` in that executable's directory, since the native
+`titanc.exe` always runs its script and cannot serve as the interpreter, with a
 coordinator-to-worker request pipe on `fd 3`, a worker-to-coordinator pipe on
 `fd 4`, captured stdout/stderr pipes, and inherited POSIX `.titan-build.lock`
 descriptors on `fds 5..`), `process.open_control(3, 4)`,

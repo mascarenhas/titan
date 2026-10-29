@@ -93,7 +93,7 @@ local function compiler_argv(workspace, source_root, ...)
     else
         assert.truthy(PREFIX,
             "set PREFIX or TITAN_TEST_PREFIX for native compiler tests")
-        table.insert(argv, "TITAN_ROCKS_ROOT=" .. PREFIX)
+        table.insert(argv, "TITAN_ROOT=" .. PREFIX)
         table.insert(argv, "LUA_CPATH=" .. REPO .. "/?.so;;")
         table.insert(argv, LUA)
         table.insert(argv, "-e")
@@ -266,13 +266,15 @@ end
         assert.falsy(output:find(owner_archive, 1, true), output)
 
         -- This fresh executable has no canonical owner, so it needs the
-        -- producer-selected DSO fallback at runtime.
-        -- Neither the type-only archive, sibling facade DSO, nor any shim may
-        -- have smuggled in a fallback implementation.
+        -- producer-selected DSO fallback at runtime. The fallback can only
+        -- come from that DSO: the type-only archive and the sibling facade
+        -- image are gone, and providers ship without Lua shims.
         assert.truthy(os.remove(owner_archive))
         assert.truthy(os.remove(workspace .. "/dynamic/facade.so"))
-        assert.truthy(os.remove(workspace .. "/dynamic/facade.lua"))
-        assert.truthy(os.remove(workspace .. "/dynamic/owner.lua"))
+        -- The cutover ships no generated shims beside a provider; assert that
+        -- rather than staging files that no longer exist.
+        assert.is_nil(lfs.attributes(workspace .. "/dynamic/facade.lua"))
+        assert.is_nil(lfs.attributes(workspace .. "/dynamic/owner.lua"))
         ok, output, why, code =
             run({ workspace .. "/app" }, workspace)
         assert.falsy(ok, output .. "\n(" .. tostring(why) .. ", " ..

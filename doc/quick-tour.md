@@ -199,13 +199,14 @@ local function private_suffix(): string
 end
 ```
 
-It has no `main`, so it builds as a library. Lua loads it through the generated
-loader in `out/`:
+It has no `main`, so it builds as a library. Lua loads it with `require` once
+`require "titan"` has installed Titan's package searcher, which finds the
+provider along the [Titan path](language/modules.md#the-titan-path):
 
 ```sh
 titanc -o out greeting
-LUA_PATH='out/?.lua;;' LUA_CPATH='out/?.so;;' \
-  lua -e 'print(require("greeting").make("Lua"))'
+TITAN_PATH_0_6='out;;' \
+  lua -e 'require "titan"; print(require("greeting").make("Lua"))'
 ```
 
 Another Titan module uses `local greeting = import "greeting"`. Lua uses
@@ -301,9 +302,11 @@ in long CPU-bound loops.
   handles, but closing a process watcher does not kill or reap its child, and
   you must close raw file descriptors yourself.
 
-A Lua program runs the event loop explicitly and uses qualified module names:
+A plain Lua program loads Titan's package searcher first, runs the event loop
+explicitly, and uses qualified module names:
 
 ```lua
+require "titan"
 local async = require "titan.async"
 local timer = require "titan.timer"
 

@@ -1042,7 +1042,9 @@ objects, while the pair array contains only native function pointers.
 
 ### Lua entries and ABI, type, and layout metadata
 
-`luaopen_<mangled-modname>` is what `require` finds. Standard-library short
+`luaopen_<mangled-modname>` is what `require` finds, through the package
+preload table or the [Titan package
+searcher](driver.md#the-titan-package-searcher). Standard-library short
 imports are desugared before module resolution, so Titan `import "os"`
 compiles as an import of `titan.os` and emits `luaopen_titan_os`, the same
 entry Lua `require "titan.os"` uses, without defining `luaopen_os` or replacing
@@ -1051,6 +1053,27 @@ Lua's own `os` library. The Lua entry calls `_init` and pushes the module
 Its members (exported functions, exported variables, and one static-namespace
 table per public record or union) are all served by the module metatable
 ([Lua interop internals](lua-interop-internals.md)).
+
+Mangling maps both `.` and `-` to `_`, so it is not injective: `a.b-c` and
+`a.b_c` share `luaopen_a_b_c`, `a_b_c_abi`, and `a_b_c_types`. The generated
+opener therefore starts with a logical-name guard for file loads
+(`coder/module.lua` postamble). `require` passes the requested name as
+argument 1 and the searcher's loader data as argument 2. When argument 2 is a
+Lua string other than Lua's documented preload loader data `":preload:"`, the
+call is a file load: the [Titan
+searcher](driver.md#the-titan-package-searcher) passes the provider path and
+Lua's C searchers pass the file name. A file load whose argument 1 is a Lua
+string must name the logical module exactly, by length and bytes; otherwise
+the opener raises `module name mismatch: requested '<x>', provider defines
+'<logical>'` before invalidating backtrace state, calling `_init`, or
+publishing anything. Every other call skips the comparison. Preload loads pass
+`":preload:"`, so `package.preload[alias] = luaopen_<m>` deliberately aliases
+the opener under another name in that state and still returns the canonical
+module; copied native preloads (including registry `_PRELOAD` snapshots in
+[independent states](lua-library.md#independent-state-ownership)) and the
+Windows launcher's `titan_open_main` preload loader take this path. Calls
+without string loader data (transfer preload loaders, native harnesses,
+`package.loadlib(...)()`) skip it too.
 
 `<prefix>_abi` is a tiny marker function that returns `TITAN_ABI_VERSION`;
 `<prefix>_abi_value` returns the same string as a native bootstrap query,
@@ -1144,7 +1167,10 @@ supply the private state that direct native code expects.
   `package.loadlib`.
 - If the module is absent, a copied native provider descriptor supplies its
   resolver.
-- The selected DSO filename is consulted only when neither is available.
+- The selected DSO filename is consulted only when neither is available:
+  `loadlib` takes the first occupied `<entry>/<file>` along the state's
+  [run-time Titan path](driver.md#the-run-time-titan-path-and-sdk-fallback),
+  then the lazy SDK fallback.
 
 Descriptor lookup does not call a Lua preload loader or initialize the
 dependency. `titan_check_module_abi` and `titan_check_module_compatibility` run
@@ -1169,7 +1195,7 @@ chooses the owner. The module userdata and nominal metatables are recovered
 from the same Lua state's registry. See [Type aliases](type-aliases.md) and
 [Selective binary dependency verification](binary-compatibility.md).
 
-The runtime's `loadlib` still maps newly needed DSOs with
+The runtime's `loadlib` (`titan-runtime/titan_path.c`) maps newly needed DSOs with
 `RTLD_LAZY | RTLD_GLOBAL`. This supports ordinary native-library relocations:
 for example, an extension can initialize its imported standard provider before
 its lazy `uv_*` calls bind. This C-linker behavior is separate from Titan's

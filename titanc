@@ -1,5 +1,25 @@
 #!/usr/bin/env lua
 
+-- `titanc --print-root` is the runtime's SDK-root query. Answer it from the
+-- native support module alone, before loading the compiler. Without usable
+-- support, and for every other spelling, the fully validated path below
+-- answers instead; it honors TITAN_ROOT without native support.
+if select("#", ...) == 1 and ... == "--print-root" then
+    local loaded, support = pcall(require, "titan")
+    local compiler_root = loaded and type(support) == "table" and
+        support._compiler_root
+    if type(compiler_root) == "function" then
+        local root, root_error = compiler_root()
+        if type(root) ~= "string" or root == "" then
+            io.stderr:write("cannot locate the Titan installation root: ",
+                tostring(root_error), "\n")
+            os.exit(1)
+        end
+        io.stdout:write(root, "\n")
+        return
+    end
+end
+
 local argparse = require 'argparse'
 
 local checker = require 'titan-compiler.checker'
@@ -145,11 +165,10 @@ if args.print_root then
     if #args.module > 0 then
         exit("--print-root cannot be combined with module names")
     end
-    local root, root_error = driver.resolve_installation_root(
-        package.cpath, platform.getenv("TITAN_ROCKS_ROOT"))
+    local root, root_error = driver.compiler_root()
     if not root then
-        exit(root_error or "cannot locate the Titan installation root: " ..
-            "package.cpath has no matching Titan or Lua installation entry")
+        exit("cannot locate the Titan installation root: " ..
+            tostring(root_error))
     end
     io.stdout:write(root, "\n")
     return
@@ -233,7 +252,7 @@ if not support_loaded or type(support) ~= "table" or
    type(support._sha256_stream) ~= "function" then
     exit("the installed Titan native support library is missing or stale " ..
         "(it lacks _sha256_binary or _sha256_stream); reinstall Titan" ..
-        (support_loaded and "" or ": " .. tostring(support)))
+        (support_loaded and "" or ": " .. tostring(support):match("^[^\n]*")))
 end
 
 resolver_context = driver.new_resolver_context({
@@ -495,7 +514,7 @@ end
 -- position, before -X payloads.
 local c_objects = {}
 if #normalized_native.c_sources > 0 then
-    local compile_argv, compile_error = driver.generated_compile_prefix()
+    local compile_argv, compile_error = driver.authored_c_compile_prefix()
     if not compile_argv then exit(compile_error) end
     local toolchain, toolchain_error = driver.toolchain_descriptor(resolver_context)
     if not toolchain then exit(toolchain_error) end
@@ -583,15 +602,8 @@ if not args.compile_only and not args.print_ast then
                 tostring(left) .. "' and '" .. tostring(right) ..
                 "' have no common module prefix")
         end
-        local seen, names = {}, {}
-        for name in pairs(resolver_context.source_names) do seen[name] = true end
-        for _, static_provider in ipairs(resolver_context.selected_static_providers) do
-            for name in pairs(static_provider.entries) do seen[name] = true end
-        end
-        for name in pairs(seen) do names[#names + 1] = name end
-        table.sort(names, util.bytewise_less)
-        local shims, library_output = driver.plan_module_shims(library, names, args.output)
-        if not shims then exit(library_output) end
+        local library_output, library_err = driver.provider_output_path(library, args.output)
+        if not library_output then exit(library_err) end
         outputs[1] = { path = library_output }
         if not platform.windows then
             outputs[#outputs + 1] = { path = (library_output:gsub("[.]so$", ".a")) }
@@ -599,7 +611,6 @@ if not args.compile_only and not args.print_ast then
                 outputs[#outputs + 1] = { path = library_output .. ".dSYM", kind = "directory" }
             end
         end
-        for _, shim in ipairs(shims) do outputs[#outputs + 1] = { path = shim.filename } end
     end
 
     local module_order = {}
@@ -818,7 +829,6 @@ end
 local provider
 local provider_output
 local windows_program_outputs
-local shim_plans
 local linked_names = {}
 local output_names = {}
 local output_name_set = {}
@@ -1013,19 +1023,12 @@ if not main_module and not args.compile_only then
     end
 
     if #errors == 0 then
-        shim_plans, provider_output =
-            driver.plan_module_shims(provider, output_names, args.output)
-        if not shim_plans then table.insert(errors, provider_output) end
+        local provider_err
+        provider_output, provider_err = driver.provider_output_path(provider, args.output)
+        if not provider_output then table.insert(errors, provider_err) end
     end
     if #errors == 0 then
         local generated_outputs = { table.unpack(compile_plans.outputs) }
-        for _, shim in ipairs(shim_plans or {}) do
-            generated_outputs[#generated_outputs + 1] = {
-                path = shim.filename,
-                owner = "generated Lua shim for logical module '"
-                    .. shim.modname .. "'",
-            }
-        end
         local outputs_ok, outputs_err =
             driver.validate_provider_output_paths(
                 provider_output, native_inputs, generated_outputs)
@@ -1111,20 +1114,12 @@ if main_module then
     for _, name in ipairs(archive_names) do
         archive_entries[name] = assert(physical_entries[name])
     end
-    local validate_titan_support = false
-    for _, static_provider in ipairs(
-            resolver_context.selected_static_providers) do
-        if static_provider.relative_archive == "titan.a" then
-            validate_titan_support = true
-            break
-        end
-    end
     local probe_ok, probe_err = true
     if not platform.windows then
         probe_ok, probe_err = driver.run_standalone_archive_probe(
             archive_entries, archive_names, ofiles, selected_static_archives,
             nil, args.verbose, extra_objects,
-            validate_titan_support, { pretty_print = args.pretty_print })
+            { pretty_print = args.pretty_print })
     end
     if not probe_ok then
         table.insert(errors, probe_err)
@@ -1149,7 +1144,6 @@ if main_module then
                 module_names = output_names,
                 archive_entries = archive_entries,
                 archive_names = archive_names,
-                validate_titan_support = validate_titan_support,
             })
         if not ok then
             table.insert(errors, link_failed("program", main_module, term, code))
@@ -1188,12 +1182,9 @@ else
         else
             local valid, validation_err = driver.validate_library_image_fresh(
                 temporary, generated_entries, output_names, args.verbose)
-            if valid and provider == "titan" then
-                valid, validation_err = driver.validate_titan_support(temporary, args.verbose)
-            end
             if valid then
                 valid, validation_err = driver.publish_windows_provider(
-                    temporary, provider_output, shim_plans, provider,
+                    temporary, provider_output,
                     link_ticket and function()
                         return linkcertificate.invalidate(resolver_context, link_ticket)
                     end or nil)
@@ -1255,10 +1246,8 @@ else
             local published, publish_err =
                 driver.publish_provider_bundle(
                     pair.dso, pair.archive, provider_output,
-                    shim_plans, pair.entries, {
-                        provider = provider,
+                    {
                         native_inputs = native_inputs,
-                        output_root = args.output,
                     })
             driver.remove_path(pair.directory)
             if not published then

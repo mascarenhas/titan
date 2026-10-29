@@ -121,6 +121,7 @@ compiler spec/coder/map_metamethods_spec.lua 1.220 4.781
 stdlib spec/coder/multi_module_grouping_spec.lua 2.325 3.802
 stdlib spec/coder/multi_module_libraries_spec.lua 39.726 50.801
 compiler spec/coder/multi_module_path_runtime_spec.lua 7.148 17.301
+stdlib spec/coder/multi_module_path_stdlib_spec.lua 1.000 -
 compiler spec/coder/named_arguments_spec.lua 3.305 13.198
 stdlib spec/coder/native_coverage_spec.lua 13.058 42.177
 compiler spec/coder/native_inputs_spec.lua 1.000 -
@@ -143,7 +144,6 @@ stdlib spec/coder/split_units_spec.lua 13.160 59.677
 compiler spec/coder/spread_expressions_spec.lua 5.039 11.918
 compiler spec/coder/stack_capacity_spec.lua 0.744 4.596
 compiler spec/coder/stack_relocation_spec.lua 1.034 6.715
-compiler spec/coder/standalone_paths_spec.lua 1.290 1.000
 compiler spec/coder/static_compiled_modules_spec.lua 2.726 4.249
 compiler spec/coder/static_dynamic_facade_spec.lua 2.264 2.594
 compiler spec/coder/static_protocol_mismatch_spec.lua 6.701 7.064
@@ -190,7 +190,6 @@ compiler spec/path_spec.lua 0.051 0.165
 compiler spec/projectcache_spec.lua 37.671 473.778
 retained spec/rockspec_spec.lua 11.706 -
 compiler spec/sha256_spec.lua 0.001 0.009
-compiler spec/standalone_paths_spec.lua 0.004 0.010
 compiler spec/staticmetadata_spec.lua 0.124 0.606
 stdlib spec/stdlib_compiler_spec.lua 0.071 0.013
 compiler spec/symtab_spec.lua 0.006 0.024

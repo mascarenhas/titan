@@ -369,8 +369,9 @@ The following existing splits avoid duplicated provider/build scaffolding:
 | Type-relation laws / checker plans / generated boundary parity | `spec/types_spec.lua`, then the topical checker/coder `type_relations_soundness_spec.lua`. |
 | Union syntax / checker frontiers / generated representation / hostile metadata | Lexer/parser specs, checker/coder `unions_spec.lua`, and `spec/union_interface_spec.lua`; reflected payload readers in `spec/coder/unions_stdlib_spec.lua`; extend compiled-module suites for source/DSO/archive composition. |
 | Folder resolution and diagnostics / public artifacts and mixed-file traces | Filesystem cases in `spec/driver_spec.lua`, then `spec/coder/folder_modules_spec.lua`. |
-| Root-major metadata claims and provider lookup | `spec/driver_spec.lua`. |
-| Prefix-container compilation, generated shims, promotion, paired publication, rollback, real macOS universal archives | `spec/coder/multi_module_libraries_spec.lua`, with packaging in `rockspec_spec.lua`. |
+| Root-major metadata claims and provider lookup; compiler root, compile-time Titan path, `;;`/`!` expansion | `spec/driver_spec.lua`. |
+| Run-time Titan path, SDK fallback, Titan package searcher, canonical reuse, name guard, searcher installation in every state | `spec/coder/multi_module_path_runtime_spec.lua`; `titanc --print-root` in `spec/titanc_root_spec.lua`. |
+| Prefix-container compilation, promotion, paired publication, rollback, real macOS universal archives | `spec/coder/multi_module_libraries_spec.lua`, with packaging in `rockspec_spec.lua`. |
 | Bounded archive/ELF/Mach-O/COFF and synthetic universal parsing | `spec/staticmetadata_spec.lua`. |
 | Static format preference, occupied paths, claims, cache, source fallback | `spec/driver_spec.lua`. |
 | Direct/dynamic nominal-owner constraints | `spec/checker/static_compiled_modules_spec.lua`. |
@@ -457,6 +458,48 @@ uncaught async Task diagnostics` and `END expected uncaught async Task
 diagnostics` around the operation. Those prefixed brackets make a successful
 aggregate log readable and keep the expectation owned by the case that
 produces it.
+
+### Native SDK selection
+
+The aggregate (`out/tests/test/tests`) and the fixture programs its tests compile
+in fresh child processes do not live in an SDK's `bin` directory. Their
+executable-relative entries `!` and `!/../lib/titan/0.6` therefore miss, and the
+runtime's SDK fallback decides which installed `titan` provider they load. That
+fallback uses `TITAN_ROOT` and otherwise spawns `$TITANC` or `titanc
+--print-root` from `PATH`
+([Titan path](../language/modules.md#the-titan-path)).
+Left to `PATH`, a user installation earlier on `PATH` can supply a
+different provider than the one the suite was built against.
+
+The Unix `Makefile` therefore sets `TITAN_ROOT` to `TITAN_TEST_INSTALL_ROOT`,
+the installation that `TEST_LUA` resolves, at every native-only launch:
+
+- `titan-stdlib-test-objects` and `titan-stdlib-test-build`;
+- the fixed fixture-object rules (`titan_test_native_rule`);
+- `titan-stdlib-test-run` and `titan-stdlib-test-run-parallel`.
+
+Fresh children inherit the root through `support.command`, so their own
+compiles and runs select the same SDK. `TITAN_TEST_SDK_ROOT`, set beside it, is
+test-helper metadata: it locates SDK tools for fixtures and selects nothing at
+run time. `TITAN_TEST_COMPILER_ENV` carries no root because Busted workers also
+receive it, and their specs choose their own provider paths.
+
+The pin replaces only the PATH-derived fallback. Explicit `TITAN_PATH_0_6` or
+`TITAN_PATH` entries and executable-relative providers still come first, and
+helpers that select exact provider paths for their children
+(`spec/support/async_stdlib.lua`) still remove `TITAN_ROOT` deliberately. A
+`TEST_LUA` outside an SDK leaves the root empty, which the runtime treats as
+unset.
+
+This is Make's own selection for its suite. A canonical run still starts
+without an ambient `TITAN_ROOT`, `TITANC`, or Titan path variable
+([repository workflow](repository-workflow.md)).
+
+`spec/libuv_build_spec.lua` ("runs prepared native tests against the selected
+SDK, not a titanc on PATH") covers this behavior. It runs a one-case aggregate
+with a logging `titanc` first on `PATH`. With the SDK selected, the run passes
+and that `titanc` is never called. With an empty selection, the aggregate
+queries it.
 
 ### Concurrent filtered runs
 
@@ -743,7 +786,8 @@ matching executable and `.dSYM` bundle) and root `test_runner_*` paths identify
 other owned fixtures. This does not consult Git, so it also works in a source
 rock while preserving author-written C/header fixtures and the ordinary `out/`
 provider stage. `make clean` additionally removes any legacy source-adjacent
-standard-library foreign headers, providers, shims, and `.dSYM` bundles.
+standard-library foreign headers, providers, and `.dSYM` bundles, and the
+checkout support module.
 
 CI runs this aggregate twice: once source-linked with native coverage in the
 `native-coverage` job, and once as an independent ASan+UBSan build in the
@@ -756,8 +800,8 @@ CI runs this aggregate twice: once source-linked with native coverage in the
 `titan.so`/`titan.a` pair (see the [standard-library
 image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image)).
 The same compiled `titan.test` implementation serves ordinary programs and
-generated test executables. Standard installation publishes the provider pair
-and shims; it does not install a private test-source payload. Packaging tests
+generated test executables. Standard installation publishes the provider pair;
+it does not install a private test-source payload. Packaging tests
 check those artifacts, while compiler regressions verify static-provider
 retention and production-object reuse across application and test links.
 

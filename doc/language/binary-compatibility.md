@@ -208,14 +208,15 @@ The Windows runtime checks each logical module's `_abi_value` before calling
 its Lua metadata entries or initializer. Windows providers must supply that
 query, even though it remains optional for existing Unix ABI-2 providers.
 Executables, the controlled Lua DLL, and native dependency DLLs share `bin`;
-Titan provider DLLs belong in `lib/titan/0.6`. Lua's `package.cpath` and Titan's
-module paths select provider files. Their native dependencies follow ordinary
-Windows DLL lookup, including process `PATH`; selecting a provider does not
-change that lookup. Titan's Lua interpreter, compiler frontend, and application
-launchers retain their adjacent `lua55.dll`.
-`TITAN_PATH_0_6` takes
-precedence over `TITAN_PATH`; an explicitly empty value disables the fallback
-Titan path.
+Titan provider DLLs belong in `lib/titan/0.6`, which a program's default
+run-time [Titan path](modules.md#the-titan-path), `!;!/../lib/titan/0.6`,
+reaches from `bin`. Titan's module paths alone select provider files; Lua's
+`package.cpath` only locates Lua C modules such as Titan's support module in
+`lib/lua/5.5`. Providers' native dependencies follow ordinary Windows DLL
+lookup, including process `PATH`; selecting a provider does not change that
+lookup. Titan's Lua interpreter, compiler frontend, and application launchers
+retain their adjacent `lua55.dll`. `TITAN_PATH_0_6` takes precedence over
+`TITAN_PATH`; an explicitly empty value searches nothing.
 
 For a standalone logical module `app.main`, the Windows compiler emits
 `bin/app.main.exe` and its application provider at
@@ -240,24 +241,21 @@ unchanged.
 
 Titan retains successfully mapped Windows providers until process exit,
 including after a Lua state closes, so native callbacks and finalizers retain
-valid code. Canonical logical-module identity still belongs to each Lua state.
-Generated Lua shims first locate their provider through `package.cpath`, then
-reuse an initialized canonical module before opening or checking another image.
-A missing provider pathname still fails that initial shim search.
+valid code. Canonical logical-module identity still belongs to each Lua state:
+Titan's package searcher reuses an initialized canonical module before opening
+or checking another image.
 
 A Windows invocation without `main` emits one DLL named from the requested
-roots' longest common dotted prefix and one Lua shim per carried logical module.
-For example, `smoke.leaf` produces `smoke/leaf.dll` and `smoke/leaf.lua`.
-Windows does not emit a paired Titan archive and rejects `--static` or selected
-Titan archive providers. Native object payloads and native import libraries
-remain separate linker inputs.
+roots' longest common dotted prefix. For example, `smoke.leaf` produces
+`smoke/leaf.dll`, which Lua loads with `require "smoke.leaf"` after
+`require "titan"`. Windows does not emit a paired Titan archive and rejects
+`--static` or selected Titan archive providers. Native object payloads and
+native import libraries remain separate linker inputs.
 
 Publication validates metadata in a fresh process before replacing outputs.
 If another process has mapped an existing provider, replacement fails and the
-previous DLL and companion shims are restored. Caught-error recovery preserves
+previous DLL is restored. Caught-error recovery preserves
 file bytes; it is not a crash-atomic or concurrent-publisher transaction.
-Removing logical modules from an existing Windows provider does not retire old
-shims automatically; use a fresh output directory for that change.
 
 These are experimental compiler and runtime foundations, not a complete
 Windows distribution. Windows error traces use libbacktrace to interleave Lua frames with native

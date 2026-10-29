@@ -25,7 +25,8 @@ end
 ```
 
 ```lua
--- Lua
+-- Lua, with sum.so on the Titan path
+require "titan"   -- installs Titan's package searcher
 local m = require "sum"
 print(m.sum_list(m.sample())) --> 10
 ```
@@ -48,8 +49,8 @@ use the chapters below for the normative language reference.
 | Chapter | Covers |
 | --- | --- |
 | [Native build profiles](build-profiles.md) | Production optimization defaults, isolated O0/no-LTO validation SDKs, `titanc` worker and native job slot bounds inside and outside GNU Make, `--c-parts` splitting of large modules, and the checkout's build and test parallelism settings. |
-| [Installing Titan on Linux and macOS](installation.md) | Build and install steps, the `PREFIX` and `ROCKS_TREE` directories, what the installation contains (including the installer's SDK digest manifest), how Titan finds it, bundled libuv and OpenSSL, compilation job defaults, building the standard library during development, uninstalling, and cleaning. |
-| [Installing and using Titan on Windows](windows-build.md) | Experimental CLANG64 installation, standalone LuaRocks configuration, DLL programs and `--exe` launcher paths, link staging directories, packaging, cleanup, native test entrypoints, Busted workers, and build parallelism. |
+| [Installing Titan on Linux and macOS](installation.md) | Build and install steps, the `PREFIX` and `ROCKS_TREE` directories, upgrading from a pre-release build, what the installation contains (including the support module and the installer's SDK digest manifest), how Titan finds it, bundled libuv and OpenSSL, compilation job defaults, building the standard library during development, uninstalling, and cleaning. |
+| [Installing and using Titan on Windows](windows-build.md) | Experimental CLANG64 installation, standalone LuaRocks configuration, the native `titanc.exe` compiler, DLL programs and `--exe` launcher paths, link staging directories, the SDK fallback's `PATH` lookup, packaging, cleanup, native test entrypoints, Busted workers, and build parallelism. |
 | [Documentation comments](documentation-comments.md) | LDoc-style summaries and tags retained for editor hover and completion. |
 | [Design philosophy and history](philosophy.md) | Why Titan exists, its core commitments, the project's history and design principles. |
 | [The type system](types.md) | All Titan types; equality, symmetric non-transitive consistency, direct coercions, gradual views, callable adjustment, the normative boundary matrix, inference, and `value`. |
@@ -72,9 +73,9 @@ use the chapters below for the normative language reference.
 | [Records](records.md) | Nominal record types, record-call shorthand, overridable constructors, fields, methods, record functions, and records as seen from Lua. |
 | [Unions](unions.md) | Nominal tagged unions with named payload parts, positional and named constructors and case bindings, full-block `when` arms, optional coverage with closed-union control-flow proof, and Lua visibility. |
 | [Arrays and maps](arrays-maps.md) | Mutable and const-qualified positive-only, holed Arrays with deterministic highest-present length and distinct canonical Lua userdata tags; ordinary Maps, positional integer-Map construction, metamethod-aware integer-Map length, conversions, and performance. |
-| [Modules](modules.md) | Logical modules, `import`, visibility, module variables, initialization, and the compilation model (shared libraries, executables, `--print-root`, runtime tree discovery, search paths). |
+| [Modules](modules.md) | Logical modules, `import`, visibility, module variables, initialization, and the compilation model (shared libraries, executables, `--print-root`, the Titan path with `;;`, `!`, and the run-time SDK fallback, and loading compiled modules from Lua through Titan's package searcher). |
 | [Visibility through explicit source imports](source-import-visibility.md) | Explicit `.titan` source imports over local declarations, direct-only Titan permission, canonical logical identity, required-source lookup, normalized use-driven C declaration origins, and the public-only ordinary-import/binary/Lua boundary. |
-| [Multi-module libraries](multi-module-libraries.md) | Separating logical modules from physical providers: common-prefix library output, prefix lookup, generated Lua loaders, and the combined standard library. |
+| [Multi-module libraries](multi-module-libraries.md) | Separating logical modules from physical providers: common-prefix library output, prefix lookup, `require` through Titan's package searcher, the reserved `titan` support name, and the combined standard library. |
 | [Static compiled modules](static-compiled-modules.md) | Self-describing `.a` providers, paired `.so`/`.a` outputs, default and `--static` resolution, native composition, and bundled/system OpenSSL final-link behavior. |
 | [Replacing shared-library dependencies](binary-compatibility.md) | Per-consumer load-time compatibility, copied native provider selection, required erased signatures and public nominal shapes, private storage changes, and union control-flow dependencies. |
 | [Incremental and separate compilation](incremental-compilation.md) | Semantic object, `--c-source`, and final-link certification, compiler-owned parallel module scheduling, certified `-c --incremental` roots, `--print-c-objects`, the persistent digest cache and installed SDK digests, source versus output path spellings, reserved output names, verbose hit/miss diagnostics, and single-invocation Make integration. |

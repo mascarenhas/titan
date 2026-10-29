@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 # Some compiler specs rebuild the checkout runtime. Preserve that Make-owned
-# archive plus the canonical installed standard-library provider pair and shims
-# around those groups so later production
+# archive plus the canonical installed standard-library provider pair around
+# those groups so later production
 # smokes see the exact build that the library gates tested. The source-rock hook
 # owns those installed artifacts; this
 # snapshot must not depend on a packaging spec having built checkout-root
@@ -33,21 +33,11 @@ esac
 
 provider=$prefix_rel/lib/titan/0.6/titan.so
 static_archive=${provider%.so}.a
-shim_dir=$prefix_rel/share/lua/5.5/titan
 
 artifacts=(
     titan-runtime/libtitan.a
     "$provider"
     "$static_archive"
-    "$shim_dir/coroutine.lua" "$shim_dir/uv.lua"
-    "$shim_dir/async.lua" "$shim_dir/timer.lua"
-    "$shim_dir/io.lua"
-    "$shim_dir/fs.lua" "$shim_dir/net.lua" "$shim_dir/ssl.lua"
-    "$shim_dir/url.lua" "$shim_dir/http.lua" "$shim_dir/websocket.lua" "$shim_dir/os.lua"
-    "$shim_dir/path.lua" "$shim_dir/peg.lua" "$shim_dir/string.lua"
-    "$shim_dir/math.lua" "$shim_dir/lua.lua"
-    "$shim_dir/iteration.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"
-    "$shim_dir/reflect.lua" "$shim_dir/sqlite3.lua" "$shim_dir/json.lua" "$shim_dir/protobuf.lua" "$shim_dir/transfer.lua" "$shim_dir/thread.lua"
 )
 
 if [[ $(uname -s) == Darwin ]]; then artifacts+=("$provider.dSYM"); fi
@@ -110,15 +100,6 @@ LUA
 remove_installed_artifacts() {
     rm -rf "$provider" "$provider.dSYM"
     rm -f "$static_archive"
-    rm -f "$shim_dir/coroutine.lua" "$shim_dir/uv.lua" \
-        "$shim_dir/async.lua" "$shim_dir/timer.lua" \
-        "$shim_dir/io.lua" \
-        "$shim_dir/fs.lua" "$shim_dir/net.lua" "$shim_dir/ssl.lua" \
-        "$shim_dir/url.lua" "$shim_dir/http.lua" "$shim_dir/websocket.lua" "$shim_dir/os.lua" \
-        "$shim_dir/path.lua" "$shim_dir/peg.lua" "$shim_dir/string.lua" \
-        "$shim_dir/math.lua" "$shim_dir/lua.lua" \
-        "$shim_dir/iteration.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua" \
-        "$shim_dir/reflect.lua" "$shim_dir/sqlite3.lua" "$shim_dir/json.lua" "$shim_dir/protobuf.lua" "$shim_dir/transfer.lua" "$shim_dir/thread.lua"
 }
 
 case "$mode" in

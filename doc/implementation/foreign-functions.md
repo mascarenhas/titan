@@ -393,9 +393,9 @@ companions are published before any source object is compiled, and
 callers.
 
 The companion is a source-build intermediate. Provider publication validates
-and commits the DSO, archive, shims, and dSYM; it excludes generated foreign
+and commits the DSO, archive, and dSYM; it excludes generated foreign
 headers. Headers add no metadata key, DSO claim, archive
-member, installed SDK declaration, Lua shim, or module-state slot. Repository
+member, installed SDK declaration, Lua entry, or module-state slot. Repository
 cleanup covers both generated header suffixes under their bounded
 generated-source ownership rules. Sanitizer generated-C snapshots preserve the required header closure with
 the saved translation unit.

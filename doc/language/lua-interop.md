@@ -18,13 +18,17 @@ run, and what does and does not work in each direction.
 
 ## Requiring a Titan module
 
-Compiling a library produces paired physical DSO/archive providers plus one
-generated Lua loader per physical logical module. A stock Lua interpreter
-uses the DSO form: `require` runs the generated loader, which finds the
-provider, loads it globally, and invokes that module's exact `luaopen_*` entry
-(see
-[Multi-module libraries](multi-module-libraries.md)). `require` returns a
-**userdata** — the module
+Compiling a library produces paired physical DSO/archive providers and no Lua
+files. Lua loads the DSO form through Titan's package searcher, which a plain
+Lua host installs with `require "titan"`. That call loads Titan's support
+module, an ordinary Lua C module at `<root>/lib/lua/5.5/titan.so`
+(`titan.dll` on Windows), from Lua's own `package.cpath`. Standalone Titan
+programs, [independent Lua states](standard-library-lua.md#independent-lua-states),
+and thread children already have the searcher. The searcher finds the
+provider along the [Titan path](modules.md#the-titan-path), checks its ABI,
+loads it globally, and invokes that module's exact `luaopen_*` entry (see
+[Multi-module libraries](multi-module-libraries.md#loading-library-modules-from-lua)).
+`require` returns a **userdata** — the module
 value — whose members you access exactly like table fields (`m.f`, `m.v`,
 `m.v = x`, `m.Rec.new`), but served through a metatable. The members are:
 
@@ -73,11 +77,13 @@ end
 ```
 
 ```sh
-./titanc counter          # produces counter.so, counter.a, and counter.lua
+./titanc counter          # produces counter.so and counter.a
 ```
 
 ```lua
--- Lua
+-- Lua: run where counter.so is on the Titan path,
+-- for example with TITAN_PATH_0_6='.;;'
+require "titan"           -- installs Titan's package searcher
 local counter = require "counter"
 print(counter.bump(10))   --> 10
 print(counter.count)      --> 10
@@ -89,18 +95,18 @@ The module value's metatable is protected: `getmetatable` on it returns
 the string `"Titan module counter"`, and `setmetatable` on it fails.
 
 One provider may export several logical Lua entries. For example,
-`titanc pkg.left pkg.right` produces `pkg.so`, `pkg.a`, `pkg/left.lua`, and
-`pkg/right.lua`. `require "pkg.left"` and `require "pkg.right"` map the same
-DSO but call `luaopen_pkg_left` and `luaopen_pkg_right`, respectively. They
-return distinct logical module values, initialize independently, and retain
-their own module state. Requiring one sibling does not initialize the other.
+`titanc pkg.left pkg.right` produces `pkg.so` and `pkg.a`.
+`require "pkg.left"` and `require "pkg.right"` map the same DSO but call
+`luaopen_pkg_left` and `luaopen_pkg_right`, respectively. They return
+distinct logical module values, initialize independently, and retain their
+own module state. Requiring one sibling does not initialize the other. A
+module that this Lua state has already initialized, for example as another
+module's dependency, is returned as it is, without opening another file.
 
-Each generated loader first obtains Titan's native support table with bare
-`require "titan"`, then uses its internal lazy/global loader for the physical
-provider. The bare name is therefore reserved: no generated logical module may
-be named exactly `titan`, and no top-level `titan.lua` loader is emitted. Bare
-`require "titan"` itself returns only the support table; it does not initialize
-the standard `titan.*` modules that share the installed `titan.so` image.
+The bare name `titan` is reserved for the support module: no logical module
+may be named exactly `titan`. Bare `require "titan"` returns only a small
+support table; it does not initialize the standard `titan.*` modules, which
+live in the separate standard provider.
 
 ### Qualified standard-library names
 
@@ -109,6 +115,7 @@ desugars their convenient short Titan imports to those qualified names, while
 Lua requires the qualified names directly. For example:
 
 ```lua
+require "titan"                      -- once per plain Lua host
 local lua_os = require "os"          -- Lua's standard table
 local titan_os = require "titan.os"  -- Titan module userdata
 
@@ -126,13 +133,14 @@ The same qualified Lua identity applies to every standard module, including
 low-level `titan.uv` binding uses the same canonical identity. All standard modules support
 the documented short Titan imports alongside their qualified names. Requiring
 `titan.string` does not mutate Lua's `string` table or string metatable. In an
-installed Titan `0.6` library tree, generated
-loaders under `<root>/share/lua/5.5/titan/` all open the DSO form
-`<root>/lib/titan/0.6/titan.so` and invoke their own exact Lua entries. Titan
+installed Titan `0.6` library tree, each of them resolves to the DSO form
+`<root>/lib/titan/0.6/titan.so` and invokes its own exact Lua entry. Titan
 imports may instead select the paired self-describing `titan.a`; both forms
 expose the same logical-module ABI/types. The installation does not create
-child DSOs, parent-level or `lib/lua` copies, symbolic links, or hard links.
-Earlier Titan installations are neither migrated nor cleaned up.
+child DSOs, Lua loader files, copies, symbolic links, or hard links.
+Earlier Titan installations are neither migrated nor cleaned up; see
+[Upgrading from a pre-release build](installation.md#upgrading-from-a-pre-release-build)
+for the generated Lua loaders that earlier builds left behind.
 
 ## How values map between the two languages
 

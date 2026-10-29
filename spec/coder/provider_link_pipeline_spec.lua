@@ -203,7 +203,6 @@ local fail = os.getenv("TITAN_TEST_PROVIDER_FAIL")
 local subjects = {
     build_static_archive = 1,
     validate_library_image = 1,
-    validate_titan_support = 1,
     validate_archive_library_equality = 2,
     validate_library_image_fresh = 1,
     publish_provider_bundle = 1,
@@ -275,7 +274,7 @@ describe("provider pair link pipeline", function()
         end
         if USE_CHECKOUT_COMPILER then
             for _, word in ipairs({
-                "TITAN_ROCKS_ROOT=" .. PREFIX, LUA, "-e",
+                "TITAN_ROOT=" .. PREFIX, LUA, "-e",
                 string.format("package.path=%q..package.path",
                     REPO .. "/?.lua;" .. REPO .. "/?/init.lua;"),
                 REPO .. "/titanc",
@@ -344,12 +343,15 @@ describe("provider pair link pipeline", function()
         assert.equal("file", lfs.attributes(output .. "/pkg.so", "mode"))
         assert.equal("file", lfs.attributes(output .. "/pkg.a", "mode"))
         assert.same(EXPECTED_VALIDATIONS, lines(validations))
+        -- A published pair is one prefix provider per module group, so a
+        -- plain Lua host installs the Titan searcher through the support
+        -- module and names the publication root explicitly.
         local ok, result = shell(workspace, quote_words({
             "env", "-u", "LUA_PATH", "-u", "LUA_CPATH", "-u", "LUA_INIT",
-            LUA, "-e", string.format(
-                "package.path=%q..package.path package.cpath=%q..package.cpath " ..
-                "assert(require('pkg.left').answer() + require('pkg.right').twice(2) > 0)",
-                output .. "/?.lua;", output .. "/?.so;" .. REPO .. "/?.so;"),
+            "TITAN_PATH_0_6=" .. output .. ";;",
+            LUA, "-e",
+            "require \"titan\"; " ..
+            "assert(require('pkg.left').answer() + require('pkg.right').twice(2) > 0)",
         }) .. " 2>&1")
         assert.truthy(ok, result)
     end
@@ -362,6 +364,33 @@ describe("provider pair link pipeline", function()
         assert.same({
             "dso-start", "dso-end", "archive-indexed", "image-start", "image-end",
         }, lines(events))
+    end)
+
+    it("publishes and opens a hyphenated logical module under its canonical symbols",
+       function()
+        if platform.windows then pending("Unix paired provider pipeline"); return end
+        write_file(source_root .. "/pkg/b-c.titan",
+            "function answer(): integer return 42 end\n")
+        local ok, result = direct({}, "pkg.left", "pkg.b-c")
+        assert.truthy(ok, result)
+        assert.same(EXPECTED_VALIDATIONS, lines(validations))
+        -- `pkg.b-c` and `pkg.b_c` share luaopen_pkg_b_c; a file load must
+        -- request the exact logical name, while package.preload may alias it.
+        ok, result = shell(workspace, quote_words({
+            "env", "-u", "LUA_PATH", "-u", "LUA_CPATH", "-u", "LUA_INIT",
+            LUA, "-e", string.format(
+                "local file = %q .. '/pkg.so' " ..
+                "local open = assert(package.loadlib(file, 'luaopen_pkg_b_c')) " ..
+                "local opened, err = pcall(open, 'pkg.b_c', file) " ..
+                "assert(not opened and err:find('module name mismatch', 1, true), err) " ..
+                "assert(debug.getregistry()['Titan module pkg.b-c'] == nil) " ..
+                "package.preload['pkg.b-c_alias'] = open " ..
+                "local aliased = require('pkg.b-c_alias') " ..
+                "assert(aliased.answer() == 42) " ..
+                "assert(open('pkg.b-c', file) == aliased and open() == aliased)",
+                output),
+        }) .. " 2>&1")
+        assert.truthy(ok, result)
     end)
 
     it("builds the archive during the DSO link but never overlaps links without a jobserver",

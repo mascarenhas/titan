@@ -63,9 +63,13 @@ copy inherited loaders and descriptors even before their modules have been
 initialized in the intermediate state.
 
 `require` otherwise uses the new state's own `package.path`, `package.cpath`,
-and searchers, initially configured by Lua's standard-library initialization.
-Host path/searcher customizations are not copied. Installed Titan shims and
-providers remain available when that state's paths find them.
+and searchers, initially configured by Lua's standard-library initialization,
+followed by Titan's package searcher, which every new state receives. Host
+path/searcher customizations are not copied, and the new state computes its
+own [Titan path](modules.md#the-titan-path) from the environment rather than
+inheriting the host's. Installed Titan providers remain available when that
+path finds them, so `require "titan.os"` works in a new state without
+`require "titan"`.
 
 `run` compiles and executes the complete text or binary chunk, passing
 its variadic arguments to Lua's `...` and returning the complete result list.
@@ -436,11 +440,12 @@ blocking source-file operation:
    in a template becomes that path. A readable candidate is compiled and
    receives `(modname, filename)` when its loader runs.
 3. Call searchers at indexes 3 and above, normally the two C searchers followed
-   by any appended custom searchers, until the first nil slot.
+   by Titan's package searcher and any appended custom searchers, until the
+   first nil slot.
 
-This source pass loads ordinary Lua files and generated Titan Lua shims. A shim
-then performs its normal exact-provider lookup, so `titan.lua.require` does
-not need a special Titan-loader branch. C modules continue through Lua's
+This source pass loads ordinary Lua files. Compiled Titan modules are found by
+Titan's package searcher in the third step, so `titan.lua.require` does not
+need a special Titan-loader branch. C modules continue through Lua's
 installed C searchers.
 
 A standalone Titan entrypoint initially publishes only the main module through
@@ -449,8 +454,8 @@ transitive Titan initialization before `main`. After each generated module
 finishes `_init` successfully, it publishes its own `luaopen_*` function in
 `registry[LUA_PRELOAD_TABLE]`; `package.preload` aliases that registry table.
 This makes every initialized import, including a private static archive
-dependency, visible to the preload searcher without a generated shim or
-separate provider DSO. Registration itself performs no initialization and does
+dependency, visible to the preload searcher without a separate provider DSO.
+Registration itself performs no initialization and does
 not fill `package.loaded`. A later `titan.lua.require` calls the published
 loader, receives the canonical initialized userdata, and installs it in the
 loaded table. The entrypoint does not publish unused or otherwise

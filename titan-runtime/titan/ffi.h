@@ -36,6 +36,12 @@ TITAN_RUNTIME_FUNC TitanModuleSymbols titan_module_preload_symbols(lua_State *L,
     const char *name, size_t length, lua_CFunction loader);
 TITAN_RUNTIME_FUNC void titan_module_preload(lua_State *L, const char *name,
     size_t length, lua_CFunction loader, TitanModuleSymbols symbols);
+/* Append the Titan package searcher to this state's package.searchers once
+** (a registry marker makes repeated calls from any image no-ops). Requires the
+** package library; never computes a path or launches a process. Every
+** Titan-owned state calls it after opening the Lua libraries. Implemented in
+** titan_path.c; preserves the entry top. */
+TITAN_RUNTIME_FUNC void titan_install_searcher(lua_State *L);
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/socket.h>

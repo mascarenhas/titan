@@ -28,15 +28,13 @@ produces:
 ```text
 geometry.so
 geometry.a
-geometry/shape.lua
-geometry/draw.lua
 ```
 
 The provider name is still the longest common sequence of complete dotted
 components in the explicitly requested roots. The `.so` and `.a` therefore
 always have the same base name. See [Multi-module
-libraries](multi-module-libraries.md) for the provider-prefix and generated
-Lua-loader rules.
+libraries](multi-module-libraries.md) for the provider-prefix rules and for
+loading the modules from Lua.
 
 Each logical module remains independent inside the two physical providers. It
 keeps its own module state, initializer, ABI entry, type entry, Lua entry, and

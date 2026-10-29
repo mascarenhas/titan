@@ -1297,17 +1297,13 @@ local function compile_and_run(hard_memory, expose_lua_internals)
     }) do
         argv[#argv + 1] = word
     end
-    argv[#argv + 1] = '-DTITAN_VDIR="0.6"'
     argv[#argv + 1] = platform.windows and
         "-I" .. prefix .. "/include" or "-Ilibbacktrace"
     if hard_memory then
         argv[#argv + 1] = "-DHARDMEMTESTS"
         argv[#argv + 1] = "-DLUA_USE_APICHECK"
         argv[#argv + 1] = "-DTITAN_ARRAY_HARDMEM_PROBE"
-        if platform.windows then
-            -- This private executable owns the Lua sources it compiles.
-            argv[#argv + 1] = "-DTITAN_LUA_BUILD_DLL"
-        else
+        if not platform.windows then
             argv[#argv + 1] = host == "Darwin"
                 and "-DLUA_USE_MACOSX" or "-DLUA_USE_LINUX"
         end
@@ -1327,8 +1323,22 @@ local function compile_and_run(hard_memory, expose_lua_internals)
     end
     append_words(argv, os.getenv("TITAN_TEST_EXTRA_CFLAGS"),
         "TITAN_TEST_EXTRA_CFLAGS")
+    if platform.windows and not hard_memory then
+        -- The controlled Lua DLL's internals are named imports here; do not
+        -- rely on MinGW auto-import. Lua's own sources define LUA_CORE, so the
+        -- hard-memory build must keep the stock helper declarations.
+        for _, word in ipairs({
+            "-DLUA_BUILD_AS_DLL",
+            "-DLUAI_FUNC=__declspec(dllimport) extern",
+            "-DLUAI_DDEC(dec)=__declspec(dllimport) extern dec",
+            "-DLUAI_DDEF=",
+        }) do
+            argv[#argv + 1] = word
+        end
+    end
     argv[#argv + 1] = source
     argv[#argv + 1] = "titan-runtime/titan.c"
+    argv[#argv + 1] = "titan-runtime/titan_path.c"
     if hard_memory then
         for _, stem in ipairs(LUA_SOURCES) do
             argv[#argv + 1] = lua_source .. "/" .. stem .. ".c"

@@ -13,10 +13,12 @@ commit. Initialize it after cloning or updating the checkout. The Unix build
 compiles directly in that submodule. Windows copies the source and installation Makefiles, `.c`, `.h`, `lua.hpp`,
 and manual pages into a dedicated `out/windows/` tree, then delegates
 compilation to the fork's `mingw` target and installation to its `install`
-target. Both receive `TITAN_LIBRARY_VERSION` and `PREFIX`. The fork installer
+target with `PREFIX`. The fork installer
 also supports native Windows GNU Make with `cmd.exe` and no Unix utilities.
-The source bytes stay unchanged. All Titan changes are already in the fork;
-Lua's platform guards select the implementation at compilation. All Windows
+The source bytes stay unchanged. On Windows the fork's C sources and headers
+are stock upstream Lua; its Windows differences are the installation rules,
+the `mingw` link flag described below, and Lua search-path conveniences. All
+Windows
 definitions live in this one Makefile: its default build target is `all`, and
 LuaRocks uses that default and the `install` target. Native GNU Make
 (including `mingw-w64-x86_64-make`) needs drive-letter paths; MSYS Make uses MSYS
@@ -96,6 +98,11 @@ workers (`titan-compiler.build_worker`) and native compiler commands launch
 through the stock LuaRocks `luv` dependency under a single coordinator-owned
 slot ledger (`titan-compiler/build.lua`, `titan-compiler/process.lua`); see
 [driver process transports](driver.md#experimental-windows-process-transports).
+Module-frontend workers run the `lua.exe` beside the running executable: the
+running `lua.exe` itself, or the SDK interpreter beside the native
+`titanc.exe`, which uses the same `lua55.dll`. `titanc.exe` cannot serve as
+the worker interpreter because it always runs its script ([worker
+launch](build-coordinator.md#worker-launch-and-descriptor-layout)).
 Before its first child launch, each coordinator and worker assigns itself to
 a non-breakaway `KILL_ON_JOB_CLOSE` Job Object through
 `titan._native_process_tree_guard()`. Every descendant inherits that strict
@@ -158,17 +165,49 @@ language-server installations retain the headers required for analysis.
 Standalone application payloads can omit those SDK-only files. This initial
 recipe installs the complete Lua SDK; it is not an application packager.
 
-Only the DLL's translation units define `TITAN_LUA_BUILD_DLL`. `LUA_CORE` and
-`LUA_LIB` still describe source roles and cannot select DLL ownership. Public
-functions, internal functions, and the four internal/public arrays explicitly
-export from the producer and import through consumers' IATs. `LUAMOD_API`
-independently exports a third-party module's opener, with C linkage in C++;
-Lua's built-in openers and auxiliary API declare `LUA_API`, so external
-libraries import them too. External libraries built with `LUA_LIB` use
-`LUALIB_API` to export their own functions while their `LUA_API` calls still
-import from Lua.
-Automatic export of other global symbols is disabled at DLL link time.
-Titan's embedded helper functions remain a separate runtime contract.
+The DLL is built from stock upstream sources with the single definition
+`-DLUA_BUILD_AS_DLL`; `LUA_CORE` and `LUA_LIB` keep their upstream per-source
+roles. The fork's `mingw` target links `lua55.dll` with
+`-Wl,--export-all-symbols`, so the public API (annotated `LUA_API`,
+`__declspec(dllexport)` while the DLL builds), every internal `LUAI_FUNC`
+function, and the data objects `lua_ident`, `luai_ctype_`, `luaP_opmodes`,
+and `luaT_typenames_` are all exported. There is no `.def` file and no
+Titan-specific macro in Lua's headers.
+
+Stock headers declare the internal API with plain `extern`, which would leave
+consumers to MinGW auto-import. Titan-owned C compiles therefore import it
+explicitly by defining, before the first Lua header:
+
+```sh
+-DLUA_BUILD_AS_DLL "-DLUAI_FUNC=__declspec(dllimport) extern" \
+  "-DLUAI_DDEC(dec)=__declspec(dllimport) extern dec" -DLUAI_DDEF=
+```
+
+The driver adds these to `driver.generated_compile_prefix()` on Windows, which
+covers generated module C, entrypoints and launchers, C validation probes, and
+header checking; `scripts/build_windows_runtime.sh` compiles the runtime with
+them; and the Windows fixture and probe scripts under `spec/support` pass the
+same list. The private LPegLabel objects are the deliberate exception, because
+their headers reuse `LUAI_FUNC` for private cross-unit symbols. The runtime
+loader and launcher gates link with `-Wl,--disable-auto-import`, and the
+Windows native test aggregate passes the same flag through `--ldflag`, so a
+Titan-owned consumer compiled without the definitions fails at link instead
+of relying on auto-import.
+
+User `--c-source` helpers are compiled with `driver.authored_c_compile_prefix()`,
+which omits all four definitions: they follow stock Lua conventions like any
+third-party Lua C module. The public API reaches them through import thunks;
+internal data reaches them through MinGW auto-import or the helper's own
+`LUAI_*` import definitions. A helper may define `LUA_LIB` (or `LUA_CORE`) to
+export its own `LUAMOD_API`/`LUALIB_API` definitions, or write
+`__declspec(dllexport)` itself, and may reuse `LUAI_FUNC` for private symbols.
+Under stock `LUA_BUILD_AS_DLL` without `LUA_LIB`/`LUA_CORE`, `LUAMOD_API` is a C
+import declaration, so an opener defined with it does not compile; in C++,
+`LUAMOD_API` is plain `extern "C"` and exports nothing. Titan's own providers
+keep plain `int luaopen_*` entries exported by their generated `.def`, the
+support module uses an explicit `__declspec(dllexport)`, and generated
+entrypoints and launchers declare `luaopen_*` references as plain `extern int`,
+never `LUAMOD_API`.
 
 The supplied build uses Lua's default 64-bit integers and double-precision
 numbers. Lua and its consumers must use the same numeric configuration and
@@ -179,19 +218,21 @@ functions and comparing all four imported data addresses with the loaded DLL.
 `spec/fixtures/windows/lua-5.5.1-exports.txt` is the exact default-release export
 oracle: 156 public functions (98 `lua_*`, 48 `luaL_*`, 10 `luaopen_*`), 205
 internal functions, and `lua_ident`, `luai_ctype_`, `luaP_opmodes`, and
-`luaT_typenames_`. It was derived independently from the pinned headers'
-`LUA_API`, `LUALIB_API`, `LUAMOD_API`, and `LUAI_FUNC` declarations, plus those
-four data declarations, and cross-checked against the same version's native
-archive. `luaH_mainposition` is excluded because upstream guards it with
+`luaT_typenames_`. Public names carry `LUA_API`, `LUALIB_API`, or `LUAMOD_API`;
+the internal functions and all four data objects are exported by the link
+flag. `lua_ident` is a plain `const char[]` definition, reached by consumers
+only through MinGW data auto-import; Titan does not reference it.
+`luaH_mainposition` is excluded because upstream guards it with
 `LUA_DEBUG`. This is an expected inventory, not evidence of a Windows build.
 
 ## Relocation and native library loading
 
-Windows `!` retains upstream's **running executable directory** meaning.
-The fork retains upstream Windows Lua-source search paths and adds
-`!\\..\\share\\lua\\5.5` for LuaRocks modules. Native module searches retain the
-executable directory and add `!\\..\\lib\\lua\\5.5` and
-`!\\..\\lib\\titan\\0.6`.
+Windows `!` retains upstream's **running executable directory** meaning, the
+same meaning as Unix `!` in the fork and `!` in Titan paths. The fork retains upstream Windows
+Lua-source search paths and adds `!\\..\\share\\lua\\5.5` for LuaRocks modules.
+Native module searches retain the executable directory and add
+`!\\..\\lib\\lua\\5.5`, where the Titan support module `titan.dll` lives; no
+Titan provider directory is on `package.cpath`.
 Lua retains its upstream executable-directory expansion. The shipped
 executables declare a UTF-8 process code page for their Windows ANSI APIs;
 Titan's own provider-path handling uses the wide Windows APIs.
@@ -201,21 +242,23 @@ in C string literals, including Unicode and literal `$` sequences. These values
 are escaped before recursive template expansion; they cannot become compiler
 template substitutions.
 
-Lua's `package.cpath` selects the module file, and `package.loadlib` uses
-upstream `LoadLibraryExA` with its default zero flags. Titan's explicit module
-loader resolves its provider path and calls `LoadLibraryExW` with zero flags.
+Lua's `package.cpath` selects Lua C modules such as the support module, and
+`package.loadlib` uses upstream `LoadLibraryExA` with its default zero flags.
+Titan providers are selected only by the [Titan
+path](driver.md#the-run-time-titan-path-and-sdk-fallback); its loader resolves
+the provider path and calls `LoadLibraryExW` with zero flags.
 Native dependencies follow the ordinary Windows DLL search order, including
 the executable directory, system locations, current directory, and the process
 `PATH`. The provider-search paths remain separate from native dependency
 resolution, and neither loader changes the process DLL search directories.
 
-Titan's `lua.exe` and application launchers import `lua55.dll`
+Titan's `lua.exe`, `titanc.exe`, and application launchers import `lua55.dll`
 before runtime initialization. The distribution retains that shared Lua runtime
 beside its executables. The standard DLL name lets Lua 5.5 binary modules use
 the same runtime when their architecture and Lua configuration match. Arbitrary
 long-path support is not promised.
 
-The executable embeds per-process UTF-8 `activeCodePage` and `longPathAware`
+`lua.exe` and `titanc.exe` embed per-process UTF-8 `activeCodePage` and `longPathAware`
 manifest declarations for Windows 11. This build does not change machine code
 pages or the OS long-path policy. The latter declaration is only the application
 opt-in: usable path lengths still depend on OS policy and each API in the path.
@@ -231,10 +274,12 @@ and [Windows DLL search order](https://learn.microsoft.com/en-us/windows/win32/d
 provider path to an absolute UTF-16 path and opens it with the zero-flag
 `LoadLibraryExW` call described above; it never changes the process DLL
 directories or `PATH`. Executables, the controlled Lua DLL, and native
-dependency DLLs share `bin`; Titan DLLs resolve from `lib/titan/0.6`. The
-default distribution root is the executable's parent directory, and wide
-environment access (`titan_win_push_environment`) preserves Unicode Titan path
-overrides and the distinction between an absent and an empty override. This
+dependency DLLs share `bin`; Titan DLLs resolve from `lib/titan/0.6`, which
+the run-time default `!;!/../lib/titan/0.6` reaches from `bin`. Wide
+environment access (`titan_win_push_environment`) preserves Unicode
+`TITAN_PATH_0_6`, `TITAN_PATH`, `TITAN_ROOT`, and `TITANC` values and the
+distinction between an absent and an empty value. The executable directory is
+`GetModuleFileNameW` converted to UTF-8, keeping a drive-root separator. This
 covers explicit dynamic module loads only, not initial EXE imports; Windows'
 already-loaded-module, KnownDLL, and API-set rules still apply.
 
@@ -259,13 +304,28 @@ query may prompt symbol-only membership checks, but a provider that claims the
 logical module cannot proceed to Lua metadata without a matching native query.
 Unix probes call `_abi`.
 
-Windows shims pass their logical name as a third `_loadlibglobal` argument. The
-helper first checks the canonical registry userdata and returns a closure
-holding that same userdata, without opening or ABI-checking the replacement
-pathname. Otherwise it maps the selected image, checks the native query, then
-returns the Lua opener. The shim's preceding `package.searchpath` step is the
-same as on Unix; direct helper calls cover canonical reuse with a missing
-pathname. Neither helper calls a plain-C query through a `lua_CFunction`.
+The [Titan package searcher](driver.md#the-titan-package-searcher) uses the
+same cached `titan_win_load_library` handle and checks the claimed module's
+`_abi_value` query before resolving `luaopen_<mangled>`, so no Windows path
+calls a plain-C query through a `lua_CFunction`. Its candidate occupancy test
+is `GetFileAttributesW`. When the lazy SDK fallback has to ask `titanc
+--print-root`, it looks up a bare program name (the default `titanc`, or a
+`TITANC` value containing no `\`, `/`, or `:`) only in the `PATH` entries,
+appending `.exe` when the name contains no `.`, so `titanc`, `titanc.exe`, and
+`my-titanc` all work. It does not use `SearchPathW` and never consults the
+current or the application directory; quoted entries and trailing separators
+are normalized, empty entries are skipped, and a relative entry is used as
+given. A miss reports `'<name>' was not found on PATH`. A `TITANC` with a
+separator or drive prefix is started as given, without an added extension.
+The child starts through `CreateProcessW` with argv only,
+`CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT`,
+the parent's environment block minus `LUA_INIT` and `LUA_INIT_5_5` (names
+compared case-insensitively), and a
+`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` limited to the `NUL` stdin/stderr handles
+and the pipe's write end. The internal `_loadlibglobal` helper accepts a third
+logical-name argument and returns an already initialized canonical module
+without opening or ABI-checking the replacement pathname; otherwise it maps
+the image, checks the native query, then returns the Lua opener.
 
 Provider loads invalidate the cached backtrace module snapshot (trace merging
 is summarized under [Experimental boundaries](#experimental-boundaries)); builds
@@ -320,8 +380,9 @@ part 0 of a split module carries. Part objects and module-private symbols never
 enter the `.def`, and `-Wl,--exclude-all-symbols` keeps them unexported.
 Hidden raw-address binding slots are never exported; canonical descriptor
 callbacks resolve later native function and slot addresses, and collision
-inventories are not export inventories. The support-only `luaopen_titan` keeps
-its explicit Lua-module export annotation. Missing module inventories fail
+inventories are not export inventories. The support module `titan.dll` is
+linked separately with `-Wl,--exclude-all-symbols`, and its explicitly
+`__declspec(dllexport)` `luaopen_titan` is its only export. Missing module inventories fail
 before an existing output is removed. Private `.def` files are removed after
 link success or failure. Private archive-validation DLLs receive the same
 complete inventory, and fresh-process validation checks the plain-C ABI before
@@ -373,10 +434,17 @@ flag arguments, override ordering, and invalid configurations without a Windows
 SDK or VM.
 
 `make -f Makefile.win lua-source-check` can run on Linux with Clang and
-`llvm-readobj`. It compiles real x64 COFF header consumers in four source-role
-combinations, checks C++ opener linkage and producer annotations, and compiles
-an actual Lua data definition. It neither substitutes Windows SDK headers nor
-builds a Windows DLL.
+`llvm-readobj`. It compiles real x64 COFF header consumers with the consumer
+definitions in the four `LUA_CORE`/`LUA_LIB` modes, in both C and C++. Every
+mode must import the internal `LUAI_*` functions and data through `__imp_`
+symbols. Public API names must be `__imp_` imports exactly while `LUA_API` is
+an import declaration (no `LUA_CORE`/`LUA_LIB`, and never `luaopen_base` in
+C++); otherwise direct references are asserted. A provider opener stays a
+plain, unmangled C name with no export annotation, and a third-party
+`LUALIB_API` definition is exported only in the `LUA_CORE`/`LUA_LIB` modes. A
+stock `lctype.o` compiled for the DLL must carry no export directive, because
+the link flag exports internal data. It neither substitutes Windows SDK
+headers nor builds a Windows DLL.
 
 On native CLANG64, `lua-check` verifies the exact DLL export inventory, imports,
 installed source/header bytes, and a real SDK consumer. It then relocates the
@@ -505,7 +573,9 @@ configures the Lua prefix as its rock tree, with CLANG64 tools and the matching
 `liblua55.a` import library. `compiler` runs the Titan rockspec through
 `luarocks make`; the rockspec selects `Makefile.win` on Windows. Its build pass
 prepares the native dependencies and runtime SDK, then builds the standard
-library with the in-tree compiler and private bootstrap. The copy-only install
+library with the in-tree compiler and the support module
+`<WINDOWS_BUILD_ROOT>/runtime/titan.dll` placed first on its `package.cpath`.
+The copy-only install
 pass and `post_install` payload publication are the same as on Unix; see
 [build and installation
 responsibilities](build-script-audit.md#installation-and-publication). Windows
@@ -530,16 +600,79 @@ for `bin/luarocks.exe`, so callers own replacement or reconfiguration of an
 existing installation. Direct standalone commands must set `LUAROCKS_CONFIG`;
 the executable does not automatically find the SDK's `etc/luarocks` directory.
 
-LuaRocks installs `bin/titanc.bat` and retains the Lua script at
-`lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc`. Build and native test helpers
-invoke that script with the selected `bin/lua.exe`, avoiding batch parsing.
+On Windows the compiler entry is the native `bin/titanc.exe`. LuaRocks records
+it in the rock manifest's `bin` table and deploys it as an ordinary program;
+there is no `bin/titanc.bat` and no extensionless `bin/titanc`. The unchanged
+`titanc` script is installed as the rock's Lua file
+`share/lua/5.5/titan-compiler/titanc.lua`, which `luarocks remove` deletes with
+the rest of the compiler. `scripts/install_compiler.mk` selects this layout
+when the including Makefile sets `TITANC_NATIVE` (`Makefile.win`:
+`<WINDOWS_BUILD_ROOT>/runtime/titanc.exe`); otherwise it installs the script as
+`bin/titanc`, as on Unix. LuaRocks 3.13's Windows deployment also writes an
+unrecorded `bin/titanc.lua` package-path helper beside the deployed `.exe`,
+which `luarocks remove` would leave behind. The Windows `post_install` publish
+step (`retire_windows_exe_helper` in `scripts/titan_install.lua`) deletes
+exactly that generated two-line helper and leaves a `bin/titanc.lua` with any
+other content alone, so the installed tree has no helper and uninstall needs no
+extra step.
+
+`titanc.exe` is upstream `lua.c` with a wide-character entry
+(`titan-runtime/titanc_windows.c`). Its `wmain` converts the UTF-16 command line
+to UTF-8 and calls `lua.c`'s renamed `main` with `<exe> -E
+<root>\share\lua\5.5\titan-compiler\titanc.lua ARGS...`, where `<root>` is the
+parent of the executable's directory. The script is therefore `arg[0]`, the
+frontend that object certificates hash, and no user argument is parsed as a
+Lua option. Because of `-E`, `LUA_INIT`, `LUA_INIT_5_5`, and the
+`LUA_PATH*`/`LUA_CPATH*` variables are ignored: the compiler modules, their
+dependencies, and the `titan` support module resolve through Lua's built-in
+Windows defaults, whose executable-relative entries (`!\lua\`, `!\`, and
+`!\..\share\lua\5.5\` for Lua files; `!\` and `!\..\lib\lua\5.5\` for C
+modules) come before the current-directory entries `.\?.lua`, `.\?\init.lua`,
+and `.\?.dll`. An installed module is therefore always taken from the SDK
+that contains the executable, and a moved SDK runs its own compiler; only a
+module missing from the SDK can be found in the current directory, as with
+the Unix compiler's `./?.lua`. An executable with no directory above its own
+fails with `titanc: cannot locate the installation root above this
+executable`. `titanc.exe --print-root` reports the usual [compiler
+root](driver.md#the-compiler-root). The executable compiles no Lua engine of its
+own: it imports only `lua55.dll`, `kernel32.dll`, and UCRT, and has no exports.
+Since it always runs its script, build workers use the `lua.exe` beside it and
+validation subprocesses use `<root>\bin\lua.exe`, never `titanc.exe`.
+
+Build and native test helpers run `bin/titanc.exe` directly.
 `spec/support/check_windows_compiler.sh` verifies installed dependencies, their PE
 imports, the compiler modules, and CLI loading from a different CWD in an SDK
-copy whose path contains spaces and Unicode. That gate invokes the retained
-script; LuaRocks' batch wrapper can contain installation-specific paths.
+copy whose path contains spaces and Unicode. It requires that no `bin/titanc`,
+`bin/titanc.bat`, or `bin/titanc.lua` is installed and that
+`titan-compiler/titanc.lua` equals the checkout `titanc`. In the relocated copy
+it checks `titanc.exe`'s PE imports and exports and its embedded manifest, runs
+`--help`, requires `--print-root` (also with `-v`) to print the relocated root,
+and builds a provider with `-j 2`. It then checks the `PATH`-only SDK fallback
+from a plain `lua.exe` host whose executable-relative roots hold no provider,
+with `TITAN_ROOT`, `TITANC`, `TITAN_PATH_0_6`, and `TITAN_PATH` unset: the
+default name, `TITANC=titanc`, and `TITANC=titanc.exe` with only the SDK `bin`
+on `PATH` select the SDK's provider, while with `titanc.exe` in the current and
+application directories but not on `PATH`, the default and `TITANC=titanc`
+report `'titanc' was not found on PATH`.
 
-`Makefile.win` builds `libtitan.a` from exactly `titan.o` and
-`minicoro.o`, plus the separate support-only `titan.dll` from `ltitanlib.o`.
+`scripts/build_windows_runtime.sh` builds `libtitan.a` from exactly `titan.o`,
+`minicoro.o`, `titan_path.o`, and `ltitanlib.o` (the Unix member order), and
+the support module `<WINDOWS_BUILD_ROOT>/runtime/titan.dll` from `ltitanlib.o`,
+`titan_path.o`, and the `lua55.dll` import library, linked with
+`-Wl,--exclude-all-symbols` so that `luaopen_titan` is its only export. It
+also builds the native compiler frontend `<WINDOWS_BUILD_ROOT>/runtime/titanc.exe`
+from the installed, configured `<prefix>/src/lua-5.5.1/lua.c` (compiled with
+`-DLUA_BUILD_AS_DLL -Dmain=titan_lua_main`), `titan-runtime/titanc_windows.c`,
+and the `vendor/windows-compiler/titanc.rc` resource, which embeds the
+`asInvoker`, UTF-8, long-path-aware `titanc.manifest`, linked against the
+`lua55.dll` import library with `-municode -Wl,--no-insert-timestamp`. Its
+objects use the compiler-host flags, like the private parser, and
+`runtime-build` passes the `RC` command (default `llvm-rc`). The shared
+`scripts/install_compiler.mk` recipe installs the support DLL as the ordinary
+Lua C module `lib/lua/5.5/titan.dll` (`Makefile.win` defines
+`TITAN_SUPPORT_MODULE` and `TITANC_NATIVE`) and the frontend as
+`bin/titanc.exe`. A direct `install` builds both through `runtime-build`; the
+LuaRocks install pass only checks that they exist (`check-support-module`).
 The private, namespaced LPegLabel archive contains exactly its five upstream
 translation units and remains build payload. All objects use the installed,
 configured Lua source headers and matching `lua55.dll` import library. The
@@ -559,26 +692,30 @@ header and the PEG archive stay in the build tree. Third-party notices and licen
 mingw32-make -f Makefile.win compiler-check runtime-check PREFIX=/c/Titan/sdk-validation
 ```
 
-Runtime staging seeds `lib/titan/0.6/titan.dll` only when absent and preserves
-any existing image, including a full standard library. It copies the runtime
-archive, public headers, license texts, and profile record directly. Callers own
-cleanup and SDK compatibility when changing native inputs.
+`install-titan-sdk` copies the runtime archive, public headers, license texts,
+and profile record directly; it never writes a provider under
+`lib/titan/0.6`. Callers own cleanup and SDK compatibility when changing
+native inputs.
 
-The runtime build compiles three runtime and five private parser translation
-units, archives the selected objects, and links the support DLL. Source/header
-timestamps decide which outputs need rebuilding; tool or flag changes require
+The runtime build compiles four runtime and five private parser translation
+units, archives the selected objects, and links the support DLL and
+`titanc.exe`. Source/header timestamps decide which outputs need rebuilding;
+tool or flag changes require
 caller-managed cleanup. `runtime-check` links the complete runtime and private
 PEG payload into a native consumer, checks permitted PE imports, and exercises
 Lua/PEG and explicit-runtime coroutine yield/resume/destruction. It verifies
-unchanged warm timestamps and proves that staging preserves an existing support
-image with extra payload. These checks cover the SDK foundation; complete Titan
+unchanged warm timestamps, the archive's member order, and the support DLL's
+single `luaopen_titan` export; a whole-archive consumer calls the archive's
+`luaopen_titan` through `extern int luaopen_titan(lua_State *)`, the shape a
+static language-server host uses. These checks cover the SDK foundation; complete Titan
 coroutine, standard-library, language-server, and extension behavior require
 their own native tests.
 
 ## Standard-provider build and publication
 
-`Makefile.win` uses the installed
-native compiler and the controlled runtime/native SDK:
+`Makefile.win` uses the installed native compiler `bin/titanc.exe` (or the
+native compiler program that `ROCK_TITANC` names, run directly) and the
+controlled runtime/native SDK:
 
 ```sh
 mingw32-make -f Makefile.win install-stdlib PREFIX=/c/Titan/sdk
@@ -591,20 +728,20 @@ image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image))
 into one `titan.dll`.
 `scripts/build_windows_stdlib.sh` passes `--output <WINDOWS_BUILD_ROOT>/out
 --source-first --incremental -j "$TITAN_JOBS" --tree "$winsource"` with the 26
-`STDLIB_ROOTS` and `-X "$winbuild/runtime/ltitanlib.o"
-"$winbuild/runtime/libtitan-lpeglabel.a"`, keeping generated C, objects,
-headers, the provider DLL, Lua shims, and the final-link certificate
-(`<WINDOWS_BUILD_ROOT>/out/.titan-links/<key>/record`) below that stage.
-`publish-stdlib` copies `<WINDOWS_BUILD_ROOT>/out/titan.dll` and the shims
-under its `titan/` directory into the canonical SDK locations; it does not read
-source-adjacent outputs. `TITAN_JOBS` bounds concurrent module-frontend workers,
+`STDLIB_ROOTS` and `-X "$winbuild/runtime/libtitan-lpeglabel.a"`, keeping
+generated C, objects, headers, the provider DLL, and the final-link certificate
+(`<WINDOWS_BUILD_ROOT>/out/.titan-links/<key>/record`) below that stage. The
+provider carries no `ltitanlib.o` and does not export `luaopen_titan`.
+`publish-stdlib` copies only `<WINDOWS_BUILD_ROOT>/out/titan.dll` to
+`lib/titan/0.6/titan.dll`; it does not read source-adjacent outputs.
+`TITAN_JOBS` bounds concurrent module-frontend workers,
 generated-C compilation, and C validation probe batches under the coordinator's
 slot ledger. The target neither reinstalls the compiler nor prepares those
 native inputs. `install-stdlib` builds that provider and then copies it;
-`publish-stdlib` copies an existing provider and its shims without rebuilding
-or validating them. The source rock instead builds the provider in
+`publish-stdlib` copies an existing provider without rebuilding
+or validating it. The source rock instead builds the provider in
 its default `all` target with the unpacked compiler sources, the controlled Lua
-program and the private bootstrap, as described in [build and installation
+program and the support module, as described in [build and installation
 responsibilities](build-script-audit.md#installation-and-publication).
 
 `mingw32-make -f Makefile.win binary-rock` uses the shared
@@ -631,9 +768,11 @@ cannot select another Lua installation. `titan-uninstall --luarocks PATH`
 selects an external frontend; otherwise cleanup tries the recorded executable,
 then `luarocks.exe` on `PATH`.
 
-`stdlib-check` is the separate artifact gate. It uses an isolated copy and a
-fresh Lua process to check exact PE exports, permitted imports, callable metadata
-against source objects and generated shims. Compiler
+`stdlib-check` is the separate artifact gate. It has no prerequisites and
+validates an existing stage: an isolated copy and a fresh Lua process check
+exact PE exports (the generated module protocols only), permitted imports,
+callable metadata against source objects, and the installed support module's
+`_executable_dir`, `_compiler_root`, and `_expand_titan_path` members. Compiler
 provider publication retains its own ABI and transactional behavior;
 `compiler-publication-check` exercises that contract independently of stdlib
 installation.
@@ -643,14 +782,13 @@ UV address helper's byte-order conversion. Its PE import audit permits
 `WS2_32.dll` explicitly. Ordinary compiled Titan clients call the provider and
 do not need this import library or private UV headers themselves.
 
-The installed files are `lib/titan/0.6/titan.dll` and one shim per root under
-`share/lua/5.5/titan`. Native tests use the DLL's ordinary `titan.test`
-implementation; no test-source payload is installed. No Titan `.a`
-provider or Titan import library is published. `--static` is unsupported on
-Windows. Removed logical modules do not trigger automatic stale-shim cleanup;
-build such a changed provider in a fresh output directory. A DLL mapped by
-another process blocks replacement, so close it before copying a new provider.
-Ordinary stdlib installation does not back up or roll back files.
+The installed files are `lib/titan/0.6/titan.dll` and, from compiler
+installation, the support module `lib/lua/5.5/titan.dll`. Native tests use the
+DLL's ordinary `titan.test` implementation; no test-source payload is
+installed. No Titan `.a` provider or Titan import library is published.
+`--static` is unsupported on Windows. A DLL mapped by another process blocks
+replacement, so close it before copying a new provider. Ordinary stdlib
+installation does not back up or roll back files.
 
 ## Windows DLL publication
 
@@ -658,19 +796,21 @@ This is the compiler's no-main Windows branch, distinct from the copy-only
 `publish-stdlib` above. It validates the generated source-object inventory
 against the linked DLL's callable ABI/types/layouts in a fresh Lua child,
 checking the plain-C ABI before any Lua metadata call. Only after that child
-exits does `driver.publish_windows_provider` publish the DLL and its exact
-physical-provider shims. Unix uses the paired archive/DSO path in [Publication
-and installation](static-compiled-modules.md#publication-and-installation).
+exits does `driver.publish_windows_provider(staged, destination,
+before_commit)` publish the DLL. Unix uses the paired archive/DSO path in
+[Publication and installation](static-compiled-modules.md#publication-and-installation).
 
 `titan-compiler/windows_publication.lua` has no native-loader or driver
 dependency; its caller supplies native filesystem operations. `publish`
-prepares destination-local copies, copies predecessor bytes into sibling
-backups, invokes any `before_commit` hook (used by `titanc` to invalidate
-`<output>/.titan-links/<key>/record` before the first public mutation), and
-replaces companions before the DLL. `publish_program` applies the same
+takes `{ source, destination }` entries, prepares destination-local copies,
+copies predecessor bytes into sibling backups, invokes any `before_commit`
+hook (used by `titanc` to invalidate `<output>/.titan-links/<key>/record`
+before the first public mutation), and commits the entries in caller order,
+the commit point last. The library branch publishes exactly one entry, the
+provider DLL. `publish_program` applies the same
 recoverable transaction to a standalone or test `{ provider, executable }`
-pair (even when `--exe` places the launcher outside `--output`), committing any
-companions, then the provider DLL, and finally the launcher EXE. Neither path
+pair (even when `--exe` places the launcher outside `--output`), committing
+the provider DLL and then the launcher EXE. Neither path
 moves an existing DLL or EXE aside: Windows can rename a mapped image but then
 refuse its deletion. Replacing the still-existing mapped image fails before
 changing its public pathname; caught failures restore only already committed
@@ -754,11 +894,6 @@ toolchain and linker arguments that the native library policy recognizes;
 otherwise inspect the stage directories, move any data you need, and delete
 the abandoned ones yourself. There is no flag to force or skip retirement.
 
-Stale-shim retirement is not implemented on Windows: the prior DLL does not
-carry the old physical membership inventory, and a matching banner or
-logical-name prefix is not proof of ownership. `driver.publish_windows_provider`
-therefore retires no shims for removed logical modules.
-
 ## Shared native standard-library tests
 
 Build and publish a validation-profile provider into its separate SDK, then run
@@ -829,7 +964,7 @@ for manifest set differences:
 3. **Fixed C fixture objects:** for each of `uv_stdio_probe` (also an
    aggregate `--c-source` helper), `sqlite3_worker_fixture`,
    `ssl_allocator_fixture`, `ssl_error_strings`, and `os_descriptor_limit`, the
-   harness runs the workspace's `sdk/bin/lua.exe` and retained `titanc` script
+   harness runs the workspace's `sdk/bin/titanc.exe`
    with `-c --incremental --print-c-objects -j "$TITAN_JOBS" --output
    "$work/native/$fixture"`, `--cflag=-std=c99 --cflag=-Wall --cflag=-Wextra
    --cflag=-Werror -I "$winprefix/src/lua-5.5.1"`, one `--cflag` per token of
@@ -840,7 +975,7 @@ for manifest set differences:
    a regular file, and copies it to `work/cwd/.titan-tests/$fixture.o` only
    when `cmp -s` reports a change. Stale `.native` nodes from another checkout
    location are never selected.
-4. **Aggregate compilation:** from `work/sdk`, the harness invokes `titanc`
+4. **Aggregate compilation:** from `work/sdk`, the harness invokes `sdk/bin/titanc.exe`
    with `--output "$output" --test --incremental --no-uv-bootstrap -j
    "$TITAN_JOBS" --exe "$winprefix/bin/titan-stdlib-tests.exe" --tree
    "$test_tree" --test-dir "$test_tree"`, the three aggregate C helpers

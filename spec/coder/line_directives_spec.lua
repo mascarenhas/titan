@@ -71,7 +71,6 @@ local function clean_cli_artifacts()
     os.remove(MODULE .. ".dll")
     os.remove(MODULE .. ".so")
     os.remove(MODULE .. ".a")
-    os.remove(MODULE .. ".lua")
     remove_tree(MODULE .. ".so.dSYM")
 end
 
@@ -142,7 +141,7 @@ describe("generated C line directives", function()
                 "--tree", workspace,
             }
             if platform.windows then
-                table.insert(argv, 2, "TITAN_ROCKS_ROOT=" .. PREFIX)
+                table.insert(argv, 2, "TITAN_ROOT=" .. PREFIX)
             else
                 lua_workspace = async_stdlib.workspace("line-directives")
                 argv[#argv + 1] = "--lua"

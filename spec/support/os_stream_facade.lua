@@ -156,11 +156,12 @@ end
 
 -- The facade fixtures are deliberately self-contained exact-provider graphs.
 -- Running them must not require (or fall back to) the shared combined standard
--- image, which may be absent or concurrently replaced by packaging tests.
+-- image, which may be absent or concurrently replaced by packaging tests. The
+-- workspace's own support module installs the Titan searcher.
 function M.run_lua_source(workspace, layout, source, options)
     options = options or {}
-    local cpath = workspace .. "/?.so;" ..
-        workspace .. "/titan-runtime/bootstrap/?.so"
+    local cpath = workspace .. "/titan-runtime/bootstrap/?.so;" ..
+        workspace .. "/?.so"
     local lua_path = workspace .. "/?.lua"
     local command = {
         "env -u LUA_PATH -u LUA_CPATH" ..
@@ -176,6 +177,8 @@ function M.run_lua_source(workspace, layout, source, options)
         command[#command + 1] = quote(argument)
     end
     command[#command + 1] = quote(host_lua())
+    command[#command + 1] = "-e"
+    command[#command + 1] = quote('require "titan"')
     command[#command + 1] = "-e"
     command[#command + 1] = quote(source)
     return async_stdlib.run(

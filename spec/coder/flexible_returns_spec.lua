@@ -34,7 +34,7 @@ describe("flexible return code generation", function()
         if h.verbose then return end
         for _, name in ipairs({ "test", "flex_provider", "flex_consumer" }) do
             for _, suffix in ipairs({ ".c", ".o", ".so", ".dll", ".dll.def",
-                                      ".lua", ".a", ".ffi.h", ".titan.h" }) do
+                                      ".a", ".ffi.h", ".titan.h" }) do
                 os.remove(name .. suffix)
             end
         end

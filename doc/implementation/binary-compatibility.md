@@ -189,9 +189,11 @@ binding. Foreign C declarations keep their normal linkage policy.
 Titan-owned runtime helpers use `TITAN_RUNTIME_FUNC` (`titan-runtime/titan/ffi.h`),
 independently of Lua's `LUAI_FUNC`. Each provider links its runtime helpers
 locally. The annotation is `visibility("internal")` on GCC-compatible
-ELF/Mach-O targets and plain `extern` elsewhere, including Windows. A
-controlled shared Lua build can therefore mark its own internal API for DLL
-export/import without making Titan helpers imports from the Lua DLL.
+ELF/Mach-O targets and plain `extern` elsewhere, including Windows. Titan-owned
+Windows compiles redefine `LUAI_FUNC` as a `__declspec(dllimport)` declaration
+so they import Lua's internal API from the stock `lua55.dll`
+([consumer definitions](windows-build.md#one-controlled-lua-dll-and-its-sdk)),
+and the separate annotation keeps Titan helpers from becoming imports too.
 
 For an explicit dynamic dependency, `coder/module.lua` uses:
 
@@ -214,6 +216,17 @@ including inherited descriptors for modules not yet initialized in its source
 state. For verification the invariant is ordering: ABI and consumer
 compatibility checks precede initialization for both copied providers and
 newly opened DSOs.
+
+`require` from Lua follows the same order through the [Titan package
+searcher](driver.md#the-titan-package-searcher). A claimed candidate's ABI is
+checked with `titan_check_abi_entry` (`titan-runtime/titan_path.c`, which the
+searcher shares with generated imports; on Windows through `_abi_value`) before
+the searcher returns `luaopen_<mangled>`, and that opener's [file-load
+name guard](codegen-overview.md#lua-entries-and-abi-type-and-layout-metadata)
+rejects a provider for a different logical name with the same mangled spelling
+before `_init` runs. An ABI mismatch reports `Titan compiled module '<file>'
+ABI mismatch: expected 2 but found <n>`. Lua callers have no consumer
+requirements, so the searcher performs no compatibility check.
 
 Explicit imports are selected, checked, and initialized in sequence: an earlier
 initializer may establish a later import's canonical module. After each

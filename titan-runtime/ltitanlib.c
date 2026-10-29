@@ -42,6 +42,22 @@
 #define titan_cast_func(t, p) ((t)(p))
 #endif
 
+/* Implemented by titan_path.c, linked beside this file in the support module
+** and in libtitan.a. Unix builds this file against the public Lua headers
+** only, so it repeats these prototypes instead of including titan.h. */
+extern void titan_install_searcher(lua_State *L);
+extern int titan_path_lua_executable_dir(lua_State *L);
+extern int titan_path_lua_compiler_root(lua_State *L);
+extern int titan_path_lua_expand(lua_State *L);
+
+/* Stock Lua's LUAMOD_API is a dllimport under LUA_BUILD_AS_DLL and plain
+** extern otherwise; the Windows support DLL must export its opener itself. */
+#if defined(_WIN32)
+#define TITAN_SUPPORT_API __declspec(dllexport)
+#else
+#define TITAN_SUPPORT_API LUAMOD_API
+#endif
+
 static void push_libs(lua_State *L, const char *registry_key) {
   lua_pushstring(L, registry_key);
   lua_rawget(L, LUA_REGISTRYINDEX);
@@ -188,13 +204,13 @@ static int lazyload(lua_State *L) {
 #endif
 }
 
-/* Internal Lua-shim helper. Canonical path keys make aliases share one entry
+/* Internal lazy/global loader helper. Canonical path keys make aliases share one entry
 ** in this state's private cache, but the cache remains distinct from both
 ** Lua's C-library handles and the compiler-only lazy/local cache above. The
 ** first request in each Lua state therefore always performs a lazy/global
 ** dlopen, which can promote an image that was mapped locally beforehand.
 ** Handles are stored as light userdata and are deliberately never closed. */
-/* Implementation notes: doc/implementation/lua-interop-internals.md#4-generated-shim-lazyglobal-loading-and-promotion */
+/* Implementation notes: doc/implementation/lua-interop-internals.md#4-the-titan-package-searcher */
 static int lazyglobalload(lua_State *L) {
 #if defined(_WIN32)
   const char *symbol = titan_win_loader_string(L, 2);
@@ -224,7 +240,7 @@ static int lazyglobalload(lua_State *L) {
   lib = titan_win_load_library(L, filename, TITAN_LAZY_GLOBAL_LIBS_KEY);
   if (lib == NULL) return windows_open_error(L);
   if (strncmp(symbol, "luaopen_", 8) != 0)
-    return push_loader_error(L, "Titan shim requires a luaopen_ entry", "init");
+    return push_loader_error(L, "Titan opener lookup requires a luaopen_ entry", "init");
   query = lua_pushfstring(L, "%s_abi_value", symbol + 8);
   results = push_abi_value(L, lib, query);
   if (results != 1) return results;
@@ -1667,6 +1683,9 @@ static const luaL_Reg titanlib[] = {
   { "_sha256_stream", sha256_stream_new },
   { "_output_lock_open", output_lock_open },
   { "_stat_precise", stat_precise },
+  { "_executable_dir", titan_path_lua_executable_dir },
+  { "_compiler_root", titan_path_lua_compiler_root },
+  { "_expand_titan_path", titan_path_lua_expand },
 #if defined(_WIN32)
   { "_abivalue", abivalue },
   { "_native_process_tree_guard", native_process_tree_guard },
@@ -1684,7 +1703,10 @@ static const luaL_Reg titanlib[] = {
   { NULL, NULL }
 };
 
-LUAMOD_API int luaopen_titan(lua_State *L) {
+/* Opening the support module also gives this Lua state the Titan searcher.
+** It does not initialize the standard library or compute any path. */
+TITAN_SUPPORT_API int luaopen_titan(lua_State *L) {
+  titan_install_searcher(L);
   if (luaL_newmetatable(L, TITAN_OUTPUT_LOCK_TYPE)) {
     luaL_newlib(L, output_lock_methods);
     lua_setfield(L, -2, "__index");

@@ -65,36 +65,23 @@ function publication.publish(entries, fs, options)
         local destinations = {}
         for _, entry in ipairs(entries) do
             need(type(entry.destination) == "string", "missing publication destination")
+            need(type(entry.source) == "string", "missing publication source")
             local key = entry.destination:gsub("\\", "/"):lower()
             need(not destinations[key], "duplicate publication destination: " .. entry.destination)
             destinations[key] = true
             local existing = regular(entry.destination, true)
-            if entry.source then
-                need(entry.source:gsub("\\", "/"):lower() ~= key,
-                    "publication source aliases destination: " .. entry.destination)
-                local source = regular(entry.source)
-                need(not existing or source.device == nil or source.inode == nil or
-                    source.device ~= existing.device or source.inode ~= existing.inode,
-                    "publication source aliases destination: " .. entry.destination)
-            end
-            if options.validate_existing then
-                need(options.validate_existing(entry, existing))
-            end
-            local item = { public = entry.destination, remove = entry.remove }
+            need(entry.source:gsub("\\", "/"):lower() ~= key,
+                "publication source aliases destination: " .. entry.destination)
+            local source = regular(entry.source)
+            need(not existing or source.device == nil or source.inode == nil or
+                source.device ~= existing.device or source.inode ~= existing.inode,
+                "publication source aliases destination: " .. entry.destination)
+            local item = { public = entry.destination }
             prepared[#prepared + 1] = item
-            if not entry.remove then
-                item.stage = need(fs.reserve(entry.destination))
-                if entry.contents ~= nil then
-                    local file = need(io.open(item.stage, "wb"))
-                    local wrote, write_error = file:write(entry.contents)
-                    local closed, close_error = file:close()
-                    need(wrote and closed, write_error or close_error)
-                else
-                    need(copy_file(assert(entry.source), item.stage))
-                end
-                item.unchanged = existing and
-                    same_file_contents(item.stage, item.public)
-            end
+            item.stage = need(fs.reserve(entry.destination))
+            need(copy_file(entry.source, item.stage))
+            item.unchanged = existing and
+                same_file_contents(item.stage, item.public)
         end
         -- Copy predecessors without renaming them. Windows can rename a mapped
         -- image, but rejects replacing that image; keep it at the public path
@@ -108,15 +95,12 @@ function publication.publish(entries, fs, options)
         -- A final-link success marker must disappear before the first public
         -- mutation. Preparation/backups above leave the predecessor intact.
         if options.before_commit then need(options.before_commit()) end
-        -- The caller orders the provider last, after its exact shim/source set.
+        -- The caller orders its commit point (the provider or launcher) last.
         for index, item in ipairs(prepared) do
-            if not item.unchanged and item.stage then
+            if not item.unchanged then
                 item.replacement_attempted = true
                 need(fs.replace(item.stage, item.public))
                 item.stage = nil
-                item.committed = true
-            elseif item.backup then
-                need(fs.remove(item.public))
                 item.committed = true
             end
             if not item.unchanged and options.after_commit then
@@ -173,11 +157,7 @@ function publication.publish_program(request, fs, options)
         not request.executable.source then
         return nil, "Windows program publication requires staged DLL and EXE"
     end
-    local entries = {}
-    for _, entry in ipairs(request.companions or {}) do entries[#entries + 1] = entry end
-    entries[#entries + 1] = request.provider
-    entries[#entries + 1] = request.executable
-    return publication.publish(entries, fs, options)
+    return publication.publish({ request.provider, request.executable }, fs, options)
 end
 
 return publication

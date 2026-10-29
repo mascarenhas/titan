@@ -12,8 +12,9 @@ build_root=$2
 check_root="$build_root/lua-check"
 mkdir -p "$check_root"
 
-# The reviewed default-source export inventory is independently derived from
-# the pinned public/internal declarations, including all four exported arrays.
+# The reviewed stock-source export inventory: the public declarations, the
+# internal functions and data, and lua_ident, all from -DLUA_BUILD_AS_DLL
+# plus the DLL link's --export-all-symbols.
 llvm-readobj --coff-exports "$prefix/bin/lua55.dll" > "$check_root/exports.txt"
 perl -ne 'print "$1\n" if /^  Name: ([^\r\n]+)\r?$/' "$check_root/exports.txt" | LC_ALL=C sort > "$check_root/export-names.txt"
 diff -u spec/fixtures/windows/lua-5.5.1-exports.txt "$check_root/export-names.txt"
@@ -58,11 +59,18 @@ cmp "$build_root/lua-5.5.1/src/lua.hpp" "$prefix/include/lua.hpp"
 CC=${CC:-clang} perl -MText::ParseWords=shellwords -e 'my @a = shellwords($ENV{CC}); die "Invalid CC command\n" unless @a; print "$_\0" for @a' > "$check_root/compiler.argv"
 mapfile -d '' -t compiler < "$check_root/compiler.argv"
 titan_windows_raw_flags "$check_root" LUA
-"${compiler[@]}" -std=c99 -Wall -Wextra "${cppflags[@]}" "${cflags[@]}" -Werror \
+# The controlled Lua DLL exposes its internals; a consumer names those imports
+# explicitly instead of relying on MinGW auto-import for data symbols.
+lua_dll_imports=(-DLUA_BUILD_AS_DLL
+  '-DLUAI_FUNC=__declspec(dllimport) extern'
+  '-DLUAI_DDEC(dec)=__declspec(dllimport) extern dec' '-DLUAI_DDEF=')
+"${compiler[@]}" -std=c99 -Wall -Wextra "${cppflags[@]}" "${cflags[@]}" "${lua_dll_imports[@]}" -Werror \
   -I "$prefix/src/lua-5.5.1" -c spec/fixtures/windows/lua_sdk_probe.c \
   -o "$check_root/consumer.o"
 llvm-readobj --symbols "$check_root/consumer.o" > "$check_root/consumer-symbols.txt"
-for name in lua_ident luai_ctype_ luaP_opmodes luaT_typenames_; do
+# The internal helpers are named imports; lua_ident is a stock plain
+# declaration and reaches the DLL through ordinary data auto-import.
+for name in luai_ctype_ luaP_opmodes luaT_typenames_; do
   grep -F "Name: __imp_$name" "$check_root/consumer-symbols.txt" >/dev/null
 done
 "${compiler[@]}" "${cppflags[@]}" "${cflags[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
@@ -97,7 +105,7 @@ cp spec/fixtures/windows/lua_loader_probe.lua "$probe_root/probe.lua"
 "${compiler[@]}" "${cppflags[@]}" "${cflags[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
   -Xlinker --out-implib -Xlinker "$probe_root/loader-dependency.dll.a" \
   -o "$probe_root/titan_lua_loader_dependency.dll" spec/fixtures/windows/lua_loader_dependency.c
-"${compiler[@]}" "${cppflags[@]}" "${cflags[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols -I "$prefix/include" \
+"${compiler[@]}" "${cppflags[@]}" "${cflags[@]}" "${lua_dll_imports[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols -I "$prefix/include" \
   -o "$provider/titan_loader_canary.dll" spec/fixtures/windows/lua_loader_canary.c \
   "$probe_root/loader-dependency.dll.a" "$prefix/lib/liblua55.a"
 # Each invocation is fresh: an earlier mapping cannot satisfy a later lookup.

@@ -105,7 +105,7 @@ local function run_cmd(argv, cwd)
             stderr_to_stdout = true,
             -- Windows runtime outputs belong to its installed private SDK,
             -- not the checkout's Unix Makefile/runtime archive.
-            env = platform.windows and { TITAN_ROCKS_ROOT = PREFIX } or nil,
+            env = platform.windows and { TITAN_ROOT = PREFIX } or nil,
         })
     end)
     if previous then assert(lfs.chdir(previous)) end
@@ -456,7 +456,7 @@ assert(module.exercise())
         assert.equal(old_o, read_file(stem .. ".o"))
     end)
 
-    it("preserves authored headers that alias final program, provider or shim outputs", function()
+    it("preserves authored headers that alias final program or provider outputs", function()
         local frontend = cli_frontend(workspace .. "/reject_frontend.lua", [[
 require("titan-compiler.driver").compile_modules = function()
     error("generated compilation must not start after a preflight collision")
@@ -465,18 +465,17 @@ require("titan-compiler.process").start_worker = function()
     error("build workers must not start after a preflight collision")
 end
 ]])
-        for index, kind in ipairs({ "executable", "provider", "shim" }) do
+        for index, kind in ipairs({ "executable", "provider" }) do
             local src, out = workspace .. "/final-src" .. index, workspace .. "/final-out" .. index
             local is_program = kind == "executable"
             local name = is_program and "app" or "library"
-            local shims, provider = assert(driver.plan_module_shims(name, { name }, out))
+            local provider = assert(driver.provider_output_path(name, out))
             local header
             if kind == "executable" then
                 header = platform.windows
                     and assert(driver.windows_program_paths("app", nil, nil, out)).executable
                     or out .. "/app"
-            elseif kind == "provider" then header = provider
-            else header = shims[1].filename end
+            else header = provider end
             local contents = "#define R2_HEADER_VALUE 7\n"
             write_file(header, contents)
             local declaration = is_program
@@ -489,8 +488,7 @@ end
             local ok, output = run_cmd({ LUA, "-E", frontend, "--tree", src,
                 "-o", out, "--c-parts", "4", name })
             assert.is_false(ok, output)
-            local expected = kind == "shim" and "refusing to overwrite unrecognized Lua file" or "aliases input"
-            assert.truthy(output:find(expected, 1, true), output)
+            assert.truthy(output:find("aliases input", 1, true), output)
             assert.equal(contents, read_file(header))
             assert.equal("previous generated C", read_file(out .. "/" .. name .. ".c"))
             assert.equal("previous object", read_file(out .. "/" .. name .. ".o"))
@@ -1147,15 +1145,12 @@ end
                 gen_objs[1].filename, gen_objs[1].modname))
             assert(driver.validate_generated_objects(gen_objs, target))
 
-            local shims, provider_out = assert(
-                driver.plan_module_shims("pkg", linked_names, driver.OUTPUT_ROOT))
+            local provider_out = assert(
+                driver.provider_output_path("pkg", driver.OUTPUT_ROOT))
             local dso_path = provider_out
             assert(driver.compile_library_output(
                 dso_path, ofiles, nil, false, nil, {}, nil, dso_path,
                 platform.windows and linked_names or nil))
-            for _, shim in ipairs(shims) do
-                write_file(shim.filename, shim.contents)
-            end
             local archive_path
             if not platform.windows then
                 archive_path = dso_path:gsub("[.]so$", ".a")
@@ -1200,9 +1195,11 @@ end
         -- calls, closures, transfer, protobuf codecs, reflection, and foreign bindings.
         for _, variant in ipairs({ unsplit, split }) do
             local script = workspace .. "/verify_run.lua"
-            write_file(script, string.format([[
-package.path = %q .. "/?.lua;" .. package.path
-package.cpath = %q .. "/?" .. %q .. ";" .. package.cpath
+            -- `pkg.main`/`pkg.dep` share one prefix provider, so the child
+            -- installs the Titan searcher through the support module and
+            -- names the provider root; no Lua shims are generated.
+            write_file(script, [[
+require "titan"
 local main = require("pkg.main")
 local dep = require("pkg.dep")
 local total, formatted, matched = main.exercise_all(7)
@@ -1214,8 +1211,10 @@ assert(main.imported_callback_identity(), "source-imported callback address dive
 local box = dep.make_box(10)
 assert(box.value == 13)
 print("VARIANT_OK")
-]], variant.out_dir, variant.out_dir, platform.windows and ".dll" or ".so"))
-            local ok, out = run_cmd({ LUA, "-E", script })
+]])
+            local ok, out = run_cmd({ "env",
+                "TITAN_PATH_0_6=" .. variant.out_dir .. ";;",
+                LUA, "-E", script })
             assert.is_true(ok, out)
             assert.truthy(out:find("VARIANT_OK", 1, true), out)
         end
@@ -1334,7 +1333,7 @@ local results = driver.compile_modules({ {
 assert(results[1].ok == nil, "injected C compilation unexpectedly succeeded")
 ]], ROOT, MULTI_CONSTRUCT_SOURCE, source_path, wrapper))
         local ok, output = run_cmd({
-            "env", "TITAN_ROCKS_ROOT=" .. PREFIX, LUA, probe,
+            "env", "TITAN_ROOT=" .. PREFIX, LUA, probe,
         })
         assert.is_true(ok, output)
         local position = 0

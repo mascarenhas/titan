@@ -6,10 +6,14 @@ if [[ $# != 2 || ${MSYSTEM:-} != CLANG64 ]]; then
 fi
 build_root=$(cd "$1" && pwd)
 prefix=$(cd "$2" && pwd)
-[[ -f $build_root/runtime/titan.dll && -f $prefix/bin/lua.exe ]]
+image="$build_root/runtime/titan.dll"
+[[ -f $image && -f $prefix/bin/lua.exe ]] || {
+  echo "missing support image or interpreter: $image" >&2
+  exit 1
+}
 stage=$(mktemp -d "$build_root/.publication-check.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
-cp "$build_root/runtime/titan.dll" "$stage/support.dll"
+cp "$image" "$stage/support.dll"
 cp titan-compiler/windows_publication.lua "$stage/windows_publication.lua"
 cp spec/support/windows_publication_probe.lua "$stage/probe.lua"
 export MSYS2_ARG_CONV_EXCL='*'

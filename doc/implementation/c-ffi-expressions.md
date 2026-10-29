@@ -287,8 +287,8 @@ workspace failures, and cleanup failures, remain retryable.
 
 The persistent directory is `<prefix>/var/cache/titan-probes/<VERSION>`
 (`cprobe_cache.VERSION`, currently 2; `driver.PROBE_CACHE_DIRECTORY`). The
-prefix is an absolute `TITAN_PREFIX`, otherwise `driver.TITAN_ROOT`, the
-installation recovered from `package.cpath`. Each source has one bounded record
+prefix is `TITAN_PREFIX`, otherwise `driver.TITAN_ROOT`, the [compiler
+root](driver.md#the-compiler-root). Each source has one bounded record
 at `<digest>.result` for either outcome. An accepted enum-carrier query also
 stores its typed selection result: match count and carrier identifier (the
 identifier sum when several match).

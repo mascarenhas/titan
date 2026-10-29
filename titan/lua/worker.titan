@@ -9,6 +9,9 @@ foreign import "stdlib.h"
 foreign import "string.h"
 foreign import "native.h"
 
+-- Every independent state, including each thread child, gets the Titan
+-- searcher after its libraries and copied native preloads. It computes its own
+-- Titan path on first use; nothing about the creator's path is inherited.
 local foreign function lua_state_open_libraries(state: *lua_State): int
   local initialization = ffi.lua_touserdata(state, 1) as foreign *titan_lua_open
   ffi.luaL_openselectedlibs(state, ~0, 0)
@@ -17,6 +20,7 @@ local foreign function lua_state_open_libraries(state: *lua_State): int
     ffi.titan_module_preload(
       state, entry.name, entry.length, entry.loader, entry.symbols)
   end
+  ffi.titan_install_searcher(state)
   return 0
 end
 

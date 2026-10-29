@@ -67,6 +67,32 @@ static void expect_error(lua_State *L, lua_CFunction function,
     lua_settop(L, top);
 }
 
+/* The scratch runtime keeps this probe in bin/ beside lib/lua/5.5 and
+** lib/titan/0.6, so its own executable names both without environment help. */
+static void fixture_runtime_root(char *root, size_t size) {
+    static const char suffix[] = "\\bin\\runtime-loader-probe.exe";
+    wchar_t module[32768];
+    char buffer[sizeof(module) / sizeof(module[0])];
+    DWORD length = GetModuleFileNameW(NULL, module,
+        (DWORD)(sizeof(module) / sizeof(module[0])));
+    int bytes, separator;
+    assert(length > 0 && length < sizeof(module) / sizeof(module[0]));
+    bytes = WideCharToMultiByte(CP_UTF8, 0, module, (int)length, buffer,
+        (int)(sizeof(buffer) - 1), NULL, NULL);
+    assert(bytes > 0);
+    buffer[bytes] = '\0';
+    assert(strlen(buffer) > sizeof(suffix) - 1 &&
+        strcmp(buffer + strlen(buffer) - (sizeof(suffix) - 1), suffix) == 0);
+    for (separator = bytes - 1; separator > 0 && buffer[separator] != '\\'; separator--);
+    assert(separator > 0);
+    buffer[separator] = '\0';  /* drop the executable name: ...\bin */
+    for (separator--; separator > 0 && buffer[separator] != '\\'; separator--);
+    assert(separator > 0);
+    buffer[separator] = '\0';  /* drop bin: the runtime root */
+    assert(strlen(buffer) < size);
+    memcpy(root, buffer, strlen(buffer) + 1);
+}
+
 static void run_lua(lua_State *L, const char *source) {
     if (luaL_dostring(L, source) != LUA_OK) {
         fprintf(stderr, "%s\n", lua_tostring(L, -1));
@@ -91,15 +117,49 @@ static int initialize_provider(lua_State *L) {
     return 0;
 }
 
+/* The support module is an ordinary Lua native module installed under the
+** package cpath, so open it the way a Lua host does instead of feeding an
+** absolute image path to the Titan provider search. */
+static void load_support(lua_State *L, const char *path) {
+    const char *message;
+    int base = lua_gettop(L);
+    lua_getglobal(L, "package");
+    lua_getfield(L, -1, "loadlib");
+    lua_remove(L, -2);
+    lua_pushstring(L, path);
+    lua_pushliteral(L, "luaopen_titan");
+    /* Success leaves the opener alone; failure returns fail, message, where,
+    ** and a raised error leaves one error object. */
+    if (lua_pcall(L, 2, LUA_MULTRET, 0) != LUA_OK
+            || !lua_isfunction(L, base + 1)) {
+        message = lua_gettop(L) >= base + 2
+            ? lua_tostring(L, base + 2) : lua_tostring(L, -1);
+        fprintf(stderr, "cannot load support module %s: %s\n", path,
+            message != NULL ? message : "(non-string error)");
+        abort();
+    }
+    lua_settop(L, base + 1);
+    if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
+        message = lua_tostring(L, -1);
+        fprintf(stderr, "support module %s failed to open: %s\n", path,
+            message != NULL ? message : "(non-string error)");
+        abort();
+    }
+}
+
 int main(int argc, char **argv) {
     typedef const char *(*query_fn)(void);
     lua_State *L = luaL_newstate();
     HMODULE provider;
     query_fn query;
+    char runtime_root[2048];
+    char support_path[2048];
+    int written;
+    fixture_runtime_root(runtime_root, sizeof(runtime_root));
     assert(L != NULL);
     luaL_checkversion(L);
     luaL_openlibs(L);
-    titan_init_paths(L);
+    titan_install_searcher(L);
     expect_error(L, environment_initial_error, "", "Windows error 87");
     expect_error(L, environment_retry_error, "", "Windows error 5");
 
@@ -123,11 +183,12 @@ int main(int argc, char **argv) {
     expect_error(L, check_provider, "fixture-missing.dll", "missing ABI symbol");
     expect_error(L, check_provider, "fixture-null.dll", "invalid ABI marker");
 
-    lua_getfield(L, LUA_REGISTRYINDEX, TITAN_ROOT_KEY);
+    lua_pushstring(L, runtime_root);
     lua_setglobal(L, "fixture_root");
-    lua_pushcfunction(L, titan_cast_func(lua_CFunction,
-        loadsym(L, loadlib(L, "titan.dll"), "luaopen_titan")));
-    lua_call(L, 0, 1);
+    written = snprintf(support_path, sizeof(support_path),
+        "%s/lib/lua/5.5/titan.dll", runtime_root);
+    assert(written > 0 && (size_t)written < sizeof(support_path));
+    load_support(L, support_path);
     lua_setglobal(L, "support");
     lua_pushcfunction(L, errorhandler);
     lua_setglobal(L, "fixture_errorhandler");
@@ -200,7 +261,7 @@ int main(int argc, char **argv) {
     assert(L != NULL);
     luaL_checkversion(L);
     luaL_openlibs(L);
-    titan_init_paths(L);
+    titan_install_searcher(L);
     lua_pushcfunction(L, initialize_provider);
     assert(lua_pcall(L, 0, 0, 0) == LUA_OK);
     run_lua(L, "assert(debug.getregistry()['fixture.init.calls'] == 2)");

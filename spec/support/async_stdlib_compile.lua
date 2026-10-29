@@ -27,12 +27,6 @@ if not root then error(errors, 0) end
 if #errors ~= 0 then error(table.concat(errors, "\n"), 0) end
 
 local has_main = checker.has_main(driver.imported[modname].ast)
-local shim_plans
-if not has_main then
-    local shim_error
-    shim_plans, shim_error = driver.plan_module_shims(modname, { modname })
-    if not shim_plans then error(shim_error, 0) end
-end
 
 local objects = {}
 for name, imported in pairs(driver.imported) do
@@ -54,6 +48,4 @@ else
     local ok, err = driver.compile_library(modname, objects, nil, false,
         extra_objects)
     if not ok then error(err, 0) end
-    local wrote, write_error = driver.write_module_shims(shim_plans)
-    if not wrote then error(write_error, 0) end
 end

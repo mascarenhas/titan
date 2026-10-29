@@ -72,7 +72,7 @@ static int fixture_finalize(lua_State *L) {
     return 0;
 }
 
-LUAMOD_API int fixture_make_finalizer(lua_State *L) {
+EXPORT int fixture_make_finalizer(lua_State *L) {
     lua_newuserdatauv(L, 1, 0);
     lua_newtable(L);
     lua_pushcfunction(L, fixture_finalize);
@@ -112,13 +112,13 @@ EXPORT Udata *fixture_gamma_init(lua_State *L) {
     return module_state(L, "Titan module fixture.gamma", gamma_symbols);
 }
 
-LUAMOD_API int luaopen_fixture_alpha(lua_State *L) {
+EXPORT int luaopen_fixture_alpha(lua_State *L) {
     fixture_alpha_init(L);
     lua_getfield(L, LUA_REGISTRYINDEX, "Titan module fixture.alpha");
     return 1;
 }
 
-LUAMOD_API int luaopen_fixture_gamma(lua_State *L) {
+EXPORT int luaopen_fixture_gamma(lua_State *L) {
     fixture_gamma_init(L);
     lua_getfield(L, LUA_REGISTRYINDEX, "Titan module fixture.gamma");
     return 1;

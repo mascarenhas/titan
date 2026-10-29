@@ -1,7 +1,7 @@
 # WebSocket ownership and framing
 
 `titan/websocket/` is one folder module with one nominal schema, native unit,
-opener and Lua shim. The public boundary is documented in
+and Lua opener. The public boundary is documented in
 [WebSocket messages](../language/standard-library-websocket.md). It composes
 ordinary public `http`, `ssl`, `net`, `uv`, `async`, `timer`, `string`, `url`
 and `gc` imports. It never imports private UV/async/transport state.

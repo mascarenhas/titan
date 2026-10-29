@@ -40,15 +40,15 @@ its generated C and objects, just as in a build without `--output`.
 
 For Linux and macOS, these examples show the paths relative to `out/`:
 
-| Source for `app.main` | C and object | Library provider pair and Lua loader | Program |
+| Source for `app.main` | C and object | Library provider pair | Program |
 | --- | --- | --- | --- |
-| `app/main.titan` | `app/main.c`, `app/main.o` | `app/main.so`, `app/main.a`, `app/main.lua` | `app/main` |
-| `app/main/main.titan` | `app/main/main.c`, `app/main/main.o` | `app/main.so`, `app/main.a`, `app/main.lua` | `app/main__main` |
+| `app/main.titan` | `app/main.c`, `app/main.o` | `app/main.so`, `app/main.a` | `app/main` |
+| `app/main/main.titan` | `app/main/main.c`, `app/main/main.o` | `app/main.so`, `app/main.a` | `app/main__main` |
 
 The library columns apply when no requested root defines the program's exact
 `main` signature. Multiple library roots still share the provider named from
 their longest common dotted prefix: `titanc -o out app.left app.right` emits
-`out/app.so`, `out/app.a`, and the logical loaders under `out/app/`.
+`out/app.so` and `out/app.a`. Library builds write no Lua files.
 
 A large module may be split into several C translation units
 ([split modules](build-profiles.md#split-modules)). Its first unit keeps the
@@ -73,12 +73,13 @@ The output directory changes neither logical module names nor source filenames
 in diagnostics and tracebacks.
 
 `--output` selects write locations; it does not add them to compiled-provider
-lookup or Lua's search paths. When consuming a previously built library, add
-its output directory to `TITAN_PATH_0_6`. For Lua consumers, select the
-generated loaders and providers through the corresponding Lua paths:
+lookup or Lua's search paths. When consuming a previously built library from
+Titan or from Lua, add its output directory to the [Titan
+path](modules.md#the-titan-path). A Lua consumer also loads Titan's support
+module first:
 
 ```sh
-LUA_PATH='out/?.lua;;' LUA_CPATH='out/?.so;;' lua -e 'require("app.main")'
+TITAN_PATH_0_6='out;;' lua -e 'require "titan"; require("app.main")'
 ```
 
 ### Executable destination (`--exe`)
@@ -96,7 +97,7 @@ titanc --incremental -o out --test --exe out/my-tests app.tests
 valid only when linking a standalone or `--test` executable; it is rejected with
 `-c` / `--compile-only` or library-only builds.
 
-On Windows, library providers and logical loaders move below `--output`.
+On Windows, library provider DLLs move below `--output`.
 Without `--exe`, standalone and test programs place their console launcher at
 `<output>/bin/<logical-module>.exe` and their application provider DLL at
 `<output>/lib/titan/0.6/<module>.dll` (for `app.main` with `-o out`,
@@ -210,6 +211,6 @@ by Git. Native dependency builds and the authored C runtime retain their own
 build locations.
 
 Omitting `--output` preserves the original paths: generated C, objects, and
-headers beside the selected source, with final providers, loaders, and program
+headers beside the selected source, with final providers and program
 paths relative to the compiler's working directory. Existing build scripts can
 adopt the option without changing module identities or binary contracts.

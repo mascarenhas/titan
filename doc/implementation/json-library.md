@@ -230,14 +230,15 @@ parse/schema/numeric errors share byte/line/column formatting.
 ## Publication and validation
 
 JSON is one ordinary logical root of the combined standard-library provider,
-with generated shim `titan/json.lua`; there is no child DSO or independent
-LuaRocks C-module owner. Image layout and publication are in
+reached from Lua as `require "titan.json"` through the Titan package searcher;
+there is no child DSO or independent LuaRocks C-module owner. Image layout and
+publication are in
 [the standard-library image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image).
 
 Public behavior lives under `spec/stdlib/titan/json/tests/`, as the explicit
 `json.tests` root of the native aggregate, without LuaCov. Packaging/native-build
-specs own exact sources, module protocols, metadata fixtures, and installed
-shims. Lua/provider and static production smokes exercise dynamic decoding,
+specs own exact sources, module protocols, metadata fixtures, and the installed
+provider. Lua/provider and static production smokes exercise dynamic decoding,
 null preservation, and a reflected record/union constructor composition.
 
 The native suite covers syntax labels and positions, null/presence behavior,

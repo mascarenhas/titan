@@ -60,7 +60,6 @@ describe(".so-only cross-module imports", function()
             remove_tree(name .. ".so")
             remove_tree(name .. ".dll")
             remove_tree(name .. ".dll.def")
-            remove_tree(name .. ".lua")
             remove_tree(name .. ".a")
             remove_tree(name .. ".so.dSYM")
         end

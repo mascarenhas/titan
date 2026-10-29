@@ -10,8 +10,8 @@ modules](static-compiled-modules.md) for archive lookup, embedded metadata,
 linking, and `--static`.
 
 The paired-provider paths and archive examples below describe Linux and macOS.
-Windows uses the same logical grouping with one DLL provider and Lua shims,
-without a paired Titan archive or `--static` mode; see
+Windows uses the same logical grouping with one DLL provider, without a paired
+Titan archive or `--static` mode; see
 [Windows loading and launchers](binary-compatibility.md#experimental-windows-loading-and-launchers).
 
 For example, given:
@@ -27,16 +27,14 @@ this library-mode invocation:
 titanc a.b.left a.b.right
 ```
 
-produces generated C, objects, and one generated Lua loader (or *shim*) for
-each logical module, but only one provider pair:
+produces generated C and objects for each logical module, but only one
+provider pair:
 
 ```text
 a/b/left.c
 a/b/left.o
-a/b/left.lua
 a/b/right.c
 a/b/right.o
-a/b/right.lua
 a/b.so
 a/b.a
 ```
@@ -47,18 +45,19 @@ belong to that module. A module large enough to be
 `.priv.h`, `.part1.c`, `.part1.o`, and further numbered parts; the provider
 pair links every one of its objects.
 
-There is no `a/b/left.so` or `a/b/right.so`. Both Lua loaders find the
-physical provider `a.b` (`a/b.so`), then call their own exact native entry:
+There is no `a/b/left.so` or `a/b/right.so`, and no Lua file is generated.
+Lua's `require` finds the physical provider `a.b` (`a/b.so`) through Titan's
+package searcher and calls each module's own exact native entry:
 
 ```text
-a/b/left.lua  -> a/b.so -> luaopen_a_b_left
-a/b/right.lua -> a/b.so -> luaopen_a_b_right
+require "a.b.left"  -> a/b.so -> luaopen_a_b_left
+require "a.b.right" -> a/b.so -> luaopen_a_b_right
 ```
 
 The ordinary single-module case is the smallest instance of the same model.
-`titanc foo.bar` produces `foo/bar.c`, `foo/bar.o`,
-`foo/bar.so`, `foo/bar.a`, and `foo/bar.lua`; the logical module and physical
-provider both happen to be `foo.bar`.
+`titanc foo.bar` produces `foo/bar.c`, `foo/bar.o`, `foo/bar.so`, and
+`foo/bar.a`; the logical module and physical provider both happen to be
+`foo.bar`.
 
 ## Choosing the provider
 
@@ -86,9 +85,10 @@ cannot link modules into one shared library: 'foo' and 'bar' have no common modu
 
 Use separate `titanc` invocations when unrelated roots should become separate
 libraries. Transitive source dependencies do not affect the provider name.
-They are linked into the selected provider and receive their own Lua loaders,
-but making an unrelated dependency independently discoverable as a compiled
-Titan module requires naming it as a root in a compatible invocation.
+They are linked into the selected provider, but making an unrelated
+dependency independently discoverable as a compiled Titan module, from Titan
+or from Lua's `require`, requires naming it as a root in a compatible
+invocation.
 
 All linked modules must also have distinct generated C symbols. Callable names
 encode the module/member and nominal/member boundaries, so function `b_c` in
@@ -135,9 +135,12 @@ a/b.so
 a/b/c.so
 ```
 
-The binary path comes from `TITAN_PATH_0_6` when set, otherwise `TITAN_PATH`,
-otherwise the default `.;<root>/lib/titan/0.6`. In an override, `;;` inserts
-that default at the same position. Search is **path-root first**: Titan walks
+The directories come from the [Titan path](modules.md#the-titan-path):
+`TITAN_PATH_0_6` when set, otherwise `TITAN_PATH`, otherwise the default, which
+is `.;<root>/lib/titan/0.6` for the compiler and `!;!/../lib/titan/0.6`
+(followed by the SDK fallback) for programs and Lua hosts. In a variable, `;;`
+inserts that default at the same position and `!` stands for the running
+executable's directory. Search is **path-root first**: Titan walks
 all candidates in the first path root before moving to the second root. Once
 an earlier root contains a file at a relative candidate such as `a/b.so`, that
 pathname shadows `a/b.so` in later roots even if the earlier file does not
@@ -154,9 +157,10 @@ without the ABI marker remains an error. The first candidate that claims and
 validates the logical module wins.
 
 Generated Titan code records that selected relative provider and loads exactly
-the same candidate at run time through the Titan binary path. Two imports from
-one provider reuse its native handle but resolve their own mangled initializer
-and function symbols.
+the same candidate at run time through the run-time Titan path. Two imports
+from one provider reuse its native handle but resolve their own mangled
+initializer and function symbols. Lua's `require` uses the same candidates and
+claim rules (see [below](#loading-library-modules-from-lua)).
 
 Ordinary dependency selection remains compiled-first. An ordinary `import` uses the
 preferred valid compiled provider before visible flat or folder source. A
@@ -169,69 +173,62 @@ provider forms. See [Static compiled
 modules](static-compiled-modules.md#direct-and-dynamic-dependencies) for the
 transitive-owner constraints.
 
-## Generated Lua loaders and ownership
+## Loading library modules from Lua
 
-Every physical logical module published in a library DSO gets one generated
-`.lua` loader at its logical path. This includes requested roots, source
-dependencies, and logical modules carried from a selected static provider. A
-[folder module](folder-modules.md) is already one logical module, so it gets
-one loader for the module, never one per contributor. With an external `--tree`
-and no `--output`, generated C stays beside the source while the provider and
-logical loader paths are created below the compiler's working directory. With
-`--output`, all of them are created below the output directory (see
-[Output directories](output-directory.md)).
-
-Generated loaders begin with:
+Lua code reaches every physical logical module of a library DSO, including
+requested roots, source dependencies, and modules carried from a selected
+static provider, with ordinary `require`. The lookup is done by Titan's
+package searcher, which a plain Lua host installs by loading Titan's support
+module first:
 
 ```lua
--- Generated by titanc; do not edit.
+require "titan"                     -- installs the Titan searcher
+local left = require "a.b.left"     -- searches the Titan path
 ```
 
-The compiler may replace a file with that exact generated ownership banner.
-It refuses to overwrite any other `.lua` file and checks all loader
-destinations before changing C, object, provider, or loader output. Loader
-files are published in the same recoverable transaction as the validated
-provider pair, before the DSO commit point.
+Standalone Titan programs, [independent Lua states](standard-library-lua.md#independent-lua-states),
+and thread children already have the searcher. `require "titan"` loads the
+support module `<root>/lib/lua/5.5/titan.so` (`titan.dll` on Windows) through
+Lua's ordinary `package.cpath`; it returns a small support table and does not
+initialize any `titan.*` standard module.
 
-At run time a loader:
+For `require "a.b.left"` the searcher:
 
-1. finds its physical provider name through `package.cpath`;
-2. obtains Titan's native support table with `require "titan"`;
-3. maps or promotes the provider with `RTLD_LAZY | RTLD_GLOBAL` through the
-   support table's internal loader; and
-4. calls the logical module's exact `luaopen_*` entry.
+1. returns `a.b.left` if this Lua state already initialized it, for example as
+   a dependency of another module, without opening another file;
+2. uses a matching [native preload](standard-library-lua.md#independent-lua-states)
+   registered by an initialized or copied module;
+3. otherwise probes `a.so`, `a/b.so`, and `a/b/left.so` along the run-time
+   Titan path with the candidate and claim rules above, checks the ABI marker,
+   and calls the module's exact `luaopen_a_b_left` entry.
 
-The provider cache canonicalizes its pathname, so relative and absolute
-spellings in one Lua state share a handle. The exact logical module remains
-cached by Lua's ordinary `require` machinery. A stock Lua 5.5 host needs both
-the generated loaders on `package.path` and the provider on `package.cpath`.
-Titan's installed Lua configures those paths for the standard library.
-`package.cpath` is independent of Titan's compile-time binary path; a Lua
-loader does not silently fall back to the provider selected by `TITAN_PATH`.
-Install one canonical provider in the active library namespace, or explicitly
-put the intended output root first in `package.cpath` when running checkout and
-fixture builds.
+When nothing claims the module, the searcher adds its `no file '…'` lines to
+Lua's usual `module 'a.b.left' not found` error. A provider that exists but
+cannot be loaded, has half of the metadata pair, lacks the exact module's ABI
+marker, or carries another ABI is an error instead of a miss. Because `.` and
+`-` both become `_` in native names, `a.b-c` and `a.b_c` share one entry name;
+the entry checks the requested name whenever a searcher loads it from a file,
+and fails with `module name mismatch: requested 'a.b_c', provider defines
+'a.b-c'` rather than initializing under the wrong name. Lua's `package.preload` may
+still alias an entry deliberately: `package.preload["alias"] = loader` makes
+`require "alias"` return that module under its own logical identity.
 
-The initial `require "titan"` is an ordinary eager/local Lua C-module load.
-For a different provider, the logical loader performs its first native mapping
-with lazy/global flags. For the standard library's own `titan.so`, it performs
-a second native open of the same canonical image, promoting the already loaded
-support image into the global namespace before resolving `luaopen_titan_*`.
-Bare `require "titan"` still returns only the support table and does not
-initialize any `titan.*` module.
+Lua's own searchers run before Titan's. Do not put Titan provider directories
+on `package.cpath`, where Lua's C searcher would open a provider without the
+checks above, and remove `.lua` files from earlier pre-release builds
+(`a/b/left.lua` and friends): Lua's source searcher, which includes `./?.lua`,
+would still find them first. Rebuild pre-release output trees; there is no
+compatibility layer for older providers or loader files (see
+[Upgrading from a pre-release build](installation.md#upgrading-from-a-pre-release-build)).
 
 ## Reserved `titan` name
 
-The bare logical module name `titan` is reserved for the Lua support table
-used by generated loaders. A library build rejects a source module named
-exactly `titan`, including a transitive source dependency, and never generates
-a top-level `titan.lua`.
-
-A *physical* provider named `titan` is valid. Its DSO must also contain the
-native support entry `luaopen_titan` with both internal loading functions and
-the compiler's native SHA-256 digest; the compiler validates that contract
-before publishing `titan.so` or any loaders.
-The standard library is the canonical provider with this name.
+The bare logical module name `titan` is reserved for the Lua support module
+that `require "titan"` loads. A library build rejects a source module named
+exactly `titan`, including a transitive source dependency, and the Titan
+searcher never resolves that name. A *physical* provider named `titan` is
+valid; the standard library is the canonical provider with this name, and it
+does not contain the support module.
 
 ## Compiled compatibility
 
@@ -260,9 +257,8 @@ Titan installations are neither migrated nor cleaned up.
 
 Executable mode is unchanged. If exactly one requested source module declares
 the exact `main(args: {string}): integer` entry, Titan links the source closure
-into one executable. It does not derive a library provider and emits neither a
-DSO nor generated Lua loaders. Unrelated requested roots are consequently
-legal in one program.
+into one executable. It does not derive a library provider and emits no DSO.
+Unrelated requested roots are consequently legal in one program.
 
 ## The standard-library provider
 
@@ -275,40 +271,19 @@ $ROCKS_TREE/lib/titan/0.6/titan.so
 $ROCKS_TREE/lib/titan/0.6/titan.a
 ```
 
-contains the native support entry plus the independent logical modules
+contains the independent logical modules
 `titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.io`,
 `titan.fs`, `titan.net`, `titan.ssl`, `titan.url`, `titan.http`, `titan.websocket`, `titan.os`, `titan.path`,
 `titan.peg`, `titan.string`, `titan.math`, `titan.lua`, `titan.iteration`,
 `titan.gc`, `titan.test`, `titan.reflect`, `titan.sqlite3`, `titan.json`,
-`titan.protobuf`, and `titan.transfer`. Their
-generated logical loaders live at:
+`titan.protobuf`, `titan.transfer`, and `titan.thread`. Lua reaches each of
+them with `require` through the Titan searcher; a plain `lua` at
+`$ROCKS_TREE/bin/lua` finds the provider in its default
+`!/../lib/titan/0.6` directory. The separate support module is installed as an
+ordinary Lua C module:
 
 ```text
-$ROCKS_TREE/share/lua/5.5/titan/coroutine.lua
-$ROCKS_TREE/share/lua/5.5/titan/uv.lua
-$ROCKS_TREE/share/lua/5.5/titan/async.lua
-$ROCKS_TREE/share/lua/5.5/titan/timer.lua
-$ROCKS_TREE/share/lua/5.5/titan/io.lua
-$ROCKS_TREE/share/lua/5.5/titan/fs.lua
-$ROCKS_TREE/share/lua/5.5/titan/net.lua
-$ROCKS_TREE/share/lua/5.5/titan/ssl.lua
-$ROCKS_TREE/share/lua/5.5/titan/url.lua
-$ROCKS_TREE/share/lua/5.5/titan/http.lua
-$ROCKS_TREE/share/lua/5.5/titan/websocket.lua
-$ROCKS_TREE/share/lua/5.5/titan/os.lua
-$ROCKS_TREE/share/lua/5.5/titan/path.lua
-$ROCKS_TREE/share/lua/5.5/titan/peg.lua
-$ROCKS_TREE/share/lua/5.5/titan/string.lua
-$ROCKS_TREE/share/lua/5.5/titan/math.lua
-$ROCKS_TREE/share/lua/5.5/titan/lua.lua
-$ROCKS_TREE/share/lua/5.5/titan/iteration.lua
-$ROCKS_TREE/share/lua/5.5/titan/gc.lua
-$ROCKS_TREE/share/lua/5.5/titan/test.lua
-$ROCKS_TREE/share/lua/5.5/titan/reflect.lua
-$ROCKS_TREE/share/lua/5.5/titan/sqlite3.lua
-$ROCKS_TREE/share/lua/5.5/titan/json.lua
-$ROCKS_TREE/share/lua/5.5/titan/protobuf.lua
-$ROCKS_TREE/share/lua/5.5/titan/transfer.lua
+$ROCKS_TREE/lib/lua/5.5/titan.so
 ```
 
 The same compiled provider supplies `titan.test` to applications and native
@@ -324,6 +299,6 @@ directly; system OpenSSL is the default, while bundled OpenSSL mode carries
 its OpenSSL objects.
 None of those private archives is an installed SDK library. The SDK includes
 public libuv, llhttp, and SQLite headers, plus OpenSSL headers in bundled mode. There are
-no production child DSOs, aliases, symbolic links, hard links, or Lua-facing
-copies. `require "titan.async"` and `import "async"` still select the same
+no production child DSOs, aliases, symbolic links, hard links, or Lua loader
+files. `require "titan.async"` and `import "async"` still select the same
 logical module and state; only their physical provider has been combined.

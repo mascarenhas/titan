@@ -37,9 +37,14 @@ Shared provider code does not make module values shared objects.
    states keep the same native dependency graph.
 3. `Lua:initialize` marshals names, lengths, loader and resolver pointers into
    a `titan_lua_preload[]` inside a `titan_lua_open` packet, creates the state
-   with `luaL_newstate`, and calls the protected `lua_state_open` entry. It
-   opens the standard libraries and calls `titan_module_preload` for each
-   entry. A failure closes the new state and raises the copied message.
+   with `luaL_newstate`, and calls the protected `lua_state_open` entry. Its
+   `lua_state_open_libraries` callback opens the standard libraries, calls
+   `titan_module_preload` for each entry, and then calls
+   `titan_install_searcher`, so every independent state, including each
+   `titan.thread` child, has exactly one [Titan package
+   searcher](driver.md#the-titan-package-searcher) at the end of
+   `package.searchers`. A failure closes the new state and raises the copied
+   message.
 
 How generated initialization publishes the loader and its descriptor is
 described in [the module protocol](codegen-overview.md#the-module-protocol);
@@ -48,9 +53,12 @@ the registry keys are listed in the
 
 Only native code pointers cross: module names become new destination strings,
 and no `package.loaded` entry, module userdata, metatable or resolved binding is
-copied. Later changes to either state's preload table are independent. Search
-paths and searchers come from the destination's own standard-library
-initialization. Invoking a copied loader performs ordinary per-state module
+copied. Later changes to either state's preload table are independent. Lua
+search paths come from the destination's own standard-library initialization;
+the Titan searcher computes the destination's own effective Titan path on its
+first lookup, so neither the creator's `TITAN_PATH_KEY` string nor its SDK
+fallback outcome is inherited. Invoking a copied loader performs ordinary
+per-state module
 initialization. Loader and resolver addresses are borrowed code pointers;
 runtime-loaded Titan providers stay mapped for the process lifetime under the
 [native-image binding rule](foreign-functions.md#source-collaboration-and-binary-isolation),
@@ -58,7 +66,7 @@ which does not make a closed Lua state usable.
 
 An explicit compiled dynamic import in the destination selects the canonical
 module first, the copied provider resolver second, and the normal DSO provider
-last (`titan-runtime/titan.c` `titan_module_provider`). Resolving a copied
+last (`titan-runtime/titan_path.c` `titan_module_provider`). Resolving a copied
 descriptor neither invokes its Lua loader nor initializes a module: generated
 import code still checks the ABI and the consumer's compatibility requirements
 before calling the selected initializer. Copied transitive dependencies
@@ -365,6 +373,13 @@ searchers keep the loader data they produce. A function-valued first result
 selects a loader; a string-valued first result contributes a diagnostic; other
 results are ignored. Search stops at the first nil searcher slot, matching
 Lua's array traversal.
+
+Compiled Titan modules therefore need no special branch: in every state Titan
+creates, and in a host after `require "titan"`, the [Titan package
+searcher](driver.md#the-titan-package-searcher) occupies a slot after Lua's
+C searchers (normally slot 5) and runs in the synchronous tail of this
+traversal. Its probing, `dlopen` calls, and any one-time SDK-fallback query
+block the calling thread without yielding.
 
 The module-level `loading: {string: boolean}` Map is set before any yielding
 search and cleared by `defer`, so cancellation also clears it. It is not a

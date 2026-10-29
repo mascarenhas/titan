@@ -10,8 +10,8 @@ if platform.windows then REPO = assert(platform.path.normalize(REPO)) end
 local PREFIX = require("spec.support.installed_prefix").active()
 local SHARED_SUFFIX = platform.windows and ".dll" or ".so"
 local LUA = PREFIX .. "/bin/lua" .. (platform.windows and ".exe" or "")
-local INSTALLED_TITANC = PREFIX .. (platform.windows and
-    "/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" or "/bin/titanc")
+-- The installed compiler program: the native titanc.exe on Windows.
+local INSTALLED_TITANC = PREFIX .. "/bin/titanc" .. (platform.windows and ".exe" or "")
 local USE_CHECKOUT_COMPILER =
     os.getenv("TITAN_TEST_USE_CHECKOUT_COMPILER") == "1"
 
@@ -142,12 +142,11 @@ local function compiler_argv(workspace, source_root, ...)
     end
 
     if installed then
-        if platform.windows then table.insert(argv, LUA) end
         table.insert(argv, INSTALLED_TITANC)
     else
         assert.truthy(PREFIX,
             "set PREFIX or TITAN_TEST_PREFIX for native compiler tests")
-        table.insert(argv, "TITAN_ROCKS_ROOT=" .. PREFIX)
+        table.insert(argv, "TITAN_ROOT=" .. PREFIX)
         table.insert(argv, "LUA_CPATH=" .. REPO .. "/?" .. SHARED_SUFFIX .. ";;")
         table.insert(argv, LUA)
         table.insert(argv, "-e")
@@ -189,16 +188,20 @@ local function compile_with_environment(
     return run(argv, workspace)
 end
 
+-- Lua hosts install the Titan searcher through the `titan` support module and
+-- find the workspace's providers through the Titan path, never cpath.
 local function run_lua(workspace, code)
     return run({
         "env",
         "-u", "LUA_PATH", "-u", "LUA_CPATH",
         "-u", "LUA_PATH_5_5", "-u", "LUA_CPATH_5_5",
+        "TITAN_PATH_0_6=" .. workspace .. ";;", "TITAN_PATH=",
         LUA, "-e", string.format([[
 package.path = %q .. "/?.lua;" .. package.path
-package.cpath = %q .. "/?" .. %q .. ";" .. %q .. "/?" .. %q .. ";" .. package.cpath
+package.cpath = %q .. "/?" .. %q .. ";" .. package.cpath
+require "titan"
 %s
-]], workspace, workspace, SHARED_SUFFIX, REPO, SHARED_SUFFIX, code),
+]], workspace, REPO, SHARED_SUFFIX, code),
     }, workspace)
 end
 
@@ -236,15 +239,8 @@ end
         else
             assert.equal("file", lfs.attributes(workspace .. "/single/item.a", "mode"))
         end
-        assert.equal("file", lfs.attributes(
-            workspace .. "/single/item.lua", "mode"))
         assert.is_nil(lfs.attributes(shared_path(workspace, "single"), "mode"))
-
-        local shim = read_file(workspace .. "/single/item.lua")
-        assert.truthy(shim:find(
-            'package.searchpath("single.item", package.cpath)', 1, true),
-            shim)
-        assert.truthy(shim:find('"luaopen_single_item"', 1, true), shim)
+        assert.same({}, collect_files(workspace, ".lua"))
 
         local compile_lines = 0
         local link_lines = 0
@@ -291,20 +287,9 @@ end
             tostring(code) .. ")")
 
         assert.equal("file", lfs.attributes(shared_path(workspace, "group"), "mode"))
-        assert.equal("file", lfs.attributes(workspace .. "/group.lua", "mode"))
-        assert.equal("file", lfs.attributes(
-            workspace .. "/group/child.lua", "mode"))
         assert.is_nil(lfs.attributes(
             shared_path(workspace, "group/child"), "mode"))
-
-        for _, shim_path in ipairs({
-            workspace .. "/group.lua",
-            workspace .. "/group/child.lua",
-        }) do
-            local shim = read_file(shim_path)
-            assert.truthy(shim:find(
-                'package.searchpath("group", package.cpath)', 1, true), shim)
-        end
+        assert.same({}, collect_files(workspace, ".lua"))
 
         ok, output = run_lua(workspace, [[
 local child = require "group.child"
@@ -315,7 +300,7 @@ assert(root.base_value() == 40)
         assert.truthy(ok, output)
     end)
 
-    it("emits one logical shim and no contributor artifacts for a folder module",
+    it("emits no Lua loader and no contributor artifacts for a folder module",
        function()
         local folder = source_root .. "/folder/unit"
         write_file(folder .. "/unit.titan", [[
@@ -336,10 +321,7 @@ end
 
         assert.equal("file", lfs.attributes(
             shared_path(workspace, "folder/unit"), "mode"))
-        assert.equal("file", lfs.attributes(
-            workspace .. "/folder/unit.lua", "mode"))
-        assert.same({ workspace .. "/folder/unit.lua" },
-            collect_files(workspace, ".lua"))
+        assert.same({}, collect_files(workspace, ".lua"))
 
         assert.equal("file", lfs.attributes(folder .. "/unit.c", "mode"))
         assert.equal("file", lfs.attributes(folder .. "/unit.o", "mode"))

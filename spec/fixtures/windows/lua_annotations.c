@@ -14,7 +14,9 @@ typedef struct CallInfo CallInfo;
 }
 #endif
 
-#if defined(LUA_LIB)
+/* A third-party library follows the stock LUA_BUILD_AS_DLL policy: LUALIB_API
+** is the exported mark only for a core or library source role. */
+#if defined(LUA_CORE) || defined(LUA_LIB)
 #ifdef __cplusplus
 extern "C"
 #endif
@@ -23,7 +25,12 @@ LUALIB_API int titan_annotation_library_probe(lua_State *L) {
 }
 #endif
 
-LUAMOD_API int luaopen_titan_annotation_probe(lua_State *L) {
+/* Compiled providers keep a plain C opener; the Windows provider .def names
+** the export instead of an export annotation. */
+#ifdef __cplusplus
+extern "C"
+#endif
+int luaopen_titan_annotation_probe(lua_State *L) {
     unsigned int index = (unsigned int)lua_gettop(L);
     luaL_checkversion(L);
     luaL_openselectedlibs(L, 0, 0);

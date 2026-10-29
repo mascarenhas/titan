@@ -6,7 +6,7 @@ local h = require "spec.support.helpers"
 local csrc
 
 local function clean()
-    for _, suffix in ipairs({ ".c", ".o", ".so", ".a", ".lua" }) do
+    for _, suffix in ipairs({ ".c", ".o", ".so", ".a" }) do
         os.remove("test" .. suffix)
     end
     os.execute("rm -rf test.so.dSYM")

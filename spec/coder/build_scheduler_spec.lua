@@ -1152,9 +1152,13 @@ describe("output-tree locks in this process", function()
     it("names an output path that is not a directory or cannot become one", function()
         local file = workspace .. "/file"
         write_file(file, "not a directory")
-        local locks, err = build.lock_outputs(strategy, { workspace .. "/fine", file .. "/out" })
+        local requested = file .. "/out"
+        -- The offending parent is reported in the platform's own spelling;
+        -- Windows normalizes separators in the observed path.
+        local parent = platform.windows and assert(platform.path.normalize(file)) or file
+        local locks, err = build.lock_outputs(strategy, { workspace .. "/fine", requested })
         assert.is_nil(locks)
-        assert.equal("cannot lock output directory '" .. file .. "/out': '" .. file ..
+        assert.equal("cannot lock output directory '" .. requested .. "': '" .. parent ..
             "' is not a directory", err)
         if not platform.windows then
             -- A dangling link occupies the name without being a directory.
@@ -1174,7 +1178,10 @@ describe("output-tree locks in this process", function()
             package.loaded.titan = {}
             stale = table.pack(build.lock_outputs(strategy, { workspace }))
             package.loaded.titan = nil
-            package.preload.titan = function() error("titan runtime is not installed", 0) end
+            -- require appends every searched path; only the first line is reported.
+            package.preload.titan = function()
+                error("titan runtime is not installed\n\tno file 'titan.so'", 0)
+            end
             missing = table.pack(build.lock_outputs(strategy, { workspace }))
         end)
         package.preload.titan = nil

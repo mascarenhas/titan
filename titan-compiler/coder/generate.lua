@@ -1119,6 +1119,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
 
     emit_item("pinned", render(postamble, {
         LUAOPEN_NAME = 'luaopen_' .. mangle_qn(modname),
+        LOGICALNAME = c_string_literal(modname),
         INITNAME = tlcontext.prefix .. 'init',
     }))
     emit_item("pinned", coder._binary_resolver(tlcontext, ast))

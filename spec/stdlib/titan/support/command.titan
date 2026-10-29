@@ -165,29 +165,24 @@ local function helper_functions(): Helpers
           -- A source file also avoids command-length limits for boundary probes.
           local path = assert(compiler_io:tmpname())
           local result = table.pack(pcall(function()
+            -- -E keeps the SDK's Lua paths deterministic. A plain Lua host
+            -- reaches Titan modules only through the Titan searcher, which
+            -- loading the support module installs. The prefix shares the
+            -- probe's first line, so its line numbers are unchanged.
+            assert(compiler_io:write_file(path, 'require("titan"); ' .. source))
+            -- Coverage explicitly selects the same provider directory as
+            -- Titan children.
             local provider = os.getenv("TITAN_TEST_PROVIDER_DIR")
-            if provider then
-              -- -E keeps the SDK's compiler paths deterministic. Coverage
-              -- explicitly selects the same ordinary provider as Titan children.
-              source = "package.path = " .. string.format("%q",
-                  provider .. "/shims/?.lua;") .. " .. package.path\n"
-                .. "package.cpath = " .. string.format("%q",
-                  provider .. "/?.so;") .. " .. package.cpath\n" .. source
-            end
-            assert(compiler_io:write_file(path, source))
-            return run(true, {tool("lua"), "-E", path})
+            local environment = provider and { TITAN_PATH_0_6 = provider } or nil
+            return run(true, {tool("lua"), "-E", path}, nil, environment)
           end))
           assert(compiler_io:unlink(path))
           if not result[1] then error(result[2], 0) end
           return table.unpack(result, 2, result.n)
         end,
         compile = function(directory, name, extra, static, environment)
+          -- The SDK's compiler program: titanc, or the native titanc.exe.
           local argv = {tool("titanc")}
-          if platform.windows then
-            local sdk = assert(os.getenv("TITAN_TEST_SDK_ROOT"))
-            argv = {tool("lua"), platform.join(sdk,
-              "lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc")}
-          end
           -- Windows production providers are DLL-only. Unix retains the
           -- archive-linked SQLite worker oracle; both execute the same child.
           if static and not platform.windows then argv[#argv + 1] = "--static" end

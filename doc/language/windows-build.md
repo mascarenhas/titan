@@ -12,7 +12,8 @@ controlled Lua DLL, dependency SDK, build targets, and native validation gates.
 Choose an absolute SDK prefix. Windows source and binary rock installations
 require the Lua SDK and rocks tree to be the same physical directory. The
 following commands install the pinned Titan Lua 5.5.1 fork, standalone LuaRocks
-3.13.0, and the Titan compiler and standard library:
+3.13.0, and the Titan compiler, its Lua support module, and the standard
+library:
 
 ```sh
 git submodule update --init --recursive
@@ -34,7 +35,8 @@ SDK prefixes and `WINDOWS_BUILD_ROOT` directories for different profiles.
 The Windows build root defaults to `out/windows` for production and
 `out/windows-validation` for validation, beneath the checkout. The standard
 provider's generated files go into that root's `out/` subdirectory; installation
-still publishes the DLL and shims into the selected SDK.
+publishes the provider DLL into the selected SDK's `lib/titan/0.6`, and
+compiler installation places the support module at `lib/lua/5.5/titan.dll`.
 Lua and LuaRocks targets reuse an existing program under `PREFIX/bin`; clean
 the corresponding private build outputs and remove or replace the installed
 program when changing native inputs. Close consumers before replacing a mapped
@@ -61,15 +63,42 @@ The generated configuration supplies Lua 5.5, the SDK rock tree, its
 `liblua55.a` import library, and the CLANG64 native tools. Compatible existing
 Lua and LuaRocks installations can build the source rock with their own
 configuration, using the same physical Lua and rocks prefix. LuaRocks owns the
-compiler, its dependencies, and the standard-library Lua shims; the rock's
-copy-only installation helper publishes the retained native SDK/provider
-payload to canonical SDK paths.
+compiler, its dependencies, and the `titan.dll` support module in
+`lib/lua/5.5`; the rock's copy-only installation helper publishes the retained
+native SDK/provider payload to canonical SDK paths.
+
+## The Lua DLL and C helpers
+
+The Windows Lua DLL `lua55.dll` is built from unmodified upstream Lua 5.5.1
+sources with `-DLUA_BUILD_AS_DLL` and linked with `-Wl,--export-all-symbols`,
+so it exports the internal Lua functions and data that generated Titan code
+uses, not only the public API. A Lua 5.5.1 DLL built the same way, with the
+default numeric configuration, is compatible.
+
+Code that Titan compiles itself (generated modules, entrypoints and launchers,
+C probes, and the runtime) imports those internals explicitly with
+`-DLUA_BUILD_AS_DLL "-DLUAI_FUNC=__declspec(dllimport) extern"
+"-DLUAI_DDEC(dec)=__declspec(dllimport) extern dec" -DLUAI_DDEF=`. Your own
+`--c-source` helpers do not receive these definitions: they compile with stock
+Lua conventions, like any third-party Lua C module. Public `lua_*`/`luaL_*`
+functions work as usual. To export a `luaopen_*` function or other
+`LUALIB_API` definition from a helper, define `LUA_LIB` or mark it
+`__declspec(dllexport)`: under `LUA_BUILD_AS_DLL` without `LUA_LIB`, stock
+`LUAMOD_API` declares an import and an opener defined with it does not
+compile. A helper that touches Lua internals relies on MinGW auto-import or
+supplies the `LUAI_*` import definitions itself, and may reuse `LUAI_FUNC` for
+its own private symbols.
 
 ## Compile and distribute programs
 
-LuaRocks installs `bin/titanc.bat`. With the SDK's `bin` on `PATH`, use `titanc`
-for the ordinary [module and program commands](modules.md#experimental-windows-compilation).
-Libraries emit one DLL provider and generated Lua shims. Programs emit a small
+The compiler is the native program `bin/titanc.exe`. With the SDK's `bin` on
+`PATH`, use `titanc` for the ordinary [module and program
+commands](modules.md#experimental-windows-compilation). It always runs the
+compiler installed in its own SDK, ignoring `LUA_INIT` and the
+`LUA_PATH`/`LUA_CPATH` variables, so a copied or moved SDK runs its own
+compiler and, without `TITAN_ROOT`, `titanc --print-root` reports the new
+location.
+Libraries emit one DLL provider. Programs emit a small
 `bin/<logical-module>.exe` launcher and an application DLL; `--exe PATH` selects
 an exact EXE destination relative to the current directory (appending `.exe`
 when absent) while keeping the provider DLL under
@@ -96,8 +125,8 @@ titanc --incremental --output out/app --exe out/app/bin/app.exe app.main
 For a standalone `app.main`, this places the launcher at `out/app/bin/app.exe`
 (or `out/app/bin/app.main.exe` when `--exe` is omitted) and its provider at
 `out/app/lib/titan/0.6/app/main.dll`. Without `--output`, those default paths
-remain relative to the compiler's working directory. Library consumers must
-select their output directory through the usual provider/Lua search paths;
+remain relative to the compiler's working directory. Library consumers
+select their output directory through the Titan path (`TITAN_PATH_0_6`);
 `--output` changes write locations without changing lookup.
 
 While linking, `titanc` builds each launcher and provider in a sibling
@@ -120,12 +149,19 @@ need, delete it, and build again. Builds without leftover stage directories
 are unaffected.
 
 Deliver the matching `lua55.dll` and native dependency DLLs beside the
-executables. Lua's Windows `!` path expansion means the running executable's
-directory. See [Windows loading and launchers](binary-compatibility.md#experimental-windows-loading-and-launchers)
+executables, and the program's other Titan provider DLLs, including the
+standard `titan.dll`, in `lib/titan/0.6` next to `bin`: a program's run-time
+[Titan path](modules.md#the-titan-path) defaults to its own directory and
+`..\lib\titan\0.6`. Lua's Windows `!` path expansion means the running
+executable's directory, as `!` does in Titan paths. See [Windows loading and launchers](binary-compatibility.md#experimental-windows-loading-and-launchers)
 for the provider layout and [native library loading](../implementation/windows-build.md#relocation-and-native-library-loading)
-for dependency search behavior. LuaRocks batch wrappers can contain
-installation-specific paths; the compiler relocation check invokes the
-retained Lua script with the relocated interpreter.
+for dependency search behavior. During development, a program that misses a
+provider in those directories asks the installed SDK once, through
+`TITAN_ROOT` or by running `titanc --print-root`. Windows looks for that
+program (`titanc.exe`, or a `TITANC` name without a directory, with `.exe`
+added when it has no extension) only in the `PATH` entries, never in the
+current directory or the program's own directory; see [the Titan
+path](modules.md#the-titan-path).
 
 `mingw32-make -f Makefile.win binary-rock PREFIX=/c/Titan/sdk` packages the
 installed rock with its native platform suffix. Use this target instead of

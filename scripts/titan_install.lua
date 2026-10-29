@@ -186,6 +186,28 @@ local function prepare_windows_cleanup_launcher(destination)
         "\n"):gsub("\n", "\r\n")))
 end
 
+-- LuaRocks' Windows deployment of a bin `.exe` also writes an unrecorded
+-- `<name>.lua` package-path helper beside it, so bin/titanc.exe gains a
+-- bin/titanc.lua that `luarocks remove` would leave behind. titanc.exe never
+-- reads it (its script is the rock's titan-compiler/titanc.lua). Remove
+-- exactly that generated two-line helper, and nothing else of that name.
+local function retire_windows_exe_helper(destination)
+    if not windows then return end
+    local relative = "bin/titanc.lua"
+    contained(destination, relative)
+    local path = destination .. "/" .. relative
+    if lfs.symlinkattributes(path, "mode") ~= "file" then return end
+    local contents
+    do
+        local input <close> = assert(io.open(path, "rb"))
+        contents = assert(input:read("*a")):gsub("\r\n", "\n")
+    end
+    if contents:match('^package%.path="[^\n]*"%.%.package%.path\n' ..
+            'package%.cpath="[^\n]*"%.%.package%.cpath\n$') then
+        assert(os.remove(path))
+    end
+end
+
 local function titan_owned(relative)
     local library = relative:match("^lib/titan/%d+[.]%d+/(.+)$")
     return library == "libtitan.a" or library == "titan.a" or
@@ -227,10 +249,11 @@ local function sdk_link_inputs(destination, inventory, common_prefix)
 end
 
 -- Record content digests with precise observations for titanc, which reuses
--- them only while every observation is unchanged. The just-installed provider
--- supplies the digest and precise stat; the compiler owns the format. A
--- payload without a loadable compiler and provider (installer fixtures)
--- records nothing, and titanc then reads and hashes these inputs as usual.
+-- them only while every observation is unchanged. The `titan` support module
+-- that LuaRocks just deployed to lib/lua/5.5 supplies the digest and precise
+-- stat; the compiler owns the format. A payload without a loadable compiler
+-- and support module (installer fixtures) records nothing, and titanc then
+-- reads and hashes these inputs as usual.
 local function publish_sdk_digests(destination, inventory, common_prefix)
     local release, inputs = sdk_link_inputs(destination, inventory, common_prefix)
     if not release then return nil end
@@ -240,8 +263,7 @@ local function publish_sdk_digests(destination, inventory, common_prefix)
     local manifest = destination .. "/" .. relative
     if lfs.symlinkattributes(manifest) then assert(os.remove(manifest)) end
     local search = package.cpath
-    package.cpath = destination .. "/lib/titan/" .. release .. "/?." ..
-        (windows and "dll" or "so") .. ";" .. search
+    package.cpath = destination .. "/lib/lua/5.5/?." .. (windows and "dll" or "so")
     local loaded, support = pcall(require, "titan")
     package.cpath = search
     if not loaded or type(support) ~= "table" or type(support._sha256_binary) ~= "function" or
@@ -307,6 +329,7 @@ function installer.publish(package_dir, destination, lua_prefix, program)
         "return { tree = %q, lua_dir = %q, luarocks = %q, digests = %s }\n",
         destination, lua_prefix, program, digests and string.format("%q", digests) or "nil")))
     prepare_windows_cleanup_launcher(destination)
+    retire_windows_exe_helper(destination)
     return true
 end
 

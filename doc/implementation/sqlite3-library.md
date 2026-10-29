@@ -287,4 +287,4 @@ Deterministic worker gates use SQLite's supported native extension hooks in a
 normal installed static-consumer child, with no rewritten provider or callback
 interposition. Focused ASan/UBSan runs use the instrumented bundled SQLite.
 Existing packaging specs verify private native archive linkage, thread mode,
-source/shim/archive inventories, and installed dynamic/static consumption.
+source/archive inventories, and installed dynamic/static consumption.

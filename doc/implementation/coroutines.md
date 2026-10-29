@@ -28,8 +28,8 @@ violating the transfer order.
 
 The source compiles under the qualified identity `titan.coroutine`. Titan code
 uses `import "coroutine"`, which the parser desugars to that name; Lua uses
-`require "titan.coroutine"`, whose generated shim maps the standard provider
-through `titan._loadlibglobal` and calls `luaopen_titan_coroutine`. The module
+`require "titan.coroutine"`, which the Titan package searcher resolves to the
+standard provider `titan.so` before calling `luaopen_titan_coroutine`. The module
 keeps its own state and initializer beside the other logical standard modules
 in that image, and has no bare `luaopen_coroutine` entry to collide with Lua's
 coroutine library.

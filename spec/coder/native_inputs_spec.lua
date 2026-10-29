@@ -277,6 +277,29 @@ int helper(void) { return 2; }
         assert.same({ "native-preprocess", "native-compile" }, phases)
     end)
 
+    it("compiles an app-owned helper through the authored C prefix", function()
+        -- titanc hands --c-source helpers the stock authored prefix, so a
+        -- helper may include the public Lua headers it is written against.
+        write(source, '#include "lua.h"\n#include "lauxlib.h"\n' ..
+            "int authored_helper(lua_State *L) { " ..
+            "lua_settop(L, 0); return 1; }\n")
+        local ctx = context()
+        local function authored()
+            return native.compile(ctx, {
+                sources = { source }, output_root = root,
+                compile_argv = assert(driver.authored_c_compile_prefix()),
+                toolchain = "authored-c-helper", incremental = true,
+            })
+        end
+        local first = assert(authored())[1]
+        assert.is_false(first.hit)
+        assert.equal("file", lfs.attributes(first.path, "mode"))
+        -- The same prefix certifies the unchanged helper as a hit.
+        local second = assert(authored())[1]
+        assert.is_true(second.hit)
+        assert.equal(first.path, second.path)
+    end)
+
     for _, publisher in ipairs({ "native", "coordinator" }) do
         it("builds an uncertified Windows toolchain through " .. publisher .. " publication without accepting a record", function()
             if not platform.windows then pending("Windows toolchain-selection uncertainty"); return end
@@ -504,7 +527,7 @@ describe("native C object path CLI", function()
         local argv = {
             platform.windows and "env.exe" or "env",
             "TITAN_RUNTIME_PREBUILT=1", "CCACHE_DISABLE=1",
-            "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_ROCKS_ROOT=" .. prefix,
+            "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_ROOT=" .. prefix,
             "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=-O0 -fno-lto",
             "TITAN_EXTRA_LDFLAGS=",
         }

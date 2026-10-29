@@ -413,7 +413,7 @@ describe("compiler-owned incremental build scenarios (CLI)", function()
             TITAN_RUNTIME_PREBUILT = "1",
             CCACHE_DISABLE = "1",
             TITAN_PROBE_CACHE_DISABLE = "1",
-            TITAN_ROCKS_ROOT = env.TITAN_ROCKS_ROOT or prefix,
+            TITAN_ROOT = env.TITAN_ROOT or prefix,
             TITAN_BUILD_PROFILE = env.TITAN_BUILD_PROFILE or "validation",
             TITAN_EXTRA_CPPFLAGS = env.TITAN_EXTRA_CPPFLAGS or "",
             TITAN_EXTRA_CFLAGS = env.TITAN_EXTRA_CFLAGS or "-O0 -fno-lto",
@@ -782,7 +782,7 @@ os.exit(ok and 0 or code or 1)
         -- Hostile runtime environment variables must not hijack standalone execution.
         local hostile_env = {
             TITAN_PATH = workspace .. "/unrelated-fallback-sdk",
-            TITAN_ROCKS_ROOT = workspace .. "/unrelated-compiler-sdk",
+            TITAN_ROOT = workspace .. "/unrelated-compiler-sdk",
             LUA_PATH_5_5 = workspace .. "/unrelated-lua/?.lua",
             LUA_CPATH_5_5 = workspace .. "/unrelated-c/?" .. SHARED_SUFFIX,
         }
@@ -1318,7 +1318,7 @@ end
             env_map.TITAN_RUNTIME_PREBUILT = "1"
             env_map.CCACHE_DISABLE = "1"
             env_map.TITAN_PROBE_CACHE_DISABLE = "1"
-            env_map.TITAN_ROCKS_ROOT = prefix
+            env_map.TITAN_ROOT = prefix
             env_map.TITAN_BUILD_PROFILE = "validation"
             env_map.TITAN_EXTRA_CPPFLAGS = ""
             env_map.TITAN_EXTRA_CFLAGS = "-O0 -fno-lto"

@@ -73,8 +73,8 @@ export PREFIX="$HOME/.local/titan/my-project"
 curl -fL -o lua-titan.tar.gz https://github.com/mascarenhas/lua-5.5.1/archive/refs/tags/v5.5.1-1.tar.gz
 tar zxf lua-titan.tar.gz
 (cd lua-5.5.1-5.5.1-1 &&
-  make linux-readline MYCFLAGS=-fPIC TITAN_LIBRARY_VERSION=0.6 PREFIX="$PREFIX" &&
-  make install TITAN_LIBRARY_VERSION=0.6 PREFIX="$PREFIX")
+  make linux-readline MYCFLAGS=-fPIC PREFIX="$PREFIX" &&
+  make install PREFIX="$PREFIX")
 
 curl -fLO https://luarocks.github.io/luarocks/releases/luarocks-3.13.0.tar.gz
 tar zxf luarocks-3.13.0.tar.gz
@@ -110,6 +110,8 @@ step above and covers the other cases:
 - [Rebuilding the standard library](doc/language/installation.md#building-the-standard-library-from-a-checkout)
   while developing it, [uninstalling](doc/language/installation.md#uninstalling),
   and [what gets installed](doc/language/installation.md#what-gets-installed).
+- [Upgrading from a pre-release build](doc/language/installation.md#upgrading-from-a-pre-release-build),
+  which generated Lua loader files that must be deleted.
 
 On Windows, follow
 [Installing and using Titan on Windows](doc/language/windows-build.md).
@@ -122,18 +124,19 @@ all generated files in one place.
 
 ```sh
 titanc -o out app.main              # a program, if app/main.titan defines main
-titanc -o out greeting              # a library: out/greeting.so, .a, and .lua
+titanc -o out greeting              # a library: out/greeting.so and out/greeting.a
 titanc -o out --test calc_test      # a native test executable
 ```
 
 - A module that defines `function main(args: {string}): integer` becomes an
   executable. `args[1]` is the first command-line argument.
 - Any other module becomes a library. Titan code imports it with `import`, and
-  Lua code uses `require`:
+  Lua code uses `require` after `require "titan"`, which installs Titan's
+  package searcher. The searcher finds providers along the Titan path:
 
   ```sh
-  LUA_PATH='out/?.lua;;' LUA_CPATH='out/?.so;;' \
-    lua -e 'print(require("greeting").make("Lua"))'
+  TITAN_PATH_0_6='out;;' \
+    lua -e 'require "titan"; print(require("greeting").make("Lua"))'
   ```
 
 - Standard-library modules have short names in Titan (`import "fs"`) and

@@ -79,34 +79,6 @@
 /titan/thread/thread.c
 /titan/json/json.titan.h
 
-# Generated logical-module shims for the combined standard-library image
-/titan/coroutine.lua
-/titan/uv.lua
-/titan/async.lua
-/titan/timer.lua
-/titan/io.lua
-/titan/fs.lua
-/titan/net.lua
-/titan/ssl.lua
-/titan/url.lua
-/titan/http.lua
-/titan/websocket.lua
-/titan/os.lua
-/titan/path.lua
-/titan/peg.lua
-/titan/string.lua
-/titan/math.lua
-/titan/lua.lua
-/titan/iteration.lua
-/titan/gc.lua
-/titan/test.lua
-/titan/reflect.lua
-/titan/sqlite3.lua
-/titan/json.lua
-/titan/protobuf.lua
-/titan/transfer.lua
-/titan/thread.lua
-
 # Native runtime command-line configuration stamps
 /titan-runtime/.titan-*-build-config
 /titan-runtime/.titan-stdlib-complete

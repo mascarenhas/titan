@@ -6,6 +6,9 @@ local builtin_io = require "io"
 local builtin_math = require "math"
 local builtin_string = require "string"
 
+-- The support module installs the Titan searcher in this plain Lua host.
+require "titan"
+
 local uv = require "titan.uv"
 local async = require "titan.async"
 local timer = require "titan.timer"

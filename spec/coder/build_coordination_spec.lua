@@ -269,7 +269,7 @@ io.stdout:write("released\n"); io.stdout:flush()
     local function compiler_environment(extra)
         local prefix = require("spec.support.installed_prefix").active()
         local values = {
-            TITAN_ROCKS_ROOT = prefix, TITAN_RUNTIME_PREBUILT = "1", CCACHE_DISABLE = "1",
+            TITAN_ROOT = prefix, TITAN_RUNTIME_PREBUILT = "1", CCACHE_DISABLE = "1",
             TITAN_PROBE_CACHE_DISABLE = "1", TITAN_EXTRA_CPPFLAGS = "",
             TITAN_EXTRA_CFLAGS = "-O0 -fno-lto", TITAN_EXTRA_LDFLAGS = "-fno-lto",
             PATH = prefix .. "/bin" .. (platform.windows and ";" or ":") .. (os.getenv("PATH") or ""),
@@ -326,7 +326,7 @@ if not hold then arg[#arg + 1] = "--test" end
 dofile(%q .. "/titanc")
 ]], repository, repository, platform.windows and ".dll" or ".so", repository, root, root, repository))
         contend(lua, frontend, { output }, { output }, false, { timeout = 60000, env = {
-            TITAN_ROCKS_ROOT = prefix, TITAN_RUNTIME_PREBUILT = "1", CCACHE_DISABLE = "1",
+            TITAN_ROOT = prefix, TITAN_RUNTIME_PREBUILT = "1", CCACHE_DISABLE = "1",
             TITAN_PROBE_CACHE_DISABLE = "1", TITAN_EXTRA_CPPFLAGS = "",
             TITAN_EXTRA_CFLAGS = "-O0 -fno-lto", TITAN_EXTRA_LDFLAGS = "-fno-lto",
         } })
@@ -1113,7 +1113,7 @@ exit $status
             "exec " .. CLEAN_ENV .. " CC=" .. quote(workspace .. "/slow_cc.sh") ..
                 " TITAN_EXTRA_CPPFLAGS= TITAN_EXTRA_CFLAGS= TITAN_EXTRA_LDFLAGS=" ..
                 " TITAN_SLOW_CC_LOG=" .. quote(workspace .. "/cc.log") ..
-                " TITAN_ROCKS_ROOT=" .. quote(PREFIX) ..
+                " TITAN_ROOT=" .. quote(PREFIX) ..
                 " TITAN_RUNTIME_PREBUILT=1 " .. quote(LUA) .. " -e " ..
                 quote("package.path = " .. string.format("%q",
                     ROOT .. "/?.lua;" .. ROOT .. "/?/init.lua;") ..

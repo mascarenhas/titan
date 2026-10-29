@@ -83,7 +83,7 @@ describe("Titan link-time optimization", function()
         -- GCC also uses MAKE for parallel LTO; skip only Titan's runtime build.
         local arguments = {
             "env", "-u", "TITAN_BUILD_PROFILE", "CC=" .. CC, "CCACHE_DISABLE=1", "TITAN_RUNTIME_PREBUILT=1",
-            "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_ROCKS_ROOT=" .. PREFIX,
+            "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_ROOT=" .. PREFIX,
             "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=" .. (extra_compile or ""),
             "TITAN_EXTRA_LDFLAGS=" .. (extra_link or ""),
             LUA, "-E", "-e", string.format("package.path = %q .. package.path",
@@ -163,8 +163,13 @@ describe("Titan link-time optimization", function()
         nm_ok, unresolved = run({ "nm", "-u", "lto_fixture.so" })
         assert.is_true(nm_ok, unresolved)
         assert.falsy(unresolved:find(SENTINEL, 1, true), unresolved)
-        ok, output = run({ LUA, "-E", "-e",
-            [[package.path = "./?.lua;" .. package.path; assert(require("lto_fixture.facade").answer() == 42)]] })
+        -- One prefix provider beside the sources: a plain Lua host installs
+        -- the Titan searcher through the support module and names that
+        -- directory, because the runtime default has no working-directory
+        -- entry.
+        ok, output = run({ "env", "TITAN_PATH_0_6=" .. workspace .. ";;",
+            LUA, "-E", "-e",
+            [[require "titan"; assert(require("lto_fixture.facade").answer() == 42)]] })
         assert.is_true(ok, output)
 
         -- Repeat the pair under a real shared jobserver. The archive-backed
@@ -188,8 +193,13 @@ describe("Titan link-time optimization", function()
         nm_ok, unresolved = run({ "nm", "-u", "lto_fixture.so" })
         assert.is_true(nm_ok, unresolved)
         assert.falsy(unresolved:find(SENTINEL, 1, true), unresolved)
-        ok, output = run({ LUA, "-E", "-e",
-            [[package.path = "./?.lua;" .. package.path; assert(require("lto_fixture.facade").answer() == 42)]] })
+        -- One prefix provider beside the sources: a plain Lua host installs
+        -- the Titan searcher through the support module and names that
+        -- directory, because the runtime default has no working-directory
+        -- entry.
+        ok, output = run({ "env", "TITAN_PATH_0_6=" .. workspace .. ";;",
+            LUA, "-E", "-e",
+            [[require "titan"; assert(require("lto_fixture.facade").answer() == 42)]] })
         assert.is_true(ok, output)
 
         -- Only the compiled provider remains resolvable. The archive must

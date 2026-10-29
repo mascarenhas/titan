@@ -4,7 +4,7 @@ local modules = { "test", "record_call_provider", "record_call_consumer" }
 
 local function clean()
     for _, name in ipairs(modules) do
-        for _, suffix in ipairs({ ".c", ".o", ".so", ".a", ".lua" }) do
+        for _, suffix in ipairs({ ".c", ".o", ".so", ".a" }) do
             os.remove(name .. suffix)
         end
         os.execute("rm -rf " .. name .. ".so.dSYM")

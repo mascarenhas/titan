@@ -37,10 +37,9 @@ local prefix_lua = os.getenv("PREFIX") and
     (os.getenv("PREFIX") .. (platform.windows and "/bin/lua.exe" or "/bin/lua")) or nil
 local LUA = prefix_lua and file_exists(prefix_lua) and prefix_lua or
     (platform.windows and "lua.exe" or "lua")
+-- The installed compiler program: the native titanc.exe on Windows.
 local prefix_titanc = os.getenv("PREFIX") and
-    (os.getenv("PREFIX") .. (platform.windows and
-        ("/lib/luarocks/rocks-5.5/titan/" .. driver.TITAN_VERSION .. "-1/bin/titanc") or
-        "/bin/titanc")) or nil
+    (os.getenv("PREFIX") .. (platform.windows and "/bin/titanc.exe" or "/bin/titanc")) or nil
 local INSTALLED_TITANC = prefix_titanc and file_exists(prefix_titanc) and
     prefix_titanc or "titanc"
 
@@ -261,13 +260,13 @@ end
 local lua_workspace
 local function source_lua_arguments(argv)
     if platform.windows then
-        table.insert(argv, 2, "TITAN_ROCKS_ROOT=" ..
+        table.insert(argv, 2, "TITAN_ROOT=" ..
             require("spec.support.installed_prefix").active())
     else
         -- The checkout profile's SDK override belongs to this Busted process,
         -- not these source-layout CLI probes, which deliberately pass --lua.
         table.insert(argv, 2, "-u")
-        table.insert(argv, 3, "TITAN_ROCKS_ROOT")
+        table.insert(argv, 3, "TITAN_ROOT")
         -- Source-checkout compilers need the matching installed Lua SDK, even
         -- when the checkout itself has never built Lua.
         lua_workspace = lua_workspace or async_stdlib.workspace("test-runner")
@@ -311,10 +310,6 @@ local function compile_installed(root, ...)
         "TITAN_EXTRA_CFLAGS=",
         "TITAN_EXTRA_LDFLAGS=",
     }
-    if platform.windows then
-        argv[#argv + 1] = LUA
-        argv[#argv + 1] = "-E"
-    end
     argv[#argv + 1] = INSTALLED_TITANC
     argv[#argv + 1] = "--test"
     for _, argument in ipairs({ ... }) do argv[#argv + 1] = argument end

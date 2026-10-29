@@ -119,13 +119,13 @@ local function titanc(overrides, ...)
     -- not contain the Unix runtime archive selected by these probes on Unix.
     if platform.windows then
         environment.TITAN_BUILD_PROFILE = environment.TITAN_BUILD_PROFILE or false
-        environment.TITAN_ROCKS_ROOT =
+        environment.TITAN_ROOT =
             require("spec.support.installed_prefix").active()
         options = { env = environment }
     else
         argv = { "env", "-u", "TITAN_BUILD_PROFILE" }
         argv[#argv + 1] = "-u"
-        argv[#argv + 1] = "TITAN_ROCKS_ROOT"
+        argv[#argv + 1] = "TITAN_ROOT"
         if environment.TITAN_BUILD_PROFILE then
             table.insert(argv, "TITAN_BUILD_PROFILE=" .. environment.TITAN_BUILD_PROFILE)
         end
@@ -156,7 +156,6 @@ end
 local ARTIFACTS = {
     MODULE .. (platform.windows and ".dll" or ".so"),
     MODULE .. ".a",
-    MODULE .. ".lua",
     APPLICATION .. "/" .. MODULE .. ".c",
     APPLICATION .. "/" .. MODULE .. ".o",
     APPLICATION .. "/" .. MODULE .. ".ffi.h",
