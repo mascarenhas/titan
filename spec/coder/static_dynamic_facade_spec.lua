@@ -271,8 +271,10 @@ end
         -- have smuggled in a fallback implementation.
         assert.truthy(os.remove(owner_archive))
         assert.truthy(os.remove(workspace .. "/dynamic/facade.so"))
-        assert.truthy(os.remove(workspace .. "/dynamic/facade.lua"))
-        assert.truthy(os.remove(workspace .. "/dynamic/owner.lua"))
+        -- The cutover ships no generated shims beside a provider; assert that
+        -- rather than staging files that no longer exist.
+        assert.is_nil(lfs.attributes(workspace .. "/dynamic/facade.lua"))
+        assert.is_nil(lfs.attributes(workspace .. "/dynamic/owner.lua"))
         ok, output, why, code =
             run({ workspace .. "/app" }, workspace)
         assert.falsy(ok, output .. "\n(" .. tostring(why) .. ", " ..
