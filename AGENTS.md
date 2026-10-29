@@ -176,8 +176,9 @@ profile loads edited compiler Lua with the selected installed SDK. It does not
 refresh runtime/providers. `luarocks test` does not build the rock; `make test`
 reinstalls it. Filters for Busted and native Titan tests are independent.
 Canonical full runs must start without ambient `ROCKS_TREE`, `TITAN_ROOT`,
-`TITAN_EXTRA_CPPFLAGS`, or `TITAN_NO_LINE_DIRECTIVES`; clear Lua path overrides
-for manual prefix-tool invocations too. See the workflow for focused overrides.
+`TITANC`, `TITAN_PATH_0_6`, `TITAN_PATH`, `TITAN_EXTRA_CPPFLAGS`, or
+`TITAN_NO_LINE_DIRECTIVES`; clear Lua path overrides for manual prefix-tool
+invocations too. See the workflow for focused overrides.
 
 Treat shared runtime archives, providers, the support module, and native
 dependencies as Make-owned read-only inputs during compiler fixtures. Never
