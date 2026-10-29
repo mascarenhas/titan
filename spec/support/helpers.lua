@@ -238,6 +238,13 @@ function M.compile_app(modname, ast)
     return compile_program(modname, objects)
 end
 
+-- Fixture providers live in the working directory. The runtime Titan path has
+-- no implicit `.`, so Lua children that import them name it explicitly.
+local function lua_with_cwd_providers(modname, script)
+    return { platform.windows and "env.exe" or "env",
+        "TITAN_PATH_0_6=.;;", "TITAN_PATH=", LUA, "-l", modname, script }
+end
+
 -- Run `code` under the stock Lua interpreter with `modname` loaded (`-l`),
 -- wrapped in pcall. Returns (true, output) on success, or (false, message).
 -- The driver code is written to a temp script and run by path rather than via
@@ -248,7 +255,7 @@ function M.call(modname, code)
     local sf = assert(io.open(script, "w"))
     sf:write(string.format("print(pcall(function () %s end))\n", code))
     sf:close()
-    local result, output = run({ LUA, "-l", modname, script }, false)
+    local result, output = run(lua_with_cwd_providers(modname, script), false)
     os.remove(script)
     local out = output ~= "" and output:match("^[^\n]*") or nil
     if not result.ok then
@@ -317,7 +324,7 @@ function M.compile_and_run(titan_code, lua_test, modname)
     local sf = assert(io.open(script, "w"))
     sf:write(lua_test)
     sf:close()
-    local result, out = run({ LUA, "-l", modname, script }, false)
+    local result, out = run(lua_with_cwd_providers(modname, script), false)
     os.remove(script)
     assert.truthy(result.started, result.diagnostic)
     return out
