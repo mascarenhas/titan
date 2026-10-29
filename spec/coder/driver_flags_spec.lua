@@ -156,7 +156,6 @@ end
 local ARTIFACTS = {
     MODULE .. (platform.windows and ".dll" or ".so"),
     MODULE .. ".a",
-    MODULE .. ".lua",
     APPLICATION .. "/" .. MODULE .. ".c",
     APPLICATION .. "/" .. MODULE .. ".o",
     APPLICATION .. "/" .. MODULE .. ".ffi.h",

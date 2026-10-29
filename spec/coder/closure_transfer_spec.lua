@@ -3,7 +3,7 @@ local temporary = require "spec.support.temporary"
 
 describe("closure transfer metadata generation", function()
     after_each(function()
-        for _, suffix in ipairs({ ".c", ".o", ".so", ".a", ".lua", ".ffi.h", ".priv.h", ".parts" }) do
+        for _, suffix in ipairs({ ".c", ".o", ".so", ".a", ".ffi.h", ".priv.h", ".parts" }) do
             os.remove("test" .. suffix)
         end
     end)

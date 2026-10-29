@@ -2,7 +2,7 @@ local h = require "spec.support.helpers"
 
 describe("reflected native projection generation", function()
     after_each(function()
-        for _, suffix in ipairs({ ".c", ".o", ".so", ".a", ".lua" }) do
+        for _, suffix in ipairs({ ".c", ".o", ".so", ".a" }) do
             os.remove("test" .. suffix)
         end
     end)

@@ -11,7 +11,7 @@ local run_coder = h.run_coder
 
 local function clean()
     for _, suffix in ipairs({
-        ".c", ".o", ".so", ".a", ".lua", "__entrypoint.c",
+        ".c", ".o", ".so", ".a", "__entrypoint.c",
         "__entrypoint.o",
     }) do
         os.remove("test" .. suffix)

@@ -41,7 +41,6 @@ describe("immediately invoked anonymous functions", function()
         os.remove("test.o")
         os.remove("test.so")
         os.remove("test.a")
-        os.remove("test.lua")
         os.execute("rm -rf test.dSYM test.so.dSYM")
         if not h.verbose then os.remove("test.c") end
     end)

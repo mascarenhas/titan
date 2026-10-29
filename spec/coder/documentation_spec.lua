@@ -6,7 +6,7 @@ local provider = "./" .. module .. (platform.windows and ".dll" or ".so")
 
 describe("documentation metadata at runtime", function()
     after_each(function()
-        for _, suffix in ipairs({".c", ".o", ".so", ".dll", ".dll.def", ".lua", ".a", ".ffi.h", ".titan.h"}) do
+        for _, suffix in ipairs({".c", ".o", ".so", ".dll", ".dll.def", ".a", ".ffi.h", ".titan.h"}) do
             os.remove(module .. suffix)
         end
         if not platform.windows then

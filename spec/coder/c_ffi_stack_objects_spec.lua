@@ -6,7 +6,7 @@ local MODULE = "ffi_stack_objects"
 
 local function clean_module(name)
     for _, suffix in ipairs({
-        ".c", ".o", ".so", ".a", ".lua", ".titan.h",
+        ".c", ".o", ".so", ".a", ".titan.h",
         "__entrypoint.c", "__entrypoint.o",
     }) do
         os.remove(name .. suffix)

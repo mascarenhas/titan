@@ -279,7 +279,7 @@ describe("incremental and separate compilation (CLI)", function()
     after_each(function()
         remove(workspace)
         for _, root in ipairs(ROOTS) do
-            for _, suffix in ipairs({ "", ".so", ".so.dSYM", ".a", ".lua", ".dSYM",
+            for _, suffix in ipairs({ "", ".so", ".so.dSYM", ".a", ".dSYM",
                 "__entrypoint.c", "__entrypoint.o", "__main", "__main.dSYM" }) do
                 remove(root .. suffix)
             end
