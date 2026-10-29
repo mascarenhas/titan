@@ -261,13 +261,13 @@ end
 local lua_workspace
 local function source_lua_arguments(argv)
     if platform.windows then
-        table.insert(argv, 2, "TITAN_ROCKS_ROOT=" ..
+        table.insert(argv, 2, "TITAN_ROOT=" ..
             require("spec.support.installed_prefix").active())
     else
         -- The checkout profile's SDK override belongs to this Busted process,
         -- not these source-layout CLI probes, which deliberately pass --lua.
         table.insert(argv, 2, "-u")
-        table.insert(argv, 3, "TITAN_ROCKS_ROOT")
+        table.insert(argv, 3, "TITAN_ROOT")
         -- Source-checkout compilers need the matching installed Lua SDK, even
         -- when the checkout itself has never built Lua.
         lua_workspace = lua_workspace or async_stdlib.workspace("test-runner")

@@ -181,7 +181,7 @@ describe("native compile-and-run coverage", function()
         write(workspace .. "/frontend.lua", "package.path = " .. string.format("%q", frontend .. "/?.lua;")
             .. " .. package.path\n" .. children:init_code() .. "\n"
             .. "local platform = require 'titan-compiler.platform'\nlocal getenv = platform.getenv\n"
-            .. "local values = " .. string.format("{CC=%q,TITAN_ROCKS_ROOT=%q,TITAN_EXTRA_CFLAGS=%q,TITAN_EXTRA_CPPFLAGS='',TITAN_EXTRA_LDFLAGS='',TITAN_NO_LINE_DIRECTIVES='0',TITAN_PROBE_CACHE_DISABLE='1'}", CC, PREFIX, "-O2 -fno-lto")
+            .. "local values = " .. string.format("{CC=%q,TITAN_ROOT=%q,TITAN_EXTRA_CFLAGS=%q,TITAN_EXTRA_CPPFLAGS='',TITAN_EXTRA_LDFLAGS='',TITAN_NO_LINE_DIRECTIVES='0',TITAN_PROBE_CACHE_DISABLE='1'}", CC, PREFIX, "-O2 -fno-lto")
             .. "\nplatform.getenv = function(name) if values[name] ~= nil then return values[name] end return getenv(name) end\n"
             .. "assert(require('lfs').chdir(" .. string.format("%q", workspace) .. "))\n"
             .. "dofile(" .. string.format("%q", frontend .. "/titanc") .. ")\n")

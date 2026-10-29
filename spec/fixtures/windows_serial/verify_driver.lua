@@ -19,7 +19,7 @@ assert(driver.INSTALLED and not driver.SOURCE_CHECKOUT)
 assert(same_path(driver.INSTALL_PATHS.root, sdk))
 assert(same_path(driver.INSTALL_PATHS.lua_source, sdk .. "/src/lua-5.5.1"))
 assert(same_path(driver.INSTALL_PATHS.liblua, sdk .. "/lib/liblua55.a"))
-assert(driver.INSTALL_PATHS.lua_cpath:sub(-5) == "?.dll")
+assert(same_path(driver.INSTALL_PATHS.titan_bin, sdk .. "/lib/titan/0.6"))
 assert(table.concat(driver.module_binary_candidates("one.two.leaf"), ";") ==
     "one.dll;one/two.dll;one/two/leaf.dll")
 assert(driver.close_resolver_context(context))

@@ -105,7 +105,7 @@ local function run_cmd(argv, cwd)
             stderr_to_stdout = true,
             -- Windows runtime outputs belong to its installed private SDK,
             -- not the checkout's Unix Makefile/runtime archive.
-            env = platform.windows and { TITAN_ROCKS_ROOT = PREFIX } or nil,
+            env = platform.windows and { TITAN_ROOT = PREFIX } or nil,
         })
     end)
     if previous then assert(lfs.chdir(previous)) end
@@ -1334,7 +1334,7 @@ local results = driver.compile_modules({ {
 assert(results[1].ok == nil, "injected C compilation unexpectedly succeeded")
 ]], ROOT, MULTI_CONSTRUCT_SOURCE, source_path, wrapper))
         local ok, output = run_cmd({
-            "env", "TITAN_ROCKS_ROOT=" .. PREFIX, LUA, probe,
+            "env", "TITAN_ROOT=" .. PREFIX, LUA, probe,
         })
         assert.is_true(ok, output)
         local position = 0

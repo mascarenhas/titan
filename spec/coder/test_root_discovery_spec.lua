@@ -1035,7 +1035,7 @@ end
         local extension = platform.windows and ".dll" or ".so"
         local argv = {
             "env", "TITAN_RUNTIME_PREBUILT=1", "CCACHE_DISABLE=1",
-            "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_ROCKS_ROOT=" .. prefix,
+            "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_ROOT=" .. prefix,
             "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=-O0 -fno-lto",
             "TITAN_EXTRA_LDFLAGS=-fno-lto", "TITAN_FILTER=",
             lua, "-E", "-e",

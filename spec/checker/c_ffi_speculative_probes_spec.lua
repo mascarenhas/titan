@@ -1034,7 +1034,7 @@ describe("titanc speculative probe batches", function()
         for _, argument in ipairs({
             "CC=" .. probe_compiler(),
             "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
-            "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_ROCKS_ROOT=" .. PREFIX,
+            "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_ROOT=" .. PREFIX,
             "TITAN_RUNTIME_PREBUILT=1", LUA, "-e",
             "package.path = " .. string.format("%q",
                 ROOT .. "/?.lua;" .. ROOT .. "/?/init.lua;") .. " .. package.path",

@@ -158,7 +158,7 @@ describe("folder modules through the public compiler", function()
                 (os.getenv("PATH") or "/usr/bin:/bin"),
         }
         if USE_CHECKOUT_COMPILER then
-            table.insert(argv, "TITAN_ROCKS_ROOT=" .. PREFIX)
+            table.insert(argv, "TITAN_ROOT=" .. PREFIX)
             table.insert(argv, "LUA_CPATH=" .. REPO .. "/?" .. SHARED_SUFFIX .. ";;")
             table.insert(argv, LUA)
             table.insert(argv, "-e")

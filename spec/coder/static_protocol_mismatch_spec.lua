@@ -87,7 +87,7 @@ local function compiler_argv(workspace, source_root, ...)
     if installed then
         argv[#argv + 1] = PREFIX .. "/bin/titanc"
     else
-        argv[#argv + 1] = "TITAN_ROCKS_ROOT=" .. PREFIX
+        argv[#argv + 1] = "TITAN_ROOT=" .. PREFIX
         argv[#argv + 1] = "LUA_CPATH=" .. REPO .. "/?.so;;"
         argv[#argv + 1] = LUA
         argv[#argv + 1] = "-e"

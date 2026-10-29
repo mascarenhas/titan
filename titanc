@@ -1,5 +1,30 @@
 #!/usr/bin/env lua
 
+-- `titanc --print-root` is the runtime's SDK-root query. Answer it from the
+-- native support module alone, before loading the compiler. Every other
+-- spelling, including extra arguments, takes the fully validated path below.
+if select("#", ...) == 1 and ... == "--print-root" then
+    local loaded, support = pcall(require, "titan")
+    local compiler_root = loaded and type(support) == "table" and
+        support._compiler_root
+    local root, root_error
+    if type(compiler_root) == "function" then
+        root, root_error = compiler_root()
+    elseif loaded then
+        root_error = "installed Titan native support lacks _compiler_root; " ..
+            "reinstall Titan"
+    else
+        root_error = "cannot load the Titan support module: " .. tostring(support)
+    end
+    if type(root) ~= "string" or root == "" then
+        io.stderr:write("cannot locate the Titan installation root: ",
+            tostring(root_error), "\n")
+        os.exit(1)
+    end
+    io.stdout:write(root, "\n")
+    return
+end
+
 local argparse = require 'argparse'
 
 local checker = require 'titan-compiler.checker'
@@ -145,11 +170,10 @@ if args.print_root then
     if #args.module > 0 then
         exit("--print-root cannot be combined with module names")
     end
-    local root, root_error = driver.resolve_installation_root(
-        package.cpath, platform.getenv("TITAN_ROCKS_ROOT"))
+    local root, root_error = driver.compiler_root()
     if not root then
-        exit(root_error or "cannot locate the Titan installation root: " ..
-            "package.cpath has no matching Titan or Lua installation entry")
+        exit("cannot locate the Titan installation root: " ..
+            tostring(root_error))
     end
     io.stdout:write(root, "\n")
     return
