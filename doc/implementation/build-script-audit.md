@@ -76,14 +76,22 @@ artifacts, and schedules worker frontends and native compilations under
 `-j$(TITAN_JOBS)`:
 
 ```sh
-$(STDLIB_COMPILER_ENV) $(TITANC) --output $(TITAN_OUTPUT_DIR) \
+$(STDLIB_COMPILER_ENV) $(STDLIB_TITANC) --output $(TITAN_OUTPUT_DIR) \
   --source-first --incremental -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) \
   -c $(STDLIB_ROOTS)
 
-$(STDLIB_COMPILER_ENV) $(TITANC) --output $(TITAN_OUTPUT_DIR) \
+$(STDLIB_COMPILER_ENV) $(STDLIB_TITANC) --output $(TITAN_OUTPUT_DIR) \
   --source-first --incremental -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) \
   $(STDLIB_ROOTS) -X $(STDLIB_EXTRA_OBJECTS)
 ```
+
+`STDLIB_TITANC` is a complete compiler command (the installed `bin/titanc`,
+or the checkout `titanc` run through `$(TITAN_LUA)` with
+`SOURCE_COMPILER_SETUP` and `--lua`). It deliberately avoids the name `TITANC`:
+the runtime reads `TITANC` as the single program its [SDK
+fallback](driver.md#the-run-time-titan-path-and-sdk-fallback) starts, and GNU
+Make exports a variable given on its command line into every recipe
+environment, where any Lua host or compiled program a recipe runs would see it.
 
 Make maintains no per-module Titan import rules, object or provider timestamp
 prerequisites, completion stamps, or C-part split-policy stamps. Only `stdlib`
@@ -328,7 +336,15 @@ modules](static-compiled-modules.md#publication-and-installation).
 The support module (`TITAN_SUPPORT_MODULE`, `titan-runtime/bootstrap/titan.so`;
 `<WINDOWS_BUILD_ROOT>/runtime/titan.dll` on Windows) links only `ltitanlib.o`
 and `titan_path.o` with `$(ROCK_LD) $(ROCK_LIBFLAG)` and exports only
-`luaopen_titan`. It is built before the compiler or standard library needs it;
+`luaopen_titan`. The Unix link enforces that with
+`TITAN_SUPPORT_EXPORT_FLAGS`: the version script
+`scripts/titan_support_exports.map` (`global: luaopen_titan; local: *;`) on
+ELF platforms and `-Wl,-exported_symbol,_luaopen_titan` on macOS. Windows links
+the DLL with `-Wl,--exclude-all-symbols` and an explicitly `dllexport` opener.
+`titan_path.o`'s global functions therefore stay local to the support image, so
+a process that also links `libtitan.a`, such as the language server, cannot
+interpose them; `libtitan.a` itself keeps default visibility. The support
+module is built before the compiler or standard library needs it;
 no SDK target seeds it, or any provider, into `lib/titan/0.6`. Both objects are
 also members of `libtitan.a` (`TITAN_RUNTIME_OBJECTS`, in the order `titan.o
 minicoro.o titan_path.o ltitanlib.o`); the standard provider does not carry

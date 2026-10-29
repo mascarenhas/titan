@@ -243,9 +243,9 @@ with `RTLD_LAZY | RTLD_GLOBAL`; Windows uses the cached
 `titan_win_load_library` handle. The ABI is checked before any Lua opener
 runs (on Windows through the plain-C `<mangled>_abi_value` query). Success
 returns `luaopen_<mangled>` and the provider path as loader data, so `require`
-calls the opener with the requested name as argument 1 and the generated
-[name guard](codegen-overview.md#the-module-protocol) rejects a provider for a
-different logical name with the same mangled spelling. These are terminal
+calls the opener with the requested name and that path, and the generated
+[file-load name guard](codegen-overview.md#lua-entries-and-abi-type-and-layout-metadata)
+rejects a provider for a different logical name with the same mangled spelling. These are terminal
 errors, never a miss: an occupied candidate that cannot be opened or
 inspected, one claim symbol without the other, an exact candidate with neither
 (`does not define module '<m>' (no ABI marker '<m>_abi')`), an ABI mismatch, and a
@@ -1737,8 +1737,11 @@ repeatable CLI native switches in a single deterministic order
   Direct programmatic callers that do not call `driver.apply_native_inputs`
   keep `driver.EXTRA_CPPFLAGS` before `driver.CFLAGS` and `driver.EXTRA_CFLAGS`
   after it. The C parser, C probe service, preamble certification probe,
-  generated module C, standalone entrypoints, and `--c-source` nodes all use
-  this same prefix.
+  generated module C, and standalone entrypoints all use this same prefix.
+  `--c-source` nodes use `driver.authored_c_compile_prefix()`, which is
+  identical except that on Windows it omits Titan's Lua DLL import
+  definitions ([Windows consumer
+  definitions](windows-build.md#one-controlled-lua-dll-and-its-sdk)).
 * **Linking (`driver.link_extra_flags()`).** Appends `TITAN_EXTRA_LDFLAGS`
   followed by CLI `-L`/`--library-dir`, `-l`/`--link` (comma lists expanded,
   repeats and interleaving preserved), and `--ldflag` options in exact
@@ -2605,7 +2608,7 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `TITAN_C_PARTS` | `titanc`, `driver.lua` (`driver.effective_c_parts`) | `4` on Linux; `1` on Windows, macOS, and other platforms (`driver.default_c_parts`) | Maximum generated C translation units per module when `--c-parts` is absent; `1` disables splitting. A changed value makes reused objects miss. |
 | `TITAN_PATH_0_6`, `TITAN_PATH` | `driver.lua` (`titan_bin_path_entries`), `titan_path.c` | unset | [Titan path](#titan-path-syntax): `;`-separated directories, `;;` inserts the default, `!` is the executable directory, an empty value searches nothing; the versioned name wins. |
 | `TITAN_ROOT` | `driver.lua`, `titanc --print-root`, `titan_path.c` (`_compiler_root()` and the run-time SDK fallback), Make | unset (empty means unset) | Explicit Titan SDK/rocks-tree root; otherwise the compiler uses the parent of its interpreter directory and the run-time fallback asks `titanc --print-root`. |
-| `TITANC` | `titan_path.c` (run-time SDK fallback) | unset (empty means unset) | Program run as `<TITANC> --print-root` instead of `titanc` from `PATH`; it must terminate. |
+| `TITANC` | `titan_path.c` (run-time SDK fallback) | unset (empty means unset) | One program name or path, run as `<TITANC> --print-root` without a shell instead of `titanc` from `PATH`; not a command line with arguments, and it must terminate. Make's stdlib compiler command is the distinct `STDLIB_TITANC`. |
 | `TITAN_PREFIX` | `driver.lua` | installation root | Root of the persistent C-probe cache `var/cache/titan-probes/2`. |
 | `TITAN_PROBE_CACHE_DISABLE` | `driver.lua` | unset | Exact value `1` disables persistent C-probe reuse. |
 | `TITAN_RUNTIME_PREBUILT` | `driver.lua` `check_runtime` | unset | Exact value `1` skips the checkout `libtitan.a` rebuild. |

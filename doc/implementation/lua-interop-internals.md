@@ -485,7 +485,7 @@ accessed. The metatable check is not a sandbox against privileged Lua or C.
 `luaopen_<mangled>` calls `_init` and pushes it, and there is no separate module
 table. After a successful `_init`, the module publishes its `luaopen_<mangled>`
 in `registry[LUA_PRELOAD_TABLE]` and a native descriptor in
-`TITAN_MODULE_PRELOADS_KEY` (`titan_module_preload`, `titan-runtime/titan.c`);
+`TITAN_MODULE_PRELOADS_KEY` (`titan_module_preload`, `titan-runtime/titan_path.c`);
 this does not write `package.loaded`. How standalone programs and static
 providers rely on that self-publication is in
 [driver](driver.md#linking-a-standalone-program-drivercompile_program) and
@@ -729,9 +729,12 @@ provider raise; a clean miss returns Lua's ordinary searcher message. The full
 contract is in [the Titan package
 searcher](driver.md#the-titan-package-searcher).
 
-`require` passes the requested name to `luaopen_<mangled>`, whose generated
-[name guard](codegen-overview.md#the-module-protocol) rejects a different
-logical name with the same mangled spelling before initialization.
+`require` passes the requested name and the provider path to
+`luaopen_<mangled>`, whose generated [file-load name
+guard](codegen-overview.md#lua-entries-and-abi-type-and-layout-metadata)
+rejects a different logical name with the same mangled spelling before
+initialization. A `package.preload` alias, whose loader data is `":preload:"`,
+is not compared.
 
 The support table's `_loadlibglobal(path, symbol)` is a separate internal
 helper for native harnesses. It canonicalizes the path with `realpath`, keeps

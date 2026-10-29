@@ -221,8 +221,8 @@ newly opened DSOs.
 searcher](driver.md#the-titan-package-searcher). A claimed candidate's ABI is
 checked with `titan_check_abi_entry` (`titan-runtime/titan_path.c`, which the
 searcher shares with generated imports; on Windows through `_abi_value`) before
-the searcher returns `luaopen_<mangled>`, and that opener's [logical-name
-guard](codegen-overview.md#lua-entries-and-abi-type-and-layout-metadata)
+the searcher returns `luaopen_<mangled>`, and that opener's [file-load
+name guard](codegen-overview.md#lua-entries-and-abi-type-and-layout-metadata)
 rejects a provider for a different logical name with the same mangled spelling
 before `_init` runs. An ABI mismatch reports `Titan compiled module '<file>'
 ABI mismatch: expected 2 but found <n>`. Lua callers have no consumer

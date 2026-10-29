@@ -244,9 +244,10 @@ the Titan searcher. The searcher's runtime candidate probe uses
 `dlopen(realpath, RTLD_LAZY | RTLD_LOCAL)` and promotes only a valid claim to
 `RTLD_LAZY | RTLD_GLOBAL` before resolving `luaopen_<mangled>`, so the
 provider's unresolved calls can later bind to dependencies that generated
-imports load. `require` passes the requested name to that opener, and the
-generated [name guard](codegen-overview.md#the-module-protocol) rejects a
-logical name that merely shares the mangled spelling. The loading paths and
+imports load. `require` passes the requested name and the provider path to
+that opener, and the generated [file-load name
+guard](codegen-overview.md#lua-entries-and-abi-type-and-layout-metadata)
+rejects a logical name that merely shares the mangled spelling. The loading paths and
 caches are in [Four shared-library loading
 paths](lua-interop-internals.md#four-shared-library-loading-paths).
 

@@ -1056,14 +1056,24 @@ table per public record or union) are all served by the module metatable
 
 Mangling maps both `.` and `-` to `_`, so it is not injective: `a.b-c` and
 `a.b_c` share `luaopen_a_b_c`, `a_b_c_abi`, and `a_b_c_types`. The generated
-opener therefore starts with an exact logical-name guard (`coder/module.lua`
-postamble). When argument 1 is a Lua string it must equal the logical name by
-length and bytes; otherwise the opener raises `module name mismatch: requested
-'<x>', provider defines '<logical>'` before invalidating backtrace state,
-calling `_init`, or publishing anything. `require`, the preload searcher, the
-Titan searcher, and the Windows launcher pass the exact requested name.
-Zero-argument calls (transfer preload loaders, native harnesses,
-`loadlib(...)()`) and non-string arguments skip the check.
+opener therefore starts with a logical-name guard for file loads
+(`coder/module.lua` postamble). `require` passes the requested name as
+argument 1 and the searcher's loader data as argument 2. When argument 2 is a
+Lua string other than Lua's documented preload loader data `":preload:"`, the
+call is a file load: the [Titan
+searcher](driver.md#the-titan-package-searcher) passes the provider path and
+Lua's C searchers pass the file name. A file load whose argument 1 is a Lua
+string must name the logical module exactly, by length and bytes; otherwise
+the opener raises `module name mismatch: requested '<x>', provider defines
+'<logical>'` before invalidating backtrace state, calling `_init`, or
+publishing anything. Every other call skips the comparison. Preload loads pass
+`":preload:"`, so `package.preload[alias] = luaopen_<m>` deliberately aliases
+the opener under another name in that state and still returns the canonical
+module; copied native preloads (including registry `_PRELOAD` snapshots in
+[independent states](lua-library.md#independent-state-ownership)) and the
+Windows launcher's `titan_open_main` preload loader take this path. Calls
+without string loader data (transfer preload loaders, native harnesses,
+`package.loadlib(...)()`) skip it too.
 
 `<prefix>_abi` is a tiny marker function that returns `TITAN_ABI_VERSION`;
 `<prefix>_abi_value` returns the same string as a native bootstrap query,

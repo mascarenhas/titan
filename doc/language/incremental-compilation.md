@@ -18,9 +18,9 @@ and [Driver and toolchain](../implementation/driver.md).
 
 | Invocation | Effect |
 | --- | --- |
-| `titanc project.base project.feature` | Compile selected source modules and publish the usual provider pair and Lua loaders, or an executable when one root has `main`. |
+| `titanc project.base project.feature` | Compile selected source modules and publish the usual provider pair, or an executable when one root has `main`. |
 | `titanc --incremental project.base project.feature` | Certify and reuse eligible source objects, including requested roots, compile only misses across the module graph, and reuse or relink the final target. |
-| `titanc -c project.feature` | Rebuild every source module in the requested closure to objects and generated headers; produce no provider, Lua loader, or executable. |
+| `titanc -c project.feature` | Rebuild every source module in the requested closure to objects and generated headers; produce no provider or executable. |
 | `titanc -c --incremental project.feature` | Certify and reuse eligible source objects, including requested roots, and compile only misses to objects and generated headers. |
 | `titanc -c --incremental --c-source helper.c` | Certify or compile standalone native C source nodes without requiring Titan module roots. |
 | `titanc -c --incremental --print-c-objects --c-source helper.c` | Also print the absolute path of each certified C object on standard output, one line per `--c-source` argument. |
@@ -243,8 +243,8 @@ static-archive validation probes, and native linking. It certifies:
   `--c-source` objects, `-X` payloads, selected dynamic providers, static
   archives, and runtime inputs;
 * the complete immutable owned output set on disk (executables, `.so`/`.a`
-  pairs, Windows `.exe`/`.dll` pairs, generated Lua shims, and Darwin `.dSYM`
-  bundles), checking file/directory kind, non-symlink status, content digests,
+  pairs, Windows `.exe`/`.dll` pairs, and Darwin `.dSYM` bundles), checking
+  file/directory kind, non-symlink status, content digests,
   and executable permission bits on Unix (mutable runtime `.gcda` counter files
   and coverage reports are not link outputs); and
 * the resolved native link libraries and file operands (via
@@ -481,6 +481,16 @@ In this layout:
   `titanc` invocations so the second waits without holding Make jobserver tokens
   and then reuses the objects published by the first.
 
+`TITANC` here names one program, which matters because Titan reads an
+environment variable of the same name. A compiled program or Lua host that
+misses a module in its default directories may run `$TITANC --print-root`,
+without a shell, to find the installed SDK (see [The Titan
+path](modules.md#the-titan-path)), and GNU Make exports a `TITANC` given on its
+command line, or inherited from the environment, to every recipe, including
+`./build/app-tests`. Keep the value a single program name or path, as in
+`make TITANC=/opt/titan/bin/titanc`, and give a compiler command that needs
+arguments or a wrapper another variable name.
+
 Keep native dependency builds (such as bundled C libraries), custom code
 generators, packaging rules, and test execution in Make; pass any generated or
 authored helper `.c` files to `titanc` with `--c-source` and prebuilt native
@@ -508,7 +518,7 @@ objects with `-c --incremental` first. For example, if `app.helper` imports
 
 ```sh
 titanc -o out vendor.algorithms
-TITAN_PATH_0_6='out/?.a;out/?.so;;' \
+TITAN_PATH_0_6='out;;' \
   titanc -o out --static --incremental --exe out/bin/app app.main
 ./out/bin/app
 ```
@@ -517,11 +527,11 @@ When separate object steps are desired, `-c --incremental` certifies both
 dependencies and explicit roots:
 
 ```sh
-TITAN_PATH_0_6='out/?.a;out/?.so;;' \
+TITAN_PATH_0_6='out;;' \
   titanc -o out --static -c --incremental app.helper
-TITAN_PATH_0_6='out/?.a;out/?.so;;' \
+TITAN_PATH_0_6='out;;' \
   titanc -o out --static -c --incremental app.main
-TITAN_PATH_0_6='out/?.a;out/?.so;;' \
+TITAN_PATH_0_6='out;;' \
   titanc -o out --static --incremental --exe out/bin/app app.main
 ./out/bin/app
 ```

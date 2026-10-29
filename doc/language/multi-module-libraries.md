@@ -207,9 +207,11 @@ Lua's usual `module 'a.b.left' not found` error. A provider that exists but
 cannot be loaded, has half of the metadata pair, lacks the exact module's ABI
 marker, or carries another ABI is an error instead of a miss. Because `.` and
 `-` both become `_` in native names, `a.b-c` and `a.b_c` share one entry name;
-the entry checks the requested name and fails with `module name mismatch:
-requested 'a.b_c', provider defines 'a.b-c'` rather than initializing under the
-wrong name.
+the entry checks the requested name whenever a searcher loads it from a file,
+and fails with `module name mismatch: requested 'a.b_c', provider defines
+'a.b-c'` rather than initializing under the wrong name. Lua's `package.preload` may
+still alias an entry deliberately: `package.preload["alias"] = loader` makes
+`require "alias"` return that module under its own logical identity.
 
 Lua's own searchers run before Titan's. Do not put Titan provider directories
 on `package.cpath`, where Lua's C searcher would open a provider without the

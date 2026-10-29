@@ -271,7 +271,7 @@ stale owned `.titan.h` when the module no longer defines foreign functions.
 Do not use either reserved path for an author-written header.
 
 These headers are source-build artifacts, not binary interfaces. They are not
-placed in `.titan.meta`, provider archives, installed SDKs, Lua shims, or
+placed in `.titan.meta`, provider archives, installed SDKs, or
 standard-library publication transactions. Binary consumers recover public
 foreign declarations from module metadata and emit exact typed native bindings;
 they do not need either generated header.

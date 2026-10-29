@@ -96,7 +96,7 @@ Read the [style guide](doc/style-guide.md) before application or stdlib work.
 | Explicit `.titan` imports: local visibility, trusted source provenance, inherited C headers | [Source-import visibility](doc/implementation/source-import-visibility.md) |
 | Certified `--incremental` `.o` reuse, `.titan.source` certificates, persistent digest cache, semantic C-header/interface digests, compile-only `-c` | [Incremental compilation](doc/implementation/incremental-compilation.md), [language guide](doc/language/incremental-compilation.md) |
 | Whole-graph build coordinator, pre-dispatch output preflight, worker RPC, `.titan-build.lock`, job-slot ledger, `--c-source`/`--print-c-objects`, final-link certificates, `--test-dir` discovery | [Build coordinator](doc/implementation/build-coordinator.md) |
-| Prefix providers, multi-root `.so`/`.a` bundles, Lua shims, staged pair publication | [Multi-module libraries](doc/implementation/multi-module-libraries.md) |
+| Prefix providers, multi-root `.so`/`.a` bundles, Lua `require` through the Titan package searcher, staged pair publication | [Multi-module libraries](doc/implementation/multi-module-libraries.md) |
 | Archive/object metadata, ELF/Mach-O/COFF readers, target selection, static composition | [Static compiled modules](doc/implementation/static-compiled-modules.md) |
 | Replacing a DSO: consumer-used signatures/public shapes and runtime verification | [Binary compatibility](doc/implementation/binary-compatibility.md) |
 | Hover/doc comments, completion, long-lived semantic clients | [Documentation comments](doc/implementation/documentation-comments.md), [completion](doc/implementation/completion.md), [language-server API](doc/implementation/driver.md#language-server-compiler-api) |
@@ -179,9 +179,9 @@ Canonical full runs must start without ambient `ROCKS_TREE`, `TITAN_ROOT`,
 `TITAN_EXTRA_CPPFLAGS`, or `TITAN_NO_LINE_DIRECTIVES`; clear Lua path overrides
 for manual prefix-tool invocations too. See the workflow for focused overrides.
 
-Treat shared runtime archives, providers, shims, and native dependencies as
-Make-owned read-only inputs during compiler fixtures. Never broadly delete
-`.a`, Lua shims, or authored C fixtures. Clean affected generated/native outputs
+Treat shared runtime archives, providers, the support module, and native
+dependencies as Make-owned read-only inputs during compiler fixtures. Never
+broadly delete `.a`, `.so`, or authored C fixtures. Clean affected generated/native outputs
 when changing tools, flags, profile, or OpenSSL mode, following documented
 ownership boundaries. Serialize builds that share those outputs.
 

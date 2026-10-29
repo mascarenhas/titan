@@ -506,7 +506,9 @@ fallback](#the-titan-path).
   header checking, probes, and generated C. See
   [native compiler and linker switches](output-directory.md#native-compiler-and-linker-switches).
 * `--c-source <file>` compiles and certifies an authored or generated C file
-  with the same native flags and links its object before `-X` payloads. With
+  with the same native flags and links its object before `-X` payloads. On
+  Windows it omits Titan's Lua DLL import definitions; see [the Lua DLL and C
+  helpers](windows-build.md#the-lua-dll-and-c-helpers). With
   `-c`, `--print-c-objects` prints each certified object's absolute path.
 * `--exe <path>` selects the exact standalone or test executable path,
   relative to the working directory.
@@ -769,7 +771,8 @@ from the default (no variable, or a variable containing `;;`), Titan tries the
 installed SDK once more. With `TITAN_ROOT` set, that is
 `<TITAN_ROOT>/lib/titan/0.6`. Otherwise Titan runs `titanc --print-root`, or
 `<TITANC> --print-root` when the `TITANC` variable names another program,
-without a shell, and uses `<printed root>/lib/titan/0.6`. Each Lua state tries
+without a shell, and uses `<printed root>/lib/titan/0.6`. `TITANC` is one
+program name or path, not a command line with arguments. Each Lua state tries
 this at most once and remembers the result, even when no SDK was found; a
 failure adds a `no Titan SDK fallback: <reason>` line to the `require` or load
 error. The fallback is skipped when it names a directory already on the path.
