@@ -31,14 +31,6 @@ local STDLIB_ROOTS = {
     "titan.lua", "titan.iteration", "titan.gc", "titan.test", "titan.reflect",
     "titan.sqlite3", "titan.json", "titan.protobuf", "titan.transfer", "titan.thread",
 }
-local STDLIB_SHIMS = {
-    "titan/coroutine.lua", "titan/uv.lua", "titan/async.lua",
-    "titan/timer.lua", "titan/io.lua", "titan/fs.lua", "titan/net.lua",
-    "titan/ssl.lua", "titan/url.lua", "titan/http.lua", "titan/websocket.lua", "titan/os.lua", "titan/path.lua",
-    "titan/peg.lua", "titan/string.lua", "titan/math.lua", "titan/lua.lua",
-    "titan/iteration.lua", "titan/gc.lua", "titan/test.lua", "titan/reflect.lua",
-    "titan/sqlite3.lua", "titan/json.lua", "titan/protobuf.lua", "titan/transfer.lua", "titan/thread.lua",
-}
 local LPEGLABEL_INCLUDE =
     "-I" .. lfs.currentdir() .. "/vendor/lpeglabel"
 local LLHTTP_NATIVE_INCLUDE =
@@ -690,7 +682,7 @@ local function stdlib_artifact(relative)
                 ' -DUSING_UV_SHARED=1 -I"' .. paths.to_slash(paths.join(prefix, "include")) .. '"' ..
                 ' -I"' .. paths.to_slash(paths.join(lfs.currentdir(), "vendor", "lpeglabel")) .. '"'
             local argv = {
-                "env.exe", "TITAN_ROCKS_ROOT=" .. prefix, "TITAN_RUNTIME_PREBUILT=1",
+                "env.exe", "TITAN_ROOT=" .. prefix, "TITAN_RUNTIME_PREBUILT=1",
                 "TITAN_EXTRA_CPPFLAGS=" .. cppflags,
                 paths.join(prefix, "bin", "lua.exe"),
                 paths.join(prefix, "lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc"),
@@ -1224,17 +1216,22 @@ printf '%s\n' "$*" >> calls
                 read_file("scripts/install_compiler.mk"))
             write_file(root .. "/spec/support/stdlib_test_modules.mk",
                 read_file("spec/support/stdlib_test_modules.mk"))
+            -- The built `titan` support module is a Make-owned input here.
+            local support_module = "titan-runtime/bootstrap/titan.so"
+            assert.truthy(lfs.mkdir(root .. "/titan-runtime"))
+            assert.truthy(lfs.mkdir(root .. "/titan-runtime/bootstrap"))
+            write_file(root .. "/" .. support_module, "support module\n")
             write_file(prefix .. "/bin/titanc", [[#!/bin/sh
 set -eu
 test "$TITAN_RUNTIME_PREBUILT" = 1
-test "$TITAN_ROCKS_ROOT" = "$PWD/prefix"
+test "$TITAN_ROOT" = "$PWD/prefix"
 test "$1 $2" = "--output out"
 shift 2
 mkdir -p out/titan
 test "$*" = "--source-first --incremental -j4 titan.math -X"
 printf 'invoke\n' >> build.log
 for output in out/titan/math.o out/titan/math.c out/titan/math.ffi.h \
-    out/titan.so out/titan.a out/titan/math.lua; do
+    out/titan.so out/titan.a; do
     if test ! -f "$output"; then printf 'provider\n' > "$output"; fi
 done
 ]])
@@ -1249,7 +1246,7 @@ done
             local arguments = {
                 "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "GNUMAKEFLAGS",
                 "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES", "-u", "MAKE",
-                "-u", "ROCKS_TREE", "-u", "TITAN_ROCKS_ROOT",
+                "-u", "ROCKS_TREE", "-u", "TITAN_ROOT",
                 "-u", "TITANC", "-u", "TITAN_LUA", "-u", "ROCK_TITANC", "-u", "TITAN_JOBS",
                 "-u", "ROCK_LUA", "-u", "STDLIB_USE_INSTALLED_RUNTIME",
                 "make", "--no-print-directory", "-s", "-C", root, "TITAN_JOBS=4",
@@ -1259,7 +1256,7 @@ done
                 "OPENSSL_PKG_CONFIG=true",
                 "STDLIB_MODULES=math", "STDLIB_ROOTS=titan.math",
                 "STDLIB_TITAN_SOURCES=titan/math.titan",
-                "STDLIB_SHIMS=out/titan/math.lua", "STDLIB_LICENSES=prepared",
+                "STDLIB_LICENSES=prepared",
                 "STDLIB_EXTRA_OBJECTS=",
                 "TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT=",
             }
@@ -1276,7 +1273,7 @@ done
             assert.equal("invoke\n", build("stdlib"))
             local old = os.time() - 30
             assert(lfs.touch(root .. "/titan/math.titan", old + 20, old + 20))
-            for _, path in ipairs({ "out/titan.so", "out/titan.a", "out/titan/math.lua" }) do
+            for _, path in ipairs({ "out/titan.so", "out/titan.a" }) do
                 assert(lfs.touch(root .. "/" .. path, old + 10, old + 10))
             end
             -- Publication must copy the completed image even when its sources
@@ -1299,6 +1296,7 @@ done
                 "TITAN_SDK_NAMESPACED_HEADERS=" .. prefix .. "/include/titan/ffi.h",
                 "LIBUV_SRC_DIR=native", "LLHTTP_HEADER=native/llhttp.h",
                 "SQLITE3_HEADER=native/sqlite3.h",
+                "--old-file=" .. support_module,
             }
             assert.equal("", build("install", table.unpack(install_arguments)))
             for _, copy in ipairs({
@@ -1315,7 +1313,7 @@ done
                 { "native/sqlite3.h", "include/sqlite3.h" },
                 { "out/titan.so", "lib/titan/0.6/titan.so" },
                 { "out/titan.a", "lib/titan/0.6/titan.a" },
-                { "out/titan/math.lua", "share/lua/5.5/titan/math.lua" },
+                { support_module, "lib/lua/5.5/titan.so" },
             }) do
                 assert.equal(read_file(root .. "/" .. copy[1]),
                     read_file(installation .. "/" .. copy[2]), copy[2])
@@ -1324,6 +1322,9 @@ done
                         lfs.attributes(installation .. "/" .. copy[2], "modification"), copy[2])
                 end
             end
+            assert.equal("rwxr-xr-x", lfs.attributes(
+                installation .. "/lib/lua/5.5/titan.so", "permissions"))
+            assert.is_nil(lfs.symlinkattributes(installation .. "/share/lua/5.5/titan"))
             for _, source in ipairs(source_inventory.lua_files(root .. "/titan-compiler")) do
                 local relative = source:sub(#root + 2)
                 assert.equal(read_file(source),
@@ -1333,8 +1334,7 @@ done
                 read_file(prefix .. "/lib/titan/0.6/titan.so"))
             assert.equal(read_file(root .. "/out/titan.a"),
                 read_file(prefix .. "/lib/titan/0.6/titan.a"))
-            assert.equal(read_file(root .. "/out/titan/math.lua"),
-                read_file(prefix .. "/share/lua/5.5/titan/math.lua"))
+            assert.is_nil(lfs.symlinkattributes(prefix .. "/share/lua/5.5/titan"))
             assert.is_nil(lfs.symlinkattributes(
                 prefix .. "/share/titan/0.6/src/titan/test.titan"))
             local private = root .. "/private rock"
@@ -1342,6 +1342,7 @@ done
             for _, option in ipairs({
                 "INST_PREFIX=" .. private, "INST_BINDIR=" .. private .. "/bin",
                 "INST_LUADIR=" .. private .. "/lua", "INST_CONFDIR=" .. private .. "/conf",
+                "INST_LIBDIR=" .. private .. "/lib",
             }) do staged_arguments[#staged_arguments + 1] = option end
             local installed_time = lfs.attributes(
                 installation .. "/lib/titan/0.6/titan.so", "modification")
@@ -1350,8 +1351,11 @@ done
                 read_file(private .. "/titan-sdk/lib/titan/0.6/titan.so"))
             assert.equal(read_file(prefix .. "/lib/liblua.a"),
                 read_file(private .. "/titan-sdk/lib/liblua.a"))
-            assert.equal(read_file(root .. "/out/titan/math.lua"),
-                read_file(private .. "/lua/titan/math.lua"))
+            -- LuaRocks deploys and owns the staged support module like any
+            -- other native Lua module; no Lua shims are staged beside it.
+            assert.equal(read_file(root .. "/" .. support_module),
+                read_file(private .. "/lib/titan.so"))
+            assert.is_nil(lfs.symlinkattributes(private .. "/lua/titan"))
             assert.equal(read_file(root .. "/scripts/titan_install.lua"),
                 read_file(private .. "/installer/titan_install.lua"))
             assert.equal(read_file(root .. "/scripts/titan-uninstall"),
@@ -1360,7 +1364,7 @@ done
             assert.equal(installed_time, lfs.attributes(
                 installation .. "/lib/titan/0.6/titan.so", "modification"))
             local outputs = { "out/titan/math.o", "out/titan/math.c", "out/titan/math.ffi.h",
-                "out/titan.so", "out/titan.a", "out/titan/math.lua" }
+                "out/titan.so", "out/titan.a" }
             for _, path in ipairs(outputs) do
                 assert(lfs.touch(root .. "/" .. path, old + 1, old + 1))
             end
@@ -2383,13 +2387,10 @@ int main(void) {
         assert.falsy(poll:find("while ", 1, true), poll)
     end)
 
-    it("keeps the reviewed standard-library roots, sources, and shims exact",
+    it("keeps the reviewed standard-library roots and sources exact",
         function()
             assert.same(STDLIB_MODULES, makefile_words("STDLIB_MODULES"))
             assert.same(STDLIB_ROOTS, makefile_words("STDLIB_ROOTS"))
-            local shims = {}
-            for _, shim in ipairs(STDLIB_SHIMS) do shims[#shims + 1] = "out/" .. shim end
-            assert.same(shims, makefile_words("STDLIB_SHIMS"))
             assert.same({ "titan/string/format_native.h" },
                 makefile_words("STRING_TITAN_HEADERS"))
             assert.same({ "titan/lua/lua.titan", "titan/lua/worker.titan" },
@@ -2873,11 +2874,12 @@ int main(void) {
             end
         end)
 
-    it("exports twenty-seven DSO openers for twenty-six standard modules",
+    -- The provider carries only the standard modules. The `titan` support
+    -- module is a separate lib/lua/5.5 native module.
+    it("exports twenty-six DSO openers and no support opener",
         function()
             assert.equal(26, #STDLIB_MODULES)
             assert.equal(26, #STDLIB_ROOTS)
-            assert.equal(26, #STDLIB_SHIMS)
 
             local container = installed_stdlib_container()
             local ok, output, why, code
@@ -2891,7 +2893,7 @@ int main(void) {
             end
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
-            local wanted = { luaopen_titan = true }
+            local wanted = {}
             for _, module in ipairs(STDLIB_MODULES) do
                 wanted["luaopen_titan_" .. module] = true
             end
@@ -2909,7 +2911,7 @@ int main(void) {
                     found[symbol] = true
                 end
             end
-            assert.equal(27, (function()
+            assert.equal(26, (function()
                 local count = 0
                 for _ in pairs(found) do count = count + 1 end
                 return count
@@ -3105,21 +3107,15 @@ int main(void) {
             end
         end)
 
-    it("uses initialized Lua sources and gives titanc exact shim ownership",
+    it("uses initialized Lua sources and the checkout support module",
         function()
             local makefile = read_file("Makefile")
             for _, contract in ipairs({
                 "LUA_SOURCE_READY := $(LUA_DIR)/src/lua.h",
                 "git submodule update --init",
-                "STDLIB_SHIMS := $(addprefix $(TITAN_OUTPUT_DIR)/,titan/coroutine.lua titan/uv.lua",
                 'package.cpath="./titan-runtime/bootstrap/?.so;" .. package.cpath',
-                "rm -f $(STDLIB_SHIMS)",
             }) do
                 assert.truthy(makefile:find(contract, 1, true), contract)
-            end
-            local ignore = read_file(".gitignore")
-            for _, shim in ipairs(STDLIB_SHIMS) do
-                assert.truthy(ignore:find("/" .. shim, 1, true), shim)
             end
             assert.falsy(makefile:find(
                 'strcmp(sym, "luaopen_titan_uv")', 1, true), makefile)
@@ -3169,32 +3165,12 @@ int main(void) {
                 driver_source)
             local _, include_count = makefile:gsub(
                 "%-I %$%(TITAN_RUNTIME_LUA_SOURCE_PATH%)", "")
-            assert.equal(2, include_count, makefile)
+            assert.equal(3, include_count, makefile)
         end)
 
-    it("keeps the private Lua bootstrap separate from the runtime archive",
-        function()
-            local file = assert(io.open("Makefile", "rb"))
-            local makefile = file:read("*a")
-            file:close()
-            local first = assert(makefile:find(
-                "$(TITAN_BOOTSTRAP_SO): $(LTITANLIB_O)", 1, true))
-            local last = assert(makefile:find(
-                "\n\n# Seed an absent canonical provider.", first, true))
-            local rule = makefile:sub(first, last - 1)
-            assert.truthy(rule:find(
-                "$(ROCK_LD) $(ROCK_LIBFLAG) -o \"$$tmp\" \"$<\"",
-                1, true), rule)
-            for _, forbidden in ipairs({
-                "$(TITAN_RUNTIME_LIB)", "$(LIBBT_LIB)", "$(RUNTIME_O)",
-                "$(MINICORO_O)", "$(TRANSFER_O)", "$(UV_O)", "$(LPEGLABEL_ARCHIVE)",
-            }) do
-                assert.falsy(rule:find(forbidden, 1, true),
-                    forbidden .. " in:\n" .. rule)
-            end
-        end)
-
-    it("uses a loadable Lua bundle for the private macOS bootstrap",
+    -- The support module is ltitanlib plus the shared path code, linked as a
+    -- loadable Lua bundle on macOS; it never carries the runtime archive.
+    it("links the titan support module from its two objects as a Lua bundle",
         function()
             if platform.windows then
                 pending("macOS bundle linker recipe and Unix Lua SDK")
@@ -3203,18 +3179,24 @@ int main(void) {
             local ok, output, why, code = run_argv({
                 "make", "--no-print-directory", "-Bn",
                 "HOST_OS=Darwin", "TITAN_EXTRA_LDFLAGS=",
-                "LUA_INSTALL_STAMP=/dev/null", "--old-file=/dev/null",
+                "LUA_INSTALL_STAMP=/dev/null", "LIBBT_LIB=/dev/null",
+                "TITAN_RUNTIME_LUA_LIB=/dev/null", "--old-file=/dev/null",
                 "titan-runtime/bootstrap/titan.so",
             })
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
             local normalized = output:gsub("%s+", " ")
-            assert.truthy(normalized:find(
-                '-bundle -undefined dynamic_lookup -o ' ..
-                '"$tmp" "titan-runtime/ltitanlib.o"', 1, true), normalized)
-            assert.falsy(normalized:find(
-                '-shared -o "$tmp" "titan-runtime/ltitanlib.o"',
-                1, true), normalized)
+            local link = assert(normalized:match(
+                '%-bundle %-undefined dynamic_lookup %-o "%$tmp" ([^;]*);'),
+                normalized)
+            -- Make prints the recipe's line continuations verbatim.
+            local inputs = {}
+            for word in link:gmatch("%S+") do
+                if word ~= "\\" then inputs[#inputs + 1] = word end
+            end
+            assert.same({ "titan-runtime/ltitanlib.o", "titan-runtime/titan_path.o" },
+                inputs)
+            assert.falsy(normalized:find('-shared -o "$tmp"', 1, true), normalized)
         end)
 
     it("installs the compiler SDK without building standard-library dependencies", function()
@@ -3239,11 +3221,12 @@ int main(void) {
                 ["lua-source/liblua.a"] = "Lua archive\n",
                 ["libtitan.a"] = "runtime archive\n",
                 ["libbacktrace.a"] = "backtrace archive\n",
-                ["bootstrap.so"] = "bare compiler support\n",
+                ["bootstrap/titan.so"] = "support module\n",
                 ["prepared"] = "prepared SDK inputs\n",
                 ["fixture.mk"] = "all stdlib libuv lpeglabel openssl llhttp sqlite3:\n" ..
                     "\t@echo unexpected stdlib dependency >&2; exit 91\n",
             }
+            assert(lfs.mkdir(root .. "/bootstrap"))
             for name, contents in pairs(fixtures) do
                 write_file(root .. "/" .. name, contents)
             end
@@ -3255,11 +3238,11 @@ int main(void) {
                 "PREFIX=" .. prefix, "ROCKS_TREE=" .. prefix,
                 "HOST_OS=Linux", "OPENSSL_MODE=bundled", "TITAN_BUILD_PROFILE=validation",
                 "TITAN_RUNTIME_SDK_PREREQS=prepared", "TITAN_RUNTIME_LIB=libtitan.a",
-                "TITAN_BOOTSTRAP_SO=bootstrap.so", "LIBBT_LIB=libbacktrace.a",
+                "TITAN_SUPPORT_MODULE=bootstrap/titan.so", "LIBBT_LIB=libbacktrace.a",
                 "TITAN_RUNTIME_LUA_SOURCE_PATH=lua-source",
                 "TITAN_RUNTIME_LUA_LIB=lua-source/liblua.a",
                 "TITAN_SDK_ROOT_HEADERS=fixture.h", "TITAN_SDK_NAMESPACED_HEADERS=ffi.h",
-                "--old-file=bootstrap.so", "MAKE=false", "install-compiler-sdk",
+                "--old-file=bootstrap/titan.so", "MAKE=false", "install-compiler-sdk",
             })
             assert.truthy(ok, output)
             for source, destination in pairs({
@@ -3267,7 +3250,7 @@ int main(void) {
                 titanc = "bin/titanc", ["THIRD_PARTY_NOTICES.md"] = "etc/THIRD_PARTY_NOTICES.md",
                 ["libtitan.a"] = "lib/titan/0.6/libtitan.a",
                 ["libbacktrace.a"] = "lib/libbacktrace.a",
-                ["bootstrap.so"] = "lib/titan/0.6/titan.so",
+                ["bootstrap/titan.so"] = "lib/lua/5.5/titan.so",
                 ["fixture.h"] = "include/fixture.h", ["ffi.h"] = "include/titan/ffi.h",
                 ["lua-source/lua.c"] = "src/lua-5.5.1/lua.c",
                 ["lua-source/lua.h"] = "src/lua-5.5.1/lua.h",
@@ -3276,6 +3259,7 @@ int main(void) {
                 assert.equal(fixtures[source], read_file(prefix .. "/" .. destination), destination)
             end
             assert.equal("validation\n", read_file(prefix .. "/etc/titan/build-profile"))
+            assert.falsy(lfs.attributes(prefix .. "/lib/titan/0.6/titan.so"))
             assert.falsy(lfs.attributes(prefix .. "/lib/titan/0.6/titan.a"))
             assert.falsy(lfs.attributes(prefix .. "/share/lua/5.5/titan"))
         end, debug.traceback)
@@ -3380,10 +3364,11 @@ int main(void) {
                     "./titanc --lua ", 1, true),
                 command)
             assert.equal(1, count_plain(command,
-                "-X titan-runtime/ltitanlib.o " ..
-                "lpeglabel-build/libtitan-lpeglabel.a " ..
+                "-X lpeglabel-build/libtitan-lpeglabel.a " ..
                 "libuv-build/libuv.a " .. HTTP_SSL_BUNDLED_PAYLOAD), command)
             assert.falsy(command:find("titan_uv.o", 1, true), command)
+            -- The provider never links the `titan` support module.
+            assert.falsy(command:find("ltitanlib.o", 1, true), command)
             assert.truthy(command:find([[CC='ccache cc']], 1, true), command)
             assert.truthy(command:find([[AR='review-ar']], 1, true), command)
             assert.truthy(command:find([[RANLIB='review-ranlib']], 1, true),
@@ -3407,8 +3392,7 @@ int main(void) {
                 tostring(code) .. ")")
             command = stdlib_command(output)
             assert.equal(1, count_plain(command,
-                    "-X titan-runtime/ltitanlib.o " ..
-                    "lpeglabel-build/libtitan-lpeglabel.a " ..
+                    "-X lpeglabel-build/libtitan-lpeglabel.a " ..
                     "libuv-build/libuv.a " .. HTTP_SSL_BUNDLED_PAYLOAD),
                 command)
             assert.equal(1, count_plain(command,
@@ -3445,8 +3429,7 @@ esac
                 tostring(code) .. ")")
             local command = stdlib_command(output)
             assert.equal(1, count_plain(command,
-                "-X titan-runtime/ltitanlib.o " ..
-                "lpeglabel-build/libtitan-lpeglabel.a " ..
+                "-X lpeglabel-build/libtitan-lpeglabel.a " ..
                 "libuv-build/libuv.a " .. HTTP_SSL_SYSTEM_PAYLOAD), command)
             assert.falsy(command:find("openssl-build/libssl.a", 1, true),
                 command)
@@ -3511,8 +3494,7 @@ esac
                 assert.equal(1, count_plain(command,
                     "./titanc --lua "), command)
                 assert.truthy(command:find(
-                    "-X titan-runtime/ltitanlib.o " ..
-                    "lpeglabel-build/libtitan-lpeglabel.a " ..
+                    "-X lpeglabel-build/libtitan-lpeglabel.a " ..
                     "libuv-build/libuv.a " .. HTTP_SSL_BUNDLED_PAYLOAD,
                     1, true), command)
                 assert.falsy(normalized:find("titan/coroutine.so:", 1, true),
@@ -3651,7 +3633,7 @@ local fields = {
     lpeglabel = assert(package.searchpath("lpeglabel", package.cpath)),
     behavior = types.tostring(types.Integer()),
     source = debug.getinfo(types.tostring, "S").source,
-    driver_source = debug.getinfo(driver.root_from_package_cpath, "S").source,
+    driver_source = debug.getinfo(driver.installed_paths, "S").source,
     cdriver_source = debug.getinfo(cdriver.process_file, "S").source,
 }
 assert(driver.close_resolver_context(context))
@@ -3692,10 +3674,10 @@ end)
                         "-u", "LUA_PATH_5_5",
                         "-u", "LUA_CPATH",
                         "-u", "LUA_CPATH_5_5",
-                        "-u", "TITAN_ROCKS_ROOT",
+                        "-u", "TITAN_ROOT",
                     }
                     if not omit_root then
-                        argv[#argv + 1] = "TITAN_ROCKS_ROOT=" .. prefix
+                        argv[#argv + 1] = "TITAN_ROOT=" .. prefix
                     end
                     for _, word in ipairs({
                         "LUA_PATH=./?.lua;./?/init.lua;;",
@@ -3744,7 +3726,7 @@ end)
                 assert.equal("exit", why)
                 assert.equal(1, code)
                 assert.truthy(output:find(
-                    "checkout Busted profile requires TITAN_ROCKS_ROOT",
+                    "checkout Busted profile requires TITAN_ROOT",
                     1, true), output)
                 assert.falsy(file_exists(report))
 
@@ -4981,8 +4963,6 @@ printf '%s\n' "${schedule[@]}"
                 "STDLIB_STATIC_ARCHIVE := $(TITAN_OUTPUT_DIR)/" .. STDLIB_STATIC_ARCHIVE,
                 "STDLIB_PROVIDER_OUTPUTS := $(STDLIB_CONTAINER) " ..
                 "$(STDLIB_STATIC_ARCHIVE)",
-                "STDLIB_EXTRA_OBJECTS := $(LTITANLIB_O) " ..
-                "$(LPEGLABEL_ARCHIVE)",
                 "include $(TITAN_MAKEFILE_DIR)scripts/install_compiler.mk",
                 "stdlib: $(STDLIB_NATIVE_PREREQS) $(STDLIB_TOOL_PREREQS)",
                 "AR=$(call make_shell_quote,$(AR))",
@@ -5001,7 +4981,6 @@ printf '%s\n' "${schedule[@]}"
                 "install -p -m 0644 $(STDLIB_LICENSES)",
                 '$(STDLIB_COMPILER_ENV) "$(TITAN_LUA)" -E',
                 "rm -f $(STDLIB_PROVIDER_OUTPUTS)",
-                "rm -f $(STDLIB_SHIMS)",
                 "rm -rf $(STDLIB_CONTAINER).dSYM",
                 "include $(TITAN_TEST_MODULE_MANIFEST)",
                 "TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/" ..
@@ -5041,7 +5020,7 @@ printf '%s\n' "${schedule[@]}"
                 "$(call make_shell_quote,$(strip " ..
                 "$(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT)))",
                 '"$$stage/titan.so" "$$stage/titan"',
-                '"$(TITAN_CANONICAL_SUPPORT_SO)"',
+                '"$(TITAN_CANONICAL_PROVIDER_SO)"',
                 '"$(CURDIR)/titan"',
             }) do
                 assert.truthy(publisher:find(contract, 1, true),
@@ -5081,14 +5060,6 @@ printf '%s\n' "${schedule[@]}"
                 'rm -f "$static_archive"',
                 'write_manifest "$manifest" "${artifacts[@]}"',
                 'cmp -s "$manifest" "$restored_manifest"',
-                '"$shim_dir/path.lua"',
-                '"$shim_dir/peg.lua" "$shim_dir/string.lua"',
-                '"$shim_dir/math.lua" "$shim_dir/lua.lua"',
-                '"$shim_dir/iteration.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"',
-                '"$shim_dir/io.lua"',
-                '"$shim_dir/fs.lua" "$shim_dir/net.lua" "$shim_dir/ssl.lua"',
-                '"$shim_dir/url.lua" "$shim_dir/http.lua" "$shim_dir/websocket.lua"',
-                '"$shim_dir/os.lua"',
             }) do
                 assert.truthy(snapshot:find(contract, 1, true), contract)
             end
@@ -5310,7 +5281,6 @@ printf '%s\n' "${schedule[@]}"
                 "make install-compiler-sdk",
                 'test -f "$PREFIX/lib/titan/0.6/libtitan.a"',
                 'test ! -e "$PREFIX/lib/titan/0.6/titan.a"',
-                'test ! -e "$PREFIX/share/lua/5.5/titan/$module.lua"',
             }) do
                 assert.equal(1, count_literal(build_job, contract), contract)
             end

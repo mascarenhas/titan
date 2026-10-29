@@ -1,5 +1,7 @@
 local mode = assert(arg[1], "expected libuv mode label")
 local process_child = arg[2]
+-- The support module installs the Titan searcher in this plain Lua host.
+require "titan"
 local builtin = require "os"
 local system = require "titan.os"
 

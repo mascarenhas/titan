@@ -62,10 +62,21 @@ local configured_lua = configured_prefix and
 local LUA = configured_lua and file_exists(configured_lua) and configured_lua
     or (platform.windows and "lua.exe" or "lua")
 
-local function run(argv, merge_stderr)
-    local result = compiler_io.new_sync():run(argv, {
-        stderr_to_stdout = merge_stderr,
-    })
+-- `environment` adds variables to the child's inherited environment.
+local function run(argv, merge_stderr, environment)
+    local options = { stderr_to_stdout = merge_stderr }
+    if environment and platform.windows then
+        options.env = environment
+    elseif environment then
+        -- The POSIX transport has no environment option; env(1) applies it.
+        local prefixed = { "env" }
+        for name, value in pairs(environment) do
+            prefixed[#prefixed + 1] = name .. "=" .. value
+        end
+        for _, word in ipairs(argv) do prefixed[#prefixed + 1] = word end
+        argv = prefixed
+    end
+    local result = compiler_io.new_sync():run(argv, options)
     local output = result.output or ""
     -- The old Lua popen streams used text mode on Windows.
     if platform.windows then output = output:gsub("\r\n", "\n") end
@@ -238,6 +249,18 @@ function M.compile_app(modname, ast)
     return compile_program(modname, objects)
 end
 
+-- Fixture providers live in the working directory. The runtime Titan path has
+-- no implicit `.`, so a Lua child that loads one names that directory ahead
+-- of the default, unless the caller already selected a Titan path.
+local function run_lua_with_cwd_providers(modname, script)
+    local environment
+    if os.getenv("TITAN_PATH_0_6") == nil and os.getenv("TITAN_PATH") == nil then
+        local directory = assert(compiler_io.new_sync():cwd())
+        environment = { TITAN_PATH_0_6 = directory .. ";;" }
+    end
+    return run({ LUA, "-l", modname, script }, false, environment)
+end
+
 -- Run `code` under the stock Lua interpreter with `modname` loaded (`-l`),
 -- wrapped in pcall. Returns (true, output) on success, or (false, message).
 -- The driver code is written to a temp script and run by path rather than via
@@ -248,7 +271,7 @@ function M.call(modname, code)
     local sf = assert(io.open(script, "w"))
     sf:write(string.format("print(pcall(function () %s end))\n", code))
     sf:close()
-    local result, output = run({ LUA, "-l", modname, script }, false)
+    local result, output = run_lua_with_cwd_providers(modname, script)
     os.remove(script)
     local out = output ~= "" and output:match("^[^\n]*") or nil
     if not result.ok then
@@ -317,7 +340,7 @@ function M.compile_and_run(titan_code, lua_test, modname)
     local sf = assert(io.open(script, "w"))
     sf:write(lua_test)
     sf:close()
-    local result, out = run({ LUA, "-l", modname, script }, false)
+    local result, out = run_lua_with_cwd_providers(modname, script)
     os.remove(script)
     assert.truthy(result.started, result.diagnostic)
     return out

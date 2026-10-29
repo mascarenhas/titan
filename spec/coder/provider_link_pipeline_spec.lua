@@ -203,7 +203,6 @@ local fail = os.getenv("TITAN_TEST_PROVIDER_FAIL")
 local subjects = {
     build_static_archive = 1,
     validate_library_image = 1,
-    validate_titan_support = 1,
     validate_archive_library_equality = 2,
     validate_library_image_fresh = 1,
     publish_provider_bundle = 1,

@@ -1,7 +1,7 @@
 local installed_prefix = require "spec.support.installed_prefix"
+local driver = require "titan-compiler.driver"
 local platform = require "titan-compiler.platform"
 local root = platform.windows and "C:/" or "/"
-local suffix = platform.windows and ".dll" or ".so"
 
 local function absolute(path)
     return root .. path
@@ -9,16 +9,16 @@ end
 
 describe("installed-prefix test support", function()
     local original_getenv
-    local original_cpath
+    local original_compiler_root
 
     before_each(function()
         original_getenv = os.getenv
-        original_cpath = package.cpath
+        original_compiler_root = driver.compiler_root
     end)
 
     after_each(function()
         os.getenv = original_getenv
-        package.cpath = original_cpath
+        driver.compiler_root = original_compiler_root
     end)
 
     local function set_environment(values)
@@ -27,15 +27,11 @@ describe("installed-prefix test support", function()
         end
     end
 
-    it("derives the prefix from the ordinary Lua C-module template",
-       function()
-        assert.equal(absolute("opt/titan"), installed_prefix.from_cpath(
-            absolute("other/?") .. suffix .. ";" ..
-            absolute("opt/titan/lib/lua/5.5/?") .. suffix .. ";./?" .. suffix))
-        assert.equal(root, installed_prefix.from_cpath(
-            absolute("lib/lua/5.5/?") .. suffix))
-        assert.is_nil(installed_prefix.from_cpath(absolute("other/?") .. suffix))
-    end)
+    local function set_compiler_root(value, err)
+        driver.compiler_root = function()
+            return value, err
+        end
+    end
 
     it("prefers explicit configuration and normalizes trailing slashes",
        function()
@@ -43,22 +39,13 @@ describe("installed-prefix test support", function()
             PREFIX = absolute("tmp/explicit///"),
             TITAN_TEST_PREFIX = absolute("tmp/fallback"),
         })
-        package.cpath = absolute("tmp/cpath/lib/lua/5.5/?") .. suffix
+        set_compiler_root(absolute("tmp/compiler"))
         assert.equal(absolute("tmp/explicit"), installed_prefix.active())
     end)
 
-    it("finds the Titan SDK after a stock LuaRocks user-tree template", function()
-        set_environment({})
-        package.cpath = table.concat({
-            absolute("home/dev/.luarocks/lib/lua/5.5/?") .. suffix,
-            absolute("sdk/lib/titan/0.6/?") .. suffix,
-            absolute("sdk/lib/lua/5.5/?") .. suffix,
-        }, ";")
-        assert.equal(absolute("sdk"), installed_prefix.active())
-    end)
-
-    it("uses the test override and then the active Lua path as fallbacks",
+    it("uses the test override and then the compiler root as fallbacks",
        function()
+        set_compiler_root(absolute("tmp/compiler/"))
         set_environment({
             PREFIX = "",
             TITAN_TEST_PREFIX = absolute("tmp/test-prefix"),
@@ -66,18 +53,16 @@ describe("installed-prefix test support", function()
         assert.equal(absolute("tmp/test-prefix"), installed_prefix.active())
 
         set_environment({})
-        package.cpath = absolute("tmp/cpath/lib/lua/5.5/?") .. suffix
-        assert.equal(absolute("tmp/cpath"), installed_prefix.active())
+        assert.equal(absolute("tmp/compiler"), installed_prefix.active())
     end)
 
     it("rejects an undiscoverable or relative prefix", function()
         set_environment({})
-        package.cpath = "./?" .. suffix
+        set_compiler_root(nil, "no compiler root")
         assert.has_error(function()
             installed_prefix.active()
         end, "native Titan specs require an absolute PREFIX/" ..
-            "TITAN_TEST_PREFIX or an active Lua package.cpath containing " ..
-            "/lib/lua/5.5/?" .. suffix)
+            "TITAN_TEST_PREFIX or a Titan compiler root")
 
         set_environment({ PREFIX = "relative" })
         assert.has_error(function()

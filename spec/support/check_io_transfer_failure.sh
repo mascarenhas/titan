@@ -41,7 +41,7 @@ LUA
 # preserves sanitizer runtime ordering without LD_PRELOAD.
 env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
   TITAN_EXTRA_LDFLAGS="${TITAN_EXTRA_LDFLAGS:-} -Wl,--wrap=dup,--wrap=close" \
-  TITAN_ROCKS_ROOT="$sdk" "$sdk/bin/titanc" \
+  TITAN_ROOT="$sdk" "$sdk/bin/titanc" \
   --tree "$root/spec/fixtures/stdlib/titan" --output "$output/native" \
   --static io_transfer_failure_app -X "$output/io_transfer_dup_failure.o" \
   > "$output/build.log" 2>&1 || { cat "$output/build.log" >&2; exit 1; }

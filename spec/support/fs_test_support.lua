@@ -16,8 +16,6 @@ function M.compile(workspace, modname, options)
     local standard = async_stdlib.standard_layout()
     assert.truthy(lfs.attributes(standard.container),
         "fs specs require prebuilt titan.so; run make stdlib first")
-    assert.truthy(lfs.attributes(standard.shim_root .. "/titan/fs.lua"),
-        "fs specs require the generated titan/fs.lua shim")
     options = options or {}
     options.layout = options.layout or standard
     return async_stdlib.compile(workspace, modname, options)

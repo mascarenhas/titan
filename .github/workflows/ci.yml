@@ -75,7 +75,7 @@ jobs:
               -u LUA_INIT_5_5 \
               -u TITAN_PATH \
               -u TITAN_PATH_0_6 \
-              -u TITAN_ROCKS_ROOT \
+              -u TITAN_ROOT \
               "$@"
           }
 
@@ -87,23 +87,22 @@ jobs:
             clean_titan_environment \
               "$PREFIX/bin/luarocks" remove titan --force
           fi
-          for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf transfer thread; do
-            rm -f "$PREFIX/share/lua/5.5/titan/$module.lua"
-          done
           rm -f "$PREFIX/share/titan/0.6/src/titan/test.titan"
-          rm -f "$PREFIX/share/lua/5.5/titan.lua" \
-            "$PREFIX/lib/lua/5.5/titan.so"
+          rm -f "$PREFIX/lib/lua/5.5/titan.so"
           if clean_titan_environment \
               "$PREFIX/bin/luarocks" show titan >/dev/null 2>&1; then
             echo "cached Titan rock remained registered after removal" >&2
             exit 1
           fi
 
+          # Titan's Lua roots its default paths at its executable directory
+          # and carries no Titan provider entry.
           clean_titan_environment "$PREFIX/bin/lua" -E -e '
             local cpath = package.cpath
             local current = assert(os.getenv("PREFIX")) ..
-              "/lib/titan/0.6/?.so"
+              "/bin/../lib/lua/5.5/?.so"
             assert(cpath:find(current, 1, true), cpath)
+            assert(not cpath:find("/lib/titan/", 1, true), cpath)
           '
 
       - name: Activate the standalone Titan prefix
@@ -125,11 +124,11 @@ jobs:
           make install-compiler-sdk
           titanc --help
           lua -E -e 'assert(type(require("titan").backtrace) == "function")'
+          test -f "$PREFIX/lib/lua/5.5/titan.so"
           test -f "$PREFIX/lib/titan/0.6/libtitan.a"
+          test ! -e "$PREFIX/lib/titan/0.6/titan.so"
           test ! -e "$PREFIX/lib/titan/0.6/titan.a"
-          for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf transfer thread; do
-            test ! -e "$PREFIX/share/lua/5.5/titan/$module.lua"
-          done
+          test ! -e "$PREFIX/share/lua/5.5/titan"
 
       # Preserve source/output mtimes, modes and the compiler prefix. There are
       # no stdlib images or stdlib native dependency builds in this archive.
@@ -391,28 +390,36 @@ jobs:
           test ! -e "$PREFIX/lib/libtitan.a"
           test ! -e "$PREFIX/share/titan/0.6/src/titan/test.titan"
 
-      - name: Verify bare support loading through the library 0.6 path
+      - name: Verify the support module and searcher-based stdlib loading
         run: |
+          support="$PREFIX/lib/lua/5.5/titan.so"
           provider="$PREFIX/lib/titan/0.6/titan.so"
-          TITAN_EXPECTED_PROVIDER="$provider" env \
-            -u LUA_PATH \
-            -u LUA_CPATH \
-            -u LUA_PATH_5_5 \
-            -u LUA_CPATH_5_5 \
-            -u LUA_INIT \
-            -u LUA_INIT_5_5 \
-            -u TITAN_PATH \
-            -u TITAN_PATH_0_6 \
-            -u TITAN_ROCKS_ROOT \
-            "$PREFIX/bin/lua" -E -e '
-              local expected = assert(os.getenv("TITAN_EXPECTED_PROVIDER"))
-              local found = assert(package.searchpath("titan", package.cpath))
-              assert(found == expected, found .. " ~= " .. expected)
-              local titan = require "titan"
-              assert(type(titan) == "table")
-              assert(type(titan.backtrace) == "function")
-              assert(type(titan._loadlibglobal) == "function")
-            '
+          test -f "$support" && test ! -e "$PREFIX/share/lua/5.5/titan"
+          clean_lua() {
+            env \
+              -u LUA_PATH \
+              -u LUA_CPATH \
+              -u LUA_PATH_5_5 \
+              -u LUA_CPATH_5_5 \
+              -u LUA_INIT \
+              -u LUA_INIT_5_5 \
+              -u TITAN_PATH \
+              -u TITAN_PATH_0_6 \
+              -u TITAN_ROOT \
+              "$PREFIX/bin/lua" -E "$@"
+          }
+          found=$(clean_lua -e 'io.write(assert(package.searchpath("titan", package.cpath)))')
+          test "$found" -ef "$support"
+          TITAN_STDLIB_PROVIDER="$provider" clean_lua -e '
+            local provider = assert(os.getenv("TITAN_STDLIB_PROVIDER"))
+            assert(package.loadlib(provider, "luaopen_titan") == nil,
+              "the stdlib provider exports luaopen_titan")
+            local titan = require "titan"
+            assert(type(titan) == "table")
+            assert(type(titan.backtrace) == "function")
+            assert(type(titan._loadlibglobal) == "function")
+            assert(type(require("titan.string").rep) == "function")
+          '
 
       - name: Verify titanc shebang environment
         run: titanc --help
@@ -817,9 +824,8 @@ jobs:
           test -f "$TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT/manifest.txt"
           test -f "$snapshot_provider" && test ! -L "$snapshot_provider"
           cmp "$snapshot_provider" "$provider"
-          for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf transfer thread; do
-            test -f "$PREFIX/share/lua/5.5/titan/$module.lua"
-          done
+          test -f "$PREFIX/lib/lua/5.5/titan.so"
+          test ! -e "$PREFIX/share/lua/5.5/titan"
           test ! -e "$PREFIX/share/titan/0.6/src/titan/test.titan"
           readelf -Ws .lua/bin/lua | grep __asan_
           readelf -Ws .lua/bin/lua | grep __ubsan_
@@ -1092,20 +1098,18 @@ jobs:
             .lua/bin/lua -e 'require("spec.support.os_test_support").process_child(assert(os.getenv("TITAN_PROCESS_SMOKE_DIR")))'
           echo "TITAN_PROCESS_SMOKE_CHILD=$process_smoke_dir/process_child" >> "$GITHUB_ENV"
 
+      # Plain Lua hosts load the support module and the stdlib provider from
+      # the interpreter's default lib/lua/5.5 and lib/titan/0.6 roots.
       - name: Run sanitized net/OS production smokes
         run: |
           bash spec/support/ci_sanitizer_capture.sh net-production-smoke \
-            env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-            TITAN_PATH_0_6="$PREFIX/lib/titan/0.6" \
-            LUA_PATH="$PREFIX/share/lua/5.5/?.lua;$PREFIX/share/lua/5.5/?/init.lua;;" \
-            LUA_CPATH="$PREFIX/lib/titan/0.6/?.so;$PREFIX/lib/lua/5.5/?.so;;" \
+            env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
+            -u TITAN_PATH -u TITAN_PATH_0_6 -u TITAN_ROOT \
             .lua/bin/lua spec/fixtures/libuv/net_production_smoke.lua \
               sanitizer
           bash spec/support/ci_sanitizer_capture.sh os-production-smoke \
-            env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-            TITAN_PATH_0_6="$PREFIX/lib/titan/0.6" \
-            LUA_PATH="$PREFIX/share/lua/5.5/?.lua;$PREFIX/share/lua/5.5/?/init.lua;;" \
-            LUA_CPATH="$PREFIX/lib/titan/0.6/?.so;$PREFIX/lib/lua/5.5/?.so;;" \
+            env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
+            -u TITAN_PATH -u TITAN_PATH_0_6 -u TITAN_ROOT \
             .lua/bin/lua spec/fixtures/libuv/os_production_smoke.lua \
               sanitizer "$TITAN_PROCESS_SMOKE_CHILD"
 

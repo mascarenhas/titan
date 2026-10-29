@@ -1151,12 +1151,13 @@ describe("generated output folders", function()
         assert(os.remove(file))
     end)
 
-    it("places providers and shims in the same output tree", function()
-        local root = temporary.name("-output-shims")
-        local plans, provider = driver.plan_module_shims("package", { "package.child" }, root)
-        assert.truthy(plans, provider)
-        assert.equal(paths.join(root, "package/child.lua"), plans[1].filename)
+    it("places providers in the output tree", function()
+        local root = temporary.name("-output-provider")
+        local provider = driver.provider_output_path("package", root)
         assert.equal(paths.join(root, "package" .. (platform.windows and ".dll" or ".so")), provider)
+        local missing, err = driver.provider_output_path("bad..name", root)
+        assert.is_nil(missing)
+        assert.equal("invalid library provider name 'bad..name'", err)
     end)
 
     it("creates output-local temporaries without renaming across filesystems", function()
@@ -1276,7 +1277,7 @@ describe("Windows launcher filenames", function()
         assert.equal("existing provider", contents)
     end)
 
-    it("validates selected archive metadata and support before emitting a launcher", function()
+    it("validates selected archive metadata before emitting a launcher", function()
         -- Isolate this pure Windows model's runtime acceptance cache from the
         -- shared driver used by real compiler and filesystem fixtures.
         local driver = assert(loadfile("titan-compiler/driver.lua"))()
@@ -1290,12 +1291,11 @@ describe("Windows launcher filenames", function()
         assert(lfs.mkdir(directory))
         local saved, calls = {}, {}
         for _, name in ipairs({ "compile_library_output", "validate_library_image",
-            "validate_library_image_fresh", "validate_titan_support" }) do
+            "validate_library_image_fresh" }) do
             saved[name] = driver[name]
         end
         local entries = { archive = { abi = "2", types = "embedded", layouts = "layout" } }
         local names = { "archive" }
-        local fail_metadata = true
         driver.compile_library_output = function() return true end
         driver.validate_library_image = function() error("coordinator mapped a staged DLL") end
         driver.validate_library_image_fresh = function(_, expected, required)
@@ -1307,12 +1307,7 @@ describe("Windows launcher filenames", function()
             assert.equal(entries, expected)
             assert.equal(names, required)
             calls[#calls + 1] = "metadata"
-            if fail_metadata then return nil, "archive metadata mismatch" end
-            return true
-        end
-        driver.validate_titan_support = function()
-            calls[#calls + 1] = "support"
-            return nil, "invalid native support"
+            return nil, "archive metadata mismatch"
         end
         local ran, failure = pcall(function()
             assert(lfs.chdir(directory))
@@ -1325,19 +1320,12 @@ describe("Windows launcher filenames", function()
             end
             platform.windows = true
             local options = { module_names = { "app", "archive" },
-                archive_entries = entries, archive_names = names,
-                validate_titan_support = true }
+                archive_entries = entries, archive_names = names }
             local ok, err = driver.compile_program("app", {}, nil, false,
                 nil, nil, nil, "entrypoint.c", nil, options)
             assert.is_nil(ok)
             assert.equal("archive metadata mismatch", err)
             assert.same({ "image", "metadata" }, calls)
-            fail_metadata = false
-            ok, err = driver.compile_program("app", {}, nil, false,
-                nil, nil, nil, "entrypoint.c", nil, options)
-            assert.is_nil(ok)
-            assert.equal("invalid native support", err)
-            assert.same({ "image", "metadata", "image", "metadata", "support" }, calls)
             assert.is_nil(lfs.attributes("entrypoint.c"))
             assert.is_nil(lfs.attributes("bin/app.exe"))
         end)
@@ -1655,36 +1643,6 @@ describe("Windows native ABI bootstrap", function()
         assert.equal("valid", probe())
         assert.same({ "resolve winabi_abi", "resolve winabi_types",
             "Lua ABI", "Lua types" }, events)
-    end)
-
-    it("passes logical identity to Windows shims when a replacement provider resolves", function()
-        local previous_sync = compiler_io.new_sync
-        compiler_io.new_sync = function()
-            return { cwd = function() return "C:/shim-fixture" end,
-                stat = function() return { kind = "directory" } end }
-        end
-        local called, plans, plan_error = pcall(driver.plan_module_shims, "winabi", { "winabi" })
-        compiler_io.new_sync = previous_sync
-        assert.truthy(called, plans)
-        assert.truthy(plans, plan_error)
-        local canonical = {}
-        local environment = {
-            error = error,
-            package = { cpath = "?.dll", searchpath = function()
-                return "replacement.dll"
-            end },
-            require = function(name)
-                assert.equal("titan", name)
-                return { _loadlibglobal = function(path, entry, module)
-                    assert.equal("replacement.dll", path)
-                    assert.equal("luaopen_winabi", entry)
-                    assert.equal("winabi", module)
-                    return function() return canonical end
-                end }
-            end,
-        }
-        local shim = assert(load(plans[1].contents, "Windows shim", "t", environment))
-        assert.equal(canonical, shim())
     end)
 end)
 
@@ -2398,19 +2356,21 @@ describe("compiler installation discovery", function()
             checkout))
     end)
 
-    it("requires exactly the two runtime archive members", function()
+    it("requires exactly the four runtime archive members", function()
+        local members = "titan.o\nminicoro.o\ntitan_path.o\nltitanlib.o\n"
+        assert.is_true(driver.runtime_archive_members_are_exact(members))
         assert.is_true(driver.runtime_archive_members_are_exact(
+            "__.SYMDEF SORTED\n" .. members))
+        assert.is_true(driver.runtime_archive_members_are_exact(
+            "__.SYMDEF_64\n" .. members))
+        assert.is_false(driver.runtime_archive_members_are_exact(
+            members .. "titan_uv.o\n"))
+        assert.is_false(driver.runtime_archive_members_are_exact(
+            "__.SYMDEF\n" .. members .. "stale.o\n"))
+        assert.is_false(driver.runtime_archive_members_are_exact(
             "titan.o\nminicoro.o\n"))
-        assert.is_true(driver.runtime_archive_members_are_exact(
-            "__.SYMDEF SORTED\ntitan.o\nminicoro.o\n"))
-        assert.is_true(driver.runtime_archive_members_are_exact(
-            "__.SYMDEF_64\ntitan.o\nminicoro.o\n"))
         assert.is_false(driver.runtime_archive_members_are_exact(
-            "titan.o\nminicoro.o\ntitan_uv.o\n"))
-        assert.is_false(driver.runtime_archive_members_are_exact(
-            "__.SYMDEF\ntitan.o\nminicoro.o\nstale.o\n"))
-        assert.is_false(driver.runtime_archive_members_are_exact(
-            "minicoro.o\ntitan.o\n"))
+            "minicoro.o\ntitan.o\ntitan_path.o\nltitanlib.o\n"))
     end)
 
     posix_model_it("links source builds through the complete runtime archive", function()
@@ -2913,18 +2873,13 @@ describe("compiled-container path contracts", function()
             "foo", "foo.bar",
         }))
 
-        local reserved_provider, reserved_roots =
+        local reserved_provider =
             driver.common_module_provider({
                 "pkg.titan.left", "pkg.titan.right",
             })
         assert.equal("pkg.titan", reserved_provider)
-        local plans, provider_path = driver.plan_module_shims(
-            reserved_provider, reserved_roots)
-        assert.truthy(plans)
-        assert.equal("pkg/titan" .. (platform.windows and ".dll" or ".so"), provider_path)
-        assert.same({ "pkg/titan/left.lua", "pkg/titan/right.lua" }, {
-            plans[1].filename, plans[2].filename,
-        })
+        assert.equal("pkg/titan" .. (platform.windows and ".dll" or ".so"),
+            driver.provider_output_path(reserved_provider))
 
         local none, _, left, right = driver.common_module_provider({
             "foo.bar", "foobar.baz",
@@ -4618,7 +4573,7 @@ end
             "both use C symbol prefix 'clash_a_b'", err)
     end)
 
-    it("reserves shims for modules carried by a selected static provider", function()
+    it("reserves only the provider pair for a library without generated Lua files", function()
         local archive = root .. "/libpkg_dep.a"
         write_file(archive, "!<arch>\n")
         local plan = source_plan({ { "pkg.app", "function answer(): integer return 42 end\n" } })
@@ -4633,9 +4588,10 @@ end
             } },
         }
         assert(preflight(plan, { roots = { "pkg.app" }, output_root = root .. "/out" }))
-        for _, name in ipairs({ "app", "dep", "carried" }) do
-            assert.is_table(reserved(plan, "generated Lua shim", "/out/pkg/" .. name .. ".lua"),
-                name)
+        local suffix = platform.windows and ".dll" or ".so"
+        assert.is_table(reserved(plan, "provider DSO", "/out/pkg" .. suffix))
+        for _, reservation in ipairs(plan.reservations) do
+            assert.is_nil(reservation.path:match("%.lua$"), reservation.path)
         end
         assert.is_true(contains(plan.inputs, archive))
     end)
@@ -12071,11 +12027,8 @@ end
                 "invalid logical Titan module name", message, 1, true)
         end
 
-        local called, plans, message = pcall(
-            driver.plan_module_shims,
-            "provider$line", { "module$line" })
-        assert.truthy(called)
-        assert.falsy(plans)
+        local provider, message = driver.provider_output_path("provider$line")
+        assert.falsy(provider)
         assert.match("invalid library provider name", message, 1, true)
     end)
 
@@ -12735,30 +12688,5 @@ describe("Windows driver dispatch", function()
         assert.equal("C:/project/module.c.tmp.owned-reservation",
             driver.sibling_temporary_path("C:/project/module.c", strategy))
         assert.same({ "reserve", "release" }, calls)
-    end)
-
-    it("returns reservation failures without changing existing shim contents", function()
-        local path = assert(temporary.name())
-        local file = assert(io.open(path, "wb"))
-        assert(file:write("previous shim")); assert(file:close())
-        compiler_io.new_sync = function()
-            return {
-                stat = function() return { kind = "directory" } end,
-                tmpname = function() return nil, "reservation denied" end,
-            }
-        end
-        platform.native = function() error("unexpected native filesystem helper") end
-        local completed, failure = pcall(function()
-            local ok, err = driver.write_module_shims({
-                { filename = path, contents = "replacement shim" },
-            })
-            assert.is_nil(ok)
-            assert.equal("reservation denied", err)
-            local old = assert(io.open(path, "rb"))
-            assert.equal("previous shim", old:read("*a"))
-            assert(old:close())
-        end)
-        assert(os.remove(path))
-        assert.is_true(completed, failure)
     end)
 end)

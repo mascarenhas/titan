@@ -1,8 +1,8 @@
-local root = os.getenv("TITAN_ROCKS_ROOT")
+local root = os.getenv("TITAN_ROOT")
 if not root or root == "" then
-    error("the checkout Busted profile requires TITAN_ROCKS_ROOT to select " ..
+    error("the checkout Busted profile requires TITAN_ROOT to select " ..
         "a prepared, ABI-matched installation; run " ..
-        'TITAN_ROCKS_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1 ' ..
+        'TITAN_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1 ' ..
         "busted --run=checkout <spec>", 0)
 end
 

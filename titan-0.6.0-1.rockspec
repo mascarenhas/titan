@@ -53,7 +53,8 @@ build = {
    },
    -- Build the runtime and stdlib with the compiler in this source rock.
    -- The install pass retains the native SDK in the private rock directory.
-   -- LuaRocks deploys compiler files and shims; the hook publishes the SDK.
+   -- LuaRocks deploys the compiler files and the `titan` support module
+   -- (lib/lua/5.5); the hook publishes the SDK.
    variables = {
       PREFIX = "$(LUA_DIR)",
       ROCKS_TREE = "$(SCRIPTS_DIR)/..",
@@ -69,6 +70,7 @@ build = {
       INST_PREFIX = "$(PREFIX)",
       INST_BINDIR = "$(BINDIR)",
       INST_LUADIR = "$(LUADIR)",
+      INST_LIBDIR = "$(LIBDIR)",
       INST_CONFDIR = "$(CONFDIR)"
    },
    copy_directories = {

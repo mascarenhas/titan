@@ -169,7 +169,7 @@ local function clean_environment(argv)
         "-u", "LUA_CPATH_5_5",
         "-u", "TITAN_PATH_0_6",
         "-u", "TITAN_PATH",
-        "-u", "TITAN_ROCKS_ROOT",
+        "-u", "TITAN_ROOT",
     }
     -- Standalone Windows LuaRocks selects its Lua SDK through this config.
     -- Keep that caller choice while removing module search-path overrides.
@@ -2598,7 +2598,7 @@ printf '%s\n' "$2"
         write_file(lua, [[#!/bin/sh
 set -eu
 printf '%s\0' "$@" > "$PROBE_ARGV"
-printf '%s\n' "$TITAN_ROCKS_ROOT" "$TITAN_RUNTIME_PREBUILT" \
+printf '%s\n' "$TITAN_ROOT" "$TITAN_RUNTIME_PREBUILT" \
   "${TITAN_COMPILER_BOOTSTRAP-}" "$MSYS2_ARG_CONV_EXCL" > "$PROBE_ENV"
 ]])
         local ok, output = run({ "chmod", "+x", tools .. "/cygpath", lua })

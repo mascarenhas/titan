@@ -227,10 +227,11 @@ local function sdk_link_inputs(destination, inventory, common_prefix)
 end
 
 -- Record content digests with precise observations for titanc, which reuses
--- them only while every observation is unchanged. The just-installed provider
--- supplies the digest and precise stat; the compiler owns the format. A
--- payload without a loadable compiler and provider (installer fixtures)
--- records nothing, and titanc then reads and hashes these inputs as usual.
+-- them only while every observation is unchanged. The `titan` support module
+-- that LuaRocks just deployed to lib/lua/5.5 supplies the digest and precise
+-- stat; the compiler owns the format. A payload without a loadable compiler
+-- and support module (installer fixtures) records nothing, and titanc then
+-- reads and hashes these inputs as usual.
 local function publish_sdk_digests(destination, inventory, common_prefix)
     local release, inputs = sdk_link_inputs(destination, inventory, common_prefix)
     if not release then return nil end
@@ -240,8 +241,7 @@ local function publish_sdk_digests(destination, inventory, common_prefix)
     local manifest = destination .. "/" .. relative
     if lfs.symlinkattributes(manifest) then assert(os.remove(manifest)) end
     local search = package.cpath
-    package.cpath = destination .. "/lib/titan/" .. release .. "/?." ..
-        (windows and "dll" or "so") .. ";" .. search
+    package.cpath = destination .. "/lib/lua/5.5/?." .. (windows and "dll" or "so")
     local loaded, support = pcall(require, "titan")
     package.cpath = search
     if not loaded or type(support) ~= "table" or type(support._sha256_binary) ~= "function" or
