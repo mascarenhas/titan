@@ -1087,7 +1087,16 @@ end
                     "producer was compiled from source instead of its public provider")
                 local program = root .. "/out/" ..
                     (platform.windows and "bin/producer_composition_app.exe" or "producer_composition_app")
-                local ran, result = run_argv({ program })
+                -- This fixture does not exercise the runtime's default search.
+                -- Name the installed SDK's provider directory for the child,
+                -- keeping the default search after `;;`, on both platforms.
+                local child = { platform.windows and "env.exe" or "env" }
+                if platform.windows then
+                    child[#child + 1] = "MSYS2_ENV_CONV_EXCL=TITAN_PATH_0_6"
+                end
+                child[#child + 1] = "TITAN_PATH_0_6=" .. prefix .. "/lib/titan/0.6;;"
+                child[#child + 1] = program
+                local ran, result = run_argv(child)
                 assert.truthy(ran, result)
                 if consumer == "io" then assert.equal("compiled-only OS\n", result) end
             end, debug.traceback)
