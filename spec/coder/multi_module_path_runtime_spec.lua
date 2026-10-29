@@ -988,8 +988,10 @@ assert(item.bump() == 3)
 ]])
 
         -- The import initializes search.item; a later require returns that
-        -- canonical module (no loader data) without opening any image, even
-        -- after its provider file is gone.
+        -- canonical module without opening any image, even after its
+        -- provider file is gone. Initialization also publishes the module's
+        -- native preload, so Lua's own preload searcher may answer the
+        -- require first; either way the canonical module comes back.
         local moved = root("moved")
         copy_file(shared_path(exact_one, "search/item"),
             shared_path(moved, "search/item"))
@@ -1000,10 +1002,15 @@ assert(consumer.bump_item() == 1)
 if package.config:sub(1, 1) ~= "\\" then
     assert(os.rename(%q, %q))
 end
-local item, provider = require "search.item"
-assert(provider == nil, tostring(provider))
+local item = require "search.item"
 assert(item.bump() == 2)
 assert(consumer.origin() == 1)
+-- The Titan searcher's own canonical branch returns the same module and
+-- names no provider file.
+local loader, data = package.searchers[#package.searchers]("search.item")
+assert(data == nil, tostring(data))
+assert(rawequal(loader("search.item"), item))
+assert(item.bump() == 3)
 ]], shared_path(moved, "search/item"), shared_path(moved, "search/item.moved")))
     end)
 
