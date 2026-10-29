@@ -131,15 +131,16 @@ TITAN_RUNTIME_FUNC TITAN_COLD l_noret titan_unwind_guard_failed(lua_State *L,
    TITAN_LIBRARY_VERSION is its major/minor component and owns installed
    library paths plus the versioned TITAN_PATH override. */
 /* Implementation notes: doc/implementation/codegen-overview.md#compiled-module-abi */
-#define TITAN_ABI_VERSION "2"
+#define TITAN_ABI_VERSION "3"
 #define TITAN_VERSION "0.6.0"
 #define TITAN_LIBRARY_VERSION "0.6"
 #define TITAN_LIBRARY_VERSION_SUFFIX "_0_6"
 #define TITAN_PATH_VAR "TITAN_PATH"
 #define TITAN_PATH_SEP "/"
-#define TITAN_ROOT_DEFAULT "/usr/local"
-#define TITAN_LUA_CPATH_SUFFIX "/lib/lua/5.5/?.so"
-#define TITAN_ROOT_KEY "9efb91a8-4a1b-4bdb-aa6b-b84d9ed1dd77"
+/* Registry string: this Lua state's effective Titan path, a `;`-separated
+** list of provider directories. titan_path.c computes it on the first lookup;
+** a string an application stores here first is used as-is (no `;;` or `!`
+** expansion and no SDK fallback). */
 #define TITAN_PATH_KEY "ec10e486-d8fd-11e7-87f4-e7e9581a929c"
 #define TITAN_LIBS_KEY "ecfc9174-d8fd-11e7-8be2-abbaa3ded45f"
 #define TITAN_BT_STATE_KEY "a222927d-0e7b-4f7a-93d9-1a6ce7111a5c"
@@ -341,6 +342,9 @@ inline static TString *_float2str(lua_State *L, lua_Number f) {
   return luaS_newlstr(L, _cvtbuff, len);
 }
 
+/* Open the first occupied `<dir>/<file>` in this state's effective Titan path
+** (then its lazy SDK fallback) lazily and globally; raises when it is absent
+** or cannot be opened. Implemented in titan_path.c. */
 TITAN_RUNTIME_FUNC void *loadlib(lua_State *L, const char *file);
 TITAN_RUNTIME_FUNC void *loadsym(lua_State *L, void *lib, const char *sym);
 TITAN_RUNTIME_FUNC void *loadglobalsym(lua_State *L, const char *sym);
@@ -364,8 +368,17 @@ TITAN_RUNTIME_FUNC void titan_check_module_compatibility(lua_State *L,
     const char *verifier, size_t verifier_size);
 TITAN_RUNTIME_FUNC void titan_check_abi(lua_State *L, void *lib, const char *sym,
                                const char *file);
+/* Check one resolved ABI marker (`<m>_abi` on Unix, the plain-C
+** `<m>_abi_value` query on Windows); raises unless it reports
+** TITAN_ABI_VERSION. Implemented in titan_path.c. */
+TITAN_RUNTIME_FUNC void titan_check_abi_entry(lua_State *L, void *raw,
+    const char *sym, const char *file, const char *error);
 TITAN_RUNTIME_FUNC void titan_invalidate_backtrace_state(lua_State *L);
-TITAN_RUNTIME_FUNC void titan_init_paths(lua_State *L);
+/* Support-module members `_executable_dir`, `_compiler_root`, and
+** `_expand_titan_path`, implemented in titan_path.c. */
+TITAN_RUNTIME_FUNC int titan_path_lua_executable_dir(lua_State *L);
+TITAN_RUNTIME_FUNC int titan_path_lua_compiler_root(lua_State *L);
+TITAN_RUNTIME_FUNC int titan_path_lua_expand(lua_State *L);
 /* Publish/recover one type-specific canonical pointer. The candidate is an
 ** opaque identity key and is never dereferenced. The helper preserves the Lua
 ** stack on success. */
