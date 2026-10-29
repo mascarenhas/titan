@@ -282,7 +282,7 @@ if [[ $mode == build ]]; then
       if [[ -n ${TITAN_COVERAGE_GCOVR:-} ]]; then
         coverage_args+=(--coverage-gcovr "$TITAN_COVERAGE_GCOVR")
       fi
-      payload+=("$winpayload/ltitanlib.o" "$winpayload/libtitan-lpeglabel.a")
+      payload+=("$winpayload/libtitan-lpeglabel.a")
       export TITAN_EXTRA_CPPFLAGS="$TITAN_EXTRA_CPPFLAGS -I\"$winsource/vendor/lpeglabel\""
       for library in libuv libllhttp libssl libcrypto; do
         TITAN_EXTRA_LDFLAGS+=" \"$winprefix/lib/$library.dll.a\""
@@ -292,7 +292,8 @@ if [[ $mode == build ]]; then
     if [[ ${payload[0]+present} ]]; then payload=(-X "${payload[@]}"); fi
     cd "$work/sdk"
     "$work/sdk/bin/lua.exe" "$winprefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" \
-      --output "$(cygpath -m "$output")" --test --incremental --no-uv-bootstrap -j "$TITAN_JOBS" \
+      --output "$(cygpath -m "$output")" --test --incremental --no-uv-bootstrap \
+      --ldflag=-Wl,--disable-auto-import -j "$TITAN_JOBS" \
       --exe "$winprefix/bin/titan-stdlib-tests.exe" --tree "$test_tree" \
       --test-dir "$(cygpath -m "$work/source/spec/stdlib/titan")" ${coverage_args[@]+"${coverage_args[@]}"} \
       --c-source "$(cygpath -m "$work/source/spec/fixtures/stdlib/native/async_foreign_work.c")" \

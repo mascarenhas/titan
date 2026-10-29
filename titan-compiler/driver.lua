@@ -1357,7 +1357,17 @@ local function compiler_family(cc, strategy)
     return family
 end
 
-local function compiler_argv(include_extra_compile_flags, context)
+-- Titan-owned C consumes the controlled Windows Lua DLL: its public and
+-- internal symbols are named imports, and MinGW auto-import is not part of the
+-- contract. User-authored --c-source helpers keep stock Lua conventions.
+local WINDOWS_LUA_DLL_IMPORTS = {
+    "-DLUA_BUILD_AS_DLL",
+    "-DLUAI_FUNC=__declspec(dllimport) extern",
+    "-DLUAI_DDEC(dec)=__declspec(dllimport) extern dec",
+    "-DLUAI_DDEF=",
+}
+
+local function compiler_argv(include_extra_compile_flags, context, user_c_helper)
     if driver.TOOLCHAIN_ERROR then return nil, driver.TOOLCHAIN_ERROR end
     local supplied_context = context
     if context or not driver.UNAME then
@@ -1399,16 +1409,8 @@ local function compiler_argv(include_extra_compile_flags, context)
         append_argv(argv, driver.EXTRA_CPPFLAGS)
     end
     append_argv(argv, cflags)
-    if driver.UNAME == "Windows" then
-        -- The controlled Lua DLL exports its public and internal surface.
-        -- Consumers name those imports explicitly instead of relying on
-        -- MinGW auto-import, which does not cover every data reference.
-        append_argv(argv, {
-            "-DLUA_BUILD_AS_DLL",
-            "-DLUAI_FUNC=__declspec(dllimport) extern",
-            "-DLUAI_DDEC(dec)=__declspec(dllimport) extern dec",
-            "-DLUAI_DDEF=",
-        })
+    if driver.UNAME == "Windows" and not user_c_helper then
+        append_argv(argv, WINDOWS_LUA_DLL_IMPORTS)
     end
     if include_extra_compile_flags then
         append_argv(argv, native or driver.EXTRA_CFLAGS)
@@ -1428,6 +1430,15 @@ end
 -- their private source/output arguments.
 function driver.generated_compile_prefix()
     local args, err = compiler_argv(true)
+    if not args then return nil, err end
+    append_compile_includes(args)
+    return args
+end
+
+-- Authored --c-source helpers are the user's own C: they compile with stock
+-- Lua conventions and never receive Titan's Windows DLL import definitions.
+function driver.authored_c_compile_prefix()
+    local args, err = compiler_argv(true, nil, true)
     if not args then return nil, err end
     append_compile_includes(args)
     return args

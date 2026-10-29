@@ -514,7 +514,7 @@ end
 -- position, before -X payloads.
 local c_objects = {}
 if #normalized_native.c_sources > 0 then
-    local compile_argv, compile_error = driver.generated_compile_prefix()
+    local compile_argv, compile_error = driver.authored_c_compile_prefix()
     if not compile_argv then exit(compile_error) end
     local toolchain, toolchain_error = driver.toolchain_descriptor(resolver_context)
     if not toolchain then exit(toolchain_error) end

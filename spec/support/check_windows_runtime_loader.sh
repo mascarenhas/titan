@@ -13,6 +13,11 @@ build_root=$(cd "$2" && pwd)
 check_root=$(mktemp -d "$build_root/runtime-loader.XXXXXX")
 runtime="$check_root/runtime ü space"
 providers="$runtime/lib/titan/0.6"
+archive="$build_root/runtime/libtitan.a"
+[[ -f $archive ]] || {
+  echo "missing runtime archive: $archive (run make -f Makefile.win runtime-build first)" >&2
+  exit 1
+}
 hostile_cwd="$check_root/cwd"
 hostile_path="$check_root/path"
 mkdir -p "$runtime/bin" "$providers" "$runtime/lib/lua/5.5" "$hostile_cwd" "$hostile_path"
@@ -42,8 +47,8 @@ runtime_libraries=("$prefix/lib/libbacktrace.a" "$build_root/runtime/libtitan.a"
 # The support module is one ordinary Lua native module that exports only its
 # opener; providers and executables link the runtime archive instead.
 "${compiler[@]}" "${common[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
-  titan-runtime/ltitanlib.c titan-runtime/titan_path.c "$lua_import" -lbcrypt \
-  -o "$runtime/lib/lua/5.5/titan.dll"
+  -Wl,--disable-auto-import titan-runtime/ltitanlib.c titan-runtime/titan_path.c \
+  "$lua_import" -lbcrypt -o "$runtime/lib/lua/5.5/titan.dll"
 fixture=spec/fixtures/windows/runtime_loader_provider.c
 for variant in provider dependency bad missing null; do
   defines=()
@@ -54,10 +59,12 @@ for variant in provider dependency bad missing null; do
     null) defines=(-DFIXTURE_ABI=NULL) ;;
   esac
   "${compiler[@]}" "${common[@]}" "${defines[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
+    -Wl,--disable-auto-import \
     "$fixture" "${runtime_libraries[@]}" \
     -o "$providers/fixture-$variant.dll"
 done
-"${compiler[@]}" "${common[@]}" "${ldflags[@]}" spec/fixtures/windows/runtime_loader_probe.c \
+"${compiler[@]}" "${common[@]}" "${ldflags[@]}" -Wl,--disable-auto-import \
+  spec/fixtures/windows/runtime_loader_probe.c \
   "${runtime_libraries[@]}" -o "$runtime/bin/runtime-loader-probe.exe"
 
 # The dependency initially exists outside every Windows DLL search directory.
@@ -70,7 +77,8 @@ done
   spec/fixtures/windows/runtime_loader_native.c "$check_root/dependency.dll.a" \
   -o "$providers/fixture-native.dll"
 
-for file in "$providers/"*.dll "$runtime/bin/"*.dll "$runtime/bin/runtime-loader-probe.exe"; do
+for file in "$providers/"*.dll "$runtime/lib/lua/5.5/"*.dll "$runtime/bin/"*.dll \
+    "$runtime/bin/runtime-loader-probe.exe"; do
   report="$check_root/$(basename "$file").imports"
   llvm-readobj --coff-imports "$file" > "$report"
   perl -0777 -e '
