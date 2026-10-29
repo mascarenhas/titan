@@ -992,6 +992,10 @@ describe("Titan code generator", function()
 
     it("evaluates two-boolean 'and' and same-option 'or' with Lua's values (issue #316)", function()
         run_coder([[
+            record Payload
+                name: string
+            end
+
             function keep(a: boolean, b: boolean, c: boolean): boolean
                 local value = (a and b) or (a and c)
                 return value
@@ -1016,6 +1020,67 @@ describe("Titan code generator", function()
                 if result == nil then return "nil" end
                 return "present"
             end
+            function and_value(a: boolean, b: boolean, v: value): value
+                return (a and b) or v
+            end
+            function value_or_and(v: value, a: boolean, b: boolean): value
+                return v or (a and b)
+            end
+            function ternary_value(c: boolean, x: boolean, v: value): value
+                return c and x or v
+            end
+            function bool_or_value(b: boolean, v: value): value
+                return b or v
+            end
+            function value_or_bool(v: value, b: boolean): value
+                return v or b
+            end
+            function and_calls(first: boolean): (boolean?, integer)
+                local calls = 0
+                local bump = function(): boolean
+                    calls = calls + 1
+                    return true
+                end
+                local result: boolean? = first and bump()
+                return result, calls
+            end
+            function or_calls(present: boolean): (integer?, integer)
+                local calls = 0
+                local bump = function(): integer?
+                    calls = calls + 1
+                    return 5
+                end
+                local first: integer? = nil
+                if present then first = 9 end
+                local result: integer? = first or bump()
+                return result, calls
+            end
+            function pick_three(a: integer?, b: integer?, c: integer?): integer?
+                return a or b or c
+            end
+            local make_payload = function(name: string): Payload?
+                return Payload.new(name)
+            end
+            local churn_name = function(count: integer): string
+                local last: Payload? = nil
+                for i = 1, count do
+                    last = make_payload("churn")
+                end
+                if not last then return "none" end
+                return "churned"
+            end
+            local describe_payload = function(p: Payload?, churned: string): string
+                if not p then return "nil" end
+                return p.name .. churned
+            end
+            -- The chosen GC-bearing option is held in a temporary while a later
+            -- argument allocates enough records to collect.
+            function pick_payload(present: boolean, churn: integer): string
+                local first: Payload? = nil
+                if present then first = make_payload("left") end
+                return describe_payload(first or make_payload("right"),
+                                        churn_name(churn))
+            end
         ]], [[
             assert(test.keep(true, false, true) == true)
             assert(test.keep(true, true, false) == true)
@@ -1032,6 +1097,34 @@ describe("Titan code generator", function()
             assert(test.pick_int(nil, nil) == nil)
             assert(test.described_and_int(false, 7) == "nil")
             assert(test.described_and_int(true, 7) == "present")
+            -- A boolean beside a `value` keeps Lua's value: `(a and b)` is
+            -- false, not nil, so the right operand of `or` is selected.
+            assert(test.and_value(false, true, "hello") == "hello")
+            assert(test.value_or_and("hello", false, true) == "hello")
+            assert(test.ternary_value(true, false, 42) == 42)
+            assert(test.bool_or_value(true, 5) == true)
+            assert(test.bool_or_value(false, "x") == "x")
+            assert(test.value_or_bool(nil, false) == false)
+            assert(test.value_or_bool(false, true) == true)
+            -- `and` and `or` evaluate the right operand only when the left
+            -- operand selects it.
+            local and_false, and_false_calls = test.and_calls(false)
+            assert(and_false == false and and_false_calls == 0)
+            local and_true, and_true_calls = test.and_calls(true)
+            assert(and_true == true and and_true_calls == 1)
+            local or_present, or_present_calls = test.or_calls(true)
+            assert(or_present == 9 and or_present_calls == 0)
+            local or_absent, or_absent_calls = test.or_calls(false)
+            assert(or_absent == 5 and or_absent_calls == 1)
+            -- A chain over one option type stops at the first truthy operand.
+            assert(test.pick_three(nil, nil, 3) == 3)
+            assert(test.pick_three(nil, 2, 3) == 2)
+            assert(test.pick_three(1, 2, 3) == 1)
+            assert(test.pick_three(nil, nil, nil) == nil)
+            -- GC-bearing options survive a collection after the result is
+            -- chosen, and the right operand allocates after collecting.
+            assert(test.pick_payload(true, 50000) == "leftchurned")
+            assert(test.pick_payload(false, 50000) == "rightchurned")
         ]])
     end)
 

@@ -1275,9 +1275,14 @@ describe("Titan type checker", function()
         ]]
         local ok, err, ast = run_checker(code)
         assert.truthy(ok, err)
-        assert.same(types.Boolean(), ast[1].block.stats[1].exps[1]._type)
-        assert.same(types.Boolean(), ast[1].block.stats[2].exps[1]._type)
-        assert.same(types.Boolean(), ast[1].block.stats[3].exps[1]._type)
+        -- The operator node itself, not the local's inferred sink: an
+        -- unannotated local never infers an option and would force a
+        -- reverted `boolean?` result back to `boolean` here.
+        for _, index in ipairs({ 1, 2, 3 }) do
+            local exp = ast[1].block.stats[index].exps[1]
+            assert.equal("Ast.ExpBinop", exp._tag)
+            assert.same(types.Boolean(), exp._type)
+        end
     end)
 
     it("keeps 'and' optional when the right operand is not boolean", function ()
@@ -1309,12 +1314,49 @@ describe("Titan type checker", function()
         ]]
         local ok, err, ast = run_checker(code)
         assert.truthy(ok, err)
+        for _, index in ipairs({ 1, 2, 3 }) do
+            local exp = ast[1].block.stats[index].exps[1]
+            assert.equal("Ast.ExpBinop", exp._tag)
+        end
         assert.same(types.Option(types.Boolean()),
             ast[1].block.stats[1].exps[1]._type)
         assert.same(types.Option(types.Integer()),
             ast[1].block.stats[2].exps[1]._type)
         assert.same(types.Option(types.String()),
             ast[1].block.stats[3].exps[1]._type)
+    end)
+
+    it("keeps a boolean beside a dynamic value in 'or' as a value", function ()
+        local code = [[
+            function fn(b: boolean, v: value, x: integer)
+                local bv = b or v
+                local vb = v or b
+                local chain = (b and b) or v
+                local other = b or x
+                local sink_bv: boolean = b or v
+                local sink_vb: boolean = v or b
+            end
+            function cond(v: value, b: boolean): boolean
+                if v or b then return true end
+                return false
+            end
+        ]]
+        local ok, err, ast = run_checker(code)
+        assert.truthy(ok, err)
+        local stats = ast[1].block.stats
+        for _, index in ipairs({ 1, 2, 3 }) do
+            local exp = stats[index].exps[1]
+            assert.equal("Ast.ExpBinop", exp._tag)
+            assert.same(types.Value(), exp._type)
+        end
+        -- A boolean beside a non-value operand keeps the truthiness rule, and
+        -- a boolean sink or condition is boolean context.
+        for _, index in ipairs({ 4, 5, 6 }) do
+            assert.same(types.Boolean(), stats[index].exps[1]._type)
+        end
+        local condition = ast[2].block.stats[1].thens[1].condition
+        assert.equal("Ast.ExpBinop", condition._tag)
+        assert.same(types.Boolean(), condition._type)
     end)
 
     it("still rejects 'or' over operands of unrelated option types", function ()

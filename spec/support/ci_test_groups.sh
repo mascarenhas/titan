@@ -85,14 +85,8 @@ esac
 
 # The Lua LPT helper validates ci_compiler_test_groups.txt,
 # ci_stdlib_compiler_test_files.txt, ci_compiler_stress_files.txt, and the
-# seven retained runtime/packaging specs:
-#   spec/asan_generated_c_context_spec.lua
-#   spec/dense_array_runtime_spec.lua
-#   spec/libuv_build_spec.lua
-#   spec/lpeglabel_build_spec.lua
-#   spec/minicoro_spec.lua
-#   spec/rockspec_spec.lua
-#   spec/titan_install_spec.lua
+# retained runtime/packaging specs that Makefile declares as
+# STDLIB_BUSTED_TESTS.
 compiler_tests=()
 compiler_unit_tests=()
 compiler_isolated_coverage_tests=()

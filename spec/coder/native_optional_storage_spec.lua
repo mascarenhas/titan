@@ -40,6 +40,10 @@ describe("native numeric optional storage", function()
             function identity(x: (foreign unsigned long long)?): (foreign unsigned long long)?
                 return x
             end
+            function pick(x: (foreign unsigned long long)?, y: (foreign unsigned long long)?): (foreign unsigned long long)?
+                local r: (foreign unsigned long long)? = x or y
+                return r
+            end
             function equal(x: (foreign unsigned long long)?, y: (foreign unsigned long long)?): boolean
                 return x == y
             end
@@ -76,6 +80,11 @@ describe("native numeric optional storage", function()
             w.item = 42
             assert(w.item == 42)
             assert(test.replace(w))
+            assert(test.pick(nil, nil) == nil)
+            assert(test.pick(nil, 42) == 42)
+            assert(test.pick(7, 42) == 7)
+            -- A present zero is truthy for a native numeric Option.
+            assert(test.pick(0, 42) == 0)
         ]])
     end)
 

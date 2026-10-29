@@ -603,6 +603,17 @@ checkexp = util.make_visitor({
                 node.rhs = truthiness(node.rhs)
                 trhs = node.rhs._type
                 node._type = context
+            elseif (tlhs._tag == "Type.Boolean" and trhs._tag == "Type.Value")
+                   or (tlhs._tag == "Type.Value" and trhs._tag == "Type.Boolean") then
+                -- A boolean beside a dynamic value keeps Lua's value: `value`
+                -- admits a `false` operand as it is, so coercing the boolean
+                -- side by truthiness would lose it. Both sides end up `value`,
+                -- which is what the `value` lowering evaluates by truthiness.
+                node.lhs = trycoerce(node.lhs, types.Value(), errors)
+                tlhs = node.lhs._type
+                node.rhs = trycoerce(node.rhs, types.Value(), errors)
+                trhs = node.rhs._type
+                node._type = types.Value()
             elseif tlhs._tag == "Type.Boolean" or trhs._tag == "Type.Boolean" then
                 -- use truthiness if the other side selects a boolean result
                 node.lhs = truthiness(node.lhs)

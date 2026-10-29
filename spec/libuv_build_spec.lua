@@ -5515,15 +5515,7 @@ printf '%s\n' "${schedule[@]}"
                 end
             end
             assert_no_stdlib_lua("spec/stdlib")
-            for _, retained in ipairs({
-                "spec/asan_generated_c_context_spec.lua",
-                "spec/dense_array_runtime_spec.lua",
-                "spec/libuv_build_spec.lua",
-                "spec/lpeglabel_build_spec.lua",
-                "spec/minicoro_spec.lua",
-                "spec/rockspec_spec.lua",
-                "spec/titan_install_spec.lua",
-            }) do
+            for _, retained in ipairs(makefile_words("STDLIB_BUSTED_TESTS")) do
                 assert.truthy(makefile:find(retained, 1, true), retained)
             end
             local packaging_step = named_step(native_coverage_job,
@@ -5911,13 +5903,9 @@ printf '%s\n' "${schedule[@]}"
                 "compiler_tests=()",
                 "compiler_unit_tests=()",
                 "compiler_isolated_coverage_tests=()",
-                "spec/asan_generated_c_context_spec.lua",
-                "spec/dense_array_runtime_spec.lua",
-                "spec/libuv_build_spec.lua",
-                "spec/lpeglabel_build_spec.lua",
-                "spec/minicoro_spec.lua",
-                "spec/rockspec_spec.lua",
-                "spec/titan_install_spec.lua",
+                -- The retained domain is referenced through its declaration
+                -- instead of a copy of its seven names.
+                "STDLIB_BUSTED_TESTS",
                 "run_isolated_compiler_coverage",
                 '"$BUSTED" -c -o gtest -v --exclude-tags=stress ' ..
                     '"$test_file"',
