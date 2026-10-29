@@ -1041,9 +1041,13 @@ $(MINICORO_O): titan-runtime/minicoro.c \
 		-c titan-runtime/minicoro.c -I titan-runtime -I $(TITAN_RUNTIME_LUA_SOURCE_PATH) \
 		-I $(LIBBT_DIR) -o $@
 
+# titan_path.c includes only the Lua SDK and titan.h (plus titan_winloader.h
+# for _WIN32), and the support module links nothing else. Ordering it behind
+# the runtime archive and libbacktrace would make a direct `make
+# install-compiler` rebuild unrelated native dependencies.
 $(TITAN_PATH_O): titan-runtime/titan_path.c titan-runtime/titan.h \
 		titan-runtime/transfer.h titan-runtime/titan/ffi.h \
-		$(TITAN_RUNTIME_LUA_HEADERS) | $(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB)
+		$(TITAN_RUNTIME_LUA_HEADERS)
 	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(CFLAGS) $(TITAN_EXTRA_CFLAGS) \
 		-c titan-runtime/titan_path.c -I titan-runtime -I $(TITAN_RUNTIME_LUA_SOURCE_PATH) \
 		-o $@
