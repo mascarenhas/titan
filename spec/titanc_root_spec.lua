@@ -146,7 +146,8 @@ describe("titanc installation root in a process", function()
             -- through the native spawn environment instead.
             local overrides = { TITAN_ROOT = false }
             for _, setting in ipairs(settings) do
-                local name, value = assert(setting:match("^([%w_]+)=(.*)$"), setting)
+                local name, value = setting:match("^([%w_]+)=(.*)$")
+                assert(name, setting)
                 overrides[name] = value
             end
             options.env = overrides
