@@ -1059,8 +1059,9 @@ io.write(message)
     -- `titanc` and a TITANC without a directory part. Windows looks for
     -- titanc.exe and appends `.exe` to a TITANC name without an extension;
     -- posix_spawnp searches PATH on Unix. A program present only in the
-    -- current directory is never started. The spawn environment, not an MSYS
-    -- `env`, carries PATH so Windows receives the exact list.
+    -- current directory is never started. The shared runner hands the
+    -- variables to each platform's own channel: `env -u ... NAME=value ...`
+    -- ahead of the command on POSIX, the native spawn environment on Windows.
     it("resolves titanc and a bare TITANC name through PATH entries only",
        function()
         local directory = root("path-probe")
@@ -1107,23 +1108,23 @@ else
 end
 ]], support.SUPPORT_CPATH))
         local function query(cwd, search, selected, expectation)
-            local previous = assert(lfs.currentdir())
-            assert.truthy(lfs.chdir(cwd))
-            local called, result = pcall(function()
-                return compiler_io.new_sync():run({ LUA, "-E", chunk, expectation }, {
-                    env = {
-                        PATH = native(search), TITANC = selected or false,
-                        TITAN_ROOT = false, TITAN_PATH = false,
-                        TITAN_PATH_0_6 = other .. ";;",
-                        TITAN_PROBE_LOG = native(log), TITAN_PROBE_ROOT = sdk,
-                        LUA_INIT = false, LUA_INIT_5_5 = false,
-                    },
-                })
-            end)
-            assert.truthy(lfs.chdir(previous))
-            assert.truthy(called, result)
-            assert.truthy(result.started and result.ok, result.output or result.diagnostic)
-            return (result.output or ""):gsub("\r\n", "\n")
+            -- PATH carries only the fixture list; the parent's Titan
+            -- selection and Lua startup hooks are removed.
+            local environment = {
+                { "PATH", native(search) },
+                { "TITANC", selected or false },
+                { "TITAN_ROOT", false },
+                { "TITAN_PATH", false },
+                { "TITAN_PATH_0_6", other .. ";;" },
+                { "TITAN_PROBE_LOG", native(log) },
+                { "TITAN_PROBE_ROOT", sdk },
+                { "LUA_INIT", false },
+                { "LUA_INIT_5_5", false },
+            }
+            local ok, output = run({ LUA, "-E", chunk, expectation }, cwd,
+                environment)
+            assert.truthy(ok, output)
+            return output
         end
         local found = { false, "titanc-path-probe" }
         if platform.windows then found[#found + 1] = "titanc-path-probe.exe" end
@@ -1204,5 +1205,127 @@ assert(not pcall(require, "search.missing"))
         assert.equal("probe\nlua_init=absent\nlua_init_5_5=absent\n",
             read_file(log))
     end)
+
+    -- A native host can drop its whole environment: glibc's clearenv() leaves
+    -- no `environ` at all. The lazy SDK fallback must then finish normally
+    -- instead of dereferencing it, and a host that keeps only an absolute
+    -- TITANC and the probe variables across the clear must resolve the SDK
+    -- exactly as usual.
+    if not platform.windows then
+        it("survives a host that cleared its environment before the fallback",
+           function()
+            local directory = root("cleared-host")
+            local source = path.join(directory, "clearenv.c")
+            write_file(source, [[
+#if !defined(__APPLE__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+#include <stdlib.h>
+#include <string.h>
+#if defined(__APPLE__)
+#include <crt_externs.h>
+#define host_environ() (*_NSGetEnviron())
+#else
+extern char **environ;
+#define host_environ() environ
+#endif
+
+static char *kept_entry(const char *name) {
+    const char *value = getenv(name);
+    char *entry;
+    if (value == NULL) return NULL;
+    entry = (char *)malloc(strlen(name) + strlen(value) + 2);
+    if (entry == NULL) return NULL;
+    strcpy(entry, name);
+    strcat(entry, "=");
+    strcat(entry, value);
+    return entry;
+}
+
+/* Replace the whole environment with the fixture's variables, if any: no
+** kept variable means the runtime sees `environ == NULL` on glibc. */
+int luaopen_clearenv(void *state) {
+    static const char *const names[] = {
+        "TITANC", "TITAN_PROBE_LOG", "TITAN_PROBE_ROOT",
+    };
+    char **table;
+    int index, used = 0;
+    (void)state;
+    table = (char **)malloc(4 * sizeof(char *));
+    if (table == NULL) return 0;
+    for (index = 0; index < 3; index++) {
+        char *entry = kept_entry(names[index]);
+        if (entry != NULL) table[used++] = entry;
+    }
+    table[used] = NULL;
+#if defined(__APPLE__)
+    /* Darwin has no clearenv(); an empty table is the same runtime effect. */
+    host_environ() = table;
+#else
+    host_environ() = used == 0 ? NULL : table;
+    if (used == 0) free(table);
+#endif
+    return 0;
+}
+]])
+            local words = { "-fPIC" }
+            for _, word in ipairs(assert(driver.shared_library_flags())) do
+                words[#words + 1] = word
+            end
+            compile_c(source, shared_path(directory, "clearenv"), words)
+            local cpath = path.to_slash(path.join(directory,
+                "?" .. SHARED_SUFFIX))
+            local function host(env, code)
+                return assert_runs(workspace, { env = env }, string.format(
+                    "package.cpath = package.cpath .. %q\n%s", ";" .. cpath,
+                    code))
+            end
+
+            -- Nothing survives the clear, so the query child gets an empty
+            -- environment and the miss is ordinary.
+            local output = host({}, [[
+require "clearenv"
+local ok, message = pcall(require, "search.missing")
+assert(not ok)
+io.write(message)
+]])
+            assert.truthy(output:find(
+                "module 'search.missing' not found", 1, true), output)
+
+            -- The variables the fixture keeps survive the clear.
+            local probe = path.join(directory, "probe.c")
+            write_file(probe, [[
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(int argc, char **argv) {
+    const char *log = getenv("TITAN_PROBE_LOG");
+    const char *root = getenv("TITAN_PROBE_ROOT");
+    FILE *file;
+    if (argc != 2 || strcmp(argv[1], "--print-root") != 0) return 2;
+    if (log == NULL || root == NULL) return 3;
+    file = fopen(log, "ab");
+    if (file == NULL) return 4;
+    fputs("probe\n", file);
+    fclose(file);
+    printf("%s\n", root);
+    return 0;
+}
+]])
+            local program = path.join(directory, "titanc-absolute")
+            compile_c(probe, program)
+            local log = root("cleared-host.log")
+            host({
+                "TITANC=" .. program,
+                "TITAN_PROBE_LOG=" .. log,
+                "TITAN_PROBE_ROOT=" .. sdk,
+            }, [[
+require "clearenv"
+assert(require("search.item").origin() == 2)
+]])
+            assert.equal(1, probe_count(log))
+        end)
+    end
 
 end)

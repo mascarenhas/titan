@@ -34,8 +34,37 @@ local function exists(name)
 end
 M.exists = exists
 
-local function run(argv, cwd)
-    local command = { table.unpack(argv) }
+-- Run one argv in `cwd` and return (ok, output, why, status).
+-- `environment` optionally describes the child's environment as ordered
+-- { name, value } pairs, where `false` removes a variable and a string sets
+-- it. POSIX env stops parsing options at the first assignment, so every `-u`
+-- precedes every `NAME=value`; Windows receives the same pairs through the
+-- native spawn environment, which an MSYS `env` would rewrite.
+local function run(argv, cwd, environment)
+    local command, options = {}, nil
+    if environment then
+        if platform.windows then
+            local values = {}
+            for _, entry in ipairs(environment) do
+                values[entry[1]] = entry[2]
+            end
+            options = { env = values }
+        else
+            command[1] = "env"
+            for _, entry in ipairs(environment) do
+                if entry[2] == false then
+                    command[#command + 1] = "-u"
+                    command[#command + 1] = entry[1]
+                end
+            end
+            for _, entry in ipairs(environment) do
+                if entry[2] ~= false then
+                    command[#command + 1] = entry[1] .. "=" .. entry[2]
+                end
+            end
+        end
+    end
+    for _, word in ipairs(argv) do command[#command + 1] = word end
     local scripts = {}
     if platform.windows then
         if command[1] == "env" then command[1] = "env.exe" end
@@ -55,7 +84,7 @@ local function run(argv, cwd)
     local previous = assert(lfs.currentdir())
     assert.truthy(lfs.chdir(cwd))
     local called, result = pcall(function()
-        return compiler_io.new_sync():run(command)
+        return compiler_io.new_sync():run(command, options)
     end)
     assert.truthy(lfs.chdir(previous))
     for _, script in ipairs(scripts) do os.remove(script) end

@@ -782,12 +782,14 @@ static int titan_path_is_lua_init_entry(const char *entry) {
 /* Push a NULL-terminated environment array for the query child: every parent
 ** entry except Lua's startup hooks, whose chunks run before --print-root and
 ** could install the Titan searcher and start the same missing-module query
-** again. The entries stay the parent's own strings. */
+** again. The entries stay the parent's own strings. A host that cleared its
+** environment has no `environ` at all (glibc's clearenv), which is an empty
+** child environment rather than a defect. */
 static char **titan_path_push_query_environ(lua_State *L) {
     char **parent = titan_path_environ();
     size_t count = 0, used = 0, index;
     char **child;
-    while (parent[count] != NULL) count++;
+    while (parent != NULL && parent[count] != NULL) count++;
     child = (char **)lua_newuserdatauv(L, (count + 1) * sizeof(char *), 0);
     for (index = 0; index < count; index++) {
         if (titan_path_is_lua_init_entry(parent[index])) continue;
