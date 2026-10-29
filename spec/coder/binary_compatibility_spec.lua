@@ -95,7 +95,7 @@ static lua_State *new_state(void) {
     lua_pushstring(L, ]] .. core.c_string_literal(package.cpath) .. [[);
     lua_setfield(L, -2, "cpath");
     lua_pop(L, 1);
-    titan_init_paths(L);
+    titan_install_searcher(L);
     return L;
 }
 ]], scoped(source)))
@@ -197,58 +197,32 @@ describe("selective binary dependency compatibility", function()
         rejects("increment")
     end)
 
-    if not platform.windows then
-        it("derives the runtime SDK root from Titan's C-path before LuaRocks' user tree", function()
-            run_native_harness([[
-#include <string.h>
-
-static void check_root(const char *cpath, const char *expected_root,
-                       const char *expected_template) {
-    lua_State *L = luaL_newstate();
-    assert(L != NULL);
-    luaL_openlibs(L);
-    lua_getglobal(L, "package");
-    lua_pushstring(L, cpath);
-    lua_setfield(L, -2, "cpath");
-    lua_pop(L, 1);
-
-    int top = lua_gettop(L);
-    titan_init_paths(L);
-    assert(lua_gettop(L) == top);
-    lua_getfield(L, LUA_REGISTRYINDEX, TITAN_ROOT_KEY);
-    assert(lua_type(L, -1) == LUA_TSTRING);
-    assert(strcmp(lua_tostring(L, -1), expected_root) == 0);
-    lua_pop(L, 1);
-    lua_getglobal(L, "package");
-    lua_getfield(L, -1, "cpath");
-    assert(strstr(lua_tostring(L, -1), expected_template) != NULL);
-    lua_pop(L, 2);
-    assert(lua_gettop(L) == top);
-    lua_close(L);
-}
-
-int main(void) {
-    check_root(
-        "/home/dev/.luarocks/lib/lua/5.5/?.so;"
-        "/first prefix/lib/titan/" TITAN_LIBRARY_VERSION "/?.so;"
-        "/second/lib/titan/" TITAN_LIBRARY_VERSION "/?.so;"
-        "/first prefix/lib/lua/5.5/?.so",
-        "/first prefix",
-        "/first prefix/lib/titan/" TITAN_LIBRARY_VERSION "/?.so");
-    check_root(
-        "/old/lib/titan/0.5/?.so;"
-        "/lookalike/lib/titan/" TITAN_LIBRARY_VERSION "/?.so.debug;"
-        "/bootstrap/lib/lua/5.5/?.so;/second/lib/lua/5.5/?.so",
-        "/bootstrap",
-        "/bootstrap/lib/titan/" TITAN_LIBRARY_VERSION "/?.so");
-    check_root("/lib/titan/" TITAN_LIBRARY_VERSION "/?.so;"
-               "/later/lib/lua/5.5/?.so", "/",
-               "/lib/titan/" TITAN_LIBRARY_VERSION "/?.so");
-    return 0;
-}
-]])
-        end)
-    end
+    it("rejects a mismatched requested module name before initialization", function()
+        build({ {
+            name = "bc180_provider",
+            src = [[
+                initializations: integer = 0
+                do
+                    initializations = initializations + 1
+                end
+            ]],
+        } })
+        local ok, out = call([[
+            local open = assert(package.loadlib(
+                "./bc180_provider.so", "luaopen_bc180_provider"))
+            local opened, err = pcall(open, "bc180_other", "./bc180_provider.so")
+            assert(not opened, "a mismatched requested name opened the provider")
+            assert(err == "module name mismatch: requested 'bc180_other', " ..
+                "provider defines 'bc180_provider'", err)
+            assert(debug.getregistry()["Titan module bc180_provider"] == nil,
+                "the provider initialized before its name check")
+            local provider = open()
+            assert(provider.initializations == 1)
+            assert(open("bc180_provider", "./bc180_provider.so") == provider)
+            assert(provider.initializations == 1)
+        ]])
+        assert.truthy(ok, out)
+    end)
 
     it("exposes a Lua-independent ABI value through the canonical provider", function()
         build({ {
@@ -1657,7 +1631,7 @@ int main(void) {
                         (platform.windows and ".dll" or ".so") .. ";")
                 local argv = {
                     "env", "TITAN_RUNTIME_PREBUILT=1", "CCACHE_DISABLE=1",
-                    "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_ROCKS_ROOT=" .. prefix,
+                    "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_ROOT=" .. prefix,
                     "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=-O0 -fno-lto",
                     "TITAN_EXTRA_LDFLAGS=-fno-lto", LUA, "-E",
                 }

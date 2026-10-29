@@ -23,8 +23,19 @@ $SIGS
 
 ]]
 
+-- Opener names are not injective: `a.b-c` and `a.b_c` share luaopen_a_b_c.
+-- A requested name must therefore match exactly before any initialization;
+-- internal zero-argument calls skip the check.
 postamble = [[
 int $LUAOPEN_NAME(lua_State *L) {
+    if (lua_type(L, 1) == LUA_TSTRING) {
+        size_t _requested_len;
+        const char *_requested = lua_tolstring(L, 1, &_requested_len);
+        if (_requested_len != sizeof($LOGICALNAME) - 1 ||
+            memcmp(_requested, $LOGICALNAME, _requested_len) != 0)
+            return luaL_error(L, "module name mismatch: requested '%s', "
+                "provider defines '%s'", _requested, $LOGICALNAME);
+    }
     titan_invalidate_backtrace_state(L);
     Udata *mod = $INITNAME(L);
     setuvalue(L, s2v(L->top.p), mod);
