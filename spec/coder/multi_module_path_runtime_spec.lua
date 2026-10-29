@@ -6,199 +6,29 @@ local path = require "titan-compiler.path"
 local platform = require "titan-compiler.platform"
 local lfs = require "lfs"
 local DEPTH_PROBE = require("spec.support.helpers").DEPTH_PROBE
+-- The workspace, provider, host and titanc-probe scaffolding is shared with
+-- multi_module_path_stdlib_spec.lua, which owns the cases whose fixtures
+-- import installed standard modules.
+local support = require "spec.support.multi_module_path"
 
-local REPO = path.normalize(assert(lfs.currentdir()))
-local PREFIX = require("spec.support.installed_prefix").active()
-local SHARED_SUFFIX = platform.windows and ".dll" or ".so"
-local EXE_SUFFIX = platform.windows and ".exe" or ""
-local LUA = path.join(PREFIX, "bin", "lua" .. EXE_SUFFIX)
-local INSTALLED_TITANC = path.join(PREFIX, platform.windows and
-    "lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" or "bin/titanc")
--- The installed support module; the only C path entry of every runtime chunk.
-local SUPPORT_CPATH = path.to_slash(path.join(PREFIX, "lib/lua/5.5",
-    "?" .. SHARED_SUFFIX))
--- titan.h TITAN_PATH_KEY: the per-state effective Titan path.
-local TITAN_PATH_KEY = "ec10e486-d8fd-11e7-87f4-e7e9581a929c"
-
-local USE_CHECKOUT_COMPILER =
-    os.getenv("TITAN_TEST_USE_CHECKOUT_COMPILER") == "1"
-
-local function exists(path)
-    return lfs.attributes(path, "mode") ~= nil
-end
-
-local function run(argv, cwd)
-    local command = { table.unpack(argv) }
-    local scripts = {}
-    if platform.windows then
-        if command[1] == "env" then command[1] = "env.exe" end
-        for index = 1, #command - 1 do
-            if command[index] == "-e" and command[index + 1]:find("[\r\n]") then
-                local script = assert(compiler_io.new_sync():tmpname())
-                local file = assert(io.open(script, "wb"))
-                assert(file:write(command[index + 1]))
-                assert(file:close())
-                scripts[#scripts + 1] = script
-                command[index] = script
-                table.remove(command, index + 1)
-                break
-            end
-        end
-    end
-    local previous = assert(lfs.currentdir())
-    assert.truthy(lfs.chdir(cwd))
-    local called, result = pcall(function()
-        return compiler_io.new_sync():run(command)
-    end)
-    assert.truthy(lfs.chdir(previous))
-    for _, script in ipairs(scripts) do os.remove(script) end
-    assert.truthy(called, result)
-    local output = result.output or result.diagnostic or ""
-    if platform.windows then
-        output = output:gsub("\r\n", "\n")
-        output = output:gsub('%^"(.-)%^"', function(word)
-            return assert(cdriver.shell_quote((word:gsub("%^(.)", "%1"))))
-        end)
-    end
-    return result.started and result.ok, output, result.why, result.status
-end
-
-local function temporary_workspace()
-    local workspace = assert(compiler_io.new_sync():tmpname())
-    assert.truthy(os.remove(workspace))
-    assert.truthy(lfs.mkdir(workspace))
-    return path.normalize(workspace)
-end
-
-local function shared_path(workspace, stem)
-    return path.join(workspace, stem .. SHARED_SUFFIX)
-end
-
-local function make_directory(directory)
-    if lfs.attributes(directory, "mode") == "directory" then return end
-    local parent = path.dirname(directory)
-    if parent ~= directory then make_directory(parent) end
-    assert.truthy(lfs.mkdir(directory), "could not create " .. directory)
-end
-
-local function write_file(filename, contents)
-    make_directory(path.dirname(filename))
-    local file = assert(io.open(filename, "wb"))
-    assert.truthy(file:write(contents))
-    assert.truthy(file:close())
-end
-
-local function read_file(path)
-    local file = assert(io.open(path, "rb"))
-    local contents = file:read("*a")
-    file:close()
-    return contents
-end
-
-local function copy_file(source, destination)
-    write_file(destination, read_file(source))
-end
-
-local function remove_tree(directory)
-    local mode = lfs.symlinkattributes(directory, "mode")
-    if mode == "directory" then
-        for name in lfs.dir(directory) do
-            if name ~= "." and name ~= ".." then
-                remove_tree(path.join(directory, name))
-            end
-        end
-        assert.truthy(lfs.rmdir(directory))
-    elseif mode then
-        assert.truthy(os.remove(directory))
-    end
-end
-
-local function compiler_argv(output_root, source_root, titan_path, ...)
-    local argv = {
-        "env",
-        "-u", "LUA_PATH", "-u", "LUA_PATH_5_5",
-        "-u", "LUA_CPATH", "-u", "LUA_CPATH_5_5",
-        "CCACHE_DISABLE=1",
-        "TITAN_PATH_0_6=" .. titan_path,
-        "TITAN_PATH=",
-    }
-    if PREFIX then
-        table.insert(argv, "PATH=" .. path.join(PREFIX, "bin") .. (platform.windows and ";" or ":") ..
-            (os.getenv("PATH") or "/usr/bin:/bin"))
-    end
-
-    local installed = not USE_CHECKOUT_COMPILER and
-        PREFIX and exists(INSTALLED_TITANC)
-    if installed then
-        if platform.windows then table.insert(argv, LUA) end
-        table.insert(argv, INSTALLED_TITANC)
-    else
-        assert.truthy(PREFIX,
-            "set PREFIX or TITAN_TEST_PREFIX for native compiler tests")
-        table.insert(argv, "TITAN_ROOT=" .. PREFIX)
-        table.insert(argv, "LUA_CPATH=" .. path.to_slash(path.join(REPO, "?" .. SHARED_SUFFIX)) .. ";;")
-        table.insert(argv, LUA)
-        table.insert(argv, "-e")
-        table.insert(argv, string.format(
-            "package.path=%q..package.path", path.to_slash(path.join(REPO, "?.lua")) .. ";" ..
-                path.to_slash(path.join(REPO, "?/init.lua")) .. ";"))
-        table.insert(argv, path.join(REPO, "titanc"))
-    end
-
-    table.insert(argv, "--tree")
-    table.insert(argv, source_root)
-    for _, argument in ipairs({ ... }) do table.insert(argv, argument) end
-    return argv
-end
-
-local function compile(output_root, source_root, titan_path, ...)
-    return run(compiler_argv(
-        output_root, source_root, titan_path, ...), output_root)
-end
-
-local function assert_compiles(output_root, source_root, titan_path, ...)
-    local ok, output, why, code = compile(
-        output_root, source_root, titan_path, ...)
-    assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-        tostring(code) .. ")")
-end
-
--- Run a Lua chunk in a fresh host whose only C path entry is the support
--- module. `require "titan"` installs the Titan searcher; Lua source search is
--- disabled so nothing but that searcher can resolve a Titan module.
--- options.titan_path sets TITAN_PATH_0_6 (nil leaves every Titan path variable
--- unset); options.env adds "NAME=value" entries; options.lua selects the host.
-local function run_lua(cwd, options, code)
-    assert.truthy(PREFIX,
-        "set PREFIX or TITAN_TEST_PREFIX for native compiler tests")
-    local argv = {
-        "env",
-        "-u", "LUA_PATH", "-u", "LUA_PATH_5_5",
-        "-u", "LUA_CPATH", "-u", "LUA_CPATH_5_5",
-        "-u", "TITAN_PATH", "-u", "TITAN_PATH_0_6",
-        "-u", "TITAN_ROOT", "-u", "TITANC",
-    }
-    if options.titan_path ~= nil then
-        table.insert(argv, "TITAN_PATH_0_6=" .. options.titan_path)
-    end
-    for _, entry in ipairs(options.env or {}) do table.insert(argv, entry) end
-    table.insert(argv, options.lua or LUA)
-    table.insert(argv, "-e")
-    table.insert(argv, string.format([[
-package.path = ""
-package.cpath = %q
-local titan = require "titan"
-local TITAN_PATH_KEY = %q
-%s
-]], SUPPORT_CPATH, TITAN_PATH_KEY, code))
-    return run(argv, cwd)
-end
-
-local function assert_runs(cwd, options, code)
-    local ok, output = run_lua(cwd, options, code)
-    assert.truthy(ok, output)
-    return output
-end
+local PREFIX = support.PREFIX
+local SHARED_SUFFIX = support.SHARED_SUFFIX
+local EXE_SUFFIX = support.EXE_SUFFIX
+local LUA = support.LUA
+local TITAN_PATH_KEY = support.TITAN_PATH_KEY
+local run = support.run
+local temporary_workspace = support.temporary_workspace
+local shared_path = support.shared_path
+local make_directory = support.make_directory
+local write_file = support.write_file
+local read_file = support.read_file
+local copy_file = support.copy_file
+local remove_tree = support.remove_tree
+local assert_compiles = support.assert_compiles
+local assert_runs = support.assert_runs
+local item_source = support.item_source
+local write_titanc_shim = support.write_titanc_shim
+local probe_count = support.probe_count
 
 describe("compiled-provider selection across Titan path roots", function()
     local workspace
@@ -610,44 +440,10 @@ end)
 describe("Titan runtime searcher and Titan path", function()
     local workspace
     -- Provider roots, each the output of one compilation.
-    local exact_one, exact_two, bundle, other, consumer, guard, statecheck
+    local exact_one, exact_two, bundle, other, consumer, guard
     local sdk, empty_sdk
 
-    local function item_source(origin)
-        return string.format([[
-count: integer = 0
-
-function origin(): integer
-    return %d
-end
-
-function bump(): integer
-    count = count + 1
-    return count
-end
-]], origin)
-    end
-
-    local function root(name) return path.join(workspace, name) end
-
-    -- A Unix stand-in for titanc that records each launch and prints a root.
-    local function write_titanc_shim(directory, log, printed_root)
-        local shim = path.join(directory, "titanc")
-        write_file(shim, string.format([[
-#!/bin/sh
-printf 'probe\n' >> '%s'
-printf '%%s\n' '%s'
-]], log, printed_root))
-        local ok, output = run({ "chmod", "+x", shim }, workspace)
-        assert.truthy(ok, output)
-        return shim
-    end
-
-    local function probe_count(log)
-        if not exists(log) then return 0 end
-        local _, count = read_file(log):gsub("probe\n", "")
-        return count
-    end
+    local function root(name) return support.root(workspace, name) end
 
     local function realpath(name)
         return assert(compiler_io.new_sync():realpath(name))
@@ -710,11 +506,10 @@ printf '%%s\n' '%s'
         other = root("other")
         consumer = root("consumer")
         guard = root("guard")
-        statecheck = root("statecheck")
         sdk = root("sdk")
         empty_sdk = root("empty-sdk")
         for _, directory in ipairs({
-            exact_one, exact_two, bundle, other, consumer, guard, statecheck,
+            exact_one, exact_two, bundle, other, consumer, guard,
             sdk, empty_sdk,
         }) do
             make_directory(directory)
@@ -783,76 +578,6 @@ end
 ]])
         assert_compiles(guard, source, guard, "guard.b-c", "guard.peer")
         assert.equal("file", lfs.attributes(shared_path(guard, "guard"), "mode"))
-
-        source = root("src-statecheck")
-        write_file(path.join(source, "statecheck.titan"), [[
-local async = import "async"
-local lua = import "lua"
-local thread = import "thread"
-
-local count_chunk = "return #package.searchers"
-
-local function transferred_integer(result: async.TransferValue): integer
-  case result
-  when is_integer(number) then
-    return number
-  else
-    raise "independent state did not return an integer"
-  end
-end
-
--- Searcher counts before and after loading the support module in an
--- independent state, and a Titan module that only its own path can find.
-function independent(cpath: string): (integer, integer, integer)
-  local state = lua.new()
-  defer state:close()
-  local before = transferred_integer(state:run(count_chunk))
-  local after = transferred_integer(state:run(
-    "package.cpath = ...; require('titan'); return #package.searchers",
-    nil, async.TransferValue.is_string(cpath)))
-  local origin = transferred_integer(state:run(
-    "return require('search.item').origin()"))
-  return before, after, origin
-end
-
--- Run one chunk in a fresh independent state, which copies this state's
--- native preloads (with their descriptors) but no initialized module.
-function in_new_state(chunk: string): integer
-  local state = lua.new()
-  defer state:close()
-  return transferred_integer(state:run(chunk))
-end
-
--- A thread child loads the support module without gaining a second Titan
--- searcher, then resolves a Titan module through its own Titan path.
-function in_thread(cpath: string): integer
-  local result = 0
-  async.run<|nil, value|>(function (): nil
-    local child = thread.spawn(function (): integer
-      local before: value = lua.load(count_chunk)()
-      lua.load("package.cpath = ...; require('titan')")(cpath)
-      local after: value = lua.load(count_chunk)()
-      if (before as integer) ~= (after as integer) then
-        raise "loading the support module added a second Titan searcher"
-      end
-      local origin: value = lua.load("return require('search.item').origin()")()
-      return origin as integer
-    end)
-    case child:join()
-    when succeeded(origin) then
-      result = origin
-    when failed(failure) then
-      failure:raise()
-    else
-      raise "searcher thread was cancelled"
-    end
-    return nil
-  end)
-  async.loop()
-  return result
-end
-]])
-        assert_compiles(statecheck, source, statecheck .. ";;", "statecheck")
 
         copy_file(shared_path(exact_two, "search/item"),
             shared_path(path.join(sdk, "lib/titan/0.6"), "search/item"))
@@ -1330,65 +1055,4 @@ io.write(message)
             "no Titan SDK fallback: cannot start '" .. not_program, 1, true), output)
     end)
 
-    it("installs one searcher in each independent state and thread child",
-       function()
-        local log = root("states.log")
-        local env = {}
-        if not platform.windows then
-            env[1] = "TITANC=" .. write_titanc_shim(root("shim-states"), log, empty_sdk)
-        end
-        assert_runs(workspace, {
-            titan_path = statecheck .. ";" .. exact_one .. ";;", env = env,
-        }, [[
-local count = #package.searchers
-package.loaded.titan = nil
-require "titan"
-assert(#package.searchers == count, #package.searchers .. " " .. count)
-
--- Lua's own paths name no Titan root: only the Titan searcher resolves these.
-local statecheck = require "statecheck"
-local before, after, origin = statecheck.independent(package.cpath)
-assert(before == after, before .. " " .. after)
-assert(origin == 1, origin)
-assert(statecheck.in_thread(package.cpath) == 1)
-]])
-        assert.equal(0, probe_count(log))
-    end)
-
-    it("prefers a matching native preload and falls through without one",
-       function()
-        -- The host loads search.item from exact-two; each child's own Titan
-        -- path names exact-one, so a file hit and a preload hit differ.
-        local stored = table.concat({
-            statecheck, exact_two, path.join(PREFIX, "lib/titan/0.6"),
-        }, ";")
-        local file_suffix = "exact-one/search/item" .. SHARED_SUFFIX
-        local preload_hit = [[
-local loader, data = package.searchers[#package.searchers]("search.item")
-assert(data == ":preload:", tostring(data))
-assert(rawequal(loader, package.preload["search.item"]))
-return loader("search.item").origin()
-]]
-        local file_hit = string.format([[
-local loader, data = package.searchers[#package.searchers]("search.item")
-assert(type(loader) == "function" and not rawequal(loader, string.len))
-local provider = data:gsub("\\", "/")
-assert(provider:sub(-%d) == %q, data)
-return 1
-]], #file_suffix, file_suffix)
-        assert_runs(workspace, { titan_path = exact_one }, string.format([[
-debug.getregistry()[TITAN_PATH_KEY] = %q
-local statecheck = require "statecheck"
-assert(require("search.item").origin() == 2)
--- The copied loader and its symbol descriptor win over the file.
-assert(statecheck.in_new_state(%q) == 2)
--- A replaced loader no longer matches the copied descriptor.
-assert(statecheck.in_new_state(%q) == 1)
--- A loader published without a descriptor never matches.
-package.preload["search.item"] = string.len
-assert(statecheck.in_new_state(%q) == 1)
-]], stored, preload_hit,
-            'package.preload["search.item"] = string.len\n' .. file_hit,
-            file_hit))
-    end)
 end)
