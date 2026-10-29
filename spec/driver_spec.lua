@@ -5371,6 +5371,18 @@ describe("compiler module loader", function()
             write_file(large_lua, "return " .. string.rep("0", threshold) .. "\n")
             write_file(frontend, "-- " .. string.rep("f", threshold) .. "\n")
             local absorbed = {}
+            -- Absorbed inputs are keyed by the driver's own spelling of each
+            -- path, which differs from the fixture's on Windows.
+            local function canonical_key(path)
+                return paths.to_slash(paths.normalize(path))
+            end
+            local function canonical_absorption(entries)
+                local normalized = {}
+                for path, count in pairs(entries) do
+                    normalized[canonical_key(path)] = count
+                end
+                return normalized
+            end
             local function coarse_io()
                 local strategy = compiler_io.new_sync()
                 for _, method in ipairs({ "stat", "lstat" }) do
@@ -5403,7 +5415,8 @@ describe("compiler module loader", function()
             local whole_read = { sha256_binary = titan._sha256_binary }
 
             local streamed = component()
-            assert.same({ [large_lua] = 1, [frontend] = 1 }, absorbed)
+            assert.same({ [canonical_key(large_lua)] = 1, [canonical_key(frontend)] = 1 },
+                canonical_absorption(absorbed))
             absorbed = {}
             assert.equal(component(whole_read), streamed)
             assert.same({}, absorbed)
