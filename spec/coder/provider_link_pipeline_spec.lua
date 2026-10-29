@@ -372,16 +372,21 @@ describe("provider pair link pipeline", function()
         local ok, result = direct({}, "pkg.left", "pkg.b-c")
         assert.truthy(ok, result)
         assert.same(EXPECTED_VALIDATIONS, lines(validations))
-        -- `pkg.b-c` and `pkg.b_c` share luaopen_pkg_b_c; only the exact
-        -- logical name opens it.
+        -- `pkg.b-c` and `pkg.b_c` share luaopen_pkg_b_c; a file load must
+        -- request the exact logical name, while package.preload may alias it.
         ok, result = shell(workspace, quote_words({
             "env", "-u", "LUA_PATH", "-u", "LUA_CPATH", "-u", "LUA_INIT",
             LUA, "-e", string.format(
-                "local open = assert(package.loadlib(%q, 'luaopen_pkg_b_c')) " ..
-                "local opened, err = pcall(open, 'pkg.b_c') " ..
+                "local file = %q .. '/pkg.so' " ..
+                "local open = assert(package.loadlib(file, 'luaopen_pkg_b_c')) " ..
+                "local opened, err = pcall(open, 'pkg.b_c', file) " ..
                 "assert(not opened and err:find('module name mismatch', 1, true), err) " ..
-                "assert(open('pkg.b-c').answer() == 42)",
-                output .. "/pkg.so"),
+                "assert(debug.getregistry()['Titan module pkg.b-c'] == nil) " ..
+                "package.preload['pkg.b-c_alias'] = open " ..
+                "local aliased = require('pkg.b-c_alias') " ..
+                "assert(aliased.answer() == 42) " ..
+                "assert(open('pkg.b-c', file) == aliased and open() == aliased)",
+                output),
         }) .. " 2>&1")
         assert.truthy(ok, result)
     end)
