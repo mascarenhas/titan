@@ -371,7 +371,9 @@ end
 local function support_function(name)
     local loaded, support = pcall(require, "titan")
     if not loaded then
-        return nil, "cannot load the Titan support module: " .. tostring(support)
+        -- require lists every searched path after its first line.
+        return nil, "cannot load the Titan support module: " ..
+            tostring(support):match("^[^\n]*")
     end
     local member = type(support) == "table" and support[name]
     if type(member) ~= "function" then
@@ -421,7 +423,7 @@ driver.TITAN_BIN_PATH =
 -- Implementation notes: doc/implementation/driver.md#module-names-and-the-search-paths
 function driver.compiler_root(strategy)
     if not configured_installation_root then
-        return nil, installation_root_error or "TITAN_ROOT is not set"
+        return nil, installation_root_error
     end
     return normalize_root(configured_installation_root, strategy)
 end
