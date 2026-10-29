@@ -252,7 +252,7 @@ if not support_loaded or type(support) ~= "table" or
    type(support._sha256_stream) ~= "function" then
     exit("the installed Titan native support library is missing or stale " ..
         "(it lacks _sha256_binary or _sha256_stream); reinstall Titan" ..
-        (support_loaded and "" or ": " .. tostring(support)))
+        (support_loaded and "" or ": " .. tostring(support):match("^[^\n]*")))
 end
 
 resolver_context = driver.new_resolver_context({

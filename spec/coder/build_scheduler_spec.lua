@@ -1174,7 +1174,10 @@ describe("output-tree locks in this process", function()
             package.loaded.titan = {}
             stale = table.pack(build.lock_outputs(strategy, { workspace }))
             package.loaded.titan = nil
-            package.preload.titan = function() error("titan runtime is not installed", 0) end
+            -- require appends every searched path; only the first line is reported.
+            package.preload.titan = function()
+                error("titan runtime is not installed\n\tno file 'titan.so'", 0)
+            end
             missing = table.pack(build.lock_outputs(strategy, { workspace }))
         end)
         package.preload.titan = nil

@@ -23,7 +23,7 @@ local function native_support(names)
     local called, support = pcall(require, "titan")
     if not called or type(support) ~= "table" then
         return nil, "cannot load the Titan native support library: " ..
-            tostring(support)
+            tostring(support):match("^[^\n]*")
     end
     for _, name in ipairs(names) do
         if type(support[name]) ~= "function" then
