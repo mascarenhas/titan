@@ -3287,6 +3287,7 @@ describe("loader resolver ownership", function()
                     return true
                 end,
                 generated_compile_prefix = function() return { "cc" } end,
+                authored_c_compile_prefix = function() return { "cc" } end,
                 toolchain_descriptor = function() return { compiler_argv = { "cc" } } end,
                 output_tool_descriptors = function() return {} end,
                 finalize_resolver_context = function(context)
