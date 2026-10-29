@@ -40,6 +40,10 @@ local installed = assert(root and root ~= "" and driver.installed_paths(root),
     "generate the launcher fixture with TITAN_ROOT naming the installation")
 write("runtime-libraries.txt",
     table.concat(driver.installed_link_inputs(installed, false), "\n") .. "\n")
-write("plan.txt", default.executable .. "\n" .. override.executable .. "\n" ..
-    default.provider .. "\n")
+-- The explicit --exe path carries native separators; the gate compares plan
+-- entries with '/' spellings, so normalize every entry at this boundary.
+local function plan_path(value) return (value:gsub("\\", "/")) end
+write("plan.txt", plan_path(default.executable) .. "\n" ..
+    plan_path(override.executable) .. "\n" ..
+    plan_path(default.provider) .. "\n")
 platform.windows = original
