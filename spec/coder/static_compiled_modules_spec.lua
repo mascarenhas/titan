@@ -303,6 +303,8 @@ describe("static compiled-module native containers", function()
             "Windows Titan archive-provider consumers are not implemented",
         ["calls public foreign entries from an archive without source or a DSO"] =
             "Windows Titan archive-provider consumers are not implemented",
+        ["validates a static provider's executable-context protocol"] =
+            "Windows standalone builds publish the DLL provider pair, not the archive probe",
     }
     local publication_cases = {
         ["rolls back every caught publication boundary"] = true,
@@ -445,6 +447,29 @@ describe("static compiled-module native containers", function()
         end)
         assert(driver.close_resolver_context(context))
         assert.truthy(completed, failure)
+    end)
+
+    it("validates a static provider's executable-context protocol", function()
+        local archive = workspace .. "/protocol probe.a"
+        make_archive(archive, { target_object })
+        local name = "fixture.target"
+        local entries = assert(staticmetadata.scan_archive(archive)).entries
+        local entry = assert(entries[name], name)
+        -- The selected archive exposes its module protocol under ordinary
+        -- executable archive extraction.
+        assert.is_true(driver.run_standalone_archive_probe(
+            { [name] = entry }, { name }, {}, { archive }, nil, false, nil, {}))
+        -- A carried interface that disagrees with the archive's bytes is the
+        -- drift this gate exists to catch.
+        local accepted, err = driver.run_standalone_archive_probe({
+            [name] = {
+                abi = entry.abi .. "x", types = entry.types,
+                layouts = entry.layouts,
+            },
+        }, { name }, {}, { archive }, nil, false, nil, {})
+        assert.is_nil(accepted)
+        assert.truthy(tostring(err):find(
+            "failed executable-context protocol validation", 1, true), err)
     end)
 
     it("derives the authoritative target from one generated module object",
