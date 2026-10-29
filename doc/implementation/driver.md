@@ -175,17 +175,28 @@ has missed the state's canonical module, a matching native preload, and every
 root of the effective path. Its source is a non-empty `TITAN_ROOT`, normalized
 with the compiler-root rules, plus `/lib/titan/0.6`. Without `TITAN_ROOT` it
 runs `$TITANC` (when non-empty) or `titanc` with argv `{program,
-"--print-root"}`, never through a shell:
+"--print-root"}`, never through a shell. The child inherits the parent's
+environment except `LUA_INIT` and `LUA_INIT_5_5`: a startup chunk that
+installs the Titan searcher and requires a missing module would otherwise
+start the same query again in every child, without bound, and any output it
+printed would corrupt the one-line answer. All other entries, including
+`PATH`, `HOME`, and `TITAN_ROOT`, stay inherited.
 
 * Unix uses `posix_spawnp` (a `PATH` search for a bare name) with stdin and
   stderr on `/dev/null`, stdout on a close-on-exec pipe, an empty signal
-  mask, and `POSIX_SPAWN_CLOEXEC_DEFAULT` where available; reads and
-  `waitpid` retry on `EINTR`.
-* Windows searches `titanc.exe` only in the `PATH` entries, never in the
-  current directory, unless `TITANC` names a program, and starts it with
-  `CreateProcessW`, `CREATE_NO_WINDOW`, and a
-  `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` limited to the `NUL` stdin/stderr and
-  the pipe's write end.
+  mask, `POSIX_SPAWN_CLOEXEC_DEFAULT` where available, and a filtered `envp`
+  array of the parent's own strings that a registry reference keeps alive
+  until the spawn has copied it; reads and `waitpid` retry on `EINTR`.
+* Windows looks up a bare name (the default `titanc`, or a `TITANC` value
+  containing no `\`, `/`, or `:`) only in the `PATH` entries, never in the
+  current or the application directory and without `SearchPathW`, appending
+  `.exe` when the name contains no `.`; a miss reports `'<name>' was not found
+  on PATH`. Any other `TITANC` is started as given. The child starts with
+  `CreateProcessW`, `CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT`, a wide
+  environment block without the two Lua startup names (compared
+  case-insensitively), and a `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` limited to
+  the `NUL` stdin/stderr and the pipe's write end. See [the Windows loader
+  boundary](windows-build.md#windows-loader-boundary).
 
 The query is accepted only on exit status 0 with exactly one line (a trailing
 `\n` or `\r\n`) holding an absolute path, at most 8192 bytes. A fallback equal
@@ -2608,7 +2619,7 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `TITAN_C_PARTS` | `titanc`, `driver.lua` (`driver.effective_c_parts`) | `4` on Linux; `1` on Windows, macOS, and other platforms (`driver.default_c_parts`) | Maximum generated C translation units per module when `--c-parts` is absent; `1` disables splitting. A changed value makes reused objects miss. |
 | `TITAN_PATH_0_6`, `TITAN_PATH` | `driver.lua` (`titan_bin_path_entries`), `titan_path.c` | unset | [Titan path](#titan-path-syntax): `;`-separated directories, `;;` inserts the default, `!` is the executable directory, an empty value searches nothing; the versioned name wins. |
 | `TITAN_ROOT` | `driver.lua`, `titanc --print-root`, `titan_path.c` (`_compiler_root()` and the run-time SDK fallback), Make | unset (empty means unset) | Explicit Titan SDK/rocks-tree root; otherwise the compiler uses the parent of its interpreter directory and the run-time fallback asks `titanc --print-root`. |
-| `TITANC` | `titan_path.c` (run-time SDK fallback) | unset (empty means unset) | One program name or path, run as `<TITANC> --print-root` without a shell instead of `titanc` from `PATH`; not a command line with arguments, and it must terminate. Make's stdlib compiler command is the distinct `STDLIB_TITANC`. |
+| `TITANC` | `titan_path.c` (run-time SDK fallback) | unset (empty means unset) | One program name or path, run as `<TITANC> --print-root` without a shell and without `LUA_INIT`/`LUA_INIT_5_5`, instead of `titanc` from `PATH`; not a command line with arguments, and it must terminate. On Windows a name without `\`, `/`, or `:` is looked up only in the `PATH` entries, with `.exe` appended when it contains no `.`. Make's stdlib compiler command is the distinct `STDLIB_TITANC`. |
 | `TITAN_PREFIX` | `driver.lua` | installation root | Root of the persistent C-probe cache `var/cache/titan-probes/2`. |
 | `TITAN_PROBE_CACHE_DISABLE` | `driver.lua` | unset | Exact value `1` disables persistent C-probe reuse. |
 | `TITAN_RUNTIME_PREBUILT` | `driver.lua` `check_runtime` | unset | Exact value `1` skips the checkout `libtitan.a` rebuild. |
@@ -2660,7 +2671,9 @@ the registry under `"titan-compiler.process: luv"`; on Windows,
 `platform.getenv` reads environment variables through the same anchored
 module, so both share one `luv` module table and native loop whichever loads
 it first). On every platform, the
-build coordinator uses `process.start_worker` (spawning `luv.exepath()` with a
+build coordinator uses `process.start_worker` (spawning `luv.exepath()` or, on
+Windows, the `lua.exe` in that executable's directory, since the native
+`titanc.exe` always runs its script and cannot serve as the interpreter, with a
 coordinator-to-worker request pipe on `fd 3`, a worker-to-coordinator pipe on
 `fd 4`, captured stdout/stderr pipes, and inherited POSIX `.titan-build.lock`
 descriptors on `fds 5..`), `process.open_control(3, 4)`,

@@ -484,9 +484,12 @@ reports the exact component:
    `titan-compiler/checker/`, `titan-compiler/coder/`, and `c-parser/`, and
    hashes each file as `{ path = <relative>, length = <bytes>, sha256 = <hex> }`.
    It adds the executing frontend script passed as `context.frontend` (`arg[0]`
-   from `titanc`, which in a LuaRocks installation is the real
+   from `titanc`, which in a Unix LuaRocks installation is the real
    `lib/luarocks/rocks-5.5/titan/<version>/bin/titanc` script rather than the
-   outer wrapper; programmatic callers without `frontend` record `{ path =
+   outer wrapper, and on Windows the
+   `share/lua/5.5/titan-compiler/titanc.lua` script that `titanc.exe` runs, so
+   that file is hashed both as a `titan-compiler/` entry and as the frontend;
+   programmatic callers without `frontend` record `{ path =
    "titanc", api = true }`). Each `length` is the file's measured byte count
    from the invocation memo: the whole read, the streamed count, or a precise
    reuse's current size. A file over the streaming threshold that is streamed

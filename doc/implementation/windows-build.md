@@ -98,6 +98,11 @@ workers (`titan-compiler.build_worker`) and native compiler commands launch
 through the stock LuaRocks `luv` dependency under a single coordinator-owned
 slot ledger (`titan-compiler/build.lua`, `titan-compiler/process.lua`); see
 [driver process transports](driver.md#experimental-windows-process-transports).
+Module-frontend workers run the `lua.exe` beside the running executable: the
+running `lua.exe` itself, or the SDK interpreter beside the native
+`titanc.exe`, which uses the same `lua55.dll`. `titanc.exe` cannot serve as
+the worker interpreter because it always runs its script ([worker
+launch](build-coordinator.md#worker-launch-and-descriptor-layout)).
 Before its first child launch, each coordinator and worker assigns itself to
 a non-breakaway `KILL_ON_JOB_CLOSE` Job Object through
 `titan._native_process_tree_guard()`. Every descendant inherits that strict
@@ -247,13 +252,13 @@ the executable directory, system locations, current directory, and the process
 `PATH`. The provider-search paths remain separate from native dependency
 resolution, and neither loader changes the process DLL search directories.
 
-Titan's `lua.exe` and application launchers import `lua55.dll`
+Titan's `lua.exe`, `titanc.exe`, and application launchers import `lua55.dll`
 before runtime initialization. The distribution retains that shared Lua runtime
 beside its executables. The standard DLL name lets Lua 5.5 binary modules use
 the same runtime when their architecture and Lua configuration match. Arbitrary
 long-path support is not promised.
 
-The executable embeds per-process UTF-8 `activeCodePage` and `longPathAware`
+`lua.exe` and `titanc.exe` embed per-process UTF-8 `activeCodePage` and `longPathAware`
 manifest declarations for Windows 11. This build does not change machine code
 pages or the OS long-path policy. The latter declaration is only the application
 opt-in: usable path lengths still depend on OS policy and each API in the path.
@@ -304,9 +309,18 @@ same cached `titan_win_load_library` handle and checks the claimed module's
 `_abi_value` query before resolving `luaopen_<mangled>`, so no Windows path
 calls a plain-C query through a `lua_CFunction`. Its candidate occupancy test
 is `GetFileAttributesW`. When the lazy SDK fallback has to ask `titanc
---print-root`, it searches `titanc.exe` only in the `PATH` entries, never in
-the current directory, unless `TITANC` names a program, and starts it with
-`CreateProcessW`, `CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT`, and a
+--print-root`, it looks up a bare program name (the default `titanc`, or a
+`TITANC` value containing no `\`, `/`, or `:`) only in the `PATH` entries,
+appending `.exe` when the name contains no `.`, so `titanc`, `titanc.exe`, and
+`my-titanc` all work. It does not use `SearchPathW` and never consults the
+current or the application directory; quoted entries and trailing separators
+are normalized, empty entries are skipped, and a relative entry is used as
+given. A miss reports `'<name>' was not found on PATH`. A `TITANC` with a
+separator or drive prefix is started as given, without an added extension.
+The child starts through `CreateProcessW` with argv only,
+`CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT`,
+the parent's environment block minus `LUA_INIT` and `LUA_INIT_5_5` (names
+compared case-insensitively), and a
 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` limited to the `NUL` stdin/stderr handles
 and the pipe's write end. The internal `_loadlibglobal` helper accepts a third
 logical-name argument and returns an already initialized canonical module
@@ -586,23 +600,74 @@ for `bin/luarocks.exe`, so callers own replacement or reconfiguration of an
 existing installation. Direct standalone commands must set `LUAROCKS_CONFIG`;
 the executable does not automatically find the SDK's `etc/luarocks` directory.
 
-LuaRocks installs `bin/titanc.bat` and retains the Lua script at
-`lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc`. Build and native test helpers
-invoke that script with the selected `bin/lua.exe`, avoiding batch parsing.
+On Windows the compiler entry is the native `bin/titanc.exe`. LuaRocks records
+it in the rock manifest's `bin` table and deploys it as an ordinary program;
+there is no `bin/titanc.bat` and no extensionless `bin/titanc`. The unchanged
+`titanc` script is installed as the rock's Lua file
+`share/lua/5.5/titan-compiler/titanc.lua`, which `luarocks remove` deletes with
+the rest of the compiler. `scripts/install_compiler.mk` selects this layout
+when the including Makefile sets `TITANC_NATIVE` (`Makefile.win`:
+`<WINDOWS_BUILD_ROOT>/runtime/titanc.exe`); otherwise it installs the script as
+`bin/titanc`, as on Unix. LuaRocks 3.13's Windows deployment also writes an
+unrecorded `bin/titanc.lua` package-path helper beside the deployed `.exe`,
+which `luarocks remove` would leave behind. The Windows `post_install` publish
+step (`retire_windows_exe_helper` in `scripts/titan_install.lua`) deletes
+exactly that generated two-line helper and leaves a `bin/titanc.lua` with any
+other content alone, so the installed tree has no helper and uninstall needs no
+extra step.
+
+`titanc.exe` is upstream `lua.c` with a wide-character entry
+(`titan-runtime/titanc_windows.c`). Its `wmain` converts the UTF-16 command line
+to UTF-8 and calls `lua.c`'s renamed `main` with `<exe> -E
+<root>\share\lua\5.5\titan-compiler\titanc.lua ARGS...`, where `<root>` is the
+parent of the executable's directory. The script is therefore `arg[0]`, the
+frontend that object certificates hash, and no user argument is parsed as a
+Lua option. Because of `-E`, `LUA_INIT`, `LUA_INIT_5_5`, and the
+`LUA_PATH*`/`LUA_CPATH*` variables are ignored: the compiler modules, their
+dependencies, and the `titan` support module resolve only through Lua's
+executable-relative defaults (`!\..\share\lua\5.5`, `!\..\lib\lua\5.5`), so a
+moved SDK runs its own compiler. An executable with no directory above its own
+fails with `titanc: cannot locate the installation root above this
+executable`. `titanc.exe --print-root` reports the usual [compiler
+root](driver.md#the-compiler-root). The executable compiles no Lua engine of its
+own: it imports only `lua55.dll`, `kernel32.dll`, and UCRT, and has no exports.
+Since it always runs its script, build workers use the `lua.exe` beside it and
+validation subprocesses use `<root>\bin\lua.exe`, never `titanc.exe`.
+
+Build and native test helpers run `bin/titanc.exe` directly.
 `spec/support/check_windows_compiler.sh` verifies installed dependencies, their PE
 imports, the compiler modules, and CLI loading from a different CWD in an SDK
-copy whose path contains spaces and Unicode. That gate invokes the retained
-script; LuaRocks' batch wrapper can contain installation-specific paths.
+copy whose path contains spaces and Unicode. It requires that no `bin/titanc`,
+`bin/titanc.bat`, or `bin/titanc.lua` is installed and that
+`titan-compiler/titanc.lua` equals the checkout `titanc`. In the relocated copy
+it checks `titanc.exe`'s PE imports and exports and its embedded manifest, runs
+`--help`, requires `--print-root` (also with `-v`) to print the relocated root,
+and builds a provider with `-j 2`. It then checks the `PATH`-only SDK fallback
+from a plain `lua.exe` host whose executable-relative roots hold no provider,
+with `TITAN_ROOT`, `TITANC`, `TITAN_PATH_0_6`, and `TITAN_PATH` unset: the
+default name, `TITANC=titanc`, and `TITANC=titanc.exe` with only the SDK `bin`
+on `PATH` select the SDK's provider, while with `titanc.exe` in the current and
+application directories but not on `PATH`, the default and `TITANC=titanc`
+report `'titanc' was not found on PATH`.
 
 `scripts/build_windows_runtime.sh` builds `libtitan.a` from exactly `titan.o`,
 `minicoro.o`, `titan_path.o`, and `ltitanlib.o` (the Unix member order), and
 the support module `<WINDOWS_BUILD_ROOT>/runtime/titan.dll` from `ltitanlib.o`,
 `titan_path.o`, and the `lua55.dll` import library, linked with
-`-Wl,--exclude-all-symbols` so that `luaopen_titan` is its only export. The
-shared `scripts/install_compiler.mk` recipe installs it as the ordinary Lua C
-module `lib/lua/5.5/titan.dll` (`Makefile.win` defines only
-`TITAN_SUPPORT_MODULE`). A direct `install` builds it through `runtime-build`;
-the LuaRocks install pass only checks that it exists (`check-support-module`).
+`-Wl,--exclude-all-symbols` so that `luaopen_titan` is its only export. It
+also builds the native compiler frontend `<WINDOWS_BUILD_ROOT>/runtime/titanc.exe`
+from the installed, configured `<prefix>/src/lua-5.5.1/lua.c` (compiled with
+`-DLUA_BUILD_AS_DLL -Dmain=titan_lua_main`), `titan-runtime/titanc_windows.c`,
+and the `vendor/windows-compiler/titanc.rc` resource, which embeds the
+`asInvoker`, UTF-8, long-path-aware `titanc.manifest`, linked against the
+`lua55.dll` import library with `-municode -Wl,--no-insert-timestamp`. Its
+objects use the compiler-host flags, like the private parser, and
+`runtime-build` passes the `RC` command (default `llvm-rc`). The shared
+`scripts/install_compiler.mk` recipe installs the support DLL as the ordinary
+Lua C module `lib/lua/5.5/titan.dll` (`Makefile.win` defines
+`TITAN_SUPPORT_MODULE` and `TITANC_NATIVE`) and the frontend as
+`bin/titanc.exe`. A direct `install` builds both through `runtime-build`; the
+LuaRocks install pass only checks that they exist (`check-support-module`).
 The private, namespaced LPegLabel archive contains exactly its five upstream
 translation units and remains build payload. All objects use the installed,
 configured Lua source headers and matching `lua55.dll` import library. The
@@ -628,8 +693,9 @@ and profile record directly; it never writes a provider under
 native inputs.
 
 The runtime build compiles four runtime and five private parser translation
-units, archives the selected objects, and links the support DLL. Source/header
-timestamps decide which outputs need rebuilding; tool or flag changes require
+units, archives the selected objects, and links the support DLL and
+`titanc.exe`. Source/header timestamps decide which outputs need rebuilding;
+tool or flag changes require
 caller-managed cleanup. `runtime-check` links the complete runtime and private
 PEG payload into a native consumer, checks permitted PE imports, and exercises
 Lua/PEG and explicit-runtime coroutine yield/resume/destruction. It verifies
@@ -642,8 +708,9 @@ their own native tests.
 
 ## Standard-provider build and publication
 
-`Makefile.win` uses the installed
-native compiler and the controlled runtime/native SDK:
+`Makefile.win` uses the installed native compiler `bin/titanc.exe` (or the
+native compiler program that `ROCK_TITANC` names, run directly) and the
+controlled runtime/native SDK:
 
 ```sh
 mingw32-make -f Makefile.win install-stdlib PREFIX=/c/Titan/sdk
@@ -892,7 +959,7 @@ for manifest set differences:
 3. **Fixed C fixture objects:** for each of `uv_stdio_probe` (also an
    aggregate `--c-source` helper), `sqlite3_worker_fixture`,
    `ssl_allocator_fixture`, `ssl_error_strings`, and `os_descriptor_limit`, the
-   harness runs the workspace's `sdk/bin/lua.exe` and retained `titanc` script
+   harness runs the workspace's `sdk/bin/titanc.exe`
    with `-c --incremental --print-c-objects -j "$TITAN_JOBS" --output
    "$work/native/$fixture"`, `--cflag=-std=c99 --cflag=-Wall --cflag=-Wextra
    --cflag=-Werror -I "$winprefix/src/lua-5.5.1"`, one `--cflag` per token of
@@ -903,7 +970,7 @@ for manifest set differences:
    a regular file, and copies it to `work/cwd/.titan-tests/$fixture.o` only
    when `cmp -s` reports a change. Stale `.native` nodes from another checkout
    location are never selected.
-4. **Aggregate compilation:** from `work/sdk`, the harness invokes `titanc`
+4. **Aggregate compilation:** from `work/sdk`, the harness invokes `sdk/bin/titanc.exe`
    with `--output "$output" --test --incremental --no-uv-bootstrap -j
    "$TITAN_JOBS" --exe "$winprefix/bin/titan-stdlib-tests.exe" --tree
    "$test_tree" --test-dir "$test_tree"`, the three aggregate C helpers

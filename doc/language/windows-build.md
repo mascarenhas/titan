@@ -91,8 +91,13 @@ its own private symbols.
 
 ## Compile and distribute programs
 
-LuaRocks installs `bin/titanc.bat`. With the SDK's `bin` on `PATH`, use `titanc`
-for the ordinary [module and program commands](modules.md#experimental-windows-compilation).
+The compiler is the native program `bin/titanc.exe`. With the SDK's `bin` on
+`PATH`, use `titanc` for the ordinary [module and program
+commands](modules.md#experimental-windows-compilation). It always runs the
+compiler installed in its own SDK, ignoring `LUA_INIT` and the
+`LUA_PATH`/`LUA_CPATH` variables, so a copied or moved SDK runs its own
+compiler and, without `TITAN_ROOT`, `titanc --print-root` reports the new
+location.
 Libraries emit one DLL provider. Programs emit a small
 `bin/<logical-module>.exe` launcher and an application DLL; `--exe PATH` selects
 an exact EXE destination relative to the current directory (appending `.exe`
@@ -150,9 +155,13 @@ standard `titan.dll`, in `lib/titan/0.6` next to `bin`: a program's run-time
 `..\lib\titan\0.6`. Lua's Windows `!` path expansion means the running
 executable's directory, as `!` does in Titan paths. See [Windows loading and launchers](binary-compatibility.md#experimental-windows-loading-and-launchers)
 for the provider layout and [native library loading](../implementation/windows-build.md#relocation-and-native-library-loading)
-for dependency search behavior. LuaRocks batch wrappers can contain
-installation-specific paths; the compiler relocation check invokes the
-retained Lua script with the relocated interpreter.
+for dependency search behavior. During development, a program that misses a
+provider in those directories asks the installed SDK once, through
+`TITAN_ROOT` or by running `titanc --print-root`. Windows looks for that
+program (`titanc.exe`, or a `TITANC` name without a directory, with `.exe`
+added when it has no extension) only in the `PATH` entries, never in the
+current directory or the program's own directory; see [the Titan
+path](modules.md#the-titan-path).
 
 `mingw32-make -f Makefile.win binary-rock PREFIX=/c/Titan/sdk` packages the
 installed rock with its native platform suffix. Use this target instead of

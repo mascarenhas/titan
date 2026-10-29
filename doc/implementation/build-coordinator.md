@@ -360,7 +360,12 @@ worker process per missed module (`titan-compiler/build_worker.lua`, launched by
 ### Worker launch and descriptor layout
 
 `worker_argv` (`build.lua`) resolves the currently running Lua
-interpreter via `luv.exepath()` and constructs:
+interpreter via `luv.exepath()` and constructs the argv below. On Windows it
+substitutes the `lua.exe` in that executable's directory: the running
+`lua.exe` itself, or the SDK interpreter beside the native `titanc.exe`, which
+uses the same `lua55.dll` but always runs its own script and so cannot run the
+worker chunk. A path without a directory part is an error (`cannot locate the
+directory of the running executable`).
 
 ```lua
 {
