@@ -1270,12 +1270,15 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
         local runtime_program = string.format([[
             local provider_path = %q
             local support_path = %q
-            local normalize = function(path) return path end
-            if package.config:sub(1, 1) == "\\" then
-                local filesystem = require("titan-compiler.io").new_sync()
-                normalize = function(path)
-                    return path and assert(filesystem:realpath(path)):lower()
-                end
+            -- Lua's default cpath spells the support directory relative to
+            -- its executable (<prefix>/bin/../lib/lua/5.5); compare the
+            -- resolved files, not path spellings.
+            local filesystem = require("titan-compiler.io").new_sync()
+            local windows = package.config:sub(1, 1) == "\\"
+            local normalize = function(path)
+                if not path then return nil end
+                local resolved = assert(filesystem:realpath(path))
+                return windows and resolved:lower() or resolved
             end
             local builtin_coroutine = require "coroutine"
             local builtin_io = require "io"
