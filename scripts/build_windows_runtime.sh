@@ -71,6 +71,10 @@ if needs_build "$work/libtitan.a" "$work/titan.o" "$work/minicoro.o" \
   archive_objects "$work/libtitan.a" "$work/titan.o" "$work/minicoro.o" \
     "$work/titan_path.o" "$work/ltitanlib.o"
 fi
+# lpeglabel is deliberately compiled without the Lua consumer definitions:
+# its own headers reuse LUAI_FUNC for private cross-unit symbols, so a
+# dllimport definition would warn, and it reaches Lua only through the public
+# API import thunks.
 peg_objects=()
 for name in lplcap lplcode lplprint lpltree lplvm; do
   if needs_build "$work/$name.o" "vendor/lpeglabel/$name.c" vendor/lpeglabel/*.h "${headers[@]}"; then

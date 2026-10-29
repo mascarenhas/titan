@@ -31,13 +31,20 @@ lua_dll_imports=(-DLUA_BUILD_AS_DLL
   '-DLUAI_DDEC(dec)=__declspec(dllimport) extern dec' '-DLUAI_DDEF=')
 common=(-std=c99 -Wall -Wextra "${cppflags[@]}" "${cflags[@]}" "${lua_dll_imports[@]}" -Wno-unused-function \
   -I titan-runtime -I "$prefix/include" -I "$prefix/src/lua-5.5.1")
-runtime_libraries=("$prefix/lib/libbacktrace.a" "$build_root/runtime/libtitan.a" \
-  "$prefix/lib/liblua55.a")
-"${compiler[@]}" "${common[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
+archive="$build_root/runtime/libtitan.a"
+[[ -f $archive ]] || {
+  echo "missing runtime archive: $archive (run make -f Makefile.win runtime-build first)" >&2
+  exit 1
+}
+runtime_libraries=("$prefix/lib/libbacktrace.a" "$archive" "$prefix/lib/liblua55.a")
+# Every link forbids auto-import: a consumer compiled without the explicit
+# Lua import definitions then fails to resolve its internal references.
+link_guard=(-Wl,--disable-auto-import)
+"${compiler[@]}" "${common[@]}" -shared "${ldflags[@]}" "${link_guard[@]}" -Wl,--exclude-all-symbols \
   -DFIXTURE_DEPENDENCY spec/fixtures/windows/runtime_loader_provider.c \
   "${runtime_libraries[@]}" -static-libgcc \
   -o "$runtime/lib/titan/0.6/fixture-dependency.dll"
-"${compiler[@]}" "${common[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
+"${compiler[@]}" "${common[@]}" -shared "${ldflags[@]}" "${link_guard[@]}" -Wl,--exclude-all-symbols \
   spec/fixtures/windows/runtime_launcher_provider.c "$generated/launcher.def" \
   "${runtime_libraries[@]}" "${system_libraries[@]}" -o "$runtime/${plan[2]}"
 llvm-readobj --coff-exports "$runtime/${plan[2]}" > "$check_root/provider.exports"
@@ -57,10 +64,10 @@ for variant in launcher direct; do
   "${compiler[@]}" "${common[@]}" -c "$generated/$variant.c" -o "$check_root/$variant.o"
 done
 for name in "${plan[0]}" "${plan[1]}"; do
-  "${compiler[@]}" "${ldflags[@]}" "$check_root/launcher.o" \
+  "${compiler[@]}" "${ldflags[@]}" "${link_guard[@]}" "$check_root/launcher.o" \
     "$check_root/launcher.res" "${runtime_libraries[@]}" "${system_libraries[@]}" -o "$runtime/$name"
 done
-"${compiler[@]}" "${ldflags[@]}" "$check_root/direct.o" \
+"${compiler[@]}" "${ldflags[@]}" "${link_guard[@]}" "$check_root/direct.o" \
   "$check_root/launcher.res" "${runtime_libraries[@]}" "${system_libraries[@]}" -o "$runtime/bin/direct.exe"
 cp "$runtime/${plan[0]}" "$runtime/bin/renamed.exe"
 cmp "$runtime/${plan[0]}" "$runtime/bin/renamed.exe"
@@ -90,7 +97,7 @@ run_expected bin/renamed.exe 38
 run_expected bin/direct.exe 37
 # A fresh incompatible provider must fail in the native value query, before its
 # Lua opener is called. The process has exited before replacing this image.
-"${compiler[@]}" "${common[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
+"${compiler[@]}" "${common[@]}" -shared "${ldflags[@]}" "${link_guard[@]}" -Wl,--exclude-all-symbols \
   '-DFIXTURE_LAUNCHER_ABI="999"' spec/fixtures/windows/runtime_launcher_provider.c \
   "$generated/launcher.def" "${runtime_libraries[@]}" "${system_libraries[@]}" -o "$runtime/${plan[2]}"
 status=0

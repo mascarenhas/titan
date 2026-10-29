@@ -19,9 +19,13 @@ for my $name (qw(LUA_CFLAGS TITAN_EXTRA_CFLAGS)) {
 }
 my $temporary = tempdir('titan-lua-coff-XXXXXX', TMPDIR => 1, CLEANUP => 1);
 my $fixture = 'spec/fixtures/windows/lua_annotations.c';
-my @imports = qw(lua_gettop luaL_checkversion_ luaL_openselectedlibs luaopen_base luaO_ceillog2
-                 luai_ctype_ luaP_opmodes luaT_typenames_);
-my $import_pattern = join '|', map { quotemeta $_ } (@imports, 'lua_ident');
+# Only the helper declarations are always imported. The public API is imported
+# exactly while LUA_API is dllimport, i.e. for a consumer without LUA_CORE or
+# LUA_LIB; stock LUAMOD_API is plain extern "C" in C++, so luaopen_base is a
+# direct reference there.
+my @internal = qw(luaO_ceillog2 luai_ctype_ luaP_opmodes luaT_typenames_);
+my @public = qw(lua_gettop luaL_checkversion_ luaL_openselectedlibs luaopen_base);
+my $import_pattern = join '|', map { quotemeta $_ } (@internal, @public, 'lua_ident');
 # The controlled DLL is built with -DLUA_BUILD_AS_DLL; consumers add these
 # definitions so every public and internal symbol is an explicit import.
 my @consumer = ('-DLUA_BUILD_AS_DLL',
@@ -48,9 +52,23 @@ for my $language (['C', '-std=c99'], ['C++', '-x', 'c++', '-std=c++11']) {
             '-Werror', '-c', $fixture, '-o', $object);
         my $symbols = capture($readobj, '--symbols', '--coff-directives', $object);
         die "$label consumer is not x86_64 COFF\n" unless $symbols =~ /Format: COFF-x86-64/;
-        for my $name (@imports) {
+        my $core_or_lib = grep { $_ eq '-DLUA_CORE' || $_ eq '-DLUA_LIB' } @{$modes[$number]};
+        for my $name (@internal) {
             die "$label consumer mode $number does not import $name through its IAT\n"
                 unless $symbols =~ /Name: __imp_\Q$name\E(?:\r?\n)/;
+        }
+        for my $name (@public) {
+            my $imported = !$core_or_lib &&
+                !($label eq 'C++' && $name eq 'luaopen_base');
+            if ($imported) {
+                die "$label consumer mode $number does not import $name through its IAT\n"
+                    unless $symbols =~ /Name: __imp_\Q$name\E(?:\r?\n)/;
+            } else {
+                die "$label consumer mode $number unexpectedly imports $name\n"
+                    if $symbols =~ /Name: __imp_\Q$name\E(?:\r?\n)/;
+                die "$label consumer mode $number lost its direct reference to $name\n"
+                    unless $symbols =~ /Name: \Q$name\E(?:\r?\n)/;
+            }
         }
         die "$label consumer must not name lua_ident as an import\n"
             if $symbols =~ /Name: __imp_lua_ident(?:\r?\n)/;
@@ -71,45 +89,6 @@ for my $language (['C', '-std=c99'], ['C++', '-x', 'c++', '-std=c++11']) {
     }
 }
 
-# The stock policy: LUA_API is the exported mark only for the DLL's own core
-# and library sources, and LUALIB_API/LUAMOD_API simply follow LUA_API. A
-# consumer therefore names its internal imports instead of relying on them
-# being exported implicitly through declarations.
-my $marks = "$temporary/marks.c";
-open my $mark_file, '>', $marks or die "cannot write $marks: $!\n";
-print {$mark_file} <<'MARKS';
-#include "lua.h"
-#include "llimits.h"
-#define TITAN_STRINGIFY_(x) #x
-#define TITAN_STRINGIFY(x) TITAN_STRINGIFY_(x)
-const char titan_lua_api_mark[] = TITAN_STRINGIFY(LUA_API);
-const char titan_lua_lib_api_mark[] = TITAN_STRINGIFY(LUALIB_API);
-const char titan_lua_mod_api_mark[] = TITAN_STRINGIFY(LUAMOD_API);
-const char titan_luai_func_mark[] = TITAN_STRINGIFY(LUAI_FUNC);
-MARKS
-close $mark_file;
-sub marks {
-    my @flags = @_;
-    return capture($clang, @target, '-E', '-P', @flags, $marks);
-}
-my $dll = marks('-DLUA_BUILD_AS_DLL', '-DLUA_CORE');
-die "the DLL build does not export LUA_API\n"
-    unless $dll =~ /titan_lua_api_mark\[\] = "__declspec\(dllexport\)"/;
-my $consumer = marks(@consumer);
-die "a consumer does not import LUA_API\n"
-    unless $consumer =~ /titan_lua_api_mark\[\] = "__declspec\(dllimport\)"/;
-die "a consumer does not follow LUA_API for LUALIB_API\n"
-    unless $consumer =~ /titan_lua_lib_api_mark\[\] = "__declspec\(dllimport\)"/;
-die "a consumer does not follow LUA_API for LUAMOD_API\n"
-    unless $consumer =~ /titan_lua_mod_api_mark\[\] = "__declspec\(dllimport\)"/;
-die "a consumer does not import LUAI_FUNC\n"
-    unless $consumer =~ /titan_luai_func_mark\[\] = "__declspec\(dllimport\) extern"/;
-die "the DLL build must not import LUAI_FUNC\n"
-    if $dll =~ /titan_luai_func_mark\[\] = "__declspec\(dllimport\)/;
-my $library = marks('-DLUA_BUILD_AS_DLL', '-DLUA_LIB');
-die "a library source role does not export its own definitions\n"
-    unless $library =~ /titan_lua_lib_api_mark\[\] = "__declspec\(dllexport\)"/;
-
 # Internal functions and data stay plain definitions; the DLL link's
 # --export-all-symbols, never a per-source visibility override, exports them.
 capture($clang, @target, '-DLUA_BUILD_AS_DLL', '-std=c99', @cflags, '-Werror',
@@ -118,5 +97,5 @@ my $internal = capture($readobj, '--coff-directives', "$temporary/lctype.o");
 die "Lua internal data must stay a plain definition exported by the DLL link\n"
     if $internal =~ /-export:/;
 
-print "Windows Lua headers: four C/C++ consumer modes, explicit IAT imports, external library exports, stock DLL/consumer marks passed\n";
+print "Windows Lua headers: four C/C++ consumer modes, mode-correct IAT and direct references, external library exports, stock public-only annotations passed\n";
 print "This checks COFF/header ownership only; it does not build or run the Windows Lua DLL.\n";

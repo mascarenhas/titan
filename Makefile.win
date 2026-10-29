@@ -73,7 +73,8 @@ TITAN_VERSION := 0.6.0
 TITAN_LIBRARY_VERSION := $(word 1,$(subst ., ,$(TITAN_VERSION))).$(word 2,$(subst ., ,$(TITAN_VERSION)))
 TITAN_INSTALL_TREE := $(PREFIX)
 # The runtime build's support-only Lua module; the shared compiler install
-# deploys it as the ordinary native module lib/lua/5.5/titan.dll.
+# deploys it as the ordinary native module lib/lua/5.5/titan.dll. The shared
+# recipe derives its destination name without splitting our spaced build path.
 TITAN_SUPPORT_MODULE = $(WINDOWS_BUILD_ROOT)/runtime/titan.dll
 # This is still the only loaded Makefile. GNU Make's word-based path functions
 # split checkout paths containing spaces, so let the recipe shell find its dir.
@@ -97,7 +98,7 @@ help:
 	@echo '  luarocks    install standalone LuaRocks into the Lua SDK prefix'
 	@echo '  compiler    build and install the Titan source rock with LuaRocks'
 	@echo '  compiler-check  validate the installed compiler and dependencies'
-	@echo '  runtime     build/install the runtime SDK and support DLL'
+	@echo '  runtime     build/install the runtime SDK (compiler install deploys the support module)'
 	@echo '  runtime-check  validate runtime consumers, rebuilds and the support DLL'
 	@echo '  stdlib      use the installed compiler/SDK to build the standard provider'
 	@echo '  stdlib-check  validate the staged provider, metadata and PE inventory'
@@ -252,12 +253,13 @@ compiler: luarocks
 compiler-check: compiler
 	bash spec/support/check_windows_compiler.sh $(call quote,$(PREFIX)) $(call quote,$(WINDOWS_BUILD_ROOT))
 
-# The shared install-compiler recipe deploys the support module, so a direct
-# SDK install builds it first. A rock build has already produced it.
-$(call make_path,$(TITAN_SUPPORT_MODULE)):
-	+$(MAKE) -f Makefile.win runtime-build
-
-install-compiler: $(call make_path,$(TITAN_SUPPORT_MODULE))
+# The shared install-compiler recipe only deploys built files. It copies the
+# support module, which a rock build has already produced.
+.PHONY: check-support-module
+check-support-module:
+	@test -f $(call quote,$(TITAN_SUPPORT_MODULE)) || { \
+	  echo 'The support module is missing; run make -f Makefile.win runtime-build first.' >&2; \
+	  exit 1; }
 
 # Runtime archive, private parser payload and the support module. The shared
 # compiler install deploys $(TITAN_SUPPORT_MODULE) as lib/lua/5.5/titan.dll.
@@ -315,8 +317,9 @@ stdlib: titan/transfer_native.h titan/async_receiver_native.h titan/uv/external-
 	  STDLIB_USE_INSTALLED_RUNTIME=$(call quote,$(STDLIB_USE_INSTALLED_RUNTIME)) \
 	  bash scripts/build_windows_stdlib.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX)) $(STDLIB_ROOTS)
 
-# The staged provider and the installed support module are both inputs.
-stdlib-check: compiler stdlib
+# The staged provider and the installed support module are both inputs; this
+# gate validates them and never rebuilds either.
+stdlib-check:
 	bash spec/support/check_windows_stdlib.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX))
 
 install-stdlib: stdlib
@@ -421,7 +424,7 @@ all: check-rocks-tree runtime native
 	+$(MAKE) -f Makefile.win stdlib STDLIB_USE_INSTALLED_RUNTIME=0
 
 ifneq ($(strip $(INST_PREFIX)),)
-install: check-rocks-tree install-compiler install-rock-tools stage-rock-payload
+install: check-rocks-tree check-support-module install-compiler install-rock-tools stage-rock-payload
 .PHONY: stage-rock-payload
 stage-rock-payload:
 	+$(MAKE) -f Makefile.win publish-titan-sdk publish-stdlib \
@@ -438,5 +441,5 @@ stage-rock-payload:
 	cp -pR $(call quote,$(PREFIX)/include/uv) $(call quote,$(PREFIX)/include/openssl) \
 	  $(call quote,$(INST_PREFIX)/titan-sdk/include/)
 else
-install: check-rocks-tree install-compiler publish-titan-sdk publish-stdlib
+install: check-rocks-tree runtime-build check-support-module install-compiler publish-titan-sdk publish-stdlib
 endif

@@ -1297,17 +1297,13 @@ local function compile_and_run(hard_memory, expose_lua_internals)
     }) do
         argv[#argv + 1] = word
     end
-    argv[#argv + 1] = '-DTITAN_VDIR="0.6"'
     argv[#argv + 1] = platform.windows and
         "-I" .. prefix .. "/include" or "-Ilibbacktrace"
     if hard_memory then
         argv[#argv + 1] = "-DHARDMEMTESTS"
         argv[#argv + 1] = "-DLUA_USE_APICHECK"
         argv[#argv + 1] = "-DTITAN_ARRAY_HARDMEM_PROBE"
-        if platform.windows then
-            -- This private executable owns the Lua sources it compiles.
-            argv[#argv + 1] = "-DTITAN_LUA_BUILD_DLL"
-        else
+        if not platform.windows then
             argv[#argv + 1] = host == "Darwin"
                 and "-DLUA_USE_MACOSX" or "-DLUA_USE_LINUX"
         end
@@ -1329,6 +1325,7 @@ local function compile_and_run(hard_memory, expose_lua_internals)
         "TITAN_TEST_EXTRA_CFLAGS")
     argv[#argv + 1] = source
     argv[#argv + 1] = "titan-runtime/titan.c"
+    argv[#argv + 1] = "titan-runtime/titan_path.c"
     if hard_memory then
         for _, stem in ipairs(LUA_SOURCES) do
             argv[#argv + 1] = lua_source .. "/" .. stem .. ".c"

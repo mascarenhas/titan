@@ -30,8 +30,10 @@ cp "$prefix/bin/lua55.dll" "$check/bin/"
 # language server) can link it without the native module.
 llvm-nm --defined-only "$work/libtitan.a" > "$check/archive.symbols"
 grep -E '(^|[^[:alnum:]_])T luaopen_titan$' "$check/archive.symbols" >/dev/null
+# The static opener's definition carries its own export mark, so the image's
+# export table is incidental: assert imports only, without pinning it.
 perl spec/support/check_windows_compiler_pe.pl --allow-extra-exports \
-  "$check/bin/runtime-sdk-probe.exe" luaopen_titan
+  "$check/bin/runtime-sdk-probe.exe"
 (cd "$check/unrelated"; PATH='' "$check/bin/runtime-sdk-probe.exe")
 
 # The support module is one ordinary Lua native module: its opener is its only
@@ -53,7 +55,9 @@ cmp "$check/before.stat" "$check/after.stat"
 # belongs to the compiler install, and the standard provider is never seeded
 # from the runtime build.
 cp -Rp "$prefix" "$check/prefix"
-rm -f "$check/prefix/lib/titan/0.6/titan.dll"
+# Remove both installed images so the assertions below describe what this
+# target installs, not what the prepared prefix already contained.
+rm -f "$check/prefix/lib/titan/0.6/titan.dll" "$check/prefix/lib/lua/5.5/titan.dll"
 make -f Makefile.win install-titan-sdk WINDOWS_BUILD_ROOT="$build" PREFIX="$check/prefix"
 cmp "$work/libtitan.a" "$check/prefix/lib/titan/0.6/libtitan.a"
 test ! -e "$check/prefix/lib/titan/0.6/titan.dll"
