@@ -1055,6 +1055,93 @@ io.write(message)
             "no Titan SDK fallback: cannot start '" .. not_program, 1, true), output)
     end)
 
+    -- Bare program names resolve through the PATH entries alone: the default
+    -- `titanc` and a TITANC without a directory part. Windows looks for
+    -- titanc.exe and appends `.exe` to a TITANC name without an extension;
+    -- posix_spawnp searches PATH on Unix. A program present only in the
+    -- current directory is never started. The spawn environment, not an MSYS
+    -- `env`, carries PATH so Windows receives the exact list.
+    it("resolves titanc and a bare TITANC name through PATH entries only",
+       function()
+        local directory = root("path-probe")
+        local source = path.join(directory, "probe.c")
+        write_file(source, [[
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(int argc, char **argv) {
+    const char *log = getenv("TITAN_PROBE_LOG");
+    const char *root = getenv("TITAN_PROBE_ROOT");
+    FILE *file;
+    if (argc != 2 || strcmp(argv[1], "--print-root") != 0) return 2;
+    if (log == NULL || root == NULL) return 3;
+    file = fopen(log, "ab");
+    if (file == NULL) return 4;
+    fputs("probe\n", file);
+    fclose(file);
+    printf("%s\n", root);
+    return 0;
+}
+]])
+        for _, name in ipairs({ "titanc", "titanc-path-probe" }) do
+            compile_c(source, path.join(directory, name .. EXE_SUFFIX))
+        end
+        local empty = root("path-probe-empty")
+        make_directory(empty)
+        local function native(name)
+            return platform.windows and (name:gsub("/", "\\")) or name
+        end
+        local log = root("path-probe.log")
+        local chunk = root("path-probe.lua")
+        write_file(chunk, string.format([[
+package.path = ""
+package.cpath = %q
+require "titan"
+if ... == "found" then
+  assert(require("search.item").origin() == 2)
+else
+  local ok, message = pcall(require, "search.item")
+  assert(not ok)
+  io.write(message)
+end
+]], support.SUPPORT_CPATH))
+        local function query(cwd, search, selected, expectation)
+            local previous = assert(lfs.currentdir())
+            assert.truthy(lfs.chdir(cwd))
+            local called, result = pcall(function()
+                return compiler_io.new_sync():run({ LUA, "-E", chunk, expectation }, {
+                    env = {
+                        PATH = native(search), TITANC = selected or false,
+                        TITAN_ROOT = false, TITAN_PATH = false,
+                        TITAN_PATH_0_6 = other .. ";;",
+                        TITAN_PROBE_LOG = native(log), TITAN_PROBE_ROOT = sdk,
+                        LUA_INIT = false, LUA_INIT_5_5 = false,
+                    },
+                })
+            end)
+            assert.truthy(lfs.chdir(previous))
+            assert.truthy(called, result)
+            assert.truthy(result.started and result.ok, result.output or result.diagnostic)
+            return (result.output or ""):gsub("\r\n", "\n")
+        end
+        local found = { false, "titanc-path-probe" }
+        if platform.windows then found[#found + 1] = "titanc-path-probe.exe" end
+        for index, selected in ipairs(found) do
+            query(workspace, directory, selected or nil, "found")
+            assert.equal(index, probe_count(log))
+        end
+        -- Both programs sit in the current directory, but no PATH entry.
+        for _, name in ipairs({ "titanc", "titanc-path-probe" }) do
+            local message = query(directory, empty,
+                name ~= "titanc" and name or nil, "missing")
+            assert.truthy(message:find("no Titan SDK fallback: ", 1, true), message)
+            assert.truthy(message:find(platform.windows and
+                ("'" .. name .. "' was not found on PATH") or ("'" .. name), 1, true), message)
+            assert.equal(#found, probe_count(log))
+        end
+    end)
+
     -- The root query child must not run the parent's Lua startup hooks: a
     -- LUA_INIT that installs the searcher and requires a missing module would
     -- otherwise start the same fallback query again, recursively and without

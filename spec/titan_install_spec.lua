@@ -426,6 +426,33 @@ assert(os.remove(arg[0]))
         assert.is_nil(lfs.symlinkattributes(separate .. "/include/titan.h"))
     end)
 
+    it("retires only LuaRocks' generated package-path helper beside titanc.exe", function()
+        local configuration = package.config
+        package.config = "\\" .. configuration:sub(2)
+        local loaded, windows_installer = pcall(function()
+            return assert(loadfile("scripts/titan_install.lua"))()
+        end)
+        package.config = configuration
+        assert.truthy(loaded, windows_installer)
+        local private, prefix = workspace .. "/rocks/titan/0.6.0-1", workspace .. "/SDK"
+        write(private .. "/titan-sdk/include/titan.h", "Titan header")
+        write(prefix .. "/bin/titanc.exe", "native titanc")
+        -- LuaRocks' Windows copy_binary writes these two text-mode lines
+        -- beside each deployed .exe, and `luarocks remove` never deletes them.
+        local helper = prefix .. "/bin/titanc.lua"
+        write(helper, 'package.path="C:\\\\SDK\\\\share\\\\lua\\\\5.5\\\\?.lua;"..package.path\r\n' ..
+            'package.cpath="C:\\\\SDK\\\\share\\\\lua\\\\5.5\\\\?.lua;"..package.cpath\r\n')
+
+        assert(windows_installer.publish(private, prefix, prefix, prefix .. "/bin/luarocks.exe"))
+
+        assert.is_nil(lfs.symlinkattributes(helper))
+        assert.equal("native titanc", read(prefix .. "/bin/titanc.exe"))
+        -- Any other file of that name is not LuaRocks' helper and stays.
+        write(helper, "return 'user script'\n")
+        assert(windows_installer.publish(private, prefix, prefix, prefix .. "/bin/luarocks.exe"))
+        assert.equal("return 'user script'\n", read(helper))
+    end)
+
     it("captures every version before removal and cleans only Titan-owned external files", function()
         local versions = workspace .. "/rocks/titan"
         local prefix = workspace .. "/SDK"

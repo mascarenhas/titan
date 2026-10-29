@@ -228,7 +228,7 @@ describe("titanc installation root in a process", function()
 
     it("resolves a symlinked interpreter to its physical installation", function()
         if platform.windows then
-            pending("POSIX symlinked interpreters; Windows resolves titanc.exe directly")
+            pending("POSIX symlinked interpreters; the native titanc.exe case follows")
             return
         end
         local workspace = temporary.name(".interpreter")
@@ -244,5 +244,28 @@ describe("titanc installation root in a process", function()
         os.remove(alias)
         lfs.rmdir(workspace)
         assert.truthy(completed, failure)
+    end)
+
+    it("derives the root from the native titanc.exe directory", function()
+        if not platform.windows then
+            pending("Unix installs the titanc script; Windows ships titanc.exe")
+            return
+        end
+        -- The installed program itself, which runs the rock's titanc script
+        -- with -E: no Lua path, TITAN_ROOT or TITANC from this process.
+        local titanc = prefix .. "/bin/titanc.exe"
+        local expected = physical_root(prefix) .. "\n"
+        for _, arguments in ipairs(forms) do
+            local argv = { titanc }
+            for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
+            local result = compiler_io.new_sync():run(argv, {
+                env = { TITAN_ROOT = false, TITANC = false },
+            })
+            assert.is_true(result.started and result.ok,
+                result.output or result.diagnostic)
+            local output = result.output:gsub("\r\n", "\n")
+            local root = assert(output:match("^(.-)\n$"), output)
+            assert.equal(expected, assert(driver.installed_paths(root)).root .. "\n")
+        end
     end)
 end)

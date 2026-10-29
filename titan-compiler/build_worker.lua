@@ -1,6 +1,8 @@
 -- One short-lived build worker of a titanc coordinator (titan-compiler.build).
--- The coordinator starts it with the exact Lua interpreter and module paths
--- it runs itself; descriptors 3 and 4 carry closed control records. The worker
+-- The coordinator starts it with the Lua interpreter it runs (on Windows, the
+-- controlled lua.exe beside the running executable, which is also the engine
+-- of the native titanc.exe) and the module paths it runs itself; descriptors
+-- 3 and 4 carry closed control records. The worker
 -- compiles exactly the one planned module it is sent, routes every native
 -- batch to the coordinator's job-slot ledger, reports one result record and
 -- exits. It never publishes: the coordinator alone does that.

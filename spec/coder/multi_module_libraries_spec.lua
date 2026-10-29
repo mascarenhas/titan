@@ -14,8 +14,8 @@ if platform.windows then REPO = assert(platform.path.normalize(REPO)) end
 local PREFIX = require("spec.support.installed_prefix").active()
 local SHARED_SUFFIX = platform.windows and ".dll" or ".so"
 local LUA = PREFIX .. "/bin/lua" .. (platform.windows and ".exe" or "")
-local INSTALLED_TITANC = PREFIX .. (platform.windows and
-    "/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" or "/bin/titanc")
+-- The installed compiler program: the native titanc.exe on Windows.
+local INSTALLED_TITANC = PREFIX .. "/bin/titanc" .. (platform.windows and ".exe" or "")
 local LUA_INCLUDE = PREFIX .. "/include"
 local USE_CHECKOUT_COMPILER =
     os.getenv("TITAN_TEST_USE_CHECKOUT_COMPILER") == "1"
@@ -168,7 +168,6 @@ local function compiler_argv(workspace, source_root, ...)
     local installed = not USE_CHECKOUT_COMPILER and
         PREFIX and exists(INSTALLED_TITANC)
     if installed then
-        if platform.windows then table.insert(argv, LUA) end
         table.insert(argv, INSTALLED_TITANC)
     else
         assert.truthy(PREFIX,

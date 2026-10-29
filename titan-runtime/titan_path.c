@@ -534,24 +534,43 @@ static int titan_path_push_provider_dir(lua_State *L, int root) {
 }
 
 #if defined(_WIN32)
-/* Locate titanc.exe in PATH without consulting the current directory. Pushes
-** the full wide path and returns it, or returns NULL with nothing pushed. */
-static WCHAR *titan_path_push_program_on_path(lua_State *L) {
-    static const WCHAR leaf[] = L"\\titanc.exe";
+/* True when a program name has no directory part: no separator and no drive
+** prefix. Such a name is looked up in the PATH entries; anything else names a
+** file and is used as given. */
+static int titan_path_is_bare_program(const char *name) {
+    return strpbrk(name, "\\/:") == NULL;
+}
+
+/* Locate a bare program name in the PATH entries only, never in the current
+** or the application directory (SearchPathW with a NULL path consults both),
+** appending `.exe` when the name has no extension. Pushes the full wide path
+** and returns it, or returns NULL with nothing pushed. */
+static WCHAR *titan_path_push_program_on_path(lua_State *L, const char *name) {
+    static const WCHAR extension[] = L".exe";
     int top = lua_gettop(L);
     DWORD capacity, length;
-    WCHAR *path, *candidate, *cursor;
+    WCHAR *wide_name, *path, *candidate, *cursor;
+    size_t name_length, suffix_length;
+    wide_name = titan_path_push_wide(L, name);
+    name_length = wcslen(wide_name);
+    /* The extension, with its terminator, or just the terminator. */
+    suffix_length = wcschr(wide_name, L'.') == NULL ?
+        sizeof(extension) / sizeof(extension[0]) : 1;
     SetLastError(ERROR_SUCCESS);
     capacity = GetEnvironmentVariableW(L"PATH", NULL, 0);
-    if (capacity == 0) return NULL;
+    if (capacity == 0) {
+        lua_settop(L, top);
+        return NULL;
+    }
     path = (WCHAR *)lua_newuserdatauv(L, capacity * sizeof(WCHAR), 0);
     length = GetEnvironmentVariableW(L"PATH", path, capacity);
     if (length == 0 || length >= capacity) {
         lua_settop(L, top);
         return NULL;
     }
+    /* An entry, a separator, the name and its suffix. */
     candidate = (WCHAR *)lua_newuserdatauv(L,
-        ((size_t)length + sizeof(leaf) / sizeof(leaf[0])) * sizeof(WCHAR), 0);
+        ((size_t)length + 1 + name_length + suffix_length) * sizeof(WCHAR), 0);
     cursor = path;
     while (*cursor != L'\0') {
         WCHAR *start = cursor, *end;
@@ -568,11 +587,17 @@ static WCHAR *titan_path_push_program_on_path(lua_State *L) {
         size = (size_t)(end - start);
         if (size == 0) continue;
         memcpy(candidate, start, size * sizeof(WCHAR));
-        memcpy(candidate + size, leaf, sizeof(leaf));
+        candidate[size] = L'\\';
+        memcpy(candidate + size + 1, wide_name, name_length * sizeof(WCHAR));
+        if (suffix_length > 1)
+            memcpy(candidate + size + 1 + name_length, extension, sizeof(extension));
+        else
+            candidate[size + 1 + name_length] = L'\0';
         attributes = GetFileAttributesW(candidate);
         if (attributes != INVALID_FILE_ATTRIBUTES &&
                 !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
-            lua_remove(L, top + 1);
+            lua_replace(L, top + 1);
+            lua_settop(L, top + 1);
             return candidate;
         }
     }
@@ -774,11 +799,14 @@ static char **titan_path_push_query_environ(lua_State *L) {
 #endif
 
 /* Run `$TITANC --print-root` (or `titanc` from PATH) as an argv process: no
-** shell, stdin and stderr on the null device, stdout read through a pipe. The
-** child keeps the parent's environment except Lua's startup hooks, whose
-** chunks could start the same missing-module query again. Push the root it
-** prints, or a diagnostic. No Lua allocation happens while descriptors,
-** handles, or the child are live. */
+** shell, stdin and stderr on the null device, stdout read through a pipe. On
+** Windows a bare program name (the default `titanc` or a TITANC without a
+** directory part) is found in the PATH entries only, as `titanc.exe` or with
+** `.exe` appended when it has no extension; posix_spawnp searches PATH for
+** the same bare names on Unix. The child keeps the parent's environment
+** except Lua's startup hooks, whose chunks could start the same
+** missing-module query again. Push the root it prints, or a diagnostic. No
+** Lua allocation happens while descriptors, handles, or the child are live. */
 static int titan_path_query_root(lua_State *L) {
     char output[TITAN_ROOT_QUERY_CAP];
     size_t length = 0;
@@ -801,18 +829,19 @@ static int titan_path_query_root(lua_State *L) {
     int list_ready = 0, started = 0;
     size_t program_length;
     luaL_checkstack(L, 6, "querying the Titan SDK root");
-    if (titan_path_push_nonempty_env(L, TITANC_VAR)) {
-        program = lua_tostring(L, top + 1);
-        wide_program = titan_path_push_wide(L, program);
-    } else {
-        program = "titanc";
+    if (!titan_path_push_nonempty_env(L, TITANC_VAR))
         lua_pushliteral(L, "titanc");
-        wide_program = titan_path_push_program_on_path(L);
+    program = lua_tostring(L, top + 1);
+    if (titan_path_is_bare_program(program)) {
+        wide_program = titan_path_push_program_on_path(L, program);
         if (wide_program == NULL) {
-            lua_settop(L, top);
-            lua_pushliteral(L, "'titanc' was not found on PATH");
+            lua_pushfstring(L, "'%s' was not found on PATH", program);
+            lua_replace(L, top + 1);
+            lua_settop(L, top + 1);
             return 0;
         }
+    } else {
+        wide_program = titan_path_push_wide(L, program);
     }
     program_length = wcslen(wide_program);
     command = (WCHAR *)lua_newuserdatauv(L,

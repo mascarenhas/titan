@@ -12,8 +12,7 @@ trial=$(mktemp -d "$work_parent/stdlib-workspace-guard.XXXXXX")
 trial=$(cd "$trial" && pwd)
 seed="$trial/owned/sdk"
 mkdir -p "$seed/bin" "$seed/lib/titan/0.6" "$seed/lib/lua/5.5" "$seed/share/lua/5.5" "$seed/etc/titan" "$seed/nested"
-mkdir -p "$seed/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin"
-for path in lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc bin/lua.exe lib/titan/0.6/titan.dll lib/lua/5.5/titan.dll; do
+for path in bin/titanc.exe bin/lua.exe lib/titan/0.6/titan.dll lib/lua/5.5/titan.dll; do
   printf 'guard fixture %s\n' "$path" > "$seed/$path"
 done
 printf '%s\n' "${TITAN_BUILD_PROFILE-validation}" > "$seed/etc/titan/build-profile"

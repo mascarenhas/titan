@@ -707,8 +707,7 @@ local function stdlib_artifact(relative)
             local argv = {
                 "env.exe", "TITAN_ROOT=" .. prefix, "TITAN_RUNTIME_PREBUILT=1",
                 "TITAN_EXTRA_CPPFLAGS=" .. cppflags,
-                paths.join(prefix, "bin", "lua.exe"),
-                paths.join(prefix, "lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc"),
+                paths.join(prefix, "bin", "titanc.exe"),
                 "--output", root .. "/out", "--source-first", "-c", "--tree", root,
                 "titan.uv", "titan.async", "titan.timer", "titan.fs", "titan.net", "titan.os", "titan.sqlite3",
             }
@@ -1093,13 +1092,22 @@ end
                 -- coroutine/minicoro headers.
                 local cppflags = os.getenv("TITAN_EXTRA_CPPFLAGS") or ""
                 if not platform.windows then cppflags = cppflags .. " -D_GNU_SOURCE" end
+                -- The installed compiler: the retained titanc script through
+                -- the SDK's Lua, or the native titanc.exe on Windows.
                 local argv = {
                     platform.windows and "env.exe" or "env",
                     "TITAN_EXTRA_CPPFLAGS=" .. cppflags,
-                    prefix .. "/bin/lua" .. executable_suffix,
-                    prefix .. "/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc",
-                    "--tree", root, "--output", root .. "/out", "--source-first",
                 }
+                if platform.windows then
+                    argv[#argv + 1] = prefix .. "/bin/titanc" .. executable_suffix
+                else
+                    argv[#argv + 1] = prefix .. "/bin/lua"
+                    argv[#argv + 1] = prefix .. "/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc"
+                end
+                for _, argument in ipairs({ "--tree", root, "--output", root .. "/out",
+                        "--source-first" }) do
+                    argv[#argv + 1] = argument
+                end
                 if consumer == "async" then argv[#argv + 1] = "--no-uv-bootstrap" end
                 argv[#argv + 1] = "titan." .. consumer
                 argv[#argv + 1] = "producer_composition_app"

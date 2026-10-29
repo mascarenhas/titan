@@ -17,7 +17,7 @@ requested_profile=$TITAN_BUILD_PROFILE
 requested_coverage=${TITAN_TEST_COVERAGE:-0}
 if [[ $mode == build ]]; then
   prefix=$(cd "$3" && pwd)
-  [[ -f $prefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc && -f $prefix/bin/lua.exe &&
+  [[ -f $prefix/bin/titanc.exe && -f $prefix/bin/lua.exe &&
      -f $prefix/lib/titan/0.6/titan.dll && -f $prefix/lib/lua/5.5/titan.dll ]]
   export TITAN_BEHAVIOR_SOURCE_SDK=$(cygpath -aw "$prefix")
 fi
@@ -248,7 +248,7 @@ if [[ $mode == build ]]; then
     for fixture in uv_stdio_probe sqlite3_worker_fixture ssl_allocator_fixture ssl_error_strings os_descriptor_limit; do
       native_output="$work/native/$fixture"
       object=$(TITAN_EXTRA_CPPFLAGS= TITAN_EXTRA_CFLAGS= TITAN_EXTRA_LDFLAGS= \
-        "$work/sdk/bin/lua.exe" "$winprefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" \
+        "$work/sdk/bin/titanc.exe" \
           -c --incremental --print-c-objects -j "$TITAN_JOBS" --output "$(cygpath -m "$native_output")" \
           "${native_args[@]}" --c-source "$(cygpath -m "$work/source/spec/fixtures/stdlib/native/$fixture.c")")
       object=${object%$'\r'}
@@ -292,7 +292,7 @@ if [[ $mode == build ]]; then
     fi
     if [[ ${payload[0]+present} ]]; then payload=(-X "${payload[@]}"); fi
     cd "$work/sdk"
-    "$work/sdk/bin/lua.exe" "$winprefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" \
+    "$work/sdk/bin/titanc.exe" \
       --output "$(cygpath -m "$output")" --test --incremental --no-uv-bootstrap \
       --ldflag=-Wl,--disable-auto-import -j "$TITAN_JOBS" \
       --exe "$winprefix/bin/titan-stdlib-tests.exe" --tree "$test_tree" \

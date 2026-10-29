@@ -12,9 +12,9 @@ prefix=$(cd "$2" && pwd)
 arguments=$(mktemp -d "$work/.argv.XXXXXX")
 pending_output=
 trap '[[ -z $pending_output ]] || rm -f "$pending_output"; rm -rf "$arguments"' EXIT
-: "${CC:=clang}" "${AR:=llvm-ar}" "${RANLIB:=llvm-ranlib}"
-export CC AR RANLIB
-for name in CC AR RANLIB; do
+: "${CC:=clang}" "${AR:=llvm-ar}" "${RANLIB:=llvm-ranlib}" "${RC:=llvm-rc}"
+export CC AR RANLIB RC
+for name in CC AR RANLIB RC; do
   perl -MText::ParseWords=shellwords -e '
     my @a=shellwords($ENV{$ARGV[0]}); die "Invalid tool command\n" unless @a;
     print "$_\0" for @a' "$name" > "$arguments/$name.argv"
@@ -22,6 +22,7 @@ done
 mapfile -d '' -t compiler < "$arguments/CC.argv"
 mapfile -d '' -t archiver < "$arguments/AR.argv"
 mapfile -d '' -t indexer < "$arguments/RANLIB.argv"
+mapfile -d '' -t resource_compiler < "$arguments/RC.argv"
 titan_windows_raw_flags "$arguments" RUNTIME
 runtime_cflags=("${cflags[@]}")
 runtime_ldflags=("${ldflags[@]}")
@@ -93,4 +94,30 @@ if needs_build "$work/titan.dll" "$work/ltitanlib.o" "$work/titan_path.o" "$pref
     -Wl,--exclude-all-symbols -Wl,--no-insert-timestamp \
     -o "$work/titan.dll" "$work/ltitanlib.o" "$work/titan_path.o" \
     "$prefix/lib/liblua55.a"
+fi
+# The native compiler frontend titanc.exe: the installed configured lua.c with
+# the stock Lua consumer definition and its main renamed to titan_lua_main,
+# the wide-argv entry that runs the installed titanc script, and the UTF-8,
+# long-path-aware manifest. Like lua.exe it imports only lua55.dll and system
+# DLLs. Compiler host code keeps the host flags.
+titanc_lua="$prefix/src/lua-5.5.1/lua.c"
+if needs_build "$work/titanc-lua.o" "$titanc_lua" "${headers[@]}"; then
+  write_output "$work/titanc-lua.o" "${compiler[@]}" "${common[@]}" -DLUA_BUILD_AS_DLL \
+    -Dmain=titan_lua_main "${parser_cflags[@]}" -c "$titanc_lua" -o "$work/titanc-lua.o"
+fi
+if needs_build "$work/titanc_windows.o" titan-runtime/titanc_windows.c "${headers[@]}"; then
+  write_output "$work/titanc_windows.o" "${compiler[@]}" "${common[@]}" -DLUA_BUILD_AS_DLL \
+    "${parser_cflags[@]}" -c titan-runtime/titanc_windows.c -o "$work/titanc_windows.o"
+fi
+# llvm-rc resolves the manifest named in the .rc file from that file's directory.
+if needs_build "$work/titanc.res" vendor/windows-compiler/titanc.rc \
+    vendor/windows-compiler/titanc.manifest; then
+  write_output "$work/titanc.res" "${resource_compiler[@]}" -FO "$work/titanc.res" \
+    vendor/windows-compiler/titanc.rc
+fi
+if needs_build "$work/titanc.exe" "$work/titanc_windows.o" "$work/titanc-lua.o" \
+    "$work/titanc.res" "$prefix/lib/liblua55.a"; then
+  write_output "$work/titanc.exe" "${compiler[@]}" -municode "${runtime_ldflags[@]}" \
+    -Wl,--no-insert-timestamp -o "$work/titanc.exe" "$work/titanc_windows.o" \
+    "$work/titanc-lua.o" "$work/titanc.res" "$prefix/lib/liblua55.a"
 fi

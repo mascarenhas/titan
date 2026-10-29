@@ -42,7 +42,6 @@ local function run(argv, cwd)
                 else break end
             end
         end
-        if command[first] == TITANC then table.insert(command, first, LUA) end
         if command[first] and command[first]:lower():match("[/\\]lua[.]exe$") then
             for index = first + 1, #command - 1 do
                 if command[index] == "-e" then
@@ -149,8 +148,8 @@ local PREFIX = installed_prefix.active()
 
 LUA = PREFIX .. "/bin/lua" .. PROGRAM_SUFFIX
 local LUAROCKS = PREFIX .. "/bin/luarocks" .. PROGRAM_SUFFIX
-TITANC = PREFIX .. (platform.windows and
-    "/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" or "/bin/titanc")
+-- The installed compiler program: the native titanc.exe on Windows.
+TITANC = PREFIX .. "/bin/titanc" .. PROGRAM_SUFFIX
 local TITAN_LIBDIR = PREFIX .. "/lib/titan/0.6"
 local TITAN_RUNTIME_ARCHIVE = TITAN_LIBDIR .. "/libtitan.a"
 local STDLIB_PROVIDER = TITAN_LIBDIR .. "/titan" .. SHARED_SUFFIX
@@ -280,14 +279,24 @@ describe("standalone-prefix source installation", function()
                 end
             end
         end
+        if platform.windows then
+            -- The native titanc.exe replaces the script launcher in bin; the
+            -- unchanged script is the rock's Lua file that titanc.exe runs.
+            expected["titan-compiler/titanc.lua"] = true
+            assert.equal(read_file("titanc"),
+                read_file(destination .. "/lua/titan-compiler/titanc.lua"))
+        end
         for _, path in ipairs(source_inventory.lua_files(destination .. "/lua")) do
             local relative = path:sub(#destination + #"/lua/" + 1)
             assert.truthy(expected[relative], "unexpected installed module " .. relative)
             expected[relative] = nil
         end
         assert.same({}, expected)
-        assert.equal(read_file("titanc"), read_file(destination .. "/bin/titanc"))
-        if not platform.windows then
+        if platform.windows then
+            assert_unique_regular_file(destination .. "/bin/titanc.exe")
+            assert_absent(destination .. "/bin/titanc")
+        else
+            assert.equal(read_file("titanc"), read_file(destination .. "/bin/titanc"))
             assert.equal("rwxr-xr-x", lfs.attributes(
                 destination .. "/bin/titanc", "permissions"))
             assert.equal(lfs.attributes("titanc", "modification"),
@@ -324,7 +333,13 @@ describe("standalone-prefix source installation", function()
             assert_file(PREFIX .. "/lib/" .. archive)
         end
         if platform.windows then
-            assert_file(PREFIX .. "/bin/titanc.bat")
+            -- LuaRocks deploys the native compiler program with no batch,
+            -- script or package-path helper beside it.
+            for _, launcher in ipairs({ "titanc", "titanc.bat", "titanc.lua" }) do
+                assert_absent(PREFIX .. "/bin/" .. launcher)
+            end
+            assert.equal(read_file("titanc"),
+                read_file(LUA_SHAREDIR .. "/titan-compiler/titanc.lua"))
             for _, dll in ipairs({ "lua55.dll", "libuv-1.dll", "libllhttp-9.4.dll",
                     "libsqlite3-0.dll", "libssl-3-x64.dll", "libcrypto-3-x64.dll" }) do
                 assert_file(PREFIX .. "/bin/" .. dll)
@@ -527,6 +542,15 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
         else assert.truthy(retained_native["titan.a"], manifest) end
         assert.truthy(manifest_table.installer["titan_install.lua"], manifest)
         assert.truthy(manifest_table.bin["titan-uninstall"], manifest)
+        -- LuaRocks owns the compiler entry: the native program on Windows,
+        -- which runs the rock's Lua copy of the titanc script.
+        if platform.windows then
+            assert.truthy(manifest_table.bin["titanc.exe"], manifest)
+            assert.is_nil(manifest_table.bin.titanc, manifest)
+            assert.truthy(manifest_table.lua["titan-compiler"]["titanc.lua"], manifest)
+        else
+            assert.truthy(manifest_table.bin.titanc, manifest)
+        end
         assert.falsy(manifest:find("vendor/lpeglabel", 1, true), manifest)
         assert.falsy(manifest:find("libtitan-lpeglabel", 1, true), manifest)
         assert.falsy(manifest:find('["pretty.lua"]', 1, true), manifest)
@@ -711,6 +735,10 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "spec/support/check_windows_libbacktrace_allocator.pl",
             "vendor/libuv/libuv-1.53.0-windows-write-reentry.patch",
             "vendor/lua/UPSTREAM.md",
+            -- The Windows build's native titanc.exe entry and manifest.
+            "titan-runtime/titanc_windows.c",
+            "vendor/windows-compiler/titanc.rc",
+            "vendor/windows-compiler/titanc.manifest",
             "lua-5.5.1/src/Makefile",
             "lua-5.5.1/src/lua.h",
             "lua-5.5.1/src/luaconf.h",
@@ -2367,13 +2395,13 @@ describe("relocatable Lua build configuration", function()
                 "make", "--no-print-directory", "-n", "-f", repository .. "/Makefile.win",
                 "PREFIX=" .. prefix, "ROCKS_TREE=" .. prefix,
                 "WINDOWS_BUILD_ROOT=" .. root,
-                "ROCK_TITANC=C:/SDK/compiler/titanc", "ROCK_LUA=C:/SDK/bin/lua.exe",
+                "ROCK_TITANC=C:/SDK/bin/titanc.exe", "ROCK_LUA=C:/SDK/bin/lua.exe",
                 "MAKE=printf '<%s>\\n'", target,
             }, repository)
             assert.truthy(ok, output)
             local _, builds = output:gsub("scripts/build_windows_stdlib[.]sh", "")
             assert.equal(1, builds, output)
-            assert.truthy(output:find("ROCK_TITANC='C:/SDK/compiler/titanc'", 1, true), output)
+            assert.truthy(output:find("ROCK_TITANC='C:/SDK/bin/titanc.exe'", 1, true), output)
             assert.truthy(output:find("ROCK_LUA='C:/SDK/bin/lua.exe'", 1, true), output)
             assert.falsy(output:find("luarocks.exe", 1, true), output)
             assert.falsy(output:find("install_windows_luarocks.sh", 1, true), output)
@@ -2420,7 +2448,18 @@ describe("relocatable Lua build configuration", function()
                     "ltitanlib.c", "titan_path.c" }) do
                 assert.falsy(output:find(forbidden, 1, true), output)
             end
-            assert.truthy(output:find("/rock/bin/titanc", 1, true), output)
+            -- Windows deploys the built native titanc.exe and keeps the
+            -- unchanged script as the rock's Lua file; Unix deploys the script.
+            if makefile == "Makefile.win" then
+                assert.truthy(output:find('/runtime/titanc.exe" "' ..
+                    workspace .. '/rock/bin/titanc.exe"', 1, true), output)
+                assert.truthy(output:find('titanc "' .. workspace ..
+                    '/rock/lua/titan-compiler/titanc.lua"', 1, true), output)
+                assert.falsy(output:find('/rock/bin/titanc"', 1, true), output)
+            else
+                assert.truthy(output:find('titanc "' .. workspace .. '/rock/bin/titanc"', 1, true), output)
+                assert.falsy(output:find("titanc.exe", 1, true), output)
+            end
             local suffix = makefile == "Makefile.win" and ".dll" or ".so"
             assert.truthy(output:find("/lib/titan/0.6/titan" .. suffix, 1, true), output)
             assert.truthy(output:find("/rock/lib/titan" .. suffix .. '"', 1, true), output)
@@ -2462,6 +2501,7 @@ describe("relocatable Lua build configuration", function()
         fixture(build, "out/titan.dll")
         fixture(build, "runtime/libtitan.a")
         fixture(build, "runtime/titan.dll", "support module\n")
+        fixture(build, "runtime/titanc.exe", "native titanc\n")
         local expected = {
             ["lib/titan/0.6/libtitan.a"] = build .. "/runtime/libtitan.a",
             ["lib/titan/0.6/titan.dll"] = build .. "/out/titan.dll",
@@ -2524,7 +2564,8 @@ describe("relocatable Lua build configuration", function()
         end
         assert.same({}, staged, "unexpected files in the retained native SDK")
         for _, copy in ipairs({
-            { "titanc", "bin/titanc" }, { "scripts/titan-uninstall", "bin/titan-uninstall" },
+            { "titanc", "lua/titan-compiler/titanc.lua" },
+            { "scripts/titan-uninstall", "bin/titan-uninstall" },
             { "scripts/titan_install.lua", "installer/titan_install.lua" },
             { "titan-compiler/driver.lua", "lua/titan-compiler/driver.lua" },
             { "THIRD_PARTY_NOTICES.md", "conf/THIRD_PARTY_NOTICES.md" },
@@ -2532,11 +2573,16 @@ describe("relocatable Lua build configuration", function()
             assert.equal(read_file(source .. "/" .. copy[1]), read_file(private .. "/" .. copy[2]))
             assert.equal(old, lfs.attributes(private .. "/" .. copy[2], "modification"))
         end
-        -- LuaRocks deploys the support module from its lib staging directory;
-        -- no Lua shims are staged.
-        assert.equal(read_file(build .. "/runtime/titan.dll"),
-            read_file(private .. "/lib/titan.dll"))
-        assert.equal(old, lfs.attributes(private .. "/lib/titan.dll", "modification"))
+        -- LuaRocks deploys the support module from its lib staging directory
+        -- and the native titanc.exe, not a script launcher, from bin; no Lua
+        -- shims are staged.
+        for _, built in ipairs({ { "titan.dll", "lib/titan.dll" },
+                { "titanc.exe", "bin/titanc.exe" } }) do
+            assert.equal(read_file(build .. "/runtime/" .. built[1]),
+                read_file(private .. "/" .. built[2]))
+            assert.equal(old, lfs.attributes(private .. "/" .. built[2], "modification"))
+        end
+        assert_absent(private .. "/bin/titanc")
         assert_absent(private .. "/lua/titan")
         assert.equal("system\n", read_file(private .. "/installer/openssl-mode"))
     end)
@@ -2560,16 +2606,22 @@ set -eu
 test "$1" = -m
 printf '%s\n' "$2"
 ]])
-        local lua = tools .. "/fake lua.exe"
-        write_file(lua, [[#!/bin/sh
+        -- Each stand-in records the program that ran, then its arguments: the
+        -- source compiler runs through the selected Lua, while the installed
+        -- compiler is the native program itself.
+        local probe = [[#!/bin/sh
 set -eu
-printf '%s\0' "$@" > "$PROBE_ARGV"
+printf '%s\0' "$0" "$@" > "$PROBE_ARGV"
 printf '%s\n' "$TITAN_ROOT" "$TITAN_RUNTIME_PREBUILT" \
   "${TITAN_COMPILER_BOOTSTRAP-}" "$MSYS2_ARG_CONV_EXCL" > "$PROBE_ENV"
-]])
-        local ok, output = run({ "chmod", "+x", tools .. "/cygpath", lua })
+]]
+        local lua = tools .. "/fake lua.exe"
+        local selected_compiler = workspace .. "/selected compiler/titanc.exe"
+        write_file(lua, probe)
+        make_directory(workspace .. "/selected compiler")
+        write_file(selected_compiler, probe)
+        local ok, output = run({ "chmod", "+x", tools .. "/cygpath", lua, selected_compiler })
         assert.truthy(ok, output)
-        local selected_compiler = workspace .. "/unavailable compiler/titanc"
         local argv_log = workspace .. "/argv"
         local environment_log = workspace .. "/environment"
         for _, installed_runtime in ipairs({ "0", "1" }) do
@@ -2596,6 +2648,7 @@ printf '%s\n' "$TITAN_ROOT" "$TITAN_RUNTIME_PREBUILT" \
             }
             local bootstrap = ""
             if installed_runtime == "0" then
+                assert.equal(lua, table.remove(arguments, 1))
                 assert.equal("-E", table.remove(arguments, 1))
                 assert.equal("-e", table.remove(arguments, 1))
                 local setup = table.remove(arguments, 1)
@@ -2667,17 +2720,21 @@ mkdir -p "$1/runtime"
         fixture(source, "spec/fixtures/retired.txt", "retired fixture\n")
         fixture(source, "spec/fixtures/shape.txt", "old file shape\n")
         for _, name in ipairs({
-                "lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc",
+                "share/lua/5.5/titan-compiler/titanc.lua",
                 "lib/titan/0.6/titan.dll", "lib/lua/5.5/titan.dll",
                 "lib/libsqlite3.dll.a", "bin/lua55.dll",
                 "share/retired.lua" }) do
             fixture(prefix, name, "published input: " .. name .. "\n")
         end
+        -- The SDK's lua.exe only runs the output check (`-E script`); the
+        -- harness compiles with the native titanc.exe directly.
         local lua = fixture(prefix, "bin/lua.exe", [=[#!/usr/bin/env bash
 set -euo pipefail
-[[ $1 != -E ]] || exit 0
+[[ $1 == -E ]]
+]=])
+        local titanc = fixture(prefix, "bin/titanc.exe", [=[#!/usr/bin/env bash
+set -euo pipefail
 printf '%s\n' "$*" >> "$WINDOWS_TITANC_LOG"
-shift
 output= exe= c_source= compile_only=0 coverage=0 print_objects=0
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -2769,7 +2826,7 @@ if [[ $TITAN_BEHAVIOR_MODE == run && -n ${TITAN_BEHAVIOR_EXE:-} ]]; then
   : > "$TITAN_BEHAVIOR_WORK/stderr.log"
 fi
 ]=])
-        local ok, output = run({ "chmod", "+x", lua, cc, cygpath, powershell })
+        local ok, output = run({ "chmod", "+x", lua, titanc, cc, cygpath, powershell })
         assert.truthy(ok, output)
         local native_log = workspace .. "/native.log"
         local compiler_log = workspace .. "/titanc.log"
