@@ -283,7 +283,8 @@ if [[ $mode == build ]]; then
       if [[ -n ${TITAN_COVERAGE_GCOVR:-} ]]; then
         coverage_args+=(--coverage-gcovr "$TITAN_COVERAGE_GCOVR")
       fi
-      payload+=("$winpayload/ltitanlib.o" "$winpayload/libtitan-lpeglabel.a")
+      # The support object belongs to the runtime archive, not the provider payload.
+      payload+=("$winpayload/libtitan-lpeglabel.a")
       export TITAN_EXTRA_CPPFLAGS="$TITAN_EXTRA_CPPFLAGS -I\"$winsource/vendor/lpeglabel\""
       for library in libuv libllhttp libssl libcrypto; do
         TITAN_EXTRA_LDFLAGS+=" \"$winprefix/lib/$library.dll.a\""
