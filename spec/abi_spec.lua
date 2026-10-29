@@ -95,7 +95,7 @@ describe("compiled-module ABI version", function()
             driver.TITAN_LIBRARY_VERSION)
         assert.equal("_" .. driver.TITAN_LIBRARY_VERSION:gsub("%.", "_"),
             driver.TITAN_LIBRARY_VERSION_SUFFIX)
-        assert.equal("3", driver.TITAN_ABI_VERSION)
+        assert.equal("2", driver.TITAN_ABI_VERSION)
         assert.equal("0.6.0", driver.TITAN_VERSION)
         assert.equal("0.6", driver.TITAN_LIBRARY_VERSION)
         assert.equal("_0_6", driver.TITAN_LIBRARY_VERSION_SUFFIX)
@@ -111,7 +111,7 @@ describe("compiled-module ABI version", function()
         assert.falsy(makefile:find("READLINE_MODE", 1, true))
         assert.falsy(makefile:find("LUA_BUILD_CONFIG", 1, true))
         assert.falsy(makefile:find("LUAROCKS_INSTALL_STAMP", 1, true))
-        assert.match("TITAN_ABI_VERSION%s*:?=%s*3", makefile)
+        assert.match("TITAN_ABI_VERSION%s*:?=%s*2", makefile)
         assert.match("TITAN_VERSION%s*:?=%s*0%.6%.0", makefile)
         assert.match("TITAN_LIBRARY_VERSION%s*:?=", makefile)
         assert.truthy(makefile:find(
@@ -119,7 +119,7 @@ describe("compiled-module ABI version", function()
         assert.match("TITAN_PATH_0_6", workflow)
         for _, lane in ipairs({ linux_workflow, macos_workflow }) do
             assert.equal(1, count_plain(
-                lane, 'TITAN_ABI_VERSION: "3"'))
+                lane, 'TITAN_ABI_VERSION: "2"'))
         end
         local cache_abi = "abi-${{ env.TITAN_ABI_VERSION }}"
         assert.equal(4, count_plain(workflow, cache_abi))
@@ -225,7 +225,7 @@ describe("compiled-module ABI version", function()
             return loader("incompatible")
         end)
         assert.falsy(loaded)
-        assert.match("ABI mismatch: expected 3 but found 1", err, 1, true)
+        assert.match("ABI mismatch: expected 2 but found 1", err, 1, true)
         if platform.windows then
             assert.equal("0", require("titan")._abivalue(
                 "incompatible.dll", "incompatible_types_called"))
@@ -290,6 +290,6 @@ int incompatible_archive_payload(void) { return 0; }
             assert.falsy(loaded)
             assert.falsy(decoded)
             assert.match("ABI mismatch", err, 1, true)
-            assert.match("expected 3 but found 1", err, 1, true)
+            assert.match("expected 2 but found 1", err, 1, true)
         end)
 end)
