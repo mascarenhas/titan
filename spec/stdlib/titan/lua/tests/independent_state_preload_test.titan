@@ -73,12 +73,14 @@ end
 
 function test_lua_independent_preload_snapshot_skips_host_closures(
     _context: test.Context)
+  -- The late loader is the fixture's own native opener under its own logical
+  -- name: generated openers reject a require for any other name.
   local configure = common.lua_helper([=[
     return function()
       local preload = debug.getregistry()._PRELOAD
       local names = {
         'lua.tests.snapshot_lua', 'lua.tests.snapshot_c_closure',
-        'lua.tests.snapshot_nonfunction', 'lua.tests.snapshot_late',
+        'lua.tests.snapshot_nonfunction', 'lua.preload_fixture',
       }
       local saved = {}
       for index, name in ipairs(names) do saved[index] = preload[name] end
@@ -104,8 +106,8 @@ function test_lua_independent_preload_snapshot_skips_host_closures(
     return package.preload['lua.tests.snapshot_lua'] == nil,
            package.preload['lua.tests.snapshot_c_closure'] == nil,
            package.preload['lua.tests.snapshot_nonfunction'] == nil,
-           package.preload['lua.tests.snapshot_late'] == nil,
-           type(package.preload['lua.preload_fixture']) == 'function'
+           package.preload['lua.preload_fixture'] == nil,
+           type(package.preload['titan.lua']) == 'function'
   ]]) }
   test.assert(#values == 5)
   for index = 1, #values do assert_transfer_boolean(values[index], true) end
@@ -113,7 +115,7 @@ function test_lua_independent_preload_snapshot_skips_host_closures(
   defer second:close()
   local late: async.TransferValue = second:run([[
     package.path, package.cpath = '', ''
-    return require('lua.tests.snapshot_late').increment(1)
+    return require('lua.preload_fixture').increment(1)
   ]])
   test.assert(transfer_integer(late) == 42,
               "new state did not snapshot the registry's late native loader")
