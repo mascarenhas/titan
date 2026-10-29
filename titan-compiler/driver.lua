@@ -1397,6 +1397,17 @@ local function compiler_argv(include_extra_compile_flags, context)
         append_argv(argv, driver.EXTRA_CPPFLAGS)
     end
     append_argv(argv, cflags)
+    if driver.UNAME == "Windows" then
+        -- The controlled Lua DLL exports its public and internal surface.
+        -- Consumers name those imports explicitly instead of relying on
+        -- MinGW auto-import, which does not cover every data reference.
+        append_argv(argv, {
+            "-DLUA_BUILD_AS_DLL",
+            "-DLUAI_FUNC=__declspec(dllimport) extern",
+            "-DLUAI_DDEC(dec)=__declspec(dllimport) extern dec",
+            "-DLUAI_DDEF=",
+        })
+    end
     if include_extra_compile_flags then
         append_argv(argv, native or driver.EXTRA_CFLAGS)
     end

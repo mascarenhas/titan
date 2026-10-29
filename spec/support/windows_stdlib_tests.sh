@@ -18,8 +18,7 @@ requested_coverage=${TITAN_TEST_COVERAGE:-0}
 if [[ $mode == build ]]; then
   prefix=$(cd "$3" && pwd)
   [[ -f $prefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc && -f $prefix/bin/lua.exe &&
-     -f $prefix/lib/titan/0.6/titan.dll &&
-     -f $prefix/share/lua/5.5/titan/sqlite3.lua ]]
+     -f $prefix/lib/titan/0.6/titan.dll && -f $prefix/lib/lua/5.5/titan.dll ]]
   export TITAN_BEHAVIOR_SOURCE_SDK=$(cygpath -aw "$prefix")
 fi
 export TITAN_BEHAVIOR_WORK=$(cygpath -aw "$workspace") TITAN_BEHAVIOR_MODE=$mode
@@ -237,7 +236,7 @@ if [[ $mode == build ]]; then
     ( cd "$source_root"
       "${MAKE:-make}" --no-print-directory -f Makefile.win windows-stdlib-test-native \
         "TITAN_TEST_BUILD_DIR=$(cygpath -m "$work")" )
-    export TITAN_ROCKS_ROOT="$winprefix" TITAN_RUNTIME_PREBUILT=1 TITAN_JOBS="${TITAN_JOBS:-4}"
+    export TITAN_ROOT="$winprefix" TITAN_RUNTIME_PREBUILT=1 TITAN_JOBS="${TITAN_JOBS:-4}"
     export TITAN_PROBE_CACHE_DISABLE=1 TITAN_PATH_0_6="$winprefix/lib/titan/0.6"
     unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 LUA_INIT LUA_INIT_5_5 ROCKS_TREE
     export PATH="$work/sdk/bin:$PATH"
@@ -321,7 +320,7 @@ rm -rf "$work/scratch"
 mkdir "$work/scratch"
 rm -f "$work/stdout.log" "$work/stderr.log"
 winprefix=$(cygpath -m "$work/sdk")
-export TITAN_ROCKS_ROOT="$winprefix" TITAN_RUNTIME_PREBUILT=1 TITAN_JOBS=1
+export TITAN_ROOT="$winprefix" TITAN_RUNTIME_PREBUILT=1 TITAN_JOBS=1
 # Preserve the controlled provider first and each child launcher's default
 # executable-relative provider directory for fresh-process fixture programs.
 export TITAN_PROBE_CACHE_DISABLE=1 TITAN_PATH_0_6="$winprefix/lib/titan/0.6;;"

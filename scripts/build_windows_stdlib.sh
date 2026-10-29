@@ -13,7 +13,7 @@ roots=("${@:3}")
 winprefix=$(cygpath -m "$prefix")
 winsource=$(cygpath -m "$source_root")
 winbuild=$(cygpath -m "$build_root")
-export TITAN_ROCKS_ROOT="$winprefix" TITAN_RUNTIME_PREBUILT=1 TITAN_JOBS="${TITAN_JOBS:-4}"
+export TITAN_ROOT="$winprefix" TITAN_RUNTIME_PREBUILT=1 TITAN_JOBS="${TITAN_JOBS:-4}"
 export TITAN_EXTRA_CPPFLAGS="${TITAN_EXTRA_CPPFLAGS:-} -DUSING_UV_SHARED=1 -I\"$winprefix/include\" -I\"$winsource/vendor/lpeglabel\""
 for library in libuv libllhttp libsqlite3 libssl libcrypto; do
   TITAN_EXTRA_LDFLAGS="${TITAN_EXTRA_LDFLAGS:-} \"$winprefix/lib/$library.dll.a\""
@@ -33,5 +33,5 @@ if [[ ${STDLIB_USE_INSTALLED_RUNTIME:-1} == 0 ]]; then
   compiler=(-E -e 'package.path="./?.lua;./?/init.lua;" .. package.path; package.cpath=os.getenv("TITAN_COMPILER_BOOTSTRAP") .. "/?.dll;" .. package.cpath' ./titanc)
 fi
 "$lua" "${compiler[@]}" --output "$winbuild/out" --source-first --incremental -j "$TITAN_JOBS" --tree "$winsource" \
-  "${roots[@]}" -X "$winbuild/runtime/ltitanlib.o" "$winbuild/runtime/libtitan-lpeglabel.a"
-echo "Built the Windows standard-library DLL and ${#roots[@]} generated shims."
+  "${roots[@]}" -X "$winbuild/runtime/libtitan-lpeglabel.a"
+echo "Built the Windows standard-library provider for ${#roots[@]} modules."

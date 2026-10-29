@@ -72,7 +72,9 @@ LUA_BIN := $(PREFIX)/bin/lua.exe
 TITAN_VERSION := 0.6.0
 TITAN_LIBRARY_VERSION := $(word 1,$(subst ., ,$(TITAN_VERSION))).$(word 2,$(subst ., ,$(TITAN_VERSION)))
 TITAN_INSTALL_TREE := $(PREFIX)
-TITAN_STDLIB_LUA_DIR ?= $(TITAN_INSTALL_TREE)/share/lua/5.5/titan
+# The runtime build's support-only Lua module; the shared compiler install
+# deploys it as the ordinary native module lib/lua/5.5/titan.dll.
+TITAN_SUPPORT_MODULE = $(WINDOWS_BUILD_ROOT)/runtime/titan.dll
 # This is still the only loaded Makefile. GNU Make's word-based path functions
 # split checkout paths containing spaces, so let the recipe shell find its dir.
 TITAN_MAKEFILE_DIR := $(shell dirname $(call quote,$(MAKEFILE_LIST)))/
@@ -95,10 +97,10 @@ help:
 	@echo '  luarocks    install standalone LuaRocks into the Lua SDK prefix'
 	@echo '  compiler    build and install the Titan source rock with LuaRocks'
 	@echo '  compiler-check  validate the installed compiler and dependencies'
-	@echo '  runtime     build/install the runtime SDK and seed an absent support DLL'
-	@echo '  runtime-check  validate runtime consumers, rebuilds and provider preservation'
-	@echo '  stdlib      use the installed compiler/SDK to build titan.dll and exact shims'
-	@echo '  stdlib-check  validate the staged DLL, metadata, shims and PE inventory'
+	@echo '  runtime     build/install the runtime SDK and support DLL'
+	@echo '  runtime-check  validate runtime consumers, rebuilds and the support DLL'
+	@echo '  stdlib      use the installed compiler/SDK to build the standard provider'
+	@echo '  stdlib-check  validate the staged provider, metadata and PE inventory'
 	@echo '  install-stdlib  build and copy the Windows DLL-only provider'
 	@echo '  publish-stdlib  copy an already built Windows provider'
 	@echo '  compiler-publication-check  validate compiler provider publication'
@@ -136,15 +138,17 @@ toolchain-check:
 	  '#error Expected native Clang x64 with UCRT headers' '#endif' | $(CC) -x c -E - >/dev/null
 	@$(CC) --version | head -n 1
 
-# Lua owns its DLL and interpreter link graph, including luac.exe.
+# Lua owns its DLL and interpreter link graph, including luac.exe. The stock
+# sources export their public surface through LUA_BUILD_AS_DLL and every
+# remaining symbol through the fork mingw link's --export-all-symbols.
 lua-build: lua-source
 	$(RC) -FO $(call quote,$(LUA_RESOURCE)) $(call quote,$(LUA_RC_SOURCE))
 	+$(MAKE) -j1 -C $(call quote,$(LUA_SOURCE)) mingw \
-	  TITAN_LIBRARY_VERSION=$(call quote,$(TITAN_LIBRARY_VERSION)) PREFIX=$(call quote,$(PREFIX)) \
+	  PREFIX=$(call quote,$(PREFIX)) \
 	  CC=$(call quote,$(CC) -std=c99) \
-	  CFLAGS=$(call quote,$(LUA_CPPFLAGS) $(LUA_CFLAGS) -DTITAN_VDIR=\"$(TITAN_LIBRARY_VERSION)\" -DLUA_BUILD_AS_DLL) \
+	  CFLAGS=$(call quote,$(LUA_CPPFLAGS) $(LUA_CFLAGS) -DLUA_BUILD_AS_DLL) \
 	  MYLDFLAGS=$(call quote,$(LUA_LDFLAGS) -Xlinker --no-insert-timestamp) \
-	  MYDLLFLAGS=$(call quote,$(LUA_LDFLAGS) -Xlinker --exclude-all-symbols -Xlinker --no-insert-timestamp) \
+	  MYDLLFLAGS=$(call quote,$(LUA_LDFLAGS) -Xlinker --no-insert-timestamp) \
 	  LUA_IMPLIB=liblua55.a MYLUAOBJS=lua-windows.res MINGW_STRIP=
 
 # An existing interpreter is sufficient. To change Lua sources or flags, clean
@@ -154,7 +158,7 @@ lua: $(call make_path,$(LUA_BIN))
 $(call make_path,$(LUA_BIN)):
 	+$(MAKE) -f Makefile.win lua-build
 	+$(MAKE) -C $(call quote,$(WINDOWS_BUILD_ROOT)/lua-$(LUA_VERSION)) install \
-	  TITAN_LIBRARY_VERSION=$(call quote,$(TITAN_LIBRARY_VERSION)) PREFIX=$(call quote,$(PREFIX))
+	  PREFIX=$(call quote,$(PREFIX))
 
 lua-check: lua
 	CC=$(call quote,$(CC)) bash spec/support/check_windows_lua.sh $(call quote,$(PREFIX)) $(call quote,$(WINDOWS_BUILD_ROOT))
@@ -248,7 +252,15 @@ compiler: luarocks
 compiler-check: compiler
 	bash spec/support/check_windows_compiler.sh $(call quote,$(PREFIX)) $(call quote,$(WINDOWS_BUILD_ROOT))
 
-# Runtime archive, private parser payload and support-only bootstrap.
+# The shared install-compiler recipe deploys the support module, so a direct
+# SDK install builds it first. A rock build has already produced it.
+$(call make_path,$(TITAN_SUPPORT_MODULE)):
+	+$(MAKE) -f Makefile.win runtime-build
+
+install-compiler: $(call make_path,$(TITAN_SUPPORT_MODULE))
+
+# Runtime archive, private parser payload and the support module. The shared
+# compiler install deploys $(TITAN_SUPPORT_MODULE) as lib/lua/5.5/titan.dll.
 RUNTIME_CFLAGS ?= $(if $(ROCK_CFLAGS),$(ROCK_CFLAGS) )$(TITAN_WINDOWS_NATIVE_CFLAGS) -Wall -Wextra
 RUNTIME_CPPFLAGS ?=
 RUNTIME_LDFLAGS ?= $(TITAN_WINDOWS_NATIVE_LDFLAGS)
@@ -277,8 +289,6 @@ install-titan-sdk publish-titan-sdk:
 	cp -p $(call quote,$(WINDOWS_BUILD_ROOT)/runtime/libtitan.a) $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/libtitan.a)
 	cp -p titan-runtime/titan.h titan-runtime/minicoro.h titan-runtime/transfer.h $(call quote,$(TITAN_INSTALL_TREE)/include/)
 	cp -p titan-runtime/titan/ffi.h $(call quote,$(TITAN_INSTALL_TREE)/include/titan/ffi.h)
-	@if ! test -e $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.dll); then \
-	  cp -p $(call quote,$(WINDOWS_BUILD_ROOT)/runtime/titan.dll) $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.dll); fi
 	cp -p LICENSE $(call quote,$(TITAN_INSTALL_TREE)/share/titan/LICENSE)
 	cp -p THIRD_PARTY_NOTICES.md $(call quote,$(TITAN_INSTALL_TREE)/share/titan/THIRD_PARTY_NOTICES.md)
 	for filename in $(TITAN_LICENSE_FILES); do cp -p "LICENSES/$$filename" $(call quote,$(TITAN_INSTALL_TREE)/share/titan/LICENSES/); done
@@ -305,7 +315,8 @@ stdlib: titan/transfer_native.h titan/async_receiver_native.h titan/uv/external-
 	  STDLIB_USE_INSTALLED_RUNTIME=$(call quote,$(STDLIB_USE_INSTALLED_RUNTIME)) \
 	  bash scripts/build_windows_stdlib.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX)) $(STDLIB_ROOTS)
 
-stdlib-check:
+# The staged provider and the installed support module are both inputs.
+stdlib-check: compiler stdlib
 	bash spec/support/check_windows_stdlib.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX))
 
 install-stdlib: stdlib
@@ -313,10 +324,8 @@ install-stdlib: stdlib
 
 # Publishing an already built stage must not rebuild or replace its inputs.
 publish-stdlib:
-	mkdir -p $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)) \
-	  $(call quote,$(TITAN_STDLIB_LUA_DIR))
+	mkdir -p $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION))
 	cp -p $(call quote,$(WINDOWS_BUILD_ROOT)/out/titan.dll) $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.dll)
-	for module in $(STDLIB_MODULES); do cp -p "$(WINDOWS_BUILD_ROOT)/out/titan/$$module.lua" $(call quote,$(TITAN_STDLIB_LUA_DIR)/); done
 	rm -f $(call quote,$(TITAN_INSTALL_TREE)/share/titan/$(TITAN_LIBRARY_VERSION)/src/titan/test.titan)
 
 compiler-publication-check: runtime
@@ -416,8 +425,7 @@ install: check-rocks-tree install-compiler install-rock-tools stage-rock-payload
 .PHONY: stage-rock-payload
 stage-rock-payload:
 	+$(MAKE) -f Makefile.win publish-titan-sdk publish-stdlib \
-	  TITAN_INSTALL_TREE=$(call quote,$(INST_PREFIX)/titan-sdk) \
-	  TITAN_STDLIB_LUA_DIR=$(call quote,$(INST_LUADIR)/titan)
+	  TITAN_INSTALL_TREE=$(call quote,$(INST_PREFIX)/titan-sdk)
 	# Retain only this controlled native SDK, never unrelated prefix contents.
 	mkdir -p $(call quote,$(INST_PREFIX)/titan-sdk/bin) \
 	  $(call quote,$(INST_PREFIX)/titan-sdk/lib) $(call quote,$(INST_PREFIX)/titan-sdk/include)

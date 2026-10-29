@@ -23,7 +23,8 @@ local function open_support(path)
     local opener = assert(package.loadlib(path, "luaopen_titan"))
     local values = table.pack(opener())
     assert(values.n == 1 and type(values[1]) == "table", "invalid Titan support table")
-    for _, name in ipairs({ "_loadlib", "_loadlibglobal", "_abivalue" }) do
+    for _, name in ipairs({ "_loadlib", "_loadlibglobal", "_abivalue",
+            "_executable_dir", "_compiler_root", "_expand_titan_path" }) do
         assert(type(values[1][name]) == "function", "missing Titan support helper " .. name)
     end
     return values[1]
@@ -32,7 +33,7 @@ local support = open_support(assert(bootstrap))
 package.loaded.titan = support
 local driver = require "titan-compiler.driver"
 local function exports_for_names(logical_names)
-    local exports = { luaopen_titan = true }
+    local exports = {}
     for _, name in ipairs(logical_names) do
         local mangled = driver.mangle_module_name(name)
         exports["luaopen_" .. mangled] = true
@@ -89,10 +90,4 @@ valid_imports(stage .. "/provider.imports")
 local callable = assert(driver.library_interface_entries(stage .. "/titan.dll", names))
 assert(driver.compare_archive_entries(callable, expected, "Windows stdlib source objects and DLL"))
 assert(driver.validate_library_image(stage .. "/titan.dll", names))
-open_support(stage .. "/titan.dll")
-local plans = assert(driver.plan_module_shims("titan", names))
-for index, plan in ipairs(plans) do
-    assert(read(stage .. "/" .. modules[index] .. ".lua") == plan.contents,
-        "staged shim does not match its exact logical/physical provider: " .. plan.modname)
-end
-print(("Validated %d Windows stdlib protocols, exact PE inventory and shims."):format(#modules))
+print(("Validated %d Windows stdlib protocols and exact PE inventory."):format(#modules))
