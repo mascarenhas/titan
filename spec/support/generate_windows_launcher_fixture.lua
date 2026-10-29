@@ -8,7 +8,10 @@ local manifest = assert(arg[2], "expected an absolute native Windows manifest pa
 local original = platform.windows
 platform.windows = true
 local default = assert(driver.windows_program_paths("fixture.launcher"))
-local override = assert(driver.windows_program_paths("fixture.launcher", "custom"))
+-- An exact --exe path below bin keeps the bin/+lib/titan/0.6 layout, so both
+-- the embedded provider and the launcher's dependency lookup stay on the
+-- approved runtime roots while exercising an unrelated launcher name.
+local override = assert(driver.windows_program_paths("fixture.launcher", "bin/custom"))
 assert(default.provider == override.provider)
 local function write(name, contents)
     -- Bash gates read these inputs with mapfile, so never let a text-mode
@@ -17,6 +20,8 @@ local function write(name, contents)
 end
 write("launcher.c", driver.entrypoint_contents("fixture.launcher", nil,
     { provider = default.relative_provider }))
+write("custom.c", driver.entrypoint_contents("fixture.launcher", nil,
+    { provider = override.relative_provider }))
 write("direct.c", driver.entrypoint_contents("fixture.launcher", nil,
     { provider = default.relative_provider, no_uv_bootstrap = true }))
 local definition, export_names = driver.windows_provider_exports({ "fixture.launcher" })
