@@ -59,6 +59,9 @@
 #define TITAN_SDK_FALLBACK_KEY "c2a9e5d4-1b7f-4e3a-8d26-5f9b0c7a4e18"
 #define TITAN_ROOT_VAR "TITAN_ROOT"
 #define TITANC_VAR "TITANC"
+/* Lua's startup hooks, which the internal root query must not inherit. */
+#define TITAN_LUA_INIT_VAR "LUA_INIT"
+#define TITAN_LUA_INIT_5_5_VAR "LUA_INIT_5_5"
 #define TITAN_PROVIDER_DIR "lib/titan/" TITAN_LIBRARY_VERSION
 #define TITAN_RUNTIME_DEFAULT_PATH "!;!/../" TITAN_PROVIDER_DIR
 #if defined(_WIN32)
@@ -604,6 +607,90 @@ static int titan_path_push_query_output(lua_State *L, const char *program,
     return 1;
 }
 
+#if defined(_WIN32)
+/* True when an environment entry names one of Lua's startup hooks. Windows
+** compares environment names case-insensitively; `entry` is "NAME=VALUE". */
+static int titan_path_is_lua_init_entry_w(const WCHAR *entry) {
+    static const WCHAR *const suppressed[] = {
+        TITAN_WIN_WIDEN_LITERAL(TITAN_LUA_INIT_5_5_VAR),
+        TITAN_WIN_WIDEN_LITERAL(TITAN_LUA_INIT_VAR),
+    };
+    size_t length = 0, index, position;
+    while (entry[length] != L'\0' && entry[length] != L'=') length++;
+    for (index = 0; index < sizeof(suppressed) / sizeof(suppressed[0]); index++) {
+        if (length != wcslen(suppressed[index])) continue;
+        for (position = 0; position < length; position++) {
+            WCHAR left = entry[position], right = suppressed[index][position];
+            if (left >= L'a' && left <= L'z') left -= L'a' - L'A';
+            if (right >= L'a' && right <= L'z') right -= L'a' - L'A';
+            if (left != right) break;
+        }
+        if (position == length) return 1;
+    }
+    return 0;
+}
+
+/* Push the child's environment block: every parent entry except Lua's startup
+** hooks, whose chunks run before --print-root and could install the Titan
+** searcher and start the same missing-module query again. The block is read
+** twice so the only allocation is Lua-owned and exact; a concurrent change
+** makes it read again. Returns the double-NUL-terminated block, or pushes a
+** diagnostic and returns NULL. */
+static WCHAR *titan_path_push_query_environment(lua_State *L) {
+    int attempt;
+    for (attempt = 0; attempt < 8; attempt++) {
+        WCHAR *source = GetEnvironmentStringsW();
+        WCHAR *block, *cursor;
+        size_t needed = 0, used = 0;
+        int top, overflow = 0;
+        if (source == NULL) {
+            titan_win_loader_error(L, "cannot read the environment for",
+                "titanc --print-root", GetLastError());
+            return NULL;
+        }
+        for (cursor = source; *cursor != L'\0';
+                cursor += wcslen(cursor) + 1) {
+            if (!titan_path_is_lua_init_entry_w(cursor))
+                needed += wcslen(cursor) + 1;
+        }
+        FreeEnvironmentStringsW(source);
+        top = lua_gettop(L);
+        block = (WCHAR *)lua_newuserdatauv(L,
+            (needed + 2) * sizeof(WCHAR), 0);
+        source = GetEnvironmentStringsW();
+        if (source == NULL) {
+            lua_settop(L, top);
+            titan_win_loader_error(L, "cannot read the environment for",
+                "titanc --print-root", GetLastError());
+            return NULL;
+        }
+        for (cursor = source; *cursor != L'\0';
+                cursor += wcslen(cursor) + 1) {
+            size_t length;
+            if (titan_path_is_lua_init_entry_w(cursor)) continue;
+            length = wcslen(cursor) + 1;
+            if (used + length > needed) {  /* grew between the two reads */
+                overflow = 1;
+                break;
+            }
+            memcpy(block + used, cursor, length * sizeof(WCHAR));
+            used += length;
+        }
+        FreeEnvironmentStringsW(source);
+        if (overflow) {
+            lua_settop(L, top);
+            continue;
+        }
+        block[used] = L'\0';
+        block[used + 1] = L'\0';  /* the block's own terminator */
+        return block;
+    }
+    lua_pushliteral(L,
+        "cannot read a stable Windows environment for the Titan query child");
+    return NULL;
+}
+#endif
+
 #if !defined(_WIN32)
 #if defined(__APPLE__)
 #define titan_path_environ() (*_NSGetEnviron())
@@ -649,12 +736,49 @@ static int titan_path_pipe(int descriptors[2]) {
     }
     return 0;
 }
+
+/* True when an environment entry names one of Lua's startup hooks; Unix
+** environment names are case-sensitive. `entry` is "NAME=VALUE". */
+static int titan_path_is_lua_init_entry(const char *entry) {
+    static const char *const suppressed[] = {
+        TITAN_LUA_INIT_5_5_VAR, TITAN_LUA_INIT_VAR,
+    };
+    const char *equals = strchr(entry, '=');
+    size_t length = equals == NULL ? strlen(entry) : (size_t)(equals - entry);
+    size_t index;
+    for (index = 0; index < sizeof(suppressed) / sizeof(suppressed[0]); index++) {
+        if (length == strlen(suppressed[index]) &&
+                memcmp(entry, suppressed[index], length) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* Push a NULL-terminated environment array for the query child: every parent
+** entry except Lua's startup hooks, whose chunks run before --print-root and
+** could install the Titan searcher and start the same missing-module query
+** again. The entries stay the parent's own strings. */
+static char **titan_path_push_query_environ(lua_State *L) {
+    char **parent = titan_path_environ();
+    size_t count = 0, used = 0, index;
+    char **child;
+    while (parent[count] != NULL) count++;
+    child = (char **)lua_newuserdatauv(L, (count + 1) * sizeof(char *), 0);
+    for (index = 0; index < count; index++) {
+        if (titan_path_is_lua_init_entry(parent[index])) continue;
+        child[used++] = parent[index];
+    }
+    child[used] = NULL;
+    return child;
+}
 #endif
 
 /* Run `$TITANC --print-root` (or `titanc` from PATH) as an argv process: no
-** shell, stdin and stderr on the null device, stdout read through a pipe.
-** Push the root it prints, or a diagnostic. No Lua allocation happens while
-** descriptors, handles, or the child are live. */
+** shell, stdin and stderr on the null device, stdout read through a pipe. The
+** child keeps the parent's environment except Lua's startup hooks, whose
+** chunks could start the same missing-module query again. Push the root it
+** prints, or a diagnostic. No Lua allocation happens while descriptors,
+** handles, or the child are live. */
 static int titan_path_query_root(lua_State *L) {
     char output[TITAN_ROOT_QUERY_CAP];
     size_t length = 0;
@@ -663,7 +787,7 @@ static int titan_path_query_root(lua_State *L) {
     static const WCHAR option[] = L" --print-root";
     int top = lua_gettop(L);
     const char *program;
-    WCHAR *wide_program, *command;
+    WCHAR *wide_program, *command, *environment;
     LPPROC_THREAD_ATTRIBUTE_LIST list;
     SIZE_T list_size = 0;
     SECURITY_ATTRIBUTES inherit = { sizeof(SECURITY_ATTRIBUTES), NULL, TRUE };
@@ -700,6 +824,13 @@ static int titan_path_query_root(lua_State *L) {
     memcpy(command + program_length + 2, option, sizeof(option));
     InitializeProcThreadAttributeList(NULL, 1, 0, &list_size);
     list = (LPPROC_THREAD_ATTRIBUTE_LIST)lua_newuserdatauv(L, list_size, 0);
+    /* The last Lua allocation: the child's filtered environment. */
+    environment = titan_path_push_query_environment(L);
+    if (environment == NULL) {
+        lua_replace(L, top + 1);
+        lua_settop(L, top + 1);
+        return 0;
+    }
 
     /* From here until every handle is closed, only Win32 calls run. */
     if (!CreatePipe(&read_end, &write_end, &inherit, 0)) {
@@ -741,7 +872,8 @@ static int titan_path_query_root(lua_State *L) {
     startup.lpAttributeList = list;
     ZeroMemory(&process, sizeof(process));
     if (!CreateProcessW(wide_program, command, NULL, NULL, TRUE,
-            CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, NULL, NULL,
+            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT |
+                EXTENDED_STARTUPINFO_PRESENT, environment, NULL,
             &startup.StartupInfo, &process)) {
         operation = "cannot start";
         goto cleanup;
@@ -805,14 +937,23 @@ cleanup:
     sigset_t mask;
     short flags = POSIX_SPAWN_SETSIGMASK;
     char *argv[3];
+    char **child_environ;
+    int environment_ref;
     if (program == NULL || program[0] == '\0') program = "titanc";
+    /* Build the child's environment before any descriptor exists, so its Lua
+    ** allocation cannot strand native state; the registry reference keeps it
+    ** alive until posix_spawnp has copied it. */
+    child_environ = titan_path_push_query_environ(L);
+    environment_ref = luaL_ref(L, LUA_REGISTRYINDEX);
     if (titan_path_pipe(descriptors) != 0) {
+        luaL_unref(L, LUA_REGISTRYINDEX, environment_ref);
         lua_pushfstring(L, "cannot create a pipe for '%s --print-root': %s",
             program, strerror(errno));
         return 0;
     }
     rc = posix_spawn_file_actions_init(&actions);
     if (rc != 0) {
+        luaL_unref(L, LUA_REGISTRYINDEX, environment_ref);
         close(descriptors[0]);
         close(descriptors[1]);
         lua_pushfstring(L, "cannot start '%s --print-root': %s", program,
@@ -821,6 +962,7 @@ cleanup:
     }
     rc = posix_spawnattr_init(&attributes);
     if (rc != 0) {
+        luaL_unref(L, LUA_REGISTRYINDEX, environment_ref);
         posix_spawn_file_actions_destroy(&actions);
         close(descriptors[0]);
         close(descriptors[1]);
@@ -845,7 +987,10 @@ cleanup:
     argv[1] = (char *)"--print-root";
     argv[2] = NULL;
     if (rc == 0) rc = posix_spawnp(&pid, program, &actions, &attributes, argv,
-        titan_path_environ());
+        child_environ);
+    /* The child has its own copy now. luaL_unref only rewrites registry slots,
+    ** so it cannot allocate while the descriptors are still open. */
+    luaL_unref(L, LUA_REGISTRYINDEX, environment_ref);
     posix_spawnattr_destroy(&attributes);
     posix_spawn_file_actions_destroy(&actions);
     close(descriptors[1]);
