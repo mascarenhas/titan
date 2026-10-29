@@ -96,6 +96,13 @@ after a shell used `luarocks init`. Native test builds use `TITAN_EXTRA_*FLAGS`
 when set and otherwise `TITAN_TEST_EXTRA_*FLAGS` (`Makefile`
 `TITAN_TEST_CFLAGS`); other explicit build-policy inputs are caller-owned.
 
+That rule is about inherited user settings. Make deliberately sets
+`TITAN_ROOT` itself for the native suite's compiler and run commands, to the
+installation that `TEST_LUA` selects
+([native SDK selection](test-runner.md#native-sdk-selection)). That pin keeps
+the suite on its own SDK; it does not make an ambient `TITAN_ROOT` safe to carry
+into a canonical run.
+
 Lua's internal assertions are a diagnostic configuration. In a separate source
 copy and prefix, add `-DLUAI_ASSERT` to `LUA_MYCFLAGS` (keeping the profile's
 `-fPIC` and host flags, for example `-fPIC -O2 -fno-lto -DLUAI_ASSERT` under

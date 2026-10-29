@@ -135,6 +135,7 @@ run from `$(TITAN_TEST_BUILD_DIR)` (default `out/tests`) after
 with `titan.so` and creates the output directory:
 
 ```sh
+TITAN_ROOT=$(TITAN_TEST_INSTALL_ROOT) \
 $(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --output . --test --incremental \
   -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) -c \
   --tree $(abspath spec/stdlib/titan) --test-dir $(abspath spec/stdlib/titan) \
@@ -142,6 +143,7 @@ $(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --output . --test --incremental \
   --c-source $(abspath spec/fixtures/stdlib/native/fs_fixture.c) \
   --c-source $(abspath spec/fixtures/stdlib/native/uv_stdio_probe.c)
 
+TITAN_ROOT=$(TITAN_TEST_INSTALL_ROOT) \
 $(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --output . --test --incremental \
   --no-uv-bootstrap -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) \
   --tree $(abspath spec/stdlib/titan) --test-dir $(abspath spec/stdlib/titan) \
@@ -154,6 +156,13 @@ $(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --output . --test --incremental \
 The compile-only recipe omits `--no-uv-bootstrap`: `titanc -c` rejects that
 link-phase option, which belongs to the final link that generates the
 entrypoint.
+
+Both recipes, the fixed-fixture rule below, and the `titan-stdlib-test-run` and
+`titan-stdlib-test-run-parallel` environments set `TITAN_ROOT` to
+`TITAN_TEST_INSTALL_ROOT`, the installation that `TEST_LUA` resolves (shell
+quoting omitted above). `TITAN_TEST_COMPILER_ENV` itself carries no root,
+because it also reaches Busted. See [native SDK
+selection](test-runner.md#native-sdk-selection).
 
 `test.tests` is passed explicitly first so it remains the default executable
 and provider owner (`out/tests/test/tests`); `--test-dir` discovers all 30
@@ -178,8 +187,8 @@ depends on `spec/fixtures/stdlib/native/<stem>.c` and `FORCE`, invokes
 $(TITAN_TEST_BUILD_DIR)/native/<stem>.o -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG)
 --print-c-objects --cflag=-std=c99 --cflag=-Wall --cflag=-Wextra
 --cflag=-Werror --cflag=-fPIC -I spec/fixtures/stdlib/native <per-helper
-flags> --c-source <stem>.c` with the helper's
-`TITAN_EXTRA_CPPFLAGS`/`CFLAGS`/`LDFLAGS`, requires the single reported path to
+flags> --c-source <stem>.c` with `TITAN_ROOT=$(TITAN_TEST_INSTALL_ROOT)` and the
+helper's `TITAN_EXTRA_CPPFLAGS`/`CFLAGS`/`LDFLAGS`, requires the single reported path to
 be absolute and to name a file, and copies it to
 `$(TITAN_TEST_BUILD_DIR)/<stem>.o` with `cp -p` only when `cmp -s` reports a
 content difference. Native nodes are keyed by canonical source path, so a
