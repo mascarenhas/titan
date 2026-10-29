@@ -165,6 +165,11 @@ jobs:
         run: |
           bash spec/support/ci_retry_luarocks_dependencies.sh \
             luarocks make --only-deps
+          # The restored Lua tree is not part of the cache key. Drop the
+          # compiler modules so removals are visible, and drop the pre-cutover
+          # share/lua/5.5/titan shim directory outright.
+          rm -rf "$PREFIX/share/lua/5.5/titan-compiler"
+          rm -rf "$PREFIX/share/lua/5.5/titan"
           luarocks make --force
           provider="$PREFIX/lib/titan/0.6/titan.so"
           static_archive="${provider%.so}.a"
