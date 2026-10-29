@@ -9,9 +9,14 @@
  * titanc script, which the rock installs as an ordinary Lua file there, is
  * therefore arg[0], the real frontend that object certificates hash. Every
  * user argument follows the script, so none is read as a Lua option. -E keeps
- * LUA_INIT and the LUA_PATH/LUA_CPATH variables out: compiler modules resolve
- * only through Lua's executable-relative defaults (!\..\share\lua\5.5 and
- * !\..\lib\lua\5.5), like the installed compiler on every other platform.
+ * LUA_INIT, LUA_INIT_5_5, and the LUA_PATH/LUA_CPATH variables out, so the
+ * compiler modules resolve through Lua's built-in Windows defaults: their
+ * executable-relative entries (!\lua\, !\, and !\..\share\lua\5.5\ for Lua
+ * files; !\ and !\..\lib\lua\5.5\ for C modules) precede the current-directory
+ * entries (.\?.lua, .\?\init.lua, .\?.dll). An installed module is therefore
+ * always taken from the SDK that contains the executable, and only a module
+ * missing from the SDK can be found in the current directory, as with the Unix
+ * compiler's ./?.lua.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
