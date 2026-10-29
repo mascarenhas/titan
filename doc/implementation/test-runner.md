@@ -459,6 +459,48 @@ diagnostics` around the operation. Those prefixed brackets make a successful
 aggregate log readable and keep the expectation owned by the case that
 produces it.
 
+### Native SDK selection
+
+The aggregate (`out/tests/test/tests`) and the fixture programs its tests compile
+in fresh child processes do not live in an SDK's `bin` directory. Their
+executable-relative entries `!` and `!/../lib/titan/0.6` therefore miss, and the
+runtime's SDK fallback decides which installed `titan` provider they load. That
+fallback uses `TITAN_ROOT` and otherwise spawns `$TITANC` or `titanc
+--print-root` from `PATH`
+([Titan path](../language/modules.md#the-titan-path)).
+Left to `PATH`, a user installation earlier on `PATH` can supply a
+different provider than the one the suite was built against.
+
+The Unix `Makefile` therefore sets `TITAN_ROOT` to `TITAN_TEST_INSTALL_ROOT`,
+the installation that `TEST_LUA` resolves, at every native-only launch:
+
+- `titan-stdlib-test-objects` and `titan-stdlib-test-build`;
+- the fixed fixture-object rules (`titan_test_native_rule`);
+- `titan-stdlib-test-run` and `titan-stdlib-test-run-parallel`.
+
+Fresh children inherit the root through `support.command`, so their own
+compiles and runs select the same SDK. `TITAN_TEST_SDK_ROOT`, set beside it, is
+test-helper metadata: it locates SDK tools for fixtures and selects nothing at
+run time. `TITAN_TEST_COMPILER_ENV` carries no root because Busted workers also
+receive it, and their specs choose their own provider paths.
+
+The pin replaces only the PATH-derived fallback. Explicit `TITAN_PATH_0_6` or
+`TITAN_PATH` entries and executable-relative providers still come first, and
+helpers that select exact provider paths for their children
+(`spec/support/async_stdlib.lua`) still remove `TITAN_ROOT` deliberately. A
+`TEST_LUA` outside an SDK leaves the root empty, which the runtime treats as
+unset.
+
+This is Make's own selection for its suite. A canonical run still starts
+without an ambient `TITAN_ROOT`, `TITANC`, or Titan path variable
+([repository workflow](repository-workflow.md)).
+
+`spec/libuv_build_spec.lua` ("runs prepared native tests against the selected
+SDK, not a titanc on PATH") covers this behavior. It runs a one-case aggregate
+with a logging `titanc` first on `PATH`. With the SDK selected, the run passes
+and that `titanc` is never called. With an empty selection, the aggregate
+queries it.
+
 ### Concurrent filtered runs
 
 The Unix `Makefile` `titan-stdlib-test-run` tees the merged output to
