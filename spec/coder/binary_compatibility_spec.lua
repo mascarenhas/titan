@@ -197,7 +197,7 @@ describe("selective binary dependency compatibility", function()
         rejects("increment")
     end)
 
-    it("rejects a mismatched requested module name before initialization", function()
+    it("rejects a mismatched requested module name for a file load", function()
         build({ {
             name = "bc180_provider",
             src = [[
@@ -208,9 +208,9 @@ describe("selective binary dependency compatibility", function()
             ]],
         } })
         local ok, out = call([[
-            local open = assert(package.loadlib(
-                "./bc180_provider.so", "luaopen_bc180_provider"))
-            local opened, err = pcall(open, "bc180_other", "./bc180_provider.so")
+            local path = "./bc180_provider.so"
+            local open = assert(package.loadlib(path, "luaopen_bc180_provider"))
+            local opened, err = pcall(open, "bc180_other", path)
             assert(not opened, "a mismatched requested name opened the provider")
             assert(err == "module name mismatch: requested 'bc180_other', " ..
                 "provider defines 'bc180_provider'", err)
@@ -218,8 +218,34 @@ describe("selective binary dependency compatibility", function()
                 "the provider initialized before its name check")
             local provider = open()
             assert(provider.initializations == 1)
-            assert(open("bc180_provider", "./bc180_provider.so") == provider)
+            assert(open("bc180_provider", path) == provider)
+            assert(open() == provider)
             assert(provider.initializations == 1)
+        ]])
+        assert.truthy(ok, out)
+    end)
+
+    it("keeps a package.preload alias of a provider opener", function()
+        build({ {
+            name = "bc180_provider",
+            src = [[
+                initializations: integer = 0
+                do
+                    initializations = initializations + 1
+                end
+            ]],
+        } })
+        local ok, out = call([[
+            package.preload["bc180_alias"] = assert(package.loadlib(
+                "./bc180_provider.so", "luaopen_bc180_provider"))
+            local aliased = require "bc180_alias"
+            assert(aliased.initializations == 1)
+            assert(debug.getregistry()["Titan module bc180_provider"] == aliased,
+                "the aliased require did not return the canonical module")
+            local open = package.preload["bc180_alias"]
+            assert(open("bc180_provider", "./bc180_provider.so") == aliased)
+            assert(open() == aliased)
+            assert(aliased.initializations == 1)
         ]])
         assert.truthy(ok, out)
     end)

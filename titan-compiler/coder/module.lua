@@ -24,11 +24,22 @@ $SIGS
 ]]
 
 -- Opener names are not injective: `a.b-c` and `a.b_c` share luaopen_a_b_c.
--- A requested name must therefore match exactly before any initialization;
--- internal zero-argument calls skip the check.
+-- A file load must therefore request the exact name before any
+-- initialization. `require` passes the searcher's loader data as the second
+-- argument: the Titan and Lua file searchers pass a path, while
+-- `package.preload` passes ":preload:", which deliberately aliases this
+-- opener under any name in the requesting state. Direct internal calls pass
+-- no loader data at all.
 postamble = [[
 int $LUAOPEN_NAME(lua_State *L) {
-    if (lua_type(L, 1) == LUA_TSTRING) {
+    int _file_load = lua_type(L, 2) == LUA_TSTRING;
+    if (_file_load) {
+        size_t _data_len;
+        const char *_data = lua_tolstring(L, 2, &_data_len);
+        _file_load = _data_len != sizeof(":preload:") - 1 ||
+            memcmp(_data, ":preload:", _data_len) != 0;
+    }
+    if (_file_load && lua_type(L, 1) == LUA_TSTRING) {
         size_t _requested_len;
         const char *_requested = lua_tolstring(L, 1, &_requested_len);
         if (_requested_len != sizeof($LOGICALNAME) - 1 ||
