@@ -15,7 +15,7 @@ runtime="$check_root/runtime ü space"
 providers="$runtime/lib/titan/0.6"
 hostile_cwd="$check_root/cwd"
 hostile_path="$check_root/path"
-mkdir -p "$runtime/bin" "$providers" "$hostile_cwd" "$hostile_path"
+mkdir -p "$runtime/bin" "$providers" "$runtime/lib/lua/5.5" "$hostile_cwd" "$hostile_path"
 cp "$prefix/bin/lua55.dll" "$runtime/bin/"
 
 # Parse the configured compiler as argv; never evaluate shell input.
@@ -30,13 +30,20 @@ printf '%s\n' '#include <_mingw.h>' \
   '#error Expected native Clang x64 with UCRT headers' '#endif' | \
   "${compiler[@]}" -x c -E - > /dev/null
 
-common=(-std=c99 -Wall -Wextra "${cppflags[@]}" "${cflags[@]}" -Wno-unused-function \
+# Generated, runtime and fixture C consume the controlled Lua DLL's internals.
+lua_dll_imports=(-DLUA_BUILD_AS_DLL
+  '-DLUAI_FUNC=__declspec(dllimport) extern'
+  '-DLUAI_DDEC(dec)=__declspec(dllimport) extern dec' '-DLUAI_DDEF=')
+common=(-std=c99 -Wall -Wextra "${cppflags[@]}" "${cflags[@]}" "${lua_dll_imports[@]}" -Wno-unused-function \
   -I titan-runtime -I "$prefix/include" -I "$prefix/src/lua-5.5.1")
 lua_import="$prefix/lib/liblua55.a"
-runtime_libraries=("$prefix/lib/libbacktrace.a" "$lua_import" -static-libgcc)
-"${compiler[@]}" "${common[@]}" -c titan-runtime/titan.c -o "$check_root/titan.o"
+runtime_libraries=("$prefix/lib/libbacktrace.a" "$build_root/runtime/libtitan.a" \
+  "$lua_import" -static-libgcc)
+# The support module is one ordinary Lua native module that exports only its
+# opener; providers and executables link the runtime archive instead.
 "${compiler[@]}" "${common[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
-  titan-runtime/ltitanlib.c "$lua_import" -lbcrypt -o "$providers/titan.dll"
+  titan-runtime/ltitanlib.c titan-runtime/titan_path.c "$lua_import" -lbcrypt \
+  -o "$runtime/lib/lua/5.5/titan.dll"
 fixture=spec/fixtures/windows/runtime_loader_provider.c
 for variant in provider dependency bad missing null; do
   defines=()
@@ -47,11 +54,11 @@ for variant in provider dependency bad missing null; do
     null) defines=(-DFIXTURE_ABI=NULL) ;;
   esac
   "${compiler[@]}" "${common[@]}" "${defines[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
-    "$fixture" "$check_root/titan.o" "${runtime_libraries[@]}" \
+    "$fixture" "${runtime_libraries[@]}" \
     -o "$providers/fixture-$variant.dll"
 done
 "${compiler[@]}" "${common[@]}" "${ldflags[@]}" spec/fixtures/windows/runtime_loader_probe.c \
-  "$check_root/titan.o" "${runtime_libraries[@]}" -o "$runtime/bin/runtime-loader-probe.exe"
+  "${runtime_libraries[@]}" -o "$runtime/bin/runtime-loader-probe.exe"
 
 # The dependency initially exists outside every Windows DLL search directory.
 # Fresh processes distinguish missing, process-PATH, and executable-bin lookup.

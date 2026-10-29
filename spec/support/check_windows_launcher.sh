@@ -25,17 +25,21 @@ CC=${CC:-clang} perl -MText::ParseWords=shellwords -e \
 mapfile -d '' -t compiler < "$check_root/compiler.argv"
 titan_windows_raw_flags "$check_root" RUNTIME
 [[ $("${compiler[@]}" -dumpmachine) == x86_64-w64-windows-gnu ]]
-common=(-std=c99 -Wall -Wextra "${cppflags[@]}" "${cflags[@]}" -Wno-unused-function \
+# Generated, runtime and fixture C consume the controlled Lua DLL's internals.
+lua_dll_imports=(-DLUA_BUILD_AS_DLL
+  '-DLUAI_FUNC=__declspec(dllimport) extern'
+  '-DLUAI_DDEC(dec)=__declspec(dllimport) extern dec' '-DLUAI_DDEF=')
+common=(-std=c99 -Wall -Wextra "${cppflags[@]}" "${cflags[@]}" "${lua_dll_imports[@]}" -Wno-unused-function \
   -I titan-runtime -I "$prefix/include" -I "$prefix/src/lua-5.5.1")
-runtime_libraries=("$prefix/lib/libbacktrace.a" "$prefix/lib/liblua55.a")
-"${compiler[@]}" "${common[@]}" -c titan-runtime/titan.c -o "$check_root/titan.o"
+runtime_libraries=("$prefix/lib/libbacktrace.a" "$build_root/runtime/libtitan.a" \
+  "$prefix/lib/liblua55.a")
 "${compiler[@]}" "${common[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
   -DFIXTURE_DEPENDENCY spec/fixtures/windows/runtime_loader_provider.c \
-  "$check_root/titan.o" "${runtime_libraries[@]}" -static-libgcc \
+  "${runtime_libraries[@]}" -static-libgcc \
   -o "$runtime/lib/titan/0.6/fixture-dependency.dll"
 "${compiler[@]}" "${common[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
   spec/fixtures/windows/runtime_launcher_provider.c "$generated/launcher.def" \
-  "$check_root/titan.o" "${runtime_libraries[@]}" "${system_libraries[@]}" -o "$runtime/${plan[2]}"
+  "${runtime_libraries[@]}" "${system_libraries[@]}" -o "$runtime/${plan[2]}"
 llvm-readobj --coff-exports "$runtime/${plan[2]}" > "$check_root/provider.exports"
 perl -0777 -e '
   my ($def, $report) = @ARGV;
@@ -53,10 +57,10 @@ for variant in launcher direct; do
   "${compiler[@]}" "${common[@]}" -c "$generated/$variant.c" -o "$check_root/$variant.o"
 done
 for name in "${plan[0]}" "${plan[1]}"; do
-  "${compiler[@]}" "${ldflags[@]}" "$check_root/launcher.o" "$check_root/titan.o" \
+  "${compiler[@]}" "${ldflags[@]}" "$check_root/launcher.o" \
     "$check_root/launcher.res" "${runtime_libraries[@]}" "${system_libraries[@]}" -o "$runtime/$name"
 done
-"${compiler[@]}" "${ldflags[@]}" "$check_root/direct.o" "$check_root/titan.o" \
+"${compiler[@]}" "${ldflags[@]}" "$check_root/direct.o" \
   "$check_root/launcher.res" "${runtime_libraries[@]}" "${system_libraries[@]}" -o "$runtime/bin/direct.exe"
 cp "$runtime/${plan[0]}" "$runtime/bin/renamed.exe"
 cmp "$runtime/${plan[0]}" "$runtime/bin/renamed.exe"
@@ -88,9 +92,11 @@ run_expected bin/direct.exe 37
 # Lua opener is called. The process has exited before replacing this image.
 "${compiler[@]}" "${common[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
   '-DFIXTURE_LAUNCHER_ABI="999"' spec/fixtures/windows/runtime_launcher_provider.c \
-  "$generated/launcher.def" "$check_root/titan.o" "${runtime_libraries[@]}" "${system_libraries[@]}" -o "$runtime/${plan[2]}"
+  "$generated/launcher.def" "${runtime_libraries[@]}" "${system_libraries[@]}" -o "$runtime/${plan[2]}"
 status=0
 (cd "$check_root/cwd"; PATH='' "$runtime/bin/renamed.exe" one ü) > "$check_root/incompatible.log" 2>&1 || status=$?
 [[ $status == 1 ]]
-grep -F 'ABI mismatch: expected 2 but found 999' "$check_root/incompatible.log" >/dev/null
+abi=$(perl -ne 'print "$1\n" if /^#define\s+TITAN_ABI_VERSION\s+"([^"]+)"/' titan-runtime/titan.h)
+[[ -n $abi ]]
+grep -F "ABI mismatch: expected $abi but found 999" "$check_root/incompatible.log" >/dev/null
 echo "Native Windows launcher evidence: $check_root"

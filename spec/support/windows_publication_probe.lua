@@ -19,35 +19,59 @@ local function write(path, bytes)
   local f = assert(io.open(path, "wb")); assert(f:write(bytes)); assert(f:close())
 end
 local old = read(root .. "/support.dll")
-for _, mode in ipairs({ "normal", "rollback", "new-companion", "mapped", "mapped-unchanged", "alias" }) do
+local function fail_at(second)
+  return { after_commit = function(index, _)
+    if index == second then return nil, "injected final failure" end
+    return true
+  end }
+end
+for _, mode in ipairs({ "provider", "program", "rollback", "new-launcher", "mapped",
+    "mapped-unchanged", "alias" }) do
   local prefix = root .. "/" .. mode
-  local image, shim, source = prefix .. "-provider.dll", prefix .. ".lua", prefix .. "-source.dll"
+  local image, launcher = prefix .. "-provider.dll", prefix .. ".exe"
+  local source, executable_source = prefix .. "-source.dll", prefix .. "-source.exe"
   write(image, old)
-  if mode ~= "new-companion" then write(shim, "old shim") end
   write(source, mode == "mapped-unchanged" and old or old .. "new overlay")
+  write(executable_source, "new executable")
+  local launcher_existed = mode == "program" or mode == "rollback"
+  if launcher_existed then write(launcher, "old executable") end
   local held
   if mode == "mapped" or mode == "mapped-unchanged" then
     held = assert(package.loadlib(image, "luaopen_titan"))
   end
-  local options
-  if mode == "rollback" or mode == "new-companion" then options = { after_commit = function(i)
-    if i == 2 then return nil, "injected final failure" end
-    return true
-  end } end
-  local ok, err = publication.publish({ { destination = shim, contents = "new shim" },
-    { destination = image, source = mode == "alias" and image:upper() or source } }, fs, options)
+  local request, options
+  if mode == "provider" or mode == "alias" then
+    request = { destination = image,
+      source = mode == "alias" and image:upper() or source }
+  else
+    request = { provider = { destination = image, source = source },
+      executable = { destination = launcher, source = executable_source } }
+    if mode == "rollback" or mode == "new-launcher" then options = fail_at(2) end
+  end
+  local ok, err
+  if request.provider then
+    ok, err = publication.publish_program(request, fs, options)
+  else
+    ok, err = publication.publish({ request }, fs, options)
+  end
   print(mode .. ": " .. tostring(ok) .. " " .. tostring(err))
-  if mode == "normal" then
-    assert(ok, err); assert(read(image) == old .. "new overlay"); assert(read(shim) == "new shim")
+  if mode == "provider" or mode == "program" then
+    assert(ok, err)
+    assert(read(image) == old .. "new overlay", "provider bytes were not published")
+    if mode == "program" then
+      assert(read(launcher) == "new executable", "launcher bytes were not published")
+    else
+      assert(not filesystem:lstat(launcher), "single-provider publication created a launcher")
+    end
   elseif mode == "mapped-unchanged" then
-    assert(ok, err); assert(read(image) == old); assert(read(shim) == "new shim")
+    assert(ok, err); assert(read(image) == old, "unchanged mapped image was rewritten")
   else
     assert(not ok, "expected protected failure")
     assert(read(image) == old, "previous image bytes changed")
-    if mode == "new-companion" then
-      assert(filesystem:lstat(shim) == nil, "new shim survived rollback")
-    else
-      assert(read(shim) == "old shim", "previous shim bytes changed")
+    if mode == "new-launcher" then
+      assert(filesystem:lstat(launcher) == nil, "new launcher survived rollback")
+    elseif launcher_existed then
+      assert(read(launcher) == "old executable", "previous launcher bytes changed")
     end
   end
   if held then assert(type(held()) == "table") end

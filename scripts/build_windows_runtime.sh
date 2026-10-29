@@ -55,14 +55,21 @@ archive_objects() {
   pending_output=
 }
 common=(-std=c99 -Wall -Wextra "${cppflags[@]}" -I titan-runtime -I "$prefix/src/lua-5.5.1" -I "$prefix/include")
-for name in titan minicoro ltitanlib; do
+# The controlled Lua DLL exposes its public and internal surface. Name those
+# imports explicitly; MinGW auto-import alone does not cover every data symbol.
+lua_dll_imports=(-DLUA_BUILD_AS_DLL
+  '-DLUAI_FUNC=__declspec(dllimport) extern'
+  '-DLUAI_DDEC(dec)=__declspec(dllimport) extern dec' '-DLUAI_DDEF=')
+for name in titan minicoro titan_path ltitanlib; do
   if needs_build "$work/$name.o" "titan-runtime/$name.c" "${headers[@]}"; then
-    write_output "$work/$name.o" "${compiler[@]}" "${common[@]}" "${runtime_cflags[@]}" \
+    write_output "$work/$name.o" "${compiler[@]}" "${common[@]}" "${lua_dll_imports[@]}" "${runtime_cflags[@]}" \
       -c "titan-runtime/$name.c" -o "$work/$name.o"
   fi
 done
-if needs_build "$work/libtitan.a" "$work/titan.o" "$work/minicoro.o"; then
-  archive_objects "$work/libtitan.a" "$work/titan.o" "$work/minicoro.o"
+if needs_build "$work/libtitan.a" "$work/titan.o" "$work/minicoro.o" \
+    "$work/titan_path.o" "$work/ltitanlib.o"; then
+  archive_objects "$work/libtitan.a" "$work/titan.o" "$work/minicoro.o" \
+    "$work/titan_path.o" "$work/ltitanlib.o"
 fi
 peg_objects=()
 for name in lplcap lplcode lplprint lpltree lplvm; do
@@ -75,8 +82,11 @@ done
 if needs_build "$work/libtitan-lpeglabel.a" "${peg_objects[@]}"; then
   archive_objects "$work/libtitan-lpeglabel.a" "${peg_objects[@]}"
 fi
-if needs_build "$work/titan.dll" "$work/ltitanlib.o" "$prefix/lib/liblua55.a"; then
+# The support module exports only luaopen_titan: it is the path/searcher
+# helpers plus the Lua import library, not the whole runtime archive.
+if needs_build "$work/titan.dll" "$work/ltitanlib.o" "$work/titan_path.o" "$prefix/lib/liblua55.a"; then
   write_output "$work/titan.dll" "${compiler[@]}" -shared "${runtime_ldflags[@]}" \
     -Wl,--exclude-all-symbols -Wl,--no-insert-timestamp \
-    -o "$work/titan.dll" "$work/ltitanlib.o" "$prefix/lib/liblua55.a"
+    -o "$work/titan.dll" "$work/ltitanlib.o" "$work/titan_path.o" \
+    "$prefix/lib/liblua55.a"
 fi

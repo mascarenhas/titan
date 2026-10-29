@@ -10,6 +10,8 @@ cp -R "$prefix/bin" "$prefix/lib" "$prefix/share" "$runtime/"
 for module in lfs lpeglabel luv; do
   perl spec/support/check_windows_compiler_pe.pl --allow-extra-exports "$runtime/lib/lua/5.5/$module.dll" "luaopen_$module"
 done
+# The support module is one ordinary native module with a single export.
+perl spec/support/check_windows_compiler_pe.pl "$runtime/lib/lua/5.5/titan.dll" luaopen_titan
 unset LUA_INIT LUA_INIT_5_5 LUA_PATH LUA_PATH_5_5 LUA_CPATH LUA_CPATH_5_5
 export MSYS2_ARG_CONV_EXCL='*'
 (cd "$check/cwd"; "$runtime/bin/lua.exe" -E -e '

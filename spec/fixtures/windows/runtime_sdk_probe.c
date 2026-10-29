@@ -6,6 +6,10 @@
 #include "minicoro.h"
 #include "titan_lpeglabel.h"
 
+/* A static consumer links the support opener from libtitan.a, exactly as the
+** language server does, instead of loading the support native module. */
+extern int luaopen_titan(lua_State *L);
+
 static TValue tag;
 static int steps;
 static mco_result yielded;
@@ -31,6 +35,14 @@ int main(void) {
         fprintf(stderr, "%s\n", lua_tostring(L, -1));
         return 2;
     }
+    if (luaopen_titan(L) != 1 || !lua_istable(L, -1)) return 7;
+    lua_getfield(L, -1, "_loadlib");
+    if (!lua_isfunction(L, -1)) return 8;
+    lua_pop(L, 1);
+    lua_getfield(L, -1, "_executable_dir");
+    if (!lua_isfunction(L, -1)) return 9;
+    lua_pop(L, 1);
+    lua_pop(L, 1);
     setivalue(&tag, 17);
     descriptor.runtime = &runtime;
     if (mco_create(&co, &descriptor) != MCO_SUCCESS) return 3;
@@ -39,6 +51,6 @@ int main(void) {
             yielded != MCO_SUCCESS) return 5;
     if (mco_destroy(co) != MCO_SUCCESS || runtime.current_co != NULL) return 6;
     lua_close(L);
-    puts("Windows runtime SDK: shared Lua, private PEG, explicit-runtime coroutine yield/resume passed");
+    puts("Windows runtime SDK: shared Lua, private PEG, static support opener, explicit-runtime coroutine yield/resume passed");
     return 0;
 }

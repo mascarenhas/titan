@@ -1,4 +1,5 @@
-/* A real SDK consumer: LUA_LIB must not turn its Lua imports into exports. */
+/* A real SDK consumer: the library source role exports this module's own
+** definitions and never re-exports the Lua API it declares. */
 #define LUA_LIB
 #include <windows.h>
 #include "lua.h"
