@@ -44,14 +44,14 @@ def command(argv, *, env=None, cwd=None, timeout=60):
 def prefix_identity(prefix):
     # The prefix is a read-only provider. Disable probe caches for consumers.
     paths = [prefix / "bin/lua", prefix / "bin/titanc", prefix / "lib/titan/0.6/titan.so",
-             prefix / "lib/titan/0.6/titan.a", prefix / "lib/titan/0.6/libtitan.a"]
+             prefix / "lib/titan/0.6/titan.a", prefix / "lib/titan/0.6/libtitan.a",
+             prefix / "lib/lua/5.5/titan.so"]
     paths += sorted((prefix / "share/lua/5.5/titan-compiler").rglob("*.lua"))
-    paths += sorted((prefix / "share/lua/5.5/titan").glob("*.lua"))
     # libtitan.a is SDK-layout dependent; capture its actual locations too.
     paths = [path for path in paths if path.is_file()]
     paths += sorted(prefix.glob("**/libtitan.a"))
     mandatory = ("bin/lua", "bin/titanc", "lib/titan/0.6/titan.so", "lib/titan/0.6/titan.a",
-                 "share/lua/5.5/titan/websocket.lua")
+                 "lib/lua/5.5/titan.so")
     for relative in mandatory:
         if not (prefix / relative).is_file():
             raise RuntimeError("current installed prefix missing " + relative)

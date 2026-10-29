@@ -13,7 +13,6 @@ TITANC="$PREFIX/bin/titanc"
 LIBRARY_ROOT="$PREFIX/lib/titan/0.6"
 PROVIDER="$LIBRARY_ROOT/titan.so"
 RUNTIME_ARCHIVE="$LIBRARY_ROOT/libtitan.a"
-SHIM_DIR="$PREFIX/share/lua/5.5/titan"
 
 test -x "$LUA"
 test -x "$TITANC"
@@ -21,18 +20,13 @@ test -f "$PROVIDER" && test ! -L "$PROVIDER"
 test -f "$LIBRARY_ROOT/titan.a" && test ! -L "$LIBRARY_ROOT/titan.a"
 test -f "$RUNTIME_ARCHIVE" && test ! -L "$RUNTIME_ARCHIVE"
 test ! -e "$PREFIX/lib/libtitan.a"
-test -d "$SHIM_DIR" && test ! -L "$SHIM_DIR"
 
 SMOKE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/titan-peg-string-san.XXXXXX")
 PROVIDER_HIDDEN="$LIBRARY_ROOT/.titan.so.peg-string-san.$$"
-SHIMS_HIDDEN="$PREFIX/share/lua/5.5/.titan.peg-string-san.$$"
 
 restore_provider() {
     if [[ -e $PROVIDER_HIDDEN || -L $PROVIDER_HIDDEN ]]; then
         mv "$PROVIDER_HIDDEN" "$PROVIDER"
-    fi
-    if [[ -e $SHIMS_HIDDEN || -L $SHIMS_HIDDEN ]]; then
-        mv "$SHIMS_HIDDEN" "$SHIM_DIR"
     fi
 }
 
@@ -42,12 +36,11 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-"$LUA" -E - "$PREFIX" <<'LUA'
-local prefix = assert(arg[1])
-package.path = prefix .. "/share/lua/5.5/?.lua;" ..
-               prefix .. "/share/lua/5.5/?/init.lua"
-package.cpath = prefix .. "/lib/titan/0.6/?.so;" ..
-                prefix .. "/lib/lua/5.5/?.so"
+env TITAN_PATH_0_6="$LIBRARY_ROOT;;" TITAN_PATH= \
+    "$LUA" -E - <<'LUA'
+-- The support module is the only image that opens `titan`; loading it installs
+-- the Titan searcher, which then finds the combined provider modules below.
+require "titan"
 
 local peg = require "titan.peg"
 local strings = require "titan.string"
@@ -114,7 +107,6 @@ TITAN
 
 test -x "$SMOKE_TMP/static_peg_string_smoke"
 mv "$PROVIDER" "$PROVIDER_HIDDEN"
-mv "$SHIM_DIR" "$SHIMS_HIDDEN"
 env \
     LUA_PATH="$SMOKE_TMP/no-lua/?.lua" \
     LUA_CPATH="$SMOKE_TMP/no-lua/?.so" \
