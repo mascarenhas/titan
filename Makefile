@@ -1062,9 +1062,8 @@ $(TITAN_RUNTIME_LIB): $(TITAN_RUNTIME_OBJECTS)
 $(TITAN_SUPPORT_MODULE): $(LTITANLIB_O) $(TITAN_PATH_O) $(TITAN_SUPPORT_EXPORTS)
 	@mkdir -p "$(@D)"
 	@set -e; tmp="$@.tmp"; rm -f "$$tmp"; \
-	if $(ROCK_LD) $(ROCK_LIBFLAG) $(TITAN_SUPPORT_EXPORT_FLAGS) \
-		-o "$$tmp" $(LTITANLIB_O) $(TITAN_PATH_O) \
-		$(TITAN_EXTRA_LDFLAGS); then \
+	if $(ROCK_LD) $(ROCK_LIBFLAG) $(TITAN_SUPPORT_EXPORT_FLAGS) -o "$$tmp" \
+		$(LTITANLIB_O) $(TITAN_PATH_O) $(TITAN_EXTRA_LDFLAGS); then \
 		mv -f "$$tmp" "$@"; \
 	else \
 		status=$$?; rm -f "$$tmp"; exit $$status; \
