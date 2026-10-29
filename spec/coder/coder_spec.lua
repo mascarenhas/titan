@@ -990,6 +990,51 @@ describe("Titan code generator", function()
         ]])
     end)
 
+    it("evaluates two-boolean 'and' and same-option 'or' with Lua's values (issue #316)", function()
+        run_coder([[
+            function keep(a: boolean, b: boolean, c: boolean): boolean
+                local value = (a and b) or (a and c)
+                return value
+            end
+            function described_and(a: boolean, b: boolean): string
+                local result: boolean? = a and b
+                if result == nil then return "nil" end
+                if result then return "true" end
+                return "false"
+            end
+            function described_or(a: boolean?, b: boolean?): string
+                local result: boolean? = a or b
+                if result == nil then return "nil" end
+                if result then return "true" end
+                return "false"
+            end
+            function pick_int(a: integer?, b: integer?): integer?
+                return a or b
+            end
+            function described_and_int(a: boolean, n: integer): string
+                local result: integer? = a and n
+                if result == nil then return "nil" end
+                return "present"
+            end
+        ]], [[
+            assert(test.keep(true, false, true) == true)
+            assert(test.keep(true, true, false) == true)
+            assert(test.keep(false, true, true) == false)
+            assert(test.described_and(false, true) == "false")
+            assert(test.described_and(true, false) == "false")
+            assert(test.described_and(true, true) == "true")
+            assert(test.described_or(nil, nil) == "nil")
+            assert(test.described_or(nil, false) == "false")
+            assert(test.described_or(false, true) == "true")
+            assert(test.described_or(true, nil) == "true")
+            assert(test.pick_int(nil, 5) == 5)
+            assert(test.pick_int(3, 5) == 3)
+            assert(test.pick_int(nil, nil) == nil)
+            assert(test.described_and_int(false, 7) == "nil")
+            assert(test.described_and_int(true, 7) == "present")
+        ]])
+    end)
+
     it("compiles a Lua-faithful numeric for (overflow-safe, copy semantics)", function()
         run_coder([[
             function up(): integer local s: integer = 0 for i = 1, 10 do s = s + i end return s end

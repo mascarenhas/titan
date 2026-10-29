@@ -1265,6 +1265,71 @@ describe("Titan type checker", function()
         assert.same(types.Boolean(), ast[1].block.stats[16].exps[1]._type)
     end)
 
+    it("types 'and' over two booleans and the all-boolean 'or' chain", function ()
+        local code = [[
+            function fn(a: boolean, b: boolean, c: boolean)
+                local both = a and b
+                local chain = a and b and a
+                local keep = (a and b) or (a and c)
+            end
+        ]]
+        local ok, err, ast = run_checker(code)
+        assert.truthy(ok, err)
+        assert.same(types.Boolean(), ast[1].block.stats[1].exps[1]._type)
+        assert.same(types.Boolean(), ast[1].block.stats[2].exps[1]._type)
+        assert.same(types.Boolean(), ast[1].block.stats[3].exps[1]._type)
+    end)
+
+    it("keeps 'and' optional when the right operand is not boolean", function ()
+        local code = [[
+            function fn(b: boolean, f: float, of: float?, bf: boolean?)
+                local b_f = b and f
+                local b_of = b and of
+                local b_bf = b and bf
+            end
+        ]]
+        local ok, err, ast = run_checker(code)
+        assert.truthy(ok, err)
+        assert.same(types.Option(types.Float()),
+            ast[1].block.stats[1].exps[1].exp._type)
+        assert.same(types.Option(types.Float()),
+            ast[1].block.stats[2].exps[1].exp._type)
+        assert.same(types.Option(types.Boolean()),
+            ast[1].block.stats[3].exps[1].exp._type)
+    end)
+
+    it("types 'or' over two operands of one option type as that option", function ()
+        local code = [[
+            function fn(b1: boolean?, b2: boolean?, i1: integer?, i2: integer?,
+                        s1: string?, s2: string?)
+                local bo: boolean? = b1 or b2
+                local io: integer? = i1 or i2
+                local so: string? = s1 or s2
+            end
+        ]]
+        local ok, err, ast = run_checker(code)
+        assert.truthy(ok, err)
+        assert.same(types.Option(types.Boolean()),
+            ast[1].block.stats[1].exps[1]._type)
+        assert.same(types.Option(types.Integer()),
+            ast[1].block.stats[2].exps[1]._type)
+        assert.same(types.Option(types.String()),
+            ast[1].block.stats[3].exps[1]._type)
+    end)
+
+    it("still rejects 'or' over operands of unrelated option types", function ()
+        local code = [[
+            function fn(i: integer?, s: string?): string?
+                return i or s
+            end
+        ]]
+        local ok, err = run_checker(code)
+        assert.falsy(ok)
+        assert.truthy(err:find(
+            "left hand side of 'or' is a integer? but right hand side is a string?",
+            1, true), err)
+    end)
+
     for _, op in ipairs({"|", "&", "<<", ">>"}) do
         it("coerces "..op.." to integer if other side is a float", function()
             local code = [[

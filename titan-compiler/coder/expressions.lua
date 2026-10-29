@@ -1458,6 +1458,38 @@ function codebinaryop(ctx, node, _)
             local lstats, lcode = materialize(ctx, node.lhs)
             local rstats, rcode = codeexp(ctx, node.rhs)
             return lstats .. "\n((void)" .. lcode .. ");\n" .. rstats, rcode
+        elseif node.lhs._type._tag == "Type.Option"
+               and types.equals(node.lhs._type, node.rhs._type) then
+            -- Both sides share an option type, so a truthy left operand is the
+            -- result as-is and an absent (or `false` payload) left operand
+            -- selects the right operand.
+            local lstats, lcode = materialize(ctx, node.lhs)
+            local rstats, rcode = materialize(ctx, node.rhs)
+            local ctmp, tmpname, tmpslot =
+                newtmp(ctx, node._type, types.is_gc(node._type))
+            local tmpset = types.is_gc(node._type)
+                and setslot(node._type, tmpslot, tmpname) or ""
+            local code = render([[
+                $LSTATS
+                $CTMP
+                if(!($COND)) {
+                    $RSTATS;
+                    $TMPNAME = $RCODE;
+                } else {
+                    $TMPNAME = $LCODE;
+                }
+                $TMPSET;
+            ]], {
+                CTMP = ctmp,
+                TMPNAME = tmpname,
+                COND = toboolean(node.lhs._type, lcode),
+                LSTATS = lstats,
+                RSTATS = rstats,
+                RCODE = rcode,
+                LCODE = lcode,
+                TMPSET = tmpset,
+            })
+            return code, tmpname
         elseif node.lhs._type._tag == "Type.Option" then
             assert(types.equals(node.lhs._type.base, node.rhs._type))
             local lstats, lcode = materialize(ctx, node.lhs)

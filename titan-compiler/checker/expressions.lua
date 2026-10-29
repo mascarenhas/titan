@@ -585,6 +585,11 @@ checkexp = util.make_visitor({
                 node._type = trhs
             elseif types.is_falsy(tlhs) then
                 node._type = tlhs
+            elseif tlhs._tag == "Type.Boolean" and trhs._tag == "Type.Boolean" then
+                -- A false left operand is itself a boolean, so `and` over two
+                -- booleans has Lua's exact boolean result instead of the
+                -- optional result the other falsy left operands require.
+                node._type = types.Boolean()
             else
                 node.rhs = trycoerce(node.rhs, optionize(trhs), errors)
                 trhs = node.rhs._type
@@ -611,6 +616,11 @@ checkexp = util.make_visitor({
                 node._type = trhs
             elseif tlhs._tag == "Type.Option" and types.equals(tlhs.base, trhs) then
                 node._type = trhs
+            elseif tlhs._tag == "Type.Option" and types.equals(tlhs, trhs) then
+                -- Both sides share an option type: a truthy left operand is the
+                -- result, otherwise the right operand, so the result keeps that
+                -- option type and no defaulting unwrap applies.
+                node._type = tlhs
             elseif tlhs._tag == "Type.Option" and trhs._tag == "Type.Value" then
                 node.lhs = trycoerce(node.lhs, types.Value(), errors)
                 tlhs = node.lhs._type
