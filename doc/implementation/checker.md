@@ -290,7 +290,10 @@ as the complete foreign environment's canonical `lua_State` pointer, and `M`,
 the current-module marker. Member selection on `M` resolves owner
 declarations, including source-private ones; qualified type syntax `M.Type`
 uses the same owner namespace rather than a lexical or generic shadow; and an
-explicit `as foreign *Udata` lowers it to the native module pointer.
+explicit `as foreign *Udata` lowers it to the native module pointer. `Udata`
+in that cast is an ordinary foreign type name with no implicit declaration, so
+the module must `foreign import "titan/ffi.h"`, which declares it; otherwise
+the cast reports `foreign type 'Udata' is not declared`.
 
 After checking, `makemoduletype` (`checker/imports.lua`) builds the module's
 interface by traversing the AST in order, skipping `_ignore` and import
@@ -723,10 +726,19 @@ frozen callable adapters reuse them as described in
 
 `or` implements option defaulting: when the left side is `t?` and the right
 side's type equals `t`, the whole expression has type `t` (`of or 1.0` with
-`of: float?` is a `float`). The full `and`/`or` case ladders (Boolean
-contexts, statically truthy/falsy left sides, optionizing the right side of
-`and`, Value mixing) live in `checkexp`'s `Ast.ExpBinop` handler and are
-specified case-by-case in [option types](../language/option-types.md).
+`of: float?` is a `float`). When the right side's type equals `t?` itself,
+the expression keeps that type and nothing is unwrapped. Outside a Boolean
+context, a `boolean` beside a `value` in `or` is injected into `value` with
+`trycoerce`, and the result is `value`. This branch runs before the one that
+converts a `boolean` beside any other type by `truthiness` and yields
+`boolean`. `and` over two `boolean` operands is typed `boolean` directly,
+because a false left operand is itself a boolean. The other left sides that
+are neither statically truthy nor falsy optionize the right side. The full
+`and`/`or` case ladders (Boolean contexts, statically truthy/falsy left
+sides, optionizing the right side of `and`, Value mixing) live in
+`checkexp`'s `Ast.ExpBinop` handler and are specified case-by-case in
+[expressions](../language/expressions.md#and-or-and-not) and
+[option types](../language/option-types.md).
 
 ## Closures: capture analysis and lambda inference
 

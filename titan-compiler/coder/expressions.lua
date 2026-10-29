@@ -1459,11 +1459,19 @@ function codebinaryop(ctx, node, _)
             local rstats, rcode = codeexp(ctx, node.rhs)
             return lstats .. "\n((void)" .. lcode .. ");\n" .. rstats, rcode
         elseif node.lhs._type._tag == "Type.Option" then
-            assert(types.equals(node.lhs._type.base, node.rhs._type))
+            -- The right operand is either the same Option type (both sides
+            -- share it, so the truthy left operand is the result as-is) or its
+            -- base type (defaulting, which unwraps the left operand).
+            local copies_left = types.equals(node._type, node.lhs._type)
+            if not copies_left then
+                assert(types.equals(node.lhs._type.base, node.rhs._type))
+            end
             local lstats, lcode = materialize(ctx, node.lhs)
             local rstats, rcode = materialize(ctx, node.rhs)
-            local ctmp, tmpname, tmpslot = newtmp(ctx, node._type, types.is_gc(node._type))
-            local tmpset = types.is_gc(node._type) and setslot(node._type, tmpslot, tmpname) or ""
+            local ctmp, tmpname, tmpslot =
+                newtmp(ctx, node._type, types.is_gc(node._type))
+            local tmpset = types.is_gc(node._type)
+                and setslot(node._type, tmpslot, tmpname) or ""
             local code = render([[
                 $LSTATS
                 $CTMP
@@ -1471,7 +1479,7 @@ function codebinaryop(ctx, node, _)
                     $RSTATS;
                     $TMPNAME = $RCODE;
                 } else {
-                    $GETL;
+                    $KEEP;
                 }
                 $TMPSET;
             ]], {
@@ -1481,8 +1489,11 @@ function codebinaryop(ctx, node, _)
                 LSTATS = lstats,
                 RSTATS = rstats,
                 RCODE = rcode,
+                LCODE = lcode,
                 TMPSET = tmpset,
-                GETL = coder._option_get(node.lhs._type, tmpname, lcode),
+                KEEP = copies_left
+                    and ("$TMPNAME = $LCODE")
+                    or coder._option_get(node.lhs._type, tmpname, lcode),
             })
             return code, tmpname
         else

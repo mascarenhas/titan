@@ -63,8 +63,16 @@ describe("type-relation soundness (checker)", function()
             assert_truthiness(op.rhs, "Type.Value")
         end
         local default = tree[4].block.stats[1].exps[1]
-        assert_truthiness(default.lhs, "Type.Value")
-        assert.equal("Ast.ExpBool", default.rhs._tag)
+        -- A `value` beside a `boolean` stays `value` in `or`: the boolean
+        -- operand is injected as a value rather than coerced by truthiness.
+        assert.equal("Ast.ExpBinop", default._tag)
+        assert.equal("Type.Value", default._type._tag)
+        assert.equal("Ast.ExpVar", default.lhs._tag)
+        assert.equal("Type.Value", default.lhs._type._tag)
+        assert.equal("Ast.ExpCast", default.rhs._tag)
+        assert.equal("Type.Value", default.rhs._type._tag)
+        assert.equal("gradual_view", default.rhs._adjustment.kind)
+        assert.equal("inject", default.rhs._adjustment.op)
         local strict = tree[5].block.stats[1].exps[1]
         assert.equal("gradual_view", strict._adjustment.kind)
         assert.equal("project", strict._adjustment.op)

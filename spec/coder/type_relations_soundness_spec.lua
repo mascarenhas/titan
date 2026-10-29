@@ -56,7 +56,7 @@ describe("type-relation soundness (end-to-end)", function()
             function nested(a: value, b: value, c: value): boolean
                 return (a and b) or not c
             end
-            function boolean_default(a: value): (boolean, boolean)
+            function boolean_default(a: value): (value, value)
                 local right = a or false
                 local left = false or a
                 return right, left
@@ -109,7 +109,9 @@ describe("type-relation soundness (end-to-end)", function()
                 assert(test.direct(a) == not not a)
                 assert(test.negate(a) == not a)
                 local right, left = test.boolean_default(a)
-                assert(right == not not a and left == not not a)
+                -- `value or boolean` stays a value and is Lua-exact: a truthy
+                -- left operand is returned unchanged, not as its truthiness.
+                assert(right == (a or false) and left == (false or a))
                 for j = 1, samples.n do
                     local b = samples[j]
                     local conjunction, disjunction = test.contextual(a, b)

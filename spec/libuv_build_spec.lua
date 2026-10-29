@@ -512,16 +512,24 @@ local function local_union_declarations(path)
     return unions
 end
 
-local function makefile_words(name, filename)
+-- A literal Lua-pattern spelling of a Makefile variable or target name, which
+-- may contain `-` (a quantifier outside a set).
+local function pattern_literal(text)
+    return (text:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%0"))
+end
+
+-- Collect the words of the first assignment whose left-hand side matches
+-- `pattern`, joining continuation lines.
+local function makefile_assignment_words(label, filename, pattern)
     local values = {}
     local collecting = false
     local found = false
-    for line in (read_file(filename or "Makefile") .. "\n"):gmatch("(.-)\n") do
+    for line in (read_file(filename) .. "\n"):gmatch("(.-)\n") do
         local value
         if collecting then
             value = line
         else
-            value = line:match("^" .. name .. "%s*:=%s*(.*)$")
+            value = line:match(pattern)
             if value then found = true end
         end
         if value then
@@ -532,8 +540,8 @@ local function makefile_words(name, filename)
             if not collecting then break end
         end
     end
-    assert.truthy(found, "missing Makefile variable " .. name)
-    assert.falsy(collecting, "unterminated Makefile variable " .. name)
+    assert.truthy(found, "missing Makefile variable " .. label)
+    assert.falsy(collecting, "unterminated Makefile variable " .. label)
     local result = {}
     local prefixing = false
     for _, word in ipairs(values) do
@@ -547,6 +555,19 @@ local function makefile_words(name, filename)
         end
     end
     return result
+end
+
+local function makefile_words(name, filename)
+    return makefile_assignment_words(name, filename or "Makefile",
+        "^" .. pattern_literal(name) .. "%s*:=%s*(.*)$")
+end
+
+-- Target-specific `export NAME = ...` assignments, which Makefile.win uses for
+-- the per-target Busted spec lists no ordinary variable declares.
+local function makefile_target_export_words(filename, target, name)
+    return makefile_assignment_words(name, filename,
+        "^" .. pattern_literal(target) .. "%s*:%s*export%s+"
+        .. pattern_literal(name) .. "%s*[:+%?]?=%s*(.*)$")
 end
 
 -- Sorted paths of an inventory domain, which the loader builds in discovery
@@ -5494,17 +5515,6 @@ printf '%s\n' "${schedule[@]}"
                 end
             end
             assert_no_stdlib_lua("spec/stdlib")
-            for _, retained in ipairs({
-                "spec/asan_generated_c_context_spec.lua",
-                "spec/dense_array_runtime_spec.lua",
-                "spec/libuv_build_spec.lua",
-                "spec/lpeglabel_build_spec.lua",
-                "spec/minicoro_spec.lua",
-                "spec/rockspec_spec.lua",
-                "spec/titan_install_spec.lua",
-            }) do
-                assert.truthy(makefile:find(retained, 1, true), retained)
-            end
             local packaging_step = named_step(native_coverage_job,
                 "Run retained runtime and packaging specs")
             for _, contract in ipairs({
@@ -5890,13 +5900,6 @@ printf '%s\n' "${schedule[@]}"
                 "compiler_tests=()",
                 "compiler_unit_tests=()",
                 "compiler_isolated_coverage_tests=()",
-                "spec/asan_generated_c_context_spec.lua",
-                "spec/dense_array_runtime_spec.lua",
-                "spec/libuv_build_spec.lua",
-                "spec/lpeglabel_build_spec.lua",
-                "spec/minicoro_spec.lua",
-                "spec/rockspec_spec.lua",
-                "spec/titan_install_spec.lua",
                 "run_isolated_compiler_coverage",
                 '"$BUSTED" -c -o gtest -v --exclude-tags=stress ' ..
                     '"$test_file"',
@@ -6026,6 +6029,13 @@ printf '%s\n' "${schedule[@]}"
             local retained_declared = makefile_words("STDLIB_BUSTED_TESTS")
             table.sort(retained_declared)
             assert.same(sorted_paths(inventory.retained), retained_declared)
+            -- Makefile.win repeats the retained list as its own per-target
+            -- export for the native-first Busted phase; compare it with the
+            -- declaration so the two cannot drift silently.
+            local windows_retained = makefile_target_export_words("Makefile.win",
+                "rock-test", "TITAN_ROCK_TEST_STDLIB_SPECS")
+            table.sort(windows_retained)
+            assert.same(retained_declared, windows_retained)
             assert.same(sorted_paths(inventory.stdlib),
                 declared_spec_paths("spec/support/ci_stdlib_compiler_test_files.txt"))
             assert.equal(#inventory.items,
@@ -6071,22 +6081,31 @@ printf '%s\n' "${schedule[@]}"
             assert.equal(#inventory.stdlib, stdlib_count)
             assert.is_true(inventory.by_path[
                 "spec/coder/build_coordination_spec.lua"].exclusive)
+            -- The stress partition declares its own tagged specs; compare the
+            -- inventory's stress domain against that declaration instead of
+            -- pinning a size that every added stress spec would re-pin, as the
+            -- retained and stdlib domains do.
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")
             local stress_assigned = {}
-            local stress_count = 0
             for line in stress_partition:gmatch("[^\n]+") do
                 if line:sub(1, 1) ~= "#" then
                     assert.truthy(line:match("^spec/.+_spec[.]lua$"), line)
                     assert.falsy(stress_assigned[line], line)
-                    assert.truthy(assigned[line], line)
                     assert.truthy(read_file(line):find(
                         "#stress", 1, true), line)
                     stress_assigned[line] = true
-                    stress_count = stress_count + 1
                 end
             end
-            assert.equal(7, stress_count)
+            local stress_items = {}
+            for _, item in ipairs(inventory.items) do
+                if item.stress then
+                    stress_items[#stress_items + 1] = item
+                end
+            end
+            assert.same(declared_spec_paths(
+                "spec/support/ci_compiler_stress_files.txt"),
+                sorted_paths(stress_items))
 
             assert.equal(1, count_literal(sanitizer_job,
                     "name: sanitizer (ubuntu-24.04, ASan+UBSan)"),
