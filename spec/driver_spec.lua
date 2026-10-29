@@ -191,6 +191,16 @@ describe("compiler-specific production debug defaults", function()
         assert.is_true(result.ok, result.output or result.diagnostic)
         assert.is_true(subject.close_resolver_context(context))
     end)
+
+    it("reports unusable compiler defaults through the authored C prefix",
+       function()
+        local subject = fresh_driver("validation")
+        subject.CFLAGS = "'unterminated"
+        local args, err = subject.authored_c_compile_prefix()
+        assert.is_nil(args)
+        assert.equal("invalid compiler defaults: " ..
+            "unterminated single quote in shell words", err)
+    end)
 end)
 
 local function fixture_path(path)
@@ -1748,6 +1758,35 @@ describe("compiler installation discovery", function()
         assert.is_function(driver.encode_project_entry)
         assert.is_function(driver.compact_project_entry)
         assert.is_function(driver.decode_project_entry)
+    end)
+
+    it("surfaces the runtime's own reason when it cannot resolve the compiler root",
+       function()
+        local original_getenv = platform.getenv
+        local original_driver = package.loaded["titan-compiler.driver"]
+        local original_titan = package.loaded.titan
+        local reason = "cannot determine the compiler root from argv[0]"
+        local subject
+        local completed, failure = xpcall(function()
+            platform.getenv = function(name)
+                if name == "TITAN_ROOT" then return nil end
+                return original_getenv(name)
+            end
+            -- The runtime owns root discovery; an unusable answer carries its
+            -- own reason and must reach the caller unchanged.
+            package.loaded.titan = {
+                _compiler_root = function() return nil, reason end,
+            }
+            package.loaded["titan-compiler.driver"] = nil
+            subject = require "titan-compiler.driver"
+        end, debug.traceback)
+        package.loaded.titan = original_titan
+        package.loaded["titan-compiler.driver"] = original_driver
+        platform.getenv = original_getenv
+        assert.truthy(completed, failure)
+        local root, err = subject.compiler_root(compiler_io.new_sync())
+        assert.is_nil(root)
+        assert.equal(reason, err)
     end)
 
     it("validates and stores one resolver-owned I/O strategy", function()

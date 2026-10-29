@@ -293,6 +293,25 @@ describe("jobserver slots", function()
         assert(slots:close())
     end)
 
+    it("reports the first require line when the native support library is absent", function()
+        local saved = package.loaded.titan
+        local observed = {}
+        local completed, failure = pcall(function()
+            package.loaded.titan = nil
+            -- require appends every searched path; only the first line is reported.
+            package.preload.titan = function()
+                error("titan runtime is not installed\n\tno file 'titan.so'", 0)
+            end
+            observed = table.pack(jobs.open_slots(2, { makeflags = false }))
+        end)
+        package.preload.titan = nil
+        package.loaded.titan = saved
+        assert.is_true(completed, failure)
+        assert.is_nil(observed[1])
+        assert.equal("cannot load the Titan native support library: " ..
+            "titan runtime is not installed", observed[2])
+    end)
+
     it("reject a second concurrent signal guard and restore on close", function()
         local slots = assert(jobs.open_slots(2, { makeflags = false }))
         local second, err = jobs.open_slots(2, { makeflags = false })
