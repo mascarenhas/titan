@@ -401,10 +401,31 @@ end
 The base types must match exactly: with `x: float?`, `x or 0.0` has type
 `float`, but `x or 0` is a **compile-time error** —
 `left hand side of 'or' is a float? but right hand side is a integer` —
-there is no integer-to-float promotion through `or`. Two escapes from the
-exact-match rule: if either operand is a `boolean`, or the `or` sits in a
-boolean context, both sides are coerced to `boolean` instead; and if the
-right operand is a `value`, the option widens and the result is `value`.
+there is no integer-to-float promotion through `or`. The exact-match rule
+has four escapes:
+
+* if the `or` sits in a boolean context, both sides are coerced to
+  `boolean`;
+* if the right operand is a `value`, the option widens and the result is
+  `value`;
+* if either operand is a `boolean` and the other is not a `value`, both
+  sides are coerced to `boolean` by truthiness (`x or false` is a
+  `boolean`);
+* if the right operand has the same option type `T?`, nothing is
+  unwrapped and the result is `T?`: the left operand when it is truthy,
+  otherwise the right one.
+
+The last form chains options and can still end in a default:
+
+```titan
+function first_set(a: integer?, b: integer?, fallback: integer): integer
+    return a or b or fallback
+end
+```
+
+For two `boolean?` operands it follows Lua truthiness: a present `false`
+on the left is falsy, so `x or y` yields `y` both when `x` is nil and when
+`x` holds `false`.
 
 **`and` produces an option.** When the left operand of `and` is not
 statically known to be truthy or falsy (so: a `boolean`, an option, or a
@@ -424,6 +445,11 @@ end
 
 (As in Lua, the idiom requires that `v1` itself cannot be false or nil —
 with `v1: integer` it cannot.)
+
+The one exception is two plain `boolean` operands. A false left operand is
+then itself a `boolean`, so `a and b` has type `boolean` and keeps Lua's
+value: `false and true` is `false`, not nil. `b and o` with `o: boolean?`
+is still `boolean?`, and `b and 1.0` is still `float?`.
 
 An option-producing `and` works with any left operand, including a plain
 `boolean` and any comparison result, so both `b and 1.0` above and

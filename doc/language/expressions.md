@@ -300,6 +300,12 @@ and the static type of the result depends on what the checker knows:
   dead); a `nil` left operand flips both rules. At run time this is
   Lua's behavior: with two integers, `a and b` returns `b` and
   `a or b` returns `a`.
+* **Two booleans.** `a and b` and `a or b` with two `boolean` operands
+  have type `boolean` and Lua's exact value. A false left operand of
+  `and` is itself the result (`false and true` is `false`), and `or`
+  yields its right operand when the left one is false. All-boolean
+  chains therefore stay `boolean` without an annotation:
+  `local keep = (a and b) or (a and c)` declares a `boolean`.
 * **`or` defaulting.** `x or d` where `x: t?` and `d: t` has type `t`:
   the option is unwrapped if non-nil, the default used otherwise. This
   is the main idiom for reading containers — see
@@ -310,17 +316,38 @@ and the static type of the result depends on what the checker knows:
       return t[i] or default
   end
   ```
+* **The same option on both sides.** `x or y` where `x` and `y` have
+  the same option type `t?` has type `t?`: the left operand when it is
+  truthy, otherwise the right one. A `boolean?` holding `false` is falsy
+  here, as in Lua, so `x or y` then yields `y`. A chain can still end in
+  a default: with `x, y: integer?`, `x or y or 0` is an `integer`.
 * **`value` operands.** `x or v` and `v or x` where either side is a
-  `value` produce a `value`. With `and`, a left operand that is a
-  `boolean`, option, or `value` makes the result the right operand's
-  type marked optional (`b and f` with `f: float` has type `float?`);
-  in that case a falsy left operand makes the whole `and` evaluate to
-  `nil` at run time — even when the falsy value was `false`, where Lua
-  would produce `false`: with `c: value`, `c and a` returns `nil`, not
-  `false`, when `c` holds `false`. A plain `boolean` left operand
-  typechecks and behaves the same way.
+  `value` produce a `value`, unless the left operand is statically
+  truthy (see above). This includes a `boolean` beside a `value`: the
+  boolean is kept as it is, so with `b: boolean` and `v: value`,
+  `b or v` is `true` when `b` is true and `v` when `b` is false, exactly
+  as in Lua.
+* **A `boolean` beside any other type in `or`.** When one operand of
+  `or` is a `boolean` and the other is neither a `boolean` nor a
+  `value`, both operands are converted by truthiness and the result is
+  a `boolean`. Here Titan departs from Lua's value: with `b: boolean`
+  and `n: integer?`, `b or n` is `true` when `b` is false and `n` holds
+  a number, where Lua would return the number. The rule also applies
+  when the other operand is statically truthy: `1 or b` is `true`.
+* **`and` with an option result.** Apart from two booleans, an `and`
+  whose left operand is a `boolean`, an option, or a `value` has the
+  right operand's type marked optional (`b and f` with `f: float` has
+  type `float?`; `b and o` with `o: boolean?` stays `boolean?`). A falsy
+  left operand then makes the whole `and` evaluate to `nil` at run
+  time, even when the falsy value was `false`, where Lua would produce
+  `false`: with `b: boolean`, `b and f` returns `nil` when `b` is
+  false, and with `c: value`, `c and a` returns `nil`, not `false`, when
+  `c` holds `false`.
 * Any other combination in `or` is the compile-time error
-  `left hand side of 'or' is a T1 but right hand side is a T2`.
+  `left hand side of 'or' is a T1 but right hand side is a T2`, for
+  example an option beside a type that is neither its base type, the
+  same option, a `boolean`, nor a `value` (`x or s` with `x: integer?`
+  and `s: string` or `s: string?`).
 
 The Lua ternary idiom `cond and a or b` works as expected when `a`
 cannot be falsy, including with a `boolean`-typed condition — a
@@ -334,7 +361,8 @@ end
 
 Long all-boolean `and`/`or` chains and `and`/`or` used for their value —
 `x == 1 and y == 2 and z == 3` as a condition, `return b and x` with
-`b: boolean` — compile and run as expected.
+`b: boolean`, `(a and b) or (a and c)` stored in an unannotated local —
+compile and run as expected.
 
 ## Concatenation: `..`
 

@@ -258,7 +258,8 @@ Some constructs demand equality directly: relational comparisons
 (`<`, `<=`, `>`, `>=`) require two numbers (any `integer`/`float` mix —
 compared by mathematical value, with no promotion) or two strings, and
 the `or` defaulting rule for options (`x or d` where `x: t?`) requires
-`d` to have exactly the base type `t`.
+`d` to have exactly the base type `t` (or exactly `t?`, which keeps the
+option instead of unwrapping it).
 
 ## Relations and boundaries: no subtyping
 

@@ -723,10 +723,19 @@ frozen callable adapters reuse them as described in
 
 `or` implements option defaulting: when the left side is `t?` and the right
 side's type equals `t`, the whole expression has type `t` (`of or 1.0` with
-`of: float?` is a `float`). The full `and`/`or` case ladders (Boolean
-contexts, statically truthy/falsy left sides, optionizing the right side of
-`and`, Value mixing) live in `checkexp`'s `Ast.ExpBinop` handler and are
-specified case-by-case in [option types](../language/option-types.md).
+`of: float?` is a `float`). When the right side's type equals `t?` itself,
+the expression keeps that type and nothing is unwrapped. Outside a Boolean
+context, a `boolean` beside a `value` in `or` is injected into `value` with
+`trycoerce`, and the result is `value`. This branch runs before the one that
+converts a `boolean` beside any other type by `truthiness` and yields
+`boolean`. `and` over two `boolean` operands is typed `boolean` directly,
+because a false left operand is itself a boolean. The other left sides that
+are neither statically truthy nor falsy optionize the right side. The full
+`and`/`or` case ladders (Boolean contexts, statically truthy/falsy left
+sides, optionizing the right side of `and`, Value mixing) live in
+`checkexp`'s `Ast.ExpBinop` handler and are specified case-by-case in
+[expressions](../language/expressions.md#and-or-and-not) and
+[option types](../language/option-types.md).
 
 ## Closures: capture analysis and lambda inference
 

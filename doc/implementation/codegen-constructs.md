@@ -615,7 +615,10 @@ the operator decision, including when an optional type parameter erases to
 `value`.
 
 Boolean-result operators emit explicit C branches with all right-operand
-evaluation inside the selected branch. Statically truthy/falsy value-returning
+evaluation inside the selected branch. An `and` over two `boolean` operands
+outside a Boolean context reaches the same branch: the checker types it
+`boolean` without truthiness casts, so a false left operand yields C `0`
+(Lua's `false`, not nil). Statically truthy/falsy value-returning
 sides short-circuit at compile time. In the general case the left operand is first
 **materialized into a temp of its own type** and the truthiness test
 runs through `toboolean(lhs-type, temp)` rather than taking the address
@@ -624,9 +627,17 @@ a comparison rvalue, an option, or a `value` alike, and the operand is
 evaluated exactly once (it may be a non-lvalue such as a direct call).
 This is what makes the `cond and a or b` ternary idiom, long all-boolean
 `and`/`or` chains, and a `<call> or default` (e.g. `return find(xs,v) or
-0`) compile. The `t? or default` shape unwraps the option on the truthy
-side — the generated form of the `t[i] or v` idiom — and a `value`-typed
-`or` tests the materialized temp with `l_isfalse`.
+0`) compile. An Option left operand of `or` has one branch for both of its
+checker shapes. The right operand's statements are emitted only in the
+falsy arm, and the truthy arm either unwraps the option
+(`coder._option_get`, for `t? or t`, the generated form of the `t[i] or v`
+idiom) or copies the left temp unchanged (for `t? or t?`). Either way the
+result temp has the expression's type and is anchored in a stack slot when
+it is GC-bearing. `toboolean` makes a present `false` in a `boolean?` select
+the right operand and tests presence for a native numeric Option. A
+`value`-typed `or` tests the materialized temp with `l_isfalse`. That
+includes `boolean or value` and `value or boolean`, whose `boolean` side the
+checker injects into `value`, so a `false` operand stays `false`.
 
 **Integer arithmetic wraps like Lua, not C.** Integer `+ - *` and unary
 `-` emit `intop(...)` — `intop(+, x, y)`, `intop(*, x, y)`,

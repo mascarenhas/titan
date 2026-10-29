@@ -549,7 +549,10 @@ not a CI run, for `stdlib` rows. The `retained` domain is the runtime/packaging 
 (`Makefile` `STDLIB_BUSTED_TESTS`, `Makefile.win`
 `TITAN_ROCK_TEST_STDLIB_SPECS`), `stdlib` is
 `spec/support/ci_stdlib_compiler_test_files.txt`, and everything else is
-`compiler`. `spec/support/compiler_test_groups.lua` validates the complete
+`compiler`. `spec/libuv_build_spec.lua` asserts that the two retained lists are
+equal and that the retained, stdlib, and stress domains each match their
+declaring list, so adding such a spec needs no re-pinned count.
+`spec/support/compiler_test_groups.lua` validates the complete
 classified union: a missing, stale, duplicate, or cross-domain row, or an
 unlisted `#stress` file, fails before any test starts. It plans any positive
 worker count with deterministic longest-processing-time assignment (heaviest
