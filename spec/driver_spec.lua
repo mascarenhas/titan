@@ -2230,6 +2230,99 @@ describe("compiler installation discovery", function()
         return value
     end
 
+    -- Run `body` while `require "titan"` yields `support`: a table, or a
+    -- string that loading the module raises.
+    local function with_support(support, body)
+        local loaded, preload = package.loaded.titan, package.preload.titan
+        package.loaded.titan = nil
+        package.preload.titan = function()
+            if type(support) == "string" then error(support, 0) end
+            return support
+        end
+        local results = table.pack(pcall(body))
+        package.loaded.titan, package.preload.titan = loaded, preload
+        assert.truthy(results[1], results[2])
+        return table.unpack(results, 2, results.n)
+    end
+
+    it("reports unloadable native support as the missing installation root",
+       function()
+        local reason = "cannot load the Titan support module: simulated missing support"
+        local missing = "simulated missing support\n\tno file 'titan.so'"
+        local sync = compiler_io.new_sync()
+        -- Driver provenance is a checkout only when the tree has the runtime
+        -- source and Makefile; the strategy decides that for this case.
+        local function layout(checkout)
+            return with_support(missing, function()
+                local unloaded = driver_with_environment({
+                    TITAN_ROOT = false, TITAN_BUILD_PROFILE = false,
+                    TITAN_EXTRA_CPPFLAGS = "", TITAN_EXTRA_CFLAGS = "",
+                    TITAN_EXTRA_LDFLAGS = "",
+                })
+                local root, root_error = unloaded.compiler_root()
+                assert.is_nil(root)
+                assert.equal(reason, root_error)
+                local strategy = setmetatable({}, { __index = sync })
+                function strategy:stat(filename)
+                    if filename:find("titan%-runtime[/\\]titan%.c$") or
+                       filename:find("[/\\]Makefile$") then
+                        return checkout and { kind = "file" } or nil
+                    end
+                    return sync:stat(filename)
+                end
+                local context = unloaded.new_resolver_context({ io = strategy })
+                assert.is_true(unloaded.close_resolver_context(context))
+                return unloaded
+            end)
+        end
+
+        local installed = layout(false)
+        assert.is_false(installed.SOURCE_CHECKOUT)
+        assert.equal("cannot locate the Titan installation root: " .. reason ..
+            "; set TITAN_ROOT to the installation prefix",
+            installed.INSTALLATION_ERROR)
+        assert.equal(installed.INSTALLATION_ERROR, installed.TOOLCHAIN_ERROR)
+
+        local checkout = layout(true)
+        assert.is_true(checkout.SOURCE_CHECKOUT)
+        assert.is_nil(checkout.INSTALLATION_ERROR)
+        assert.is_nil(checkout.TOOLCHAIN_ERROR)
+    end)
+
+    it("returns Titan path expansion failures as compiled-module lookup diagnostics",
+       function()
+        local configured = driver_with_environment({
+            TITAN_ROOT = fixture_path("/sdk"),
+            TITAN_PATH_0_6 = "first;;",
+        })
+        local context = configured.new_resolver_context()
+        local completed, failure = pcall(function()
+            for _, case in ipairs({
+                { {}, "installed Titan native support lacks " ..
+                    "_expand_titan_path; reinstall Titan" },
+                { { _expand_titan_path = function()
+                      error("cannot determine the executable directory", 0)
+                  end },
+                  "cannot expand Titan path 'first;;': " ..
+                    "cannot determine the executable directory" },
+            }) do
+                with_support(case[1], function()
+                    local entries, entries_error = configured.titan_bin_path_entries(
+                        configured.TITAN_BIN_PATH)
+                    assert.is_nil(entries)
+                    assert.equal(case[2], entries_error)
+                    local resolved, resolve_error =
+                        configured.find_dependency_interface(
+                            configured.TITAN_BIN_PATH, "pkg.mod", context)
+                    assert.is_nil(resolved)
+                    assert.equal(case[2], resolve_error)
+                end)
+            end
+        end)
+        assert.is_true(configured.close_resolver_context(context))
+        assert.truthy(completed, failure)
+    end)
+
     it("selects a non-empty TITAN_ROOT as the compiler root and probe-cache owner",
        function()
         local explicit = driver_with_environment({
