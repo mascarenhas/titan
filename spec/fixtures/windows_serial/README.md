@@ -41,7 +41,8 @@ The smoke needs no private native helper DLL.
 
 `verify_driver.lua <private-sdk> <clang.exe> <owned-parent>` loads the installed
 edited compiler, checks prefix/source/import-library discovery and DLL
-candidates, and validates the installed support provider in a fresh Lua process.
+candidates, loads the installed support module (`lib/lua/5.5/titan.dll`) and
+calls its `luaopen_titan` opener in a fresh Lua process.
 It parses nested Unicode headers and compiles a C-probe baseline against matching
 SDK headers. Use a private SDK with spaces and Unicode and repeat with NTFS and
 shared parents.
