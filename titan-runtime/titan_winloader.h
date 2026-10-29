@@ -135,47 +135,12 @@ failed:
     return NULL;
 }
 
-/* The approved distribution has bin/<program>.exe and lib/titan/<version>.
-** Derive its root from the executable, independently of CWD and global PATH. */
-static void titan_win_push_root(lua_State *L) {
-    int top = lua_gettop(L);
-    DWORD capacity = 256;
-    WCHAR *wide, *last;
-    luaL_checkstack(L, 4, "locating the Windows Titan distribution");
-    for (;;) {
-        DWORD length;
-        wide = (WCHAR *)lua_newuserdatauv(L, capacity * sizeof(WCHAR), 0);
-        length = GetModuleFileNameW(NULL, wide, capacity);
-        if (length == 0) {
-            titan_win_loader_error(L, "cannot locate executable", "", GetLastError());
-            lua_error(L);
-        }
-        if (length < capacity) break;
-        lua_pop(L, 1);
-        if (capacity == TITAN_WIN_PATH_CAP)
-            luaL_error(L, "Windows executable path exceeds supported length");
-        capacity *= 2;
-        if (capacity > TITAN_WIN_PATH_CAP) capacity = TITAN_WIN_PATH_CAP;
-    }
-    last = wcsrchr(wide, L'\\');
-    if (last == NULL) luaL_error(L, "cannot locate Windows executable directory");
-    *last = L'\0';
-    last = wcsrchr(wide, L'\\');
-    if (last == NULL) luaL_error(L, "cannot locate Windows Titan distribution root");
-    /* Keep the separator of a drive root (C:\\bin\\app.exe -> C:\\). */
-    if (last == wide + 2 && wide[1] == L':') last++;
-    *last = L'\0';
-    titan_win_push_utf8(L, wide);
-    lua_replace(L, top + 1);
-    lua_settop(L, top + 1);
-}
-
 /* Push the UTF-8 value, preserving the distinction between absent and empty. */
 static int titan_win_push_environment(lua_State *L, const WCHAR *name) {
     int top = lua_gettop(L);
     DWORD capacity, length;
     WCHAR *wide;
-    luaL_checkstack(L, 4, "reading the Windows Titan path");
+    luaL_checkstack(L, 4, "reading the Windows Titan environment");
     SetLastError(ERROR_SUCCESS);
     capacity = GetEnvironmentVariableW(name, NULL, 0);
     if (capacity == 0) {
@@ -183,7 +148,7 @@ static int titan_win_push_environment(lua_State *L, const WCHAR *name) {
         if (error == ERROR_ENVVAR_NOT_FOUND) return 0;
         if (error != ERROR_SUCCESS) {
             titan_win_loader_error(L, "cannot read Windows environment",
-                "Titan search path", error);
+                "Titan environment variable", error);
             lua_error(L);
         }
         lua_pushliteral(L, "");
@@ -199,7 +164,7 @@ static int titan_win_push_environment(lua_State *L, const WCHAR *name) {
             if (error == ERROR_ENVVAR_NOT_FOUND) return 0;
             if (error != ERROR_SUCCESS) {
                 titan_win_loader_error(L, "cannot read Windows environment",
-                    "Titan search path", error);
+                    "Titan environment variable", error);
                 lua_error(L);
             }
             lua_pushliteral(L, "");
