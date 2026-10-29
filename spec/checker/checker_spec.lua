@@ -1350,9 +1350,13 @@ describe("Titan type checker", function()
             assert.same(types.Value(), exp._type)
         end
         -- A boolean beside a non-value operand keeps the truthiness rule, and
-        -- a boolean sink or condition is boolean context.
+        -- a boolean sink or condition is boolean context. Read the operator
+        -- node itself: an annotated sink would project a reverted `value`
+        -- result to `boolean` and hide the regression.
         for _, index in ipairs({ 4, 5, 6 }) do
-            assert.same(types.Boolean(), stats[index].exps[1]._type)
+            local exp = stats[index].exps[1]
+            assert.equal("Ast.ExpBinop", exp._tag)
+            assert.same(types.Boolean(), exp._type)
         end
         local condition = ast[2].block.stats[1].thens[1].condition
         assert.equal("Ast.ExpBinop", condition._tag)

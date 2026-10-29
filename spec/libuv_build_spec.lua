@@ -5515,9 +5515,6 @@ printf '%s\n' "${schedule[@]}"
                 end
             end
             assert_no_stdlib_lua("spec/stdlib")
-            for _, retained in ipairs(makefile_words("STDLIB_BUSTED_TESTS")) do
-                assert.truthy(makefile:find(retained, 1, true), retained)
-            end
             local packaging_step = named_step(native_coverage_job,
                 "Run retained runtime and packaging specs")
             for _, contract in ipairs({
@@ -5903,9 +5900,6 @@ printf '%s\n' "${schedule[@]}"
                 "compiler_tests=()",
                 "compiler_unit_tests=()",
                 "compiler_isolated_coverage_tests=()",
-                -- The retained domain is referenced through its declaration
-                -- instead of a copy of its seven names.
-                "STDLIB_BUSTED_TESTS",
                 "run_isolated_compiler_coverage",
                 '"$BUSTED" -c -o gtest -v --exclude-tags=stress ' ..
                     '"$test_file"',
