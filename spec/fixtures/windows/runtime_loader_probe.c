@@ -117,6 +117,36 @@ static int initialize_provider(lua_State *L) {
     return 0;
 }
 
+/* The support module is an ordinary Lua native module installed under the
+** package cpath, so open it the way a Lua host does instead of feeding an
+** absolute image path to the Titan provider search. */
+static void load_support(lua_State *L, const char *path) {
+    const char *message;
+    int base = lua_gettop(L);
+    lua_getglobal(L, "package");
+    lua_getfield(L, -1, "loadlib");
+    lua_remove(L, -2);
+    lua_pushstring(L, path);
+    lua_pushliteral(L, "luaopen_titan");
+    /* Success leaves the opener alone; failure returns fail, message, where,
+    ** and a raised error leaves one error object. */
+    if (lua_pcall(L, 2, LUA_MULTRET, 0) != LUA_OK
+            || !lua_isfunction(L, base + 1)) {
+        message = lua_gettop(L) >= base + 2
+            ? lua_tostring(L, base + 2) : lua_tostring(L, -1);
+        fprintf(stderr, "cannot load support module %s: %s\n", path,
+            message != NULL ? message : "(non-string error)");
+        abort();
+    }
+    lua_settop(L, base + 1);
+    if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
+        message = lua_tostring(L, -1);
+        fprintf(stderr, "support module %s failed to open: %s\n", path,
+            message != NULL ? message : "(non-string error)");
+        abort();
+    }
+}
+
 int main(int argc, char **argv) {
     typedef const char *(*query_fn)(void);
     lua_State *L = luaL_newstate();
@@ -158,9 +188,7 @@ int main(int argc, char **argv) {
     written = snprintf(support_path, sizeof(support_path),
         "%s/lib/lua/5.5/titan.dll", runtime_root);
     assert(written > 0 && (size_t)written < sizeof(support_path));
-    lua_pushcfunction(L, titan_cast_func(lua_CFunction,
-        loadsym(L, loadlib(L, support_path), "luaopen_titan")));
-    lua_call(L, 0, 1);
+    load_support(L, support_path);
     lua_setglobal(L, "support");
     lua_pushcfunction(L, errorhandler);
     lua_setglobal(L, "fixture_errorhandler");

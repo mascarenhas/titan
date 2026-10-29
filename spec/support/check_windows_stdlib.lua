@@ -32,18 +32,7 @@ end
 local support = open_support(assert(bootstrap))
 package.loaded.titan = support
 local driver = require "titan-compiler.driver"
-local function exports_for_names(logical_names)
-    local exports = {}
-    for _, name in ipairs(logical_names) do
-        local mangled = driver.mangle_module_name(name)
-        exports["luaopen_" .. mangled] = true
-        for _, suffix in ipairs({ "abi_value", "abi", "types", "layouts", "compatibility", "init" }) do
-            exports[mangled .. "_" .. suffix] = true
-        end
-    end
-    return exports
-end
-local expected_exports = exports_for_names(names)
+local objectmetadata = require "titan-compiler.objectmetadata"
 local function exported(path)
     local report, found = read(path), {}
     assert(report:match("Format: COFF%-x86%-64"), "provider is not x64 PE/COFF")
@@ -77,14 +66,28 @@ local function valid_imports(path)
     end
     assert(count > 0, "missing PE import inventory")
 end
-local objects = {}
+local objects, interfaces = {}, {}
 for _, name in ipairs(modules) do
     local stem = assert(generated) .. "/titan/" .. name .. (folders[name] and ("/" .. name) or "")
-    objects[#objects + 1] = { filename = stem .. ".o", modname = "titan." .. name }
+    local filename = stem .. ".o"
+    objects[#objects + 1] = { filename = filename, modname = "titan." .. name }
+    -- The provider link reads these same generated-object interfaces, so the
+    -- expected export inventory is the producer's, including public raw
+    -- foreign entries; never a fixed protocol-only list.
+    local entry, err = objectmetadata.read(read(filename), filename)
+    assert(entry and entry.type, err or
+        ("missing module interface metadata: " .. filename))
+    assert(entry.type.name == "titan." .. name,
+        "object interface metadata names " .. tostring(entry.type.name) ..
+        " instead of titan." .. name)
+    interfaces[entry.type.name] = entry.type
 end
 local target = assert(driver.derive_target_fingerprint(objects[1].filename, names[1]))
 local expected = {}
 assert(driver.validate_generated_objects(objects, target, expected))
+local _, expected_names = driver.windows_provider_exports(names, interfaces)
+local expected_exports = {}
+for _, name in ipairs(expected_names) do expected_exports[name] = true end
 exact_exports(exported(stage .. "/provider.exports"), expected_exports)
 valid_imports(stage .. "/provider.imports")
 local callable = assert(driver.library_interface_entries(stage .. "/titan.dll", names))
