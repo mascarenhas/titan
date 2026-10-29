@@ -549,6 +549,29 @@ local function makefile_words(name, filename)
     return result
 end
 
+-- Sorted paths of an inventory domain, which the loader builds in discovery
+-- order rather than in its declaring list's order.
+local function sorted_paths(items)
+    local paths = {}
+    for _, item in ipairs(items) do paths[#paths + 1] = item.path end
+    table.sort(paths)
+    return paths
+end
+
+-- Sorted spec paths a CI partition file declares; comments and blank lines
+-- do not declare entries.
+local function declared_spec_paths(filename)
+    local paths = {}
+    for line in (read_file(filename) .. "\n"):gmatch("(.-)\n") do
+        local declared = line:match("^%s*(.-)%s*$")
+        if declared ~= "" and declared:sub(1, 1) ~= "#" then
+            paths[#paths + 1] = declared
+        end
+    end
+    table.sort(paths)
+    return paths
+end
+
 local function stdlib_source_files()
     local sources = {}
     local source_ensembles = {
@@ -1087,7 +1110,16 @@ end
                     "producer was compiled from source instead of its public provider")
                 local program = root .. "/out/" ..
                     (platform.windows and "bin/producer_composition_app.exe" or "producer_composition_app")
-                local ran, result = run_argv({ program })
+                -- This fixture does not exercise the runtime's default search.
+                -- Name the installed SDK's provider directory for the child,
+                -- keeping the default search after `;;`, on both platforms.
+                local child = { platform.windows and "env.exe" or "env" }
+                if platform.windows then
+                    child[#child + 1] = "MSYS2_ENV_CONV_EXCL=TITAN_PATH_0_6"
+                end
+                child[#child + 1] = "TITAN_PATH_0_6=" .. prefix .. "/lib/titan/0.6;;"
+                child[#child + 1] = program
+                local ran, result = run_argv(child)
                 assert.truthy(ran, result)
                 if consumer == "io" then assert.equal("compiled-only OS\n", result) end
             end, debug.traceback)
@@ -5891,10 +5923,15 @@ printf '%s\n' "${schedule[@]}"
             for _, meta_key in ipairs({ "schema", "host", "profile", "date", "compiler" }) do
                 assert.truthy(inventory.metadata[meta_key], meta_key)
             end
-            assert.equal(7, #inventory.retained)
-            -- These are installed-provider compiler specs, not native owners:
-            -- the four issue-303 integration specs extend the previous eleven.
-            assert.equal(15, #inventory.stdlib)
+            -- Each domain mirrors a separately maintained declaration: the
+            -- Makefile's retained tests and the CI installed-provider list.
+            -- Derive their membership instead of pinning inventory sizes that
+            -- every added spec would have to re-pin here.
+            local retained_declared = makefile_words("STDLIB_BUSTED_TESTS")
+            table.sort(retained_declared)
+            assert.same(sorted_paths(inventory.retained), retained_declared)
+            assert.same(sorted_paths(inventory.stdlib),
+                declared_spec_paths("spec/support/ci_stdlib_compiler_test_files.txt"))
             assert.equal(#inventory.items,
                 #inventory.retained + #inventory.stdlib + #inventory.compiler)
             local assigned = {}
