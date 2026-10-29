@@ -456,7 +456,7 @@ assert(module.exercise())
         assert.equal(old_o, read_file(stem .. ".o"))
     end)
 
-    it("preserves authored headers that alias final program, provider or shim outputs", function()
+    it("preserves authored headers that alias final program or provider outputs", function()
         local frontend = cli_frontend(workspace .. "/reject_frontend.lua", [[
 require("titan-compiler.driver").compile_modules = function()
     error("generated compilation must not start after a preflight collision")
@@ -465,18 +465,17 @@ require("titan-compiler.process").start_worker = function()
     error("build workers must not start after a preflight collision")
 end
 ]])
-        for index, kind in ipairs({ "executable", "provider", "shim" }) do
+        for index, kind in ipairs({ "executable", "provider" }) do
             local src, out = workspace .. "/final-src" .. index, workspace .. "/final-out" .. index
             local is_program = kind == "executable"
             local name = is_program and "app" or "library"
-            local shims, provider = assert(driver.plan_module_shims(name, { name }, out))
+            local provider = assert(driver.provider_output_path(name, out))
             local header
             if kind == "executable" then
                 header = platform.windows
                     and assert(driver.windows_program_paths("app", nil, nil, out)).executable
                     or out .. "/app"
-            elseif kind == "provider" then header = provider
-            else header = shims[1].filename end
+            else header = provider end
             local contents = "#define R2_HEADER_VALUE 7\n"
             write_file(header, contents)
             local declaration = is_program
@@ -489,8 +488,7 @@ end
             local ok, output = run_cmd({ LUA, "-E", frontend, "--tree", src,
                 "-o", out, "--c-parts", "4", name })
             assert.is_false(ok, output)
-            local expected = kind == "shim" and "refusing to overwrite unrecognized Lua file" or "aliases input"
-            assert.truthy(output:find(expected, 1, true), output)
+            assert.truthy(output:find("aliases input", 1, true), output)
             assert.equal(contents, read_file(header))
             assert.equal("previous generated C", read_file(out .. "/" .. name .. ".c"))
             assert.equal("previous object", read_file(out .. "/" .. name .. ".o"))
@@ -1147,15 +1145,12 @@ end
                 gen_objs[1].filename, gen_objs[1].modname))
             assert(driver.validate_generated_objects(gen_objs, target))
 
-            local shims, provider_out = assert(
-                driver.plan_module_shims("pkg", linked_names, driver.OUTPUT_ROOT))
+            local provider_out = assert(
+                driver.provider_output_path("pkg", driver.OUTPUT_ROOT))
             local dso_path = provider_out
             assert(driver.compile_library_output(
                 dso_path, ofiles, nil, false, nil, {}, nil, dso_path,
                 platform.windows and linked_names or nil))
-            for _, shim in ipairs(shims) do
-                write_file(shim.filename, shim.contents)
-            end
             local archive_path
             if not platform.windows then
                 archive_path = dso_path:gsub("[.]so$", ".a")

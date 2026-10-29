@@ -11,11 +11,11 @@ local function replace(from, to)
 end
 
 describe("Windows file publication transaction", function()
-    local root, fs, source, shim, image
+    local root, fs, source, companion_source, companion, image
     local function write(path, bytes) assert(util.set_file_contents(path, bytes)) end
     local function read(path) return assert(util.get_file_contents(path)) end
     local function entries()
-        return { { destination = shim, contents = "new shim" },
+        return { { destination = companion, source = companion_source },
             { destination = image, source = source } }
     end
     local function filenames()
@@ -27,14 +27,16 @@ describe("Windows file publication transaction", function()
         return files
     end
     local function unchanged()
-        assert.equal("old shim", read(shim))
+        assert.equal("old companion", read(companion))
         assert.equal("old DLL", read(image))
-        assert.same({ "module.lua", "provider.dll", "source.dll" }, filenames())
+        assert.same({ "companion-source.dll", "companion.dll", "provider.dll", "source.dll" }, filenames())
     end
     before_each(function()
         root = temporary.name(); assert(os.remove(root)); assert(lfs.mkdir(root))
-        source, shim, image = root .. "/source.dll", root .. "/module.lua", root .. "/provider.dll"
-        write(source, "new DLL"); write(shim, "old shim"); write(image, "old DLL")
+        source, image = root .. "/source.dll", root .. "/provider.dll"
+        companion_source, companion = root .. "/companion-source.dll", root .. "/companion.dll"
+        write(source, "new DLL"); write(image, "old DLL")
+        write(companion_source, "new companion"); write(companion, "old companion")
         local sequence = 0
         fs = {
             stat = function(path)
@@ -58,9 +60,9 @@ describe("Windows file publication transaction", function()
         assert(lfs.rmdir(root))
     end)
 
-    it("commits companion files before the provider", function()
+    it("commits the companion before the final image", function()
         assert(publication.publish(entries(), fs, { after_commit = function(index)
-            assert.equal("new shim", read(shim))
+            assert.equal("new companion", read(companion))
             assert.equal(index == 1 and "old DLL" or "new DLL", read(image))
             return true
         end }))
@@ -68,18 +70,18 @@ describe("Windows file publication transaction", function()
     end)
 
     it("preserves unchanged files and mtimes without replacing a mapped DLL", function()
-        write(source, "old DLL")
+        write(source, "old DLL"); write(companion_source, "old companion")
         local old = os.time() - 60
-        assert(lfs.touch(shim, old, old))
+        assert(lfs.touch(companion, old, old))
         assert(lfs.touch(image, old, old))
         fs.replace = function() return nil, "DLL is in use" end
         assert(publication.publish({
-            { destination = shim, contents = "old shim" },
+            { destination = companion, source = companion_source },
             { destination = image, source = source },
         }, fs, { after_commit = function()
             error("unchanged files must not be committed")
         end }))
-        assert.equal(old, lfs.attributes(shim, "modification"))
+        assert.equal(old, lfs.attributes(companion, "modification"))
         assert.equal(old, lfs.attributes(image, "modification"))
         unchanged()
     end)
@@ -98,26 +100,27 @@ describe("Windows file publication transaction", function()
             return true
         end }))
         assert.same({ 1 }, commits)
-        assert.equal("new shim", read(shim))
+        assert.equal("new companion", read(companion))
         assert.equal("old DLL", read(image))
         assert.equal(old, lfs.attributes(image, "modification"))
-        assert.same({ "module.lua", "provider.dll", "source.dll" }, filenames())
+        assert.same({ "companion-source.dll", "companion.dll", "provider.dll", "source.dll" }, filenames())
     end)
 
     it("retains an unchanged companion when a changed DLL cannot be replaced", function()
+        write(companion_source, "old companion")
         local old = os.time() - 60
-        assert(lfs.touch(shim, old, old))
+        assert(lfs.touch(companion, old, old))
         fs.replace = function(from, to)
             assert.equal(image, to)
             return nil, "DLL is in use"
         end
         local ok, err = publication.publish({
-            { destination = shim, contents = "old shim" },
+            { destination = companion, source = companion_source },
             { destination = image, source = source },
         }, fs)
         assert.is_nil(ok)
         assert.matches("DLL is in use", err, 1, true)
-        assert.equal(old, lfs.attributes(shim, "modification"))
+        assert.equal(old, lfs.attributes(companion, "modification"))
         unchanged()
     end)
 
@@ -204,39 +207,11 @@ describe("Windows file publication transaction", function()
         end)
     end
 
-    it("removes an obsolete companion before committing its replacement provider", function()
-        local plans = entries()
-        plans[1] = { destination = shim, remove = true }
-        assert(publication.publish(plans, fs, { after_commit = function(index)
-            assert.is_nil(lfs.symlinkattributes(shim))
-            assert.equal(index == 1 and "old DLL" or "new DLL", read(image))
-            return true
-        end }))
-        assert.equal("new DLL", read(image))
-        assert.same({ "provider.dll", "source.dll" }, filenames())
-    end)
-
-    it("restores an obsolete companion when the later provider commit fails", function()
-        local plans = entries()
-        plans[1] = { destination = shim, remove = true }
-        fs.replace = function(from, to)
-            if to == image then
-                assert.is_nil(lfs.symlinkattributes(shim))
-                return nil, "DLL is in use"
-            end
-            return replace(from, to)
-        end
-        local ok, err = publication.publish(plans, fs)
-        assert.is_nil(ok)
-        assert.matches("DLL is in use", err, 1, true)
-        unchanged()
-    end)
-
     it("removes a newly created companion when the later provider commit fails", function()
-        assert(os.remove(shim))
+        assert(os.remove(companion))
         fs.replace = function(from, to)
             if to == image then
-                assert.equal("new shim", read(shim))
+                assert.equal("new companion", read(companion))
                 return nil, "DLL is in use"
             end
             return replace(from, to)
@@ -244,9 +219,9 @@ describe("Windows file publication transaction", function()
         local ok, err = publication.publish(entries(), fs)
         assert.is_nil(ok)
         assert.matches("DLL is in use", err, 1, true)
-        assert.is_nil(lfs.symlinkattributes(shim))
+        assert.is_nil(lfs.symlinkattributes(companion))
         assert.equal("old DLL", read(image))
-        assert.same({ "provider.dll", "source.dll" }, filenames())
+        assert.same({ "companion-source.dll", "provider.dll", "source.dll" }, filenames())
     end)
 
     it("rolls back companions when the existing DLL cannot be replaced", function()
@@ -274,7 +249,7 @@ describe("Windows file publication transaction", function()
         assert.is_nil(ok)
         assert.matches("DLL is in use", err, 1, true)
         assert.matches("cannot remove unused backup copy", err, 1, true)
-        assert.equal("old shim", read(shim))
+        assert.equal("old companion", read(companion))
         assert.equal("old DLL", read(image))
         assert.equal("old DLL", read(image .. ".reserved.4"))
     end)
@@ -285,30 +260,29 @@ describe("Windows file publication transaction", function()
         unchanged()
     end)
 
-    it("rejects source aliases and unrecognized companion ownership", function()
+    it("rejects source aliases and entries without a staged source", function()
         local plans = entries(); plans[2].source = image
         local ok, err = publication.publish(plans, fs)
         assert.is_nil(ok); assert.matches("aliases destination", err, 1, true)
         unchanged()
-        ok, err = publication.publish(entries(), fs, { validate_existing = function()
-            return nil, "unrecognized generated shim"
-        end })
-        assert.is_nil(ok); assert.matches("unrecognized generated shim", err, 1, true)
+        plans = entries(); plans[1].source = nil
+        ok, err = publication.publish(plans, fs)
+        assert.is_nil(ok); assert.matches("missing publication source", err, 1, true)
         unchanged()
     end)
 
     it("reports incomplete rollback instead of claiming restoration", function()
         fs.replace = function(from, to)
             if to == image then return nil, "DLL is in use" end
-            if to == shim and from:match("reserved.3$") then
-                return nil, "cannot restore previous shim"
+            if to == companion and from:match("reserved.3$") then
+                return nil, "cannot restore previous companion"
             end
             return replace(from, to)
         end
         local ok, err = publication.publish(entries(), fs)
         assert.is_nil(ok)
         assert.matches("publication cleanup", err, 1, true)
-        assert.matches("cannot restore previous shim", err, 1, true)
+        assert.matches("cannot restore previous companion", err, 1, true)
         assert.equal("old DLL", read(image))
     end)
 end)

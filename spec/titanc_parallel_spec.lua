@@ -132,8 +132,8 @@ local function run_titanc(arguments, environment_jobs, customize, expect)
     function driver.common_module_provider()
         return "pkg", { "pkg.one", "pkg.two" }
     end
-    function driver.plan_module_shims()
-        return {}, "pkg.so"
+    function driver.provider_output_path()
+        return "pkg.so"
     end
     function driver.validate_provider_output_paths() return true end
     function driver.mangle_module_name(name)
@@ -704,7 +704,7 @@ describe("titanc command-line orchestration", function()
             "'other' have no common module prefix\n", diagnostics)
     end)
 
-    it("reserves carried static-provider shims and links their archives", function()
+    it("links carried static-provider archives into the library", function()
         local diagnostics, observed = run_titanc(ordinary_arguments(nil), nil, function(fakes)
             local new_context = fakes.driver.new_resolver_context
             function fakes.driver.new_resolver_context(options)
@@ -715,15 +715,9 @@ describe("titanc command-line orchestration", function()
                 } }
                 return context
             end
-            function fakes.driver.plan_module_shims(_, names)
-                fakes.observed.shim_names = names
-                return {}, "pkg.so"
-            end
             stop_at_link_inputs(fakes)
         end)
         assert.equal("stopped at the final-link tool request\n", diagnostics)
-        assert.same({ "pkg.carried", "pkg.dep", "pkg.one", "pkg.three", "pkg.two" },
-            observed.shim_names)
         assert.same({ "pkg/one.o", "pkg/three.o", "pkg/two.o", "deps/libpkg_dep.a" },
             observed.link_inputs)
     end)
