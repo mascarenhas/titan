@@ -3179,16 +3179,17 @@ int main(void) {
             local ok, output, why, code = run_argv({
                 "make", "--no-print-directory", "-Bn",
                 "HOST_OS=Darwin", "TITAN_EXTRA_LDFLAGS=",
-                "LUA_INSTALL_STAMP=/dev/null", "LIBBT_LIB=/dev/null",
-                "TITAN_RUNTIME_LUA_LIB=/dev/null", "--old-file=/dev/null",
+                "LUA_INSTALL_STAMP=/dev/null", "--old-file=/dev/null",
                 "titan-runtime/bootstrap/titan.so",
             })
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
             local normalized = output:gsub("%s+", " ")
+            -- Match the loadable-bundle link and its inputs, not the exact
+            -- flag list: the export restriction belongs to the installed
+            -- module's behavior test.
             local link = assert(normalized:match(
-                '%-bundle %-undefined dynamic_lookup ' ..
-                '%-Wl,%-exported_symbol,_luaopen_titan %-o "%$tmp" ([^;]*);'),
+                '%-bundle %-undefined dynamic_lookup[^;]-%-o "%$tmp" ([^;]*);'),
                 normalized)
             -- Make prints the recipe's line continuations verbatim.
             local inputs = {}
@@ -3198,6 +3199,9 @@ int main(void) {
             assert.same({ "titan-runtime/ltitanlib.o", "titan-runtime/titan_path.o" },
                 inputs)
             assert.falsy(normalized:find('-shared -o "$tmp"', 1, true), normalized)
+            -- A direct support build must not rebuild unrelated native
+            -- dependencies (libbacktrace, the runtime archive).
+            assert.falsy(normalized:find("libbacktrace", 1, true), normalized)
         end)
 
     it("installs the compiler SDK without building standard-library dependencies", function()
