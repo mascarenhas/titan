@@ -324,7 +324,10 @@ CRT, `size_t` on POSIX); offsets stay `size_t` so partial writes still emit the
 complete report.
 
 `spawn_raw<|R|>(entry, initially_observed, admission)` encodes the zero-argument
-`entry` into `ctrl.entry_msg`, detaches a fresh `lua.new()` state, sets
+`entry` into `ctrl.entry_msg`, detaches a fresh `lua.new()` state (which
+therefore has its copied native preloads and its own [Titan package
+searcher](driver.md#the-titan-package-searcher), and computes its own Titan
+path rather than inheriting the parent's), sets
 `ctrl.refcount = 2` (parent handle and worker), creates the worker with
 `uv.create_native_thread` and stores the token in `ctrl.os_thread`. For a
 `Group` member, `admission` is the group's membership Map: `spawn_raw` publishes

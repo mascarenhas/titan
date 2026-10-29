@@ -9,12 +9,14 @@ into matching shared and static providers. For example:
 titanc app.model app.view
 ```
 
-produces `app.so` and `app.a`, plus generated `app/model.lua` and
-`app/view.lua` shims. Both native forms contain the modules' ordinary
+produces `app.so` and `app.a`. Both native forms contain the modules' ordinary
 `app_model_*` and `app_view_*` protocol symbols. They do not create a logical
-`app` module or a combined module state.
+`app` module or a combined module state, and library mode writes no Lua file:
+Lua reaches each logical module through the [Titan package
+searcher](driver.md#the-titan-package-searcher), which uses the same candidate
+and claim rules as the compiler.
 
-This chapter describes DSO provider lookup, grouping, shims, and the dynamic
+This chapter describes DSO provider lookup, grouping, and the dynamic
 publication protocol. Archive metadata/resolution, flattening, paired
 transaction, and three-way validation are in [Static compiled
 modules](static-compiled-modules.md). Folder-source assembly remains a
@@ -39,16 +41,15 @@ longest common sequence of complete dotted components
 The comparison is component-wise: `foo` and `foobar` have no common prefix.
 Unrelated roots are rejected before code generation. Transitive source
 dependencies do not influence the provider name, but their objects are part
-of the link union and they receive shims because their `luaopen_*` entries are
-present in the image. An unrelated transitive dependency is not independently
-discoverable through Titan prefix lookup merely because its object is embedded:
-packaging it as a public Titan binary requires naming it as a compatible
-requested root. Its generated Lua shim can still call the entry known to be in
-this invocation's provider.
+of the link union and their `luaopen_*` entries are present in the image. An
+unrelated transitive dependency is not independently discoverable through
+Titan prefix lookup, at compile time or by the run-time searcher, merely
+because its object is embedded: packaging it as a public Titan binary requires
+naming it as a compatible requested root.
 
 Standalone-program mode differs. When exactly one requested root has the
 required `main(args: {string}): integer`, all source objects are linked into
-that program, no provider prefix is derived, and no Lua shim is emitted.
+that program and no provider prefix is derived.
 
 ## Compiled-module candidate search
 
@@ -61,8 +62,9 @@ a/b/c.so
 ```
 
 The exact location is therefore the final candidate. The compiler first
-expands the selected `TITAN_PATH_0_6`/`TITAN_PATH` with the runtime's `;;`
-default-insertion semantics. It then searches **root-major**
+expands the selected `TITAN_PATH_0_6`/`TITAN_PATH` with the [shared `;;` and
+`!` grammar](driver.md#titan-path-syntax) (`driver.titan_bin_path_entries`).
+It then searches **root-major**
 (`driver.find_dynamic_interface`; `driver.find_static_interface` is the `.a`
 pass described in [Static compiled modules](static-compiled-modules.md#resolver-state-and-format-passes)):
 all shallow-to-exact candidates in the first path root, then all candidates in
@@ -74,7 +76,12 @@ opening or inspecting metadata. A missing candidate remains available in a
 later root. Consequently a local exact `./a/b/c.so` can still beat a shallow
 installed `a.so`, while an earlier root's unrelated `a.so` prevents a later
 root's `a.so` from being selected. Generated runtime imports reproduce the same
-relative-path precedence without embedding an absolute compiler-machine path.
+relative-path precedence without embedding an absolute compiler-machine path,
+and the run-time [Titan package searcher](driver.md#the-titan-package-searcher)
+applies the same root-major, shadowing, and claim rules to `require`. Only the
+defaults differ: the compiler searches `.;<root>/lib/titan/0.6`, while
+programs and Lua hosts search `!;!/../lib/titan/0.6` and then the lazy SDK
+fallback.
 
 ### Claim and terminal-error states
 
@@ -214,7 +221,7 @@ Layout strings are independent of semantic descriptors and analysis inventories;
 paired archive/DSO publication compares both byte strings. The public-prefix
 layout rules are in [Native nominal storage](nominal-storage.md).
 
-## Validated publication and generated shims
+## Validated publication
 
 Both native forms go to one sibling staging directory; the contained DSO keeps
 the public basename so its macOS dSYM agrees. The staged pair is validated
@@ -225,70 +232,41 @@ and validations within the shared job budget; see also [Three-way
 validation](static-compiled-modules.md#three-way-validation) and [Publication
 and installation](static-compiled-modules.md#publication-and-installation).
 
-`titanc` stages one shim per physical logical module at
-`<logical/path>.lua` (`driver.plan_module_shims`). Source contributors do not
-receive shims. Every generated file starts with `driver.GENERATED_SHIM_BANNER`:
+The provider pair (plus the Darwin dSYM) is the whole published set.
+`driver.provider_output_path(provider, output_root)` returns the DSO path for
+a provider prefix below the output root, or `nil, "invalid library provider
+name '…'"`. No Lua loader is planned, generated, validated for ownership,
+retired, or published, so a published library is consumable from Lua exactly
+where it is consumable from Titan: on the Titan path.
 
-```lua
--- Generated by titanc; do not edit.
-```
+Lua code reaches a logical module with ordinary `require` once the state has
+the Titan searcher. The searcher's runtime candidate probe uses
+`dlopen(realpath, RTLD_LAZY | RTLD_LOCAL)` and promotes only a valid claim to
+`RTLD_LAZY | RTLD_GLOBAL` before resolving `luaopen_<mangled>`, so the
+provider's unresolved calls can later bind to dependencies that generated
+imports load. `require` passes the requested name to that opener, and the
+generated [name guard](codegen-overview.md#the-module-protocol) rejects a
+logical name that merely shares the mangled spelling. The loading paths and
+caches are in [Four shared-library loading
+paths](lua-interop-internals.md#four-shared-library-loading-paths).
 
-The banner is the ownership mark. Before code generation,
-`validate_generated_shim_destination` accepts a missing destination or a regular
-file that begins with the banner; any other file is user-owned and aborts the
-build. Retirement is stricter: when a valid prior self-describing archive
-advertises keys absent from the replacement, `driver.publish_provider_bundle`
-removes an old shim only if its full contents equal
-`generated_shim_contents` for that provider and module, and otherwise refuses
-with `refusing to retire unrecognized old Lua shim`.
-
-The body selects the provider through Lua's independent `package.cpath` and
-calls the exact logical entry:
-
-```lua
-local path, search_error = package.searchpath("a.b", package.cpath)
-if not path then error(search_error, 0) end
-
-local titan = require "titan"
-local open, open_error = titan._loadlibglobal(path, "luaopen_a_b_c")
-if not open then error(open_error, 0) end
-
-return open()
-```
-
-The Windows template passes the logical name as a third `_loadlibglobal`
-argument so the helper can return an already initialized canonical module; see
-[Windows loader boundary](windows-build.md#windows-loader-boundary).
-`package.searchpath` intentionally follows Lua-path precedence rather than the
-compiler's Titan path. Production installation avoids ambiguity by publishing
-one canonical provider; fixtures prepend their intended provider root
-explicitly.
-
-### The lazy/global support helper
-
-Stock Lua's `package.loadlib(path, "*")` is eager/global and shares Lua's own
-pathname cache, so it cannot promote an image that Lua's C searcher already
-mapped eager/local. Shims therefore call the internal
-`titan._loadlibglobal(path, symbol)` (`titan-runtime/ltitanlib.c`
-`lazyglobalload`), which keeps its own per-state cache and maps with
-`RTLD_LAZY | RTLD_GLOBAL`. For the standard library this promotes the
-`titan.so` image that `require "titan"` already mapped for the support table.
-Bare support loading never initializes a standard module or installs the async
-program bootstrap. The helper's caching, error shape, and promotion rules are
-in [Generated-shim lazy/global loading and
-promotion](lua-interop-internals.md#4-generated-shim-lazyglobal-loading-and-promotion).
+The searcher is appended after Lua's own searchers. A Titan provider
+directory must therefore not appear on `package.cpath`: Lua's all-in-one C
+searcher would otherwise open `titan.so` for `require "titan.string"` and call
+`luaopen_titan_string` itself, bypassing the ABI check and the lazy/global
+promotion. Likewise, an old generated `<logical/path>.lua` file left on
+`package.path` (`./?.lua` included) is found before the Titan searcher; delete
+such files from pre-release output trees.
 
 ## Reserved `titan` and the standard-library image
 
-The bare logical module name `titan` is reserved in library mode because it
-belongs to the Lua support API and every shim requires it. A **physical**
-provider named `titan` is valid only when its final image also contains
-`ltitanlib.o`'s genuine `luaopen_titan`. The driver checks that entry in a fresh
-Lua process (`driver.lua` `support_validation_script`) and requires exactly one
-support table exposing `_loadlib`, `_loadlibglobal`, and the compiler digests
-`_sha256_binary` and `_sha256_stream`. A stale support object without either
-digest fails as stale before publication. Compiler-side `package.loaded` state cannot satisfy the
-proof.
+The bare logical module name `titan` is reserved: `require "titan"` loads the
+Lua support module from `lib/lua/5.5`, and the Titan searcher never resolves
+that name. `titanc` therefore rejects a logical module named exactly `titan`
+in the link union (`logical module 'titan' is reserved by Titan's native Lua
+support module`). A **physical** provider prefix `titan` carries no support
+entry and needs no special validation; the standard library is the canonical
+provider with that prefix.
 
 The production standard library is the canonical example. One compiler
 invocation names all twenty-six logical roots (`Makefile` `STDLIB_ROOTS`):
@@ -307,24 +285,23 @@ The invocation publishes root `titan.so` and `titan.a`:
 
 ```sh
 titanc --output out --source-first --incremental <STDLIB_ROOTS> \
-  -X titan-runtime/ltitanlib.o lpeglabel-build/libtitan-lpeglabel.a \
+  -X lpeglabel-build/libtitan-lpeglabel.a \
      libuv-build/libuv.a llhttp-build/libtitan-llhttp.a \
      sqlite3-build/libtitan-sqlite3.a \
      openssl-build/libssl.a openssl-build/libcrypto.a  # OPENSSL_MODE=bundled
 ```
 
-Internal standard imports are direct. `ltitanlib.o` is shared `-X`
-payload and supplies bare `luaopen_titan` without adding a logical metadata
-key. The private namespaced five-member LPegLabel archive follows it as
-metadata-free payload. The pinned libuv payload follows it, then the private
-llhttp and SQLite archives, and finally any bundled OpenSSL payload used directly by
-`titan.ssl`. The eight HTTP callback definitions already live in the generated
-`titan.http` object; there is no adapter object. Bundled archives are
-force-carried into the DSO and flattened into the archive; system OpenSSL settings remain final-link inputs
-and are never copied into `titan.a`. The DSO exports twenty-seven Lua entries
-(`luaopen_titan` plus the twenty-six logical entries); both forms define the
-twenty-six logical protocols, and the archive advertises exactly twenty-six
-metadata keys.
+Internal standard imports are direct. The private namespaced five-member
+LPegLabel archive is the first, metadata-free `-X` payload. The pinned libuv
+payload follows it, then the private llhttp and SQLite archives, and finally
+any bundled OpenSSL payload used directly by `titan.ssl`. The eight HTTP
+callback definitions already live in the generated `titan.http` object; there
+is no adapter object. Bundled archives are force-carried into the DSO and
+flattened into the archive; system OpenSSL settings remain final-link inputs
+and are never copied into `titan.a`. The provider carries no `ltitanlib.o`:
+the DSO exports exactly the twenty-six logical Lua entries and no
+`luaopen_titan`, both forms define the twenty-six logical protocols, and the
+archive advertises exactly twenty-six metadata keys.
 `OPENSSL_MODE` defaults to `system`. Static consumers then pass the ordered
 `pkg-config --libs openssl` result through `TITAN_EXTRA_LDFLAGS`; both the
 executable-context archive probe and the final program link append those
@@ -341,17 +318,17 @@ likewise generated source-build intermediates: they are available before the
 standard objects compile but never become provider members, publication-stage
 artifacts, or installed headers.
 
-The canonical installed files are the provider pair (plus the DSO's macOS
-dSYM) and twenty-six Lua shims:
+The canonical installed files are the provider pair, plus the DSO's macOS
+dSYM, and the separately built support module:
 
 ```text
 <root>/lib/titan/0.6/titan.so
 <root>/lib/titan/0.6/titan.a
 <root>/lib/titan/0.6/titan.so.dSYM          # macOS only
-<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,websocket,os,path,peg,string,math,lua,iteration,gc,test,reflect,sqlite3,json,protobuf,transfer,thread}.lua
+<root>/lib/lua/5.5/titan.so                 # support module, not a provider
 ```
 
-The Make object graph, private support bootstrap, LuaRocks install and
+The Make object graph, support module, LuaRocks install and
 `post_install` copy, uninstall, and binary rock are described in [Build and
 installation responsibilities](build-script-audit.md). Production library tests
 treat the installed set as read-only; CI snapshots and restores it around

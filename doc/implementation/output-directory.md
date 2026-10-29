@@ -35,8 +35,8 @@ stem, so they never pick up source-adjacent objects from another configuration.
 Without an output root the resolver keeps source-adjacent paths. Routing changes
 neither serialized interfaces nor the generated-code ABI.
 
-Final providers keep common-prefix naming below the output root, and generated
-Lua shims keep their logical module paths there. Without `--exe`, Unix programs
+Final providers keep common-prefix naming below the output root; library mode
+writes no Lua loader files. Without `--exe`, Unix programs
 and test runners use mapped `program_output` stems below the output root, and
 Windows programs use `<output>/bin/<logical>.exe` and
 `<output>/lib/titan/0.6/<logical/module>.dll` (`driver.windows_program_paths`).
@@ -122,8 +122,8 @@ build](windows-build.md).
 `spec/driver_spec.lua` covers mapping and directory preparation. CLI
 integration specs (`spec/coder/incremental_compilation_spec.lua`,
 `spec/coder/build_coordination_spec.lua`, `spec/coder/link_certification_spec.lua`,
-`spec/coder/native_inputs_spec.lua`, `spec/coder/test_runner_spec.lua`,
-`spec/coder/standalone_paths_spec.lua`) compile and run external source trees,
+`spec/coder/native_inputs_spec.lua`, `spec/coder/test_runner_spec.lua`)
+compile and run external source trees,
 libraries, folder modules, and test runners with output paths that contain
 spaces. Incremental cases verify reuse
 and header restoration in the selected tree, and coverage cases verify the

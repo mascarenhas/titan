@@ -86,9 +86,10 @@ authored runtime objects (`titan-runtime/`) and the remaining native trees
 (LPegLabel, llhttp, SQLite, and bundled OpenSSL) still require the clean steps
 below when changing tools, flags, profile, or OpenSSL mode.
 
-Run full validation without ambient `ROCKS_TREE`, `TITAN_ROCKS_ROOT`,
-`TITAN_EXTRA_CPPFLAGS`, or `TITAN_NO_LINE_DIRECTIVES`. These alter SDK/provider
-selection, fixture preprocessing, or traceback attribution. Make unsets
+Run full validation without ambient `ROCKS_TREE`, `TITAN_ROOT`, `TITANC`,
+`TITAN_PATH_0_6`, `TITAN_PATH`, `TITAN_EXTRA_CPPFLAGS`, or
+`TITAN_NO_LINE_DIRECTIVES`. These alter SDK/provider selection, the run-time
+SDK fallback, fixture preprocessing, or traceback attribution. Make unsets
 `LUA_PATH`, `LUA_CPATH`, and their Lua 5.5 variants for its test and compiler
 invocations; clear them for manual prefix-tool invocations too, especially
 after a shell used `luarocks init`. Native test builds use `TITAN_EXTRA_*FLAGS`
@@ -172,7 +173,7 @@ grep -Eq '^Titan link hit ' /tmp/native-identical-reinstall.log
 `titanc` accepts dotted module names, not file paths. Use its
 [CLI reference](driver.md#the-titanc-command-line) for provider/standalone
 selection, `--tree`, `--output`, incremental object reuse, `-c`, and test mode.
-Source-rock `all` uses the in-tree compiler and private bootstrap; ordinary
+Source-rock `all` uses the in-tree compiler and its support module; ordinary
 `stdlib` uses the installed compiler unless `STDLIB_USE_INSTALLED_RUNTIME=0`.
 Packaging, binary rocks, and uninstall are documented in [build and
 installation responsibilities](build-script-audit.md#installation-and-publication).
@@ -182,9 +183,9 @@ installation responsibilities](build-script-audit.md#installation-and-publicatio
 For focused compiler Lua edits, use the explicit checkout profile:
 
 ```sh
-TITAN_ROCKS_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1 \
+TITAN_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1 \
   busted --run=checkout spec/parser_spec.lua
-TITAN_ROCKS_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1 \
+TITAN_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1 \
   busted --run=checkout spec/coder/coder_spec.lua --filter='for loop'
 ```
 
@@ -193,10 +194,11 @@ LuaRocks launcher has initialized its paths, so edited checkout compiler
 modules load without reinstalling them; an ambient checkout-first `LUA_PATH`
 alone does not have that precedence. The C module path is unchanged. The
 profile's helper, `spec/support/checkout_busted.lua`, rejects a missing
-`TITAN_ROCKS_ROOT`, creates one resolver context to initialize the driver
+`TITAN_ROOT`, creates one resolver context to initialize the driver
 layout, calls `driver.configure_foreign_c` so direct checker FFI imports use the
 installed SDK headers, and closes the context. It changes no compiler loader
-or source-identity mechanism. `TITAN_ROCKS_ROOT` separately preserves the
+or source-identity mechanism. A non-empty `TITAN_ROOT` selects installed mode
+even though the driver source is the checkout's, so it preserves the
 installed driver layout, headers and runtime libraries; scope it to this
 command.
 
@@ -212,7 +214,7 @@ broken local module fails rather than falling back to the install.
 
 `titanc --output DIRECTORY` keeps generated C, objects, headers, `--c-source`
 nodes (`.native/`), final-link certificates and synthetic sources
-(`.titan-links/`), providers, loaders, and programs below that directory while
+(`.titan-links/`), providers, and programs below that directory while
 preserving their source-root hierarchy, and serializes concurrent invocations
 sharing the directory with `<output>/.titan-build.lock`. `--tree` still selects
 sources; `--output` changes neither source identity nor provider/Lua search
@@ -220,7 +222,7 @@ paths. Omitting it preserves the legacy source-adjacent generation behavior.
 See [output-directory routing](output-directory.md) for the exact mapping.
 
 Repository Make builds default to `TITAN_OUTPUT_DIR=out`: the standard-provider
-pair and loaders stage there, native tests use `out/tests` (with child-only C
+pair stages there, native tests use `out/tests` (with child-only C
 fixture objects certified under `out/tests/native/<helper>.o`), and native
 coverage uses `out/coverage` with reports in `out/coverage/report`. Within an
 output tree, `titanc --incremental` certifies compiler, flag, profile, header,
@@ -240,7 +242,7 @@ state reset `types.registry` and, for imports, `driver.imported` first.
 
 Compiler fixtures remove only their exact artifacts, including the paired
 `.a` from a no-main compile. Treat `titan-runtime/libtitan.a`, the standard
-stage's `out/titan.so`/`out/titan.a` and shims, canonical installed providers,
+stage's `out/titan.so`/`out/titan.a`, canonical installed providers,
 and native dependency archives as shared Make-owned state. Helpers must not
 invalidate them to force a rebuild. `make clean` removes the selected
 `TITAN_OUTPUT_DIR` as an owned output tree. The bounded cleanup rules for

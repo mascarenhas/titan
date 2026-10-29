@@ -991,14 +991,14 @@ includes `uv.h`, exposes one operation through a narrow `provider_probe.h`,
 and leaves `uv_random` unresolved in its DSO. The Titan fixture imports that
 narrow header and public `uv`; its initializer loads the combined provider
 before the native lazy call binds. A Lua variant explicitly loads `titan.uv`
-through its generated shim before mapping the probe. That sequence also
+with `require` through the Titan package searcher before mapping the probe. That sequence also
 satisfies eager native relocations, while ordinary Titan function-call loading
 uses the general lazy/global runtime loader. This is evidence about native
 provider linkage, not a public libuv adapter recipe.
 
 Do not embed another copy of Titan's bundled archive in an extension. Even an
 identical archive creates another native instance with separate process-global
-state. See [the implementation loader](../implementation/lua-interop-internals.md#4-generated-shim-lazyglobal-loading-and-promotion)
+state. See [the implementation loader](../implementation/lua-interop-internals.md#four-shared-library-loading-paths)
 for cache and promotion details.
 
 ## Current Limitations

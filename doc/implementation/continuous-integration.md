@@ -42,19 +42,23 @@ that keeps those slots full is owned by the
 
 `build-compiler` prepares a clean ABI-2 Lua prefix, installs compiler/test
 dependencies with `luarocks make --only-deps` and `luarocks test --prepare`,
-then calls `make install-compiler-sdk`. It builds runtime, libbacktrace, bare
-native compiler support, compiler Lua/CLI, the matching Lua SDK, and Titan
-headers. Guarded `stage-titan-bootstrap` supplies bare `require "titan"`
-support without logical stdlib metadata, shims, or `titan.a`. Libuv, llhttp,
-SQLite, OpenSSL, and private LPegLabel do not belong to this producer.
+then calls `make install-compiler-sdk`. It builds runtime, libbacktrace, the
+native support module, compiler Lua/CLI, the matching Lua SDK, and Titan
+headers, then checks that the support module is installed at
+`lib/lua/5.5/titan.so` and that neither a `lib/titan/0.6/titan.so|a` provider
+nor a `share/lua/5.5/titan` directory exists. Libuv, llhttp, SQLite, OpenSSL,
+and private LPegLabel do not belong to this producer.
 
 Its archive is a full-tree tar preserving source/output mtimes, prepared Lua
 files, and executable modes. It excludes standard-provider outputs, stdlib
 native build trees, and prefix-owned C-probe caches. Producer and consumers
 must agree on OS, architecture, and object target. The dependency cache key
-includes the active ABI. Restore reruns Lua/LuaRocks preparation, replaces only
-known active `0.6` Titan rock/direct-shim state, and verifies `package.cpath`
-contains `lib/titan/0.6/?.so`.
+includes the active ABI. Preparation removes only known Titan-owned state from
+the cached prefix (the rock registration, a manifest-external
+`lib/lua/5.5/titan.so`, and the compiler and legacy `share/lua/5.5/titan`
+directories) and verifies, with all Lua and Titan path variables unset, that
+Lua's `package.cpath` contains `$PREFIX/bin/../lib/lua/5.5/?.so` and no
+`/lib/titan/` entry.
 
 `test-linux-compiler` runs shards 1–2 and 3–4 of one four-way covered plan on
 separate runners (`spec/support/ci_parallel_compiler_tests.sh`).
@@ -119,11 +123,12 @@ source-compiling those dependencies in compiler-only shards. This includes
 remain in `spec/coder/unions_spec.lua`. The compiler SDK installs no standard
 library, and source-compiling protobuf's dependency closure also requires
 private LPegLabel headers that the SDK omits. Snapshot and restore the
-canonical provider pair, shims, and checkout runtime around compiler fixtures.
-The `rockspec_spec.lua` publication gate stages the already validated installed
-pair/shims and passes the exact `STDLIB_INSTALL_STAGE` to `publish-stdlib`;
-calling build-dependent `install-stdlib` here would rebuild all roots. Keep
-packaging gates before legacy compiler fixtures that clean root outputs.
+canonical provider pair, runtime archive, and checkout runtime around compiler
+fixtures. The `rockspec_spec.lua` publication gate stages the already
+validated installed pair and passes the exact `STDLIB_INSTALL_STAGE` to
+`publish-stdlib`; calling build-dependent `install-stdlib` here would rebuild
+all roots. Keep packaging gates before legacy compiler fixtures that clean
+root outputs.
 
 Then `make titan-native-coverage-build` builds the source-linked native
 coverage aggregate with matching GCC/gcov 14 and pinned gcovr 8.4 (HTML, LCOV
@@ -131,10 +136,16 @@ and Cobertura), and `make titan-native-coverage-run` runs the complete
 unfiltered behavior suite once. Each execution resets counters and replaces
 reports, so the saved report is that complete run. An extra ordinary uncovered
 aggregate in this lane would add no behavior coverage. Packaging still consumes
-the ordinary installed provider. The bundled-OpenSSL production smoke
-(`ci_dependency_mode_smoke.sh bundled`) follows; after the probe cache is saved,
-`make clean-stdlib` and a forced reinstall with system OpenSSL run the distinct
-`system` canary.
+the ordinary installed provider. After installing the rock, CI verifies the
+loading layout in a plain Lua process with every Lua and Titan path variable
+unset: `package.searchpath("titan", package.cpath)` must be the installed
+`lib/lua/5.5/titan.so`, the standard provider must not export
+`luaopen_titan`, and `require "titan"` followed by `require "titan.string"`
+must reach the provider through the Titan searcher. The bundled-OpenSSL
+production smoke (`ci_dependency_mode_smoke.sh bundled`) follows; its Lua
+fixtures likewise `require "titan"` before any `titan.*` module, with path
+variables unset. After the probe cache is saved, `make clean-stdlib` and a
+forced reinstall with system OpenSSL run the distinct `system` canary.
 
 LuaCov measures the Lua compiler, not Titan/C library implementations. Keep
 standard-library API/runtime behavior outside LuaCov; a library-discovered
@@ -315,8 +326,8 @@ check on other hosts. It retries only dependency acquisition within the same pre
 build and complete test execution remain single-shot. Run all uncovered
 stdlib/runtime/packaging work and the aggregate before
 `ci_test_groups.sh compiler-uncovered`. Before compiler
-fixtures, use `ci_stdlib_snapshot.sh` to preserve the runtime archive,
-canonical pair, conditional dSYM, and all shims, then restore them
+fixtures, use `ci_stdlib_snapshot.sh` to preserve the runtime archive and the
+canonical provider pair with its conditional dSYM, then restore them
 before bundled/system production smokes. Retain the real x86_64/arm64 universal
 Mach-O archive lookup/repackaging proof; a host-only synthetic check is not a
 replacement. Compiler/language specs must not delete shared runtime state to

@@ -265,8 +265,7 @@ pass itself never runs the checker, code generator, or C preprocessor:
   still decided by its certificate.
 * **Final outputs.** The pass reserves the actual program path and Darwin
   `.dSYM`, the Windows launcher and provider DLL, or the library provider,
-  archive, `.dSYM`, and generated Lua shims, including shims of modules
-  carried by already-selected static archives.
+  archive, and `.dSYM`.
 * **Protected inputs.** `--c-source` files and `-X` payloads, every source
   constituent, the non-`search` C headers recorded by cached modules, selected
   binary providers and archives, every held `.titan-build.lock` file, and the
@@ -938,10 +937,9 @@ is:
 * **Windows standalone or `--test` executable:** `{ path = paths.executable }`
   and `{ path = paths.provider }`;
 * **Unix provider library:** `{ path = "<prefix>.so" }`, `{ path =
-  "<prefix>.a" }`, optional `{ path = "<prefix>.so.dSYM", kind = "directory" }`
-  on Darwin, and `{ path = shim.filename }` for each generated Lua shim;
-* **Windows provider library:** `{ path = "<prefix>.dll" }` and each generated
-  Lua shim.
+  "<prefix>.a" }`, and optional `{ path = "<prefix>.so.dSYM", kind =
+  "directory" }` on Darwin;
+* **Windows provider library:** `{ path = "<prefix>.dll" }`.
 
 Mutable runtime coverage outputs (`.gcda` files and rendered coverage reports)
 are never part of `spec.outputs`. Each target owns
@@ -970,8 +968,8 @@ are never part of `spec.outputs`. Each target owns
   `no_uv_bootstrap`, `argv` (`driver.link_extra_flags()`), `toolchain`
   (`{ compiler = toolchain_identity, output_tools }`, see below), `test_cases`
   (deterministically sorted descriptors from `test_runner.discover`),
-  `templates` (`configuration.compiler`, covering runner/entrypoint templates
-  and `standalone_paths.lua`), `coverage` (`coverage.inventory`), `companions`
+  `templates` (`configuration.compiler`, covering the runner and entrypoint
+  templates), `coverage` (`coverage.inventory`), `companions`
   (Windows launcher manifest and `relative_provider` path), `policy` (`{ uname,
   darwin, profile, target }`), `bindings` (`resolver_context.native_bindings`),
   `target`, and `environment` (`{ runtime_flags, MACOSX_DEPLOYMENT_TARGET,
