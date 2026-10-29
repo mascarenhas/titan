@@ -12470,7 +12470,7 @@ function driver.preflight_build_outputs(context, plan, options)
     return true
 end
 
--- Implementation notes: doc/implementation/multi-module-libraries.md#validated-publication-and-generated-shims
+-- Implementation notes: doc/implementation/multi-module-libraries.md#validated-publication
 local function validate_generated_shim_destination(filename)
     local parents_ok, parents_err = validate_output_ancestors(filename)
     if not parents_ok then return nil, parents_err end
