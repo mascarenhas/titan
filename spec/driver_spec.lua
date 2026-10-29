@@ -4681,8 +4681,13 @@ end
             } },
         }
         assert(preflight(plan, { roots = { "pkg.app" }, output_root = root .. "/out" }))
+        -- The single requested root is the provider: pkg.app, not its parent.
         local suffix = platform.windows and ".dll" or ".so"
-        assert.is_table(reserved(plan, "provider DSO", "/out/pkg" .. suffix))
+        assert.is_table(reserved(plan, "provider DSO", "/out/pkg/app" .. suffix))
+        if not platform.windows then
+            assert.is_table(reserved(plan, "provider archive", "/out/pkg/app.a"))
+        end
+        assert.is_nil(reserved(plan, "provider DSO", "/out/pkg" .. suffix))
         for _, reservation in ipairs(plan.reservations) do
             assert.is_nil(reservation.path:match("%.lua$"), reservation.path)
         end
