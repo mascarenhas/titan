@@ -11,7 +11,7 @@ local MODULE = "ffi_operators"
 
 local function clean_module()
     for _, suffix in ipairs({
-        ".c", ".o", ".so", ".a", ".lua", ".titan.h",
+        ".c", ".o", ".so", ".a", ".titan.h",
         "__entrypoint.c", "__entrypoint.o",
     }) do
         os.remove(MODULE .. suffix)

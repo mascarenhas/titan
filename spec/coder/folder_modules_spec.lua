@@ -382,7 +382,10 @@ assert(folder.through_extra(37) == 37)
 assert(folder.through_interface(42) == 42)
 print("OK")
 ]], workspace, SHARED_SUFFIX)
-        local ok, output = run({ LUA, "-e", script }, workspace)
+        -- The consumer provider resolves its foldercase dependency through
+        -- the runtime Titan path, so name the publication root explicitly.
+        local ok, output = run({ "env", "TITAN_PATH_0_6=" .. workspace .. ";;",
+            LUA, "-e", script }, workspace)
         assert.truthy(ok, output)
         assert.equal("OK\n", output)
     end)
@@ -563,7 +566,10 @@ for name, expected in pairs({positional = "positional", named = "named", string_
     assert(results[1] == #expected and results[2] == nil and results[3] == expected)
 end
 ]], workspace, SHARED_SUFFIX, consumer)
-            local ok, output = run({LUA, "-e", script}, workspace)
+            -- The consumer provider resolves its imported provider through
+            -- the runtime Titan path, so name that root explicitly.
+            local ok, output = run({ "env", "TITAN_PATH_0_6=" .. workspace .. ";;",
+                LUA, "-e", script }, workspace)
             assert.truthy(ok, output)
         end)
     end

@@ -89,6 +89,12 @@ jobs:
           fi
           rm -f "$PREFIX/share/titan/0.6/src/titan/test.titan"
           rm -f "$PREFIX/lib/lua/5.5/titan.so"
+          # The restored Lua tree is not part of the cache key. Drop the
+          # compiler modules so removals are visible, and drop the pre-cutover
+          # share/lua/5.5/titan shim directory outright.
+          rm -rf "$PREFIX/share/lua/5.5/titan-compiler" \
+            "$PREFIX/share/lua/5.5/c-parser"
+          rm -rf "$PREFIX/share/lua/5.5/titan"
           if clean_titan_environment \
               "$PREFIX/bin/luarocks" show titan >/dev/null 2>&1; then
             echo "cached Titan rock remained registered after removal" >&2

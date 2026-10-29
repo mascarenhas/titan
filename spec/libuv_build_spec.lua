@@ -1138,7 +1138,7 @@ printf '%s\n' "$*" >> calls
                 "make", "--no-print-directory", "-s", "-C", root,
                 "PREFIX=" .. root, "TITAN_JOBS=4", "MAKE=false",
                 "STDLIB_USE_INSTALLED_RUNTIME=0", "OPENSSL_MODE=system",
-                "OPENSSL_PKG_CONFIG=true", "TITANC=sh ./record-compiler",
+                "OPENSSL_PKG_CONFIG=true", "STDLIB_TITANC=sh ./record-compiler",
                 "STDLIB_NATIVE_PREREQS=prepared", "STDLIB_TOOL_PREREQS=prepared",
                 "STDLIB_PLATFORM_PREREQS=prepared", "STDLIB_BOOTSTRAP_PREREQ=prepared",
                 "STDLIB_RUNTIME_ARCHIVE_PREREQ=prepared", "STDLIB_EXTRA_OBJECTS=first.o second.a" }
@@ -1247,7 +1247,8 @@ done
                 "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "GNUMAKEFLAGS",
                 "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES", "-u", "MAKE",
                 "-u", "ROCKS_TREE", "-u", "TITAN_ROOT",
-                "-u", "TITANC", "-u", "TITAN_LUA", "-u", "ROCK_TITANC", "-u", "TITAN_JOBS",
+                "-u", "TITANC", "-u", "STDLIB_TITANC", "-u", "TITAN_LUA",
+                "-u", "ROCK_TITANC", "-u", "TITAN_JOBS",
                 "-u", "ROCK_LUA", "-u", "STDLIB_USE_INSTALLED_RUNTIME",
                 "make", "--no-print-directory", "-s", "-C", root, "TITAN_JOBS=4",
                 "PREFIX=" .. prefix, "HOST_OS=Linux",
@@ -1286,7 +1287,7 @@ done
             end
             local installation = root .. "/installed"
             local install_arguments = {
-                "PREFIX=" .. installation, "TITANC=false",
+                "PREFIX=" .. installation, "STDLIB_TITANC=false",
                 "TITAN_RUNTIME_LIB=" .. prefix .. "/lib/titan/0.6/libtitan.a",
                 "TITAN_RUNTIME_LUA_SOURCE_PATH=" .. prefix .. "/src/lua-5.5.1",
                 "TITAN_RUNTIME_LUA_LIB=" .. prefix .. "/lib/liblua.a",
@@ -3167,7 +3168,8 @@ int main(void) {
         end)
 
     -- The support module is ltitanlib plus the shared path code, linked as a
-    -- loadable Lua bundle on macOS; it never carries the runtime archive.
+    -- loadable Lua bundle on macOS; it never carries the runtime archive and
+    -- exports only luaopen_titan.
     it("links the titan support module from its two objects as a Lua bundle",
         function()
             if platform.windows then
@@ -3185,7 +3187,8 @@ int main(void) {
                 tostring(code) .. ")")
             local normalized = output:gsub("%s+", " ")
             local link = assert(normalized:match(
-                '%-bundle %-undefined dynamic_lookup %-o "%$tmp" ([^;]*);'),
+                '%-bundle %-undefined dynamic_lookup ' ..
+                '%-Wl,%-exported_symbol,_luaopen_titan %-o "%$tmp" ([^;]*);'),
                 normalized)
             -- Make prints the recipe's line continuations verbatim.
             local inputs = {}
@@ -6978,7 +6981,7 @@ printf '%s %s %s\n' "$jobs" "$pool" "${TITAN_C_PARTS:-default}" >> "$TITAN_FIXTU
                 argv[#argv + 1] = make_program
                 for _, word in ipairs(flags or {}) do argv[#argv + 1] = word end
                 for _, word in ipairs({ "--no-print-directory", "-s", "-f", "Makefile",
-                    "PREFIX=" .. root, "TEST_LUA=false", "TITANC=" .. root .. "/titanc",
+                    "PREFIX=" .. root, "TEST_LUA=false", "STDLIB_TITANC=" .. root .. "/titanc",
                     "STDLIB_USE_INSTALLED_RUNTIME=0", "STDLIB_NATIVE_PREREQS=" .. root .. "/prepared",
                     "STDLIB_TOOL_PREREQS=", "STDLIB_PLATFORM_PREREQS=",
                     "STDLIB_RUNTIME_ARCHIVE_PREREQ=", "STDLIB_BOOTSTRAP_PREREQ=", "stdlib-objects" }) do
@@ -7046,7 +7049,7 @@ printf '%s %s %s\n' "$jobs" "$pool" "${TITAN_C_PARTS:-default}" >> "$TITAN_FIXTU
             local logical = makefile:gsub("\\\n", " ")
             local launches = 0
             for line in logical:gmatch("[^\n]+") do
-                if line:match("^\t") and (line:find("%$%$?%(TITANC%)%s+%-") or
+                if line:match("^\t") and (line:find("%$%$?%(STDLIB_TITANC%)%s+%-") or
                         line:find("%$%$?%(TEST_TITANC%)%s+%-")) then
                     launches = launches + 1
                     assert.truthy(line:match(

@@ -420,6 +420,15 @@ STDLIB_LICENSES := LICENSES/libuv-LICENSE LICENSES/libuv-LICENSE-extra \
 # checkout compiler loads it from here; installs deploy it to lib/lua/5.5.
 TITAN_SUPPORT_MODULE := titan-runtime/bootstrap/titan.so
 STDLIB_BOOTSTRAP_PREREQ := $(TITAN_SUPPORT_MODULE)
+# The support module is an ordinary Lua C module exporting only luaopen_titan;
+# titan_path.o's globals stay local to this image so a process that also
+# preloads libtitan.a (the language server) cannot interpose them.
+TITAN_SUPPORT_EXPORTS := scripts/titan_support_exports.map
+ifeq ($(HOST_OS),Darwin)
+  TITAN_SUPPORT_EXPORT_FLAGS ?= -Wl,-exported_symbol,_luaopen_titan
+else
+  TITAN_SUPPORT_EXPORT_FLAGS ?= -Wl,--version-script=$(TITAN_SUPPORT_EXPORTS)
+endif
 ROCK_LUA_INCDIR ?= $(PREFIX)/include
 ROCK_LUA_HEADERS = $(addprefix $(ROCK_LUA_INCDIR)/,lua.h luaconf.h lauxlib.h)
 # Stock LuaRocks supplies optimized dependency flags. Apply the Titan payload
@@ -453,7 +462,9 @@ SOURCE_COMPILER_SETUP = local root=os.getenv("ROCKS_TREE"); \
 	package.cpath=root .. "/lib/lua/5.5/?.so;" .. package.cpath end; \
 	package.path="./?.lua;./?/init.lua;" .. package.path; \
 	package.cpath="./titan-runtime/bootstrap/?.so;" .. package.cpath
-TITANC ?= $(if $(filter 1,$(STDLIB_USE_INSTALLED_RUNTIME)),$(call make_shell_quote,$(STDLIB_INSTALLED_ROOT)/bin/titanc),$(call make_shell_quote,$(TITAN_LUA)) -E -e $(call make_shell_quote,$(SOURCE_COMPILER_SETUP)) ./titanc --lua $(call make_shell_quote,$(abspath $(TITAN_RUNTIME_LUA_SOURCE_PATH))))
+# Distinct from the runtime `TITANC` command that the SDK fallback spawns:
+# a command-line Make variable is exported into every recipe environment.
+STDLIB_TITANC ?= $(if $(filter 1,$(STDLIB_USE_INSTALLED_RUNTIME)),$(call make_shell_quote,$(STDLIB_INSTALLED_ROOT)/bin/titanc),$(call make_shell_quote,$(TITAN_LUA)) -E -e $(call make_shell_quote,$(SOURCE_COMPILER_SETUP)) ./titanc --lua $(call make_shell_quote,$(abspath $(TITAN_RUNTIME_LUA_SOURCE_PATH))))
 
 # Standard modules have one installed pathname. PREFIX owns Lua; ROCKS_TREE
 # owns these Titan artifacts when it is supplied. The source-tree
@@ -1037,7 +1048,8 @@ $(TITAN_PATH_O): titan-runtime/titan_path.c titan-runtime/titan.h \
 		-c titan-runtime/titan_path.c -I titan-runtime -I $(TITAN_RUNTIME_LUA_SOURCE_PATH) \
 		-o $@
 
-$(LTITANLIB_O): titan-runtime/ltitanlib.c \
+$(LTITANLIB_O): titan-runtime/ltitanlib.c titan-runtime/titan.h \
+		titan-runtime/titan_winloader.h \
 		$(wildcard $(ROCK_LUA_HEADERS)) $(LUA_SDK_PREREQ)
 	$(CC) $(ROCK_CFLAGS) $(TITAN_EXTRA_CFLAGS) \
 		-I"$(ROCK_LUA_INCDIR)" -c "$<" -o "$@"
@@ -1049,11 +1061,11 @@ $(TITAN_RUNTIME_LIB): $(TITAN_RUNTIME_OBJECTS)
 
 # An ordinary Lua C module exporting only luaopen_titan; it needs neither the
 # standard library nor the rest of the runtime.
-$(TITAN_SUPPORT_MODULE): $(LTITANLIB_O) $(TITAN_PATH_O)
+$(TITAN_SUPPORT_MODULE): $(LTITANLIB_O) $(TITAN_PATH_O) $(TITAN_SUPPORT_EXPORTS)
 	@mkdir -p "$(@D)"
 	@set -e; tmp="$@.tmp"; rm -f "$$tmp"; \
-	if $(ROCK_LD) $(ROCK_LIBFLAG) -o "$$tmp" $(LTITANLIB_O) $(TITAN_PATH_O) \
-		$(TITAN_EXTRA_LDFLAGS); then \
+	if $(ROCK_LD) $(ROCK_LIBFLAG) $(TITAN_SUPPORT_EXPORT_FLAGS) -o "$$tmp" \
+		$(LTITANLIB_O) $(TITAN_PATH_O) $(TITAN_EXTRA_LDFLAGS); then \
 		mv -f "$$tmp" "$@"; \
 	else \
 		status=$$?; rm -f "$$tmp"; exit $$status; \
@@ -1192,12 +1204,12 @@ STDLIB_COMPILER_ENV = CC=$(call make_shell_quote,$(CC)) \
 stdlib-objects: $(STDLIB_NATIVE_PREREQS) $(STDLIB_TOOL_PREREQS) $(STDLIB_BOOTSTRAP_PREREQ) $(STDLIB_RUNTIME_ARCHIVE_PREREQ) $(STDLIB_PLATFORM_PREREQS) ## Compile standard-library objects without linking a provider
 	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) \
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
-	$(STDLIB_COMPILER_ENV) $(TITANC) --output $(call make_shell_quote,$(TITAN_OUTPUT_DIR)) --source-first --incremental -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) -c $(STDLIB_ROOTS)
+	$(STDLIB_COMPILER_ENV) $(STDLIB_TITANC) --output $(call make_shell_quote,$(TITAN_OUTPUT_DIR)) --source-first --incremental -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) -c $(STDLIB_ROOTS)
 
 stdlib: $(STDLIB_NATIVE_PREREQS) $(STDLIB_TOOL_PREREQS) $(STDLIB_BOOTSTRAP_PREREQ) $(STDLIB_RUNTIME_ARCHIVE_PREREQ) $(STDLIB_PLATFORM_PREREQS) ## Build the paired standard-library provider
 	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) \
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
-	$(STDLIB_COMPILER_ENV) $(TITANC) --output $(call make_shell_quote,$(TITAN_OUTPUT_DIR)) --source-first --incremental -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) \
+	$(STDLIB_COMPILER_ENV) $(STDLIB_TITANC) --output $(call make_shell_quote,$(TITAN_OUTPUT_DIR)) --source-first --incremental -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) \
 	  $(STDLIB_ROOTS) -X $(STDLIB_EXTRA_OBJECTS)
 
 install-stdlib: stdlib ## Install the paired standard library from this source tree

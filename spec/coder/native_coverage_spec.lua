@@ -337,18 +337,15 @@ end
         assert.falsy(ok, output)
         assert.matches("--coverage requires a test or standalone executable", output, 1, true)
         assert.is_nil(lfs.attributes(provider))
-        assert.is_nil(lfs.attributes(workspace .. "/calc.lua"))
         if not platform.windows then assert.is_nil(lfs.attributes(workspace .. "/calc.a")) end
         ok, output = compile({}, { "calc" })
         assert.truthy(ok, output)
         local ordinary = read(provider)
-        local shim = read(workspace .. "/calc.lua")
         local archive = not platform.windows and read(workspace .. "/calc.a")
         ok, output = compile(options, { "calc" })
         assert.falsy(ok, output)
         assert.matches("--coverage requires a test or standalone executable", output, 1, true)
         assert.equal(ordinary, read(provider))
-        assert.equal(shim, read(workspace .. "/calc.lua"))
         if archive then assert.equal(archive, read(workspace .. "/calc.a")) end
     end)
 

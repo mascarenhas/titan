@@ -158,7 +158,6 @@ describe("nominal layout provider boundaries", function()
         end
         remove(source_root .. "/private.h")
         remove(name .. ".so")
-        remove(name .. ".lua")
         write(source_root .. "/archive_app.titan", [[
             local provider = import "nominal_archive_fixture"
             foreign import "lua.h"
@@ -197,7 +196,6 @@ describe("nominal layout provider boundaries", function()
         end
         remove(source_root .. "/private.h")
         remove(name .. ".a")
-        remove(name .. ".lua")
         write(source_root .. "/dso_app.titan", [[
             local provider = import "nominal_dso_fixture"
             foreign import "lua.h"

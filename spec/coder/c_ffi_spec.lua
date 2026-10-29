@@ -89,7 +89,6 @@ describe("C FFI code generation", function()
         os.remove("test.o")
         os.remove("test.so")
         os.remove("test.a")
-        os.remove("test.lua")
         if not h.verbose then os.remove("test.c") end
         os.execute("rm -rf test.so.dSYM")
     end)

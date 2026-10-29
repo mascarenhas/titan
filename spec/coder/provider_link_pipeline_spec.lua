@@ -343,12 +343,15 @@ describe("provider pair link pipeline", function()
         assert.equal("file", lfs.attributes(output .. "/pkg.so", "mode"))
         assert.equal("file", lfs.attributes(output .. "/pkg.a", "mode"))
         assert.same(EXPECTED_VALIDATIONS, lines(validations))
+        -- A published pair is one prefix provider per module group, so a
+        -- plain Lua host installs the Titan searcher through the support
+        -- module and names the publication root explicitly.
         local ok, result = shell(workspace, quote_words({
             "env", "-u", "LUA_PATH", "-u", "LUA_CPATH", "-u", "LUA_INIT",
-            LUA, "-e", string.format(
-                "package.path=%q..package.path package.cpath=%q..package.cpath " ..
-                "assert(require('pkg.left').answer() + require('pkg.right').twice(2) > 0)",
-                output .. "/?.lua;", output .. "/?.so;" .. REPO .. "/?.so;"),
+            "TITAN_PATH_0_6=" .. output .. ";;",
+            LUA, "-e",
+            "require \"titan\"; " ..
+            "assert(require('pkg.left').answer() + require('pkg.right').twice(2) > 0)",
         }) .. " 2>&1")
         assert.truthy(ok, result)
     end

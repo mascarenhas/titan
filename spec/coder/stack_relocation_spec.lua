@@ -6,7 +6,6 @@ local function clean()
     os.remove("test.o")
     os.remove("test.so")
     os.remove("test.a")
-    os.remove("test.lua")
     os.execute("rm -rf test.so.dSYM")
     if not h.verbose then os.remove("test.c") end
 end

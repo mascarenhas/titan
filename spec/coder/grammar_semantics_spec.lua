@@ -2,7 +2,7 @@ local h = require "spec.support.helpers"
 
 describe("simplified grammar generated behavior", function()
     after_each(function()
-        for _, suffix in ipairs({ ".c", ".o", ".so", ".a", ".lua", ".ffi.h", ".titan.h" }) do
+        for _, suffix in ipairs({ ".c", ".o", ".so", ".a", ".ffi.h", ".titan.h" }) do
             os.remove("test" .. suffix)
         end
         os.execute("rm -rf test.so.dSYM")

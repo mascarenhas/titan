@@ -365,8 +365,8 @@ describe("standalone-prefix source installation", function()
             assert_file(PREFIX ..
                 "/share/lua/5.5/titan-compiler/" .. module)
         end
-        -- Plain Lua finds the support module on its default C path; no
-        -- generated Lua shims accompany the standard provider.
+        -- Plain Lua finds the support module on its default C path. The
+        -- standard provider is one image; its modules have no staged Lua shims.
         assert_unique_regular_file(SUPPORT_MODULE)
         assert_absent(LUA_SHAREDIR .. "/titan")
         assert_absent(LUA_SHAREDIR .. "/titan.lua")
@@ -1336,6 +1336,18 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             missing, missing_error, missing_stage =
                 titan._loadlib(support_path, "luaopen_titan_math")
             assert(missing == nil and missing_stage == "init", tostring(missing_error))
+            -- The support image exports only luaopen_titan, so a process that
+            -- also preloads libtitan.a cannot interpose its path internals.
+            for _, hidden in ipairs({ "loadlib", "titan_install_searcher",
+                    "titan_module_preload", "titan_check_abi_entry",
+                    "titan_path_lua_executable_dir",
+                    "titan_path_lua_compiler_root",
+                    "titan_path_lua_expand" }) do
+                local found, hidden_error, hidden_stage =
+                    titan._loadlib(support_path, hidden)
+                assert(found == nil and hidden_stage == "init",
+                    hidden .. ": " .. tostring(hidden_error))
+            end
             assert(type(coroutine) == "userdata")
             assert(type(uv) == "userdata")
             assert(type(async) == "userdata")
@@ -2627,9 +2639,8 @@ printf '%s\n' "$TITAN_ROOT" "$TITAN_RUNTIME_PREBUILT" \
         fixture(source, "scripts/build_windows_runtime.sh", [=[#!/usr/bin/env bash
 set -euo pipefail
 mkdir -p "$1/runtime"
-for name in ltitanlib.o libtitan-lpeglabel.a; do
-  [[ -f $1/runtime/$name ]] || printf '%s\n' "$name" > "$1/runtime/$name"
-done
+[[ -f $1/runtime/libtitan-lpeglabel.a ]] ||
+  printf '%s\n' "libtitan-lpeglabel.a" > "$1/runtime/libtitan-lpeglabel.a"
 ]=])
         fixture(source, "titan/transfer_native.h", "/* transfer input */\n")
         fixture(source, "titan/protobuf/native.h", "/* protobuf input */\n")
@@ -2787,7 +2798,11 @@ fi
         local native_compiles = read_file(c_compile_log)
         local links = read_file(link_log)
         local commands = read_file(compiler_log)
-        assert.truthy(commands:find("--test --incremental --no-uv-bootstrap", 1, true), commands)
+        -- Platform link flags may be interleaved with these switches, so
+        -- assert each switch rather than one contiguous argv fragment.
+        for _, flag in ipairs({ "--test", "--incremental", "--no-uv-bootstrap" }) do
+            assert.truthy(commands:find(flag .. " ", 1, true), commands)
+        end
         assert.truthy(commands:find(" -j 2 ", 1, true), commands)
         assert.truthy(commands:find("--test-dir " .. work .. "/source/spec/stdlib/titan", 1, true), commands)
         assert.truthy(commands:find("--exe " .. work .. "/sdk/bin/titan-stdlib-tests.exe", 1, true), commands)
