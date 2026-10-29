@@ -1055,4 +1055,67 @@ io.write(message)
             "no Titan SDK fallback: cannot start '" .. not_program, 1, true), output)
     end)
 
+    -- The root query child must not run the parent's Lua startup hooks: a
+    -- LUA_INIT that installs the searcher and requires a missing module would
+    -- otherwise start the same fallback query again, recursively and without
+    -- a bound. Everything else in the environment must still be inherited.
+    it("keeps Lua startup hooks out of the root query child", function()
+        local directory = root("init-probe")
+        local source = path.join(directory, "init_probe.c")
+        write_file(source, [[
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(int argc, char **argv) {
+    const char *log = getenv("TITAN_PROBE_LOG");
+    const char *root = getenv("TITAN_PROBE_ROOT");
+    FILE *file;
+    if (argc != 2 || strcmp(argv[1], "--print-root") != 0) return 2;
+    if (log == NULL || root == NULL) return 3;
+    file = fopen(log, "ab");
+    if (file == NULL) return 4;
+    fputs("probe\n", file);
+    fputs(getenv("LUA_INIT") == NULL ? "lua_init=absent\n" : "lua_init=present\n",
+        file);
+    fputs(getenv("LUA_INIT_5_5") == NULL ? "lua_init_5_5=absent\n" :
+        "lua_init_5_5=present\n", file);
+    fclose(file);
+    printf("%s\n", root);
+    return 0;
+}
+]])
+        local function native(name)
+            return platform.windows and (name:gsub("/", "\\")) or name
+        end
+        local program = path.join(directory, "titanc-init" .. EXE_SUFFIX)
+        compile_c(source, program)
+        local log = root("init-probe.log")
+        -- Windows compares environment names case-insensitively, so the mixed
+        -- spelling must be withheld too; Lua's own startup lookup is
+        -- case-insensitive there, which the asserting chunk below proves.
+        local names = platform.windows and
+            { "Lua_Init_5_5", "Lua_Init" } or { "LUA_INIT_5_5", "LUA_INIT" }
+        local initializer = 'probe_lua_init = "seen"'
+        assert_runs(workspace, {
+            titan_path = other .. ";;",
+            env = {
+                "TITANC=" .. native(program),
+                "TITAN_PROBE_LOG=" .. native(log),
+                "TITAN_PROBE_ROOT=" .. sdk,
+                names[1] .. "=" .. initializer,
+                names[2] .. "=" .. initializer,
+            },
+        }, [[
+assert(probe_lua_init == "seen", "the parent host runs its Lua startup hook")
+local item, provider = require "search.item"
+assert(item.origin() == 2)
+assert(provider:gsub("\\", "/"):find("lib/titan/0.6", 1, true), provider)
+assert(not pcall(require, "search.missing"))
+]])
+        assert.equal(1, probe_count(log))
+        assert.equal("probe\nlua_init=absent\nlua_init_5_5=absent\n",
+            read_file(log))
+    end)
+
 end)
