@@ -199,7 +199,8 @@ local shadows its name, and can select local module members. Body-local type
 annotations may use `M.Type` to select an owner type despite a local or generic
 shadow with that spelling. The explicit
 `M as foreign *Udata` cast exposes the module's native address at the trusted
-FFI boundary.
+FFI boundary. The cast needs the `Udata` declaration: add
+`foreign import "titan/ffi.h"` to the module that writes it.
 
 Top-level declarations and member selectors admit keyword spellings where the
 grammar uses `AnyName`. Local bindings and parameters still require `Name`.

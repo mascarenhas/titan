@@ -375,6 +375,8 @@ frames are skipped when an abandoned coroutine is unwound; see
 `M` is the other readonly ordinary-function builtin. It selects current-module
 members, including local or keyword-named members, as `M.member`, and an
 explicit `M as foreign *Udata` exposes the borrowed module userdata pointer.
+The cast needs the `Udata` declaration: add `foreign import "titan/ffi.h"` to
+the module that writes it.
 Foreign function bodies receive neither builtin implicitly.
 
 ## Casts And Coercions

@@ -290,7 +290,10 @@ as the complete foreign environment's canonical `lua_State` pointer, and `M`,
 the current-module marker. Member selection on `M` resolves owner
 declarations, including source-private ones; qualified type syntax `M.Type`
 uses the same owner namespace rather than a lexical or generic shadow; and an
-explicit `as foreign *Udata` lowers it to the native module pointer.
+explicit `as foreign *Udata` lowers it to the native module pointer. `Udata`
+in that cast is an ordinary foreign type name with no implicit declaration, so
+the module must `foreign import "titan/ffi.h"`, which declares it; otherwise
+the cast reports `foreign type 'Udata' is not declared`.
 
 After checking, `makemoduletype` (`checker/imports.lua`) builds the module's
 interface by traversing the AST in order, skipping `_ignore` and import
