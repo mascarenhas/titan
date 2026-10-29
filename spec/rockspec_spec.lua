@@ -2229,6 +2229,10 @@ inspect-lua-sdk:
             copy_tree("titan-runtime/" .. source,
                 workspace .. "/titan-runtime/" .. source)
         end
+        -- The support bundle's link rule consumes the export map beside the
+        -- real Makefile's own directory.
+        copy_tree("scripts/titan_support_exports.map",
+            workspace .. "/scripts/titan_support_exports.map")
         copy_tree("vendor/lpeglabel", workspace .. "/vendor/lpeglabel")
         local stage = workspace .. "/sdk"
         local libbacktrace = PREFIX .. "/lib/libbacktrace.a"

@@ -1048,8 +1048,9 @@ $(TITAN_PATH_O): titan-runtime/titan_path.c titan-runtime/titan.h \
 		-c titan-runtime/titan_path.c -I titan-runtime -I $(TITAN_RUNTIME_LUA_SOURCE_PATH) \
 		-o $@
 
-$(LTITANLIB_O): titan-runtime/ltitanlib.c titan-runtime/titan.h \
-		titan-runtime/titan_winloader.h \
+# ltitanlib.c includes titan.h and titan_winloader.h only for _WIN32, where
+# scripts/build_windows_runtime.sh tracks every titan-runtime/*.h header.
+$(LTITANLIB_O): titan-runtime/ltitanlib.c \
 		$(wildcard $(ROCK_LUA_HEADERS)) $(LUA_SDK_PREREQ)
 	$(CC) $(ROCK_CFLAGS) $(TITAN_EXTRA_CFLAGS) \
 		-I"$(ROCK_LUA_INCDIR)" -c "$<" -o "$@"
