@@ -247,9 +247,11 @@ body and ordinary cleanup have returned. A first explicit `cancel` during that
 interval keeps the normal cancellation precedence over pending success or
 failure; it does not bypass the retirement barrier.
 
-A Lua host drives scheduled work explicitly:
+A Lua host drives scheduled work explicitly, after `require "titan"` has
+installed Titan's package searcher:
 
 ```lua
+require "titan"
 local async = require "titan.async"
 local timer = require "titan.timer"
 

@@ -138,7 +138,9 @@ installed Titan `0.6` library tree, each of them resolves to the DSO form
 imports may instead select the paired self-describing `titan.a`; both forms
 expose the same logical-module ABI/types. The installation does not create
 child DSOs, Lua loader files, copies, symbolic links, or hard links.
-Earlier Titan installations are neither migrated nor cleaned up.
+Earlier Titan installations are neither migrated nor cleaned up; see
+[Upgrading from a pre-release build](installation.md#upgrading-from-a-pre-release-build)
+for the generated Lua loaders that earlier builds left behind.
 
 ## How values map between the two languages
 

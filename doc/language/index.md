@@ -25,7 +25,8 @@ end
 ```
 
 ```lua
--- Lua
+-- Lua, with sum.so on the Titan path
+require "titan"   -- installs Titan's package searcher
 local m = require "sum"
 print(m.sum_list(m.sample())) --> 10
 ```

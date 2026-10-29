@@ -302,9 +302,11 @@ in long CPU-bound loops.
   handles, but closing a process watcher does not kill or reap its child, and
   you must close raw file descriptors yourself.
 
-A Lua program runs the event loop explicitly and uses qualified module names:
+A plain Lua program loads Titan's package searcher first, runs the event loop
+explicitly, and uses qualified module names:
 
 ```lua
+require "titan"
 local async = require "titan.async"
 local timer = require "titan.timer"
 

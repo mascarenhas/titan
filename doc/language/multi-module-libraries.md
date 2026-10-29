@@ -218,7 +218,8 @@ on `package.cpath`, where Lua's C searcher would open a provider without the
 checks above, and remove `.lua` files from earlier pre-release builds
 (`a/b/left.lua` and friends): Lua's source searcher, which includes `./?.lua`,
 would still find them first. Rebuild pre-release output trees; there is no
-compatibility layer for older providers or loader files.
+compatibility layer for older providers or loader files (see
+[Upgrading from a pre-release build](installation.md#upgrading-from-a-pre-release-build)).
 
 ## Reserved `titan` name
 
