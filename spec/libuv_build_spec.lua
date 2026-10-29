@@ -6160,6 +6160,9 @@ printf '%s\n' "${schedule[@]}"
                 "steps.sanitizer-native-cache.outputs.cache-primary-key",
                 "steps.sanitizer-native-cache.outputs.cache-hit != 'true'",
                 'test ! -e "$PREFIX/bin/luarocks"',
+                -- The boundary check must tolerate a prefix where the Lua
+                -- installation created no lib/titan tree at all.
+                'if test -e "$PREFIX/lib/titan" || test -L "$PREFIX/lib/titan"; then',
                 'find "$PREFIX/lib/titan" ! -type d -print -quit',
                 'test -z "$titan_entries"',
                 'test ! -e "$PREFIX/var/cache/titan-probes"',

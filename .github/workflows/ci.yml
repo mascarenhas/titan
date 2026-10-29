@@ -760,9 +760,15 @@ jobs:
           test -f openssl-build/libssl.a
           test -f openssl-build/libcrypto.a
           test ! -e "$PREFIX/bin/luarocks"
-          # Lua creates its versioned search directory during installation.
-          # Only installed Titan artifacts belong beyond this cache boundary.
-          titan_entries="$(find "$PREFIX/lib/titan" ! -type d -print -quit)"
+          # The Lua installation creates no lib/titan tree of its own, so a
+          # clean sanitizer prefix has neither the directory nor a versioned
+          # search directory beneath it. Only installed Titan artifacts belong
+          # beyond this cache boundary, so any entry found here fails, including
+          # a non-directory lib/titan.
+          titan_entries=""
+          if test -e "$PREFIX/lib/titan" || test -L "$PREFIX/lib/titan"; then
+            titan_entries="$(find "$PREFIX/lib/titan" ! -type d -print -quit)"
+          fi
           test -z "$titan_entries"
           test ! -e "$PREFIX/var/cache/titan-probes"
 
