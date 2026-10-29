@@ -66,7 +66,8 @@ local function contain_native_processes()
     if not platform.windows or contained then return true end
     local loaded, support = pcall(require, "titan")
     if not loaded then
-        return nil, "cannot contain Windows native process tree: " .. tostring(support)
+        return nil, "cannot contain Windows native process tree: " ..
+            tostring(support):match("^[^\n]*")
     end
     if type(support) ~= "table" or
        type(support._native_process_tree_guard) ~= "function" then

@@ -363,6 +363,28 @@ describe("provider pair link pipeline", function()
         }, lines(events))
     end)
 
+    it("publishes and opens a hyphenated logical module under its canonical symbols",
+       function()
+        if platform.windows then pending("Unix paired provider pipeline"); return end
+        write_file(source_root .. "/pkg/b-c.titan",
+            "function answer(): integer return 42 end\n")
+        local ok, result = direct({}, "pkg.left", "pkg.b-c")
+        assert.truthy(ok, result)
+        assert.same(EXPECTED_VALIDATIONS, lines(validations))
+        -- `pkg.b-c` and `pkg.b_c` share luaopen_pkg_b_c; only the exact
+        -- logical name opens it.
+        ok, result = shell(workspace, quote_words({
+            "env", "-u", "LUA_PATH", "-u", "LUA_CPATH", "-u", "LUA_INIT",
+            LUA, "-e", string.format(
+                "local open = assert(package.loadlib(%q, 'luaopen_pkg_b_c')) " ..
+                "local opened, err = pcall(open, 'pkg.b_c') " ..
+                "assert(not opened and err:find('module name mismatch', 1, true), err) " ..
+                "assert(open('pkg.b-c').answer() == 42)",
+                output .. "/pkg.so"),
+        }) .. " 2>&1")
+        assert.truthy(ok, result)
+    end)
+
     it("builds the archive during the DSO link but never overlaps links without a jobserver",
        function()
         if platform.windows then pending("Unix paired provider pipeline"); return end

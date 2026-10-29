@@ -137,7 +137,7 @@ local function run_titanc(arguments, environment_jobs, customize, expect)
     end
     function driver.validate_provider_output_paths() return true end
     function driver.mangle_module_name(name)
-        return name:gsub("[.]", "_")
+        return name:gsub("[%-.]", "_")
     end
     function driver.write_foreign_header_plans() return true end
     function driver.compile_modules(requests, jobs, verbose, plans)

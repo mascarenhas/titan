@@ -4064,6 +4064,27 @@ static struct titan_symlink_origin *titan_symlink_origin_get(void) {
             assert.equal(42, status)
         end)
 
+        it("builds and runs an application whose modules have hyphenated names", function ()
+            -- Entry and opener symbols use the canonical `[-.]` mangling.
+            local ok, err = generate_modules({
+                ["dep-lib"] = [[
+                    function answer(): integer
+                        return 42
+                    end
+                ]],
+                ["main-cli"] = [[
+                    local dep = import "dep-lib"
+                    function main(args: {string}): integer
+                        return dep.answer()
+                    end
+                ]],
+            }, "main-cli", true)
+            assert.truthy(ok, err)
+            local ok, err, status = call_app("./main-cli")
+            assert.truthy(ok, err)
+            assert.equal(42, status)
+        end)
+
     end)
 end)
 

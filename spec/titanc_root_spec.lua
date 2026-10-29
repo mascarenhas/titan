@@ -80,13 +80,26 @@ describe("titanc installation root query", function()
         assert.equal("cannot locate the Titan installation root: " ..
             "cannot locate executable\n", stderr)
         assert.same({ "titan" }, required)
+    end)
 
-        status, stdout, stderr = query({ "--print-root" },
-            "module 'titan' not found")
-        assert.equal(1, status)
-        assert.equal("", stdout)
-        assert.matches("cannot load the Titan support module: " ..
-            "module 'titan' not found", stderr, 1, true)
+    it("answers from the full command line when native support is unusable",
+    function()
+        for _, support in ipairs({ "module 'titan' not found", {} }) do
+            local status, stdout, stderr, required = query({ "--print-root" },
+                support, "/selected/SDK")
+            assert.equal(0, status)
+            assert.equal("/selected/SDK\n", stdout)
+            assert.equal("", stderr)
+            assert.truthy(table.concat(required, "\n"):find(
+                "titan-compiler.driver", 1, true))
+
+            status, stdout, stderr = query({ "--print-root" }, support,
+                nil, "cannot load the Titan support module: missing")
+            assert.equal(1, status)
+            assert.equal("", stdout)
+            assert.equal("cannot locate the Titan installation root: " ..
+                "cannot load the Titan support module: missing\n", stderr)
+        end
     end)
 
     it("validates every other spelling through the full command line",
@@ -120,14 +133,25 @@ describe("titanc installation root in a process", function()
     local forms = { { "--print-root" }, { "--print-root", "-v" } }
 
     -- Both forms must load the compiler and support selected by this run.
-    local function print_root(interpreter, arguments, environment)
+    -- `prelude` is Lua run before titanc; stderr is merged when requested.
+    local function run_titanc(interpreter, arguments, environment, prelude,
+                              merge_stderr)
         local argv = { platform.windows and "env.exe" or "env", "-u", "TITAN_ROOT",
             "LUA_PATH_5_5=" .. package.path, "LUA_CPATH_5_5=" .. package.cpath }
         for _, setting in ipairs(environment or {}) do argv[#argv + 1] = setting end
         argv[#argv + 1] = interpreter
+        if prelude then
+            argv[#argv + 1] = "-e"
+            argv[#argv + 1] = prelude
+        end
         argv[#argv + 1] = "titanc"
         for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
-        local result = compiler_io.new_sync():run(argv, { stderr_to_stdout = false })
+        return compiler_io.new_sync():run(argv,
+            { stderr_to_stdout = merge_stderr == true })
+    end
+
+    local function print_root(interpreter, arguments, environment, prelude)
+        local result = run_titanc(interpreter, arguments, environment, prelude)
         assert.is_true(result.started and result.ok,
             result.output or result.diagnostic)
         local output = result.output:gsub("\r\n", "\n")
@@ -166,6 +190,24 @@ describe("titanc installation root in a process", function()
                     print_root(lua, arguments, { "TITAN_ROOT=" .. root }))
             end
         end
+    end)
+
+    it("answers from the full command line when native support cannot load",
+    function()
+        local unloadable = "package.preload.titan = function() " ..
+            "error('simulated missing support\\n\\tno file', 0) end"
+        local root = temporary.name(" selected SDK")
+        local expected = assert(driver.installed_paths(root)).root .. "\n"
+        for _, arguments in ipairs(forms) do
+            assert.equal(expected, print_root(lua, arguments,
+                { "TITAN_ROOT=" .. root }, unloadable))
+        end
+        local result = run_titanc(lua, { "--print-root" }, nil, unloadable, true)
+        assert.is_true(result.started, result.diagnostic)
+        assert.is_false(result.ok)
+        assert.equal("cannot locate the Titan installation root: " ..
+            "cannot load the Titan support module: simulated missing support\n",
+            (result.output:gsub("\r\n", "\n")))
     end)
 
     it("resolves a symlinked interpreter to its physical installation", function()
