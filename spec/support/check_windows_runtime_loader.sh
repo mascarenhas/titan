@@ -63,8 +63,15 @@ for variant in provider dependency bad missing null; do
     "$fixture" "${runtime_libraries[@]}" \
     -o "$providers/fixture-$variant.dll"
 done
+# The probe is a real Windows Lua host: package.loadlib resolves UTF-8 paths
+# through ANSI Windows APIs, so it needs the same UTF-8, long-path-aware
+# manifest resource as lua.exe. llvm-rc enters the .rc directory, so the lua.exe
+# recipe's manifest stays a relative name.
+llvm-rc -FO "$check_root/runtime-loader-probe.res" \
+  vendor/lua/lua-5.5.1-windows.rc
 "${compiler[@]}" "${common[@]}" "${ldflags[@]}" -Wl,--disable-auto-import \
   spec/fixtures/windows/runtime_loader_probe.c \
+  "$check_root/runtime-loader-probe.res" \
   "${runtime_libraries[@]}" -o "$runtime/bin/runtime-loader-probe.exe"
 
 # The dependency initially exists outside every Windows DLL search directory.

@@ -24,9 +24,17 @@ write("launcher.def", definition)
 write("launcher.exports.txt", table.concat(export_names, "\n") .. "\n")
 write("launcher.manifest", driver.windows_launcher_manifest())
 write("launcher.rc", driver.windows_launcher_resource(manifest))
-local runtime = driver.installed_link_inputs({
-    libtitan = "runtime", libbacktrace = "backtrace", liblua = "lua" })
-write("system-libraries.txt", table.concat(runtime, "\n", 4) .. "\n")
+-- A real titanc Windows program/provider link consumes exactly
+-- driver.installed_link_inputs: the installed runtime, backtrace and Lua
+-- archives plus its system flag. Emit that complete list; the gate replaces
+-- the installed runtime with the freshly built archive under test.
+local root = platform.getenv("TITAN_ROOT")
+if root == "" then root = nil end
+root = root or driver.TITAN_ROOT
+local installed = assert(root and root ~= "" and driver.installed_paths(root),
+    "generate the launcher fixture with TITAN_ROOT naming the installation")
+write("runtime-libraries.txt",
+    table.concat(driver.installed_link_inputs(installed, false), "\n") .. "\n")
 write("plan.txt", default.executable .. "\n" .. override.executable .. "\n" ..
     default.provider .. "\n")
 platform.windows = original

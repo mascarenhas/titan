@@ -19,7 +19,7 @@ cp "$prefix/bin/lua55.dll" "$runtime/bin/"
 # so the controlled Lua DLL must also sit beside that launcher.
 cp "$prefix/bin/lua55.dll" "$runtime/"
 mapfile -t plan < "$generated/plan.txt"
-mapfile -t system_libraries < "$generated/system-libraries.txt"
+mapfile -t driver_libraries < "$generated/runtime-libraries.txt"
 [[ ${#plan[@]} == 3 ]]
 [[ ${plan[0]} == bin/fixture.launcher.exe && ${plan[1]} == custom.exe ]]
 [[ ${plan[2]} == lib/titan/0.6/fixture/launcher.dll ]]
@@ -63,17 +63,27 @@ archive="$build_root/runtime/libtitan.a"
   echo "missing runtime archive: $archive (run make -f Makefile.win runtime-build first)" >&2
   exit 1
 }
-runtime_libraries=("$prefix/lib/libbacktrace.a" "$archive" "$prefix/lib/liblua55.a")
+[[ ${#driver_libraries[@]} -ge 4 ]] || {
+  echo "incomplete driver link inputs: $generated/runtime-libraries.txt" >&2
+  exit 1
+}
+# The driver's installed program/provider link list, with this build's freshly
+# built runtime archive in place of the installed copy it names.
+runtime_libraries=("$archive" "${driver_libraries[@]:1}")
+# runtime_launcher_provider.c itself calls BCryptGenRandom. A real link
+# supplies such a system library through its own link flags, exactly as the
+# stdlib provider build adds -lws2_32; the driver defaults carry none.
+fixture_libraries=(-lbcrypt)
 # Every link forbids auto-import: a consumer compiled without the explicit
 # Lua import definitions then fails to resolve its internal references.
 link_guard=(-Wl,--disable-auto-import)
 "${compiler[@]}" "${common[@]}" -shared "${ldflags[@]}" "${link_guard[@]}" -Wl,--exclude-all-symbols \
   -DFIXTURE_DEPENDENCY spec/fixtures/windows/runtime_loader_provider.c \
-  "${runtime_libraries[@]}" -static-libgcc \
+  "${runtime_libraries[@]}" \
   -o "$runtime/lib/titan/0.6/fixture-dependency.dll"
 "${compiler[@]}" "${common[@]}" -shared "${ldflags[@]}" "${link_guard[@]}" -Wl,--exclude-all-symbols \
   spec/fixtures/windows/runtime_launcher_provider.c "$generated/launcher.def" \
-  "${runtime_libraries[@]}" "${system_libraries[@]}" -o "$runtime/${plan[2]}"
+  "${runtime_libraries[@]}" "${fixture_libraries[@]}" -o "$runtime/${plan[2]}"
 llvm-readobj --coff-exports "$runtime/${plan[2]}" > "$check_root/provider.exports"
 perl -ne 'print "$1\n" if /^  Name: ([^\r\n]+)\r?$/' "$check_root/provider.exports" \
   | LC_ALL=C sort > "$check_root/provider-export-names.txt"
@@ -87,11 +97,11 @@ for variant in launcher direct; do
 done
 "${compiler[@]}" "${common[@]}" -c "$override_dir/custom.c" -o "$check_root/custom.o"
 "${compiler[@]}" "${ldflags[@]}" "${link_guard[@]}" "$check_root/launcher.o" \
-  "$check_root/launcher.res" "${runtime_libraries[@]}" "${system_libraries[@]}" -o "$runtime/${plan[0]}"
+  "$check_root/launcher.res" "${runtime_libraries[@]}" -o "$runtime/${plan[0]}"
 "${compiler[@]}" "${ldflags[@]}" "${link_guard[@]}" "$check_root/custom.o" \
-  "$check_root/launcher.res" "${runtime_libraries[@]}" "${system_libraries[@]}" -o "$runtime/${plan[1]}"
+  "$check_root/launcher.res" "${runtime_libraries[@]}" -o "$runtime/${plan[1]}"
 "${compiler[@]}" "${ldflags[@]}" "${link_guard[@]}" "$check_root/direct.o" \
-  "$check_root/launcher.res" "${runtime_libraries[@]}" "${system_libraries[@]}" -o "$runtime/bin/direct.exe"
+  "$check_root/launcher.res" "${runtime_libraries[@]}" -o "$runtime/bin/direct.exe"
 cp "$runtime/${plan[0]}" "$runtime/bin/renamed.exe"
 cmp "$runtime/${plan[0]}" "$runtime/bin/renamed.exe"
 for file in "$runtime/bin/"*.exe "$runtime/${plan[1]}" "$runtime/lib/titan/0.6/fixture/launcher.dll"; do
@@ -122,7 +132,7 @@ run_expected bin/direct.exe 37
 # Lua opener is called. The process has exited before replacing this image.
 "${compiler[@]}" "${common[@]}" -shared "${ldflags[@]}" "${link_guard[@]}" -Wl,--exclude-all-symbols \
   '-DFIXTURE_LAUNCHER_ABI="999"' spec/fixtures/windows/runtime_launcher_provider.c \
-  "$generated/launcher.def" "${runtime_libraries[@]}" "${system_libraries[@]}" -o "$runtime/${plan[2]}"
+  "$generated/launcher.def" "${runtime_libraries[@]}" "${fixture_libraries[@]}" -o "$runtime/${plan[2]}"
 status=0
 (cd "$check_root/cwd"; PATH='' "$runtime/bin/renamed.exe" one ü) > "$check_root/incompatible.log" 2>&1 || status=$?
 [[ $status == 1 ]]
