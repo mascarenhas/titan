@@ -690,7 +690,7 @@ local function stdlib_artifact(relative)
                 ' -DUSING_UV_SHARED=1 -I"' .. paths.to_slash(paths.join(prefix, "include")) .. '"' ..
                 ' -I"' .. paths.to_slash(paths.join(lfs.currentdir(), "vendor", "lpeglabel")) .. '"'
             local argv = {
-                "env.exe", "TITAN_ROCKS_ROOT=" .. prefix, "TITAN_RUNTIME_PREBUILT=1",
+                "env.exe", "TITAN_ROOT=" .. prefix, "TITAN_RUNTIME_PREBUILT=1",
                 "TITAN_EXTRA_CPPFLAGS=" .. cppflags,
                 paths.join(prefix, "bin", "lua.exe"),
                 paths.join(prefix, "lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc"),
@@ -1227,7 +1227,7 @@ printf '%s\n' "$*" >> calls
             write_file(prefix .. "/bin/titanc", [[#!/bin/sh
 set -eu
 test "$TITAN_RUNTIME_PREBUILT" = 1
-test "$TITAN_ROCKS_ROOT" = "$PWD/prefix"
+test "$TITAN_ROOT" = "$PWD/prefix"
 test "$1 $2" = "--output out"
 shift 2
 mkdir -p out/titan
@@ -1249,7 +1249,7 @@ done
             local arguments = {
                 "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "GNUMAKEFLAGS",
                 "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES", "-u", "MAKE",
-                "-u", "ROCKS_TREE", "-u", "TITAN_ROCKS_ROOT",
+                "-u", "ROCKS_TREE", "-u", "TITAN_ROOT",
                 "-u", "TITANC", "-u", "TITAN_LUA", "-u", "ROCK_TITANC", "-u", "TITAN_JOBS",
                 "-u", "ROCK_LUA", "-u", "STDLIB_USE_INSTALLED_RUNTIME",
                 "make", "--no-print-directory", "-s", "-C", root, "TITAN_JOBS=4",
@@ -3651,7 +3651,7 @@ local fields = {
     lpeglabel = assert(package.searchpath("lpeglabel", package.cpath)),
     behavior = types.tostring(types.Integer()),
     source = debug.getinfo(types.tostring, "S").source,
-    driver_source = debug.getinfo(driver.root_from_package_cpath, "S").source,
+    driver_source = debug.getinfo(driver.installed_paths, "S").source,
     cdriver_source = debug.getinfo(cdriver.process_file, "S").source,
 }
 assert(driver.close_resolver_context(context))
@@ -3692,10 +3692,10 @@ end)
                         "-u", "LUA_PATH_5_5",
                         "-u", "LUA_CPATH",
                         "-u", "LUA_CPATH_5_5",
-                        "-u", "TITAN_ROCKS_ROOT",
+                        "-u", "TITAN_ROOT",
                     }
                     if not omit_root then
-                        argv[#argv + 1] = "TITAN_ROCKS_ROOT=" .. prefix
+                        argv[#argv + 1] = "TITAN_ROOT=" .. prefix
                     end
                     for _, word in ipairs({
                         "LUA_PATH=./?.lua;./?/init.lua;;",
@@ -3744,7 +3744,7 @@ end)
                 assert.equal("exit", why)
                 assert.equal(1, code)
                 assert.truthy(output:find(
-                    "checkout Busted profile requires TITAN_ROCKS_ROOT",
+                    "checkout Busted profile requires TITAN_ROOT",
                     1, true), output)
                 assert.falsy(file_exists(report))
 
@@ -5280,7 +5280,7 @@ printf '%s\n' "${schedule[@]}"
                 linux_workflow)
             assert.falsy(macos_job:find("\n    needs:", 1, true), macos_job)
             assert.equal(1, count_literal(macos_workflow,
-                'TITAN_ABI_VERSION: "2"'), macos_workflow)
+                'TITAN_ABI_VERSION: "3"'), macos_workflow)
             for _, removed in ipairs({
                 "\n  test-linux-stdlib:", "\n  compiler-coverage:",
                 "prepare-linux", "test-linux-library", "ubuntu-slim",
