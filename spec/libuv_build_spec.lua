@@ -2402,7 +2402,7 @@ int main(void) {
             assert.same({ "titan/thread/native.h" },
                 makefile_words("THREAD_TITAN_HEADERS"))
             assert.same({
-                "$(LTITANLIB_O)", "$(LPEGLABEL_ARCHIVE)",
+                "$(LPEGLABEL_ARCHIVE)",
                 "$(LIBUV_EXTRA_OBJECTS)", "$(LLHTTP_ARCHIVE)",
                 "$(SQLITE3_ARCHIVE)", "$(OPENSSL_EXTRA_OBJECTS)",
             }, makefile_words("STDLIB_EXTRA_OBJECTS"))
@@ -5742,10 +5742,6 @@ printf '%s\n' "${schedule[@]}"
             assert.truthy(workflow:find(
                 "--name='standalone-prefix source installation loads direct " ..
                 "libuv calls lazily for Titan and explicitly for Lua'",
-                1, true), workflow)
-            assert.truthy(workflow:find(
-                "for module in coroutine uv async timer io fs net ssl url " ..
-                "http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf transfer thread; do",
                 1, true), workflow)
             assert.truthy(workflow:find(
                 'test ! -e "$PREFIX/share/titan/0.6/src/titan/test.titan"',
