@@ -1,6 +1,17 @@
-/* Native entry for the unchanged installed titanc.lua script.  Link the
- * configured upstream lua.c front end with -Dmain=titan_lua_main, and the
- * single controlled Lua DLL; no Lua engine is compiled into this executable.
+/* Native Windows titanc.exe: the upstream lua.c front end, compiled separately
+ * with -Dmain=titan_lua_main, linked against the import library of the single
+ * controlled lua55.dll. No Lua engine is compiled into this executable, so the
+ * lua.exe installed beside it runs the same engine for compiler subprocesses.
+ *
+ * The UTF-16 command line becomes UTF-8 and lua.c receives
+ *     <this executable> -E <root>\share\lua\5.5\titan-compiler\titanc.lua ARGS
+ * where <root> is the parent of this executable's directory. The unchanged
+ * titanc script, which the rock installs as an ordinary Lua file there, is
+ * therefore arg[0], the real frontend that object certificates hash. Every
+ * user argument follows the script, so none is read as a Lua option. -E keeps
+ * LUA_INIT and the LUA_PATH/LUA_CPATH variables out: compiler modules resolve
+ * only through Lua's executable-relative defaults (!\..\share\lua\5.5 and
+ * !\..\lib\lua\5.5), like the installed compiler on every other platform.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -8,6 +19,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <wchar.h>
+
+#include "lua.h"
 
 int titan_lua_main(int argc, char **argv);
 
@@ -24,41 +37,58 @@ static char *utf8(const wchar_t *wide) {
 }
 
 int wmain(int argc, wchar_t **wide_argv) {
-    wchar_t *module = NULL, *script = NULL;
+    static char ignore_environment[] = "-E";
+    static const wchar_t script_path[] =
+        L"\\share\\lua\\" LUA_VDIR L"\\titan-compiler\\titanc.lua";
+    const size_t script_length = sizeof(script_path) / sizeof(script_path[0]);
+    const char *failure = "cannot read this executable's path";
+    wchar_t *module = NULL, *script = NULL, *leaf, *root_end;
     char **argv = NULL;
-    int status = EXIT_FAILURE;
-    DWORD capacity = 512;
-    if (argc < 1 || argc > INT_MAX - 2) goto failed;
+    int count = 0, index, status = EXIT_FAILURE;
+    DWORD capacity = MAX_PATH, length;
+    size_t root_length;
     for (;;) {
         module = malloc((size_t)capacity * sizeof(*module));
         if (!module) goto failed;
-        DWORD length = GetModuleFileNameW(NULL, module, capacity);
+        length = GetModuleFileNameW(NULL, module, capacity);
         if (!length) goto failed;
         if (length < capacity) break;
         free(module);
         module = NULL;
-        if (capacity == 32768) goto failed;
+        if (capacity >= 32768) goto failed;
         capacity *= 2;
     }
-    argv = calloc((size_t)argc + 2, sizeof(*argv));
-    if (!argv || !(argv[0] = utf8(module))) goto failed;
-    wchar_t *separator = wcsrchr(module, L'\\');
-    if (!separator) goto failed;
-    size_t directory = (size_t)(separator + 1 - module);
-    script = malloc((directory + 11) * sizeof(*script));
+    /* <root>\bin\titanc.exe: drop the file name, then its directory. */
+    failure = "cannot locate the installation root above this executable";
+    leaf = wcsrchr(module, L'\\');
+    if (!leaf) goto failed;
+    *leaf = L'\0';
+    root_end = wcsrchr(module, L'\\');
+    *leaf = L'\\';
+    if (!root_end || root_end == module) goto failed;
+    root_length = (size_t)(root_end - module);
+    failure = "cannot prepare the native UTF-8 command line";
+    if (argc < 1 || argc > INT_MAX - 3) goto failed;
+    script = malloc((root_length + script_length) * sizeof(*script));
     if (!script) goto failed;
-    wmemcpy(script, module, directory);
-    wcscpy(script + directory, L"titanc.lua");
-    if (!(argv[1] = utf8(script))) goto failed;
-    for (int i = 1; i < argc; ++i)
-        if (!(argv[i + 1] = utf8(wide_argv[i]))) goto failed;
-    status = titan_lua_main(argc + 1, argv);
+    wmemcpy(script, module, root_length);
+    wmemcpy(script + root_length, script_path, script_length);
+    /* This executable, -E, the script, then every argument after argv[0]. */
+    count = argc + 2;
+    argv = calloc((size_t)count + 1, sizeof(*argv));
+    if (!argv || !(argv[0] = utf8(module))) goto failed;
+    argv[1] = ignore_environment;
+    if (!(argv[2] = utf8(script))) goto failed;
+    for (index = 1; index < argc; ++index)
+        if (!(argv[index + 2] = utf8(wide_argv[index]))) goto failed;
+    status = titan_lua_main(count, argv);
     goto done;
 failed:
-    fputs("titanc: cannot prepare native UTF-8 command line\n", stderr);
+    fprintf(stderr, "titanc: %s\n", failure);
 done:
     if (argv) {
-        for (int i = 0; i < argc + 1; ++i) free(argv[i]);
+        for (index = 0; index < count; ++index)
+            if (argv[index] != ignore_environment) free(argv[index]);
         free(argv);
     }
     free(module);

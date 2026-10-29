@@ -18,8 +18,8 @@ M.PREFIX = require("spec.support.installed_prefix").active()
 M.SHARED_SUFFIX = platform.windows and ".dll" or ".so"
 M.EXE_SUFFIX = platform.windows and ".exe" or ""
 M.LUA = path.join(M.PREFIX, "bin", "lua" .. M.EXE_SUFFIX)
-local INSTALLED_TITANC = path.join(M.PREFIX, platform.windows and
-    "lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" or "bin/titanc")
+-- The installed compiler program: the native titanc.exe on Windows.
+local INSTALLED_TITANC = path.join(M.PREFIX, "bin", "titanc" .. M.EXE_SUFFIX)
 -- The installed support module; the only C path entry of every runtime chunk.
 M.SUPPORT_CPATH = path.to_slash(path.join(M.PREFIX, "lib/lua/5.5",
     "?" .. M.SHARED_SUFFIX))
@@ -145,7 +145,6 @@ local function compiler_argv(output_root, source_root, titan_path, ...)
     local installed = not USE_CHECKOUT_COMPILER and
         M.PREFIX and exists(INSTALLED_TITANC)
     if installed then
-        if platform.windows then table.insert(argv, M.LUA) end
         table.insert(argv, INSTALLED_TITANC)
     else
         assert.truthy(M.PREFIX,

@@ -3029,10 +3029,6 @@ describe("compiled-container path contracts", function()
 
     it("expands ! in a configured Titan path to the compiler interpreter's directory",
        function()
-        if platform.windows then
-            pending("POSIX interpreter spelling; Windows uses titanc.exe's directory")
-            return
-        end
         local prefix = require("spec.support.installed_prefix").active()
         local previous = lfs.currentdir()
         assert(lfs.chdir(prefix .. "/bin"))
@@ -3041,7 +3037,31 @@ describe("compiled-container path contracts", function()
         local script = 'local driver = require "titan-compiler.driver"; ' ..
             'io.write(table.concat(assert(driver.titan_bin_path_entries(' ..
             'driver.TITAN_BIN_PATH)), "\\n"))'
-        local result = compiler_io.new_sync():run({
+        local result
+        if platform.windows then
+            -- The native titanc.exe runs from this same bin directory, so its
+            -- `!` is the directory this lua.exe expands. MSYS tools rewrite
+            -- path-list values, so the spawn environment carries them.
+            local root = prefix .. "/selected sdk"
+            result = compiler_io.new_sync():run({ prefix .. "/bin/lua.exe", "-e", script }, {
+                stderr_to_stdout = false,
+                env = { TITAN_PATH = false, TITAN_ROOT = root,
+                    TITAN_PATH_0_6 = "!/providers;;",
+                    LUA_PATH_5_5 = package.path, LUA_CPATH_5_5 = package.cpath },
+            })
+            assert.truthy(result.ok, result.output or result.diagnostic)
+            local function spelling(entry) return entry:gsub("\\", "/"):lower() end
+            local entries = {}
+            for entry in result.output:gsub("\r\n", "\n"):gmatch("[^\n]+") do
+                entries[#entries + 1] = spelling(entry)
+            end
+            assert.same({
+                spelling(executable_dir .. "/providers"), ".",
+                spelling(assert(driver.installed_paths(root)).titan_bin),
+            }, entries)
+            return
+        end
+        result = compiler_io.new_sync():run({
             "env", "-u", "TITAN_PATH", "TITAN_ROOT=/sdk",
             "TITAN_PATH_0_6=!/providers;;",
             "LUA_PATH_5_5=" .. package.path, "LUA_CPATH_5_5=" .. package.cpath,

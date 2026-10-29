@@ -12,6 +12,19 @@ TITAN_COMPILER_LUA := $(wildcard titan-compiler/*.lua \
 # deploys it to lib/lua/5.5 and owns it like any other rock file. Its build
 # directory may contain spaces, so take only the last path component.
 TITAN_SUPPORT_MODULE_NAME = $(lastword $(subst /, ,$(TITAN_SUPPORT_MODULE)))
+# An including Makefile that builds a native compiler frontend names it in
+# TITANC_NATIVE (Makefile.win: titanc.exe). It is then the only compiler entry
+# in bin, which LuaRocks deploys as an ordinary program, and the unchanged
+# titanc script is an ordinary rock-owned Lua file the frontend runs:
+# titan-compiler/titanc.lua below the Lua module tree. Otherwise the script
+# itself is the bin entry.
+TITANC_NATIVE ?=
+ifneq ($(strip $(TITANC_NATIVE)),)
+TITANC_INSTALL = install -p -m 0755 "$(TITANC_NATIVE)" "$(INST_BINDIR)/titanc.exe"; \
+	install -p -m 0644 titanc "$(INST_LUADIR)/titan-compiler/titanc.lua"
+else
+TITANC_INSTALL = install -p -m 0755 titanc "$(INST_BINDIR)/titanc"
+endif
 .PHONY: install-compiler
 install-compiler:
 	@set -e; \
@@ -23,7 +36,7 @@ install-compiler:
 	mkdir -p "$(INST_BINDIR)" "$(INST_CONFDIR)" "$(INST_LIBDIR)"; \
 	install -p -m 0755 "$(TITAN_SUPPORT_MODULE)" \
 	  "$(INST_LIBDIR)/$(TITAN_SUPPORT_MODULE_NAME)"; \
-	install -p -m 0755 titanc "$(INST_BINDIR)/titanc"; \
+	$(TITANC_INSTALL); \
 	install -p -m 0644 THIRD_PARTY_NOTICES.md "$(INST_CONFDIR)/"
 
 # Files outside LuaRocks' lua/lib/bin deployment stay in the version directory

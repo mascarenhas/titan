@@ -72,10 +72,13 @@ LUA_BIN := $(PREFIX)/bin/lua.exe
 TITAN_VERSION := 0.6.0
 TITAN_LIBRARY_VERSION := $(word 1,$(subst ., ,$(TITAN_VERSION))).$(word 2,$(subst ., ,$(TITAN_VERSION)))
 TITAN_INSTALL_TREE := $(PREFIX)
-# The runtime build's support-only Lua module; the shared compiler install
-# deploys it as the ordinary native module lib/lua/5.5/titan.dll. The shared
-# recipe derives its destination name without splitting our spaced build path.
+# The runtime build's support-only Lua module and native compiler frontend.
+# The shared compiler install deploys them as the ordinary native module
+# lib/lua/5.5/titan.dll and as bin/titanc.exe, which replaces a script
+# launcher. The shared recipe derives the module's destination name without
+# splitting our spaced build path.
 TITAN_SUPPORT_MODULE = $(WINDOWS_BUILD_ROOT)/runtime/titan.dll
+TITANC_NATIVE = $(WINDOWS_BUILD_ROOT)/runtime/titanc.exe
 # This is still the only loaded Makefile. GNU Make's word-based path functions
 # split checkout paths containing spaces, so let the recipe shell find its dir.
 TITAN_MAKEFILE_DIR := $(shell dirname $(call quote,$(MAKEFILE_LIST)))/
@@ -98,7 +101,7 @@ help:
 	@echo '  luarocks    install standalone LuaRocks into the Lua SDK prefix'
 	@echo '  compiler    build and install the Titan source rock with LuaRocks'
 	@echo '  compiler-check  validate the installed compiler and dependencies'
-	@echo '  runtime     build/install the runtime SDK (compiler install deploys the support module)'
+	@echo '  runtime     build/install the runtime SDK (compiler install deploys the support module and titanc.exe)'
 	@echo '  runtime-check  validate runtime consumers, rebuilds and the support DLL'
 	@echo '  stdlib      use the installed compiler/SDK to build the standard provider'
 	@echo '  stdlib-check  validate the staged provider, metadata and PE inventory'
@@ -254,15 +257,16 @@ compiler-check: compiler
 	bash spec/support/check_windows_compiler.sh $(call quote,$(PREFIX)) $(call quote,$(WINDOWS_BUILD_ROOT))
 
 # The shared install-compiler recipe only deploys built files. It copies the
-# support module, which a rock build has already produced.
+# support module and titanc.exe, which a rock build has already produced.
 .PHONY: check-support-module
 check-support-module:
-	@test -f $(call quote,$(TITAN_SUPPORT_MODULE)) || { \
-	  echo 'The support module is missing; run make -f Makefile.win runtime-build first.' >&2; \
+	@test -f $(call quote,$(TITAN_SUPPORT_MODULE)) && test -f $(call quote,$(TITANC_NATIVE)) || { \
+	  echo 'The support module or titanc.exe is missing; run make -f Makefile.win runtime-build first.' >&2; \
 	  exit 1; }
 
-# Runtime archive, private parser payload and the support module. The shared
-# compiler install deploys $(TITAN_SUPPORT_MODULE) as lib/lua/5.5/titan.dll.
+# Runtime archive, private parser payload, the support module and titanc.exe.
+# The shared compiler install deploys $(TITAN_SUPPORT_MODULE) as
+# lib/lua/5.5/titan.dll and $(TITANC_NATIVE) as bin/titanc.exe.
 RUNTIME_CFLAGS ?= $(if $(ROCK_CFLAGS),$(ROCK_CFLAGS) )$(TITAN_WINDOWS_NATIVE_CFLAGS) -Wall -Wextra
 RUNTIME_CPPFLAGS ?=
 RUNTIME_LDFLAGS ?= $(TITAN_WINDOWS_NATIVE_LDFLAGS)
@@ -273,7 +277,7 @@ TITAN_LICENSE_FILES := libuv-LICENSE libuv-LICENSE-extra libuv-tree-LICENSE libu
 
 .PHONY: runtime-build runtime install-titan-sdk runtime-check
 runtime-build: lua libbacktrace
-	CC=$(call quote,$(CC)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB)) \
+	CC=$(call quote,$(CC)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB)) RC=$(call quote,$(RC)) \
 	  RUNTIME_CFLAGS=$(call quote,$(RUNTIME_CFLAGS)) \
 	  RUNTIME_CPPFLAGS=$(call quote,$(RUNTIME_CPPFLAGS)) \
 	  RUNTIME_LDFLAGS=$(call quote,$(RUNTIME_LDFLAGS)) \

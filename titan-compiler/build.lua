@@ -352,11 +352,23 @@ function Scheduler:release_slot()
 end
 
 -- The interpreter and module path this process runs with, never a PATH
--- launcher: workers load exactly the compiler the coordinator loaded.
+-- launcher: workers load exactly the compiler the coordinator loaded. On
+-- Windows that interpreter is the controlled lua.exe beside the running
+-- executable: the running lua.exe itself, or the one beside the native
+-- titanc.exe, which runs the same lua55.dll but is a frontend for a single
+-- script rather than an interpreter.
 local function worker_argv(entry)
     local interpreter, err = process.library().exepath()
     if not interpreter then
         return nil, "cannot locate the running Lua interpreter: " .. tostring(err)
+    end
+    if platform.windows then
+        local directory = interpreter:match("^(.*)[/\\][^/\\]+$")
+        if not directory then
+            return nil, "cannot locate the directory of the running executable '" ..
+                interpreter .. "'"
+        end
+        interpreter = directory .. "\\lua.exe"
     end
     return { interpreter, "-E", "-e", string.format(
         "package.path = %q; package.cpath = %q; require(%q).main()",
