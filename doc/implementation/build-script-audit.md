@@ -320,7 +320,7 @@ with `+` and `RECURSIVE_WRAPPER_GUARD`, and delegates native parallelism to
 
 | Target | Effect |
 | --- | --- |
-| `install-compiler` | Compiler Lua modules (`INST_LUADIR`), `titanc` (`INST_BINDIR`), third-party notices (`INST_CONFDIR`), and the support module `titan.so` (`INST_LIBDIR`, default `<root>/lib/lua/5.5`). A direct install builds the support module first; the LuaRocks install pass only copies it. |
+| `install-compiler` | Compiler Lua modules (`INST_LUADIR`), `titanc` (`INST_BINDIR`), third-party notices (`INST_CONFDIR`), and the support module `titan.so` (`INST_LIBDIR`, default `<root>/lib/lua/5.5`). When the including Makefile sets `TITANC_NATIVE` (`Makefile.win`), it installs that native frontend as `bin/titanc.exe` and the `titanc` script as `INST_LUADIR/titan-compiler/titanc.lua` instead. A direct install builds the support module first; the LuaRocks install pass only copies it. |
 | `install-compiler-sdk` | `install-compiler` plus the runtime archive, Lua SDK and Titan headers, with no standard library; records the profile in `etc/titan/build-profile`. |
 | `install-titan-sdk` / `publish-titan-sdk` | Build then copy / copy only the native SDK: runtime, libuv, llhttp and SQLite headers, and OpenSSL headers in bundled mode. |
 | `stdlib` / `stdlib-objects` | Build the provider pair / compile objects only. |
@@ -363,7 +363,9 @@ LuaRocks runs the install pass (`install` with `INST_PREFIX` set, and the
 matching `Makefile.win` target) in the same source directory as the build
 pass; it copies without compiling. Compiler Lua modules go to `INST_LUADIR`,
 the support module to `INST_LIBDIR`, and `titanc` and `titan-uninstall` to
-`INST_BINDIR` (`install-rock-tools`). The rockspec passes
+`INST_BINDIR` (`install-rock-tools`); on Windows the compiler entry there is
+`titanc.exe` and the script goes to `INST_LUADIR` as
+`titan-compiler/titanc.lua`. The rockspec passes
 `INST_LIBDIR = "$(LIBDIR)"`, so LuaRocks stages the support module in the rock's
 `lib` directory, deploys it to `<tree>/lib/lua/5.5/titan.so`, records it in
 `rock_manifest`, and removes it with the rock like any other native Lua module.
@@ -376,9 +378,13 @@ absolute path to copy that payload into the canonical SDK locations; it needs no
 source directory, Makefile or compiler. Its installed-SDK digest bootstrap
 (`publish_sdk_digests`) loads the support module with `package.cpath` set to
 exactly `<tree>/lib/lua/5.5/?.so` (`?.dll` on Windows), which LuaRocks has
-already deployed. Binary rocks carry the same payload and copier. The
-canonical SDK and providers therefore stay outside LuaRocks' manifest. The
-rockspec uses `build.type = "make"` and declares no `modules`.
+already deployed. On Windows, the copier also deletes the unrecorded
+`bin/titanc.lua` package-path helper that LuaRocks writes beside a deployed
+`.exe` (only that generated two-line form; see the [Windows compiler
+bootstrap](windows-build.md#runtime-sdk-and-compiler-bootstrap)). Binary rocks
+carry the same payload and copier. The canonical SDK and providers therefore
+stay outside LuaRocks' manifest. The rockspec uses `build.type = "make"` and
+declares no `modules`.
 
 `titan-uninstall` (`scripts/titan_install.lua`) removes all installed Titan
 rock versions through LuaRocks first. Only when that succeeds does it remove

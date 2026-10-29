@@ -772,8 +772,14 @@ installed SDK once more. With `TITAN_ROOT` set, that is
 `<TITAN_ROOT>/lib/titan/0.6`. Otherwise Titan runs `titanc --print-root`, or
 `<TITANC> --print-root` when the `TITANC` variable names another program,
 without a shell, and uses `<printed root>/lib/titan/0.6`. `TITANC` is one
-program name or path, not a command line with arguments. Each Lua state tries
-this at most once and remembers the result, even when no SDK was found; a
+program name or path, not a command line with arguments. On Windows a name
+without `\`, `/`, or `:` (including the default `titanc`) is looked up only in
+the `PATH` entries, never in the current directory or the program's own
+directory, with `.exe` appended when the name has no extension; a `TITANC`
+path is used as given. The query runs with the program's environment minus
+`LUA_INIT` and `LUA_INIT_5_5`, so a Lua startup hook cannot run inside it. Each
+Lua state tries this at most once and remembers the result, even when no SDK
+was found; a
 failure adds a `no Titan SDK fallback: <reason>` line to the `require` or load
 error. The fallback is skipped when it names a directory already on the path.
 This lets an executable built into an output tree use the installed standard

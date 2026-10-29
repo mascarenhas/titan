@@ -168,10 +168,11 @@ The `!` expansion described above makes Lua's module paths follow a moved tree, 
 Titan computes its default root and library directory from the running executable in
 the same way. This covers module search only. LuaRocks configuration and installed
 command wrappers can still contain absolute paths, so moving a tree does not make
-every tool relocatable. In particular, LuaRocks' `bin/titanc` wrapper embeds the
+every tool relocatable. In particular, LuaRocks' Unix `bin/titanc` wrapper embeds the
 absolute path of the interpreter and of the tree's Lua modules: in a copied tree it
 still runs the original installation's Lua, so `titanc` reports the original root.
-Reinstall Titan in the copy, or set `TITAN_ROOT` to the copy.
+Reinstall Titan in the copy, or set `TITAN_ROOT` to the copy. The Windows
+`bin/titanc.exe` has no such paths: it runs the compiler of the SDK that contains it.
 
 ### Versions
 
@@ -487,7 +488,8 @@ lua -e 'require "titan"; assert(require("titan.string"))'
 
 For an installed `titanc`, the root is `TITAN_ROOT` when that is set and non-empty,
 otherwise the parent of the directory that contains the Lua interpreter running
-`titanc`, with symlinks resolved: `$PREFIX/bin/lua` gives `$PREFIX`.
+`titanc`, with symlinks resolved: `$PREFIX/bin/lua` gives `$PREFIX`. On Windows it is
+the parent of the directory that contains `titanc.exe`.
 `titanc --print-root` prints that root and compiles nothing. The compiler takes the
 SDK headers, `liblua.a`, the runtime archive, and the standard library from below the
 root, and searches compiled modules along the compile-time Titan path
@@ -527,7 +529,9 @@ Overrides:
   interpreter. A separate Unix tree needs it.
 - `TITANC` names the `titanc` program that programs and Lua hosts run for the SDK
   fallback when `TITAN_ROOT` is unset. It is one program name or path, started without
-  a shell and with the single argument `--print-root`, not a command line.
+  a shell and with the single argument `--print-root`, not a command line. On Windows,
+  a name without a directory is looked up only in the `PATH` entries, with `.exe`
+  appended when it has no extension.
 - `--lua <path>` selects another complete Lua source and build tree for one compiler
   run. It works only in a source checkout. If the path matches the installed Lua SDK's
   `src/lua-5.5.1/`, linking uses the SDK's `lib/liblua.a`; otherwise it uses that tree's
