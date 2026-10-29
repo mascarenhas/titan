@@ -275,7 +275,7 @@ describe("provider pair link pipeline", function()
         end
         if USE_CHECKOUT_COMPILER then
             for _, word in ipairs({
-                "TITAN_ROCKS_ROOT=" .. PREFIX, LUA, "-e",
+                "TITAN_ROOT=" .. PREFIX, LUA, "-e",
                 string.format("package.path=%q..package.path",
                     REPO .. "/?.lua;" .. REPO .. "/?/init.lua;"),
                 REPO .. "/titanc",

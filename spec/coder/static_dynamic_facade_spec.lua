@@ -93,7 +93,7 @@ local function compiler_argv(workspace, source_root, ...)
     else
         assert.truthy(PREFIX,
             "set PREFIX or TITAN_TEST_PREFIX for native compiler tests")
-        table.insert(argv, "TITAN_ROCKS_ROOT=" .. PREFIX)
+        table.insert(argv, "TITAN_ROOT=" .. PREFIX)
         table.insert(argv, "LUA_CPATH=" .. REPO .. "/?.so;;")
         table.insert(argv, LUA)
         table.insert(argv, "-e")

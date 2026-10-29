@@ -1,14 +1,20 @@
 local argparse = require "argparse"
+local compiler_io = require "titan-compiler.io"
 local driver = require "titan-compiler.driver"
+local lfs = require "lfs"
 local platform = require "titan-compiler.platform"
+local temporary = require "spec.support.temporary"
 
 local EXIT = {}
 
-local function query(arguments, cpath, environment, windows)
-    local stdout, stderr = {}, {}
+-- Run the checkout titanc script in a sandbox. `support` is the value of
+-- `require "titan"`, or a string that require raises. The full command line
+-- may use only the driver's root query, which returns `root, root_error`.
+local function query(arguments, support, root, root_error)
+    local stdout, stderr, required = {}, {}, {}
     local status = 0
     local query_driver = setmetatable({
-        resolve_installation_root = driver.resolve_installation_root,
+        compiler_root = function() return root, root_error end,
     }, {
         __index = function(_, name)
             error("root query attempted compiler operation: " .. name)
@@ -23,8 +29,8 @@ local function query(arguments, cpath, environment, windows)
         end,
         ["titan-compiler.driver"] = query_driver,
         ["titan-compiler.platform"] = {
-            getenv = function(name) return (environment or {})[name] end,
-            windows = windows,
+            getenv = function() return nil end,
+            windows = false,
         },
     }
     local function stream(output)
@@ -35,89 +41,150 @@ local function query(arguments, cpath, environment, windows)
         end }
     end
     local sandbox = setmetatable({
-        require = function(name) return modules[name] or {} end,
-        package = { cpath = cpath },
+        require = function(name)
+            required[#required + 1] = name
+            if name == "titan" then
+                if type(support) == "string" then error(support, 0) end
+                return support
+            end
+            return modules[name] or {}
+        end,
         io = { stdout = stream(stdout), stderr = stream(stderr) },
         os = { exit = function(code) status = code; error(EXIT, 0) end },
     }, { __index = _G })
-    local previous_windows, previous_native = platform.windows, platform.native
-    platform.windows = windows or false
-    platform.native = function() error("root query loaded native support") end
-    local ok, failure = pcall(assert(loadfile("titanc", "t", sandbox)))
-    platform.windows, platform.native = previous_windows, previous_native
+    local ok, failure = pcall(assert(loadfile("titanc", "t", sandbox)),
+        table.unpack(arguments))
     if not ok then assert.equal(EXIT, failure) end
-    return status, table.concat(stdout), table.concat(stderr)
+    return status, table.concat(stdout), table.concat(stderr), required
+end
+
+local function support_root(root, root_error)
+    return { _compiler_root = function() return root, root_error end }
 end
 
 describe("titanc installation root query", function()
-    it("provides the standalone discovery root query", function()
-        local status, stdout, stderr = query({ "--print-root" },
-            "/SDK/lib/titan/0.6/?.so")
-        assert.equal(0, status)
-        assert.equal("/SDK\n", stdout)
-        assert.equal("", stderr)
-    end)
-
-    it("prefers the current Titan SDK over the LuaRocks user tree", function()
-        local status, stdout, stderr = query({ "--print-root" },
-            "/home/dev/.luarocks/lib/lua/5.5/?.so;" ..
-            "/SDK with spaces/lib/titan/0.6/?.so;" ..
-            "/SDK with spaces/lib/lua/5.5/?.so")
+    it("answers the exact root query from native support alone", function()
+        local status, stdout, stderr, required = query({ "--print-root" },
+            support_root("/SDK with spaces"))
         assert.equal(0, status)
         assert.equal("/SDK with spaces\n", stdout)
         assert.equal("", stderr)
+        assert.same({ "titan" }, required)
     end)
 
-    it("retains the installation override and ignores the probe-cache prefix",
+    it("reports an unavailable root without stdout or compiler work", function()
+        local status, stdout, stderr, required = query({ "--print-root" },
+            support_root(nil, "cannot locate executable"))
+        assert.equal(1, status)
+        assert.equal("", stdout)
+        assert.equal("cannot locate the Titan installation root: " ..
+            "cannot locate executable\n", stderr)
+        assert.same({ "titan" }, required)
+
+        status, stdout, stderr = query({ "--print-root" },
+            "module 'titan' not found")
+        assert.equal(1, status)
+        assert.equal("", stdout)
+        assert.matches("cannot load the Titan support module: " ..
+            "module 'titan' not found", stderr, 1, true)
+    end)
+
+    it("validates every other spelling through the full command line",
     function()
-        local status, stdout, stderr = query({ "--print-root" },
-            "/SDK/lib/titan/0.6/?.so", {
-                TITAN_ROCKS_ROOT = "/selected/SDK///",
-                TITAN_PREFIX = "/unrelated/cache",
-                TITAN_JOBS = "invalid",
-            })
+        local support = support_root("/support/SDK")
+        local status, stdout, stderr = query({ "--print-root", "-v" },
+            support, "/selected/SDK")
         assert.equal(0, status)
         assert.equal("/selected/SDK\n", stdout)
         assert.equal("", stderr)
-        status, stdout = query({ "--print-root", "--jobs", "invalid" },
-            "/SDK/lib/lua/5.5/?.so", {
-                TITAN_ROCKS_ROOT = "", TITAN_PREFIX = "/unrelated/cache",
-            })
-        assert.equal(0, status)
-        assert.equal("/SDK\n", stdout)
-    end)
 
-    it("reports a missing installation without stdout or compiler work", function()
-        local status, stdout, stderr = query({ "--print-root" }, "./?.so")
+        status, stdout, stderr = query({ "--print-root", "-v" }, support,
+            nil, "cannot load the Titan support module")
         assert.equal(1, status)
         assert.equal("", stdout)
-        assert.matches("cannot locate the Titan installation root", stderr, 1, true)
-    end)
+        assert.matches("cannot locate the Titan installation root: " ..
+            "cannot load the Titan support module", stderr, 1, true)
 
-    it("rejects module names with the query and still requires build modules",
-    function()
         for _, arguments in ipairs({ { "--print-root", "example" }, {} }) do
-            local status, stdout, stderr = query(arguments,
-                "/SDK/lib/titan/0.6/?.so")
+            status, stdout, stderr = query(arguments, support, "/selected/SDK")
             assert.equal(1, status)
             assert.equal("", stdout)
             assert.matches("module name", stderr, 1, true)
         end
     end)
+end)
 
-    it("discovers Windows drive, UNC, and extended roots without native tools",
-    function()
-        for _, case in ipairs({
-            { [[C:\SDK 雪\bin\..\lib\titan\0.6\?.dll]], "C:/SDK 雪" },
-            { [[\\server\share\SDK\lib\lua\5.5\?.dll]], "//server/share/SDK" },
-            { [[\\?\C:\SDK 雪\lib\titan\0.6\?.dll]], [[\\?\C:\SDK 雪]] },
-            { [[C:\lib\lua\5.5\?.dll]], "C:/" },
-        }) do
-            local status, stdout, stderr = query({ "--print-root" },
-                case[1], nil, true)
-            assert.equal(0, status)
-            assert.equal(case[2] .. "\n", stdout)
-            assert.equal("", stderr)
+describe("titanc installation root in a process", function()
+    local prefix = require("spec.support.installed_prefix").active()
+    local lua = prefix .. "/bin/lua" .. (platform.windows and ".exe" or "")
+    local forms = { { "--print-root" }, { "--print-root", "-v" } }
+
+    -- Both forms must load the compiler and support selected by this run.
+    local function print_root(interpreter, arguments, environment)
+        local argv = { platform.windows and "env.exe" or "env", "-u", "TITAN_ROOT",
+            "LUA_PATH_5_5=" .. package.path, "LUA_CPATH_5_5=" .. package.cpath }
+        for _, setting in ipairs(environment or {}) do argv[#argv + 1] = setting end
+        argv[#argv + 1] = interpreter
+        argv[#argv + 1] = "titanc"
+        for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
+        local result = compiler_io.new_sync():run(argv, { stderr_to_stdout = false })
+        assert.is_true(result.started and result.ok,
+            result.output or result.diagnostic)
+        local output = result.output:gsub("\r\n", "\n")
+        if platform.windows then
+            -- Native and driver spellings may differ only in separators.
+            local root = assert(output:match("^(.-)\n$"), output)
+            output = assert(driver.installed_paths(root)).root .. "\n"
         end
+        return output
+    end
+
+    -- The expected spelling of an executable-derived root: the physical prefix.
+    local function physical_root(directory)
+        if platform.windows then return assert(driver.installed_paths(directory)).root end
+        local previous = lfs.currentdir()
+        assert(lfs.chdir(directory))
+        local resolved = lfs.currentdir()
+        assert(lfs.chdir(previous))
+        return resolved
+    end
+
+    it("derives the root from the running interpreter when TITAN_ROOT is unset or empty",
+    function()
+        local expected = physical_root(prefix) .. "\n"
+        for _, arguments in ipairs(forms) do
+            assert.equal(expected, print_root(lua, arguments))
+            assert.equal(expected, print_root(lua, arguments, { "TITAN_ROOT=" }))
+        end
+    end)
+
+    it("prints a non-empty TITAN_ROOT in the driver's normalized form", function()
+        for _, root in ipairs({ temporary.name(" selected SDK") .. "//", "spec" }) do
+            local expected = assert(driver.installed_paths(root)).root .. "\n"
+            for _, arguments in ipairs(forms) do
+                assert.equal(expected,
+                    print_root(lua, arguments, { "TITAN_ROOT=" .. root }))
+            end
+        end
+    end)
+
+    it("resolves a symlinked interpreter to its physical installation", function()
+        if platform.windows then
+            pending("POSIX symlinked interpreters; Windows resolves titanc.exe directly")
+            return
+        end
+        local workspace = temporary.name(".interpreter")
+        assert(lfs.mkdir(workspace))
+        local alias = workspace .. "/lua"
+        assert(lfs.link(lua, alias, true))
+        local completed, failure = pcall(function()
+            local expected = physical_root(prefix) .. "\n"
+            for _, arguments in ipairs(forms) do
+                assert.equal(expected, print_root(alias, arguments))
+            end
+        end)
+        os.remove(alias)
+        lfs.rmdir(workspace)
+        assert.truthy(completed, failure)
     end)
 end)

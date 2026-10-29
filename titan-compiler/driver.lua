@@ -94,11 +94,6 @@ function driver.compiler_cache_stats(options)
     }
 end
 
-local function lua_cpath_suffix()
-    return "/lib/lua/" .. driver.LUA_VERSION ..
-        (platform.windows and "/?.dll" or "/?.so")
-end
-
 local perf = {}
 
 function perf.compiler_file_contents(context, filename)
@@ -209,44 +204,6 @@ local function same_existing_file(left, right)
         left_attr.dev == right_attr.dev and left_attr.ino == right_attr.ino
 end
 
--- LuaRocks prepends its user tree to package.cpath. Prefer the current Titan
--- provider template, which identifies the SDK owned by the Lua installation;
--- fall back to the ordinary Lua template during bootstrap.
-function driver.root_from_package_cpath(cpath)
-    if type(cpath) ~= "string" then return nil end
-    local suffixes = {
-        "/lib/titan/" .. driver.TITAN_LIBRARY_VERSION .. "/?" ..
-            (platform.windows and ".dll" or ".so"),
-        lua_cpath_suffix(),
-    }
-    for _, suffix in ipairs(suffixes) do
-        for template in (cpath .. ";"):gmatch("(.-);") do
-            local matched = template
-            if platform.windows then
-                -- Match separators without changing the returned extended-root
-                -- spelling or interpreting executable-relative ".." components.
-                matched = template:gsub("\\", "/")
-            end
-            if #matched >= #suffix and matched:sub(-#suffix) == suffix then
-                local root = template:sub(1, #template - #suffix)
-                if platform.windows then
-                    if root:match("^[A-Za-z]:$") then root = root .. "/" end
-                    if root == "" then return nil end
-                    local spelling = platform.path.separators(root)
-                    if not spelling and root:sub(1, 4) == "\\\\?\\" then
-                        -- Removing the suffix also removed the separator that is
-                        -- part of an extended drive or volume-GUID root.
-                        spelling = platform.path.separators(root .. "\\")
-                    end
-                    return spelling
-                end
-                return root ~= "" and root or "/"
-            end
-        end
-    end
-    return nil
-end
-
 local function normalize_root(root, strategy)
     if type(root) ~= "string" or root == "" then return nil end
     if platform.windows then
@@ -292,12 +249,6 @@ local function normalize_root(root, strategy)
     return normalize_absolute_path(root)
 end
 
--- Implementation notes: doc/implementation/driver.md#module-names-and-the-search-paths
-function driver.resolve_installation_root(cpath, override)
-    if override == "" then override = nil end
-    return normalize_root(override or driver.root_from_package_cpath(cpath))
-end
-
 local function root_join(root, suffix)
     if platform.windows then return assert(platform.join(root, suffix)) end
     if root == "/" then return "/" .. suffix end
@@ -307,12 +258,6 @@ end
 local function append_path(directory, suffix)
     if platform.windows then return assert(platform.join(directory, suffix)) end
     return directory .. "/" .. suffix
-end
-
-function driver.probe_cache_directory(cpath, override)
-    local root = driver.resolve_installation_root(cpath, override)
-    if not root then return nil end
-    return root_join(root, "var/cache/titan-probes/" .. cprobe_cache.VERSION)
 end
 
 function driver.installed_paths(root)
@@ -330,7 +275,6 @@ function driver.installed_paths(root)
         liblua = root_join(root, platform.windows and
             "lib/liblua55.a" or "lib/liblua.a"),
         titan_bin = titan_lib,
-        lua_cpath = root_join(titan_lib, platform.windows and "?.dll" or "?.so"),
         sdk_digests = root_join(titan_lib, incremental.SDK_DIGESTS),
     }
 end
@@ -422,13 +366,43 @@ local function source_checkout_root(strategy)
     return nil
 end
 
-local internal_root = platform.getenv("TITAN_ROCKS_ROOT")
-if internal_root == "" then internal_root = nil end
+-- Root and Titan path policy come from the native support module, which
+-- shares them with the runtime. A missing member means stale native support.
+local function support_function(name)
+    local loaded, support = pcall(require, "titan")
+    if not loaded then
+        return nil, "cannot load the Titan support module: " .. tostring(support)
+    end
+    local member = type(support) == "table" and support[name]
+    if type(member) ~= "function" then
+        return nil, "installed Titan native support lacks " .. name ..
+            "; reinstall Titan"
+    end
+    return member
+end
+
+-- The compiler SDK root is a non-empty TITAN_ROOT, otherwise the parent of the
+-- running interpreter's directory. Selecting it never starts another process.
+local function executable_compiler_root()
+    local compiler_root, support_error = support_function("_compiler_root")
+    if not compiler_root then return nil, support_error end
+    local root, root_error = compiler_root()
+    if type(root) ~= "string" or root == "" then
+        return nil, tostring(root_error)
+    end
+    return root
+end
+
+local explicit_root = platform.getenv("TITAN_ROOT")
+if explicit_root == "" then explicit_root = nil end
 local probe_prefix = platform.getenv("TITAN_PREFIX")
 if probe_prefix == "" then probe_prefix = nil end
 local probe_cache_disabled = platform.getenv("TITAN_PROBE_CACHE_DISABLE") == "1"
-local configured_installation_root =
-    internal_root or driver.root_from_package_cpath(package.cpath)
+local configured_installation_root, installation_root_error = explicit_root, nil
+if not configured_installation_root then
+    configured_installation_root, installation_root_error =
+        executable_compiler_root()
+end
 driver.TITAN_ROOT = configured_installation_root and
     platform.is_absolute(configured_installation_root) and
     normalize_absolute_path(configured_installation_root) or nil
@@ -438,12 +412,21 @@ local preliminary_probe_root = probe_prefix and
 driver.PROBE_CACHE_DIRECTORY = not probe_cache_disabled and
     preliminary_probe_root and root_join(preliminary_probe_root,
         "var/cache/titan-probes/" .. cprobe_cache.VERSION) or nil
-local configured_titan_bin_path =
+-- A configured Titan path is expanded at lookup time against the current
+-- layout's default; nil selects DEFAULT_TITAN_BIN_PATH unexpanded.
+driver.TITAN_BIN_PATH =
     platform.getenv("TITAN_PATH" .. driver.TITAN_LIBRARY_VERSION_SUFFIX)
     or platform.getenv("TITAN_PATH")
 
+-- Implementation notes: doc/implementation/driver.md#module-names-and-the-search-paths
+function driver.compiler_root(strategy)
+    if not configured_installation_root then
+        return nil, installation_root_error or "TITAN_ROOT is not set"
+    end
+    return normalize_root(configured_installation_root, strategy)
+end
+
 local function apply_layout(source_root)
-    local previous_bin_default = driver.DEFAULT_TITAN_BIN_PATH
     local previous_lua_default = driver._DEFAULT_LUA_SOURCE_PATH
     driver.SOURCE_CHECKOUT_ROOT = source_root
     driver.SOURCE_CHECKOUT = source_root ~= nil
@@ -451,17 +434,12 @@ local function apply_layout(source_root)
     driver.INSTALL_PATHS = driver.installed_paths(driver.TITAN_ROOT)
     driver.INSTALLATION_ERROR = driver.INSTALLED and
         not driver.INSTALL_PATHS and
-        ("cannot locate the Titan installation: package.cpath has no entry " ..
-            "ending in '" .. lua_cpath_suffix() .. "'") or nil
+        ("cannot locate the Titan installation root" ..
+            (installation_root_error and (": " .. installation_root_error) or "") ..
+            "; set TITAN_ROOT to the installation prefix") or nil
 
-    local bin_default = driver.INSTALL_PATHS and
-        (".;" .. driver.INSTALL_PATHS.titan_bin) or
-        (".;/usr/local/lib/titan/" .. driver.TITAN_LIBRARY_VERSION)
-    driver.DEFAULT_TITAN_BIN_PATH = bin_default
-    if driver.TITAN_BIN_PATH == nil or
-       driver.TITAN_BIN_PATH == previous_bin_default then
-        driver.TITAN_BIN_PATH = configured_titan_bin_path or bin_default
-    end
+    driver.DEFAULT_TITAN_BIN_PATH = driver.INSTALL_PATHS and
+        (".;" .. driver.INSTALL_PATHS.titan_bin) or "."
 
     local lua_default = driver.INSTALLED and driver.INSTALL_PATHS and
         driver.INSTALL_PATHS.lua_source or "lua-5.5.1/src"
@@ -477,7 +455,7 @@ end
 -- Keep module loading purely lexical. A relative driver source is the ordinary
 -- checkout shape; every real filesystem check and canonicalization is repeated
 -- through the first resolver context below before compiler work begins.
-local lexical_source_root = not internal_root and DRIVER_SOURCE and
+local lexical_source_root = not explicit_root and DRIVER_SOURCE and
     not platform.is_absolute(DRIVER_SOURCE:sub(2)) and
     DRIVER_SOURCE:sub(2):match(platform.windows and
         "^(.*)[/\\]titan%-compiler[/\\]driver[.]lua$" or
@@ -501,7 +479,7 @@ function driver.initialize_layout(context)
     driver.TITAN_ROOT = installation_root
 
     local checkout_root, checkout_error
-    if not internal_root then
+    if not explicit_root then
         checkout_root, checkout_error = source_checkout_root(context.io)
         if checkout_error then return nil, checkout_error end
     end
@@ -2127,20 +2105,22 @@ local function run_dsymutil(output, verbose, stable_input_basename, executable)
     return ok, term, code
 end
 
--- Expand an explicit Titan binary path with the same `;;` default insertion
--- used by the native runtime's pushpath(). Empty path entries are separators,
--- not directories; callers split the expanded result with path_entries().
-function driver.expand_titan_bin_path(path, default_path)
-    default_path = default_path or driver.DEFAULT_TITAN_BIN_PATH
-    if path == nil then return default_path end
-    return (path:gsub(";;", function()
-        return ";" .. default_path .. ";"
-    end))
-end
-
+-- Expand a configured Titan binary path with the runtime's rules: `;;`
+-- inserts the default in place and `!` names the running interpreter's
+-- directory. Empty path entries are separators, not directories.
 function driver.titan_bin_path_entries(path, default_path)
+    local expanded = default_path or driver.DEFAULT_TITAN_BIN_PATH
+    if path ~= nil then
+        local expand, support_error = support_function("_expand_titan_path")
+        if not expand then return nil, support_error end
+        local ok, result = pcall(expand, path, expanded)
+        if not ok then
+            return nil, "cannot expand Titan path '" .. path .. "': " ..
+                tostring(result)
+        end
+        expanded = result
+    end
     local entries = {}
-    local expanded = driver.expand_titan_bin_path(path, default_path)
     for entry in expanded:gmatch("[^;]+") do
         table.insert(entries, entry)
     end
@@ -4012,7 +3992,9 @@ function driver.find_dynamic_interface(paths, modname, context)
     local windows_io = platform.windows and not (context and context.io) and
         compiler_io.new_sync() or nil
 
-    for _, root in ipairs(driver.titan_bin_path_entries(paths)) do
+    local roots, roots_error = driver.titan_bin_path_entries(paths)
+    if not roots then return nil, roots_error end
+    for _, root in ipairs(roots) do
         local absolute_root, root_error = normalize_root(
             root, context and context.io or nil)
         if not absolute_root then return nil, root_error end
@@ -4132,7 +4114,9 @@ function driver.find_static_interface(paths, modname, context)
     if #candidates == 0 then return nil end
     local occupied = {}
 
-    for _, root in ipairs(driver.titan_bin_path_entries(paths)) do
+    local roots, roots_error = driver.titan_bin_path_entries(paths)
+    if not roots then return nil, roots_error end
+    for _, root in ipairs(roots) do
         local absolute_root, root_error = normalize_root(root, context.io)
         if not absolute_root then return nil, root_error end
         for index, relative in ipairs(candidates) do
@@ -9435,9 +9419,6 @@ static int titan_open_main(lua_State *L) {
 
 local entrypoint_template = [[
 
-#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
-#define _XOPEN_SOURCE 700
-#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -9446,16 +9427,6 @@ local entrypoint_template = [[
 #include "lualib.h"
 #include "lauxlib.h"
 #include "titan.h"
-#if defined(_WIN32)
-#include <windows.h>
-#include <wchar.h>
-#else
-#include <unistd.h>
-#include <limits.h>
-#if defined(__APPLE__)
-#include <mach-o/dyld.h>
-#endif
-#endif
 
 $PLATFORM_ALERTS
 
@@ -9524,63 +9495,6 @@ static void report_titan_error(const char *message, const char *trace) {
     fputs("stack traceback:", stderr);
     write_tabbed_trace(trace);
     exit(EXIT_FAILURE);
-}
-
-/* Resolve the process image, independently of argv[0], PATH and CWD. */
-static void titan_push_executable_directory(lua_State *L) {
-#if defined(_WIN32)
-    DWORD length;
-    int bytes;
-    WCHAR *wide = (WCHAR *)lua_newuserdatauv(L, 32768 * sizeof(WCHAR), 0);
-    char *utf8;
-    WCHAR *last;
-    length = GetModuleFileNameW(NULL, wide, 32768);
-    if (length == 0 || length >= 32768) fatal("cannot locate executable");
-    last = wcsrchr(wide, L'\\');
-    if (last == NULL) fatal("cannot locate executable directory");
-    if (last == wide + 2 && wide[1] == L':') last++;
-    *last = L'\0';
-    bytes = WideCharToMultiByte(CP_UTF8, 0, wide, -1, NULL, 0, NULL, NULL);
-    if (bytes == 0) fatal("cannot encode executable directory");
-    utf8 = (char *)lua_newuserdatauv(L, (size_t)bytes, 0);
-    if (!WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, bytes, NULL, NULL))
-        fatal("cannot encode executable directory");
-    lua_pushstring(L, utf8);
-    lua_replace(L, -3);
-    lua_pop(L, 1);
-#else
-    char image[PATH_MAX + 1], resolved[PATH_MAX + 1];
-    char *last;
-#if defined(__APPLE__)
-    uint32_t size = sizeof(image);
-    if (_NSGetExecutablePath(image, &size) != 0)
-        fatal("cannot locate executable");
-#else
-    ssize_t length = readlink("/proc/self/exe", image, sizeof(image));
-    if (length < 0 || (size_t)length >= sizeof(image))
-        fatal("cannot locate executable");
-    image[length] = '\0';
-#endif
-    if (realpath(image, resolved) == NULL) fatal("cannot resolve executable");
-    last = strrchr(resolved, '/');
-    if (last == NULL) fatal("cannot locate executable directory");
-    if (last == resolved) last++;
-    *last = '\0';
-    lua_pushstring(L, resolved);
-#endif
-}
-
-static void titan_init_standalone_paths(lua_State *L) {
-    static const unsigned char source[] = $PATH_INITIALIZER;
-    if (luaL_loadbuffer(L, (const char *)source, sizeof(source),
-                        "@titan.standalone_paths") != LUA_OK)
-        fatal(lua_tostring(L, -1));
-    titan_push_executable_directory(L);
-    lua_pushliteral(L, TITAN_LIBRARY_VERSION);
-    lua_pushliteral(L, TITAN_ROOT_KEY);
-    lua_pushliteral(L, TITAN_PATH_KEY);
-    if (lua_pcall(L, 4, 0, 0) != LUA_OK) fatal(lua_tostring(L, -1));
-    titan_init_paths(L);
 }
 
 static char titan_main_array_writer_key;
@@ -9683,7 +9597,7 @@ int main(int argc, char** argv) {
         fatal("not enough memory for state");
     }
     luaL_openlibs(L);
-    titan_init_standalone_paths(L);
+    titan_install_searcher(L);
     $COVERAGE_PREPARE
     lua_getglobal(L, "package");
     lua_getfield(L, -1, "preload");
@@ -9721,8 +9635,6 @@ int main(int argc, char** argv) {
 function driver.entrypoint_contents(modname, program_name, options)
     options = options or {}
     local values = {
-        PATH_INITIALIZER = assert(staticmetadata.c_initializer(
-            require("titan-compiler.standalone_paths"))),
         PROGNAME = program_name or modname:gsub(".*[.]", ""),
         LUAOPEN_FN = "luaopen_" .. modname:gsub("[.]", "_"),
         MODNAME = modname,

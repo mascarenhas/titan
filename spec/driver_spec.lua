@@ -397,29 +397,9 @@ describe("Windows compiler path integration", function()
         assert.is_true(ffiheaders.validate_plan(descriptor))
     end)
 
-    it("extracts the controlled Lua cpath without confusing Titan providers", function()
-        assert.equal("C:/SDK/bin/..", driver.root_from_package_cpath(table.concat({
-            [[C:\Users\dev\.luarocks\lib\lua\5.5\?.dll]],
-            [[C:\SDK\bin\..\lib\titan\0.6\?.dll]],
-            [[C:\Wrong\lib\lua\5.5\?.so]],
-            [[C:\SDK\bin\..\lib\lua\5.5\?.dll]],
-        }, ";")))
-        assert.equal([[\\?\C:\SDK]], driver.root_from_package_cpath(
-            [[\\?\C:\SDK\lib\lua\5.5\?.dll]]))
-        assert.equal("C:/", driver.root_from_package_cpath(
-            [[C:\lib\lua\5.5\?.dll]]))
-        assert.equal([[\\?\C:\]], driver.root_from_package_cpath(
-            [[\\?\C:\lib\lua\5.5\?.dll]]))
-        assert.equal([[\\?\Volume{d0ac8cd8-bd4b-11f1-af3e-fa5e484244a2}\]],
-            driver.root_from_package_cpath(
-                [[\\?\Volume{d0ac8cd8-bd4b-11f1-af3e-fa5e484244a2}\lib\lua\5.5\?.dll]]))
-        assert.is_nil(driver.root_from_package_cpath(
-            [[C:\SDK\bin\?.dll;C:\SDK\lib\lua\5.5\?.dll.debug]]))
-    end)
-
     it("keeps extended SDK joins and the controlled Lua import library", function()
         local layout = driver.installed_paths([[\\?\C:\SDK é]])
-        assert.equal([[\\?\C:\SDK é\lib\titan\0.6\?.dll]], layout.lua_cpath)
+        assert.equal([[\\?\C:\SDK é\lib\titan\0.6]], layout.titan_bin)
         assert.equal([[\\?\C:\SDK é\src\lua-5.5.1]], layout.lua_source)
         assert.equal([[\\?\C:\SDK é\lib\liblua55.a]], layout.liblua)
         assert.equal([[\\?\C:\SDK é\include]], layout.include)
@@ -429,7 +409,7 @@ describe("Windows compiler path integration", function()
         local layout = driver.installed_paths([[C:\SDK 日本\bin\..]])
         assert.equal("C:/SDK 日本", layout.root)
         assert.equal("C:/SDK 日本/lib/liblua55.a", layout.liblua)
-        assert.equal("C:/SDK 日本/lib/titan/0.6/?.dll", layout.lua_cpath)
+        assert.equal("C:/SDK 日本/lib/titan/0.6", layout.titan_bin)
     end)
 
     it("discovers source checkouts through the injected strategy", function()
@@ -2230,67 +2210,74 @@ describe("compiler installation discovery", function()
         assert.is_nil(value.IS_DARWIN)
     end)
 
-    posix_model_it("prefers the current Titan provider over LuaRocks' user tree", function()
-        local cpath = table.concat({
-            "/home/dev/.luarocks/lib/lua/5.5/?.so",
-            "/old/lib/titan/0.5/?.so",
-            "/first prefix/lib/titan/0.6/?.so",
-            "/wrong/lib/lua/5.4/?.so",
-            "/also-wrong/lib/lua/5.5/?.dylib",
-            "/first prefix/lib/lua/5.5/?.so",
-            "/second/lib/lua/5.5/?.so",
-        }, ";")
-        assert.equal("/first prefix",
-            driver.root_from_package_cpath(cpath))
+    -- Load a fresh driver with `values` overlaid on the host environment;
+    -- `false` unsets a variable.
+    local function driver_with_environment(values)
+        local module_name = "titan-compiler.driver"
+        local loaded_driver = package.loaded[module_name]
+        local original_getenv = platform.getenv
+        package.loaded[module_name] = nil
+        platform.getenv = function(name)
+            local value = values[name]
+            if value == false then return nil end
+            if value ~= nil then return value end
+            return original_getenv(name)
+        end
+        local loaded, value = pcall(require, module_name)
+        platform.getenv = original_getenv
+        package.loaded[module_name] = loaded_driver
+        assert.truthy(loaded, value)
+        return value
+    end
+
+    it("selects a non-empty TITAN_ROOT as the compiler root and probe-cache owner",
+       function()
+        local explicit = driver_with_environment({
+            TITAN_ROOT = fixture_path("/post-install/tree/"),
+            TITAN_PREFIX = false,
+            TITAN_PROBE_CACHE_DISABLE = false,
+        })
+        assert.equal(fixture_path("/post-install/tree"), explicit.TITAN_ROOT)
+        assert.equal(fixture_path("/post-install/tree"),
+            assert(explicit.compiler_root()))
+        assert.equal(fixture_path("/post-install/tree/var/cache/titan-probes/") ..
+            cprobe_cache.VERSION, explicit.PROBE_CACHE_DIRECTORY)
     end)
 
-    posix_model_it("falls back to the first ordinary Lua template during bootstrap", function()
-        assert.equal("/lua/prefix", driver.root_from_package_cpath(table.concat({
-            "/old/lib/titan/0.5/?.so",
-            "/wrong/lib/titan/0.6/?.so.debug",
-            "/lua/prefix/lib/lua/5.5/?.so",
-            "/second/lib/lua/5.5/?.so",
-        }, ";")))
-    end)
-
-    posix_model_it("rejects suffix lookalikes and handles the filesystem root", function()
-        assert.is_nil(driver.root_from_package_cpath(table.concat({
-            "/prefix/lib/lua/5.5/?x.so",
-            "/prefix/lib/lua/5.5/?.so.debug",
-            "/prefix/lib/lua/5.5/sub/?.so",
-        }, ";")))
-        assert.equal("/", driver.root_from_package_cpath(
-            "/lib/lua/5.5/?.so;/later/lib/lua/5.5/?.so"))
-        assert.is_nil(driver.root_from_package_cpath(nil))
-    end)
-
-    posix_model_it("gives the internal installation override precedence", function()
-        assert.equal("/post-install/tree", driver.resolve_installation_root(
-            "/lua/prefix/lib/lua/5.5/?.so", "/post-install/tree/"))
-        assert.equal("/lua/prefix", driver.resolve_installation_root(
-            "/lua/prefix/lib/lua/5.5/?.so", ""))
+    it("resolves a relative TITAN_ROOT against the current directory", function()
+        local explicit = driver_with_environment({
+            TITAN_ROOT = "./discarded/../normalized//",
+        })
+        local previous_windows = platform.windows
         local previous_currentdir, previous_chdir = lfs.currentdir, lfs.chdir
+        platform.windows = false
         lfs.currentdir = function() return "/model/work" end
         lfs.chdir = function() return nil, "unavailable model directory" end
-        local completed, failure = pcall(function()
-            assert.equal("/model/work/normalized", driver.resolve_installation_root(
-                nil, "./discarded/../normalized//"))
-        end)
+        local completed, root = pcall(explicit.compiler_root)
+        platform.windows = previous_windows
         lfs.currentdir, lfs.chdir = previous_currentdir, previous_chdir
-        assert.truthy(completed, failure)
+        assert.truthy(completed, root)
+        assert.equal("/model/work/normalized", root)
     end)
 
-    posix_model_it("derives the format-1 probe cache from an explicit prefix first",
+    it("searches the current directory and then the SDK providers by default",
        function()
-        local cpath = "/installed/lib/lua/5.5/?.so"
-        assert.equal("/explicit/var/cache/titan-probes/" .. cprobe_cache.VERSION,
-            driver.probe_cache_directory(cpath, "/explicit"))
-        assert.equal("/installed/var/cache/titan-probes/" .. cprobe_cache.VERSION,
-            driver.probe_cache_directory(cpath, ""))
-        assert.equal("/var/cache/titan-probes/" .. cprobe_cache.VERSION,
-            driver.probe_cache_directory(
-                "/lib/lua/5.5/?.so", nil))
-        assert.is_nil(driver.probe_cache_directory(nil, nil))
+        local root = fixture_path("/sdk")
+        local providers = fixture_path("/sdk/lib/titan/0.6")
+        local function entries(titan_path_0_6, titan_path)
+            local configured = driver_with_environment({
+                TITAN_ROOT = root,
+                TITAN_PATH_0_6 = titan_path_0_6,
+                TITAN_PATH = titan_path,
+            })
+            return assert(configured.titan_bin_path_entries(
+                configured.TITAN_BIN_PATH))
+        end
+        assert.same({ ".", providers }, entries(false, false))
+        assert.same({ "first", ".", providers, "last" },
+            entries("first;;last", "ignored"))
+        assert.same({ "only", ".", providers }, entries(false, "only;;"))
+        assert.same({}, entries("", "ignored"))
     end)
 
     it("honors the test-only persistent-probe-cache disable switch",
@@ -2343,21 +2330,25 @@ describe("compiler installation discovery", function()
         assert(lfs.mkdir(nested))
         local alias = workspace .. "/alias"
         assert(lfs.link(nested, alias, true))
+        local function compiler_root(value)
+            return assert(driver_with_environment({
+                TITAN_ROOT = value,
+            }).compiler_root())
+        end
 
-        assert.equal(alias, driver.resolve_installation_root(nil, alias))
+        assert.equal(alias, compiler_root(alias))
 
         local expected_parent
         if platform.windows then
             -- Ordinary Win32 roots normalize dots before filesystem traversal.
-            expected_parent = driver.resolve_installation_root(nil, workspace)
+            expected_parent = compiler_root(workspace)
         else
             local previous = lfs.currentdir()
             assert(lfs.chdir(physical))
             expected_parent = lfs.currentdir()
             assert(lfs.chdir(previous))
         end
-        assert.equal(expected_parent,
-            driver.resolve_installation_root(nil, alias .. "/.."))
+        assert.equal(expected_parent, compiler_root(alias .. "/.."))
 
         if platform.windows then
             assert(lfs.rmdir(alias))
@@ -2378,7 +2369,6 @@ describe("compiler installation discovery", function()
             libbacktrace = "/opt/titan/lib/libbacktrace.a",
             liblua = "/opt/titan/lib/liblua.a",
             titan_bin = "/opt/titan/lib/titan/0.6",
-            lua_cpath = "/opt/titan/lib/titan/0.6/?.so",
             sdk_digests = "/opt/titan/lib/titan/0.6/sdk-digests",
         }, paths)
 
@@ -2969,29 +2959,50 @@ describe("compiled-container path contracts", function()
     end)
 
     it("expands explicit double separators with the runtime default", function()
-        assert.equal("R1;D1;D2;R2",
-            driver.expand_titan_bin_path("R1;;R2", "D1;D2"))
         assert.same({ "R1", "D1", "D2", "R2" },
             driver.titan_bin_path_entries("R1;;R2", "D1;D2"))
         assert.same({ "D1", "D2" },
             driver.titan_bin_path_entries(nil, "D1;D2"))
+        -- Inserted default bytes are literal directories, even a `!`.
+        assert.same({ "R1", "/sdk!/lib" },
+            driver.titan_bin_path_entries("R1;;", "/sdk!/lib"))
     end)
 
     it("preserves literal percent signs while inserting defaults", function()
         local explicit = "/tmp/100%/first;;/tmp/50%/last"
         local defaults = "/tmp/default%root;/tmp/other%root"
-        assert.equal(table.concat({
-            "/tmp/100%/first",
-            "/tmp/default%root",
-            "/tmp/other%root",
-            "/tmp/50%/last",
-        }, ";"), driver.expand_titan_bin_path(explicit, defaults))
         assert.same({
             "/tmp/100%/first",
             "/tmp/default%root",
             "/tmp/other%root",
             "/tmp/50%/last",
         }, driver.titan_bin_path_entries(explicit, defaults))
+    end)
+
+    it("expands ! in a configured Titan path to the compiler interpreter's directory",
+       function()
+        if platform.windows then
+            pending("POSIX interpreter spelling; Windows uses titanc.exe's directory")
+            return
+        end
+        local prefix = require("spec.support.installed_prefix").active()
+        local previous = lfs.currentdir()
+        assert(lfs.chdir(prefix .. "/bin"))
+        local executable_dir = lfs.currentdir()
+        assert(lfs.chdir(previous))
+        local script = 'local driver = require "titan-compiler.driver"; ' ..
+            'io.write(table.concat(assert(driver.titan_bin_path_entries(' ..
+            'driver.TITAN_BIN_PATH)), "\\n"))'
+        local result = compiler_io.new_sync():run({
+            "env", "-u", "TITAN_PATH", "TITAN_ROOT=/sdk",
+            "TITAN_PATH_0_6=!/providers;;",
+            "LUA_PATH_5_5=" .. package.path, "LUA_CPATH_5_5=" .. package.cpath,
+            prefix .. "/bin/lua", "-e", script,
+        }, { stderr_to_stdout = false })
+        assert.truthy(result.ok, result.output or result.diagnostic)
+        assert.equal(table.concat({
+            executable_dir .. "/providers", ".", "/sdk/lib/titan/0.6",
+        }, "\n"), result.output)
     end)
 
     it("stages an atomic library under its final basename", function()

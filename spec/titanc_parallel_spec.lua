@@ -1116,7 +1116,7 @@ describe("Windows native descendant containment", function()
         for name, value in pairs({
             CC = assert(platform.windows_process_command({ wrapper })),
             PATH = prefix .. "/bin;" .. (platform.getenv("PATH") or ""),
-            TITAN_ROCKS_ROOT = prefix, TITAN_RUNTIME_PREBUILT = "1",
+            TITAN_ROOT = prefix, TITAN_RUNTIME_PREBUILT = "1",
             TITAN_EXTRA_CPPFLAGS = "", TITAN_EXTRA_CFLAGS = "-O0 -fno-lto",
             TITAN_EXTRA_LDFLAGS = "-fno-lto", CCACHE_DISABLE = "1",
             TITAN_TREE_REAL_CC = real_command, TITAN_TREE_MATCH = match or "",

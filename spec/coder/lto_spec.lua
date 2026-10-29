@@ -83,7 +83,7 @@ describe("Titan link-time optimization", function()
         -- GCC also uses MAKE for parallel LTO; skip only Titan's runtime build.
         local arguments = {
             "env", "-u", "TITAN_BUILD_PROFILE", "CC=" .. CC, "CCACHE_DISABLE=1", "TITAN_RUNTIME_PREBUILT=1",
-            "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_ROCKS_ROOT=" .. PREFIX,
+            "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_ROOT=" .. PREFIX,
             "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=" .. (extra_compile or ""),
             "TITAN_EXTRA_LDFLAGS=" .. (extra_link or ""),
             LUA, "-E", "-e", string.format("package.path = %q .. package.path",

@@ -142,7 +142,7 @@ describe("generated C line directives", function()
                 "--tree", workspace,
             }
             if platform.windows then
-                table.insert(argv, 2, "TITAN_ROCKS_ROOT=" .. PREFIX)
+                table.insert(argv, 2, "TITAN_ROOT=" .. PREFIX)
             else
                 lua_workspace = async_stdlib.workspace("line-directives")
                 argv[#argv + 1] = "--lua"

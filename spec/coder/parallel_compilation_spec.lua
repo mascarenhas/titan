@@ -128,7 +128,7 @@ local function titanc(
             tonumber(cli_jobs or environment_jobs) or 4, #MODULES)),
         "TITAN_PARALLEL_TEST_DIAGNOSTICS=" .. (diagnostics or ""),
         "TITAN_PARALLEL_TEST_FAIL=" .. (failing_module or ""),
-        "TITAN_ROCKS_ROOT=" .. assert(PREFIX,
+        "TITAN_ROOT=" .. assert(PREFIX,
             "parallel compilation spec requires the prepared Titan prefix"),
         "TITAN_RUNTIME_PREBUILT=1",
         LUA,
