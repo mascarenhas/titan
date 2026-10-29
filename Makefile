@@ -1296,6 +1296,10 @@ TITAN_TEST_COMPILER_ENV = TITAN_BUILD_PROFILE=$(call make_shell_quote,$(TITAN_BU
 	TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_FEATURE_CPPFLAGS) -I.)) \
 	TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CFLAGS))) \
 	TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_LDFLAGS)))
+# Native launches additionally set TITAN_ROOT to TITAN_TEST_INSTALL_ROOT (the
+# installation selected by TEST_LUA), so the runtime's SDK fallback cannot
+# consult a titanc on PATH or a user root. TITAN_TEST_COMPILER_ENV stays
+# Busted-compatible: its specs choose their own provider paths.
 STDLIB_BUSTED_TESTS := \
 	spec/asan_generated_c_context_spec.lua spec/dense_array_runtime_spec.lua \
 	spec/libuv_build_spec.lua spec/lpeglabel_build_spec.lua \
@@ -1352,6 +1356,7 @@ titan-stdlib-test-objects: $(filter %.h,$(TITAN_TEST_FIXTURE_OUTPUTS)) | check-t
 	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) set -e; \
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 	cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); \
+	TITAN_ROOT=$(call make_shell_quote,$(TITAN_TEST_INSTALL_ROOT)) \
 	$(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --output . --test --incremental -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) -c \
 	  --tree $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
 	  --test-dir $(call make_shell_quote,$(abspath spec/stdlib/titan)) $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
@@ -1377,6 +1382,7 @@ $(TITAN_TEST_BUILD_DIR)/$(1).o: spec/fixtures/stdlib/native/$(1).c FORCE | check
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 	native_output=$$(call make_shell_quote,$$(TITAN_TEST_BUILD_DIR)/native/$(1).o); \
 	native_object=$$$$(CC=$$(call make_shell_quote,$$(CC)) \
+	TITAN_ROOT=$$(call make_shell_quote,$$(TITAN_TEST_INSTALL_ROOT)) \
 	TITAN_BUILD_PROFILE=$$(call make_shell_quote,$$(TITAN_BUILD_PROFILE)) \
 	TITAN_EXTRA_CPPFLAGS=$$(call make_shell_quote,$$(strip $$(TITAN_TEST_CPPFLAGS) $(3))) \
 	TITAN_EXTRA_CFLAGS=$$(call make_shell_quote,$$(TITAN_TEST_CFLAGS)) \
@@ -1407,6 +1413,7 @@ titan-stdlib-test-build: $(TITAN_TEST_FIXTURE_OUTPUTS) | check-titan-test-sdk ##
 	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) set -e; \
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 	cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); \
+	TITAN_ROOT=$(call make_shell_quote,$(TITAN_TEST_INSTALL_ROOT)) \
 	$(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --output . --test --incremental --no-uv-bootstrap -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) \
 	  --tree $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
 	  --test-dir $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
@@ -1429,6 +1436,7 @@ titan-stdlib-test-run: ## Run the built native suite, optionally with TITAN_FILT
 	TITAN_TEST_BUILD_DIR=$(call make_shell_quote,$(abspath $(TITAN_TEST_BUILD_DIR))) \
 	TITAN_TEST_SOURCE_ROOT=$(call make_shell_quote,$(CURDIR)) \
 	TITAN_TEST_SDK_ROOT=$(call make_shell_quote,$(TITAN_TEST_INSTALL_ROOT)) \
+	TITAN_ROOT=$(call make_shell_quote,$(TITAN_TEST_INSTALL_ROOT)) \
 	TITAN_PROCESS_CHILD=$(call make_shell_quote,$(abspath $(TITAN_TEST_BUILD_DIR)/os_process_host_child)) \
 	TITAN_FILTER=$(call make_shell_quote_value,TITAN_FILTER) \
 	bash -o pipefail -c ' \
@@ -1477,6 +1485,7 @@ titan-stdlib-test-run-parallel: ## Run the built native suite in parallel owner 
 	TITAN_TEST_BUILD_DIR=$(call make_shell_quote,$(abspath $(TITAN_TEST_BUILD_DIR))) \
 	TITAN_TEST_SOURCE_ROOT=$(call make_shell_quote,$(CURDIR)) \
 	TITAN_TEST_SDK_ROOT=$(call make_shell_quote,$(TITAN_TEST_INSTALL_ROOT)) \
+	TITAN_ROOT=$(call make_shell_quote,$(TITAN_TEST_INSTALL_ROOT)) \
 	TITAN_PROCESS_CHILD=$(call make_shell_quote,$(abspath $(TITAN_TEST_BUILD_DIR)/os_process_host_child)) \
 	bash spec/support/run_parallel_stdlib_tests.sh
 
