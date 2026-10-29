@@ -9,7 +9,9 @@ TITAN_COMPILER_LUA := $(wildcard titan-compiler/*.lua \
 
 # The including Makefile names the built `titan` Lua support module
 # (TITAN_SUPPORT_MODULE). It is an ordinary native Lua module: LuaRocks
-# deploys it to lib/lua/5.5 and owns it like any other rock file.
+# deploys it to lib/lua/5.5 and owns it like any other rock file. Its build
+# directory may contain spaces, so take only the last path component.
+TITAN_SUPPORT_MODULE_NAME = $(lastword $(subst /, ,$(TITAN_SUPPORT_MODULE)))
 .PHONY: install-compiler
 install-compiler:
 	@set -e; \
@@ -20,7 +22,7 @@ install-compiler:
 	done; \
 	mkdir -p "$(INST_BINDIR)" "$(INST_CONFDIR)" "$(INST_LIBDIR)"; \
 	install -p -m 0755 "$(TITAN_SUPPORT_MODULE)" \
-	  "$(INST_LIBDIR)/$(notdir $(TITAN_SUPPORT_MODULE))"; \
+	  "$(INST_LIBDIR)/$(TITAN_SUPPORT_MODULE_NAME)"; \
 	install -p -m 0755 titanc "$(INST_BINDIR)/titanc"; \
 	install -p -m 0644 THIRD_PARTY_NOTICES.md "$(INST_CONFDIR)/"
 
