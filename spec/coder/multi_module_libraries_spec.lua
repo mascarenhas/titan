@@ -346,7 +346,11 @@ local function run_program(workspace, relative)
                 workspace .. ";" .. PREFIX .. "/lib/titan/0.6",
             workspace .. "/" .. relative }, workspace)
     end
-    return run({ workspace .. "/" .. relative }, workspace)
+    -- The fixtures publish their providers beside the workspace, not beside
+    -- the executable, so name that root explicitly. `;;` keeps the default
+    -- executable-relative and SDK fallback entries.
+    return run({ "env", "TITAN_PATH_0_6=" .. workspace .. ";;",
+        workspace .. "/" .. relative }, workspace)
 end
 
 local function metadata_options()

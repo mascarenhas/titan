@@ -359,7 +359,7 @@ describe("incremental and separate compilation (CLI)", function()
         end
     end)
 
-    it("puts library providers and Lua shims beside the redirected module hierarchy", function()
+    it("publishes library providers beside the redirected module hierarchy without Lua shims", function()
         local flat, folder = NAMESPACE .. ".flat", NAMESPACE .. ".folder"
         local first = source(flat, "function answer(): integer return 21 end\n")
         local second = source(folder, "function answer(): integer return 22 end\n", true)
@@ -367,18 +367,20 @@ describe("incremental and separate compilation (CLI)", function()
         compiled("-o", output, flat, folder)
         assert.is_true(exists(output .. "/" .. NAMESPACE .. SHARED_SUFFIX))
         if not platform.windows then assert.is_true(exists(output .. "/" .. NAMESPACE .. ".a")) end
+        -- One prefix image per module group; no per-module Lua shims.
         for _, name in ipairs({ flat, folder }) do
-            assert.is_true(exists(output .. "/" .. name:gsub("[.]", "/") .. ".lua"))
+            assert.is_false(exists(output .. "/" .. name:gsub("[.]", "/") .. ".lua"))
         end
         for _, stem in ipairs({ first, second }) do
             assert.is_false(exists(stem .. ".c"))
             assert.is_false(exists(stem .. ".o"))
             assert.is_false(exists(stem .. ".ffi.h"))
         end
-        local ok, text = run({ LUA, "-E", "-e", string.format(
-            "package.path = %q .. package.path; package.cpath = %q .. package.cpath; " ..
-            "assert(require(%q).answer() == 21); assert(require(%q).answer() == 22)",
-            output .. "/?.lua;", output .. "/?" .. SHARED_SUFFIX .. ";", flat, folder) })
+        local ok, text = run({ "env", "TITAN_PATH_0_6=" .. output .. ";;",
+            LUA, "-E", "-e", string.format(
+                'require "titan"; ' ..
+                "assert(require(%q).answer() == 21); assert(require(%q).answer() == 22)",
+                flat, folder) })
         assert.is_true(ok, text)
     end)
 
@@ -944,11 +946,15 @@ os.exit(result.ok and 0 or result.status or 1)
                 "-v", base, left, right)
         end
         local function values(expected_left, expected_right)
+            -- `NAMESPACE.left`/`.right` share one prefix provider published
+            -- beside the working directory, so the child installs the Titan
+            -- searcher and names that root explicitly.
             local script = string.format(
-                'package.path = "./?.lua;" .. package.path; ' ..
+                'require "titan"; ' ..
                 'assert(require(%q).number() == %d); assert(require(%q).number() == %d)',
                 left, expected_left, right, expected_right)
-            local ok, output = run({ LUA, "-E", "-e", script })
+            local ok, output = run({ "env", "TITAN_PATH_0_6=" ..
+                (assert(lfs.currentdir())) .. ";;", LUA, "-E", "-e", script })
             assert.is_true(ok, output)
         end
         build()

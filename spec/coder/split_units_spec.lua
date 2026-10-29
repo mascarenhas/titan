@@ -1195,9 +1195,11 @@ end
         -- calls, closures, transfer, protobuf codecs, reflection, and foreign bindings.
         for _, variant in ipairs({ unsplit, split }) do
             local script = workspace .. "/verify_run.lua"
-            write_file(script, string.format([[
-package.path = %q .. "/?.lua;" .. package.path
-package.cpath = %q .. "/?" .. %q .. ";" .. package.cpath
+            -- `pkg.main`/`pkg.dep` share one prefix provider, so the child
+            -- installs the Titan searcher through the support module and
+            -- names the provider root; no Lua shims are generated.
+            write_file(script, [[
+require "titan"
 local main = require("pkg.main")
 local dep = require("pkg.dep")
 local total, formatted, matched = main.exercise_all(7)
@@ -1209,8 +1211,10 @@ assert(main.imported_callback_identity(), "source-imported callback address dive
 local box = dep.make_box(10)
 assert(box.value == 13)
 print("VARIANT_OK")
-]], variant.out_dir, variant.out_dir, platform.windows and ".dll" or ".so"))
-            local ok, out = run_cmd({ LUA, "-E", script })
+]])
+            local ok, out = run_cmd({ "env",
+                "TITAN_PATH_0_6=" .. variant.out_dir .. ";;",
+                LUA, "-E", script })
             assert.is_true(ok, out)
             assert.truthy(out:find("VARIANT_OK", 1, true), out)
         end

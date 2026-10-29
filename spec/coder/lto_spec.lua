@@ -163,8 +163,13 @@ describe("Titan link-time optimization", function()
         nm_ok, unresolved = run({ "nm", "-u", "lto_fixture.so" })
         assert.is_true(nm_ok, unresolved)
         assert.falsy(unresolved:find(SENTINEL, 1, true), unresolved)
-        ok, output = run({ LUA, "-E", "-e",
-            [[package.path = "./?.lua;" .. package.path; assert(require("lto_fixture.facade").answer() == 42)]] })
+        -- One prefix provider beside the sources: a plain Lua host installs
+        -- the Titan searcher through the support module and names that
+        -- directory, because the runtime default has no working-directory
+        -- entry.
+        ok, output = run({ "env", "TITAN_PATH_0_6=" .. workspace .. ";;",
+            LUA, "-E", "-e",
+            [[require "titan"; assert(require("lto_fixture.facade").answer() == 42)]] })
         assert.is_true(ok, output)
 
         -- Repeat the pair under a real shared jobserver. The archive-backed
@@ -188,8 +193,13 @@ describe("Titan link-time optimization", function()
         nm_ok, unresolved = run({ "nm", "-u", "lto_fixture.so" })
         assert.is_true(nm_ok, unresolved)
         assert.falsy(unresolved:find(SENTINEL, 1, true), unresolved)
-        ok, output = run({ LUA, "-E", "-e",
-            [[package.path = "./?.lua;" .. package.path; assert(require("lto_fixture.facade").answer() == 42)]] })
+        -- One prefix provider beside the sources: a plain Lua host installs
+        -- the Titan searcher through the support module and names that
+        -- directory, because the runtime default has no working-directory
+        -- entry.
+        ok, output = run({ "env", "TITAN_PATH_0_6=" .. workspace .. ";;",
+            LUA, "-E", "-e",
+            [[require "titan"; assert(require("lto_fixture.facade").answer() == 42)]] })
         assert.is_true(ok, output)
 
         -- Only the compiled provider remains resolvable. The archive must

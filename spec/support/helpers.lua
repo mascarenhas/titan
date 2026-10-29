@@ -251,14 +251,17 @@ end
 
 -- Fixture providers live in the working directory. The runtime Titan path has
 -- no implicit `.`, so a Lua child that loads one names that directory ahead
--- of the default, unless the caller already selected a Titan path.
+-- of the default, unless the caller already selected a Titan path. The child
+-- also loads the support module, which installs the Titan searcher: the
+-- standard provider is reached through that searcher, never generated shims.
 local function run_lua_with_cwd_providers(modname, script)
     local environment
     if os.getenv("TITAN_PATH_0_6") == nil and os.getenv("TITAN_PATH") == nil then
         local directory = assert(compiler_io.new_sync():cwd())
         environment = { TITAN_PATH_0_6 = directory .. ";;" }
     end
-    return run({ LUA, "-l", modname, script }, false, environment)
+    return run({ LUA, "-e", "require \"titan\"", "-l", modname, script },
+        false, environment)
 end
 
 -- Run `code` under the stock Lua interpreter with `modname` loaded (`-l`),
