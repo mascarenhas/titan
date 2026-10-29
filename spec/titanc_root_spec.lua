@@ -136,18 +136,33 @@ describe("titanc installation root in a process", function()
     -- `prelude` is Lua run before titanc; stderr is merged when requested.
     local function run_titanc(interpreter, arguments, environment, prelude,
                               merge_stderr)
-        local argv = { platform.windows and "env.exe" or "env", "-u", "TITAN_ROOT",
-            "LUA_PATH_5_5=" .. package.path, "LUA_CPATH_5_5=" .. package.cpath }
-        for _, setting in ipairs(environment or {}) do argv[#argv + 1] = setting end
-        argv[#argv + 1] = interpreter
+        local settings = { "LUA_PATH_5_5=" .. package.path,
+            "LUA_CPATH_5_5=" .. package.cpath }
+        for _, setting in ipairs(environment or {}) do settings[#settings + 1] = setting end
+        local argv, options = {}, { stderr_to_stdout = merge_stderr == true }
+        if platform.windows then
+            -- MSYS tools rewrite values they read as POSIX path lists, so an
+            -- `env` argument list mangles these paths. Set the exact values
+            -- through the native spawn environment instead.
+            local overrides = { TITAN_ROOT = false }
+            for _, setting in ipairs(settings) do
+                local name, value = assert(setting:match("^([%w_]+)=(.*)$"), setting)
+                overrides[name] = value
+            end
+            options.env = overrides
+            argv[1] = interpreter
+        else
+            argv = { "env", "-u", "TITAN_ROOT" }
+            for _, setting in ipairs(settings) do argv[#argv + 1] = setting end
+            argv[#argv + 1] = interpreter
+        end
         if prelude then
             argv[#argv + 1] = "-e"
             argv[#argv + 1] = prelude
         end
         argv[#argv + 1] = "titanc"
         for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
-        return compiler_io.new_sync():run(argv,
-            { stderr_to_stdout = merge_stderr == true })
+        return compiler_io.new_sync():run(argv, options)
     end
 
     local function print_root(interpreter, arguments, environment, prelude)
