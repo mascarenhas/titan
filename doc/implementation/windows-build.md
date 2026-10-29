@@ -624,9 +624,14 @@ parent of the executable's directory. The script is therefore `arg[0]`, the
 frontend that object certificates hash, and no user argument is parsed as a
 Lua option. Because of `-E`, `LUA_INIT`, `LUA_INIT_5_5`, and the
 `LUA_PATH*`/`LUA_CPATH*` variables are ignored: the compiler modules, their
-dependencies, and the `titan` support module resolve only through Lua's
-executable-relative defaults (`!\..\share\lua\5.5`, `!\..\lib\lua\5.5`), so a
-moved SDK runs its own compiler. An executable with no directory above its own
+dependencies, and the `titan` support module resolve through Lua's built-in
+Windows defaults, whose executable-relative entries (`!\lua\`, `!\`, and
+`!\..\share\lua\5.5\` for Lua files; `!\` and `!\..\lib\lua\5.5\` for C
+modules) come before the current-directory entries `.\?.lua`, `.\?\init.lua`,
+and `.\?.dll`. An installed module is therefore always taken from the SDK
+that contains the executable, and a moved SDK runs its own compiler; only a
+module missing from the SDK can be found in the current directory, as with
+the Unix compiler's `./?.lua`. An executable with no directory above its own
 fails with `titanc: cannot locate the installation root above this
 executable`. `titanc.exe --print-root` reports the usual [compiler
 root](driver.md#the-compiler-root). The executable compiles no Lua engine of its
