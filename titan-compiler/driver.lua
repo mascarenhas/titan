@@ -7697,10 +7697,14 @@ local RUNTIME_ARCHIVE_INPUTS = {
     "minicoro.h",
     "transfer.h",
     "titan/ffi.h",
+    "titan_path.c",
+    "ltitanlib.c",
 }
 local RUNTIME_ARCHIVE_MEMBERS = {
     "titan.o",
     "minicoro.o",
+    "titan_path.o",
+    "ltitanlib.o",
 }
 
 local function is_archive_symbol_index(member)

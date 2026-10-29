@@ -2366,19 +2366,21 @@ describe("compiler installation discovery", function()
             checkout))
     end)
 
-    it("requires exactly the two runtime archive members", function()
+    it("requires exactly the four runtime archive members", function()
+        local members = "titan.o\nminicoro.o\ntitan_path.o\nltitanlib.o\n"
+        assert.is_true(driver.runtime_archive_members_are_exact(members))
         assert.is_true(driver.runtime_archive_members_are_exact(
+            "__.SYMDEF SORTED\n" .. members))
+        assert.is_true(driver.runtime_archive_members_are_exact(
+            "__.SYMDEF_64\n" .. members))
+        assert.is_false(driver.runtime_archive_members_are_exact(
+            members .. "titan_uv.o\n"))
+        assert.is_false(driver.runtime_archive_members_are_exact(
+            "__.SYMDEF\n" .. members .. "stale.o\n"))
+        assert.is_false(driver.runtime_archive_members_are_exact(
             "titan.o\nminicoro.o\n"))
-        assert.is_true(driver.runtime_archive_members_are_exact(
-            "__.SYMDEF SORTED\ntitan.o\nminicoro.o\n"))
-        assert.is_true(driver.runtime_archive_members_are_exact(
-            "__.SYMDEF_64\ntitan.o\nminicoro.o\n"))
         assert.is_false(driver.runtime_archive_members_are_exact(
-            "titan.o\nminicoro.o\ntitan_uv.o\n"))
-        assert.is_false(driver.runtime_archive_members_are_exact(
-            "__.SYMDEF\ntitan.o\nminicoro.o\nstale.o\n"))
-        assert.is_false(driver.runtime_archive_members_are_exact(
-            "minicoro.o\ntitan.o\n"))
+            "minicoro.o\ntitan.o\ntitan_path.o\nltitanlib.o\n"))
     end)
 
     posix_model_it("links source builds through the complete runtime archive", function()
