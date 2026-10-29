@@ -9638,14 +9638,13 @@ function driver.entrypoint_contents(modname, program_name, options)
     options = options or {}
     local values = {
         PROGNAME = program_name or modname:gsub(".*[.]", ""),
-        LUAOPEN_FN = "luaopen_" .. modname:gsub("[.]", "_"),
+        LUAOPEN_FN = "luaopen_" .. driver.mangle_module_name(modname),
         MODNAME = modname,
         SKIP_MAIN_BOOTSTRAP = options.no_uv_bootstrap and "1" or "0",
         COVERAGE_DECLARATIONS = "", COVERAGE_PREPARE = "", COVERAGE_FINISH = "",
     }
     if platform.windows then
         values.PROGNAME = c_string_contents(values.PROGNAME)
-        values.LUAOPEN_FN = "luaopen_" .. driver.mangle_module_name(modname)
         values.ABI_FN = driver.mangle_module_name(modname) .. "_abi"
         values.PROVIDER = c_string_contents(assert(options.provider,
             "Windows entrypoint requires an explicit provider"))
@@ -11466,9 +11465,8 @@ finish(valid == true, valid and "ok" or tostring(message))
             table.concat(expected, ",\n") .. " }\n" .. [[
 local support = require "titan"
 for name, entry in pairs(expected) do
-    local prefix = name:gsub("[.]", "_")
+    local prefix = name:gsub("[%-.]", "_")
     if package.config:sub(1, 1) == "\\" then
-        prefix = name:gsub("[%-.]", "_")
         if type(support._abivalue) ~= "function" then
             finish(false, "Windows Titan support is missing its native ABI query helper")
         end
