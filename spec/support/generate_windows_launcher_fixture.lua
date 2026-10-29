@@ -11,13 +11,17 @@ local default = assert(driver.windows_program_paths("fixture.launcher"))
 local override = assert(driver.windows_program_paths("fixture.launcher", "custom"))
 assert(default.provider == override.provider)
 local function write(name, contents)
-    assert(util.set_file_contents(output .. "/" .. name, contents))
+    -- Bash gates read these inputs with mapfile, so never let a text-mode
+    -- handle translate newlines on Windows.
+    assert(util.set_file_contents(output .. "/" .. name, contents, "wb"))
 end
 write("launcher.c", driver.entrypoint_contents("fixture.launcher", nil,
     { provider = default.relative_provider }))
 write("direct.c", driver.entrypoint_contents("fixture.launcher", nil,
     { provider = default.relative_provider, no_uv_bootstrap = true }))
-write("launcher.def", driver.windows_provider_exports({ "fixture.launcher" }))
+local definition, export_names = driver.windows_provider_exports({ "fixture.launcher" })
+write("launcher.def", definition)
+write("launcher.exports.txt", table.concat(export_names, "\n") .. "\n")
 write("launcher.manifest", driver.windows_launcher_manifest())
 write("launcher.rc", driver.windows_launcher_resource(manifest))
 local runtime = driver.installed_link_inputs({
