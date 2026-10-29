@@ -463,8 +463,10 @@ end
         local executable = workspace .. "/" ..
             (paths and paths.executable or "application")
         assert.equal("file", lfs.attributes(executable, "mode"))
-        local entrypoint = workspace .. "/application__entrypoint.c"
-        assert.equal("file", lfs.attributes(entrypoint, "mode"))
+        local entrypoints = collect_files(source_root .. "/.titan-links",
+            "/synthetic/application__entrypoint.c")
+        assert.equal(1, #entrypoints)
+        assert.equal("file", lfs.attributes(entrypoints[1], "mode"))
         assert.same(paths and { workspace .. "/" .. paths.provider } or {},
             collect_files(workspace, SHARED_SUFFIX))
         assert.same({}, collect_files(workspace, ".lua"))

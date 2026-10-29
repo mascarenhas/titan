@@ -5,6 +5,7 @@ local driver = require "titan-compiler.driver"
 local platform = require "titan-compiler.platform"
 local lfs = require "lfs"
 local async_stdlib = require "spec.support.async_stdlib"
+local objectmetadata = require "titan-compiler.objectmetadata"
 
 local FIXTURE = "spec/fixtures/test_runner"
 local ROOT = "test_runner_fixture"
@@ -96,6 +97,31 @@ local function remove_tree(path)
     end
 end
 
+local function synthetic_targets(output_root, owner)
+    local targets = {}
+    local links = output_root .. "/.titan-links"
+    if lfs.attributes(links, "mode") ~= "directory" then return targets end
+    for key in lfs.dir(links) do
+        if #key == 64 and key:match("^[0-9a-f]+$") then
+            local directory = links .. "/" .. key
+            for _, suffix in ipairs({
+                "__test_runner.c", "__test_entrypoint.c", "__entrypoint.c",
+            }) do
+                if file_exists(directory .. "/synthetic/" .. owner .. suffix) then
+                    targets[#targets + 1] = directory
+                    break
+                end
+            end
+        end
+    end
+    return targets
+end
+
+local function synthetic_file(output_root, owner, suffix)
+    local targets = synthetic_targets(output_root, owner)
+    assert.equal(1, #targets, owner)
+    return targets[1] .. "/synthetic/" .. owner .. suffix
+end
 local ARTIFACTS = {
     executable(ROOT),
     FIXTURE .. "/" .. ROOT .. ".c",
@@ -112,10 +138,6 @@ local ARTIFACTS = {
     FIXTURE .. "/titan/test/runner/user.o",
     FIXTURE .. "/" .. MUTATION .. ".c",
     FIXTURE .. "/" .. MUTATION .. ".o",
-    ROOT .. "__test_runner.c",
-    ROOT .. "__test_runner.o",
-    ROOT .. "__test_entrypoint.c",
-    ROOT .. "__test_entrypoint.o",
 }
 
 local COLLISION_ARTIFACTS = {
@@ -138,53 +160,45 @@ local NESTED_ARTIFACTS = {
     FIXTURE .. "/nested/tests/tests.c",
     FIXTURE .. "/nested/tests/tests.o",
     "nested/tests__main",
-    "nested/tests__main__test_runner.c",
-    "nested/tests__main__test_runner.o",
-    "nested/tests__main__test_entrypoint.c",
-    "nested/tests__main__test_entrypoint.o",
 }
 
 local BOOTSTRAP_ARTIFACTS = {
     BOOTSTRAP,
     FIXTURE .. "/" .. BOOTSTRAP .. ".c",
     FIXTURE .. "/" .. BOOTSTRAP .. ".o",
-    BOOTSTRAP .. "__entrypoint.c",
-    BOOTSTRAP .. "__entrypoint.o",
 }
 
 local STATIC_ARTIFACTS = {
     STATIC,
     FIXTURE .. "/" .. STATIC .. ".c",
     FIXTURE .. "/" .. STATIC .. ".o",
-    STATIC .. "__test_runner.c",
-    STATIC .. "__test_runner.o",
-    STATIC .. "__test_entrypoint.c",
-    STATIC .. "__test_entrypoint.o",
 }
 
 local function remove_artifact(path)
-    os.remove(path)
     local stem = path:match("^(.*)[.]c$")
     if stem then
-        local companion = io.open(stem .. ".parts", "rb")
-        if companion then
-            local count = driver.parse_parts_companion(companion:read("*a"), stem)
-            companion:close()
-            for index = 1, (count or 1) - 1 do
-                os.remove(driver.part_c_filename(stem, index))
-                os.remove(driver.part_object_filename(stem, index))
+        local object = io.open(stem .. ".o", "rb")
+        if object then
+            local record = objectmetadata.read(object:read("*a"), stem .. ".o")
+            object:close()
+            local native = record and record.object_metadata
+            if native and objectmetadata.validate_parts(native) then
+                for _, part in ipairs(native.parts) do
+                    os.remove(stem .. part.c_suffix)
+                    os.remove(stem .. part.object_suffix)
+                end
             end
         end
         os.remove(stem .. ".priv.h")
         os.remove(stem .. ".ffi.h")
         os.remove(stem .. ".titan.h")
-        os.remove(stem .. ".parts")
         if platform.windows then
             os.remove(path .. ".manifest")
             os.remove(path .. ".rc")
             os.remove(path .. ".res")
         end
     end
+    os.remove(path)
 end
 
 local function clean_nested()
@@ -196,6 +210,16 @@ end
 
 local function clean()
     for _, path in ipairs(ARTIFACTS) do remove_artifact(path) end
+    for _, output_root in ipairs({ FIXTURE, "." }) do
+        for _, owner in ipairs({
+            ROOT, "tests", BOOTSTRAP, STATIC, "test_runner_collision",
+            "test_runner_progname", "test_runner_hierarchy", "url",
+        }) do
+            for _, directory in ipairs(synthetic_targets(output_root, owner)) do
+                remove_tree(directory)
+            end
+        end
+    end
     for _, path in ipairs(COLLISION_ARTIFACTS) do remove_artifact(path) end
     for _, path in ipairs(BOOTSTRAP_ARTIFACTS) do remove_artifact(path) end
     for _, path in ipairs(STATIC_ARTIFACTS) do remove_artifact(path) end
@@ -229,7 +253,7 @@ local function clean()
     os.remove("url__test_entrypoint.o")
     remove_tree("url.dSYM")
     for _, modname in ipairs({ ROOT, BOOTSTRAP, STATIC,
-            "test_runner_progname", "test_runner_hierarchy", "url" }) do
+            "test_runner_progname", "test_runner_hierarchy", "test_runner_collision", "url" }) do
         clean_program(modname)
     end
 end
@@ -378,6 +402,13 @@ describe("native Titan test runner", function()
         for _, path in ipairs(ARTIFACTS) do
             assert.is_true(file_exists(path), path)
         end
+        for _, suffix in ipairs({
+            "__test_runner.c", "__test_runner.o",
+            "__test_entrypoint.c", "__test_entrypoint.o",
+        }) do
+            local path = synthetic_file(FIXTURE, ROOT, suffix)
+            assert.is_true(file_exists(path), path)
+        end
         assert.is_false(file_exists(ROOT .. "__test_support.c"))
         assert.is_false(file_exists(ROOT .. "__test_support.o"))
         assert.falsy(compiler_output:find("multiple main", 1, true),
@@ -386,7 +417,8 @@ describe("native Titan test runner", function()
 
     it("calls test-runner main directly when async bootstrap is disabled",
        function()
-        local entrypoint = read_file(ROOT .. "__test_entrypoint.c")
+        local entrypoint = read_file(
+            synthetic_file(FIXTURE, ROOT, "__test_entrypoint.c"))
         assert.truthy(entrypoint:find(
             "if (1 || lua_isnil(L, -1))", 1, true), entrypoint)
         assert.truthy(entrypoint:find(
@@ -773,10 +805,10 @@ end
             output)
     end)
 
-    it("rejects launcher naming for library and compile-only output", function()
+    it("rejects executable destinations for library and compile-only output", function()
         for _, compile_only in ipairs({ false, true }) do
             local argv = working_titanc_arguments()
-            argv[#argv + 1] = "--launcher-name"
+            argv[#argv + 1] = "--exe"
             argv[#argv + 1] = "custom"
             if compile_only then argv[#argv + 1] = "--compile-only" end
             argv[#argv + 1] = "--tree"
@@ -785,8 +817,8 @@ end
             local ok, output = run(argv)
             assert.falsy(ok, output)
             local expected = compile_only and
-                "--launcher-name cannot be combined with --compile-only" or
-                "--launcher-name is only valid when compiling a standalone executable"
+                "--exe cannot be combined with --compile-only" or
+                "--exe is only valid when compiling a standalone or test executable"
             assert.truthy(output:find(expected, 1, true), output)
         end
     end)
@@ -840,7 +872,7 @@ end
             1, true), run_output)
     end)
 
-    it("rejects synthetic output collisions before generating C", function()
+    it("isolates synthetic outputs from similarly named source modules", function()
         local suite = "test_runner_collision"
         local owner_source = suite .. [[.titan]]
         local owner_contents = [[local test = import "test"
@@ -860,13 +892,17 @@ end
         argv[#argv + 1] = suite
         argv[#argv + 1] = colliding
         local ok, output = run(argv)
-        assert.falsy(ok, output)
-        assert.truthy(output:find("shared by source modules", 1, true), output)
-        assert.truthy(output:find(colliding, 1, true), output)
-        assert.truthy(output:find("titan.test.runner", 1, true), output)
-        assert.is_false(file_exists(suite .. ".c"))
-        assert.is_false(file_exists(colliding .. ".c"))
-        assert.is_false(file_exists(suite .. suffix .. ".o"))
+        assert.truthy(ok, output)
+        assert.is_true(file_exists(suite .. ".c"))
+        assert.is_true(file_exists(colliding .. ".c"))
+        assert.is_true(file_exists(colliding .. ".o"))
+        local runner = synthetic_file(".", suite, "__test_runner.c")
+        assert.not_equal(colliding .. ".c", runner)
+        assert.is_true(file_exists(runner), runner)
+        local ran, result = run_program({ "./" .. executable(suite) })
+        assert.truthy(ran, result)
+        assert.truthy(result:find(
+            "[       OK ] " .. suite .. ".test_collision", 1, true), result)
 
         os.remove(owner_source)
         os.remove(colliding_source)

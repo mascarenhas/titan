@@ -362,7 +362,8 @@ describe("standalone-prefix source installation", function()
             "cdeclarator.lua", "cpreamble.lua", "cprobe.lua",
             "cprobe_cache.lua", "ffiheaders.lua", "objectmetadata.lua",
             "csemantics.lua", "io.lua", "sha256.lua", "test_runner.lua",
-            "version.lua",
+            "version.lua", "build.lua", "build_worker.lua", "incremental.lua",
+            "depfile.lua", "linkcertificate.lua", "nativeinputs.lua", "testroots.lua",
         }) do
             assert_file(PREFIX ..
                 "/share/lua/5.5/titan-compiler/" .. module)
@@ -559,6 +560,30 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             assert.truthy(stdlib_lua_manifest and
                 stdlib_lua_manifest[module .. ".lua"], manifest)
         end
+
+        -- The installer recorded every approved SDK native link input,
+        -- including the selected Lua archive; titanc admits and reuses each
+        -- digest without reading the bytes.
+        local incremental = require "titan-compiler.incremental"
+        local location = assert(loadfile(PREFIX ..
+            "/lib/luarocks/rocks-5.5/titan/0.6.0-1/installer/location.lua", "t", {}))()
+        assert.equal("lib/titan/0.6/" .. incremental.SDK_DIGESTS, location.digests)
+        local support = require "titan"
+        local certified = { io = compiler_io.new_sync(),
+            cache_adapter = { sha256_binary = support._sha256_binary } }
+        assert(incremental.load_sdk_digests(certified, PREFIX .. "/" .. location.digests))
+        local sdk_inputs = { "lib/titan/0.6/titan" .. SHARED_SUFFIX, "lib/titan/0.6/libtitan.a",
+            "lib/libbacktrace.a", platform.windows and "lib/liblua55.a" or "lib/liblua.a" }
+        if not platform.windows then sdk_inputs[#sdk_inputs + 1] = "lib/titan/0.6/titan.a" end
+        local sha256 = require "titan-compiler.sha256"
+        for _, relative in ipairs(sdk_inputs) do
+            local digest, bytes = incremental.file_digest(certified, PREFIX .. "/" .. relative)
+            assert.is_nil(bytes, relative)
+            assert.equal(sha256.hex_via(support._sha256_binary,
+                read_file(PREFIX .. "/" .. relative)), digest, relative)
+        end
+        assert.equal(#sdk_inputs, incremental.counters(certified).sdk_reuses)
+        assert.equal(0, incremental.counters(certified).file_reads)
     end)
 
     it("packs and unpacks every vendored and standard-library source",
@@ -934,6 +959,8 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "spec/support/run_parallel_compiler_tests.sh",
             "spec/support/run_with_timeout.sh",
             "spec/support/clean_generated_test_artifacts.sh",
+            "spec/support/clean_generated_test_artifacts.lua",
+            "spec/support/build_windows_stdlib_native.sh",
             "spec/fixtures/stdlib/native/async_foreign_work.c",
             "spec/fixtures/stdlib/native/async_foreign_work.h",
             "spec/fixtures/stdlib/native/os_process_child.c",
@@ -2596,7 +2623,7 @@ printf '%s\n' "$TITAN_ROCKS_ROOT" "$TITAN_RUNTIME_PREBUILT" \
                 arguments[#arguments + 1] = argument
             end
             local expected = {
-                "--output", build_root .. "/out", "--source-first", "-j", "3", "--tree", source_root,
+                "--output", build_root .. "/out", "--source-first", "--incremental", "-j", "3", "--tree", source_root,
                 "titan.math", "titan.json", "-X",
                 build_root .. "/runtime/ltitanlib.o",
                 build_root .. "/runtime/libtitan-lpeglabel.a",
@@ -2617,6 +2644,391 @@ printf '%s\n' "$TITAN_ROCKS_ROOT" "$TITAN_RUNTIME_PREBUILT" \
             assert.same(expected, arguments)
             assert.equal(table.concat({ prefix, "1", bootstrap, "*", "" }, "\n"),
                 read_file(environment_log))
+        end
+    end)
+
+    it("refreshes Windows harness inputs without discarding owned build outputs", function()
+        if platform.windows then
+            pending("POSIX shell fixture for Windows harness orchestration")
+            return
+        end
+        workspace = temporary_directory("windows-harness-refresh")
+        local repository = assert(lfs.currentdir())
+        local source = workspace .. "/source checkout"
+        local prefix = workspace .. "/published SDK"
+        local work = workspace .. "/native workspace"
+        local tools = workspace .. "/tools"
+        local function fixture(base, name, contents)
+            local path = base .. "/" .. name
+            make_directory(assert(path:match("^(.+)/[^/]+$")))
+            write_file(path, contents)
+            return path
+        end
+        for _, name in ipairs({
+                "Makefile.win", "scripts/windows_build_profile.sh",
+                "spec/support/windows_stdlib_tests.sh",
+                "spec/support/build_windows_stdlib_native.sh",
+                "scripts/windows_native_coverage.sh",
+                "spec/support/stdlib_test_modules.mk",
+                "spec/support/check_stdlib_test_output.lua" }) do
+            fixture(source, name, read_file(repository .. "/" .. name))
+        end
+        fixture(source, "scripts/install_compiler.mk", "")
+        fixture(source, "scripts/build_windows_runtime.sh", [=[#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p "$1/runtime"
+for name in ltitanlib.o libtitan-lpeglabel.a; do
+  [[ -f $1/runtime/$name ]] || printf '%s\n' "$name" > "$1/runtime/$name"
+done
+]=])
+        fixture(source, "titan/transfer_native.h", "/* transfer input */\n")
+        fixture(source, "titan/protobuf/native.h", "/* protobuf input */\n")
+        fixture(source, "spec/stdlib/titan/test/tests.titan",
+            "function value(): integer return 1 end\n")
+        fixture(source, "spec/stdlib/titan/retired_tests.titan",
+            "function value(): integer return 2 end\n")
+        local native = "spec/fixtures/stdlib/native/"
+        for _, name in ipairs({ "async_foreign_work", "fs_fixture", "uv_stdio_probe",
+                "sqlite3_worker_fixture", "ssl_allocator_fixture",
+                "ssl_error_strings", "os_descriptor_limit",
+                "os_process_host_child", "windows_test_supervisor" }) do
+            fixture(source, native .. name .. ".c", "/* " .. name .. " */\n")
+            fixture(source, native .. name .. ".h", "/* " .. name .. " header */\n")
+        end
+        for _, name in ipairs({ "uv_coverage_threads.h", "uv_coverage_pty.h",
+                "os_process_host_child_windows.h" }) do
+            fixture(source, native .. name, "/* native header */\n")
+        end
+        fixture(source, "spec/fixtures/retired.txt", "retired fixture\n")
+        fixture(source, "spec/fixtures/shape.txt", "old file shape\n")
+        for _, name in ipairs({
+                "lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc",
+                "lib/titan/0.6/titan.dll", "share/lua/5.5/titan/sqlite3.lua",
+                "lib/libsqlite3.dll.a", "bin/lua55.dll",
+                "share/retired.lua" }) do
+            fixture(prefix, name, "published input: " .. name .. "\n")
+        end
+        local lua = fixture(prefix, "bin/lua.exe", [=[#!/usr/bin/env bash
+set -euo pipefail
+[[ $1 != -E ]] || exit 0
+printf '%s\n' "$*" >> "$WINDOWS_TITANC_LOG"
+shift
+output= exe= c_source= compile_only=0 coverage=0 print_objects=0
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --output) output=$2; shift ;;
+    --exe) exe=$2; shift ;;
+    --c-source) c_source=$2; shift ;;
+    -c) compile_only=1 ;;
+    --print-c-objects) print_objects=1 ;;
+    --coverage) coverage=1 ;;
+  esac
+  shift
+done
+mkdir -p "$output"
+if [[ $compile_only == 1 ]]; then
+  mkdir -p "$output/.native"
+  object="$output/.native/fixture.o"
+  if [[ ! -f $object ]] || ! cmp -s "$c_source" "$object"; then
+    cp "$c_source" "$object"
+    printf '%s\n' "$c_source" >> "$WINDOWS_C_COMPILE_LOG"
+  fi
+  if [[ $print_objects == 1 ]]; then printf '%s\r\n' "$object"; fi
+else
+  if [[ ! -f $exe ]]; then
+    printf '%s\n' "aggregate executable" > "$exe"
+    printf '%s\n' "$exe" >> "$WINDOWS_LINK_LOG"
+  fi
+  if [[ $coverage == 1 ]]; then
+    mkdir -p "$output/.coverage"
+    [[ -f $output/.coverage/retained.gcno ]] ||
+      printf '%s\n' "coverage notes" > "$output/.coverage/retained.gcno"
+  fi
+fi
+]=])
+        local cc = fixture(tools, "native-cc", [=[#!/usr/bin/env bash
+set -euo pipefail
+case $1 in
+  -dumpmachine) echo x86_64-w64-windows-gnu; exit 0 ;;
+  --version) echo "fixture Clang"; exit 0 ;;
+esac
+printf '%s\n' "$*" >> "$WINDOWS_NATIVE_LOG"
+source=
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    */cwd/spec/fixtures/stdlib/native/os_process_host_child.c|\
+    */cwd/spec/fixtures/stdlib/native/windows_test_supervisor.c) source=$1 ;;
+  esac
+  if [[ $1 == -o ]]; then
+    [[ -n $source && -f $source ]] || {
+      echo 'expected an existing native helper C source before -o' >&2
+      exit 2
+    }
+    printf '%s\n' "pure C executable" > "$2"
+    exit 0
+  fi
+  shift
+done
+exit 1
+]=])
+        local cygpath = fixture(tools, "cygpath", [=[#!/bin/sh
+set -eu
+format= codepage=
+while [ "$#" -gt 1 ]; do
+  case $1 in
+    -m|-w|-aw|-u) format=$1; shift ;;
+    -C) codepage=$2; shift 2 ;;
+    *) printf 'unexpected cygpath option: %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+[ "$#" -eq 1 ] && [ -n "$format" ] || exit 2
+require_utf8=0
+case $1 in
+  */os_process_host_child.c|*/windows_test_supervisor.c) require_utf8=1 ;;
+  */"process child ação 東京.exe"|*/windows-test-supervisor.exe)
+    [ "$format" != -m ] || require_utf8=1 ;;
+esac
+if [ "$require_utf8" = 1 ]; then
+  [ "$format" = -m ] && [ "$codepage" = UTF8 ] || {
+    echo 'native helper conversion requires -m -C UTF8' >&2
+    exit 2
+  }
+fi
+printf '%s\n' "$1"
+]=])
+        local powershell = fixture(tools, "powershell.exe", [=[#!/usr/bin/env bash
+set -euo pipefail
+if [[ $TITAN_BEHAVIOR_MODE == run && -n ${TITAN_BEHAVIOR_EXE:-} ]]; then
+  [[ ! -e $TITAN_TEST_ROOT/stale ]]
+  : > "$TITAN_BEHAVIOR_WORK/stdout.log"
+  : > "$TITAN_BEHAVIOR_WORK/stderr.log"
+fi
+]=])
+        local ok, output = run({ "chmod", "+x", lua, cc, cygpath, powershell })
+        assert.truthy(ok, output)
+        local native_log = workspace .. "/native.log"
+        local compiler_log = workspace .. "/titanc.log"
+        local c_compile_log = workspace .. "/c-compile.log"
+        local link_log = workspace .. "/link.log"
+        local function harness(mode, coverage, profile)
+            local command = {
+                "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKEOVERRIDES",
+                "-u", "MAKELEVEL", "-u", "GNUMAKEFLAGS",
+                "-u", "LUA_PATH", "-u", "LUA_CPATH",
+                "MSYSTEM=CLANG64", "TITAN_BUILD_PROFILE=" .. (profile or "validation"),
+                "TITAN_TEST_COVERAGE=" .. (coverage and "1" or "0"),
+                "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
+                "TEST_CPPFLAGS=", "TEST_CFLAGS=-O0 -fno-lto", "TEST_LDFLAGS=",
+                "TITAN_JOBS=2", "MAKE=make", "CC=" .. quote(cc),
+                "PATH=" .. tools .. ":" .. (os.getenv("PATH") or "/usr/bin:/bin"),
+                "WINDOWS_NATIVE_LOG=" .. native_log, "WINDOWS_TITANC_LOG=" .. compiler_log,
+                "WINDOWS_C_COMPILE_LOG=" .. c_compile_log, "WINDOWS_LINK_LOG=" .. link_log,
+                "bash", source .. "/spec/support/windows_stdlib_tests.sh", mode, work,
+            }
+            if mode == "build" then command[#command + 1] = prefix end
+            return run(command, source)
+        end
+        ok, output = harness("build")
+        assert.truthy(ok, output)
+        local raw_commands = read_file(native_log)
+        assert.truthy(raw_commands:find(work .. "/sdk/bin/process child ação 東京.exe", 1, true), raw_commands)
+        assert_file(work .. "/sdk/bin/process child ação 東京.exe")
+        assert.falsy(read_file(repository .. "/Makefile.win"):find("process child ação 東京.exe", 1, true))
+        local native_compiles = read_file(c_compile_log)
+        local links = read_file(link_log)
+        local commands = read_file(compiler_log)
+        assert.truthy(commands:find("--test --incremental --no-uv-bootstrap -j 2", 1, true), commands)
+        assert.truthy(commands:find("--test-dir " .. work .. "/source/spec/stdlib/titan", 1, true), commands)
+        assert.truthy(commands:find("--exe " .. work .. "/sdk/bin/titan-stdlib-tests.exe", 1, true), commands)
+        assert.falsy(commands:find("--launcher-name", 1, true), commands)
+        assert.falsy(commands:find("async.tests", 1, true), commands)
+        local _, native_sources = commands:gsub("%-%-c%-source", "")
+        assert.equal(8, native_sources, commands)
+        local _, printed_objects = commands:gsub("%-%-print%-c%-objects", "")
+        assert.equal(5, printed_objects, commands)
+        local fixed_helpers = { "uv_stdio_probe", "sqlite3_worker_fixture",
+            "ssl_allocator_fixture", "ssl_error_strings", "os_descriptor_limit" }
+        for _, name in ipairs(fixed_helpers) do
+            local object = work .. "/cwd/.titan-tests/" .. name .. ".o"
+            assert.equal(read_file(source .. "/" .. native .. name .. ".c"), read_file(object))
+            assert.truthy(lfs.touch(object, 1000, 1000))
+            fixture(work, "native/" .. name .. "/.native/stale-other-tree.o", "stale native node\n")
+        end
+        local sdk_input = work .. "/sdk/lib/titan/0.6/titan.dll"
+        local source_input = work .. "/source/spec/stdlib/titan/test/tests.titan"
+        assert.truthy(lfs.touch(sdk_input, 1000, 1000))
+        assert.truthy(lfs.touch(source_input, 1000, 1000))
+        fixture(work, "sdk/retained.generated", "unrelated generated output\n")
+        fixture(work, "scratch/stale", "execution scratch\n")
+        -- Republish identical SDK bytes with new publication timestamps.
+        write_file(prefix .. "/lib/titan/0.6/titan.dll", read_file(sdk_input))
+        assert.truthy(os.remove(prefix .. "/share/retired.lua"))
+        assert.truthy(os.remove(source .. "/spec/stdlib/titan/retired_tests.titan"))
+        assert.truthy(os.remove(source .. "/spec/fixtures/retired.txt"))
+        assert.truthy(os.remove(source .. "/spec/fixtures/shape.txt"))
+        fixture(source, "spec/fixtures/shape.txt/new.txt", "new directory shape\n")
+        ok, output = harness("build")
+        assert.truthy(ok, output)
+        assert.equal(raw_commands, read_file(native_log))
+        assert.equal(native_compiles, read_file(c_compile_log))
+        assert.equal(links, read_file(link_log))
+        assert.equal(1000, lfs.attributes(sdk_input, "modification"))
+        assert.equal(1000, lfs.attributes(source_input, "modification"))
+        for _, name in ipairs(fixed_helpers) do
+            assert.equal(1000, lfs.attributes(work .. "/cwd/.titan-tests/" .. name .. ".o", "modification"))
+            assert.equal("stale native node\n", read_file(work .. "/native/" .. name ..
+                "/.native/stale-other-tree.o"))
+        end
+        assert_absent(work .. "/sdk/share/retired.lua")
+        assert_absent(work .. "/source/spec/stdlib/titan/retired_tests.titan")
+        assert_absent(work .. "/cwd/spec/fixtures/retired.txt")
+        assert.equal("new directory shape\n", read_file(work .. "/cwd/spec/fixtures/shape.txt/new.txt"))
+        assert.equal("unrelated generated output\n", read_file(work .. "/sdk/retained.generated"))
+        assert_file(work .. "/scratch/stale")
+        ok, output = harness("run")
+        assert.truthy(ok, output)
+        assert_absent(work .. "/scratch/stale")
+        fixture(work, "scratch/stale", "must survive rejected runs\n")
+        ok, output = harness("run", false, "production")
+        assert.falsy(ok, output)
+        assert.truthy(output:find("different profile", 1, true), output)
+        assert_file(work .. "/scratch/stale")
+        ok, output = harness("run", true)
+        assert.falsy(ok, output)
+        assert.truthy(output:find("different coverage mode", 1, true), output)
+        assert_file(work .. "/scratch/stale")
+        local edited_source = source .. "/spec/stdlib/titan/test/tests.titan"
+        write_file(edited_source, "function value(): integer return 3 end\n")
+        assert.truthy(lfs.touch(edited_source, 1000, 1000))
+        local edited_sdk = "/share/lua/5.5/titan/sqlite3.lua"
+        assert.truthy(lfs.touch(work .. "/sdk" .. edited_sdk, 1000, 1000))
+        write_file(prefix .. edited_sdk, "changed SDK input\n")
+        assert.truthy(lfs.touch(prefix .. edited_sdk, 1000, 1000))
+        -- Retained native certificates must also repair missing fixed copies.
+        for _, name in ipairs(fixed_helpers) do
+            assert.truthy(os.remove(work .. "/cwd/.titan-tests/" .. name .. ".o"))
+        end
+        ok, output = harness("build", true)
+        assert.truthy(ok, output)
+        assert.equal("function value(): integer return 3 end\n", read_file(source_input))
+        assert.equal("changed SDK input\n", read_file(work .. "/sdk" .. edited_sdk))
+        for _, name in ipairs(fixed_helpers) do
+            local object = work .. "/cwd/.titan-tests/" .. name .. ".o"
+            assert.equal(read_file(source .. "/" .. native .. name .. ".c"), read_file(object))
+            assert.equal("stale native node\n", read_file(work .. "/native/" .. name ..
+                "/.native/stale-other-tree.o"))
+        end
+        local notes = work .. "/coverage/.coverage/retained.gcno"
+        assert.truthy(lfs.touch(notes, 1000, 1000))
+        ok, output = harness("build", true)
+        assert.truthy(ok, output)
+        assert.equal(1000, lfs.attributes(notes, "modification"))
+        assert.equal(raw_commands, read_file(native_log))
+        assert.equal(native_compiles, read_file(c_compile_log))
+        assert.truthy(read_file(compiler_log):find("--output " .. work .. "/coverage", 1, true))
+        ok, output = harness("run", true)
+        assert.truthy(ok, output)
+        assert.equal(1000, lfs.attributes(notes, "modification"))
+    end)
+
+    it("builds and reuses the exact Unicode Windows host child through native Make", function()
+        if not platform.windows then
+            pending("native Windows Make UTF-8 output boundary")
+            return
+        end
+        workspace = temporary_directory("windows-native-child-name")
+        local repository = assert(lfs.currentdir())
+        local work = workspace .. "/native workspace"
+        local inputs = work .. "/cwd/spec/fixtures/stdlib/native"
+        local bin = work .. "/sdk/bin"
+        make_directory(inputs)
+        make_directory(bin)
+        write_file(work .. "/.titan-test-owner", "titan-windows-stdlib-tests-v1\n")
+        for _, name in ipairs({ "os_process_host_child.c", "os_process_host_child_windows.h",
+                "windows_test_supervisor.c" }) do
+            write_file(inputs .. "/" .. name,
+                read_file(repository .. "/spec/fixtures/stdlib/native/" .. name))
+        end
+        local compiler = assert(cdriver.split_shell_words(os.getenv("CC") or "clang.exe"))
+        assert.truthy(compiler[1])
+        write_file(work .. "/CC.argv", table.concat(compiler, "\0") .. "\0")
+        write_file(work .. "/cppflags.argv", "")
+        write_file(work .. "/cflags.argv", "-O0\0-fno-lto\0")
+        write_file(work .. "/ldflags.argv", "-fno-lto\0")
+        write_file(work .. "/native-flags.config", "native Unicode output contract\n")
+        local function build_native()
+            return run({
+                "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKEOVERRIDES",
+                "-u", "MAKELEVEL", "-u", "GNUMAKEFLAGS",
+                "MSYSTEM=CLANG64", "MSYS2_ARG_CONV_EXCL=*",
+                selected_make(), "--no-print-directory", "-f", repository .. "/Makefile.win",
+                "TITAN_TEST_BUILD_DIR=" .. work, "windows-stdlib-test-native",
+            }, repository)
+        end
+        local ok, output = build_native()
+        assert.truthy(ok, output)
+        local child = bin .. "/process child ação 東京.exe"
+        local supervisor = bin .. "/windows-test-supervisor.exe"
+        assert_file(child)
+        assert_file(supervisor)
+        local names = {}
+        for name in lfs.dir(bin) do
+            if name ~= "." and name ~= ".." then names[#names + 1] = name end
+        end
+        table.sort(names)
+        assert.same({ "process child ação 東京.exe", "windows-test-supervisor.exe" }, names)
+        ok, output = run({ child, "output", "ação 東京", "" })
+        assert.truthy(ok, output)
+        assert.equal("ação 東京", output)
+        local contents = { read_file(child), read_file(supervisor) }
+        local future = os.time() + 86400
+        assert.truthy(lfs.touch(child, future, future))
+        assert.truthy(lfs.touch(supervisor, future, future))
+        ok, output = build_native()
+        assert.truthy(ok, output)
+        assert.equal(future, lfs.attributes(child, "modification"))
+        assert.equal(future, lfs.attributes(supervisor, "modification"))
+        assert.equal(contents[1], read_file(child))
+        assert.equal(contents[2], read_file(supervisor))
+        assert.truthy(os.remove(child))
+        ok, output = build_native()
+        assert.truthy(ok, output)
+        assert_file(child)
+        assert.equal(future, lfs.attributes(supervisor, "modification"))
+    end)
+
+    it("does not launch Windows compiler or test wrappers under Make observation modes", function()
+        if platform.windows then
+            pending("POSIX shell fixture for Windows Make observation modes")
+            return
+        end
+        workspace = temporary_directory("windows-make-observation")
+        local repository = assert(lfs.currentdir())
+        local tools = workspace .. "/tools"
+        make_directory(tools)
+        for _, mode in ipairs({ "-n", "-q", "-t" }) do
+            for _, target in ipairs({ "stdlib", "titan-stdlib-test-build",
+                    "titan-native-coverage-build", "rock-test" }) do
+                local marker = workspace .. "/unexpected-wrapper"
+                local wrapper = tools .. "/bash"
+                write_file(wrapper, "#!/bin/sh\n: > " .. quote(marker) .. "\nexit 93\n")
+                local ok, output = run({ "chmod", "+x", wrapper })
+                assert.truthy(ok, output)
+                local commands = {
+                    "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKEOVERRIDES",
+                    "-u", "MAKELEVEL", "-u", "GNUMAKEFLAGS",
+                    "PATH=" .. tools .. ":" .. (os.getenv("PATH") or "/usr/bin:/bin"),
+                    "make", "--no-print-directory", mode, "-f", repository .. "/Makefile.win",
+                    "PREFIX=" .. workspace .. "/absent SDK",
+                    "WINDOWS_BUILD_ROOT=" .. workspace .. "/absent outputs",
+                    "SHELL=/bin/bash", target,
+                }
+                ok, output = run(commands, repository)
+                assert.equal(mode ~= "-q", ok, output)
+                assert_absent(marker)
+                assert_absent(workspace .. "/absent SDK")
+                assert_absent(workspace .. "/absent outputs")
+            end
         end
     end)
 

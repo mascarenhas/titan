@@ -98,7 +98,8 @@ UNC paths retain the driver's normalized forward-separator spelling; explicit
 extended paths retain their namespace and literal semantics. No installation
 prefix is embedded in the query, compiler, Lua, or native provider. Its only
 successful stdout is the root and one newline. Module names are rejected;
-without the query the CLI still requires at least one module name.
+without `--print-root`, `--test-dir`, or `-c --c-source`, the CLI requires at
+least one module name.
 
 ### Standalone startup path discovery
 
@@ -273,11 +274,12 @@ created.
 | `source_first` | `--test` or `--source-first`: try source before compiled formats for every dependency, keeping compiled fallback on a clean miss. |
 | `verbose`, `pretty_print` | Carry `-v` and `--pretty-print` into resolver-owned C-probe and checking-header work. |
 | `extra_ffi_include_dirs` | Analysis-local include roots, normalized here and appended to a fresh C-probe toolchain descriptor without changing the process-global foreign-C configuration. |
-| `cache_adapter`, `header_inputs`, `c_header_analysis` | Persistent cache callbacks, host-validated input observations, and the per-analysis header-validation token; see [Cache adapter and persistent payloads](#cache-adapter-and-persistent-payloads). |
+| `cache_adapter`, `header_inputs`, `c_header_analysis` | Persistent cache callbacks (default: the digest-only native adapter when available), host-validated input observations, and the per-analysis header-validation token; see [Cache adapter and persistent payloads](#cache-adapter-and-persistent-payloads). |
 | `embedded_interface_provider` | Trusted host ABI/type inventory; see [Embedded interface provider and target profile](#embedded-interface-provider-and-target-profile). |
 | `analysis_only`, `completion`, `completion_closed_world`, `transient_caches` | Semantic-analysis modes; see [Analysis loader options](#analysis-loader-options) and [Completion](completion.md). |
 | `source_process_trace`, `c_header_process_trace`, `c_probe_cache_trace`, `c_probe_semantic_trace`, `c_probe_execution_trace` | Best-effort observers; see [Observability callbacks](#observability-callbacks). |
 | `jobs` | The invocation's local native job cap (`titanc` passes its resolved `--jobs`). Above one, ordinary checks of this resolver may batch body-phase acceptance C probes under that cap; absent or one keeps every probe synchronous. See [GNU Make jobserver participation](#gnu-make-jobserver-participation). |
+| `frontend` | Path of the executing `titanc` script (`arg[0]`), or `"api"` when omitted; hashed into the `compiler` component of the incremental configuration certificate. |
 
 Checkout/installation discovery and platform initialization do not perform
 filesystem or subprocess work while `driver.lua` is loaded. Context creation
@@ -327,15 +329,21 @@ Loader-owned options are:
 
 * `context` — the shared [resolver context](#drivernew_resolver_contextoptions).
 * `source_roots` — requested build roots, which are source-required (see
-  [the selection logic](#source-vs-compiled-providers-the-selection-logic));
-  `forced_source_roots` additionally bypasses object reuse for compile-only
-  roots.
-* `source_overrides` — in-memory source descriptors keyed by module name, such
-  as `titanc`'s generated `titan.test.runner`; an override makes that module
+  [the selection logic](#source-vs-compiled-providers-the-selection-logic)).
+  Under `--incremental`, requested roots are certified like any other source
+  module; without `--incremental`, every source module is rebuilt.
+* `source_overrides` — in-memory or pre-resolved source descriptors keyed by
+  module name, such as `titanc`'s generated `titan.test.runner` or descriptors
+  returned by `testroots.discover`; an override makes that module
   source-preferred.
-* `incremental`, `coverage`, `output_root` — [object-backed source
-  reuse](incremental-compilation.md), [native coverage](native-coverage.md)
-  instrumentation, and [output routing](output-directory.md).
+* `incremental`, `test`, `coverage`, `output_root`, `c_parts`,
+  `split_threshold` — [object-backed source reuse](incremental-compilation.md),
+  test-owner flag policy (`context.codegen_policy`), [native
+  coverage](native-coverage.md) instrumentation, [output
+  routing](output-directory.md), and split-unit codegen policy.
+* `plan_mode`, `imports_for`, `worker_plan` — [build
+  coordinator](build-coordinator.md) closure planning and worker execution
+  modes; see [Compiler-owned module builds](#compiler-owned-module-builds).
 * `known_source_modules`, `cached_source_entries`, `cached_interfaces`,
   `cached_binary_interfaces` — semantic-client inputs; see [Analysis loader
   options](#analysis-loader-options).
@@ -477,8 +485,9 @@ checked before the checker registers them ([Interfaces](interfaces.md#separate-c
 The serialized form itself is described in [Lua entries and ABI, type, and
 layout metadata](codegen-overview.md#lua-entries-and-abi-type-and-layout-metadata).
 A source entry's `source_manifest` uses a different encoder,
-`titan-compiler/sourceinterface.lua` (`titan-source-interface-v1`): the public
-`types.serialize` text plus a closed-schema source delta and header inputs.
+`titan-compiler/sourceinterface.lua` (`version.SOURCE_INTERFACE_FORMAT`,
+`titan-source-interface-v2`): the public `types.serialize` text plus a
+closed-schema source delta and header inputs (`file`, `search`, and `origin`).
 
 ### `driver.tableloader(modtable, imported, deps, options)`
 
@@ -509,9 +518,12 @@ and closed captured dependency catalogs.
 `driver.LANGUAGE_SERVER_API_VERSION` identifies the exact compiler contract
 for long-lived semantic clients. It remains **1 until Titan's first public
 release**; prerelease compiler and language-server changes move together without
-bumping this marker. It is independent from `driver.TITAN_ABI_VERSION` and
-persisted cache schema versions. A client must reject an absent, noninteger,
-or different marker before invoking these options.
+bumping this marker. It is independent from `driver.TITAN_ABI_VERSION` (`"2"`)
+and persisted cache/record schema versions owned in `titan-compiler/version.lua`
+(`OBJECT_RECORD_SCHEMA`, `TITAN_LINK_RECORD_SCHEMA`, `TITAN_NATIVE_RECORD_SCHEMA`,
+`C_HEADER_CACHE_VERSION = 8`, `PROJECT_CACHE_VERSION = 6`,
+`SOURCE_INTERFACE_FORMAT = "titan-source-interface-v2"`). A client must reject
+an absent, noninteger, or different marker before invoking these options.
 
 The contract includes parser/checker source metadata, analysis-local FFI include
 roots, transient checked ASTs, compact declared manifests, serialized interfaces,
@@ -658,9 +670,12 @@ and store editor facts separately before releasing each checked AST.
 optionally followed by current input metadata. A nil second result means legacy
 or unavailable metadata; an empty array represents a known empty closure.
 Writes return success. `inputs` is a dense ordered array of
-`{kind, path, identity, observation?}`. An observation has integer
-`modified_seconds`, integer `modified_nanoseconds` in `[0, 1000000000)`, and a
-`physical_identity` string; it is not part of semantic/cache-key equality.
+`{kind, path, identity, observation?}`, where `kind` is `"file"`, `"search"`,
+or `"origin"`. An observation has `precision` (`"ns"` or `"coarse"`), integer
+`size`, integer `modified_seconds`, integer `modified_nanoseconds` in
+`[0, 1000000000)`, optional integer `changed_seconds` and `changed_nanoseconds`
+(`ctime`), and a `physical_identity` string; it is validation metadata, never
+part of semantic/cache-key equality.
 String transport exceptions and bad payloads degrade to ordinary compilation;
 non-string exceptions preserve the cancellation object's identity. Callbacks
 may suspend through the host's compiler boundary. Read-only clients omit both
@@ -678,7 +693,8 @@ preprocessing, parsing, conversion or source checking.
 Project encode/decode options and the cache adapter also accept an optional
 `sha256_binary(bytes)` dot callback returning exactly 32 binary SHA-256 bytes.
 Embeddings can use a synchronous native digest implementation for large graph
-payloads; omission retains the dependency-free Lua implementation. The callback
+payloads; omitting it from a supplied adapter (or from project encode/decode
+options) retains the dependency-free Lua implementation. The callback
 must hash the supplied complete string, including embedded NUL/high bytes,
 without changing compiler state. Its output uses the same wire checksum as the
 fallback, so payloads remain readable in either mode and the graph wire
@@ -687,9 +703,24 @@ exception objects propagate unchanged through the graph boundary. Required
 header content hashing also uses this callback when available; a broken string
 result/error falls back to the ordinary Lua digest, while cancellation propagates.
 
-A **digest-only** adapter supplies `sha256_binary` alone, with no `get`, `put`,
-`refresh_inputs`, or `yield` (`titan-compiler/cacheadapter.lua` `validate`);
-`titanc` passes this shape. It offers no storage, so storage work is gated on the
+The cache adapter may also supply `sha256_stream()`, a dot constructor
+returning an incremental digest with `update(bytes)`, `finish()` (32 binary
+bytes), and optionally `absorb(file)`; `cacheadapter.validate` rejects a non-function value. Certified-file
+digests use it, together with the strategy's optional `absorb_file`, to hash a
+digest-only file larger than `incremental.STREAM_THRESHOLD_BYTES` without
+materializing it
+([Tagged canonicalization and invocation file
+memos](incremental-compilation.md#tagged-canonicalization-and-invocation-file-memos)).
+
+A **digest-only** adapter supplies `sha256_binary`, optionally with
+`sha256_stream`, and no `get`, `put`, `refresh_inputs`, or `yield`
+(`titan-compiler/cacheadapter.lua` `validate`); `titanc` and build workers
+pass this shape with both entries. `driver.new_resolver_context` installs the
+same shape when its caller supplies no adapter and the native support library
+(`require "titan"`) exposes `_sha256_binary` (with `_sha256_stream` when
+present), so embedded and in-process contexts digest certified files natively
+as `titanc` does. A caller's adapter is used unchanged, and a host without the
+native library keeps the Lua digest. A digest-only adapter offers no storage, so storage work is gated on the
 actual capability (`cacheadapter.can_get`, `cacheadapter.can_put`), never on
 adapter presence. Header-cache restoration and observation refresh require
 `get`, header and FFI-conversion stores require `put`, and
@@ -700,8 +731,9 @@ result and baseline keys (`cprobe.Service:_digest`). Those keys keep the
 lowercase hexadecimal spelling of the pure-Lua digest, so probe-cache entries
 are shared between native and pure-Lua compilations.
 
-The `c-header-v7` payload (`c-parser/cdriver.lua` `HEADER_CACHE_VERSION`)
-stores the closed extracted-declaration graph described in [FFI
+The `c-header-v8` payload (`c-parser/cdriver.lua` `HEADER_CACHE_VERSION`, set
+from `version.C_HEADER_CACHE_VERSION = 8`) stores the closed
+extracted-declaration graph described in [FFI
 internals](ffi-internals.md#checker-rules); it excludes CPP macro environments,
 token/spacing sidecars, body definitions, and parser records. Fresh processing
 projects the completed header once; disk restoration performs one
@@ -711,19 +743,25 @@ tokens, with no projection or deep copy on a live hit. Checker conversion
 creates separate Titan types.
 
 A disk miss runs ordinary preprocessing, parsing and declaration extraction.
-Before accepting a disk hit, the compiler checks each dependency's physical
-identity and saved mtime and restats every search candidate. The fourth `put`
+Before accepting a disk hit, the compiler revalidates every recorded `file`,
+`search`, and `origin` input (`cpp.revalidate_header_input`). The fourth `put`
 argument carries the reusable header's dependency and search tails; the
 caller's forced-header/top-level search prefix is reconstructed for every
-request. Matching mtime and physical identity reuse the saved content identity
-without reading or hashing. Changed mtime reads/hashes once; equal content
-refreshes observation metadata without invalidating declarations.
-Replacement/retarget takes a fresh read/hash because the physical input changed.
-Missing inputs invalidate through metadata without a content read.
-Same-physical-input changes preserving the observed mtime are intentionally not
-detected. Timestamps retain the I/O strategy's exact seconds/nanoseconds;
-LuaFileSystem retains its reported precision. Missing or malformed legacy
-observations require a fresh read once.
+request. A saved `file` content digest (`c-header-file-v3:sha256:<hex>`) is
+reused from metadata without reading only when both the saved/baseline
+observation and current observation declare `precision == "ns"`, include valid
+`changed_seconds` (`ctime`), and match in every field (`size`, `modified_*`,
+`changed_*`, and `physical_identity`), and the path remains `readable`.
+Strategies that report `time_precision = "coarse"` (the LuaFileSystem fallback
+used when the native `titan` support library is unavailable) always read the
+file once per validation pass, guarding before and after the read with
+physical observations and hashing the bytes; synchronous `titanc` normally
+reads native nanosecond observations and takes the metadata path. Equal
+content refreshes observation metadata without invalidating
+declarations. `origin` inputs (`c-header-origin-v1;real=<realpath>`) are
+re-resolved via `realpath` on every validation pass, even when `file`
+observations take the `"ns"` fast path. Missing or malformed legacy
+observations take a fresh read once.
 
 Forced `-include`/`-imacros` preprocessing contexts remain local to the active
 I/O provider. Subsequent preprocessing needs their mutable macro/output state,
@@ -765,7 +803,8 @@ objects propagate unchanged and no partly decoded graph is published.
 `driver.compiler_cache_stats({context = context})` returns `headers` and
 `conversion` counters; conversion has `lookups`, `hits`, `misses` and `stores`.
 Header counters additionally include cumulative `file_reads`, `file_hashes`,
-`metadata_reuses`, `search_checks`, and `memo_reuses` for that I/O strategy.
+`metadata_reuses`, `search_checks`, `origin_checks`, and `memo_reuses` for that
+I/O strategy.
 Reads/hashes include preprocessing and forced-header work, not just cache
 validation; graph checksums are separate. Clearing a process cache resets these
 counters.
@@ -870,7 +909,10 @@ backend-specific records, arrays, error objects, or task handles.
 | `stat(path)` | `metadata, nil`, `nil, nil` for a clean missing path, or `nil, message`. Follows the final symbolic link. |
 | `lstat(path)` | The same result convention as `stat`, but describes the final symbolic link itself. |
 | `readable(path)` | One boolean. `true` means the path can be opened for binary reading; absence, invalid input, and ordinary open failures are `false`. |
+| `executable(path)` (optional) | `true`, `false`, or `nil, message`. Whether the current process may execute `path` under its effective user, groups, and ACLs; the synchronous POSIX strategy uses native `faccessat(AT_EACCESS, X_OK)` and neither opens nor reads the file. Tool selection (`incremental.physical_executable`) requires this capability on POSIX: a strategy without it, or an indeterminate `nil, message`, fails selection closed rather than guessing from mode bits or readability. |
+| `executable_search_cwd()` (optional, Windows) | `true`, `false`, or `nil, message`. Whether the native launcher searches the current directory for a bare executable name; the synchronous strategy asks `NeedCurrentDirectoryForExePathW`, the same policy libuv uses. Without a definite answer, a current-directory candidate that differs from the `PATH` candidate cannot be certified. |
 | `read_file(path, max_bytes?)` | `bytes, nil` or `nil, message`. Without a bound, reads the complete file as a binary-safe Lua string. A bound must be a nonnegative integer; the method returns the complete file when its size is at most that bound, or exactly the first `max_bytes + 1` bytes when it is larger. This optional form lets bounded decoders detect overflow without materializing an unbounded replacement. |
+| `absorb_file(path, stream)` (optional) | `total, nil` or `nil, message`. Feeds the file's bytes, in order, into the incremental digest `stream` without materializing the whole file, and returns the total byte count. Open, read, and close failures return `nil, message`; path checks and open semantics match `read_file`. The synchronous strategy lets a native stream absorb the open file through `stream:absorb(file)`, and gives any other stream chunks of at most 1 MiB through `stream:update(bytes)`. It resolves the stream's methods before opening the file, so a raising lookup propagates unchanged and opens nothing. A stream error is re-raised unchanged after the file is closed, so cancellation keeps its identity. Without this capability, certified files are read whole. |
 | `write_file(path, bytes)` | `true, nil` or `nil, message`. Publishes only complete contents: an observer sees complete file contents. Windows replacement may briefly leave the destination absent between removal and rename. Failure and cancellation must not leak the strategy's sibling temporary. If cancellation races the final rename, the destination may contain either complete version. |
 | `list(path)` | A dense one-based array of entry basenames, or `nil, message`. `.` and `..` are excluded and order is unspecified. |
 | `mkdir(path, remove_if_cancelled?)` | `true, nil` or `nil, message`. Creates one directory; its parent must already exist. The optional ownership rule is described below. |
@@ -878,18 +920,35 @@ backend-specific records, arrays, error objects, or task handles.
 | `rmdir(path)` | `true, nil` or `nil, message`. Removes one empty directory. |
 | `rename(from, to)` | `true, nil` or `nil, message`. Renames within the filesystem using the platform's replacement semantics. |
 | `tmpname()` | `path, nil` or `nil, message`. On success `path` names an existing, process-unique, empty regular file owned by the caller. Ownership transfers only with the successful return; cancellation before that return must not leak the reservation. |
-| `run(argv, options?)` | One normalized result table. `argv` is a nonempty dense array of strings, not a shell-fragment interface. `LANG` and `LC_ALL` are fixed to `C`. `options.stderr_to_stdout` defaults to `true`; when false, only stdout is captured and stderr remains on the compiler process's stderr. |
+| `run(argv, options?)` | One normalized result table. `argv` is a nonempty dense array of strings, not a shell-fragment interface. `LANG` and `LC_ALL` are fixed to `C`. `options.stderr_to_stdout` defaults to `true`; when false, only stdout is captured and stderr remains on the compiler process's stderr. When `titanc` has bound its held output locks to the synchronous POSIX strategy, every child inherits those lock descriptors with the same command, environment, stderr, and status contract: `run` (and a serial `run_batch`) captures through `process.capture`, while a parallel `run_batch` launches its jobs through `jobs.launch` and `process.start_job` ([POSIX lock inheritance](build-coordinator.md#planned-worker-resolution-and-orphan-lifetime)). |
 | `yield(module_name)` | No results. The cooperative post-module checkpoint receives the name of the module just checked; the synchronous implementation ignores it. |
 
 `stat` and `lstat` metadata has the Lua-facing fields `kind`, `size`,
-`mode`, `modified_seconds`, and `modified_nanoseconds`, plus optional `device`
-and `inode`. When present, the latter form an opaque physical-file identity
-pair: clients compare the pair only for equality and must not interpret either
-component. The synchronous Windows strategy omits them; LuaFileSystem does not
-provide useful Windows file identities. `kind` is `file`,
-`directory`, `symlink`, or `other`; `size` and the timestamps are integers,
-nanoseconds are in `[0, 1000000000)`, and `mode` carries the POSIX file-type
-and permission bits used by filesystem/header identity code.
+`mode`, `modified_seconds`, `modified_nanoseconds`, and `time_precision`,
+plus optional `changed_seconds`, `changed_nanoseconds`, `device`, and `inode`.
+The synchronous strategy uses the runtime's native `titan._stat_precise` when
+the `titan` support library loads: its results also carry integer `mtime_ns`
+and, when available, integer `ctime_ns` and opaque `dev`/`ino` strings (POSIX
+`st_dev`/`st_ino`; on Windows the volume serial number and the first nonzero
+file ID from `FileIdInfo` or `GetFileInformationByHandle`), copied into
+`device`/`inode`. POSIX always supplies all three. A Windows volume that
+reports no `ChangeTime` omits `ctime_ns` and `changed_*`, and a file without a
+nonzero file ID omits `dev`/`ino`; the native call never substitutes either.
+The strategy sets `precision` and `time_precision` to `"ns"` only when the
+change time and both identity components are present, and otherwise to
+`"coarse"`, so such a file is read and hashed like a LuaFileSystem
+observation. On Windows the results also carry
+`windows_attributes`, the raw `FileAttributes` DWORD from the same
+`FileBasicInfo` query. Without that library it falls back to
+LuaFileSystem with `time_precision = "coarse"` and, on Windows, no
+`device`/`inode`, because LuaFileSystem provides no useful Windows file
+identity. Host strategies may supply `"ns"` observations of their own. When
+present, `device` and `inode` form an opaque physical-file identity pair:
+clients compare the pair only for equality and must not interpret either
+component. `kind` is `file`, `directory`, `symlink`, or `other`;
+`size` and the timestamps are integers, nanoseconds are in `[0, 1000000000)`,
+and `mode` carries the POSIX file-type and permission bits used by
+filesystem/header identity code.
 
 `run` always supplies boolean `started` and `ok` plus a string `diagnostic`.
 A completed process also supplies integer `status`, string `why` (`exit` or
@@ -986,74 +1045,76 @@ analysis and is described in [Completion](completion.md).
 ### C-header dependency closures
 
 Every successfully checked source entry also owns an ordered
-`c_header_dependencies` array. A `file` item names a header whose exact parsed
-bytes and followed physical-file identity supply the recorded fingerprint. A
-`search` item names one exact candidate consulted during ordered lookup, up to
-and including the winner, and records its final-component `lstat` state,
-followed state, physical identities, and the exact read-open predicate used for
-selection, including missing files, broken symlinks, and effective access
-failures. The checker unions the complete written/imported
-foreign-include set for that module, deduplicates identical kind/path
-observations in first-seen order, and rejects conflicting identities from one
-check. Paths are absolute lookup spellings: a relative candidate is prefixed
-with the captured process cwd and harmless standalone `.` components are
-removed, but `..`, repeated separators, and symbolic-link components remain
-untouched. Restat and generated C therefore traverse the same lookup route;
-retargeting an intermediate symbolic link changes the physical fingerprint
-instead of leaving a cache entry pinned to its former target.
-Configured `-imacros` and `-include` inputs are part of this same per-module
-closure, including their transitive includes and every candidate consulted to
-resolve a relative operand. Resolver-owned
-generated `.ffi.h` trees are parsed by `cdriver` as the module C environment.
-Their validated descriptors identify the generated text and nested dependency
-trees; these compiler-owned inputs do not escape as restattable temporary paths.
-Exact physical author headers and search candidates still populate the observed
-closure. Saved source identity and regenerated descriptors cover generated
-inputs. The C probe baseline includes the same module `.ffi.h` and supplies the
-authoritative compilation check.
+`c_header_dependencies` array with three input kinds (`c-parser/cpp.lua` and
+`c-parser/cdriver.lua`):
+
+* `file`: a header read by the preprocessor, carrying content-only identity
+  `c-header-file-v3:sha256:<hex>` (or
+  `c-header-file-v3:unreadable:<search-identity>`) and an optional physical
+  `observation`;
+* `search`: a candidate path probed during ordered include lookup up to and
+  including the winner, carrying
+  `c-header-search-v2;exists=<yes|no>;kind=<followed-kind|missing>;open=<readable|unreadable>`;
+  and
+* `origin`: a real (non-generated) header whose lines reach parsed output and
+  participate in `declaration_scope_resolver`, carrying
+  `c-header-origin-v1;real=<realpath>` to certify its realpath-nominal C
+  declaration scope separately from file bytes.
+
+The checker unions the complete written/imported foreign-include set for that
+module, deduplicates identical `kind .. "\0" .. path` entries in first-seen
+order (so `file` and `origin` entries for the same header coexist), and rejects
+conflicting identities from one check. Paths are absolute lookup spellings: a
+relative candidate is prefixed with the captured process cwd and harmless
+standalone `.` components are removed, but `..`, repeated separators, and
+symbolic-link components remain untouched. Restat and generated C therefore
+traverse the same lookup route; retargeting a symbolic link changes the
+`search` or `origin` identity instead of leaving a cache entry pinned to its
+former target. Configured `-imacros` and `-include` inputs are part of this
+same per-module closure, including their transitive includes and every
+candidate consulted to resolve a relative operand. Resolver-owned generated
+`.ffi.h` trees are parsed by `cdriver` as the module C environment. Their
+validated descriptors identify the generated text and nested dependency trees;
+these compiler-owned inputs do not escape as restattable temporary paths. Exact
+physical author headers, search candidates, and declaring origins still populate
+the observed closure. The C probe baseline includes the same module `.ffi.h`
+and supplies the authoritative compilation check.
 
 ### `driver.restat_c_header_dependencies(dependencies, options)`
 
-This language-server helper validates a previously published ordered dependency
-array and returns `inputs, nil, changed`: the same kind/path sequence with current
-identities/observations and a boolean semantic-change flag (including false).
-Touch-only observation changes leave that flag false. It does
-not parse source, reparse a header, walk an include directory, or mutate the
-dependency input. When it owns a temporary resolver, creating and closing that
-resolver may initialize driver layout state and perform the context lifecycle
-work described above. File content is read only when its saved physical identity
-or timestamp is inapplicable or differs. It examines only the exact `file` paths
-and `search` candidates already observed by the checker. A changed transitive header or
-newly valid earlier search candidate therefore changes the owning module's
-fingerprint.
+This helper validates a previously published ordered dependency array (`file`,
+`search`, and `origin` entries) and returns four values:
+`inputs, nil, changed, classified`. `inputs` is the same kind/path sequence
+with current identities and observations; `changed` is a boolean semantic-change
+flag (including `false` when touch-only observation metadata changed over
+identical content and origin); and `classified` is `nil` when `changed` is
+`false`, or `"c-input <path>: <reason>"` for the first changed input, where
+`<reason>` is `content`, `provenance`, `missing`, `unreadable`, `candidate`, or
+`changed-during-read`. It does not parse Titan source, reparse a header, walk
+an include directory, or mutate the dependency input.
 
-Initial ordinary, nested and forced header reads certify metadata before and
-after reading the exact bytes passed to the dependency observer. A modification
-or replacement across that boundary rejects the operation before publication.
-The observer retains that certified observation rather than restatting later;
-final closure validation then detects an edit that happened after the read.
-Caller-supplied bytes or a pre-opened `FILE*` have no certified mtime and require
-a fresh content comparison at final validation.
-
-Ordinary filesystem churn is data rather than a driver failure. If a former
-`file` cannot now be read because it was deleted, replaced by another kind, or
-became unreadable, the result carries a stable
-`c-header-file-v2:unreadable:...` identity describing its current `lstat` and
-followed/read-open state. Recreating a readable file replaces that state with
-its exact byte and followed physical-file identity. Malformed dependency shapes,
-unknown kinds and a file changing during the required read return `nil, message`.
+Initial and revalidated header reads certify metadata before and after reading
+the exact bytes. If a header's physical observation changes while it is being
+read, `revalidate_header_input` returns a read-race error and
+`driver.restat_c_header_dependencies` returns
+`nil, "cannot fingerprint C header input '<path>': C header changed while it was read: <path>", true, "c-input <path>: changed-during-read"`.
+Ordinary filesystem churn is data rather than a failure: if a former `file` was
+deleted, replaced by another kind, or became unreadable, its refreshed entry
+carries `c-header-file-v3:unreadable:<search-identity>` and classifies the
+change as `missing` or `unreadable`. If a former `origin` cannot be resolved,
+its refreshed entry carries `c-header-origin-v1;unresolved` with reason
+`missing` or `unreadable`, and a resolved realpath change reports `provenance`.
+Malformed dependency shapes or unknown kinds return `nil, message`.
 
 The optional second argument may be a resolver context, an options table with
 `context`, or an options table with `io`. The first two forms borrow the
 caller's context; the last creates and closes a temporary resolver around that
-strategy. Omitting the argument uses synchronous I/O and the same mtime-first
-policy. Optional `options.header_validation` is a caller-owned table shared by
-all module closures in one coherent validation pass; it memoizes file metadata,
-required reads/hashes, and search checks by exact kind/path. Start a new table
-at every filesystem validation boundary. Ordinary parser calls keep private
-passes, and completed-analysis graph reuse remains separately branded.
-Every header read, lstat/stat, and readability check uses the selected
-`context.io`.
+strategy. `options.header_validation` defaults to `context.header_validation`
+so all certifications in one resolver context share one validation pass per
+invocation, memoizing checks by `kind .. "\0" .. path` and sharing
+`context.file_digest`. Semantic hosts start a fresh `header_validation` table
+at each filesystem validation boundary. Every header read, `lstat`/`stat`,
+`realpath`, and `readable` check uses `context.io`.
 
 ### `driver.resolve_external_modules(requests, known_sources, options)`
 
@@ -1127,38 +1188,41 @@ native_references, objects`.
    symbols consistently. The `.titan.source` record stores `parts_version = 1`,
    the relative `parts` suffixes, the effective `c_parts`, `split_threshold`,
    the `.priv.h` suffix when split, and `private_symbols`.
-4. **Plan outputs without writing** (`prepare_compile`). The stem is
-   `sourcef:gsub("[.]titan$", "")`, **next to the flat source or folder main**,
-   or the matching path below the output root with `titanc --output`
-   (`driver.relocate_source_output`; see
-   [Output directory](output-directory.md)). Part 0 is `<stem>.c`/`<stem>.o`,
-   part `k` is `<stem>.part<k>.c`/`.o`, a split module adds `<stem>.priv.h`, and
-   every module gets the `<stem>.parts` companion. Contributors never receive
-   generated C or object files. Planning checks ownership: an existing
-   `<stem>.parts` must be a regular file starting with `titan-parts-v1 `, and,
-   when the module splits, an existing `<stem>.priv.h` must be a regular file
-   starting with `coder.PRIVATE_HEADER_MARKER`; otherwise the compile refuses to
-   overwrite the user-owned path. An unrelated `<stem>.priv.h` is ignored when
-   the module does not split.
+4. **Plan outputs and certificate without writing** (`prepare_compile`). The
+   stem is `sourcef:gsub("[.]titan$", "")`, **next to the flat source or folder
+   main**, or the matching path below the output root with `titanc --output`
+   (`driver.relocate_source_output`; see [Output directory](output-directory.md)).
+   Part 0 is `<stem>.c`/`<stem>.o`, part `k` is `<stem>.part<k>.c`/`.o`, and a
+   split module adds `<stem>.priv.h`. Contributors never receive generated C or
+   object files. When the module splits, an existing `<stem>.priv.h` must be a
+   regular file starting with `coder.PRIVATE_HEADER_MARKER`; otherwise the
+   compile refuses to overwrite the user-owned path. An unrelated
+   `<stem>.priv.h` is ignored when the module does not split.
 
-   The prior inventory names the only stale files that may be deleted. It is
-   read from the existing primary object's validated `parts` record and from an
-   existing companion that `driver.parse_parts_companion` accepts exactly: for
-   each prior part `k >= 1`, `<stem>.part<k>.c`, `.o`, `.gcno`, and `.gcda`, plus
-   an existing marker-owned `<stem>.priv.h`. No directory is scanned, so a file
-   such as `<stem>.part99.c` that no record lists is never touched. The plan's
-   outputs are the companion and its stage, the header, every new part's C,
-   object, `.gcno`, `.gcda`, and compile temporary, every prior-inventory path,
-   and the module's generated headers and their staging files. Its inputs are
-   the source constituents, C header dependencies, and `native_inputs`.
+   When `options.context` and `source_entry.source_certificate` are present,
+   `prepare_compile` calls `driver.incremental_configuration(context)`,
+   computes the producer self digests (`incremental.producer_digests` stored on
+   `source_entry.interface_digests`), and builds `native.certificate` via
+   `incremental.make_certificate` ([Object-backed source
+   modules](incremental-compilation.md)). It also computes per-module test-owner
+   flags via `driver.test_owner_flags(options.test, test_functions)`.
+
+   The prior inventory names the only stale split files that may be deleted. It
+   is read solely from the existing primary `<stem>.o`'s validated
+   `object_metadata.parts` record: for each prior part `k >= 1`,
+   `<stem>.part<k>.c`, `.o`, `.gcno`, and `.gcda`, plus an existing
+   marker-owned `<stem>.priv.h`. No companion manifest file is written and no
+   directory is scanned, so an unrecorded file such as `<stem>.part99.c` is
+   never touched. The plan's outputs are the private header, every new part's
+   C, object, `.gcno`, `.gcda`, and compile temporary, every prior-inventory
+   path, and the module's generated headers and their staging files. Its inputs
+   are the source constituents, C header dependencies, and `native_inputs`.
 
    Primary object metadata is read in binary mode here (the prior inventory)
    and wherever else the driver reads compiled objects, including the Windows
    link-interface lookup at link time: UCRT text reads can truncate a COFF
-   object at byte `0x1A`. The `.parts` companion is also read and written in
-   binary mode on every platform, preserving its exact LF-delimited format
-   rather than translating it to CRLF on Windows. Ordinary source/header text
-   I/O retains its existing text-mode semantics.
+   object at byte `0x1A`. Ordinary source/header text I/O retains its existing
+   text-mode semantics.
 5. **Preflight.** Before any invalidation or write, `driver.compile`
    validates the plan with `driver.validate_provider_output_paths`: an
    existing output must be a regular non-link file, and no output may alias
@@ -1178,20 +1242,23 @@ native_references, objects`.
    call without a `header_plans` entry for the module. `titanc` plans the
    headers of every source module it compiles (`driver.plan_foreign_headers`),
    passes those plans to batch planning, and writes them itself, so under the
-   CLI materialize never writes a header. Materialize then invalidates: it
-   removes `<stem>.o` (the commit marker), `<stem>.parts`, `<stem>.c`,
-   `<stem>.gcda`, `<stem>.gcno`, and every prior-inventory path. It writes
-   `<stem>.priv.h` for a split module and each part's C file, unlinking the old
-   file first and appending the `.titan.source` record to part 0. Each file is
-   normalized in place and optionally formatted with `--pretty-print`.
-   Formatting failure aborts before its object is compiled but retains the raw
-   or partially formatted `.c` as a diagnostic artifact. Coverage mode converts
-   each part's markers and then appends the record to part 0
-   ([native coverage](native-coverage.md#selection-and-object-ownership)).
-7. **Compile.** Each part's C is compiled with the parsed `driver.CC`, then
-   `TITAN_EXTRA_CPPFLAGS`, Titan's fixed `driver.CFLAGS`,
-   `TITAN_EXTRA_CFLAGS`, the `-I` include roots, and per-request extra flags,
-   in that order (`driver.generated_compile_prefix`). When the resulting
+   CLI materialize never writes a header. Materialize then invalidates: unless
+   `options.staged` is set (in a build worker, whose coordinator already
+   retired the primary object before dispatch), it removes `<stem>.o` (the
+   commit marker), then removes `<stem>.c`, `<stem>.gcda`, `<stem>.gcno`, and
+   every prior-inventory path. It writes `<stem>.priv.h` for a split module and
+   each part's C file, unlinking the old file first and appending the
+   `.titan.source` record to part 0. Each file is normalized in place and
+   optionally formatted with `--pretty-print`. Formatting failure aborts before
+   its object is compiled but retains the raw or partially formatted `.c` as a
+   diagnostic artifact. Coverage mode converts each part's markers and then
+   appends the record to part 0 ([native
+   coverage](native-coverage.md#selection-and-object-ownership)).
+7. **Compile.** Each part's C is compiled with `driver.generated_compile_prefix()`
+   (the parsed `driver.CC`, `driver.CFLAGS`, normalized compile extras from
+   `TITAN_EXTRA_CPPFLAGS`/`TITAN_EXTRA_CFLAGS` and CLI `-I`/`-D`/`--cflag`, and
+   trailing SDK `-I` include roots), followed by `driver.test_owner_flags` and
+   per-request `extra_compile_flags`. When the resulting
    command enables LTO and names no seed, the driver appends a stable seed so
    archive bytes stay reproducible: `-frandom-seed=<modname>` for an unsplit
    module, and `-frandom-seed=<modname>.part<k>` for every part of a split
@@ -1239,32 +1306,16 @@ native_references, objects`.
    `-fno-optimize-sibling-calls` to retain their tail frames. Sanitizer CI
    explicitly disables LTO so saved object functions can be compared with
    the generated-C diagnostic shadow.
-8. **Publish** (`publish_compiled_object`). Only when every part compiled, the
-   driver renames the nonzero part objects into place from the highest index
-   down, writes the companion to a stage and renames it, and renames
-   `<stem>.o` last, so the primary object is the module's commit marker. Any
-   failure removes the staged companion, the companion, the primary object,
-   and every part temporary and part object. The companion
-   (`driver.render_parts_companion`) lists leaf names only, one per line, with
-   a trailing newline:
-
-   ```text
-   titan-parts-v1 4
-   bar.priv.h
-   bar.c
-   bar.o
-   bar.part1.c
-   bar.part1.o
-   bar.part2.c
-   bar.part2.o
-   bar.part3.c
-   bar.part3.o
-   ```
-
-   An unsplit module's companion is `titan-parts-v1 1`, `bar.c`, and `bar.o`.
-   It exists for build tools. The incremental loader never reads it; reuse
-   trusts only the `.titan.source` record
-   ([split reuse checks](incremental-compilation.md#split-modules)).
+8. **Publish** (`publish_compiled_object`). For a direct in-process compile,
+   only when every part compiled, the driver renames the nonzero part objects
+   into place from the highest index down and renames `<stem>.o` last, so the
+   primary object is the module's commit marker. Any failure removes the
+   primary object and every part temporary and part object. In a coordinator
+   build (`build.run`), workers compile with `options.staged = true` and return
+   their sibling temporary object paths in `result.staged`; the coordinator
+   alone revalidates inputs and renames the parts and `<stem>.o` into place via
+   `driver.publish_staged_module` ([Staged module publication
+   order](build-coordinator.md#staged-module-publication-order)).
 
 ### Batch planning: `driver.compile_modules`
 
@@ -1331,9 +1382,39 @@ reinterpreted. A direct command ends in `os.execute`; batch transports are
 described in [Parallel generated-C compilation](#parallel-generated-c-compilation).
 Unterminated quotes, trailing escapes, NUL bytes, an empty configured command,
 and non-dense programmatic argument arrays produce configuration errors.
-A malformed `CLANG_FORMAT` is therefore inert in the default mode. `-v` prints
+A malformed `CLANG_FORMAT` is therefore inert in the default mode. `-v` writes
 the same safely quoted compiler/linker commands—and any opted-in formatter
-command—that are executed.
+command—that are executed to standard error.
+
+### Compiler-owned module builds
+
+While `driver.compile_module` and `driver.compile_modules` remain available for
+programmatic callers and `--print-ast`, ordinary `titanc` invocations delegate
+module-graph discovery, certification, and parallel compilation to
+`titan-compiler/build.lua` and `titan-compiler/build_worker.lua` (see
+[Compiler-owned build coordinator](build-coordinator.md)). The driver exports
+the following functions for the coordinator, workers, native inputs, and test
+discovery:
+
+| Function | Role |
+| --- | --- |
+| `driver.incremental_configuration(context)` | Installs `context.incremental_options` and computes/memoizes the invocation's `{ digest, compiler, preamble, toolchain, options }` certificate (`nil, err` on failure). |
+| `driver.restore_source_object(context, modname, source, record, options?)` | Restores an accepted `.titan.source` record into `driver.imported` and `types.registry` without parsing or checking (`options.published` suppresses the `-v` hit line). |
+| `driver.test_owner_flags(test_build, test_functions)` | Returns `test_runner.TEST_COMPILE_FLAGS` (`{"-fno-optimize-sibling-calls"}`) when `test_build` is true and `test_functions` is nonempty, else `{}`; shared by compilation and `codegen-options` certification. |
+| `driver.resolve_source(context, modname, source_path?)` | Runs the tagged source resolver over `source_path` (default `driver.TITAN_SOURCE_PATH`), returning a `flat`, `folder`, or `blocked` descriptor, `nil` on a clean miss, or `nil, err`. Used by `titan-compiler/testroots.lua`. |
+| `driver.resolution_plan(context)` | Closes a `plan_mode` loader and returns the authoritative `plan` (`modules`, topological/bytewise `order`, `archives`, `linked`, `provider_file`, `digest`, `update`, `accepted`). `archives[path]` holds the coordinator's metadata scan of each selected static archive (per carried module its canonical payload and origin, plus the precise pre-scan observation), or nothing when that observation was coarse. |
+| `driver.plan_descriptor(plan, modname)` | Projects `plan` into the closed `titan-build-worker-v1` table sent to `modname`'s worker, carrying accepted dependency `.o` paths, exact selected binary providers, and the data-only archive metadata scans (`archives`). |
+| `driver.worker_configuration(context)` | Serializes driver paths/flags, resolver options, `codegen_policy`, the coordinator's compiler digest (`compiler`), and either `context.incremental_configuration` or the `uncertified` reason as closed data for a worker. |
+| `driver.new_worker_context(configuration, io_strategy)` | Reconstructs a worker's resolver context from `worker_configuration` and verifies `incremental.compiler_component` against the top-level `configuration.compiler` (failing with `compiler installation changed during build` on mismatch). A nested certified configuration must carry the same compiler digest; the uncertified form has none. |
+| `driver.invalidate_source_object(context, modname, source)` | Coordinator pre-dispatch step: reads any existing `<stem>.o`'s validated `parts` list, unlinks `<stem>.o` first, and unlinks recorded `.part<k>.{o,c,gcno,gcda}` files. |
+| `driver.compile_planned_module(context, modname, options)` | Worker entry: checks `modname` against `options.plan` (`worker_plan` loader mode, reporting `build plan divergence` on any discrepancy), writes generated headers and C files, compiles object parts to sibling temporaries (`staged = true`), and returns `{ modname, object, objects, staged, diagnostics }`. |
+| `driver.publish_staged_module(context, result)` | Coordinator post-worker step: decodes the staged primary `.o`, resolves a fresh source descriptor, runs `incremental.revalidate_record` in a fresh pass, and renames sidecar `.part<k>.o` files then `<stem>.o` last. |
+| `driver.apply_native_inputs(normalized)` | Installs `normalized.compile_argv` (`driver.NATIVE_COMPILE_FLAGS`) and `normalized.link_argv` (`driver.NATIVE_LINK_FLAGS`) from `nativeinputs.normalize`. |
+| `driver.link_extra_flags()` | Returns `driver.NATIVE_LINK_FLAGS` when installed, else `driver.EXTRA_LDFLAGS` or `{}`. |
+| `driver.native_link_backend(context)` | Returns `"darwin"` on macOS and `"none"` on Windows. On other Unix hosts it probes `<cc> -Wl,--dependency-file=<tmp> -Wl,--version` and returns `"gnu"`, `"lld"`, or `"none"`; the result is memoized per resolver context and persisted by `linkcertificate.linker_backend` in `<output>/.titan/linker-feature`, keyed by the compiler argv, link flags, toolchain identity, and physical compiler/linker identities. When the output tools are already uncertified (for example an opaque compiler prefix, whose final link is `uncacheable`), it returns `"none"`, the reason, and `"uncertified"` on every platform without probing, inventorying tools, reading or writing `linker-feature`, or memoizing the result. |
+| `driver.windows_launcher_name(modname, override?)` | Validates the Windows launcher basename: the logical module name by default, or the `--exe` basename. Rejects separators, control and reserved characters, trailing dots/spaces, reserved DOS device names, and components over 255 UTF-16 units, then appends `.exe` when absent. |
+| `driver.windows_program_paths(modname, exe, output_module, output_root)` | Computes Windows `.exe` launcher and `.dll` provider paths (`exe` overrides the default `<output>/bin/<logical>.exe`, appends `.exe` if absent, embeds the relative path from `<exe-dir>/../lib/titan/0.6` to the provider under `--output`, and rejects cross-volume paths). |
+| `driver.publish_windows_provider(staged, destination, shim_plans, provider, before_commit?)` | Publishes a validated Windows provider DLL and its Lua shims via `windows_publication.publish`, invoking `before_commit` to invalidate the link certificate before the first public mutation. |
 
 ### Parallel generated-C compilation
 
@@ -1359,7 +1440,8 @@ publication:
 3. It refills a slot as soon as any child reports completion, so completion
    order is independent of launch order.
 4. After every child has been reaped, it replays each job's captured stdout and
-   stderr in module/part order, whatever the completion order was.
+   stderr to the compiler's stderr in module/part order, whatever the
+   completion order was.
 5. A module succeeds only when every one of its jobs succeeded. Its error and
    exit code are those of its first failing part, and every part's own result
    stays in the module result's `jobs` array (`jobs.summarize`). An ordinary
@@ -1475,20 +1557,29 @@ never blocks in a token read while its own children can still finish, and two
 recipes sharing `make -j2` each progress with their implicit slots. No helper
 process reads tokens.
 
-An advertised but unusable authorization prints one warning per process and
-uses one job. This covers an unrecognized authorization, closed or mismatched
-descriptors, a FIFO that cannot be opened, and any pipe authorization off
-Linux. It also covers GNU Make 4.4's `-2,-2` marker for a recipe that is not
-marked `+`: the marker is the last authorization and hides the real pipe.
-macOS's stock GNU Make 3.81 passes a pipe that Titan cannot reopen privately,
-so each `titanc` recipe there compiles serially in its one implicit slot while
-Make still runs independent recipes in parallel. GNU Make 4.4's FIFO jobserver
-(Homebrew `gmake`) or a standalone `titanc -jN` outside Make compiles in
-parallel on macOS. A Makefile that runs `titanc` must mark the recipe with `+`
-and keep `MAKEFLAGS` and the jobserver descriptors through any wrapper; Titan's
-own graph does so ([Make job pool](build-script-audit.md#make-job-pool-and-titanc-recipes)).
-Windows uses only the local cap, because MSYS2 Make's jobserver descriptors are
-not native UCRT descriptors.
+An advertised but unusable authorization—an unrecognized format, closed or
+mismatched descriptors, a FIFO that cannot be opened, or GNU Make 4.4's
+`-2,-2` marker when a recipe lacks `+`—prints one warning per process
+(`warn_unusable`) and falls back to one job. When a valid inherited pipe
+authorization (`--jobserver-auth=R,W` or `--jobserver-fds=R,W`) is encountered
+on a non-Linux POSIX platform that cannot privately reopen pipe descriptions
+(such as macOS's stock GNU Make 3.81), `_jobserver_open("pipe", R, W)` returns
+`nil, reason, "unsupported"`, and `jobs.unshareable_pipe_limit` prints one
+warning per process and retains `titanc`'s own local `--jobs`/`TITAN_JOBS` cap
+outside the parent Make pool rather than mutating the parent's shared pipe
+flags or serializing the build. Sharing a parent Make pool on macOS requires
+GNU Make >= 4.4's FIFO jobserver (`gmake`). A Makefile that runs `titanc` must
+mark the recipe with `+` and preserve `MAKEFLAGS` and jobserver descriptors
+through any wrapper ([Make job
+pool](build-script-audit.md#make-job-pool-and-titanc-recipes)). Windows uses
+only the local cap, because MSYS2 Make's jobserver descriptors are not native
+UCRT descriptors.
+
+In coordinator builds (`build.run`), a single `jobs.open_slots` ledger is
+shared by live worker frontends and coordinator-launched native jobs via
+`Slots:token_descriptor()`, `Slots:signal_descriptor()`, and
+`jobs.use_remote(session)`; see [Slot ledger and jobserver
+rules](build-coordinator.md#slot-ledger-and-jobserver-rules).
 
 On POSIX, a parallel batch installs a temporary INT/TERM/HUP action (`_signal_guard`)
 that only records the first signal in a `sig_atomic_t` and writes a wake byte;
@@ -1511,26 +1602,31 @@ A SIGKILL cannot be intercepted, and tokens a killed process held are not return
 
 ### Shared C preprocessor, compiler, and linker inputs
 
-At driver initialization, `CC` defaults to `cc` and the three
-append-only Titan variables are parsed with the argument rules above:
+At driver initialization, `CC` defaults to `cc` (`clang.exe` on Windows) and
+the three append-only environment variables (`TITAN_EXTRA_CPPFLAGS`,
+`TITAN_EXTRA_CFLAGS`, `TITAN_EXTRA_LDFLAGS`) are tokenized with the shell-word
+rules above. When `titanc` runs, `nativeinputs.normalize` and
+`driver.apply_native_inputs` combine defaults, environment variables, and
+repeatable CLI native switches in a single deterministic order
+([Native inputs and `--c-source` nodes](build-coordinator.md#native-inputs-and---c-source-nodes)):
 
-* `TITAN_EXTRA_CPPFLAGS` supplies feature macros and include paths. The
-  checker gives the same parsed words and `CC` to every `foreign import`.
-  The C parser asks that real compiler, in C99 mode, for its effective
-  include search and predefined macros, so a header found through `-I`
-  and a branch selected by `-D` agree with the later generated-C build.
-  The probe then adds the same current runtime/Lua fixed include directories
-  in their real order; in source-checkout mode, applying `titanc --lua`
-  refreshes this checker configuration before any import is checked. Installed
-  mode keeps its matched SDK fixed.
-  These words also precede Titan's fixed compile defaults when compiling
-  generated modules, `titan-runtime/titan.c`, and standalone entrypoints.
-* `TITAN_EXTRA_CFLAGS` follows Titan's fixed compile defaults on those
-  same three compilation paths. It is compilation-only and is not
-  copied into a shared-library or executable link command.
-* `TITAN_EXTRA_LDFLAGS` is appended, in its parsed order, after Titan's
-  objects, archives, built-in `-ldl -lm`, and `-l` options on each final
-  shared-library or executable link.
+* **Compilation (`driver.generated_compile_prefix()`).** Starts with parsed
+  `CC` and profile-selected `driver.CFLAGS`. When `driver.NATIVE_COMPILE_FLAGS`
+  is installed (`titanc`), it appends `TITAN_EXTRA_CPPFLAGS`,
+  `TITAN_EXTRA_CFLAGS`, and CLI `-I`/`--include-dir`, `-D`/`--define`, and
+  `--cflag` options in exact command-line order, followed last by the fixed
+  SDK/runtime `-I` directories (`driver.foreign_include_dirs()`, so user `-I`
+  paths are searched before `<root>/include` and `<root>/src/lua-5.5.1`).
+  Direct programmatic callers that do not call `driver.apply_native_inputs`
+  keep `driver.EXTRA_CPPFLAGS` before `driver.CFLAGS` and `driver.EXTRA_CFLAGS`
+  after it. The C parser, C probe service, preamble certification probe,
+  generated module C, standalone entrypoints, and `--c-source` nodes all use
+  this same prefix.
+* **Linking (`driver.link_extra_flags()`).** Appends `TITAN_EXTRA_LDFLAGS`
+  followed by CLI `-L`/`--library-dir`, `-l`/`--link` (comma lists expanded,
+  repeats and interleaving preserved), and `--ldflag` options in exact
+  command-line order after Titan's objects, archives, and runtime libraries on
+  every provider, program, and standalone archive-probe link.
 
 Both compile-flag channels may use GCC/Clang's separated or joined
 `-imacros file`/`-imacrosfile` and `-include file`/`-includefile` spellings.
@@ -1628,11 +1724,15 @@ path as `install_name`; the driver forwards it as the `LC_ID_DYLIB` value
 (`-install_name`) instead of allowing Darwin's linker to derive that identity
 from the unique staging path. That public-provider link also uses Darwin's
 `-reproducible` mode so its debug map does not encode volatile input-object
-properties. For this staged-provider case, the driver runs `dsymutil` from the
-unique stage directory with only the stable DSO leaf name; this keeps the
-dSYM's relocation-map `binary-path` metadata independent of the transaction's
-random directory. An unchanged relink can therefore retain byte-identical DSO,
-UUID, and dSYM contents.
+properties. For this staged-provider case, when `dsymutil` was certified,
+the driver runs that pinned absolute `dsymutil` from the unique stage
+directory with only the stable DSO leaf name; this keeps the dSYM's
+relocation-map `binary-path` metadata independent of the transaction's random
+directory, so an unchanged relink can retain byte-identical DSO, UUID, and
+dSYM contents. An uncertified `dsymutil` instead runs as plain `dsymutil` from
+the original working directory with the full output path, and its final link
+is uncacheable, so no stable-metadata guarantee applies
+([uncertified `dsymutil`](build-coordinator.md#recipe-file-digests-and-native-library-policy)).
 
 Validation, the unchanged-bundle equivalence check, and the
 `publish_provider_bundle` commit order (shims and dSYM, archive, then the DSO
@@ -1662,18 +1762,25 @@ does not embed a second libuv instance.
 
 `driver.compile_program(modname, libnames, link, verbose, extra_objects,
 program_output, static_archives, entrypoint_output, program_name, options)`
-produces an
-executable at the optional
-`program_output` path, relative to the working directory. Omitting it
-preserves the original `modname:gsub("[.]", "/")` default for programmatic
-callers and `tableloader`. The trailing `static_archives` list contains
-selected self-describing providers. The optional entrypoint path and display
-name let test mode keep synthetic native artifacts beside the selected program
-without changing its logical main identity. The optional final table carries
-`titanc`'s `no_uv_bootstrap`, `pretty_print`, `launcher_name`,
-`output_module`, `output_root`, `coverage_runtime`, `module_names`,
-`archive_entries`, `archive_names`, and `validate_titan_support`; omitting it
-preserves the ordinary hook-selection behavior for programmatic callers.
+produces an executable at the optional `program_output` path (or `options.exe`
+when given), relative to the working directory. Omitting it preserves the
+original `modname:gsub("[.]", "/")` default for programmatic callers and
+`tableloader`. The trailing `static_archives` list contains selected
+self-describing providers. The optional entrypoint path and display name let
+`titanc` place synthetic runner and entrypoint files inside the target's
+`.titan-links/<key>/synthetic/` directory without changing the logical main
+identity. The optional `options` table carries `no_uv_bootstrap`,
+`pretty_print`, `exe`, `final_link_flags` (the final-link certificate's linker
+dependency-report flag, appended only to the final Unix executable link),
+`before_commit` (invalidating the link certificate record before mutating
+public outputs), `output_module`, `output_root`, `coverage_runtime`,
+`module_names`, `archive_entries`, `archive_names`, and
+`validate_titan_support`. On Windows, `compile_windows_program` stages both the
+provider `.dll` and launcher `.exe`, validates the staged DLL in a fresh child
+process, and publishes them as one recoverable set via
+`windows_publication.publish_program` (committing the `.dll` before the `.exe`
+after `before_commit`); staging cleanup failures and stale-stage retirement
+are described in [Windows DLL publication](windows-build.md#windows-dll-publication).
 Filesystem source descriptors cache:
 
 | Form for `foo.bar` | `program_output` |
@@ -1805,193 +1912,120 @@ policy.
 
 ```sh
 ./titanc [--print-root] [--print-ast] [--pretty-print] [-v|--verbose] \
-  [-j|--jobs <jobs>] [--c-parts <n>] [--launcher-name <name>] [--static] \
+  [-j|--jobs <jobs>] [--c-parts <n>] [--exe <path>] [--static] \
   [--source-first] [--incremental] [-c|--compile-only] [--test] \
+  [--test-dir <dir>]... [--test-exclude <module>]... \
   [--coverage [--coverage-backend <backend>] [--coverage-module <glob>]... \
     [--coverage-root <dir>] [--coverage-gcov <cmd>] \
     [--coverage-format <format>]... [--coverage-output <dir>] \
     [--coverage-gcovr <cmd>]] \
   [--no-uv-bootstrap] [--no-line-directives] [-u|--lua <luasrc>] \
-  [-t|--tree <srcroot>] [-o|--output <dir>] [-l|--link lib1,lib2] \
-  [-X|--extra-object <payload>...] <module>...
+  [-t|--tree <srcroot>] [-o|--output <dir>] \
+  [-I|--include-dir <dir>]... [-D|--define <def>]... [--cflag <arg>]... \
+  [-L|--library-dir <dir>]... [-l|--link <libs>]... [--ldflag <arg>]... \
+  [--c-source <file>]... [--print-c-objects] \
+  [-X|--extra-object <payload>...] [<module>...]
 ```
 
-`titanc` (a short `argparse` script at the repository root) takes one
-or more dot-separated module names; the [flag table](#titanc-flags) lists every
-option. `--print-root` instead prints the installation root and exits (see
-[above](#module-names-and-the-search-paths)). `--tree` overrides
-`driver.TITAN_SOURCE_PATH`. In source-checkout mode, `--lua` overrides
-`driver.LUA_SOURCE_PATH`; installed mode rejects it so the installed headers,
-`liblua.a`, and `libtitan.a` remain a matched SDK. `-o`/`--output` routes
-generated files below one folder while preserving the source hierarchy; see
-[Output directory](output-directory.md). `--pretty-print` opts every
-emitted C/header boundary into the fixed `clang-format` pass; default builds do
-not invoke it. `-v` prints every native-tool command line plus any opted-in
-formatter command, `--print-ast` dumps each module's AST after checking, and
-`-j`/`--jobs` sets the positive local job cap. The command-line value overrides
-`TITAN_JOBS`, and the cap is four when neither is set; a parent GNU Make
-jobserver can lower but never raise it ([GNU Make jobserver
-participation](#gnu-make-jobserver-participation)). The cap bounds every native
-compiler child: generated-C compilations, the second provider link, and each
-module's batch of body-phase C acceptance probes
-([C FFI](c-ffi-expressions.md#speculative-batched-acceptance-probes)). Checker
-traversal, code generation and formatting stay ordered in the compiler
-process; `-j1`, `TITAN_JOBS=1` and, on POSIX, an explicit serial `make -j1`
-also run every C probe synchronously where it is reached. A Unix provider pair builds its archive while the
-DSO links and starts the archive-backed validation link concurrently only with
-its own jobserver slot; see [Provider link
-pipeline](static-compiled-modules.md#provider-link-pipeline). `--static` swaps the compiled-provider passes
-to prefer self-describing archives before DSOs, `--test` selects the native test
-pipeline described in [Native test runner](test-runner.md), and the
-`--coverage` family instruments and reports native line coverage as described
-in [Native coverage](native-coverage.md). `--launcher-name` names a Windows
-standalone or test launcher; see [Windows application
-launchers](windows-build.md#windows-application-launchers).
+`titanc` (an `argparse` script at the repository root) takes dot-separated
+module names, `--test-dir` discovery directories, or `-c --c-source` files; the
+[flag table](#titanc-flags) lists every option and constraint. `--print-root`
+prints the installation root and exits ([above](#module-names-and-the-search-paths)).
+`--tree` overrides `driver.TITAN_SOURCE_PATH`. In source-checkout mode, `--lua`
+overrides `driver.LUA_SOURCE_PATH`; installed mode rejects it so the installed
+headers, `liblua.a`, and `libtitan.a` remain a matched SDK. `-o`/`--output`
+routes generated files below one folder while preserving the source hierarchy
+([Output directory](output-directory.md)). `--exe` sets the exact executable
+output path relative to the current working directory on every platform
+(appending `.exe` on Windows when absent while keeping the Windows provider DLL
+under `--output` and embedding its relative path from `<exe-dir>/../lib/titan/0.6`).
 
-`--no-uv-bootstrap` threads one entrypoint-only option through
-`driver.compile_program`. The driver renders the bootstrap condition with a
-constant direct-path operand; module initialization,
-`TITAN_MAIN_ARGC_KEY`/`TITAN_MAIN_ARGV_KEY` publication, libuv's possible argv
-replacement, main retrieval, protected error handling, and the registry hook
-itself are unchanged.
+`--pretty-print` opts every emitted C/header boundary into the fixed
+`clang-format` pass; default builds do not invoke it. `-v` writes safely quoted
+native-tool and formatter commands, replayed worker and native-job output, and
+incremental certification decisions to standard error:
+`Titan object hit <mod>: <object>`, `Titan object miss <mod>: <code>[ <detail>]`,
+`Titan native hit <source>`, `Titan native miss <source>`,
+`Titan link hit <target>`, and `Titan link miss <target>: <reason>`. Standard
+output carries only requested results: the `--print-root` root, `--print-ast`
+dumps, and `--print-c-objects` paths.
+`--print-ast` runs the shared `build.plan` and output preflight, then checks
+requested modules in-process and dumps each AST.
+`-j`/`--jobs` sets the positive local job cap (overriding `TITAN_JOBS`, default
+4), which bounds concurrent worker frontends, generated-C compilations, the
+second provider link, and speculative C-probe batches ([GNU Make jobserver
+participation](#gnu-make-jobserver-participation)). `--static` swaps the
+compiled-provider passes to prefer self-describing archives before DSOs,
+`--test` (with optional `--test-dir` and `--test-exclude`) selects the native
+test pipeline ([Native test runner](test-runner.md)), and the `--coverage`
+family instruments and reports native line coverage ([Native
+coverage](native-coverage.md)).
 
-`--no-line-directives` (or `TITAN_NO_LINE_DIRECTIVES=1`, for direct driver
-users and build automation) leaves native diagnostics attributed to the
-generated C file instead of Titan source; [Mixed-source `#line`
-attribution](codegen-overview.md#mixed-source-line-attribution) owns the
-directive policy. `driver.compile` passes the resolved policy explicitly to
-`coder.generate`; every generation resets the coder's emission policy,
-including when one Lua process alternates modes. Disabling directives can omit
-ordinary native Titan frames from logical tracebacks, and entry boundaries may
-instead render as `[C]`.
+Repeatable `-I`/`--include-dir`, `-D`/`--define`, and `--cflag` options append
+to the normalized compile flags after `TITAN_EXTRA_CPPFLAGS`/`CFLAGS` and
+before the SDK include roots. Repeatable `-L`/`--library-dir`, `-l`/`--link`
+(comma-separated or repeated), and `--ldflag` options append to the normalized
+link flags after `TITAN_EXTRA_LDFLAGS` in exact command-line order. Repeatable
+`--c-source` options compile and certify C files into `<output>/.native/` with
+the invocation's generated-C compile prefix and link their objects before
+`-X`/`--extra-object` payloads. With `-c`, `--print-c-objects` writes the
+absolute path of each certified object, one line per `--c-source` argument in
+argument order, after the output locks are released. Native nodes are keyed by
+canonical source path, so a moved checkout leaves the old nodes behind;
+consumers that copy a node use the printed path instead of enumerating
+`.native/`.
 
-`-l` passes extra system libraries to the linker, and `-X`/`--extra-object`
-appends one or more already-built native payloads. In library mode those
-payloads must be supported relocatable objects or regular archives: archives
-are force-carried into the DSO and flattened into the paired `.a`, while mixed
-payload retains CLI order in both forms. Executable mode keeps the broader
-established final-link behavior. Runtime and callback-shim objects are not
-normally passed this way: both checkout and installed builds select them from
-`libtitan.a`. The standard provider's `ltitanlib.o` is the deliberate support
-payload.
+`--incremental` enables semantic certification for every source module in the
+closure (including explicit command-line roots, both in full builds and with
+`-c`), `--c-source` nodes, and final executable or provider links. Without
+`--incremental`, every selected source module and `--c-source` node is rebuilt.
+`-c`/`--compile-only` stops after object and header emission. See
+[Object-backed source modules](incremental-compilation.md) and [Compiler-owned
+build coordinator](build-coordinator.md).
 
-`--incremental` enables source-object metadata reuse, and `-c/--compile-only`
-stops after object/header emission. Compile-only roots always rebuild; the
-complete requested-root set becomes `forced_source_roots` before traversal.
-`--source-first` selects the same source preference already used by `--test`
-without changing ordinary-import visibility. Cached roots supply `has_main`
-and `external_symbols` facts when their AST is absent. Cached discovery records
-supply test function names, and only the final test invocation synthesizes the
-thin runner. Its `titan.test` dependency uses the ordinary standard provider.
-See [Object-backed source modules](incremental-compilation.md) for record
-replay, header restoration, and Make-owned invalidation.
+Before creating a resolver, `titanc` rejects:
 
-Before creating a resolver, `titanc` rejects `--print-root` with module names,
-a missing module name, `--incremental` with `--print-ast`, any `--coverage-*`
-option without `--coverage`, `--static` on Windows, `--compile-only` with
-`--launcher-name`, `-l`, `-X`, or `--no-uv-bootstrap`, and a `--jobs` or
-`TITAN_JOBS` value that is not a positive integer. After checking, it rejects
-`--launcher-name` without a standalone or test main or on a non-Windows host,
-`--no-uv-bootstrap` without a standalone or test main, `--coverage` without a
-test or standalone executable unless `-c` is given, a requested module named
-`titan.test.runner` in test mode, and, on Windows, any selected static Titan
-archive.
+* `--print-root` with module names;
+* no module names unless `--print-root`, `--test-dir`, or `-c --c-source` is
+  given;
+* `--incremental` with `--print-ast`;
+* any `--coverage-*` option without `--coverage`;
+* `--static` on Windows;
+* `-c`/`--compile-only` with `--exe`, `-l`, `-L`, `--ldflag`, `-X`, or
+  `--no-uv-bootstrap`;
+* `--test-dir` or `--test-exclude` without `--test`, or `--test-exclude`
+  without `--test-dir`;
+* `--print-c-objects` without `-c` and at least one `--c-source`, or with
+  `--print-root` or `--print-ast`; and
+* a `--jobs`/`TITAN_JOBS` or `--c-parts`/`TITAN_C_PARTS` value that is not a
+  positive integer.
 
-After those preflight rejections and before creating its resolver, `titanc`
-loads the native support library (`require "titan"`) and exits with a
-reinstall diagnostic when it is missing or lacks `_sha256_binary`; an
-older support library is a stale installation, not a slower mode. It passes
-the digest-only adapter `{ sha256_binary = support._sha256_binary }` as the
-resolver's `cache_adapter` ([Cache adapter and persistent
-payloads](#cache-adapter-and-persistent-payloads)), so C-header content
-identities and C-probe cache keys are hashed natively while no cache entry is
-built or stored. `--print-root` returns before this point and never loads
-native support. Programmatic drivers without an adapter keep the pure-Lua
-digest.
-
-Every CLI module name is placed in one `requested_roots` set and passed to the
-filesystem loader. Those roots are source-first; everything they import runs
-the configured complete compiled-format passes before source (`.so`, then
-`.a` by default; swapped by `--static`), unless `--source-first` was selected.
-After checking, linking in library mode derives
-one physical provider base from the requested roots' longest common dotted
-prefix. It rejects an empty prefix, the reserved logical module `titan`,
-conflicting mangled C prefixes/protocol symbols, unsafe physical overlaps,
-producer-binding identity conflicts, input/output aliases, and unowned shim
-destinations before native linking.
-
-In test mode, requested roots still come from source, but their entire
-invocation uses source-first dependency selection. After those modules check,
-`titanc` discovers cases, checks generated `titan.test.runner` as the sole main,
-and reuses standalone linking. Input application mains are ignored; the first
-requested root determines the executable path. Only case-owning modules receive
-the trailing sibling-call-preservation flag.
-
-Fresh source modules reachable from every root are compiled once; incremental
-object hits reuse their declarations and machine code. Dynamic
-dependencies retain exact selected DSO handles. Selected static dependencies
-contribute deduplicated physical archives: their complete validated
-membership is direct native input and is repackaged into both output forms,
-without bulk-entering ordinary resolver state. [Multi-module
-libraries](multi-module-libraries.md) documents logical grouping and DSO
-loading; [Static compiled modules](static-compiled-modules.md) documents the
-archive resolver, binding constraints, composition, and paired publication.
-
-The standard library is built through this same generic path: one
-source-first, incremental `titanc` invocation names every standard root and
-carries `ltitanlib.o` and the bundled native archives as `-X` payload. The
-exact invocation, payload order, and OpenSSL modes are in [Reserved `titan`
-and the standard-library
-image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image);
-the Make object graph, private bootstrap, and LuaRocks installation are in
-[Build and installation responsibilities](build-script-audit.md).
-
-The `titanc` flow:
-
-1. **Typecheck everything first.** One loader and resolver context shared by
-   the complete `source_roots` set checks every requested module through
-   `checker.checkimport`; requested roots are source-first, ordinary imports are
-   checked recursively with compiled-format-first resolution, explicit `.titan`
-   imports are source-required, and each selected
-   folder is parsed into one dense AST and checked under its logical name.
-   Each source module records direct source/static dependency edges under
-   canonical stripped logical names. After all roots,
-   `driver.finalize_resolver_context` derives the invocation-wide source set,
-   deduplicated selected archives, producer-binding constraints, and
-   `native_static_names`, which every `compile_module`/`coder.generate` pass
-   uses to choose direct native calls. Final linking separately consumes the
-   resulting source objects and the context's deduplicated selected archives.
-   All errors — load failures and type errors alike — accumulate into one list,
-   and if it is nonempty `titanc` prints them all to stderr and exits with
-   status 1 **before any code generation**.
-2. **`main` detection.** For each successfully checked module,
-   `checker.has_main(ast)` looks for a top-level function named `main`
-   with exactly one fixed parameter of checked type `{string}` (mutable;
-   `const { string }` and `const? { string }` do not qualify), no input tail,
-   exactly one checked return type of `integer`, and no flexible result tail.
-   Transparent aliases may spell either type; omitting the return annotation
-   means zero declared results and therefore is not a `main`. At most
-   one requested module may have a `main`;
-   a second produces the error
-   `<modname>: multiple main functions found (already declared in <main_module>)`.
-3. **Library preflight, then compile.** In no-main mode the compiler derives
-   the common provider and validates the linked logical-name/mangling set and
-   every shim destination before changing build outputs. Every source module
-   in `driver.imported` — requested or pulled in as a source dependency — is
-   then compiled once to a `.o` with `driver.compile_module`. Failures are
-   collected and reported at the end.
-4. **Link and publish.** If a `main` module was found, *all* compiled source
-   objects and selected static providers are linked into a single executable
-   with `driver.compile_program` — passing the main cache entry's
-   `program_output`, so a folder root uses `P__main` while a flat root retains
-   `P`. Dependencies selected from DSOs remain dynamic. Otherwise the sorted
-   source-object union, selected static providers, and `--extra-object`
-   payload feed one provider pair (see [Linking a provider
-   pair](#linking-a-provider-pair)), which is validated and published as
-   described in [Three-way
-   validation](static-compiled-modules.md#three-way-validation). Link,
-   archive, validation, and publication failures are collected and make
-   `titanc` exit with status 1.
+After those preflight checks, `titanc` loads `require "titan"`, requires
+`_sha256_binary` and `_sha256_stream` (a support library without either is
+reported as missing or stale), creates its resolver context with `frontend = arg[0]`,
+applies normalized native inputs, and discovers any `--test-dir` roots. It
+locks the `--output` directory, or without `--output` every `--tree` source
+root plus the working directory (source-adjacent objects may belong to any
+root, and default providers and executables are CWD-relative), and adds the
+`--exe` directory when given, all through `build.lock_outputs`. With
+`--output` it then loads the
+[persistent digest cache](incremental-compilation.md#persistent-digest-cache).
+It runs `build.run`, whose coordinator-side pre-dispatch
+[output preflight](build-coordinator.md#pre-dispatch-output-preflight)
+rejects output collisions and graph-dependent option errors (`--exe` or
+`--no-uv-bootstrap` without a standalone or test executable, `--coverage` on
+library-only builds unless `-c` is given, multiple `main` roots, and library
+roots without a common prefix) before any worker starts; each worker checks
+the C headers its fresh module discovers against the same reservations before
+writing generated module artifacts. `build.run`
+certifies, compiles, and restores the module closure. `titanc` then compiles
+any `--c-source` nodes via `nativeinputs.compile` and—for linking
+invocations—gates runner/entrypoint synthesis, archive probing, and linking
+with `linkcertificate.prepare`, `linkcertificate.check`,
+`linkcertificate.invalidate`, and `linkcertificate.commit`. On Windows it
+calls `driver.cleanup_stale_staging` between `prepare` and `check`
+([End-to-end invocation sequence](build-coordinator.md#end-to-end-invocation-sequence)).
+The digest cache is saved before the locks are released.
 
 ## Optional `clang-format` generated-source formatting
 
@@ -2214,8 +2248,12 @@ It is *not* part of the runtime SDK's `libtitan.a` or ordinary generated
 modules. Its table (`ltitanlib.c` `titanlib`) exports the user-facing
 `backtrace`, the internal testing helpers `pin` and `clear` used to exercise
 the traceback pin discipline, the loader helpers `_loadlib` and
-`_loadlibglobal`, the compiler digest `_sha256_binary`, on Windows only
-`_abivalue`, and elsewhere the compiler's jobserver and signal helpers:
+`_loadlibglobal`, the compiler digests `_sha256_binary` and `_sha256_stream`, the output-tree lock
+`_output_lock_open`, the precise file observation `_stat_precise`, on Windows
+only `_abivalue`, `_native_process_tree_guard`, and the current-directory
+search query `_executable_search_cwd` (backing `Sync:executable_search_cwd`),
+and elsewhere the effective-permission query `_executable_access` (backing
+`Sync:executable`) and the compiler's jobserver and signal helpers:
 
 ```lua
 -- Lua
@@ -2258,19 +2296,60 @@ boundary](windows-build.md#windows-loader-boundary).
 
 `titan._sha256_binary(bytes)` returns the 32-byte binary SHA-256 digest of a
 string, including embedded NUL and high bytes, and raises for any other
-argument. It is portable C over the public Lua API, with no OpenSSL or process
+argument. It is C over the public Lua API, with no OpenSSL or process
 dependency, so the private bootstrap provides it before the standard library
-exists. `titanc` refuses to start without it ([The `titanc` command
-line](#the-titanc-command-line)), and a physical provider named `titan` is
-published only when a fresh Lua process finds it, beside `_loadlib` and
-`_loadlibglobal`, in the linked support table (`driver.lua`
+exists. A SHA-256 computation (`TitanSha256` init, update, and final) selects
+one compressor when it starts and uses it for every data and padding block,
+with no process-wide state; whole blocks are compressed straight from the
+caller's bytes and only a partial block is buffered. On x86 and x86-64
+GCC/Clang builds that compressor is the SHA extensions when one CPUID feature
+probe reports them (with SSSE3 and SSE4.1), and otherwise the portable block
+function. A little-endian AArch64 build whose target defines
+`__ARM_FEATURE_SHA2` always uses the ARMv8 SHA2 instructions; big-endian
+AArch64 and every other target use the portable function. An input shorter
+than one 64-byte block makes no data-block call. All paths produce identical
+digests.
+
+`titan._sha256_stream()` returns a new incremental digest over the same state.
+`stream:update(bytes)` absorbs a string and returns the stream.
+`stream:absorb(file)` hashes an open Lua file handle from its current position
+to end of file through one fixed 64 KiB C buffer, so no Lua string holds its
+bytes, and returns the byte count, or `nil, message, errno` on a read error; a
+closed handle raises `attempt to use a closed file`. `stream:finish()` returns
+the 32-byte digest of everything absorbed, equal to `_sha256_binary` of the
+concatenation; afterwards every method raises `attempt to use a finished
+SHA-256 stream`. The compiler uses it to hash large certified files.
+
+`titanc` and build workers refuse to start without both entries ([The `titanc`
+command line](#the-titanc-command-line)), and a physical provider named
+`titan` is published only when a fresh Lua process finds both, beside
+`_loadlib` and `_loadlibglobal`, in the linked support table (`driver.lua`
 `support_validation_script`); a stale `ltitanlib.o` therefore fails before
 publication instead of producing an installation that `titanc` rejects.
 
 The POSIX-only `_jobserver_open`, `_jobserver_wait`, `_signal_guard`,
-`_signal_pending`, and `_signal_raise` are private to `titan-compiler/jobs.lua`;
-[GNU Make jobserver participation](#gnu-make-jobserver-participation)
-describes the client ledger, the wait, and the temporary signal actions.
+`_signal_pending`, `_signal_raise`, `_signal_wake_descriptor`, and
+`_sigpipe_ignore` are private to `titan-compiler/jobs.lua` and
+`titan-compiler/build.lua`; `client:descriptor()` exposes the private
+nonblocking jobserver read fd for `luv` polling, `_signal_wake_descriptor()`
+exposes the signal guard's wake pipe read fd, and `_sigpipe_ignore()` ignores
+`SIGPIPE` while the coordinator communicates with worker pipes and restores the
+prior `sigaction` on `guard:restore()`. [GNU Make jobserver
+participation](#gnu-make-jobserver-participation) and [Slot ledger and
+jobserver rules](build-coordinator.md#slot-ledger-and-jobserver-rules) describe
+their use.
+
+#### Output-tree coordination
+
+`titan._output_lock_open(path)` (`ltitanlib.c`) backs
+`build.lock_outputs`: it opens `<directory>/.titan-build.lock` without
+following a terminal symlink or reparse point (`O_NOFOLLOW | O_CLOEXEC` and
+`S_ISREG` on POSIX; `FILE_FLAG_OPEN_REPARSE_POINT` without `FILE_SHARE_DELETE`
+on Windows) and returns a `titan.outputlock` userdata with methods `try()`
+(nonblocking `flock(LOCK_EX | LOCK_NB)` or `LockFileEx`), `linked(path)`,
+`identity()`, `descriptor()` (the POSIX fd inherited by build workers so an
+orphaned worker keeps the output domain locked until exit), and `close()`. See
+[Output-tree coordination](build-coordinator.md#output-tree-coordination).
 
 ## Lua installation and executable-relative search paths
 
@@ -2334,19 +2413,21 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 
 | Flag | Effect | Constraints |
 | --- | --- | --- |
-| `<module>...` | Logical modules to build; all become source-required roots. | At least one, unless `--print-root`. |
+| `<module>...` | Logical modules to build; all become source-required roots. | At least one, unless `--print-root`, `--test-dir`, or `-c --c-source`. |
 | `--print-root` | Print the selected installation root and exit. | No module names. |
 | `--print-ast` | Print each module's AST after checking. | Not with `--incremental`. |
 | `--pretty-print` | Format generated C and headers with `CLANG_FORMAT`. | |
-| `-v`, `--verbose` | Print native-tool and formatter commands. | |
-| `-j`, `--jobs <n>` | Local cap on concurrent native compiler processes: generated-C compilations and speculative C probe batches; overrides `TITAN_JOBS`, default 4. `1` keeps every C probe synchronous. | Positive integer. |
+| `-v`, `--verbose` | Write native-tool/formatter commands, replayed worker output, and incremental object, native-C, and link hit/miss decisions to standard error. | |
+| `-j`, `--jobs <n>` | Local cap on concurrent worker frontends and native compiler processes; overrides `TITAN_JOBS`, default 4. `1` keeps every C probe synchronous. | Positive integer. |
 | `--c-parts <n>` | Maximum generated C translation units per module whose generated code reaches 2 MiB; overrides `TITAN_C_PARTS` (default 4 on Linux, otherwise 1); `1` disables splitting; independent of `--jobs`. See [Translation-unit parts](codegen-overview.md#translation-unit-parts). | Positive integer. |
-| `--launcher-name <name>` | Windows standalone/test launcher filename in `bin` (default: logical module name). | Windows only; requires a standalone or test main; not with `-c`. |
+| `--exe <path>` | Exact executable destination relative to CWD (`.exe` appended on Windows when absent; Windows provider DLL stays under `--output`). | Requires a standalone or test executable; not with `-c` or library-only builds. |
 | `--static` | Run the archive pass before the DSO pass. | Not on Windows. |
 | `--source-first` | Prefer source to compiled providers for every dependency. | |
-| `--incremental` | Reuse source objects no older than their sources. | Not with `--print-ast`. |
-| `-c`, `--compile-only` | Emit objects and headers only; always rebuild requested modules. | Not with `--launcher-name`, `-l`, `-X`, or `--no-uv-bootstrap`. |
+| `--incremental` | Certify and reuse source module objects (including explicit roots), `--c-source` objects, and final links. | Not with `--print-ast`. |
+| `-c`, `--compile-only` | Emit objects and headers only; without `--incremental` every module and `--c-source` file is rebuilt. | Not with `--exe`, `-l`, `-L`, `--ldflag`, `-X`, or `--no-uv-bootstrap`. |
 | `--test` | Build native tests (objects only with `-c`). | No requested module may be named `titan.test.runner`. |
+| `--test-dir <dir>` | Recursively discover source modules under `<dir>` whose final component is `test(s)`, `spec(s)`, `*_test(s)`, or `*_spec(s)` as roots; repeatable. | Requires `--test`; `<dir>` must lie inside a `--tree` root. |
+| `--test-exclude <module>` | Exclude an exact logical module name from automatic `--test-dir` discovery (explicit roots still win); repeatable. | Requires `--test` and `--test-dir`. |
 | `--coverage` | Instrument source modules without `test_` functions and report when the test executable runs. | Requires a test or standalone executable unless `-c`. |
 | `--coverage-backend <name>` | `gcc-gcov` (Unix default) or `llvm-gcov` (Windows default). | Every `--coverage-*` option requires `--coverage`. |
 | `--coverage-module <glob>` | Override automatic selection with a logical-module glob (`*`, `?`); repeat for a union. | |
@@ -2358,10 +2439,17 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `--no-uv-bootstrap` | Call `main` directly instead of the registered async bootstrap hook. | Requires a standalone or test main; not with `-c`. |
 | `--no-line-directives` | Omit generated Titan `#line` directives. | |
 | `-u`, `--lua <dir>` | Lua source tree (`driver.LUA_SOURCE_PATH`). | Source checkouts only. |
-| `-t`, `--tree <dir>` | Source root (`driver.TITAN_SOURCE_PATH`, default `.`). | |
+| `-t`, `--tree <dir>` | Source root, or an ordered `;`-separated list of roots searched in order (`driver.TITAN_SOURCE_PATH`, default `.`). | |
 | `-o`, `--output <dir>` | Folder for generated files, preserving the source hierarchy. | |
-| `-l`, `--link <libs>` | Comma-separated libraries passed as `-l` to the final link. | |
-| `-X`, `--extra-object <payload>...` | Native objects/archives carried into the linked outputs. | Library mode accepts only relocatable objects and regular archives. |
+| `-I`, `--include-dir <dir>` | Native include directory for C headers, probes, generated C, and `--c-source`; repeatable, order kept, searched before the SDK. | |
+| `-D`, `--define <def>` | Native preprocessor definition `NAME[=VALUE]`; repeatable, order kept. | |
+| `--cflag <arg>` | One native compile argument (for example `--cflag=-pthread`); repeatable, order kept. | |
+| `-L`, `--library-dir <dir>` | Native library search directory for final links; repeatable, order kept. | Not with `-c`. |
+| `-l`, `--link <libs>` | Comma-separated or repeated libraries passed as `-l` to the final link; order and repeats kept. | Not with `-c`. |
+| `--ldflag <arg>` | One native link argument (for example `--ldflag=-Wl,--as-needed`); repeatable, order kept. | Not with `-c`. |
+| `--c-source <file>` | Authored/generated C file compiled and certified under `<output>/.native/`, linked before `-X` payloads; repeatable. | Allowed without `<module>` when combined with `-c`. |
+| `--print-c-objects` | Print the absolute certified object path for each `--c-source` argument, one per line in argument order; nothing else is written to stdout. | Requires `-c` and at least one `--c-source`; not with `--print-root` or `--print-ast`. |
+| `-X`, `--extra-object <payload>...` | Native objects/archives carried into the linked outputs after `--c-source` objects. | Not with `-c`; library mode accepts only relocatable objects and regular archives. |
 
 ### Environment variables
 
@@ -2372,9 +2460,9 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `CLANG_FORMAT` | `driver.lua` | `clang-format` | Formatter command, parsed only when `--pretty-print` selects it. |
 | `RC` | `driver.lua` | `llvm-rc` | Windows launcher resource compiler. |
 | `MAKE` | `driver.lua` `check_runtime` | `make` | Make command for the checkout runtime archive. |
-| `TITAN_EXTRA_CPPFLAGS` | `driver.lua` | empty | Preprocessing words for foreign-import probes, prepended to every Titan, runtime, and entrypoint compilation. |
-| `TITAN_EXTRA_CFLAGS` | `driver.lua` | empty | Compilation-only words after the fixed defaults; never used by final links. |
-| `TITAN_EXTRA_LDFLAGS` | `driver.lua` | empty | Ordered linker inputs appended to final provider and program links. |
+| `TITAN_EXTRA_CPPFLAGS` | `driver.lua`, `nativeinputs.lua` | empty | Preprocessing words for foreign-import probes, C probes, generated modules, `--c-source` nodes, runtime, and entrypoints (followed by CLI `-I`/`-D`). |
+| `TITAN_EXTRA_CFLAGS` | `driver.lua`, `nativeinputs.lua` | empty | Compilation-only words after `TITAN_EXTRA_CPPFLAGS` (followed by CLI `--cflag`); never used by final links. |
+| `TITAN_EXTRA_LDFLAGS` | `driver.lua`, `nativeinputs.lua` | empty | Ordered linker inputs appended to final provider and program links (followed by CLI `-L`, `-l`/`--link`, and `--ldflag`). |
 | `TITAN_BUILD_PROFILE` | `driver.lua` | `production` | `validation` selects `-O0 -fno-lto -g`; any other value is a toolchain error. |
 | `TITAN_NO_LINE_DIRECTIVES` | `driver.lua` | unset | Exact value `1` disables generated `#line` directives, like `--no-line-directives`. |
 | `TITAN_JOBS` | `titanc` | `4` | Local job cap when `--jobs` is absent. |
@@ -2410,6 +2498,9 @@ workflow sets them equal, but they are separate ownership concepts.
 | `driver.LANGUAGE_SERVER_API_VERSION` | `1` | Exact compiler/semantic-client handshake; see [Language-server compiler API](#language-server-compiler-api). |
 | `driver.EMIT_LINE_DIRECTIVES` | true unless `TITAN_NO_LINE_DIRECTIVES=1` | Default `#line` policy. |
 | `driver.CFLAGS` | `--std=c99 -O3 -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC` plus compiler-specific debug flags; Linux production adds `-flto=auto -ffat-lto-objects` | GCC uses `-g1`, Clang `-gline-tables-only -fdebug-info-for-profiling`, other compilers `-g`. |
+| `driver.NATIVE_COMPILE_FLAGS` / `driver.NATIVE_LINK_FLAGS` | `driver.apply_native_inputs(normalized)` | Normalized ordered compile and link extras (`TITAN_EXTRA_*` then CLI native switches). |
+| `driver.OUTPUT_ROOT` | `args.output` in `titanc` | Selected `--output` directory for synchronous native publication temporaries. |
+| `driver.PROJECT_CACHE_VERSION` | `version.PROJECT_CACHE_VERSION` (`6`) | Language-server project-manifest schema version. |
 | shared-library flags | `driver.shared_library_flags` | `-shared`; Darwin adds `-undefined dynamic_lookup`, Windows `-Wl,--exclude-all-symbols`. |
 | installed link set | `driver.installed_link_inputs` | Unix: `libtitan.a`, `libbacktrace.a`, `liblua.a`, `-ldl` (non-Darwin), `-lm`; Windows: `libtitan.a`, `libbacktrace.a`, `liblua55.a`, `-static-libgcc`. Not copied into package archives. |
 | checkout link set | `driver.source_link_inputs` | Local `libtitan.a`, `libbacktrace.a`, matching `liblua.a` (`<prefix>/lib/liblua.a` when `LUA_SOURCE_PATH` physically matches the installed Lua SDK), `-ldl -lm`. |
@@ -2423,6 +2514,24 @@ generated `_init`, standalone path initialization, and Lua entry wrappers that
 ensure `errorhandler` is active —
 are in [Lua interop internals](lua-interop-internals.md).
 
+### Build-worker transport
+
+`titan-compiler/process.lua` provides the cross-platform `luv` transport
+(`luv >= 1.52.1` on Linux, macOS, and Windows, anchored once per Lua state in
+the registry under `"titan-compiler.process: luv"`; on Windows,
+`platform.getenv` reads environment variables through the same anchored
+module, so both share one `luv` module table and native loop whichever loads
+it first). On every platform, the
+build coordinator uses `process.start_worker` (spawning `luv.exepath()` with a
+coordinator-to-worker request pipe on `fd 3`, a worker-to-coordinator pipe on
+`fd 4`, captured stdout/stderr pipes, and inherited POSIX `.titan-build.lock`
+descriptors on `fds 5..`), `process.open_control(3, 4)`,
+`process.frame`/`process.new_frames` (4-byte big-endian length framing up to
+256 MiB + 64 bytes), `process.encode_record`/`process.decode_record`
+(`graphcodec` with native SHA-256), and `process.start_job` for worker-submitted
+native compile and C-probe batches. See [Build-worker
+transport](build-coordinator.md#build-worker-transport).
+
 ## Experimental Windows process transports
 
 `titan-compiler.platform` reads the Lua host separator without filesystem or
@@ -2433,9 +2542,12 @@ object's authoritative target fingerprint.
 
 Configured tool names reach the process transport unchanged. Titan does not
 resolve executables, append extensions, or inspect binary formats before launch.
-The operating system reports lookup and execution failures. Serial
-inherited-output commands retain `os.execute`; their renderer applies C-runtime
-quoting followed by `cmd` escaping and sets `LANG=C` and `LC_ALL=C`.
+The operating system reports lookup and execution failures. On Windows,
+serial inherited-output commands, including native links, launch through
+`process.run` with the parsed argument array, sharing the compiler's standard
+streams under the same process-tree guard as worker and batch launches. The
+Windows renderer (C-runtime quoting followed by `cmd` escaping) only formats
+the verbose command echo.
 
 Windows native links use `driver.run_link_command` to avoid the `cmd.exe`
 command-length limit as the number or length of object paths grows. It first
@@ -2467,6 +2579,13 @@ Exit callbacks queue the completed schedule position; `uv.run("once")`
 delivers whichever child finishes first. Larger generated-C units start first
 and each completion frees its slot immediately. Diagnostics still replay in
 original request order.
+
+Every `process.lua` spawn first calls `titan._native_process_tree_guard()`
+once per process, assigning the compiler process to a non-breakaway
+`KILL_ON_JOB_CLOSE` Job Object whose handle lives until process teardown.
+Children therefore inherit a strict ancestor job before executing, whatever
+job libuv adds them to; a failed guard reports an error and launches nothing
+([orphan lifetime](build-coordinator.md#planned-worker-resolution-and-orphan-lifetime)).
 
 The adapter closes process and pipe handles after completion and retains the
 native exit value, including 256 and 9009. Launch failures are distinct from

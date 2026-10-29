@@ -65,10 +65,16 @@ object, and `.gcno`/`.gcda` files beside the primary ones, such as
 the module's coverage inventory, so counter resets and reports include all of
 them.
 
-`--incremental` works in coverage mode. Each compiled object carries its partial
-coverage file list; linking reconstructs the complete executable inventory from
-new and reused objects. Selected objects use O0/no LTO and atomic gcov-compatible
-instrumentation. Keep source line directives enabled.
+`--incremental` certifies both coverage module objects and the final coverage
+executable link. Each compiled object certificate records its coverage policy
+(`codegen-options coverage`) and verifies that its generated `.c` and `.gcno`
+notes remain present as regular files (`coverage-artifacts`); linking
+reconstructs the complete executable inventory from fresh and reused objects and
+writes a link certificate under `<output>/.titan-links/`. Mutable runtime
+`.gcda` counter files and generated coverage reports are not part of the link
+certificate, so running tests does not invalidate the cached link. Selected
+objects use `-O0 -fno-lto` and atomic gcov-compatible instrumentation. Keep
+source line directives enabled.
 
 At startup, a coverage test executable deletes the `.gcda` counters corresponding
 to its embedded inventory, retaining `.gcno` notes. After successful tests and
@@ -126,21 +132,25 @@ cross-run combination belong to external tools.
 
 ## Titan repository coverage
 
-With a prepared SDK, the coverage targets use the ordinary native test aggregate
-and select production source imports from its graph with
-`--coverage-module 'titan.*'`. Test-containing modules remain excluded:
+With a prepared SDK, the coverage targets build the native test aggregate in a
+separate coverage output tree (`out/coverage` on Unix, `<workspace>/coverage` on
+Windows) using `--test --incremental --no-uv-bootstrap --coverage`, automatic
+root discovery (`--test-dir` with explicit first root `test.tests`), `--exe`,
+and `--c-source` for the aggregate C helpers, selecting production source
+imports from its graph with `--coverage-module 'titan.*'`. Test-containing
+modules remain excluded:
 
 ```sh
 make titan-native-coverage PREFIX=/tmp/titan-sdk CC=gcc-14 \
   TITAN_COVERAGE_GCOV=gcov-14
 ```
 
-Use `titan-native-coverage-build` to compile separately and
-`titan-native-coverage-run` to run the built executable and report without
-recompiling. `TITAN_FILTER` selects tests as usual. Unlike `make
-titan-stdlib-test`, the coverage run always uses one test process, because
-every execution resets and then dumps the same counter files. Rich reports are
-optional:
+Use `titan-native-coverage-build` to compile (or certify and reuse unchanged
+coverage objects and the final link) separately and `titan-native-coverage-run`
+to run the built executable and report without recompiling. `TITAN_FILTER`
+selects tests as usual. Unlike `make titan-stdlib-test`, the coverage run always
+uses one test process, because every execution resets and then dumps the same
+counter files. Rich reports are optional:
 
 ```sh
 make titan-native-coverage PREFIX=/tmp/titan-sdk CC=gcc-14 \
@@ -148,12 +158,13 @@ make titan-native-coverage PREFIX=/tmp/titan-sdk CC=gcc-14 \
   TITAN_COVERAGE_GCOVR=/path/to/gcovr
 ```
 
-On Windows, use the same targets through `make -f Makefile.win`. The ordinary
-native harness copies the prepared SDK to its private local NTFS workspace and
-source-links production code into the test provider. Child fixture programs
-that consume prebuilt providers remain unmeasured. Their behavior still runs in
-the ordinary aggregate; measuring a separate binary requires its own source
-coverage build, with combination handled externally.
+On Windows, use the same targets through `make -f Makefile.win`. The native
+harness refreshes changed SDK and source inputs in its private local NTFS
+workspace and source-links production code into the coverage provider while
+preserving `.gcno` notes across runs. Child fixture programs that consume
+prebuilt providers remain unmeasured. Their behavior still runs in the ordinary
+aggregate; measuring a separate binary requires its own source coverage build,
+with combination handled externally.
 
 Run unfiltered for a baseline, then add cases for uncovered behavior in its
 native test owner. Keep ordinary optimized and platform validation as separate

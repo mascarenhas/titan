@@ -66,10 +66,12 @@ local function assert_process_file(filename, options)
     return ffi_types, include, context
 end
 
-local function semantic_inputs(inputs)
+local function semantic_inputs(inputs, kind)
     local copy = {}
-    for index, input in ipairs(inputs) do
-        copy[index] = { kind = input.kind, path = input.path, identity = input.identity }
+    for _, input in ipairs(inputs) do
+        if not kind or input.kind == kind then
+            copy[#copy + 1] = { kind = input.kind, path = input.path, identity = input.identity }
+        end
     end
     return copy
 end
@@ -415,15 +417,107 @@ describe("generated module C header inputs", function()
             end
         end
     end)
+
+    for _, publication in ipairs({ "symlink retarget", "hardlink replacement" }) do
+        it("certifies a quoted nested declaring origin after " .. publication, function()
+            if not require_symlink_capability() then return end
+            local root = directory()
+            local bytes = "struct Shared { int value; };\n"
+            local first = file(root .. "/first.h", bytes)
+            local second = file(root .. "/second.h", bytes)
+            local link = root .. "/selected.h"
+            files[#files + 1] = link
+            assert(lfs.link(first, link, true))
+            local outer = file(root .. "/outer.h", '#include "selected.h"\n')
+            local strategy = compiler_io.new_sync()
+            local options = { io = strategy, compiler_include_dirs = {} }
+            local initial, include = assert_process_file(outer, options)
+            local input, origin
+            for _, dependency in ipairs(include.c_header_dependencies) do
+                if dependency.path == link then
+                    if dependency.kind == "file" then input = dependency
+                    elseif dependency.kind == "origin" then origin = dependency end
+                end
+            end
+            assert.is_table(input)
+            assert.is_table(origin)
+            assert(os.remove(link))
+            assert(lfs.link(publication == "symlink retarget" and second or first,
+                link, publication == "symlink retarget"))
+            local current, err, changed = cdriver.revalidate_header_input(input, { io = strategy })
+            assert.is_nil(err)
+            assert.is_false(changed)
+            assert.equal(input.identity, current.identity)
+            local refreshed, origin_err, moved, reason = cdriver.revalidate_header_input(origin, { io = strategy })
+            assert.is_nil(origin_err)
+            local fresh, fresh_include = assert_process_file(outer, options)
+            if platform.windows then
+                assert.is_false(moved)
+                assert.equal(initial, fresh)
+            else
+                assert.is_true(moved)
+                assert.equal("provenance", reason)
+                assert.not_equal(origin.identity, refreshed.identity)
+                assert.not_equal(initial, fresh)
+                assert.not_equal(initial["struct@Shared"]._tag_provenance.ffi_scope,
+                    fresh["struct@Shared"]._tag_provenance.ffi_scope)
+            end
+            local found = false
+            for _, dependency in ipairs(fresh_include.c_header_dependencies) do
+                if dependency.kind == "origin" and dependency.path == link then
+                    assert.equal(refreshed.identity, dependency.identity)
+                    found = true
+                end
+            end
+            assert.is_true(found)
+        end)
+    end
+
+    it("certifies directory-link origins over physically identical nested leaves", function()
+        if platform.windows then pending("Sync nominal origins are lexical on Windows"); return end
+        if not require_symlink_capability() then return end
+        local root = directory()
+        local first, second = directory(root, "first"), directory(root, "second")
+        local original = file(first .. "/api.h", "struct SharedLeaf { int value; };\n")
+        local linked = second .. "/api.h"
+        files[#files + 1] = linked
+        assert(lfs.link(original, linked))
+        local link = root .. "/current"
+        files[#files + 1] = link
+        assert(lfs.link(first, link, true))
+        local outer = file(root .. "/outer.h", '#include "current/api.h"\n')
+        local strategy = compiler_io.new_sync()
+        local _, include = assert_process_file(outer, { io = strategy })
+        local input, origin
+        for _, dependency in ipairs(include.c_header_dependencies) do
+            if dependency.path == link .. "/api.h" then
+                if dependency.kind == "file" then input = dependency
+                elseif dependency.kind == "origin" then origin = dependency end
+            end
+        end
+        assert.is_table(input)
+        assert.is_table(origin)
+        assert(os.remove(link))
+        assert(lfs.link(second, link, true))
+        local current, err, changed = cdriver.revalidate_header_input(input, { io = strategy })
+        assert.is_nil(err)
+        assert.is_false(changed)
+        assert.same(input.observation, current.observation)
+        local _, origin_err, moved, reason = cdriver.revalidate_header_input(origin, { io = strategy })
+        assert.is_nil(origin_err)
+        assert.is_true(moved)
+        assert.equal("provenance", reason)
+    end)
 end)
 
-describe("mtime-first C header validation", function()
+describe("semantic C header validation", function()
     local cpp = require "c-parser.cpp"
     local sha256 = require "titan-compiler.sha256"
     local function fixture(identity)
         local world = {
             contents = "typedef int observed_type;\n",
             attributes = { kind = "file", mode = 33188, device = 1, inode = 17,
+                size = 27, time_precision = "ns", changed_seconds = 100, changed_nanoseconds = 456,
                 modified_seconds = 100, modified_nanoseconds = 123 },
             reads = 0, hashes = 0, stats = 0, lstats = 0, opens = 0,
         }
@@ -471,7 +565,7 @@ describe("mtime-first C header validation", function()
         assert.same(input, current)
         assert.equal(0, world.reads)
         assert.equal(0, world.hashes)
-        assert.equal(0, world.opens)
+        assert.equal(1, world.opens)
         assert.equal(1, world.stats)
         assert.equal(1, world.lstats)
     end)
@@ -514,13 +608,14 @@ describe("mtime-first C header validation", function()
         assert.equal(123, input.observation.modified_nanoseconds)
     end)
 
-    it("reads a replacement as a new input even when its mtime and bytes match", function()
+    it("reads a replacement and preserves identity when its bytes match", function()
         local world, input = fixture()
         world.attributes.inode = 18
-        local current, err, changed = validate(world, input)
+        local current, err, changed, reason = validate(world, input)
         assert.is_nil(err)
-        assert.is_true(changed)
-        assert.not_equal(input.identity, current.identity)
+        assert.is_false(changed)
+        assert.is_nil(reason)
+        assert.equal(input.identity, current.identity)
         assert.equal(1, world.reads)
         assert.equal(1, world.hashes)
         local stable, _, repeated = validate(world, current)
@@ -547,9 +642,10 @@ describe("mtime-first C header validation", function()
     it("detects missing files without attempting a content read", function()
         local world, input = fixture()
         world.attributes = nil
-        local current, err, changed = validate(world, input)
+        local current, err, changed, reason = validate(world, input)
         assert.is_nil(err)
         assert.is_true(changed)
+        assert.equal("missing", reason)
         assert.matches("unreadable", current.identity)
         assert.is_nil(current.observation)
         assert.equal(0, world.reads)
@@ -567,9 +663,11 @@ describe("mtime-first C header validation", function()
         assert.equal(1, world.reads)
         current.observation = nil
         world.after_read = function() world.attributes.modified_nanoseconds = 125 end
-        local rejected, err = validate(world, current)
+        local rejected, err, raced, reason = validate(world, current)
         assert.is_nil(rejected)
         assert.matches("changed while it was read", err, 1, true)
+        assert.is_true(raced)
+        assert.equal("changed-during-read", reason)
     end)
 
     it("memoizes ordered search observations within one pass only", function()
@@ -594,6 +692,205 @@ describe("mtime-first C header validation", function()
         local cancellation = {}
         world.adapter.sha256_binary = function() error(cancellation, 0) end
         local ok, err = pcall(validate, world, input)
+        assert.is_false(ok)
+        assert.equal(cancellation, err)
+    end)
+
+    it("uses native Sync observations for header reuse and detects preserved-mtime edits through ctime", function()
+        local support = require "titan"
+        local native = support._stat_precise
+        local path = platform.windows and "C:/header.h" or "/header.h"
+        local contents = "typedef long observed_type;\n"
+        local changed_ns, reads = 100000000001, 0
+        support._stat_precise = function(filename, follow)
+            assert.equal(path, filename)
+            assert.is_boolean(follow)
+            return { kind = "file", dev = "18446744073709551615",
+                ino = "0123456789abcdef0123456789abcdef",
+                size = #contents, mode = 0x81A4,
+                mtime_ns = 100000000000, ctime_ns = changed_ns }
+        end
+        local ok, failure = pcall(function()
+            local strategy = compiler_io.new_sync()
+            function strategy:readable(filename) assert.equal(path, filename); return true end
+            function strategy:read_file(filename)
+                assert.equal(path, filename)
+                reads = reads + 1
+                return contents
+            end
+            local input = assert(cpp.revalidate_header_input(
+                { kind = "file", path = path, identity = "unobserved" }, { io = strategy }))
+            assert.equal("ns", input.observation.precision)
+            assert.equal(0, input.observation.modified_nanoseconds)
+            assert.equal(1, input.observation.changed_nanoseconds)
+            assert.equal(1, reads)
+            reads = 0
+            cpp.clear_header_input_stats(strategy)
+            local current, err, changed = cpp.revalidate_header_input(input, { io = strategy })
+            assert.is_nil(err)
+            assert.is_false(changed)
+            assert.same(input, current)
+            assert.equal(0, reads)
+            assert.equal(0, cpp.header_input_stats(strategy).file_reads)
+            assert.equal(0, cpp.header_input_stats(strategy).file_hashes)
+            assert.equal(1, cpp.header_input_stats(strategy).metadata_reuses)
+            contents = "typedef char observed_type;\n"
+            changed_ns = changed_ns + 1
+            local updated, update_error, differs, reason = cpp.revalidate_header_input(input, { io = strategy })
+            assert.is_nil(update_error)
+            assert.is_true(differs)
+            assert.equal("content", reason)
+            assert.not_equal(input.identity, updated.identity)
+            assert.equal(input.observation.size, updated.observation.size)
+            assert.equal(input.observation.modified_seconds, updated.observation.modified_seconds)
+            assert.equal(input.observation.modified_nanoseconds, updated.observation.modified_nanoseconds)
+            assert.equal(2, updated.observation.changed_nanoseconds)
+            assert.equal(1, reads)
+        end)
+        support._stat_precise = native
+        if not ok then error(failure, 0) end
+    end)
+
+    for _, precision in ipairs({ "coarse", "unknown", "absent" }) do
+        it("hashes bytes with " .. precision .. " precision even at a nonzero nanosecond", function()
+            local world, input = fixture()
+            world.attributes.time_precision = precision ~= "absent" and precision or nil
+            local baseline = assert(validate(world, input))
+            world.reads, world.hashes = 0, 0
+            world.contents = "typedef long observed_type;\n"
+            local current, err, changed, reason = validate(world, baseline)
+            assert.is_nil(err)
+            assert.is_true(changed)
+            assert.equal("content", reason)
+            assert.not_equal(baseline.identity, current.identity)
+            assert.equal(1, world.reads)
+            assert.equal(1, world.hashes)
+            assert.equal("coarse", current.observation.precision)
+        end)
+    end
+
+    it("uses declared nanosecond precision at an exact-second timestamp", function()
+        local world, input = fixture()
+        world.attributes.modified_nanoseconds = 0
+        local current = assert(validate(world, input))
+        world.reads, world.hashes = 0, 0
+        local _, err, changed = validate(world, current)
+        assert.is_nil(err)
+        assert.is_false(changed)
+        assert.equal(0, world.reads)
+        assert.equal(0, world.hashes)
+    end)
+
+    it("reads precise metadata without a change-time observation", function()
+        local world, input = fixture()
+        world.attributes.changed_seconds, world.attributes.changed_nanoseconds = nil, nil
+        local current = assert(validate(world, input))
+        world.reads, world.hashes = 0, 0
+        assert(validate(world, current))
+        assert.equal(1, world.reads)
+        assert.equal(1, world.hashes)
+    end)
+
+    for _, field in ipairs({ "size", "changed_seconds", "changed_nanoseconds" }) do
+        it("refreshes identical bytes after a changed " .. field .. " observation", function()
+            local world, input = fixture()
+            world.attributes[field] = world.attributes[field] + 1
+            local current, err, changed = validate(world, input)
+            assert.is_nil(err)
+            assert.is_false(changed)
+            assert.equal(input.identity, current.identity)
+            assert.equal(1, world.reads)
+            assert.equal(1, world.hashes)
+            assert.equal(world.attributes[field], current.observation[field])
+        end)
+    end
+
+    for _, field in ipairs({ "size", "changed_seconds", "changed_nanoseconds" }) do
+        it("rejects a changed " .. field .. " during a guarded read", function()
+            local world, input = fixture()
+            world.attributes.time_precision = "coarse"
+            world.after_read = function() world.attributes[field] = world.attributes[field] + 1 end
+            local current, err, changed, reason = validate(world, input)
+            assert.is_nil(current)
+            assert.matches("changed while it was read", err, 1, true)
+            assert.is_true(changed)
+            assert.equal("changed-during-read", reason)
+        end)
+    end
+
+    it("classifies effective access changes without trusting unchanged precise metadata", function()
+        local world, input = fixture()
+        world.io.readable = function() return false end
+        world.io.read_file = function() world.reads = world.reads + 1; return nil, "access denied" end
+        local current, err, changed, reason = validate(world, input)
+        assert.is_nil(err)
+        assert.is_true(changed)
+        assert.equal("unreadable", reason)
+        assert.is_nil(current.observation)
+        assert.equal(1, world.reads)
+        assert.matches("open=unreadable", current.identity, 1, true)
+    end)
+
+    it("classifies earlier candidate changes independently of file contents", function()
+        local world = fixture()
+        local input = { kind = "search", path = "/header.h",
+            identity = cpp.header_search_identity("/header.h", nil, world.io) }
+        world.attributes = nil
+        local current, err, changed, reason = validate(world, input)
+        assert.is_nil(err)
+        assert.is_true(changed)
+        assert.equal("candidate", reason)
+        assert.equal("c-header-search-v2;exists=no;kind=missing;open=unreadable", current.identity)
+    end)
+
+    it("rechecks declaring origins independently of a precise leaf observation", function()
+        local world, input = fixture()
+        local real, resolves = "/first/header.h", 0
+        world.io.realpath = function() resolves = resolves + 1; return real end
+        local origin = { kind = "origin", path = "/header.h",
+            identity = assert(cpp.header_input_identity("origin", "/header.h", world.io)) }
+        resolves = 0
+        real = "/second/header.h"
+        local pass = {}
+        assert(validate(world, input, pass))
+        assert.equal(0, world.reads)
+        local current, err, changed, reason = validate(world, origin, pass)
+        assert.is_nil(err)
+        assert.is_true(changed)
+        assert.equal("provenance", reason)
+        assert.equal("c-header-origin-v1;real=/second/header.h", current.identity)
+        assert.same(current, assert(validate(world, origin, pass)))
+        assert.equal(1, resolves)
+        assert(validate(world, origin, {}))
+        assert.equal(2, resolves)
+    end)
+
+    it("shares exact consumed bytes with the invocation digest callback", function()
+        local world, input = fixture()
+        world.attributes.time_precision = "coarse"
+        local calls = 0
+        local current, err, changed = cpp.revalidate_header_input(input, {
+            io = world.io,
+            file_digest = function(path, bytes)
+                assert.equal("/header.h", path)
+                assert.equal(world.contents, bytes)
+                calls = calls + 1
+                return sha256.hex(bytes)
+            end,
+        })
+        assert.is_nil(err)
+        assert.is_false(changed)
+        assert.equal(input.identity, current.identity)
+        assert.equal(1, calls)
+        assert.equal(1, world.reads)
+    end)
+
+    it("preserves cancellation identity while resolving a declaring origin", function()
+        local world = fixture()
+        local cancellation = {}
+        world.io.realpath = function() error(cancellation, 0) end
+        local ok, err = pcall(validate, world,
+            { kind = "origin", path = "/header.h", identity = "old" })
         assert.is_false(ok)
         assert.equal(cancellation, err)
     end)
@@ -628,6 +925,54 @@ describe("completed C header payload transport", function()
         files[#files + 1] = path
         return path
     end
+
+    it("round-trips origin inputs and rejects the previous header-cache schema", function()
+        local cpp = require "c-parser.cpp"
+        local version = require "titan-compiler.version"
+        local path = header("struct Persisted { int value; };\n")
+        local strategy = compiler_io.new_sync()
+        local options = { io = strategy, cache_adapter = adapter, compiler_include_dirs = {} }
+        local first, include = assert_process_file(path, options)
+        assert.equal(8, cdriver.HEADER_CACHE_VERSION)
+        local key, payload = next(payloads)
+        assert.matches("^c%-header%-v8", key)
+        local saved = assert(cpp.decode_graph(payload))
+        assert.equal(version.C_HEADER_CACHE_VERSION, saved.version)
+        local origin
+        for _, input in ipairs(saved.dependencies) do
+            if input.kind == "origin" and input.path == path then origin = input end
+        end
+        assert.is_table(origin)
+        assert.equal(assert(cdriver.header_input_identity("origin", path, strategy)), origin.identity)
+        cdriver.clear_process_cache(strategy)
+        local restored, restored_include = assert_process_file(path, options)
+        assert.equal(1, matches)
+        assert.not_equal(first, restored)
+        assert.same(semantic_inputs(include.c_header_dependencies),
+            semantic_inputs(restored_include.c_header_dependencies))
+        saved.version = 7
+        payloads[key] = assert(cpp.encode_graph(saved))
+        cdriver.clear_process_cache(strategy)
+        assert_process_file(path, options)
+        assert.equal(2, matches)
+    end)
+
+    it("reuses a persisted graph after identical bytes are republished at the same origin", function()
+        local path = header("typedef int republished_type;\n")
+        local replacement = header("typedef int republished_type;\n")
+        local strategy = compiler_io.new_sync()
+        local options = { io = strategy, cache_adapter = adapter }
+        local _, include = assert_process_file(path, options)
+        if platform.windows then assert(os.remove(path)) end
+        assert(os.rename(replacement, path))
+        cdriver.clear_process_cache(strategy)
+        local _, restored = assert_process_file(path, options)
+        assert.equal(1, matches)
+        assert.same(semantic_inputs(include.c_header_dependencies),
+            semantic_inputs(restored.c_header_dependencies))
+        assert.equal(1, cdriver.process_cache_stats(strategy).file_reads)
+        assert.equal(1, cdriver.process_cache_stats(strategy).file_hashes)
+    end)
 
     it("reopens extracted definitions without parsing and preserves expanded macro spelling", function()
         local cpp = require "c-parser.cpp"
@@ -665,7 +1010,7 @@ describe("completed C header payload transport", function()
     end)
 
     it("validates saved input when its mtime is preserved", function()
-        local path = header("typedef int changed_type;\n")
+        local path = header("typedef long changed_type;\n")
         local strategy = compiler_io.new_sync()
         local stamp = assert(strategy:stat(path)).modified_seconds
         -- LuaFileSystem's touch restores seconds. Establish that exact stamp
@@ -675,17 +1020,16 @@ describe("completed C header payload transport", function()
         assert.equal(0, original.modified_nanoseconds)
         local options = { io = strategy, cache_adapter = adapter }
         assert_process_file(path, options)
-        write_file(path, "typedef unsigned changed_type;\n")
+        write_file(path, "typedef char changed_type;\n")
         assert(lfs.touch(path, stamp, stamp))
         local current = assert(strategy:stat(path))
-        for _, field in ipairs({ "modified_seconds", "modified_nanoseconds", "device", "inode" }) do
+        for _, field in ipairs({ "size", "modified_seconds", "modified_nanoseconds", "device", "inode" }) do
             assert.equal(original[field], current[field], field)
         end
         cdriver.clear_process_cache()
         local restored = assert_process_file(path, options)
-        assert.equal(platform.windows and 2 or 1, matches)
-        assert.same({ platform.windows and "unsigned" or "int" },
-            restored.changed_type.def)
+        assert.equal(2, matches)
+        assert.same({ "char" }, restored.changed_type.def)
     end)
 
     it("refreshes touched input metadata without rewriting the persisted graph", function()
@@ -707,6 +1051,9 @@ describe("completed C header payload transport", function()
             return true
         end
         local strategy = compiler_io.new_sync()
+        local observation = assert(strategy:stat(path))
+        local precise = observation.time_precision == "ns"
+        local expected_refreshes = observation.device ~= nil and observation.inode ~= nil and 1 or 0
         local options = { io = strategy, cache_adapter = adapter }
         assert_process_file(path, options)
         local key, original = next(payloads)
@@ -717,22 +1064,21 @@ describe("completed C header payload transport", function()
         assert_process_file(path, options)
         assert.equal(1, matches)
         assert.equal(1, puts)
-        assert.equal(platform.windows and 0 or 1, refreshes)
+        assert.equal(expected_refreshes, refreshes)
         assert.equal(original, payloads[key])
         assert.equal(1, cdriver.process_cache_stats(strategy).file_reads)
         assert.equal(1, cdriver.process_cache_stats(strategy).file_hashes)
         cdriver.clear_process_cache(strategy)
         assert_process_file(path, options)
-        assert.equal(platform.windows and 0 or 1, refreshes)
-        assert.equal(platform.windows and 1 or 0,
-            cdriver.process_cache_stats(strategy).file_reads)
-        assert.equal(platform.windows and 1 or 0,
-            cdriver.process_cache_stats(strategy).file_hashes)
+        assert.equal(expected_refreshes, refreshes)
+        assert.equal(precise and 0 or 1, cdriver.process_cache_stats(strategy).file_reads)
+        assert.equal(precise and 0 or 1, cdriver.process_cache_stats(strategy).file_hashes)
     end)
 
     it("backfills touched observations through a legacy byte-only adapter", function()
         local path = header("typedef int legacy_touch;\n")
         local strategy = compiler_io.new_sync()
+        local precise = assert(strategy:stat(path)).time_precision == "ns"
         local options = { io = strategy, cache_adapter = adapter }
         assert_process_file(path, options)
         local stamp = assert(lfs.attributes(path, "modification"))
@@ -744,10 +1090,8 @@ describe("completed C header payload transport", function()
         cdriver.clear_process_cache(strategy)
         assert_process_file(path, options)
         assert.equal(1, matches)
-        assert.equal(platform.windows and 1 or 0,
-            cdriver.process_cache_stats(strategy).file_reads)
-        assert.equal(platform.windows and 1 or 0,
-            cdriver.process_cache_stats(strategy).file_hashes)
+        assert.equal(precise and 0 or 1, cdriver.process_cache_stats(strategy).file_reads)
+        assert.equal(precise and 0 or 1, cdriver.process_cache_stats(strategy).file_hashes)
     end)
 
     for _, flag in ipairs({ "-include", "-imacros" }) do
@@ -919,13 +1263,7 @@ describe("completed C header payload transport", function()
             local result, err = cdriver.process_file(target, options)
             assert.is_true(raced)
             assert.is_nil(result)
-            local diagnostic = "C header changed while it was read"
-            if platform.windows then
-                diagnostic = forced and
-                    "forced C headers changed while probing" or
-                    "C header changed while preprocessing"
-            end
-            assert.matches(diagnostic, err, 1, true)
+            assert.matches("C header changed while it was read", err, 1, true)
             assert.is_nil(next(payloads))
             local current, include = assert_process_file(target, options)
             assert.same({ "long" }, current.racing_type.def)
@@ -1018,7 +1356,7 @@ describe("completed C header payload transport", function()
         assert.matches("sha256_binary", invalid, 1, true)
     end)
 
-    it("retains direct symlink identity even when the target bytes are identical", function()
+    it("keeps file content identity separate from a symlink declaring origin", function()
         if not require_symlink_capability() then return end
         local path = header("typedef int link_type;\n")
         local link = path .. ".link"
@@ -1026,11 +1364,24 @@ describe("completed C header payload transport", function()
         files[#files + 1] = link
         local strategy = compiler_io.new_sync()
         local first = assert(cdriver.header_input_identity("file", link, strategy))
-        os.remove(link)
+        local origin = { kind = "origin", path = link,
+            identity = assert(cdriver.header_input_identity("origin", link, strategy)) }
+        assert(os.remove(link))
         assert(lfs.link(path, link))
         local second = assert(cdriver.header_input_identity("file", link, strategy))
-        assert.not_equal(first, second)
-        assert.matches(";lstat=", first, 1, true)
+        assert.equal(first, second)
+        assert.matches("^c%-header%-file%-v3:sha256:%x+$", first)
+        local current, err, changed, reason = cdriver.revalidate_header_input(origin, { io = strategy })
+        assert.is_nil(err)
+        if platform.windows then
+            -- Sync nominal origins are lexical on Windows.
+            assert.is_false(changed)
+            assert.equal(origin.identity, current.identity)
+        else
+            assert.is_true(changed)
+            assert.equal("provenance", reason)
+            assert.not_equal(origin.identity, current.identity)
+        end
     end)
 end)
 
@@ -1155,7 +1506,7 @@ describe("C FFI cdriver", function()
                 { kind = "file", path = nested,
                   identity = assert(cdriver.header_input_identity(
                       "file", nested)) },
-            }, semantic_inputs(include.c_header_dependencies))
+            }, semantic_inputs(include.c_header_dependencies, "file"))
             assert.equal(
                 include.c_header_dependencies,
                 context.c_header_dependencies)
@@ -1294,9 +1645,9 @@ describe("C FFI cdriver", function()
 
             assert(os.remove(link))
             assert(lfs.link("second/nested", link, true))
-            assert.not_equal(first_file_identity,
+            assert.equal(first_file_identity,
                 assert(cdriver.header_input_identity("file", lookup)))
-            assert.not_equal(first_search_identity,
+            assert.equal(first_search_identity,
                 assert(cdriver.header_input_identity("search", lookup)))
 
             remove_tree(
@@ -1337,7 +1688,7 @@ describe("C FFI cdriver", function()
                 { alias, vendor, root })
         end)
 
-        it("uses physical identity when available and content identity otherwise",
+        it("preserves semantic identity across hardlink and copy publications",
         function()
             local root = tmp_dir()
             local original = root .. "/original.h"
@@ -1362,20 +1713,13 @@ describe("C FFI cdriver", function()
             -- alone is replaced by the independently created file.
             if platform.windows then assert(os.remove(linked)) end
             assert(os.rename(replacement, linked))
-            if platform.windows then
-                assert.equal(original_file,
-                    assert(cdriver.header_input_identity("file", linked)))
-                assert.equal(original_search,
-                    assert(cdriver.header_input_identity("search", linked)))
-                write_file(linked, "typedef long titan_physical_header_value;\n")
-                assert.not_equal(original_file,
-                    assert(cdriver.header_input_identity("file", linked)))
-            else
-                assert.not_equal(original_file,
-                    assert(cdriver.header_input_identity("file", linked)))
-                assert.not_equal(original_search,
-                    assert(cdriver.header_input_identity("search", linked)))
-            end
+            assert.equal(original_file,
+                assert(cdriver.header_input_identity("file", linked)))
+            assert.equal(original_search,
+                assert(cdriver.header_input_identity("search", linked)))
+            write_file(linked, "typedef long titan_physical_header_value;\n")
+            assert.not_equal(original_file,
+                assert(cdriver.header_input_identity("file", linked)))
 
             remove_tree({ original, linked, replacement }, { root })
         end)
@@ -1414,9 +1758,9 @@ describe("C FFI cdriver", function()
             assert.truthy(ok, err)
             assert.equal(late_header,
                 include.c_header_dependencies[2].path)
-            assert.matches("lstat=file",
+            assert.matches("exists=yes",
                 include.c_header_search_inputs[2].identity, 1, true)
-            assert.matches("stat=file",
+            assert.matches("kind=file",
                 include.c_header_search_inputs[2].identity, 1, true)
             assert.matches("open=unreadable",
                 include.c_header_search_inputs[2].identity, 1, true)
@@ -1439,14 +1783,14 @@ describe("C FFI cdriver", function()
             assert(lfs.link(target, link, true))
             local broken = assert(cdriver.header_input_identity(
                 "search", link))
-            assert.matches("lstat=link", broken, 1, true)
-            assert.matches("stat=missing", broken, 1, true)
+            assert.matches("exists=yes", broken, 1, true)
+            assert.matches("kind=missing", broken, 1, true)
 
             write_file(target, "typedef int titan_future_header;\n")
             local followed = assert(cdriver.header_input_identity(
                 "search", link))
-            assert.matches("lstat=link", followed, 1, true)
-            assert.matches("stat=file", followed, 1, true)
+            assert.matches("exists=yes", followed, 1, true)
+            assert.matches("kind=file", followed, 1, true)
             assert.not_equal(broken, followed)
 
             assert(os.remove(link))
@@ -1790,7 +2134,7 @@ extern titan_cdriver_cache_type titan_cdriver_cache_value;
                 local old_nested_identity
                 for _, input in ipairs(
                         same_include.c_header_dependencies) do
-                    if input.path == nested then
+                    if input.kind == "file" and input.path == nested then
                         old_nested_identity = input.identity
                     end
                 end
@@ -2991,7 +3335,7 @@ typedef float cached_selection;
                     identity = assert(cdriver.header_input_identity(
                         "file", imported)),
                 },
-            }, semantic_inputs(first_include.c_header_dependencies))
+            }, semantic_inputs(first_include.c_header_dependencies, "file"))
 
             write_file(forced, "#define TITAN_FORCED_TYPE long\n")
             local second, second_include =
@@ -3059,7 +3403,7 @@ typedef double titan_forced_order_value;
                 local paths = {}
                 for _, dependency in ipairs(
                         include.c_header_dependencies) do
-                    paths[#paths + 1] = dependency.path
+                    if dependency.kind == "file" then paths[#paths + 1] = dependency.path end
                 end
                 return paths
             end)())

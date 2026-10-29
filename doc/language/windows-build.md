@@ -70,9 +70,13 @@ payload to canonical SDK paths.
 LuaRocks installs `bin/titanc.bat`. With the SDK's `bin` on `PATH`, use `titanc`
 for the ordinary [module and program commands](modules.md#experimental-windows-compilation).
 Libraries emit one DLL provider and generated Lua shims. Programs emit a small
-`bin/<logical-module>.exe` launcher and an application DLL; `--launcher-name`
-can select another EXE name without changing provider identity. Windows Titan
-archive providers and `--static` are unsupported.
+`bin/<logical-module>.exe` launcher and an application DLL; `--exe PATH` selects
+an exact EXE destination relative to the current directory (appending `.exe`
+when absent) while keeping the provider DLL under
+`<output>/lib/titan/0.6/<module>.dll` (or `lib/titan/0.6/<module>.dll` without
+`--output`) and embedding the relative path from `<exe-dir>/../lib/titan/0.6` to
+that provider on the same volume. Cross-volume `--exe` destinations, Windows
+Titan archive providers, and `--static` are unsupported.
 
 Splitting large generated modules into several C translation units is opt-in
 on Windows: `--c-parts` defaults to 1 there. Pass `--c-parts N` or set
@@ -86,15 +90,34 @@ Use [an output directory](output-directory.md) to separate generated files from
 sources and keep configurations independent:
 
 ```sh
-titanc --output out/app app.main
+titanc --incremental --output out/app --exe out/app/bin/app.exe app.main
 ```
 
-For a standalone `app.main`, this places the launcher at
-`out/app/bin/app.main.exe` and its provider at
-`out/app/lib/titan/0.6/app/main.dll`. Without `--output`, those final paths remain
-relative to the compiler's working directory. Library consumers must select
-their output directory through the usual provider/Lua search paths;
+For a standalone `app.main`, this places the launcher at `out/app/bin/app.exe`
+(or `out/app/bin/app.main.exe` when `--exe` is omitted) and its provider at
+`out/app/lib/titan/0.6/app/main.dll`. Without `--output`, those default paths
+remain relative to the compiler's working directory. Library consumers must
+select their output directory through the usual provider/Lua search paths;
 `--output` changes write locations without changing lookup.
+
+While linking, `titanc` builds each launcher and provider in a sibling
+`<file>.stage.tmp.<suffix>` directory beside its destination (for example
+`bin/app.exe.stage.tmp.<suffix>`) and removes it after publishing. If an
+interrupted build leaves one behind, the next link with the same outputs
+removes it, including when `--exe` reaches the locked output directory through
+a junction that Windows allows the process to follow (Redirection Guard can
+refuse a junction created by a non-administrator with error 448, and Titan
+does not bypass that policy). These directory names belong to the compiler: if
+a leftover one contains a Titan source, C header, `--c-source` file, `-X`
+object, linker input, compiler or linker tool, or output of the current build,
+linking fails with `refusing to retire stale Windows staging` and deletes
+nothing. Move that file elsewhere and build again. When `titanc` cannot
+identify every file and tool the link uses (for example with an uncertified
+compiler or linker flags it cannot interpret), any leftover stage directory
+stops the link with the same message, followed by `the native link and tool
+inventory is incomplete (<reason>)`. Inspect that directory, move anything you
+need, delete it, and build again. Builds without leftover stage directories
+are unaffected.
 
 Deliver the matching `lua55.dll` and native dependency DLLs beside the
 executables. Lua's Windows `!` path expansion means the running executable's
@@ -132,9 +155,10 @@ workers by default; `TITAN_ROCK_TEST_JOBS` sets any positive worker count. A
 failure in the native phase does not skip the specs, and a failing spec file
 does not stop the others; the run reports every failure and then fails.
 
-`TITAN_JOBS` (default four) bounds native and generated-C compilation for these
-runs; `MAKEFLAGS` is ignored. Raise it to the number of CPUs on a larger machine.
-See [native build parallelism](../implementation/windows-build.md#native-build-parallelism)
+`TITAN_JOBS` (default four) bounds module-frontend workers and native C
+compilation for these runs; `MAKEFLAGS` is ignored. Raise it to the number of
+CPUs on a larger machine. See
+[native build parallelism](../implementation/windows-build.md#native-build-parallelism)
 and [test ownership](../implementation/windows-build.md#test-ownership-and-keep-going).
 
 For the shared suite's separate build/run targets, filtering, and evidence

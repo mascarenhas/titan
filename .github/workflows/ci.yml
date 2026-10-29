@@ -427,6 +427,10 @@ jobs:
           TITAN_TEST_EXTRA_LDFLAGS: "-fno-lto"
         run: make stdlib-busted-test EXTRA_TEST_FLAGS="-o gtest -v"
 
+      # Two workers run the integrations concurrently, each in a private
+      # extraction of the prepared tree with half of the job's -j4, sharing
+      # this installed prefix; the exclusive files then run alone. Their
+      # LuaCov stats merge into one report.
       - name: Run compiler integrations that require the installed stdlib
         env:
           TITAN_EXTRA_CFLAGS: "-O0 -fno-lto"
@@ -437,7 +441,7 @@ jobs:
           TITAN_COVERAGE_TEST_REQUIRED: "1"
         run: |
           bash spec/support/ci_stdlib_snapshot.sh save "$RUNNER_TEMP/titan-stdlib.tar"
-          bash spec/support/ci_test_groups.sh stdlib-compiler
+          bash spec/support/ci_parallel_compiler_tests.sh stdlib
           bash spec/support/ci_stdlib_snapshot.sh restore "$RUNNER_TEMP/titan-stdlib.tar"
           luacov "titan%-compiler/" "titanc$"
           grep "Summary" -B1 -A1000 luacov.report.out
@@ -450,6 +454,21 @@ jobs:
           make titan-native-coverage-build TITAN_COVERAGE_GCOV=gcov-14 \
             TITAN_COVERAGE_FORMATS='html lcov cobertura' \
             TITAN_COVERAGE_GCOVR="$RUNNER_TEMP/titan-coverage-tools/bin/gcovr"
+
+      - name: Certify identical SDK reinstall without coverage compilation or linking
+        run: |
+          luarocks make --force
+          log="$RUNNER_TEMP/titan-coverage-identical-reinstall.log"
+          make titan-native-coverage-build TITAN_VERBOSE=1 TITAN_COVERAGE_GCOV=gcov-14 \
+            TITAN_COVERAGE_FORMATS='html lcov cobertura' \
+            TITAN_COVERAGE_GCOVR="$RUNNER_TEMP/titan-coverage-tools/bin/gcovr" 2>&1 | tee "$log"
+          grep -Eq '^Titan object hit ' "$log"
+          grep -Eq '^Titan native hit ' "$log"
+          grep -Eq '^Titan link hit ' "$log"
+          if grep -Eq '^Titan (object|native|link) miss |os_process_host_child[.]c' "$log"; then
+            echo "Identical SDK reinstall compiled or linked native coverage artifacts" >&2
+            exit 1
+          fi
 
       - name: Run complete covered aggregate with fresh counters
         run: make titan-native-coverage-run
@@ -811,8 +830,8 @@ jobs:
           readelf -Ws "$provider" | grep __asan_
           readelf -Ws "$provider" | grep __ubsan_
 
-      # Build the aggregate native suite exactly once. Every focused native
-      # sanitizer gate below filters this same instrumented executable.
+      # Every focused sanitizer gate filters the same complete aggregate.
+      # Its identical-reinstall gate must reuse every certified build artifact.
       - name: Build unified native stdlib sanitizer executable
         env:
           TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
@@ -820,6 +839,28 @@ jobs:
         run: |
           bash spec/support/ci_sanitizer_capture.sh native-stdlib-build \
             make titan-stdlib-test-build
+
+      - name: Certify identical SDK reinstall without sanitizer compilation or linking
+        env:
+          TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
+          TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
+        run: |
+          # The first install owns the immutable failure-diagnostic snapshot.
+          # Only this identical reinstall skips taking a second snapshot.
+          bash spec/support/ci_sanitizer_capture.sh identical-reinstall \
+            env TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT= luarocks make --force
+          cmp "$TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT/provider.so" \
+            "$PREFIX/lib/titan/0.6/titan.so"
+          log="$RUNNER_TEMP/titan-sanitizer-identical-reinstall.log"
+          bash spec/support/ci_sanitizer_capture.sh native-stdlib-identical-reinstall \
+            make titan-stdlib-test-build TITAN_VERBOSE=1 2>&1 | tee "$log"
+          grep -Eq '^Titan object hit ' "$log"
+          grep -Eq '^Titan native hit ' "$log"
+          grep -Eq '^Titan link hit ' "$log"
+          if grep -Eq '^Titan (object|native|link) miss |os_process_host_child[.]c' "$log"; then
+            echo "Identical SDK reinstall compiled or linked native sanitizer artifacts" >&2
+            exit 1
+          fi
 
       # Check shutdown on the already built sanitizer aggregate. Coverage
       # reporting must not consume the lifetime oracle's 15-second budget.

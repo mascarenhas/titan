@@ -54,9 +54,20 @@ local function with_overrides(target, replacements, body)
     return table.unpack(results, 2, results.n)
 end
 
+local function with_native_stat(native, body)
+    local support = require "titan"
+    return with_overrides(support, { _stat_precise = native }, body)
+end
+
+local function coarse_stat_it(name, body)
+    it(name, function() return with_native_stat(false, body) end)
+end
+
 local function posix_model_it(name, body)
     it(name, function()
-        return with_overrides(platform, { windows = false }, body)
+        return with_native_stat(false, function()
+            return with_overrides(platform, { windows = false }, body)
+        end)
     end)
 end
 
@@ -92,6 +103,136 @@ describe("compiler I/O strategy", function()
         end, "compiler I/O strategy method 'read_file' must be callable")
     end)
 
+    it("keeps execution eligibility an optional strategy capability", function()
+        local strategy = compiler_io.new_sync()
+        strategy.executable = false
+        assert.equal(strategy, compiler_io.validate(strategy))
+    end)
+
+    it("delegates effective execution eligibility without opening the file", function()
+        local support, strategy = require "titan", compiler_io.new_sync()
+        local checked, result, diagnostic = {}, true, nil
+        with_overrides(support, { _executable_access = function(path)
+            checked[#checked + 1] = path
+            return result, diagnostic
+        end }, function()
+            with_overrides(io, { open = function()
+                error("execution eligibility must not open or read a file")
+            end }, function()
+                assert.is_true(strategy:executable("/route/link/../tool"))
+                result = false
+                assert.is_false(strategy:executable("/route/link/../tool"))
+                result, diagnostic = nil, "native eligibility query failed"
+                local allowed, err = strategy:executable("/route/link/../tool")
+                assert.is_nil(allowed)
+                assert.equal(diagnostic, err)
+                assert.same({ "/route/link/../tool", "/route/link/../tool",
+                    "/route/link/../tool" }, checked)
+            end)
+        end)
+    end)
+
+    it("fails closed when native execution eligibility is unavailable", function()
+        with_overrides(require "titan", { _executable_access = false }, function()
+            local allowed, err = compiler_io.new_sync():executable("tool")
+            assert.is_nil(allowed)
+            assert.matches("native support lacks _executable_access", err, 1, true)
+        end)
+    end)
+
+    it("validates execution query paths before calling native support", function()
+        with_overrides(require "titan", { _executable_access = function()
+            error("malformed paths must not reach native support")
+        end }, function()
+            local strategy = compiler_io.new_sync()
+            local allowed, err = strategy:executable(false)
+            assert.is_nil(allowed)
+            assert.equal("path must be a string", err)
+            allowed, err = strategy:executable("bad\0path")
+            assert.is_nil(allowed)
+            assert.equal("path contains a NUL byte", err)
+        end)
+    end)
+
+    it("propagates native execution query cancellation unchanged", function()
+        local cancelled = {}
+        with_overrides(require "titan", { _executable_access = function()
+            error(cancelled, 0)
+        end }, function()
+            local strategy = compiler_io.new_sync()
+            local ok, err = pcall(strategy.executable, strategy, "tool")
+            assert.is_false(ok)
+            assert.equal(cancelled, err)
+        end)
+    end)
+
+    it("keeps executable CWD search an optional strategy capability", function()
+        local strategy = compiler_io.new_sync()
+        strategy.executable_search_cwd = false
+        assert.equal(strategy, compiler_io.validate(strategy))
+    end)
+
+    it("delegates executable CWD search without environment or file fallbacks", function()
+        local support, strategy = require "titan", compiler_io.new_sync()
+        local result, diagnostic, checked = true, nil, 0
+        local function forbidden()
+            error("CWD search policy must come only from native support")
+        end
+        with_overrides(support, { _executable_search_cwd = function(...)
+            assert.equal(0, select("#", ...))
+            checked = checked + 1
+            return result, diagnostic
+        end }, function()
+            with_overrides(io, { open = forbidden }, function()
+                with_overrides(os, { getenv = forbidden }, function()
+                    with_overrides(platform, { getenv = forbidden }, function()
+                        assert.is_true(strategy:executable_search_cwd())
+                        result = false
+                        assert.is_false(strategy:executable_search_cwd())
+                        result, diagnostic = nil, "native CWD query unavailable"
+                        local allowed, err = strategy:executable_search_cwd()
+                        assert.is_nil(allowed)
+                        assert.equal(diagnostic, err)
+                        local cancelled = {}
+                        diagnostic = cancelled
+                        allowed, err = strategy:executable_search_cwd()
+                        assert.is_nil(allowed)
+                        assert.equal(cancelled, err)
+                        assert.equal(4, checked)
+                    end)
+                end)
+            end)
+        end)
+    end)
+
+    it("reports unavailable native executable CWD policy without guessing", function()
+        local strategy = compiler_io.new_sync()
+        local function forbidden()
+            error("unavailable CWD policy must not consult the host environment")
+        end
+        with_overrides(require "titan", { _executable_search_cwd = false }, function()
+            with_overrides(platform, { getenv = forbidden }, function()
+                with_overrides(os, { getenv = forbidden }, function()
+                    local allowed, err = strategy:executable_search_cwd()
+                    assert.is_nil(allowed)
+                    assert.matches("native support lacks _executable_search_cwd", err, 1, true)
+                end)
+            end)
+        end)
+    end)
+
+    it("propagates native executable CWD query cancellation unchanged", function()
+        local cancelled = {}
+        with_overrides(require "titan", { _executable_search_cwd = function()
+            error(cancelled, 0)
+        end }, function()
+            local strategy = compiler_io.new_sync()
+            local ok, err = pcall(strategy.executable_search_cwd, strategy)
+            assert.is_false(ok)
+            assert.equal(cancelled, err)
+        end)
+    end)
+
     it("keeps the synchronous yield checkpoint a no-op", function()
         local strategy = compiler_io.new_sync()
         local co = coroutine.create(function()
@@ -102,6 +243,227 @@ describe("compiler I/O strategy", function()
         assert.is_true(resumed)
         assert.equal("completed", result)
         assert.equal("dead", coroutine.status(co))
+    end)
+
+    coarse_stat_it("declares floating timestamp observations coarse at whole and fractional seconds", function()
+        local strategy = compiler_io.new_sync()
+        for _, stamp in ipairs({ 100, 100.125 }) do
+            with_overrides(lfs, {
+                attributes = function()
+                    return { mode = "file", size = 4, modification = stamp, dev = 1, ino = 2 }
+                end,
+            }, function()
+                local stat = assert(strategy:stat("fixture.h"))
+                assert.equal("coarse", stat.time_precision)
+                assert.equal("coarse", stat.precision)
+                assert.equal(100, stat.modified_seconds)
+                assert.equal(stamp == 100 and 0 or 125000000, stat.modified_nanoseconds)
+            end)
+        end
+    end)
+
+    it("normalizes exact native timestamps and opaque identities for stat and lstat", function()
+        local calls = {}
+        local path = "SDK 日本/linked/../header.h"
+        local function native(filename, follow)
+            calls[#calls + 1] = { filename, follow }
+            return { kind = follow and "file" or "link",
+                dev = "18446744073709551615", ino = "0123456789abcdef0123456789abcdef",
+                size = 19, mode = follow and 0x81A4 or 0xA1FF,
+                mtime_ns = 1790816523123456789, ctime_ns = 1790816523987654321 }
+        end
+        with_native_stat(native, function()
+            with_overrides(lfs, {
+                attributes = function() error("native stat must not query LFS") end,
+                symlinkattributes = function() error("native lstat must not query LFS") end,
+            }, function()
+                local strategy = compiler_io.new_sync()
+                for _, follow in ipairs({ true, false }) do
+                    local stat = assert(follow and strategy:stat(path) or strategy:lstat(path))
+                    assert.same({
+                        kind = follow and "file" or "symlink",
+                        dev = "18446744073709551615", ino = "0123456789abcdef0123456789abcdef",
+                        device = "18446744073709551615", inode = "0123456789abcdef0123456789abcdef",
+                        size = 19, mode = follow and 0x81A4 or 0xA1FF,
+                        precision = "ns", time_precision = "ns",
+                        mtime_ns = 1790816523123456789, ctime_ns = 1790816523987654321,
+                        modified_seconds = 1790816523, modified_nanoseconds = 123456789,
+                        changed_seconds = 1790816523, changed_nanoseconds = 987654321,
+                    }, stat)
+                end
+                assert.same({ { path, true }, { path, false } }, calls)
+            end)
+        end)
+    end)
+
+    it("preserves optional native Windows entry attributes for both observation modes", function()
+        for _, attributes in ipairs({ false, 0, 0x80, 0x410 }) do
+            with_native_stat(function(_, follow)
+                return { kind = follow and "file" or "link", dev = "1", ino = "2",
+                    size = 0, mode = follow and 0x81A4 or 0xA1FF,
+                    mtime_ns = 0, ctime_ns = 0,
+                    windows_attributes = attributes ~= false and attributes or nil }
+            end, function()
+                local strategy = compiler_io.new_sync()
+                for _, method in ipairs({ "stat", "lstat" }) do
+                    local observed = assert(strategy[method](strategy, "tool-link.exe"))
+                    assert.equal(attributes ~= false and attributes or nil, observed.windows_attributes)
+                    assert.equal(method == "stat" and "file" or "symlink", observed.kind)
+                end
+            end)
+        end
+    end)
+
+    it("preserves exact-second and pre-epoch native timestamps", function()
+        for _, stamp in ipairs({ 0, -1, -1000000001 }) do
+            with_native_stat(function()
+                return { kind = "file", dev = "1", ino = "2", size = 0, mode = 0x81A4,
+                    mtime_ns = stamp, ctime_ns = stamp }
+            end, function()
+                local stat = assert(compiler_io.new_sync():stat("fixture.h"))
+                assert.equal("ns", stat.precision)
+                assert.equal(stamp, stat.mtime_ns)
+                assert.equal(stamp, stat.ctime_ns)
+                assert.equal(stamp // 1000000000, stat.modified_seconds)
+                assert.equal(stamp % 1000000000, stat.modified_nanoseconds)
+                assert.equal(stat.modified_seconds, stat.changed_seconds)
+                assert.equal(stat.modified_nanoseconds, stat.changed_nanoseconds)
+            end)
+        end
+    end)
+
+    -- A Windows volume may report no ChangeTime, or neither file-identity
+    -- query may succeed; the native result then omits those fields.
+    local incomplete_native = { { "ctime_ns" }, { "dev", "ino" } }
+    local function incomplete_stat(omitted, size)
+        return function()
+            local result = { kind = "file", dev = "7", ino = "8", size = size or 3, mode = 0x81A4,
+                mtime_ns = 100000000123, ctime_ns = 100000000456 }
+            for _, field in ipairs(omitted) do result[field] = nil end
+            return result
+        end
+    end
+
+    it("declares a native observation without a change time or file identity coarse", function()
+        for _, omitted in ipairs(incomplete_native) do
+            with_native_stat(incomplete_stat(omitted), function()
+                local stat = assert(compiler_io.new_sync():stat("fixture.h"))
+                assert.equal("coarse", stat.precision, omitted[1])
+                assert.equal("coarse", stat.time_precision, omitted[1])
+                assert.equal(100, stat.modified_seconds)
+                assert.equal(123, stat.modified_nanoseconds)
+                if omitted[1] == "ctime_ns" then
+                    assert.is_nil(stat.changed_seconds)
+                    assert.is_nil(stat.changed_nanoseconds)
+                    assert.equal("7", stat.device)
+                    assert.equal("8", stat.inode)
+                else
+                    assert.is_nil(stat.device)
+                    assert.is_nil(stat.inode)
+                    assert.equal(100, stat.changed_seconds)
+                    assert.equal(456, stat.changed_nanoseconds)
+                end
+            end)
+        end
+    end)
+
+    it("never reuses a recorded digest for a native observation without a change time or identity", function()
+        local codec = require "titan-compiler.graphcodec"
+        local incremental = require "titan-compiler.incremental"
+        local sha256 = require "titan-compiler.sha256"
+        local version = require "titan-compiler.version"
+        local root = workspace()
+        local ok, err = pcall(function()
+            local strategy = compiler_io.new_sync()
+            local input, manifest = root .. "/input.o", root .. "/sdk-digests"
+            local bytes = "object bytes"
+            assert(strategy:write_file(input, bytes))
+            -- A stale record matching what the former substitutions reported:
+            -- the change time copied from mtime, and dev = ino = "0".
+            assert(strategy:write_file(manifest, assert(codec.encode({
+                schema = version.SDK_DIGEST_SCHEMA, digest = version.CERTIFICATE_DIGEST,
+                canonicalization = version.CERTIFICATE_CANONICALIZATION, abi = version.TITAN_ABI_VERSION,
+                files = { [assert(strategy:realpath(input))] = { digest = sha256.hex("stale"),
+                    observation = { precision = "ns", kind = "file", dev = "0", ino = "0", size = #bytes,
+                        mode = 0x81A4, mtime_ns = 100000000123, ctime_ns = 100000000123 } } },
+            }))))
+            for _, omitted in ipairs(incomplete_native) do
+                local native = incomplete_stat(omitted, #bytes)
+                with_native_stat(function(path, follow)
+                    local result = native(path, follow)
+                    if result.dev then result.dev, result.ino = "0", "0" end
+                    if result.ctime_ns then result.ctime_ns = result.mtime_ns end
+                    return result
+                end, function()
+                    local ctx = { io = compiler_io.new_sync() }
+                    assert(incremental.load_sdk_digests(ctx, manifest))
+                    assert.equal(sha256.hex(bytes), (incremental.file_digest(ctx, input)), omitted[1])
+                    assert.equal(0, incremental.counters(ctx).sdk_reuses, omitted[1])
+                    assert.equal(1, incremental.counters(ctx).file_reads, omitted[1])
+                end)
+            end
+        end)
+        remove_tree(root)
+        if not ok then error(err, 0) end
+    end)
+
+    it("distinguishes native missing paths and errors without querying coarse metadata", function()
+        local calls = 0
+        with_native_stat(function(path)
+            calls = calls + 1
+            if path == "missing" then return nil, "ENOENT: No such file or directory", 2 end
+            if path == "blocked/child" then return nil, "ENOTDIR: Not a directory", 20 end
+            return nil, "EACCES: Permission denied", 13
+        end, function()
+            with_overrides(lfs, {
+                attributes = function() error("native error must not query LFS") end,
+                symlinkattributes = function() error("native error must not query LFS") end,
+            }, function()
+                local strategy = compiler_io.new_sync()
+                for _, method in ipairs({ "stat", "lstat" }) do
+                    local missing, err = strategy[method](strategy, "missing")
+                    assert.is_nil(missing)
+                    assert.is_nil(err)
+                    missing, err = strategy[method](strategy, "blocked/child")
+                    assert.is_nil(missing)
+                    assert.equal("ENOTDIR: Not a directory", err)
+                    missing, err = strategy[method](strategy, "denied")
+                    assert.is_nil(missing)
+                    assert.equal("EACCES: Permission denied", err)
+                end
+                assert.equal(6, calls)
+                assert.is_nil(strategy:stat(false))
+                assert.is_nil(strategy:lstat("bad\0path"))
+                assert.equal(6, calls)
+            end)
+        end)
+    end)
+
+    it("observes native precise support added after a coarse lookup", function()
+        with_native_stat(false, function()
+            local strategy = compiler_io.new_sync()
+            with_overrides(lfs, {
+                attributes = function()
+                    return { mode = "file", size = 0, modification = 100 }
+                end,
+            }, function()
+                assert.equal("coarse", assert(strategy:stat("fixture.h")).precision)
+                require("titan")._stat_precise = function()
+                    return { kind = "file", dev = "1", ino = "2", size = 0, mode = 0x81A4,
+                        mtime_ns = 100000000000, ctime_ns = 100000000001 }
+                end
+                assert.equal("ns", assert(strategy:stat("fixture.h")).precision)
+            end)
+        end)
+    end)
+
+    it("propagates native precise-stat cancellation unchanged", function()
+        local cancelled = {}
+        with_native_stat(function() error(cancelled, 0) end, function()
+            local ok, err = pcall(compiler_io.new_sync().stat, compiler_io.new_sync(), "fixture.h")
+            assert.is_false(ok)
+            assert.equal(cancelled, err)
+        end)
     end)
 
     it("preserves binary files and normalizes filesystem operations", function()
@@ -147,12 +509,21 @@ describe("compiler I/O strategy", function()
 
         local metadata = assert(strategy:stat(source))
         local expected_keys = {
-            "kind", "mode", "modified_nanoseconds", "modified_seconds", "size",
+            "kind", "mode", "modified_nanoseconds", "modified_seconds",
+            "precision", "size", "time_precision",
         }
-        if not platform.windows then
-            table.insert(expected_keys, 1, "inode")
-            table.insert(expected_keys, 1, "device")
+        local precise = metadata.precision == "ns"
+        if precise then
+            for _, key in ipairs({
+                "changed_seconds", "changed_nanoseconds", "ctime_ns", "mtime_ns", "dev", "ino",
+            }) do expected_keys[#expected_keys + 1] = key end
         end
+        if precise and platform.windows then expected_keys[#expected_keys + 1] = "windows_attributes" end
+        if precise or not platform.windows then
+            expected_keys[#expected_keys + 1] = "device"
+            expected_keys[#expected_keys + 1] = "inode"
+        end
+        table.sort(expected_keys)
         assert.same(expected_keys, (function()
             local keys = {}
             for key in pairs(metadata) do keys[#keys + 1] = key end
@@ -162,7 +533,18 @@ describe("compiler I/O strategy", function()
         assert.equal("file", metadata.kind)
         assert.equal(#bytes, metadata.size)
         assert.equal(0x8000, metadata.mode & 0xF000)
-        if platform.windows then
+        if precise then
+            assert.is_string(metadata.device)
+            assert.is_string(metadata.inode)
+            assert.equal(metadata.dev, metadata.device)
+            assert.equal(metadata.ino, metadata.inode)
+            assert.equal("integer", math.type(metadata.mtime_ns))
+            assert.equal("integer", math.type(metadata.ctime_ns))
+            if platform.windows then
+                assert.equal("integer", math.type(metadata.windows_attributes))
+                assert.equal(0, metadata.windows_attributes & 0x10)
+            else assert.is_nil(metadata.windows_attributes) end
+        elseif platform.windows then
             assert.is_nil(metadata.device)
             assert.is_nil(metadata.inode)
         else
@@ -171,6 +553,7 @@ describe("compiler I/O strategy", function()
         end
         assert.is_number(metadata.modified_seconds)
         assert.is_number(metadata.modified_nanoseconds)
+        assert.equal(precise and "ns" or "coarse", metadata.time_precision)
         assert.is_true(metadata.modified_nanoseconds >= 0)
         assert.is_true(metadata.modified_nanoseconds < 1000000000)
 
@@ -179,7 +562,7 @@ describe("compiler I/O strategy", function()
         local hard_link_metadata = assert(strategy:stat(hard_link))
         assert.equal(bytes, assert(strategy:read_file(hard_link)))
         assert.equal(metadata.size, hard_link_metadata.size)
-        if not platform.windows then
+        if precise or not platform.windows then
             assert.equal(metadata.device, hard_link_metadata.device)
             assert.equal(metadata.inode, hard_link_metadata.inode)
         end
@@ -207,6 +590,62 @@ describe("compiler I/O strategy", function()
         local temporary_metadata = assert(strategy:stat(temporary))
         assert.equal("file", temporary_metadata.kind)
         assert.is_true(strategy:unlink(temporary))
+    end)
+
+    it("absorbs files into digest streams and keeps stream failures unchanged", function()
+        root = workspace()
+        local strategy = compiler_io.new_sync()
+        local source = root .. "/absorbed.bin"
+        local bytes = string.rep("prefix\0middle\255suffix", 200000)
+        assert.is_true(strategy:write_file(source, bytes))
+        -- A Lua stream receives bounded chunks in order.
+        local chunks = {}
+        local lua_stream = { update = function(self, chunk)
+            assert.is_true(#chunk >= 1 and #chunk <= 1024 * 1024)
+            chunks[#chunks + 1] = chunk
+            return self
+        end }
+        assert.equal(#bytes, assert(strategy:absorb_file(source, lua_stream)))
+        assert.is_true(#chunks > 1)
+        assert.equal(bytes, table.concat(chunks))
+        local empty = root .. "/empty.bin"
+        assert.is_true(strategy:write_file(empty, ""))
+        assert.equal(0, assert(strategy:absorb_file(empty, { update = function()
+            error("an empty file has no chunks")
+        end })))
+
+        -- A native stream absorbs the open file itself.
+        local support = require "titan"
+        if type(support._sha256_stream) == "function" then
+            local native = support._sha256_stream()
+            assert.equal(#bytes, assert(strategy:absorb_file(source, native)))
+            assert.equal(support._sha256_binary(bytes), native:finish())
+            assert.has_error(function() strategy:absorb_file(source, native) end,
+                "attempt to use a finished SHA-256 stream")
+        end
+
+        local missing, missing_error = strategy:absorb_file(root .. "/absent.bin",
+            { update = function() end })
+        assert.is_nil(missing)
+        assert.is_string(missing_error)
+        local cancelled = {}
+        local ok, err = pcall(strategy.absorb_file, strategy, source,
+            { update = function() error(cancelled, 0) end })
+        assert.is_false(ok)
+        assert.equal(cancelled, err)
+
+        -- A stream whose method lookup raises fails before any file is opened.
+        local open, opens = io.open, 0
+        io.open = function(...)
+            opens = opens + 1
+            return open(...)
+        end
+        local raising = setmetatable({}, { __index = function() error(cancelled, 0) end })
+        local lookup_ok, lookup_err = pcall(strategy.absorb_file, strategy, source, raising)
+        io.open = open
+        assert.is_false(lookup_ok)
+        assert.equal(cancelled, lookup_err)
+        assert.equal(0, opens)
     end)
 
     it("distinguishes symlinks, dangling targets, and canonical paths", function()
@@ -270,6 +709,76 @@ describe("compiler I/O strategy", function()
         else
             assert.matches("does not exist", canonical_err, 1, true)
         end
+    end)
+
+    posix_model_it("keeps captured shell semantics while inheriting coordinator leases", function()
+        local process = require "titan-compiler.process"
+        local argv = { "tool with spaces", "quoted'argument", "line\nbreak" }
+        for _, settings in ipairs({ {}, { stderr_to_stdout = false } }) do
+            for _, case in ipairs({
+                { ok = true, why = "exit", status = 0 },
+                { ok = false, why = "exit", status = 3 },
+                { ok = false, why = "exit", status = 126 },
+                { ok = false, why = "exit", status = 127 },
+                { ok = false, why = "exit", status = 143 },
+                { ok = false, why = "signal", status = 15 },
+            }) do
+                local strategy, popen_calls = compiler_io.new_sync(), 0
+                local leases, output = { 17, 41 }, "captured\0bytes"
+                with_overrides(io, { popen = function(_, mode)
+                    popen_calls = popen_calls + 1
+                    assert.equal("r", mode)
+                    return {
+                        read = function() return output end,
+                        close = function() return case.ok, case.why, case.status end,
+                    }
+                end }, function()
+                    local baseline = strategy:run(argv, settings)
+                    strategy._process_inherit = leases
+                    with_overrides(process, { capture = function(actual, options)
+                        assert.same({ "/bin/sh", "-c", baseline.command }, actual)
+                        assert.equal(leases, options.inherit)
+                        assert.is_true(options.inherit_environment)
+                        assert.is_false(options.stderr_to_stdout)
+                        return { started = true, ok = case.ok, why = case.why,
+                            status = case.status, output = output }
+                    end }, function()
+                        assert.same(baseline, strategy:run(argv, settings))
+                    end)
+                    assert.equal(1, popen_calls)
+                    strategy._process_inherit = nil
+                    assert.same(baseline, strategy:run(argv, settings))
+                    assert.equal(2, popen_calls)
+                end)
+            end
+        end
+    end)
+
+    posix_model_it("does not escape inherited leases after a capture infrastructure failure", function()
+        local process = require "titan-compiler.process"
+        local strategy = compiler_io.new_sync()
+        strategy._process_inherit = { 17 }
+        with_overrides(io, { popen = function()
+            error("an inherited command must not fall back to popen")
+        end }, function()
+            with_overrides(process, { capture = function() error("capture launch denied") end },
+            function()
+                local result = strategy:run({ "tool" })
+                assert.is_false(result.started)
+                assert.is_false(result.ok)
+                assert.matches("capture launch denied", result.diagnostic, 1, true)
+                assert.is_nil(result.status)
+            end)
+            local expected = { started = true, ok = false, output = "partial",
+                diagnostic = "could not capture command output: interrupted read" }
+            with_overrides(process, { capture = function() return expected end }, function()
+                local result = strategy:run({ "tool" })
+                assert.equal(expected, result)
+                assert.is_string(result.command)
+                assert.is_nil(result.status)
+                assert.matches("interrupted read", result.diagnostic, 1, true)
+            end)
+        end)
     end)
 
     it("captures argv with deterministic locale and normalized status", function()
@@ -629,11 +1138,12 @@ describe("Windows synchronous compiler I/O", function()
         end
     end)
 
-    it("uses LuaFileSystem metadata and lexical existing paths on Windows", function()
+    coarse_stat_it("uses LuaFileSystem metadata and lexical existing paths on Windows", function()
         local attributes = { mode = "file", permissions = "rw-rw-rw-",
             size = 4294967419, dev = 7, ino = 0, modification = 1790816523 }
         local metadata = { kind = "file", mode = 0x81B6, size = 4294967419,
-            modified_seconds = 1790816523, modified_nanoseconds = 0 }
+            modified_seconds = 1790816523, modified_nanoseconds = 0,
+            time_precision = "coarse", precision = "coarse" }
         local calls = {}
         local function query(name, path)
             calls[#calls + 1] = { name, path }
@@ -853,6 +1363,55 @@ describe("synchronous compiler I/O batches", function()
                 end
                 assert_guard_restored()
             end)
+        end
+    end)
+
+    posix_model_it("forwards coordinator leases to every parallel captured child", function()
+        root = workspace()
+        local strategy, leases = compiler_io.new_sync(), { 17, 41 }
+        strategy._process_inherit = leases
+        local channel, launches, logs = {}, {}, 0
+        function strategy:tmpname()
+            logs = logs + 1
+            local filename = root .. "/capture-" .. logs
+            local file = assert(io.open(filename, "wb"))
+            assert(file:close())
+            return filename
+        end
+        local results = with_overrides(jobs, {
+            open_slots = function()
+                return { limit = 2, close = function() return true end,
+                    cancelled = function() return nil end }
+            end,
+            open_channel = function() return channel end,
+            close_channel = function(actual)
+                assert.equal(channel, actual)
+                return true
+            end,
+            launch = function(actual, argv, _, stdout, stderr, index, before_start, options)
+                assert.equal(channel, actual)
+                assert.equal(stdout, stderr)
+                assert.is_nil(before_start)
+                assert.equal(leases, options.inherit)
+                launches[index] = argv
+                local file = assert(io.open(stdout, "wb"))
+                assert(file:write("child " .. index))
+                assert(file:close())
+                return { ok = true, term = "exit", code = 0, finish_errors = {} }
+            end,
+            drive = function(_, actual, count, launch)
+                assert.equal(channel, actual)
+                for index = 1, count do assert(launch(index)) end
+                return count + 1
+            end,
+        }, function()
+            return strategy:run_batch({ { "first-tool" }, { "second-tool" } }, { jobs = 2 })
+        end)
+        assert.same({ { "first-tool" }, { "second-tool" } }, launches)
+        for index = 1, 2 do
+            assert.is_true(results[index].ok, results[index].diagnostic)
+            assert.equal("child " .. index, results[index].output)
+            assert.is_nil(lfs.attributes(root .. "/capture-" .. index))
         end
     end)
 

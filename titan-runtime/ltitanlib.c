@@ -1,6 +1,10 @@
 #if !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700
 #endif
+/* Darwin hides flock(2)'s LOCK_* operations under a strict XSI level. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
 #if defined(_WIN32) && !defined(_WIN32_WINNT)
 #define _WIN32_WINNT 0x0602
 #endif
@@ -16,6 +20,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -309,7 +314,7 @@ static int cleartrace(lua_State *L) {
 
 /* Private compiler helper: SHA-256 of a Lua byte string, returned as the
 ** 32-byte binary digest. Byte-for-byte equal to titan-compiler.sha256.
-** Implementation notes: doc/implementation/driver.md#native-compiler-support */
+** Implementation notes: doc/implementation/driver.md#the-runtime-support-library-titan-runtime */
 #define TITAN_SHA_ROTR(x, n) ((uint32_t)(((x) >> (n)) | ((x) << (32 - (n)))))
 
 static const uint32_t titan_sha256_k[64] = {
@@ -328,68 +333,297 @@ static const uint32_t titan_sha256_k[64] = {
   0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u,
 };
 
-static void titan_sha256_block(uint32_t state[8], const unsigned char *block) {
+/* Certification hashes every final-link input, including the standard
+** provider of several hundred megabytes, so compression speed bounds fresh
+** links. Hardware SHA-256 (x86 SHA extensions selected at run time, or the
+** ARMv8 SHA2 extension when a little-endian AArch64 target guarantees it)
+** computes the identical FIPS 180-4 compression; selection never changes a
+** digest. The ARM message load byte-reverses each word for little-endian
+** lanes, so big-endian AArch64 keeps the portable compressor. */
+#if (defined(__x86_64__) || defined(__i386__)) && \
+    (defined(__GNUC__) || defined(__clang__))
+#include <cpuid.h>
+#include <immintrin.h>
+#define TITAN_SHA256_X86 1
+#elif defined(__aarch64__) && defined(__ARM_FEATURE_SHA2) && \
+    defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#include <arm_neon.h>
+#define TITAN_SHA256_ARM 1
+#endif
+
+/* Compresses `blocks` consecutive 64-byte blocks into `state`. */
+typedef void (*titan_sha256_compressor)(uint32_t state[8],
+                                        const unsigned char *data,
+                                        size_t blocks);
+
+#if !defined(TITAN_SHA256_ARM)
+static void titan_sha256_portable(uint32_t state[8], const unsigned char *data,
+                                  size_t blocks) {
   uint32_t w[64];
   uint32_t a, b, c, d, e, f, g, h;
   int i;
-  for (i = 0; i < 16; i++)
-    w[i] = ((uint32_t)block[4 * i] << 24) | ((uint32_t)block[4 * i + 1] << 16) |
-           ((uint32_t)block[4 * i + 2] << 8) | (uint32_t)block[4 * i + 3];
-  for (i = 16; i < 64; i++) {
-    uint32_t s0 = TITAN_SHA_ROTR(w[i - 15], 7) ^ TITAN_SHA_ROTR(w[i - 15], 18) ^
-                  (w[i - 15] >> 3);
-    uint32_t s1 = TITAN_SHA_ROTR(w[i - 2], 17) ^ TITAN_SHA_ROTR(w[i - 2], 19) ^
-                  (w[i - 2] >> 10);
-    w[i] = (uint32_t)(w[i - 16] + s0 + w[i - 7] + s1);
+  for (; blocks > 0; blocks--, data += 64) {
+    for (i = 0; i < 16; i++)
+      w[i] = ((uint32_t)data[4 * i] << 24) | ((uint32_t)data[4 * i + 1] << 16) |
+             ((uint32_t)data[4 * i + 2] << 8) | (uint32_t)data[4 * i + 3];
+    for (i = 16; i < 64; i++) {
+      uint32_t s0 = TITAN_SHA_ROTR(w[i - 15], 7) ^ TITAN_SHA_ROTR(w[i - 15], 18) ^
+                    (w[i - 15] >> 3);
+      uint32_t s1 = TITAN_SHA_ROTR(w[i - 2], 17) ^ TITAN_SHA_ROTR(w[i - 2], 19) ^
+                    (w[i - 2] >> 10);
+      w[i] = (uint32_t)(w[i - 16] + s0 + w[i - 7] + s1);
+    }
+    a = state[0]; b = state[1]; c = state[2]; d = state[3];
+    e = state[4]; f = state[5]; g = state[6]; h = state[7];
+    for (i = 0; i < 64; i++) {
+      uint32_t sum1 = TITAN_SHA_ROTR(e, 6) ^ TITAN_SHA_ROTR(e, 11) ^ TITAN_SHA_ROTR(e, 25);
+      uint32_t choose = (e & f) ^ ((uint32_t)~e & g);
+      uint32_t temp1 = (uint32_t)(h + sum1 + choose + titan_sha256_k[i] + w[i]);
+      uint32_t sum0 = TITAN_SHA_ROTR(a, 2) ^ TITAN_SHA_ROTR(a, 13) ^ TITAN_SHA_ROTR(a, 22);
+      uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
+      uint32_t temp2 = (uint32_t)(sum0 + majority);
+      h = g; g = f; f = e; e = (uint32_t)(d + temp1);
+      d = c; c = b; b = a; a = (uint32_t)(temp1 + temp2);
+    }
+    state[0] += a; state[1] += b; state[2] += c; state[3] += d;
+    state[4] += e; state[5] += f; state[6] += g; state[7] += h;
   }
-  a = state[0]; b = state[1]; c = state[2]; d = state[3];
-  e = state[4]; f = state[5]; g = state[6]; h = state[7];
-  for (i = 0; i < 64; i++) {
-    uint32_t sum1 = TITAN_SHA_ROTR(e, 6) ^ TITAN_SHA_ROTR(e, 11) ^ TITAN_SHA_ROTR(e, 25);
-    uint32_t choose = (e & f) ^ ((uint32_t)~e & g);
-    uint32_t temp1 = (uint32_t)(h + sum1 + choose + titan_sha256_k[i] + w[i]);
-    uint32_t sum0 = TITAN_SHA_ROTR(a, 2) ^ TITAN_SHA_ROTR(a, 13) ^ TITAN_SHA_ROTR(a, 22);
-    uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
-    uint32_t temp2 = (uint32_t)(sum0 + majority);
-    h = g; g = f; f = e; e = (uint32_t)(d + temp1);
-    d = c; c = b; b = a; a = (uint32_t)(temp1 + temp2);
-  }
-  state[0] += a; state[1] += b; state[2] += c; state[3] += d;
-  state[4] += e; state[5] += f; state[6] += g; state[7] += h;
+}
+#endif
+
+#if defined(TITAN_SHA256_X86)
+
+static int titan_sha256_x86_available(void) {
+  unsigned int a, b, c, d;
+  if (__get_cpuid_max(0, NULL) < 7 || !__get_cpuid(1, &a, &b, &c, &d) ||
+      !(c & bit_SSSE3) || !(c & bit_SSE4_1))
+    return 0;
+  __cpuid_count(7, 0, a, b, c, d);
+  return (b & bit_SHA) != 0;
 }
 
-static int sha256_binary(lua_State *L) {
-  uint32_t state[8] = {
+__attribute__((target("sha,sse4.1,ssse3")))
+static void titan_sha256_x86(uint32_t state[8], const unsigned char *data,
+                             size_t blocks) {
+  const __m128i swap = _mm_set_epi64x(0x0c0d0e0f08090a0bLL, 0x0405060700010203LL);
+  __m128i abef, cdgh, msg[4];
+  __m128i tmp = _mm_shuffle_epi32(_mm_loadu_si128((const __m128i *)&state[0]), 0xB1);
+  cdgh = _mm_shuffle_epi32(_mm_loadu_si128((const __m128i *)&state[4]), 0x1B);
+  abef = _mm_alignr_epi8(tmp, cdgh, 8);
+  cdgh = _mm_blend_epi16(cdgh, tmp, 0xF0);
+  for (; blocks > 0; blocks--, data += 64) {
+    __m128i abef_saved = abef, cdgh_saved = cdgh;
+    int j;
+    for (j = 0; j < 4; j++)
+      msg[j] = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)(data + 16 * j)), swap);
+    for (j = 0; j < 16; j++) {
+      __m128i wk = _mm_add_epi32(msg[j & 3],
+          _mm_loadu_si128((const __m128i *)&titan_sha256_k[4 * j]));
+      cdgh = _mm_sha256rnds2_epu32(cdgh, abef, wk);
+      abef = _mm_sha256rnds2_epu32(abef, cdgh, _mm_shuffle_epi32(wk, 0x0E));
+      if (j < 12) {
+        __m128i next = _mm_add_epi32(_mm_sha256msg1_epu32(msg[j & 3], msg[(j + 1) & 3]),
+            _mm_alignr_epi8(msg[(j + 3) & 3], msg[(j + 2) & 3], 4));
+        msg[j & 3] = _mm_sha256msg2_epu32(next, msg[(j + 3) & 3]);
+      }
+    }
+    abef = _mm_add_epi32(abef, abef_saved);
+    cdgh = _mm_add_epi32(cdgh, cdgh_saved);
+  }
+  tmp = _mm_shuffle_epi32(abef, 0x1B);
+  cdgh = _mm_shuffle_epi32(cdgh, 0xB1);
+  _mm_storeu_si128((__m128i *)&state[0], _mm_blend_epi16(tmp, cdgh, 0xF0));
+  _mm_storeu_si128((__m128i *)&state[4], _mm_alignr_epi8(cdgh, tmp, 8));
+}
+#elif defined(TITAN_SHA256_ARM)
+
+static void titan_sha256_arm(uint32_t state[8], const unsigned char *data,
+                             size_t blocks) {
+  uint32x4_t abcd = vld1q_u32(&state[0]), efgh = vld1q_u32(&state[4]), msg[4];
+  for (; blocks > 0; blocks--, data += 64) {
+    uint32x4_t abcd_saved = abcd, efgh_saved = efgh;
+    int j;
+    for (j = 0; j < 4; j++)
+      msg[j] = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data + 16 * j)));
+    for (j = 0; j < 16; j++) {
+      uint32x4_t wk = vaddq_u32(msg[j & 3], vld1q_u32(&titan_sha256_k[4 * j]));
+      uint32x4_t previous = abcd;
+      abcd = vsha256hq_u32(abcd, efgh, wk);
+      efgh = vsha256h2q_u32(efgh, previous, wk);
+      if (j < 12)
+        msg[j & 3] = vsha256su1q_u32(vsha256su0q_u32(msg[j & 3], msg[(j + 1) & 3]),
+                                     msg[(j + 2) & 3], msg[(j + 3) & 3]);
+    }
+    abcd = vaddq_u32(abcd, abcd_saved);
+    efgh = vaddq_u32(efgh, efgh_saved);
+  }
+  vst1q_u32(&state[0], abcd);
+  vst1q_u32(&state[4], efgh);
+}
+#endif
+
+/* Probe the CPU once per digest call; the caller keeps the choice for both
+** its data and padding blocks, with no unsynchronized process-wide state. */
+static titan_sha256_compressor titan_sha256_select(void) {
+#if defined(TITAN_SHA256_ARM)
+  return titan_sha256_arm;
+#else
+#if defined(TITAN_SHA256_X86)
+  if (titan_sha256_x86_available()) return titan_sha256_x86;
+#endif
+  return titan_sha256_portable;
+#endif
+}
+
+/* One SHA-256 computation. The compressor selected at its start serves every
+** data and padding block; whole blocks are compressed straight from the
+** caller's bytes and only a partial block is buffered. */
+typedef struct {
+  titan_sha256_compressor compress;
+  uint32_t state[8];
+  unsigned char block[64];
+  size_t buffered;
+  uint64_t length;
+} TitanSha256;
+
+static void titan_sha256_init(TitanSha256 *sha) {
+  static const uint32_t initial[8] = {
     0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
     0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u,
   };
-  unsigned char tail[128], digest[32];
-  const unsigned char *data;
-  size_t length, offset, rest, tail_length, i;
-  uint64_t bits;
-  luaL_checktype(L, 1, LUA_TSTRING);
-  data = (const unsigned char *)lua_tolstring(L, 1, &length);
-  for (offset = 0; length - offset >= 64; offset += 64)
-    titan_sha256_block(state, data + offset);
-  rest = length - offset;
-  memcpy(tail, data + offset, rest);
+  sha->compress = titan_sha256_select();
+  memcpy(sha->state, initial, sizeof initial);
+  sha->buffered = 0;
+  sha->length = 0;
+}
+
+static void titan_sha256_update(TitanSha256 *sha, const unsigned char *data,
+                                size_t length) {
+  size_t whole;
+  sha->length += length;
+  if (sha->buffered > 0) {
+    size_t take = 64 - sha->buffered;
+    if (take > length) take = length;
+    memcpy(sha->block + sha->buffered, data, take);
+    sha->buffered += take;
+    data += take;
+    length -= take;
+    if (sha->buffered < 64) return;
+    sha->compress(sha->state, sha->block, 1);
+    sha->buffered = 0;
+  }
+  whole = length - length % 64;
+  if (whole > 0) sha->compress(sha->state, data, whole / 64);
+  memcpy(sha->block, data + whole, length - whole);
+  sha->buffered = length - whole;
+}
+
+static void titan_sha256_final(TitanSha256 *sha, unsigned char digest[32]) {
+  unsigned char tail[128];
+  size_t rest = sha->buffered, tail_length, i;
+  uint64_t bits = sha->length << 3;
+  memcpy(tail, sha->block, rest);
   tail[rest] = 0x80;
   tail_length = rest < 56 ? 64 : 128;
   memset(tail + rest + 1, 0, tail_length - rest - 1);
-  bits = (uint64_t)length << 3;
   for (i = 0; i < 8; i++)
     tail[tail_length - 1 - i] = (unsigned char)(bits >> (8 * i));
-  titan_sha256_block(state, tail);
-  if (tail_length == 128) titan_sha256_block(state, tail + 64);
+  sha->compress(sha->state, tail, tail_length / 64);
   for (i = 0; i < 8; i++) {
-    digest[4 * i] = (unsigned char)(state[i] >> 24);
-    digest[4 * i + 1] = (unsigned char)(state[i] >> 16);
-    digest[4 * i + 2] = (unsigned char)(state[i] >> 8);
-    digest[4 * i + 3] = (unsigned char)state[i];
+    digest[4 * i] = (unsigned char)(sha->state[i] >> 24);
+    digest[4 * i + 1] = (unsigned char)(sha->state[i] >> 16);
+    digest[4 * i + 2] = (unsigned char)(sha->state[i] >> 8);
+    digest[4 * i + 3] = (unsigned char)sha->state[i];
   }
+}
+
+static int sha256_binary(lua_State *L) {
+  TitanSha256 sha;
+  unsigned char digest[32];
+  const unsigned char *data;
+  size_t length;
+  luaL_checktype(L, 1, LUA_TSTRING);
+  data = (const unsigned char *)lua_tolstring(L, 1, &length);
+  titan_sha256_init(&sha);
+  titan_sha256_update(&sha, data, length);
+  titan_sha256_final(&sha, digest);
   lua_pushlstring(L, (const char *)digest, sizeof digest);
   return 1;
 }
+
+/* Private compiler helper: an incremental SHA-256 for bounded-chunk file
+** digests. `stream:update(bytes)` returns the stream; `stream:absorb(file)`
+** hashes an open Lua file from its position to end of file through one fixed
+** buffer, so no Lua string ever holds its bytes, and returns the byte count
+** (or nil, message, errno on a read error); `stream:finish()` returns the same
+** 32-byte digest as _sha256_binary of everything absorbed, after which the
+** stream rejects further use. */
+#define TITAN_SHA256_STREAM_TYPE "titan.sha256_stream"
+
+typedef struct {
+  TitanSha256 sha;
+  int finished;
+} TitanSha256Stream;
+
+static TitanSha256Stream *check_sha256_stream(lua_State *L) {
+  TitanSha256Stream *stream =
+      (TitanSha256Stream *)luaL_checkudata(L, 1, TITAN_SHA256_STREAM_TYPE);
+  if (stream->finished) luaL_error(L, "attempt to use a finished SHA-256 stream");
+  return stream;
+}
+
+static int sha256_stream_new(lua_State *L) {
+  TitanSha256Stream *stream =
+      (TitanSha256Stream *)lua_newuserdatauv(L, sizeof(TitanSha256Stream), 0);
+  titan_sha256_init(&stream->sha);
+  stream->finished = 0;
+  luaL_setmetatable(L, TITAN_SHA256_STREAM_TYPE);
+  return 1;
+}
+
+static int sha256_stream_update(lua_State *L) {
+  TitanSha256Stream *stream = check_sha256_stream(L);
+  const unsigned char *data;
+  size_t length;
+  luaL_checktype(L, 2, LUA_TSTRING);
+  data = (const unsigned char *)lua_tolstring(L, 2, &length);
+  titan_sha256_update(&stream->sha, data, length);
+  lua_settop(L, 1);
+  return 1;
+}
+
+static int sha256_stream_absorb(lua_State *L) {
+  TitanSha256Stream *stream = check_sha256_stream(L);
+  luaL_Stream *file = (luaL_Stream *)luaL_checkudata(L, 2, LUA_FILEHANDLE);
+  unsigned char buffer[65536];
+  lua_Integer total = 0;
+  size_t count;
+  if (file->closef == NULL) return luaL_error(L, "attempt to use a closed file");
+  clearerr(file->f);
+  while ((count = fread(buffer, 1, sizeof buffer, file->f)) > 0) {
+    titan_sha256_update(&stream->sha, buffer, count);
+    total += (lua_Integer)count;
+  }
+  if (ferror(file->f)) return luaL_fileresult(L, 0, NULL);
+  lua_pushinteger(L, total);
+  return 1;
+}
+
+static int sha256_stream_finish(lua_State *L) {
+  TitanSha256Stream *stream = check_sha256_stream(L);
+  unsigned char digest[32];
+  stream->finished = 1;
+  titan_sha256_final(&stream->sha, digest);
+  lua_pushlstring(L, (const char *)digest, sizeof digest);
+  return 1;
+}
+
+static const luaL_Reg sha256_stream_methods[] = {
+  { "update", sha256_stream_update },
+  { "absorb", sha256_stream_absorb },
+  { "finish", sha256_stream_finish },
+  { NULL, NULL },
+};
 
 #if !defined(_WIN32)
 /* Private compiler helpers: GNU Make jobserver participation for native job
@@ -414,6 +648,30 @@ static int push_errno(lua_State *L, const char *what, int error_number) {
   lua_pushnil(L);
   lua_pushfstring(L, "%s: %s", what, strerror(error_number));
   return 2;
+}
+
+/* Effective execution permission is independent of file readability and of
+** execute bits granted to some other credential class. */
+static int executable_access(lua_State *L) {
+  size_t length;
+  const char *path = luaL_checklstring(L, 1, &length);
+  int result, error_number;
+  if (memchr(path, '\0', length) != NULL)
+    return luaL_argerror(L, 1, "path contains a NUL byte");
+  do result = faccessat(AT_FDCWD, path, X_OK, AT_EACCESS);
+  while (result != 0 && errno == EINTR);
+  if (result == 0) {
+    lua_pushboolean(L, 1);
+    return 1;
+  }
+  error_number = errno;
+  if (error_number == EACCES || error_number == ENOENT ||
+      error_number == ENOTDIR) {
+    lua_pushboolean(L, 0);
+    return 1;
+  }
+  return push_errno(L, "cannot check effective execution permission",
+                    error_number);
 }
 
 static int push_failure(lua_State *L, const char *message) {
@@ -489,7 +747,8 @@ static TitanJobserver *check_jobserver(lua_State *L, int index) {
 }
 
 /* _jobserver_open("fifo", path) or _jobserver_open("pipe", read_fd, write_fd)
-** -> client | nil, reason. */
+** -> client | nil, reason[, "unsupported"]. The third result marks a valid
+** inherited pipe that this platform cannot reopen privately. */
 static int jobserver_open(lua_State *L) {
   const char *kind = luaL_checkstring(L, 1);
   TitanJobserver *client =
@@ -524,10 +783,11 @@ static int jobserver_open(lua_State *L) {
     if (fstat((int)inherited_read, &read_channel) != 0 ||
         fstat((int)inherited_write, &write_channel) != 0)
       return push_failure(L, "the jobserver descriptors are closed");
-    if (!S_ISFIFO(read_channel.st_mode) || !S_ISFIFO(write_channel.st_mode) ||
-        !same_channel(&read_channel, &write_channel))
+    if (!S_ISFIFO(read_channel.st_mode) || !S_ISFIFO(write_channel.st_mode))
       return push_failure(L, "the jobserver descriptors are not one pipe");
 #if defined(__linux__)
+    if (!same_channel(&read_channel, &write_channel))
+      return push_failure(L, "the jobserver descriptors are not one pipe");
     {
       char path[64];
       snprintf(path, sizeof path, "/proc/self/fd/%d", (int)inherited_read);
@@ -543,8 +803,21 @@ static int jobserver_open(lua_State *L) {
       }
     }
 #else
-    return push_failure(L, "this platform cannot reopen an inherited "
-                           "jobserver pipe privately");
+    {
+      int read_flags = fcntl((int)inherited_read, F_GETFL);
+      int write_flags = fcntl((int)inherited_write, F_GETFL);
+      if (read_flags < 0 || write_flags < 0 ||
+          ((read_flags & O_ACCMODE) != O_RDONLY &&
+           (read_flags & O_ACCMODE) != O_RDWR) ||
+          ((write_flags & O_ACCMODE) != O_WRONLY &&
+           (write_flags & O_ACCMODE) != O_RDWR))
+        return push_failure(L, "the jobserver descriptors are not one pipe");
+    }
+    lua_pushnil(L);
+    lua_pushliteral(L, "this platform cannot reopen an inherited "
+                       "jobserver pipe privately");
+    lua_pushliteral(L, "unsupported");
+    return 3;
 #endif
   } else {
     return luaL_argerror(L, 1, "expected \"fifo\" or \"pipe\"");
@@ -600,6 +873,15 @@ static int jobserver_held(lua_State *L) {
   TitanJobserver *client =
       (TitanJobserver *)luaL_checkudata(L, 1, TITAN_JOBSERVER_TYPE);
   lua_pushinteger(L, (lua_Integer)client->held);
+  return 1;
+}
+
+/* client:descriptor() -> the private nonblocking token read descriptor, for
+** an event loop that polls readability (titan-compiler.build). Reading stays
+** with client:acquire(), which records the exact byte. */
+static int jobserver_descriptor(lua_State *L) {
+  TitanJobserver *client = check_jobserver(L, 1);
+  lua_pushinteger(L, (lua_Integer)client->read_fd);
   return 1;
 }
 
@@ -752,6 +1034,62 @@ static int signal_raise(lua_State *L) {
   return 1;
 }
 
+/* _signal_wake_descriptor() -> the active guard's nonblocking wake read
+** descriptor | nil. An event loop polls it for readability and then reads
+** _signal_pending(); the guard's restore closes it. */
+static int signal_wake_descriptor(lua_State *L) {
+  if (titan_signal_guarded && titan_wake_read_fd >= 0)
+    lua_pushinteger(L, (lua_Integer)titan_wake_read_fd);
+  else lua_pushnil(L);
+  return 1;
+}
+
+/* _sigpipe_ignore() -> guard | nil, reason. SIGPIPE is ignored until
+** guard:restore() (or collection) reinstates the exact prior action. The
+** build coordinator writes to worker control pipes whose reader may already
+** have died; such a write must fail with EPIPE instead of ending the
+** coordinator. Children it starts through libuv reset every disposition. */
+#define TITAN_SIGPIPE_GUARD_TYPE "titan.sigpipeguard"
+
+typedef struct TitanSigpipeGuard {
+  struct sigaction saved;
+  int active;
+} TitanSigpipeGuard;
+
+static int sigpipe_ignore(lua_State *L) {
+  TitanSigpipeGuard *guard =
+      (TitanSigpipeGuard *)lua_newuserdatauv(L, sizeof(TitanSigpipeGuard), 0);
+  struct sigaction ignore;
+  guard->active = 0;
+  luaL_setmetatable(L, TITAN_SIGPIPE_GUARD_TYPE);
+  memset(&ignore, 0, sizeof ignore);
+  ignore.sa_handler = SIG_IGN;
+  sigemptyset(&ignore.sa_mask);
+  if (sigaction(SIGPIPE, &ignore, &guard->saved) != 0)
+    return push_errno(L, "cannot ignore SIGPIPE", errno);
+  guard->active = 1;
+  return 1;
+}
+
+static void sigpipe_guard_release(TitanSigpipeGuard *guard) {
+  if (guard->active) sigaction(SIGPIPE, &guard->saved, NULL);
+  guard->active = 0;
+}
+
+/* guard:restore() -> true. Idempotent. */
+static int sigpipe_guard_restore(lua_State *L) {
+  sigpipe_guard_release(
+      (TitanSigpipeGuard *)luaL_checkudata(L, 1, TITAN_SIGPIPE_GUARD_TYPE));
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
+static int sigpipe_guard_gc(lua_State *L) {
+  sigpipe_guard_release(
+      (TitanSigpipeGuard *)luaL_checkudata(L, 1, TITAN_SIGPIPE_GUARD_TYPE));
+  return 0;
+}
+
 /* _jobserver_wait(completion_file, client_or_nil, watch_signals)
 ** -> "signal", signo | "completion" | "slot" | nil, reason.
 ** The completion FILE must be unbuffered; nothing is consumed from it. */
@@ -805,8 +1143,518 @@ static const luaL_Reg jobserver_methods[] = {
   { "release", jobserver_release },
   { "held", jobserver_held },
   { "close", jobserver_close },
+  { "descriptor", jobserver_descriptor },
   { NULL, NULL }
 };
+#endif
+
+/* Private compiler helper: the whole-output-tree build lock. A permanent
+** lock file is opened without following a substituted leaf, and an exclusive
+** OS lock on that handle (POSIX flock on the open-file description, Windows
+** LockFileEx) owns the tree. Closing the handle, collecting the userdata or
+** process death releases it; the file itself is never unlinked, which would
+** split one lock across two files. Waiting is the caller's nonblocking
+** try/sleep loop, so ordinary Lua interruption keeps working.
+** Implementation notes: doc/implementation/driver.md#output-tree-coordination */
+#define TITAN_OUTPUT_LOCK_TYPE "titan.outputlock"
+
+typedef struct TitanOutputLock {
+#if defined(_WIN32)
+  HANDLE handle;
+#else
+  int fd;
+#endif
+  int locked;
+  char identity[96];
+} TitanOutputLock;
+
+static TitanOutputLock *check_output_lock(lua_State *L) {
+  TitanOutputLock *lock =
+      (TitanOutputLock *)luaL_checkudata(L, 1, TITAN_OUTPUT_LOCK_TYPE);
+#if defined(_WIN32)
+  if (lock->handle == INVALID_HANDLE_VALUE)
+#else
+  if (lock->fd < 0)
+#endif
+    luaL_error(L, "attempt to use a closed build lock");
+  return lock;
+}
+
+static void output_lock_release(TitanOutputLock *lock) {
+#if defined(_WIN32)
+  if (lock->handle != INVALID_HANDLE_VALUE) CloseHandle(lock->handle);
+  lock->handle = INVALID_HANDLE_VALUE;
+#else
+  if (lock->fd >= 0) close(lock->fd);
+  lock->fd = -1;
+#endif
+  lock->locked = 0;
+}
+
+/* _output_lock_open(path) -> lock | nil, reason. Creates the file when it is
+** missing; rejects a symbolic link/reparse point or any non-regular leaf. */
+static int output_lock_open(lua_State *L) {
+#if defined(_WIN32)
+  const char *path = titan_win_loader_string(L, 1);
+  TitanOutputLock *lock;
+  BY_HANDLE_FILE_INFORMATION info;
+  WCHAR *wide;
+  int count;
+  luaL_checkstack(L, 4, "opening a build lock");
+  count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+  if (count == 0 || (unsigned)count > TITAN_WIN_PATH_CAP) {
+    DWORD error = count == 0 ? GetLastError() : ERROR_FILENAME_EXCED_RANGE;
+    lua_pushnil(L);
+    titan_win_loader_error(L, "cannot open build lock", path, error);
+    return 2;
+  }
+  wide = (WCHAR *)lua_newuserdatauv(L, (size_t)count * sizeof(WCHAR), 0);
+  if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, count)) {
+    DWORD error = GetLastError();
+    lua_pushnil(L);
+    titan_win_loader_error(L, "cannot open build lock", path, error);
+    return 2;
+  }
+  lock = (TitanOutputLock *)lua_newuserdatauv(L, sizeof(TitanOutputLock), 0);
+  lock->handle = INVALID_HANDLE_VALUE;
+  lock->locked = 0;
+  lock->identity[0] = '\0';
+  luaL_setmetatable(L, TITAN_OUTPUT_LOCK_TYPE);
+  /* No FILE_SHARE_DELETE: the lock file cannot be removed or renamed away
+  ** while any invocation holds it open. */
+  lock->handle = CreateFileW(wide, GENERIC_READ | GENERIC_WRITE,
+      FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  if (lock->handle == INVALID_HANDLE_VALUE) {
+    DWORD error = GetLastError();
+    lua_pushnil(L);
+    titan_win_loader_error(L, "cannot open build lock", path, error);
+    return 2;
+  }
+  if (GetFileType(lock->handle) != FILE_TYPE_DISK ||
+      !GetFileInformationByHandle(lock->handle, &info) ||
+      (info.dwFileAttributes &
+       (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0) {
+    output_lock_release(lock);
+    lua_pushnil(L);
+    lua_pushfstring(L, "build lock '%s' is not a regular file", path);
+    return 2;
+  }
+  snprintf(lock->identity, sizeof lock->identity, "win:%lx:%lx:%lx",
+           (unsigned long)info.dwVolumeSerialNumber,
+           (unsigned long)info.nFileIndexHigh,
+           (unsigned long)info.nFileIndexLow);
+  return 1;
+#else
+  const char *path = luaL_checkstring(L, 1);
+  TitanOutputLock *lock =
+      (TitanOutputLock *)lua_newuserdatauv(L, sizeof(TitanOutputLock), 0);
+  struct stat info;
+  lock->fd = -1;
+  lock->locked = 0;
+  lock->identity[0] = '\0';
+  luaL_setmetatable(L, TITAN_OUTPUT_LOCK_TYPE);
+  /* O_NONBLOCK keeps a substituted FIFO or device from blocking the open;
+  ** flock itself is requested nonblocking separately. */
+  do lock->fd = open(path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC |
+                     O_NONBLOCK, 0666);
+  while (lock->fd < 0 && errno == EINTR);
+  if (lock->fd < 0) {
+    int error_number = errno;
+    lua_pushnil(L);
+    if (error_number == ELOOP)
+      lua_pushfstring(L, "build lock '%s' is a symbolic link", path);
+    else
+      lua_pushfstring(L, "cannot open build lock '%s': %s", path,
+                      strerror(error_number));
+    return 2;
+  }
+  if (fstat(lock->fd, &info) != 0 || !S_ISREG(info.st_mode)) {
+    output_lock_release(lock);
+    lua_pushnil(L);
+    lua_pushfstring(L, "build lock '%s' is not a regular file", path);
+    return 2;
+  }
+  snprintf(lock->identity, sizeof lock->identity, "posix:%llu:%llu",
+           (unsigned long long)info.st_dev, (unsigned long long)info.st_ino);
+  return 1;
+#endif
+}
+
+/* lock:try() -> true (now held) | false (another handle holds it)
+** | nil, reason. */
+static int output_lock_try(lua_State *L) {
+  TitanOutputLock *lock = check_output_lock(L);
+  if (!lock->locked) {
+#if defined(_WIN32)
+    OVERLAPPED range;
+    memset(&range, 0, sizeof range);
+    if (!LockFileEx(lock->handle,
+                    LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1,
+                    0, &range)) {
+      DWORD error = GetLastError();
+      if (error == ERROR_LOCK_VIOLATION || error == ERROR_IO_PENDING) {
+        lua_pushboolean(L, 0);
+        return 1;
+      }
+      lua_pushnil(L);
+      titan_win_loader_error(L, "cannot lock build lock", lock->identity, error);
+      return 2;
+    }
+#else
+    int result;
+    do result = flock(lock->fd, LOCK_EX | LOCK_NB);
+    while (result != 0 && errno == EINTR);
+    if (result != 0) {
+      if (errno == EWOULDBLOCK || errno == EAGAIN) {
+        lua_pushboolean(L, 0);
+        return 1;
+      }
+      return push_errno(L, "cannot lock the build lock", errno);
+    }
+#endif
+    lock->locked = 1;
+  }
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
+/* lock:linked(path) -> true when path still names this lock's file. A tree
+** removed and recreated while waiting yields a new file that must be
+** reopened; Windows denies that removal while a handle is open. */
+static int output_lock_linked(lua_State *L) {
+  TitanOutputLock *lock = check_output_lock(L);
+#if defined(_WIN32)
+  (void)lock;
+  lua_pushboolean(L, 1);
+#else
+  const char *path = luaL_checkstring(L, 2);
+  struct stat held, named;
+  lua_pushboolean(L, fstat(lock->fd, &held) == 0 && lstat(path, &named) == 0 &&
+                         held.st_dev == named.st_dev &&
+                         held.st_ino == named.st_ino);
+#endif
+  return 1;
+}
+
+static int output_lock_identity(lua_State *L) {
+  TitanOutputLock *lock = check_output_lock(L);
+  lua_pushstring(L, lock->identity);
+  return 1;
+}
+
+/* lock:descriptor() -> POSIX descriptor | nil (Windows). The build
+** coordinator lets each worker inherit it, so the open-file description and
+** its flock stay held until every worker has exited, even after the
+** coordinator itself died. */
+static int output_lock_descriptor(lua_State *L) {
+  TitanOutputLock *lock = check_output_lock(L);
+#if defined(_WIN32)
+  (void)lock;
+  lua_pushnil(L);
+#else
+  lua_pushinteger(L, (lua_Integer)lock->fd);
+#endif
+  return 1;
+}
+
+/* lock:close() -> true. Idempotent; releases ownership. */
+static int output_lock_close(lua_State *L) {
+  output_lock_release(
+      (TitanOutputLock *)luaL_checkudata(L, 1, TITAN_OUTPUT_LOCK_TYPE));
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
+static int output_lock_gc(lua_State *L) {
+  output_lock_release(
+      (TitanOutputLock *)luaL_checkudata(L, 1, TITAN_OUTPUT_LOCK_TYPE));
+  return 0;
+}
+
+static const luaL_Reg output_lock_methods[] = {
+  { "try", output_lock_try },
+  { "linked", output_lock_linked },
+  { "identity", output_lock_identity },
+  { "descriptor", output_lock_descriptor },
+  { "close", output_lock_close },
+  { NULL, NULL }
+};
+
+
+/* Private compiler helper: precise file metadata for incremental observation
+** reuse. Returns { kind, dev, ino, size, mode, mtime_ns, ctime_ns }, plus
+** windows_attributes on Windows; on failure (missing paths included), returns
+** nil, errmsg, errno_code without raising. A Windows volume that reports no
+** ChangeTime omits ctime_ns, and a file that neither FileIdInfo nor
+** GetFileInformationByHandle identifies (a failed query or a zero file ID)
+** omits dev and ino; the compiler then treats the observation as coarse
+** instead of substituting either value. */
+static int stat_precise(lua_State *L) {
+  size_t path_len = 0;
+  const char *path = luaL_checklstring(L, 1, &path_len);
+  int follow = lua_isnoneornil(L, 2) ? 1 : lua_toboolean(L, 2);
+  int has_ctime = 1, has_identity = 1;
+  const char *kind;
+  char dev_buf[32], ino_buf[64];
+  lua_Integer size_val, mode_val, mtime_ns, ctime_ns;
+#if defined(_WIN32)
+  lua_Integer windows_attributes;
+#endif
+  if (strlen(path) != path_len) {
+    lua_pushnil(L);
+    lua_pushliteral(L, "path contains a NUL byte");
+    lua_pushinteger(L, EINVAL);
+    return 3;
+  }
+  if (path_len == 0) {
+    lua_pushnil(L);
+    lua_pushliteral(L, "ENOENT: No such file or directory");
+    lua_pushinteger(L, 2);
+    return 3;
+  }
+#if defined(_WIN32)
+  {
+    WCHAR *wide;
+    int count;
+    DWORD flags, file_type;
+    HANDLE handle;
+    FILE_BASIC_INFO basic_info;
+    FILE_STANDARD_INFO standard_info;
+    BY_HANDLE_FILE_INFORMATION handle_info;
+    FILE_ID_INFO id_info;
+    BOOL has_basic, has_standard, has_handle_info, has_id_info;
+    int64_t write_ticks, change_ticks;
+    luaL_checkstack(L, 5, "inspecting file metadata");
+    count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    if (count <= 0 || (unsigned)count > TITAN_WIN_PATH_CAP) {
+      DWORD error = count <= 0 ? GetLastError() : ERROR_FILENAME_EXCED_RANGE;
+      lua_pushnil(L);
+      titan_win_loader_error(L, follow ? "stat" : "lstat", path, error);
+      lua_pushinteger(L, (lua_Integer)error);
+      return 3;
+    }
+    wide = (WCHAR *)lua_newuserdatauv(L, (size_t)count * sizeof(WCHAR), 0);
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, count)) {
+      DWORD error = GetLastError();
+      lua_pushnil(L);
+      titan_win_loader_error(L, follow ? "stat" : "lstat", path, error);
+      lua_pushinteger(L, (lua_Integer)error);
+      return 3;
+    }
+    flags = FILE_FLAG_BACKUP_SEMANTICS |
+            (follow ? 0 : FILE_FLAG_OPEN_REPARSE_POINT);
+    handle = CreateFileW(wide, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, flags, NULL);
+    if (handle == INVALID_HANDLE_VALUE) {
+      DWORD error = GetLastError();
+      lua_pushnil(L);
+      if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ||
+          error == ERROR_CANT_ACCESS_FILE) {
+        lua_pushliteral(L, "ENOENT: No such file or directory");
+        lua_pushinteger(L, 2);
+      } else {
+        titan_win_loader_error(L, follow ? "stat" : "lstat", path, error);
+        lua_pushinteger(L, (lua_Integer)error);
+      }
+      return 3;
+    }
+    file_type = GetFileType(handle);
+    has_basic = GetFileInformationByHandleEx(
+        handle, FileBasicInfo, &basic_info, sizeof basic_info);
+    has_standard = GetFileInformationByHandleEx(
+        handle, FileStandardInfo, &standard_info, sizeof standard_info);
+    has_id_info = GetFileInformationByHandleEx(
+        handle, FileIdInfo, &id_info, sizeof id_info);
+    has_handle_info = GetFileInformationByHandle(handle, &handle_info);
+    CloseHandle(handle);
+    if (!has_basic || (!has_standard && !has_handle_info)) {
+      DWORD error = GetLastError();
+      lua_pushnil(L);
+      titan_win_loader_error(L, follow ? "stat" : "lstat", path, error);
+      lua_pushinteger(L, (lua_Integer)error);
+      return 3;
+    }
+    windows_attributes = (lua_Integer)basic_info.FileAttributes;
+    if (file_type != FILE_TYPE_DISK) {
+      kind = "other";
+    } else if (!follow &&
+               (basic_info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+      kind = "link";
+    } else if (has_standard
+                   ? standard_info.Directory
+                   : ((basic_info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)) {
+      kind = "directory";
+    } else {
+      kind = "file";
+    }
+    if (strcmp(kind, "directory") == 0) {
+      size_val = 0;
+    } else if (has_standard) {
+      size_val = (lua_Integer)standard_info.EndOfFile.QuadPart;
+    } else {
+      size_val = (lua_Integer)(((uint64_t)handle_info.nFileSizeHigh << 32) |
+                               (uint64_t)handle_info.nFileSizeLow);
+    }
+    if (strcmp(kind, "file") == 0) mode_val = 0x8000;
+    else if (strcmp(kind, "directory") == 0) mode_val = 0x4000;
+    else if (strcmp(kind, "link") == 0) mode_val = 0xA000;
+    else mode_val = 0;
+    if ((basic_info.FileAttributes & FILE_ATTRIBUTE_READONLY) != 0)
+      mode_val |= (strcmp(kind, "directory") == 0) ? 0555 : 0444;
+    else
+      mode_val |= (strcmp(kind, "directory") == 0) ? 0777 : 0666;
+    write_ticks = (int64_t)basic_info.LastWriteTime.QuadPart;
+    change_ticks = (int64_t)basic_info.ChangeTime.QuadPart;
+    mtime_ns = (lua_Integer)((write_ticks - 116444736000000000LL) * 100LL);
+    if (change_ticks == 0) {
+      has_ctime = 0;
+      ctime_ns = 0;
+    } else {
+      ctime_ns = (lua_Integer)((change_ticks - 116444736000000000LL) * 100LL);
+    }
+    {
+      /* A zero file ID identifies nothing; fall through to the next query. */
+      int i, id_known = 0;
+      if (has_id_info)
+        for (i = 0; i < 16 && !id_known; i++)
+          id_known = id_info.FileId.Identifier[i] != 0;
+      if (id_known) {
+        snprintf(dev_buf, sizeof dev_buf, "%llu",
+                 (unsigned long long)id_info.VolumeSerialNumber);
+        for (i = 0; i < 16; i++)
+          snprintf(ino_buf + 2 * i, 3, "%02x",
+                   (unsigned int)id_info.FileId.Identifier[i]);
+      } else if (has_handle_info && (handle_info.nFileIndexHigh != 0 ||
+                                     handle_info.nFileIndexLow != 0)) {
+        snprintf(dev_buf, sizeof dev_buf, "%lu",
+                 (unsigned long)handle_info.dwVolumeSerialNumber);
+        snprintf(ino_buf, sizeof ino_buf, "%08lx%08lx",
+                 (unsigned long)handle_info.nFileIndexHigh,
+                 (unsigned long)handle_info.nFileIndexLow);
+      } else {
+        has_identity = 0;
+      }
+    }
+  }
+#else
+  {
+    struct stat info;
+    int64_t mtime_sec, mtime_nsec, ctime_sec, ctime_nsec;
+    if ((follow ? stat(path, &info) : lstat(path, &info)) != 0) {
+      int err = errno;
+      lua_pushnil(L);
+      if (err == ENOENT)
+        lua_pushfstring(L, "ENOENT: %s", strerror(err));
+      else
+        lua_pushstring(L, strerror(err));
+      lua_pushinteger(L, (lua_Integer)err);
+      return 3;
+    }
+    if (S_ISREG(info.st_mode)) kind = "file";
+    else if (S_ISDIR(info.st_mode)) kind = "directory";
+    else if (S_ISLNK(info.st_mode)) kind = "link";
+    else kind = "other";
+    snprintf(dev_buf, sizeof dev_buf, "%llu", (unsigned long long)info.st_dev);
+    snprintf(ino_buf, sizeof ino_buf, "%llu", (unsigned long long)info.st_ino);
+    size_val = (lua_Integer)info.st_size;
+    mode_val = (lua_Integer)info.st_mode;
+#if defined(__APPLE__)
+    mtime_sec = (int64_t)info.st_mtimespec.tv_sec;
+    mtime_nsec = (int64_t)info.st_mtimespec.tv_nsec;
+    ctime_sec = (int64_t)info.st_ctimespec.tv_sec;
+    ctime_nsec = (int64_t)info.st_ctimespec.tv_nsec;
+#else
+    mtime_sec = (int64_t)info.st_mtim.tv_sec;
+    mtime_nsec = (int64_t)info.st_mtim.tv_nsec;
+    ctime_sec = (int64_t)info.st_ctim.tv_sec;
+    ctime_nsec = (int64_t)info.st_ctim.tv_nsec;
+#endif
+    mtime_ns = (lua_Integer)(mtime_sec * 1000000000LL + mtime_nsec);
+    ctime_ns = (lua_Integer)(ctime_sec * 1000000000LL + ctime_nsec);
+  }
+#endif
+#if defined(_WIN32)
+  lua_createtable(L, 0, 8);
+  lua_pushinteger(L, windows_attributes);
+  lua_setfield(L, -2, "windows_attributes");
+#else
+  lua_createtable(L, 0, 7);
+#endif
+  lua_pushstring(L, kind);
+  lua_setfield(L, -2, "kind");
+  if (has_identity) {
+    lua_pushstring(L, dev_buf);
+    lua_setfield(L, -2, "dev");
+    lua_pushstring(L, ino_buf);
+    lua_setfield(L, -2, "ino");
+  }
+  lua_pushinteger(L, size_val);
+  lua_setfield(L, -2, "size");
+  lua_pushinteger(L, mode_val);
+  lua_setfield(L, -2, "mode");
+  lua_pushinteger(L, mtime_ns);
+  lua_setfield(L, -2, "mtime_ns");
+  if (has_ctime) {
+    lua_pushinteger(L, ctime_ns);
+    lua_setfield(L, -2, "ctime_ns");
+  }
+  return 1;
+}
+#if defined(_WIN32)
+/* Query the same native policy as libuv instead of guessing from getenv. */
+static int executable_search_cwd(lua_State *L) {
+  lua_pushboolean(L, NeedCurrentDirectoryForExePathW(L""));
+  return 1;
+}
+
+/* Contain the compiler before it can create a child. Windows 8+ inherits
+** every non-breakaway ancestor job at CreateProcess time, even when libuv
+** subsequently adds the child to its own silent-breakaway job. Assigning a
+** running child instead would leave a window for an uncontained grandchild.
+**
+** This noninheritable handle deliberately lasts until OS process teardown.
+** A Lua finalizer must not close it: the compiler itself belongs to the job,
+** so closing the last handle would terminate the current process as well.
+** Process teardown closes it after Lua cleanup, preserving normal exit
+** status while terminating descendants, including nested worker jobs. */
+static HANDLE native_process_tree_job;
+
+static int native_process_tree_guard(lua_State *L) {
+  HANDLE job;
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
+  DWORD error;
+  const char *operation;
+  if (native_process_tree_job != NULL) {
+    lua_pushboolean(L, 1);
+    return 1;
+  }
+  job = CreateJobObjectW(NULL, NULL);
+  if (job == NULL) {
+    error = GetLastError();
+    operation = "cannot create native process-tree job";
+  } else {
+    memset(&limits, 0, sizeof limits);
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation,
+                                 &limits, sizeof limits)) {
+      error = GetLastError();
+      operation = "cannot configure non-breakaway native process-tree job";
+    } else if (!AssignProcessToJobObject(job, GetCurrentProcess())) {
+      error = GetLastError();
+      operation = "cannot assign compiler to non-breakaway native process-tree job";
+    } else {
+      native_process_tree_job = job;
+      lua_pushboolean(L, 1);
+      return 1;
+    }
+    CloseHandle(job);
+  }
+  lua_pushnil(L);
+  titan_win_loader_error(L, operation, "current compiler process", error);
+  return 2;
+}
 #endif
 
 static const luaL_Reg titanlib[] = {
@@ -816,19 +1664,41 @@ static const luaL_Reg titanlib[] = {
   { "_loadlib", lazyload },
   { "_loadlibglobal", lazyglobalload },
   { "_sha256_binary", sha256_binary },
+  { "_sha256_stream", sha256_stream_new },
+  { "_output_lock_open", output_lock_open },
+  { "_stat_precise", stat_precise },
 #if defined(_WIN32)
   { "_abivalue", abivalue },
+  { "_native_process_tree_guard", native_process_tree_guard },
+  { "_executable_search_cwd", executable_search_cwd },
 #else
+  { "_executable_access", executable_access },
   { "_jobserver_open", jobserver_open },
   { "_jobserver_wait", jobserver_wait },
   { "_signal_guard", signal_guard },
   { "_signal_pending", signal_pending },
   { "_signal_raise", signal_raise },
+  { "_signal_wake_descriptor", signal_wake_descriptor },
+  { "_sigpipe_ignore", sigpipe_ignore },
 #endif
   { NULL, NULL }
 };
 
 LUAMOD_API int luaopen_titan(lua_State *L) {
+  if (luaL_newmetatable(L, TITAN_OUTPUT_LOCK_TYPE)) {
+    luaL_newlib(L, output_lock_methods);
+    lua_setfield(L, -2, "__index");
+    lua_pushcfunction(L, output_lock_gc);
+    lua_setfield(L, -2, "__gc");
+    lua_pushcfunction(L, output_lock_gc);
+    lua_setfield(L, -2, "__close");
+  }
+  lua_pop(L, 1);
+  if (luaL_newmetatable(L, TITAN_SHA256_STREAM_TYPE)) {
+    luaL_newlib(L, sha256_stream_methods);
+    lua_setfield(L, -2, "__index");
+  }
+  lua_pop(L, 1);
 #if !defined(_WIN32)
   if (luaL_newmetatable(L, TITAN_JOBSERVER_TYPE)) {
     luaL_newlib(L, jobserver_methods);
@@ -846,6 +1716,19 @@ LUAMOD_API int luaopen_titan(lua_State *L) {
     lua_setfield(L, -2, "__index");
     lua_pushcfunction(L, signal_guard_gc);
     lua_setfield(L, -2, "__gc");
+    lua_pushcfunction(L, signal_guard_gc);
+    lua_setfield(L, -2, "__close");
+  }
+  lua_pop(L, 1);
+  if (luaL_newmetatable(L, TITAN_SIGPIPE_GUARD_TYPE)) {
+    lua_newtable(L);
+    lua_pushcfunction(L, sigpipe_guard_restore);
+    lua_setfield(L, -2, "restore");
+    lua_setfield(L, -2, "__index");
+    lua_pushcfunction(L, sigpipe_guard_gc);
+    lua_setfield(L, -2, "__gc");
+    lua_pushcfunction(L, sigpipe_guard_gc);
+    lua_setfield(L, -2, "__close");
   }
   lua_pop(L, 1);
 #endif

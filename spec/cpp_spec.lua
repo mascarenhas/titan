@@ -1239,3 +1239,119 @@ describe("C header identities with a digest adapter", function()
         assert(os.remove(path))
     end)
 end)
+
+describe("C preprocessor semantic digest adapters", function()
+    local sha256 = require "titan-compiler.sha256"
+    local semantic_tag = "titan-cpp-semantic-context-v1"
+
+    local function fixture(callback, forced)
+        local root = platform.windows and "C:/SDK 日本/include path" or "/SDK 日本/include path"
+        local header = root .. "/forced.h"
+        local contents = "#define FORCED_VALUE 7\n"
+        local strategy = {}
+        function strategy:run(argv)
+            local verbose, included = false, false
+            for _, argument in ipairs(argv) do
+                if argument == "-v" then verbose = true end
+                if argument == "-include" then included = true end
+            end
+            local macros = '#define VENDOR_VERSION "fixture"\n#define VALUE (1 + 2)\n#define JOIN(a,b) a ## b\n'
+            return { started = true, ok = true, why = "exit", status = 0,
+                output = verbose and table.concat({
+                    '#include "..." search starts here:',
+                    '#include <...> search starts here:',
+                    " " .. root, "End of search list.", "",
+                }, "\n") or macros .. (included and "#define FORCED_VALUE 7\n" or "") }
+        end
+        function strategy:cwd() return root end
+        function strategy:stat(path)
+            if path ~= header then return nil end
+            return { kind = "file", size = #contents, mode = 0x81A4,
+                device = 1, inode = 2, time_precision = "ns",
+                modified_seconds = 100, modified_nanoseconds = 0,
+                changed_seconds = 100, changed_nanoseconds = 1 }
+        end
+        strategy.lstat = strategy.stat
+        function strategy:readable(path) return path == header end
+        function strategy:read_file(path)
+            if path == header then return contents end
+            return nil, "missing"
+        end
+        return { io = strategy, compiler = { "fixture-cc" }, fixed_include_dirs = {},
+            cppflags = forced and { "-include", header } or {},
+            cache_adapter = callback and { sha256_binary = callback } or nil }
+    end
+
+    local function plain_context(forced)
+        local hex, inputs = sha256.hex, {}
+        sha256.hex = function(bytes)
+            if bytes:find(semantic_tag, 1, true) then inputs[#inputs + 1] = bytes end
+            return hex(bytes)
+        end
+        local ok, context, err = pcall(cpp.new_context, fixture(nil, forced))
+        sha256.hex = hex
+        assert.is_true(ok, context)
+        assert(context, err)
+        return context, inputs
+    end
+
+    for _, forced in ipairs({ false, true }) do
+        it("preserves canonical bytes and keys with a native adapter for "
+            .. (forced and "forced" or "ordinary") .. " contexts", function()
+            local plain, inputs = plain_context(forced)
+            local native_inputs = {}
+            local options = fixture(function(bytes)
+                if bytes:find(semantic_tag, 1, true) then native_inputs[#native_inputs + 1] = bytes end
+                return require("titan")._sha256_binary(bytes)
+            end, forced)
+            local native = assert(cpp.new_context(options))
+            assert.equal(forced and 2 or 1, #native_inputs)
+            assert.same(inputs, native_inputs)
+            assert.equal(plain.preprocessor_configuration_key, native.preprocessor_configuration_key)
+            assert.equal(plain.forced_header_manifest, native.forced_header_manifest)
+            assert.same(plain.incdirs, native.incdirs)
+            assert.same(plain.defines, native.defines)
+            assert.equal(native.preprocessor_configuration_key,
+                assert(cpp.new_context(options)).preprocessor_configuration_key)
+            assert.equal(forced and 2 or 1, #native_inputs)
+        end)
+    end
+
+    for _, case in ipairs({
+        { "missing", function() end },
+        { "boolean", function() return false end },
+        { "short", function() return string.rep("x", 31) end },
+        { "long", function() return string.rep("x", 33) end },
+        { "table", function() return {} end },
+        { "string error", function() error("native digest unavailable", 0) end },
+    }) do
+        it("preserves the fallback key for a " .. case[1] .. " digest result", function()
+            local plain = plain_context(false)
+            local calls = 0
+            local context = assert(cpp.new_context(fixture(function(bytes)
+                assert.is_not_nil(bytes:find(semantic_tag, 1, true))
+                calls = calls + 1
+                return case[2]()
+            end)))
+            assert.equal(1, calls)
+            assert.equal(plain.preprocessor_configuration_key, context.preprocessor_configuration_key)
+        end)
+    end
+
+    it("propagates digest cancellation without publishing a completed context", function()
+        local plain = plain_context(false)
+        local cancelled = {}
+        local options = fixture(function() error(cancelled, 0) end)
+        local ok, err = pcall(cpp.new_context, options)
+        assert.is_false(ok)
+        assert.equal(cancelled, err)
+        local calls = 0
+        options.cache_adapter.sha256_binary = function(bytes)
+            calls = calls + 1
+            return require("titan")._sha256_binary(bytes)
+        end
+        local context = assert(cpp.new_context(options))
+        assert.equal(1, calls)
+        assert.equal(plain.preprocessor_configuration_key, context.preprocessor_configuration_key)
+    end)
+end)

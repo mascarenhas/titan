@@ -14,6 +14,7 @@ source_root=$(cd "$(dirname "$0")/../.." && pwd)
 workspace=$2
 owner=titan-windows-stdlib-tests-v1
 requested_profile=$TITAN_BUILD_PROFILE
+requested_coverage=${TITAN_TEST_COVERAGE:-0}
 if [[ $mode == build ]]; then
   prefix=$(cd "$3" && pwd)
   [[ -f $prefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc && -f $prefix/bin/lua.exe &&
@@ -72,27 +73,101 @@ work=$(cd "$workspace" && pwd)
 [[ ! -L $workspace && -f $work/.titan-test-owner &&
    $(cat "$work/.titan-test-owner") == "$owner" ]]
 
+# Manifests list only copied inputs, never generated SDK/output files. Removed
+# inputs retire their exact old paths; unchanged bytes keep their timestamps.
+owned_destination() {
+  local path=$1
+  while [[ $path != "$work" ]]; do
+    [[ $path == "$work/"* && ! -L $path ]] || {
+      echo "Refusing a linked or external owned destination: $path" >&2; return 1;
+    }
+    path=${path%/*}
+  done
+}
+copy_input() {
+  local input=$1 output=$2
+  owned_destination "$output"
+  if [[ ! -f $output ]] || ! cmp -s "$input" "$output"; then
+    mkdir -p "${output%/*}"
+    cp "$input" "$output"
+  fi
+}
+refresh_inputs() {
+  local base=$1 destination=$2 manifest=$3 input relative directory
+  shift 3
+  : > "$manifest.new"
+  for input in "$@"; do
+    relative=${input#"$base/"}
+    [[ $relative != "$input" && $relative != /* && /$relative/ != */../* &&
+       /$relative/ != */./* ]] || { echo "Invalid owned input: $input" >&2; return 1; }
+    printf '%s\0' "$relative" >> "$manifest.new"
+  done
+  if [[ -f $manifest ]]; then
+    # Keep NUL-delimited membership linear without Bash 4 associative arrays.
+    perl -0e '
+      open my $new, "<", $ARGV[0] or die "$ARGV[0]: $!\n";
+      my %current = map { $_ => 1 } <$new>;
+      close $new or die "$ARGV[0]: $!\n";
+      open my $old, "<", $ARGV[1] or die "$ARGV[1]: $!\n";
+      while (my $path = <$old>) { print $path unless $current{$path}; }
+      close $old or die "$ARGV[1]: $!\n";
+    ' "$manifest.new" "$manifest" > "$manifest.removed"
+    while IFS= read -r -d '' relative; do
+      [[ -n $relative && $relative != /* && /$relative/ != */../* && /$relative/ != */./* ]] || {
+        echo "Invalid owned input manifest: $manifest" >&2; return 1;
+      }
+      owned_destination "$destination/$relative"
+      rm -f "$destination/$relative"
+      directory="$destination/$relative"
+      directory=${directory%/*}
+      while [[ $directory != "$destination" ]] && rmdir "$directory" 2>/dev/null; do
+        directory=${directory%/*}
+      done
+    done < "$manifest.removed"
+    rm -f "$manifest.removed"
+  fi
+  for input in "$@"; do
+    relative=${input#"$base/"}
+    copy_input "$input" "$destination/$relative"
+  done
+  mv -f "$manifest.new" "$manifest"
+}
+
 if [[ $mode == build ]]; then
-  # Only this marked workspace owns these outputs. Never rebuild or publish into
-  # the supplied SDK, or mix native outputs with a Unix source checkout.
-  rm -rf "$work/sdk" "$work/source" "$work/cwd" "$work/scratch"
-  rm -f "$work/build.complete" "$work/build.log" "$work/stdout.log" "$work/stderr.log"
-  mkdir -p "$work/sdk" "$work/source" "$work/cwd/spec/fixtures" "$work/cwd/.titan-tests" "$work/scratch"
-  cp -R "$prefix/." "$work/sdk/"
-  shopt -s globstar nullglob
-  for input in "$source_root"/spec/stdlib/titan/**/*.titan "$source_root"/spec/stdlib/titan/**/*.h; do
+  # Only this marked workspace owns these outputs. Refresh the supplied SDK
+  # without deleting generated objects, providers, certificates or gcno notes.
+  rm -f "$work/build.complete" "$work/build.log"
+  for destination in "$work/sdk" "$work/source" "$work/cwd/spec/fixtures" "$work/cwd/.titan-tests"; do
+    owned_destination "$destination"
+  done
+  mkdir -p "$work/sdk" "$work/source" "$work/cwd/spec/fixtures" "$work/cwd/.titan-tests"
+  find "$prefix" \( -type f -o -type l \) -print0 > "$work/sdk.inputs.scan"
+  sdk_inputs=()
+  while IFS= read -r -d '' input; do sdk_inputs+=("$input"); done < "$work/sdk.inputs.scan"
+  rm -f "$work/sdk.inputs.scan"
+  refresh_inputs "$prefix" "$work/sdk" "$work/sdk.inputs" "${sdk_inputs[@]}"
+  shopt -s nullglob
+  find "$source_root/spec/stdlib/titan" -name '.*' -prune -o \
+    \( -type f -o -type l \) \( -name '*.titan' -o -name '*.h' \) -print0 > "$work/source.inputs.scan"
+  source_inputs=()
+  while IFS= read -r -d '' input; do
     case "$input" in *.titan.h|*.ffi.h) continue ;; esac
-    relative=${input#"$source_root/"}
-    mkdir -p "$work/source/$(dirname "$relative")"
-    cp "$input" "$work/source/$relative"
+    source_inputs+=("$input")
+  done < "$work/source.inputs.scan"
+  rm -f "$work/source.inputs.scan"
+  for input in "$source_root"/spec/fixtures/stdlib/native/*.c "$source_root"/spec/fixtures/stdlib/native/*.h; do
+    case "$input" in *.titan.h|*.ffi.h) continue ;; esac
+    source_inputs+=("$input")
   done
   # Preserve authored relative imports of private collaboration headers.
-  mkdir -p "$work/source/titan/protobuf"
-  cp "$source_root/titan/transfer_native.h" "$work/source/titan/transfer_native.h"
-  cp "$source_root/titan/protobuf/native.h" "$work/source/titan/protobuf/native.h"
-  # Fresh-process tests read their authored fixtures from the ordinary root CWD.
+  source_inputs+=("$source_root/titan/transfer_native.h" "$source_root/titan/protobuf/native.h")
+  refresh_inputs "$source_root" "$work/source" "$work/source.inputs" "${source_inputs[@]}"
+  # Fresh-process tests read authored fixtures from the ordinary root CWD.
   # Same-stem generated C and synthetic runner headers are not fixture inputs.
-  for input in "$source_root"/spec/fixtures/**/*; do
+  fixture_inputs=()
+  find "$source_root/spec/fixtures" -name '.*' -prune -o \
+    \( -type f -o -type l \) -print0 > "$work/fixtures.inputs.scan"
+  while IFS= read -r -d '' input; do
     [[ -f $input ]] || continue
     case "$input" in
       *.ffi.h|*.titan.h|*__test_support.*|*__test_runner.*|*__test_entrypoint.*) continue ;;
@@ -100,16 +175,18 @@ if [[ $mode == build ]]; then
       *.titan|*.h|*.lua|*.pem|*.sh|*.txt|*.json) ;;
       *) continue ;;
     esac
-    relative=${input#"$source_root/spec/fixtures/"}
-    mkdir -p "$work/cwd/spec/fixtures/$(dirname "$relative")"
-    cp "$input" "$work/cwd/spec/fixtures/$relative"
-  done
+    fixture_inputs+=("$input")
+  done < "$work/fixtures.inputs.scan"
+  rm -f "$work/fixtures.inputs.scan"
+  refresh_inputs "$source_root/spec/fixtures" "$work/cwd/spec/fixtures" \
+    "$work/fixtures.inputs" "${fixture_inputs[@]}"
   "${MAKE:-make}" --no-print-directory -s \
     -f "$(cygpath -m "$source_root/spec/support/stdlib_test_modules.mk")" \
     print-stdlib-test-roots > "$work/roots.txt"
-  mapfile -t roots < "$work/roots.txt"
-  [[ ${#roots[@]} -gt 0 && ${roots[0]} == test.tests ]]
-  cp "$source_root/spec/support/check_stdlib_test_output.lua" "$work/check_stdlib_test_output.lua"
+  roots=()
+  while IFS= read -r root; do roots+=("${root%$'\r'}"); done < "$work/roots.txt"
+  [[ ${#roots[@]} == 30 && ${roots[0]} == test.tests ]]
+  copy_input "$source_root/spec/support/check_stdlib_test_output.lua" "$work/check_stdlib_test_output.lua"
   winprefix=$(cygpath -m "$work/sdk")
   winnative=$(cygpath -m "$work/cwd/.titan-tests")
   export CC=${CC:-clang} AR=${AR:-llvm-ar} RANLIB=${RANLIB:-llvm-ranlib}
@@ -122,51 +199,70 @@ if [[ $mode == build ]]; then
   # oracles at -O0; CLANG64 otherwise gives launchers only a 1 MiB reserve.
   export TITAN_EXTRA_LDFLAGS="${TITAN_EXTRA_LDFLAGS:-} \"$winprefix/lib/libsqlite3.dll.a\" -luser32 -lws2_32 -Wl,--stack,8388608"
   # Parse configured tool/flag strings without evaluating command substitutions.
-  for name in CC TITAN_EXTRA_CFLAGS TITAN_EXTRA_CPPFLAGS TITAN_EXTRA_LDFLAGS; do
+  for name in CC; do
     perl -MText::ParseWords=shellwords -e '
       my $s=$ENV{$ARGV[0]}; my @a=shellwords($s);
       die "Malformed argument string\n" if $s =~ /\S/ && !@a;
       die "Empty C compiler command\n" if $ARGV[0] eq "CC" && !@a;
       print "$_\0" for @a' "$name" > "$work/$name.argv"
   done
-  mapfile -d '' -t compiler < "$work/CC.argv"
-  mapfile -d '' -t cflags < "$work/TITAN_EXTRA_CFLAGS.argv"
-  mapfile -d '' -t cppflags < "$work/TITAN_EXTRA_CPPFLAGS.argv"
+  compiler=()
+  while IFS= read -r -d '' word; do compiler+=("$word"); done < "$work/CC.argv"
   titan_windows_raw_flags "$work" TEST
   [[ $("${compiler[@]}" -dumpmachine) == x86_64-w64-windows-gnu ]]
   for name in TITAN_BUILD_PROFILE CC AR RANLIB TITAN_EXTRA_CFLAGS TITAN_EXTRA_CPPFLAGS TITAN_EXTRA_LDFLAGS TEST_CFLAGS TEST_CPPFLAGS TEST_LDFLAGS; do
     printf 'export %s=%q\n' "$name" "${!name}"
   done > "$work/compiler.env"
+  printf 'export TITAN_TEST_COVERAGE=%q\n' "$requested_coverage" >> "$work/compiler.env"
+  native_headers=("$work/cwd/spec/fixtures/stdlib/native/uv_coverage_threads.h"
+    "$work/cwd/spec/fixtures/stdlib/native/uv_coverage_pty.h")
+  for fixture in async_foreign_work fs_fixture uv_stdio_probe sqlite3_worker_fixture \
+      ssl_allocator_fixture ssl_error_strings os_descriptor_limit; do
+    if [[ -f $work/cwd/spec/fixtures/stdlib/native/$fixture.h ]]; then
+      native_headers+=("$work/cwd/spec/fixtures/stdlib/native/$fixture.h")
+    fi
+  done
+  refresh_inputs "$work/cwd/spec/fixtures/stdlib/native" "$work/cwd/.titan-tests" \
+    "$work/native-headers.inputs" "${native_headers[@]}"
+  # Pure-C executable rules depend only on authored inputs and this content-
+  # stable native policy receipt, never on SDK/compiler publication mtimes.
+  {
+    printf '%s\0' "$TITAN_BUILD_PROFILE" "${compiler[@]}" "${cppflags[@]}" "${cflags[@]}" "${ldflags[@]}"
+    "${compiler[@]}" --version
+  } > "$work/native-flags.config.new"
+  copy_input "$work/native-flags.config.new" "$work/native-flags.config"
+  rm -f "$work/native-flags.config.new"
   (
     set -x
-    cp "$work/cwd/spec/fixtures/stdlib/native/uv_coverage_threads.h" "$work/cwd/.titan-tests/uv_coverage_threads.h"
-    cp "$work/cwd/spec/fixtures/stdlib/native/uv_coverage_pty.h" "$work/cwd/.titan-tests/uv_coverage_pty.h"
-    # Compile standalone child fixtures on Windows too, including cases whose
-    # POSIX/static-provider behavior is classified as unavailable. Their sticky
-    # OpenSSL startup objects must never be linked into the aggregate below.
-    for fixture in async_foreign_work fs_fixture uv_stdio_probe sqlite3_worker_fixture \
-        ssl_allocator_fixture ssl_error_strings os_descriptor_limit; do
-      if [[ -f $work/cwd/spec/fixtures/stdlib/native/$fixture.h ]]; then
-        cp "$work/cwd/spec/fixtures/stdlib/native/$fixture.h" "$work/cwd/.titan-tests/$fixture.h"
-      fi
-      "${compiler[@]}" -std=c99 -Wall -Wextra -Werror "${cppflags[@]}" "${cflags[@]}" \
-        -I"$winprefix/src/lua-5.5.1" \
-        -c "$(cygpath -m "$source_root/spec/fixtures/stdlib/native/$fixture.c")" \
-        -o "$winnative/$fixture.o"
-    done
-    "${compiler[@]}" -std=c99 -Wall -Wextra -Werror "${cppflags[@]}" "${cflags[@]}" "${ldflags[@]}" -municode \
-      "$(cygpath -m "$work/cwd/spec/fixtures/stdlib/native/os_process_host_child.c")" \
-      -o "$winprefix/bin/process child ação 東京.exe"
-    "${compiler[@]}" -std=c99 -Wall -Wextra -Werror "${cppflags[@]}" "${cflags[@]}" "${ldflags[@]}" -municode \
-      "$(cygpath -m "$work/cwd/spec/fixtures/stdlib/native/windows_test_supervisor.c")" \
-      -o "$winprefix/bin/windows-test-supervisor.exe"
+    ( cd "$source_root"
+      "${MAKE:-make}" --no-print-directory -f Makefile.win windows-stdlib-test-native \
+        "TITAN_TEST_BUILD_DIR=$(cygpath -m "$work")" )
     export TITAN_ROCKS_ROOT="$winprefix" TITAN_RUNTIME_PREBUILT=1 TITAN_JOBS="${TITAN_JOBS:-4}"
     export TITAN_PROBE_CACHE_DISABLE=1 TITAN_PATH_0_6="$winprefix/lib/titan/0.6"
     unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 LUA_INIT LUA_INIT_5_5 ROCKS_TREE
     export PATH="$work/sdk/bin:$PATH"
+    # Fresh child programs need fixed object paths, including the UV helper
+    # also compiled into the aggregate. Certify each native source separately.
+    native_args=(--cflag=-std=c99 --cflag=-Wall --cflag=-Wextra --cflag=-Werror
+      -I "$winprefix/src/lua-5.5.1")
+    for flag in "${cppflags[@]}" "${cflags[@]}"; do native_args+=("--cflag=$flag"); done
+    for fixture in uv_stdio_probe sqlite3_worker_fixture ssl_allocator_fixture ssl_error_strings os_descriptor_limit; do
+      native_output="$work/native/$fixture"
+      object=$(TITAN_EXTRA_CPPFLAGS= TITAN_EXTRA_CFLAGS= TITAN_EXTRA_LDFLAGS= \
+        "$work/sdk/bin/lua.exe" "$winprefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" \
+          -c --incremental --print-c-objects -j "$TITAN_JOBS" --output "$(cygpath -m "$native_output")" \
+          "${native_args[@]}" --c-source "$(cygpath -m "$work/source/spec/fixtures/stdlib/native/$fixture.c")")
+      object=${object%$'\r'}
+      [[ -n $object && $object != *$'\n'* && $object != *$'\r'* && -f $object ]] || {
+        echo 'Expected one reported native fixture object' >&2; exit 1;
+      }
+      copy_input "$object" "$work/cwd/.titan-tests/$fixture.o"
+    done
     test_tree=$(cygpath -m "$work/source/spec/stdlib/titan")
     coverage_args=()
-    payload=("$winnative/async_foreign_work.o" "$winnative/fs_fixture.o" "$winnative/uv_stdio_probe.o")
+    payload=()
+    output="$work/sdk"
+    if [[ ${TITAN_TEST_COVERAGE:-0} == 1 ]]; then output="$work/coverage"; fi
     if [[ ${TITAN_TEST_COVERAGE:-0} == 1 ]]; then
       # Use the same source graph and test runner. Only production source
       # objects below .coverage carry instrumentation; child fixture builds
@@ -194,10 +290,16 @@ if [[ $mode == build ]]; then
       done
       export TITAN_EXTRA_LDFLAGS="$TITAN_EXTRA_LDFLAGS -lws2_32"
     fi
+    if [[ ${payload[0]+present} ]]; then payload=(-X "${payload[@]}"); fi
     cd "$work/sdk"
-    "$work/sdk/bin/lua.exe" "$winprefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" --output "$winprefix" --test --no-uv-bootstrap -j "$TITAN_JOBS" \
-      --launcher-name titan-stdlib-tests --tree "$test_tree" "${coverage_args[@]}" \
-      "${roots[@]}" -X "${payload[@]}"
+    "$work/sdk/bin/lua.exe" "$winprefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" \
+      --output "$(cygpath -m "$output")" --test --incremental --no-uv-bootstrap -j "$TITAN_JOBS" \
+      --exe "$winprefix/bin/titan-stdlib-tests.exe" --tree "$test_tree" \
+      --test-dir "$(cygpath -m "$work/source/spec/stdlib/titan")" ${coverage_args[@]+"${coverage_args[@]}"} \
+      --c-source "$(cygpath -m "$work/source/spec/fixtures/stdlib/native/async_foreign_work.c")" \
+      --c-source "$(cygpath -m "$work/source/spec/fixtures/stdlib/native/fs_fixture.c")" \
+      --c-source "$(cygpath -m "$work/source/spec/fixtures/stdlib/native/uv_stdio_probe.c")" \
+      test.tests ${payload[@]+"${payload[@]}"}
   ) 2>&1 | tee "$work/build.log"
   [[ -f $work/sdk/bin/titan-stdlib-tests.exe ]]
   printf '%s\n' "Windows x64 CLANG64/UCRT; shared native inventory; local NTFS; profile=$TITAN_BUILD_PROFILE" > "$work/build.complete"
@@ -206,11 +308,18 @@ if [[ $mode == build ]]; then
 fi
 
 [[ -f $work/build.complete && -f $work/sdk/bin/titan-stdlib-tests.exe ]]
-rm -f "$work/stdout.log" "$work/stderr.log"
+# Runtime scratch is execution-owned; never reset compiler output trees here.
 source "$work/compiler.env"
 [[ $TITAN_BUILD_PROFILE == "$requested_profile" ]] || {
   echo 'The test workspace was built with a different profile; rebuild it first' >&2; exit 1;
 }
+[[ $TITAN_TEST_COVERAGE == "$requested_coverage" ]] || {
+  echo 'The test workspace was built with a different coverage mode; rebuild it first' >&2; exit 1;
+}
+owned_destination "$work/scratch"
+rm -rf "$work/scratch"
+mkdir "$work/scratch"
+rm -f "$work/stdout.log" "$work/stderr.log"
 winprefix=$(cygpath -m "$work/sdk")
 export TITAN_ROCKS_ROOT="$winprefix" TITAN_RUNTIME_PREBUILT=1 TITAN_JOBS=1
 # Preserve the controlled provider first and each child launcher's default

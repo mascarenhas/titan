@@ -39,10 +39,11 @@ of this installation in place.
 Lua and LuaRocks preparation, `LUA_PLATFORM` and the Readline requirement are
 described in [build and installation
 responsibilities](build-script-audit.md#lua-and-native-dependencies). Native
-dependency preparation needs CMake, Perl, tar, curl or wget, and sha256sum or
-shasum. `CC`, `AR`, and `RANLIB` may be command strings; pass the same selected
-tools through Make, LuaRocks, installation checks, and consumer builds.
-`clang-format` is needed only for `titanc --pretty-print`.
+dependency preparation and the `luv` compiler rock dependency need CMake, Perl,
+tar, curl or wget, and sha256sum or shasum. `CC`, `AR`, and `RANLIB` may be
+command strings; pass the same selected tools through Make, LuaRocks,
+installation checks, and consumer builds. `clang-format` is needed only for
+`titanc --pretty-print`.
 
 `PREFIX` owns Lua and LuaRocks; `ROCKS_TREE` owns the Titan rock, SDK, and
 standard provider and defaults to `PREFIX`. The supported developer layout sets
@@ -75,10 +76,15 @@ Distinct `--output` roots can separate generated Titan objects, but
 repository Make builds default to one `out/` tree, and authored runtime and
 native dependency builds share their checkout locations. Serialize builds that
 share those inputs or use private source copies. Within one checkout,
-libbacktrace and libuv rebuild once when the profile, compiler, or their flags
-change ([configuration
+`titanc --incremental` certifies compiler, profile, flag, SDK header, and
+interface changes for `stdlib`, `titan-stdlib-test-build`, child C fixtures,
+and `titan-native-coverage-build`, while libbacktrace, libuv, and the pure-C
+test host child rebuild once when their configuration stamps change
+([configuration
 stamps](build-script-audit.md#native-dependency-configuration-stamps)); the
-other native trees and the standard library still need the clean steps below.
+authored runtime objects (`titan-runtime/`) and the remaining native trees
+(LPegLabel, llhttp, SQLite, and bundled OpenSSL) still require the clean steps
+below when changing tools, flags, profile, or OpenSSL mode.
 
 Run full validation without ambient `ROCKS_TREE`, `TITAN_ROCKS_ROOT`,
 `TITAN_EXTRA_CPPFLAGS`, or `TITAN_NO_LINE_DIRECTIVES`. These alter SDK/provider
@@ -108,7 +114,7 @@ runtime code that writes the stack through Lua internals is not checked.
 | `make busted-test BUSTED_FILTER='for loop'` | Busted only, as one focused process. |
 | `make stdlib-test` | Retained runtime/packaging Busted specs, then the native aggregate; no compiler specs and no coverage. |
 | `make titan-stdlib-test` | Build the aggregate native suite, then run it with `titan-stdlib-test-run-parallel`, or with `titan-stdlib-test-run` when `TITAN_FILTER` is set. |
-| `make titan-stdlib-test-build` | Build all native roots once in one `TITAN_JOBS` pool. |
+| `make titan-stdlib-test-build` | Build the native test aggregate and its fixtures in one `TITAN_JOBS` pool. |
 | `make titan-stdlib-test-run-parallel TITAN_TEST_JOBS=4` | Run the existing aggregate as `TITAN_TEST_JOBS` (default four) owner groups, then the timing-guarded owners alone, and audit the union ([parallel runs](test-runner.md#parallel-native-aggregate-runs)). Rejects `TITAN_FILTER`. |
 | `make titan-stdlib-test-run` | One serial process over the existing aggregate. |
 | `make titan-stdlib-test-run TITAN_FILTER='^ssl[.]tests[.]'` | Filter a fresh execution of the existing aggregate; never filter compilation. |
@@ -116,7 +122,7 @@ runtime code that writes the stack through Lua internals is not checked.
 | `make rock-test BUSTED_FILTER='parser' TITAN_FILTER='^http[.]tests[.]'` | Independently filter both domains. Neither filter skips the other domain. |
 | `make titan-native-coverage` | Build and run the source-linked native coverage aggregate serially; see [native coverage](native-coverage.md#repository-integration-and-verification). |
 | `make stdlib` / `make install-stdlib` | Incremental standard-provider build in one `TITAN_JOBS` pool / build then copy, using the installed compiler/SDK by default. |
-| `make clean-stdlib` | Clear standard-provider outputs before changing tools, flags, profile, or OpenSSL mode. |
+| `make clean-stdlib` | Clear standard-provider outputs (`out/titan`, `out/.titan-links`, `out/titan.so`, `out/titan.a`, `out/titan.so.dSYM`). |
 | `make clean` / `make distclean` | Remove owned generated artifacts / also remove downloaded native dependency trees. |
 
 Leaf build/run targets require a prepared matching SDK. Default Busted,
@@ -133,10 +139,35 @@ and the Busted workers share one pool: `TITAN_JOBS` slots (default four) unless
 `make -jN` or a parent Make supplies one. The native run starts after that
 work has drained and uses its own `TITAN_TEST_JOBS` processes. GNU Make before
 4.2, including macOS's stock 3.81, cannot show `make -j1`, so there the builds
-stay serial, with one job per `titanc`, unless `TITAN_JOBS` is set in the
-environment or on the command line; the Busted workers then share a private
-pool with one slot per worker plus one for the native build. Put GNU Make 4.2
-or later first on `PATH`, or set `TITAN_JOBS`, for the four-job default.
+stay serial (`TITAN_JOBS=1`) unless `TITAN_JOBS` is set in the environment or
+on the command line; the Busted workers then share a private pool with one slot
+per worker plus one for the native build. Put GNU Make 4.2 or later first on
+`PATH`, or set `TITAN_JOBS`, for the four-job default; sharing a parent Make
+pool across processes on macOS requires GNU Make 4.4 or later's FIFO jobserver
+(under an older macOS pipe jobserver, `titanc` warns once and applies its local
+`--jobs`/`TITAN_JOBS` bound).
+
+Because `titanc --incremental` certifies source objects, `--c-source` helpers,
+and final links by content and semantic interface digests rather than installed
+file timestamps or inodes, an identical `luarocks make --force` reinstall
+(which republishes the compiler, SDK headers, and standard provider with fresh
+mtimes and inodes) followed by `make titan-stdlib-test-build` or `make
+titan-native-coverage-build` performs zero module, helper, runner, or
+entrypoint compilations and zero links. With `TITAN_VERBOSE=1` (`-v`), `titanc`
+reports `Titan object hit <mod>: <object>`, `Titan native hit <source>`, and
+`Titan link hit <target>` on stderr (or `Titan (object|native|link) miss ...`
+with the miss reason; `-E` preprocessing probes for preamble and `--c-source`
+certification still run and are not object compilations):
+
+```sh
+make titan-stdlib-test-build
+luarocks make --force
+make titan-stdlib-test-build TITAN_VERBOSE=1 2>&1 | tee /tmp/native-identical-reinstall.log
+grep -Eq '^Titan object hit ' /tmp/native-identical-reinstall.log
+grep -Eq '^Titan native hit ' /tmp/native-identical-reinstall.log
+grep -Eq '^Titan link hit ' /tmp/native-identical-reinstall.log
+! grep -Eq '^Titan (object|native|link) miss |os_process_host_child[.]c' /tmp/native-identical-reinstall.log
+```
 
 `titanc` accepts dotted module names, not file paths. Use its
 [CLI reference](driver.md#the-titanc-command-line) for provider/standalone
@@ -179,21 +210,24 @@ broken local module fails rather than falling back to the install.
 
 ## Route generated output explicitly
 
-`titanc --output DIRECTORY` keeps generated C, objects, headers, providers,
-loaders, and programs below that directory while preserving their source-root
-hierarchy. Use one output directory consistently for incremental object recipes
-and the final link. `--tree` still selects sources; `--output` changes neither
-source identity nor provider/Lua search paths. Omitting it preserves the legacy
-source-adjacent generation behavior. See
-[output-directory routing](output-directory.md) for the exact mapping.
+`titanc --output DIRECTORY` keeps generated C, objects, headers, `--c-source`
+nodes (`.native/`), final-link certificates and synthetic sources
+(`.titan-links/`), providers, loaders, and programs below that directory while
+preserving their source-root hierarchy, and serializes concurrent invocations
+sharing the directory with `<output>/.titan-build.lock`. `--tree` still selects
+sources; `--output` changes neither source identity nor provider/Lua search
+paths. Omitting it preserves the legacy source-adjacent generation behavior.
+See [output-directory routing](output-directory.md) for the exact mapping.
 
 Repository Make builds default to `TITAN_OUTPUT_DIR=out`: the standard-provider
-pair and loaders stage there, native tests use `out/tests`, and native coverage
-uses `out/coverage` with reports in `out/coverage/report`. An output root can
-separate generated Titan configurations; flags and tools still require explicit
-invalidation. Authored runtime C objects, native dependency archives, and SDK
-probe caches retain their own locations and ownership, so changing only the
-output directory does not isolate all repository build inputs.
+pair and loaders stage there, native tests use `out/tests` (with child-only C
+fixture objects certified under `out/tests/native/<helper>.o`), and native
+coverage uses `out/coverage` with reports in `out/coverage/report`. Within an
+output tree, `titanc --incremental` certifies compiler, flag, profile, header,
+and dependency-interface changes automatically. Authored runtime C objects,
+native dependency archives, and SDK probe caches retain their own locations and
+ownership, so changing only the output directory does not isolate all
+repository build inputs.
 
 ## Preserve fixture and shared-output ownership
 

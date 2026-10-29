@@ -286,14 +286,18 @@ flags with:
 - `TITAN_EXTRA_LDFLAGS`: the final link only, in order.
 
 Shell quoting in these variables is parsed once, so a path with spaces stays one
-argument and malformed quoting is rejected. Make does not track these settings; clean
-and rebuild after changing any of them.
+argument and malformed quoting is rejected. `titanc` certifies these settings
+for every generated Titan object and final link, so changing them recompiles or
+relinks exactly what they affect. The Make rules that build Titan's C runtime
+and bundled native libraries track them only where
+[Native build profiles](build-profiles.md) says so; clean the other native
+build outputs after changing these variables.
 
-`TITAN_JOBS` (or `titanc -j N`) caps concurrent native compiler processes in
-one `titanc` run: generated-C object compilations and, while modules are
-checked, C validation probe batches. It defaults to four; on Linux and macOS
-values above one need the standard POSIX `mkfifo` utility. Inside a GNU Make
-recipe on those platforms `titanc` also shares Make's job slots
+`TITAN_JOBS` (or `titanc -j N`) caps the module-frontend workers and native
+compiler processes active in one `titanc` run: generated-C object
+compilations and C validation probe batches. It defaults to four; on Linux and
+macOS values above one need the standard POSIX `mkfifo` utility. Inside a GNU
+Make recipe `titanc` also shares Make's job slots when the jobserver allows it
 ([Compiler jobs and GNU Make](build-profiles.md#compiler-jobs-and-gnu-make)).
 In a checkout, `make stdlib` and `luarocks make` share one Make job pool of `TITAN_JOBS`
 slots unless you pass `make -jN`. GNU Make before 4.2, including macOS's stock 3.81,
@@ -355,18 +359,20 @@ After the rock is installed, you can rebuild the standard library from a checkou
 without reinstalling the compiler:
 
 ```sh
-make stdlib          # rebuild changed modules and their dependents, then relink
+make stdlib          # rebuild changed modules and affected consumers, then relink
 make install-stdlib  # build if needed, then copy to the selected tree
-make clean-stdlib    # remove standard-library outputs before changing build inputs
+make clean-stdlib    # remove standard-library outputs
 ```
 
-Both build commands use the installed compiler and its SDK. Make tracks installed
-compiler and SDK updates, source imports, and native headers as prerequisites. Run
-`make clean-stdlib` before changing flags, toolchain, profile, or OpenSSL mode. Also
-clean the matching native dependency build directories when their inputs change
-(`make clean-llhttp`, `clean-sqlite3`, `clean-openssl`), or use a separate source
-copy and SDK prefix. Libbacktrace and libuv record their profile, compiler, and
-flags and rebuild once when those change ([configuration
+Both build commands use the installed compiler and its SDK and always run
+`titanc --incremental`, which certifies compiler and SDK updates, source imports,
+C headers, flags, toolchain, and profile itself; changing any of them rebuilds
+only the affected modules and relinks. Titan's authored runtime objects and the
+bundled native dependencies are built by Make rules instead: clean them when
+their tools, flags, profile, or OpenSSL mode change (`make clean`, or
+`make clean-llhttp`, `clean-sqlite3`, and `clean-openssl` for those libraries),
+or use a separate source copy and SDK prefix. Libbacktrace and libuv record their
+profile, compiler, and flags and rebuild once when those change ([configuration
 stamps](../implementation/build-script-audit.md#native-dependency-configuration-stamps)). To exercise edits to the checkout compiler,
 reinstall with `luarocks make`, or select the checkout compiler and runtime with
 `make stdlib STDLIB_USE_INSTALLED_RUNTIME=0`. `STDLIB_USE_INSTALLED_RUNTIME` defaults to
@@ -396,6 +402,7 @@ All paths are under `ROCKS_TREE` (the same as `PREFIX` in the default layout).
 | `lib/titan/0.6/titan.so` | The dynamic standard-library provider. It holds every logical standard module (listed below) plus the native support that `require "titan"` loads. |
 | `lib/titan/0.6/titan.a` | The static form of the same modules, with their private native payload: LPegLabel, libuv, llhttp, SQLite, and OpenSSL in bundled mode. |
 | `lib/titan/0.6/titan.so.dSYM` | Debug information, on macOS only. |
+| `lib/titan/0.6/sdk-digests` | Content digests the installer recorded for Titan's own `titan.so`, `titan.a`, and `libtitan.a` in `lib/titan/0.6/`, for `lib/libbacktrace.a`, and for the `lib/liblua.a` that Titan links, so `titanc` can skip rehashing them while they are unchanged. When Lua shares the prefix, its existing `liblua.a` is recorded without Titan taking ownership of it. Removed by `titan-uninstall`. |
 | `share/lua/5.5/titan/*.lua` | One generated loader per standard module. Each maps the canonical provider globally and calls that module's `luaopen_titan_*` entry. |
 | `share/titan/LICENSE`, `share/titan/THIRD_PARTY_NOTICES.md`, `share/titan/LICENSES/` | Titan's license and the licenses of bundled code. |
 | `etc/titan/build-profile` | The build profile (`production` or `validation`). |

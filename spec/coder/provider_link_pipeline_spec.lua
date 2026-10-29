@@ -98,6 +98,29 @@ local function listing(root)
     return entries
 end
 
+-- Permanent locks, preamble inputs and per-target link bookkeeping survive a
+-- failed staged rebuild. A previous success record does not: the link gate
+-- invalidates it before rebuilding. Keep every other entry visible so stage
+-- leaks or newly published provider artifacts still fail the inventory check.
+local function provider_artifacts(root, allow_success_record)
+    local artifacts = {}
+    for _, entry in ipairs(listing(root)) do
+        local key, suffix = entry:match("^[.]titan%-links/([0-9a-f]+)(.*)$")
+        local link_bookkeeping = key and #key == 64 and
+            (suffix == "" or suffix == "/link.d" or suffix == "/record")
+        if link_bookkeeping and suffix == "/record" then
+            assert.truthy(allow_success_record, "failed link retained a success record: " .. entry)
+        end
+        if entry ~= ".titan-build.lock" and entry ~= ".titan" and
+            entry ~= ".titan/preamble.c" and entry ~= ".titan/digests" and
+            entry ~= ".titan/linker-feature" and entry ~= ".titan-links" and
+            not link_bookkeeping then
+            artifacts[#artifacts + 1] = entry
+        end
+    end
+    return artifacts
+end
+
 local function lines(path)
     local result = {}
     for line in (read_file(path) or ""):gmatch("[^\n]+") do
@@ -412,7 +435,7 @@ describe("provider pair link pipeline", function()
         local shared = uname:match("Linux") ~= nil
         local ok, result = direct({}, "--incremental", "pkg.left", "pkg.right")
         assert.truthy(ok, result)
-        local inventory = listing(output)
+        local inventory = provider_artifacts(output, true)
         local published = {}
         for _, leaf in ipairs({ "pkg.so", "pkg.a" }) do
             published[leaf] = {
@@ -467,7 +490,7 @@ describe("provider pair link pipeline", function()
                 assert.truthy(position(trace, "dso-end"), label)
                 assert.falsy(position(lines(validations),
                     "publish_provider_bundle pkg.so"), label)
-                assert.same(inventory, listing(output), label)
+                assert.same(inventory, provider_artifacts(output, false), label)
                 for leaf, snapshot in pairs(published) do
                     assert.equal(snapshot.bytes, read_file(output .. "/" .. leaf), label)
                     assert.equal(snapshot.modified, lfs.attributes(

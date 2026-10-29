@@ -6,6 +6,7 @@ local driver = require "titan-compiler.driver"
 local filesystem = require "spec.support.filesystem"
 local installed_prefix = require "spec.support.installed_prefix"
 local lfs = require "lfs"
+local objectmetadata = require "titan-compiler.objectmetadata"
 local parser = require "titan-compiler.parser"
 local platform = require "titan-compiler.platform"
 local process = require "titan-compiler.process"
@@ -665,7 +666,6 @@ test "$3" = 0 || exit "$3"
             assert.is_false(file_exists(driver.part_object_filename(
                 source_root .. "/batch/one", part)))
         end
-        assert.is_false(file_exists(source_root .. "/batch/one.parts"))
         for index = 2, 3 do
             local leaf = leaves[index]
             assert.truthy(results[index].ok, results[index].err)
@@ -673,7 +673,10 @@ test "$3" = 0 || exit "$3"
             for _, object in ipairs(results[index].objects) do
                 assert.is_true(file_exists(object), object)
             end
-            assert.is_true(file_exists(source_root .. "/batch/" .. leaf .. ".parts"))
+            local primary = source_root .. "/batch/" .. leaf .. ".o"
+            local record = assert(objectmetadata.read(read_file(primary), primary))
+            assert.is_true(objectmetadata.validate_parts(record.object_metadata))
+            assert.equal(#parts[leaf], #record.object_metadata.parts)
         end
     end)
 
@@ -1016,12 +1019,12 @@ test "$3" = 0 || exit "$3"
             temporary_logs[#temporary_logs + 1] = path
             return path
         end)
-        io.stdout = {
+        io.stderr = {
             write = function() return nil, "injected command write failure" end,
             flush = function() return true end,
         }
         local results = driver.compile_modules(checked_requests(), JOBS, true)
-        io.stdout = previous_stdout
+        io.stderr = previous_stderr
         for _, result in ipairs(results) do
             assert.falsy(result.ok)
             assert.truthy(tostring(result.err):find(
@@ -1093,7 +1096,7 @@ test "$3" = 0 || exit "$3"
             return path
         end)
         local shown = {}
-        io.stdout = {
+        io.stderr = {
             write = function(_, output)
                 shown[#shown + 1] = output
                 return true
@@ -1103,7 +1106,7 @@ test "$3" = 0 || exit "$3"
 
         local results = driver.compile_modules(requests, JOBS, true)
         restore_tmpname()
-        io.stdout = previous_stdout
+        io.stderr = previous_stderr
         assert.falsy(results[1].ok)
         assert.truthy(tostring(results[1].err):find(
             "injected tmpname failure", 1, true), tostring(results[1].err))

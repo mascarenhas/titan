@@ -5,13 +5,17 @@ build/run split, and executable. Production object instrumentation, source
 attribution, counters, and reporting belong to the compiler and host tool;
 the generated runner does not depend on gcovr or perform collection itself.
 
-Titan's test infrastructure has three ordinary pieces:
+Titan's test infrastructure has four ordinary pieces:
 
 1. `titan/test.titan`, the ordinary standard module containing the public
    test API and its execution, filtering, and reporting implementation;
-2. `titan-compiler/test_runner.lua`, which discovers checked test functions and
+2. `titan-compiler/testroots.lua`, which enumerates `--test-dir` search
+   directories and resolves conventional test-module names through the ordinary
+   tagged source resolver;
+3. `titan-compiler/test_runner.lua`, which discovers checked test functions and
    renders a synthetic Titan module; and
-3. the `titanc --test` orchestration in `titanc` and `driver.lua`.
+4. the `titanc --test` orchestration in `titanc`, `driver.lua`, `build.lua`,
+   and `linkcertificate.lua`.
 
 There is no test AST node, special code-generator lowering, runner C runtime,
 registry identity trick, or second compiler pipeline. The synthetic runner is
@@ -36,38 +40,104 @@ for other imports, so a static test link retains the standard archive without
 any source overlap. Actual authored source overlaps retain the general
 whole-provider composition checks; test mode does not weaken those checks.
 
-The CLI's `source_overrides` supplies only generated `titan.test.runner`
-contents. Its descriptor carries `files`, an in-memory `contents` map, and the
-usual `program_output`; parsing and checking use the ordinary source pipeline.
-The runner imports `titan.test` publicly. Its discovered test owners use
-explicit `.titan` imports, preserving the already-checked source provenance and
-inheriting the real C headers needed to reconstruct their exported native
-fields. Discovery never supplies binary owners to this source-only path.
-No test-support source is installed with the SDK or copied into a test build.
+The CLI's `source_overrides` holds any source descriptors returned by
+`testroots.discover` and, at final link time, the generated `titan.test.runner`
+descriptor. The runner's descriptor carries `files`, an in-memory `contents`
+map, and its synthetic `program_output` stem; parsing and checking use the
+ordinary source pipeline. The runner imports `titan.test` publicly. Its
+discovered test owners use explicit `.titan` imports, preserving the
+already-checked source provenance and inheriting the real C headers needed to
+reconstruct their exported native fields. Discovery never supplies binary
+owners to this source-only path. No test-support source is installed with the
+SDK or copied into a test build.
 
 Ordinary production module code generation is independent of `--test`.
-Production objects can be shared by application and test executables when flags
-and resolved providers match. Direct private imports from tests affect consumer
-visibility, while the producer already contains its source collaboration
-surface. Make still owns dependency and configuration invalidation; coverage,
-optimization, or provider changes can require separate objects.
+`driver.test_owner_flags(test_build, test_functions)` enables
+`test_runner.TEST_COMPILE_FLAGS` (`-fno-optimize-sibling-calls`) and records
+`codegen.test_flags = true` in the module certificate only when `test_build` is
+true and the module declares discovered `test_` functions. Because a module
+with no `test_` functions records `test_flags = false` in both application and
+`--test` builds, application and test executables sharing an output tree reuse
+unchanged certified production objects without recompiling them. Direct private
+imports from tests affect only the consumer's visibility; the producer object
+already carries its source collaboration surface.
+
+## Automatic test-root discovery
+
+Repeatable `--test-dir DIR` and `--test-exclude MODULE` (`titan-compiler/testroots.lua`
+`testroots.discover`) are valid only with `--test`, and `--test-exclude`
+requires at least one `--test-dir`. Each `DIR` is resolved relative to the
+invocation working directory via `context.io:stat` and `context.io:realpath`.
+A missing, unreadable, or non-directory `DIR` fails immediately. Every `DIR`
+must lie lexically or physically inside a configured `--tree` source root
+(`driver.TITAN_SOURCE_PATH`); `testroots.discover` selects the **first**
+configured containing `--tree` root in `--tree` order to derive the directory's
+logical module prefix, rather than stripping `DIR`'s basename or choosing a
+longest prefix. Repeated or overlapping `--test-dir` arguments deduplicate.
+
+For each discovery area, `testroots.discover` walks entries in bytewise order
+with `context.io:list` and `context.io:lstat`, yielding cooperatively through
+`context.io:yield`. Hidden files and directories (names starting with `.`) and
+names that are not valid single module components are skipped. A candidate
+logical root is a module whose final component is `test`, `tests`, `spec`, or
+`specs`, or ends in `_test`, `_tests`, `_spec`, or `_specs`. Symbolic links
+whose name can form a candidate or directory are inspected with
+`context.io:stat`, so broken candidate links fail discovery; file symlinks
+resolve through the ordinary source resolver, while directory symlinks are
+tested at most once as a folder module owner and are not descended into
+recursively (an explicitly passed `--test-dir` directory symlink is traversed).
+
+Each candidate name is resolved both against its containing source root and
+across the full `--tree` path with `driver.resolve_source`. Immediate folder
+contributors (`kind == "blocked"`) and non-folder directories are ignored, while
+nested directories inside a folder module are still traversed for independently
+resolvable modules. If full `--tree` resolution is blocked by an earlier source
+root's folder module or resolves `source.main` outside all requested
+`--test-dir` areas, discovery fails with an explicit shadowing error rather
+than silently running another subtree's tests. If two discovery areas resolve
+the same logical name to different source descriptors, discovery fails with an
+ambiguity error. Discovery reports errors from its own requested-directory
+`stat`/`realpath`, directory `list`, entry `lstat`, and candidate symlink
+`stat`, and reports vanished selected source files; candidate existence checks
+inside `driver.resolve_source` use the shared `regular_file` helper, which on
+POSIX discards a returned `stat` error while probing candidate paths.
+
+`--test-exclude MODULE` validates `MODULE` as an exact logical module name and
+removes matching names from automatic discovery only. Explicit positional CLI
+roots are deduplicated in command-line order and win over `--test-exclude`;
+remaining discovered roots are sorted with `util.bytewise_less` and appended
+after explicit roots. An empty combined root list fails with `no test modules
+found`. Discovery never reads source bytes, parses, or typechecks: unselected
+malformed `.titan` files are ignored unless reached through the import closure
+of a selected root, while a selected root with zero `test_` functions remains
+legal.
 
 ## Source discovery
 
-After requested roots and their source closures check, `test_runner.discover`
-walks only source-backed entries in the union of those closures. A candidate is
-a surviving nonlocal `Ast.TopLevelFunc`, begins with `test_`, has one fixed
+Before `test_runner.discover` runs, `build.run` plans and certifies the
+requested source closure. Each module whose source-object certificate hits
+(`incremental.certify_local` and `incremental.verdict`) is restored into
+`driver.imported` by `driver.restore_source_object` with `kind = "source"`,
+`object_metadata`, and saved `test_functions` (`test_runner.function_names`
+recorded when the object was compiled), without parsing or typechecking its
+source. Only certified and restored source records or freshly checked ASTs from
+worker misses enter `driver.imported`.
+
+`test_runner.discover` walks source-backed entries in the union of the
+requested roots' dependency closures (`mod.ast` or `mod.kind == "source"` with
+`mod.object_metadata`). On a freshly checked AST, a candidate is a surviving
+nonlocal `Ast.TopLevelFunc` whose name begins with `test_`, has one fixed
 parameter and no `varargtype`, and normalizes that parameter with
-`types.normalize` to `Type.Nominal("titan.test.Context")`. Results are not
-restricted because the generated wrapper calls the function as a statement.
+`types.normalize` to `Type.Nominal("titan.test.Context")`; on a restored
+certified object, `mod.test_functions` supplies the function names directly.
+Results are not restricted because the generated wrapper calls the function as
+a statement.
 
 Source module names and then full case names are sorted with
 `util.bytewise_less`; discovery never depends on `pairs` order. It returns both
-the case descriptors and the exact owner-module set used for compilation
-flags. Generated source-object metadata records `test_runner.function_names`
-as `test_functions`, so an object-backed source entry supports the same
-discovery traversal without an AST. Binary providers are never discovered,
-even when a static provider physically carries other logical keys.
+the sorted case descriptors and the exact owner-module set. Binary providers
+are never discovered, even when a static provider physically carries other
+logical keys.
 
 ## Synthetic source and native outputs
 
@@ -94,36 +164,44 @@ because generated source has no exact import spelling for it; a bare name such
 as `math` would instead collide with Lua's `luaopen_math`. The documented
 `*_test`/`*_spec` convention avoids those existing module constraints.
 
-The generated descriptor is named `<first-program-output>__test_runner.titan`;
-the ordinary coder produces the adjacent `.c/.o`. `compile_program` receives
-an explicit `__test_entrypoint.c` path and links the same standalone objects,
-selected standard providers, runtime archive, and `-X` payload order as any
-other main. The first requested root's `program_output` owns the executable,
-including the folder `__main` convention. Input application mains do not
-participate in main selection under `--test`.
+For non-`-c`, non-`--print-ast` builds, `titanc` prepares and checks the
+final-link certificate (`linkcertificate.prepare` and `linkcertificate.check`)
+under `<output>/.titan-links/<key>/record` before rendering the synthetic
+runner or entrypoint, where `<key>` is the SHA-256 digest of the canonical
+sorted final output paths. The link recipe includes the ordered `roots`,
+`test_cases`, compiled module object parts, `--c-source` objects, `-X`
+payloads, selected providers and archives, runtime inputs, link flags,
+toolchain identity, and coverage inventory. On a link hit, `titanc` restores
+any missing public foreign headers, prints `Titan link hit <target>` under
+`-v`, and exits without generating or compiling the runner or entrypoint or
+invoking the linker.
 
-With `--output`, program stems and generated companions are mapped below the
-selected directory; source identity and test discovery remain unchanged.
-Without it, the original placement rules still apply. See
-[output-directory routing](output-directory.md).
+On a link miss, `titanc` invalidates `<output>/.titan-links/<key>/record` and
+places the target's synthetic files under
+`<output>/.titan-links/<key>/synthetic/<leaf>__test_runner.titan` (with its
+generated `.c` and `.o`) and
+`<output>/.titan-links/<key>/synthetic/<leaf>__test_entrypoint.c` (and `.o`),
+where `<leaf>` is the final component of the first root's logical name. Giving
+each final output set its own `synthetic/` directory prevents two test targets
+in one output tree that share a first root from overwriting each other's runner
+or entrypoint. Unless `--exe PATH` overrides the destination, the first root
+(`requested_modules[1]` — the first explicit root, or the bytewise-first
+discovered root when no explicit root is given) owns the default executable
+path (`program_output`, including the folder `__main` convention, or
+`<output>/bin/<logical>.exe` and `<output>/lib/titan/0.6/<logical/module>.dll`
+on Windows). Input application mains do not participate in main selection under
+`--test`. See [output-directory routing](output-directory.md).
 
-`-c --test` performs discovery so actual test-owner objects retain their C
-flags, then stops before generating the runner or linking. An incremental final
-test invocation discovers current cases from source or object metadata,
-generates a fresh runner and entrypoint, and reuses eligible source objects.
-Make owns invalidation when cases, imports, compiler settings, or headers change.
+`-c --test` (with or without `--test-dir`) certifies or compiles the source
+closure so test-owner objects receive `test_runner.TEST_COMPILE_FLAGS`
+(`-fno-optimize-sibling-calls`), compiles any `--c-source` nodes, and stops
+before link certification, runner generation, or linking.
 
-Before emitting C, `validate_program_output_paths` checks every source,
-runner, entrypoint, executable, and Darwin dSYM destination in both normalized
-and physical-parent form. It rejects aliases, ancestor/descendant conflicts,
-symlink leaves, and leaves of the wrong kind. Generated-parent creation never
-replaces an occupied path.
-
-`driver.compile` accepts an invocation-local `extra_compile_flags` list.
-`titanc` passes `test_runner.TEST_COMPILE_FLAGS`
-(`-fno-optimize-sibling-calls`) only for discovery-owner modules. The standard
-provider, runner, entrypoint, production dependencies, and probes retain their
-normal flags. There is no invocation-wide test codegen mode.
+Before emitting C for the final link, `validate_program_output_paths` checks
+every source, runner, entrypoint, executable, and Darwin dSYM destination in
+both normalized and physical-parent form. It rejects aliases,
+ancestor/descendant conflicts, symlink leaves, and leaves of the wrong kind.
+Generated-parent creation never replaces an occupied path.
 
 ## `titan.test` execution API and private state
 
@@ -299,6 +377,7 @@ The following existing splits avoid duplicated provider/build scaffolding:
 | Target derivation, `-X` classification, archive tools/construction, native archive validation | `spec/coder/static_compiled_modules_spec.lua`. |
 | DSO-selected imports and serialized rehydration | `spec/coder/so_import_spec.lua` and `spec/checker/so_rehydration_spec.lua`; omit dependency source and paired archives and assert dynamic selection. |
 | Dense Array capacity/hash/GC representation | `spec/dense_array_runtime_spec.lua`; language and checker behavior stays in topical compiler specs. |
+| Source-object certification, depfile parsing, scheduler workers, native inputs, link certification, output locking, and automatic test-root discovery | `spec/incremental_spec.lua`, `spec/depfile_spec.lua`, and `spec/coder/{incremental_compilation,build_scheduler,link_certification,native_inputs,build_coordination,test_root_discovery,compiler_build_scenarios}_spec.lua`. |
 
 Regex dogfood stays under `spec/stdlib/titan/string/regex_test.titan` outside
 LuaCov. Standard-library tests must not rewrite production source, recreate
@@ -312,26 +391,46 @@ teardown when the deadline wins, and timer-only cancellation when the reader win
 
 ## Repository dogfooding
 
-The shared `spec/support/stdlib_test_modules.mk` manifest names 30
-module-owned roots under `spec/stdlib/titan/` (`TITAN_STDLIB_TEST_ROOTS`), used
-by Linux, macOS, and native Windows. The same inventory names their
-test/helper compilation units, folder contributors, and direct source imports.
-On Unix, Make schedules per-module `-c --test --incremental` commands after
-their source dependencies. Every command runs from `TITAN_TEST_BUILD_DIR`
-(default `out/tests`) with `--output .`, uses the same absolute source tree and
-flags, and depends on the installed standard provider. No separate
-`titan.test` support object is compiled.
+The shared `spec/support/stdlib_test_modules.mk` manifest names the 30
+module-owned roots under `spec/stdlib/titan/` (`TITAN_STDLIB_TEST_ROOTS`,
+beginning with `TITAN_STDLIB_TEST_PROGRAM_ROOT := test.tests`) along with their
+measured validation durations and timing guards. This manifest is runtime
+scheduling and output-audit metadata for Linux, macOS, and Windows, not a Make
+dependency graph or compiler input list (`spec/libuv_build_spec.lua` verifies
+that `testroots.discover` over `spec/stdlib/titan` matches the exact 30-owner
+set).
 
-One final Unix `--output . --test --incremental --no-uv-bootstrap` invocation
-keeps all roots explicit and discovers the complete source/object closure. The
-designated first root, `test.tests`, owns `out/tests/test/tests`; the current
-synthetic runner, entrypoint, and Darwin dSYM are also owned there. Module C,
-objects, and headers reproduce the test source hierarchy below `out/tests`,
-leaving the source tree untouched. Make owns their source-import,
-private-header, installed-provider, compiler/SDK, and configuration
-prerequisites. Native fixture objects and the host child executable are
-separate targets. A no-op `titan-stdlib-test-build` invokes neither the
-compiler nor the linker.
+On Unix, `titan-stdlib-test-objects` and `titan-stdlib-test-build` run from
+`TITAN_TEST_BUILD_DIR` (default `out/tests`) and invoke a single installed
+`$(TEST_TITANC)` command with `--output . --test --incremental
+-j$(TITAN_JOBS) --tree $(abspath spec/stdlib/titan) --test-dir $(abspath
+spec/stdlib/titan) test.tests` and the three aggregate C helpers
+(`async_foreign_work.c`, `fs_fixture.c`, and `uv_stdio_probe.c`) passed via
+`--c-source`. `titan-stdlib-test-objects` adds `-c`;
+`titan-stdlib-test-build` adds the link-phase `--no-uv-bootstrap` and `--exe`
+options, which `-c` rejects. `test.tests` stays explicit and first so it owns
+the default provider identity and executable path (`out/tests/test/tests`,
+passed explicitly via `--exe` on `titan-stdlib-test-build`); `--test-dir`
+discovers the other 29 owners and deduplicates `test.tests`. Module C, objects,
+and headers reproduce the test source hierarchy below `out/tests`, aggregate
+`--c-source` objects live in `out/tests/.native/`, and the link certificate and
+synthetic runner/entrypoint live under `out/tests/.titan-links/<key>/`.
+
+Fixed fixture objects (`uv_stdio_probe.o`, `sqlite3_worker_fixture.o`,
+`ssl_allocator_fixture.o`, `ssl_error_strings.o`, `os_descriptor_limit.o`, and
+on Linux `transfer_alloc_fault.o`, `uv_sync_alloc_fault.o`, and
+`thread_retirement_fault.o`) are certified by separate `$(TEST_TITANC) -c
+--incremental --output $(TITAN_TEST_BUILD_DIR)/native/<stem>.o
+--print-c-objects ... --c-source` rules; each copies the object path that
+`titanc` reports to `$(TITAN_TEST_BUILD_DIR)/<stem>.o` only when `cmp -s`
+detects a content change. `os_process_host_child` is compiled directly by
+`$(CC)` from its C source and `$(TITAN_TEST_BUILD_DIR)/native-flags.config`
+([native test aggregate and C fixture
+rules](build-script-audit.md#native-test-aggregate-and-c-fixture-rules)). After
+an identical `luarocks make --force` reinstall, `make titan-stdlib-test-build`
+certifies every module object, `--c-source` helper, and final link as a hit and
+performs zero object compilations and zero links; certification still runs its
+preprocessing and toolchain probes.
 
 `make titan-stdlib-test-run` returns to the repository root before executing,
 because several fixtures use repository-relative paths. `TITAN_FILTER` supplies
@@ -400,8 +499,10 @@ Titan-only filter leaves the partitioned run enabled.
 `spec/support/ci_compiler_test_groups.txt` (schema `titan-busted-timings-v2`) is
 the timing dataset. Its header records host, profile, date, and compiler; each
 row names one discovered `spec/**/*_spec.lua` file, its domain, its measured
-local validation seconds, and optional Linux CI covered seconds (`-` falls back
-to the local value). The `retained` domain is the runtime/packaging set
+local validation seconds, and optional covered seconds (`-` falls back to the
+local value): Linux CI covered+stress durations for `compiler` rows, and
+same-host serial four-CPU LuaCov diagnostic seconds of the CI step's files,
+not a CI run, for `stdlib` rows. The `retained` domain is the runtime/packaging set
 (`Makefile` `STDLIB_BUSTED_TESTS`, `Makefile.win`
 `TITAN_ROCK_TEST_STDLIB_SPECS`), `stdlib` is
 `spec/support/ci_stdlib_compiler_test_files.txt`, and everything else is
@@ -425,9 +526,11 @@ CI runs the installed-stdlib files only after installing the standard provider;
 local Unix and Windows unfiltered runs still schedule each file exactly once
 through the same per-file inventory.
 
-`EXCLUSIVE_SPECS` names the genuinely exclusive files:
-`spec/coder/parallel_compilation_spec.lua` and `spec/coder/jobserver_spec.lua`
-count overlapping real compiler processes against their own caps, drive real
+`EXCLUSIVE_SPECS` (`spec/support/compiler_test_groups.lua`) names the
+genuinely exclusive files: `spec/coder/parallel_compilation_spec.lua`,
+`spec/coder/jobserver_spec.lua`, `spec/coder/build_scheduler_spec.lua`, and
+the stdlib-domain `spec/coder/build_coordination_spec.lua`. They count
+overlapping real compiler processes against their own caps, drive real
 parent Make jobservers, or install process-global signal guards. They run
 alone in their own checkout copy after every ordinary worker and any
 overlapped native build have finished, with `MAKEFLAGS`, `MFLAGS`,
@@ -548,22 +651,32 @@ workspace.
 ### Platform portability and complete execution
 
 `Makefile.win` provides the same build/run leaf targets through
-`spec/support/windows_stdlib_tests.sh`. It compiles every root, with up to
-`TITAN_JOBS` (default four) concurrent generated-C object compilations, using the
-native CLANG64/UCRT SDK in a marked, disposable local NTFS workspace. The
-workspace contains a private SDK copy, test sources, authored child fixtures,
-generated objects, logs, and scratch paths. Test sources retain their
-`source/spec/stdlib/titan/` paths. The authoritative transfer and protobuf native
-headers are copied under `source/titan/`, preserving authored relative imports
-without exporting private collaboration headers through the SDK.
-Windows retains its Job Object
-supervisor: descendants enter the private job before execution and are killed
-when supervision ends. PowerShell drains both output pipes concurrently and
-reads the complete Windows exit status, which can exceed 255. It prints that
-status and exits 1 for any nonzero value, because Bash keeps only eight exit
-bits and a native status such as 256 would otherwise read as success. The
-aggregate still uses `--no-uv-bootstrap`; fresh child tests select their own
-bootstrap normally.
+`spec/support/windows_stdlib_tests.sh`. It refreshes the supplied native
+CLANG64/UCRT SDK, test sources, collaboration headers (`titan/transfer_native.h`
+and `titan/protobuf/native.h`), and authored fixtures into a marked local NTFS
+workspace using NUL-delimited owned-input manifests (`sdk.inputs`,
+`source.inputs`, `fixtures.inputs`, `native-headers.inputs`) and copy-if-different
+comparisons, preserving generated objects, providers, certificates, and `.gcno`
+notes across builds. Pure-C `process child ação 東京.exe` and
+`windows-test-supervisor.exe` are built through `Makefile.win`
+`windows-stdlib-test-native`, which delegates to the UTF-8 Bash helper
+`spec/support/build_windows_stdlib_native.sh` and its timestamp freshness
+checks against `native-flags.config`. The fixed C fixture `.o` files are
+certified via `titanc -c --incremental --print-c-objects --c-source` in
+`work/native/<fixture>` and copied to `work/cwd/.titan-tests/<fixture>.o` when
+changed, and the aggregate is built with one `titanc --output ... --test
+--incremental --no-uv-bootstrap -j "$TITAN_JOBS" --exe
+"$winprefix/bin/titan-stdlib-tests.exe" --tree "$test_tree" --test-dir
+"$test_tree" --c-source ... test.tests` invocation ([shared native
+standard-library tests](windows-build.md#shared-native-standard-library-tests)).
+Execution resets only `work/scratch` and the run logs, then runs the aggregate
+under the Windows Job Object supervisor: descendants enter the private job
+before execution and are killed when supervision ends. PowerShell drains both
+output pipes concurrently and reads the complete Windows exit status, which can
+exceed 255. It prints that status and exits 1 for any nonzero value, because
+Bash keeps only eight exit bits and a native status such as 256 would otherwise
+read as success. The aggregate still uses `--no-uv-bootstrap`; fresh child
+tests select their own bootstrap normally.
 
 The same width difference applies inside the suite. A POSIX process exit
 status carries only eight bits, so `os.process_tests` skips its above-255 exit
@@ -610,28 +723,27 @@ reason. An Intel macOS run does not establish Apple Silicon behavior.
 
 Builds retain their reusable outputs; explicit `make clean` removes the
 selected `TITAN_OUTPUT_DIR` (default `out/`) as a Make-owned tree. The test
-cleanup helper (`spec/support/clean_generated_test_artifacts.sh`) prunes `out/`
-while inspecting synthetic fixtures and, unless `--keep-output` is selected,
-removes the owned `out/tests` and legacy `.titan-tests` directories
-recursively. Under `spec/`, legacy compiler outputs still use the bounded
-cleanup rules: remove every generated `.o`, and a primary `.c` only when a
-same-stem `.titan` source exists. Split-module outputs, below `spec/` and at
-the repository root, are removed only through a `<stem>.parts` companion whose
-every line matches `driver.render_parts_companion` exactly; the helper builds
-each deleted path from the companion's own stem, never from its contents, and
-a malformed companion deletes nothing. A failed split compile removes its
-companion but keeps the part C files and private header, so for a
-`.titan`-backed stem below `spec/` with no companion the helper removes only
-`<stem>.part<k>.c`/`.o` with a positive decimal `k` and a `<stem>.priv.h` whose
-first line is `coder.PRIVATE_HEADER_MARKER`. Generated headers require their
-exact compiler banner; synthetic test suffixes and root `test_runner_*`
-identify other owned fixtures. This does not consult Git, so it also works in
-a source rock while preserving author-written C/header fixtures and the
-ordinary `out/` provider stage. Outside `spec/`, `make clean` removes every C
-file, object, `.parts` companion, `.priv.h` header, and nonzero part C file
-and object that a compilation without `--output` leaves beside root, `titan/`,
-and `titan/uv/` modules or beside a standard folder module's main stem
-(`TITAN_LEGACY_SOURCE_OUTPUTS`), keeping authored sources and headers.
+cleanup helper (`spec/support/clean_generated_test_artifacts.sh` and
+`spec/support/clean_generated_test_artifacts.lua`) prunes `out/` while
+inspecting synthetic fixtures and, unless `--keep-output` is selected, removes
+the owned `out/tests` and legacy `.titan-tests` directories recursively. First,
+`clean_generated_test_artifacts.lua` inspects every regular, non-symlink `.o`
+file under `spec/`, `titan/`, and the repository root with
+`objectmetadata.read` and `objectmetadata.validate_parts`. When the object
+carries a valid primary `.titan.source` record, the helper removes the exact
+recorded `<stem><part.c_suffix>`, `<stem><part.object_suffix>`, and optional
+`<stem><native.private_header>` files; a missing or malformed record deletes
+nothing. Under `spec/`, the shell
+script then removes a primary `<stem>.c` only when a same-stem `<stem>.titan`
+source exists, preserving author-written C fixtures. Generated `.titan.h` and
+`.ffi.h` headers below `spec/` and at `./test.titan.h` and `./test.ffi.h`
+require their exact compiler banner; synthetic `*__test_support.*`,
+`*__test_runner.*`, and `*__test_entrypoint.*` suffixes (together with their
+matching executable and `.dSYM` bundle) and root `test_runner_*` paths identify
+other owned fixtures. This does not consult Git, so it also works in a source
+rock while preserving author-written C/header fixtures and the ordinary `out/`
+provider stage. `make clean` additionally removes any legacy source-adjacent
+standard-library foreign headers, providers, shims, and `.dSYM` bundles.
 
 CI runs this aggregate twice: once source-linked with native coverage in the
 `native-coverage` job, and once as an independent ASan+UBSan build in the

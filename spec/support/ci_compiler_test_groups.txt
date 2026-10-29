@@ -8,12 +8,17 @@
 # Domains:
 #   retained - runtime/packaging specs (Makefile STDLIB_BUSTED_TESTS)
 #   stdlib   - installed-stdlib compiler integration specs (ci_stdlib_compiler_test_files.txt)
+#              Their ci_covered_seconds come from a same-host serial 4-CPU
+#              LuaCov diagnostic run of this step's files (2026-10-28), not a CI run.
 #   compiler - compiler/language specs
 # Optional column ci_covered_seconds records Linux CI covered+stress durations
 # (run 37890691611 at b32db0c / 37887221316 at e9d3855, GCC 14, ubicloud-standard-2).
 # When ci_covered_seconds is '-', CI partitioning falls back to local_validation_seconds.
 # Shard assignments are never stored here; spec/support/compiler_test_groups.lua
 # computes deterministic LPT partitions for any worker count N.
+# Issue 303 additions use an unmeasured 1.000 local weight; except for the
+# stdlib rows above, they have no covered timing. Neither is an observation
+# from the timing runs above.
 compiler spec/abi_spec.lua 0.201 2.926
 retained spec/asan_generated_c_context_spec.lua 0.587 -
 compiler spec/binary_compatibility_spec.lua 0.017 0.107
@@ -66,11 +71,14 @@ compiler spec/checker/type_relations_soundness_spec.lua 1.009 5.964
 compiler spec/checker/type_tests_spec.lua 0.773 5.536
 compiler spec/checker/unions_spec.lua 0.526 6.427
 compiler spec/checker/variadic_spec.lua 0.503 3.706
+compiler spec/checker_recovery_index_spec.lua 1.000 -
 compiler spec/codecov_report_spec.lua 0.002 0.017
 compiler spec/coder/adapter_registry_elimination_spec.lua 2.278 7.976
 compiler spec/coder/backtrace_spec.lua 2.580 6.038
 compiler spec/coder/binary_compatibility_spec.lua 28.429 39.979
 compiler spec/coder/bound_methods_spec.lua 2.440 6.427
+stdlib spec/coder/build_coordination_spec.lua 1.000 34.874
+compiler spec/coder/build_scheduler_spec.lua 1.000 -
 compiler spec/coder/c_ffi_allocation_constructors_spec.lua 5.677 9.360
 compiler spec/coder/c_ffi_operators_spec.lua 3.534 12.153
 compiler spec/coder/c_ffi_owned_types_spec.lua 18.328 104.633
@@ -83,12 +91,13 @@ compiler spec/coder/closure_adjustment_wrappers_spec.lua 5.706 15.454
 compiler spec/coder/closure_transfer_spec.lua 1.137 0.000
 compiler spec/coder/closures_spec.lua 9.812 18.381
 compiler spec/coder/coder_spec.lua 41.556 94.307
+stdlib spec/coder/compiler_build_scenarios_spec.lua 1.000 115.379
 compiler spec/coder/const_values_spec.lua 1.177 6.224
 compiler spec/coder/contextual_value_calls_spec.lua 2.592 7.007
 compiler spec/coder/coverage_attribution_spec.lua 1.531 9.242
 compiler spec/coder/defer_spec.lua 1.543 6.407
 compiler spec/coder/dense_arrays_spec.lua 6.434 20.570
-stdlib spec/coder/documentation_spec.lua 0.749 -
+stdlib spec/coder/documentation_spec.lua 0.749 1.215
 compiler spec/coder/driver_flags_spec.lua 10.232 14.360
 compiler spec/coder/erased_boundary_spec.lua 0.394 5.370
 compiler spec/coder/error_handling_spec.lua 15.987 14.716
@@ -101,18 +110,20 @@ compiler spec/coder/for_in_spec.lua 5.981 9.721
 compiler spec/coder/foreign_functions_spec.lua 7.726 42.897
 compiler spec/coder/generics_spec.lua 10.497 31.540
 compiler spec/coder/grammar_semantics_spec.lua 3.993 25.896
-stdlib spec/coder/immediate_functions_spec.lua 6.013 -
-stdlib spec/coder/incremental_compilation_spec.lua 33.326 -
+stdlib spec/coder/immediate_functions_spec.lua 6.013 6.859
+stdlib spec/coder/incremental_compilation_spec.lua 33.326 103.458
 compiler spec/coder/interfaces_spec.lua 10.678 41.375
 compiler spec/coder/jobserver_spec.lua 35.270 -
 compiler spec/coder/line_directives_spec.lua 1.122 6.580
+stdlib spec/coder/link_certification_spec.lua 1.000 19.630
 compiler spec/coder/lto_spec.lua 4.471 7.261
 compiler spec/coder/map_metamethods_spec.lua 1.220 4.781
-stdlib spec/coder/multi_module_grouping_spec.lua 2.325 -
-stdlib spec/coder/multi_module_libraries_spec.lua 39.726 -
+stdlib spec/coder/multi_module_grouping_spec.lua 2.325 3.802
+stdlib spec/coder/multi_module_libraries_spec.lua 39.726 50.801
 compiler spec/coder/multi_module_path_runtime_spec.lua 7.148 17.301
 compiler spec/coder/named_arguments_spec.lua 3.305 13.198
-stdlib spec/coder/native_coverage_spec.lua 13.058 -
+stdlib spec/coder/native_coverage_spec.lua 13.058 42.177
+compiler spec/coder/native_inputs_spec.lua 1.000 -
 compiler spec/coder/native_optional_storage_spec.lua 3.657 17.238
 compiler spec/coder/native_symbol_names_spec.lua 0.896 6.111
 compiler spec/coder/nominal_codec_spec.lua 5.302 0.000
@@ -128,7 +139,7 @@ compiler spec/coder/reflection_projection_spec.lua 1.628 0.000
 compiler spec/coder/so_import_spec.lua 8.934 16.910
 compiler spec/coder/so_trace_names_spec.lua 1.334 6.051
 compiler spec/coder/source_import_local_visibility_spec.lua 8.831 76.086
-stdlib spec/coder/split_units_spec.lua 13.160 -
+stdlib spec/coder/split_units_spec.lua 13.160 59.677
 compiler spec/coder/spread_expressions_spec.lua 5.039 11.918
 compiler spec/coder/stack_capacity_spec.lua 0.744 4.596
 compiler spec/coder/stack_relocation_spec.lua 1.034 6.715
@@ -136,12 +147,13 @@ compiler spec/coder/standalone_paths_spec.lua 1.290 1.000
 compiler spec/coder/static_compiled_modules_spec.lua 2.726 4.249
 compiler spec/coder/static_dynamic_facade_spec.lua 2.264 2.594
 compiler spec/coder/static_protocol_mismatch_spec.lua 6.701 7.064
-stdlib spec/coder/test_runner_spec.lua 20.987 -
+stdlib spec/coder/test_root_discovery_spec.lua 1.000 27.648
+stdlib spec/coder/test_runner_spec.lua 20.987 21.852
 compiler spec/coder/type_relations_soundness_spec.lua 11.665 26.953
 compiler spec/coder/type_tests_spec.lua 1.492 7.539
 compiler spec/coder/unions_spec.lua 8.322 36.908
-stdlib spec/coder/unions_stdlib_spec.lua 0.946 -
-stdlib spec/coder/unwind_stdlib_spec.lua 0.611 -
+stdlib spec/coder/unions_stdlib_spec.lua 0.946 2.177
+stdlib spec/coder/unwind_stdlib_spec.lua 0.611 0.792
 compiler spec/coder/variadic_spec.lua 10.539 19.392
 compiler spec/compiler_environment_spec.lua 0.041 0.062
 compiler spec/compiler_io_spec.lua 0.022 0.188
@@ -155,12 +167,15 @@ compiler spec/cprobe_spec.lua 2.678 21.896
 compiler spec/csemantics_spec.lua 0.145 0.627
 compiler spec/ctypes_spec.lua 0.211 2.820
 retained spec/dense_array_runtime_spec.lua 2.367 -
+compiler spec/depfile_spec.lua 1.000 -
 compiler spec/documentation_spec.lua 0.232 0.787
 compiler spec/driver_spec.lua 9.998 89.022
 compiler spec/foreign_alias_headers_spec.lua 2.974 46.664
 compiler spec/foreigncache_spec.lua 26.974 413.885
 compiler spec/foreigntypes_spec.lua 0.043 0.181
+compiler spec/generic_validation_spec.lua 1.000 -
 compiler spec/graphcodec_spec.lua 0.291 9.459
+compiler spec/incremental_spec.lua 1.000 -
 compiler spec/installed_prefix_spec.lua 0.121 0.095
 compiler spec/lexer_spec.lua 0.069 0.322
 retained spec/libuv_build_spec.lua 37.702 -
@@ -177,7 +192,7 @@ retained spec/rockspec_spec.lua 11.706 -
 compiler spec/sha256_spec.lua 0.001 0.009
 compiler spec/standalone_paths_spec.lua 0.004 0.010
 compiler spec/staticmetadata_spec.lua 0.124 0.606
-stdlib spec/stdlib_compiler_spec.lua 0.071 -
+stdlib spec/stdlib_compiler_spec.lua 0.071 0.013
 compiler spec/symtab_spec.lua 0.006 0.024
 compiler spec/test_runner_spec.lua 0.140 0.112
 retained spec/titan_install_spec.lua 0.057 -

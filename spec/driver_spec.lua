@@ -18,6 +18,8 @@ local util = require "titan-compiler.util"
 local titan = require "titan"
 local platform = require "titan-compiler.platform"
 local paths = require "titan-compiler.path"
+local version = require "titan-compiler.version"
+local incremental = require "titan-compiler.incremental"
 
 describe("compiler-specific production debug defaults", function()
     local function fresh_driver(profile)
@@ -201,10 +203,20 @@ local function posix_model_it(name, callback)
         local previous_driver = {}
         for key, value in pairs(driver) do previous_driver[key] = value end
         platform.windows = false
+        if previous then
+            -- Host module-load paths on Windows carry drive letters (`C:/...`).
+            -- Delegate to the real production `driver.initialize_layout` so its
+            -- context/strategy validation runs unchanged while skipping only
+            -- the host-root reinterpretation step.
+            driver.initialize_layout = function(context)
+                if type(context) == "table" and context.io ~= nil then
+                    context._layout_initialized = true
+                end
+                return previous_driver.initialize_layout(context)
+            end
+        end
         local completed, failure = xpcall(callback, debug.traceback)
         platform.windows = previous
-        -- Layout initialization inside a POSIX model must not leave native
-        -- installed paths reinterpreted as POSIX relative paths afterwards.
         for key in pairs(driver) do driver[key] = nil end
         for key, value in pairs(previous_driver) do driver[key] = value end
         assert.truthy(completed, failure)
@@ -245,6 +257,8 @@ describe("Windows compiler path integration", function()
             windows = platform.windows,
             native = platform.native,
             new_sync = compiler_io.new_sync,
+            lfs_attributes = lfs.attributes,
+            lfs_symlinkattributes = lfs.symlinkattributes,
         }
         platform.windows = true
         platform.native = function(name)
@@ -255,16 +269,23 @@ describe("Windows compiler path integration", function()
         platform.windows = originals.windows
         platform.native = originals.native
         compiler_io.new_sync = originals.new_sync
+        lfs.attributes = originals.lfs_attributes
+        lfs.symlinkattributes = originals.lfs_symlinkattributes
     end)
 
-    local function header_manifest(paths)
+    local function header_manifest(paths, kind)
+        kind = kind or "file"
         local modtype = types.Module("header_paths", {}, {})
         modtype._source = true
         modtype.source_members = {}
         modtype.source_type_members = {}
         local headers = {}
         for index, path in ipairs(paths) do
-            headers[index] = { kind = "file", path = path, identity = "bytes:header" }
+            headers[index] = {
+                kind = type(path) == "table" and path.kind or kind,
+                path = type(path) == "table" and path.path or path,
+                identity = type(path) == "table" and path.identity or "bytes:header",
+            }
         end
         return sourceinterface.serialize({
             kind = "source", type = modtype, c_header_dependencies = headers,
@@ -284,14 +305,25 @@ describe("Windows compiler path integration", function()
             "C:/SDK/link/../include/lua.h",
         }
         local manifest = assert(header_manifest(paths))
+        assert.equal(version.SOURCE_INTERFACE_FORMAT, sourceinterface.FORMAT)
+        assert.matches(version.SOURCE_INTERFACE_FORMAT, manifest, 1, true)
         for _, path in ipairs(paths) do
             assert.matches(path, manifest, 1, true)
         end
         assert.not_equal(assert(header_manifest({ paths[1] })),
             assert(header_manifest({ paths[2] })))
+        assert.not_equal(assert(header_manifest({ paths[1] }, "file")),
+            assert(header_manifest({ paths[1] }, "origin")))
+        assert.is_string(assert(header_manifest({
+            { kind = "file", path = paths[1], identity = "bytes:header" },
+            { kind = "origin", path = paths[1], identity = "origin:header" },
+        })))
         local duplicate, duplicate_error = header_manifest({ paths[1], paths[1] })
         assert.is_nil(duplicate)
         assert.matches("repeat file input", duplicate_error, 1, true)
+        local duplicate_origin, origin_error = header_manifest({ paths[1], paths[1] }, "origin")
+        assert.is_nil(duplicate_origin)
+        assert.matches("repeat origin input", origin_error, 1, true)
         for _, path in ipairs({ "relative.h", "C:relative.h", "/rooted.h",
                 [[\rooted.h]], [[\\server]], [[\\.\C:\device.h]], "C:/bad\0.h" }) do
             local value, err = header_manifest({ path })
@@ -477,6 +509,628 @@ describe("Windows compiler path integration", function()
         assert.same({ "C:/new", "C:/new/child",
             "C:/new/child/provider.dll.stage.tmp.stage" }, created)
     end)
+
+    it("retires only matching stale directories under their held output domain", function()
+        local directory = "C:/build/lib"
+        local stage = directory .. "/APP.dll.stage.tmp.old"
+        local entries = {
+            [directory] = { "APP.dll.stage.tmp.old", "app.dll.stage.tmp.",
+                "other.dll.stage.tmp.old", "app.dll.tmp.old",
+                "app.dll.stage.tmp.link", "app.dll.stage.tmp.file" },
+            [stage] = { "APP.dll", "nested" },
+            [stage .. "/nested"] = { "outside-link" },
+        }
+        local kinds = {
+            [stage] = "directory", [stage .. "/APP.dll"] = "file",
+            [stage .. "/nested"] = "directory",
+            [stage .. "/nested/outside-link"] = "symlink",
+            [directory .. "/app.dll.stage.tmp."] = "directory",
+            [directory .. "/other.dll.stage.tmp.old"] = "directory",
+            [directory .. "/app.dll.tmp.old"] = "directory",
+            [directory .. "/app.dll.stage.tmp.link"] = "symlink",
+            [directory .. "/app.dll.stage.tmp.file"] = "file",
+        }
+        local removed, locks = {}, { entries = { { directory = "C:/BUILD" } } }
+        local strategy = {
+            stat = function(_, filename)
+                assert.equal(directory, filename)
+                return { kind = "directory" }
+            end,
+            lstat = function(_, filename)
+                return kinds[filename] and { kind = kinds[filename] }
+            end,
+            list = function(_, filename) return assert(entries[filename], filename) end,
+            unlink = function(_, filename)
+                assert.equal(1, #locks.entries)
+                removed[#removed + 1], kinds[filename] = filename, nil
+                return true
+            end,
+            rmdir = function(_, filename)
+                assert.equal(1, #locks.entries)
+                removed[#removed + 1], kinds[filename] = filename, nil
+                return true
+            end,
+        }
+        compiler_io.new_sync = function() error("unexpected host filesystem strategy") end
+        -- Neither a reserved sibling nor an input below a matching link, which
+        -- is never a candidate, blocks retirement of the genuine stage.
+        local plan = {
+            reservations = { { path = directory .. "/app.dll" } },
+            inputs = { directory .. "/app.dll.stage.tmp.link/source.titan" },
+            order = {},
+        }
+        assert(driver.cleanup_stale_staging({ io = strategy },
+            { { path = directory .. "/app.dll" } }, locks,
+            { plan = plan, native_objects = {}, link_inputs = {},
+                native_policy = { cacheable = true, backend = "compiler", files = {} },
+                compiler_tools = {}, output_tools = {} }))
+        assert.same({ stage .. "/APP.dll", stage .. "/nested/outside-link",
+            stage .. "/nested", stage }, removed)
+        assert.equal("directory", kinds[directory .. "/app.dll.stage.tmp."])
+        assert.equal("directory", kinds[directory .. "/other.dll.stage.tmp.old"])
+        assert.equal("directory", kinds[directory .. "/app.dll.tmp.old"])
+        assert.equal("symlink", kinds[directory .. "/app.dll.stage.tmp.link"])
+        assert.equal("file", kinds[directory .. "/app.dll.stage.tmp.file"])
+    end)
+
+    it("rejects stale cleanup without the matching output lock before touching disk", function()
+        local context = { io = setmetatable({}, {
+            __index = function() error("cleanup touched an unlocked filesystem") end,
+        }) }
+        local outputs = { { path = "C:/build/app.dll" } }
+        local ok, err = driver.cleanup_stale_staging(context, outputs)
+        assert.is_nil(ok)
+        assert.matches("requires held output locks", err, 1, true)
+        ok, err = driver.cleanup_stale_staging(context, outputs,
+            { entries = { { directory = "C:/build-other" } } })
+        assert.is_nil(ok)
+        assert.matches("no output lock for 'C:/build/app.dll'", err, 1, true)
+        ok, err = driver.cleanup_stale_staging(context, outputs,
+            { entries = { { directory = "C:/build" } } })
+        assert.is_nil(ok)
+        assert.matches("requires the invocation's preflighted inputs and reservations",
+            err, 1, true)
+        local held = { entries = { { directory = "C:/build" } } }
+        local plan = { inputs = {}, reservations = {}, order = {} }
+        ok, err = driver.cleanup_stale_staging(context, outputs, held, { plan = plan })
+        assert.is_nil(ok)
+        assert.matches("requires the invocation's native C nodes", err, 1, true)
+        -- A node from a nativeinputs result without its recorded dependency
+        -- list cannot be protected, so the cleanup fails closed.
+        ok, err = driver.cleanup_stale_staging(context, outputs, held, { plan = plan,
+            native_objects = { { source = "C:/src/helper.c", path = "C:/build/.native/helper.o" } } })
+        assert.is_nil(ok)
+        assert.matches("each native C node's source and recorded dependencies", err, 1, true)
+        ok, err = driver.cleanup_stale_staging(context, outputs, held,
+            { plan = plan, native_objects = {} })
+        assert.is_nil(ok)
+        assert.matches("requires the invocation's final-link inputs", err, 1, true)
+        ok, err = driver.cleanup_stale_staging(context, outputs, held,
+            { plan = plan, native_objects = {}, link_inputs = {} })
+        assert.is_nil(ok)
+        assert.matches("requires the invocation's prepared native link policy", err, 1, true)
+        ok, err = driver.cleanup_stale_staging(context, outputs, held,
+            { plan = plan, native_objects = {}, link_inputs = {}, native_policy = { files = {} } })
+        assert.is_nil(ok)
+        assert.matches("requires the invocation's native tool identities", err, 1, true)
+    end)
+
+    -- A closed Windows strategy for stale-staging retirement. Nodes are keyed
+    -- by normalized absolute spelling; every call is recorded, so a test can
+    -- prove that a refusal precedes every removal.
+    local function staging_model(nodes)
+        local model = { calls = {}, removed = {} }
+        local function record(operation, filename)
+            model.calls[#model.calls + 1] = operation .. " " .. filename
+        end
+        local function remove(operation, filename)
+            record(operation, filename)
+            model.removed[#model.removed + 1], nodes[filename] = filename, nil
+            return true
+        end
+        model.io = {
+            cwd = function() return "C:/work" end,
+            stat = function(_, filename)
+                record("stat", filename)
+                return nodes[filename]
+            end,
+            lstat = function(_, filename)
+                record("lstat", filename)
+                return nodes[filename]
+            end,
+            list = function(_, filename)
+                record("list", filename)
+                local names = {}
+                for candidate in pairs(nodes) do
+                    local parent, leaf = candidate:match("^(.*)/([^/]+)$")
+                    if parent == filename then names[#names + 1] = leaf end
+                end
+                table.sort(names)
+                return names
+            end,
+            unlink = function(_, filename) return remove("unlink", filename) end,
+            rmdir = function(_, filename) return remove("rmdir", filename) end,
+        }
+        return model
+    end
+
+    -- The protection inventory titanc supplies: its preflighted plan, the
+    -- native C nodes, the prepared final link's inputs and native library
+    -- policy, and its native tools. `compiler_tools = false` models an
+    -- uncertified toolchain, which titanc passes as nil.
+    local function staging_protection(fields)
+        local compiler_tools = fields.compiler_tools
+        if compiler_tools == nil then compiler_tools = {}
+        elseif compiler_tools == false then compiler_tools = nil end
+        return {
+            plan = { inputs = fields.inputs or {}, reservations = fields.reservations or {},
+                order = fields.order or {} },
+            native_objects = fields.native or {},
+            link_inputs = fields.links or {},
+            native_policy = fields.native_policy or
+                { cacheable = true, backend = "compiler", files = fields.native_files or {} },
+            compiler_tools = compiler_tools,
+            output_tools = fields.output_tools or {},
+        }
+    end
+
+    describe("stale stages over protected invocation paths", function()
+        local bin = "C:/out/bin"
+        local abandoned = bin .. "/app.exe.stage.tmp.abandoned"
+        local authored = bin .. "/app.exe.stage.tmp.authored"
+        local outputs = { { path = bin .. "/app.exe" }, { path = "C:/out/lib/titan/0.6/app.dll" } }
+        local locks = { entries = { { directory = "C:/out", path = "C:/out/.titan-build.lock" } } }
+        local previous_imported
+        before_each(function()
+            previous_imported = driver.imported
+            compiler_io.new_sync = function() error("unexpected host filesystem strategy") end
+        end)
+        after_each(function() driver.imported = previous_imported end)
+
+        -- The earlier candidate is genuinely abandoned; the later one holds the
+        -- protected file, so validation must precede every removal.
+        local function layout(leaf)
+            return {
+                ["C:/out"] = { kind = "directory" }, [bin] = { kind = "directory" },
+                [abandoned] = { kind = "directory" },
+                [abandoned .. "/app.exe"] = { kind = "file", device = "7", inode = "abandoned" },
+                [authored] = { kind = "directory" },
+                [authored .. "/" .. leaf] = { kind = "file", device = "7", inode = "authored" },
+            }
+        end
+
+        for _, case in ipairs({
+            { name = "a declared native object", leaf = "helper.o",
+                protection = staging_protection({ inputs = { authored .. "/helper.o" } }) },
+            { name = "an authored C source", leaf = "authored.c",
+                protection = staging_protection({ inputs = { authored .. "/authored.c" } }) },
+            { name = "a case-folded native spelling of an input", leaf = "helper.o",
+                protection = staging_protection({
+                    inputs = { [[c:\OUT\BIN\APP.EXE.STAGE.TMP.AUTHORED\HELPER.O]] },
+                }) },
+            { name = "a Titan source restored by the build", leaf = "app.titan",
+                protection = staging_protection({ order = { "app" } }),
+                imported = { app = { source_files = { authored .. "/app.titan" } } } },
+            { name = "a C header a worker recorded after preflight", leaf = "local.h",
+                protection = staging_protection({ order = { "app" } }),
+                imported = { app = {
+                    source_files = { "C:/src/app.titan" },
+                    c_header_dependencies = { { kind = "file", path = authored .. "/local.h" } },
+                } } },
+            { name = "a reserved output", leaf = "app.c",
+                protection = staging_protection({
+                    reservations = { { path = authored .. "/app.c" } },
+                }) },
+            { name = "a header recorded only by --c-source preprocessing", leaf = "native.h",
+                protection = staging_protection({ inputs = { "C:/src/helper.c" },
+                    native = { { source = "C:/src/helper.c", path = "C:/out/.native/helper.o",
+                        dependencies = { "C:/src/helper.c", authored .. "/native.h" } } } }) },
+            { name = "a --c-source node's own source", leaf = "node.c",
+                protection = staging_protection({
+                    native = { { source = authored .. "/node.c", path = "C:/out/.native/node.o",
+                        dependencies = { "C:/src/node.h" } } } }) },
+            { name = "a raw final-link input outside -X", leaf = "helper.a",
+                protection = staging_protection({ links = { authored .. "/helper.a" } }) },
+            { name = "a native library the link policy resolved", leaf = "libhelper.a",
+                protection = staging_protection({
+                    links = { "C:/out/bin/app.o" },
+                    native_files = { "C:/llvm/lib/libm.a", authored .. "/libhelper.a" },
+                }) },
+            { name = "the certified compiler executable", leaf = "clang.exe",
+                protection = staging_protection({ compiler_tools = {
+                    { path = "C:/llvm/bin/ccache.exe" }, { path = authored .. "/clang.exe" },
+                } }) },
+            { name = "a selected output tool", leaf = "llvm-rc.exe",
+                protection = staging_protection({ output_tools = {
+                    linker = { argv = { "ld.lld" }, identity = { path = "C:/llvm/bin/ld.lld.exe" } },
+                    rc = { argv = { "llvm-rc" }, identity = { path = authored .. "/llvm-rc.exe" } },
+                } }) },
+            { name = "a selected LTO plugin", leaf = "LLVMgold.dll",
+                protection = staging_protection({ output_tools = {
+                    lto_plugins = { { argv = { authored .. "/LLVMgold.dll" },
+                        identity = { path = authored .. "/LLVMgold.dll" } } },
+                } }) },
+            { name = "a physical alias of a staged file", leaf = "helper.o",
+                protection = staging_protection({ inputs = { "C:/elsewhere/helper.o" } }),
+                aliases = {
+                    ["C:/elsewhere/helper.o"] = { kind = "file", device = "7", inode = "authored" },
+                } },
+        }) do
+            it("retains every candidate when one contains " .. case.name, function()
+                local nodes = layout(case.leaf)
+                for filename, node in pairs(case.aliases or {}) do nodes[filename] = node end
+                local model = staging_model(nodes)
+                driver.imported = case.imported or {}
+                local ok, err = driver.cleanup_stale_staging(
+                    { io = model.io }, outputs, locks, case.protection)
+                assert.is_nil(ok)
+                assert.matches("refusing to retire stale Windows staging: staging path '" ..
+                    authored, err, 1, true)
+                assert.matches("for final output '" .. bin .. "/app.exe'", err, 1, true)
+                assert.same({}, model.removed)
+                assert.equal("directory", nodes[abandoned].kind)
+                assert.equal("file", nodes[abandoned .. "/app.exe"].kind)
+                assert.equal("directory", nodes[authored].kind)
+                assert.equal("file", nodes[authored .. "/" .. case.leaf].kind)
+            end)
+        end
+
+        it("retains every candidate when a later footprint or protected path cannot be observed", function()
+            local nodes = layout("helper.o")
+            local model = staging_model(nodes)
+            local list = model.io.list
+            model.io.list = function(strategy, filename)
+                if filename == authored then return nil, "list: access denied" end
+                return list(strategy, filename)
+            end
+            local ok, err = driver.cleanup_stale_staging({ io = model.io }, outputs, locks,
+                staging_protection({}))
+            assert.is_nil(ok)
+            assert.matches("cannot list '" .. authored .. "': list: access denied", err, 1, true)
+            assert.same({}, model.removed)
+
+            model.io.list = list
+            local lstat = model.io.lstat
+            model.io.lstat = function(strategy, filename)
+                if filename == "C:/src/denied.h" then return nil, "lstat: access denied" end
+                return lstat(strategy, filename)
+            end
+            ok, err = driver.cleanup_stale_staging({ io = model.io }, outputs, locks,
+                staging_protection({ inputs = { "C:/src/denied.h" } }))
+            assert.is_nil(ok)
+            assert.matches("refusing to retire stale Windows staging: lstat: access denied",
+                err, 1, true)
+            assert.same({}, model.removed)
+            assert.equal("file", nodes[abandoned .. "/app.exe"].kind)
+        end)
+
+        it("retires every candidate when protected paths only meet links or siblings", function()
+            local nodes = layout("helper.o")
+            -- A link inside an abandoned stage is removed, never followed; a
+            -- matching link beside the stages is never a candidate.
+            nodes[authored .. "/target-link"] = { kind = "symlink", device = "7", inode = "link" }
+            nodes["C:/src/target.h"] = { kind = "file", device = "7", inode = "target" }
+            nodes[bin .. "/app.exe.stage.tmp.user-link"] = {
+                kind = "symlink", device = "7", inode = "user-link",
+            }
+            local model = staging_model(nodes)
+            driver.imported = {
+                app = { source_files = { "C:/src/app.titan" },
+                    c_header_dependencies = { { kind = "file", path = "C:/src/target.h" } } },
+            }
+            assert(driver.cleanup_stale_staging({ io = model.io }, outputs, locks,
+                staging_protection({
+                    order = { "app" },
+                    reservations = { { path = bin .. "/app.exe" } },
+                    inputs = { bin .. "/app.exe.stage.tmp.user-link/source.titan" },
+                    native = { { source = "C:/src/helper.c", path = "C:/out/.native/helper.o",
+                        dependencies = { "C:/src/helper.c", "C:/src/target.h" } } },
+                    links = { "C:/out/bin/app.o" },
+                    native_files = { "C:/src/libtarget.a" },
+                    compiler_tools = { { path = "C:/llvm/bin/clang.exe" } },
+                    output_tools = { linker = { argv = { "ld.lld" },
+                        identity = { path = "C:/llvm/bin/ld.lld.exe" } } },
+                })))
+            assert.same({
+                abandoned .. "/app.exe", abandoned,
+                authored .. "/helper.o", authored .. "/target-link", authored,
+            }, model.removed)
+            assert.equal("symlink", nodes[bin .. "/app.exe.stage.tmp.user-link"].kind)
+            assert.equal("file", nodes["C:/src/target.h"].kind)
+        end)
+
+        -- An unresolved native library policy or an uncertified tool selection
+        -- leaves no evidence for a raw operand or tool inside a stage.
+        for _, case in ipairs({
+            { name = "an opaque native library policy",
+                reason = "opaque linker input mechanism: @empty.rsp",
+                fields = { links = { "C:/out/bin/app.o" }, native_policy = {
+                    cacheable = false, backend = "none", argv = {},
+                    reason = "opaque linker input mechanism: @empty.rsp",
+                } } },
+            { name = "an uncertified compiler toolchain",
+                reason = "the compiler toolchain is uncertified",
+                fields = { compiler_tools = false } },
+            { name = "an uncertified output tool selection",
+                reason = "native linker selection is unknown",
+                fields = { output_tools = { uncertified = "native linker selection is unknown" } } },
+        }) do
+            it("retains every candidate while " .. case.name .. " leaves the inventory incomplete", function()
+                local nodes = layout("helper.o")
+                local model = staging_model(nodes)
+                local ok, err = driver.cleanup_stale_staging(
+                    { io = model.io }, outputs, locks, staging_protection(case.fields))
+                assert.is_nil(ok)
+                assert.matches("refusing to retire stale Windows staging '" .. abandoned ..
+                    "': the native link and tool inventory is incomplete (" .. case.reason .. ")",
+                    err, 1, true)
+                assert.same({}, model.removed)
+                assert.equal("file", nodes[abandoned .. "/app.exe"].kind)
+                assert.equal("file", nodes[authored .. "/helper.o"].kind)
+            end)
+
+            it("continues without stale candidates while " .. case.name .. " is incomplete", function()
+                local nodes = {
+                    ["C:/out"] = { kind = "directory" }, [bin] = { kind = "directory" },
+                    [bin .. "/app.exe"] = { kind = "file", device = "7", inode = "public" },
+                    [bin .. "/other.exe.stage.tmp.kept"] = { kind = "directory" },
+                }
+                local model = staging_model(nodes)
+                assert(driver.cleanup_stale_staging(
+                    { io = model.io }, outputs, locks, staging_protection(case.fields)))
+                assert.same({}, model.removed)
+                assert.equal("directory", nodes[bin .. "/other.exe.stage.tmp.kept"].kind)
+            end)
+        end
+    end)
+
+    describe("stale stages under a deduplicated output-lock alias", function()
+        local held = { kind = "file", device = "2864434397",
+            inode = "000000000000000000010000000004d2" }
+        local locks = { entries = { { directory = "C:/real", path = "C:/real/.titan-build.lock" } } }
+        local outputs = {
+            { path = "C:/alias/bin/app.exe" }, { path = "C:/real/lib/titan/0.6/app.dll" },
+        }
+        local stage = "C:/alias/bin/app.exe.stage.tmp.old"
+        local function layout(alias_lock)
+            return {
+                ["C:/real"] = { kind = "directory" }, ["C:/real/.titan-build.lock"] = held,
+                ["C:/alias"] = { kind = "directory" }, ["C:/alias/.titan-build.lock"] = alias_lock,
+                ["C:/alias/bin"] = { kind = "directory" },
+                [stage] = { kind = "directory" },
+                [stage .. "/app.exe"] = { kind = "file", device = "2864434397", inode = "stage" },
+            }
+        end
+        before_each(function()
+            compiler_io.new_sync = function() error("unexpected host filesystem strategy") end
+        end)
+
+        it("retires a stage reached through another spelling of the held lock file", function()
+            local model = staging_model(layout(held))
+            assert(driver.cleanup_stale_staging(
+                { io = model.io }, outputs, locks, staging_protection({})))
+            assert.same({ stage .. "/app.exe", stage }, model.removed)
+        end)
+
+        for _, case in ipairs({
+            { name = "another domain's lock", lock = { kind = "file", device = "2864434397",
+                inode = "000000000000000000010000000004d3" } },
+            { name = "a lock file linked to the held one",
+                lock = { kind = "symlink", device = held.device, inode = held.inode } },
+            { name = "no lock file" },
+            { name = "lock files without a native file ID", unavailable = true },
+        }) do
+            it("rejects an alias proven only by " .. case.name .. " before any listing", function()
+                local nodes = layout(case.lock)
+                if case.unavailable then
+                    -- Native stat omits dev/ino when no file ID is available.
+                    nodes["C:/real/.titan-build.lock"] = { kind = "file" }
+                    nodes["C:/alias/.titan-build.lock"] = { kind = "file" }
+                end
+                local model = staging_model(nodes)
+                local ok, err = driver.cleanup_stale_staging(
+                    { io = model.io }, outputs, locks, staging_protection({}))
+                assert.is_nil(ok)
+                assert.matches("no output lock for 'C:/alias/bin/app.exe'", err, 1, true)
+                assert.same({}, model.removed)
+                for _, call in ipairs(model.calls) do
+                    assert.matches("^lstat .*/%.titan%-build%.lock$", call)
+                end
+                assert.equal("file", nodes[stage .. "/app.exe"].kind)
+            end)
+        end
+
+        it("reports an ancestor lock inspection failure without retiring anything", function()
+            local model = staging_model(layout(held))
+            local lstat = model.io.lstat
+            model.io.lstat = function(strategy, filename)
+                if filename == "C:/alias/.titan-build.lock" then
+                    return nil, "lstat: access denied"
+                end
+                return lstat(strategy, filename)
+            end
+            local ok, err = driver.cleanup_stale_staging(
+                { io = model.io }, outputs, locks, staging_protection({}))
+            assert.is_nil(ok)
+            assert.matches("lstat: access denied", err, 1, true)
+            assert.same({}, model.removed)
+        end)
+    end)
+
+    it("reports the failed staged file and still retires the other image directory", function()
+        local removed = {}
+        local strategy = {
+            lstat = function(_, filename)
+                return { kind = filename:match("%.dll$") and "file" or "directory" }
+            end,
+            list = function() return { "image.dll" } end,
+            unlink = function(_, filename)
+                removed[#removed + 1] = filename
+                if filename == "C:/scratch/provider/image.dll" then
+                    return nil, "image is still open"
+                end
+                return true
+            end,
+            rmdir = function(_, filename)
+                removed[#removed + 1] = filename
+                return true
+            end,
+        }
+        local ok, err = driver.cleanup_staging_directories(
+            { "C:/scratch/provider", "C:/scratch/launcher" }, strategy)
+        assert.is_nil(ok)
+        assert.matches("C:/scratch/provider/image.dll", err, 1, true)
+        assert.matches("image is still open", err, 1, true)
+        assert.same({ "C:/scratch/provider/image.dll",
+            "C:/scratch/launcher/image.dll", "C:/scratch/launcher" }, removed)
+    end)
+
+    it("checks Windows output reservation ancestors through compiler_io without full-table LFS calls", function()
+        lfs.symlinkattributes = function(path, request)
+            if request == nil then
+                error("full-table lfs.symlinkattributes is forbidden on Windows: " .. tostring(path))
+            end
+            return originals.lfs_symlinkattributes(path, request)
+        end
+        lfs.attributes = function(path, request)
+            if request == nil then
+                error("full-table lfs.attributes is forbidden on Windows: " .. tostring(path))
+            end
+            return originals.lfs_attributes(path, request)
+        end
+
+        local lstat_entries = {
+            ["C:/"] = {
+                kind = "directory", mode = 0x41ff, size = 0,
+                device = "100", inode = "1",
+            },
+            ["C:/project"] = {
+                kind = "directory", mode = 0x41ff, size = 0,
+                device = "100", inode = "2",
+            },
+            ["C:/project/file_parent"] = {
+                kind = "file", mode = 0x81b6, size = 12,
+                device = "100", inode = "3",
+            },
+            ["C:/project/link_parent"] = {
+                kind = "symlink", mode = 0xa1ff, size = 0,
+                device = "100", inode = "4",
+            },
+        }
+        local stat_entries = {
+            ["C:/project/link_parent"] = {
+                kind = "directory", mode = 0x41ff, size = 0,
+                device = "100", inode = "5",
+            },
+        }
+        local lstat_counts, stat_counts = {}, {}
+        local io_error_path, io_error_method
+        compiler_io.new_sync = function()
+            return {
+                cwd = function() return "C:/project" end,
+                lstat = function(_, filename)
+                    lstat_counts[filename] = (lstat_counts[filename] or 0) + 1
+                    if io_error_method == "lstat" and filename == io_error_path then
+                        return nil, "lstat: access denied: " .. filename
+                    end
+                    return lstat_entries[filename]
+                end,
+                stat = function(_, filename)
+                    stat_counts[filename] = (stat_counts[filename] or 0) + 1
+                    if io_error_method == "stat" and filename == io_error_path then
+                        return nil, "stat: broken target: " .. filename
+                    end
+                    return stat_entries[filename] or lstat_entries[filename]
+                end,
+            }
+        end
+
+        local sources = {
+            { modname = "app", output = "C:/project/build/app.titan", c_parts = 1 },
+        }
+        local ok, err = driver.validate_program_output_paths(
+            sources, "C:/project/build/bin/app.exe",
+            "C:/project/build/synthetic/app__entrypoint.c", {})
+        assert.is_true(ok, err)
+        assert.equal(1, lstat_counts["C:/"])
+        assert.equal(1, lstat_counts["C:/project"])
+        assert.equal(1, lstat_counts["C:/project/build"])
+
+        ok, err = driver.validate_program_output_paths(
+            sources, "C:/project/file_parent/app.exe",
+            "C:/project/build/synthetic/app__entrypoint.c", {})
+        assert.is_nil(ok)
+        assert.matches("output parent 'C:/project/file_parent' is not a directory", err, 1, true)
+
+        ok, err = driver.validate_program_output_paths(
+            sources, "C:/project/link_parent/app.exe",
+            "C:/project/build/synthetic/app__entrypoint.c", {})
+        assert.is_true(ok, err)
+        assert.equal(1, stat_counts["C:/project/link_parent"])
+
+        stat_entries["C:/project/link_parent"] = {
+            kind = "file", mode = 0x81b6, size = 12,
+            device = "100", inode = "6",
+        }
+        ok, err = driver.validate_program_output_paths(
+            sources, "C:/project/link_parent/app.exe",
+            "C:/project/build/synthetic/app__entrypoint.c", {})
+        assert.is_nil(ok)
+        assert.matches("output parent 'C:/project/link_parent' is not a directory", err, 1, true)
+
+        stat_entries["C:/project/link_parent"] = {
+            kind = "directory", mode = 0x41ff, size = 0,
+            device = "100", inode = "5",
+        }
+        lstat_entries["C:/project/build/app.o"] = {
+            kind = "file", mode = 0x81b6, size = 64,
+            device = "100", inode = "99",
+        }
+        lstat_entries["C:/project/hardlinked_input.o"] = {
+            kind = "file", mode = 0x81b6, size = 64,
+            device = "100", inode = "99",
+        }
+        ok, err = driver.validate_program_output_paths(
+            sources, "C:/project/build/bin/app.exe",
+            "C:/project/build/synthetic/app__entrypoint.c",
+            { "C:/project/hardlinked_input.o" })
+        assert.is_nil(ok)
+        assert.matches("aliases input 'C:/project/hardlinked_input.o'", err, 1, true)
+
+        lstat_entries["C:/project/build/app.o"] = {
+            kind = "file", mode = 0x81b6, size = 64,
+        }
+        lstat_entries["C:/project/hardlinked_input.o"] = {
+            kind = "file", mode = 0x81b6, size = 64,
+        }
+        ok, err = driver.validate_program_output_paths(
+            sources, "C:/project/build/bin/app.exe",
+            "C:/project/build/synthetic/app__entrypoint.c",
+            { "C:/project/hardlinked_input.o" })
+        assert.is_true(ok, err)
+        ok, err = driver.validate_program_output_paths(
+            sources, "C:/project/build/bin/app.exe",
+            "C:/project/build/synthetic/app__entrypoint.c",
+            { [[c:\PROJECT\build\APP.O]] })
+        assert.is_nil(ok)
+        assert.matches("aliases input", err, 1, true)
+
+        io_error_method = "lstat"
+        io_error_path = "C:/project"
+        ok, err = driver.validate_program_output_paths(
+            sources, "C:/project/build/bin/app.exe",
+            "C:/project/build/synthetic/app__entrypoint.c", {})
+        assert.is_nil(ok)
+        assert.matches("lstat: access denied: C:/project", err, 1, true)
+
+        io_error_method = "stat"
+        io_error_path = "C:/project/link_parent"
+        ok, err = driver.validate_program_output_paths(
+            sources, "C:/project/link_parent/app.exe",
+            "C:/project/build/synthetic/app__entrypoint.c", {})
+        assert.is_nil(ok)
+        assert.matches("stat: broken target: C:/project/link_parent", err, 1, true)
+    end)
 end)
 
 local function empty_layouts(name)
@@ -574,23 +1228,31 @@ describe("Windows launcher filenames", function()
         assert.equal("custom.EXE", driver.windows_launcher_name("app.main", "custom.EXE"))
         local original = assert(driver.windows_program_paths("app.main"))
         local renamed = assert(driver.windows_program_paths("app.main", "renamed"))
+        local in_bin = assert(driver.windows_program_paths("app.main", "bin/renamed"))
         assert.equal("bin/app.main.exe", original.executable)
-        assert.equal("bin/renamed.exe", renamed.executable)
+        assert.equal("renamed.exe", renamed.executable)
+        assert.equal(paths.normalize("bin/renamed.exe"), in_bin.executable)
         assert.equal(original.provider, renamed.provider)
+        assert.equal(original.provider, in_bin.provider)
         assert.equal("lib/titan/0.6/app/main.dll", original.provider)
         assert.equal("app/main.dll", original.relative_provider)
+        assert.equal("app/main.dll", in_bin.relative_provider)
         local suite = assert(driver.windows_program_paths("titan.test_runner", nil, "app.tests"))
         assert.equal("bin/app.tests.exe", suite.executable)
         assert.equal("app/tests.dll", suite.relative_provider)
     end)
 
-    it("relocates both Windows program artifacts under an optional output root", function()
+    it("relocates Windows program artifacts under an optional output root and explicit --exe", function()
         local root = temporary.name("-coverage-output")
-        local original = assert(driver.windows_program_paths("app.main", "display"))
-        local covered = assert(driver.windows_program_paths("app.main", "display", nil, root))
+        local original = assert(driver.windows_program_paths("app.main", "bin/display"))
+        local covered = assert(driver.windows_program_paths(
+            "app.main", paths.join(root, "bin/display"), nil, root))
         assert.equal(paths.join(root, original.executable), covered.executable)
         assert.equal(paths.join(root, original.provider), covered.provider)
         assert.equal(original.relative_provider, covered.relative_provider)
+        local direct = assert(driver.windows_program_paths("app.main", "display", nil, root))
+        assert.equal("display.exe", direct.executable)
+        assert.equal(paths.join(root, original.provider), direct.provider)
         local suite = assert(driver.windows_program_paths("titan.test_runner", nil, "app.tests", root))
         assert.equal(paths.join(root, "bin/app.tests.exe"), suite.executable)
         assert.equal(paths.join(root, "lib/titan/0.6/app/tests.dll"), suite.provider)
@@ -605,7 +1267,7 @@ describe("Windows launcher filenames", function()
             "app" .. string.char(127), string.char(255) }) do
             local value, err = driver.windows_launcher_name("app", name)
             assert.is_nil(value, name)
-            assert.matches("--launcher-name", err, 1, true)
+            assert.matches("--exe", err, 1, true)
         end
     end)
 
@@ -655,8 +1317,13 @@ describe("Windows launcher filenames", function()
         local names = { "archive" }
         local fail_metadata = true
         driver.compile_library_output = function() return true end
-        driver.validate_library_image = function() return true end
+        driver.validate_library_image = function() error("coordinator mapped a staged DLL") end
         driver.validate_library_image_fresh = function(_, expected, required)
+            if expected == nil then
+                assert.same({ "app", "archive" }, required)
+                calls[#calls + 1] = "image"
+                return true
+            end
             assert.equal(entries, expected)
             assert.equal(names, required)
             calls[#calls + 1] = "metadata"
@@ -669,8 +1336,12 @@ describe("Windows launcher filenames", function()
         end
         local ran, failure = pcall(function()
             assert(lfs.chdir(directory))
+            local real_sync = previous_sync()
             compiler_io.new_sync = function()
-                return { stat = function() return { kind = "directory" } end }
+                return setmetatable({
+                    stat = function() return { kind = "directory" } end,
+                    mkdir = function() return true end,
+                }, { __index = real_sync })
             end
             platform.windows = true
             local options = { module_names = { "app", "archive" },
@@ -680,13 +1351,13 @@ describe("Windows launcher filenames", function()
                 nil, nil, nil, "entrypoint.c", nil, options)
             assert.is_nil(ok)
             assert.equal("archive metadata mismatch", err)
-            assert.same({ "metadata" }, calls)
+            assert.same({ "image", "metadata" }, calls)
             fail_metadata = false
             ok, err = driver.compile_program("app", {}, nil, false,
                 nil, nil, nil, "entrypoint.c", nil, options)
             assert.is_nil(ok)
             assert.equal("invalid native support", err)
-            assert.same({ "metadata", "metadata", "support" }, calls)
+            assert.same({ "image", "metadata", "image", "metadata", "support" }, calls)
             assert.is_nil(lfs.attributes("entrypoint.c"))
             assert.is_nil(lfs.attributes("bin/app.exe"))
         end)
@@ -697,6 +1368,75 @@ describe("Windows launcher filenames", function()
         for name, fn in pairs(saved) do driver[name] = fn end
         driver.remove_path(directory)
         assert.truthy(ran, failure)
+    end)
+
+    it("reports staging cleanup failure after committing a Windows program", function()
+        local subject = assert(loadfile("titan-compiler/driver.lua"))()
+        local process = require "titan-compiler.process"
+        local publication = require "titan-compiler.windows_publication"
+        local previous = { windows = platform.windows, getenv = platform.getenv,
+            native = platform.native, sync = compiler_io.new_sync,
+            run = process.run, write = util.set_file_contents,
+            publish = publication.publish_program }
+        local committed, retired, fresh = false, nil, false
+        local completed, failure = xpcall(function()
+            platform.windows = true
+            platform.getenv = function() return nil end
+            platform.native = function() error("unexpected native call in Windows publication model") end
+            compiler_io.new_sync = function()
+                return { stat = function() return { kind = "directory" } end }
+            end
+            subject.INSTALLED, subject.UNAME, subject.IS_DARWIN = true, "Windows", false
+            subject.INSTALL_PATHS = subject.installed_paths("C:/SDK")
+            subject.BUILD_PROFILE, subject.CFLAGS, subject.CC = "development", "-O0", "clang"
+            subject.TOOLCHAIN_ERROR = nil
+            subject.compile_library_output = function() return true end
+            subject.staged_library_output = function(filename)
+                local basename = filename:match("([^/\\]+)$")
+                local directory = filename .. ".stage.tmp.model"
+                return directory .. "/" .. basename, directory
+            end
+            subject.validate_library_image = function() error("coordinator mapped a staged DLL") end
+            subject.validate_library_image_fresh = function(_, expected, names)
+                assert.is_nil(expected)
+                assert.same({ "app" }, names)
+                fresh = true
+                return true
+            end
+            subject.generated_compile_prefix = function() return { "clang" } end
+            subject.entrypoint_contents = function() return "generated entrypoint" end
+            subject.format_generated_file = function() return true end
+            subject.run_link_command = function() return true end
+            process.run = function() return true, "exit", 0 end
+            util.set_file_contents = function() return true end
+            publication.publish_program = function(images)
+                assert.is_true(fresh)
+                assert.equal(paths.normalize("C:/build/lib/titan/0.6/app.dll"), images.provider.destination)
+                assert.equal(paths.normalize("C:/build/bin/app.exe"), images.executable.destination)
+                committed = true
+                return true
+            end
+            subject.cleanup_staging_directories = function(directories)
+                assert.is_true(committed)
+                retired = directories
+                return nil, "cannot remove '" .. directories[1] .. "/app.dll': access denied"
+            end
+            local ok, err = subject.compile_program("app", {}, nil, false,
+                nil, nil, nil, "C:/build/entrypoint.c", nil,
+                { output_root = "C:/build", module_names = { "app" } })
+            assert.is_nil(ok)
+            assert.matches("Windows program publication committed but staging cleanup failed", err, 1, true)
+            assert.matches(retired[1] .. "/app.dll", err, 1, true)
+            assert.matches("access denied", err, 1, true)
+            assert.same({ paths.normalize("C:/build/lib/titan/0.6/app.dll.stage.tmp.model"),
+                paths.normalize("C:/build/bin/app.exe.stage.tmp.model") }, retired)
+        end, debug.traceback)
+        platform.windows, platform.getenv, platform.native =
+            previous.windows, previous.getenv, previous.native
+        compiler_io.new_sync, process.run, util.set_file_contents =
+            previous.sync, previous.run, previous.write
+        publication.publish_program = previous.publish
+        assert.is_true(completed, failure)
     end)
 end)
 
@@ -1619,7 +2359,11 @@ describe("compiler installation discovery", function()
         assert.equal(expected_parent,
             driver.resolve_installation_root(nil, alias .. "/.."))
 
-        assert(os.remove(alias))
+        if platform.windows then
+            assert(lfs.rmdir(alias))
+        else
+            assert(os.remove(alias))
+        end
         remove_tree(workspace)
     end)
 
@@ -1635,6 +2379,7 @@ describe("compiler installation discovery", function()
             liblua = "/opt/titan/lib/liblua.a",
             titan_bin = "/opt/titan/lib/titan/0.6",
             lua_cpath = "/opt/titan/lib/titan/0.6/?.so",
+            sdk_digests = "/opt/titan/lib/titan/0.6/sdk-digests",
         }, paths)
 
         assert.same({
@@ -1869,6 +2614,7 @@ describe("record constructor compiled-interface validation", function()
         modtype.source_type_members = {}
         local entry = {kind = "source", type = modtype, c_header_dependencies = {}}
         local before = assert(sourceinterface.serialize(entry))
+        assert.matches(version.SOURCE_INTERFACE_FORMAT, before, 1, true)
         record.custom_constructor = true
         assert.not_equal(before, assert(sourceinterface.serialize(entry)))
     end)
@@ -2269,16 +3015,19 @@ describe("loader resolver ownership", function()
     it("closes the titanc resolver when an unexpected error unwinds the chunk",
     function()
         local close_calls = 0
+        local fake_context = { io = {} }
         local fake_driver = {
+            TITAN_SOURCE_PATH = ".",
             deduplicate_module_names = function(modules) return modules end,
-            new_resolver_context = function() return {} end,
+            new_resolver_context = function() return fake_context end,
+            apply_native_inputs = function() end,
             configure_foreign_c = function() end,
             default_c_parts = function() return 1 end,
             defaultloader = function()
                 error("injected titanc loader failure")
             end,
             close_resolver_context = function(context)
-                assert.is_table(context)
+                assert.equal(fake_context, context)
                 close_calls = close_calls + 1
                 return true
             end,
@@ -2287,6 +3036,7 @@ describe("loader resolver ownership", function()
         local chain = {
             args = function(self) return self end,
             count = function(self) return self end,
+            action = function(self) return self end,
         }
         function argument_parser:argument() return chain end
         function argument_parser:flag() return chain end
@@ -2297,27 +3047,54 @@ describe("loader resolver ownership", function()
                 extra_object = {},
                 coverage_module = {},
                 coverage_format = {},
+                test_dir = {},
+                test_exclude = {},
+                c_source = {},
+                link = {},
+                library_dir = {},
+                ldflag = {},
             }
         end
         local fake_argparse = setmetatable({}, {
             __call = function() return argument_parser end,
         })
         local modules = {
-            titan = titan,
             argparse = fake_argparse,
+            ["titan-compiler.build"] = {
+                lock_outputs = function()
+                    return {
+                        descriptors = function() return { 17 } end,
+                        release = function() end,
+                    }
+                end,
+                run = function()
+                    assert.same({ 17 }, fake_context.io._process_inherit)
+                    error("injected titanc loader failure")
+                end,
+            },
             ["titan-compiler.checker"] = {},
             ["titan-compiler.coder"] = {},
             ["titan-compiler.coverage"] = {},
             ["titan-compiler.parser"] = {},
+            ["titan-compiler.path"] = paths,
             ["titan-compiler.driver"] = fake_driver,
+            ["titan-compiler.incremental"] = {
+                load_digest_cache = function() return true end,
+                save_digest_cache = function() return true end,
+            },
+            ["titan-compiler.nativeinputs"] = {
+                normalize = function() return {} end,
+            },
+            ["titan-compiler.linkcertificate"] = {},
             ["titan-compiler.platform"] = {
                 windows = false,
                 getenv = function() return nil end,
             },
             ["titan-compiler.test_runner"] = {},
             ["titan-compiler.util"] = {},
-            -- titanc requires the native digest before creating its resolver.
-            titan = { _sha256_binary = function() return string.rep("\0", 32) end },
+            -- titanc requires the native digests before creating its resolver.
+            titan = { _sha256_binary = function() return string.rep("\0", 32) end,
+                _sha256_stream = function() error("fixture never streams", 0) end },
         }
         local environment = setmetatable({
             arg = {},
@@ -2331,6 +3108,267 @@ describe("loader resolver ownership", function()
         assert.matches("injected titanc loader failure", tostring(err),
             1, true)
         assert.equal(1, close_calls)
+        assert.is_nil(fake_context.io._process_inherit)
+    end)
+
+    it("skips Titan FFI and module graph setup for C-only compile-only invocations",
+    function()
+        local function run_cli(parsed_args)
+            local events = {
+                initialize_platform = 0,
+                configure_foreign_c = 0,
+                build_run = 0,
+                defaultloader = 0,
+                preflight = 0,
+                native_compile = 0,
+                load_digest_cache = 0,
+                save_digest_cache = 0,
+                close_context = 0,
+                release_locks = 0,
+                stdout = {},
+            }
+            local fake_context = {
+                io = {
+                    cwd = function() return "/project" end,
+                },
+                selected_static_providers = {},
+                source_names = { app = true },
+                dynamic_names = {},
+                native_bindings = {},
+                native_static_names = { app = true },
+                native_interface_types = {},
+            }
+            local fake_driver = {
+                TITAN_SOURCE_PATH = ".",
+                EXTRA_CPPFLAGS = {},
+                EXTRA_CFLAGS = {},
+                EXTRA_LDFLAGS = {},
+                imported = {
+                    app = {
+                        kind = "source",
+                        filename = "/project/app.titan",
+                        source_files = { "/project/app.titan" },
+                        compiled = "/out/app.o",
+                        compiled_objects = { "/out/app.o" },
+                        external_symbols = {},
+                        private_symbols = {},
+                        native_references = {},
+                    },
+                },
+                deduplicate_module_names = function(modules) return modules end,
+                new_resolver_context = function() return fake_context end,
+                prepare_output_root = function(dir) return dir end,
+                apply_native_inputs = function() end,
+                initialize_platform = function(context)
+                    assert.equal(fake_context, context)
+                    events.initialize_platform = events.initialize_platform + 1
+                    return true
+                end,
+                configure_foreign_c = function(context)
+                    assert.equal(fake_context, context)
+                    events.configure_foreign_c = events.configure_foreign_c + 1
+                    return true
+                end,
+                default_c_parts = function() return 1 end,
+                defaultloader = function()
+                    events.defaultloader = events.defaultloader + 1
+                    return function() return true end
+                end,
+                preflight_build_outputs = function(context, plan, opts)
+                    assert.equal(fake_context, context)
+                    assert.same({ 19 }, context.io._process_inherit)
+                    events.preflight = events.preflight + 1
+                    events.preflight_plan = plan
+                    events.preflight_options = opts
+                    return true
+                end,
+                generated_compile_prefix = function() return { "cc" } end,
+                toolchain_descriptor = function() return { compiler_argv = { "cc" } } end,
+                output_tool_descriptors = function() return {} end,
+                finalize_resolver_context = function(context)
+                    assert.equal(fake_context, context)
+                    return true
+                end,
+                plan_foreign_headers = function() return {} end,
+                mangle_module_name = function(name) return name end,
+                record_module_symbols = function() end,
+                plan_compile_requests = function(_, _, inputs)
+                    return { inputs = inputs or {}, outputs = {} }
+                end,
+                write_foreign_header_plans = function() return true end,
+                compile_modules = function(requests)
+                    local results = {}
+                    for index in ipairs(requests) do
+                        results[index] = { ok = true, libname = "/out/app.o" }
+                    end
+                    return results
+                end,
+                close_resolver_context = function(context)
+                    assert.equal(fake_context, context)
+                    events.close_context = events.close_context + 1
+                    return true
+                end,
+            }
+            local argument_parser = {}
+            local chain = {
+                args = function(self) return self end,
+                count = function(self) return self end,
+                action = function(self) return self end,
+            }
+            function argument_parser:argument() return chain end
+            function argument_parser:flag() return chain end
+            function argument_parser:option() return chain end
+            function argument_parser:parse() return parsed_args end
+            local fake_argparse = setmetatable({}, {
+                __call = function() return argument_parser end,
+            })
+            local modules = {
+                argparse = fake_argparse,
+                ["titan-compiler.build"] = {
+                    lock_outputs = function()
+                        return {
+                            descriptors = function() return { 19 } end,
+                            release = function()
+                                events.release_locks = events.release_locks + 1
+                            end,
+                        }
+                    end,
+                    run = function(context, request)
+                        assert.equal(fake_context, context)
+                        events.build_run = events.build_run + 1
+                        if request.preflight then
+                            assert(request.preflight({ order = {}, modules = {} }))
+                        end
+                        return true
+                    end,
+                },
+                ["titan-compiler.checker"] = {},
+                ["titan-compiler.coder"] = {},
+                ["titan-compiler.coverage"] = {},
+                ["titan-compiler.parser"] = {},
+                ["titan-compiler.path"] = paths,
+                ["titan-compiler.driver"] = fake_driver,
+                ["titan-compiler.incremental"] = {
+                    load_digest_cache = function()
+                        events.load_digest_cache = events.load_digest_cache + 1
+                        return true
+                    end,
+                    save_digest_cache = function()
+                        events.save_digest_cache = events.save_digest_cache + 1
+                        return true
+                    end,
+                },
+                ["titan-compiler.nativeinputs"] = {
+                    normalize = function(request)
+                        return {
+                            c_sources = request.cli.c_sources or {},
+                        }
+                    end,
+                    compile = function(context, request)
+                        assert.equal(fake_context, context)
+                        assert.same({ 19 }, context.io._process_inherit)
+                        events.native_compile = events.native_compile + 1
+                        local out = {}
+                        for index, src in ipairs(request.sources) do
+                            out[index] = {
+                                source = src,
+                                path = "/out/.native/obj" .. index .. ".o",
+                                hit = true,
+                            }
+                        end
+                        return out
+                    end,
+                },
+                ["titan-compiler.linkcertificate"] = {
+                    canonical_path = function(_, path)
+                        return "/project/" .. tostring(path)
+                    end,
+                },
+                ["titan-compiler.platform"] = {
+                    windows = false,
+                    getenv = function() return nil end,
+                    absolute = function(path) return path end,
+                },
+                ["titan-compiler.test_runner"] = {},
+                ["titan-compiler.util"] = util,
+                titan = { _sha256_binary = function() return string.rep("\0", 32) end,
+                    _sha256_stream = function() error("fixture never streams", 0) end },
+            }
+            local fake_io = setmetatable({
+                stdout = {
+                    write = function(_, ...)
+                        for i = 1, select("#", ...) do
+                            events.stdout[#events.stdout + 1] = tostring(select(i, ...))
+                        end
+                        return true
+                    end,
+                },
+            }, { __index = io })
+            local environment = setmetatable({
+                arg = {},
+                io = fake_io,
+                require = function(name)
+                    return assert(modules[name], "unexpected module " .. name)
+                end,
+            }, { __index = _G })
+            local chunk = assert(loadfile("titanc", "t", environment))
+            local ok, err = pcall(chunk)
+            assert.is_true(ok, tostring(err))
+            assert.is_nil(fake_context.io._process_inherit)
+            return events
+        end
+
+        local c_only = run_cli({
+            module = {},
+            compile_only = true,
+            print_c_objects = true,
+            output = "/out",
+            extra_object = nil,
+            coverage_module = {},
+            coverage_format = {},
+            test_dir = {},
+            test_exclude = {},
+            c_source = { "first.c", "second.c" },
+            link = {},
+            library_dir = {},
+            ldflag = {},
+        })
+        assert.equal(1, c_only.initialize_platform)
+        assert.equal(0, c_only.configure_foreign_c)
+        assert.equal(0, c_only.build_run)
+        assert.equal(0, c_only.defaultloader)
+        assert.equal(1, c_only.preflight)
+        assert.same({ order = {}, modules = {} }, c_only.preflight_plan)
+        assert.same({}, c_only.preflight_options.roots)
+        assert.is_true(c_only.preflight_options.compile_only)
+        assert.same({ "first.c", "second.c" }, c_only.preflight_options.native_inputs)
+        assert.equal(1, c_only.native_compile)
+        assert.equal(1, c_only.load_digest_cache)
+        assert.equal(1, c_only.save_digest_cache)
+        assert.equal(1, c_only.close_context)
+        assert.equal(1, c_only.release_locks)
+        assert.equal("/out/.native/obj1.o\n/out/.native/obj2.o\n",
+            table.concat(c_only.stdout))
+
+        local mixed = run_cli({
+            module = { "app" },
+            compile_only = true,
+            print_c_objects = true,
+            output = "/out",
+            extra_object = nil,
+            coverage_module = {},
+            coverage_format = {},
+            test_dir = {},
+            test_exclude = {},
+            c_source = { "first.c" },
+            link = {},
+            library_dir = {},
+            ldflag = {},
+        })
+        assert.equal(1, mixed.configure_foreign_c)
+        assert.equal(1, mixed.build_run)
+        assert.equal(1, mixed.preflight)
+        assert.equal(1, mixed.native_compile)
     end)
 
     it("closes internally owned default and table resolvers exactly once",
@@ -2529,21 +3567,25 @@ describe("generated C formatting", function()
     local original_set_file_contents
     local original_native
 
+    local original_stderr
+
     before_each(function()
         original_execute = os.execute
         original_rename = os.rename
         original_print = _G.print
+        original_stderr = io.stderr
         original_formatter = driver.CLANG_FORMAT
         original_format_generated_file = driver.format_generated_file
         original_get_file_contents = util.get_file_contents
         original_set_file_contents = util.set_file_contents
-        original_native = platform.native
+        platform.native = original_native
     end)
 
     after_each(function()
         os.execute = original_execute
         os.rename = original_rename
         _G.print = original_print
+        io.stderr = original_stderr
         driver.CLANG_FORMAT = original_formatter
         driver.format_generated_file = original_format_generated_file
         util.get_file_contents = original_get_file_contents
@@ -2569,7 +3611,12 @@ describe("generated C formatting", function()
             commands[#commands + 1] = command
             return true, "exit", 0
         end
-        _G.print = function(command) printed[#printed + 1] = command end
+        io.stderr = {
+            write = function(_, command)
+                printed[#printed + 1] = tostring(command)
+                return true
+            end,
+        }
         driver.CLANG_FORMAT = "'/tools with spaces/clang-format' --Werror"
         local path = temporary.name(" generated module.c")
         write_file(path, "int value;\n")
@@ -3179,6 +4226,15 @@ describe("standalone output ownership", function()
         assert.matches("aliases output", err, 1, true)
     end)
 
+    it("requires a named executable and a C entrypoint", function()
+        local ok, err = driver.validate_program_output_paths({}, "", "entrypoint.c", {})
+        assert.is_nil(ok)
+        assert.equal("standalone executable path must be a nonempty string", err)
+        ok, err = driver.validate_program_output_paths({}, "program", "entrypoint.cc", {})
+        assert.is_nil(ok)
+        assert.equal("standalone entrypoint path must end in .c", err)
+    end)
+
     posix_output_it("rejects source and synthetic output collisions before compilation",
        function()
         local stems = {
@@ -3295,7 +4351,11 @@ describe("standalone output ownership", function()
         }, root .. "/program", root .. "/entrypoint.c", {})
         assert.truthy(ok, message)
 
-        assert(os.remove(linked))
+        if platform.windows then
+            assert(lfs.rmdir(linked))
+        else
+            assert(os.remove(linked))
+        end
         assert(lfs.rmdir(physical))
         assert(lfs.rmdir(root))
     end)
@@ -3339,11 +4399,11 @@ describe("standalone output ownership", function()
         end)
         after_each(function() remove_tree(root) end)
 
-        it("preserves authored companions and private headers but accepts compiler-owned ones", function()
+        it("preserves authored private headers but accepts compiler-owned ones", function()
             local stem = root .. "/module"
             local sources = { { modname = "module", output = stem .. ".titan",
                                 c_parts = 3 } }
-            for _, suffix in ipairs({ ".parts", ".priv.h" }) do
+            for _, suffix in ipairs({ ".priv.h" }) do
                 local filename = stem .. suffix
                 local contents = "authored " .. suffix .. "\n"
                 write_file(filename, contents)
@@ -3358,25 +4418,12 @@ describe("standalone output ownership", function()
                 assert(os.remove(filename))
             end
 
-            local companion = [[titan-parts-v1 3
-module.priv.h
-module.c
-module.o
-module.part1.c
-module.part1.o
-module.part2.c
-module.part2.o
-]]
             local header = "/* Generated by Titan: module private declarations. */\n" ..
                 "/* declarations */\n"
-            write_file(stem .. ".parts", companion)
             write_file(stem .. ".priv.h", header)
             local ok, err = driver.validate_program_output_paths(
                 sources, root .. "/program", root .. "/entrypoint.c", {})
             assert.truthy(ok, err)
-            local restored = assert(util.get_file_contents(stem .. ".parts", "rb"))
-            assert.equal(companion, restored)
-            assert.equal(3, driver.parse_parts_companion(restored, stem))
             assert.equal(header, assert(util.get_file_contents(stem .. ".priv.h", "rb")))
         end)
 
@@ -3415,12 +4462,231 @@ module.part2.o
     end)
 end)
 
+describe("build output preflight", function()
+    local root, contexts, previous_imported, previous_registry
+    before_each(function()
+        root = temporary.name()
+        assert(os.remove(root))
+        assert(lfs.mkdir(root))
+        contexts = {}
+        previous_imported, previous_registry = driver.imported, types.registry
+        driver.imported, types.registry = {}, {}
+    end)
+    after_each(function()
+        driver.imported, types.registry = previous_imported, previous_registry
+        for _, context in ipairs(contexts) do driver.close_resolver_context(context) end
+        remove_tree(root)
+    end)
+
+    local function resolver()
+        local context = driver.new_resolver_context()
+        contexts[#contexts + 1] = context
+        return context
+    end
+
+    local function descriptor(name, contents)
+        local relative = name:gsub("[.]", "/")
+        local directory = root
+        for component in relative:gmatch("([^/]+)/") do
+            directory = directory .. "/" .. component
+            if not lfs.attributes(directory) then assert(lfs.mkdir(directory)) end
+        end
+        local filename = root .. "/" .. relative .. ".titan"
+        write_file(filename, contents)
+        return { kind = "flat", main = filename, files = { filename },
+            program_output = root .. "/" .. relative }
+    end
+
+    -- Fresh source modules in dependency order.
+    local function source_plan(sources)
+        local plan = { order = {}, modules = {} }
+        for _, entry in ipairs(sources) do
+            plan.order[#plan.order + 1] = entry[1]
+            plan.modules[entry[1]] = { kind = "source", source = descriptor(entry[1], entry[2]) }
+        end
+        return plan
+    end
+
+    local function preflight(plan, options)
+        options.c_parts = options.c_parts or 1
+        return driver.preflight_build_outputs(resolver(), plan, options)
+    end
+
+    local function reserved(plan, owner, suffix)
+        for _, reservation in ipairs(plan.reservations) do
+            if reservation.owner == owner and (suffix == nil or
+               paths.to_slash(reservation.path):sub(-#suffix) == suffix) then
+                return reservation
+            end
+        end
+    end
+
+    local function contains(values, expected)
+        for _, value in ipairs(values) do
+            if paths.to_slash(value) == paths.to_slash(expected) then return true end
+        end
+        return false
+    end
+
+    it("selects main through local, self-qualified and imported source aliases", function()
+        local plan = source_plan({
+            { "types", "type Args = {string}\n" },
+            { "app", [[
+local types = import "types"
+type Arguments = types.Args
+type Result = integer
+type Code = M.Result
+function main(args: Arguments): Code
+    return 0
+end
+]] },
+        })
+        assert(preflight(plan, { roots = { "app" } }))
+        assert.is_table(reserved(plan, "standalone executable"))
+        assert.is_nil(reserved(plan, "provider DSO"))
+
+        -- Without the alias target the signature is not a program entry.
+        plan = source_plan({ { "lib", "type Code = integer\nfunction main(args: Unknown): Code return 0 end\n" } })
+        assert(preflight(plan, { roots = { "lib" } }))
+        assert.is_nil(reserved(plan, "standalone executable"))
+        assert.is_table(reserved(plan, "provider DSO"))
+    end)
+
+    it("selects main through an alias of an already checked dependency interface", function()
+        local parser = require "titan-compiler.parser"
+        local checker = require "titan-compiler.checker"
+        local contents = "type Args = {string}\n"
+        local filename = root .. "/checked_types.titan"
+        write_file(filename, contents)
+        local ast = assert(parser.parse(filename, contents))
+        local modtype, errors = checker.check("checked_types", ast, contents, filename)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        driver.imported.checked_types = { kind = "dynamic", type = modtype }
+        local plan = source_plan({ { "app", [[
+local checked_types = import "checked_types"
+function main(args: checked_types.Args): integer
+    return 0
+end
+]] } })
+        assert(preflight(plan, { roots = { "app" } }))
+        assert.is_table(reserved(plan, "standalone executable"))
+    end)
+
+    it("rejects a second main and program-only options for a library", function()
+        local main = "function main(args: {string}): integer return 0 end\n"
+        local ok, err = preflight(source_plan({ { "app", main }, { "tool", main } }),
+            { roots = { "app", "tool" } })
+        assert.is_nil(ok)
+        assert.equal("tool: multiple main functions found (already declared in app)", err)
+        -- Test and compile-only builds never select a standalone main.
+        assert(preflight(source_plan({ { "app", main }, { "tool", main } }),
+            { roots = { "app", "tool" }, compile_only = true }))
+
+        local library = "function answer(): integer return 42 end\n"
+        ok, err = preflight(source_plan({ { "lib", library } }),
+            { roots = { "lib" }, exe = root .. "/bin/lib" })
+        assert.is_nil(ok)
+        assert.equal("--exe is only valid when compiling a standalone or test executable", err)
+        ok, err = preflight(source_plan({ { "lib", library } }),
+            { roots = { "lib" }, no_uv_bootstrap = true })
+        assert.is_nil(ok)
+        assert.equal("--no-uv-bootstrap is only valid when compiling a standalone executable", err)
+    end)
+
+    it("rejects unrelated library roots and colliding C symbol prefixes", function()
+        local library = "function answer(): integer return 42 end\n"
+        local ok, err = preflight(source_plan({ { "alpha", library }, { "beta", library } }),
+            { roots = { "alpha", "beta" } })
+        assert.is_nil(ok)
+        assert.equal("cannot link modules into one shared library: 'alpha' and 'beta' " ..
+            "have no common module prefix", err)
+        ok, err = preflight(source_plan({ { "clash.a-b", library }, { "clash.a.b", library } }),
+            { roots = { "clash.a-b", "clash.a.b" } })
+        assert.is_nil(ok)
+        assert.equal("cannot link logical modules 'clash.a-b' and 'clash.a.b': " ..
+            "both use C symbol prefix 'clash_a_b'", err)
+    end)
+
+    it("reserves shims for modules carried by a selected static provider", function()
+        local archive = root .. "/libpkg_dep.a"
+        write_file(archive, "!<arch>\n")
+        local plan = source_plan({ { "pkg.app", "function answer(): integer return 42 end\n" } })
+        plan.modules["pkg.dep"] = { kind = "static", archive = archive }
+        driver.imported["pkg.dep"] = {
+            kind = "static", static_archive = archive,
+            external_symbols = coder.interface_external_symbols("pkg.dep",
+                types.Module("pkg.dep", {})),
+            static_provider = { archive = archive, entries = {
+                ["pkg.dep"] = { type = types.Module("pkg.dep", {}) },
+                ["pkg.carried"] = { type = types.Module("pkg.carried", {}) },
+            } },
+        }
+        assert(preflight(plan, { roots = { "pkg.app" }, output_root = root .. "/out" }))
+        for _, name in ipairs({ "app", "dep", "carried" }) do
+            assert.is_table(reserved(plan, "generated Lua shim", "/out/pkg/" .. name .. ".lua"),
+                name)
+        end
+        assert.is_true(contains(plan.inputs, archive))
+    end)
+
+    it("certifies a saved module from its record's inventory and header inputs", function()
+        local plan = source_plan({ { "saved", "function answer(): integer return 42 end\n" } })
+        plan.modules.saved.certified = { status = "hit", record = {
+            type = types.Module("saved", {}),
+            object_metadata = { has_main = false },
+            c_header_dependencies = {
+                { kind = "quoted", path = root .. "/saved.h" },
+                { kind = "search", path = root .. "/candidate.h" },
+            },
+        } }
+        assert(preflight(plan, { roots = { "saved" } }))
+        assert.is_true(contains(plan.inputs, root .. "/saved.h"))
+        assert.is_false(contains(plan.inputs, root .. "/candidate.h"))
+        assert.is_table(reserved(plan, "provider DSO"))
+    end)
+
+    it("recognizes older compiler-generated C and refuses authored C at an output", function()
+        local cpreamble = require "titan-compiler.cpreamble"
+        local stem = root .. "/gen"
+        local split_push = "#if defined(__ELF__)\n#pragma GCC visibility push(protected)\n" ..
+            "#endif\nint split_unit;\n"
+        local cases = {
+            { "/* An older generated unit. */\n" .. cpreamble.fixed_prefix, true },
+            { "#include \"" .. root .. "/elsewhere/gen.priv.h\"\n" .. split_push, false },
+            { "int authored(void) { return 1; }\n", false },
+        }
+        if not platform.windows then
+            cases[#cases + 1] = { "#include " ..
+                assert(ffiheaders.quote_header(paths.normalize(stem .. ".priv.h"))) .. "\n" ..
+                split_push, true }
+            cases[#cases + 1] = { "#include \"/moved/output/gen.priv.h\"\n" .. split_push,
+                true, driver.PRIVATE_HEADER_MARKER .. "\n" }
+        end
+        for index, case in ipairs(cases) do
+            local plan = source_plan({ { "gen", "function answer(): integer return 42 end\n" } })
+            write_file(stem .. ".c", case[1])
+            if case[3] then write_file(stem .. ".priv.h", case[3]) end
+            local ok, err = preflight(plan, { roots = { "gen" }, compile_only = true })
+            if case[2] then
+                assert.truthy(ok, err)
+            else
+                assert.is_nil(ok, index)
+                assert.matches("for logical module 'gen' aliases input", err, 1, true)
+                assert.matches("(not compiler-generated C; move it or use another output directory)",
+                    err, 1, true)
+            end
+            if case[3] then assert(os.remove(stem .. ".priv.h")) end
+        end
+    end)
+end)
+
 describe("compiler module loader", function()
     local root
     local source
     local binary
     local previous
     local native_abi_exports
+    local static_provider_exports
 
     local function provider_path(path)
         return (path:gsub("%.so$", platform.windows and ".dll" or ".so"))
@@ -3453,9 +4719,10 @@ describe("compiler module loader", function()
             entries = {},
             key_order = {},
         }
+        -- Static metadata reconstructs canonical logical .so paths on every host.
         for name, modtype in pairs(module_types) do
-            modtype.file = provider_path(modtype.file)
             provider.entries[name] = {
+                abi = driver.TITAN_ABI_VERSION,
                 type = modtype,
                 types = types.serialize(modtype),
                 layouts = empty_layouts(name),
@@ -3466,6 +4733,36 @@ describe("compiler module loader", function()
             provider.key_order[#provider.key_order + 1] = name
         end
         table.sort(provider.key_order, util.bytewise_less)
+        static_provider_exports[filename] = provider
+        staticmetadata.scan_archive = function(found_filename, options)
+            local template = static_provider_exports[found_filename]
+            if not template then
+                return previous.scan_archive(found_filename, options)
+            end
+            local result = {
+                archive = found_filename,
+                entries = {},
+                key_order = { table.unpack(template.key_order) },
+            }
+            for name, entry in pairs(template.entries) do
+                local copy = {}
+                for k, v in pairs(entry) do copy[k] = v end
+                if options and options.validate_types and copy.types then
+                    local decoded_types, err = options.validate_types(
+                        name, copy.types, copy.origin or found_filename)
+                    if not decoded_types then return nil, err end
+                    copy.decoded_types = decoded_types
+                end
+                if options and options.validate_layouts and copy.layouts then
+                    local decoded_layouts, err = options.validate_layouts(
+                        name, copy.layouts)
+                    if not decoded_layouts then return nil, err end
+                    copy.decoded_layouts = decoded_layouts
+                end
+                result.entries[name] = copy
+            end
+            return result
+        end
         context.provider_cache[filename] = provider
         return provider
     end
@@ -3758,8 +5055,10 @@ describe("compiler module loader", function()
             registry = types.registry,
             loadlib = titan._loadlib,
             abivalue = titan._abivalue,
+            scan_archive = staticmetadata.scan_archive,
         }
         native_abi_exports = {}
+        static_provider_exports = {}
         driver.TITAN_SOURCE_PATH = source
         driver.TITAN_BIN_PATH = binary
         driver.imported = {}
@@ -3773,20 +5072,52 @@ describe("compiler module loader", function()
         types.registry = previous.registry
         titan._loadlib = previous.loadlib
         titan._abivalue = previous.abivalue
+        staticmetadata.scan_archive = previous.scan_archive
         remove_tree(root)
     end)
 
     describe("incremental source objects", function()
-        local loaders
-        before_each(function() loaders = {} end)
-        after_each(function()
-            for _, loader in ipairs(loaders) do driver.close_loader(loader) end
+        local loaders, contexts, original_incremental
+        local original_linker_backend, original_cppflags
+        before_each(function()
+            original_linker_backend =
+                require("titan-compiler.linkcertificate").linker_backend
+            original_cppflags = driver.EXTRA_CPPFLAGS
+            loaders, contexts, original_incremental = {}, {}, {}
+            for _, name in ipairs({
+                    "configuration", "toolchain_identity", "make_certificate" }) do
+                original_incremental[name] = incremental[name]
+            end
         end)
+        after_each(function()
+            require("titan-compiler.linkcertificate").linker_backend =
+                original_linker_backend
+            driver.EXTRA_CPPFLAGS = original_cppflags
+            for name, implementation in pairs(original_incremental) do
+                incremental[name] = implementation
+            end
+            for _, loader in ipairs(loaders) do driver.close_loader(loader) end
+            for _, context in ipairs(contexts) do
+                driver.close_resolver_context(context)
+            end
+        end)
+
+        local function tracked_context()
+            local context = driver.new_resolver_context()
+            contexts[#contexts + 1] = context
+            return context
+        end
+
+        local function uncertain_toolchain()
+            return nil, "native delegate selection is unknown", "uncertified"
+        end
 
         local function fresh_loader(options)
             driver.imported, types.registry = {}, {}
             options = options or {}
-            options.source_first = true
+            if options.source_first == nil then
+                options.source_first = true
+            end
             local dependencies = {}
             local loader = driver.defaultloader(dependencies, options)
             loaders[#loaders + 1] = loader
@@ -3800,39 +5131,1200 @@ describe("compiler module loader", function()
             return driver.imported[name]
         end
 
+        local function capture_stderr(action)
+            local chunks = {}
+            local original_stderr = io.stderr
+            io.stderr = {
+                write = function(_, ...)
+                    for index = 1, select("#", ...) do
+                        chunks[#chunks + 1] = tostring(select(index, ...))
+                    end
+                    return true
+                end,
+            }
+            local ok, result = xpcall(action, debug.traceback)
+            io.stderr = original_stderr
+            assert.is_true(ok, result)
+            return result, table.concat(chunks)
+        end
+
         -- These driver tests only load metadata. A small real native object
         -- isolates the source fast path from code generation and final linking.
-        local function write_source_object(entry, payload)
+        local function write_source_object(entry, payload, mutator, options)
+            options = options or {}
             local stem = (entry.native_output or entry.filename):gsub("[.]titan$", "")
             local object = stem .. ".o"
+            local context = options.context or driver.new_resolver_context()
+            local owns_context = options.context == nil
+            assert(driver.incremental_configuration(context))
+            local static_deps = options.static_deps or { [entry.type.name] = true }
+            local imports, bindings, providers = {}, {}, {}
+            for _, node in ipairs(entry.ast or {}) do
+                if not node._ignore and node._tag == "Ast.TopLevelImport" then
+                    local dep = driver.imported[node.modname]
+                    imports[#imports + 1] = {
+                        name = node.modname,
+                        source_required = node._source_import == true,
+                    }
+                    if static_deps[node.modname] or (dep and dep.kind ~= "dynamic") then
+                        bindings[node.modname] = "direct"
+                    elseif dep and dep.kind == "dynamic" then
+                        bindings[node.modname] = "handle"
+                        providers[node.modname] = dep.type.file
+                    end
+                end
+            end
+            for owner_name in pairs(entry.ast and entry.ast._binary_usage or {}) do
+                if owner_name ~= entry.type.name and not bindings[owner_name] then
+                    local recovered = context.contextual_owner_entries and
+                        context.contextual_owner_entries[owner_name]
+                    if static_deps[owner_name] or (recovered and recovered.linked) then
+                        bindings[owner_name] = "direct"
+                    else
+                        bindings[owner_name] = "global"
+                    end
+                end
+            end
+            local source_desc = {
+                kind = #entry.source_files > 1 and "folder" or "flat",
+                main = entry.filename,
+                files = entry.source_files,
+                native_output = entry.native_output,
+            }
+            local source_cert = entry.source_certificate or
+                incremental.source_certificate(context, source_desc)
+            local layouts = empty_layouts(entry.type.name)
             local native = {
-                has_main = false, imports = {}, native_references = {},
+                has_main = false,
+                imports = imports,
+                bindings = bindings,
+                providers = providers,
+                native_references = {},
                 external_symbols = {},
-                layouts = empty_layouts(entry.type.name),
+                layouts = layouts,
                 foreign_header = entry.ast and entry.ast._foreign_header_recipe,
                 parts_version = 1,
                 parts = {
                     { index = 0, c_suffix = ".c", object_suffix = ".o" },
                 },
             }
+            entry.interface_digests = assert(incremental.producer_digests(
+                context, entry, layouts, native.foreign_header))
+            native.certificate = assert(incremental.make_certificate(
+                context, entry, native, {
+                    source = source_cert,
+                    stem = context.incremental_options.stem(
+                        entry.type.name, source_desc),
+                    codegen = context.incremental_options.codegen_options(
+                        entry.type.name, native),
+                    plan = {
+                        linked = function(dep_name)
+                            if static_deps[dep_name] then return true end
+                            local recovered = context.contextual_owner_entries and
+                                context.contextual_owner_entries[dep_name]
+                            if recovered then return recovered.linked == true end
+                            local dep = driver.imported[dep_name]
+                            return dep ~= nil and dep.kind ~= "dynamic"
+                        end,
+                        provider_file = function(dep_name)
+                            local dep = driver.imported[dep_name]
+                            return dep and dep.kind == "dynamic" and
+                                dep.type and dep.type.file or nil
+                        end,
+                        digest = function(dep_name, view)
+                            local dep = driver.imported[dep_name] or
+                                (context.contextual_owner_entries and
+                                    context.contextual_owner_entries[dep_name])
+                            return dep and incremental.interface_digest(
+                                context, dep, view) or nil
+                        end,
+                    },
+                    binary_usage = entry.ast and entry.ast._binary_usage or {},
+                    generated_parts = {
+                        { index = 0, code = "int ordinary_object;\n" },
+                    },
+                }))
+            if mutator then mutator(native) end
+            if owns_context then
+                assert.is_true(driver.close_resolver_context(context))
+            end
             if payload == nil then payload = assert(objectmetadata.encode(entry, native)) end
             local code = payload == false and "int ordinary_object;\n"
                 or assert(objectmetadata.render(payload, "source_metadata"))
-            write_file(stem .. ".metadata.c", code)
+            write_file(stem .. ".c", code)
             local argv = assert(driver.generated_compile_prefix())
-            for _, argument in ipairs({ "-c", stem .. ".metadata.c", "-o", object }) do
+            for _, argument in ipairs({ "-c", stem .. ".c", "-o", object }) do
                 argv[#argv + 1] = argument
             end
             local result = compiler_io.new_sync():run(argv)
             assert.is_true(result.ok, result.output or result.diagnostic)
-            local latest = 0
-            for _, filename in ipairs(entry.source_files) do
-                local modified = assert(lfs.attributes(filename, "modification"))
-                latest = math.max(latest, modified)
-            end
-            assert(lfs.touch(object, latest + 2, latest + 2))
-            return object
+            return object, native
         end
+
+        it("digests through the native support library unless the caller supplies an adapter", function()
+            local sha256 = require "titan-compiler.sha256"
+            local context = tracked_context()
+            local adapter = context.cache_adapter
+            assert.equal(titan._sha256_binary, adapter.sha256_binary)
+            assert.equal(titan._sha256_stream, adapter.sha256_stream)
+            assert.is_nil(adapter.get)
+            assert.is_nil(adapter.put)
+            assert.are_not.equal(adapter, tracked_context().cache_adapter)
+            local value = { module = "identity", sizes = { 1, 2 } }
+            assert.equal(incremental.digest({}, "fixture", value),
+                incremental.digest(context, "fixture", value))
+            local filename = source .. "/digested.titan"
+            local contents = "function answer(): integer return 42 end\n"
+            write_file(filename, contents)
+            assert.equal(sha256.hex(contents), (incremental.file_digest(context, filename)))
+
+            local caller = { get = function() end }
+            local supplied = driver.new_resolver_context({ cache_adapter = caller })
+            contexts[#contexts + 1] = supplied
+            assert.equal(caller, supplied.cache_adapter)
+
+            local loaded = package.loaded.titan
+            package.loaded.titan = {}
+            local created, without = pcall(driver.new_resolver_context)
+            package.loaded.titan = loaded
+            assert.is_true(created, without)
+            contexts[#contexts + 1] = without
+            assert.is_nil(without.cache_adapter)
+        end)
+
+        it("certifies streamed compiler and frontend inputs under coarse observations without a caller adapter", function()
+            local threshold = incremental.STREAM_THRESHOLD_BYTES
+            local compiler_root = root .. "/compiler"
+            for _, directory in ipairs({ "", "/titan-compiler", "/titan-compiler/checker",
+                    "/titan-compiler/coder", "/c-parser" }) do
+                assert(lfs.mkdir(compiler_root .. directory))
+            end
+            local large_lua = compiler_root .. "/titan-compiler/large.lua"
+            local frontend = root .. "/titanc-frontend"
+            write_file(compiler_root .. "/titan-compiler/small.lua", "return {}\n")
+            write_file(large_lua, "return " .. string.rep("0", threshold) .. "\n")
+            write_file(frontend, "-- " .. string.rep("f", threshold) .. "\n")
+            local absorbed = {}
+            local function coarse_io()
+                local strategy = compiler_io.new_sync()
+                for _, method in ipairs({ "stat", "lstat" }) do
+                    local observe = strategy[method]
+                    strategy[method] = function(self, path)
+                        local stat, err = observe(self, path)
+                        if not stat then return stat, err end
+                        local coarse = {}
+                        for field, value in pairs(stat) do coarse[field] = value end
+                        coarse.precision, coarse.time_precision = "coarse", "coarse"
+                        return coarse
+                    end
+                end
+                local absorb = strategy.absorb_file
+                function strategy:absorb_file(path, stream)
+                    absorbed[path] = (absorbed[path] or 0) + 1
+                    return absorb(self, path, stream)
+                end
+                return strategy
+            end
+            local options = { compiler_root = compiler_root, frontend = frontend }
+            local function component(cache_adapter)
+                local context = driver.new_resolver_context({
+                    io = coarse_io(), cache_adapter = cache_adapter,
+                })
+                contexts[#contexts + 1] = context
+                return assert(incremental.compiler_component(context, options))
+            end
+            -- A caller's digest without a stream reads each whole file.
+            local whole_read = { sha256_binary = titan._sha256_binary }
+
+            local streamed = component()
+            assert.same({ [large_lua] = 1, [frontend] = 1 }, absorbed)
+            absorbed = {}
+            assert.equal(component(whole_read), streamed)
+            assert.same({}, absorbed)
+
+            write_file(large_lua, "return " .. string.rep("1", threshold) .. "\n")
+            local changed = component()
+            assert.are_not.equal(streamed, changed)
+            assert.equal(component(whole_read), changed)
+        end)
+
+        it("propagates only explicit native policy uncertainty without a partial configuration", function()
+            incremental.toolchain_identity = uncertain_toolchain
+            local context = tracked_context()
+            local configuration, reason, status =
+                driver.incremental_configuration(context)
+            assert.is_nil(configuration)
+            assert.equal("native delegate selection is unknown", reason)
+            assert.equal("uncertified", status)
+            assert.is_nil(context.incremental_configuration)
+            assert.is_table(context.incremental_options)
+            assert.is_string(assert(incremental.compiler_component(context)))
+            local again, same_reason, same_status =
+                driver.incremental_configuration(context)
+            assert.is_nil(again)
+            assert.equal(reason, same_reason)
+            assert.equal(status, same_status)
+
+            incremental.configuration = function()
+                return nil, "native delegate selection is unknown"
+            end
+            local failed_context = tracked_context()
+            local failed, failure, failure_status =
+                driver.incremental_configuration(failed_context)
+            assert.is_nil(failed)
+            assert.matches("cannot certify compiler configuration:", failure, 1, true)
+            assert.is_nil(failure_status)
+            assert.is_nil(failed_context.incremental_uncertified)
+            local cancellation = {}
+            incremental.configuration = function() error(cancellation, 0) end
+            local completed, raised = pcall(driver.incremental_configuration,
+                failed_context)
+            assert.is_false(completed)
+            assert.equal(cancellation, raised)
+        end)
+
+        it("forwards proven compiler stage policy and explicit output uncertainty without another query", function()
+            local context = tracked_context()
+            local calls = 0
+            local tools = { { path = "C:/llvm/bin/clang.exe" } }
+            incremental.toolchain_identity = function()
+                calls = calls + 1
+                return "observed-toolchain", { stage_policy = "llvm", tools = tools }
+            end
+            local request = assert(driver.output_tool_descriptors(context))
+            assert.equal("observed-toolchain", request.toolchain)
+            assert.equal("llvm", request.compiler_stage_policy)
+            -- Stale-stage retirement protects these already observed binaries.
+            assert.equal(tools, request.compiler_tools)
+            assert.is_nil(request.uncacheable)
+            assert.equal(1, calls)
+
+            incremental.toolchain_identity = uncertain_toolchain
+            request = assert(driver.output_tool_descriptors(context))
+            assert.is_nil(request.toolchain)
+            assert.is_nil(request.compiler_stage_policy)
+            assert.is_nil(request.compiler_tools)
+            assert.equal("native delegate selection is unknown", request.uncacheable)
+            incremental.toolchain_identity = function()
+                return nil, "cannot read native executable"
+            end
+            local failed, failure = driver.output_tool_descriptors(context)
+            assert.is_nil(failed)
+            assert.equal("cannot read native executable", failure)
+            local cancellation = {}
+            incremental.toolchain_identity = function() error(cancellation, 0) end
+            local completed, raised = pcall(driver.output_tool_descriptors, context)
+            assert.is_false(completed)
+            assert.equal(cancellation, raised)
+        end)
+
+        it("preserves uncertain linker status without caching a guessed backend", function()
+            incremental.toolchain_identity = uncertain_toolchain
+            local context = tracked_context()
+            local calls = 0
+            local linkcertificate = require "titan-compiler.linkcertificate"
+            linkcertificate.linker_backend = function(_, request)
+                calls = calls + 1
+                assert.equal("native delegate selection is unknown", request.uncacheable)
+                return "none", request.uncacheable, "uncertified"
+            end
+            for _ = 1, 2 do
+                local backend, reason, status = driver.native_link_backend(context)
+                assert.equal("none", backend)
+                assert.equal("native delegate selection is unknown", reason)
+                assert.equal("uncertified", status)
+                assert.is_nil(context.native_link_backend)
+            end
+            assert.equal(2, calls)
+            linkcertificate.linker_backend = function()
+                return nil, "cannot inspect selected linker"
+            end
+            local failed, failure = driver.native_link_backend(context)
+            assert.is_nil(failed)
+            assert.equal("cannot inspect selected linker", failure)
+            local cancellation = {}
+            linkcertificate.linker_backend = function() error(cancellation, 0) end
+            local completed, raised = pcall(driver.native_link_backend, context)
+            assert.is_false(completed)
+            assert.equal(cancellation, raised)
+        end)
+
+        it("rebuilds a prior certified object without publishing a certificate under policy uncertainty", function()
+            local name = "incremental_driver_uncertain_native"
+            write_file(source .. "/" .. name .. ".titan",
+                "function answer(): integer return 42 end\n")
+            local initial = load_ok(fresh_loader(), name)
+            local object = write_source_object(initial)
+            incremental.toolchain_identity = uncertain_toolchain
+            incremental.make_certificate = function()
+                error("uncertified producer must not publish a certificate", 0)
+            end
+            local context = tracked_context()
+            local loader, dependencies = fresh_loader({
+                context = context, incremental = true,
+            })
+            local entry = load_ok(loader, name)
+            assert.is_table(entry.ast)
+            assert.is_nil(entry.compiled)
+            assert.is_table(entry.source_certificate)
+            assert(driver.prepare_foreign_headers(
+                { name }, driver.imported, false, false))
+            local compiled, compile_error, actual_object = driver.compile_module(
+                name, entry, dependencies, false, { context = context })
+            assert.is_true(compiled, compile_error)
+            assert.equal(object, actual_object)
+            assert.is_nil(context.incremental_configuration)
+            assert.is_nil(entry.interface_digests)
+            local bytes = assert(util.get_file_contents(object, "rb"))
+            local restored = assert(objectmetadata.read(bytes, object))
+            assert.equal(name, restored.type.name)
+            assert.is_nil(restored.object_metadata.certificate)
+            local next_loader = fresh_loader({
+                context = tracked_context(), incremental = true,
+            })
+            local next_entry = load_ok(next_loader, name)
+            assert.is_table(next_entry.ast)
+            assert.is_nil(next_entry.compiled)
+        end)
+
+        it("plans fresh source imports rather than restoring records under policy uncertainty", function()
+            local name = "incremental_driver_uncertain_plan"
+            write_file(source .. "/" .. name .. ".titan",
+                "function answer(): integer return 42 end\n")
+            write_source_object(load_ok(fresh_loader(), name))
+            incremental.toolchain_identity = uncertain_toolchain
+            local calls = 0
+            local loader = fresh_loader({
+                context = tracked_context(), incremental = true, plan_mode = true,
+                imports_for = function(modname, source_description, certified)
+                    calls = calls + 1
+                    assert.equal(name, modname)
+                    assert.equal(source .. "/" .. name .. ".titan",
+                        source_description.main)
+                    assert.is_nil(certified)
+                    return {}
+                end,
+            })
+            local ok, _, errors = loader(name)
+            assert.is_true(ok)
+            assert.equal(0, #errors)
+            assert.equal(1, calls)
+            assert.is_true(driver.imported[name]._planned)
+            assert.is_nil(driver.imported[name].compiled)
+        end)
+
+        it("keeps real worker compiler inventory validation when native policy is uncertified", function()
+            incremental.toolchain_identity = uncertain_toolchain
+            local context = tracked_context()
+            local configuration = assert(driver.worker_configuration(context))
+            assert.is_nil(configuration.configuration)
+            assert.equal("native delegate selection is unknown", configuration.uncertified)
+            assert.equal(assert(incremental.compiler_component(context)),
+                configuration.compiler)
+            local worker = assert(driver.new_worker_context(
+                configuration, compiler_io.new_sync()))
+            contexts[#contexts + 1] = worker
+            assert.is_nil(worker.incremental_configuration)
+            local certificate, reason, status =
+                driver.incremental_configuration(worker)
+            assert.is_nil(certificate)
+            assert.equal(configuration.uncertified, reason)
+            assert.equal("uncertified", status)
+            assert.is_true(incremental.counters(worker).file_hashes > 0)
+
+            configuration.compiler = configuration.compiler .. "-changed"
+            local mismatched, mismatch_error = driver.new_worker_context(
+                configuration, compiler_io.new_sync())
+            assert.is_nil(mismatched)
+            assert.equal("compiler installation changed during build", mismatch_error)
+            configuration.compiler = assert(incremental.compiler_component(context))
+            local strategy = compiler_io.new_sync()
+            local list = strategy.list
+            function strategy:list(directory)
+                if paths.basename(directory) == "titan-compiler" then
+                    return nil, "compiler inventory is unreadable"
+                end
+                return list(self, directory)
+            end
+            local unreadable, inventory_error =
+                driver.new_worker_context(configuration, strategy)
+            assert.is_nil(unreadable)
+            assert.matches("compiler inventory is unreadable", inventory_error, 1, true)
+            local cancellation = {}
+            function strategy:list() error(cancellation, 0) end
+            local completed, raised = pcall(driver.new_worker_context,
+                configuration, strategy)
+            assert.is_false(completed)
+            assert.equal(cancellation, raised)
+        end)
+
+        it("publishes raw worker dependencies while rejecting changed sources, headers and include candidates", function()
+            local producer = "incremental_driver_raw_producer"
+            local consumer = "incremental_driver_raw_consumer"
+            local producer_file = source .. "/" .. producer .. ".titan"
+            local consumer_file = source .. "/" .. consumer .. ".titan"
+            local consumer_source = 'local producer = import "' .. producer ..
+                '.titan"\nfunction answer(): integer return producer.answer() end\n'
+            local include = source .. "/late"
+            assert(lfs.mkdir(include))
+            local header = source .. "/raw_worker.h"
+            local header_contents = '#include "raw_worker_config.h"\n' ..
+                "#define TITAN_RAW_WORKER_VALUE RAW_WORKER_CONFIG\n"
+            local config_contents = "#define RAW_WORKER_CONFIG 42\n"
+            write_file(header, header_contents)
+            write_file(include .. "/raw_worker_config.h", config_contents)
+            driver.EXTRA_CPPFLAGS = { table.unpack(driver.EXTRA_CPPFLAGS) }
+            driver.EXTRA_CPPFLAGS[#driver.EXTRA_CPPFLAGS + 1] = "-I" .. include
+            write_file(producer_file,
+                'foreign import "raw_worker.h"\n' ..
+                "function answer(): integer return ffi.TITAN_RAW_WORKER_VALUE end\n")
+            write_file(consumer_file, consumer_source)
+            incremental.toolchain_identity = uncertain_toolchain
+            incremental.make_certificate = function()
+                error("raw worker must not publish a certificate", 0)
+            end
+            local context = tracked_context()
+            local loader = fresh_loader({
+                context = context, incremental = true, plan_mode = true,
+                imports_for = function(name)
+                    return name == consumer and {
+                        { name = producer, source_required = true },
+                    } or {}
+                end,
+            })
+            local loaded, _, diagnostics = loader(consumer)
+            assert.is_true(loaded)
+            assert.equal(0, #diagnostics)
+            local plan = driver.resolution_plan(context)
+            assert.same({ producer, consumer }, plan.order)
+            local configuration = assert(driver.worker_configuration(context))
+            local function stage(name)
+                local descriptor = driver.plan_descriptor(plan, name)
+                local imported, registry = driver.imported, types.registry
+                driver.imported, types.registry = {}, {}
+                local worker = assert(driver.new_worker_context(
+                    configuration, compiler_io.new_sync()))
+                contexts[#contexts + 1] = worker
+                local result, compile_error = driver.compile_planned_module(
+                    worker, name, {
+                        plan = descriptor, jobs = 2,
+                    })
+                driver.imported, types.registry = imported, registry
+                assert.truthy(result, compile_error)
+                assert.is_table(result.source_snapshot)
+                return result
+            end
+            local function reject_changed_inputs(result, expected)
+                local rejected, input_error =
+                    driver.publish_staged_module(context, result)
+                assert.is_nil(rejected)
+                assert.matches(expected, input_error, 1, true)
+                assert.is_nil(lfs.attributes(result.object))
+                for _, item in ipairs(result.staged) do
+                    assert.is_nil(lfs.attributes(item.from))
+                end
+                return input_error
+            end
+            for _, name in ipairs(plan.order) do
+                assert(driver.invalidate_source_object(
+                    context, name, plan.modules[name].source))
+                local result = stage(name)
+                if name == producer then
+                    write_file(header, header_contents .. "#define RAW_WORKER_EXTRA 1\n")
+                    local header_error = reject_changed_inputs(result, "c-input ")
+                    assert.matches("raw_worker.h", header_error, 1, true)
+                    write_file(header, header_contents)
+                    result = stage(name)
+                    local earlier = source .. "/raw_worker_config.h"
+                    write_file(earlier, config_contents)
+                    local candidate_error = reject_changed_inputs(result, "c-input ")
+                    assert.matches("raw_worker_config.h", candidate_error, 1, true)
+                    assert.matches("candidate", candidate_error, 1, true)
+                    assert(os.remove(earlier))
+                    result = stage(name)
+                elseif name == consumer then
+                    write_file(consumer_file, consumer_source .. "\n")
+                    reject_changed_inputs(result, "changed during the build: source-content")
+                    write_file(consumer_file, consumer_source)
+                    result = stage(name)
+                end
+                local published = assert(driver.publish_staged_module(context, result))
+                assert.equal("built", published.status)
+                assert.is_nil(published.record.object_metadata.certificate)
+                plan.update(name, published)
+                local entry = assert(driver.restore_source_object(
+                    context, name, plan.modules[name].source, published,
+                    { published = true }))
+                assert.is_nil(entry.ast)
+                assert.is_string(entry.compiled)
+                assert.is_nil(entry.interface_digests)
+            end
+            assert.is_true(driver.imported[consumer].deps[producer])
+            assert.is_nil(context.incremental_configuration)
+            local next_context = tracked_context()
+            load_ok(fresh_loader({
+                context = next_context, incremental = true,
+            }), consumer)
+            for _, name in ipairs({ producer, consumer }) do
+                assert.is_table(driver.imported[name].ast)
+                assert.is_nil(driver.imported[name].compiled)
+            end
+            assert.is_nil(next_context.incremental_configuration)
+        end)
+
+        -- A coordinator's planning loader over the given source modules, with
+        -- each module's ordinary or `.titan` imports supplied by name.
+        local function planning_loader(sources, imports, certified)
+            for name, contents in pairs(sources) do
+                write_file(source .. "/" .. name .. ".titan", contents)
+            end
+            if not certified then incremental.toolchain_identity = uncertain_toolchain end
+            local context = tracked_context()
+            local loader = fresh_loader({
+                context = context, incremental = true, plan_mode = true,
+                imports_for = function(name) return imports[name] or {} end,
+            })
+            return context, loader
+        end
+
+        -- One worker over closed configuration and descriptor data.
+        local function worker_compile(context, descriptor, name, options)
+            options = options or {}
+            local configuration = assert(driver.worker_configuration(context))
+            if options.configure then options.configure(configuration) end
+            local imported, registry = driver.imported, types.registry
+            local extra_cflags = driver.EXTRA_CFLAGS
+            driver.imported, types.registry = {}, {}
+            local worker = assert(driver.new_worker_context(
+                configuration, compiler_io.new_sync()))
+            contexts[#contexts + 1] = worker
+            local result, compile_error = driver.compile_planned_module(
+                worker, name, { plan = descriptor, jobs = options.jobs })
+            driver.imported, types.registry = imported, registry
+            driver.EXTRA_CFLAGS = extra_cflags
+            return result, compile_error
+        end
+
+        local function publish_planned(context, plan, name, options)
+            assert(driver.invalidate_source_object(
+                context, name, plan.modules[name].source))
+            local result = assert(worker_compile(context,
+                driver.plan_descriptor(plan, name), name, options))
+            local published = assert(driver.publish_staged_module(context, result))
+            plan.update(name, published)
+            return published, result
+        end
+
+        local function raised(action)
+            local ok, err = pcall(action)
+            assert.is_false(ok)
+            return tostring(err)
+        end
+
+        it("plans an unavailable import and reports it again from the worker", function()
+            local consumer = "planned_unavailable_consumer"
+            local missing = "planned_unavailable_dependency"
+            local context, loader = planning_loader({
+                [consumer] = 'local dependency = import "' .. missing .. '"\n' ..
+                    "function answer(): integer return dependency.answer() end\n",
+            }, { [consumer] = { { name = missing } } })
+            local loaded, _, diagnostics = loader(consumer)
+            assert.is_true(loaded)
+            assert.equal(0, #diagnostics)
+            local plan = driver.resolution_plan(context)
+            assert.same({ consumer }, plan.order)
+            local unavailable = plan.modules[missing]
+            assert.equal("unavailable", unavailable.kind)
+            assert.is_string(unavailable.error)
+            assert.equal(unavailable.error, plan.modules[consumer].failed[missing])
+            assert.is_nil(plan.linked(missing))
+            local digest, digest_error = plan.digest(missing)
+            assert.is_nil(digest)
+            assert.equal("unavailable", digest_error)
+            local descriptor = driver.plan_descriptor(plan, consumer)
+            assert.same({ kind = "unavailable", linked = false, error = unavailable.error },
+                descriptor.modules[missing])
+            local result, compile_error = worker_compile(context, descriptor, consumer)
+            assert.is_nil(result)
+            assert.matches(unavailable.error, compile_error, 1, true)
+
+            -- The plan and its resolver keep their documented preconditions.
+            assert.matches("the build plan has no source module '" .. missing .. "'",
+                raised(function() driver.plan_descriptor(plan, missing) end), 1, true)
+            assert.matches("only planned source modules accept a certified record",
+                raised(function() plan.update(missing, {}) end), 1, true)
+            assert.matches("a planned module update requires its certified record",
+                raised(function() plan.update(consumer, {}) end), 1, true)
+            assert.matches("a resolution plan requires an open planning loader bound to its " ..
+                "resolver context", raised(function() driver.resolution_plan(context) end), 1, true)
+            assert.matches("a resolution plan requires a resolver context",
+                raised(function() driver.resolution_plan({}) end), 1, true)
+            assert.matches("restoring an object requires a resolver context",
+                raised(function() driver.restore_source_object({}, consumer) end), 1, true)
+            assert.matches("restoring an object requires a loader bound to its resolver context",
+                raised(function()
+                    driver.restore_source_object(tracked_context(), consumer)
+                end), 1, true)
+            assert.matches("source lookup requires a resolver context",
+                raised(function() driver.resolve_source({}, consumer) end), 1, true)
+        end)
+
+        it("orders import cycles and their importers after acyclic planned modules", function()
+            local context, loader = planning_loader({
+                planned_cycle_a = "function a(): integer return 1 end\n",
+                planned_cycle_b = "function b(): integer return 2 end\n",
+                planned_cycle_leaf = "function leaf(): integer return 3 end\n",
+                planned_cycle_root = "function root(): integer return 4 end\n",
+                planned_cycle_self = "function itself(): integer return 5 end\n",
+            }, {
+                planned_cycle_root = {
+                    { name = "planned_cycle_a" }, { name = "planned_cycle_leaf" },
+                    { name = "planned_cycle_self" },
+                },
+                planned_cycle_a = { { name = "planned_cycle_b" } },
+                planned_cycle_b = { { name = "planned_cycle_a" } },
+                planned_cycle_self = { { name = "planned_cycle_self" } },
+            })
+            assert.is_true((loader("planned_cycle_root")))
+            local plan = driver.resolution_plan(context)
+            assert.same({
+                "planned_cycle_leaf", "planned_cycle_a", "planned_cycle_b",
+                "planned_cycle_root", "planned_cycle_self",
+            }, plan.order)
+            assert.is_nil(plan.modules.planned_cycle_leaf.cyclic)
+            for _, name in ipairs({ "planned_cycle_a", "planned_cycle_b",
+                    "planned_cycle_root", "planned_cycle_self" }) do
+                assert.is_true(plan.modules[name].cyclic, name)
+            end
+            assert.is_string(plan.modules.planned_cycle_b.failed.planned_cycle_a)
+            assert.is_string(plan.modules.planned_cycle_self.failed.planned_cycle_self)
+        end)
+
+        it("rejects worker descriptors that diverge from the coordinator's plan", function()
+            local base, middle = "planned_chain_base", "planned_chain_middle"
+            local top, direct = "planned_chain_top", "planned_chain_direct"
+            local context, loader = planning_loader({
+                [base] = "function answer(): integer return 40 end\n",
+                [middle] = 'local base = import "' .. base .. '"\n' ..
+                    "function answer(): integer return base.answer() + 1 end\n",
+                [top] = 'local middle = import "' .. middle .. '"\n' ..
+                    "function answer(): integer return middle.answer() + 1 end\n",
+                [direct] = 'local middle = import "' .. middle .. '.titan"\n' ..
+                    "function answer(): integer return middle.answer() + 2 end\n",
+            }, {
+                [middle] = { { name = base } },
+                [top] = { { name = middle } },
+                [direct] = { { name = middle, source_required = true } },
+            })
+            for _, root_name in ipairs({ top, direct }) do
+                local loaded, _, diagnostics = loader(root_name)
+                assert.is_true(loaded)
+                assert.equal(0, #diagnostics)
+            end
+            local plan = driver.resolution_plan(context)
+            assert.same({ base, middle, direct, top }, plan.order)
+            publish_planned(context, plan, base)
+            publish_planned(context, plan, middle)
+
+            local function diverged(name, change)
+                local descriptor = driver.plan_descriptor(plan, name)
+                change(descriptor.modules)
+                local result, compile_error = worker_compile(context, descriptor, name)
+                assert.is_nil(result)
+                return compile_error
+            end
+            assert.matches("build plan divergence: module '" .. middle ..
+                "' is not in the coordinator's plan",
+                diverged(top, function(modules) modules[middle] = nil end), 1, true)
+            assert.matches("build plan divergence: module '" .. middle .. "' has no accepted object",
+                diverged(top, function(modules) modules[middle].object = nil end), 1, true)
+            assert.matches("cannot read planned object for module '" .. middle .. "'",
+                diverged(top, function(modules)
+                    modules[middle].object = source .. "/missing.o"
+                end), 1, true)
+            write_file(source .. "/not-an-object.o", "not an object")
+            assert.matches("cannot decode planned object for module '" .. middle .. "'",
+                diverged(top, function(modules)
+                    modules[middle].object = source .. "/not-an-object.o"
+                end), 1, true)
+            assert.matches("build plan divergence: module '" .. middle ..
+                "' has unsupported planned kind 'archive'",
+                diverged(top, function(modules)
+                    modules[middle] = { kind = "archive", linked = true }
+                end), 1, true)
+            assert.matches("build plan divergence: source-imported module '" .. middle ..
+                "' is planned as a dynamic provider",
+                diverged(direct, function(modules)
+                    modules[middle] = { kind = "dynamic", linked = false }
+                end), 1, true)
+            -- A restored dependency's own recorded imports also come from the plan.
+            assert.matches("build plan divergence: module '" .. base ..
+                "' is not in the coordinator's plan",
+                diverged(top, function(modules) modules[base] = nil end), 1, true)
+            assert.matches("build plan divergence: module '" .. middle ..
+                "' is not linked in the plan but not in the worker's selection",
+                diverged(top, function(modules) modules[middle].linked = false end), 1, true)
+
+            local valid = driver.plan_descriptor(plan, top)
+            local result, compile_error = worker_compile(context, {
+                protocol = valid.protocol, modname = middle, modules = valid.modules,
+            }, top)
+            assert.is_nil(result)
+            assert.equal("invalid build plan for module '" .. top .. "'", compile_error)
+            result = assert(worker_compile(context, valid, top))
+            assert.equal(top, result.modname)
+
+            -- The coordinator restores only complete records whose imports it selected.
+            local accepted = plan.accepted(middle)
+            local metadata = {}
+            for key, value in pairs(accepted.record.object_metadata) do metadata[key] = value end
+            metadata.imports = { { name = "planned_chain_unselected" } }
+            local missing, code, detail = driver.restore_source_object(context, middle,
+                plan.modules[middle].source, setmetatable({ object_metadata = metadata },
+                    { __index = accepted.record }))
+            assert.is_nil(missing)
+            assert.equal("dependency-unavailable", code)
+            assert.equal("planned_chain_unselected", detail)
+            missing, code, detail = driver.restore_source_object(context, middle,
+                plan.modules[middle].source, { object_metadata = {} })
+            assert.is_nil(missing)
+            assert.equal("record-unreadable", code)
+            assert.equal("record has no object metadata", detail)
+            context.probe_verbose = true
+            local entry, hit = capture_stderr(function()
+                return assert(driver.restore_source_object(context, base,
+                    plan.modules[base].source, plan.accepted(base)))
+            end)
+            context.probe_verbose = nil
+            assert.equal("Titan object hit " .. base .. ": " .. entry.compiled .. "\n", hit)
+        end)
+
+        it("compiles planned split parts and retires their published inventory", function()
+            local name = "planned_split_parts"
+            local functions = {}
+            for index = 1, 8 do
+                functions[index] = ("function value%d(): integer return %d end\n"):format(index, index)
+            end
+            local context, loader = planning_loader({ [name] = table.concat(functions) }, {})
+            assert.is_true((loader(name)))
+            local plan = driver.resolution_plan(context)
+            local stem = source .. "/" .. name
+            local _, result = publish_planned(context, plan, name, {
+                jobs = 2,
+                configure = function(configuration)
+                    configuration.policy.c_parts = 4
+                    configuration.policy.split_threshold = 1
+                end,
+            })
+            assert.is_true(#result.objects > 1)
+            local wrote_private_header = false
+            for _, filename in ipairs(result.written) do
+                if paths.to_slash(filename) == paths.to_slash(paths.normalize(stem .. ".priv.h")) then
+                    wrote_private_header = true
+                end
+            end
+            assert.is_true(wrote_private_header)
+            for _, object in ipairs(result.objects) do
+                assert.equal("file", lfs.attributes(object, "mode"), object)
+            end
+            write_file(stem .. ".part1.gcda", "stale part counters")
+            assert(driver.invalidate_source_object(context, name, plan.modules[name].source))
+            for _, object in ipairs(result.objects) do
+                assert.is_nil(lfs.attributes(object), object)
+            end
+            for index = 1, #result.objects - 1 do
+                assert.is_nil(lfs.attributes(stem .. ".part" .. index .. ".c"))
+            end
+            assert.is_nil(lfs.attributes(stem .. ".part1.gcda"))
+            assert.equal("file", lfs.attributes(stem .. ".c", "mode"))
+        end)
+
+        it("refuses to invalidate a directory or an object it cannot remove", function()
+            local name = "planned_invalidation"
+            local context, loader = planning_loader({
+                [name] = "function answer(): integer return 42 end\n",
+            }, {})
+            assert.is_true((loader(name)))
+            local plan = driver.resolution_plan(context)
+            local planned = plan.modules[name].source
+            local primary = source .. "/" .. name .. ".o"
+            assert(lfs.mkdir(primary))
+            local ok, err = driver.invalidate_source_object(context, name, planned)
+            assert.is_nil(ok)
+            assert.equal("object output '" .. primary .. "' for module '" .. name ..
+                "' is a directory", err)
+            assert(lfs.rmdir(primary))
+            publish_planned(context, plan, name)
+            local unlink = context.io.unlink
+            function context.io:unlink() return nil, "object is busy" end
+            ok, err = driver.invalidate_source_object(context, name, planned)
+            context.io.unlink = unlink
+            assert.is_nil(ok)
+            assert.equal("cannot invalidate object for module '" .. name ..
+                "': object is busy", err)
+            assert.equal("file", lfs.attributes(primary, "mode"))
+        end)
+
+        it("removes a planned module's staged objects when its native compile fails", function()
+            local name = "planned_native_failure"
+            local context, loader = planning_loader({
+                [name] = "function answer(): integer return 42 end\n",
+            }, {})
+            assert.is_true((loader(name)))
+            local plan = driver.resolution_plan(context)
+            local result, compile_error = worker_compile(context,
+                driver.plan_descriptor(plan, name), name, {
+                    configure = function(configuration)
+                        local flags = configuration.driver.extra_cflags
+                        flags[#flags + 1] = "-include"
+                        flags[#flags + 1] = source .. "/missing-forced-header.h"
+                    end,
+                })
+            assert.is_nil(result)
+            assert.is_string(compile_error)
+            for entry in lfs.dir(source) do
+                if entry:find(name, 1, true) then
+                    assert.is_nil(entry:match("%.o$") or entry:match("%.o%."), entry)
+                end
+            end
+        end)
+
+        it("discards malformed or unpublishable worker results without an object", function()
+            local name = "planned_publication_failures"
+            local context, loader = planning_loader({
+                [name] = "function answer(): integer return 42 end\n",
+            }, {})
+            assert.is_true((loader(name)))
+            local plan = driver.resolution_plan(context)
+            local descriptor = driver.plan_descriptor(plan, name)
+            local stem = source .. "/" .. name
+            local function staged()
+                return assert(worker_compile(context, descriptor, name))
+            end
+            local function rejected(result, expected)
+                local published, err = driver.publish_staged_module(context, result)
+                assert.is_nil(published)
+                assert.matches(expected, err, 1, true)
+                for _, item in ipairs(result.staged or {}) do
+                    assert.is_nil(lfs.attributes(item.from), item.from)
+                end
+            end
+
+            write_file(stem .. ".orphan.tmp", "part bytes")
+            rejected({ modname = name, staged = {
+                { role = "part", from = stem .. ".orphan.tmp", to = stem .. ".part1.o" },
+            } }, "worker result for module '" .. name .. "' has no primary object")
+            rejected({ modname = name, staged = {
+                { role = "primary", from = stem .. ".missing.tmp", to = stem .. ".o" },
+            } }, "cannot read staged object for module '" .. name .. "'")
+            write_file(stem .. ".garbage.tmp", "not an object")
+            rejected({ modname = name, staged = {
+                { role = "primary", from = stem .. ".garbage.tmp", to = stem .. ".o" },
+            } }, "cannot decode staged object for module '" .. name .. "'")
+
+            local result = staged()
+            result.staged[#result.staged + 1] = {
+                role = "part", from = stem .. ".vanished.tmp", to = stem .. ".part9.o",
+            }
+            rejected(result, "cannot publish object part '" .. stem .. ".part9.o'")
+            assert.is_nil(lfs.attributes(stem .. ".o"))
+
+            result = staged()
+            local rename = context.io.rename
+            function context.io:rename(from, to)
+                if from == result.staged[1].from then return nil, "rename denied" end
+                return rename(self, from, to)
+            end
+            rejected(result, "cannot publish object '" .. stem .. ".o': rename denied")
+            context.io.rename = rename
+            assert.is_nil(lfs.attributes(stem .. ".o"))
+
+            -- A committed object is replaced, unless its removal is refused.
+            local published = assert(driver.publish_staged_module(context, staged()))
+            result = staged()
+            local unlink = context.io.unlink
+            function context.io:unlink(filename)
+                if filename == published.object then return nil, "unlink denied" end
+                return unlink(self, filename)
+            end
+            rejected(result, "cannot replace object for module '" .. name .. "': unlink denied")
+            context.io.unlink = unlink
+            assert.equal("file", lfs.attributes(published.object, "mode"))
+            assert(driver.publish_staged_module(context, staged()))
+
+            result = staged()
+            result.source_snapshot = nil
+            rejected(result, "inputs of module '" .. name .. "' changed during the build: " ..
+                "invalid uncertified worker input snapshot")
+
+            result = staged()
+            assert(os.remove(stem .. ".titan"))
+            rejected(result, "cannot resolve module '" .. name .. "' for publication: ")
+        end)
+
+        it("rejects a certified worker object whose source changed during the build", function()
+            local name = "planned_certified_edit"
+            local contents = "function answer(): integer return 42 end\n"
+            local context, loader = planning_loader({ [name] = contents }, {}, true)
+            assert.is_true((loader(name)))
+            local plan = driver.resolution_plan(context)
+            assert(driver.invalidate_source_object(context, name, plan.modules[name].source))
+            local result = assert(worker_compile(context,
+                driver.plan_descriptor(plan, name), name))
+            assert.is_nil(result.source_snapshot)
+            write_file(source .. "/" .. name .. ".titan", contents .. "\n")
+            local published, err = driver.publish_staged_module(context, result)
+            assert.is_nil(published)
+            assert.matches("inputs of module '" .. name .. "' changed during the build: ",
+                err, 1, true)
+            assert.is_nil(lfs.attributes(result.object))
+        end)
+
+        it("loads exactly the binary providers the coordinator planned in a worker", function()
+            local provider = "planned_binary_provider"
+            local consumer = "planned_binary_consumer"
+            local provider_file = provider_path(binary .. "/" .. provider .. ".so")
+            cache_dynamic_provider(provider_file,
+                { [provider] = result_module(provider, types.Integer()) })
+            local context, loader = planning_loader({
+                [consumer] = 'local provider = import "' .. provider .. '"\n' ..
+                    "function answer(): integer return provider.answer() + 1 end\n",
+            }, { [consumer] = { { name = provider } } })
+            local loaded, _, diagnostics = loader(consumer)
+            assert.is_true(loaded)
+            assert.equal(0, #diagnostics)
+            local plan = driver.resolution_plan(context)
+            assert.equal("dynamic", plan.modules[provider].kind)
+            local function compiled(change)
+                local descriptor = driver.plan_descriptor(plan, consumer)
+                if change then change(descriptor.modules[provider]) end
+                return worker_compile(context, descriptor, consumer)
+            end
+            local result = assert(compiled())
+            assert.equal(consumer, result.modname)
+            local _, divergence = compiled(function(item)
+                item.provider_file = "elsewhere/" .. provider .. ".so"
+            end)
+            assert.matches("build plan divergence: module '" .. provider ..
+                "' provider file is '", divergence, 1, true)
+            assert.matches("', planned 'elsewhere/" .. provider .. ".so'", divergence, 1, true)
+
+            local other = provider_path(binary .. "/planned_binary_other.so")
+            cache_dynamic_provider(other,
+                { planned_binary_other = result_module("planned_binary_other", types.Integer()) })
+            -- Like dlsym, the other provider has no symbols of the planned module.
+            local load = titan._loadlib
+            titan._loadlib = function(found, symbol)
+                local ok, value = pcall(load, found, symbol)
+                if ok then return value end
+                return nil, "undefined symbol: " .. symbol, "init"
+            end
+            local _, unclaimed = compiled(function(item) item.file = other end)
+            assert.matches("planned provider '" .. other .. "' no longer claims module '" ..
+                provider .. "'", unclaimed, 1, true)
+
+            if platform.windows then return end
+            local archive = binary .. "/libplanned_binary_other.a"
+            cache_static_provider(context, archive,
+                { planned_binary_other = result_module("planned_binary_other", types.Integer()) })
+            local _, absent = compiled(function(item)
+                item.kind, item.archive, item.relative = "static", archive, "libplanned_binary_other.a"
+                item.file, item.provider_file = nil, nil
+            end)
+            assert.matches("planned static provider '" .. archive .. "' contains no module '" ..
+                provider .. "'", absent, 1, true)
+        end)
+
+        it("rejects resolver, loader and worker entry points without their required inputs", function()
+            assert.matches("frontend must be a nonempty path",
+                raised(function() driver.new_resolver_context({ frontend = "" }) end), 1, true)
+            assert.matches("configuration certification requires a resolver context",
+                raised(function() driver.incremental_configuration({}) end), 1, true)
+            assert.matches("plan_mode requires an imports_for function",
+                raised(function()
+                    driver.defaultloader({}, { context = tracked_context(), plan_mode = true })
+                end), 1, true)
+            assert.matches("worker_plan must be a build plan descriptor",
+                raised(function()
+                    driver.defaultloader({}, { context = tracked_context(), worker_plan = {} })
+                end), 1, true)
+            local worker, worker_error = driver.new_worker_context(
+                { protocol = version.BUILD_WORKER_PROTOCOL }, compiler_io.new_sync())
+            assert.is_nil(worker)
+            assert.equal("incompatible build worker configuration", worker_error)
+
+            incremental.toolchain_identity = uncertain_toolchain
+            local configuration = assert(driver.worker_configuration(tracked_context()))
+            local support = package.loaded.titan
+            package.loaded.titan = { _sha256_binary = support._sha256_binary }
+            worker, worker_error = driver.new_worker_context(configuration, compiler_io.new_sync())
+            package.loaded.titan = support
+            assert.is_nil(worker)
+            assert.equal("the installed Titan native support library is missing or stale " ..
+                "(it lacks _sha256_binary or _sha256_stream)", worker_error)
+
+            incremental.configuration = function()
+                return nil, "compiler inventory is unreadable"
+            end
+            local failed, failure = driver.worker_configuration(tracked_context())
+            assert.is_nil(failed)
+            assert.equal("cannot certify compiler configuration: compiler inventory is unreadable",
+                failure)
+            local cancellation = {}
+            incremental.configuration = function() return nil, cancellation end
+            local ok, raised_value = pcall(driver.worker_configuration, tracked_context())
+            assert.is_false(ok)
+            assert.equal(cancellation, raised_value)
+        end)
+
+        it("reuses the coordinator's archive scan in a worker only under the same archive observation", function()
+            if platform.windows then
+                pending("Windows Titan archive-provider consumers are not implemented")
+                return
+            end
+            local process = require "titan-compiler.process"
+            local parser = require "titan-compiler.parser"
+            local checker = require "titan-compiler.checker"
+            local producer = "incremental_driver_archive_producer"
+            local consumer = "incremental_driver_archive_consumer"
+            local producer_file = source .. "/" .. producer .. ".titan"
+            local suffix = "/" .. producer .. ".a"
+            -- Publish a real producer archive, then hide its source so the
+            -- consumer selects the archive.
+            local function publish_producer(contents)
+                write_file(producer_file, contents)
+                local imported, registry = driver.imported, types.registry
+                driver.imported, types.registry = {}, {}
+                local ast, parse_error = parser.parse(producer_file, contents)
+                assert.truthy(ast, parse_error)
+                local _, check_errors = checker.check(
+                    producer, ast, contents, producer_file)
+                assert.equal(0, #check_errors, table.concat(check_errors, "\n"))
+                local compiled, compile_error, object = driver.compile(
+                    producer, ast, producer_file, {}, false)
+                driver.imported, types.registry = imported, registry
+                assert.is_true(compiled, compile_error)
+                local target = assert(driver.derive_target_fingerprint(object, producer))
+                assert(driver.build_static_archive(
+                    binary .. suffix, { object }, {}, target, false))
+                assert(os.remove(producer_file))
+            end
+            publish_producer("function answer(): integer return 41 end\n")
+            write_file(source .. "/" .. consumer .. ".titan",
+                'local producer = import "' .. producer .. '"\n' ..
+                "function answer(): integer return producer.answer() + 1 end\n")
+            incremental.toolchain_identity = uncertain_toolchain
+            incremental.make_certificate = function()
+                error("uncertified worker must not publish a certificate", 0)
+            end
+            local context = driver.new_resolver_context({ prefer_static = true })
+            contexts[#contexts + 1] = context
+            local loader = fresh_loader({
+                context = context, incremental = true, plan_mode = true,
+                imports_for = function(name)
+                    return name == consumer and { { name = producer } } or {}
+                end,
+            })
+            local loaded, _, diagnostics = loader(consumer)
+            assert.is_true(loaded)
+            assert.equal(0, #diagnostics)
+            local plan = driver.resolution_plan(context)
+            assert.equal("static", plan.modules[producer].kind)
+            local archive = plan.modules[producer].archive
+            local planned = assert(plan.archives[archive])
+            -- Closed data: canonical metadata strings plus the scan's precise
+            -- observation, never archive members or decoded objects.
+            assert.equal("ns", planned.observation.precision)
+            local planned_names = {}
+            for name, item in pairs(planned.modules) do
+                planned_names[#planned_names + 1] = name
+                local fields = {}
+                for field, value in pairs(item) do
+                    assert.is_string(value)
+                    fields[#fields + 1] = field
+                end
+                table.sort(fields)
+                assert.same({ "origin", "payload" }, fields)
+            end
+            assert.same({ producer }, planned_names)
+            local encoded = assert(process.encode_record(
+                driver.plan_descriptor(plan, consumer)))
+            local configuration = assert(driver.worker_configuration(context))
+            local generated_file = source .. "/" .. consumer .. ".c"
+
+            -- One worker over the transported descriptor, counting archive reads.
+            local function stage(mutate)
+                local descriptor = assert(process.decode_record(encoded))
+                if mutate then mutate(descriptor) end
+                local reads = 0
+                local strategy = compiler_io.new_sync()
+                local read_file = strategy.read_file
+                function strategy:read_file(path, ...)
+                    if path:sub(-#suffix) == suffix then reads = reads + 1 end
+                    return read_file(self, path, ...)
+                end
+                local imported, registry = driver.imported, types.registry
+                driver.imported, types.registry = {}, {}
+                local worker = assert(driver.new_worker_context(configuration, strategy))
+                contexts[#contexts + 1] = worker
+                local result, compile_error = driver.compile_planned_module(
+                    worker, consumer, { plan = descriptor })
+                local selected = driver.imported[producer]
+                driver.imported, types.registry = imported, registry
+                for _, item in ipairs(result and result.staged or {}) do
+                    os.remove(item.from)
+                end
+                return result, compile_error, reads, selected
+            end
+            local function staged_ok(mutate)
+                local result, compile_error, reads, selected = stage(mutate)
+                assert.truthy(result, compile_error)
+                return reads, assert(util.get_file_contents(generated_file, "rb")),
+                    selected
+            end
+
+            local reads, generated, selected = staged_ok()
+            assert.equal(0, reads)
+            assert.equal("metadata", selected.static_provider.kind)
+            assert.is_nil(selected.type.members.extra)
+            local fallbacks = {
+                { "absent", function(descriptor) descriptor.archives = nil end },
+                { "other path", function(descriptor)
+                    descriptor.archives = {
+                        [archive .. ".other"] = descriptor.archives[archive],
+                    }
+                end },
+                { "coarse", function(descriptor)
+                    descriptor.archives[archive].observation.precision = "coarse"
+                end },
+                { "rejected", function(descriptor)
+                    local item = descriptor.archives[archive].modules[producer]
+                    item.payload = item.payload .. "\n"
+                end },
+            }
+            for _, case in ipairs(fallbacks) do
+                local fallback_reads, fallback_generated, fallback_selected =
+                    staged_ok(case[2])
+                assert.equal(1, fallback_reads, case[1])
+                assert.equal(generated, fallback_generated, case[1])
+                assert.equal("archive", fallback_selected.static_provider.kind, case[1])
+            end
+
+            -- An archive changed after planning is rescanned, so the worker
+            -- never selects the stale planned interface.
+            publish_producer("function answer(): integer return 41 end\n" ..
+                "function extra(): integer return 7 end\n")
+            local changed_reads, _, changed = staged_ok()
+            assert.equal(1, changed_reads)
+            assert.equal("archive", changed.static_provider.kind)
+            assert.truthy(changed.type.members.extra)
+
+            -- Without an observable archive the worker fails closed.
+            assert(os.remove(binary .. suffix))
+            local missing, missing_error = stage()
+            assert.is_nil(missing)
+            assert.matches("cannot inspect static provider", missing_error, 1, true)
+        end)
 
         it("skips parsing, checking, generation and native compilation on an object hit", function()
             local name = "incremental_driver_warm"
@@ -3884,33 +6376,66 @@ describe("compiler module loader", function()
             assert.equal(before, lfs.attributes(object, "modification"))
         end)
 
-        it("ignores object metadata by default and falls back for missing or unusable records", function()
+        it("ignores object metadata by default and classifies missing or unusable records", function()
             local name = "incremental_driver_fallback"
             local filename = source .. "/" .. name .. ".titan"
-            write_file(filename, "function answer(): integer return 42 end\n")
+            local initial_source = "function answer(): integer return 42 end\n"
+            write_file(filename, initial_source)
             local entry = load_ok(fresh_loader(), name)
-            local payload = assert(objectmetadata.encode(entry, {
+            local uncertified_payload = assert(objectmetadata.encode(entry, {
                 has_main = false, imports = {}, native_references = {}, external_symbols = {},
+                layouts = empty_layouts(entry.type.name),
+                parts_version = 1,
+                parts = {
+                    { index = 0, c_suffix = ".c", object_suffix = ".o" },
+                },
             }))
             for _, scenario in ipairs({
-                { label = "absent object" },
-                { label = "absent source section", payload = false },
-                { label = "Lua syntax error", payload = "return {" },
-                { label = "Lua execution error", payload = "return missing.field" },
-                { label = "ABI mismatch", payload = "return {abi='unsupported'}" },
-                { label = "older object", payload = payload, older = true },
-                { label = "default ignores current object", payload = payload, default = true },
+                { label = "absent object", miss = "no-object" },
+                { label = "absent source section", payload = false, miss = "record-unreadable" },
+                { label = "Lua syntax error", payload = "return {", miss = "record-unreadable" },
+                { label = "Lua execution error", payload = "return missing.field", miss = "record-unreadable" },
+                { label = "ABI mismatch", payload = "return {abi='unsupported',schema='1',digest='sha256'}", miss = "record-schema" },
+                { label = "old envelope without schema", payload = "return {abi='2',module='" .. name .. "',entry={}}", miss = "record-schema" },
+                { label = "wrong schema version", payload = "return {abi='2',schema='0',digest='sha256',module='" .. name .. "',entry={}}", miss = "record-schema" },
+                { label = "wrong digest algorithm", payload = "return {abi='2',schema='1',digest='blake3',module='" .. name .. "',entry={}}", miss = "record-schema" },
+                { label = "missing certificate", payload = uncertified_payload, miss = "record-schema" },
+                { label = "incomplete certificate", mutator = function(native) native.certificate.configuration = nil end, miss = "record-schema" },
+                { label = "changed source with preserved timestamp", mutator = function() end, edit_source = "function answer(): integer return 43 end\n", miss = "source-content" },
+                { label = "default ignores current object", mutator = function() end, default = true },
             }) do
+                write_file(filename, initial_source)
+                entry = load_ok(fresh_loader(), name)
                 local object = filename:gsub("[.]titan$", ".o")
-                if scenario.payload ~= nil then write_source_object(entry, scenario.payload)
-                else os.remove(object) end
-                if scenario.older then
-                    local modified = assert(lfs.attributes(filename, "modification"))
-                    assert(lfs.touch(object, modified - 1, modified - 1))
+                if scenario.payload ~= nil or scenario.mutator ~= nil then
+                    write_source_object(entry, scenario.payload, scenario.mutator)
+                else
+                    os.remove(object)
                 end
-                local restored = load_ok(fresh_loader({ incremental = not scenario.default }), name)
+                if scenario.edit_source then
+                    local modified = assert(lfs.attributes(filename, "modification"))
+                    write_file(filename, scenario.edit_source)
+                    assert(lfs.touch(filename, modified, modified))
+                end
+                local restored, stderr = capture_stderr(function()
+                    local context = driver.new_resolver_context({ verbose = true })
+                    local loader = fresh_loader({
+                        context = context,
+                        incremental = not scenario.default,
+                    })
+                    local loaded = load_ok(loader, name)
+                    assert.is_true(driver.close_resolver_context(context))
+                    return loaded
+                end)
                 assert.is_table(restored.ast, scenario.label)
                 assert.is_nil(restored.compiled, scenario.label)
+                if scenario.miss then
+                    assert.matches(
+                        "Titan object miss " .. name .. ": " .. scenario.miss,
+                        stderr, 1, true)
+                else
+                    assert.equal("", stderr, scenario.label)
+                end
             end
         end)
 
@@ -3918,10 +6443,13 @@ describe("compiler module loader", function()
             local name = "incremental_driver_failed_replacement"
             local filename = source .. "/" .. name .. ".titan"
             write_file(filename, "function answer(): integer return 42 end\n")
-            local loader, dependencies = fresh_loader()
+            local initial_context = driver.new_resolver_context()
+            local loader, dependencies = fresh_loader({ context = initial_context })
             local entry = load_ok(loader, name)
             assert(driver.prepare_foreign_headers({ name }, driver.imported, false, false))
-            local ok, err, object = driver.compile_module(name, entry, dependencies, false)
+            local ok, err, object = driver.compile_module(
+                name, entry, dependencies, false, { context = initial_context })
+            assert.is_true(driver.close_resolver_context(initial_context))
             assert.truthy(ok, err)
             local function read_object()
                 local file = assert(io.open(object, "rb"))
@@ -3964,7 +6492,7 @@ describe("compiler module loader", function()
             assert.is_true(lfs.attributes(object, "modification") > timestamp)
         end)
 
-        it("compares every folder contributor and permits equal source/object timestamps", function()
+        it("certifies folder contributor membership and content independently of timestamps", function()
             local name = "incremental_driver_folder"
             local directory = source .. "/" .. name
             assert(lfs.mkdir(directory))
@@ -3980,6 +6508,9 @@ describe("compiler module loader", function()
             end
             assert.equal(object, load_ok(fresh_loader({ incremental = true }), name).compiled)
             assert(lfs.touch(contributor, timestamp + 1, timestamp + 1))
+            assert.equal(object, load_ok(fresh_loader({ incremental = true }), name).compiled)
+            write_file(contributor, "local function hidden(): integer return 43 end\n")
+            assert(lfs.touch(contributor, timestamp, timestamp))
             assert.is_table(load_ok(fresh_loader({ incremental = true }), name).ast)
         end)
 
@@ -4084,6 +6615,147 @@ describe("compiler module loader", function()
             loader = fresh_loader({ incremental = true })
             ok, result, errors = loader(consumer)
             assert.is_true(not ok or #errors > 0, tostring(result))
+        end)
+
+        it("preserves contextual native constraints on object hits and hashes each warm input once", function()
+            local owner = "incremental_driver_t12_owner"
+            local facade = "incremental_driver_t12_facade"
+            local first = "incremental_driver_t12_first"
+            local second = "incremental_driver_t12_second"
+            local app = "incremental_driver_t12_app"
+            local shared_header = source .. "/t12_shared.h"
+            write_file(shared_header, "#define T12_SHARED_VALUE 21\n")
+            local first_file = source .. "/" .. first .. ".titan"
+            local second_file = source .. "/" .. second .. ".titan"
+            local app_file = source .. "/" .. app .. ".titan"
+            write_file(first_file, [[
+                foreign import "t12_shared.h"
+                function value(): integer return ffi.T12_SHARED_VALUE end
+            ]])
+            write_file(second_file, [[
+                foreign import "t12_shared.h"
+                function value(): integer return ffi.T12_SHARED_VALUE end
+            ]])
+            write_file(app_file,
+                "local first = import '" .. first .. ".titan'\n"
+                .. "local second = import '" .. second .. ".titan'\n"
+                .. "local facade = import '" .. facade .. "'\n"
+                .. "function answer(): integer\n"
+                .. "    local _item = facade.make()\n"
+                .. "    return first.value() + second.value()\n"
+                .. "end\n")
+
+            local item_record = types.Record(owner .. ".Item", {}, {}, {}, 1)
+            local owner_type = types.Module(owner, {
+                types.ModuleMember(owner, "Item", item_record, nil),
+            })
+            assert.is_true(driver.validate_module_interface(owner_type, owner))
+            owner_type.file = owner .. ".so"
+            local facade_type = types.Module(facade, {
+                types.ModuleMember(facade, "make",
+                    types.Function({}, { types.Nominal(owner .. ".Item") },
+                        false, nil, nil), {}),
+            })
+            assert.is_true(driver.validate_module_interface(facade_type, facade))
+            facade_type.file = facade .. ".so"
+            local archive_path = binary .. "/" .. facade .. ".a"
+            local roots = { [first] = true, [second] = true, [app] = true }
+
+            local fresh_ctx = driver.new_resolver_context({ prefer_static = true })
+            cache_static_provider(fresh_ctx, archive_path, {
+                [facade] = facade_type,
+                [owner] = owner_type,
+            })
+            local fresh_load, fresh_deps = fresh_loader({
+                context = fresh_ctx,
+                prefer_static = true,
+                source_first = false,
+                source_roots = roots,
+            })
+            load_ok(fresh_load, app)
+            local finalized, finalize_errors =
+                driver.finalize_resolver_context(fresh_ctx)
+            assert.truthy(finalized,
+                finalize_errors and table.concat(finalize_errors, "\n"))
+            assert.is_table(fresh_ctx.native_constraints[owner])
+            for _, modname in ipairs({ first, second, app }) do
+                write_source_object(driver.imported[modname], nil, nil, {
+                    context = fresh_ctx,
+                    static_deps = fresh_deps,
+                })
+            end
+            local expected_constraints = fresh_ctx.native_constraints
+            local expected_bindings = fresh_ctx.native_bindings
+            assert.is_true(driver.close_resolver_context(fresh_ctx))
+
+            local hit_ctx = driver.new_resolver_context({ prefer_static = true })
+            cache_static_provider(hit_ctx, archive_path, {
+                [facade] = facade_type,
+                [owner] = owner_type,
+            })
+            local hit_load = fresh_loader({
+                context = hit_ctx,
+                incremental = true,
+                prefer_static = true,
+                source_first = false,
+                source_roots = roots,
+            })
+            load_ok(hit_load, app)
+            for _, modname in ipairs({ first, second, app }) do
+                assert.is_nil(driver.imported[modname].ast, modname)
+                assert.is_string(driver.imported[modname].compiled, modname)
+            end
+            finalized, finalize_errors =
+                driver.finalize_resolver_context(hit_ctx)
+            assert.truthy(finalized,
+                finalize_errors and table.concat(finalize_errors, "\n"))
+            assert.same(expected_constraints, hit_ctx.native_constraints)
+            assert.same(expected_bindings, hit_ctx.native_bindings)
+
+            local counters = incremental.counters(hit_ctx)
+            assert.is_nil(counters.revalidation)
+            for path_key, counts in pairs(counters.files) do
+                assert.equal(1, counts.hashes, path_key)
+                assert.is_true(counts.reads <= 1, path_key)
+            end
+            local shared_real = assert(hit_ctx.io:realpath(shared_header))
+            local header_stats = require("c-parser.cpp").header_input_stats(hit_ctx.io)
+            assert.is_true((counters.files[shared_real] and counters.files[shared_real].hashes or 0) <= 1)
+            assert.equal(1, header_stats.metadata_reuses + header_stats.file_hashes)
+            assert.is_true(header_stats.memo_reuses >= 1)
+            assert.is_true(header_stats.file_reads <= 1)
+            for _, source_path in ipairs({ first_file, second_file, app_file }) do
+                local real = assert(hit_ctx.io:realpath(source_path))
+                assert.equal(1, counters.files[real].hashes, source_path)
+                assert.equal(1, counters.files[real].reads, source_path)
+            end
+
+            local first_real = assert(hit_ctx.io:realpath(first_file))
+            local warm_hashes = counters.file_hashes
+            local warm_reads = counters.file_reads
+            local revalidated = incremental.revalidate_record(
+                hit_ctx, first, {
+                    kind = "flat",
+                    main = first_file,
+                    files = { first_file },
+                }, driver.imported[first])
+            assert.equal("hit", revalidated.status)
+            assert.equal(warm_hashes, counters.file_hashes)
+            assert.equal(warm_reads, counters.file_reads)
+            assert.equal(1, counters.files[first_real].hashes)
+            assert.is_table(counters.revalidation)
+            assert.equal(1, counters.revalidation.passes)
+            -- Revalidation re-observes the unchanged source instead of rereading it.
+            assert.equal(0, counters.revalidation.files[first_real].hashes)
+            assert.equal(0, counters.revalidation.files[first_real].reads)
+            assert.equal(1, counters.revalidation.files[first_real].observation_reuses)
+            local worker_cfg = assert(driver.worker_configuration(hit_ctx))
+            local worker_ctx = assert(driver.new_worker_context(
+                worker_cfg, compiler_io.new_sync()))
+            assert.equal(warm_hashes, counters.file_hashes)
+            assert.is_true(incremental.counters(worker_ctx).file_hashes > 0)
+            assert.is_true(driver.close_resolver_context(worker_ctx))
+            assert.is_true(driver.close_resolver_context(hit_ctx))
         end)
     end)
 
@@ -5253,7 +7925,7 @@ describe("compiler module loader", function()
                     path = valid.path,
                     identity = valid.identity,
                 }},
-                expected = "kind must be 'file' or 'search'",
+                expected = "kind must be 'file', 'search', or 'origin'",
             },
             {
                 headers = {{
@@ -5274,6 +7946,21 @@ describe("compiler module loader", function()
             {
                 headers = { valid, valid },
                 expected = "repeats search input '" .. fixture_path("/virtual/source-interface.h") .. "'",
+            },
+            {
+                headers = {
+                    {
+                        kind = "origin",
+                        path = valid.path,
+                        identity = version.C_HEADER_ORIGIN_PROTOCOL .. ";real=" .. valid.path,
+                    },
+                    {
+                        kind = "origin",
+                        path = valid.path,
+                        identity = version.C_HEADER_ORIGIN_PROTOCOL .. ";real=" .. valid.path,
+                    },
+                },
+                expected = "repeats origin input '" .. fixture_path("/virtual/source-interface.h") .. "'",
             },
             {
                 headers = { valid, extra = true },
@@ -5547,7 +8234,12 @@ end
             path = fixture_path("/virtual/second.h"),
             identity = "bytes:one",
         }
-        local baseline = manifest({ first, second })
+        local third = {
+            kind = "origin",
+            path = second.path,
+            identity = version.C_HEADER_ORIGIN_PROTOCOL .. ";real=" .. second.path,
+        }
+        local baseline = manifest({ first, second, third })
         assert.equal(baseline, manifest({
             {
                 kind = first.kind,
@@ -5559,29 +8251,41 @@ end
                 path = second.path,
                 identity = second.identity,
             },
+            {
+                kind = third.kind,
+                path = third.path,
+                identity = third.identity,
+            },
         }))
         assert.not_equal(baseline, manifest({
             {
                 kind = "file",
                 path = first.path,
                 identity = first.identity,
-            }, second,
+            }, second, third,
         }))
         assert.not_equal(baseline, manifest({
             {
                 kind = first.kind,
                 path = fixture_path("/virtual/renamed.h"),
                 identity = first.identity,
-            }, second,
+            }, second, third,
         }))
         assert.not_equal(baseline, manifest({
             {
                 kind = first.kind,
                 path = first.path,
                 identity = "now-present",
-            }, second,
+            }, second, third,
         }))
-        assert.not_equal(baseline, manifest({ second, first }))
+        assert.not_equal(baseline, manifest({
+            first, second, {
+                kind = "origin",
+                path = third.path,
+                identity = version.C_HEADER_ORIGIN_PROTOCOL .. ";real=" .. fixture_path("/virtual/other.h"),
+            },
+        }))
+        assert.not_equal(baseline, manifest({ second, first, third }))
     end)
 
     it("ignores benign descriptor sharing topology", function()
@@ -6061,7 +8765,7 @@ end
                     path = valid.path,
                     identity = valid.identity,
                 }},
-                expected = "kind must be 'file' or 'search'",
+                expected = "kind must be 'file', 'search', or 'origin'",
             },
             {
                 value = {{
@@ -6082,6 +8786,21 @@ end
             {
                 value = { valid, valid },
                 expected = "repeats search input '" .. fixture_path("/virtual/header.h") .. "'",
+            },
+            {
+                value = {
+                    {
+                        kind = "origin",
+                        path = valid.path,
+                        identity = version.C_HEADER_ORIGIN_PROTOCOL .. ";real=" .. valid.path,
+                    },
+                    {
+                        kind = "origin",
+                        path = valid.path,
+                        identity = version.C_HEADER_ORIGIN_PROTOCOL .. ";real=" .. valid.path,
+                    },
+                },
+                expected = "repeats origin input '" .. fixture_path("/virtual/header.h") .. "'",
             },
             {
                 value = { valid, extra = true },
@@ -6599,6 +9318,165 @@ end
         assert.equal("source", driver.imported.provider.kind)
     end)
 
+    it("retains immutable snapshots of every consumed compiled view across source replacement and mutable tableloader descriptors",
+    function()
+        local first_dir = root .. "/first-bin"
+        local second_dir = root .. "/second-bin"
+        assert(lfs.mkdir(first_dir))
+        assert(lfs.mkdir(second_dir))
+        local first_so = first_dir .. provider_path("/provider.so")
+        local second_so = second_dir .. provider_path("/provider.so")
+        local integer_provider = types.Module("provider", {
+            types.ModuleMember("provider", "answer",
+                types.Function({}, { types.Integer() }, false, nil, nil), {}),
+        })
+        local string_provider = types.Module("provider", {
+            types.ModuleMember("provider", "answer",
+                types.Function({}, { types.String() }, false, nil, nil), {}),
+        })
+        write_file(first_so, "first dynamic provider\n")
+        write_file(second_so, "second dynamic provider\n")
+        mock_native_abi(first_so, { provider = driver.TITAN_ABI_VERSION })
+        mock_native_abi(second_so, { provider = driver.TITAN_ABI_VERSION })
+        titan._loadlib = function(filename, symbol)
+            local selected = filename == first_so and integer_provider
+                or filename == second_so and string_provider
+                or error("unexpected provider " .. tostring(filename))
+            if symbol == "provider_abi" then
+                return function() return driver.TITAN_ABI_VERSION end
+            elseif symbol == "provider_types" then
+                local serialized = types.serialize(selected)
+                return function() return serialized end
+            elseif symbol == "provider_layouts" then
+                return function() return empty_layouts("provider") end
+            end
+            error("unexpected symbol " .. symbol)
+        end
+
+        write_file(source .. "/first_consumer.titan", [[
+            local provider = import "provider"
+            function answer(): integer return provider.answer() end
+        ]])
+        write_file(source .. "/second_consumer.titan", [[
+            local provider = import "provider"
+            function answer(): integer return provider.answer() end
+        ]])
+        write_file(source .. "/provider.titan", [[
+            local function secret(): integer return 40 end
+            function answer(): integer return secret() + 2 end
+        ]])
+        write_file(source .. "/matching_source_root.titan", [[
+            local provider = import "provider.titan"
+            function answer(): integer return provider.secret() + provider.answer() end
+        ]])
+
+        driver.TITAN_BIN_PATH = first_dir
+        local context = driver.new_resolver_context()
+        local loader = driver.defaultloader({}, {
+            context = context,
+            source_roots = {
+                first_consumer = true,
+                second_consumer = true,
+                matching_source_root = true,
+            },
+        })
+        local loaded, result, errors = loader("first_consumer")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        loaded, result, errors = loader("second_consumer")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.equal("dynamic", driver.imported.provider.kind)
+        assert.equal(first_so, driver.imported.provider.filename)
+
+        loaded, result, errors = loader("matching_source_root")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.equal("source", driver.imported.provider.kind)
+        assert.is_table(driver.imported.provider.type.source_members.secret)
+        assert.is_true(driver.close_loader(loader))
+        assert.is_true(driver.close_resolver_context(context))
+
+        -- Consuming two distinct compiled views of `provider` in one resolver
+        -- context and then replacing `provider` with source matching only the
+        -- second view must still reject against the first recorded view.
+        write_file(source .. "/string_consumer.titan", [[
+            local provider = import "provider"
+            function answer(): string return provider.answer() end
+        ]])
+        write_file(source .. "/provider.titan", [[
+            function answer(): string return "matches second only" end
+        ]])
+        write_file(source .. "/mismatch_source_root.titan", [[
+            local provider = import "provider.titan"
+            function answer(): string return provider.answer() end
+        ]])
+        driver.imported, types.registry = {}, {}
+        local multi_ctx = driver.new_resolver_context()
+        local multi_loader = driver.defaultloader({}, {
+            context = multi_ctx,
+            source_roots = {
+                first_consumer = true,
+                string_consumer = true,
+                mismatch_source_root = true,
+            },
+        })
+        driver.TITAN_BIN_PATH = first_dir
+        loaded, result, errors = multi_loader("first_consumer")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+
+        driver.imported.provider = nil
+        driver.TITAN_BIN_PATH = second_dir
+        loaded, result, errors = multi_loader("string_consumer")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+
+        loaded, result, errors = multi_loader("mismatch_source_root")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(1, #errors)
+        assert.equal("source module 'provider' does not match a compiled " ..
+            "interface already used in this compilation", errors[1])
+        assert.is_true(driver.close_loader(multi_loader))
+        assert.is_true(driver.close_resolver_context(multi_ctx))
+
+        -- Mutating a caller-held tableloader Type.Module descriptor in-place
+        -- across A -> B -> A returns must snapshot each returned projection
+        -- so a later source replacement matching A still rejects B.
+        local mutable_fn = types.Function({}, { types.Integer() }, false, nil, nil)
+        local mutable_compiled = types.Module("cached", {
+            types.ModuleMember("cached", "answer", mutable_fn, {}),
+        })
+        local imported = {
+            cached = { kind = "dynamic", type = mutable_compiled },
+        }
+        local table_loader = driver.tableloader({
+            cached = [[
+                function answer(): integer return 7 end
+            ]],
+        }, imported)
+        loaded, result, errors = table_loader("cached")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors)
+
+        mutable_fn.rettypes[1] = types.String()
+        loaded, result, errors = table_loader("cached")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors)
+
+        mutable_fn.rettypes[1] = types.Integer()
+        loaded, result, errors = table_loader("cached")
+        assert.truthy(loaded, tostring(result))
+        assert.equal(0, #errors)
+
+        loaded, result, errors = table_loader("cached", { kind = "source-import" })
+        assert.truthy(loaded, tostring(result))
+        assert.equal(1, #errors)
+        assert.equal("source module 'cached' does not match a compiled " ..
+            "interface already used in this compilation", errors[1])
+        assert.is_true(driver.close_tableloader(table_loader))
+    end)
+
     it("does not fall back to a cached compiled provider for an " ..
        "explicit-source import", function()
         local compiled = types.Module("compiled_only", {}, {})
@@ -6896,7 +9774,8 @@ end
                     c_header_dependencies = {{
                         kind = "search",
                         path = root .. "/provider.h",
-                        identity = "c-header-search-v1;lstat=missing;stat=missing",
+                        identity = version.C_HEADER_SEARCH_PROTOCOL ..
+                            ";exists=no;kind=missing;open=unreadable",
                     }},
                 },
             },
@@ -6919,7 +9798,8 @@ end
         assert.same({{
             kind = "search",
             path = root .. "/provider.h",
-            identity = "c-header-search-v1;lstat=missing;stat=missing",
+            identity = version.C_HEADER_SEARCH_PROTOCOL ..
+                ";exists=no;kind=missing;open=unreadable",
         }}, driver.imported.provider.c_header_dependencies)
         assert.same({
             dirty = true,
@@ -7671,11 +10551,13 @@ end
         assert.is_string(header_input_identity(observed, "file", outer))
         assert.is_string(
             header_input_identity(observed, "file", late_selected))
+        assert.is_string(
+            header_input_identity(observed, "origin", late_selected))
         assert.is_string(header_input_identity(observed, "search", outer))
-        assert.matches("stat=missing",
+        assert.matches("kind=missing",
             header_input_identity(observed, "search", early_selected),
             1, true)
-        assert.matches("stat=file",
+        assert.matches("kind=file",
             header_input_identity(observed, "search", late_selected),
             1, true)
         local restat_io = compiler_io.new_sync()
@@ -7685,22 +10567,25 @@ end
             read_paths[path] = (read_paths[path] or 0) + 1
             return original_read(self, path)
         end
-        assert.same(observed,
-            assert(driver.restat_c_header_dependencies(
-                observed, { io = restat_io })))
-        -- Windows LuaFileSystem has no physical identity to certify an
-        -- unchanged file, so restatting must read and hash its contents.
-        local expected_reads = platform.windows and 1 or 0
-        assert.equal(expected_reads, read_paths[outer] or 0)
-        assert.equal(expected_reads, read_paths[late_selected] or 0)
+        local refreshed, restat_error, changed, classified =
+            driver.restat_c_header_dependencies(observed, { io = restat_io })
+        assert.is_nil(restat_error)
+        assert.is_false(changed)
+        assert.is_nil(classified)
+        assert.same(observed, refreshed)
+        -- Precise native Sync observations reuse unchanged headers without reading.
+        assert.equal(0, read_paths[outer] or 0)
+        assert.equal(0, read_paths[late_selected] or 0)
 
         write_file(late_selected,
             "typedef long titan_driver_selected_header;\n")
         local restat_context =
             driver.new_resolver_context({ io = restat_io })
-        local nested_changed =
-            assert(driver.restat_c_header_dependencies(
-                observed, restat_context))
+        local nested_changed, nested_error, nested_dirty, nested_reason =
+            driver.restat_c_header_dependencies(observed, restat_context)
+        assert.is_nil(nested_error)
+        assert.is_true(nested_dirty)
+        assert.equal("c-input " .. late_selected .. ": content", nested_reason)
         assert.not_equal(
             header_input_identity(observed, "file", late_selected),
             header_input_identity(nested_changed, "file", late_selected))
@@ -7708,9 +10593,13 @@ end
         write_file(late_selected, late_contents)
         write_file(early_selected,
             "typedef short titan_driver_selected_header;\n")
-        local shadowed = assert(
-            driver.restat_c_header_dependencies(
-                observed, { context = restat_context }))
+        assert.is_true(driver.close_resolver_context(restat_context))
+        restat_context = driver.new_resolver_context({ io = restat_io })
+        local shadowed, shadow_error, shadow_dirty, shadow_reason =
+            driver.restat_c_header_dependencies(observed, { context = restat_context })
+        assert.is_nil(shadow_error)
+        assert.is_true(shadow_dirty)
+        assert.equal("c-input " .. early_selected .. ": candidate", shadow_reason)
         assert.not_equal(
             header_input_identity(observed, "search", early_selected),
             header_input_identity(shadowed, "search", early_selected))
@@ -7726,7 +10615,10 @@ end
         local lexical = root .. "/include"
         local link = root .. "/ffi-sdk-link"
         local outer = root .. "/ffi-link-outer.h"
-        local selected_lookup = link .. "/../include/ffi-selected.h"
+        -- Win32 normalizes dots lexically; POSIX traverses the link before '..'.
+        local selected_lookup = platform.windows
+            and lexical .. "/ffi-selected.h"
+            or link .. "/../include/ffi-selected.h"
         local selected_contents = [[
 #define TITAN_LINK_VALUE 42
 typedef int titan_driver_symlink_value;
@@ -7740,7 +10632,8 @@ typedef int titan_driver_symlink_value;
             assert(lfs.mkdir(second .. "/nested"))
             assert(lfs.mkdir(second .. "/include"))
             assert(lfs.mkdir(lexical))
-            assert(lfs.link("ffi-link-first/nested", link, true))
+            assert(lfs.link(platform.windows and first .. "/nested"
+                or "ffi-link-first/nested", link, true))
             write_file(outer, "#include <ffi-selected.h>\n")
             write_file(first .. "/include/ffi-selected.h", selected_contents)
             write_file(second .. "/include/ffi-selected.h", selected_contents)
@@ -7758,21 +10651,56 @@ typedef double titan_driver_symlink_value;
                 header_input_identity(observed, "file", selected_lookup)
             local first_search =
                 header_input_identity(observed, "search", selected_lookup)
+            local first_origin =
+                header_input_identity(observed, "origin", selected_lookup)
             assert.is_string(first_file)
             assert.is_string(first_search)
+            assert.is_string(first_origin)
 
-            assert(os.remove(link))
-            assert(lfs.link("ffi-link-second/nested", link, true))
-            local restatted = assert(
-                driver.restat_c_header_dependencies(observed))
-            assert.not_equal(first_file,
+            if platform.windows then
+                assert(lfs.rmdir(link))
+            else
+                assert(os.remove(link))
+            end
+            assert(lfs.link(platform.windows and second .. "/nested"
+                or "ffi-link-second/nested", link, true))
+            local restatted, restat_error, changed, reason =
+                driver.restat_c_header_dependencies(observed)
+            assert.is_nil(restat_error)
+            assert.equal(first_file,
                 header_input_identity(restatted, "file", selected_lookup))
-            assert.not_equal(first_search,
+            assert.equal(first_search,
                 header_input_identity(restatted, "search", selected_lookup))
+            if platform.windows then
+                assert.is_false(changed)
+                assert.is_nil(reason)
+                assert.equal(first_origin,
+                    header_input_identity(restatted, "origin", selected_lookup))
+            else
+                assert.is_true(changed)
+                assert.equal("c-input " .. selected_lookup .. ": provenance", reason)
+                assert.not_equal(first_origin,
+                    header_input_identity(restatted, "origin", selected_lookup))
+            end
+
+            write_file(platform.windows and selected_lookup
+                or second .. "/include/ffi-selected.h",
+                "typedef long titan_driver_symlink_value;\n")
+            local content_restatted, content_error, content_changed, content_reason =
+                driver.restat_c_header_dependencies(restatted)
+            assert.is_nil(content_error)
+            assert.is_true(content_changed)
+            assert.equal("c-input " .. selected_lookup .. ": content", content_reason)
+            assert.not_equal(first_file,
+                header_input_identity(content_restatted, "file", selected_lookup))
         end)
         local removed, remove_error = true
         if lfs.symlinkattributes(link, "mode") then
-            removed, remove_error = os.remove(link)
+            if platform.windows then
+                removed, remove_error = lfs.rmdir(link)
+            else
+                removed, remove_error = os.remove(link)
+            end
         end
         assert.truthy(completed, failure)
         assert.truthy(removed, remove_error)
@@ -7860,7 +10788,7 @@ typedef double titan_driver_symlink_value;
         assert.truthy(ok)
         assert.equal(0, #errors)
         assert.equal("static", driver.imported.choice.kind)
-        assert.equal(provider_path("choice.so"), modtype.file)
+        assert.equal("choice.so", modtype.file)
         assert.equal(archive, driver.imported.choice.static_archive)
     end)
 
@@ -7890,7 +10818,7 @@ typedef double titan_driver_symlink_value;
         })("a.b.c")
         assert.truthy(ok)
         assert.equal(0, #errors)
-        assert.equal(provider_path("a/b/c.so"), modtype.file)
+        assert.equal("a/b/c.so", modtype.file)
         assert.equal(earlier_exact,
             driver.imported["a.b.c"].static_archive)
         assert.equal("a/b/c.a", driver.imported["a.b.c"].relative)
@@ -7923,7 +10851,7 @@ typedef double titan_driver_symlink_value;
         })("a.b")
         assert.truthy(ok)
         assert.equal(0, #errors)
-        assert.equal(provider_path("a/b.so"), modtype.file)
+        assert.equal("a/b.so", modtype.file)
         assert.equal(unshadowed_claim,
             driver.imported["a.b"].static_archive)
         assert.equal("a/b.a", driver.imported["a.b"].relative)
@@ -7958,7 +10886,7 @@ typedef double titan_driver_symlink_value;
         assert.equal("static", driver.imported["mixed.child"].kind)
         assert.equal(archive,
             driver.imported["mixed.child"].static_archive)
-        assert.equal(provider_path("mixed/child.so"), modtype.file)
+        assert.equal("mixed/child.so", modtype.file)
     end)
 
     it("treats an exact archive nonclaim as terminal", function()
@@ -8129,7 +11057,7 @@ typedef double titan_driver_symlink_value;
         assert.equal(0, #errors)
         assert.equal("static", driver.imported["bundle.left"].kind)
         assert.is_nil(driver.imported["bundle.right"])
-        assert.equal(provider_path("bundle/left.so"), modtype.file)
+        assert.equal("bundle/left.so", modtype.file)
         assert.is_nil(types.serialize(modtype):find(archive, 1, true))
 
         local finalized, final_errors =
@@ -9216,7 +12144,228 @@ end
     end)
 end)
 
+describe("Darwin dSYM execution selection", function()
+    local subject, context, root, previous, commands, selections, dsym_result
+    local cpp = require "c-parser.cpp"
+
+    before_each(function()
+        previous = nil
+        if platform.windows then return end
+        previous = {
+            execute = os.execute, getenv = platform.getenv,
+            physical = incremental.physical_executable,
+            toolchain = incremental.toolchain_identity,
+            cwd = assert(lfs.currentdir()),
+        }
+        root = temporary.name("-darwin-selection")
+        assert(lfs.mkdir(root))
+        root = assert(compiler_io.new_sync():realpath(root))
+        local loaded_driver = package.loaded["titan-compiler.driver"]
+        package.loaded["titan-compiler.driver"] = nil
+        local loaded, value = pcall(require, "titan-compiler.driver")
+        package.loaded["titan-compiler.driver"] = loaded_driver
+        assert.is_true(loaded, value)
+        subject = value
+        context = subject.new_resolver_context()
+        context._platform_initialized, context.uname, context.is_darwin =
+            true, "Darwin", true
+        subject.UNAME, subject.IS_DARWIN = "Darwin", true
+        subject.CC, subject.CFLAGS = "native-compiler", ""
+        -- This isolated driver models commands, not runtime preparation.
+        subject.INSTALLED, subject.OUTPUT_LOCKS = true, nil
+        commands, selections, dsym_result = {}, {}, nil
+        incremental.toolchain_identity = function()
+            return "independent-compiler-proof", { stage_policy = "llvm" }
+        end
+        incremental.physical_executable = function(_, command)
+            assert.equal("dsymutil", command)
+            selections[#selections + 1] = assert(lfs.currentdir())
+            return nil, "Darwin executable search policy is unknown", "uncertified"
+        end
+        os.execute = function(command)
+            local argv = assert(cpp.split_shell_words(command))
+            local invocation = { argv = argv, cwd = assert(lfs.currentdir()) }
+            commands[#commands + 1] = invocation
+            if argv[1] == "native-compiler" then
+                for index, argument in ipairs(argv) do
+                    if argument == "-o" then
+                        invocation.output = argv[index + 1]
+                        write_file(invocation.output, "native image fixture\n")
+                        return true, "exit", 0
+                    end
+                end
+                error("native command has no output")
+            end
+            assert.is_true(argv[1] == "dsymutil" or
+                argv[1] == root .. "/tools with spaces/dsymutil")
+            if dsym_result then return table.unpack(dsym_result, 1, 3) end
+            local output = argv[2]
+            if not platform.is_absolute(output) then
+                output = paths.join(invocation.cwd, output)
+            end
+            local bundle = output .. ".dSYM"
+            assert(lfs.mkdir(bundle))
+            assert(lfs.mkdir(bundle .. "/Contents"))
+            assert(lfs.mkdir(bundle .. "/Contents/Resources"))
+            assert(lfs.mkdir(bundle .. "/Contents/Resources/DWARF"))
+            write_file(bundle .. "/Contents/Resources/DWARF/" ..
+                paths.basename(output), "debug fixture\n")
+            return true, "exit", 0
+        end
+    end)
+
+    after_each(function()
+        if not previous then return end
+        if subject and context then subject.close_resolver_context(context) end
+        os.execute, platform.getenv = previous.execute, previous.getenv
+        incremental.physical_executable = previous.physical
+        incremental.toolchain_identity = previous.toolchain
+        assert(lfs.chdir(previous.cwd))
+        remove_tree(root)
+        subject, context = nil, nil
+    end)
+
+    local function compile_program(executable)
+        return subject.compile_program("darwin_selection", {}, nil, false, {},
+            root .. "/program", {}, root .. "/entry.c", nil, {
+                no_uv_bootstrap = true, dsymutil = executable,
+            })
+    end
+
+    local function assert_raw_execution()
+        local invocation = commands[#commands]
+        assert.equal("dsymutil", invocation.argv[1])
+        assert.equal(previous.cwd, invocation.cwd)
+        assert.is_true(platform.is_absolute(invocation.argv[2]))
+        assert.equal(previous.cwd, lfs.currentdir())
+    end
+
+    it("keeps an unset PATH uncertified through output planning and standalone publication", function()
+        if platform.windows then pending("Darwin POSIX launch behavior"); return end
+        incremental.physical_executable = previous.physical
+        platform.getenv = function(name)
+            if name == "PATH" then return nil end
+            return previous.getenv(name)
+        end
+        local request = assert(subject.output_tool_descriptors(context, "program"))
+        assert.same({ "dsymutil" }, request.tools.dsymutil)
+        assert.is_string(request.uncacheable)
+        assert.equal("independent-compiler-proof", request.toolchain)
+        assert.is_nil(context.incremental_uncertified)
+        local tools = assert(require("titan-compiler.linkcertificate").output_tools(
+            context, request))
+        assert.equal(request.uncacheable, tools.uncertified)
+        local ok, term, code = compile_program(request.tools.dsymutil[1])
+        assert.is_true(ok, tostring(term) .. ": " .. tostring(code))
+        assert_raw_execution()
+        assert.equal("file", lfs.attributes(root .. "/program", "mode"))
+        assert.equal("file", lfs.attributes(root ..
+            "/program.dSYM/Contents/Resources/DWARF/program", "mode"))
+    end)
+
+    it("runs a directly requested uncertified standalone dSYM without changing lookup cwd", function()
+        if platform.windows then pending("Darwin POSIX launch behavior"); return end
+        local ok, term, code = compile_program()
+        assert.is_true(ok, tostring(term) .. ": " .. tostring(code))
+        assert.same({ previous.cwd }, selections)
+        assert_raw_execution()
+    end)
+
+    for _, case in ipairs({
+        { name = "ordinary library", stable = false },
+        { name = "staged provider", stable = true },
+    }) do
+        it("keeps raw " .. case.name .. " dSYM lookup in the original cwd", function()
+            if platform.windows then pending("Darwin POSIX launch behavior"); return end
+            local output = root .. "/private/provider.so"
+            local ok, term, code = subject.compile_library_output(
+                output, {}, nil, false, {}, {}, nil,
+                case.stable and root .. "/public.so" or nil, { "provider" })
+            assert.is_true(ok, tostring(term) .. ": " .. tostring(code))
+            assert.same({ previous.cwd }, selections)
+            assert_raw_execution()
+            assert.equal(output, commands[#commands].argv[2])
+        end)
+    end
+
+    it("retains the admitted absolute spelling and stable leaf for certified execution", function()
+        if platform.windows then pending("Darwin POSIX launch behavior"); return end
+        local admitted = root .. "/tools with spaces/dsymutil"
+        incremental.physical_executable = function(_, command)
+            assert.equal("dsymutil", command)
+            selections[#selections + 1] = assert(lfs.currentdir())
+            return "canonical-physical-tool-identity", admitted
+        end
+        local request = assert(subject.output_tool_descriptors(context, "program"))
+        assert.same({ admitted }, request.tools.dsymutil)
+        assert.is_nil(request.uncacheable)
+        local ok, term, code = compile_program(request.tools.dsymutil[1])
+        assert.is_true(ok, tostring(term) .. ": " .. tostring(code))
+        assert.same({ previous.cwd }, selections)
+        local invocation = commands[#commands]
+        local linked = commands[#commands - 1]
+        assert.equal(admitted, invocation.argv[1])
+        assert.equal(paths.dirname(linked.output), invocation.cwd)
+        assert.equal(paths.basename(linked.output), invocation.argv[2])
+        assert.equal(previous.cwd, lfs.currentdir())
+    end)
+
+    for _, case in ipairs({
+        { name = "ordinary returned failure", select = function()
+            return nil, "cannot read the dSYM executable"
+        end },
+        { name = "raised I/O failure", select = function()
+            error("cannot read the dSYM executable", 0)
+        end },
+    }) do
+        it("does not turn a dSYM " .. case.name .. " into raw execution", function()
+            if platform.windows then pending("Darwin POSIX launch behavior"); return end
+            incremental.physical_executable = case.select
+            local request, descriptor_error =
+                subject.output_tool_descriptors(context, "program")
+            assert.is_nil(request)
+            assert.equal("cannot read the dSYM executable", descriptor_error)
+            local ok, execution_error = compile_program()
+            assert.is_nil(ok)
+            assert.equal("cannot read the dSYM executable", execution_error)
+            for _, invocation in ipairs(commands) do
+                assert.equal("native-compiler", invocation.argv[1])
+            end
+            assert.equal(previous.cwd, lfs.currentdir())
+            assert.is_nil(lfs.attributes(root .. "/program"))
+        end)
+    end
+
+    it("preserves selector cancellation identity at descriptor and standalone boundaries", function()
+        if platform.windows then pending("Darwin POSIX launch behavior"); return end
+        local cancellation = {}
+        incremental.physical_executable = function() error(cancellation, 0) end
+        local completed, raised = pcall(subject.output_tool_descriptors,
+            context, "program")
+        assert.is_false(completed)
+        assert.equal(cancellation, raised)
+        completed, raised = pcall(compile_program)
+        assert.is_false(completed)
+        assert.equal(cancellation, raised)
+        assert.equal(previous.cwd, lfs.currentdir())
+        assert.is_nil(lfs.attributes(root .. "/program"))
+    end)
+
+    it("preserves operational failure of a legitimately raw dSYM command", function()
+        if platform.windows then pending("Darwin POSIX launch behavior"); return end
+        dsym_result = { false, "exit", 23 }
+        local ok, term, code = compile_program()
+        assert.is_nil(ok)
+        assert.equal("exit", term)
+        assert.equal(23, code)
+        assert_raw_execution()
+        assert.is_nil(lfs.attributes(root .. "/program"))
+        assert.is_nil(lfs.attributes(root .. "/program.dSYM"))
+    end)
+end)
+
 describe("Windows link response files", function()
+    local process = require "titan-compiler.process"
     local previous, response
 
     before_each(function()
@@ -9225,7 +12374,9 @@ describe("Windows link response files", function()
         previous = {
             windows = platform.windows, cc = driver.CC, getenv = platform.getenv,
             reserve = driver.sibling_temporary_path,
-            execute = os.execute, print = _G.print, remove = os.remove,
+            execute = os.execute, process_run = process.run,
+            print = _G.print, stderr = io.stderr,
+            remove = os.remove,
         }
         platform.windows = true
         driver.CC = 'ccache "C:/compiler tools/clang.exe"'
@@ -9237,7 +12388,9 @@ describe("Windows link response files", function()
         driver.CC = previous.cc
         driver.sibling_temporary_path = previous.reserve
         os.execute = previous.execute
+        process.run = previous.process_run
         _G.print = previous.print
+        io.stderr = previous.stderr
         os.remove = previous.remove
         platform.getenv = previous.getenv
         os.remove(response)
@@ -9276,6 +12429,7 @@ describe("Windows link response files", function()
     it("rejects invalid argv and a different CC prefix before publication", function()
         driver.sibling_temporary_path = function() error("response must not be reserved") end
         os.execute = function() error("link must not launch") end
+        process.run = function() error("link must not launch") end
         for _, case in ipairs({
             { "nonempty argument array", nil },
             { "nonempty argument array", false },
@@ -9309,8 +12463,15 @@ describe("Windows link response files", function()
             local contents = assert(platform.windows_response_contents({ table.unpack(argv, 3) }))
             assert.is_true(#contents > 8191)
             local printed = {}
-            _G.print = function(line) printed[#printed + 1] = line end
-            os.execute = function(command)
+            io.stderr = {
+                write = function(_, line)
+                    printed[#printed + 1] = tostring(line)
+                    return true
+                end,
+            }
+            os.execute = function() error("Windows link must use process.run") end
+            process.run = function(launched_argv)
+                local command = assert(platform.windows_command(launched_argv, false))
                 assert.is_true(#command < 1024)
                 assert.truthy(command:find("@", 1, true))
                 assert.truthy(command:find("compiler", 1, true))
@@ -9334,7 +12495,8 @@ describe("Windows link response files", function()
 
     for _, case in ipairs({ { "successful", true, 0 }, { "failed", false, 23 } }) do
         it("reports response removal failure after a " .. case[1] .. " link", function()
-            os.execute = function() return case[2] or nil, "exit", case[3] end
+            os.execute = function() error("Windows link must use process.run") end
+            process.run = function() return case[2] or nil, "exit", case[3] end
             os.remove = function(filename)
                 if filename == response then return nil, "injected removal failure" end
                 return previous.remove(filename)
@@ -9356,7 +12518,8 @@ describe("Windows link response files", function()
         if not previous.windows then platform.getenv = os.getenv end
         local output = paths.basename(response) .. ".dll"
         local prefix = output .. ".link.rsp.tmp."
-        os.execute = function(command)
+        os.execute = function() error("Windows link must use process.run") end
+        process.run = function(launched_argv)
             local found
             for filename in lfs.dir(".") do
                 if filename:sub(1, #prefix) == prefix then
@@ -9367,9 +12530,9 @@ describe("Windows link response files", function()
             assert.is_string(found)
             response = found
             assert.equal("file", lfs.attributes(response, "mode"))
-            assert.equal(assert(platform.windows_command({
+            assert.same({
                 "ccache", "C:/compiler tools/clang.exe", "@" .. response,
-            }, false)), command)
+            }, launched_argv)
             return true, "exit", 0
         end
         assert.is_true(driver.run_link_command({
@@ -9379,7 +12542,8 @@ describe("Windows link response files", function()
     end)
 
     it("removes the response file when execution throws", function()
-        os.execute = function() error("injected link launch error") end
+        os.execute = function() error("Windows link must use process.run") end
+        process.run = function() error("injected link launch error") end
         local ok, err = driver.run_link_command({
             "ccache", "C:/compiler tools/clang.exe", "input.o",
         }, false, "result.dll")
@@ -9391,6 +12555,7 @@ describe("Windows link response files", function()
     it("reports response publication failure before launching", function()
         driver.sibling_temporary_path = function() return response .. "/missing.rsp" end
         os.execute = function() error("link must not launch") end
+        process.run = function() error("link must not launch") end
         local ok, err = driver.run_link_command({
             "ccache", "C:/compiler tools/clang.exe", "input.o",
         }, false, "result.dll")
@@ -9461,6 +12626,7 @@ end)
 
 describe("Windows driver dispatch", function()
     local platform = require "titan-compiler.platform"
+    local process = require "titan-compiler.process"
     local previous
 
     before_each(function()
@@ -9473,6 +12639,7 @@ describe("Windows driver dispatch", function()
             compile_module = driver.compile_module,
             new_sync = compiler_io.new_sync,
             execute = os.execute,
+            process_run = process.run,
         }
         platform.windows = true
     end)
@@ -9486,6 +12653,7 @@ describe("Windows driver dispatch", function()
         driver.compile_module = previous.compile_module
         compiler_io.new_sync = previous.new_sync
         os.execute = previous.execute
+        process.run = previous.process_run
     end)
 
     it("initializes without requiring uname or native support", function()
@@ -9523,8 +12691,9 @@ describe("Windows driver dispatch", function()
                 end,
             }
         end
-        os.execute = function(command)
-            local name = assert(command:match("windows_serial%.[a-z]+"))
+        os.execute = function() error("Windows compile must use process.run") end
+        process.run = function(argv)
+            local name = assert(argv[1]:match("windows_serial%.[a-z]+"))
             calls[#calls + 1] = name
             if name == "windows_serial.failed" then return nil, "compile rejected" end
             return true

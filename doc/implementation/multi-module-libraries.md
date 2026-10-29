@@ -285,9 +285,9 @@ belongs to the Lua support API and every shim requires it. A **physical**
 provider named `titan` is valid only when its final image also contains
 `ltitanlib.o`'s genuine `luaopen_titan`. The driver checks that entry in a fresh
 Lua process (`driver.lua` `support_validation_script`) and requires exactly one
-support table exposing `_loadlib`, `_loadlibglobal`, and the compiler digest
-`_sha256_binary`. A stale support object without the digest fails as stale
-before publication. Compiler-side `package.loaded` state cannot satisfy the
+support table exposing `_loadlib`, `_loadlibglobal`, and the compiler digests
+`_sha256_binary` and `_sha256_stream`. A stale support object without either
+digest fails as stale before publication. Compiler-side `package.loaded` state cannot satisfy the
 proof.
 
 The production standard library is the canonical example. One compiler

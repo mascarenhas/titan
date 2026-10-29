@@ -303,6 +303,191 @@ describe("jobserver slots", function()
         local third = assert(jobs.open_slots(2, { makeflags = false }))
         assert(third:close())
     end)
+
+    it("expose the token and wake descriptors to an event loop", function()
+        pool("ab")
+        local slots = assert(jobs.open_slots(3,
+            { makeflags = "-j3 --jobserver-auth=fifo:" .. fifo }))
+        finally(function() slots:close() end)
+        assert.is_nil(slots:token_descriptor())       -- nothing active yet
+        assert.equal("integer", math.type(slots:signal_descriptor()))
+        assert.is_true(slots:acquire_nowait())          -- implicit slot
+        assert.equal("integer", math.type(slots:token_descriptor()))
+        assert.is_true(slots:acquire_nowait())
+        assert.is_true(slots:acquire_nowait())
+        assert.is_nil(slots:token_descriptor())       -- at the local cap
+        for _ = 1, 3 do assert(slots:release()) end
+        assert(slots:close())
+        assert.equal(2, available())
+    end)
+
+    it("keep titanc's own bound for a pipe pool this platform cannot reopen", function()
+        local warnings = {}
+        io.stderr = { write = function(_, ...)
+            for index = 1, select("#", ...) do
+                warnings[#warnings + 1] = select(index, ...)
+            end
+            return true
+        end }
+        package.loaded["titan-compiler.jobs"] = nil
+        local fresh = require "titan-compiler.jobs"
+        package.loaded["titan-compiler.jobs"] = jobs
+        local auth = { kind = "pipe", read = 3, write = 4, text = "3,4" }
+        assert.equal(5, fresh.unshareable_pipe_limit(5, auth, "no private reopen"))
+        assert.equal(2, fresh.unshareable_pipe_limit(2, auth, "no private reopen"))
+        local text = table.concat(warnings)
+        local _, count = text:gsub("cannot be shared on this platform", "")
+        assert.equal(1, count, text)
+        assert.truthy(text:find("(3,4)", 1, true), text)
+        assert.truthy(text:find("job bound of 5", 1, true), text)
+    end)
+end)
+
+describe("build-worker native batches", function()
+    -- A fresh module copy keeps the remote executor out of the shared one.
+    local remote_jobs
+    before_each(function()
+        package.loaded["titan-compiler.jobs"] = nil
+        remote_jobs = require "titan-compiler.jobs"
+        package.loaded["titan-compiler.jobs"] = jobs
+    end)
+
+    it("send the whole batch to the coordinator and keep its start order", function()
+        local requests = {}
+        assert.is_false(remote_jobs.is_remote())
+        remote_jobs.use_remote({ run_batch = function(_, batch)
+            requests[#requests + 1] = batch
+            -- The coordinator started a prefix, then was cancelled.
+            return { { ok = true, term = "exit", code = 0 },
+                     { ok = nil, term = "exit", code = 2 } }, nil, 15
+        end })
+        assert.is_true(remote_jobs.is_remote())
+        -- The coordinator owns the signal guard and re-raises after draining.
+        remote_jobs.propagate(15)
+        local slots = assert(remote_jobs.open_slots(4,
+            { makeflags = "-j4 --jobserver-auth=fifo:/nonexistent" }))
+        assert.equal(4, slots.limit)
+        assert.is_nil(slots.client)
+        local channel = assert(remote_jobs.open_channel(function()
+            error("a worker reserves no completion FIFO")
+        end))
+        local shown, processes = {}, {}
+        local next_position, failure, cancelled, raised = remote_jobs.drive(
+            slots, channel, 3, function(position)
+                local process = assert(remote_jobs.launch(channel,
+                    { "cc", "-c", "part" .. position .. ".c" }, "ignored shell text",
+                    "/logs/out" .. position, "/logs/err" .. position, position,
+                    function() shown[#shown + 1] = position; return true end))
+                processes[position] = process
+                return process
+            end, function() error("no launch fails") end, "parallel C compiler")
+        assert.equal(4, next_position)
+        assert.is_nil(failure)
+        assert.equal(15, cancelled)
+        assert.is_nil(raised)
+        assert.same({ 1, 2, 3 }, shown)
+        assert.same({ {
+            { argv = { "cc", "-c", "part1.c" }, stdout = "/logs/out1", stderr = "/logs/err1" },
+            { argv = { "cc", "-c", "part2.c" }, stdout = "/logs/out2", stderr = "/logs/err2" },
+            { argv = { "cc", "-c", "part3.c" }, stdout = "/logs/out3", stderr = "/logs/err3" },
+        } }, requests)
+        assert.is_true(processes[1].ok)
+        assert.equal(2, processes[2].code)
+        assert.is_nil(processes[3].ok)
+        assert.truthy(processes[3].finish_errors[1]:find("interrupted by signal 15", 1, true))
+        for _, process in ipairs(processes) do
+            remote_jobs.reap(process)
+            assert.is_true(process.reaped)
+        end
+        assert.equal(15, slots:cancelled())
+        assert.is_true(remote_jobs.close_channel(channel))
+        assert.is_true(slots:close())
+    end)
+
+    it("fail every job when the coordinator cannot be reached", function()
+        remote_jobs.use_remote({ run_batch = function()
+            return nil, "the build coordinator closed the control channel"
+        end })
+        local slots = assert(remote_jobs.open_slots(2))
+        local channel = assert(remote_jobs.open_channel())
+        local processes = {}
+        local _, failure = remote_jobs.drive(slots, channel, 2, function(position)
+            processes[position] = assert(remote_jobs.launch(channel, { "cc" }, "cc",
+                "/out", "/err", position))
+            return processes[position]
+        end, function() error("no launch fails") end, "C probe compiler")
+        assert.equal("the build coordinator closed the control channel", failure)
+        for _, process in ipairs(processes) do
+            assert.is_nil(process.ok)
+            assert.truthy(process.finish_errors[1]:find("closed the control channel", 1, true))
+        end
+        assert.is_true(slots:close())
+    end)
+
+    it("bound jobs a worker runs itself by the local cap without borrowing tokens", function()
+        remote_jobs.use_remote({ run_batch = function() error("synchronous jobs stay in the worker") end })
+        local slots = assert(remote_jobs.open_slots(2,
+            { makeflags = "-j8 --jobserver-auth=fifo:/nonexistent" }))
+        assert.is_nil(slots.client)
+        assert.is_true(slots:acquire_nowait())
+        assert.is_true(slots:acquire_nowait())
+        assert.is_false(slots:acquire_nowait())
+        assert.is_true(slots:release())
+        assert.is_true(slots:acquire_nowait())
+        for _ = 1, 3 do assert.is_true(slots:release()) end
+        -- An extra release cannot create a third slot.
+        assert.is_true(slots:acquire_nowait())
+        assert.is_true(slots:acquire_nowait())
+        assert.is_false(slots:acquire_nowait())
+        assert.is_true(slots:close())
+    end)
+
+    it("send the jobs recorded before a raising launch and return what it raised", function()
+        local requests = {}
+        remote_jobs.use_remote({ run_batch = function(_, batch)
+            requests[#requests + 1] = batch
+            return { { ok = true, term = "exit", code = 0 } }
+        end })
+        local slots = assert(remote_jobs.open_slots(4))
+        local channel = assert(remote_jobs.open_channel())
+        local processes, failure_object = {}, {}
+        local next_position, failure, cancelled, raised = remote_jobs.drive(slots, channel, 3,
+            function(position)
+                if position == 2 then error(failure_object) end
+                processes[position] = assert(remote_jobs.launch(channel, { "cc", "part" .. position },
+                    "cc", "/out" .. position, "/err" .. position, position))
+                return processes[position]
+            end, function() error("no launch fails") end, "parallel C compiler")
+        assert.equal(2, next_position)
+        assert.is_nil(failure)
+        assert.is_nil(cancelled)
+        assert.equal(failure_object, raised.error)
+        assert.same({ { { argv = { "cc", "part1" }, stdout = "/out1", stderr = "/err1" } } }, requests)
+        assert.is_true(processes[1].ok)
+        assert.is_nil(processes[3])
+        assert.is_true(slots:close())
+    end)
+
+    it("fail every recorded job and return the error when the coordinator request raises", function()
+        local broken = {}
+        remote_jobs.use_remote({ run_batch = function() error(broken) end })
+        local slots = assert(remote_jobs.open_slots(2))
+        local channel = assert(remote_jobs.open_channel())
+        local processes = {}
+        local next_position, failure, _, raised = remote_jobs.drive(slots, channel, 2, function(position)
+            processes[position] = assert(remote_jobs.launch(channel, { "cc" }, "cc",
+                "/out", "/err", position))
+            return processes[position]
+        end, function() error("no launch fails") end, "C probe compiler")
+        assert.equal(3, next_position)
+        assert.equal("the build coordinator request failed", failure)
+        assert.equal(broken, raised.error)
+        for _, process in ipairs(processes) do
+            assert.is_nil(process.ok)
+            assert.equal("not started: the build coordinator request failed", process.finish_errors[1])
+        end
+        assert.is_true(slots:close())
+    end)
 end)
 
 describe("native SHA-256", function()
@@ -340,9 +525,93 @@ describe("native SHA-256", function()
         assert.equal(sha256.hex(large), sha256.hex_via(support._sha256_binary, large))
     end)
 
+    it("matches the pure-Lua digest for non-periodic input at every block phase", function()
+        -- The selected compression backend (hardware or portable) must equal
+        -- FIPS 180-4 over data whose blocks never repeat.
+        local bytes, state = {}, 0x2545f491
+        for index = 1, 9000 do
+            state = (state * 1103515245 + 12345) & 0x7fffffff
+            bytes[index] = string.char((state >> 16) & 0xff)
+        end
+        local message = table.concat(bytes)
+        for _, length in ipairs({ 55, 56, 63, 64, 65, 119, 120, 127, 128, 129, 4095, 4097, 8990 }) do
+            for _, first in ipairs({ 1, 2, 7 }) do
+                local slice = message:sub(first, first + length - 1)
+                assert.equal(sha256.binary(slice), support._sha256_binary(slice), length .. "@" .. first)
+            end
+        end
+    end)
+
     it("accepts only strings", function()
         assert.has_error(function() support._sha256_binary(42) end)
         assert.has_error(function() support._sha256_binary(nil) end)
+    end)
+
+    it("streams the one-shot digest across every chunk split", function()
+        if type(support._sha256_stream) ~= "function" then
+            pending("native _sha256_stream requires a reinstalled runtime")
+            return
+        end
+        local bytes, state = {}, 0x1b873593
+        for index = 1, 700 do
+            state = (state * 1103515245 + 12345) & 0x7fffffff
+            bytes[index] = string.char((state >> 16) & 0xff)
+        end
+        local message = table.concat(bytes)
+        for _, length in ipairs({ 0, 1, 55, 56, 63, 64, 65, 127, 128, 129, 700 }) do
+            local slice = message:sub(1, length)
+            local expected = sha256.binary(slice)
+            for _, size in ipairs({ 1, 3, 63, 64, 65, 200, 1000 }) do
+                local stream = support._sha256_stream()
+                for first = 1, length, size do
+                    assert.equal(stream, stream:update(slice:sub(first, first + size - 1)))
+                end
+                stream:update("")
+                assert.equal(expected, stream:finish(), length .. "/" .. size)
+            end
+        end
+        local large = string.rep("titan\0", 400000)
+        local stream = support._sha256_stream()
+        for first = 1, #large, 65536 + 7 do stream:update(large:sub(first, first + 65536 + 6)) end
+        assert.equal(support._sha256_binary(large), stream:finish())
+    end)
+
+    it("rejects non-string chunks and use after finish", function()
+        if type(support._sha256_stream) ~= "function" then
+            pending("native _sha256_stream requires a reinstalled runtime")
+            return
+        end
+        local stream = support._sha256_stream()
+        assert.has_error(function() stream:update(42) end)
+        assert.equal(sha256.binary(""), stream:finish())
+        assert.has_error(function() stream:update("x") end)
+        assert.has_error(function() stream:finish() end)
+    end)
+
+    it("absorbs an open file from its position through a fixed buffer", function()
+        if type(support._sha256_stream) ~= "function" then
+            pending("native _sha256_stream requires a reinstalled runtime")
+            return
+        end
+        local path = require("spec.support.temporary").name()
+        local bytes = string.rep("titan\0\255", 30000) .. "tail"
+        local writer = assert(io.open(path, "wb"))
+        assert(writer:write(bytes))
+        assert(writer:close())
+        local file = assert(io.open(path, "rb"))
+        local stream = support._sha256_stream()
+        assert.equal(#bytes, stream:absorb(file))
+        assert.equal(0, stream:absorb(file))
+        assert.equal(support._sha256_binary(bytes), stream:finish())
+        assert(file:seek("set", 7))
+        stream = support._sha256_stream():update(bytes:sub(1, 7))
+        assert.equal(#bytes - 7, stream:absorb(file))
+        assert.equal(support._sha256_binary(bytes), stream:finish())
+        assert(file:close())
+        assert.has_error(function() support._sha256_stream():absorb(file) end,
+            "attempt to use a closed file")
+        assert.has_error(function() support._sha256_stream():absorb("not a file") end)
+        assert(os.remove(path))
     end)
 end)
 
@@ -476,22 +745,25 @@ describe("generated-C batches under a parent Make", function()
         assert.equal(2, maximum(), output)
     end)
 
-    it("reopen a pipe pool privately or fall back to one job", function()
+    it("reopen a pipe pool privately or keep titanc's own bound", function()
         local version = make_version()
         if not version then pending("GNU Make unavailable") return end
-        makefile("all: one\n" .. recipe("one", tree("a", LEAVES)))
         local style = version >= 404 and "--jobserver-style=pipe " or ""
         if LINUX then
+            makefile("all: one\n" .. recipe("one", tree("a", LEAVES)))
             local ok, output = run_make(style .. "-j3", "EXPECTED=3")
             assert.truthy(ok, output)
             assert.equal(3, maximum(), output)
             assert.falsy(output:find("jobserver", 1, true), output)
         else
-            -- Stock macOS Make 3.81 cannot be reopened privately.
-            local ok, output = run_make(style .. "-j3", "EXPECTED=1")
+            -- Stock macOS Make 3.81's pipe cannot be reopened privately:
+            -- titanc keeps its own --jobs bound outside the parent's pool.
+            makefile("all: one\n" .. recipe("one", "--jobs 3 " .. tree("a", LEAVES)))
+            local ok, output = run_make(style .. "-j2", "EXPECTED=3")
             assert.truthy(ok, output)
-            assert.equal(1, maximum(), output)
-            assert.truthy(output:find("titanc: warning: the parent make jobserver", 1, true), output)
+            assert.equal(3, maximum(), output)
+            local _, warnings = output:gsub("cannot be shared on this platform", "")
+            assert.equal(1, warnings, output)
         end
     end)
 
@@ -922,7 +1194,7 @@ end
 local popen, launches = io.popen, 0
 io.popen = function(command, mode)
     launches = launches + 1
-    local silent, count = command:gsub("printf '%%s\\n' '?%d+'? >[^;]+; ", "")
+    local silent, count = command:gsub("printf '%%s\\n' '?%d+'?; ", "")
     assert(count == 1, command)
     local pipe = popen(silent, mode)
     if launches == 2 then assert(support._signal_raise(15)) end

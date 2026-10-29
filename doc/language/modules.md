@@ -459,10 +459,14 @@ The compiler driver is invoked with dot-separated *module names*, not
 file paths:
 
 ```sh
-titanc [--print-ast] [--pretty-print] [-v] [-j jobs] [--static] [--test] \
+titanc [--print-ast] [--pretty-print] [-v] [-j jobs] [--c-parts n] [--static] \
   [--source-first] [--incremental] [-c|--compile-only] \
+  [--test [--test-dir dir]... [--test-exclude module]...] [--exe path] \
   [--no-uv-bootstrap] [--no-line-directives] [--lua <luasrc>] \
-  [--tree <srcroot>] [-o|--output <directory>] [-l lib1,lib2] [-X object...] <module>...
+  [--tree <srcroot>] [-o|--output <directory>] \
+  [-I dir]... [-D name[=value]]... [--cflag arg]... \
+  [-L dir]... [-l lib1,lib2]... [--ldflag arg]... \
+  [--c-source file]... [--print-c-objects] [-X object...] <module>...
 ```
 
 `titanc --print-root` is a separate query: it prints the selected installation
@@ -478,7 +482,10 @@ installation layout from the compiler launcher filename.
 * `--tree <srcroot>` sets the source tree root (default `.`); module
   `foo.bar` is looked up first at the folder main
   `<srcroot>/foo/bar/bar.titan`, then at flat source
-  `<srcroot>/foo/bar.titan`.
+  `<srcroot>/foo/bar.titan`. The value may be an ordered, semicolon-separated
+  list of roots (quote it in the shell, as in `--tree 'src;tests'`); each
+  module is looked up in the roots in order, and the first root that has it
+  wins.
 * `-o/--output <directory>` creates the destination and missing parents, then
   writes generated files beneath it. Generated C, objects, and headers recreate
   the selected source root's hierarchy there; final providers, loaders,
@@ -489,16 +496,28 @@ installation layout from the compiler launcher filename.
   `lua-5.5.1/src`. An installed compiler rejects this override and always
   uses its matched `<root>/src/lua-5.5.1` headers,
   `<root>/lib/liblua.a`, and `<root>/lib/titan/0.6/libtitan.a`.
-* `-l/--link` adds extra C libraries to the link line (FFI use).
-* `-j/--jobs <jobs>` caps concurrent native compiler processes: generated-C
-  object compilations and, while modules are checked, batches of C validation
-  probes. It defaults to the positive integer in `TITAN_JOBS`, or to four when
-  that variable is unset. On Linux and macOS, values above one require the
-  standard POSIX `mkfifo` utility. Inside a parent GNU Make on those platforms the run also shares
-  Make's job slots; see [Compiler jobs and GNU Make](build-profiles.md#compiler-jobs-and-gnu-make).
-  Parsing, checking, C generation, and generated-header work remain ordered in
-  the compiler process, and diagnostics do not depend on the job count. With
-  `--jobs 1` (or, on Linux and macOS, under `make -j1`) every C probe runs when reached.
+* `-l/--link`, `-L/--library-dir`, and `--ldflag` add native libraries,
+  library directories, and single link arguments to final links, in
+  command-line order. `-I/--include-dir`, `-D/--define`, and `--cflag` add
+  include directories, macro definitions, and single compile arguments to C
+  header checking, probes, and generated C. See
+  [native compiler and linker switches](output-directory.md#native-compiler-and-linker-switches).
+* `--c-source <file>` compiles and certifies an authored or generated C file
+  with the same native flags and links its object before `-X` payloads. With
+  `-c`, `--print-c-objects` prints each certified object's absolute path.
+* `--exe <path>` selects the exact standalone or test executable path,
+  relative to the working directory.
+* `-j/--jobs <jobs>` caps the module-frontend worker processes and native
+  compiler processes (generated-C translation units and batches of C
+  validation probes) that one `titanc` run keeps active at once. It defaults
+  to the positive integer in `TITAN_JOBS`, or to four when that variable is
+  unset. On Linux and macOS, values above one require the standard POSIX
+  `mkfifo` utility. Inside a parent GNU Make the run also shares Make's job
+  slots when the jobserver allows it; see
+  [Compiler jobs and GNU Make](build-profiles.md#compiler-jobs-and-gnu-make).
+  Diagnostics and generated files do not depend on the job count. With
+  `--jobs 1` (or, on Linux and macOS, under `make -j1`) every C probe runs
+  when reached.
 * `--c-parts <n>` sets the maximum number of C translation units into which a
   module with at least 2 MiB of generated C definitions is split, so its parts
   can compile in parallel. It defaults to the positive integer in
@@ -512,15 +531,19 @@ installation layout from the compiler launcher filename.
 * `--source-first` prefers available source dependencies to compiled providers,
   with compiled fallback for ordinary source misses. It does not grant private
   visibility to ordinary imports.
-* `--incremental` allows current source objects to supply declarations and code.
-  The build system owns dependency/configuration invalidation; default builds
-  ignore old objects. `-c/--compile-only` emits objects and headers without
-  linking and always rebuilds explicit roots, while `-c --incremental` can reuse
-  their source dependencies. See [Incremental and separate compilation](incremental-compilation.md)
-  for the Make contract and incompatible options.
+* `--incremental` reuses each source module object, `--c-source` object, and
+  final link whose certificate still matches its sources, compiler, native
+  configuration, C headers, dependency interfaces, and bindings; `-v` explains
+  every miss. `-c/--compile-only` emits objects and headers without linking;
+  without `--incremental` it rebuilds every module in the requested closure,
+  while `-c --incremental` certifies explicit roots like any dependency. See
+  [Incremental and separate compilation](incremental-compilation.md) for the
+  certificate contents, Make patterns, and incompatible options.
 * `--test` source-prefers the requested roots' complete dependency graph,
   discovers public `test_*` functions, and links a standalone native test
-  executable even without an application `main`. See
+  executable even without an application `main`. `--test-dir <dir>` adds every
+  conventionally named test module below a directory as a root, and
+  `--test-exclude <module>` removes one discovered root. See
   [Testing Titan code](standard-library-test.md).
 * `--no-uv-bootstrap` is valid only when the result is a normal standalone
   executable or a `--test` executable. The generated entrypoint still
@@ -540,14 +563,18 @@ installation layout from the compiler launcher filename.
 * `--pretty-print` runs `clang-format` on generated C and source-foreign
   headers. Formatting is opt-in; without it Titan preserves the generator's raw
   layout while still removing blank physical lines after `#line` directives.
-* `-v/--verbose` prints every C tool command line and, with `--pretty-print`,
-  the formatter command line; `--print-ast` dumps the parsed AST.
+* `-v/--verbose` writes every C tool command line and incremental hit and miss
+  decision to standard error, where compiler output also goes, plus the
+  formatter command line with `--pretty-print`; `--print-ast` dumps the parsed
+  AST.
 
-By default, `titanc` first typechecks every selected source module, reports
-*all* errors, and exits with status 1 before generating any code if a module
-failed. `--incremental` can supply previously checked declarations from current
-objects. Once loading/checking succeeds, the compiler emits needed objects and,
-unless `-c` was requested, links the result.
+`titanc` checks and compiles each module of the requested closure after its
+dependencies, running independent modules in parallel. It reports *all*
+errors in dependency order and exits with status 1 without linking if any
+module failed; a module that depends on a failed one is skipped, while
+independent modules may already have published their objects. With
+`--incremental`, unchanged modules supply their declarations from certified
+objects without being parsed or checked again.
 
 `clang-format` is needed only for `--pretty-print`; `CLANG_FORMAT` selects a
 different compatible command. In that mode Titan formats every generated `.c`
@@ -602,13 +629,15 @@ executable. The folder program's `__main` suffix avoids colliding with its
 source directory; the logical module name and entrypoint path remain
 unchanged.
 
-Use separate output directories to isolate configurations sharing source files.
-Without `--output`, different working directories do not isolate source-adjacent C/object outputs.
-When building the same sources with different compiler modes or flags, stage a
-separate source tree for each configuration and point `--tree` at that copy.
-For example, an application build and a `--test` build can select different
-compiled dependencies; concurrent invocations must not overwrite the same
-source objects. The build system owns those source copies and invalidation.
+Use separate output directories to keep configurations with different
+compiler modes or flags side by side. Sharing one output directory is also
+correct: certification rebuilds whatever a configuration change affects, and
+`.titan-build.lock` serializes concurrent invocations, but alternating between
+configurations then rebuilds on every switch. An application build and a
+`--test` build can share one output directory and reuse unchanged production
+objects. Without `--output`, generated C and objects stay beside the sources,
+so different working directories do not isolate them; stage a separate source
+tree for each configuration and point `--tree` at that copy.
 
 An installed compiler links `<root>/lib/titan/0.6/libtitan.a`; compiler development
 directly from the repository lazily rebuilds and links

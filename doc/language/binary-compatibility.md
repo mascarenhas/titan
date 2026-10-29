@@ -221,14 +221,18 @@ For a standalone logical module `app.main`, the Windows compiler emits
 `bin/app.main.exe` and its application provider at
 `lib/titan/0.6/app/main.dll`. A folder module named `app` instead uses
 `bin/app.exe`; contributor filenames do not determine its launcher name.
-`--launcher-name NAME` overrides the launcher basename and appends `.exe`
-unless that suffix is already present. It accepts one valid Windows filename,
-not a path, and is valid only for Windows standalone or `--test` builds.
-A test launcher's default name follows the first requested logical root.
+`--exe PATH` selects the exact launcher path instead, relative to the current
+directory, and appends `.exe` unless that suffix is already present; its
+basename must be a valid Windows filename. The application provider DLL stays
+at `lib/titan/0.6/<module>.dll` below `--output`, and the launcher records the
+relative path to it, which must stay on the same volume. `--exe` is valid
+only for standalone or `--test` builds. A test launcher's default name follows
+the first requested logical root.
 
 The launcher embeds the selected logical module and relative provider path.
-Renaming the EXE within `bin` therefore preserves loading; an override does not
-rename or change the provider. The existing argument Array, protected error
+Renaming the EXE within `bin` therefore preserves loading; choosing another
+name with `--exe` does not rename or change the provider. The existing
+argument Array, protected error
 handling, process exit status, and optional `--no-uv-bootstrap` behavior apply.
 The launcher runs with the caller's privileges and declares UTF-8 and long-path
 support in its application manifest. Unix output names and entrypoints are

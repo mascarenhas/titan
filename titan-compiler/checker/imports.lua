@@ -13,6 +13,33 @@ local function recovery_interface_key(modname, exposer)
     return exposer_key .. "\0" .. modname
 end
 
+-- Recovering a referenced nominal graph asks the same recovered module for the
+-- same fully qualified owner many times. The members list is the authoritative
+-- ordered view, so index the first Record/Union per fully qualified name once.
+-- A memo is only valid for the exact members array and its current length: an
+-- interface that appends a member or replaces `module.members` rebuilds instead
+-- of answering from a stale or incomplete index. The weak key keeps an evicted
+-- interface's index collectable with it.
+local nominal_owner_indexes = setmetatable({}, { __mode = "k" })
+
+local function nominal_owner_index(members)
+    local memo = nominal_owner_indexes[members]
+    local count = #members
+    if memo and memo.count == count then return memo.index end
+    local index = {}
+    for position = 1, count do
+        local member = members[position]
+        local typ = member.type or member
+        if type(typ) == "table" and type(typ.name) == "string"
+           and (typ._tag == "Type.Record" or typ._tag == "Type.Union")
+           and index[typ.name] == nil then
+            index[typ.name] = typ
+        end
+    end
+    nominal_owner_indexes[members] = { count = count, index = index }
+    return index
+end
+
 -- Walk a recovered interface type and, for every Nominal or forwarding
 -- GenericAlias that names another module, recover that module before
 -- reconciling generic arity and canonical binder projections. This preserves
@@ -20,12 +47,10 @@ end
 -- second registry or another provider identity mechanism.
 function checker._recovered_nominal_owner(module, fqtn)
     if type(module) ~= "table" then return nil end
-    for _, member in ipairs(module.members or {}) do
-        local typ = member.type or member
-        if type(typ) == "table" and typ.name == fqtn
-           and (typ._tag == "Type.Record" or typ._tag == "Type.Union") then
-            return typ
-        end
+    local members = module.members
+    if members ~= nil then
+        local typ = nominal_owner_index(members)[fqtn]
+        if typ then return typ end
     end
     local name = fqtn:match("([^.]+)$")
     local typ = name and module.type_members and module.type_members[name]
@@ -117,7 +142,7 @@ function generic_validate_recovered_application(
 
     if owner.scope ~= nil then
         local reconstructed, reconstruction_error = pcall(
-            types.substitute, owner, owner.scope, arguments)
+            types.validate_substitution, owner, owner.scope, arguments)
         if not reconstructed then
             return nil, "recovered nominal '" .. nominal.fqtn ..
                 "' is not a canonical application: " ..

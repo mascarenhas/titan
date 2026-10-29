@@ -92,6 +92,9 @@ local function to_hex(digest)
     return (("%02x"):rep(#digest):format(digest:byte(1, -1)))
 end
 
+-- Lowercase hex spelling of a binary digest, as `sha256.hex` returns.
+sha256.to_hex = to_hex
+
 function sha256.hex(message)
     return to_hex(sha256.binary(message))
 end

@@ -45,9 +45,11 @@ opener in a standalone. Use names such as `url_test`, `math_spec`, or
 
 ## Discovery and compilation
 
-`titanc --test M...` typechecks each requested source root and its source-backed
-import closure. With `--incremental`, current objects can supply the same
-discovered declarations. A test is every declaration that is all of the following:
+`titanc --test` typechecks each selected source root and its source-backed
+import closure. With `--incremental`, certified source objects supply their saved
+discovered declarations without reparsing or rechecking unchanged modules. A
+test case is every declaration in the source-backed closure that is all of the
+following:
 
 * a public, non-`local` top-level function whose name starts with `test_`;
 * not an ignored duplicate declaration;
@@ -60,6 +62,60 @@ functions and lookalike parameter types are not tests. Cases are ordered by
 their complete bytewise name, `<logical-module>.<function-name>`, independent
 of import traversal order. Folder contributors participate through their one
 combined logical module.
+
+### Automatic test-root discovery
+
+Instead of listing every test root on the command line, pass repeatable
+`--test-dir DIR` (and optional repeatable `--test-exclude MODULE`) with
+`--test`:
+
+```sh
+titanc --test --incremental -o out --exe out/suite \
+  --tree . --test-dir tests --test-exclude tests.windows_only_test
+./out/suite
+```
+
+* **Directory scope and namespace.** Each `DIR` must be an existing directory
+  inside a configured `--tree` source root (resolved relative to the current
+  working directory when not absolute). `titanc` derives logical module prefixes
+  from the **first** configured `--tree` root that contains `DIR`; it does not
+  strip the directory's own name or add an implicit `--tree` entry. For example,
+  `--tree . --test-dir tests` discovers modules under `tests.*`, whereas
+  `--tree tests --test-dir tests` discovers top-level names inside `tests/`.
+* **Naming convention for automatic roots.** `titanc` enumerates `DIR`
+  recursively on every invocation without reading or parsing unselected files. A
+  source module (a flat `.titan` file or a folder module's canonical main) is
+  selected as an automatic root when its **final logical name component** is
+  `test`, `tests`, `spec`, `specs`, or ends with `_test`, `_tests`, `_spec`, or
+  `_specs`. Immediate `.titan` contributors of a folder module belong to that
+  folder owner and are never separate roots. Hidden descendant directories (names
+  starting with `.`) are skipped, and directory symlinks are not descended
+  implicitly, although a symlinked directory passed explicitly to `--test-dir`
+  is traversed and a matching linked folder owner is resolved normally.
+* **Resolver consistency.** Each candidate is resolved through the ordinary
+  tagged source resolver. If an earlier `--tree` root shadows a candidate with a
+  source outside the requested `--test-dir` areas, or if overlapping discovery
+  areas map one logical name to different sources, `titanc` fails with an error
+  rather than running another subtree's tests.
+* **Exclusions and explicit roots.** `--test-exclude MODULE` accepts an exact
+  logical module name (no globs) and removes it from **automatic** root
+  selection only; it requires `--test-dir`. An explicit positional root on the
+  command line wins over `--test-exclude`, and an excluded module that is
+  imported by a selected root still participates in the import closure.
+  Explicit positional roots keep their command-line order (deduplicated) and
+  precede the bytewise-sorted automatic roots. If no explicit roots are given
+  and automatic discovery finds no matching modules, `titanc` fails with
+  `no test modules found`.
+* **Root selection versus case discovery.** The filename convention applies only
+  to `--test-dir` root selection; arbitrarily named test modules remain valid as
+  explicit positional roots, and actual test cases inside any selected root or
+  imported source module are still discovered solely by the semantic `test_`
+  signature rule above. A selected root with zero `test_` functions is allowed.
+  Unselected files outside the requested import closure are ignored even if
+  malformed, whereas a syntax or I/O error in a selected root or its
+  contributors fails the build.
+
+### Source-first resolution and runner generation
 
 Test mode deliberately resolves dependencies **source first**, falling back to
 the normal compiled-provider order only when no source exists. This is one
@@ -77,12 +133,16 @@ The compiler generates a thin ordinary source module with the reserved identity
 `titan.test.runner`. It imports `titan.test` and every test owner through their
 public interfaces, wraps discovered callbacks in `test.Case` descriptors, and
 provides the sole `main`, which calls `test.run(args, cases)`. A `main` in an
-input module is ignored in test mode. The first requested root owns the
-executable path, including the usual folder-root `__main` rule, so unrelated
-roots can form one test executable. No provider pair or Lua shim is emitted.
-Adjacent generated artifacts use the executable stem: `__test_runner.c/.o` and
-`__test_entrypoint.c/.o`. Ordinary test and dependency translation units keep
-their normal generated-file locations: the selected
+input module is ignored in test mode. Unless `--exe PATH` specifies the
+executable destination directly, the first resulting root (explicit roots first,
+then bytewise automatic roots) owns the default executable path, including the
+usual folder-root `__main` rule, so unrelated roots can form one test
+executable. No provider pair or Lua shim is emitted. The generated runner
+source (`<name>__test_runner.titan`, with its C and object) and entrypoint
+(`<name>__test_entrypoint.c`) are isolated per target under
+`<output>/.titan-links/<key>/synthetic/`, where `<name>` is the last component
+of the first root. Ordinary test and dependency
+translation units keep their normal generated-file locations: the selected
 [output directory](output-directory.md), or beside the source when none is
 selected.
 
@@ -93,12 +153,13 @@ implementation; no installed Titan test source is required. With `--static`,
 its selected archive remains selected unless an actual authored source import
 independently creates a provider overlap under the normal composition rules.
 
-For separate test builds, `-c --test --incremental` emits source objects and
-test compilation flags without synthesizing a runner or executable. The final
-`--test --incremental` command discovers fresh and cached cases, generates the
-current runner, and links one executable. See
-[Separate native test executables](incremental-compilation.md#separate-native-test-executables)
-for the sequence and Make-owned invalidation contract.
+With `--incremental`, `titanc --test` certifies module objects and the final
+test executable link under `<output>/.titan-links/`: a warm build with no
+source, header, flag, or case changes reuses the existing test binary without
+parsing, rendering the runner, compiling C, or relinking. For compile-only
+workflows, `-c --test --incremental` certifies or compiles source objects with
+test-owner flags without synthesizing a runner or executable; see
+[Separate native test executables](incremental-compilation.md#separate-native-test-executables).
 
 Production modules can share unchanged objects between application and test
 executables when compilation settings and resolved dependency providers match.

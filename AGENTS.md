@@ -89,12 +89,13 @@ Read the [style guide](doc/style-guide.md) before application or stdlib work.
 | C casts/operators/macros/enums, target arithmetic, compile-probe result caching | [C FFI declarations and expressions](doc/implementation/c-ffi-expressions.md) |
 | Public/local C-ABI functions, runtime-resolved raw imports, restricted foreign bodies, `.titan.h`, sequencing | [Foreign functions](doc/implementation/foreign-functions.md) |
 | Trusted raw Lua C API: stack/root ledger, protected independent-state calls, native preload helpers, longjmp, audited allowlist | [Trusted Lua C API boundary](doc/implementation/ffi-lua-api-followup.md) |
-| Module lookup, C compilation/linking, CLI flags, SDK/tool paths, language-server API | [Driver and toolchain](doc/implementation/driver.md) |
+| Module lookup, C compilation/linking, native CLI switches, SDK/tool paths, language-server API | [Driver and toolchain](doc/implementation/driver.md) |
 | Native loader/provider snapshots, canonical module selection, per-state Titan bindings, stable raw-function image bindings, ABI checks before initialization | [Module protocol](doc/implementation/codegen-overview.md#the-module-protocol), [dependency wiring](doc/implementation/codegen-overview.md#static-vs-dynamic-dependency-wiring), [runtime verification](doc/implementation/binary-compatibility.md#generated-exports-and-runtime-verification) |
-| Generated files under `-o`/`--output`, source-relative layouts, incremental/coverage paths | [Output-directory routing](doc/implementation/output-directory.md), [output user guide](doc/language/output-directory.md) |
+| Generated files under `-o`/`--output`, `--exe` destinations, `.titan`/`.native`/`.titan-links` state, incremental/coverage paths | [Output-directory routing](doc/implementation/output-directory.md), [output user guide](doc/language/output-directory.md) |
 | Folder mains/contributors, declaration order, canonical module/output identity | [Folder modules](doc/implementation/folder-modules.md) |
 | Explicit `.titan` imports: local visibility, trusted source provenance, inherited C headers | [Source-import visibility](doc/implementation/source-import-visibility.md) |
-| Compile-only `-c`, incremental `.o` reuse, source-object metadata, Make-owned invalidation | [Incremental compilation](doc/implementation/incremental-compilation.md) |
+| Certified `--incremental` `.o` reuse, `.titan.source` certificates, persistent digest cache, semantic C-header/interface digests, compile-only `-c` | [Incremental compilation](doc/implementation/incremental-compilation.md), [language guide](doc/language/incremental-compilation.md) |
+| Whole-graph build coordinator, pre-dispatch output preflight, worker RPC, `.titan-build.lock`, job-slot ledger, `--c-source`/`--print-c-objects`, final-link certificates, `--test-dir` discovery | [Build coordinator](doc/implementation/build-coordinator.md) |
 | Prefix providers, multi-root `.so`/`.a` bundles, Lua shims, staged pair publication | [Multi-module libraries](doc/implementation/multi-module-libraries.md) |
 | Archive/object metadata, ELF/Mach-O/COFF readers, target selection, static composition | [Static compiled modules](doc/implementation/static-compiled-modules.md) |
 | Replacing a DSO: consumer-used signatures/public shapes and runtime verification | [Binary compatibility](doc/implementation/binary-compatibility.md) |

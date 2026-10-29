@@ -62,9 +62,15 @@ case "$group" in
     compiler-shard-[1-4])
         requested_shard=${group##*-}
         ;;
+    stdlib-compiler-shard-[1-2])
+        # One of the stdlib job's two concurrent installed-stdlib halves.
+        requested_domain=stdlib
+        requested_shard=${group##*-}
+        ;;
     *)
         usage="usage: $0 {compiler|compiler-uncovered|compiler-shard-{1..4}|"
-        usage+="stdlib-compiler|stdlib-compiler-uncovered} [all|ordinary|exclusive]"
+        usage+="stdlib-compiler|stdlib-compiler-uncovered|"
+        usage+="stdlib-compiler-shard-{1..2}} [all|ordinary|exclusive]"
         echo "$usage" >&2
         exit 2
         ;;
@@ -202,7 +208,7 @@ run_compiler_stress() {
 }
 
 case "$group" in
-    compiler | compiler-shard-[1-4] | stdlib-compiler)
+    compiler | compiler-shard-[1-4] | stdlib-compiler | stdlib-compiler-shard-[1-2])
         coverage_status=0
         stress_status=0
         run_compiler_coverage || coverage_status=$?

@@ -156,7 +156,49 @@ local function normalized_stat(attributes)
         inode = not platform.windows and attributes.ino or nil,
         modified_seconds = modified_seconds,
         modified_nanoseconds = modified_nanoseconds,
+        -- LFS exposes floating seconds, not a declared native nanosecond clock.
+        time_precision = "coarse",
+        precision = "coarse",
     }
+end
+
+local tried_native_support = false
+
+local function stat_attributes(path, follow)
+    local support = package.loaded.titan
+    if not support and not tried_native_support then
+        tried_native_support = true
+        local loaded, value = pcall(require, "titan")
+        if loaded then support = value end
+    end
+    local precise = type(support) == "table" and support._stat_precise
+    if type(precise) == "function" then
+        local attributes, err, code = precise(path, follow)
+        if not attributes then
+            if missing_errno(code) then return nil, nil end
+            return nil, operation_error(follow and "stat" or "lstat", err)
+        end
+        -- The native call owns this fresh result. Preserve its exact integer
+        -- timestamps and opaque file IDs for certificate observations, while
+        -- supplying the existing resolver/header fields from those same bytes.
+        attributes.kind = attributes.kind == "link" and "symlink" or attributes.kind
+        attributes.device, attributes.inode = attributes.dev, attributes.ino
+        attributes.modified_seconds = attributes.mtime_ns // 1000000000
+        attributes.modified_nanoseconds = attributes.mtime_ns % 1000000000
+        if attributes.ctime_ns ~= nil then
+            attributes.changed_seconds = attributes.ctime_ns // 1000000000
+            attributes.changed_nanoseconds = attributes.ctime_ns % 1000000000
+        end
+        -- Without a change time or a file identity (a Windows volume that
+        -- reports neither) the observation cannot authorize reuse: coarse.
+        local precision = attributes.ctime_ns ~= nil and attributes.dev ~= nil
+            and attributes.ino ~= nil and "ns" or "coarse"
+        attributes.precision, attributes.time_precision = precision, precision
+        return attributes
+    end
+    local attributes, err = lfs_attributes(path, follow)
+    if not attributes then return nil, err end
+    return normalized_stat(attributes)
 end
 
 function Sync:cwd()
@@ -271,17 +313,13 @@ end
 function Sync:stat(path)
     local valid, path_err = checked_path(path)
     if not valid then return nil, path_err end
-    local attributes, err = lfs_attributes(path, true)
-    if not attributes then return nil, err end
-    return normalized_stat(attributes)
+    return stat_attributes(path, true)
 end
 
 function Sync:lstat(path)
     local valid, path_err = checked_path(path)
     if not valid then return nil, path_err end
-    local attributes, err = lfs_attributes(path, false)
-    if not attributes then return nil, err end
-    return normalized_stat(attributes)
+    return stat_attributes(path, false)
 end
 
 local function open_file(path, mode)
@@ -298,6 +336,28 @@ function Sync:readable(path)
     if not file then return false end
     pcall(file.close, file)
     return true
+end
+
+-- Optional strategy capability: effective POSIX X_OK, not file readability.
+-- Tool selection must fail closed when a strategy cannot supply this query.
+function Sync:executable(path)
+    local valid, path_err = checked_path(path)
+    if not valid then return nil, path_err end
+    local support = require "titan"
+    if type(support) ~= "table" or type(support._executable_access) ~= "function" then
+        return nil, "installed Titan native support lacks _executable_access; reinstall Titan"
+    end
+    return support._executable_access(path)
+end
+
+-- Optional strategy capability: match libuv's Windows CWD search policy.
+function Sync:executable_search_cwd()
+    local support = require "titan"
+    if type(support) ~= "table" or
+       type(support._executable_search_cwd) ~= "function" then
+        return nil, "installed Titan native support lacks _executable_search_cwd; reinstall Titan"
+    end
+    return support._executable_search_cwd()
 end
 
 function Sync:read_file(path, max_bytes)
@@ -325,6 +385,56 @@ function Sync:read_file(path, max_bytes)
     if not close_ok then return nil, tostring(closed) end
     if not closed then return nil, operation_error("close", close_err) end
     return contents
+end
+
+-- Optional strategy capability: feed a file's bytes, in order, into the
+-- incremental digest `stream` without materializing the whole file, and
+-- return the total byte count. A native stream absorbs the open file through
+-- one fixed buffer; any other stream receives chunks of at most
+-- ABSORB_CHUNK_BYTES through `stream:update(bytes)`. Strategies without this
+-- capability are read whole. A stream error propagates unchanged once the
+-- file is closed.
+local ABSORB_CHUNK_BYTES = 1024 * 1024
+
+function Sync:absorb_file(path, stream)
+    local valid, path_err = checked_path(path)
+    if not valid then return nil, path_err end
+    -- Resolve the stream's methods before a handle exists, so a raising
+    -- lookup cannot strand an open file.
+    local absorb = stream.absorb
+    local update = absorb == nil and stream.update or nil
+    local file, open_err = open_file(path, "rb")
+    if not file then return nil, open_err end
+    local function rethrow(err)
+        pcall(file.close, file)
+        error(err, 0)
+    end
+    local total, failure = 0, nil
+    if absorb ~= nil then
+        local absorbed, count, absorb_err = pcall(absorb, stream, file)
+        if not absorbed then rethrow(count) end
+        if count == nil then failure = operation_error("read", absorb_err) end
+        total = count
+    else
+        while true do
+            local read_ok, chunk, read_err = pcall(file.read, file, ABSORB_CHUNK_BYTES)
+            if not read_ok then
+                failure = tostring(chunk)
+                break
+            elseif chunk == nil then
+                if read_err ~= nil then failure = operation_error("read", read_err) end
+                break
+            end
+            total = total + #chunk
+            local updated, update_err = pcall(update, stream, chunk)
+            if not updated then rethrow(update_err) end
+        end
+    end
+    local close_ok, closed, close_err = pcall(file.close, file)
+    if failure then return nil, failure end
+    if not close_ok then return nil, tostring(closed) end
+    if not closed then return nil, operation_error("close", close_err) end
+    return total
 end
 
 local function write_file_direct(path, contents)
@@ -593,6 +703,28 @@ function Sync:run(argv, options)
     end
     local command = captured_command(normalized)
     if options.stderr_to_stdout ~= false then command = command .. " 2>&1" end
+    if self._process_inherit then
+        -- Keep the ordinary shell/locale/redirection semantics, but make the
+        -- coordinator's output leases explicit across exec and descendants.
+        local captured, result = pcall(function()
+            return require("titan-compiler.process").capture(
+                { "/bin/sh", "-c", command }, {
+                    inherit = self._process_inherit,
+                    inherit_environment = true,
+                    stderr_to_stdout = false,
+                })
+        end)
+        if not captured then
+            return { started = false, ok = false, command = command,
+                diagnostic = "could not start captured command: " .. tostring(result) }
+        end
+        if result.started and result.why then
+            return shell_result(command, result.output or "",
+                result.ok, result.why, result.status)
+        end
+        result.command = command
+        return result
+    end
 
     local opened, pipe, popen_err = pcall(lua_io.popen, command,
         "r")
@@ -749,7 +881,10 @@ function Sync:run_batch(commands, options)
                     local log, log_err = self:tmpname()
                     if not log then return nil, log_err end
                     local called, process, launch_err = pcall(jobs.launch,
-                        channel, item.argv, item.command, log, log, position)
+                        channel, item.argv, item.command, log, log, position, nil,
+                        not platform.windows and self._process_inherit and {
+                            inherit = self._process_inherit,
+                        } or nil)
                     if not called or not process then
                         remove_log(log)
                         if not called then error(process, 0) end

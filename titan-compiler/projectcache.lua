@@ -11,7 +11,7 @@ local completion = require "titan-compiler.completion"
 local platform = require "titan-compiler.platform"
 local documentation = require "titan-compiler.documentation"
 
-local projectcache = { VERSION = 5 }
+local projectcache = { VERSION = version.PROJECT_CACHE_VERSION }
 
 local schemas = require "titan-compiler.declarationschemas"
 
@@ -195,7 +195,9 @@ local function project(entry, options, strict, declarations_only)
             elseif kind == "Type.GenericAlias" then keep_owner(source.target_owner_fqtn)
             elseif kind == "header" then headers[#headers + 1] = target
             elseif kind == "input" then
-                if target.kind ~= "file" and target.kind ~= "search" then fail("invalid header input kind") end
+                if target.kind ~= "file" and target.kind ~= "search" and target.kind ~= "origin" then
+                    fail("invalid header input kind")
+                end
                 if not platform.is_absolute(target.path) or target.path:find("\0", 1, true) or target.identity == "" then
                     fail("invalid header input identity")
                 end

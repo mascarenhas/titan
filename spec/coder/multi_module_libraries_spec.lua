@@ -564,8 +564,8 @@ end
                 "'-Xlinker' '-reproducible' '-Xlinker' " ..
                 "'-install_name' '-Xlinker' 'pkg.so'",
                 1, true), provider_link)
-            assert.truthy(verbose_output:find(
-                "'dsymutil' 'pkg.so'", 1, true), verbose_output)
+            assert.truthy(verbose_output:match(
+                "'/[^\n]*dsymutil' 'pkg%.so'"), verbose_output)
             local relocation_map =
                 single_dsym_relocation_map(workspace .. "/pkg.so.dSYM")
             assert.falsy(relocation_map:find(
@@ -786,6 +786,19 @@ printf '%%s\n' "$count" > %s
         local waited, wait_output = run({ "sleep", "2" }, workspace)
         assert.truthy(waited, wait_output)
 
+        ok, output, why, code = compile_with_environment(
+            workspace, source_root, environment, "-v",
+            "pkg.left", "pkg.right", "pkg.shared")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        assert.equal("2\n", read_file(counter))
+        assert.is_nil(lfs.attributes(snapshots .. "/staged-4.a", "mode"))
+
+        -- A final-link hit performs no archive work. Force a link-only recipe
+        -- miss to retain the ordinary-archive header-noise publication check.
+        environment.TITAN_EXTRA_LDFLAGS =
+            (os.getenv("TITAN_EXTRA_LDFLAGS") or "") .. " -L" ..
+            assert(cdriver.shell_quote(workspace))
         ok, output, why, code = compile_with_environment(
             workspace, source_root, environment, "-v",
             "pkg.left", "pkg.right", "pkg.shared")
@@ -2164,8 +2177,8 @@ end
                 "'-Xlinker' '-reproducible' '-Xlinker' " ..
                 "'-install_name' '-Xlinker' 'payload/item.so'",
                 1, true), dso_link)
-            assert.truthy(output:find(
-                "'dsymutil' 'item.so'", 1, true), output)
+            assert.truthy(output:match(
+                "'/[^\n]*dsymutil' 'item%.so'"), output)
             local relocation_map = single_dsym_relocation_map(
                 workspace .. "/payload/item.so.dSYM")
             assert.falsy(relocation_map:find(

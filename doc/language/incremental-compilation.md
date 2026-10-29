@@ -1,243 +1,574 @@
 # Incremental and separate compilation
 
-Titan can reuse generated objects when a build system has already arranged
-the required rebuilds. Object reuse is opt-in; an ordinary `titanc` invocation
-continues to load and check selected source modules afresh.
+With `--incremental`, `titanc` certifies generated objects, compiler-managed C
+inputs, and final link outputs by semantic and content digests, reusing each
+artifact when all of its inputs still match. A single `titanc` invocation
+discovers the requested source import closure, certifies ready modules in
+dependency order, restores hits in-process without parsing or typechecking
+their sources, and runs short-lived worker processes only for modules that
+miss. Without `--incremental`, `titanc` loads, checks, compiles, and links
+selected source modules afresh.
+
+For certificate layouts, worker scheduling, and record formats, see
+[Object-backed source modules](../implementation/incremental-compilation.md),
+[Compiler-owned build coordinator](../implementation/build-coordinator.md),
+and [Driver and toolchain](../implementation/driver.md).
 
 ## Options and outputs
 
 | Invocation | Effect |
 | --- | --- |
 | `titanc project.base project.feature` | Compile selected source modules and publish the usual provider pair and Lua loaders, or an executable when one root has `main`. |
-| `titanc --incremental project.base project.feature` | Reuse eligible source objects, including roots, and perform the usual final link. |
-| `titanc -c project.feature` | Compile selected source modules to objects and generated headers; produce no provider, Lua loader, or executable. |
-| `titanc -c --incremental project.feature` | Rebuild the explicit root and reuse eligible source dependency objects. |
+| `titanc --incremental project.base project.feature` | Certify and reuse eligible source objects, including requested roots, compile only misses across the module graph, and reuse or relink the final target. |
+| `titanc -c project.feature` | Rebuild every source module in the requested closure to objects and generated headers; produce no provider, Lua loader, or executable. |
+| `titanc -c --incremental project.feature` | Certify and reuse eligible source objects, including requested roots, and compile only misses to objects and generated headers. |
+| `titanc -c --incremental --c-source helper.c` | Certify or compile standalone native C source nodes without requiring Titan module roots. |
+| `titanc -c --incremental --print-c-objects --c-source helper.c` | Also print the absolute path of each certified C object on standard output, one line per `--c-source` argument. |
 
-`--compile-only` is the long spelling of `-c`. Every explicit root rebuilds in
-this mode, even when encountered first as another root's dependency. Make may
-have invoked its recipe because an import, C header, or compiler setting
-changed while the root's own source timestamp did not.
+`--compile-only` is the long spelling of `-c`. Plain `-c` without
+`--incremental` forces every module in the requested source closure (and any
+`--c-source` input) to rebuild. Combining `-c --incremental` certifies explicit
+command-line roots by the same rules as source dependencies: an unchanged root
+is a certified hit and compiles no object. Certification itself may still run
+the C preprocessor and toolchain self-description probes.
 
-Compile-only mode retains source-closure compilation: missing or stale source
-dependency objects can also be generated. A complete Make graph builds shared
-dependencies before their consumers, so parallel consumer recipes reuse those
-objects. `-c` alone does not promise to write only the requested root's files.
+Whether linking or running with `-c`, one `titanc` invocation plans the
+complete source closure from the requested roots. Running module-frontend
+workers and native compiler commands (generated-C translation-unit parts and
+batched C validation probes) share the invocation's `-j` / `--jobs` (or
+`TITAN_JOBS`) slot budget and any supported parent GNU Make jobserver pool
+([Compiler jobs and GNU Make](build-profiles.md#compiler-jobs-and-gnu-make)).
 Unrelated roots and multiple roots defining `main` can be compiled together
 with `-c`; common provider naming and executable selection happen when linking.
 
-Pass `-o out` consistently in the object and final-link invocations to keep
-objects and generated headers in the [output tree](output-directory.md).
-Incremental lookup and missing-header restoration use that same tree. Without
-`--output`, they stay beside each flat source or folder main,
-including when `--tree` points elsewhere. A folder module's objects belong to
-the entire module, never to one contributor: one object, or one object per
-part when the module is [split](build-profiles.md#split-modules).
+Pass `-o out` or `--output out` so generated C, objects, headers, native C
+nodes (`out/.native/`), final-link certificates (`out/.titan-links/`),
+compiler caches (`out/.titan/`), and the output-tree lock
+(`out/.titan-build.lock`) stay together in the
+[output tree](output-directory.md). Without `--output`, module objects and
+generated headers stay beside each flat source or folder main, including when
+`--tree` points elsewhere; `titanc` then locks every source root and the
+working directory, and keeps link and native metadata in the first source
+root. A folder module's objects belong to the entire module, never to one
+contributor: one object, or one object per part when the module is
+[split](build-profiles.md#split-modules).
 
-Use `--source-first` in every phase when source dependencies should take
-precedence over installed `.so` or `.a` providers. This option still allows
-compiled fallback on an ordinary import's source miss. It does not grant access
-to private declarations: only a direct `import "project.base.titan"` requests
-the source collaboration view.
+Reuse follows the source spelling but not the output spelling. The selected
+`--tree` path appears in generated `#line` directives, debug information, and
+tracebacks, so naming the same source root differently (for example relative
+instead of absolute) rebuilds the affected modules. Different spellings of
+the same `--output` or `--exe` destination, such as relative and absolute
+paths, reuse the existing objects and link record.
 
-`-c` rejects `-l`, `-X`, and `--no-uv-bootstrap` because those options require
-linking. `--static` remains a compiled dependency preference. `--incremental`
-cannot be combined with `--print-ast`, which requires freshly checked ASTs.
-`--test` supports both incremental linking and separate object compilation.
+Use `--source-first` when source dependencies should take precedence over
+installed `.so`, `.a`, or `.dll` providers. This option still allows compiled
+fallback on an ordinary import's source miss. It does not grant access to
+private declarations: only a direct `import "project.base.titan"` requests the
+source collaboration view.
+
+`-c` rejects `--exe`, `-l`, `-L`, `--ldflag`, `-X`, and `--no-uv-bootstrap`
+because those options apply only to linking. `--print-c-objects` requires `-c`
+and at least one `--c-source`. `--static` remains a compiled
+dependency preference (unsupported on Windows). `--incremental` cannot be
+combined with `--print-ast`, which requires freshly checked ASTs in the
+coordinator process. `--test` supports both incremental whole-graph linking and
+`-c` compile-only object compilation, including automatic root discovery with
+`--test-dir` and `--test-exclude`
+([Testing Titan code](standard-library-test.md#discovery-and-compilation)).
 
 ## What object reuse promises
 
-After normal source resolution, `--incremental` looks for the module's companion
-object (`<stem>.o`) and requires it to be no older than every currently
-discovered source constituent. Equal timestamps count as current. The object
-supplies the module's declarations, source-private view, import and native-link
-facts, and generated header information. For a split module it also lists the
-other part objects (`<stem>.part1.o`, `<stem>.part2.o`, and so on). Each listed
-part must be a regular file that is no older than the sources and that was
-compiled for the same target. It must also be a plain native object: only the
-primary object carries Titan metadata. The `.parts` inventory beside the
-object is not consulted. Reuse covers all of a module's objects or none: a
-missing, stale, or mismatched part makes Titan compile the whole module from
-source. Reusing a module skips parsing, checking, C generation, and C
-compilation for it. `-v` reports reuse and fallback reasons.
+Each compiled primary module object (`<stem>.o`) embeds a certificate of the
+inputs it was built from. An object written for another Titan ABI, an older
+record schema, or another certificate format misses with `record-schema` and
+is rebuilt from source; no cleanup or migration step is needed.
 
-Missing or older objects, absent source metadata, failed metadata loading or
-execution, and incompatible Titan ABI metadata fall back to source compilation.
-So does an object compiled with a different `--c-parts` or `TITAN_C_PARTS`
-value, even when its module was not split. Titan applies this check only when
-it runs, so a build tool that skips `titanc` for up-to-date objects must treat
-the part count as an input too; the Titan checkout's Make targets do ([split
-modules](build-profiles.md#split-modules)).
-Metadata emitted by the compiler is trusted. Explicit roots and direct `.titan`
-imports still require actual source files; an orphan object, archive, or DSO
-does not substitute for source-private access.
+For each source module in the planned closure, `--incremental` certifies the
+following inputs before accepting `<stem>.o`:
 
-The object metadata reader recognizes ordinary COFF objects for the experimental
-Windows port, alongside ELF and Mach-O. This format support alone does not make
-Windows compilation available or enable Windows static providers. PE images,
-COFF import objects, and BigObj are not reusable source objects.
+* **Own sources and folder membership.** The certificate records whether the
+  module resolved as `flat` or `folder`, the exact ordered list of constituent
+  `.titan` paths (canonical main first, then immediate contributors in bytewise
+  order), and the SHA-256 content digest of each file. Adding or removing a
+  folder contributor, switching between flat and folder layout, or editing a
+  file with a preserved timestamp misses; touching a timestamp without changing
+  bytes remains a hit. Explicit roots and direct `.titan` imports still require
+  actual source files on disk.
+* **Compiler and native configuration.** One invocation-wide configuration
+  has four components, and `-v` names the one that changed:
+  * `compiler`: the contents of every compiler and C-parser Lua file in the
+    loaded installation, plus the executing `titanc` frontend script.
+    Reinstalling identical files is a hit; editing any of them, even a
+    comment, rebuilds every module.
+  * `preamble`: the preprocessed fixed generated-C preamble (`titan.h`,
+    `titan/ffi.h`, Lua headers, and C library headers) and the contents of
+    every header it reaches, probed through `<output>/.titan/preamble.c`.
+    This covers active macros, forced `-include` headers, `-isystem`
+    shadowing, and `__has_include` queries, even in modules without
+    `foreign import`.
+  * `toolchain`: which C compiler installation runs. `titanc` asks the
+    complete `CC` command (without the effective compile flags) for its
+    predefined macros and its `-E -v` banner, and records the physical
+    identity (resolved path, size, file identity, mode, and modification and
+    change times) of the compiler driver, an explicit compiler behind
+    `ccache`, `sccache`, or `distcc`, and the named compiler stages (`cc1` and
+    `as` for GCC; `as` for Clang with `-fno-integrated-as`, where Clang is
+    recognized from its `clang version` line, not from a path). The working
+    directory that Clang prints in its banner does not take part, and on
+    Linux and macOS a leading shell `exec` in `CC` is ignored.
+  * `options`: the effective generated-C compile command (including profile
+    defaults, `TITAN_EXTRA_CPPFLAGS`, `TITAN_EXTRA_CFLAGS`, and CLI `-I`, `-D`,
+    and `--cflag` arguments), build profile, `#line` directive policy,
+    `--pretty-print`, extra FFI include directories, and the selected Titan
+    SDK root.
+* **Module code-generation options.** Each record certifies its output stem and
+  its code-generation policy: `--c-parts` and the split threshold, whether the
+  module owns `test_` functions in a `--test` build (and therefore receives
+  `-fno-optimize-sibling-calls`), and coverage instrumentation.
+* **Split parts, companions, and coverage notes.** A
+  [split module](build-profiles.md#split-modules) is reused as a whole or
+  rebuilt from source. Only the primary `<stem>.o` carries Titan metadata,
+  including the authoritative list of the module's parts (`<stem>.c`,
+  `<stem>.part1.c`/`.part1.o`, and so on, plus `<stem>.priv.h`). Every
+  recorded generated `.c` part, `.priv.h` header, and `.part<k>.o` object
+  (plus `.gcno` notes when coverage is enabled for the module) must exist as a
+  regular file, and part objects must be plain metadata-free native objects
+  for the primary object's target. The metadata reader supports ELF, Mach-O,
+  and ordinary Windows COFF objects (PE images, COFF import objects, and
+  BigObj are not reusable source objects). Missing generated `.ffi.h` and
+  `.titan.h` headers are restored from a certified object without
+  recompiling the module.
+* **Transitive C header closure.** Before restoring any declarations from a
+  cached object, `titanc` revalidates every C header and include-search
+  candidate the module's foreign imports reached:
+  * Header files are identified by content, so republishing identical SDK or
+    library headers with new timestamps, inodes, copies, hardlinks, or
+    symlinks at the same resolved path is a hit.
+  * Every real (non-generated) header whose declarations reach the module
+    also records its resolved path, which determines the nominal identity of
+    its C declarations. Retargeting a symlink or replacing it with a hardlink
+    to a different resolved path is a clean miss, even when the bytes are
+    identical.
+  * Search candidates record existence, followed kind, and readability,
+    catching newly created shadowing headers in earlier `-I` or
+    quoted-include directories and permission changes.
+* **Direct imports, contextual nominal owners, and native bindings.** Each
+  direct import records its required view (`public` for ordinary imports, or
+  `source` for `import "name.titan"`) and the dependency's semantic interface
+  digest. For source modules, the `public` digest covers
+  serialized semantic public types, exact generated nominal layout bytes, and
+  any copied `.titan.h` foreign helper bodies; the `source` digest adds the
+  serialized source-private manifest. For compiled providers (`.so`, `.a`,
+  `.dll`), each logical module inside a combined provider is fingerprinted
+  individually from its own `_types` and `_layouts`, not from the whole
+  provider file's bytes or timestamp. An implementation-only edit in a producer
+  module (or an edit to an unrelated module in `titan.so`/`titan.a`) leaves its
+  interface digest unchanged, so importing consumers hit without recompiling.
+  Contextually reached nominal owners—modules not directly imported whose
+  records, unions, or Interfaces flow through another dependency's
+  signatures—are certified by their `public` interface digests. Every direct
+  import and contextual owner also certifies its resolved native access binding
+  (`direct`, `handle`, or `global`) and selected provider filename.
+  `--source-first`, `--static`, and `--test` do not globally invalidate
+  objects: unchanged production modules without `test_` functions are shared
+  between application and `--test` builds when their resolved bindings and
+  compile flags match.
 
-Reused objects preserve their own native access paths. A module can directly
-import a dynamic provider while another module uses that provider's record
-methods through a returned value, without importing it. Those objects can be
-reused together: the direct importer keeps its provider handle and the indirect
-consumer keeps its global symbol lookup. Reuse still rejects incompatible
-provider changes and changes between direct native and dynamic binding.
+With `--output`, `titanc` reads file metadata (device, inode, size, mode, and
+nanosecond modification and change times) and keeps a digest cache in
+`<output>/.titan/digests`, so a file whose metadata is unchanged since the
+last invocation is not read and hashed again; each module's primary object is
+still read for its
+certificate. A changed file is always rehashed, and deleting the cache is
+safe. Without `--output`, `titanc` keeps no persistent digest cache. An SDK
+installed by its installer also records the digests of Titan's own providers
+and runtime archives, `libbacktrace.a`, and the Lua archive it links, so even
+a fresh output tree, or a build without `--output`, reuses them until those
+files change. If the SDK files are replaced any other way, they are simply
+read and hashed again. After compiling and linking, `titanc` checks every
+input again by the same rule, so an edit made during the build is still
+caught without rereading files that did not change. Unchanged metadata is
+trusted. The times are reported in nanoseconds, but a filesystem may store
+them more coarsely: on HFS+, ext3, or some NFS servers, a same-size edit made
+in place within the same second as the previous write can go unnoticed until
+the file changes again.
 
-The timestamp check is deliberately limited. **The build system owns every
-other invalidation input:** imported modules, C headers, folder membership
-changes, compiler changes, flags, SDK/toolchain settings, selected binary
-providers, and native payloads. Timestamp eligibility does not compare these
-inputs against a previous build; the native-binding compatibility checks do not
-replace dependency invalidation. Use the same source-selection and compilation
-settings in all phases. A clean rebuild is required after changing settings
-unless the build graph already invalidates the affected objects.
+### Native `--c-source` nodes and final-link certification
 
-Missing generated headers needed by a newly compiled importer can be restored
-from a current producer object without rechecking its source. Existing complete
-companions are left untouched. Source-foreign headers include the direct-call
-helpers of local foreign functions, some with copied bodies, so consumer
-rebuild rules must include these headers or the producer object.
+Authored or generated C files passed with repeatable `--c-source FILE` are
+compiled with the invocation's effective native compile flags and toolchain
+identity (excluding Titan-only test-owner and coverage flags) into
+`<output>/.native/<hash>.o` alongside a `<hash>.record` certificate, where
+`<hash>` is derived from the C file's canonical path. On each invocation,
+`titanc` preprocesses each C file and hashes the authored source,
+preprocessed output, transitive header contents, compile command, and
+toolchain identity. When `--incremental` is active and both the input digest
+and current `.o` bytes match the record, `titanc` reuses the object without
+compiling. Resulting objects are linked in `--c-source` command-line order
+before `-X` payloads.
+
+A build script that needs the compiled object itself, for example to copy a
+helper to a fixed path, should ask for it with `--print-c-objects` rather
+than listing `.native/`. Standard output then contains exactly one absolute
+path per `--c-source` argument, in argument order. Moving a checkout leaves
+the nodes keyed by its old paths in place, so `.native/` can hold more than
+one object for the same C file:
+
+```sh
+object=$(titanc -c --incremental -o out/helper --print-c-objects \
+  --c-source native/helper.c)
+cmp -s "$object" out/helper.o || cp -p "$object" out/helper.o
+```
+
+For executable, test, and library builds (without `-c` or `--print-ast`),
+`titanc` maintains a final-link certificate under
+`<output>/.titan-links/<key>/record`, where `<key>` identifies the target's
+set of final outputs. The generated test runner and entrypoint sources live
+beside it in `<output>/.titan-links/<key>/synthetic/`, so an application and
+a test executable sharing one output directory never overwrite each other's.
+The link check runs before test runner rendering, entrypoint generation,
+static-archive validation probes, and native linking. It certifies:
+
+* the link recipe: ordered requested roots, entry module and
+  `--no-uv-bootstrap`, effective link argv (`-L`, `-l`, `--ldflag`,
+  `TITAN_EXTRA_LDFLAGS`), the compiler identity and the physical identities of
+  the linker the compiler actually selects, the archiver, ranlib,
+  resource-compiler, or `dsymutil` tools that target uses, every linker stage
+  and plugin the compiler names for the link, and, with LTO, GCC's LTO
+  compiler stages, discovered test cases, compiler
+  template digest, coverage runtime
+  inventory, Windows launcher manifest and relative provider path, Darwin
+  `.dSYM` policy, native bindings, and target/deployment environment;
+* the actual SHA-256 content digests of all linked module `.o` parts,
+  `--c-source` objects, `-X` payloads, selected dynamic providers, static
+  archives, and runtime inputs;
+* the complete immutable owned output set on disk (executables, `.so`/`.a`
+  pairs, Windows `.exe`/`.dll` pairs, generated Lua shims, and Darwin `.dSYM`
+  bundles), checking file/directory kind, non-symlink status, content digests,
+  and executable permission bits on Unix (mutable runtime `.gcda` counter files
+  and coverage reports are not link outputs); and
+* the resolved native link libraries and file operands (via
+  `-Wl,--dependency-file` on GNU/LLD, `-Wl,-dependency_info` on Darwin ld64,
+  or, where linker dependency output is unavailable, the `-l` libraries
+  resolved through `-L` and compiler `-print-file-name` plus raw archive,
+  object, import-library, `--just-symbols`, and `--retain-symbols-file`
+  operands).
+
+When the link certificate hits, `titanc` restores any missing public `.ffi.h`
+or `.titan.h` headers and exits without generating synthetic C or invoking the
+linker. Pure link changes (`-L`, `-l`, `--ldflag`, `-X`, `--exe`) or
+implementation-only edits inside a dynamic provider miss only the final link and
+relink existing module objects without recompiling Titan modules.
+
+### Verbose hit and miss diagnostics
+
+Passing `-v` or `--verbose` writes per-module, per-C-source, and per-link
+decisions, and the native commands `titanc` runs, to standard error. Module
+decisions are buffered and flushed in deterministic plan order. Compiler
+output replayed from workers and native jobs also goes to standard error, so
+standard output stays reserved for requested results such as
+`--print-c-objects` paths:
+
+```text
+Titan object hit <module>: <primary-object-path>
+Titan object miss <module>: <code>[ <detail>]
+Titan object uncertified <module>: <error>
+Titan native hit <c-source-path>
+Titan native miss <c-source-path>
+Titan link hit <target-path>
+Titan link miss <target-path>: <reason>
+titanc: waiting for build lock '<lock-path>'
+```
+
+| Object miss code (`<code>[ <detail>]`) | Meaning |
+| --- | --- |
+| `no-object` | Primary `<stem>.o` is missing or is not a regular file. |
+| `record-unreadable [<detail>]` | Object file or its `.titan.source` metadata section cannot be read or decoded. |
+| `record-schema [<detail>]` | Another Titan ABI, an older or incompatible record schema or digest algorithm, a module-name mismatch, or missing/invalid certificate fields. |
+| `configuration compiler\|preamble\|toolchain\|options` | Loaded compiler/parser/frontend Lua inventory, generated-C preamble header closure, native toolchain identity, or effective compile options changed. |
+| `source-set added\|removed <path>` | Flat-versus-folder layout or folder contributor membership changed. |
+| `source-content <path>` | SHA-256 content of the main `.titan` source or a contributor changed, or could not be read. |
+| `output-moved` | Output stem differs from the stem recorded in the certificate. |
+| `codegen-options c_parts\|split_threshold\|test_flags\|coverage` | Per-module code-generation policy changed. |
+| `parts [<detail>]` | A recorded generated `.c` part, `.priv.h` header, or sidecar `.part<k>.o` is missing, not a regular file, carries unexpected metadata, or mismatches the primary target fingerprint. |
+| `coverage-artifacts <path>` | A required `.c` source or `.gcno` note file for a coverage-instrumented module is missing or not a regular file. |
+| `c-input <path>: content\|provenance\|missing\|unreadable\|candidate\|changed-during-read` | A transitive C header or include-search candidate changed content, declaring realpath origin, existence/kind, or readability, or changed while being read. |
+| `import-interface <module> (public\|source)` | A direct dependency's semantic public interface, nominal layout, copied `.titan.h` helper body, or (for `.titan` imports) source-private manifest changed. |
+| `owner-interface <module>` | A contextually reached nominal owner's public interface or layout changed. |
+| `import-binding <module>: <before> -> <after>` | A direct dependency's native binding (`direct`, `handle`, or `global`) or selected provider path changed. |
+| `owner-binding <module>: <before> -> <after>` | A contextual nominal owner's native binding changed. |
+| `dependency-unavailable <names>` / `dependency-rebuilt <names>` | A dependency could not supply a certified interface digest (or was freshly checked in an in-process single-pass loader). |
+
+Common `Titan link miss <target>: <reason>` reasons include `missing record`
+(or a record read error on a cold link), `link record schema`,
+`link inputs changed`, `link output set changed`, `link outputs changed` (or a
+specific missing/nonregular/non-executable output error),
+`native libraries changed`, or an uncacheable native flag diagnostic (`opaque
+linker input mechanism: <flag>`, `opaque native C input mechanism`,
+`linker scripts require dependency output`, or
+`cannot resolve native library: <name>`).
+
+### Certification boundaries and limitations
+
+* **External build tools still own non-Titan inputs and actions.** Building
+  third-party native libraries (such as libuv, OpenSSL, SQLite, or llhttp),
+  running custom code generators (whose generated `.c` or `.titan` outputs can
+  then be passed to `titanc`), preparing SDKs and environment variables,
+  assembling platform distribution bundles, and running test binaries or
+  external coverage aggregators remain build-tool responsibilities.
+* **Always invoke `titanc`.** Certification runs only when `titanc` runs. A
+  build script that skips invoking `titanc` based on incomplete timestamp lists
+  can miss header, flag, or interface changes.
+* **Compiler-reserved output names.** Before any module compilation starts,
+  `titanc` reserves every file the planned build may write and checks the
+  whole set for collisions with sources, native inputs, the C headers of
+  already certified modules, and other outputs; a module being recompiled
+  checks the C headers it discovers against the same set before writing its
+  generated module artifacts. For
+  each module this includes `<stem>.part1.c`/`.part1.o` through the configured
+  `--c-parts` maximum, even when the module generates fewer parts, along with
+  `<stem>.priv.h`, `<stem>.titan.h`, and `<stem>.ffi.h`. An authored file at a
+  reserved name is an error, never overwritten: keep hand-written C and headers
+  away from those names.
+* **Linker-reported library inputs do not rewalk earlier `-L` directories.**
+  Link certification hashes the library files reported by the linker (or
+  resolved through `-L` and `$(CC) -print-file-name` when linker dependency
+  output is unavailable). On a warm check, `titanc` verifies the recorded
+  library files' byte digests; it does not rewalk `-L` search paths to check
+  whether a newly created file in an earlier `-L` directory would shadow a
+  previously linked library. Opaque compiler or linker mechanisms (`@file`
+  response files, `-fplugin`/`--plugin`, `--specs`, `-Xclang`, `-wrapper`,
+  `-Xlinker`, file lists, and, without linker dependency output, linker
+  scripts, thin archives, and any linker option outside the supported set)
+  mark the `--c-source` node or final link uncacheable so it rebuilds cleanly.
+* **Toolchain physical identity.** Native tool identity combines the
+  compiler's self-description (its `-E -v` banner and predefined macros) with
+  the physical file metadata (resolved path, size, file identity, mode, and
+  modification and change times) of the compiler driver, an explicit
+  `ccache`/`sccache`/`distcc` target, named stage binaries (`cc1`, `as`), and
+  linker/archiver/resource tools. It does not hash tool executable bytes; an
+  in-place binary replacement at the same path that preserves its size and
+  both timestamps, or an opaque wrapper script that hides a changed downstream
+  binary, is not detected.
+* **Stable compiler installation and inputs during a build.** The compiler
+  installation, SDK, and source/header inputs must remain stable while a build
+  runs. Worker processes verify the loaded `compiler` Lua inventory against the
+  coordinator and fail with `compiler installation changed during build` on a
+  mismatch. Read-race guards and pre-publication revalidation reject observed
+  concurrent file modifications.
+* **Whole-interface and compiler-Lua digests are conservative.** Interface
+  digests cover a module's complete public interface (or complete
+  source-private manifest for `.titan` imports) rather than per-consumer symbol
+  usage: adding an unused export rechecks direct importers, and editing a doc
+  comment in a `.titan`-imported module rechecks its explicit source consumers.
+  Editing a comment in `titan-compiler/*.lua` or `c-parser/*.lua` invalidates
+  `configuration compiler` across all modules.
+* **Shared source-resolver `stat` behavior.** Automatic test-root discovery
+  (`--test-dir`) reports errors from its own directory `stat`, `list`, entry
+  `lstat`, and symlink target `stat` calls, then delegates candidate selection
+  to the shared source resolver, which on POSIX treats a candidate `stat`
+  failure as an absent candidate.
+* **Local-filesystem output locking.** `titanc` coordinates concurrent
+  invocations sharing an output tree or `--exe` destination directory through
+  OS-backed locks on `<dir>/.titan-build.lock` (`flock` on Linux/macOS,
+  `LockFileEx` on Windows). Locking is supported on local Linux, macOS, and
+  Windows NTFS filesystems; network filesystems (such as NFS or SMB) are not
+  covered.
+* **GNU Make jobserver pool sharing.** Sharing a parent Make's job pool across
+  `titanc`'s internal worker and native jobs requires GNU Make 4.4 or newer's
+  FIFO jobserver (`--jobserver-auth=fifo:...`), or Linux where inherited pipe
+  descriptors can be reopened privately through `/proc/self/fd`. When a parent
+  Make advertises an inherited pipe jobserver that cannot be reopened privately
+  (such as macOS's stock GNU Make 3.81 or GNU Make earlier than 4.4 on macOS),
+  `titanc` warns once and enforces its own local `--jobs`/`TITAN_JOBS` cap
+  without borrowing from the parent pool
+  ([Compiler jobs and GNU Make](build-profiles.md#compiler-jobs-and-gnu-make)).
 
 ## Optimization and toolchain settings
 
-Titan-generated C defaults to `-O3` on Linux and macOS. On Linux, GCC and Clang
-also receive `-flto=auto -ffat-lto-objects` during compilation and linking. These
-objects retain native code and readable Titan metadata alongside the compiler's
-intermediate representation. The final provider or executable link can inline
-and propagate constants across separately compiled source objects and members
-of Titan-produced archives. Normal export, private visibility, and provider
-identity rules still apply. A dependency used through an existing DSO remains
-a dynamic boundary.
+Titan-generated C defaults to `-O3` on Linux, macOS, and Windows. On Linux, GCC
+and Clang also receive `-flto=auto -ffat-lto-objects` during compilation and
+linking. These objects retain native code and readable Titan metadata alongside
+the compiler's intermediate representation. The final provider or executable
+link can inline and propagate constants across separately compiled source
+objects and members of Titan-produced archives. Normal export, private
+visibility, and provider identity rules still apply. A dependency used through
+an existing DSO remains a dynamic boundary.
 
 The Linux compiler/linker toolchain must support fat LTO objects and the
 matching LTO backend. Titan keeps the ordinary native-container contract; it
 does not silently fall back to bitcode-only objects or omit requested LTO.
 
-macOS does not enable LTO by default: its objects retain the ordinary Mach-O
-representation consumed by Titan's metadata reader. Bitcode-only object files
-are not supported module inputs.
+macOS and Windows do not enable LTO by default: their objects retain the
+ordinary Mach-O or COFF representation consumed by Titan's metadata reader.
+Bitcode-only object files are not supported module inputs.
 
-Use the same compiler and build configuration for objects and their final link.
-Make must invalidate objects when those settings change. Fixture and debugging
-builds can explicitly override the defaults:
+Native compile and link flags are normalized once per invocation in a fixed
+order: profile defaults first, then `TITAN_EXTRA_CPPFLAGS`,
+`TITAN_EXTRA_CFLAGS`, and `TITAN_EXTRA_LDFLAGS` from the environment, and
+finally command-line `-I`, `-D`, `--cflag`, `-L`, `-l`, and `--ldflag` switches
+in command-line order
+([Output directories](output-directory.md#native-compiler-and-linker-switches)).
+Fixture and debugging builds can override the optimization defaults either via
+CLI switches or environment variables:
+
+```sh
+titanc --incremental -o out --cflag=-O0 --cflag=-fno-lto \
+  --ldflag=-O0 --ldflag=-fno-lto project.main
+```
 
 ```sh
 TITAN_EXTRA_CFLAGS='-O0 -fno-lto' TITAN_EXTRA_LDFLAGS='-O0 -fno-lto' \
-  titanc project.main
+  titanc --incremental -o out project.main
 ```
 
-Extra C flags are appended to compilation commands; extra linker flags are
-appended to final links. Set both when disabling the complete optimization
-pipeline. They do not themselves invalidate cached objects: rebuild affected
-objects with the same override before an incremental final link.
+With `--incremental`, changing compile flags (`-I`, `-D`, `--cflag`,
+`TITAN_EXTRA_CPPFLAGS`, `TITAN_EXTRA_CFLAGS`, or `TITAN_BUILD_PROFILE`)
+automatically misses `configuration options` and recompiles affected objects,
+while changing link-only flags (`-L`, `-l`, `--ldflag`, `TITAN_EXTRA_LDFLAGS`,
+`-X`, or `--exe`) misses only the final-link certificate and relinks existing
+module objects.
 
 ## A Make build
 
-For two flat modules, where `project.feature` imports `project.base`:
+Because `titanc --incremental` discovers the module import graph, certifies
+sources, C headers, interfaces, flags, `--c-source` files, and final links, and
+coordinates shared output directories, a project Makefile does not need
+per-module `.o` rules, hand-maintained import lists, header prerequisites, or
+configuration stamp files. Mark each `titanc` recipe phony and prefix it with
+`+` so GNU Make passes its jobserver:
 
 ```make
-.DELETE_ON_ERROR:
-TITANC = titanc
-TITAN_BUILD_FLAGS = --source-first --incremental
-BUILD_INPUTS = Makefile build-config.mk
+TITANC ?= titanc
+TITAN_JOBS ?= 4
+TITAN_FLAGS = --static --incremental --output build -j $(TITAN_JOBS) \
+  -I include --c-source src/native_helper.c
 
-project/base.o project/base.ffi.h &: project/base.titan $(BUILD_INPUTS)
-	$(TITANC) $(TITAN_BUILD_FLAGS) -c project.base
+.PHONY: all app tests test clean
+all: app
 
-project/feature.o project/feature.ffi.h &: project/feature.titan \
-        project/base.o project/base.ffi.h $(BUILD_INPUTS)
-	$(TITANC) $(TITAN_BUILD_FLAGS) -c project.feature
+app:
+	+$(TITANC) $(TITAN_FLAGS) --exe build/app app.main
 
-project.so project.a project/base.lua project/feature.lua &: \
-        project/base.o project/feature.o $(BUILD_INPUTS)
-	$(TITANC) $(TITAN_BUILD_FLAGS) project.base project.feature
+tests:
+	+$(TITANC) $(TITAN_FLAGS) --test --exe build/app-tests --test-dir tests
+
+test: app tests
+	./build/app-tests
+
+clean:
+	rm -rf build
 ```
 
-The grouped targets require GNU Make support for `&:`. With another Make,
-use one project-owned completion stamp per recipe, make consumers depend on
-that stamp, and remove the stamp when cleaning any of its outputs.
+In this layout:
 
-`build-config.mk` is maintained by the project when compiler, flags, or SDK
-settings change; Titan neither creates nor interprets it. Add actual C headers,
-external providers, and native payloads to the appropriate prerequisites.
-Modules defining source foreign functions also produce `.titan.h`; list that
-output and make source consumers depend on it. Listing the producer object
-conservatively rebuilds consumers for implementation changes too.
+* `make app` and `make tests` always invoke `titanc`. On a warm build where
+  nothing changed—including immediately after an identical SDK reinstall—all
+  module objects, `src/native_helper.c`, and the final link record under
+  `build/.titan-links/` hit, so `titanc` compiles no object and runs no link;
+  only certification probes such as preprocessing run.
+* Editing a function body in a dependency module recompiles only that module's
+  `.o` and relinks; consumers whose imported public (or `.titan` source-private)
+  interface did not change reuse their existing `.o` files.
+* Editing `include/header.h` or `src/native_helper.c` recompiles only the
+  modules or native C node whose closure includes that file, without listing C
+  headers in `Makefile`.
+* `app` and `tests` share `build/`. Unchanged production modules without
+  `test_` functions compile once and are reused by both targets, while each
+  executable keeps its own link certificate and synthetic entrypoint/runner
+  directory under `build/.titan-links/<key>/`. If `make -j2 test` runs `app`
+  and `tests` concurrently, `build/.titan-build.lock` serializes the two
+  `titanc` invocations so the second waits without holding Make jobserver tokens
+  and then reuses the objects published by the first.
 
-For folder modules, explicitly list all constituents and make the file
-declaring that inventory a prerequisite. A source directory's timestamp is not
-a suitable substitute: writing generated files in it would invalidate the
-directory again.
+Keep native dependency builds (such as bundled C libraries), custom code
+generators, packaging rules, and test execution in Make; pass any generated or
+authored helper `.c` files to `titanc` with `--c-source` and prebuilt native
+archives or objects with `-X`. See
+[Static compiled modules](static-compiled-modules.md) and
+[Multi-module libraries](multi-module-libraries.md) for provider contracts.
 
-The final command still names logical modules. Titan combines their objects
-into its ordinary `.so`/`.a` pair and shims, or links its normal executable.
-Keep native support payloads and final libraries in the existing `-X`/`-l`
-options on this final command. Titan module objects are not `-X` payloads and
-are not a new installed library format. See [Static compiled modules](static-compiled-modules.md)
-and [Multi-module libraries](multi-module-libraries.md) for provider contracts.
-
-The standard library uses this same model: one object target per logical
-module, followed by the existing combined `titan.so`/`titan.a` publication.
-After installing with `luarocks make`, `make stdlib` uses that installed compiler
-and its SDK to rebuild changed standard modules and their dependents. With no
-changes and the same build settings, it reuses the objects and provider pair
-left by the installation. `make install-stdlib` builds if necessary and copies
-that pair and its shims into the installation. With the prefix's Lua on `PATH`, these Make commands
-detect `PREFIX` automatically; an explicit `PREFIX` still takes precedence.
-Changed modules compile side by side in one Make job pool of `TITAN_JOBS` slots
-(default four with GNU Make 4.2 or later; earlier GNU Make builds serially
-unless `TITAN_JOBS` is set) unless `make -jN` supplies another ([Build and test
-parallelism](build-profiles.md#build-and-test-parallelism)). Each module's
-`.parts` file lists its generated part files; a missing, incomplete, or
-damaged list or part rebuilds that whole module, even when only its object is
-requested.
+The Titan repository's own standard-library and native-test targets use this
+same single-invocation model: `make stdlib` and `make stdlib-objects` invoke
+`titanc --output out --source-first --incremental -j$(TITAN_JOBS)` over the 26
+standard-library roots (with `-c` for objects only, or `-X` for the runtime and
+bundled native archives when linking `titan.so` and `titan.a`), and
+`make titan-stdlib-test-build` invokes the installed `titanc --test
+--incremental --no-uv-bootstrap` with `--test-dir`, `--exe`, and `--c-source`
+for its aggregate C helpers. After an identical `luarocks make --force`
+reinstall, rebuilding the native test aggregate hits every module object,
+`--c-source` helper, and final link without recompiling or relinking.
 
 ## Separate standalone executables
 
-The same object workflow supports applications. For example, `app.helper` may
-import `titan.math`, while `app.main` imports `app.helper.titan` and a separately
-built `vendor.algorithms` provider:
+An application can build in one `--incremental` invocation or prepare certified
+objects with `-c --incremental` first. For example, if `app.helper` imports
+`titan.math`, and `app.main` imports `app.helper.titan` and a separately built
+`vendor.algorithms` provider:
 
 ```sh
-titanc vendor.algorithms
-titanc --static -c --incremental app.helper
-titanc --static -c --incremental app.main
-titanc --static --incremental app.main
-./app/main
+titanc -o out vendor.algorithms
+TITAN_PATH_0_6='out/?.a;out/?.so;;' \
+  titanc -o out --static --incremental --exe out/bin/app app.main
+./out/bin/app
 ```
 
-The final invocation detects `main` from the object metadata, reuses both app
-objects, and links the selected standard-library and external-library archives.
-Use the same `--static`/source-selection policy for every application phase.
-When native payloads or system-provider libraries are required, pass `-X` and
-`-l` only on the final invocation, with the active provider's normal link
-inputs. Compile-only invocations do not emit an executable or entrypoint.
+When separate object steps are desired, `-c --incremental` certifies both
+dependencies and explicit roots:
+
+```sh
+TITAN_PATH_0_6='out/?.a;out/?.so;;' \
+  titanc -o out --static -c --incremental app.helper
+TITAN_PATH_0_6='out/?.a;out/?.so;;' \
+  titanc -o out --static -c --incremental app.main
+TITAN_PATH_0_6='out/?.a;out/?.so;;' \
+  titanc -o out --static --incremental --exe out/bin/app app.main
+./out/bin/app
+```
+
+Repeating either `-c --incremental` command when inputs are unchanged is a
+certified hit and compiles no object. The final invocation detects
+`main` from the certified object metadata, reuses both application objects,
+links the selected standard-library and external-library archives, and records
+the final link certificate under `out/.titan-links/`. Pass `--exe`, `-L`, `-l`,
+`--ldflag`, `-X`, and `--no-uv-bootstrap` on the final link invocation;
+compile-only invocations do not emit an executable or entrypoint.
 
 ## Separate native test executables
 
-Compile each test owner after its source dependencies, then link the requested
-roots from a consistent build directory and source-selection configuration:
+A test suite can likewise build in one whole-graph invocation—listing roots
+explicitly or discovering them with `--test-dir`—or precompile objects with
+`-c --test --incremental`:
 
 ```sh
-titanc --test -c --incremental project.unit_tests
-titanc --test -c --incremental project.integration_tests
-titanc --test --incremental project.unit_tests project.integration_tests
+titanc -o out --test --incremental --exe out/project-tests \
+  --test-dir tests
+./out/project-tests
 ```
 
-`-c --test` discovers cases to apply the test-owner compilation flags but emits
-no runner or executable. The final invocation discovers cases from both fresh
-source and current objects, generates a new runner, and links the usual test
-executable. Application `main` functions in test roots remain ignored. Test
-additions/removals become visible after Make rebuilds the owning object.
+Or with separate compile-only invocations:
 
-`titan.test` is an ordinary dependency of the thin generated runner. An
-installed SDK supplies its compiled implementation; no separate support source
-or object is built. Production source objects may be shared with application
-builds when flags, ABI, and selected dependency providers match. A test's
-explicit `.titan` import does not change the producer's generated code.
-Track imports, foreign headers, provider changes, and configuration inputs in
-the same Make graph. Compile actual test owners with `--test` so their native
-frames retain the required test flags. `--no-uv-bootstrap`, native payloads,
-and link libraries belong on the final command. The standard-library test
-aggregate uses this object graph and one final executable; it retains the same
-runtime filters and test ownership as an ordinary `--test` build.
+```sh
+titanc -o out --test -c --incremental project.unit_tests
+titanc -o out --test -c --incremental project.integration_tests
+titanc -o out --test --incremental --exe out/project-tests \
+  project.unit_tests project.integration_tests
+```
+
+`-c --test --incremental` discovers `test_` cases to certify and apply the
+test-owner compilation flags (`-fno-optimize-sibling-calls`) without rendering
+a runner or linking an executable. The final `--test --incremental` invocation
+collects discovered cases from certified objects and any freshly compiled
+modules, checks the target's link certificate under `out/.titan-links/`, and on
+a miss renders the synthetic runner and entrypoint under
+`out/.titan-links/<key>/synthetic/` and links the test executable. Application
+`main` functions in test roots remain ignored.
+
+`titan.test` is an ordinary dependency of the thin generated runner, supplied
+by the installed SDK's compiled provider. Production source objects without
+`test_` functions are shared between application and test builds in the same
+output directory when native compile flags, SDK, and resolved dependency
+bindings match. A test's explicit `.titan` import exposes the producer's local
+declarations without changing the producer's generated object.
+`--no-uv-bootstrap`, `--exe`, `-L`, `-l`, `--ldflag`, and `-X` belong on the
+final link command.

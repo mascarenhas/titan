@@ -1685,7 +1685,7 @@ dofile(program)
                 for _, argument in ipairs({ ... }) do
                     argv[#argv + 1] = scoped(argument)
                 end
-                run(argv)
+                return run(argv)
             end
 
             build({
@@ -1719,12 +1719,18 @@ dofile(program)
             assert(file:close())
             generated[scoped("bc180_consumer")] = true
 
-            compile("-c", "--incremental", "bc180_consumer")
+            local initial = compile("-c", "--incremental", "-v", "bc180_consumer")
+            assert.matches("Titan object miss " .. scoped("bc180_consumer") .. ": no-object",
+                initial, 1, true)
             local object = read(stem .. ".o")
             local future = os.time() + 60
             assert(lfs.touch(scoped(stem .. ".o"), future))
-            for _ = 1, 2 do
-                compile("--incremental", "bc180_consumer")
+            for index = 1, 2 do
+                local warm = compile("--incremental", "-v", "bc180_consumer")
+                if index == 1 then
+                    assert.matches("Titan object hit " .. scoped("bc180_consumer") .. ":",
+                        warm, 1, true)
+                end
                 assert.equal(future, lfs.attributes(scoped(stem .. ".o"), "modification"))
                 assert.truthy(read(stem .. ".o") == object,
                     "warm final link rebuilt the compile-only consumer object")
@@ -1752,6 +1758,33 @@ dofile(program)
             assert.truthy(read("bc180_consumer.so") == image)
             assert.truthy(read(stem .. ".o") == object)
             rejects("read")
+
+            build({ { name = "bc180_owner", src = [[
+                record Item n: integer end
+                function make(): Item return Item.new(17) end
+                function Item:read(): integer return self.n end
+            ]] } })
+            local import_miss = compile("--incremental", "-v", "bc180_consumer")
+            assert.matches(
+                "Titan object miss " .. scoped("bc180_consumer") ..
+                ": import-interface " .. scoped("bc180_provider") .. " (public)",
+                import_miss, 1, true)
+            runs("assert(consumer.run() == 262)")
+
+            build({ { name = "bc180_owner", src = [[
+                record Item
+                    local hidden: integer
+                    n: integer
+                end
+                function make(): Item return Item.new(1, 27) end
+                function Item:read(): integer return self.n end
+            ]] } })
+            local owner_miss = compile("--incremental", "-v", "bc180_consumer")
+            assert.matches(
+                "Titan object miss " .. scoped("bc180_consumer") ..
+                ": owner-interface " .. scoped("bc180_owner"),
+                owner_miss, 1, true)
+            runs("assert(consumer.run() == 272)")
         end)
     end)
 end)
