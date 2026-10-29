@@ -50,7 +50,7 @@ describe("installed standard-provider compiler integration", function()
                 " -E -e 'package.cpath=\"\"' \"$@\"\n")
             assert(os.execute("chmod +x " .. cdriver.shell_quote(workspace .. "/bin/lua")))
             driver.INSTALL_PATHS = { root = workspace }
-            package.cpath = installed.root .. "/lib/titan/0.6/?.so"
+            package.cpath = installed.root .. "/lib/lua/5.5/?.so"
             package.loaded.titan = { _loadlib = function()
                 error("fresh validation reused parent support")
             end }
