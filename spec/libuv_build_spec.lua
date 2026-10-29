@@ -3167,7 +3167,8 @@ int main(void) {
         end)
 
     -- The support module is ltitanlib plus the shared path code, linked as a
-    -- loadable Lua bundle on macOS; it never carries the runtime archive.
+    -- loadable Lua bundle on macOS; it never carries the runtime archive and
+    -- exports only luaopen_titan.
     it("links the titan support module from its two objects as a Lua bundle",
         function()
             if platform.windows then
@@ -3185,7 +3186,8 @@ int main(void) {
                 tostring(code) .. ")")
             local normalized = output:gsub("%s+", " ")
             local link = assert(normalized:match(
-                '%-bundle %-undefined dynamic_lookup %-o "%$tmp" ([^;]*);'),
+                '%-bundle %-undefined dynamic_lookup ' ..
+                '%-Wl,%-exported_symbol,_luaopen_titan %-o "%$tmp" ([^;]*);'),
                 normalized)
             -- Make prints the recipe's line continuations verbatim.
             local inputs = {}

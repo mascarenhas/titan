@@ -420,6 +420,15 @@ STDLIB_LICENSES := LICENSES/libuv-LICENSE LICENSES/libuv-LICENSE-extra \
 # checkout compiler loads it from here; installs deploy it to lib/lua/5.5.
 TITAN_SUPPORT_MODULE := titan-runtime/bootstrap/titan.so
 STDLIB_BOOTSTRAP_PREREQ := $(TITAN_SUPPORT_MODULE)
+# The support module is an ordinary Lua C module exporting only luaopen_titan;
+# titan_path.o's globals stay local to this image so a process that also
+# preloads libtitan.a (the language server) cannot interpose them.
+TITAN_SUPPORT_EXPORTS := scripts/titan_support_exports.map
+ifeq ($(HOST_OS),Darwin)
+  TITAN_SUPPORT_EXPORT_FLAGS ?= -Wl,-exported_symbol,_luaopen_titan
+else
+  TITAN_SUPPORT_EXPORT_FLAGS ?= -Wl,--version-script=$(TITAN_SUPPORT_EXPORTS)
+endif
 ROCK_LUA_INCDIR ?= $(PREFIX)/include
 ROCK_LUA_HEADERS = $(addprefix $(ROCK_LUA_INCDIR)/,lua.h luaconf.h lauxlib.h)
 # Stock LuaRocks supplies optimized dependency flags. Apply the Titan payload
@@ -1037,7 +1046,8 @@ $(TITAN_PATH_O): titan-runtime/titan_path.c titan-runtime/titan.h \
 		-c titan-runtime/titan_path.c -I titan-runtime -I $(TITAN_RUNTIME_LUA_SOURCE_PATH) \
 		-o $@
 
-$(LTITANLIB_O): titan-runtime/ltitanlib.c \
+$(LTITANLIB_O): titan-runtime/ltitanlib.c titan-runtime/titan.h \
+		titan-runtime/titan_winloader.h \
 		$(wildcard $(ROCK_LUA_HEADERS)) $(LUA_SDK_PREREQ)
 	$(CC) $(ROCK_CFLAGS) $(TITAN_EXTRA_CFLAGS) \
 		-I"$(ROCK_LUA_INCDIR)" -c "$<" -o "$@"
@@ -1049,10 +1059,11 @@ $(TITAN_RUNTIME_LIB): $(TITAN_RUNTIME_OBJECTS)
 
 # An ordinary Lua C module exporting only luaopen_titan; it needs neither the
 # standard library nor the rest of the runtime.
-$(TITAN_SUPPORT_MODULE): $(LTITANLIB_O) $(TITAN_PATH_O)
+$(TITAN_SUPPORT_MODULE): $(LTITANLIB_O) $(TITAN_PATH_O) $(TITAN_SUPPORT_EXPORTS)
 	@mkdir -p "$(@D)"
 	@set -e; tmp="$@.tmp"; rm -f "$$tmp"; \
-	if $(ROCK_LD) $(ROCK_LIBFLAG) -o "$$tmp" $(LTITANLIB_O) $(TITAN_PATH_O) \
+	if $(ROCK_LD) $(ROCK_LIBFLAG) $(TITAN_SUPPORT_EXPORT_FLAGS) \
+		-o "$$tmp" $(LTITANLIB_O) $(TITAN_PATH_O) \
 		$(TITAN_EXTRA_LDFLAGS); then \
 		mv -f "$$tmp" "$@"; \
 	else \

@@ -1,0 +1,10 @@
+/* The support module is one ordinary Lua C module: only luaopen_titan may be
+   exported. titan_path.o's internals stay local to this image so a process
+   that also preloads libtitan.a (the language server) cannot interpose them.
+   libtitan.a keeps default visibility; this map applies to this link only. */
+{
+  global:
+    luaopen_titan;
+  local:
+    *;
+};
