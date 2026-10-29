@@ -166,7 +166,7 @@ For Unix verification, choose an absolute isolated prefix and put its `bin` on
 ```sh
 make test                                           # prepare/reinstall and run the full mixed suite
 make busted-test BUSTED_FILTER='parser'              # installed compiler snapshot, Busted only
-TITAN_ROCKS_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1 busted --run=checkout spec/parser_spec.lua
+TITAN_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1 busted --run=checkout spec/parser_spec.lua
 make titan-stdlib-test                              # build and run the native aggregate
 make titan-stdlib-test-run TITAN_FILTER='^ssl[.]tests[.]' # reuse its built executable
 ```
@@ -175,7 +175,7 @@ Default Busted and `luarocks test` use the installed compiler; the checkout
 profile loads edited compiler Lua with the selected installed SDK. It does not
 refresh runtime/providers. `luarocks test` does not build the rock; `make test`
 reinstalls it. Filters for Busted and native Titan tests are independent.
-Canonical full runs must start without ambient `ROCKS_TREE`, `TITAN_ROCKS_ROOT`,
+Canonical full runs must start without ambient `ROCKS_TREE`, `TITAN_ROOT`,
 `TITAN_EXTRA_CPPFLAGS`, or `TITAN_NO_LINE_DIRECTIVES`; clear Lua path overrides
 for manual prefix-tool invocations too. See the workflow for focused overrides.
 

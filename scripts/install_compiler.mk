@@ -2,10 +2,14 @@
 # use the selected tree directly; LuaRocks deploys and inventories staged files.
 INST_BINDIR ?= $(TITAN_INSTALL_TREE)/bin
 INST_LUADIR ?= $(TITAN_INSTALL_TREE)/share/lua/5.5
+INST_LIBDIR ?= $(TITAN_INSTALL_TREE)/lib/lua/5.5
 INST_CONFDIR ?= $(TITAN_INSTALL_TREE)/etc
 TITAN_COMPILER_LUA := $(wildcard titan-compiler/*.lua \
 	titan-compiler/checker/*.lua titan-compiler/coder/*.lua c-parser/*.lua)
 
+# The including Makefile names the built `titan` Lua support module
+# (TITAN_SUPPORT_MODULE). It is an ordinary native Lua module: LuaRocks
+# deploys it to lib/lua/5.5 and owns it like any other rock file.
 .PHONY: install-compiler
 install-compiler:
 	@set -e; \
@@ -14,7 +18,9 @@ install-compiler:
 	  mkdir -p "$${destination%/*}"; \
 	  install -p -m 0644 "$$source" "$$destination"; \
 	done; \
-	mkdir -p "$(INST_BINDIR)" "$(INST_CONFDIR)"; \
+	mkdir -p "$(INST_BINDIR)" "$(INST_CONFDIR)" "$(INST_LIBDIR)"; \
+	install -p -m 0755 "$(TITAN_SUPPORT_MODULE)" \
+	  "$(INST_LIBDIR)/$(notdir $(TITAN_SUPPORT_MODULE))"; \
 	install -p -m 0755 titanc "$(INST_BINDIR)/titanc"; \
 	install -p -m 0644 THIRD_PARTY_NOTICES.md "$(INST_CONFDIR)/"
 

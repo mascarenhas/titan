@@ -1,6 +1,6 @@
 -- Run the ordinary multi-root compiler orchestration with the isolated paths
 -- used by async standard-library specs. The parent sets CWD to the workspace,
--- so the grouped provider, archive, shims, and generated sources stay private.
+-- so the grouped provider, archive and generated sources stay private.
 local repo = assert(arg[1])
 local source_root = assert(arg[2])
 local runtime_root = assert(arg[3])

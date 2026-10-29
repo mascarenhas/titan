@@ -5,12 +5,6 @@ local installed_prefix = require "spec.support.installed_prefix"
 
 local M = {}
 local REPO = lfs.currentdir()
-local STANDARD_MODULES = {
-    "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
-    "url", "http", "websocket", "os", "path", "peg", "string", "math", "lua", "iteration", "gc",
-    "test", "reflect", "sqlite3", "json", "protobuf", "transfer", "thread",
-}
-
 
 local function quote(word)
     return "'" .. tostring(word):gsub("'", "'\\''") .. "'"
@@ -43,56 +37,29 @@ local function fresh_workspace_path(label)
     return path
 end
 
-local function production_layout(library_root, shim_root)
+local function production_layout(library_root)
     return {
         kind = "container",
         library_root = library_root,
-        shim_root = shim_root,
         container = library_root .. "/titan.so",
     }
-end
-
-local function valid_production_layout(layout)
-    if not exists(layout.container) then return false end
-    for _, module in ipairs(STANDARD_MODULES) do
-        if not exists(layout.shim_root .. "/titan/" .. module .. ".lua") then
-            return false
-        end
-    end
-    return true
 end
 
 local function find_standard_layout()
     local layouts = {}
     local prefix = os.getenv("PREFIX")
     if prefix and prefix ~= "" then
-        layouts[#layouts + 1] = production_layout(
-            prefix .. "/lib/titan/0.6", prefix .. "/share/lua/5.5")
+        layouts[#layouts + 1] = production_layout(prefix .. "/lib/titan/0.6")
     end
-
-    -- Discover the two owners independently. The supported installation puts
-    -- both under one rocks tree today, but PREFIX/ROCKS_TREE equality is
-    -- deployment policy rather than a helper invariant.
-    local installed_container = package.searchpath("titan", package.cpath)
-    local installed_shim = package.searchpath(
-        "titan.coroutine", package.path)
-    local installed_root = installed_container and
-        installed_container:match(
-            "^(.*)/lib/titan/0%.6/titan%.so$")
-    local installed_shim_root = installed_shim and
-        installed_shim:match("^(.*)/titan/coroutine%.lua$")
-    if installed_root and installed_shim_root then
-        layouts[#layouts + 1] = production_layout(
-            installed_root .. "/lib/titan/0.6", installed_shim_root)
-    end
-
-    layouts[#layouts + 1] = production_layout(REPO .. "/out", REPO .. "/out")
+    -- The active installation's compiler root owns its provider directory.
+    local root = installed_prefix.active()
+    layouts[#layouts + 1] = production_layout(root .. "/lib/titan/0.6")
+    layouts[#layouts + 1] = production_layout(REPO .. "/out")
     for _, layout in ipairs(layouts) do
-        if valid_production_layout(layout) then return layout end
+        if exists(layout.container) then return layout end
     end
-    error("async stdlib specs require the combined titan.so and all twenty-five " ..
-          "generated titan/*.lua shims; run make stdlib first", 0)
-
+    error("async stdlib specs require the combined titan.so; " ..
+          "run make stdlib first", 0)
 end
 M.standard_layout = find_standard_layout
 
@@ -105,7 +72,6 @@ local function exact_layout(root)
     return {
         kind = "exact",
         library_root = root,
-        shim_root = root,
         providers = {},
     }
 end
@@ -117,8 +83,6 @@ local function assert_layout(layout)
         "unknown stdlib layout kind: " .. tostring(layout.kind))
     assert.truthy(type(layout.library_root) == "string",
         "stdlib layout is missing library_root")
-    assert.truthy(type(layout.shim_root) == "string",
-        "stdlib layout is missing shim_root")
     if layout.kind == "container" then
         assert.equals(layout.library_root .. "/titan.so", layout.container)
     elseif layout.container then
@@ -136,28 +100,11 @@ local function register_exact_provider(layout, modname)
     assert.equals("exact", assert_layout(layout).kind)
     local relative = modname:gsub("%.", "/")
     local provider = layout.library_root .. "/" .. relative .. ".so"
-    local shim = layout.shim_root .. "/" .. relative .. ".lua"
     assert.truthy(exists(provider),
         "exact variant is missing provider " .. provider)
-    assert.truthy(exists(shim), "exact variant is missing shim " .. shim)
-    local contents = M.read(shim)
-    assert.truthy(contents:find(
-        "package.searchpath(" .. string.format("%q", modname) ..
-            ", package.cpath)", 1, true),
-        "exact variant shim does not select provider " .. modname)
-    layout.providers[modname] = { provider = provider, shim = shim }
+    layout.providers[modname] = { provider = provider }
 end
 M.register_exact_provider = register_exact_provider
-
-local function canonical_cpath(layout)
-    return assert_layout(layout).library_root .. "/?.so"
-end
-M.canonical_cpath = canonical_cpath
-
-local function canonical_lua_path(layout)
-    return assert_layout(layout).shim_root .. "/?.lua"
-end
-M.canonical_lua_path = canonical_lua_path
 
 local function host_libuv_config()
     local makefile = M.read and M.read("Makefile") or nil
@@ -285,7 +232,7 @@ function M.compile(workspace, modname, options)
     local lua = host_lua()
     local environment = {
         "env -u LUA_PATH -u LUA_CPATH" ..
-            " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 -u TITAN_ROCKS_ROOT CCACHE_DISABLE=1",
+            " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 -u TITAN_ROOT CCACHE_DISABLE=1",
         "TITAN_PATH_0_6=" .. quote(layout.library_root),
         "TITAN_PATH=",
     }
@@ -342,7 +289,7 @@ function M.compile_bundle(workspace, roots, options)
 
     local environment = {
         "env -u LUA_PATH -u LUA_CPATH" ..
-            " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 -u TITAN_ROCKS_ROOT CCACHE_DISABLE=1",
+            " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 -u TITAN_ROOT CCACHE_DISABLE=1",
         "TITAN_PATH_0_6=" .. quote(layout.library_root),
         "TITAN_PATH=",
     }
@@ -433,30 +380,16 @@ function M.prepare_async_core(workspace, layout, facades)
     end
 
     local cppflags, ldflags, archive = host_libuv_config()
-    local support = workspace .. "/titan-runtime/ltitanlib.o"
-    assert.truthy(exists(support),
-        "exact grouped stdlib build requires prepared ltitanlib.o")
     M.compile_bundle(workspace, roots, {
         layout = layout,
         cppflags = cppflags,
         cflags = "-fno-strict-aliasing",
         ldflags = ldflags,
-        extra_objects = { support, archive },
+        extra_objects = { archive },
     })
 
     for _, modname in ipairs(roots) do
-        local relative = modname:gsub("%.", "/")
-        local shim = layout.shim_root .. "/" .. relative .. ".lua"
-        assert.truthy(exists(shim),
-            "grouped stdlib provider is missing shim " .. shim)
-        local contents = M.read(shim)
-        assert.truthy(contents:find(
-            'package.searchpath("titan", package.cpath)', 1, true),
-            "grouped stdlib shim does not select prefix provider titan")
-        layout.providers[modname] = {
-            provider = layout.container,
-            shim = shim,
-        }
+        layout.providers[modname] = { provider = layout.container }
     end
 end
 
@@ -471,19 +404,14 @@ function M.prepare_gc(workspace, layout)
     register_exact_provider(layout, "titan.gc")
 end
 
+-- Plain Lua hosts load the `titan` support module from the interpreter's
+-- default lib/lua/5.5 path; requiring it installs the Titan searcher, which
+-- then finds providers in the layout's Titan path only.
 function M.run_lua_source(workspace, source, options)
     options = options or {}
     local layout = assert_layout(options.layout or find_standard_layout())
-    local cpath = workspace .. "/?.so;" .. canonical_cpath(layout)
-    if not layout.container then
-        local support_layout = find_standard_layout()
-        if support_layout.library_root ~= layout.library_root then
-            cpath = cpath .. ";" .. canonical_cpath(support_layout)
-        end
-    end
-    cpath = cpath .. ";;"
-    local lua_path = workspace .. "/?.lua;" ..
-        canonical_lua_path(layout) .. ";" .. REPO .. "/?.lua;" ..
+    local cpath = workspace .. "/?.so;;"
+    local lua_path = workspace .. "/?.lua;" .. REPO .. "/?.lua;" ..
         REPO .. "/?/init.lua;;"
     local lua = host_lua()
     local command = {
@@ -500,6 +428,8 @@ function M.run_lua_source(workspace, source, options)
         command[#command + 1] = quote(argument)
     end
     command[#command + 1] = quote(lua)
+    command[#command + 1] = "-e"
+    command[#command + 1] = quote('require "titan"')
     command[#command + 1] = "-e"
     command[#command + 1] = quote(source)
     return run(table.concat(command, " "), options.cwd or workspace)

@@ -298,7 +298,7 @@ def main():
         shutil.copy2(source, root / "fixtures" / source.name)
     env = os.environ.copy()
     for key in ("LUA_PATH", "LUA_CPATH", "LUA_PATH_5_5", "LUA_CPATH_5_5",
-                "TITAN_ROCKS_ROOT", "TITAN_PATH", "TITAN_PATH_0_6", "TITAN_PREFIX"):
+                "TITAN_ROOT", "TITAN_PATH", "TITAN_PATH_0_6", "TITAN_PREFIX"):
         env.pop(key, None)
     env.update(PATH=str(prefix / "bin") + os.pathsep + env.get("PATH", ""),
                TMPDIR=str(root / "tmp"), CCACHE_DIR=str(root / "ccache"),

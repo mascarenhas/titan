@@ -1,3 +1,5 @@
+-- The support module installs the Titan searcher in this plain Lua host.
+require "titan"
 local async = require "titan.async"
 local net = require "titan.net"
 local timer = require "titan.timer"

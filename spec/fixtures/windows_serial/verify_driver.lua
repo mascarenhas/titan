@@ -23,7 +23,7 @@ assert(driver.INSTALL_PATHS.lua_cpath:sub(-5) == "?.dll")
 assert(table.concat(driver.module_binary_candidates("one.two.leaf"), ";") ==
     "one.dll;one/two.dll;one/two/leaf.dll")
 assert(driver.close_resolver_context(context))
-assert(driver.validate_titan_support(sdk .. "/lib/titan/0.6/titan.dll"))
+assert(package.loadlib(sdk .. "/lib/lua/5.5/titan.dll", "luaopen_titan"))
 
 local root = assert(sync:reserve_sibling(parent .. "/driver-path-gate", true))
 local unicode = root .. "/headers ação-日本語-😀"
