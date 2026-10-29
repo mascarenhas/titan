@@ -16,9 +16,12 @@ done
 perl spec/support/check_windows_compiler_pe.pl "$runtime/lib/lua/5.5/titan.dll" luaopen_titan
 # LuaRocks deploys the native compiler program itself: no batch or script
 # launcher. The unchanged titanc script is the rock's Lua file that it runs.
-for name in titanc titanc.bat titanc.lua; do
-  [[ ! -e $prefix/bin/$name ]] || { echo "unexpected installed bin/$name" >&2; exit 1; }
-done
+# MSYS resolves an extensionless `titanc` to `titanc.exe` in existence tests,
+# so compare the directory's exact entries instead of stat-ing those names.
+launchers=$(find "$prefix/bin" -maxdepth 1 \
+  \( -name titanc -o -name titanc.bat -o -name titanc.lua \) -print)
+[[ -z $launchers ]] || { echo "unexpected installed launcher: $launchers" >&2; exit 1; }
+[[ -f $prefix/bin/titanc.exe ]]
 [[ -f $prefix/share/lua/5.5/titan-compiler/titanc.lua ]]
 cmp titanc "$prefix/share/lua/5.5/titan-compiler/titanc.lua"
 # titanc.exe imports only the controlled Lua DLL and Windows/UCRT and exports
