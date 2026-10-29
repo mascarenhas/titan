@@ -1059,8 +1059,12 @@ $(TITAN_SUPPORT_MODULE): $(LTITANLIB_O) $(TITAN_PATH_O)
 		status=$$?; rm -f "$$tmp"; exit $$status; \
 	fi
 
-# The installed compiler loads the support module from lib/lua/5.5.
+# The installed compiler loads the support module from lib/lua/5.5. Direct
+# installs build it first; the LuaRocks install pass (INST_PREFIX) only copies
+# what its build pass produced.
+ifeq ($(strip $(INST_PREFIX)),)
 install-compiler: $(TITAN_SUPPORT_MODULE)
+endif
 
 # Build with this source rock's compiler, even when another Titan is installed.
 # The checkout support module supplies native compiler support without
