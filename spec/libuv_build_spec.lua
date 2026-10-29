@@ -5280,7 +5280,7 @@ printf '%s\n' "${schedule[@]}"
                 linux_workflow)
             assert.falsy(macos_job:find("\n    needs:", 1, true), macos_job)
             assert.equal(1, count_literal(macos_workflow,
-                'TITAN_ABI_VERSION: "3"'), macos_workflow)
+                'TITAN_ABI_VERSION: "2"'), macos_workflow)
             for _, removed in ipairs({
                 "\n  test-linux-stdlib:", "\n  compiler-coverage:",
                 "prepare-linux", "test-linux-library", "ubuntu-slim",

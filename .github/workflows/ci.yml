@@ -12,7 +12,7 @@ env:
   TITAN_BUILD_PROFILE: validation
   MAKEFLAGS: "-j2"
   TITAN_JOBS: "2"
-  TITAN_ABI_VERSION: "3"
+  TITAN_ABI_VERSION: "2"
   # Keep canonical and sanitizer providers bundled; the canary tests system OpenSSL.
   OPENSSL_MODE: bundled
 

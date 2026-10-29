@@ -5,7 +5,7 @@ on:
 
 env:
   TITAN_BUILD_PROFILE: validation
-  TITAN_ABI_VERSION: "3"
+  TITAN_ABI_VERSION: "2"
 
 jobs:
   # macOS runners are expensive, so keep the complete cross-platform gate on

@@ -468,7 +468,7 @@ TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT ?=
 # ABI compatibility is independent from the semantic compiler/stdlib release.
 # Installed library paths use the release's derived major/minor component so
 # patch releases share one provider namespace.
-TITAN_ABI_VERSION          := 3
+TITAN_ABI_VERSION          := 2
 TITAN_VERSION              := 0.6.0
 TITAN_VERSION_COMPONENTS   := $(subst ., ,$(TITAN_VERSION))
 TITAN_LIBRARY_VERSION      := $(word 1,$(TITAN_VERSION_COMPONENTS)).$(word 2,$(TITAN_VERSION_COMPONENTS))
