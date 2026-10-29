@@ -168,7 +168,8 @@ jobs:
           # The restored Lua tree is not part of the cache key. Drop the
           # compiler modules so removals are visible, and drop the pre-cutover
           # share/lua/5.5/titan shim directory outright.
-          rm -rf "$PREFIX/share/lua/5.5/titan-compiler"
+          rm -rf "$PREFIX/share/lua/5.5/titan-compiler" \
+            "$PREFIX/share/lua/5.5/c-parser"
           rm -rf "$PREFIX/share/lua/5.5/titan"
           luarocks make --force
           provider="$PREFIX/lib/titan/0.6/titan.so"
