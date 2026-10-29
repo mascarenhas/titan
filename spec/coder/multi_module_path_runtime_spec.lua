@@ -1059,8 +1059,9 @@ io.write(message)
     -- `titanc` and a TITANC without a directory part. Windows looks for
     -- titanc.exe and appends `.exe` to a TITANC name without an extension;
     -- posix_spawnp searches PATH on Unix. A program present only in the
-    -- current directory is never started. The spawn environment, not an MSYS
-    -- `env`, carries PATH so Windows receives the exact list.
+    -- current directory is never started. Windows receives PATH through the
+    -- spawn environment, not an MSYS `env`; Unix passes the same variables
+    -- through an `env` argv.
     it("resolves titanc and a bare TITANC name through PATH entries only",
        function()
         local directory = root("path-probe")
@@ -1107,18 +1108,48 @@ else
 end
 ]], support.SUPPORT_CPATH))
         local function query(cwd, search, selected, expectation)
+            -- The child's environment is explicit: PATH is the fixture list,
+            -- and the parent's Titan selection and Lua hooks are removed.
+            local environment = {
+                { "PATH", native(search) },
+                { "TITANC", selected or false },
+                { "TITAN_ROOT", false },
+                { "TITAN_PATH", false },
+                { "TITAN_PATH_0_6", other .. ";;" },
+                { "TITAN_PROBE_LOG", native(log) },
+                { "TITAN_PROBE_ROOT", sdk },
+                { "LUA_INIT", false },
+                { "LUA_INIT_5_5", false },
+            }
+            local argv = { LUA, "-E", chunk, expectation }
+            local options = {}
+            if platform.windows then
+                -- The spawn environment, not an MSYS `env`, carries PATH so
+                -- the runtime receives the exact list.
+                local values = {}
+                for _, entry in ipairs(environment) do
+                    values[entry[1]] = entry[2]
+                end
+                options.env = values
+            else
+                -- compiler_io.run forwards options only on Windows; Unix
+                -- supplies the same environment as an `env` argv.
+                local prefix = { "env" }
+                for _, entry in ipairs(environment) do
+                    if entry[2] == false then
+                        prefix[#prefix + 1] = "-u"
+                        prefix[#prefix + 1] = entry[1]
+                    else
+                        prefix[#prefix + 1] = entry[1] .. "=" .. entry[2]
+                    end
+                end
+                for _, word in ipairs(argv) do prefix[#prefix + 1] = word end
+                argv = prefix
+            end
             local previous = assert(lfs.currentdir())
             assert.truthy(lfs.chdir(cwd))
             local called, result = pcall(function()
-                return compiler_io.new_sync():run({ LUA, "-E", chunk, expectation }, {
-                    env = {
-                        PATH = native(search), TITANC = selected or false,
-                        TITAN_ROOT = false, TITAN_PATH = false,
-                        TITAN_PATH_0_6 = other .. ";;",
-                        TITAN_PROBE_LOG = native(log), TITAN_PROBE_ROOT = sdk,
-                        LUA_INIT = false, LUA_INIT_5_5 = false,
-                    },
-                })
+                return compiler_io.new_sync():run(argv, options)
             end)
             assert.truthy(lfs.chdir(previous))
             assert.truthy(called, result)
