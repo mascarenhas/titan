@@ -369,8 +369,9 @@ The following existing splits avoid duplicated provider/build scaffolding:
 | Type-relation laws / checker plans / generated boundary parity | `spec/types_spec.lua`, then the topical checker/coder `type_relations_soundness_spec.lua`. |
 | Union syntax / checker frontiers / generated representation / hostile metadata | Lexer/parser specs, checker/coder `unions_spec.lua`, and `spec/union_interface_spec.lua`; reflected payload readers in `spec/coder/unions_stdlib_spec.lua`; extend compiled-module suites for source/DSO/archive composition. |
 | Folder resolution and diagnostics / public artifacts and mixed-file traces | Filesystem cases in `spec/driver_spec.lua`, then `spec/coder/folder_modules_spec.lua`. |
-| Root-major metadata claims and provider lookup | `spec/driver_spec.lua`. |
-| Prefix-container compilation, generated shims, promotion, paired publication, rollback, real macOS universal archives | `spec/coder/multi_module_libraries_spec.lua`, with packaging in `rockspec_spec.lua`. |
+| Root-major metadata claims and provider lookup; compiler root, compile-time Titan path, `;;`/`!` expansion | `spec/driver_spec.lua`. |
+| Run-time Titan path, SDK fallback, Titan package searcher, canonical reuse, name guard, searcher installation in every state | `spec/coder/multi_module_path_runtime_spec.lua`; `titanc --print-root` in `spec/titanc_root_spec.lua`. |
+| Prefix-container compilation, promotion, paired publication, rollback, real macOS universal archives | `spec/coder/multi_module_libraries_spec.lua`, with packaging in `rockspec_spec.lua`. |
 | Bounded archive/ELF/Mach-O/COFF and synthetic universal parsing | `spec/staticmetadata_spec.lua`. |
 | Static format preference, occupied paths, claims, cache, source fallback | `spec/driver_spec.lua`. |
 | Direct/dynamic nominal-owner constraints | `spec/checker/static_compiled_modules_spec.lua`. |
@@ -743,7 +744,8 @@ matching executable and `.dSYM` bundle) and root `test_runner_*` paths identify
 other owned fixtures. This does not consult Git, so it also works in a source
 rock while preserving author-written C/header fixtures and the ordinary `out/`
 provider stage. `make clean` additionally removes any legacy source-adjacent
-standard-library foreign headers, providers, shims, and `.dSYM` bundles.
+standard-library foreign headers, providers, and `.dSYM` bundles, and the
+checkout support module.
 
 CI runs this aggregate twice: once source-linked with native coverage in the
 `native-coverage` job, and once as an independent ASan+UBSan build in the
@@ -756,8 +758,8 @@ CI runs this aggregate twice: once source-linked with native coverage in the
 `titan.so`/`titan.a` pair (see the [standard-library
 image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image)).
 The same compiled `titan.test` implementation serves ordinary programs and
-generated test executables. Standard installation publishes the provider pair
-and shims; it does not install a private test-source payload. Packaging tests
+generated test executables. Standard installation publishes the provider pair;
+it does not install a private test-source payload. Packaging tests
 check those artifacts, while compiler regressions verify static-provider
 retention and production-object reuse across application and test links.
 

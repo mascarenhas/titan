@@ -202,32 +202,30 @@ considered.
 ## Generated artifacts
 
 The canonical main source controls where generated C and object files go.
-The logical module name controls its generated Lua loader and program
-entrypoint paths. In a single-root library build it is also the provider name;
-with several roots, their common provider prefix controls the one paired
-shared/static provider base.
+The logical module name controls the program entrypoint paths. In a single-root
+library build it is also the provider name; with several roots, their common
+provider prefix controls the one paired shared/static provider base.
 
-| Form for `foo.bar` | Generated C/object | Lua loader | Single-root provider pair | Entrypoint | Executable |
-| --- | --- | --- | --- | --- | --- |
-| flat `foo/bar.titan` | `foo/bar.c`, `foo/bar.o` | `foo/bar.lua` | `foo/bar.so`, `foo/bar.a` | `foo/bar__entrypoint.c` | `foo/bar` |
-| folder `foo/bar/bar.titan` | `foo/bar/bar.c`, `foo/bar/bar.o` | `foo/bar.lua` | `foo/bar.so`, `foo/bar.a` | `foo/bar__entrypoint.c` | `foo/bar__main` |
+| Form for `foo.bar` | Generated C/object | Single-root provider pair | Entrypoint | Executable |
+| --- | --- | --- | --- | --- |
+| flat `foo/bar.titan` | `foo/bar.c`, `foo/bar.o` | `foo/bar.so`, `foo/bar.a` | `foo/bar__entrypoint.c` | `foo/bar` |
+| folder `foo/bar/bar.titan` | `foo/bar/bar.c`, `foo/bar/bar.o` | `foo/bar.so`, `foo/bar.a` | `foo/bar__entrypoint.c` | `foo/bar__main` |
 
-The loader and provider columns apply in library mode. The entrypoint and
+The provider column applies in library mode. The entrypoint and
 executable columns apply when the module declares Titan's ordinary
 `main(args: {string}): integer`; that function may be declared in the main
 source or a contributor. The `__main` suffix prevents the
 folder program from colliding with its `foo/bar/` source directory and also
 works when `--tree` points outside the current directory. Contributor files
-never receive generated `.c`, `.o`, `.lua`, `.so`, `.a`, or executable
+never receive generated `.c`, `.o`, `.so`, `.a`, or executable
 artifacts.
 A folder's generated C and objects belong to its logical module as a whole:
 one object, or one object per part when a large module is
 [split](build-profiles.md#split-modules), always named
-from the canonical main (`foo/bar/bar.o`, `foo/bar/bar.part1.o`, ...). It has
-one generated loader for its logical module, even when a multi-root invocation
-links its objects into a shallower provider. The loader belongs to `foo.bar`,
-not to any source basename, and points at the provider selected for the whole
-invocation. For a dotted module built from an external tree, the compiler
+from the canonical main (`foo/bar/bar.o`, `foo/bar/bar.part1.o`, ...). Lua
+code requires it by its logical name `foo.bar`, including when a multi-root
+invocation links its objects into a shallower provider; nothing is named after
+a contributor's basename. For a dotted module built from an external tree, the compiler
 creates the logical output parent (such as `foo/`) in the current directory
 before linking.
 See [Static compiled modules](static-compiled-modules.md) for paired provider
@@ -259,8 +257,8 @@ qualified spelling; no source marker is needed to use that interface.
 `titan.async` separately owns the Runtime and Task/error/subscription records.
 See the [UV reference](standard-library-uv.md) for the complete public surface.
 
-These files are one logical module and therefore produce one `titan/uv.lua`
-loader and objects named from `uv.titan`, never one artifact per contributor.
+These files are one logical module and therefore produce objects named from
+`uv.titan`, never one artifact per contributor.
 `titan.uv` is large enough to be split: with the Linux default of four parts
 its objects are `uv.o` and `uv.part1.o` through `uv.part3.o`. The production
 standard-library invocation links all of them with the objects of the other

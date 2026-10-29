@@ -5,14 +5,14 @@ Its source may be one flat `.titan` file or a canonical main plus immediate
 `.titan` contributors in a [folder module](folder-modules.md). Both forms
 compile as one logical module. In library mode, one or more related logical
 modules are linked into a physical provider (a DSO/archive pair on Linux and
-macOS, a DLL on Windows) and receive generated Lua loaders; Lua programs use
-`require` and other Titan modules use
+macOS, a DLL on Windows); Lua programs use `require`, through Titan's package
+searcher, and other Titan modules use
 `import` without exposing that physical grouping. A module that defines a
 [`main` function](functions.md) becomes a standalone executable instead. This
 chapter describes what goes inside a logical module, how modules reference
 each other, and what the compiler produces. See
 [Multi-module libraries](multi-module-libraries.md) for the provider and
-loader rules.
+lookup rules.
 
 The native output, archive, and static Lua examples in this chapter describe
 Linux and macOS. See [Experimental Windows compilation](#experimental-windows-compilation)
@@ -471,13 +471,16 @@ titanc [--print-ast] [--pretty-print] [-v] [-j jobs] [--c-parts n] [--static] \
 
 `titanc --print-root` is a separate query: it prints the selected installation
 root followed by a newline and exits without compiling, probing C tools, or
-creating a probe cache. Do not pass module names with the query. It uses the
-compiler's ordinary `package.cpath` discovery, including Windows installations
-and relocated SDKs, with `TITAN_ROCKS_ROOT` retaining its internal installation
-override. `TITAN_PREFIX` only selects the C-probe cache and does not affect this
-query. An undiscoverable installation reports an error and exits with status 1.
-Build tools can use this query to find the matching SDK rather than infer the
-installation layout from the compiler launcher filename.
+creating a probe cache. Do not pass module names with the query. The root is
+`TITAN_ROOT` when that is set and non-empty, otherwise the parent of the
+directory that contains the Lua interpreter running `titanc` (symlinks
+resolved), so an installation at `<root>/bin/lua` reports `<root>`, including
+on Windows and after the tree is moved. `TITAN_PREFIX` only selects the
+C-probe cache and does not affect this query. An undiscoverable installation
+reports an error and exits with status 1. Build tools can use this query to
+find the matching SDK rather than infer the installation layout from the
+compiler launcher filename, and compiled programs use it as their [SDK
+fallback](#the-titan-path).
 
 * `--tree <srcroot>` sets the source tree root (default `.`); module
   `foo.bar` is looked up first at the folder main
@@ -488,7 +491,7 @@ installation layout from the compiler launcher filename.
   wins.
 * `-o/--output <directory>` creates the destination and missing parents, then
   writes generated files beneath it. Generated C, objects, and headers recreate
-  the selected source root's hierarchy there; final providers, loaders,
+  the selected source root's hierarchy there; final providers,
   executables, and coverage files also use that tree. Prefer this option to
   keep generated files together. See [Output directories](output-directory.md).
 * `--lua <luasrc>` points a source-checkout compiler at a complete Lua
@@ -503,7 +506,9 @@ installation layout from the compiler launcher filename.
   header checking, probes, and generated C. See
   [native compiler and linker switches](output-directory.md#native-compiler-and-linker-switches).
 * `--c-source <file>` compiles and certifies an authored or generated C file
-  with the same native flags and links its object before `-X` payloads. With
+  with the same native flags and links its object before `-X` payloads. On
+  Windows it omits Titan's Lua DLL import definitions; see [the Lua DLL and C
+  helpers](windows-build.md#the-lua-dll-and-c-helpers). With
   `-c`, `--print-c-objects` prints each certified object's absolute path.
 * `--exe <path>` selects the exact standalone or test executable path,
   relative to the working directory.
@@ -593,13 +598,15 @@ objects without default LTO. See [Optimization and toolchain settings](increment
 On Linux and macOS, a single-root library build uses that root as its physical
 provider and produces these paths:
 
-| Source form for `foo.bar` | Generated C/object | Lua loader | Provider pair | Entrypoint | Executable |
-| --- | --- | --- | --- | --- | --- |
-| flat `foo/bar.titan` | `foo/bar.c`, `foo/bar.o` | `foo/bar.lua` | `foo/bar.so`, `foo/bar.a` | `foo/bar__entrypoint.c` | `foo/bar` |
-| folder `foo/bar/bar.titan` | `foo/bar/bar.c`, `foo/bar/bar.o` | `foo/bar.lua` | `foo/bar.so`, `foo/bar.a` | `foo/bar__entrypoint.c` | `foo/bar__main` |
+| Source form for `foo.bar` | Generated C/object | Provider pair | Entrypoint | Executable |
+| --- | --- | --- | --- | --- |
+| flat `foo/bar.titan` | `foo/bar.c`, `foo/bar.o` | `foo/bar.so`, `foo/bar.a` | `foo/bar__entrypoint.c` | `foo/bar` |
+| folder `foo/bar/bar.titan` | `foo/bar/bar.c`, `foo/bar/bar.o` | `foo/bar.so`, `foo/bar.a` | `foo/bar__entrypoint.c` | `foo/bar__main` |
 
-The Lua-loader and provider columns apply in library mode; the
-entrypoint and executable columns apply in `main` program mode.
+The provider column applies in library mode; the entrypoint and executable
+columns apply in `main` program mode. Library mode writes no Lua files: Lua
+code loads the provider through [Titan's package
+searcher](lua-interop.md#requiring-a-titan-module).
 
 In `--test` mode the first requested root's executable column applies even when
 no root declares `main`; the generated runner is the sole main. Its runner and
@@ -611,9 +618,8 @@ for tests. See the
 
 With several no-`main` roots, Titan publishes one paired provider at their longest common
 dotted-component prefix. For example, `titanc foo.left foo.right` produces
-`foo.so` and `foo.a`, plus `foo/left.lua` and `foo/right.lua`; it does not
-produce child providers. Roots without a common component are rejected. Every source dependency
-linked into the provider also receives one logical Lua loader. The complete
+`foo.so` and `foo.a`; it does not produce child providers. Roots without a
+common component are rejected. The complete
 grouping, lookup, ownership, and reserved-name rules are in
 [Multi-module libraries](multi-module-libraries.md); archive precedence,
 metadata, linking, and `--static` are in [Static compiled
@@ -621,10 +627,10 @@ modules](static-compiled-modules.md).
 
 With `--output`, all paths in the table are below that output directory, and
 generated C and objects are relative to the selected source root. Without the
-option, the provider pair, generated Lua loaders, executable, and entrypoint paths are
+option, the provider pair, executable, and entrypoint paths are
 relative to the directory `titanc` runs in. Generated C and objects are beside
 the flat source or folder main, even when `--tree` points elsewhere. A folder
-contributor never produces a separate C file, object, loader, DSO, archive, or
+contributor never produces a separate C file, object, DSO, archive, or
 executable. The folder program's `__main` suffix avoids colliding with its
 source directory; the logical module name and entrypoint path remain
 unchanged.
@@ -641,13 +647,14 @@ tree for each configuration and point `--tree` at that copy.
 
 An installed compiler links `<root>/lib/titan/0.6/libtitan.a`; compiler development
 directly from the repository lazily rebuilds and links
-`titan-runtime/libtitan.a`. Both archives contain exactly `titan.o` and `minicoro.o`; source-defined
+`titan-runtime/libtitan.a`. Both archives contain `titan.o`, `minicoro.o`,
+`titan_path.o` (module location), and `ltitanlib.o` (the Lua support module);
+a link pulls in only the members it references. Source-defined
 foreign callbacks live in their generated module objects, and neither driver
 mode links `titan.o` directly. Vendored `libbacktrace.a` and the matching `liblua.a` remain separate
-link inputs. The native Lua support entry is compiled from `ltitanlib.c`: a
-private support-only bootstrap enables installation, while the canonical
-installed provider pair carries that entry together with the standard logical
-modules. Generated Lua loaders use its DSO form.
+link inputs. The Lua support module is also installed on its own as the
+ordinary Lua C module `<root>/lib/lua/5.5/titan.so` (`titan.dll` on Windows);
+the standard-library provider pair does not contain it.
 
 *Implementation note:* the driver and the exact compiler invocations
 are described in [the driver documentation](../implementation/driver.md);
@@ -656,7 +663,7 @@ the structure of the generated C is in
 
 ### Experimental Windows compilation
 
-Windows library builds emit one DLL provider and Lua shims; they do not emit
+Windows library builds emit one DLL provider; they do not emit
 a paired Titan archive. `--static` and selected Titan archive providers are
 unsupported. Standalone builds emit a launcher in `bin` and an application DLL
 under `lib/titan/0.6`. All use the SDK's controlled shared Lua DLL and matching
@@ -694,9 +701,9 @@ runtime, or shared-folder workflow has passed its platform tests.
 
 ## Where modules are found
 
-The binary-path and Lua relocation examples below describe Linux and macOS.
-Windows retains Lua's upstream `!` meaning (the running executable's directory)
-and uses `!..` for the SDK root; see the [Windows relocation rules](../implementation/windows-build.md#relocation-and-native-library-loading).
+The examples below use Unix paths. On Windows the same rules apply to `.dll`
+files and `\`-separated directories; see the [Windows relocation
+rules](../implementation/windows-build.md#relocation-and-native-library-loading).
 
 * **Source modules** are looked up in the *source tree* — the directory
   given by `--tree`, defaulting to the current directory. In each source root,
@@ -709,62 +716,89 @@ and uses `!..` for the SDK root; see the [Windows relocation rules](../implement
   `.c`/`.o` files are always written next to the source; the linked
   `.so`/`.a` provider pair lands relative to the compiler's working
   directory, as described above.
-* **Compiled modules** are looked up along the *binary search path*: a
-  semicolon-separated list of plain directories taken from
-  `TITAN_PATH_0_6`, or `TITAN_PATH` if that is unset. Otherwise the default
-  is `.;<root>/lib/titan/0.6`. An installed `titanc` recovers `<root>` from
-  the first literal `package.cpath` entry ending in
-  `/lib/titan/0.6/?.so` (`?.dll` on Windows), falling back to the first ordinary
-  `/lib/lua/5.5/?.so` template during bootstrap. This keeps LuaRocks' preceding
-  user-tree templates from selecting the wrong SDK. For logical `a.b.c`, the
-  default performs a complete pass over `a.so`, `a/b.so`, and exact `a/b/c.so`,
-  then a complete pass over
-  the corresponding `.a` paths; `--static` swaps those passes. A file in an
-  earlier root shadows the same relative candidate in later roots within its
-  format, while an unrelated ancestor container can advance to a deeper
-  candidate. The same path is used at run time by dependencies selected from
-  DSOs; a `;;` in an environment override inserts the default path. See
-  [Finding a compiled module in a
+* **Compiled modules** are looked up along the [Titan path](#the-titan-path),
+  a list of directories. For logical `a.b.c`, the compiler performs a complete
+  pass over `a.so`, `a/b.so`, and exact `a/b/c.so` in every directory, then a
+  complete pass over the corresponding `.a` paths; `--static` swaps those
+  passes. A file in an earlier directory shadows the same relative candidate
+  in later directories within its format, while an unrelated ancestor
+  container can advance to a deeper candidate. Programs, Lua hosts, and
+  dependencies selected from DSOs use the same candidates and shadowing rules
+  at run time. See [Finding a compiled module in a
   provider](multi-module-libraries.md#finding-a-compiled-module-in-a-provider)
   for DSO claims and [Static compiled
   modules](static-compiled-modules.md#dependency-search) for archive
   precedence and metadata.
 
-Here `<root>` is the Titan SDK/rocks-tree root. `PREFIX` owns Lua and LuaRocks,
-while `ROCKS_TREE` owns the Titan SDK and standard modules. The supported
-developer installation currently makes those paths equal, which is why the
-driver can discover the Titan root from Lua's `package.cpath`; the names do not
-have inherently identical ownership.
+### The Titan path
 
-Titan's own Lua build sets `LUA_ROOT` to `"!/"` and expands `!` in
-`package.path` and `package.cpath` from the running executable: an interpreter
-at `<root>/bin/lua` uses `<root>`. Moving that tree preserves those default
+A Titan path is a list of directories separated by `;`. Each entry is a
+directory, not a `?` template, and empty entries are ignored. The path comes
+from `TITAN_PATH_0_6` when that variable is set, otherwise from `TITAN_PATH`,
+otherwise from the default. A variable that is set but empty searches nothing.
+Two further spellings are recognized in a variable:
+
+* `;;` inserts the default path at that position, so
+  `TITAN_PATH_0_6='vendor/lib;;'` searches `vendor/lib` first and then the
+  default directories.
+* `!` stands for the directory of the running executable, after resolving
+  symlinks. It is replaced once and literally: text that comes from the
+  inserted default or from the directory itself is never expanded again.
+
+The default depends on who searches:
+
+| Searcher | `!` is the directory of | Default path |
+| --- | --- | --- |
+| `titanc`, at compile time | the Lua interpreter that runs `titanc` | `.;<root>/lib/titan/0.6` |
+| compiled programs, Lua hosts, [independent Lua states](standard-library-lua.md#independent-lua-states), at run time | the program or host executable | `!;!/../lib/titan/0.6`, then the SDK fallback |
+
+`<root>` is the Titan SDK root: `TITAN_ROOT` when that variable is set and
+non-empty, otherwise the parent of the directory that contains the Lua
+interpreter running `titanc`. `titanc --print-root` prints it. `PREFIX` owns
+Lua and LuaRocks, while `ROCKS_TREE` owns the Titan SDK and standard modules;
+the supported developer installation makes those paths equal, but the names
+do not have inherently identical ownership.
+
+The run-time default has no `.`: the working directory never supplies
+providers to a program. A program at `/opt/app/bin/app` searches
+`/opt/app/bin` and then `/opt/app/lib/titan/0.6`, and a plain `lua` at
+`$PREFIX/bin/lua` searches `$PREFIX/bin` and `$PREFIX/lib/titan/0.6`, where the
+standard library is installed. Deploy a program's dynamic providers in one of
+those two directories, or select them with a Titan path variable.
+
+When a run-time lookup has missed in every directory and the path was derived
+from the default (no variable, or a variable containing `;;`), Titan tries the
+installed SDK once more. With `TITAN_ROOT` set, that is
+`<TITAN_ROOT>/lib/titan/0.6`. Otherwise Titan runs `titanc --print-root`, or
+`<TITANC> --print-root` when the `TITANC` variable names another program,
+without a shell, and uses `<printed root>/lib/titan/0.6`. `TITANC` is one
+program name or path, not a command line with arguments. Each Lua state tries
+this at most once and remembers the result, even when no SDK was found; a
+failure adds a `no Titan SDK fallback: <reason>` line to the `require` or load
+error. The fallback is skipped when it names a directory already on the path.
+This lets an executable built into an output tree use the installed standard
+library while `titanc` is on `PATH`. The program named by `TITANC` (or the
+`titanc` found on `PATH`) must terminate; Titan waits for it without a time
+limit. Deployed applications should not depend on the fallback.
+
+Titan's own Lua build sets `LUA_ROOT` to `"!/../"` and expands `!` in
+`package.path` and `package.cpath` to the directory of the running
+executable: an interpreter at `<root>/bin/lua` searches
+`<root>/bin/../share/lua/5.5` and `<root>/bin/../lib/lua/5.5`, where Titan's
+support module `titan.so` is installed. Moving that tree preserves those default
 module paths, and invoking Lua through a symlink still uses the actual
 executable's location. Environment path overrides retain their ordinary Lua
 precedence. LuaRocks configuration and installed command wrappers may still
 contain absolute paths, so this module-path behavior alone does not make an
 entire installed toolchain relocatable.
 
-Standalone Titan executables select defaults separately from their build
-installation. For each unset `LUA_PATH`, `LUA_CPATH`, or `TITAN_PATH` (including
-its versioned form), startup first tries `titanc --print-root` on `PATH`, then
-asks `lua` on `PATH` for `package.cpath`. Lua discovery prefers the current
-`/lib/titan/0.6/?.so` template, then `/lib/lua/5.5/?.so` (`?.dll` on Windows).
-If neither command provides a root, the root is the physical directory
-containing the executable; Unix symlink launches use the physical image. The
-working directory does not select that root. Default Lua and Titan library
-paths use that root's `share/lua/5.5`, `lib/lua/5.5`, and `lib/titan/0.6` trees.
-Ordinary `./` module search entries remain available. Explicit variables,
-including empty values, retain their existing precedence, and a `;;` in an
-explicit Titan path inserts the default described here (on Windows, when the
-Lua paths are also all set explicitly, the default is rooted at the
-executable's parent directory instead). Windows
-launchers also retain their adjacent `../lib` and `../share` bundle paths. A
-Windows launcher loads its own provider from that `../lib` tree, so its default
-Titan path is `.;<root>/lib/titan/0.6;<exe-dir>/../lib/titan/0.6`. An override
-such as `TITAN_PATH_0_6="C:/sdk/lib/titan/0.6;;"` keeps both default entries.
-An override without `;;` must name the launcher's provider directory itself.
-No path from the Titan build environment is embedded in the program.
+Standalone Titan executables keep Lua's default `package.path` and
+`package.cpath` and use the run-time Titan path above for dependencies
+selected from DSOs. A Windows launcher in `bin` finds its own application DLL
+relative to itself in `../lib/titan/0.6`, which is also the second default
+entry. No path from the Titan build environment is embedded in the program.
+
+### Standard-library names
 
 The standard-library names `coroutine`, `uv`, `async`, `timer`, `io`, `fs`,
 `net`, `ssl`, `url`, `http`, `websocket`, `os`, `path`, `peg`, `string`, `test`, `lua`, `math`, `gc`,
@@ -794,18 +828,19 @@ is available through `import "uv"` or `require "titan.uv"`. It exposes explicit
 loops, native owners, callbacks, and utility operations; importing it alone
 does not create an async Runtime or install the Task bootstrap.
 
-Lua's `require`, for its part, finds a generated logical loader through
-`package.path`; that loader finds its physical provider through
-`package.cpath`, loads it globally, and invokes the module's exact
-`luaopen_*` entry (see [Requiring a Titan
-module](lua-interop.md#requiring-a-titan-module)). Titan's installed Lua
-default includes `<root>/lib/titan/0.6/?.so` and the standard loader root.
-A qualified standard name such as `titan.os` therefore runs
-`<root>/share/lua/5.5/titan/os.lua`, which opens the canonical DSO
-`<root>/lib/titan/0.6/titan.so`. Default Titan imports select that same
+Lua's `require` reaches compiled Titan modules through Titan's package
+searcher (see [Requiring a Titan
+module](lua-interop.md#requiring-a-titan-module)). A plain Lua host first runs
+`require "titan"`, which loads the support module
+`<root>/lib/lua/5.5/titan.so` from Lua's default `package.cpath` and appends
+the searcher to `package.searchers`; compiled programs and Titan-created Lua
+states already have it. `require "titan.os"` then probes `titan.so`,
+`titan/os.so` along the run-time Titan path, where the canonical DSO
+`<root>/lib/titan/0.6/titan.so` claims it, checks the ABI, and invokes the
+module's exact `luaopen_titan_os` entry. Default Titan imports select that same
 physical file by validating the `titan.os` callable metadata; `--static`
 prefers the paired self-describing `titan.a`. Installation creates no child
-DSOs, parent-level or `lib/lua` copies, symbolic links, or hard links. The
+DSOs, Lua loader files, parent-level copies, symbolic links, or hard links. The
 installer does not provide cross-version migration. `titan-uninstall` removes
 all Titan rock versions in its selected tree through LuaRocks, then cleans
 the exact external Titan SDK/provider files only if removal succeeds. Lua and
@@ -864,10 +899,12 @@ not the client extension interface. See
 [native provider linkage](ffi.md#native-provider-linkage) for the distinction.
 
 A statically linked dependency is still a module of its own from Lua's point
-of view. Its generated logical loader points at the enclosing provider, so if
-`main.so` embeds `geom.point` and a Lua script also `require`s `geom.point`,
-both refer to the same module instance in that Lua state, with the same
-record/union/Interface identities and the same module variables.
+of view. Once `main.so` has initialized an embedded `geom.point`, a Lua script
+that `require`s `geom.point` in the same Lua state receives that same module
+instance, with the same record/union/Interface identities and the same module
+variables, without loading another file. Before any importer has initialized
+it, `require "geom.point"` succeeds only if a provider on the Titan path claims
+`geom.point` itself, such as `geom.so` or `geom/point.so`.
 
 ## Standalone executables
 
@@ -907,13 +944,14 @@ still initializes its own state and bindings. Any compiled-in module outside
 the entrypoint's initialization closure and an unused archive sibling remain
 absent from its preload table.
 
-After `luaL_openlibs`, the executable selects its root as described under
-[where modules are found](#where-modules-are-found), adds
-`<root>/lib/titan/0.6/?.so` to `package.cpath` if it is absent, and
-initializes the Titan module path from that same root. Deploy the standard
-provider and loaders as described there. For another layout, configure the
-path overrides shown under [Running with a stock Lua](#running-with-a-stock-lua).
-`args[1]` onward
+After `luaL_openlibs`, the executable installs Titan's package searcher. It
+does not change Lua's `package.path` or `package.cpath`, embeds no build-time
+path, and starts no process at startup: dependencies selected from DSOs, and
+any compiled module the program `require`s, are found along the run-time
+[Titan path](#the-titan-path). Deploy the standard provider and other
+providers in the executable's directory or in `../lib/titan/0.6` next to it,
+or set `TITAN_PATH_0_6`; build with `--static` to link archive providers
+instead. `args[1]` onward
 contain only the user-supplied arguments; index 0 is absent and the executable
 name is not stored. Therefore `#args` is the argument count. The integer returned by
 `main` becomes the process exit status; an uncaught run-time error
@@ -953,9 +991,12 @@ with `<module>: multiple main functions found (already declared in
 
 ## Running with a stock Lua
 
-This section describes Linux and macOS. Windows modules require the
-[controlled Lua DLL and its SDK](../implementation/windows-build.md#one-controlled-lua-dll-and-its-sdk),
-including the matching exported Lua internals.
+This section describes Linux and macOS. On Windows, Titan's controlled Lua DLL
+is built from unmodified upstream sources with `-DLUA_BUILD_AS_DLL` and
+linked with `-Wl,--export-all-symbols`, so that Lua's internal functions and
+data are exported; a stock Lua 5.5.1 DLL built the same way can host Titan
+modules. See the [Windows user guide](windows-build.md#the-lua-dll-and-c-helpers) and the
+[controlled Lua DLL and its SDK](../implementation/windows-build.md#one-controlled-lua-dll-and-its-sdk).
 
 Compiled Titan modules support the stock Lua loader; provider loading does
 not require patched `dlopen` flags. Titan's own Lua build separately patches
@@ -977,19 +1018,25 @@ compiler release does target one specific Lua version (currently
 Lua 5.5), because the generated code works against that version's
 internals.
 
-The bundled direct-libuv extension contract also works with stock Lua 5.5. The
-installed `$ROCKS_TREE/share/lua/5.5/titan/uv.lua` module uses the native
-support table's lazy/global loader to promote the shared `titan.so` provider
-before it invokes the exact native entry. A stock interpreter can reproduce
-Titan's configured search paths with:
+A stock interpreter needs two things: Titan's support module on its
+`package.cpath`, so that `require "titan"` installs the package searcher, and
+the provider directories on the Titan path. A stock Lua does not expand `!` in
+its own Unix paths, so name the support module's directory explicitly:
 
 ```sh
-export LUA_PATH_5_5="$ROCKS_TREE/share/lua/5.5/?.lua;$ROCKS_TREE/share/lua/5.5/?/init.lua;;"
-export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.6/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
+export LUA_CPATH_5_5="$ROCKS_TREE/lib/lua/5.5/?.so;;"
+export TITAN_PATH_0_6="$ROCKS_TREE/lib/titan/0.6;;"
+lua -e 'require "titan"; assert(require("titan.string"))'
 ```
 
-The ordinary `/lib/lua/5.5/?.so` template is Titan's root-discovery anchor. If
-it is omitted, also set
-`TITAN_PATH_0_6="$ROCKS_TREE/lib/titan/0.6"`. Titan still targets the exact
-Lua 5.5 runtime ABI and internals; using the stock loader does not make a module
-compatible with another Lua version or configuration.
+Titan itself computes `!` in Titan paths from the running interpreter, so
+`TITAN_PATH_0_6` can be omitted when that interpreter lives in
+`$ROCKS_TREE/bin`; `TITAN_ROOT="$ROCKS_TREE"` also works, through the SDK
+fallback. Do not add `$ROCKS_TREE/lib/titan/0.6` to `package.cpath`: Lua's
+own C searchers run before Titan's searcher and would open the provider
+without its ABI check. The bundled direct-libuv extension contract works the
+same way: `require "titan.uv"` loads the shared `titan.so` provider through
+the searcher, which maps it with global symbol visibility before invoking the
+exact native entry. Titan still targets the exact Lua 5.5 runtime ABI and
+internals; using the stock loader does not make a module compatible with
+another Lua version or configuration.

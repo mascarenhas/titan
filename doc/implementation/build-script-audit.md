@@ -7,7 +7,7 @@ source-rock deployment on all three platforms. `scripts/install_compiler.mk`
 holds the compiler, rock-tool and `binary-rock` rules shared by both Makefiles.
 
 This chapter is the canonical home for Lua preparation, the standard-library
-and native-test compiler recipes, the private bootstrap, and LuaRocks
+and native-test compiler recipes, the support module, and LuaRocks
 installation, `post_install`, binary rocks and uninstall. The standard-library
 root list and
 physical image are in [multi-module
@@ -24,17 +24,20 @@ change. Linux defaults to Lua's `linux-readline` target and macOS to `macosx`;
 provide Readline development files or override `LUA_PLATFORM`.
 
 An explicit `PREFIX` always wins. Otherwise a validation-profile invocation
-uses the checkout's `.lua-validation`, and a production invocation discovers a
-Titan Lua prefix from `PATH` (`scripts/detect_lua_prefix.sh`), falling back to
+uses the checkout's `.lua-validation`, and a production invocation takes the
+parent of the realpath directory of the Lua 5.5 `lua` on `PATH`
+(`scripts/detect_lua_prefix.sh`, which keeps an equivalent `PATH` spelling of
+`<prefix>/bin/lua` and parses no `package.cpath`), falling back to
 `/usr/local`. `TITAN_INSTALL_TREE`, the destination of the Titan SDK and
 providers, is `ROCKS_TREE` when that is set and `PREFIX` otherwise in the Unix
-`Makefile`; `Makefile.win` always uses `PREFIX`.
+`Makefile`; `Makefile.win` always uses `PREFIX`. `make lua` passes only
+`PREFIX` (and the toolchain settings) to the Lua fork's build and install.
 
 Ordinary native archives use source/header prerequisites and `ar`/`ranlib`.
 Failed output recipes remove unfinished artifacts before an ordinary retry.
 CMake owns libuv incrementality; upstream configure/make owns libbacktrace and
 bundled OpenSSL. Both Makefiles default to `OPENSSL_MODE=system`, which uses an
-installed OpenSSL SDK. The Windows runtime build compiles its eight inputs
+installed OpenSSL SDK. The Windows runtime build compiles its nine inputs
 directly. Versioned source acquisition retains checksums and the required
 upstream corrections. On all three platforms, LuaRocks installs `luv` for the
 compiler's worker and subprocess transport; its LuaRocks build uses CMake and
@@ -73,38 +76,47 @@ artifacts, and schedules worker frontends and native compilations under
 `-j$(TITAN_JOBS)`:
 
 ```sh
-$(STDLIB_COMPILER_ENV) $(TITANC) --output $(TITAN_OUTPUT_DIR) \
+$(STDLIB_COMPILER_ENV) $(STDLIB_TITANC) --output $(TITAN_OUTPUT_DIR) \
   --source-first --incremental -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) \
   -c $(STDLIB_ROOTS)
 
-$(STDLIB_COMPILER_ENV) $(TITANC) --output $(TITAN_OUTPUT_DIR) \
+$(STDLIB_COMPILER_ENV) $(STDLIB_TITANC) --output $(TITAN_OUTPUT_DIR) \
   --source-first --incremental -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) \
   $(STDLIB_ROOTS) -X $(STDLIB_EXTRA_OBJECTS)
 ```
 
+`STDLIB_TITANC` is a complete compiler command (the installed `bin/titanc`,
+or the checkout `titanc` run through `$(TITAN_LUA)` with
+`SOURCE_COMPILER_SETUP` and `--lua`). It deliberately avoids the name `TITANC`:
+the runtime reads `TITANC` as the single program its [SDK
+fallback](driver.md#the-run-time-titan-path-and-sdk-fallback) starts, and GNU
+Make exports a variable given on its command line into every recipe
+environment, where any Lua host or compiled program a recipe runs would see it.
+
 Make maintains no per-module Titan import rules, object or provider timestamp
 prerequisites, completion stamps, or C-part split-policy stamps. Only `stdlib`
 passes the `-X` native payload
-(`ltitanlib.o`, `libtitan-lpeglabel.a`, bundled `libuv.a`,
+(`libtitan-lpeglabel.a`, bundled `libuv.a`,
 `libtitan-llhttp.a`, `libtitan-sqlite3.a`, and in bundled mode OpenSSL's
 `libssl.a` and `libcrypto.a`), in the order fixed by the [standard-library
 image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image),
-and produces the provider pair (`titan.so` and `titan.a`) and generated Lua
-shims under `TITAN_OUTPUT_DIR` (default `out/`). The compiler's own source
+and produces the provider pair (`titan.so` and `titan.a`) under
+`TITAN_OUTPUT_DIR` (default `out/`). The compiler's own source
 record (`<stem>.o` `.titan.source`) certifies module sources, folder
 membership, compiler and native flags, C-part split settings (`c_parts` and
 `split_threshold`), split-part completeness, C headers, and dependency
 interfaces, while `<output>/.titan-links/<key>/record` certifies the final
-provider pair and shims ([incremental
+provider pair ([incremental
 compilation](incremental-compilation.md)).
 
 `STDLIB_USE_INSTALLED_RUNTIME` defaults to `1` when
 `$(TITAN_INSTALL_TREE)/bin/titanc` exists. That selects the installed compiler,
 runtime archives (`libtitan.a`, `libbacktrace.a`, `liblua.a`), and SDK headers;
 `titanc` certifies those compiler, header, and archive contents directly.
-`all` and `STDLIB_USE_INSTALLED_RUNTIME=0` select the checkout compiler,
-checkout runtime, and private bootstrap (`titan-runtime/bootstrap/titan.so`)
-instead.
+`all` and `STDLIB_USE_INSTALLED_RUNTIME=0` select the checkout compiler and
+checkout runtime instead; the checkout compiler loads the support module
+`titan-runtime/bootstrap/titan.so` through the `package.cpath` entry that
+`SOURCE_COMPILER_SETUP` prepends, and `all` clears `TITAN_ROOT` for that build.
 
 `make clean-stdlib` removes `$(TITAN_OUTPUT_DIR)/titan`,
 `$(TITAN_OUTPUT_DIR)/.titan-links`, `$(STDLIB_PROVIDER_OUTPUTS)`, and
@@ -299,15 +311,16 @@ with `+` and `RECURSIVE_WRAPPER_GUARD`, and delegates native parallelism to
 
 | Target | Effect |
 | --- | --- |
-| `install-compiler-sdk` | Compiler, runtime archive, headers and bare bootstrap support, with no standard library; records the profile in `etc/titan/build-profile`. |
+| `install-compiler` | Compiler Lua modules (`INST_LUADIR`), `titanc` (`INST_BINDIR`), third-party notices (`INST_CONFDIR`), and the support module `titan.so` (`INST_LIBDIR`, default `<root>/lib/lua/5.5`). A direct install builds the support module first; the LuaRocks install pass only copies it. |
+| `install-compiler-sdk` | `install-compiler` plus the runtime archive, Lua SDK and Titan headers, with no standard library; records the profile in `etc/titan/build-profile`. |
 | `install-titan-sdk` / `publish-titan-sdk` | Build then copy / copy only the native SDK: runtime, libuv, llhttp and SQLite headers, and OpenSSL headers in bundled mode. |
-| `stdlib` / `stdlib-objects` | Build the provider pair and shims / compile objects only. |
+| `stdlib` / `stdlib-objects` | Build the provider pair / compile objects only. |
 | `install-stdlib` / `publish-stdlib` | Build then copy / copy an already built `STDLIB_INSTALL_STAGE` (default `TITAN_OUTPUT_DIR`) without rebuilding or validating it. |
 | `install` (no `INST_PREFIX`) | `install-compiler`, `publish-titan-sdk`, `publish-stdlib`. |
 | `install` (LuaRocks pass) | `install-compiler`, `install-rock-tools`, `stage-rock-payload`. |
 | `binary-rock` | `luarocks pack titan`, renaming the `.all.rock` result to the suffix from `luarocks config arch`. |
 
-Standard-library installation copies the built provider, shims, licenses, and
+Standard-library installation copies the built provider pair, licenses, and
 optional symbols. SDK installation also publishes Titan's own `LICENSE` at
 `<root>/share/titan/LICENSE`. The SDK never contains `libuv.a`: the bundled
 libuv archive is private payload of the standard provider. Installation keeps
@@ -320,24 +333,43 @@ Compiler provider publication is a separate compiler contract with its own
 regression tests; see [static compiled
 modules](static-compiled-modules.md#publication-and-installation).
 
-`stage-titan-bootstrap` copies the private runtime bootstrap into the
-canonical provider path only when no provider exists there, preserving an
-installed full standard library. The SDK targets depend on it. The source-rock
-`all` target builds the standard library with the private bootstrap and never
-publishes the bootstrap.
+The support module (`TITAN_SUPPORT_MODULE`, `titan-runtime/bootstrap/titan.so`;
+`<WINDOWS_BUILD_ROOT>/runtime/titan.dll` on Windows) links only `ltitanlib.o`
+and `titan_path.o` with `$(ROCK_LD) $(ROCK_LIBFLAG)` and exports only
+`luaopen_titan`. The Unix link enforces that with
+`TITAN_SUPPORT_EXPORT_FLAGS`: the version script
+`scripts/titan_support_exports.map` (`global: luaopen_titan; local: *;`) on
+ELF platforms and `-Wl,-exported_symbol,_luaopen_titan` on macOS. Windows links
+the DLL with `-Wl,--exclude-all-symbols` and an explicitly `dllexport` opener.
+`titan_path.o`'s global functions therefore stay local to the support image, so
+a process that also links `libtitan.a`, such as the language server, cannot
+interpose them; `libtitan.a` itself keeps default visibility. The support
+module is built before the compiler or standard library needs it;
+no SDK target seeds it, or any provider, into `lib/titan/0.6`. Both objects are
+also members of `libtitan.a` (`TITAN_RUNTIME_OBJECTS`, in the order `titan.o
+minicoro.o titan_path.o ltitanlib.o`); the standard provider does not carry
+`ltitanlib.o`.
 
 LuaRocks runs the install pass (`install` with `INST_PREFIX` set, and the
 matching `Makefile.win` target) in the same source directory as the build
-pass; it copies without compiling. Compiler Lua modules and generated
-standard-library shims go to `INST_LUADIR`; `titanc` and `titan-uninstall` go to
-`INST_BINDIR` (`install-rock-tools`). `stage-rock-payload` keeps the built SDK
+pass; it copies without compiling. Compiler Lua modules go to `INST_LUADIR`,
+the support module to `INST_LIBDIR`, and `titanc` and `titan-uninstall` to
+`INST_BINDIR` (`install-rock-tools`). The rockspec passes
+`INST_LIBDIR = "$(LIBDIR)"`, so LuaRocks stages the support module in the rock's
+`lib` directory, deploys it to `<tree>/lib/lua/5.5/titan.so`, records it in
+`rock_manifest`, and removes it with the rock like any other native Lua module.
+`scripts/install_compiler.mk` installs it under the last path component of
+`TITAN_SUPPORT_MODULE`, so a build root containing spaces cannot split the
+name. `stage-rock-payload` keeps the built SDK
 and provider pair under `<rock-prefix>/titan-sdk`. The rockspec's
 `post_install` hook runs `<rock-prefix>/installer/titan_install.lua` by
 absolute path to copy that payload into the canonical SDK locations; it needs no
-source directory, Makefile or compiler. Binary rocks carry the same payload and
-copier. The canonical SDK and providers therefore stay outside LuaRocks'
-manifest. The rockspec uses `build.type = "make"` and declares no `modules`, so
-there is no LuaRocks-manifest C module named `titan`.
+source directory, Makefile or compiler. Its installed-SDK digest bootstrap
+(`publish_sdk_digests`) loads the support module with `package.cpath` set to
+exactly `<tree>/lib/lua/5.5/?.so` (`?.dll` on Windows), which LuaRocks has
+already deployed. Binary rocks carry the same payload and copier. The
+canonical SDK and providers therefore stay outside LuaRocks' manifest. The
+rockspec uses `build.type = "make"` and declares no `modules`.
 
 `titan-uninstall` (`scripts/titan_install.lua`) removes all installed Titan
 rock versions through LuaRocks first. Only when that succeeds does it remove

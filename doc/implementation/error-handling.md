@@ -144,17 +144,21 @@ so a newly mapped provider must invalidate it. Every generated module selects
 static: every runtime copy reads the same registry-owned userdata at
 `TITAN_BT_STATE_KEY`, whose payload is the cached `backtrace_state *`.
 `titan_invalidate_backtrace_state` clears that slot, and the next error lazily
-creates a fresh state. It is called by:
+creates a fresh state. The slot is cleared by:
 
-* `loadlibfrompath` (`titan-runtime/titan.c`), only after `dlopen` maps a new
-  image (the cached-handle fast path does not invalidate); and
+* the run-time provider loader (`titan_path_open_global` in
+  `titan-runtime/titan_path.c`, shared by compiled imports' `loadlib` and the
+  [Titan package searcher](driver.md#the-titan-package-searcher)), only after
+  `dlopen` maps a new image for the state (the cached-handle fast path does
+  not invalidate); and
 * every generated `luaopen_*` (the postamble in `titan-compiler/coder/module.lua`),
-  which covers modules loaded by Lua's own `require`.
+  through `titan_invalidate_backtrace_state`, which covers modules loaded by
+  Lua's own `require`.
 
-The Windows loader (`titan-runtime/titan_winloader.h` `titan_win_load_library`)
-does not call it: it clears the same registry slot inline, only when it maps a
-new image, because the support-only bootstrap that uses it does not link the
-full runtime.
+`titan_path.c` and the Windows loader (`titan-runtime/titan_winloader.h`
+`titan_win_load_library`) do not call `titan_invalidate_backtrace_state`: they
+clear the same registry slot inline, only when they map a new image, because
+the support module that also links them does not link `titan.o`.
 
 The opaque state may retain function pointers into the image whose
 libbacktrace copy created it. Titan never `dlclose`s dependency handles during

@@ -195,11 +195,11 @@ root or output root:
 | folder | `foo/bar/bar.titan` | `foo/bar/bar.c`, `foo/bar/bar.o` | `foo/bar/bar.titan.h` |
 
 Only one compile call is made, so contributors produce no standalone C,
-object, generated header, provider, or Lua-shim artifacts. Foreign declarations
+object, generated header, or provider artifacts. Foreign declarations
 from the combined AST share the canonical main's companion; all companions for
 an invocation are planned and written before the first object is compiled. In
 library mode the logical module's object joins the invocation-wide source
-union, and exactly one generated shim represents logical `foo.bar` (see
+union, and only logical `foo.bar` has a `luaopen_foo_bar` entry in the provider (see
 [Multi-module libraries](multi-module-libraries.md#provider-selection-for-a-library-invocation)
 for provider naming). The provider and program link paths create their output
 parent directories, so a dotted module under an external `--tree` does not
@@ -252,7 +252,7 @@ standard-library
 image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image),
 which also owns the root list, payload order, and provider counts. Each follows
 the rules above: one canonical main, immediate contributors sharing
-module-private scope, one generated C/object pair, and one logical shim.
+module-private scope, one generated C/object pair, and one logical Lua entry.
 Contributor filenames never become modules or archive metadata keys.
 
 `titan.uv` is the largest. Its sources are enumerated explicitly by the

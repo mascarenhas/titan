@@ -261,7 +261,7 @@ state. `transfer_active_closures` and protobuf's active-record Map detect only
 reentrant conversion cycles and unwind with `defer`; there are no identity
 indexes or cell registries.
 
-**Lifetime.** Titan's loader and generated Lua shims keep provider images mapped
+**Lifetime.** Titan's loader and its package searcher keep provider images mapped
 for the process lifetime, so a transferred closure stays valid after its source
 state closes. Manually loaded native libraries keep the caller-owned code
 lifetime, as for raw C functions and preload snapshots. A packet pins no origin

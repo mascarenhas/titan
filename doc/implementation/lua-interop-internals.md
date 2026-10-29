@@ -485,7 +485,7 @@ accessed. The metatable check is not a sandbox against privileged Lua or C.
 `luaopen_<mangled>` calls `_init` and pushes it, and there is no separate module
 table. After a successful `_init`, the module publishes its `luaopen_<mangled>`
 in `registry[LUA_PRELOAD_TABLE]` and a native descriptor in
-`TITAN_MODULE_PRELOADS_KEY` (`titan_module_preload`, `titan-runtime/titan.c`);
+`TITAN_MODULE_PRELOADS_KEY` (`titan_module_preload`, `titan-runtime/titan_path.c`);
 this does not write `package.loaded`. How standalone programs and static
 providers rely on that self-publication is in
 [driver](driver.md#linking-a-standalone-program-drivercompile_program) and
@@ -547,8 +547,9 @@ globals. Translation-unit statics hold immutable candidates and generated
 code; state-dependent pointers and Interface arrays belong to the module native
 payload. String keys are defined in `titan-runtime/titan.h`,
 `titan-runtime/titan/ffi.h`, `titan-runtime/titan.c`
-(`TITAN_ARRAY_METATABLE_PAIR`), and `titan-runtime/ltitanlib.c` (the two
-loader caches). The complete inventory:
+(`TITAN_ARRAY_METATABLE_PAIR`), `titan-runtime/titan_path.c` (the searcher
+marker and SDK-fallback record), and `titan-runtime/ltitanlib.c` (the two
+support-helper caches). The complete inventory:
 
 | Registry key | Value |
 | --- | --- |
@@ -563,9 +564,10 @@ loader caches). The complete inventory:
 | `TITAN_ARRAY_METATABLE_PAIR` (`"Titan array metatable pair"`) | the canonical table holding the mutable and const proxy metatables; generated modules cache both Table pointers in consecutive `_mod` slots |
 | `TITAN_ARRAY_METATABLE` / `TITAN_CONST_ARRAY_METATABLE` (`"Titan array metatable"`, `"Titan const array metatable"`) | named projections repaired from the canonical pair for ordinary registry lookup |
 | the metatable pointer itself (via `lua_rawsetp`) | the FQTN string: the reverse map used only in error messages |
-| `TITAN_ROOT_KEY` (`"9efb91a8-4a1b-4bdb-aa6b-b84d9ed1dd77"`) | the normalized Titan SDK/rocks-tree root cached by `titan_init_paths`/`pushroot` |
-| `TITAN_PATH_KEY` (`"ec10e486-d8fd-11e7-87f4-e7e9581a929c"`) | the resolved Titan search path, cached by `pushpath` |
-| `TITAN_LIBS_KEY` (`"ecfc9174-d8fd-11e7-8be2-abbaa3ded45f"`) | the runtime `loadlib` handle cache (path 3 below) |
+| `TITAN_PATH_KEY` (`"ec10e486-d8fd-11e7-87f4-e7e9581a929c"`) | the state's effective Titan path string, computed on first lookup by `titan_path.c`; a string an application stores first is used as-is |
+| `TITAN_SDK_FALLBACK_KEY` (`"c2a9e5d4-1b7f-4e3a-8d26-5f9b0c7a4e18"`) | private record binding SDK-fallback eligibility to the computed path and caching the one probe outcome (`titan_path.c`) |
+| `TITAN_SEARCHER_KEY` (`"6f0b7c1e-3f0a-4b8e-9c55-2d3b1f6a9e47"`) | marker that this state's `package.searchers` already has the Titan searcher (`titan_install_searcher`) |
+| `TITAN_LIBS_KEY` (`"ecfc9174-d8fd-11e7-8be2-abbaa3ded45f"`) | the runtime handle cache shared by `loadlib` and the Titan searcher (paths 3 and 4 below) |
 | `TITAN_MAIN_BOOTSTRAP_KEY` (`"41c48a97-55a5-4514-a76f-79ab028ae6e0"`) | an optional standalone hook installed by `titan.async` |
 | `TITAN_MAIN_ARGC_KEY` (`"fd9c8d85-f521-4052-92e6-8af5c349e5bb"`) | the process argument count published by a standalone entrypoint |
 | `TITAN_MAIN_ARGV_KEY` (`"fc1376f3-2cb7-48d4-969c-c02df930cf68"`) | the process argument vector, replaced by the pointer `uv_setup_args` returns when `uv.setup_process_args()` runs |
@@ -575,7 +577,7 @@ loader caches). The complete inventory:
 | `TITAN_NAMES_KEY` (`"a7c4e2f0-1d6b-4e3a-9c5f-8b2d7e0a4f16"`) | native-symbol display names for trace formatting |
 | `TITAN_TRACE_PINNED` (`"5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"`) | the one-shot flag that preserves an existing traceback for a bare re-raise |
 | `TITAN_LAZY_LIBS_KEY` (`"b03f87d2-aea4-407c-87df-054d5be15ef2"`) | `titan._loadlib`'s lazy/local handle cache (path 2) |
-| `TITAN_LAZY_GLOBAL_LIBS_KEY` (`"3f6cae7b-8aeb-42eb-9f72-a978cfe96f7c"`) | `titan._loadlibglobal`'s canonical-path lazy/global handle cache (path 4) |
+| `TITAN_LAZY_GLOBAL_LIBS_KEY` (`"3f6cae7b-8aeb-42eb-9f72-a978cfe96f7c"`) | `titan._loadlibglobal`'s canonical-path lazy/global handle cache |
 | `"Titan function type <runtime identity> tag"` | a shared light-userdata identity tag per first-class function type, keyed by `types.runtime_identity` (`coder/generate.lua`) |
 
 The trace keys are used as described in
@@ -624,17 +626,20 @@ emitting-module upvalue.
 
 Four separate loading paths share the per-logical-module symbols but differ in
 selection, `dlopen` flags, cache, and whether module initialization runs. The
-helpers are registered by `titan-runtime/ltitanlib.c` (`_loadlib`,
-`_loadlibglobal`) and `titan-runtime/titan.c` (`loadlib`).
+helpers are registered by `titan-runtime/ltitanlib.c` (`_loadlib`) and
+implemented in `titan-runtime/titan_path.c` (`loadlib` and the package
+searcher).
 
-### 1. Lua's eager/local support bootstrap
+### 1. Lua's eager/local support load
 
-The first `require "titan"` uses Lua's ordinary C searcher: it maps `titan.so`
+A plain Lua host's first `require "titan"` uses Lua's ordinary C searcher: it
+maps the support module `<root>/lib/lua/5.5/titan.so` from `package.cpath`
 with Lua's eager/local policy, calls `luaopen_titan`, and returns only the
-native support table. The private source-install bootstrap and the combined
-standard image both provide that entry. Bare support loading does not run any
-`titan.*_init`, create a standard module `Udata`, or install the async program
-hook.
+native support table. `luaopen_titan` appends the Titan searcher (path 4) to
+that state's `package.searchers`. Support loading does not map any provider,
+run any `titan.*_init`, create a standard module `Udata`, or install the async
+program hook. Generated executables, independent states and thread children
+install the searcher directly instead.
 
 ### 2. Compiler lazy/local interface inspection
 
@@ -648,7 +653,7 @@ as the module type's `file` field; it is not serialized.
 
 ### 3. Canonical Titan runtime imports
 
-Generated code selects the logical provider through `titan-runtime/titan.c`:
+Generated code selects the logical provider through `titan-runtime/titan_path.c`:
 
 ```c
 TitanModuleProvider some_dep_provider =
@@ -672,13 +677,14 @@ When the logical module is absent, selection first looks for a matching copied
 native preload descriptor, whose resolver supplies symbols without running a
 Lua loader or initializing the dependency. Only when that is also absent does
 it call `loadlib` for the compile-selected relative filename. `loadlib`
-consults `TITAN_LIBS_KEY`, then walks the versioned `TITAN_PATH` variable,
-`TITAN_PATH`, or `".;<root>/lib/titan/<version>"` (`;;` splices the default),
-maps `dir/file` with `RTLD_LAZY | RTLD_GLOBAL`, caches the handle per state,
-invalidates native backtrace state, and never calls `dlclose`. Two logical
-modules in one image can share the handle and resolve different mangled
-entries. The path variables are described in
-[driver](driver.md#module-names-and-the-search-paths).
+consults `TITAN_LIBS_KEY`, selects the first occupied `<entry>/<file>` along the
+state's effective Titan path (`TITAN_PATH_0_6`, `TITAN_PATH`, or the run-time
+default `!;!/../lib/titan/0.6`, followed by the lazy SDK fallback), maps it with
+`RTLD_LAZY | RTLD_GLOBAL`, caches the handle per state, invalidates native
+backtrace state, and never calls `dlclose`. Two logical modules in one image
+can share the handle and resolve different mangled entries. The path rules are
+in [the run-time Titan
+path](driver.md#the-run-time-titan-path-and-sdk-fallback).
 
 The ABI check precedes the consumer's erased-signature and nominal-shape
 checks, all before the dependency initializes. `titan_module_symbol` resolves
@@ -705,32 +711,45 @@ This linker behavior does not choose Titan's logical provider. Native
 constructors, imported data and taken function-address relocations are eager
 and stay outside the initializer-ordering contract.
 
-### 4. Generated-shim lazy/global loading and promotion
+### 4. The Titan package searcher
 
-Every linked source module has a generated `<logical/path>.lua` shim. It
-locates the provider with `package.searchpath(provider, package.cpath)`,
-requires the bare support table, and calls
-`titan._loadlibglobal(path, "luaopen_<logical>")`. That helper canonicalizes
-the path with `realpath`, keeps its own per-state cache
-(`TITAN_LAZY_GLOBAL_LIBS_KEY`), calls `dlopen(canonical, RTLD_LAZY | RTLD_GLOBAL)`
-on the first request, and resolves the Lua entry. It returns
-`nil, message, stage` instead of raising and reports the requested pathname.
+`require(name)` reaches `titan_path_searcher` after Lua's own searchers. It
+returns the state's canonical module first, without opening any image, then a
+matching native preload loader. Otherwise it walks the shallow-to-exact
+candidates of the effective Titan path root-major, probes each occupied
+candidate with `dlopen(realpath, RTLD_LAZY | RTLD_LOCAL)` for the
+`<mangled>_abi`/`<mangled>_types` pair, and promotes a valid claim to
+`RTLD_LAZY | RTLD_GLOBAL` before checking the ABI and resolving
+`luaopen_<mangled>`. The promotion happens before any initializer runs, so a
+provider's unresolved calls can later bind to dependencies loaded through
+path 3. It cannot undo eager relocations, so every provider must still be
+link-complete with respect to eager loading. The handle joins the same
+`TITAN_LIBS_KEY` cache, keyed by the image's realpath. Errors in a selected
+provider raise; a clean miss returns Lua's ordinary searcher message. The full
+contract is in [the Titan package
+searcher](driver.md#the-titan-package-searcher).
 
-The helper deliberately bypasses Lua's C-library cache and `_loadlib`'s cache.
-For an unrelated provider this is its first lazy/global mapping. For the
-combined standard library, Lua's support bootstrap has already mapped the same
-`titan.so` eager/local; the second `dlopen` promotes that image to global
-before the shim calls `luaopen_titan_uv` (or another logical entry). It cannot
-undo eager relocations Lua already performed, so both the private bootstrap
-and the full `titan.so` must be link-complete under eager loading. A second Lua
-state repeats its own cache insertion and promotion while the OS loader may
-reuse the mapped image.
+`require` passes the requested name and the provider path to
+`luaopen_<mangled>`, whose generated [file-load name
+guard](codegen-overview.md#lua-entries-and-abi-type-and-layout-metadata)
+rejects a different logical name with the same mangled spelling before
+initialization. A `package.preload` alias, whose loader data is `":preload:"`,
+is not compared.
 
-The installed standard layout pairs `<root>/lib/titan/<version>/{titan.so,titan.a}`
-with one generated DSO-form shim per standard root (Makefile `STDLIB_SHIMS`)
-below `<root>/share/lua/5.5/titan/`; the root list is in
-[Multi-module libraries](multi-module-libraries.md#reserved-titan-and-the-standard-library-image). The `provider_probe` loader
-fixture that exercises this path is described in
+The support table's `_loadlibglobal(path, symbol)` is a separate internal
+helper for native harnesses. It canonicalizes the path with `realpath`, keeps
+its own per-state cache (`TITAN_LAZY_GLOBAL_LIBS_KEY`), calls
+`dlopen(canonical, RTLD_LAZY | RTLD_GLOBAL)` on the first request, and returns
+the requested Lua entry or `nil, message, stage`. Because that cache is
+distinct from Lua's C-library cache and `_loadlib`'s cache, its first request
+in a state always performs a lazy/global `dlopen`.
+
+The installed standard layout is the pair
+`<root>/lib/titan/<version>/{titan.so,titan.a}` with no Lua files; the root
+list is in
+[Multi-module libraries](multi-module-libraries.md#reserved-titan-and-the-standard-library-image).
+The `provider_probe` loader fixture that exercises lazy/global provider
+loading is described in
 [Linking a provider pair](driver.md#linking-a-provider-pair).
 
 ## Safety summary

@@ -265,8 +265,7 @@ pass itself never runs the checker, code generator, or C preprocessor:
   still decided by its certificate.
 * **Final outputs.** The pass reserves the actual program path and Darwin
   `.dSYM`, the Windows launcher and provider DLL, or the library provider,
-  archive, `.dSYM`, and generated Lua shims, including shims of modules
-  carried by already-selected static archives.
+  archive, and `.dSYM`.
 * **Protected inputs.** `--c-source` files and `-X` payloads, every source
   constituent, the non-`search` C headers recorded by cached modules, selected
   binary providers and archives, every held `.titan-build.lock` file, and the
@@ -826,8 +825,9 @@ certification, generated module C, `--c-source` nodes, and final links:
      components) and appends `"-l" .. name` to `link_argv` for each entry,
      preserving repeats and exact interleaving with `-L` and `--ldflag`.
 4. **Trailing SDK include roots (`driver.foreign_include_dirs()`).** Appended
-   after `driver.NATIVE_COMPILE_FLAGS` in `driver.generated_compile_prefix()`
-   and `driver.toolchain_descriptor(context)`, so user environment and CLI `-I`
+   after `driver.NATIVE_COMPILE_FLAGS` in `driver.generated_compile_prefix()`,
+   `driver.authored_c_compile_prefix()`, and
+   `driver.toolchain_descriptor(context)`, so user environment and CLI `-I`
    directories are searched before `<root>/include` and
    `<root>/src/lua-5.5.1`.
 
@@ -837,9 +837,12 @@ When `titanc --coverage` is active, `--coverage` and `-fno-lto` are appended to
 ### `--c-source` compilation and records
 
 `nativeinputs.compile(context, request)` (`titan-compiler/nativeinputs.lua`)
-compiles authored or pre-generated C files using the invocation's
-`driver.generated_compile_prefix()` (without Titan-only test-owner or module
-coverage flags) and shared `toolchain_identity`:
+compiles authored or pre-generated C files with the argv that `titanc` builds
+from `driver.authored_c_compile_prefix()` (without Titan-only test-owner or
+module coverage flags) and shared `toolchain_identity`. That prefix equals
+`driver.generated_compile_prefix()` except on Windows, where it omits Titan's
+Lua DLL import definitions so that helpers keep stock Lua conventions (see
+[the Windows consumer definitions](windows-build.md#one-controlled-lua-dll-and-its-sdk)):
 
 1. **Deduplication and storage stem.** Each path in `request.sources` is
    canonicalized via `linkcertificate.canonical_path(context, source)` (resolving
@@ -938,10 +941,9 @@ is:
 * **Windows standalone or `--test` executable:** `{ path = paths.executable }`
   and `{ path = paths.provider }`;
 * **Unix provider library:** `{ path = "<prefix>.so" }`, `{ path =
-  "<prefix>.a" }`, optional `{ path = "<prefix>.so.dSYM", kind = "directory" }`
-  on Darwin, and `{ path = shim.filename }` for each generated Lua shim;
-* **Windows provider library:** `{ path = "<prefix>.dll" }` and each generated
-  Lua shim.
+  "<prefix>.a" }`, and optional `{ path = "<prefix>.so.dSYM", kind =
+  "directory" }` on Darwin;
+* **Windows provider library:** `{ path = "<prefix>.dll" }`.
 
 Mutable runtime coverage outputs (`.gcda` files and rendered coverage reports)
 are never part of `spec.outputs`. Each target owns
@@ -970,8 +972,8 @@ are never part of `spec.outputs`. Each target owns
   `no_uv_bootstrap`, `argv` (`driver.link_extra_flags()`), `toolchain`
   (`{ compiler = toolchain_identity, output_tools }`, see below), `test_cases`
   (deterministically sorted descriptors from `test_runner.discover`),
-  `templates` (`configuration.compiler`, covering runner/entrypoint templates
-  and `standalone_paths.lua`), `coverage` (`coverage.inventory`), `companions`
+  `templates` (`configuration.compiler`, covering the runner and entrypoint
+  templates), `coverage` (`coverage.inventory`), `companions`
   (Windows launcher manifest and `relative_provider` path), `policy` (`{ uname,
   darwin, profile, target }`), `bindings` (`resolver_context.native_bindings`),
   `target`, and `environment` (`{ runtime_flags, MACOSX_DEPLOYMENT_TARGET,

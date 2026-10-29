@@ -358,9 +358,7 @@ source actually references. The driver links and runs a private
 executable-context protocol probe for the ordinary selected archive keys plus
 that use-site set, using ordinary archive extraction before publishing the real
 executable. Exported-but-unused nominal types therefore do not force unrelated
-members out of an archive. Selecting the shallow standard `titan.a` also makes
-the probe validate `luaopen_titan` and its `_loadlib`/`_loadlibglobal` support
-table.
+members out of an archive.
 
 A private archive dependency reaches `package.preload` only when its importer
 initializes it; an unused archive sibling is neither extracted nor initialized.
@@ -386,8 +384,8 @@ Before generating synthetic runner or entrypoint sources, running
 and `linkcertificate.check`) under `<output>/.titan-links/<key>/`, where
 `<key>` is the SHA-256 digest of the canonical sorted final output paths. For a
 Unix provider pair, the certified `outputs` set comprises `<provider>.so`,
-`<provider>.a`, `<provider>.so.dSYM` (on Darwin), and every planned
-`<module>.lua` shim; for a standalone or test program, it comprises the
+`<provider>.a`, and `<provider>.so.dSYM` (on Darwin); for a standalone or test
+program, it comprises the
 executable (plus `.dSYM` on Darwin, or `<executable>.exe` and `<provider>.dll`
 on Windows).
 
@@ -497,25 +495,27 @@ a shared jobserver.
 
 ## Publication and installation
 
-`driver.publish_provider_bundle` publishes a no-main provider bundle. It stages
-the DSO, archive, shims, and Darwin dSYM on the destination filesystem. After
-validation, publication backs up current owned paths, installs shims/dSYM,
-publishes the archive, and renames the DSO last as the default dynamic-path
-commit point. Caught and injected failures restore all backups. This is
-recoverable process-level publication, not a claim of crash, power-loss, or
-asynchronous-signal atomicity.
+`driver.publish_provider_bundle(staged_dso, staged_archive, public_dso,
+options)` publishes a no-main provider bundle. It stages the DSO, archive, and
+Darwin dSYM on the destination filesystem. After validation, publication backs
+up current owned paths, installs the dSYM, publishes the archive, and renames
+the DSO last as the default dynamic-path commit point. Caught failures restore
+all backups; tests inject them at the `before-dsym`, `after-dsym`,
+`before-archive`, `after-archive`, `before-dso`, and `after-dso` boundaries
+(`options.fail_at`/`inject_failure`). This is recoverable process-level
+publication, not a claim of crash, power-loss, or asynchronous-signal
+atomicity.
 
 Before replacing an existing bundle, publication compares the staged DSO,
-archive, generated shims, and Darwin dSYM tree with their public counterparts
-(`same_file_contents`, `same_regular_archive_contents`). The DSO, shims, and
-dSYM files must be byte-identical with matching modes. A regular archive must
+archive, and Darwin dSYM tree with their public counterparts
+(`same_file_contents`, `same_regular_archive_contents`). The DSO and dSYM files
+must be byte-identical with matching modes. A regular archive must
 have the same record names/order/sizes, index and long-name bytes, member bytes,
 padding, and file mode; only the fixed-width archive-header
 timestamp/uid/gid/mode fields are ignored, accommodating configured tools that
-lack deterministic `D`. When that complete owned set is unchanged and no stale
-shim needs retiring, Titan removes the staged artifacts and preserves the public
-bundle and its mtimes. Any changed or missing member takes the ordinary
-transactional path.
+lack deterministic `D`. When that complete owned set is unchanged, Titan
+removes the staged artifacts and preserves the public bundle and its mtimes.
+Any changed or missing member takes the ordinary transactional path.
 
 After `driver.publish_provider_bundle` (or `driver.compile_program` /
 `driver.publish_windows_provider`) succeeds, `titanc` calls
@@ -525,16 +525,13 @@ rehashing only files whose observation changed, snapshots the published
 outputs, records the linker-reported native
 library inputs from `link.d` (or the compiler fallback), and writes
 `<output>/.titan-links/<key>/record` last. Even when `publish_provider_bundle`
-finds the staged pair and shims byte-identical to the existing public outputs
+finds the staged pair byte-identical to the existing public outputs
 and preserves their timestamps, `linkcertificate.commit` writes the updated
 link record so subsequent no-op invocations hit before entering the link
 pipeline.
 
-When replacing a valid prior self-describing archive with fewer keys, its old
-key set enumerates the exact stale generated shims eligible for transactional
-removal; see [Validated publication and generated
-shims](multi-module-libraries.md#validated-publication-and-generated-shims).
-Titan never scans a directory and never removes an unrecognized Lua file.
+Publication owns only the provider pair and its dSYM. It never scans a
+directory and never creates or removes Lua files.
 
 Every metadata entry carries `TITAN_ABI_VERSION`, independently of the
 container banner version, and static validation checks it before schema

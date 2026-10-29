@@ -20,7 +20,7 @@ for byte operations, formatting, packing, and regex parsing/compilation. The
 [maintenance rules](standard-library-maintenance.md#keep-public-behavior-with-its-declaration)
 decide when a helper stays separate. All files form one logical module with
 one checker/code-generator pass, one `titan_string_*` protocol, one generated
-object, and one `titan/string.lua` shim.
+object, and one `luaopen_titan_string` entry.
 
 `titan.string` imports only `titan.peg` (format grammar, regex parser, and
 compiled regexes) and `titan.gc` (weak regex cache). `titan.peg` imports

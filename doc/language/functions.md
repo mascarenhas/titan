@@ -574,8 +574,9 @@ module name become directory separators). A
 path so the executable cannot collide with the source directory. Both forms
 statically embed all the requested modules plus every imported module selected
 from source or a static provider. Imports selected from compiled `.so` files
-are loaded dynamically at startup; both compiled forms recover the same public
-interface metadata.
+are loaded dynamically at startup, from the run-time
+[Titan path](modules.md#the-titan-path); both compiled forms recover the same
+public interface metadata.
 
 The executable initially places only its main module in `package.preload`.
 Requiring it performs the normal Titan import initialization before `main`
@@ -583,8 +584,8 @@ runs. After each generated module initializes successfully, it publishes its
 own loader under its logical name in that same preload table. Consequently all
 initialized imports—including private dependencies from a static provider—are
 available to Lua's ordinary `require` and to
-[`titan.lua.require`](standard-library-lua.md#loading-modules), without a Lua
-shim or separate provider DSO when they are linked statically. Publishing is a
+[`titan.lua.require`](standard-library-lua.md#loading-modules), without a
+separate provider DSO when they are linked statically. Publishing is a
 consequence of successful initialization, not a second initialization step. A
 linked module outside the initialized import closure and an unused archive
 sibling publish no preload entry. See
@@ -592,7 +593,7 @@ sibling publish no preload entry. See
 
 ```sh
 ./titanc answer        # answer.titan declares main -> executable ./answer
-./titanc pkg.foo pkg.bar # neither has main -> pkg.so/pkg.a plus two Lua loaders
+./titanc pkg.foo pkg.bar # neither has main -> one pkg.so/pkg.a provider pair
 ```
 
 Library roots must share at least one dotted component; use separate compiler

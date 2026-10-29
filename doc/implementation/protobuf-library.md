@@ -557,8 +557,8 @@ as described under [Encoding](#encoding), and `serialize` keeps its public-field
 policy at the root. Custom payloads and closure snapshots are immutable byte
 strings before they enter the native transfer boundary.
 
-The Unix and Windows standard providers include `titan.protobuf`, its Lua shim,
-and its native tests in the shared inventory. `titan.lua` and `titan.async`
+The Unix and Windows standard providers include `titan.protobuf` and its Lua
+entry, and its native tests are in the shared inventory. `titan.lua` and `titan.async`
 depend on the codec through `titan.transfer`, so its loader
 is available in independent-state preload snapshots and Receiver-only
 applications. Explicit nominal carriers retain
