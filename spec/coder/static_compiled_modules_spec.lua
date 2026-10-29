@@ -305,12 +305,10 @@ describe("static compiled-module native containers", function()
             "Windows Titan archive-provider consumers are not implemented",
     }
     local publication_cases = {
-        ["rolls back every caught publication boundary including stale shims"] = true,
+        ["rolls back every caught publication boundary"] = true,
         ["preserves an identical recursive Darwin dSYM tree"] = true,
-        ["retires only exact old-provider stale shims on successful publication"] = true,
-        ["retires stale shims only inside the selected output folder"] = true,
+        ["publishes no Lua loaders and leaves Lua files beside the provider"] = true,
         ["rejects nonregular provider destinations and native input aliases"] = true,
-        ["rechecks planned shim ownership at publication"] = true,
     }
     local register = it
     local function it(name, callback)
@@ -1102,24 +1100,16 @@ end
         assert.match("type metadata", err, 1, true)
     end)
 
-    it("rolls back every caught publication boundary including stale shims",
-       function()
+    it("rolls back every caught publication boundary", function()
         local seed = workspace .. "/old-provider-seed.a"
         assert(driver.build_static_archive(
             seed, { target_object }, {}, target, false))
         local old_archive = read_file(seed)
         local public_dso = workspace .. "/provider.so"
         local public_archive = workspace .. "/provider.a"
-        local stale_shim = workspace .. "/fixture/target.lua"
-        local new_shim = workspace .. "/new/module.lua"
-        local old_shim = in_directory(workspace, function()
-            return assert(driver.plan_module_shims(
-                "provider", { "fixture.target" }))[1].contents
-        end)
 
         for _, failpoint in ipairs({
-            "before-shims",
-            "after-shims",
+            "before-dsym",
             "after-dsym",
             "before-archive",
             "after-archive",
@@ -1128,8 +1118,6 @@ end
         }) do
             write_file(public_dso, "old dso")
             write_file(public_archive, old_archive)
-            write_file(stale_shim, old_shim)
-            os.remove(new_shim)
 
             local staged_dso = workspace .. "/staged-" .. failpoint .. ".so"
             local staged_archive =
@@ -1141,15 +1129,8 @@ end
             local published, publish_err = in_directory(workspace, function()
                 return driver.publish_provider_bundle(
                     staged_dso, staged_archive, public_dso, {
-                        {
-                            filename = "new/module.lua",
-                            contents = driver.GENERATED_SHIM_BANNER ..
-                                "return 'new'\n",
-                        },
-                    }, {}, {
                         fail_at = failpoint,
                         public_archive = public_archive,
-                        provider = "provider",
                     })
             end)
             assert.falsy(published)
@@ -1157,8 +1138,6 @@ end
                 failpoint, publish_err, 1, true)
             assert.equal("old dso", read_file(public_dso))
             assert.equal(old_archive, read_file(public_archive))
-            assert.equal(old_shim, read_file(stale_shim))
-            assert.is_nil(lfs.symlinkattributes(new_shim))
             if driver.IS_DARWIN then
                 assert.equal("old dSYM", read_file(
                     public_dso .. ".dSYM/Contents/test-marker"))
@@ -1179,16 +1158,12 @@ end
             local public_archive = workspace .. "/darwin-provider.a"
             local staged_dso = workspace .. "/darwin-staged.so"
             local staged_archive = workspace .. "/darwin-staged.a"
-            local public_shim = workspace .. "/same/module.lua"
-            local shim_contents = driver.GENERATED_SHIM_BANNER ..
-                "return 'same'\n"
             local dso_contents = "identical provider DSO"
             local archive_contents = read_file(input_archive)
             write_file(public_dso, dso_contents)
             write_file(staged_dso, dso_contents)
             write_file(public_archive, archive_contents)
             write_file(staged_archive, archive_contents)
-            write_file(public_shim, shim_contents)
 
             local relative_marker =
                 ".dSYM/Contents/Resources/DWARF/provider"
@@ -1203,7 +1178,6 @@ end
             for _, path in ipairs({
                 public_dso,
                 public_archive,
-                public_shim,
                 public_dso .. relative_marker,
             }) do
                 assert.truthy(lfs.touch(
@@ -1213,13 +1187,7 @@ end
             local published, public_static =
                 driver.publish_provider_bundle(
                     staged_dso, staged_archive, public_dso, {
-                        {
-                            filename = public_shim,
-                            contents = shim_contents,
-                        },
-                    }, {}, {
                         public_archive = public_archive,
-                        provider = "darwin-provider",
                     })
             assert.truthy(published, public_static)
             assert.equal(public_archive, public_static)
@@ -1230,8 +1198,6 @@ end
                 lfs.attributes(public_dso, "modification"))
             assert.equal(preserved_mtime,
                 lfs.attributes(public_archive, "modification"))
-            assert.equal(preserved_mtime,
-                lfs.attributes(public_shim, "modification"))
             assert.equal(preserved_mtime, lfs.attributes(
                 public_dso .. relative_marker, "modification"))
         end))
@@ -1239,88 +1205,38 @@ end
         if not checked[1] then error(checked[2], 0) end
     end)
 
-    it("retires only exact old-provider stale shims on successful publication",
+    it("publishes no Lua loaders and leaves Lua files beside the provider",
        function()
         local seed = workspace .. "/old-provider-seed.a"
         assert(driver.build_static_archive(
             seed, { target_object }, {}, target, false))
-        local old_archive = read_file(seed)
         local public_dso = workspace .. "/provider.so"
         local public_archive = workspace .. "/provider.a"
-        local stale_shim = workspace .. "/fixture/target.lua"
-        local old_shim = in_directory(workspace, function()
-            return assert(driver.plan_module_shims(
-                "provider", { "fixture.target" }))[1].contents
-        end)
-
-        local function publish_with_shim(contents)
-            write_file(public_dso, "old dso")
-            write_file(public_archive, old_archive)
-            write_file(stale_shim, contents)
-            local staged_dso = workspace .. "/staged-provider.so"
-            local staged_archive = workspace .. "/staged-provider.a"
-            write_file(staged_dso, "new dso")
-            write_file(staged_archive, read_file(input_archive))
-            prepare_publication_dsym(staged_dso, public_dso)
-            local published, public_static = in_directory(
-                workspace, function()
-                    return driver.publish_provider_bundle(
-                        staged_dso, staged_archive, public_dso, {}, {}, {
-                            public_archive = public_archive,
-                            provider = "provider",
-                        })
-                end)
-            return published, public_static
-        end
-
-        local published, public_static = publish_with_shim(old_shim)
-        assert.truthy(published, public_static)
-        assert.equal(public_archive, public_static)
-        assert.equal("new dso", read_file(public_dso))
-        assert.equal(read_file(input_archive), read_file(public_archive))
-        assert.is_nil(lfs.symlinkattributes(stale_shim))
-
-        -- The banner alone is not ownership: provider and entry must still
-        -- match the exact old generated template.
-        local modified = old_shim .. "-- user modification\n"
-        published, public_static = publish_with_shim(modified)
-        assert.falsy(published)
-        assert.match("refusing to retire unrecognized old Lua shim",
-            public_static, 1, true)
-        assert.equal("old dso", read_file(public_dso))
-        assert.equal(old_archive, read_file(public_archive))
-        assert.equal(modified, read_file(stale_shim))
-    end)
-
-    it("retires stale shims only inside the selected output folder", function()
-        local root = workspace .. "/output-scope"
-        local output = root .. "/output"
-        local public_dso = output .. "/provider.so"
-        local public_archive = output .. "/provider.a"
-        assert(driver.build_static_archive(
-            public_archive, { target_object }, {}, target, false))
         write_file(public_dso, "old dso")
-        local old_shim = assert(driver.plan_module_shims(
-            "provider", { "fixture.target" }, output))[1].contents
-        local stale_shim = output .. "/fixture/target.lua"
-        local unrelated_shim = root .. "/fixture/target.lua"
-        local unrelated_contents = "return 'unrelated source-tree loader'\n"
-        write_file(stale_shim, old_shim)
-        write_file(unrelated_shim, unrelated_contents)
-        local staged_dso = output .. "/staged.so"
-        local staged_archive = output .. "/staged.a"
+        write_file(public_archive, read_file(seed))
+        -- A module carried only by the previous archive: its Lua file is
+        -- authored content, not compiler output to retire.
+        local authored = workspace .. "/fixture/target.lua"
+        write_file(authored, "return 'authored loader'\n")
+        local staged_dso = workspace .. "/staged-provider.so"
+        local staged_archive = workspace .. "/staged-provider.a"
         write_file(staged_dso, "new dso")
         write_file(staged_archive, read_file(input_archive))
         prepare_publication_dsym(staged_dso, public_dso)
-        local published, err = in_directory(root, function()
+
+        local published, public_static = in_directory(workspace, function()
             return driver.publish_provider_bundle(
-                staged_dso, staged_archive, public_dso, {}, {}, {
-                    provider = "provider", output_root = output,
+                staged_dso, staged_archive, public_dso, {
+                    public_archive = public_archive,
                 })
         end)
-        assert.truthy(published, err)
-        assert.is_nil(lfs.symlinkattributes(stale_shim))
-        assert.equal(unrelated_contents, read_file(unrelated_shim))
+        assert.truthy(published, public_static)
+        assert.equal("new dso", read_file(public_dso))
+        assert.equal(read_file(input_archive), read_file(public_archive))
+        assert.equal("return 'authored loader'\n", read_file(authored))
+        for name in lfs.dir(workspace) do
+            assert.is_nil(name:match("%.lua$"), name)
+        end
     end)
 
     it("rejects nonregular provider destinations and native input aliases",
@@ -1423,33 +1339,5 @@ end
             })
         assert.falsy(ok)
         assert.match("path hierarchy conflict", err, 1, true)
-    end)
-
-    it("rechecks planned shim ownership at publication", function()
-        local plans, public_dso = in_directory(workspace, function()
-            return driver.plan_module_shims(
-                "provider", { "fixture.target" })
-        end)
-        assert.truthy(plans, public_dso)
-        local public_shim = workspace .. "/fixture/target.lua"
-        write_file(public_shim, "return 'user file'\n")
-        local staged_dso = workspace .. "/staged-provider.so"
-        local staged_archive = workspace .. "/staged-provider.a"
-        write_file(staged_dso, "new dso")
-        write_file(staged_archive, read_file(input_archive))
-        prepare_publication_dsym(
-            staged_dso, workspace .. "/provider.so")
-
-        local published, publish_err = in_directory(workspace, function()
-            return driver.publish_provider_bundle(
-                staged_dso, staged_archive, public_dso,
-                plans, {}, { provider = "provider" })
-        end)
-        assert.falsy(published)
-        assert.match("refusing to overwrite unrecognized Lua file",
-            publish_err, 1, true)
-        assert.equal("return 'user file'\n", read_file(public_shim))
-        assert.equal("new dso", read_file(staged_dso))
-        assert.equal(read_file(input_archive), read_file(staged_archive))
     end)
 end)
