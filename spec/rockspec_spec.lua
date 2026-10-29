@@ -365,8 +365,8 @@ describe("standalone-prefix source installation", function()
             assert_file(PREFIX ..
                 "/share/lua/5.5/titan-compiler/" .. module)
         end
-        -- Plain Lua finds the support module on its default C path; no
-        -- generated Lua shims accompany the standard provider.
+        -- Plain Lua finds the support module on its default C path. The
+        -- standard provider is one image; its modules have no staged Lua shims.
         assert_unique_regular_file(SUPPORT_MODULE)
         assert_absent(LUA_SHAREDIR .. "/titan")
         assert_absent(LUA_SHAREDIR .. "/titan.lua")

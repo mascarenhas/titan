@@ -266,9 +266,9 @@ end
         assert.falsy(output:find(owner_archive, 1, true), output)
 
         -- This fresh executable has no canonical owner, so it needs the
-        -- producer-selected DSO fallback at runtime.
-        -- Neither the type-only archive, sibling facade DSO, nor any shim may
-        -- have smuggled in a fallback implementation.
+        -- producer-selected DSO fallback at runtime. The fallback can only
+        -- come from that DSO: the type-only archive and the sibling facade
+        -- image are gone, and providers ship without Lua shims.
         assert.truthy(os.remove(owner_archive))
         assert.truthy(os.remove(workspace .. "/dynamic/facade.so"))
         -- The cutover ships no generated shims beside a provider; assert that
