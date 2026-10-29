@@ -131,7 +131,7 @@ TITAN_RUNTIME_FUNC TITAN_COLD l_noret titan_unwind_guard_failed(lua_State *L,
    TITAN_LIBRARY_VERSION is its major/minor component and owns installed
    library paths plus the versioned TITAN_PATH override. */
 /* Implementation notes: doc/implementation/codegen-overview.md#compiled-module-abi */
-#define TITAN_ABI_VERSION "3"
+#define TITAN_ABI_VERSION "2"
 #define TITAN_VERSION "0.6.0"
 #define TITAN_LIBRARY_VERSION "0.6"
 #define TITAN_LIBRARY_VERSION_SUFFIX "_0_6"
