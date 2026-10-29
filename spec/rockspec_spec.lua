@@ -2229,8 +2229,8 @@ inspect-lua-sdk:
             copy_tree("titan-runtime/" .. source,
                 workspace .. "/titan-runtime/" .. source)
         end
-        -- The support bundle's link rule consumes the export map beside the
-        -- real Makefile's own directory.
+        -- The support link reads the export map relative to Make's working
+        -- directory, like the runtime sources copied above.
         copy_tree("scripts/titan_support_exports.map",
             workspace .. "/scripts/titan_support_exports.map")
         copy_tree("vendor/lpeglabel", workspace .. "/vendor/lpeglabel")
