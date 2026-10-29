@@ -329,9 +329,10 @@ static int titan_path_ascii_lower(int c) {
 #endif
 
 /* Push the normalized form of a configured root (TITAN_ROOT), following the
-** driver's normalize_root: a relative value is joined to the current
+** driver's compiler_root: a relative value is joined to the current
 ** directory; a path with a `..` component resolves through the filesystem
-** when it exists; everything else is normalized lexically. */
+** when realpath succeeds; everything else, including every realpath failure,
+** is normalized lexically. */
 static int titan_path_push_root(lua_State *L, const char *value) {
 #if defined(_WIN32)
     return titan_path_push_full(L, value);
@@ -355,11 +356,6 @@ static int titan_path_push_root(lua_State *L, const char *value) {
             lua_pushstring(L, resolved);
             lua_replace(L, top + 1);
             return 1;
-        }
-        if (errno != ENOENT && errno != ENOTDIR) {
-            lua_pushfstring(L, "cannot resolve '%s': %s", path, strerror(errno));
-            lua_replace(L, top + 1);
-            return 0;
         }
     }
     titan_path_push_lexical(L, path, lua_rawlen(L, top + 1));
