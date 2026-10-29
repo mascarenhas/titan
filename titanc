@@ -1,28 +1,23 @@
 #!/usr/bin/env lua
 
 -- `titanc --print-root` is the runtime's SDK-root query. Answer it from the
--- native support module alone, before loading the compiler. Every other
--- spelling, including extra arguments, takes the fully validated path below.
+-- native support module alone, before loading the compiler. Without usable
+-- support, and for every other spelling, the fully validated path below
+-- answers instead; it honors TITAN_ROOT without native support.
 if select("#", ...) == 1 and ... == "--print-root" then
     local loaded, support = pcall(require, "titan")
     local compiler_root = loaded and type(support) == "table" and
         support._compiler_root
-    local root, root_error
     if type(compiler_root) == "function" then
-        root, root_error = compiler_root()
-    elseif loaded then
-        root_error = "installed Titan native support lacks _compiler_root; " ..
-            "reinstall Titan"
-    else
-        root_error = "cannot load the Titan support module: " .. tostring(support)
+        local root, root_error = compiler_root()
+        if type(root) ~= "string" or root == "" then
+            io.stderr:write("cannot locate the Titan installation root: ",
+                tostring(root_error), "\n")
+            os.exit(1)
+        end
+        io.stdout:write(root, "\n")
+        return
     end
-    if type(root) ~= "string" or root == "" then
-        io.stderr:write("cannot locate the Titan installation root: ",
-            tostring(root_error), "\n")
-        os.exit(1)
-    end
-    io.stdout:write(root, "\n")
-    return
 end
 
 local argparse = require 'argparse'
