@@ -1666,6 +1666,94 @@ end
         if not tested then error(failure, 0) end
     end)
 
+    it("runs prepared native tests against the selected SDK, not a titanc on PATH", function()
+        if platform.windows then pending("Unix Make native launch environment"); return end
+        -- The aggregate resolves titan.test through the runtime's lazy SDK
+        -- fallback, so the run target has to carry TITAN_ROOT. A titanc
+        -- earlier on PATH must not decide which provider the suite loads.
+        local root = make_temp_dir()
+        local tested, failure = xpcall(function()
+            local prefix = installed_prefix.active()
+            local native = root .. "/spec/fixtures/stdlib/native"
+            local tests = root .. "/out/tests"
+            local ok, output = run_argv({ "mkdir", "-p", root .. "/scripts",
+                root .. "/spec/support", root .. "/spec/stdlib/titan/test", native })
+            assert.truthy(ok, output)
+            for _, path in ipairs({ "Makefile", "scripts/install_compiler.mk",
+                    "spec/support/stdlib_test_modules.mk",
+                    "spec/support/run_with_timeout.sh",
+                    "spec/support/check_stdlib_test_output.lua" }) do
+                write_file(root .. "/" .. path, read_file(path))
+            end
+            write_file(root .. "/prepared", "native fixtures\n")
+            write_file(root .. "/spec/stdlib/titan/test/tests.titan", [[
+local test = import "test"
+
+function test_selected_sdk(_context: test.Context)
+  test.assert(true)
+end
+]])
+            for _, name in ipairs({ "async_foreign_work", "fs_fixture", "uv_stdio_probe" }) do
+                write_file(native .. "/" .. name .. ".c", string.format(
+                    "int titan_minimal_%s(void);\nint titan_minimal_%s(void) { return 0; }\n", name, name))
+            end
+            local build = { "env", "-u", "MAKEFLAGS", "-u", "MFLAGS",
+                "-u", "GNUMAKEFLAGS", "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES",
+                "-u", "TITAN_ROOT", "-u", "TITAN_PATH", "-u", "TITAN_PATH_0_6",
+                "make", "--no-print-directory", "-C", root,
+                "PREFIX=" .. root, "TITAN_JOBS=2", "MAKE=false", "TEST_LUA=true",
+                "TEST_TITANC=" .. quote(prefix .. "/bin/titanc"),
+                "TITAN_TEST_INSTALL_ROOT=" .. prefix, "TITAN_TEST_FIXTURE_OUTPUTS=prepared",
+                "TITAN_TEST_BUILD_DIR=" .. tests, "titan-stdlib-test-build" }
+            local built, build_log = run_argv(build)
+            assert.truthy(built, build_log)
+
+            -- A foreign titanc first on PATH records every default SDK query.
+            local foreign = root .. "/foreign-bin"
+            local calls = root .. "/foreign-titanc.calls"
+            assert.truthy(run_argv({ "mkdir", "-p", foreign }))
+            write_file(foreign .. "/titanc", string.format(
+                "#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %s\nexit 1\n", quote(calls)))
+            assert.truthy(run_argv({ "chmod", "0755", foreign .. "/titanc" }))
+            local path = foreign .. ":" .. (os.getenv("PATH") or "/usr/bin:/bin")
+            local function run_native(selection)
+                return run_argv({ "env", "-u", "MAKEFLAGS", "-u", "MFLAGS",
+                    "-u", "GNUMAKEFLAGS", "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES",
+                    "-u", "TITAN_ROOT", "-u", "TITAN_PATH", "-u", "TITAN_PATH_0_6",
+                    "-u", "TITANC", "-u", "LUA_PATH", "-u", "LUA_CPATH",
+                    "-u", "LUA_PATH_5_5", "-u", "LUA_CPATH_5_5",
+                    "PATH=" .. path, "make", "--no-print-directory", "-C", root,
+                    "PREFIX=" .. root, "TITAN_JOBS=2", "MAKE=false",
+                    "TEST_LUA=" .. quote(prefix .. "/bin/lua"),
+                    "TITAN_TEST_INSTALL_ROOT=" .. selection,
+                    "TITAN_STDLIB_TEST_ROOTS=test.tests",
+                    "TITAN_TEST_BUILD_DIR=" .. tests,
+                    "TITAN_TEST_RUN_LOG=" .. root .. "/run.log",
+                    "TITAN_TEST_RUN_ROOTS=" .. root .. "/run-roots.txt",
+                    "TITAN_TEST_TIMEOUT=120", "titan-stdlib-test-run" })
+            end
+
+            -- Control: without a selected SDK the aggregate queries PATH, so
+            -- the fixture really depends on the selection the run supplies.
+            write_file(calls, "")
+            local unselected, unselected_log = run_native("")
+            assert.falsy(unselected, unselected_log)
+            local control_calls = read_file(calls)
+            assert.truthy(control_calls ~= "", unselected_log)
+            assert.truthy(control_calls:find("--print-root", 1, true), control_calls)
+
+            write_file(calls, "")
+            local selected, selected_log = run_native(prefix)
+            assert.truthy(selected, selected_log)
+            assert.truthy(selected_log:find("[  PASSED  ] 1 test.", 1, true), selected_log)
+            assert.truthy(selected_log:find(
+                "Native stdlib gate: selected=1 passed=1", 1, true), selected_log)
+            assert.equal("", lfs.attributes(calls) and read_file(calls) or "", selected_log)
+        end, debug.traceback)
+        remove_tree(root)
+        if not tested then error(failure, 0) end
+    end)
+
     it("prepares every fixed child object from scratch and preserves unchanged publications", function()
         if platform.windows then pending("Unix Make native fixture preparation"); return end
         local root = make_temp_dir()
