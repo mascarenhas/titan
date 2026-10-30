@@ -693,8 +693,14 @@ describe("the live renderer", function()
         while #written == before and (uv.hrtime() - started) < 2000000000 do
             uv.run("once")
         end
+        -- Record the observation before any cleanup write can satisfy it.
+        local repainted = #written > before
+        if not keepalive:is_closing() then
+            keepalive:stop()
+            keepalive:close()
+        end
         reporter:finish()
-        assert.truthy(#written > before, "the timer never repainted the region")
+        assert.truthy(repainted, "the timer never repainted the region")
     end)
 
     it("uses the ASCII separator with ASCII glyphs", function()

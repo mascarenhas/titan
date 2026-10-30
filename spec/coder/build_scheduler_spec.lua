@@ -678,6 +678,7 @@ describe("build worker control sessions", function()
         local plain = receive(replies)
         assert.same({ kind = "progress", phase = "checking" }, plain)
         assert.is_nil(plain.detail)
+        session.control:close()
     end)
 
     it("answers each native batch with the coordinator reply of the same id", function()

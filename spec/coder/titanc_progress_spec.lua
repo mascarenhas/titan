@@ -426,7 +426,7 @@ describe("titanc progress reporting", function()
             "#!/bin/sh",
             "exec env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5" ..
                 " -u NO_COLOR -u MAKEFLAGS -u MFLAGS -u MAKELEVEL" ..
-                " TERM=xterm-256color" ..
+                " TERM=xterm-256color LC_ALL=C LANG=C" ..
                 " CC=" .. quote(wrapper) .. " TITAN_PATH= TITAN_ROOT=" ..
                 quote(PREFIX) .. " " .. table.concat(words, " "),
             "",
@@ -480,7 +480,7 @@ describe("titanc progress reporting", function()
             "#!/bin/sh",
             "exec env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5" ..
                 " -u NO_COLOR -u MAKEFLAGS -u MFLAGS -u MAKELEVEL" ..
-                " TERM=xterm-256color TITAN_PATH= TITAN_ROOT=" ..
+                " TERM=xterm-256color LC_ALL=C LANG=C TITAN_PATH= TITAN_ROOT=" ..
                 quote(PREFIX) .. " TITAN_RUNTIME_PREBUILT=1 " ..
                 table.concat(words, " "),
             "",
@@ -540,7 +540,7 @@ describe("titanc progress reporting", function()
             "#!/bin/sh",
             "exec env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5" ..
                 " -u NO_COLOR -u MAKEFLAGS -u MFLAGS -u MAKELEVEL" ..
-                " TERM=xterm-256color CC=" .. quote(wrapper) ..
+                " TERM=xterm-256color LC_ALL=C LANG=C CC=" .. quote(wrapper) ..
                 " TITAN_PATH= TITAN_ROOT=" .. quote(PREFIX) ..
                 " TITAN_RUNTIME_PREBUILT=1 " .. table.concat(words, " "),
             "",

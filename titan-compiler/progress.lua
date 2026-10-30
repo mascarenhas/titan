@@ -172,7 +172,7 @@ local function render(pieces, width, colour)
     for _, piece in ipairs(pieces) do
         if width and used >= width then break end
         local text = piece[1]
-        if width and codepoint_count(text) >= width - used then
+        if width and codepoint_count(text) > width - used then
             text = truncate(text, width - used)
         end
         if text ~= "" then
