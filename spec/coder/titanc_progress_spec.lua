@@ -70,9 +70,18 @@ local function shell(command)
     return ok == true, output
 end
 
-local function has_script()
-    local ok = shell("command -v script")
-    return ok
+-- The live case needs util-linux `script` (``-q -f -e -c <command> <file>``).
+-- BSD/macOS `script` takes `script -q <file> <command...>` and rejects these
+-- flags, so probe the exact form and skip elsewhere instead of failing the
+-- platform gate. The probe writes a short-lived explicit typescript file, so
+-- it never leaves `script`'s default file behind.
+local function script_supports_command_form()
+    local script_file = assert(compiler_io.new_sync():tmpname())
+    os.remove(script_file)
+    local ok, output = shell("script -qfec 'printf titan-script-probe' " ..
+        quote(script_file))
+    os.remove(script_file)
+    return ok and output:find("titan-script-probe", 1, true) ~= nil
 end
 
 -- One titanc invocation with separately captured streams. The child's stderr
@@ -357,8 +366,8 @@ describe("titanc progress reporting", function()
     end)
 
     it("keeps a provider-pair link diagnostic visible in the live region", function()
-        if not has_script() then
-            pending("the live provider-pair case needs a POSIX `script`")
+        if not script_supports_command_form() then
+            pending("needs util-linux `script` (-qfec); the BSD/macOS form is unsupported")
             return
         end
         -- A wrapper compiler fails the shared provider link with a diagnostic
@@ -390,6 +399,7 @@ describe("titanc progress reporting", function()
             "#!/bin/sh",
             "exec env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5" ..
                 " -u NO_COLOR -u MAKEFLAGS -u MFLAGS -u MAKELEVEL" ..
+                " TERM=xterm-256color" ..
                 " CC=" .. quote(wrapper) .. " TITAN_PATH= TITAN_ROOT=" ..
                 quote(PREFIX) .. " " .. table.concat(words, " "),
             "",
@@ -397,9 +407,16 @@ describe("titanc progress reporting", function()
         assert.truthy(shell("chmod +x " .. quote(launcher)))
 
         local typescript = root .. "/live-link.typescript"
-        shell("script -qfec " .. quote(launcher) .. " " .. quote(typescript))
-        local screen = terminal.render(read_file(typescript) or "")
+        local ran = shell("script -qfec " .. quote(launcher) .. " " ..
+            quote(typescript))
+        assert.is_false(ran, "the failing link must exit nonzero")
+        local transcript = read_file(typescript) or ""
+        local screen = terminal.render(transcript)
         local rendered = table.concat(screen, "\n")
+        -- Live mode really was selected: the region was drawn (erase-down) and
+        -- its rows were parked/redrawn with cursor moves.
+        assert.truthy(transcript:find("\27[J", 1, true),
+            "no live redraw sequence in the transcript: " .. rendered)
         -- The captured stdout and stderr logs both survive the failure event,
         -- which erases and redraws the region.
         assert.is_true(terminal.shows(screen, "link denied out"), rendered)
