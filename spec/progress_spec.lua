@@ -38,15 +38,34 @@ local function columns(text)
     return count
 end
 
--- Terminal cells of one line under the reporter's conservative rule: an ASCII
--- byte is one cell, any other codepoint two. It is never smaller than the real
--- width of the text, so `cells(line) <= width` proves the row cannot wrap.
+-- Terminal cells of one line under the reporter's conservative rule: a
+-- well-formed ASCII character is one cell, any other character two, and every
+-- byte outside a well-formed sequence (a stray continuation byte, an invalid
+-- lead, a truncated tail) two as well. It is never smaller than the real width
+-- of the text, so `cells(line) <= width` proves the row cannot wrap.
 local function cells(text)
-    local count = 0
-    for index = 1, #text do
+    local count, index = 0, 1
+    while index <= #text do
         local byte = text:byte(index)
-        if byte < 0x80 then count = count + 1
-        elseif byte >= 0xC0 then count = count + 2 end
+        local expected
+        if byte < 0x80 then
+            count, index = count + 1, index + 1
+        else
+            if byte >= 0xC0 and byte <= 0xDF then expected = 1
+            elseif byte >= 0xE0 and byte <= 0xEF then expected = 2
+            elseif byte >= 0xF0 and byte <= 0xF7 then expected = 3
+            else expected = 0 end
+            local well_formed = expected > 0
+            for offset = 1, expected do
+                local following = text:byte(index + offset)
+                if not following or following < 0x80 or following > 0xBF then
+                    well_formed = false
+                    break
+                end
+            end
+            count = count + 2
+            index = index + (well_formed and 1 + expected or 1)
+        end
     end
     return count
 end
@@ -351,8 +370,28 @@ describe("display width", function()
         assert.equal(2, progress.width("é"))
         assert.equal(4, progress.width("éé"))
         assert.equal(8, progress.width("app.模块"))
-        -- A bare continuation byte carries no codepoint of its own.
+        -- A three-byte character is one codepoint of two cells.
         assert.equal(2, progress.width("\230\168\161"))
+        assert.equal(2, progress.width("\163"))
+        assert.equal(3, progress.width("a\163"))
+    end)
+
+    it("counts every byte outside a well-formed sequence as two cells", function()
+        -- Lone continuation bytes are what a Latin-1 name becomes, and a
+        -- terminal draws each one as a replacement character.
+        assert.equal(2, progress.width("\163"))
+        assert.equal(6, progress.width("\163\163\163"))
+        assert.equal(5, progress.width("caf\233"))
+        -- A truncated lead byte is one invalid byte, and the continuations
+        -- that followed it are measured on their own.
+        assert.equal(4, progress.width("\228\184"))
+        assert.equal(5, progress.width("x\240\159"))
+        -- A broken continuation run stops at the byte that is not one.
+        assert.equal(4, progress.width("\195\169\169"))
+        assert.equal(3, progress.width("\195a"))
+        -- Invalid leads above 0xF7 are ordinary invalid bytes.
+        assert.equal(2, progress.width("\248"))
+        assert.equal(2, progress.width("\255"))
     end)
 
     it("truncates on codepoint boundaries within a cell budget", function()
@@ -372,6 +411,24 @@ describe("display width", function()
         assert.equal("模", cut)
         assert.equal(2, progress.width(cut))
         assert.equal("模块", progress.truncate("模块", 4))
+        -- A malformed name is cut by the same rule: the stray byte is two
+        -- cells, so only one of them fits the budget, and the tail is kept.
+        assert.equal("\163", progress.truncate("\163\163\163abc", 2))
+        assert.equal("\163\163", progress.truncate("\163\163\163abc", 4))
+        assert.equal("\163\163a", progress.truncate("\163\163abc", 5))
+        assert.equal("caf", progress.truncate("caf\233", 3))
+        -- A truncated sequence is one invalid byte, never half of a character.
+        assert.equal("ab", progress.truncate("ab\228\184", 3))
+        assert.equal("ab\228", progress.truncate("ab\228\184", 4))
+        for _, text in ipairs({ "\163\163\163abc", "\228\184\169x",
+                "caf\233", "\240\159\152a", "a\255b" }) do
+            for limit = 0, progress.width(text) do
+                local cut = progress.truncate(text, limit)
+                assert.truthy(text:sub(1, #cut) == cut, "not a prefix: " .. cut)
+                assert.is_true(progress.width(cut) <= limit,
+                    string.format("%q -> %q exceeds %d", text, cut, limit))
+            end
+        end
     end)
 
     it("keeps every live row inside the width for a wide name", function()

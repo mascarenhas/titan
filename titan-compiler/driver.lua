@@ -521,9 +521,7 @@ driver.LIVE_PROGRESS = nil
 -- and their byte-identical output.
 local function idle_hook()
     local reporter = driver.LIVE_PROGRESS
-    if not reporter or not reporter.animates or not reporter:animates() then
-        return nil
-    end
+    if not reporter or not reporter:animates() then return nil end
     return {
         interval = progress.FRAME_MILLISECONDS,
         tick = function() reporter:tick() end,

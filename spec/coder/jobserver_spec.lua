@@ -423,14 +423,17 @@ describe("native job waits with an idle progress frame", function()
     end)
 
     it("keeps blocking without a timeout until a child completes", function()
-        local writer = notify_after("0.3", 9)
+        -- The clock starts before the writer exists, so the lower bound below
+        -- cannot be shortened by a scheduling pause between fork and read.
         local started = hrtime()
+        local writer = notify_after("0.3", 9)
         local event = support._jobserver_wait(completion, nil, false)
         local elapsed = seconds(started, hrtime())
         assert.is_true(writer:close())
         assert.equal("completion", event)
-        -- A blocking wait cannot return before the child wrote its line.
-        assert.is_true(elapsed >= 0.2, elapsed)
+        -- A blocking wait cannot return before the child wrote its line, and
+        -- the clock started before that child could be forked.
+        assert.is_true(elapsed >= 0.25, elapsed)
         assert.is_true(elapsed < 30, elapsed)
         assert.equal("9", completion:read("*l"))
     end)
@@ -486,8 +489,8 @@ describe("native job waits with an idle progress frame", function()
                     error("the reporter is gone")
                 end },
             }))
-            local writer = notify_after("0.3", 4)
             local started = hrtime()
+            local writer = notify_after("0.3", 4)
             event = slots:wait(completion, false)
             elapsed = seconds(started, hrtime())
             assert.is_true(writer:close())
@@ -498,12 +501,63 @@ describe("native job waits with an idle progress frame", function()
         assert.is_true(completed, text)
         -- The child still owns the transaction: its completion is the result.
         assert.equal("completion", event)
-        assert.is_true(elapsed >= 0.2, elapsed)
+        assert.is_true(elapsed >= 0.25, elapsed)
         -- One frame failed, was reported once, and was then given up.
         assert.equal(1, ticks)
         local _, count = text:gsub("live progress frame failed", "")
         assert.equal(1, count, text)
         assert.truthy(text:find("the reporter is gone", 1, true), text)
+    end)
+
+    it("warns once for a real reporter whose frames fail, then keeps waiting", function()
+        -- The production hook is `reporter:tick`. A renderer that fails on
+        -- every frame must reach the ledger's policy, not be swallowed inside
+        -- the reporter, or the hook would retry it ten times a second.
+        local progress = require "titan-compiler.progress"
+        local warnings = {}
+        local saved = io.stderr
+        io.stderr = { write = function(_, ...)
+            for index = 1, select("#", ...) do
+                warnings[#warnings + 1] = select(index, ...)
+            end
+            return true
+        end }
+        local failing = false
+        local reporter = progress.new(progress.LIVE, {
+            locale = "C", width = 40, now = function() return 0 end,
+            writer = function()
+                if failing then error("stderr is gone") end
+            end,
+        })
+        local slots, event, elapsed
+        local completed = pcall(function()
+            -- One row is drawn for real; every later frame fails.
+            reporter:link_begin("app.so")
+            failing = true
+            assert.is_true(reporter:animates())
+            slots = assert(jobs.open_slots(1, {
+                makeflags = false,
+                idle = { interval = progress.FRAME_MILLISECONDS,
+                    tick = function() reporter:tick() end },
+            }))
+            local started = hrtime()
+            local writer = notify_after("0.3", 6)
+            event = slots:wait(completion, false)
+            elapsed = seconds(started, hrtime())
+            assert.is_true(writer:close())
+        end)
+        io.stderr = saved
+        if slots then slots:close() end
+        reporter:close()
+        local text = table.concat(warnings)
+        assert.is_true(completed, text)
+        -- The renderer really failed, the failure was reported once, and the
+        -- child's completion is still the wait's result.
+        assert.equal("completion", event)
+        assert.is_true(elapsed >= 0.25, elapsed)
+        local _, count = text:gsub("live progress frame failed", "")
+        assert.equal(1, count, text)
+        assert.truthy(text:find("stderr is gone", 1, true), text)
     end)
 
     it("reports a cancellation that arrives during idle frames", function()

@@ -172,13 +172,10 @@ end
 local warned_local_cap = false
 
 -- A live progress frame drawn during a native wait is a courtesy: the child it
--- is drawing over still owns the transaction, so a broken frame is reported
--- once and then switched off instead of failing the wait.
-local warned_idle = false
-
+-- is drawing over still owns the transaction. The ledger drops its hook as
+-- soon as a frame fails, so this runs once per ledger and a broken renderer is
+-- never retried ten times a second.
 local function warn_idle(reason)
-    if warned_idle then return end
-    warned_idle = true
     pcall(io.stderr.write, io.stderr,
         "titanc: warning: the live progress frame failed: " ..
         tostring(reason) .. "; native job waits no longer draw frames\n")
