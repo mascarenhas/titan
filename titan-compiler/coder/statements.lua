@@ -1044,7 +1044,9 @@ function codeassignment(ctx, var, cexp, etype, lvalue)
                     Table *_t = $CMEXP;
                     $KEYPREP
 
-                    TValue _vv;
+                    /* zero-init: a nil or boolean store sets only the tag, but
+                     * every table store below copies value_ whole. */
+                    TValue _vv = {0};
                     $SETVV
                     $STORE
                     $BARRIER
