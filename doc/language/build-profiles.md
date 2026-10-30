@@ -138,6 +138,9 @@ sharing a parent Make pool on macOS requires GNU Make 4.4 or later (Homebrew
 because the recipe was not marked with `+`, `titanc` warns once and runs with
 one job. Windows applies only the local `--jobs` / `TITAN_JOBS` bound. See
 [GNU Make jobserver participation](../implementation/driver.md#gnu-make-jobserver-participation).
+Under a parent jobserver, `titanc` reports progress in its plain one-line form,
+because parallel recipes share the terminal; pass `-q` for the output without
+progress lines ([Build output](modules.md#build-output)).
 
 ## Split modules
 

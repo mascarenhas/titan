@@ -262,12 +262,15 @@ relink existing module objects without recompiling Titan modules.
 
 ### Verbose hit and miss diagnostics
 
-Passing `-v` or `--verbose` writes per-module, per-C-source, and per-link
-decisions, and the native commands `titanc` runs, to standard error. Module
-decisions are buffered and flushed in deterministic plan order. Compiler
-output replayed from workers and native jobs also goes to standard error, so
-standard output stays reserved for requested results such as
-`--print-c-objects` paths:
+Without `-v`, `titanc` reports restored modules only as a count
+(`N modules up to date`) and a final-link certificate hit as
+`<output> up to date`; see [Build output](modules.md#build-output). Passing
+`-v` or `--verbose` writes per-module, per-C-source, and per-link
+decisions, and the native commands `titanc` runs, to standard error, beside
+the plain progress lines. Module decisions are buffered and flushed in
+deterministic plan order. Compiler output replayed from workers and native
+jobs also goes to standard error, so standard output stays reserved for
+requested results such as `--print-c-objects` paths:
 
 ```text
 Titan object hit <module>: <primary-object-path>

@@ -460,7 +460,7 @@ The compiler driver is invoked with dot-separated *module names*, not
 file paths:
 
 ```sh
-titanc [--print-ast] [--pretty-print] [-v] [-j jobs] [--c-parts n] [--static] \
+titanc [--print-ast] [--pretty-print] [-q|-v] [-j jobs] [--c-parts n] [--static] \
   [--source-first] [--incremental] [-c|--compile-only] \
   [--test [--test-dir dir]... [--test-exclude module]...] [--exe path] \
   [--no-uv-bootstrap] [--no-line-directives] [--lua <luasrc>] \
@@ -570,10 +570,14 @@ fallback](#the-titan-path).
 * `--pretty-print` runs `clang-format` on generated C and source-foreign
   headers. Formatting is opt-in; without it Titan preserves the generator's raw
   layout while still removing blank physical lines after `#line` directives.
+* `-q/--quiet` turns off progress reporting. Standard error then carries only
+  diagnostics and native tool output, as titanc printed before progress
+  reporting existed. See [Build output](#build-output).
 * `-v/--verbose` writes every C tool command line and incremental hit and miss
   decision to standard error, where compiler output also goes, plus the
-  formatter command line with `--pretty-print`; `--print-ast` dumps the parsed
-  AST.
+  formatter command line with `--pretty-print`. Progress lines are added in
+  their plain one-line form. `-q` and `-v` together are a usage error.
+  `--print-ast` dumps the parsed AST.
 
 `titanc` checks and compiles each module of the requested closure after its
 dependencies, running independent modules in parallel. It reports *all*
@@ -662,6 +666,82 @@ the standard-library provider pair does not contain it.
 are described in [the driver documentation](../implementation/driver.md);
 the structure of the generated C is in
 [the code generator overview](../implementation/codegen-overview.md).
+
+### Build output
+
+`titanc` reports build progress on standard error. Standard output is reserved
+for requested results such as `--print-root`, `--print-ast`, and
+`--print-c-objects`, so those stay machine-readable. Three modes select what
+standard error carries:
+
+| Mode | Selected by | Standard error |
+| --- | --- | --- |
+| quiet | `-q`/`--quiet` | Diagnostics and native compiler and linker output only, as before progress reporting existed. |
+| progress | default | The quiet output plus progress: which Titan module is being compiled and in which phase. It never shows command lines. |
+| verbose | `-v`/`--verbose` | The verbose command and hit/miss lines plus progress, always in the plain form. |
+
+Progress names these events:
+
+- **Each module that is compiled:** `parsing`, `checking`, `generating C`, and
+  `compiling C` (with the part count when a [split module](build-profiles.md#split-modules)
+  has more than one part), then `done` with the elapsed time, or `failed`.
+- **Modules restored by `--incremental`:** no line each, but one summary,
+  `N modules up to date`.
+- **Each `--c-source` file that is compiled:** a `compiling C source` step.
+  A certified hit is only counted in the final summary.
+- **Each final link:** a `linking` step named by the output's file name. A
+  final-link certificate hit is reported as `<output> up to date`.
+- **The end of the build:** `Finished in <time>` with the counts of compiled
+  and up-to-date modules and the outputs it linked. On failure, it prints
+  `Failed after <time>` instead, followed by the diagnostics, unchanged. An
+  invocation that fails before any build work, such as a usage error, prints
+  only its error.
+
+The **plain** form prints one self-contained line per event, so it reads well in
+logs and stays readable when parallel builds interleave their output:
+
+```text
+app.one .................. parsing
+app.one .................. checking
+app.one .................. generating C
+app.one .................. compiling C
+app.one .................. done 0.3s
+1 module up to date
+app.so ................... linking
+app.so ................... done 0.1s
+Finished in 0.5s: 1 compiled, 1 up to date, linked app.so
+```
+
+The **live** form is for a terminal. Each finished module or link leaves one
+persistent line, and a region below it redraws in place: one row for each
+module or step in progress, with a spinner, its phase and its elapsed time,
+and a footer with the completed count, the number running, the number up to
+date, and the elapsed time. Output from the compiler and linker is printed
+above the region, so it is never overwritten. The region is erased when the
+build finishes or fails. The cursor is never hidden.
+
+`titanc` picks the live form only when all of these hold. Otherwise it uses
+the plain form:
+
+- standard error is a terminal;
+- `TERM` is not `dumb`;
+- `-v` is absent;
+- `MAKEFLAGS` advertises no jobserver (`--jobserver-auth` or `--jobserver-fds`).
+  `titanc` jobs started together by a parallel `make` would share the terminal,
+  and their regions would overwrite each other.
+
+Both forms use colour only when standard error is a terminal, `TERM` is not
+`dumb`, and `NO_COLOR` is unset or empty. Following
+[no-color.org](https://no-color.org), `NO_COLOR` turns off colour, not the live
+region. The spinner and the finished marks (`✓`, `✗`) use Unicode on Linux and
+macOS when the locale (the first non-empty of `LC_ALL`, `LC_CTYPE`, and `LANG`)
+names UTF-8. Otherwise, and always on Windows, they are ASCII (`-\|/`, `ok`,
+`FAILED`).
+
+Only the `titanc` command reports progress. Code that uses the compiler as a
+library, including language servers such as the one in vscode-titan, prints no
+progress. Build automation that needs the output as it was before progress
+reporting, for example to compare or parse standard error, should pass `-q`.
 
 ### Experimental Windows compilation
 
