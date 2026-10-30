@@ -2216,8 +2216,9 @@ exact text.
   [Progress events](build-coordinator.md#progress-events) for the scheduler
   hooks and the worker's optional `progress` record.
 - It passes step callbacks to `nativeinputs.compile`, which brackets the native
-  compile of each `--c-source` miss with `source_begin` and `source_done`, or
-  `source_failed` when that compile fails. A certified hit calls
+  compile of each `--c-source` miss with `source_begin` and exactly one of
+  `source_done` or `source_failed`. A failure before the compile starts
+  (preprocessing or certification) reports no step, and a certified hit calls
   `source_up_to_date` instead.
 - It names each final link by the output's basename. It calls `link_begin`
   before the standalone archive probe, or before the provider link, then
@@ -2237,10 +2238,15 @@ a footer (`[completed/total]`, running count, up-to-date count, clock).
 
 - **Redraw.** A redraw returns to the region start, erases down (`\r ESC[J`),
   draws the rows truncated to the reporter's width, and parks the cursor at the
-  region start. The width is the console size on Windows; on Unix it is
-  an exported `COLUMNS` value, otherwise 80. Widths count visible text only,
-  never escape sequences, and truncation never splits a UTF-8 sequence. A
-  finished module or step becomes one persistent line above the region.
+  region start. The width is re-read on every frame and comes from the first
+  available of these: an injected `width` (tests); the console size on
+  Windows; on Unix, `get_winsize` on a private `/dev/tty` handle that the
+  reporter opens with `uv.fs_open` and wraps with `uv.new_tty(fd, true)`, so
+  libuv's reopen replaces that private descriptor and never fd 2; an exported
+  `COLUMNS`; otherwise 80. `close()` closes the private handle. Widths count
+  visible text only, never escape sequences, and truncation never splits a
+  UTF-8 sequence. A finished module or step becomes one persistent line above
+  the region.
 - **Text written while the region is drawn.** `write(text)` erases the region,
   writes the text, and draws the region again.
 - **Animation.** One unref'd 100 ms `uv` timer on the default loop drives the
@@ -2735,7 +2741,7 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `MAKEFLAGS` | `jobs.lua` `open_slots` (Unix), `titanc` (`progress.select`) | unset | A parent GNU Make's jobserver authorization and `-j1`; see [GNU Make jobserver participation](#gnu-make-jobserver-participation). An advertised jobserver (`--jobserver-auth`/`--jobserver-fds`) also selects the plain progress form. |
 | `TERM` | `titanc` (`progress.select`, `progress.colour`) | unset | `dumb` selects the plain progress form and disables colour. |
 | `NO_COLOR` | `titanc` (`progress.colour`) | unset | Non-empty disables progress colour only; the live region stays. |
-| `COLUMNS` | `titanc` (`progress.new` width) | unset | Positive integer width for the Unix live region, which has no terminal handle to ask; otherwise 80. Windows reads the console size. |
+| `COLUMNS` | `titanc` (`progress.new` width) | unset | Positive integer width for the live region when no terminal can report one (no Windows console and no Unix `/dev/tty`); otherwise 80. |
 | `LC_ALL`, `LC_CTYPE`, `LANG` | `titanc` (`progress.locale`) | unset | The first non-empty value naming UTF-8 selects Unicode progress glyphs on Unix; Windows always uses ASCII. |
 | `TITAN_C_PARTS` | `titanc`, `driver.lua` (`driver.effective_c_parts`) | `4` on Linux; `1` on Windows, macOS, and other platforms (`driver.default_c_parts`) | Maximum generated C translation units per module when `--c-parts` is absent; `1` disables splitting. A changed value makes reused objects miss. |
 | `TITAN_PATH_0_6`, `TITAN_PATH` | `driver.lua` (`titan_bin_path_entries`), `titan_path.c` | unset | [Titan path](#titan-path-syntax): `;`-separated directories, `;;` inserts the default, `!` is the executable directory, an empty value searches nothing; the versioned name wins. |
