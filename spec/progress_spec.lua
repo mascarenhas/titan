@@ -38,6 +38,19 @@ local function columns(text)
     return count
 end
 
+-- Terminal cells of one line under the reporter's conservative rule: an ASCII
+-- byte is one cell, any other codepoint two. It is never smaller than the real
+-- width of the text, so `cells(line) <= width` proves the row cannot wrap.
+local function cells(text)
+    local count = 0
+    for index = 1, #text do
+        local byte = text:byte(index)
+        if byte < 0x80 then count = count + 1
+        elseif byte >= 0xC0 then count = count + 2 end
+    end
+    return count
+end
+
 describe("progress mode selection", function()
     it("keeps the historical output for -q", function()
         assert.equal(progress.NULL, progress.select({ quiet = true }))
@@ -325,6 +338,79 @@ describe("the plain renderer", function()
         local reporter, written = capture()
         reporter:fail()
         assert.equal("", written())
+    end)
+end)
+
+describe("display width", function()
+    it("counts ASCII as one cell and every other codepoint as two", function()
+        assert.equal(0, progress.width(""))
+        assert.equal(7, progress.width("app.one"))
+        assert.equal(2, progress.width("一"))
+        -- Narrow and combining characters also count two: the rule is
+        -- deliberately conservative (any non-ASCII codepoint is wide).
+        assert.equal(2, progress.width("é"))
+        assert.equal(4, progress.width("éé"))
+        assert.equal(8, progress.width("app.模块"))
+        -- A bare continuation byte carries no codepoint of its own.
+        assert.equal(2, progress.width("\230\168\161"))
+    end)
+
+    it("truncates on codepoint boundaries within a cell budget", function()
+        assert.equal("", progress.truncate("app.one", 0))
+        assert.equal("", progress.truncate("app.one", -3))
+        assert.equal("", progress.truncate("模块", 1))
+        assert.equal("app", progress.truncate("app.one", 3))
+        assert.equal("app.one", progress.truncate("app.one", 7))
+        assert.equal("app.one", progress.truncate("app.one", 40))
+        -- A two-cell character that fits is kept whole...
+        assert.equal("ab一", progress.truncate("ab一cd", 4))
+        -- ...and dropped whole when only one cell remains.
+        assert.equal("ab", progress.truncate("ab一cd", 3))
+        assert.equal("ab", progress.truncate("abé", 3))
+        -- The cut never splits a UTF-8 sequence.
+        local cut = progress.truncate("模块", 3)
+        assert.equal("模", cut)
+        assert.equal(2, progress.width(cut))
+        assert.equal("模块", progress.truncate("模块", 4))
+    end)
+
+    it("keeps every live row inside the width for a wide name", function()
+        local width = 40
+        local reporter, written = capture({
+            kind = progress.LIVE, locale = "en_US.UTF-8", width = width,
+        })
+        reporter:plan(2)
+        reporter:module_begin("模块.一")
+        reporter:module_phase("模块.一", "compiling C", "4 parts")
+        reporter:link_begin("程序")
+        local drawn = 0
+        for row in written():gmatch("[^\r\n]+") do
+            local visible = plain_text(row)
+            drawn = drawn + 1
+            assert.is_true(cells(visible) <= width,
+                string.format("%d cells: %q", cells(visible), visible))
+        end
+        assert.is_true(drawn > 2, drawn)
+        -- The wide rows survive a finished step and the summary.
+        reporter:module_done("模块.一")
+        reporter:finish()
+        for row in written():gmatch("[^\r\n]+") do
+            local visible = plain_text(row)
+            assert.is_true(cells(visible) <= width,
+                string.format("%d cells: %q", cells(visible), visible))
+        end
+    end)
+
+    it("pads a plain line's dots by display width", function()
+        local function pad_of(name)
+            local reporter, written = capture()
+            reporter:module_phase(name, "parsing")
+            return (written():gsub("parsing\n$", ""))
+        end
+        -- Seven cells and four codepoints: both states start at one column.
+        assert.equal(cells(pad_of("app.one")), cells(pad_of("模块.一")))
+        assert.equal(cells(pad_of("app.one")), 27)
+        assert.equal(27, cells(pad_of("模块.一")))
     end)
 end)
 

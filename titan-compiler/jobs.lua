@@ -171,6 +171,19 @@ end
 
 local warned_local_cap = false
 
+-- A live progress frame drawn during a native wait is a courtesy: the child it
+-- is drawing over still owns the transaction, so a broken frame is reported
+-- once and then switched off instead of failing the wait.
+local warned_idle = false
+
+local function warn_idle(reason)
+    if warned_idle then return end
+    warned_idle = true
+    pcall(io.stderr.write, io.stderr,
+        "titanc: warning: the live progress frame failed: " ..
+        tostring(reason) .. "; native job waits no longer draw frames\n")
+end
+
 -- The single policy for a valid inherited pipe jobserver that this platform
 -- cannot reopen privately (stock macOS Make 3.81): titanc keeps its own local
 -- --jobs/TITAN_JOBS bound and takes no part in the parent's pool. It neither
@@ -243,17 +256,28 @@ Slots.__index = Slots
 -- `options.makeflags` overrides the inherited MAKEFLAGS (for tests).
 -- `options.guard` installs the cancellation guard even with one slot, for a
 -- caller whose single job still runs as an asynchronous child.
+-- `options.idle = { interval = <ms>, tick = <function> }` bounds every wait by
+-- one interval and calls `tick` after each expiry, so a caller that owns a
+-- live progress region keeps drawing frames while a native child runs. `wait`
+-- never reports that expiry to its caller, and without the option every wait
+-- blocks exactly as before.
 function jobs.open_slots(local_cap, options)
     assert(math.type(local_cap) == "integer" and local_cap >= 1,
         "the local job cap must be a positive integer")
     options = options or {}
+    local idle = options.idle
+    if idle then
+        assert(math.type(idle.interval) == "integer" and idle.interval >= 1 and
+            type(idle.tick) == "function",
+            "an idle progress hook needs a positive integer interval and a tick function")
+    end
     if remote then
         return setmetatable({
             limit = local_cap, shared = false, active = 0, remote = remote,
         }, RemoteSlots)
     end
     local slots = setmetatable({
-        limit = local_cap, shared = false, active = 0,
+        limit = local_cap, shared = false, active = 0, idle = idle,
     }, Slots)
     -- Windows batches use luv processes; MSYS2 jobserver descriptors are not
     -- native UCRT descriptors, so only the local cap applies there.
@@ -323,13 +347,31 @@ end
 -- Waits until the unbuffered completion FILE is readable ("completion"), a
 -- token may be available ("slot", only when `want_slot`), or INT/TERM/HUP
 -- arrived ("signal", signo). Nothing is consumed from the FILE.
+--
+-- With an idle hook every wait is bounded by its interval and one `tick` runs
+-- per expiry, so the owner's live region draws a frame while a native child
+-- runs; such an expiry is drawn, never returned. A failing `tick` is reported
+-- once and then dropped: a broken frame must not fail, delay or otherwise
+-- change the link it is drawing over, so the wait simply blocks again.
 function Slots:wait(file, want_slot)
     if not self.support then return "completion" end
-    local client = want_slot and self.active < self.limit and self.client or nil
-    local event, value = self.support._jobserver_wait(
-        file, client, self.guard ~= nil and self.cancelled_signal == nil)
-    if event == "signal" then self.cancelled_signal = value end
-    return event, value
+    local idle = self.idle
+    while true do
+        local client = want_slot and self.active < self.limit and self.client or nil
+        local event, value = self.support._jobserver_wait(
+            file, client, self.guard ~= nil and self.cancelled_signal == nil,
+            idle and idle.interval)
+        if event == "signal" then
+            self.cancelled_signal = value
+            return event, value
+        end
+        if event ~= "timeout" then return event, value end
+        local drawn, draw_err = pcall(idle.tick)
+        if not drawn then
+            self.idle, idle = nil, nil
+            warn_idle(draw_err)
+        end
+    end
 end
 
 function Slots:cancelled()

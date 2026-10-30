@@ -18,8 +18,11 @@ local LINE_COLUMN = 26
 -- Live scrollback and active rows share one name column.
 local NAME_COLUMN = 24
 
--- The transient region refreshes on this timer period.
-local FRAME_MILLISECONDS = 100
+-- The transient region refreshes on this timer period, and a native job wait
+-- asks for one idle frame per period, so about ten frames a second arrive
+-- whether the loop or the wait is driving them.
+progress.FRAME_MILLISECONDS = 100
+local FRAME_MILLISECONDS = progress.FRAME_MILLISECONDS
 
 -- Bounded drain attempts for queued Windows console writes.
 local CONSOLE_FLUSH_STEPS = 64
@@ -140,27 +143,41 @@ end
 
 --
 -- Text measurement: escape sequences are never measured, and truncation
--- never splits a UTF-8 sequence.
+-- never splits a UTF-8 sequence. Every ASCII byte is one terminal cell and
+-- every other codepoint is two (the conservative rule of #324): a wide
+-- character in a module, output or path name makes its row shorter than the
+-- terminal rather than wider, and only a row that is too wide can wrap and
+-- leave a stale line behind. A terminal that draws a combining mark or a
+-- half-width kana in one cell therefore loses padding, never the invariant.
 --
 
-local function codepoint_count(text)
-    local count = 0
+-- Display width of TEXT in cells.
+function progress.width(text)
+    local width = 0
     for index = 1, #text do
         local byte = text:byte(index)
-        if byte < 0x80 or byte >= 0xC0 then count = count + 1 end
+        if byte < 0x80 then
+            width = width + 1
+        elseif byte >= 0xC0 then
+            width = width + 2
+        end
     end
-    return count
+    return width
 end
 
-local function truncate(text, limit)
+-- The longest prefix of TEXT within LIMIT cells, cut on codepoint
+-- boundaries: a two-cell codepoint that does not fit is dropped whole.
+function progress.truncate(text, limit)
     if limit <= 0 then return "" end
-    local count = 0
+    local width = 0
     for index = 1, #text do
         local byte = text:byte(index)
-        if byte < 0x80 or byte >= 0xC0 then
-            count = count + 1
-            if count > limit then return text:sub(1, index - 1) end
+        if byte < 0x80 then
+            width = width + 1
+        elseif byte >= 0xC0 then
+            width = width + 2
         end
+        if width > limit then return text:sub(1, index - 1) end
     end
     return text
 end
@@ -172,8 +189,8 @@ local function render(pieces, width, colour)
     for _, piece in ipairs(pieces) do
         if width and used >= width then break end
         local text = piece[1]
-        if width and codepoint_count(text) > width - used then
-            text = truncate(text, width - used)
+        if width and progress.width(text) > width - used then
+            text = progress.truncate(text, width - used)
         end
         if text ~= "" then
             local style = piece[2]
@@ -184,14 +201,14 @@ local function render(pieces, width, colour)
             else
                 out[#out + 1] = text
             end
-            used = used + codepoint_count(text)
+            used = used + progress.width(text)
         end
     end
     return table.concat(out)
 end
 
 local function padding(name, column)
-    local used = codepoint_count(name)
+    local used = progress.width(name)
     if used >= column then return " " end
     return string.rep(" ", column - used)
 end
@@ -361,11 +378,21 @@ function Reporter:width()
     return 80
 end
 
--- One plain line: the name padded to a common column, then its state.
+-- One plain line: the name padded to a common column, then its state. The
+-- dots are placed from the name's cell width, so a wide character never
+-- pushes the state past the column.
 function Reporter:line(name, state)
-    local dots = LINE_COLUMN - 1 - codepoint_count(name)
+    local dots = LINE_COLUMN - 1 - progress.width(name)
     if dots < 3 then dots = 3 end
     self:out(name .. " " .. string.rep(".", dots) .. " " .. state .. "\n")
+end
+
+-- True while another frame would still be drawn: the live renderer before
+-- `finish`/`fail`. A native job wait asks this before it takes an idle hook, so
+-- quiet, plain, verbose and library runs keep their blocking wait and their
+-- byte-identical output.
+function Reporter:animates()
+    return self.kind == progress.LIVE and not self.closed
 end
 
 function Reporter:activate(name, entry)
