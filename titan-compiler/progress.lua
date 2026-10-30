@@ -208,12 +208,29 @@ local function default_writer(text)
     io.stderr:flush()
 end
 
+-- The window size on Unix. libuv's TTY init reopens the descriptor it is
+-- given, so the handle is built over a private `/dev/tty` descriptor: fd 2
+-- keeps its inherited description and children keep inheriting it. The handle
+-- lives as long as the reporter so `get_winsize` can answer every frame.
+local function open_size_handle(uv)
+    if not uv or not uv.fs_open or not uv.new_tty then return nil end
+    local opened, fd = pcall(uv.fs_open, "/dev/tty", "r", 0)
+    if not opened or math.type(fd) ~= "integer" then return nil end
+    local wrapped, handle = pcall(uv.new_tty, fd, true)
+    if not wrapped or not handle then
+        pcall(uv.fs_close, fd)
+        return nil
+    end
+    return handle
+end
+
 -- Options: `writer(text)` replaces stderr, `now()` returns seconds,
 -- `width()` returns the terminal width (or is the width itself), `uv` is the
--- live platform library (the timer and, on Windows, the TTY writer; without it
--- the live renderer only writes through `writer`), `columns` is the exported
--- COLUMNS hint for a width no TTY handle can report, and `windows`, `locale`,
--- `tty`, `term`, `no_color` describe the environment the CLI observed.
+-- live platform library (the timer, the Windows TTY writer and the private
+-- terminal handle that reports the window size; without it the live renderer
+-- only writes through `writer`), `columns` is the exported COLUMNS hint for a
+-- width no terminal can report, and `windows`, `locale`, `tty`, `term`,
+-- `no_color` describe the environment the CLI observed.
 function progress.new(kind, options)
     options = options or {}
     kind = kind or progress.NULL
@@ -241,6 +258,7 @@ function progress.new(kind, options)
     self.started = self.now()
     if self.kind == progress.LIVE then
         self.sink = self:live_sink(uv)
+        if uv and not self.windows then self.size_tty = open_size_handle(uv) end
         if uv then
             local opened, timer = pcall(uv.new_timer)
             if opened and timer then
@@ -324,15 +342,20 @@ function Reporter:elapsed()
     return elapsed
 end
 
--- The reported width, the console's own size, or the exported COLUMNS hint
--- (a Unix region has no TTY handle to ask), and 80 when nothing is known.
+local function winsize(handle)
+    if not handle or not handle.get_winsize then return nil end
+    local called, width = pcall(handle.get_winsize, handle)
+    if called and type(width) == "number" and width > 0 then return width end
+    return nil
+end
+
+-- An injected width, the console's own size (Windows), the private terminal
+-- handle's size (Unix), the exported COLUMNS hint, then 80.
 function Reporter:width()
     if type(self.width_of) == "number" then return self.width_of end
     if self.width_of then return self.width_of() end
-    if self.tty and self.tty.get_winsize then
-        local called, width = pcall(self.tty.get_winsize, self.tty)
-        if called and type(width) == "number" and width > 0 then return width end
-    end
+    local width = winsize(self.tty) or winsize(self.size_tty)
+    if width then return width end
     local hint = self.column_hint
     if type(hint) == "number" and hint > 0 then return hint end
     return 80
@@ -618,6 +641,10 @@ function Reporter:close()
         self.timer:stop()
         self.timer:close()
         self.timer = nil
+    end
+    if self.size_tty then
+        pcall(self.size_tty.close, self.size_tty)
+        self.size_tty = nil
     end
 end
 

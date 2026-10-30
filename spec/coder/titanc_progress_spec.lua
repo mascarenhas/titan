@@ -327,6 +327,26 @@ describe("titanc progress reporting", function()
         }, phases)
     end)
 
+    it("reports no step for an authored C source that fails before compiling", function()
+        -- The preprocessing step fails, before the compile begins, so there is
+        -- no step to finish: no begin line, no failed line, no summary.
+        local broken = root .. "/missing_header.c"
+        write_file(broken, '#include "no_such_header_322.h"\n' ..
+            "int missing(void) { return 0; }\n")
+        local ok, stdout, stderr = run(compiler({
+            "-c", "--output", root .. "/missing-native", "--c-source", broken,
+        }), root)
+        assert.is_false(ok)
+        assert.equal("", stdout)
+        -- The compiler's own diagnostic is unchanged.
+        assert.truthy(stderr:find("no_such_header_322.h", 1, true), stderr)
+        assert.is_nil(first_line_matching(stderr,
+            "^%S*missing_header%.c %.+ compiling C source$"), stderr)
+        assert.is_nil(first_line_matching(stderr,
+            "^%S*missing_header%.c %.+ failed$"), stderr)
+        assert.is_nil(stderr:find("Failed after", 1, true), stderr)
+    end)
+
     it("reports a failed authored C source before its diagnostics", function()
         local broken = root .. "/broken.c"
         write_file(broken, "int broken(void) { return }\n")

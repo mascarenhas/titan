@@ -403,6 +403,102 @@ describe("the live renderer", function()
         assert.truthy(text:find("⠋", 1, true), text)
     end)
 
+    it("reports the real window size from a private terminal handle", function()
+        local size_calls = 0
+        local closed = false
+        local handle = {
+            get_winsize = function()
+                size_calls = size_calls + 1
+                return 40, 20
+            end,
+            close = function() closed = true end,
+        }
+        local opened_fd, wrapped_fd, wrapped_readable
+        local uv = {
+            hrtime = function() return 0 end,
+            run = function() return 0 end,
+            new_timer = function()
+                return { start = function() end, stop = function() end,
+                    close = function() end, unref = function() end }
+            end,
+            fs_open = function(path, mode, permissions)
+                assert.equal("/dev/tty", path)
+                opened_fd = 7
+                return opened_fd
+            end,
+            new_tty = function(fd, readable)
+                wrapped_fd, wrapped_readable = fd, readable
+                return handle
+            end,
+        }
+        local reporter = progress.new(progress.LIVE, {
+            uv = uv, windows = false, tty = true, term = "xterm",
+            locale = "en_US.UTF-8",
+            writer = function() end,
+            now = function() return 0 end,
+        })
+        -- The private descriptor is wrapped, never fd 2.
+        assert.equal(7, opened_fd)
+        assert.equal(7, wrapped_fd)
+        assert.is_true(wrapped_readable)
+        -- The width is asked again on every frame.
+        reporter:module_begin("app.one")
+        assert.equal(40, reporter:width())
+        reporter:tick()
+        assert.truthy(size_calls >= 2, size_calls)
+        reporter:finish()
+        assert.is_true(closed)
+    end)
+
+    it("falls back to COLUMNS and then to 80 without a terminal handle", function()
+        local uv = {
+            hrtime = function() return 0 end,
+            run = function() return 0 end,
+            new_timer = function()
+                return { start = function() end, stop = function() end,
+                    close = function() end, unref = function() end }
+            end,
+            fs_open = function() return nil, "no controlling terminal" end,
+        }
+        local hinted = progress.new(progress.LIVE, {
+            uv = uv, windows = false, tty = true, term = "xterm",
+            locale = "en_US.UTF-8", columns = "46",
+            writer = function() end, now = function() return 0 end,
+        })
+        assert.equal(46, hinted:width())
+        hinted:finish()
+
+        local plain = progress.new(progress.LIVE, {
+            uv = uv, windows = false, tty = true, term = "xterm",
+            locale = "en_US.UTF-8",
+            writer = function() end, now = function() return 0 end,
+        })
+        assert.equal(80, plain:width())
+        plain:finish()
+    end)
+
+    it("prefers an injected width over every terminal handle", function()
+        local handle = { get_winsize = function() return 40, 20 end,
+            close = function() end }
+        local uv = {
+            hrtime = function() return 0 end,
+            run = function() return 0 end,
+            new_timer = function()
+                return { start = function() end, stop = function() end,
+                    close = function() end, unref = function() end }
+            end,
+            fs_open = function() return 9 end,
+            new_tty = function() return handle end,
+        }
+        local reporter = progress.new(progress.LIVE, {
+            uv = uv, windows = false, tty = true, term = "xterm",
+            locale = "en_US.UTF-8", columns = "46", width = 33,
+            writer = function() end, now = function() return 0 end,
+        })
+        assert.equal(33, reporter:width())
+        reporter:finish()
+    end)
+
     it("uses the ASCII separator with ASCII glyphs", function()
         local reporter, written = capture({
             kind = progress.LIVE, locale = "C", width = 80,
