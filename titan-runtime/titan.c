@@ -151,7 +151,7 @@ static int titan_array_lua_index(lua_State *L) {
     TValue receiver = lua_totvalue(L, 1);
     Table *backing = titan_array_require_backing(&receiver);
     lua_Integer index;
-    TValue result;
+    TValue result = {0};
 
     if (lua_type(L, 2) != LUA_TNUMBER)
         return luaL_error(L, "Titan array index must be an integer");
@@ -421,7 +421,7 @@ Table *titan_array_new_impl(lua_State *L, Table *metatable,
     Table *backing;
     Udata *proxy;
     TValue proxy_value;
-    TValue writer_value;
+    TValue writer_value = {0};
 
     lua_assert(metatable != NULL);
     lua_assert(result != NULL);
@@ -1260,7 +1260,7 @@ static uintptr_t titan_unwind_key(const void *address) {
 }
 
 static void titan_unwind_clear_registry_string(lua_State *L, const char *key) {
-  TValue nil;
+  TValue nil = {0};
   setnilvalue(&nil);
   /* Storing nil into an existing slot never allocates; an absent key has
   ** nothing to clear. */
