@@ -506,6 +506,25 @@ describe("native job waits with an idle progress frame", function()
         assert.truthy(text:find("the reporter is gone", 1, true), text)
     end)
 
+    it("reports a cancellation that arrives during idle frames", function()
+        local ticks = 0
+        local slots = assert(jobs.open_slots(1, {
+            makeflags = false, guard = true,
+            -- The first frame delivers the INT a terminal would send; the
+            -- wait must return it instead of waiting another interval.
+            idle = { interval = 50, tick = function()
+                ticks = ticks + 1
+                assert(support._signal_raise(2))
+            end },
+        }))
+        finally(function() slots:close() end)
+        local event, value = slots:wait(completion, false)
+        assert.equal("signal", event)
+        assert.equal(2, value)
+        assert.equal(1, ticks)
+        assert.equal(2, slots:cancelled())
+    end)
+
     it("rejects an idle hook that cannot draw a frame", function()
         local called, failure = pcall(jobs.open_slots, 2, {
             makeflags = false, idle = { interval = 0, tick = function() end },
