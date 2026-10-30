@@ -595,7 +595,7 @@ jobs:
       SANITIZER_FLAGS: "-O0 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       # Keep instrumentation in the job environment so recursive Make and
       # LuaRocks builds receive the same sanitizer flags throughout the job.
-      LUA_MYCFLAGS: "-fPIC -O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      LUA_MYCFLAGS: "-O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LUA_MYLDFLAGS: "-O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LUA_MYLIBS: "-O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       COMPILER_DEPS_CFLAGS: "-O1 -fno-lto -fPIC -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"

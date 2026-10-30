@@ -934,7 +934,7 @@ esac
             local rows = {}
             for row in output:gmatch("[^\n]+") do rows[#rows + 1] = row end
             assert.matches("-O0 -fno-lto", rows[1], 1, true)
-            assert.same({"-fPIC -O2 -fno-lto", "-O2 -fno-lto",
+            assert.same({"-O2 -fno-lto", "-O2 -fno-lto",
                 "-O2 -fPIC -O0 -fno-lto",
                 "-O2 -fno-lto"},
                 {table.unpack(rows, 2)})
@@ -6136,7 +6136,7 @@ printf '%s\n' "${schedule[@]}"
                 'TITAN_EXTRA_LDFLAGS: "-O0 -fno-lto -g ' ..
                 '-fsanitize=address,undefined'), sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
-                'LUA_MYCFLAGS: "-fPIC -O1 -fno-lto -g ' ..
+                'LUA_MYCFLAGS: "-O1 -fno-lto -g ' ..
                 '-fsanitize=address,undefined'), sanitizer_job)
             for _, contract in ipairs({
                 'SANITIZER_NATIVE_CACHE_SCHEMA: "v4"',
