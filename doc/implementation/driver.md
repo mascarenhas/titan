@@ -2181,7 +2181,7 @@ never create a reporter, and every hook in `build.lua`, `build_worker.lua`,
    - `makeflags` without `jobserver-auth` or `jobserver-fds`;
 4. anything else selects `PLAIN`.
 
-`titanc` reads `TERM`, `MAKEFLAGS`, `NO_COLOR`, and the locale chain
+`titanc` reads `TERM`, `MAKEFLAGS`, `NO_COLOR`, `COLUMNS`, and the locale chain
 (`progress.locale`: the first non-empty of `LC_ALL`, `LC_CTYPE`, and `LANG`) once,
 after the `--print-root` query. It probes the terminal with
 `uv.guess_handle(2)` only when neither `-q` nor `-v` is given. A null
@@ -2193,7 +2193,8 @@ otherwise.
 
 `progress.new(kind, options)` takes injectable `writer`, `now` (wall-clock
 seconds; `uv.hrtime` in `titanc`), `width`, and `uv`, plus the observed
-`windows`, `locale`, `tty`, `term`, and `no_color`, so the unit spec
+`windows`, `locale`, `tty`, `term`, `no_color`, and `columns` (the `COLUMNS`
+width hint), so the unit spec
 (`spec/progress_spec.lua`) drives both renderers without a terminal. The
 reporter methods are:
 
@@ -2235,10 +2236,11 @@ has one row per active module or step (spinner, name, phase, elapsed time) and
 a footer (`[completed/total]`, running count, up-to-date count, clock).
 
 - **Redraw.** A redraw returns to the region start, erases down (`\r ESC[J`),
-  draws the rows truncated to the terminal width (80 when unknown), and parks
-  the cursor at the region start. Widths count visible text only, never escape
-  sequences, and truncation never splits a UTF-8 sequence. A finished module or
-  step becomes one persistent line above the region.
+  draws the rows truncated to the reporter's width, and parks the cursor at the
+  region start. The width is the console size on Windows; on Unix it is
+  an exported `COLUMNS` value, otherwise 80. Widths count visible text only,
+  never escape sequences, and truncation never splits a UTF-8 sequence. A
+  finished module or step becomes one persistent line above the region.
 - **Text written while the region is drawn.** `write(text)` erases the region,
   writes the text, and draws the region again.
 - **Animation.** One unref'd 100 ms `uv` timer on the default loop drives the
@@ -2247,8 +2249,13 @@ a footer (`[completed/total]`, running count, up-to-date count, clock).
   loop alive. `finish` and `fail` stop and close it, and erase the region. The
   cursor is never hidden, so no exit path has to restore it.
 - **Output sink.** On Unix the renderer writes to the inherited, blocking
-  standard error. On Windows it writes through a `uv.new_tty(2, false)` handle,
-  so libuv translates the escape sequences for consoles without VT support.
+  standard error. It never opens a libuv TTY on fd 2, because libuv would
+  reopen that descriptor non-blocking and close-on-exec. On Windows it writes
+  through a `uv.new_tty(2, false)` handle, so libuv translates the escape
+  sequences for consoles without VT support. `try_write` delivers what the
+  console accepts at once, and any remainder is queued in order. Ordinary
+  code, never a timer frame, drains the queue with bounded
+  `uv.run("nowait")` calls, at the latest before the final summary.
 
 While the live renderer owns the terminal, `titanc` sets `driver.LIVE_PROGRESS`
 to the reporter. `run_argv` then runs a child that would otherwise inherit
@@ -2728,6 +2735,7 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `MAKEFLAGS` | `jobs.lua` `open_slots` (Unix), `titanc` (`progress.select`) | unset | A parent GNU Make's jobserver authorization and `-j1`; see [GNU Make jobserver participation](#gnu-make-jobserver-participation). An advertised jobserver (`--jobserver-auth`/`--jobserver-fds`) also selects the plain progress form. |
 | `TERM` | `titanc` (`progress.select`, `progress.colour`) | unset | `dumb` selects the plain progress form and disables colour. |
 | `NO_COLOR` | `titanc` (`progress.colour`) | unset | Non-empty disables progress colour only; the live region stays. |
+| `COLUMNS` | `titanc` (`progress.new` width) | unset | Positive integer width for the Unix live region, which has no terminal handle to ask; otherwise 80. Windows reads the console size. |
 | `LC_ALL`, `LC_CTYPE`, `LANG` | `titanc` (`progress.locale`) | unset | The first non-empty value naming UTF-8 selects Unicode progress glyphs on Unix; Windows always uses ASCII. |
 | `TITAN_C_PARTS` | `titanc`, `driver.lua` (`driver.effective_c_parts`) | `4` on Linux; `1` on Windows, macOS, and other platforms (`driver.default_c_parts`) | Maximum generated C translation units per module when `--c-parts` is absent; `1` disables splitting. A changed value makes reused objects miss. |
 | `TITAN_PATH_0_6`, `TITAN_PATH` | `driver.lua` (`titan_bin_path_entries`), `titan_path.c` | unset | [Titan path](#titan-path-syntax): `;`-separated directories, `;;` inserts the default, `!` is the executable directory, an empty value searches nothing; the versioned name wins. |

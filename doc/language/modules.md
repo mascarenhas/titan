@@ -692,7 +692,8 @@ Progress names these events:
 - **Each final link:** a `linking` step named by the output's file name. A
   final-link certificate hit is reported as `<output> up to date`.
 - **The end of the build:** `Finished in <time>` with the counts of compiled
-  and up-to-date modules and the outputs it linked. On failure, it prints
+  and up-to-date modules, the outputs it linked, and `<output> up to date` for
+  a final-link certificate hit. On failure, it prints
   `Failed after <time>` instead, followed by the diagnostics, unchanged. An
   invocation that fails before any build work, such as a usage error, prints
   only its error.
