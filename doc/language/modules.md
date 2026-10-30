@@ -716,10 +716,11 @@ Finished in 0.5s: 1 compiled, 1 up to date, linked app.so
 The **live** form is for a terminal. Each finished module or link leaves one
 persistent line, and a region below it redraws in place: one row for each
 module or step in progress, with a spinner, its phase and its elapsed time,
-and a footer with the completed count, the number running, the number up to
-date, and the elapsed time. Output from the compiler and linker is printed
-above the region, so it is never overwritten. The region is erased when the
-build finishes or fails. The cursor is never hidden.
+and a footer with the number of modules done (including those up to date) out
+of the total, the number running, the number up to date, and the elapsed time.
+Output from the compiler and linker is printed above the region, so it is never
+overwritten. The region is erased when the build finishes or fails. The cursor
+is never hidden.
 
 `titanc` picks the live form only when all of these hold. Otherwise it uses
 the plain form:

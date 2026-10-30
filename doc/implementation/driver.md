@@ -2234,7 +2234,9 @@ cursor.
 
 The live renderer keeps one transient region below the scrollback. The region
 has one row per active module or step (spinner, name, phase, elapsed time) and
-a footer (`[completed/total]`, running count, up-to-date count, clock).
+a footer (`[completed/total]`, running count, up-to-date count, clock). The
+completed count includes modules restored from their certificates, so an
+all-hit build shows `[total/total]`.
 
 - **Redraw.** A redraw returns to the region start, erases down (`\r ESC[J`),
   draws the rows truncated to the reporter's width, and parks the cursor at the
@@ -2244,16 +2246,21 @@ a footer (`[completed/total]`, running count, up-to-date count, clock).
   reporter opens with `uv.fs_open` and wraps with `uv.new_tty(fd, true)`, so
   libuv's reopen replaces that private descriptor and never fd 2; an exported
   `COLUMNS`; otherwise 80. `close()` closes the private handle. Widths count
-  visible text only, never escape sequences, and truncation never splits a
-  UTF-8 sequence. A finished module or step becomes one persistent line above
-  the region.
+  the codepoints of visible text only, never escape sequences, and truncation
+  never splits a UTF-8 sequence. A double-width character (for example in a
+  CJK path) still counts as one column, so such a row can exceed the width.
+  A finished module or step becomes one persistent line above the region.
 - **Text written while the region is drawn.** `write(text)` erases the region,
   writes the text, and draws the region again.
 - **Animation.** One unref'd 100 ms `uv` timer on the default loop drives the
-  spinner. It animates during workers, native jobs, and links because every
-  compiler wait already spins `uv.run("once")`. Being unref'd, it never keeps a
-  loop alive. `finish` and `fail` stop and close it, and erase the region. The
-  cursor is never hidden, so no exit path has to restore it.
+  spinner. It animates whenever the coordinator waits in `uv.run("once")`:
+  in the scheduler loop (workers and coordinator-run native jobs), in
+  `Process:wait`, and in captured commands, including captured final links.
+  A provider-pair link waits for its parallel link jobs in the native
+  `_jobserver_wait` poll instead, so the spinner pauses on that row until the
+  link returns. Being unref'd, the timer never keeps a loop alive. `finish`
+  and `fail` stop and close it, and erase the region. The cursor is never
+  hidden, so no exit path has to restore it.
 - **Output sink.** On Unix the renderer writes to the inherited, blocking
   standard error. It never opens a libuv TTY on fd 2, because libuv would
   reopen that descriptor non-blocking and close-on-exec. On Windows it writes
@@ -2269,7 +2276,11 @@ stderr (final links, archive probes) through `process.capture`, and replays its
 combined output through `LIVE_PROGRESS:write`. On Unix the child runs as
 `/bin/sh -c <command>` with the held output-lock descriptors, as on the
 non-live path. The exit status, termination kind, and failure text are returned
-exactly as the inherited run reports them.
+exactly as the inherited run reports them. Provider-pair links (the public DSO
+and the archive-validation image) already capture each job's output to log
+files. `finish_prepared_compile` replays those logs through
+`LIVE_PROGRESS:write` as well, and through the stream path with its write
+checks otherwise.
 
 Plain, verbose, and quiet runs, and every non-CLI caller, leave
 `LIVE_PROGRESS` nil and keep inherited stderr. Worker output and
