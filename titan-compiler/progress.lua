@@ -225,7 +225,6 @@ function progress.new(kind, options)
             return os.clock()
         end,
         width_of = options.width,
-        uv = uv,
         started = nil,
         active = {}, order = {}, total = nil,
         completed = 0, compiled = 0, up_to_date_count = 0,
