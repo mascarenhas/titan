@@ -18,8 +18,11 @@ local LINE_COLUMN = 26
 -- Live scrollback and active rows share one name column.
 local NAME_COLUMN = 24
 
--- The transient region refreshes on this timer period.
-local FRAME_MILLISECONDS = 100
+-- The transient region refreshes on this timer period, and a native job wait
+-- asks for one idle frame per period, so about ten frames a second arrive
+-- whether the loop or the wait is driving them.
+progress.FRAME_MILLISECONDS = 100
+local FRAME_MILLISECONDS = progress.FRAME_MILLISECONDS
 
 -- Bounded drain attempts for queued Windows console writes.
 local CONSOLE_FLUSH_STEPS = 64
@@ -140,27 +143,63 @@ end
 
 --
 -- Text measurement: escape sequences are never measured, and truncation
--- never splits a UTF-8 sequence.
+-- never splits a UTF-8 sequence. Every ASCII byte is one terminal cell and
+-- every other character is two (the conservative rule of #324): a wide
+-- character in a module, output or path name makes its row shorter than the
+-- terminal rather than wider, and only a row that is too wide can wrap and
+-- leave a stale line behind. A terminal that draws a combining mark or a
+-- half-width kana in one cell therefore loses padding, never the invariant.
+--
+-- Names are arbitrary bytes on Linux, so a malformed sequence counts as the
+-- bytes a terminal draws for it: a lead byte consumes the continuation bytes
+-- it declares and is two cells, and any byte that is not part of a well-formed
+-- sequence -- a stray continuation byte, an invalid lead, a truncated tail --
+-- is one replacement character of two cells. Charging less than a character
+-- can occupy is what would let a row wrap.
 --
 
-local function codepoint_count(text)
-    local count = 0
-    for index = 1, #text do
-        local byte = text:byte(index)
-        if byte < 0x80 or byte >= 0xC0 then count = count + 1 end
+-- One codepoint step over TEXT at INDEX: its cells, and the next index.
+local function step(text, index)
+    local byte = text:byte(index)
+    if byte < 0x80 then return 1, index + 1 end
+    if byte < 0xC0 then return 2, index + 1 end
+    local expected
+    if byte <= 0xDF then expected = 1
+    elseif byte <= 0xEF then expected = 2
+    elseif byte <= 0xF7 then expected = 3
+    else return 2, index + 1 end
+    for offset = 1, expected do
+        local following = text:byte(index + offset)
+        if not following or following < 0x80 or following > 0xBF then
+            -- An invalid or truncated sequence is one invalid byte; whatever
+            -- follows is measured on its own.
+            return 2, index + 1
+        end
     end
-    return count
+    return 2, index + 1 + expected
 end
 
-local function truncate(text, limit)
+-- Display width of TEXT in cells.
+function progress.width(text)
+    local width, index = 0, 1
+    while index <= #text do
+        local cells, following = step(text, index)
+        width = width + cells
+        index = following
+    end
+    return width
+end
+
+-- The longest prefix of TEXT within LIMIT cells, cut on codepoint
+-- boundaries: a two-cell character that does not fit is dropped whole.
+function progress.truncate(text, limit)
     if limit <= 0 then return "" end
-    local count = 0
-    for index = 1, #text do
-        local byte = text:byte(index)
-        if byte < 0x80 or byte >= 0xC0 then
-            count = count + 1
-            if count > limit then return text:sub(1, index - 1) end
-        end
+    local width, index = 0, 1
+    while index <= #text do
+        local cells, following = step(text, index)
+        if width + cells > limit then return text:sub(1, index - 1) end
+        width = width + cells
+        index = following
     end
     return text
 end
@@ -172,8 +211,8 @@ local function render(pieces, width, colour)
     for _, piece in ipairs(pieces) do
         if width and used >= width then break end
         local text = piece[1]
-        if width and codepoint_count(text) > width - used then
-            text = truncate(text, width - used)
+        if width and progress.width(text) > width - used then
+            text = progress.truncate(text, width - used)
         end
         if text ~= "" then
             local style = piece[2]
@@ -184,14 +223,14 @@ local function render(pieces, width, colour)
             else
                 out[#out + 1] = text
             end
-            used = used + codepoint_count(text)
+            used = used + progress.width(text)
         end
     end
     return table.concat(out)
 end
 
 local function padding(name, column)
-    local used = codepoint_count(name)
+    local used = progress.width(name)
     if used >= column then return " " end
     return string.rep(" ", column - used)
 end
@@ -264,6 +303,8 @@ function progress.new(kind, options)
             if opened and timer then
                 self.timer = timer
                 timer:start(FRAME_MILLISECONDS, FRAME_MILLISECONDS, function()
+                    -- A loop callback must never raise, and nothing above it
+                    -- could report a broken frame: keep the swallow here.
                     pcall(self.tick, self)
                 end)
                 -- An animation never keeps the loop alive.
@@ -361,11 +402,21 @@ function Reporter:width()
     return 80
 end
 
--- One plain line: the name padded to a common column, then its state.
+-- One plain line: the name padded to a common column, then its state. The
+-- dots are placed from the name's cell width, so a wide character never
+-- pushes the state past the column.
 function Reporter:line(name, state)
-    local dots = LINE_COLUMN - 1 - codepoint_count(name)
+    local dots = LINE_COLUMN - 1 - progress.width(name)
     if dots < 3 then dots = 3 end
     self:out(name .. " " .. string.rep(".", dots) .. " " .. state .. "\n")
+end
+
+-- True while another frame would still be drawn: the live renderer before
+-- `finish`/`fail`. A native job wait asks this before it takes an idle hook, so
+-- quiet, plain, verbose and library runs keep their blocking wait and their
+-- byte-identical output.
+function Reporter:animates()
+    return self.kind == progress.LIVE and not self.closed
 end
 
 function Reporter:activate(name, entry)
@@ -448,14 +499,19 @@ function Reporter:redraw()
     self.drawn = true
 end
 
--- The timer frame: advance the spinner and refresh the visible region.
+-- One animation frame: advance the spinner and refresh the visible region.
+-- The error of a frame that failed is re-raised after `in_callback` is
+-- restored, so a caller decides what to do with it: the animation timer
+-- swallows it (a loop callback must never raise), while an idle native wait
+-- hands it to the job ledger, which reports it once and drops the hook.
 function Reporter:tick()
     if self.kind ~= progress.LIVE or self.closed then return end
     self.frame = self.frame + 1
     if #self.order == 0 then return end
     self.in_callback = true
-    pcall(self.redraw, self)
+    local drawn, draw_err = pcall(self.redraw, self)
     self.in_callback = false
+    if not drawn then error(draw_err, 0) end
 end
 
 -- One finished module or step becomes a persistent line above the region.

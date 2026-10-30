@@ -1106,13 +1106,19 @@ static int sigpipe_guard_gc(lua_State *L) {
   return 0;
 }
 
-/* _jobserver_wait(completion_file, client_or_nil, watch_signals)
-** -> "signal", signo | "completion" | "slot" | nil, reason.
-** The completion FILE must be unbuffered; nothing is consumed from it. */
+/* _jobserver_wait(completion_file, client_or_nil, watch_signals, timeout_ms)
+** -> "signal", signo | "completion" | "slot" | "timeout" | nil, reason.
+** The completion FILE must be unbuffered; nothing is consumed from it.
+** A non-negative `timeout_ms` bounds one poll: on expiry the call returns
+** "timeout" instead of blocking, so a Lua caller can draw one live progress
+** frame and wait again. Absent, nil or negative keeps the blocking poll that
+** every other caller relies on. */
 static int jobserver_wait(lua_State *L) {
   luaL_Stream *stream = (luaL_Stream *)luaL_checkudata(L, 1, LUA_FILEHANDLE);
   TitanJobserver *client = lua_isnoneornil(L, 2) ? NULL : check_jobserver(L, 2);
   int watch_signals = lua_toboolean(L, 3);
+  lua_Integer timeout = luaL_optinteger(L, 4, -1);
+  int timeout_ms = timeout < 0 ? -1 : (timeout > INT_MAX ? INT_MAX : (int)timeout);
   struct pollfd fds[3];
   nfds_t count = 0, token = 0, wake = 0;
   if (stream->closef == NULL) return luaL_error(L, "attempt to use a closed file");
@@ -1130,13 +1136,15 @@ static int jobserver_wait(lua_State *L) {
   }
   for (;;) {
     nfds_t i;
+    int ready;
     if (watch_signals && titan_cancel_signal != 0) {
       lua_pushliteral(L, "signal");
       lua_pushinteger(L, (lua_Integer)titan_cancel_signal);
       return 2;
     }
     for (i = 0; i < count; i++) fds[i].revents = 0;
-    if (poll(fds, count, -1) < 0) {
+    ready = poll(fds, count, timeout_ms);
+    if (ready < 0) {
       if (errno == EINTR) continue;
       return push_errno(L, "cannot wait for native jobs", errno);
     }
@@ -1149,6 +1157,10 @@ static int jobserver_wait(lua_State *L) {
     }
     if (token != 0 && fds[token].revents != 0) {
       lua_pushliteral(L, "slot");
+      return 1;
+    }
+    if (ready == 0 && timeout_ms >= 0) {
+      lua_pushliteral(L, "timeout");
       return 1;
     }
   }

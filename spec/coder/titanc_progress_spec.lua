@@ -462,6 +462,75 @@ describe("titanc progress reporting", function()
         assert.is_nil(quiet_stderr:find("compiling C", 1, true), quiet_stderr)
     end)
 
+    it("draws spinner frames while a slow provider link runs", function()
+        if not script_supports_command_form() then
+            pending("needs util-linux `script` (-qfec); the BSD/macOS form is unsupported")
+            return
+        end
+        -- A native provider-pair link waits in the private completion poll,
+        -- which runs no loop: without an idle frame the spinner of that row
+        -- would freeze for the whole link. The wrapper holds each
+        -- shared-library link for a second, then runs the real compiler, so
+        -- the terminal transcript can count what was drawn meanwhile.
+        local wrapper = root .. "/slow_link.sh"
+        write_file(wrapper, table.concat({
+            "#!/bin/sh",
+            'for argument in "$@"; do',
+            '    if [ "$argument" = "-shared" ]; then',
+            "        sleep 1",
+            "        break",
+            "    fi",
+            "done",
+            'exec cc "$@"',
+            "",
+        }, "\n"))
+        assert.truthy(shell("chmod +x " .. quote(wrapper)))
+
+        local words = {}
+        for _, word in ipairs(compiler({
+            "--tree", source, "--output", root .. "/live-slow-out",
+            "app.one", "app.two",
+        })) do
+            words[#words + 1] = quote(word)
+        end
+        local launcher = root .. "/live_slow_link.sh"
+        write_file(launcher, table.concat({
+            "#!/bin/sh",
+            "exec env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5" ..
+                " -u NO_COLOR -u MAKEFLAGS -u MFLAGS -u MAKELEVEL" ..
+                " TERM=xterm-256color LC_ALL=C LANG=C CC=" .. quote(wrapper) ..
+                " TITAN_PATH= TITAN_ROOT=" .. quote(PREFIX) .. " " ..
+                table.concat(words, " "),
+            "",
+        }, "\n"))
+        assert.truthy(shell("chmod +x " .. quote(launcher)))
+
+        local typescript = root .. "/live-slow-link.typescript"
+        local ran = shell("script -qfec " .. quote(launcher) .. " " ..
+            quote(typescript))
+        assert.is_true(ran, "the slow provider link must still succeed")
+        if children then children:collect() end
+        local transcript = read_file(typescript) or ""
+        -- Escape sequences removed, every redraw of the link row counts once.
+        local visible = transcript:gsub("\27%[[%d;]*%a", "")
+        local frames, drawn = {}, 0
+        for glyph in visible:gmatch("[\r\n]  ([-\\|/]) app%.so ") do
+            drawn = drawn + 1
+            frames[glyph] = true
+        end
+        local distinct = 0
+        for _ in pairs(frames) do distinct = distinct + 1 end
+        -- A frozen spinner draws the link row once per completed child (three
+        -- times here: the start, and each wait's return); roughly ten frames a
+        -- second draw many more and cycle through the four ASCII glyphs.
+        assert.is_true(drawn >= 10,
+            "the link row was drawn only " .. drawn .. " times")
+        assert.is_true(distinct >= 3,
+            "only " .. distinct .. " spinner frames were drawn")
+        assert.truthy(visible:find("linked app.so", 1, true),
+            table.concat(terminal.render(transcript), "\n"))
+    end)
+
     it("reports a standalone program link in the live region", function()
         if not script_supports_command_form() then
             pending("needs util-linux `script` (-qfec); the BSD/macOS form is unsupported")

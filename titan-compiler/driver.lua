@@ -24,6 +24,7 @@ local objectmetadata = require "titan-compiler.objectmetadata"
 local incremental = require "titan-compiler.incremental"
 local documentation = require "titan-compiler.documentation"
 local jobs = require "titan-compiler.jobs"
+local progress = require "titan-compiler.progress"
 
 local lfs = require "lfs"
 
@@ -509,6 +510,24 @@ driver.EMIT_LINE_DIRECTIVES = platform.getenv("TITAN_NO_LINE_DIRECTIVES") ~= "1"
 -- a child that would write into the region is captured and replayed above it
 -- instead. Every other caller leaves it nil and children inherit stderr.
 driver.LIVE_PROGRESS = nil
+
+-- A native batch waits in the private `_jobserver_wait` helper, which blocks
+-- until a child finishes and runs no loop, so the live animation timer cannot
+-- fire and the spinner freezes for the whole compile or link. While the CLI's
+-- live reporter animates, each wait is bounded by one frame period and draws a
+-- frame instead, which keeps about ten redraws a second. The hook only calls
+-- the reporter: it never runs a loop, so nothing can re-enter the wait. Quiet,
+-- plain, verbose and library callers get no hook and keep their blocking wait
+-- and their byte-identical output.
+local function idle_hook()
+    local reporter = driver.LIVE_PROGRESS
+    if not reporter or not reporter:animates() then return nil end
+    return {
+        interval = progress.FRAME_MILLISECONDS,
+        tick = function() reporter:tick() end,
+    }
+end
+
 driver.TITAN_RUNTIME_PATH = "titan-runtime/"
 driver.LIBBACKTRACE_PATH = "libbacktrace"
 driver.BUILD_PROFILE = platform.getenv("TITAN_BUILD_PROFILE") or "production"
@@ -9047,7 +9066,7 @@ function run_prepared_compiles(prepared, parallelism, verbose)
     local slots
     if parallelism > 1 and #entries > 1 then
         local slots_err
-        slots, slots_err = jobs.open_slots(parallelism)
+        slots, slots_err = jobs.open_slots(parallelism, { idle = idle_hook() })
         if not slots then
             for _, entry in ipairs(entries) do jobs.record(entry, nil, slots_err) end
             return jobs.summarize(results)
@@ -11092,9 +11111,10 @@ function driver.link_provider_pair(request)
     local archive = dso:gsub("[.]so$", ".a")
     local image = directory .. "/archive-validation.so"
     -- Even one slot runs its links as background children, so the
-    -- cancellation guard must own INT/TERM/HUP for the whole transaction.
+    -- cancellation guard must own INT/TERM/HUP for the whole transaction. A
+    -- slow link also gets idle progress frames while it runs.
     local slots, slots_err = jobs.open_slots(request.parallelism,
-        { guard = true })
+        { guard = true, idle = idle_hook() })
     if not slots then
         remove_path(directory)
         return nil, slots_err

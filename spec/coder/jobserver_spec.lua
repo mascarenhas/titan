@@ -362,6 +362,239 @@ describe("jobserver slots", function()
     end)
 end)
 
+describe("native job waits with an idle progress frame", function()
+    if platform.windows then
+        it("are POSIX-only", function()
+            pending("_jobserver_wait and the slot ledger's wait are POSIX-only")
+        end)
+        return
+    end
+
+    local support = require "titan"
+    local hrtime = require("titan-compiler.process").library().hrtime
+    local workspace, fifo, completion
+
+    local function seconds(from, to) return (to - from) / 1e9 end
+
+    -- True, once the sleep ends, after printing `index` into the FIFO.
+    local function notify_after(delay, index, path)
+        return assert(io.popen("sh -c " .. quote(
+            "sleep " .. delay .. "; printf '" .. index .. "\\n' > " ..
+            quote(path or fifo))))
+    end
+
+    before_each(function()
+        workspace = assert(compiler_io.new_sync():tmpname())
+        os.remove(workspace)
+        assert(lfs.mkdir(workspace))
+        fifo = workspace .. "/completion"
+        assert(shell("mkfifo -m 600 " .. quote(fifo)))
+        completion = assert(io.open(fifo, "r+"))
+        assert(completion:setvbuf("no"))
+    end)
+
+    after_each(function()
+        if completion then completion:close() end
+        completion = nil
+        remove_tree(workspace)
+    end)
+
+    it("returns a timeout instead of blocking while nothing is ready", function()
+        local started = hrtime()
+        local event, value = support._jobserver_wait(completion, nil, false, 50)
+        local elapsed = seconds(started, hrtime())
+        assert.equal("timeout", event)
+        assert.is_nil(value)
+        -- The poll was bounded by the request, so it neither returned at once
+        -- nor waited for a child that never arrives.
+        assert.is_true(elapsed >= 0.02, elapsed)
+        assert.is_true(elapsed < 30, elapsed)
+    end)
+
+    it("reports completion at once when the channel is readable", function()
+        assert(completion:write("7\n"))
+        local started = hrtime()
+        local event = support._jobserver_wait(completion, nil, false, 30000)
+        local elapsed = seconds(started, hrtime())
+        assert.equal("completion", event)
+        assert.is_true(elapsed < 30, elapsed)
+        -- Readiness is reported, never consumed: the caller reads the line.
+        assert.equal("7", completion:read("*l"))
+    end)
+
+    it("keeps blocking without a timeout until a child completes", function()
+        -- The clock starts before the writer exists, so the lower bound below
+        -- cannot be shortened by a scheduling pause between fork and read.
+        local started = hrtime()
+        local writer = notify_after("0.3", 9)
+        local event = support._jobserver_wait(completion, nil, false)
+        local elapsed = seconds(started, hrtime())
+        assert.is_true(writer:close())
+        assert.equal("completion", event)
+        -- A blocking wait cannot return before the child wrote its line, and
+        -- the clock started before that child could be forked.
+        assert.is_true(elapsed >= 0.25, elapsed)
+        assert.is_true(elapsed < 30, elapsed)
+        assert.equal("9", completion:read("*l"))
+    end)
+
+    it("drives a native batch while drawing one frame per idle interval", function()
+        local channel = assert(jobs.open_channel(function()
+            return assert(compiler_io.new_sync():tmpname())
+        end))
+        finally(function() jobs.close_channel(channel) end)
+        local ticks = 0
+        local slots = assert(jobs.open_slots(2, {
+            makeflags = false,
+            idle = { interval = 50, tick = function() ticks = ticks + 1 end },
+        }))
+        finally(function() slots:close() end)
+        local launched, failures = {}, {}
+        local next_position, failure, cancelled = jobs.drive(slots, channel, 1,
+            function(position)
+                launched[position] = assert(jobs.launch(channel,
+                    { "sh", "-c", "sleep 0.3" }, "sleep 0.3",
+                    workspace .. "/one.out", workspace .. "/one.err", position))
+                return launched[position]
+            end, function(position, reason)
+                failures[#failures + 1] = { position, reason }
+            end, "idle slot")
+        assert.equal(2, next_position)
+        assert.is_nil(failure)
+        assert.is_nil(cancelled)
+        assert.same({}, failures)
+        assert.is_true(launched[1].ok)
+        assert.is_true(launched[1].reaped)
+        -- The job ran about 0.3 s at a 50 ms frame period: several frames were
+        -- drawn while it was still running, and none of them was an event.
+        assert.is_true(ticks >= 3, "only " .. ticks .. " idle frames were drawn")
+    end)
+
+    it("reports a failing frame once and keeps waiting for the child", function()
+        local warnings = {}
+        local saved = io.stderr
+        io.stderr = { write = function(_, ...)
+            for index = 1, select("#", ...) do
+                warnings[#warnings + 1] = select(index, ...)
+            end
+            return true
+        end }
+        local ticks = 0
+        local slots, event, elapsed
+        local completed = pcall(function()
+            slots = assert(jobs.open_slots(2, {
+                makeflags = false,
+                idle = { interval = 50, tick = function()
+                    ticks = ticks + 1
+                    error("the reporter is gone")
+                end },
+            }))
+            local started = hrtime()
+            local writer = notify_after("0.3", 4)
+            event = slots:wait(completion, false)
+            elapsed = seconds(started, hrtime())
+            assert.is_true(writer:close())
+        end)
+        io.stderr = saved
+        if slots then slots:close() end
+        local text = table.concat(warnings)
+        assert.is_true(completed, text)
+        -- The child still owns the transaction: its completion is the result.
+        assert.equal("completion", event)
+        assert.is_true(elapsed >= 0.25, elapsed)
+        -- One frame failed, was reported once, and was then given up.
+        assert.equal(1, ticks)
+        local _, count = text:gsub("live progress frame failed", "")
+        assert.equal(1, count, text)
+        assert.truthy(text:find("the reporter is gone", 1, true), text)
+    end)
+
+    it("warns once for a real reporter whose frames fail, then keeps waiting", function()
+        -- The production hook is `reporter:tick`. A renderer that fails on
+        -- every frame must reach the ledger's policy, not be swallowed inside
+        -- the reporter, or the hook would retry it ten times a second.
+        local progress = require "titan-compiler.progress"
+        local warnings = {}
+        local saved = io.stderr
+        io.stderr = { write = function(_, ...)
+            for index = 1, select("#", ...) do
+                warnings[#warnings + 1] = select(index, ...)
+            end
+            return true
+        end }
+        local failing = false
+        local reporter = progress.new(progress.LIVE, {
+            locale = "C", width = 40, now = function() return 0 end,
+            writer = function()
+                if failing then error("stderr is gone") end
+            end,
+        })
+        local slots, event, elapsed
+        local completed = pcall(function()
+            -- One row is drawn for real; every later frame fails.
+            reporter:link_begin("app.so")
+            failing = true
+            assert.is_true(reporter:animates())
+            slots = assert(jobs.open_slots(1, {
+                makeflags = false,
+                idle = { interval = progress.FRAME_MILLISECONDS,
+                    tick = function() reporter:tick() end },
+            }))
+            local started = hrtime()
+            local writer = notify_after("0.3", 6)
+            event = slots:wait(completion, false)
+            elapsed = seconds(started, hrtime())
+            assert.is_true(writer:close())
+        end)
+        io.stderr = saved
+        if slots then slots:close() end
+        reporter:close()
+        local text = table.concat(warnings)
+        assert.is_true(completed, text)
+        -- The renderer really failed, the failure was reported once, and the
+        -- child's completion is still the wait's result.
+        assert.equal("completion", event)
+        assert.is_true(elapsed >= 0.25, elapsed)
+        local _, count = text:gsub("live progress frame failed", "")
+        assert.equal(1, count, text)
+        assert.truthy(text:find("stderr is gone", 1, true), text)
+    end)
+
+    it("reports a cancellation that arrives during idle frames", function()
+        local ticks = 0
+        local slots = assert(jobs.open_slots(1, {
+            makeflags = false, guard = true,
+            -- The first frame delivers the INT a terminal would send; the
+            -- wait must return it instead of waiting another interval.
+            idle = { interval = 50, tick = function()
+                ticks = ticks + 1
+                assert(support._signal_raise(2))
+            end },
+        }))
+        finally(function() slots:close() end)
+        local event, value = slots:wait(completion, false)
+        assert.equal("signal", event)
+        assert.equal(2, value)
+        assert.equal(1, ticks)
+        assert.equal(2, slots:cancelled())
+    end)
+
+    it("rejects an idle hook that cannot draw a frame", function()
+        local called, failure = pcall(jobs.open_slots, 2, {
+            makeflags = false, idle = { interval = 0, tick = function() end },
+        })
+        assert.is_false(called)
+        assert.truthy(tostring(failure):find("idle progress hook", 1, true),
+            failure)
+        called, failure = pcall(jobs.open_slots, 2, {
+            makeflags = false, idle = { interval = 50 },
+        })
+        assert.is_false(called)
+        assert.truthy(tostring(failure):find("idle progress hook", 1, true),
+            failure)
+    end)
+end)
+
 describe("build-worker native batches", function()
     -- A fresh module copy keeps the remote executor out of the shared one.
     local remote_jobs
