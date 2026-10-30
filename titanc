@@ -35,6 +35,7 @@ local path = require 'titan-compiler.path'
 local incremental = require 'titan-compiler.incremental'
 local nativeinputs = require 'titan-compiler.nativeinputs'
 local linkcertificate = require 'titan-compiler.linkcertificate'
+local progress = require 'titan-compiler.progress'
 
 -- Native switches keep their exact command-line order across kinds.
 local native_cli = {}
@@ -53,6 +54,7 @@ p:flag('--print-root', 'Print the selected Titan installation root and exit.')
 p:flag('--print-ast', 'Print the AST.')
 p:flag('--pretty-print', 'Format generated C and headers with clang-format.')
 p:flag('-v --verbose', 'Be verbose about compiler invocations.')
+p:flag('-q --quiet', 'Print only diagnostics, native compiler output and --print-* results: the historical output, with no progress reporting.')
 p:option('-j --jobs',
     'Maximum concurrent compiler jobs: module-frontend workers and native compiler jobs share these slots (default: TITAN_JOBS or 4).')
 p:option('--c-parts',
@@ -93,6 +95,9 @@ p:option('-X --extra-object',
 local args = p:parse()
 
 local resolver_context
+-- The CLI's progress reporter (issue #322); nil in quiet mode and for every
+-- library or language-server caller, so their stderr stays exactly as before.
+local reporter
 -- Output-domain locks; process exit also releases them.
 local output_locks, locked_io
 local function release_locks()
@@ -140,7 +145,13 @@ local function exit(msg)
         end
     end
     release_locks()
-    io.stderr:write(msg, "\n")
+    if reporter then
+        -- Erase any live region, then the diagnostics exactly as written.
+        reporter:fail()
+        reporter:write(msg .. "\n")
+    else
+        io.stderr:write(msg, "\n")
+    end
     os.exit(1)
 end
 
@@ -150,6 +161,13 @@ local function finish()
         exit("failed to clean C probe service: " .. tostring(close_err))
     end
     release_locks()
+    if reporter then reporter:finish() end
+end
+
+-- A live region owns terminal stderr, so verbose command echoes cannot share
+-- it; the plain renderer serves verbose mode and both switches are refusals.
+if args.quiet and args.verbose then
+    exit("-q/--quiet and -v/--verbose cannot be combined")
 end
 
 if args.print_c_objects then
@@ -172,6 +190,47 @@ if args.print_root then
     end
     io.stdout:write(root, "\n")
     return
+end
+
+-- Progress reporting (issue #322). The environment is read once; only a
+-- build that could report progress probes the terminal, and only a terminal
+-- gets the live renderer. Progress goes to stderr exclusively, so --print-*
+-- stdout stays machine-readable.
+local environment = {
+    quiet = args.quiet == true,
+    verbose = args.verbose == true,
+    term = platform.getenv("TERM"),
+    makeflags = platform.getenv("MAKEFLAGS"),
+    no_color = platform.getenv("NO_COLOR"),
+    locale = progress.locale({
+        LC_ALL = platform.getenv("LC_ALL"),
+        LC_CTYPE = platform.getenv("LC_CTYPE"),
+        LANG = platform.getenv("LANG"),
+    }),
+    windows = platform.windows == true,
+}
+if not environment.quiet then
+    local loaded, process = pcall(require, "titan-compiler.process")
+    local opened, uv = false, nil
+    if loaded then opened, uv = pcall(process.library) end
+    if opened then
+        -- The same library supplies the wall clock and, when the renderer is
+        -- live, the terminal handle and the animation timer.
+        environment.uv = uv
+        environment.now = function() return uv.hrtime() / 1e9 end
+        if not environment.verbose then
+            local guessed, handle = pcall(uv.guess_handle, 2)
+            environment.tty = guessed and handle == "tty" or false
+        end
+    end
+end
+local report_kind = progress.select(environment)
+if report_kind ~= progress.NULL then
+    reporter = progress.new(report_kind, environment)
+end
+if reporter and report_kind == progress.LIVE then
+    -- The live region owns terminal stderr: children are captured instead.
+    driver.LIVE_PROGRESS = reporter
 end
 if #args.module == 0 and #args.test_dir == 0 and
    not (args.compile_only and #args.c_source > 0) then
@@ -459,9 +518,12 @@ else
         output_root = args.output,
         locks = output_locks,
         preflight = preflight_outputs,
+        progress = reporter,
     })
     if signal then
         close_coordinator_context()
+        -- No stale region survives the re-raised signal.
+        if reporter then reporter:fail() end
         require("titan-compiler.jobs").propagate(signal)
     end
     if not built then exit(table.concat(diagnostics, "\n")) end
@@ -524,6 +586,12 @@ if #normalized_native.c_sources > 0 then
         compile_argv = compile_argv,
         toolchain = toolchain,
         incremental = args.incremental == true,
+        begin_step = reporter and function(source)
+            reporter:source_begin(source)
+        end or nil,
+        finish_step = reporter and function(source)
+            reporter:source_done(source)
+        end or nil,
     })
     if not compiled then exit(native_compile_error) end
     for _, object in ipairs(compiled) do
@@ -531,6 +599,8 @@ if #normalized_native.c_sources > 0 then
             io.stderr:write("Titan native ", object.hit and "hit " or "miss ",
                 tostring(object.source), "\n")
         end
+        -- A certified miss ran as a visible step; a hit is only counted.
+        if object.hit and reporter then reporter:source_up_to_date() end
         c_objects[#c_objects + 1] = object
     end
 end
@@ -572,6 +642,8 @@ if #extra_objects == 0 then extra_objects = nil end
 -- The final-link certificate gates every runner/entrypoint generation,
 -- archive probe, validation link and final link. A hit changes nothing.
 local link_ticket, program_path, windows_paths, coverage_runtime, dsymutil
+-- The final link's output basename, reported as the progress step.
+local link_name
 if not args.compile_only and not args.print_ast then
     local planned, plan_errors = driver.finalize_resolver_context(resolver_context)
     if not planned then exit(table.concat(plan_errors, "\n")) end
@@ -754,9 +826,11 @@ if not args.compile_only and not args.print_ast then
         module_order, driver.imported, args.verbose, args.pretty_print)
     if not headers_ready then exit(headers_error) end
     local target = outputs[1].path
+    if reporter then link_name = progress.basename(target) end
     local hit, reason = linkcertificate.check(resolver_context, ticket)
     if hit then
         if args.verbose then io.stderr:write("Titan link hit ", target, "\n") end
+        if reporter then reporter:link_up_to_date(link_name) end
         finish()
         return
     end
@@ -1114,6 +1188,8 @@ if main_module then
     for _, name in ipairs(archive_names) do
         archive_entries[name] = assert(physical_entries[name])
     end
+    -- The standalone archive probe belongs to the link step that follows it.
+    if reporter and link_name then reporter:link_begin(link_name) end
     local probe_ok, probe_err = true
     if not platform.windows then
         probe_ok, probe_err = driver.run_standalone_archive_probe(
@@ -1123,6 +1199,7 @@ if main_module then
     end
     if not probe_ok then
         table.insert(errors, probe_err)
+        if reporter and link_name then reporter:link_failed(link_name) end
     else
         local ok, term, code = driver.compile_program(main_module, ofiles,
             nil, args.verbose, extra_objects,
@@ -1147,6 +1224,9 @@ if main_module then
             })
         if not ok then
             table.insert(errors, link_failed("program", main_module, term, code))
+            if reporter and link_name then reporter:link_failed(link_name) end
+        elseif reporter and link_name then
+            reporter:link_done(link_name)
         end
     end
 else
@@ -1161,6 +1241,7 @@ else
     local native_payload, payload_err =
         driver.classify_native_payloads(extra_objects, native_target)
     if not native_payload then exit(payload_err) end
+    if reporter and link_name then reporter:link_begin(link_name) end
     if platform.windows then
         local temporary, temporary_directory =
             driver.staged_library_output(provider_output)
@@ -1174,6 +1255,7 @@ else
             output_names)
         if not ok then
             table.insert(errors, link_failed("library", provider, term, code))
+            if reporter and link_name then reporter:link_failed(link_name) end
             local cleaned, cleanup_error =
                 driver.cleanup_staging_directories({ temporary_directory })
             if not cleaned then
@@ -1196,7 +1278,12 @@ else
                     "Windows library publication committed but staging cleanup failed: " or
                     "Windows library staging cleanup failed: ") .. cleanup_error)
             end
-            if not valid then table.insert(errors, validation_err) end
+            if not valid then
+                table.insert(errors, validation_err)
+                if reporter and link_name then reporter:link_failed(link_name) end
+            elseif reporter and link_name then
+                reporter:link_done(link_name)
+            end
         end
     else
         local ordered_archive_inputs = {}
@@ -1242,6 +1329,7 @@ else
             exit(pair_err)
         elseif not pair then
             table.insert(errors, pair_err)
+            if reporter and link_name then reporter:link_failed(link_name) end
         else
             local published, publish_err =
                 driver.publish_provider_bundle(
@@ -1253,6 +1341,9 @@ else
             if not published then
                 table.insert(errors, "failed to publish provider pair '" ..
                     provider .. "': " .. tostring(publish_err))
+                if reporter and link_name then reporter:link_failed(link_name) end
+            elseif reporter and link_name then
+                reporter:link_done(link_name)
             end
         end
     end

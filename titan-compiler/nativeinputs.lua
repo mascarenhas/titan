@@ -180,6 +180,7 @@ local function compile_node(context, request, source, stem)
                     dependencies = files }
             end
         end
+        if request.begin_step then request.begin_step(source) end
         staged = reserve(context, object)
         local command = {}
         append(command, request.compile_argv)
@@ -213,6 +214,7 @@ local function compile_node(context, request, source, stem)
         -- to catch publication races and to prime immediate native-only reuse.
         need(incremental.file_digest(incremental.fresh_context(context), object) == identity,
             "native object changed during publication: " .. object)
+        if request.finish_step then request.finish_step(source) end
         return { path = object, identity = identity, source = source, hit = false, cacheable = cacheable,
             dependencies = files }
     end)
@@ -247,6 +249,9 @@ end
 -- Titan-only test-owner/coverage flags. run participates in the shared ledger;
 -- publish, if supplied, is coordinator-owned and commits the primary last.
 -- An explicitly uncertified toolchain still builds, without record metadata.
+-- Optional `begin_step(source)`/`finish_step(source)` bracket the native
+-- compile of each miss, for a progress reporter; a certified cache hit never
+-- calls them, so a hit shows no step.
 function native.compile(context, request)
     return guarded(function()
         need(type(request.output_root) == "string", "native output root is required")

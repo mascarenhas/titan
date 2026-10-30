@@ -505,6 +505,10 @@ end
 
 driver.TITAN_SOURCE_PATH = "."
 driver.EMIT_LINE_DIRECTIVES = platform.getenv("TITAN_NO_LINE_DIRECTIVES") ~= "1"
+-- Set by the titanc CLI when its live progress renderer owns terminal stderr:
+-- a child that would write into the region is captured and replayed above it
+-- instead. Every other caller leaves it nil and children inherit stderr.
+driver.LIVE_PROGRESS = nil
 driver.TITAN_RUNTIME_PATH = "titan-runtime/"
 driver.LIBBACKTRACE_PATH = "libbacktrace"
 driver.BUILD_PROFILE = platform.getenv("TITAN_BUILD_PROFILE") or "production"
@@ -1161,6 +1165,31 @@ local function run_argv(argv, verbose)
     local cmd, err = command_argv(argv)
     if not cmd then return nil, err end
     if verbose then io.stderr:write(cmd, "\n") end
+    if driver.LIVE_PROGRESS then
+        -- A live region owns terminal stderr: run the child (and its shell
+        -- wrapper) with captured output and replay it above the region. The
+        -- exit status and the diagnostic text stay exactly as inherited.
+        local captured
+        if platform.windows then
+            captured = require("titan-compiler.process").capture(argv)
+        else
+            captured = require("titan-compiler.process").capture(
+                { "/bin/sh", "-c", cmd }, {
+                    inherit = driver.OUTPUT_LOCKS and
+                        driver.OUTPUT_LOCKS:descriptors() or nil,
+                })
+        end
+        if captured.output and captured.output ~= "" then
+            driver.LIVE_PROGRESS:write(captured.output)
+        end
+        if not captured.started then
+            if captured.diagnostic then
+                driver.LIVE_PROGRESS:write(captured.diagnostic .. "\n")
+            end
+            return nil, "exit", 127
+        end
+        return captured.ok and true or nil, captured.why, captured.status
+    end
     if platform.windows then return require("titan-compiler.process").run(argv) end
     if driver.OUTPUT_LOCKS then
         -- The coordinator's descriptors are close-on-exec. Give synchronous
@@ -5600,8 +5629,11 @@ function driver.defaultloader(static_deps, options)
             if main_initializer then table.insert(ast, main_initializer) end
             return ast
         end
+        local on_phase = options.on_phase
+        if on_phase then on_phase("parsing", modname) end
         local ast, parse_error = assemble(profile_frame)
         if not ast then return false, parse_error end
+        if on_phase then on_phase("checking", modname) end
         local main_input = inputs[1]
 
         driver.imported[modname] = CIRCULAR_MARK
@@ -6678,6 +6710,9 @@ function driver.compile_planned_module(context, modname, options)
     local verbose = options.verbose == true
     local coverage_build = policy.coverage
     local source = copy_source_descriptor(plan.modules[modname].source)
+    -- The optional phase callback reports the boundaries a progress reporter
+    -- shows; a compile started for any other module leaves it untouched.
+    local on_phase = options.on_phase
     -- Provider inspection reuses the coordinator's archive metadata scans.
     context.planned_archives = type(plan.archives) == "table" and
         plan.archives or nil
@@ -6691,6 +6726,9 @@ function driver.compile_planned_module(context, modname, options)
         output_root = context.output_root,
         c_parts = c_parts,
         split_threshold = policy.split_threshold,
+        on_phase = on_phase and function(phase, name)
+            if name == modname then on_phase(phase) end
+        end or nil,
     })
     local ok, errors = checker.checkimport(modname, loader)
     if not ok then return nil, tostring(errors) end
@@ -6748,6 +6786,7 @@ function driver.compile_planned_module(context, modname, options)
             staged = true,
         },
     }
+    if on_phase then on_phase("generating C") end
     local plans, plan_error = driver.plan_compile_requests(
         { request }, verbose, nil, nil, header_plans)
     if not plans then return nil, plan_error end
@@ -6767,6 +6806,12 @@ function driver.compile_planned_module(context, modname, options)
             { compilation }, parallelism, verbose)
         result = compiled[1]
     else
+        -- No batch: this worker compiles its own parts, so it reports the
+        -- phase the coordinator reports when it runs the batch instead.
+        if on_phase then
+            on_phase("compiling C", #compilation.jobs > 1 and
+                (#compilation.jobs .. " parts") or nil)
+        end
         result = { ok = true }
         for _, job in ipairs(compilation.jobs) do
             local job_ok, job_err = run_argv(job.argv, verbose)
