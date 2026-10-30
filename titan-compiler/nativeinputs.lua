@@ -235,6 +235,10 @@ local function compile_node(context, request, source, stem)
     retire(staged)
     retire(preprocessed)
     retire(dependencies)
+    -- A source that began a step and did not complete it ends as failed.
+    if request.fail_step and (not completed or cleanup_cancelled) then
+        request.fail_step(source)
+    end
     if not completed and type(result) ~= "string" then error(result, 0) end
     if cleanup_cancelled then error(cleanup_cancelled.error, 0) end
     if not completed then
@@ -249,9 +253,10 @@ end
 -- Titan-only test-owner/coverage flags. run participates in the shared ledger;
 -- publish, if supplied, is coordinator-owned and commits the primary last.
 -- An explicitly uncertified toolchain still builds, without record metadata.
--- Optional `begin_step(source)`/`finish_step(source)` bracket the native
--- compile of each miss, for a progress reporter; a certified cache hit never
--- calls them, so a hit shows no step.
+-- Optional `begin_step(source)`, `finish_step(source)` and
+-- `fail_step(source)` bracket the native compile of each miss, for a progress
+-- reporter; a certified cache hit never calls them, so a hit shows no step,
+-- and every begun step ends in exactly one of the two terminal callbacks.
 function native.compile(context, request)
     return guarded(function()
         need(type(request.output_root) == "string", "native output root is required")

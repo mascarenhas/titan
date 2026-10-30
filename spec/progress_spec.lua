@@ -76,11 +76,13 @@ describe("progress glyphs and colour", function()
         local unicode = progress.glyphs({ locale = "en_US.UTF-8" })
         assert.equal("✓", unicode.ok)
         assert.equal("✗", unicode.failed)
+        assert.equal(" · ", unicode.separator)
         assert.equal(10, #unicode.spinner)
 
         local ascii = progress.glyphs({ locale = "C" })
         assert.equal("ok", ascii.ok)
         assert.equal("FAILED", ascii.failed)
+        assert.equal(" | ", ascii.separator)
         assert.same({ "-", "\\", "|", "/" }, ascii.spinner)
 
         assert.equal("ok", progress.glyphs({ locale = "en_US.UTF-8", windows = true }).ok)
@@ -208,6 +210,18 @@ describe("the plain renderer", function()
         assert.equal("app.so ................... up to date\n", written())
     end)
 
+    it("never counts a certificate hit as a link in the summary", function()
+        local reporter, written = capture()
+        reporter:up_to_date()
+        reporter:link_up_to_date("app.so")
+        reporter:finish()
+        assert.equal(table.concat({
+            "app.so ................... up to date",
+            "Finished in 0.0s: 1 up to date, app.so up to date",
+            "",
+        }, "\n"), written())
+    end)
+
     it("finishes with one summary of compiled, up to date and linked", function()
         local clock = 0
         local reporter, written = capture({ now = function() return clock end })
@@ -307,6 +321,33 @@ describe("the live renderer", function()
         reporter:module_phase("app.one", "compiling C", "2 parts")
         assert.truthy(written():find("compiling C 2 parts", 1, true), written())
         assert.truthy(written():find("5.1s", 1, true), written())
+        -- Nothing clears the phase: `compiling C` is the last one before
+        -- `done`, and a record without a phase name reports nothing.
+        local before = written()
+        reporter:module_phase("app.one", nil)
+        assert.equal(before, written())
+        clock = 6.2
+        reporter:module_done("app.one")
+        assert.truthy(written():find("6.2s", 1, true), written())
+    end)
+
+    it("falls back to an exported terminal-width hint", function()
+        local reporter, written = capture({
+            kind = progress.LIVE, locale = "C", width = nil, columns = "40",
+        })
+        reporter:module_begin("app.a-very-long-module-name")
+        for line in written():gmatch("[^\r\n]+") do
+            local visible = plain_text(line)
+            assert.is_true(columns(visible) <= 40, visible)
+        end
+        -- Nothing known at all still truncates to the 80-column default.
+        local fallback, fallback_written = capture({
+            kind = progress.LIVE, locale = "C",
+        })
+        fallback:module_begin("app." .. string.rep("x", 120))
+        for line in fallback_written():gmatch("[^\r\n]+") do
+            assert.is_true(columns(plain_text(line)) <= 80, line)
+        end
     end)
 
     it("truncates every row to the terminal width", function()
@@ -360,6 +401,112 @@ describe("the live renderer", function()
         assert.is_nil(text:find("\27[36m", 1, true))
         assert.is_nil(text:find("\27[1m", 1, true))
         assert.truthy(text:find("⠋", 1, true), text)
+    end)
+
+    it("uses the ASCII separator with ASCII glyphs", function()
+        local reporter, written = capture({
+            kind = progress.LIVE, locale = "C", width = 80,
+        })
+        reporter:plan(2)
+        reporter:module_begin("app.one")
+        reporter:up_to_date()
+        local text = written()
+        assert.truthy(text:find("[0/2] 1 running | 1 up to date | 0:00", 1, true),
+            text)
+        -- No UTF-8 byte leaks into an ASCII region.
+        assert.is_nil(text:find("\194\183", 1, true))
+    end)
+
+    it("writes a Unix live region through blocking stderr, never a libuv tty", function()
+        local written = {}
+        local tty_calls = 0
+        local uv = {
+            hrtime = function() return 0 end,
+            run = function() return 0 end,
+            new_timer = function()
+                return { start = function() end, stop = function() end,
+                    close = function() end, unref = function() end }
+            end,
+            new_tty = function()
+                tty_calls = tty_calls + 1
+                error("a Unix live reporter must not reopen fd 2")
+            end,
+        }
+        local reporter = progress.new(progress.LIVE, {
+            uv = uv, windows = false, tty = true, term = "xterm",
+            locale = "en_US.UTF-8",
+            writer = function(text) written[#written + 1] = text end,
+            now = function() return 0 end,
+            width = 80,
+        })
+        assert.equal(0, tty_calls)
+        reporter:module_begin("app.one")
+        -- One large write is delivered whole through the blocking sink.
+        local payload = string.rep("diagnostic line\n", 12000) .. "END-OF-DIAGNOSTICS"
+        reporter:write(payload)
+        reporter:finish()
+        local text = table.concat(written)
+        assert.truthy(text:find(payload, 1, true), "the large write was truncated")
+        assert.equal(0, tty_calls)
+    end)
+
+    it("delivers every queued Windows console write before the summary", function()
+        local accepted = false
+        local queued, callbacks = {}, {}
+        local tty = {
+            try_write = function(_, text)
+                if accepted then return #text end
+                return 0
+            end,
+            write = function(_, text, callback)
+                queued[#queued + 1] = text
+                callbacks[#callbacks + 1] = callback
+                return true
+            end,
+            get_winsize = function() return 120, 40 end,
+        }
+        local runs = 0
+        local uv = {
+            hrtime = function() return 0 end,
+            new_tty = function() return tty end,
+            new_timer = function()
+                return { start = function() end, stop = function() end,
+                    close = function() end, unref = function() end }
+            end,
+            run = function()
+                runs = runs + 1
+                local callback = table.remove(callbacks, 1)
+                if callback then callback() end
+                return 0
+            end,
+        }
+        local reporter = progress.new(progress.LIVE, {
+            uv = uv, windows = true, tty = true, term = "xterm",
+            locale = "en_US.UTF-8",
+            writer = function() error("the Windows sink must use the console") end,
+            now = function() return 0 end,
+        })
+        assert.equal(tty, reporter.tty)
+        -- The console accepts nothing yet: the frame is queued and drained.
+        reporter:module_begin("app.one")
+        assert.equal(0, reporter.pending)
+        assert.truthy(runs > 0)
+        assert.truthy(#queued > 0)
+
+        -- A frame drawn from the timer callback must not run the loop again.
+        local runs_before = runs
+        reporter:tick()
+        assert.equal(runs_before, runs)
+        assert.truthy(reporter.pending > 0)
+
+        -- Ordinary code drains what the callback left queued, and the final
+        -- message is delivered last.
+        accepted = true
+        reporter:write("after the frame\n")
+        assert.equal(0, reporter.pending)
+        assert.truthy(runs > runs_before)
+        reporter:finish()
+        assert.equal(0, reporter.pending)
     end)
 
     it("styles the region when colour is enabled", function()

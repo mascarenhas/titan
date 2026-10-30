@@ -495,11 +495,6 @@ function Scheduler:reply(worker, batch)
     if payload then sent, err = worker.process:send(payload) end
     if not sent then
         self:worker_failed(worker, "cannot answer a native batch: " .. tostring(err))
-    else
-        local reporter = self.options.progress
-        -- The batch reply ends the "compiling C" phase; `done` follows when
-        -- the worker settles and its result is published.
-        if reporter then reporter:module_phase(worker.node.name, nil) end
     end
 end
 
@@ -535,11 +530,6 @@ function Scheduler:worker_record(worker, payload)
         if self.stopped then
             -- Nothing new starts; the worker keeps its slot and finishes.
             return self:reply_stopped(worker, batch)
-        end
-        local reporter = self.options.progress
-        if reporter then
-            reporter:module_phase(worker.node.name, "compiling C",
-                count > 1 and (count .. " parts") or nil)
         end
         worker.batch = batch
         -- The first job inherits the frontend's slot; the others queue for

@@ -6799,6 +6799,15 @@ function driver.compile_planned_module(context, modname, options)
     jobs.set_request_index(compilation, 1)
 
     local parallelism = options.jobs or context.jobs or 1
+    -- The worker owns this phase on both paths: a multi-part compile is sent
+    -- as a native batch by `run_prepared_compiles`, and a single part compiles
+    -- right here. Native batches also carry the checker's speculative C-probe
+    -- work, which belongs to `checking`, so the coordinator never infers this
+    -- phase from a batch it receives or answers.
+    if on_phase and #compilation.jobs > 0 then
+        on_phase("compiling C", #compilation.jobs > 1 and
+            (#compilation.jobs .. " parts") or nil)
+    end
     local result, cancelled
     if parallelism > 1 and #compilation.jobs > 1 then
         local compiled
@@ -6806,12 +6815,6 @@ function driver.compile_planned_module(context, modname, options)
             { compilation }, parallelism, verbose)
         result = compiled[1]
     else
-        -- No batch: this worker compiles its own parts, so it reports the
-        -- phase the coordinator reports when it runs the batch instead.
-        if on_phase then
-            on_phase("compiling C", #compilation.jobs > 1 and
-                (#compilation.jobs .. " parts") or nil)
-        end
         result = { ok = true }
         for _, job in ipairs(compilation.jobs) do
             local job_ok, job_err = run_argv(job.argv, verbose)

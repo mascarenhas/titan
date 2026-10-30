@@ -21,6 +21,9 @@ local NAME_COLUMN = 24
 -- The transient region refreshes on this timer period.
 local FRAME_MILLISECONDS = 100
 
+-- Bounded drain attempts for queued Windows console writes.
+local CONSOLE_FLUSH_STEPS = 64
+
 local ESC = "\27["
 local STYLES = {
     bold = ESC .. "1m",
@@ -73,19 +76,19 @@ local function names_utf8(locale)
     return locale:match("[Uu][Tt][Ff]%-?8") ~= nil
 end
 
--- Glyphs: Unicode on Unix when the locale names UTF-8, ASCII otherwise and
--- always on Windows.
+-- Glyphs and the footer separator: Unicode on Unix when the locale names
+-- UTF-8, ASCII otherwise and always on Windows.
 function progress.glyphs(options)
     options = options or {}
     if options.windows or not names_utf8(options.locale) then
         return {
             unicode = false, spinner = ASCII_SPINNER,
-            ok = "ok", failed = "FAILED",
+            ok = "ok", failed = "FAILED", separator = " | ",
         }
     end
     return {
         unicode = true, spinner = UNICODE_SPINNER,
-        ok = "✓", failed = "✗",
+        ok = "✓", failed = "✗", separator = " · ",
     }
 end
 
@@ -207,15 +210,17 @@ end
 
 -- Options: `writer(text)` replaces stderr, `now()` returns seconds,
 -- `width()` returns the terminal width (or is the width itself), `uv` is the
--- live platform library (the timer and the TTY writer; without it the live
--- renderer only writes through `writer`), and `windows`, `locale`, `tty`,
--- `term`, `no_color` describe the environment the CLI observed.
+-- live platform library (the timer and, on Windows, the TTY writer; without it
+-- the live renderer only writes through `writer`), `columns` is the exported
+-- COLUMNS hint for a width no TTY handle can report, and `windows`, `locale`,
+-- `tty`, `term`, `no_color` describe the environment the CLI observed.
 function progress.new(kind, options)
     options = options or {}
     kind = kind or progress.NULL
     local uv = options.uv
     local self = setmetatable({
         kind = kind,
+        windows = options.windows == true,
         glyphs = progress.glyphs(options),
         colour = progress.colour(options),
         writer = options.writer or default_writer,
@@ -225,20 +230,17 @@ function progress.new(kind, options)
             return os.clock()
         end,
         width_of = options.width,
+        column_hint = math.tointeger(tonumber(options.columns)),
         started = nil,
         active = {}, order = {}, total = nil,
         completed = 0, compiled = 0, up_to_date_count = 0,
         up_to_date_printed = 0, sources_up_to_date = 0, links = {},
+        link_hits = {}, pending = 0, in_callback = false,
         frame = 0, events = 0, drawn = false, closed = false,
     }, Reporter)
     self.started = self.now()
     if self.kind == progress.LIVE then
-        if uv then
-            local opened, tty = pcall(uv.new_tty, 2, false)
-            if opened and tty then self.tty = tty end
-        end
-        self.sink = self.tty and function(text) self.tty:write(text) end
-            or self.writer
+        self.sink = self:live_sink(uv)
         if uv then
             local opened, timer = pcall(uv.new_timer)
             if opened and timer then
@@ -254,10 +256,61 @@ function progress.new(kind, options)
     return self
 end
 
+-- The live sink. Unix writes through the inherited blocking stderr: a libuv
+-- TTY handle would reopen fd 2 non-blocking and close-on-exec, which drops a
+-- queued frame when the process exits and hides fd 2 from children that do not
+-- set explicit stdio. A Windows console needs libuv's TTY writer to translate
+-- the escape sequences, its handle wraps the console the process already owns
+-- (it never replaces fd 2), and `drain` delivers every queued write before the
+-- final message.
+function Reporter:live_sink(uv)
+    if not self.windows or not uv then return self.writer end
+    local opened, tty = pcall(uv.new_tty, 2, false)
+    if not opened or not tty then return self.writer end
+    -- `drain` needs the loop that delivers the console writes.
+    self.tty, self.uv = tty, uv
+    return function(text) self:console_write(text) end
+end
+
+-- Windows console writes take what the console accepts now and queue the
+-- remainder, in order, on the stream.
+function Reporter:console_write(text)
+    local offset = 1
+    while offset <= #text do
+        local written = select(1, self.tty:try_write(text:sub(offset)))
+        if type(written) ~= "number" or written <= 0 then
+            return self:queue_console_write(text:sub(offset))
+        end
+        offset = offset + written
+    end
+end
+
+function Reporter:queue_console_write(text)
+    self.pending = self.pending + 1
+    local queued = self.tty:write(text, function()
+        self.pending = self.pending - 1
+    end)
+    if not queued then self.pending = self.pending - 1 end
+end
+
+-- Deliver queued console writes. Only ordinary code may call this: a loop
+-- callback (a timer frame) must not run the loop again, so it leaves the tail
+-- to the loop that is already running.
+function Reporter:drain()
+    if not self.tty or self.pending == 0 or not self.uv then return end
+    if self.in_callback then return end
+    local budget = CONSOLE_FLUSH_STEPS
+    while self.pending > 0 and budget > 0 do
+        self.uv.run("nowait")
+        budget = budget - 1
+    end
+end
+
 -- Text goes to stderr: the plain writer, or the live terminal sink.
 function Reporter:out(text)
     if self.kind == progress.LIVE then
         self.sink(text)
+        self:drain()
     else
         self.writer(text)
     end
@@ -271,6 +324,8 @@ function Reporter:elapsed()
     return elapsed
 end
 
+-- The reported width, the console's own size, or the exported COLUMNS hint
+-- (a Unix region has no TTY handle to ask), and 80 when nothing is known.
 function Reporter:width()
     if type(self.width_of) == "number" then return self.width_of end
     if self.width_of then return self.width_of() end
@@ -278,6 +333,8 @@ function Reporter:width()
         local called, width = pcall(self.tty.get_winsize, self.tty)
         if called and type(width) == "number" and width > 0 then return width end
     end
+    local hint = self.column_hint
+    if type(hint) == "number" and hint > 0 then return hint end
     return 80
 end
 
@@ -345,9 +402,10 @@ function Reporter:region()
     end
     footer[#footer + 1] = #self.order .. " running"
     if self.up_to_date_count > 0 then
-        footer[#footer + 1] = " · " .. self.up_to_date_count .. " up to date"
+        footer[#footer + 1] = self.glyphs.separator ..
+            self.up_to_date_count .. " up to date"
     end
-    footer[#footer + 1] = " · " .. progress.clock(self:elapsed())
+    footer[#footer + 1] = self.glyphs.separator .. progress.clock(self:elapsed())
     lines[#lines + 1] = render({ { table.concat(footer), "dim" } }, width,
         self.colour)
     return lines
@@ -372,7 +430,9 @@ function Reporter:tick()
     if self.kind ~= progress.LIVE or self.closed then return end
     self.frame = self.frame + 1
     if #self.order == 0 then return end
-    self:redraw()
+    self.in_callback = true
+    pcall(self.redraw, self)
+    self.in_callback = false
 end
 
 -- One finished module or step becomes a persistent line above the region.
@@ -409,17 +469,10 @@ function Reporter:module_begin(name)
     self:redraw()
 end
 
--- `phase` is nil when the current phase ended without a named successor.
+-- A named phase; anything else (a stray record) reports nothing.
 function Reporter:module_phase(name, phase, detail)
     if self.kind == progress.NULL then return end
-    if type(phase) ~= "string" then
-        local entry = self.active[name]
-        if entry and self.kind == progress.LIVE then
-            entry.phase, entry.detail = nil, nil
-            self:redraw()
-        end
-        return
-    end
+    if type(phase) ~= "string" then return end
     self.events = self.events + 1
     if self.kind == progress.PLAIN then
         return self:line(name, phase .. (detail and (" (" .. detail .. ")") or ""))
@@ -511,11 +564,12 @@ function Reporter:link_failed(name)
     end_step(self, name, false, "failed")
 end
 
--- A final-link certificate hit: `<output> up to date`.
+-- A final-link certificate hit: `<output> up to date`. It is not a link: the
+-- finish summary says the output was up to date, never that it was linked.
 function Reporter:link_up_to_date(name)
     if self.kind == progress.NULL then return end
     self.events = self.events + 1
-    self.links[#self.links + 1] = name
+    self.link_hits[#self.link_hits + 1] = name
     if self.kind == progress.PLAIN then
         return self:line(name, "up to date")
     end
@@ -583,6 +637,9 @@ local function summary(self)
     if #self.links > 0 then
         segments[#segments + 1] = "linked " .. table.concat(self.links, ", ")
     end
+    for _, name in ipairs(self.link_hits) do
+        segments[#segments + 1] = name .. " up to date"
+    end
     local text = "Finished in " .. progress.duration(self:elapsed())
     if #segments > 0 then text = text .. ": " .. table.concat(segments, ", ") end
     return text
@@ -597,6 +654,7 @@ function Reporter:finish()
     self:erase()
     self:close()
     if text then self:out(text .. "\n") end
+    self:drain()
 end
 
 -- The failing end of the invocation, before its diagnostics. Erasing the
@@ -609,6 +667,7 @@ function Reporter:fail()
     self:erase()
     self:close()
     if text then self:out(text .. "\n") end
+    self:drain()
 end
 
 return progress

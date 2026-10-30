@@ -1394,7 +1394,8 @@ describe("module build scheduler", function()
         assert.same({ "a", "b", "d" }, record.requested)
     end)
 
-    it("accepts worker progress records without replying and without a reporter", function()
+    -- A recording reporter: every scheduler hook appends one call in order.
+    local function recording_reporter()
         local reporter = { calls = {} }
         function reporter:plan(total)
             self.calls[#self.calls + 1] = "plan " .. tostring(total)
@@ -1420,7 +1421,11 @@ describe("module build scheduler", function()
                 self.calls[#self.calls + 1] = "write " .. text
             end
         end
+        return reporter
+    end
 
+    it("accepts worker progress records without replying and without a reporter", function()
+        local reporter = recording_reporter()
         local ok, diagnostics = run(graph({ { "a" } }), {
             a = { progress_records = {
                 { phase = "parsing" },
@@ -1434,8 +1439,6 @@ describe("module build scheduler", function()
             "phase a compiling C 2 parts",
             "done a",
         }, reporter.calls)
-        -- A plain reporter also owns the replayed worker output.
-        assert.same({}, captured)
 
         -- Without a reporter the records are ignored and never fail the module.
         captured = {}
@@ -1443,6 +1446,42 @@ describe("module build scheduler", function()
             b = { progress_records = { { phase = "parsing" } } },
         }, { jobs = 2 })
         assert.is_true(quiet, quiet_diagnostics and table.concat(quiet_diagnostics, "\n"))
+    end)
+
+    it("never infers a phase from a native batch, including probe batches", function()
+        local reporter = recording_reporter()
+        -- The checker's speculative C-probe batch arrives while the worker is
+        -- still checking; only the worker's own records name phases.
+        local ok, diagnostics = run(graph({ { "a" } }), {
+            a = {
+                progress_records = { { phase = "parsing" }, { phase = "checking" } },
+                batches = { { job("probe") } },
+            },
+        }, { jobs = 4, progress = reporter })
+        assert.is_true(ok, diagnostics and table.concat(diagnostics, "\n"))
+        assert.same({
+            "begin a",
+            "phase a parsing",
+            "phase a checking",
+            "done a",
+        }, reporter.calls)
+    end)
+
+    it("routes replayed worker output through the reporter in plan order", function()
+        local reporter = recording_reporter()
+        -- b settles first; the replayed output still follows the plan (a, b).
+        local ok, diagnostics = run(graph({ { "a" }, { "b" } }), {
+            a = { stdout = "out a\n", stderr = "err a\n", frontend_sleep = 200 },
+            b = { stdout = "out b\n" },
+        }, { jobs = 2, progress = reporter })
+        assert.is_true(ok, diagnostics and table.concat(diagnostics, "\n"))
+        local writes = {}
+        for _, call in ipairs(reporter.calls) do
+            if call:sub(1, 6) == "write " then writes[#writes + 1] = call end
+        end
+        assert.same({ "write out a\n", "write err a\n", "write out b\n" }, writes)
+        -- The reporter owns the text: nothing reached the real stderr.
+        assert.same({}, captured)
     end)
 
     it("rejects malformed control records and missing results", function()

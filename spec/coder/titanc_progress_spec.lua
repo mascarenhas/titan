@@ -63,8 +63,11 @@ end
 -- One titanc invocation with separately captured streams. The child's stderr
 -- is a file, so a normal run selects the plain renderer deterministically.
 local function run(arguments, cwd)
+    -- A parent jobserver would cap the probe and C job bounds; these cases
+    -- choose their own jobs per invocation.
     local words = { "env", "-u", "LUA_PATH", "-u", "LUA_CPATH", "-u",
         "LUA_PATH_5_5", "-u", "LUA_CPATH_5_5", "-u", "NO_COLOR",
+        "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKELEVEL",
         "TITAN_PATH=", "TITAN_ROOT=" .. PREFIX }
     for _, word in ipairs(arguments) do
         words[#words + 1] = quote(word)
@@ -221,7 +224,9 @@ describe("titanc progress reporting", function()
         expect_line(stderr, "^2 modules up to date$", "up-to-date summary")
         expect_line(stderr, "^app%.so %.+ up to date$", "link certificate hit")
         expect_line(stderr,
-            "^Finished in .*: 2 up to date, linked app%.so$", "summary")
+            "^Finished in .*: 2 up to date, app%.so up to date$", "summary")
+        -- The hit output is never reported as linked.
+        assert.is_nil(stderr:find("linked", 1, true), stderr)
         for _, line in ipairs(lines(stderr)) do
             assert.is_nil(line:find("parsing", 1, true), line)
             assert.is_nil(line:find("compiling", 1, true), line)
@@ -271,6 +276,76 @@ describe("titanc progress reporting", function()
         assert.equal(1, #captured)
         assert.truthy(captured[1]:find("type error", 1, true), captured[1])
         assert.truthy(captured[1]:find("bad.titan:2:10:", 1, true), captured[1])
+    end)
+
+    it("reports probe batches during checking as no phase at all", function()
+        -- Four C operators defer the checker's acceptance probes, so a
+        -- native batch arrives while the module is still checking. Only the
+        -- worker names phases; a batch never adds or clears one.
+        local header = REPO .. "/spec/fixtures/speculative_probes/speculative.h"
+        local tree = root .. "/probe-src"
+        make_directory(tree)
+        write_file(tree .. "/probe_module.titan", table.concat({
+            'foreign import "' .. header .. '"',
+            '',
+            "local function add(a: foreign spec_ok_t, b: foreign spec_ok_t): foreign int",
+            "  return a + b",
+            "end",
+            "",
+            "local function widen(a: foreign spec_wide_t, b: foreign spec_ok_t): foreign long",
+            "  return a * b",
+            "end",
+            "",
+            "local function again(a: foreign spec_ok_t, b: foreign spec_ok_t): foreign int",
+            "  return a - b",
+            "end",
+            "",
+            "local function view(p: foreign *spec_item): foreign *spec_other",
+            "  return p",
+            "end",
+            "",
+            "function check(): integer",
+            "  return 0",
+            "end",
+            "",
+        }, "\n"))
+        local ok, stdout, stderr = run(compiler({
+            "-j", "4", "--tree", tree, "--output", root .. "/probe-out",
+            "probe_module",
+        }), root)
+        assert.truthy(ok, stderr)
+        assert.equal("", stdout)
+        local phases = {}
+        for _, line in ipairs(lines(stderr)) do
+            local state = line:match("^probe_module %.+ (.*)$")
+            if state then
+                phases[#phases + 1] = (state:gsub("^done %d+%.%ds$", "done"))
+            end
+        end
+        assert.same({
+            "parsing", "checking", "generating C", "compiling C", "done",
+        }, phases)
+    end)
+
+    it("reports a failed authored C source before its diagnostics", function()
+        local broken = root .. "/broken.c"
+        write_file(broken, "int broken(void) { return }\n")
+        local ok, stdout, stderr = run(compiler({
+            "-c", "--output", root .. "/broken-native", "--c-source", broken,
+        }), root)
+        assert.is_false(ok)
+        assert.equal("", stdout)
+        local begun = expect_line(stderr, "broken%.c %.+ compiling C source$",
+            "C source step")
+        local failed = expect_line(stderr, "broken%.c %.+ failed$",
+            "C source failure")
+        local summary = expect_line(stderr, "^Failed after %d+%.%ds$",
+            "failure summary")
+        assert.truthy(position(stderr, begun) < position(stderr, failed))
+        assert.truthy(position(stderr, failed) < position(stderr, summary))
+        -- The compiler's own diagnostics follow unchanged.
+        local diagnostic = expect_line(stderr, "error", "compiler diagnostic")
+        assert.truthy(position(stderr, summary) < position(stderr, diagnostic))
     end)
 
     it("keeps --print-c-objects stdout to certified paths", function()

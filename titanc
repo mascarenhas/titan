@@ -202,6 +202,8 @@ local environment = {
     term = platform.getenv("TERM"),
     makeflags = platform.getenv("MAKEFLAGS"),
     no_color = platform.getenv("NO_COLOR"),
+    -- A Unix live region has no TTY handle to ask; honour an exported hint.
+    columns = platform.getenv("COLUMNS"),
     locale = progress.locale({
         LC_ALL = platform.getenv("LC_ALL"),
         LC_CTYPE = platform.getenv("LC_CTYPE"),
@@ -591,6 +593,9 @@ if #normalized_native.c_sources > 0 then
         end or nil,
         finish_step = reporter and function(source)
             reporter:source_done(source)
+        end or nil,
+        fail_step = reporter and function(source)
+            reporter:source_failed(source)
         end or nil,
     })
     if not compiled then exit(native_compile_error) end
@@ -1325,6 +1330,8 @@ else
         if pair_signal then
             -- Remove the resolver's temporaries before re-raising.
             close_coordinator_context()
+            -- No stale region survives the re-raised signal.
+            if reporter then reporter:fail() end
             require("titan-compiler.jobs").propagate(pair_signal)
             exit(pair_err)
         elseif not pair then
