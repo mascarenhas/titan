@@ -927,6 +927,12 @@ function fake.main()
         session.control:receive()
         os.exit(0)
     end
+    if request.progress_records then
+        -- Frontend phase records a progress-enabled coordinator asked for.
+        for _, record in ipairs(request.progress_records) do
+            assert(session:progress(record.phase, record.detail))
+        end
+    end
     counter(request, "enter")
     local ok = request.ok ~= false
     if request.batch_wait then wait_for(request.batch_wait) end
@@ -1388,6 +1394,57 @@ describe("module build scheduler", function()
         assert.same({ "a", "b", "d" }, record.requested)
     end)
 
+    it("accepts worker progress records without replying and without a reporter", function()
+        local reporter = { calls = {} }
+        function reporter:plan(total)
+            self.calls[#self.calls + 1] = "plan " .. tostring(total)
+        end
+        function reporter:module_begin(name)
+            self.calls[#self.calls + 1] = "begin " .. name
+        end
+        function reporter:module_phase(name, phase, detail)
+            self.calls[#self.calls + 1] = "phase " .. name .. " " .. tostring(phase) ..
+                (detail and (" " .. detail) or "")
+        end
+        function reporter:module_done(name)
+            self.calls[#self.calls + 1] = "done " .. name
+        end
+        function reporter:module_failed(name)
+            self.calls[#self.calls + 1] = "failed " .. name
+        end
+        function reporter:up_to_date(name)
+            self.calls[#self.calls + 1] = "hit " .. name
+        end
+        function reporter:write(text)
+            if type(text) == "string" and text ~= "" then
+                self.calls[#self.calls + 1] = "write " .. text
+            end
+        end
+
+        local ok, diagnostics = run(graph({ { "a" } }), {
+            a = { progress_records = {
+                { phase = "parsing" },
+                { phase = "compiling C", detail = "2 parts" },
+            } },
+        }, { jobs = 2, progress = reporter })
+        assert.is_true(ok, diagnostics and table.concat(diagnostics, "\n"))
+        assert.same({
+            "begin a",
+            "phase a parsing",
+            "phase a compiling C 2 parts",
+            "done a",
+        }, reporter.calls)
+        -- A plain reporter also owns the replayed worker output.
+        assert.same({}, captured)
+
+        -- Without a reporter the records are ignored and never fail the module.
+        captured = {}
+        local quiet, quiet_diagnostics = run(graph({ { "b" } }), {
+            b = { progress_records = { { phase = "parsing" } } },
+        }, { jobs = 2 })
+        assert.is_true(quiet, quiet_diagnostics and table.concat(quiet_diagnostics, "\n"))
+    end)
+
     it("rejects malformed control records and missing results", function()
         local ok, diagnostics = run(graph({ { "garbled" }, { "silent" } }), {
             garbled = { garbage = true }, silent = { exit = 3 },
@@ -1414,7 +1471,7 @@ describe("module build scheduler", function()
             nul_argument = { steps = { { send = native(1, {
                 valid, { argv = { "cc\0" }, stdout = "o", stderr = "e" },
             }) } } },
-            unknown_kind = { steps = { { send = { kind = "progress" } } } },
+            unknown_kind = { steps = { { send = { kind = "timetable" } } } },
             two_results = { steps = { { send = result }, { send = result } } },
             undecodable = { steps = { { raw = "\0not a control record" } } },
             truncated = { truncated = true },
@@ -1428,7 +1485,7 @@ describe("module build scheduler", function()
         assert.equal(failed("bad_id", "unexpected native batch request"), diagnostics[1])
         assert.equal(failed("empty_argv", "malformed native job 1"), diagnostics[2])
         assert.equal(failed("nul_argument", "malformed native job 2"), diagnostics[3])
-        assert.equal(failed("unknown_kind", "unknown control record kind progress"), diagnostics[4])
+        assert.equal(failed("unknown_kind", "unknown control record kind timetable"), diagnostics[4])
         assert.equal(failed("two_results", "unexpected result record"), diagnostics[5])
         assert.truthy(diagnostics[6]:find(failed("undecodable", "invalid control record: "), 1, true),
             diagnostics[6])

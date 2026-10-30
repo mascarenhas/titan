@@ -119,7 +119,7 @@ end
 
 local workspace, children
 local function compile(options, roots)
-    local argv = { LUA, workspace .. "/frontend.lua" }
+    local argv = { LUA, workspace .. "/frontend.lua", "-q" }
     for _, item in ipairs(options or {}) do argv[#argv + 1] = item end
     argv[#argv + 1], argv[#argv + 2] = "--tree", workspace
     for _, name in ipairs(roots or { "checks" }) do argv[#argv + 1] = name end

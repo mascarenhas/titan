@@ -375,7 +375,8 @@ describe("standalone-prefix source installation", function()
             "cprobe_cache.lua", "ffiheaders.lua", "objectmetadata.lua",
             "csemantics.lua", "io.lua", "sha256.lua", "test_runner.lua",
             "version.lua", "build.lua", "build_worker.lua", "incremental.lua",
-            "depfile.lua", "linkcertificate.lua", "nativeinputs.lua", "testroots.lua",
+            "depfile.lua", "linkcertificate.lua", "nativeinputs.lua", "progress.lua",
+            "testroots.lua",
         }) do
             assert_file(PREFIX ..
                 "/share/lua/5.5/titan-compiler/" .. module)
