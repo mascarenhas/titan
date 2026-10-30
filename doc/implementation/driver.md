@@ -1685,6 +1685,24 @@ never blocks in a token read while its own children can still finish, and two
 recipes sharing `make -j2` each progress with their implicit slots. No helper
 process reads tokens.
 
+`_jobserver_wait(file, client_or_nil, watch_signals, timeout_ms)` returns
+`"completion"`, `"slot"`, `"signal", signo`, `"timeout"`, or `nil, reason`. An
+absent, nil, or negative `timeout_ms` keeps the blocking `poll(-1)`. A
+non-negative value bounds each poll (values above `INT_MAX` are clamped) and
+returns `"timeout"` when nothing became ready. The `EINTR` retry and the
+cancellation check before every poll do not depend on the timeout, so a
+recorded signal still wins over another interval. Only `Slots:wait` sees
+`"timeout"`: a ledger opened with `jobs.open_slots(n, { idle = { interval =
+ms, tick = fn } })` passes `interval` on every wait and calls `tick()` once per
+expiry, then waits again, so the event never reaches a caller. Without
+`idle`, every wait blocks exactly as before. `open_slots` asserts a positive
+integer interval and a `tick` function. The tick runs under `pcall`: the first
+error prints one `titanc: warning: the live progress frame failed: …` line,
+and the ledger drops the hook for the rest of its life. A broken frame
+therefore never fails, delays, or changes the native job it was drawn over.
+Only the live progress renderer passes a hook (see [Progress
+reporting](#progress-reporting)).
+
 An advertised but unusable authorization—an unrecognized format, closed or
 mismatched descriptors, a FIFO that cannot be opened, or GNU Make 4.4's
 `-2,-2` marker when a recipe lacks `+`—prints one warning per process
@@ -2204,7 +2222,13 @@ reporter methods are:
 - `up_to_date` and `up_to_date_drained`;
 - `link_begin`, `link_done`, `link_failed`, and `link_up_to_date`;
 - `source_begin`, `source_done`, `source_failed`, and `source_up_to_date`;
-- `write(text)`, `finish()`, and `fail()`.
+- `write(text)`, `finish()`, and `fail()`;
+- `animates()`, true for a live reporter before `finish` or `fail`, and
+  `tick()`, which advances the spinner one frame and redraws the region.
+
+The module also exports `progress.FRAME_MILLISECONDS` (100), the frame period
+shared by the animation timer and the idle native-wait hook, and the width
+helpers `progress.width(text)` and `progress.truncate(text, limit)`.
 
 `finish` prints the `Finished in` summary and `fail` prints `Failed after`. A
 reporter that recorded no event prints neither, so usage errors keep their
@@ -2245,20 +2269,57 @@ all-hit build shows `[total/total]`.
   Windows; on Unix, `get_winsize` on a private `/dev/tty` handle that the
   reporter opens with `uv.fs_open` and wraps with `uv.new_tty(fd, true)`, so
   libuv's reopen replaces that private descriptor and never fd 2; an exported
-  `COLUMNS`; otherwise 80. `close()` closes the private handle. Widths count
-  the codepoints of visible text only, never escape sequences, and truncation
-  never splits a UTF-8 sequence. A double-width character (for example in a
-  CJK path) still counts as one column, so such a row can exceed the width.
-  A finished module or step becomes one persistent line above the region.
+  `COLUMNS`; otherwise 80. `close()` closes the private handle. Widths are
+  measured in terminal cells over visible text only, never escape sequences,
+  under a conservative rule (#324). An ASCII byte is one cell. Every other
+  character is two cells: a lead byte followed by the continuation bytes it
+  declares counts as one character. Any byte outside such a sequence (a stray
+  continuation byte, an invalid lead, a cut-short sequence) is charged as one
+  two-cell replacement character. Lead bytes are not checked further, so an
+  overlong, surrogate, or out-of-range sequence (which no encoder produces)
+  counts as one two-cell character even where a terminal draws one
+  replacement per byte. Apart from those, nothing is measured narrower than a
+  terminal draws it. A row with a CJK path, a combining mark, or a Latin-1
+  file name can therefore come out shorter than the width but never wider,
+  and no row wraps into a stale line. `progress.truncate` keeps the longest
+  prefix within the budget and cuts only between characters, so a two-cell
+  character that does not fit is dropped whole. The reporter's own glyphs
+  (the Unicode spinner, `✓`, `✗`, `·`) are measured by the same rule. The
+  plain-mode dot padding and the live name column use the same measure. A
+  finished module or step becomes one persistent line above the region,
+  truncated like a row. The `Finished in` and `Failed after` lines are written
+  once, after the region is erased, and are not truncated.
 - **Text written while the region is drawn.** `write(text)` erases the region,
   writes the text, and draws the region again.
 - **Animation.** One unref'd 100 ms `uv` timer on the default loop drives the
   spinner. It animates whenever the coordinator waits in `uv.run("once")`:
   in the scheduler loop (workers and coordinator-run native jobs), in
   `Process:wait`, and in captured commands, including captured final links.
-  A provider-pair link waits for its parallel link jobs in the native
-  `_jobserver_wait` poll instead, so the spinner pauses on that row until the
-  link returns. Being unref'd, the timer never keeps a loop alive. `finish`
+  A provider-pair link (`driver.link_provider_pair`) and a parallel
+  generated-C batch (`run_prepared_compiles`) instead wait for their children
+  in the native `_jobserver_wait` poll, which runs no loop. While
+  `driver.LIVE_PROGRESS:animates()`, both open their slot ledger with the
+  idle hook `{ interval = progress.FRAME_MILLISECONDS, tick = function()
+  reporter:tick() end }`
+  ([GNU Make jobserver participation](#gnu-make-jobserver-participation)), so
+  each wait is bounded by one frame period and draws one frame per expiry.
+  The tick only redraws and never runs the loop, so nothing can re-enter the
+  wait. `Reporter:tick` restores its `in_callback` flag and re-raises a
+  failed redraw. The timer callback swallows that error, because a loop
+  callback must not raise. The idle hook hands it to the ledger, which warns
+  once and drops the hook. Plain, verbose, quiet, and library runs get no
+  hook and keep the blocking poll and their byte-identical output. The other
+  coordinator waits already run a loop or show no row:
+  - the scheduler's ledger in `build.lua` waits through `luv` polls and
+    timers;
+  - `run_argv`, the archive-member probe, and `Sync:run` take the
+    `process.capture` path under the CLI's output locks;
+  - the stopped-batch reap of a CLI launch is `Process:wait`;
+  - `Sync:run_batch` C probe batches run in build workers, and reach the
+    coordinator only for `--print-ast` and the `--test` runner check, when
+    no row is active and `tick` draws nothing.
+
+  Being unref'd, the timer never keeps a loop alive. `finish`
   and `fail` stop and close it, and erase the region. The cursor is never
   hidden, so no exit path has to restore it.
 - **Output sink.** On Unix the renderer writes to the inherited, blocking
@@ -2788,7 +2849,7 @@ workflow sets them equal, but they are separate ownership concepts.
 | `driver.CFLAGS` | `--std=c99 -O3 -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC` plus compiler-specific debug flags; Linux production adds `-flto=auto -ffat-lto-objects` | GCC uses `-g1`, Clang `-gline-tables-only -fdebug-info-for-profiling`, other compilers `-g`. |
 | `driver.NATIVE_COMPILE_FLAGS` / `driver.NATIVE_LINK_FLAGS` | `driver.apply_native_inputs(normalized)` | Normalized ordered compile and link extras (`TITAN_EXTRA_*` then CLI native switches). |
 | `driver.OUTPUT_ROOT` | `args.output` in `titanc` | Selected `--output` directory for synchronous native publication temporaries. |
-| `driver.LIVE_PROGRESS` | `nil`; the live reporter in `titanc` | While set, `run_argv` captures children that would inherit stderr and replays their output above the live region ([Progress reporting](#progress-reporting)). |
+| `driver.LIVE_PROGRESS` | `nil`; the live reporter in `titanc` | While set, `run_argv` captures children that would inherit stderr and replays their output above the live region, and the native batch ledgers of `run_prepared_compiles` and `link_provider_pair` take the idle frame hook ([Progress reporting](#progress-reporting)). |
 | `driver.PROJECT_CACHE_VERSION` | `version.PROJECT_CACHE_VERSION` (`6`) | Language-server project-manifest schema version. |
 | shared-library flags | `driver.shared_library_flags` | `-shared`; Darwin adds `-undefined dynamic_lookup`, Windows `-Wl,--exclude-all-symbols`. |
 | installed link set | `driver.installed_link_inputs` | Unix: `libtitan.a`, `libbacktrace.a`, `liblua.a`, `-ldl` (non-Darwin), `-lm`; Windows: `libtitan.a`, `libbacktrace.a`, `liblua55.a`, `-static-libgcc`. Not copied into package archives. |

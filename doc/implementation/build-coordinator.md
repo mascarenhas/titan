@@ -677,7 +677,14 @@ Worker lifetime is bounded even if the coordinator terminates abnormally:
 When one or more modules miss, `Scheduler:run()` opens a single slot ledger
 `jobs.open_slots(self.options.jobs or 1, { guard = true })`
 (`titan-compiler/jobs.lua`) shared by all worker frontends and all
-multi-job native batches.
+multi-job native batches. The scheduler never calls the blocking
+`Slots:wait`. It uses only `acquire_nowait` and the `luv` token, signal, and
+process-exit callbacks below, so the live progress timer keeps animating
+while workers and coordinator-run native jobs run, and the ledger takes no
+idle frame hook. Only the coordinator's own native batches outside the
+scheduler (`run_prepared_compiles` and `link_provider_pair`) wait in
+`_jobserver_wait` and take that hook ([Progress
+reporting](driver.md#progress-reporting)).
 
 ### Concurrency invariant, lease handoff, and dispatch priority
 
