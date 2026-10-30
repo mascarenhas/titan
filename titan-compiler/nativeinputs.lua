@@ -157,6 +157,10 @@ local function compile_node(context, request, source, stem)
     local preprocessed, dependencies = stem .. ".i", stem .. ".d"
     local object, sidecar = stem .. ".o", stem .. ".record"
     local staged
+    -- A step exists only between `begin_step` and one terminal callback: a
+    -- preprocessing or certification failure before the compile reports no
+    -- step at all, and a completed compile is never reported as failed.
+    local began, finished = false, false
     local completed, result = pcall(function()
         local cacheable = not request.uncacheable and cacheable_policy(request.compile_argv)
         local argv = {}
@@ -179,6 +183,10 @@ local function compile_node(context, request, source, stem)
                 return { path = object, identity = identity, source = source, hit = true, cacheable = true,
                     dependencies = files }
             end
+        end
+        if request.begin_step then
+            request.begin_step(source)
+            began = true
         end
         staged = reserve(context, object)
         local command = {}
@@ -213,6 +221,10 @@ local function compile_node(context, request, source, stem)
         -- to catch publication races and to prime immediate native-only reuse.
         need(incremental.file_digest(incremental.fresh_context(context), object) == identity,
             "native object changed during publication: " .. object)
+        if request.finish_step then
+            request.finish_step(source)
+            finished = true
+        end
         return { path = object, identity = identity, source = source, hit = false, cacheable = cacheable,
             dependencies = files }
     end)
@@ -233,6 +245,10 @@ local function compile_node(context, request, source, stem)
     retire(staged)
     retire(preprocessed)
     retire(dependencies)
+    -- Only a begun, unfinished step ends as failed.
+    if request.fail_step and began and not finished then
+        request.fail_step(source)
+    end
     if not completed and type(result) ~= "string" then error(result, 0) end
     if cleanup_cancelled then error(cleanup_cancelled.error, 0) end
     if not completed then
@@ -247,6 +263,11 @@ end
 -- Titan-only test-owner/coverage flags. run participates in the shared ledger;
 -- publish, if supplied, is coordinator-owned and commits the primary last.
 -- An explicitly uncertified toolchain still builds, without record metadata.
+-- Optional `begin_step(source)`, `finish_step(source)` and
+-- `fail_step(source)` bracket the native compile of each miss, for a progress
+-- reporter; a certified cache hit never calls them, so a hit shows no step,
+-- and every begun step ends in exactly one of the two terminal callbacks while
+-- a failure before the compile begins reports no step at all.
 function native.compile(context, request)
     return guarded(function()
         need(type(request.output_root) == "string", "native output root is required")

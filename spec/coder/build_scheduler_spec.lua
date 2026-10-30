@@ -664,6 +664,23 @@ describe("build worker control sessions", function()
         uv.run("nowait")
     end)
 
+    it("sends frontend progress records without waiting for a reply", function()
+        local requests, replies = pipes()
+        send(requests, compile_request({ module = "app", options = { progress = true } }))
+        local session = assert(build_worker.connect(requests.read, replies.write))
+        assert.is_true(session:progress("parsing"))
+        assert.is_true(session:progress("compiling C", "2 parts"))
+        assert.is_true(session:progress("checking"))
+        assert.same({ kind = "progress", phase = "parsing" }, receive(replies))
+        assert.same({ kind = "progress", phase = "compiling C", detail = "2 parts" },
+            receive(replies))
+        -- A phase without a detail carries no detail field at all.
+        local plain = receive(replies)
+        assert.same({ kind = "progress", phase = "checking" }, plain)
+        assert.is_nil(plain.detail)
+        session.control:close()
+    end)
+
     it("answers each native batch with the coordinator reply of the same id", function()
         local requests, replies = pipes()
         send(requests, compile_request({ module = "app", options = { jobs = 2 } }))
@@ -926,6 +943,12 @@ function fake.main()
         end
         session.control:receive()
         os.exit(0)
+    end
+    if request.progress_records then
+        -- Frontend phase records a progress-enabled coordinator asked for.
+        for _, record in ipairs(request.progress_records) do
+            assert(session:progress(record.phase, record.detail))
+        end
     end
     counter(request, "enter")
     local ok = request.ok ~= false
@@ -1388,6 +1411,96 @@ describe("module build scheduler", function()
         assert.same({ "a", "b", "d" }, record.requested)
     end)
 
+    -- A recording reporter: every scheduler hook appends one call in order.
+    local function recording_reporter()
+        local reporter = { calls = {} }
+        function reporter:plan(total)
+            self.calls[#self.calls + 1] = "plan " .. tostring(total)
+        end
+        function reporter:module_begin(name)
+            self.calls[#self.calls + 1] = "begin " .. name
+        end
+        function reporter:module_phase(name, phase, detail)
+            self.calls[#self.calls + 1] = "phase " .. name .. " " .. tostring(phase) ..
+                (detail and (" " .. detail) or "")
+        end
+        function reporter:module_done(name)
+            self.calls[#self.calls + 1] = "done " .. name
+        end
+        function reporter:module_failed(name)
+            self.calls[#self.calls + 1] = "failed " .. name
+        end
+        function reporter:up_to_date(name)
+            self.calls[#self.calls + 1] = "hit " .. name
+        end
+        function reporter:write(text)
+            if type(text) == "string" and text ~= "" then
+                self.calls[#self.calls + 1] = "write " .. text
+            end
+        end
+        return reporter
+    end
+
+    it("accepts worker progress records without replying and without a reporter", function()
+        local reporter = recording_reporter()
+        local ok, diagnostics = run(graph({ { "a" } }), {
+            a = { progress_records = {
+                { phase = "parsing" },
+                { phase = "compiling C", detail = "2 parts" },
+            } },
+        }, { jobs = 2, progress = reporter })
+        assert.is_true(ok, diagnostics and table.concat(diagnostics, "\n"))
+        assert.same({
+            "begin a",
+            "phase a parsing",
+            "phase a compiling C 2 parts",
+            "done a",
+        }, reporter.calls)
+
+        -- Without a reporter the records are ignored and never fail the module.
+        captured = {}
+        local quiet, quiet_diagnostics = run(graph({ { "b" } }), {
+            b = { progress_records = { { phase = "parsing" } } },
+        }, { jobs = 2 })
+        assert.is_true(quiet, quiet_diagnostics and table.concat(quiet_diagnostics, "\n"))
+    end)
+
+    it("never infers a phase from a native batch, including probe batches", function()
+        local reporter = recording_reporter()
+        -- The checker's speculative C-probe batch arrives while the worker is
+        -- still checking; only the worker's own records name phases.
+        local ok, diagnostics = run(graph({ { "a" } }), {
+            a = {
+                progress_records = { { phase = "parsing" }, { phase = "checking" } },
+                batches = { { job("probe") } },
+            },
+        }, { jobs = 4, progress = reporter })
+        assert.is_true(ok, diagnostics and table.concat(diagnostics, "\n"))
+        assert.same({
+            "begin a",
+            "phase a parsing",
+            "phase a checking",
+            "done a",
+        }, reporter.calls)
+    end)
+
+    it("routes replayed worker output through the reporter in plan order", function()
+        local reporter = recording_reporter()
+        -- b settles first; the replayed output still follows the plan (a, b).
+        local ok, diagnostics = run(graph({ { "a" }, { "b" } }), {
+            a = { stdout = "out a\n", stderr = "err a\n", frontend_sleep = 200 },
+            b = { stdout = "out b\n" },
+        }, { jobs = 2, progress = reporter })
+        assert.is_true(ok, diagnostics and table.concat(diagnostics, "\n"))
+        local writes = {}
+        for _, call in ipairs(reporter.calls) do
+            if call:sub(1, 6) == "write " then writes[#writes + 1] = call end
+        end
+        assert.same({ "write out a\n", "write err a\n", "write out b\n" }, writes)
+        -- The reporter owns the text: nothing reached the real stderr.
+        assert.same({}, captured)
+    end)
+
     it("rejects malformed control records and missing results", function()
         local ok, diagnostics = run(graph({ { "garbled" }, { "silent" } }), {
             garbled = { garbage = true }, silent = { exit = 3 },
@@ -1414,7 +1527,7 @@ describe("module build scheduler", function()
             nul_argument = { steps = { { send = native(1, {
                 valid, { argv = { "cc\0" }, stdout = "o", stderr = "e" },
             }) } } },
-            unknown_kind = { steps = { { send = { kind = "progress" } } } },
+            unknown_kind = { steps = { { send = { kind = "timetable" } } } },
             two_results = { steps = { { send = result }, { send = result } } },
             undecodable = { steps = { { raw = "\0not a control record" } } },
             truncated = { truncated = true },
@@ -1428,7 +1541,7 @@ describe("module build scheduler", function()
         assert.equal(failed("bad_id", "unexpected native batch request"), diagnostics[1])
         assert.equal(failed("empty_argv", "malformed native job 1"), diagnostics[2])
         assert.equal(failed("nul_argument", "malformed native job 2"), diagnostics[3])
-        assert.equal(failed("unknown_kind", "unknown control record kind progress"), diagnostics[4])
+        assert.equal(failed("unknown_kind", "unknown control record kind timetable"), diagnostics[4])
         assert.equal(failed("two_results", "unexpected result record"), diagnostics[5])
         assert.truthy(diagnostics[6]:find(failed("undecodable", "invalid control record: "), 1, true),
             diagnostics[6])

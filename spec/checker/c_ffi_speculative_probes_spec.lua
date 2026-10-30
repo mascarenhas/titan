@@ -1038,7 +1038,7 @@ describe("titanc speculative probe batches", function()
             "TITAN_RUNTIME_PREBUILT=1", LUA, "-e",
             "package.path = " .. string.format("%q",
                 ROOT .. "/?.lua;" .. ROOT .. "/?/init.lua;") .. " .. package.path",
-            ROOT .. "/titanc", "--jobs", tostring(jobs), "-c", "-o", output,
+            ROOT .. "/titanc", "-q", "--jobs", tostring(jobs), "-c", "-o", output,
             "--tree", workspace .. "/src",
         }) do
             argv[#argv + 1] = argument

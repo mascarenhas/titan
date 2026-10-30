@@ -485,7 +485,7 @@ describe("final link certification through the CLI", function()
             end
             argv, options = {}, { env = variables }
         end
-        for _, value in ipairs({ lua, "-E", frontend, "--incremental",
+        for _, value in ipairs({ lua, "-E", frontend, "-q", "--incremental",
             "--tree", root, "--output", root .. "/out" }) do argv[#argv + 1] = value end
         for _, value in ipairs(arguments) do argv[#argv + 1] = value end
         local result = context().io:run(argv, options)

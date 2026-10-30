@@ -93,6 +93,20 @@ function Session:abandoned()
     return self.control:poll()
 end
 
+-- One optional control record for a progress-enabled coordinator, sent at a
+-- phase boundary. It carries no reply and no protocol version: the
+-- coordinator only asks for it when its own report expects it, and a worker
+-- of a quiet or verbose invocation never sends one. `detail` refines the
+-- phase for display (the generated-C part count), and is absent otherwise.
+function Session:progress(phase, detail)
+    local payload, err = process.encode_record({
+        kind = "progress", phase = tostring(phase),
+        detail = type(detail) == "string" and detail or nil,
+    })
+    if not payload then return nil, err end
+    return self.control:send(payload)
+end
+
 local function diagnostic_list(value)
     if type(value) == "table" then
         local list = {}
@@ -127,11 +141,19 @@ local function compile(session)
     if not context then
         return { ok = false, diagnostics = diagnostic_list(context_err) }
     end
+    -- Progress records are advisory: they are only sent when the coordinator
+    -- asked for them, and a failed send is left to the result transport.
+    local options = type(request.options) == "table" and request.options or {}
+    if options.progress == true then
+        options.on_phase = function(phase, detail)
+            session:progress(phase, detail)
+        end
+    end
     local called, result, compile_err = xpcall(
         driver.compile_planned_module, function(err)
             if type(err) == "string" then return err end
             return debug.traceback(tostring(err), 2)
-        end, context, request.module, request.options)
+        end, context, request.module, options)
     local closed, close_err = driver.close_resolver_context(context)
     if not called then
         io.stderr:write(tostring(result), "\n")

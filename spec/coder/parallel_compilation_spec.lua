@@ -136,6 +136,7 @@ local function titanc(
         "package.path = " .. string.format("%q", local_path) ..
             " .. package.path",
         ROOT .. "/titanc",
+        "-q",
     }) do
         argv[#argv + 1] = argument
     end

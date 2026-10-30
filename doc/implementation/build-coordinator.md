@@ -451,6 +451,7 @@ The message exchange for one worker is:
                pretty_print = request.pretty_print,
                verbose = request.verbose,
                jobs = ledger.limit,
+               progress = true,  -- only when the CLI passed a reporter
            },
        },
    }
@@ -521,10 +522,52 @@ The message exchange for one worker is:
    }
    ```
 
+Between the request and the result, a worker of a progress-enabled coordinator
+also sends optional `progress` records. When the request carries
+`options.progress = true`, `build_worker.lua` installs `options.on_phase` for
+`driver.compile_planned_module`. `Session:progress` then sends one unanswered
+record at each phase boundary:
+
+```lua
+{ kind = "progress", phase = "parsing" | "checking" | "generating C" | "compiling C",
+  detail = "<n> parts" }  -- detail only for a module with more than one part
+```
+
+The driver reports `parsing` and `checking` from the module's loader only for
+the requested module, never for a dependency it loads. It reports
+`generating C` before compile planning. It reports `compiling C` once, with the
+part count when there is more than one part, just before the generated parts
+compile, both when the worker compiles them itself and before
+`driver.run_prepared_compiles` submits them as a `native` batch. The coordinator
+never infers a phase from `native` batches, because a worker also submits
+speculative C-probe batches while it is still checking. The coordinator handles
+the `progress` record before the `native` branch, never replies, and ignores it
+without a reporter. A worker of a coordinator without a reporter never sends
+one. The record is optional and requested only by a progress-enabled
+coordinator from the same installation, so `version.BUILD_WORKER_PROTOCOL` is
+unchanged.
+
 Any malformed frame, unknown record kind, unexpected batch or duplicate result,
 or non-zero worker exit after `ok = true` is treated as a protocol failure: the
 coordinator drops any queued native jobs for that worker, sends `SIGTERM` if
 the worker is still alive, and fails the module.
+
+### Progress events
+
+The `titanc` reporter ([Progress reporting](driver.md#progress-reporting))
+reaches the scheduler as `request.progress`. `build.run` passes it to the
+scheduler as `options.progress`. Without one (the library, language-server
+clients, `-q`), every hook below is skipped and stderr is written exactly as
+before.
+
+| Point | Reporter call |
+| --- | --- |
+| after the node list is built | `plan(#nodes)` (the live footer denominator) |
+| `decide` restores a certified module | `up_to_date()` |
+| `Scheduler:start_worker` registers the worker | `module_begin(name)` |
+| `worker_record` receives `progress` | `module_phase(name, phase, detail)` |
+| `worker_settled` | `module_done(name)` for `done`, `module_failed(name)` for `failed` |
+| `scheduler:run()` returns | `up_to_date_drained()` (the plain `N modules up to date` line) |
 
 ### Planned worker resolution and orphan lifetime
 
@@ -717,7 +760,10 @@ written as workers finish. `Scheduler:emit()` advances `self.cursor` from `1`
 to `#self.nodes` in `plan.order`, flushing a node only after it reaches a
 settled state (`done`, `failed`, or `skipped`). `Scheduler:flush` writes both
 the captured worker stdout and stderr to the coordinator's stderr, keeping
-`titanc` stdout free for requested results such as `--print-c-objects`.
+`titanc` stdout free for requested results such as `--print-c-objects`. With a
+progress reporter it writes them through `reporter:write`, so the live region
+is erased first and redrawn afterwards; a failed write stays tolerated, as it
+was with direct stderr writes.
 Output and diagnostics are therefore deterministic and independent of worker
 completion order.
 

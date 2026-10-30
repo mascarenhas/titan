@@ -290,6 +290,14 @@ local function run_titanc(arguments, environment_jobs, customize, expect)
         ["titan-compiler.util"] = {
             bytewise_less = function(left, right) return left < right end,
         },
+        -- This harness models no terminal: progress stays exactly the
+        -- historical output, so the orchestration assertions stay exact. The
+        -- renderers have their own specs.
+        ["titan-compiler.progress"] = {
+            NULL = "null", PLAIN = "plain", LIVE = "live",
+            select = function() return "null" end,
+            locale = function() return nil end,
+        },
     }
 
     local printed = {}

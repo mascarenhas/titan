@@ -404,6 +404,7 @@ function Scheduler:start_worker(node)
         self:release_slot()
         self:fail(node, message)
     end
+    local reporter = self.options.progress
     if not self.argv then
         local argv, argv_err = worker_argv(self.options.worker_entry or build.WORKER_ENTRY)
         if not argv then return abandon(argv_err) end
@@ -441,6 +442,7 @@ function Scheduler:start_worker(node)
     self.live_workers = self.live_workers + 1
     self.started = self.started + 1
     self.workers[#self.workers + 1] = worker
+    if reporter then reporter:module_begin(node.name) end
     if worker.failure then
         child:kill("sigterm")
         return
@@ -491,7 +493,9 @@ function Scheduler:reply(worker, batch)
     })
     local sent
     if payload then sent, err = worker.process:send(payload) end
-    if not sent then self:worker_failed(worker, "cannot answer a native batch: " .. tostring(err)) end
+    if not sent then
+        self:worker_failed(worker, "cannot answer a native batch: " .. tostring(err))
+    end
 end
 
 function Scheduler:worker_record(worker, payload)
@@ -500,7 +504,16 @@ function Scheduler:worker_record(worker, payload)
     if not record then
         return self:worker_failed(worker, "invalid control record: " .. tostring(err))
     end
-    if record.kind == "native" then
+    if record.kind == "progress" then
+        -- Frontend phases of a progress-enabled worker: advisory, never
+        -- answered, and ignored when this coordinator has no reporter.
+        local reporter = self.options.progress
+        if reporter and type(record.phase) == "string" then
+            reporter:module_phase(worker.node.name, record.phase,
+                type(record.detail) == "string" and record.detail or nil)
+        end
+        return
+    elseif record.kind == "native" then
         local count = dense_count(record.jobs)
         if worker.batch or not worker.lease or worker.result or
            math.type(record.id) ~= "integer" or not count then
@@ -654,6 +667,14 @@ function Scheduler:worker_settled(worker)
             self:fail(node, err)
         else
             self:complete(node)
+        end
+    end
+    local reporter = self.options.progress
+    if reporter then
+        if node.state == "done" then
+            reporter:module_done(node.name)
+        elseif node.state == "failed" then
+            reporter:module_failed(node.name)
         end
     end
 end
@@ -840,11 +861,20 @@ end
 
 -- Buffered output and diagnostics leave in plan order, never in completion
 -- order: each settled node in turn, stopping at the first unsettled one.
+-- A reporter owns the live region, so the text goes through it; without one
+-- (the library, the language server, `-q`) stderr stays exactly as before.
 function Scheduler:flush(node)
     if node.flushed then return end
     node.flushed = true
-    write_stream(io.stderr, node.stdout)
-    write_stream(io.stderr, node.stderr)
+    local reporter = self.options.progress
+    if reporter then
+        -- A failed stderr write was tolerated before the reporter existed.
+        pcall(reporter.write, reporter, table.concat(node.stdout))
+        pcall(reporter.write, reporter, table.concat(node.stderr))
+    else
+        write_stream(io.stderr, node.stdout)
+        write_stream(io.stderr, node.stderr)
+    end
     append_all(self.diagnostics, node.messages)
 end
 
@@ -980,6 +1010,10 @@ function build.run(context, request)
         if not ready then return nil, append_all({}, preflight_err) end
     end
 
+    -- The CLI's reporter (nil for the library, the language server and -q):
+    -- every hook below is a no-op without it.
+    local reporter = request.progress
+
     local nodes, by_name = {}, {}
     for _, name in ipairs(plan.order) do
         local module = plan.modules[name]
@@ -1000,6 +1034,8 @@ function build.run(context, request)
         end
     end
 
+    if reporter then reporter:plan(#nodes) end
+
     local configuration
 
     local function decide(node)
@@ -1017,6 +1053,7 @@ function build.run(context, request)
                 driver.restore_source_object(context, node.name, module.source, certified)
             if entry then
                 plan.update(node.name, certified)
+                if reporter then reporter:up_to_date() end
                 return "done"
             elseif entry == nil then
                 miss_line(context, node, code, detail)
@@ -1056,6 +1093,8 @@ function build.run(context, request)
                 pretty_print = request.pretty_print,
                 verbose = request.verbose,
                 jobs = jobs_bound,
+                -- Workers report frontend phases only when asked to.
+                progress = reporter ~= nil,
             },
         }
     end
@@ -1088,9 +1127,11 @@ function build.run(context, request)
         decide = decide, request = request_for, complete = complete,
         discard = discard,
     }, {
-        jobs = request.jobs, locks = request.locks,
+        jobs = request.jobs, locks = request.locks, progress = reporter,
     })
     local built, build_diagnostics, signo = scheduler:run()
+    -- Every decision drained: the single up-to-date summary is due.
+    if reporter then reporter:up_to_date_drained() end
     if not built then return nil, build_diagnostics, signo end
     local finalized, finalize_errors = driver.finalize_resolver_context(context)
     if not finalized then return nil, append_all({}, finalize_errors) end

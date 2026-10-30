@@ -1535,7 +1535,7 @@ discovery:
 | `driver.worker_configuration(context)` | Serializes driver paths/flags, resolver options, `codegen_policy`, the coordinator's compiler digest (`compiler`), and either `context.incremental_configuration` or the `uncertified` reason as closed data for a worker. |
 | `driver.new_worker_context(configuration, io_strategy)` | Reconstructs a worker's resolver context from `worker_configuration` and verifies `incremental.compiler_component` against the top-level `configuration.compiler` (failing with `compiler installation changed during build` on mismatch). A nested certified configuration must carry the same compiler digest; the uncertified form has none. |
 | `driver.invalidate_source_object(context, modname, source)` | Coordinator pre-dispatch step: reads any existing `<stem>.o`'s validated `parts` list, unlinks `<stem>.o` first, and unlinks recorded `.part<k>.{o,c,gcno,gcda}` files. |
-| `driver.compile_planned_module(context, modname, options)` | Worker entry: checks `modname` against `options.plan` (`worker_plan` loader mode, reporting `build plan divergence` on any discrepancy), writes generated headers and C files, compiles object parts to sibling temporaries (`staged = true`), and returns `{ modname, object, objects, staged, diagnostics }`. |
+| `driver.compile_planned_module(context, modname, options)` | Worker entry: checks `modname` against `options.plan` (`worker_plan` loader mode, reporting `build plan divergence` on any discrepancy), writes generated headers and C files, compiles object parts to sibling temporaries (`staged = true`), and returns `{ modname, object, objects, staged, diagnostics }`. An optional `options.on_phase(phase, detail)` receives `parsing` and `checking` for `modname` only, `generating C`, and `compiling C` (with `"<n> parts"` above one part) before the parts compile on either path ([progress record](build-coordinator.md#control-protocol-titan-build-worker-v1)). |
 | `driver.publish_staged_module(context, result)` | Coordinator post-worker step: decodes the staged primary `.o`, resolves a fresh source descriptor, runs `incremental.revalidate_record` in a fresh pass, and renames sidecar `.part<k>.o` files then `<stem>.o` last. |
 | `driver.apply_native_inputs(normalized)` | Installs `normalized.compile_argv` (`driver.NATIVE_COMPILE_FLAGS`) and `normalized.link_argv` (`driver.NATIVE_LINK_FLAGS`) from `nativeinputs.normalize`. |
 | `driver.link_extra_flags()` | Returns `driver.NATIVE_LINK_FLAGS` when installed, else `driver.EXTRA_LDFLAGS` or `{}`. |
@@ -2043,7 +2043,7 @@ policy.
 ## The `titanc` command line
 
 ```sh
-./titanc [--print-root] [--print-ast] [--pretty-print] [-v|--verbose] \
+./titanc [--print-root] [--print-ast] [--pretty-print] [-q|--quiet | -v|--verbose] \
   [-j|--jobs <jobs>] [--c-parts <n>] [--exe <path>] [--static] \
   [--source-first] [--incremental] [-c|--compile-only] [--test] \
   [--test-dir <dir>]... [--test-exclude <module>]... \
@@ -2080,7 +2080,9 @@ incremental certification decisions to standard error:
 `Titan native hit <source>`, `Titan native miss <source>`,
 `Titan link hit <target>`, and `Titan link miss <target>: <reason>`. Standard
 output carries only requested results: the `--print-root` root, `--print-ast`
-dumps, and `--print-c-objects` paths.
+dumps, and `--print-c-objects` paths. Every build also reports progress on
+standard error unless `-q`/`--quiet` is given; `-v` adds the plain progress
+lines to its own output ([Progress reporting](#progress-reporting)).
 `--print-ast` runs the shared `build.plan` and output preflight, then checks
 requested modules in-process and dumps each AST.
 `-j`/`--jobs` sets the positive local job cap (overriding `TITAN_JOBS`, default
@@ -2117,6 +2119,8 @@ build coordinator](build-coordinator.md).
 
 Before creating a resolver, `titanc` rejects:
 
+* `-q`/`--quiet` together with `-v`/`--verbose` (checked first, right after
+  argument parsing, and written straight to standard error);
 * `--print-root` with module names;
 * no module names unless `--print-root`, `--test-dir`, or `-c --c-source` is
   given;
@@ -2158,6 +2162,130 @@ with `linkcertificate.prepare`, `linkcertificate.check`,
 calls `driver.cleanup_stale_staging` between `prepare` and `check`
 ([End-to-end invocation sequence](build-coordinator.md#end-to-end-invocation-sequence)).
 The digest cache is saved before the locks are released.
+
+### Progress reporting
+
+`titan-compiler/progress.lua` renders the progress that only the `titanc`
+command reports ([Build output](../language/modules.md#build-output) is the user
+contract). The compiler library, the driver APIs, and language-server clients
+never create a reporter, and every hook in `build.lua`, `build_worker.lua`,
+`driver.lua`, and `nativeinputs.lua` is a no-op without one.
+
+`progress.select(options)` is a pure decision over injected facts:
+
+1. `quiet` selects `progress.NULL`;
+2. `verbose` selects `progress.PLAIN`;
+3. `progress.LIVE` requires all of these:
+   - `tty` (stderr is a terminal);
+   - `term` other than `dumb`;
+   - `makeflags` without `jobserver-auth` or `jobserver-fds`;
+4. anything else selects `PLAIN`.
+
+`titanc` reads `TERM`, `MAKEFLAGS`, `NO_COLOR`, `COLUMNS`, and the locale chain
+(`progress.locale`: the first non-empty of `LC_ALL`, `LC_CTYPE`, and `LANG`) once,
+after the `--print-root` query. It probes the terminal with
+`uv.guess_handle(2)` only when neither `-q` nor `-v` is given. A null
+selection creates no reporter at all, so a `-q` invocation runs the same code
+path as before progress reporting existed. `progress.colour` requires a
+terminal, a `TERM` other than `dumb`, and an unset or empty `NO_COLOR`.
+`progress.glyphs` picks Unicode only on Unix with a UTF-8 locale and ASCII
+otherwise.
+
+`progress.new(kind, options)` takes injectable `writer`, `now` (wall-clock
+seconds; `uv.hrtime` in `titanc`), `width`, and `uv`, plus the observed
+`windows`, `locale`, `tty`, `term`, `no_color`, and `columns` (the `COLUMNS`
+width hint), so the unit spec
+(`spec/progress_spec.lua`) drives both renderers without a terminal. The
+reporter methods are:
+
+- `plan(total)`;
+- `module_begin`, `module_phase(name, phase, detail)`, `module_done`, and
+  `module_failed`;
+- `up_to_date` and `up_to_date_drained`;
+- `link_begin`, `link_done`, `link_failed`, and `link_up_to_date`;
+- `source_begin`, `source_done`, `source_failed`, and `source_up_to_date`;
+- `write(text)`, `finish()`, and `fail()`.
+
+`finish` prints the `Finished in` summary and `fail` prints `Failed after`. A
+reporter that recorded no event prints neither, so usage errors keep their
+exact text.
+
+`titanc` wires the reporter as follows:
+
+- It passes the reporter to `build.run` as `request.progress`. See
+  [Progress events](build-coordinator.md#progress-events) for the scheduler
+  hooks and the worker's optional `progress` record.
+- It passes step callbacks to `nativeinputs.compile`, which brackets the native
+  compile of each `--c-source` miss with `source_begin` and exactly one of
+  `source_done` or `source_failed`. A failure before the compile starts
+  (preprocessing or certification) reports no step, and a certified hit calls
+  `source_up_to_date` instead.
+- It names each final link by the output's basename. It calls `link_begin`
+  before the standalone archive probe, or before the provider link, then
+  `link_done` or `link_failed` on each outcome. A final-link certificate hit
+  calls `link_up_to_date`.
+- `exit()` calls `fail()` and then writes its message through `write`.
+  `finish()` calls `finish`. Each signal propagation calls `fail()` before
+  `jobs.propagate`.
+
+The plain renderer writes one self-contained line per event, with the name
+dot-padded to a common column (at least three dots), and never moves the
+cursor.
+
+The live renderer keeps one transient region below the scrollback. The region
+has one row per active module or step (spinner, name, phase, elapsed time) and
+a footer (`[completed/total]`, running count, up-to-date count, clock). The
+completed count includes modules restored from their certificates, so an
+all-hit build shows `[total/total]`.
+
+- **Redraw.** A redraw returns to the region start, erases down (`\r ESC[J`),
+  draws the rows truncated to the reporter's width, and parks the cursor at the
+  region start. The width is re-read on every frame and comes from the first
+  available of these: an injected `width` (tests); the console size on
+  Windows; on Unix, `get_winsize` on a private `/dev/tty` handle that the
+  reporter opens with `uv.fs_open` and wraps with `uv.new_tty(fd, true)`, so
+  libuv's reopen replaces that private descriptor and never fd 2; an exported
+  `COLUMNS`; otherwise 80. `close()` closes the private handle. Widths count
+  the codepoints of visible text only, never escape sequences, and truncation
+  never splits a UTF-8 sequence. A double-width character (for example in a
+  CJK path) still counts as one column, so such a row can exceed the width.
+  A finished module or step becomes one persistent line above the region.
+- **Text written while the region is drawn.** `write(text)` erases the region,
+  writes the text, and draws the region again.
+- **Animation.** One unref'd 100 ms `uv` timer on the default loop drives the
+  spinner. It animates whenever the coordinator waits in `uv.run("once")`:
+  in the scheduler loop (workers and coordinator-run native jobs), in
+  `Process:wait`, and in captured commands, including captured final links.
+  A provider-pair link waits for its parallel link jobs in the native
+  `_jobserver_wait` poll instead, so the spinner pauses on that row until the
+  link returns. Being unref'd, the timer never keeps a loop alive. `finish`
+  and `fail` stop and close it, and erase the region. The cursor is never
+  hidden, so no exit path has to restore it.
+- **Output sink.** On Unix the renderer writes to the inherited, blocking
+  standard error. It never opens a libuv TTY on fd 2, because libuv would
+  reopen that descriptor non-blocking and close-on-exec. On Windows it writes
+  through a `uv.new_tty(2, false)` handle, so libuv translates the escape
+  sequences for consoles without VT support. `try_write` delivers what the
+  console accepts at once, and any remainder is queued in order. Ordinary
+  code, never a timer frame, drains the queue with bounded
+  `uv.run("nowait")` calls, at the latest before the final summary.
+
+While the live renderer owns the terminal, `titanc` sets `driver.LIVE_PROGRESS`
+to the reporter. `run_argv` then runs a child that would otherwise inherit
+stderr (final links, archive probes) through `process.capture`, and replays its
+combined output through `LIVE_PROGRESS:write`. On Unix the child runs as
+`/bin/sh -c <command>` with the held output-lock descriptors, as on the
+non-live path. The exit status, termination kind, and failure text are returned
+exactly as the inherited run reports them. Provider-pair links (the public DSO
+and the archive-validation image) already capture each job's output to log
+files. `finish_prepared_compile` replays those logs through
+`LIVE_PROGRESS:write` as well, and through the stream path with its write
+checks otherwise.
+
+Plain, verbose, and quiet runs, and every non-CLI caller, leave
+`LIVE_PROGRESS` nil and keep inherited stderr. Worker output and
+coordinator-run native jobs are already captured. They reach the terminal
+through the scheduler's plan-order flush, which writes through the reporter.
 
 ## Optional `clang-format` generated-source formatting
 
@@ -2571,7 +2699,8 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `--print-root` | Print the selected installation root and exit. | No module names. |
 | `--print-ast` | Print each module's AST after checking. | Not with `--incremental`. |
 | `--pretty-print` | Format generated C and headers with `CLANG_FORMAT`. | |
-| `-v`, `--verbose` | Write native-tool/formatter commands, replayed worker output, and incremental object, native-C, and link hit/miss decisions to standard error. | |
+| `-q`, `--quiet` | Create no progress reporter: standard error carries only diagnostics and native-tool output, exactly as before progress reporting. | Not with `-v`. |
+| `-v`, `--verbose` | Write native-tool/formatter commands, replayed worker output, and incremental object, native-C, and link hit/miss decisions to standard error, plus plain progress lines. | Not with `-q`. |
 | `-j`, `--jobs <n>` | Local cap on concurrent worker frontends and native compiler processes; overrides `TITAN_JOBS`, default 4. `1` keeps every C probe synchronous. | Positive integer. |
 | `--c-parts <n>` | Maximum generated C translation units per module whose generated code reaches 2 MiB; overrides `TITAN_C_PARTS` (default 4 on Linux, otherwise 1); `1` disables splitting; independent of `--jobs`. See [Translation-unit parts](codegen-overview.md#translation-unit-parts). | Positive integer. |
 | `--exe <path>` | Exact executable destination relative to CWD (`.exe` appended on Windows when absent; Windows provider DLL stays under `--output`). | Requires a standalone or test executable; not with `-c` or library-only builds. |
@@ -2620,7 +2749,11 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `TITAN_BUILD_PROFILE` | `driver.lua` | `production` | `validation` selects `-O0 -fno-lto -g`; any other value is a toolchain error. |
 | `TITAN_NO_LINE_DIRECTIVES` | `driver.lua` | unset | Exact value `1` disables generated `#line` directives, like `--no-line-directives`. |
 | `TITAN_JOBS` | `titanc` | `4` | Local job cap when `--jobs` is absent. |
-| `MAKEFLAGS` | `jobs.lua` `open_slots` (Unix) | unset | A parent GNU Make's jobserver authorization and `-j1`; see [GNU Make jobserver participation](#gnu-make-jobserver-participation). |
+| `MAKEFLAGS` | `jobs.lua` `open_slots` (Unix), `titanc` (`progress.select`) | unset | A parent GNU Make's jobserver authorization and `-j1`; see [GNU Make jobserver participation](#gnu-make-jobserver-participation). An advertised jobserver (`--jobserver-auth`/`--jobserver-fds`) also selects the plain progress form. |
+| `TERM` | `titanc` (`progress.select`, `progress.colour`) | unset | `dumb` selects the plain progress form and disables colour. |
+| `NO_COLOR` | `titanc` (`progress.colour`) | unset | Non-empty disables progress colour only; the live region stays. |
+| `COLUMNS` | `titanc` (`progress.new` width) | unset | Positive integer width for the live region when no terminal can report one (no Windows console and no Unix `/dev/tty`); otherwise 80. |
+| `LC_ALL`, `LC_CTYPE`, `LANG` | `titanc` (`progress.locale`) | unset | The first non-empty value naming UTF-8 selects Unicode progress glyphs on Unix; Windows always uses ASCII. |
 | `TITAN_C_PARTS` | `titanc`, `driver.lua` (`driver.effective_c_parts`) | `4` on Linux; `1` on Windows, macOS, and other platforms (`driver.default_c_parts`) | Maximum generated C translation units per module when `--c-parts` is absent; `1` disables splitting. A changed value makes reused objects miss. |
 | `TITAN_PATH_0_6`, `TITAN_PATH` | `driver.lua` (`titan_bin_path_entries`), `titan_path.c` | unset | [Titan path](#titan-path-syntax): `;`-separated directories, `;;` inserts the default, `!` is the executable directory, an empty value searches nothing; the versioned name wins. |
 | `TITAN_ROOT` | `driver.lua`, `titanc --print-root`, `titan_path.c` (`_compiler_root()` and the run-time SDK fallback), Make | unset (empty means unset) | Explicit Titan SDK/rocks-tree root; otherwise the compiler uses the parent of its interpreter directory and the run-time fallback asks `titanc --print-root`. |
@@ -2655,6 +2788,7 @@ workflow sets them equal, but they are separate ownership concepts.
 | `driver.CFLAGS` | `--std=c99 -O3 -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC` plus compiler-specific debug flags; Linux production adds `-flto=auto -ffat-lto-objects` | GCC uses `-g1`, Clang `-gline-tables-only -fdebug-info-for-profiling`, other compilers `-g`. |
 | `driver.NATIVE_COMPILE_FLAGS` / `driver.NATIVE_LINK_FLAGS` | `driver.apply_native_inputs(normalized)` | Normalized ordered compile and link extras (`TITAN_EXTRA_*` then CLI native switches). |
 | `driver.OUTPUT_ROOT` | `args.output` in `titanc` | Selected `--output` directory for synchronous native publication temporaries. |
+| `driver.LIVE_PROGRESS` | `nil`; the live reporter in `titanc` | While set, `run_argv` captures children that would inherit stderr and replays their output above the live region ([Progress reporting](#progress-reporting)). |
 | `driver.PROJECT_CACHE_VERSION` | `version.PROJECT_CACHE_VERSION` (`6`) | Language-server project-manifest schema version. |
 | shared-library flags | `driver.shared_library_flags` | `-shared`; Darwin adds `-undefined dynamic_lookup`, Windows `-Wl,--exclude-all-symbols`. |
 | installed link set | `driver.installed_link_inputs` | Unix: `libtitan.a`, `libbacktrace.a`, `liblua.a`, `-ldl` (non-Darwin), `-lm`; Windows: `libtitan.a`, `libbacktrace.a`, `liblua55.a`, `-static-libgcc`. Not copied into package archives. |
@@ -2685,7 +2819,8 @@ descriptors on `fds 5..`), `process.open_control(3, 4)`,
 `process.frame`/`process.new_frames` (4-byte big-endian length framing up to
 256 MiB + 64 bytes), `process.encode_record`/`process.decode_record`
 (`graphcodec` with native SHA-256), and `process.start_job` for worker-submitted
-native compile and C-probe batches. See [Build-worker
+native compile and C-probe batches. A progress-enabled coordinator also asks
+its workers for optional, unanswered `progress` records. See [Build-worker
 transport](build-coordinator.md#build-worker-transport).
 
 ## Experimental Windows process transports

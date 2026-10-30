@@ -149,6 +149,7 @@ compiler spec/coder/static_dynamic_facade_spec.lua 2.264 2.594
 compiler spec/coder/static_protocol_mismatch_spec.lua 6.701 7.064
 stdlib spec/coder/test_root_discovery_spec.lua 1.000 27.648
 stdlib spec/coder/test_runner_spec.lua 20.987 21.852
+compiler spec/coder/titanc_progress_spec.lua 4.274 -
 compiler spec/coder/type_relations_soundness_spec.lua 11.665 26.953
 compiler spec/coder/type_tests_spec.lua 1.492 7.539
 compiler spec/coder/unions_spec.lua 8.322 36.908
@@ -187,6 +188,7 @@ compiler spec/native_record_fields_spec.lua 9.584 65.613
 compiler spec/nominal_layout_spec.lua 0.025 0.317
 compiler spec/parser_spec.lua 1.096 3.838
 compiler spec/path_spec.lua 0.051 0.165
+compiler spec/progress_spec.lua 0.016 -
 compiler spec/projectcache_spec.lua 37.671 473.778
 retained spec/rockspec_spec.lua 11.706 -
 compiler spec/sha256_spec.lua 0.001 0.009
