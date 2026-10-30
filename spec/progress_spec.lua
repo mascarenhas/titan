@@ -11,6 +11,8 @@ local function capture(options)
         writer = function(text) written[#written + 1] = text end,
         now = options.now or function() return 0 end,
         width = options.width,
+        columns = options.columns,
+        uv = options.uv,
         locale = options.locale,
         windows = options.windows,
         term = options.term,
@@ -108,6 +110,21 @@ describe("progress glyphs and colour", function()
         assert.is_true(progress.colour({ tty = true, term = "xterm", no_color = "" }))
     end)
 
+    it("reports zero for a negative or undefined time", function()
+        assert.equal("0.0s", progress.duration(-5))
+        assert.equal("0.0s", progress.duration(0 / 0))
+        assert.equal("0:00", progress.clock(-5))
+        assert.equal("0:00", progress.clock(0 / 0))
+    end)
+
+    it("names a final link by its output basename", function()
+        assert.equal("app.so", progress.basename("/out/app.so"))
+        assert.equal("app.so", progress.basename("app.so/"))
+        assert.equal("app.exe", progress.basename("C:\\out\\app.exe"))
+        -- A spelling with no remaining component is kept as given.
+        assert.equal("//", progress.basename("//"))
+    end)
+
     it("formats elapsed times and the footer clock", function()
         assert.equal("3.4s", progress.duration(3.44))
         assert.equal("14.2s", progress.duration(14.25))
@@ -203,6 +220,46 @@ describe("the plain renderer", function()
             "app.so ................... done 0.0s",
             "",
         }, "\n"), written())
+    end)
+
+    it("writes a completed row that exactly fills the width", function()
+        local function row_at(width)
+            local reporter, written = capture({
+                kind = progress.LIVE, locale = "C", width = width,
+            })
+            reporter:module_begin("abcdefghijklm")
+            local first = written():match("^[^\r\n]+")
+            reporter:finish()
+            return plain_text(first)
+        end
+        local natural = row_at(200)
+        local exact = row_at(columns(natural))
+        assert.equal(natural, exact)
+    end)
+
+    it("writes through stderr when no writer is injected", function()
+        local captured = {}
+        local saved = io.stderr
+        io.stderr = {
+            write = function(_, ...)
+                for index = 1, select("#", ...) do
+                    captured[#captured + 1] = tostring(select(index, ...))
+                end
+                return true
+            end,
+            flush = function() return true end,
+        }
+        local called, failure = pcall(function()
+            local reporter = progress.new(progress.PLAIN, {
+                now = function() return 0 end,
+            })
+            reporter:module_begin("app.one")
+            reporter:module_phase("app.one", "parsing")
+        end)
+        io.stderr = saved
+        assert.truthy(called, failure)
+        assert.equal("app.one .................. parsing\n",
+            table.concat(captured))
     end)
 
     it("reports a certificate hit as up to date", function()
@@ -314,6 +371,54 @@ describe("the live renderer", function()
         assert.truthy(text:find("[1/2] 0 running", 1, true), text)
     end)
 
+    it("leaves a failed module row in the scrollback", function()
+        local clock = 0
+        local reporter, written = capture({
+            kind = progress.LIVE, locale = "C", width = 80,
+            now = function() return clock end,
+        })
+        reporter:module_begin("app.two")
+        clock = 1.6
+        reporter:module_failed("app.two")
+        local screen = terminal.render(written())
+        local rendered = table.concat(screen, "\n")
+        assert.is_true(terminal.shows(screen, "FAILED app.two"), rendered)
+        assert.is_true(terminal.shows(screen, "failed"), rendered)
+        -- A failed row states the outcome instead of an elapsed time.
+        assert.is_nil(rendered:find("1.6s", 1, true), rendered)
+    end)
+
+    it("leaves an up-to-date link row in the scrollback", function()
+        local reporter, written = capture({
+            kind = progress.LIVE, locale = "C", width = 80,
+        })
+        reporter:link_up_to_date("app.so")
+        local screen = terminal.render(written())
+        local rendered = table.concat(screen, "\n")
+        assert.is_true(terminal.shows(screen, "ok app.so"), rendered)
+        assert.is_true(terminal.shows(screen, "up to date"), rendered)
+    end)
+
+    it("reports a failed authored C source step in both renderers", function()
+        local reporter, written = capture()
+        reporter:source_begin("helper.c")
+        reporter:source_failed("helper.c")
+        assert.equal(table.concat({
+            "helper.c ................. compiling C source",
+            "helper.c ................. failed",
+            "",
+        }, "\n"), written())
+
+        local live_reporter, live_written = capture({
+            kind = progress.LIVE, locale = "C", width = 80,
+        })
+        live_reporter:source_begin("helper.c")
+        live_reporter:source_failed("helper.c")
+        local screen = terminal.render(live_written())
+        assert.is_true(terminal.shows(screen, "FAILED helper.c"),
+            table.concat(screen, "\n"))
+    end)
+
     it("shows the phase and elapsed time on the active row", function()
         local clock = 0
         local reporter, written = live({ now = function() return clock end })
@@ -336,7 +441,7 @@ describe("the live renderer", function()
         local reporter, written = capture({
             kind = progress.LIVE, locale = "C", width = nil, columns = "40",
         })
-        reporter:module_begin("app.a-very-long-module-name")
+        reporter:module_begin("app." .. string.rep("x", 80))
         for line in written():gmatch("[^\r\n]+") do
             local visible = plain_text(line)
             assert.is_true(columns(visible) <= 40, visible)
@@ -498,6 +603,98 @@ describe("the live renderer", function()
         })
         assert.equal(33, reporter:width())
         reporter:finish()
+    end)
+
+    it("closes the private descriptor when the terminal handle cannot wrap it", function()
+        local closed
+        local uv = {
+            hrtime = function() return 0 end,
+            run = function() return 0 end,
+            new_timer = function()
+                return { start = function() end, stop = function() end,
+                    close = function() end, unref = function() end }
+            end,
+            fs_open = function() return 11 end,
+            new_tty = function() return nil, "not a terminal" end,
+            fs_close = function(fd) closed = fd; return true end,
+        }
+        local reporter = progress.new(progress.LIVE, {
+            uv = uv, windows = false, tty = true, term = "xterm",
+            locale = "C", columns = "64", writer = function() end,
+            now = function() return 0 end,
+        })
+        assert.equal(11, closed)
+        assert.equal(64, reporter:width())
+        reporter:finish()
+    end)
+
+    it("falls back when the console cannot report its size", function()
+        local handle = {
+            get_winsize = function() error("not a console") end,
+            close = function() end,
+        }
+        local uv = {
+            hrtime = function() return 0 end,
+            run = function() return 0 end,
+            new_timer = function()
+                return { start = function() end, stop = function() end,
+                    close = function() end, unref = function() end }
+            end,
+            fs_open = function() return 9 end,
+            new_tty = function() return handle end,
+        }
+        local reporter = progress.new(progress.LIVE, {
+            uv = uv, windows = false, tty = true, term = "xterm",
+            locale = "C", columns = "58", writer = function() end,
+            now = function() return 0 end,
+        })
+        assert.equal(58, reporter:width())
+        reporter:finish()
+    end)
+
+    it("falls back to a monotonic clock when none is injected", function()
+        local ticks = 0
+        local uv = {
+            hrtime = function() ticks = ticks + 1000000000; return ticks end,
+            run = function() return 0 end,
+            new_timer = function()
+                return { start = function() end, stop = function() end,
+                    close = function() end, unref = function() end }
+            end,
+            fs_open = function() return nil, "no controlling terminal" end,
+        }
+        local reporter = progress.new(progress.LIVE, {
+            uv = uv, windows = false, tty = true, term = "xterm",
+            locale = "C", writer = function() end,
+        })
+        assert.equal(1, reporter:elapsed())
+        assert.equal(2, reporter:elapsed())
+        reporter:finish()
+        -- No platform clock at all still measures something.
+        local bare = progress.new(progress.PLAIN, { writer = function() end })
+        assert.is_true(bare:elapsed() >= 0)
+    end)
+
+    it("repaints the active region on the animation timer", function()
+        local uv = require("titan-compiler.process").library()
+        local written = {}
+        local reporter = progress.new(progress.LIVE, {
+            uv = uv, windows = false, tty = true, term = "xterm",
+            locale = "C", width = 80,
+            writer = function(text) written[#written + 1] = text end,
+        })
+        reporter:module_begin("app.one")
+        local before = #written
+        -- The animation timer is unref'd, so keep the loop alive just long
+        -- enough to observe one frame.
+        local keepalive = uv.new_timer()
+        local started = uv.hrtime()
+        keepalive:start(250, 0, function() keepalive:close() end)
+        while #written == before and (uv.hrtime() - started) < 2000000000 do
+            uv.run("once")
+        end
+        reporter:finish()
+        assert.truthy(#written > before, "the timer never repainted the region")
     end)
 
     it("uses the ASCII separator with ASCII glyphs", function()

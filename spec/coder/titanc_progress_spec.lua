@@ -3,17 +3,17 @@ local cdriver = require "c-parser.cdriver"
 local compiler_io = require "titan-compiler.io"
 local lfs = require "lfs"
 local platform = require "titan-compiler.platform"
+local luacov_children = require "spec.support.luacov_children"
 local terminal = require "spec.support.terminal_screen"
 
 local REPO = assert(lfs.currentdir())
 local PREFIX = require("spec.support.installed_prefix").active()
 local EXE_SUFFIX = platform.windows and ".exe" or ""
 local LUA = PREFIX .. "/bin/lua" .. EXE_SUFFIX
--- The installed compiler program, or the checkout script under the checkout
--- Busted profile (after a reinstall the installed program is the same code).
-local INSTALLED_TITANC = PREFIX .. "/bin/titanc" .. EXE_SUFFIX
-local USE_CHECKOUT_COMPILER =
-    os.getenv("TITAN_TEST_USE_CHECKOUT_COMPILER") == "1"
+-- Every CLI child runs a private copy of this checkout's compiler so the
+-- behaviour it exercises can be enrolled with LuaCov (a subprocess is never
+-- measured by the parent runner). `frontend`/`children` are set in `setup`.
+local frontend, children, frontend_wrapper
 
 local function quote(text)
     return assert(cdriver.shell_quote(text))
@@ -52,6 +52,19 @@ local function remove_tree(path)
     elseif mode then
         assert(os.remove(path))
     end
+end
+
+local function copy_tree(source, destination)
+    if lfs.attributes(source, "mode") == "directory" then
+        assert(lfs.mkdir(destination), "could not create " .. destination)
+        for entry in lfs.dir(source) do
+            if entry ~= "." and entry ~= ".." then
+                copy_tree(source .. "/" .. entry, destination .. "/" .. entry)
+            end
+        end
+        return
+    end
+    write_file(destination, assert(read_file(source)))
 end
 
 local function workspace()
@@ -113,6 +126,7 @@ local function run(arguments, cwd, environment)
     end)
     assert(lfs.chdir(previous))
     assert.truthy(called, result)
+    if children then children:collect() end
     local stdout = read_file(stdout_path) or ""
     local stderr = read_file(stderr_path) or ""
     os.remove(stdout_path)
@@ -121,17 +135,7 @@ local function run(arguments, cwd, environment)
 end
 
 local function compiler(arguments)
-    local argv = {}
-    if USE_CHECKOUT_COMPILER then
-        argv[#argv + 1] = LUA
-        argv[#argv + 1] = "-E"
-        argv[#argv + 1] = "-e"
-        argv[#argv + 1] = string.format("package.path=%q..package.path",
-            REPO .. "/?.lua;" .. REPO .. "/?/init.lua;")
-        argv[#argv + 1] = REPO .. "/titanc"
-    else
-        argv[#argv + 1] = INSTALLED_TITANC
-    end
+    local argv = { LUA, "-E", frontend_wrapper }
     for _, word in ipairs(arguments) do argv[#argv + 1] = word end
     return argv
 end
@@ -199,6 +203,29 @@ describe("titanc progress reporting", function()
         }, "\n"))
         write_file(root .. "/helper.c",
             "int titanc_progress_helper(void) { return 7; }\n")
+        write_file(source .. "/app_main.titan", table.concat({
+            "function main(args: {string}): integer",
+            "  return 0",
+            "end",
+            "",
+        }, "\n"))
+        -- The CLI children run this checkout's compiler from a private copy so
+        -- their behaviour (reporter creation, -q/-v, worker records, steps)
+        -- counts under LuaCov; the helper is a no-op otherwise.
+        frontend = root .. "/tooling"
+        make_directory(frontend)
+        for _, name in ipairs({ "titan-compiler", "c-parser", "titanc" }) do
+            copy_tree(REPO .. "/" .. name, frontend .. "/" .. name)
+        end
+        children = luacov_children.new(REPO, frontend, root .. "/child-luacov")
+        frontend_wrapper = root .. "/frontend.lua"
+        write_file(frontend_wrapper, table.concat({
+            "package.path = " .. string.format("%q", frontend .. "/?.lua;") ..
+                " .. package.path",
+            children:init_code(),
+            "dofile(" .. string.format("%q", frontend .. "/titanc") .. ")",
+            "",
+        }, "\n"))
     end)
 
     teardown(function()
@@ -432,6 +459,118 @@ describe("titanc progress reporting", function()
         assert.is_false(quiet_ok)
         assert.truthy(quiet_stderr:find("link denied out", 1, true), quiet_stderr)
         assert.truthy(quiet_stderr:find("link denied err", 1, true), quiet_stderr)
+        assert.is_nil(quiet_stderr:find("compiling C", 1, true), quiet_stderr)
+    end)
+
+    it("reports a standalone program link in the live region", function()
+        if not script_supports_command_form() then
+            pending("needs util-linux `script` (-qfec); the BSD/macOS form is unsupported")
+            return
+        end
+        local executable = root .. "/app-main"
+        local words = {}
+        for _, word in ipairs(compiler({
+            "--tree", source, "--output", root .. "/program-out",
+            "--exe", executable, "app_main",
+        })) do
+            words[#words + 1] = quote(word)
+        end
+        local launcher = root .. "/live_program.sh"
+        write_file(launcher, table.concat({
+            "#!/bin/sh",
+            "exec env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5" ..
+                " -u NO_COLOR -u MAKEFLAGS -u MFLAGS -u MAKELEVEL" ..
+                " TERM=xterm-256color TITAN_PATH= TITAN_ROOT=" ..
+                quote(PREFIX) .. " TITAN_RUNTIME_PREBUILT=1 " ..
+                table.concat(words, " "),
+            "",
+        }, "\n"))
+        assert.truthy(shell("chmod +x " .. quote(launcher)))
+
+        local typescript = root .. "/live-program.typescript"
+        local ran = shell("script -qfec " .. quote(launcher) .. " " ..
+            quote(typescript))
+        assert.is_true(ran, "the standalone program build must succeed")
+        if children then children:collect() end
+        local transcript = read_file(typescript) or ""
+        local screen = terminal.render(transcript)
+        local rendered = table.concat(screen, "\n")
+        assert.truthy(transcript:find("\27[J", 1, true),
+            "no live redraw sequence in the transcript: " .. rendered)
+        -- One compiled module and one final link, named by the executable.
+        assert.is_true(terminal.shows(screen, "ok app_main"), rendered)
+        assert.is_true(terminal.shows(screen, "ok app-main"), rendered)
+        assert.truthy(rendered:find("Finished in", 1, true), rendered)
+        assert.truthy(rendered:find("linked app%-main"), rendered)
+        assert.truthy(lfs.attributes(executable, "mode") == "file", rendered)
+    end)
+
+    it("keeps a failed standalone link diagnostic visible in the live region", function()
+        if not script_supports_command_form() then
+            pending("needs util-linux `script` (-qfec); the BSD/macOS form is unsupported")
+            return
+        end
+        -- The wrapper fails only the final program link (it names the
+        -- generated entrypoint), with a diagnostic that has no newline.
+        local wrapper = root .. "/deny_program.sh"
+        write_file(wrapper, table.concat({
+            "#!/bin/sh",
+            'for argument in "$@"; do',
+            '    case "$argument" in',
+            '        *__entrypoint.c)',
+            "            printf 'program link denied' >&2",
+            "            exit 1",
+            "            ;;",
+            "    esac",
+            "done",
+            'exec cc "$@"',
+            "",
+        }, "\n"))
+        assert.truthy(shell("chmod +x " .. quote(wrapper)))
+
+        local words = {}
+        for _, word in ipairs(compiler({
+            "--tree", source, "--output", root .. "/program-fail-out",
+            "--exe", root .. "/app-fail", "app_main",
+        })) do
+            words[#words + 1] = quote(word)
+        end
+        local launcher = root .. "/live_program_fail.sh"
+        write_file(launcher, table.concat({
+            "#!/bin/sh",
+            "exec env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5" ..
+                " -u NO_COLOR -u MAKEFLAGS -u MFLAGS -u MAKELEVEL" ..
+                " TERM=xterm-256color CC=" .. quote(wrapper) ..
+                " TITAN_PATH= TITAN_ROOT=" .. quote(PREFIX) ..
+                " TITAN_RUNTIME_PREBUILT=1 " .. table.concat(words, " "),
+            "",
+        }, "\n"))
+        assert.truthy(shell("chmod +x " .. quote(launcher)))
+
+        local typescript = root .. "/live-program-fail.typescript"
+        local ran = shell("script -qfec " .. quote(launcher) .. " " ..
+            quote(typescript))
+        assert.is_false(ran, "the failing program link must exit nonzero")
+        if children then children:collect() end
+        local transcript = read_file(typescript) or ""
+        local screen = terminal.render(transcript)
+        local rendered = table.concat(screen, "\n")
+        assert.truthy(transcript:find("\27[J", 1, true),
+            "no live redraw sequence in the transcript: " .. rendered)
+        -- The captured linker diagnostic survives the failed-step redraw.
+        assert.is_true(terminal.shows(screen, "program link denied"), rendered)
+        assert.is_true(terminal.shows(screen, "FAILED app-fail"), rendered)
+        assert.truthy(rendered:find("Failed after", 1, true), rendered)
+        assert.is_nil(lfs.attributes(root .. "/app-fail", "mode"), rendered)
+
+        -- Quiet mode keeps the historical stderr for the same failure.
+        local quiet_ok, _, quiet_stderr = run(compiler({
+            "-q", "--tree", source, "--output", root .. "/program-fail-quiet",
+            "--exe", root .. "/app-fail-quiet", "app_main",
+        }), root, { "CC=" .. wrapper })
+        assert.is_false(quiet_ok)
+        assert.truthy(quiet_stderr:find("program link denied", 1, true),
+            quiet_stderr)
         assert.is_nil(quiet_stderr:find("compiling C", 1, true), quiet_stderr)
     end)
 

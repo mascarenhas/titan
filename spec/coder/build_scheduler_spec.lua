@@ -664,6 +664,22 @@ describe("build worker control sessions", function()
         uv.run("nowait")
     end)
 
+    it("sends frontend progress records without waiting for a reply", function()
+        local requests, replies = pipes()
+        send(requests, compile_request({ module = "app", options = { progress = true } }))
+        local session = assert(build_worker.connect(requests.read, replies.write))
+        assert.is_true(session:progress("parsing"))
+        assert.is_true(session:progress("compiling C", "2 parts"))
+        assert.is_true(session:progress("checking"))
+        assert.same({ kind = "progress", phase = "parsing" }, receive(replies))
+        assert.same({ kind = "progress", phase = "compiling C", detail = "2 parts" },
+            receive(replies))
+        -- A phase without a detail carries no detail field at all.
+        local plain = receive(replies)
+        assert.same({ kind = "progress", phase = "checking" }, plain)
+        assert.is_nil(plain.detail)
+    end)
+
     it("answers each native batch with the coordinator reply of the same id", function()
         local requests, replies = pipes()
         send(requests, compile_request({ module = "app", options = { jobs = 2 } }))
