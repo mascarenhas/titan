@@ -11,8 +11,8 @@
 #              Their ci_covered_seconds come from a same-host serial 4-CPU
 #              LuaCov diagnostic run of this step's files (2026-10-28), not a CI run.
 #   compiler - compiler/language specs
-# Optional column ci_covered_seconds records Linux CI covered+stress durations
-# (run 37890691611 at b32db0c / 37887221316 at e9d3855, GCC 14, ubicloud-standard-2).
+# For compiler rows, optional column ci_covered_seconds records Linux CI covered+stress
+# durations (run 37890691611 at b32db0c / 37887221316 at e9d3855, GCC 14, ubicloud-standard-2).
 # When ci_covered_seconds is '-', CI partitioning falls back to local_validation_seconds.
 # Shard assignments are never stored here; spec/support/compiler_test_groups.lua
 # computes deterministic LPT partitions for any worker count N.

@@ -542,10 +542,12 @@ Titan-only filter leaves the partitioned run enabled.
 `spec/support/ci_compiler_test_groups.txt` (schema `titan-busted-timings-v2`) is
 the timing dataset. Its header records host, profile, date, and compiler; each
 row names one discovered `spec/**/*_spec.lua` file, its domain, its measured
-local validation seconds, and optional covered seconds (`-` falls back to the
-local value): Linux CI covered+stress durations for `compiler` rows, and
-same-host serial four-CPU LuaCov diagnostic seconds of the CI step's files,
-not a CI run, for `stdlib` rows. The `retained` domain is the runtime/packaging set
+local validation seconds, and an optional covered-seconds column
+(`ci_covered_seconds`; `-` falls back to the local value). Despite the column
+name, it holds Linux CI covered+stress durations only in `compiler` rows. In
+`stdlib` rows it holds same-host serial four-CPU LuaCov diagnostic seconds of
+the CI step's files, not a CI run, and `retained` rows leave it `-`. The
+`retained` domain is the runtime/packaging set
 (`Makefile` `STDLIB_BUSTED_TESTS`, `Makefile.win`
 `TITAN_ROCK_TEST_STDLIB_SPECS`), `stdlib` is
 `spec/support/ci_stdlib_compiler_test_files.txt`, and everything else is
@@ -608,6 +610,16 @@ exclusions as patterns, so a prefix whose checkout-relative name contains `*`,
 the caller's `TMPDIR`; Windows workers also get private TEMP/TMP below MSYS2's
 short `/tmp`, so nested fixture paths fit ordinary Win32 filename limits, and
 run under the native Job Object supervisor.
+
+A private `TMPDIR` does not make every temporary name private. On POSIX,
+Lua's `os.tmpname()` ignores `TMPDIR`: it creates a file from the fixed
+template `/tmp/lua_XXXXXX` with `mkstemp`. Both the spec helper
+`spec/support/temporary.lua` and the compiler's synchronous filesystem
+strategy (`Sync:tmpname` in `titan-compiler/io.lua`) take their names from it,
+so concurrent Unix workers, local or in CI, also share the host's `/tmp`
+temporary-file namespace. `mkstemp` reserves each base name it returns, but a
+name that `temporary.name(suffix)` derives after removing that reservation is
+not reserved, so these names are not guaranteed collision-free.
 
 On Unix the ordinary workers are the targets of an ephemeral GNU Make
 3.81-compatible work graph with ASCII phony names, run with `-k` so every
