@@ -1,5 +1,6 @@
 local assert = require "luassert"
 local progress = require "titan-compiler.progress"
+local terminal = require "spec.support.terminal_screen"
 
 -- The reporter's writer, clock and terminal width are injected, so both
 -- renderers are exercised without a terminal.
@@ -507,10 +508,59 @@ describe("the live renderer", function()
         reporter:module_begin("app.one")
         reporter:up_to_date()
         local text = written()
-        assert.truthy(text:find("[0/2] 1 running | 1 up to date | 0:00", 1, true),
+        -- A restored module is a completed decision, so it advances the
+        -- footer's numerator as well as the up-to-date count.
+        assert.truthy(text:find("[1/2] 1 running | 1 up to date | 0:00", 1, true),
             text)
         -- No UTF-8 byte leaks into an ASCII region.
         assert.is_nil(text:find("\194\183", 1, true))
+    end)
+
+    it("counts restored modules in the footer's completed numerator", function()
+        local reporter, written = capture({
+            kind = progress.LIVE, locale = "C", width = 80,
+        })
+        reporter:plan(3)
+        reporter:up_to_date()
+        reporter:up_to_date()
+        reporter:module_begin("app.three")
+        reporter:module_done("app.three")
+        local text = written()
+        assert.truthy(text:find("[3/3] 0 running | 2 up to date | 0:00", 1, true),
+            text)
+
+        -- An all-hit build reaches the total without compiling anything.
+        local hits, hits_written = capture({
+            kind = progress.LIVE, locale = "C", width = 80,
+        })
+        hits:plan(2)
+        hits:up_to_date()
+        hits:up_to_date()
+        local hit_text = hits_written()
+        assert.truthy(hit_text:find("[2/2] 0 running | 2 up to date | 0:00", 1, true),
+            hit_text)
+    end)
+
+    it("terminates a write without a newline so the next step cannot erase it", function()
+        local clock = 0
+        local reporter, written = capture({
+            kind = progress.LIVE, locale = "en_US.UTF-8", width = 80,
+            now = function() return clock end,
+        })
+        reporter:module_begin("app.one")
+        reporter:link_begin("app.so")
+        -- A captured child log that does not end in a newline (both streams).
+        reporter:write("link denied out")
+        reporter:write("link denied err")
+        clock = 1.4
+        reporter:link_failed("app.so")
+        local screen = terminal.render(written())
+        assert.is_true(terminal.shows(screen, "link denied out"),
+            table.concat(screen, "\n"))
+        assert.is_true(terminal.shows(screen, "link denied err"),
+            table.concat(screen, "\n"))
+        assert.is_true(terminal.shows(screen, "failed"),
+            table.concat(screen, "\n"))
     end)
 
     it("writes a Unix live region through blocking stderr, never a libuv tty", function()

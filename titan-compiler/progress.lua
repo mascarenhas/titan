@@ -539,6 +539,9 @@ function Reporter:up_to_date()
     if self.kind == progress.NULL then return end
     self.events = self.events + 1
     self.up_to_date_count = self.up_to_date_count + 1
+    -- A restored module is a completed decision: it advances the footer's
+    -- numerator without adding to the compiled count or drawing a line.
+    self.completed = self.completed + 1
     if self.kind == progress.LIVE then self:redraw() end
 end
 

@@ -8860,7 +8860,9 @@ end
 
 -- Native batch helpers. This chunk is near Lua's 200-active-local limit, so
 -- the helpers are scoped to this block; only the scheduler entry point and
--- the launch/reap/replay table shared with provider links escape.
+-- the launch/reap/replay table shared with provider links escape. The replay
+-- owner routes captured bytes through the live reporter when one owns the
+-- terminal (G2-1).
 local run_prepared_compiles, compile_batch
 do
 
@@ -8973,6 +8975,24 @@ local function launch_prepared_compile(
     return process
 end
 
+-- Captured child logs are replayed into the coordinator's stderr. A live
+-- progress region owns that terminal, so the bytes go through its reporter:
+-- it erases the region first, terminates a chunk that does not end in a
+-- newline and redraws, so a following step event cannot erase the text. The
+-- historical stream path (quiet, plain, verbose and every non-CLI caller)
+-- keeps its write/flush success checks.
+local function replay_sink()
+    local reporter = driver.LIVE_PROGRESS
+    if not reporter then return io.stderr end
+    return {
+        write = function(_, text)
+            reporter:write(text)
+            return true
+        end,
+        flush = function() return true end,
+    }
+end
+
 local function protected_replay_compile_output(filename, stream)
     local called, ok, err = pcall(replay_compile_output, filename, stream)
     if not called then
@@ -8987,15 +9007,16 @@ local reap_prepared_compile_without_throw = jobs.reap
 local function finish_prepared_compile(process)
     if not process.reaped then jobs.reap(process) end
     local finish_errors = process.finish_errors
+    local sink = replay_sink()
 
     local stdout_ok, stdout_err = protected_replay_compile_output(
-        process.stdout_path, io.stderr)
+        process.stdout_path, sink)
     if not stdout_ok then
         finish_errors[#finish_errors + 1] =
             "stdout: " .. tostring(stdout_err)
     end
     local stderr_ok, stderr_err = protected_replay_compile_output(
-        process.stderr_path, io.stderr)
+        process.stderr_path, sink)
     if not stderr_ok then
         finish_errors[#finish_errors + 1] =
             "stderr: " .. tostring(stderr_err)

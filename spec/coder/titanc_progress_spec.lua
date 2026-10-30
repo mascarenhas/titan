@@ -3,6 +3,7 @@ local cdriver = require "c-parser.cdriver"
 local compiler_io = require "titan-compiler.io"
 local lfs = require "lfs"
 local platform = require "titan-compiler.platform"
+local terminal = require "spec.support.terminal_screen"
 
 local REPO = assert(lfs.currentdir())
 local PREFIX = require("spec.support.installed_prefix").active()
@@ -62,13 +63,31 @@ end
 
 -- One titanc invocation with separately captured streams. The child's stderr
 -- is a file, so a normal run selects the plain renderer deterministically.
-local function run(arguments, cwd)
+local function shell(command)
+    local pipe = assert(io.popen(command .. " 2>&1", "r"))
+    local output = assert(pipe:read("a"))
+    local ok = pipe:close()
+    return ok == true, output
+end
+
+local function has_script()
+    local ok = shell("command -v script")
+    return ok
+end
+
+-- One titanc invocation with separately captured streams. The child's stderr
+-- is a file, so a normal run selects the plain renderer deterministically.
+-- `environment` adds NAME=value assignments to the child.
+local function run(arguments, cwd, environment)
     -- A parent jobserver would cap the probe and C job bounds; these cases
     -- choose their own jobs per invocation.
     local words = { "env", "-u", "LUA_PATH", "-u", "LUA_CPATH", "-u",
         "LUA_PATH_5_5", "-u", "LUA_CPATH_5_5", "-u", "NO_COLOR",
         "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKELEVEL",
         "TITAN_PATH=", "TITAN_ROOT=" .. PREFIX }
+    for _, assignment in ipairs(environment or {}) do
+        words[#words + 1] = assignment
+    end
     for _, word in ipairs(arguments) do
         words[#words + 1] = quote(word)
     end
@@ -215,8 +234,18 @@ describe("titanc progress reporting", function()
     end)
 
     it("reports up-to-date modules and the link certificate hit", function()
+        -- This case owns its output tree: the measured rebuild is seeded by a
+        -- cold build here, so it never depends on another case having run.
+        local hit_output = root .. "/hit-out"
+        local seeded, _, seed_stderr = run(compiler({
+            "--tree", source, "--output", hit_output, "app.one", "app.two",
+        }), root)
+        assert.truthy(seeded, seed_stderr)
+        expect_line(seed_stderr,
+            "^Finished in .*: 2 compiled, linked app%.so$", "seed summary")
+
         local ok, stdout, stderr = run(compiler({
-            "--tree", source, "--output", output, "--incremental",
+            "--tree", source, "--output", hit_output, "--incremental",
             "app.one", "app.two",
         }), root)
         assert.truthy(ok, stderr)
@@ -325,6 +354,68 @@ describe("titanc progress reporting", function()
         assert.same({
             "parsing", "checking", "generating C", "compiling C", "done",
         }, phases)
+    end)
+
+    it("keeps a provider-pair link diagnostic visible in the live region", function()
+        if not has_script() then
+            pending("the live provider-pair case needs a POSIX `script`")
+            return
+        end
+        -- A wrapper compiler fails the shared provider link with a diagnostic
+        -- that does not end in a newline, on both captured streams.
+        local wrapper = root .. "/deny_link.sh"
+        write_file(wrapper, table.concat({
+            "#!/bin/sh",
+            'for argument in "$@"; do',
+            '    if [ "$argument" = "-shared" ]; then',
+            "        printf 'link denied out'",
+            "        printf 'link denied err' >&2",
+            "        exit 1",
+            "    fi",
+            "done",
+            'exec cc "$@"',
+            "",
+        }, "\n"))
+        assert.truthy(shell("chmod +x " .. quote(wrapper)))
+
+        local live_output = root .. "/live-link-out"
+        local words = {}
+        for _, word in ipairs(compiler({
+            "--tree", source, "--output", live_output, "app.one", "app.two",
+        })) do
+            words[#words + 1] = quote(word)
+        end
+        local launcher = root .. "/live_link.sh"
+        write_file(launcher, table.concat({
+            "#!/bin/sh",
+            "exec env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5" ..
+                " -u NO_COLOR -u MAKEFLAGS -u MFLAGS -u MAKELEVEL" ..
+                " CC=" .. quote(wrapper) .. " TITAN_PATH= TITAN_ROOT=" ..
+                quote(PREFIX) .. " " .. table.concat(words, " "),
+            "",
+        }, "\n"))
+        assert.truthy(shell("chmod +x " .. quote(launcher)))
+
+        local typescript = root .. "/live-link.typescript"
+        shell("script -qfec " .. quote(launcher) .. " " .. quote(typescript))
+        local screen = terminal.render(read_file(typescript) or "")
+        local rendered = table.concat(screen, "\n")
+        -- The captured stdout and stderr logs both survive the failure event,
+        -- which erases and redraws the region.
+        assert.is_true(terminal.shows(screen, "link denied out"), rendered)
+        assert.is_true(terminal.shows(screen, "link denied err"), rendered)
+        assert.is_true(terminal.shows(screen, "failed"), rendered)
+        assert.is_nil(lfs.attributes(live_output .. "/app.so"), rendered)
+
+        -- Quiet mode keeps the historical output for the same failure.
+        local quiet_ok, _, quiet_stderr = run(compiler({
+            "-q", "--tree", source, "--output", root .. "/live-link-quiet",
+            "app.one", "app.two",
+        }), root, { "CC=" .. wrapper })
+        assert.is_false(quiet_ok)
+        assert.truthy(quiet_stderr:find("link denied out", 1, true), quiet_stderr)
+        assert.truthy(quiet_stderr:find("link denied err", 1, true), quiet_stderr)
+        assert.is_nil(quiet_stderr:find("compiling C", 1, true), quiet_stderr)
     end)
 
     it("reports no step for an authored C source that fails before compiling", function()
