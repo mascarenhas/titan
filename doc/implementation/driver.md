@@ -2523,12 +2523,16 @@ unchanged.
 The Lua source bytes are identical across platforms and independent of `PREFIX`.
 The Windows implementation and DLL annotations are selected by the source's
 platform guards at compilation. `make lua` runs the fork's platform build and
-installation with `PREFIX`; the fork's installer
-copies the archive, public headers, and internal sources. Platform defaults
-(`linux-readline`, `macosx`) and the rule that preparation checks only the
-installed `$PREFIX/bin/lua` and `$PREFIX/bin/luarocks` programs, so callers
-must clean and replace them when rebuilding, are in [Build and installation
-responsibilities](build-script-audit.md). LuaRocks uses stock `configure`,
+installation with `PREFIX`; the fork's installer copies the archive, public
+headers, and internal sources. The fork's Unix targets compile that archive
+with `-fPIC`, because Titan links `liblua.a` into shared objects: the support
+module and, through the installed link set, every compiled DSO. Platform
+defaults (`linux-readline`, `macosx`), the Lua flag variables, and the rule
+that preparation checks only the installed `$PREFIX/bin/lua` and
+`$PREFIX/bin/luarocks` programs, so callers must clean and replace them when
+rebuilding, are in [Build and installation
+responsibilities](build-script-audit.md#lua-and-native-dependencies).
+LuaRocks uses stock `configure`,
 `make`, and `make install` with `--prefix`, `--rocks-tree`, `--with-lua`, and
 `--force-config`; it retains its ordinary generated configuration and
 wrappers. Pass custom native tools to later rock builds explicitly.
@@ -2549,7 +2553,8 @@ compiler passes its `driver.LUA_SOURCE_PATH` to Make, including a source tree
 selected with `titanc --lua`. When that source/header path physically matches
 the active installed Lua SDK's `src/lua-5.5.1`, `source_link_inputs` selects
 the matching `<prefix>/lib/liblua.a`. Other source trees retain their local
-`liblua.a`. Installed
+`liblua.a` (for a stock tree, see [A stock Lua
+tree](../language/installation.md#a-stock-lua-tree)). Installed
 compiler invocations still reject `--lua`. LuaRocks' `ROCK_LUA_INCDIR` remains
 the explicit public-header input for its native helper builds.
 

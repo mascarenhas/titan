@@ -105,9 +105,10 @@ into a canonical run.
 
 Lua's internal assertions are a diagnostic configuration. In a separate source
 copy and prefix, add `-DLUAI_ASSERT` to `LUA_MYCFLAGS` (keeping the profile's
-`-fPIC` and host flags, for example `-fPIC -O2 -fno-lto -DLUAI_ASSERT` under
-validation) and, to check Titan's own uses of Lua internals too, build the
-runtime, standard library, and tests with `TITAN_EXTRA_CPPFLAGS=-DLUAI_ASSERT`.
+host flags, for example `-O2 -fno-lto -DLUAI_ASSERT` under validation; the
+fork's Unix targets add `-fPIC` themselves) and, to check Titan's own uses of
+Lua internals too, build the runtime, standard library, and tests with
+`TITAN_EXTRA_CPPFLAGS=-DLUAI_ASSERT`.
 Lua's `api_check` then also becomes an assertion, so it reports any public Lua
 C API call that pushes past its frame's reserved stack top; generated and
 runtime code that writes the stack through Lua internals is not checked.
