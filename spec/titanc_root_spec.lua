@@ -32,6 +32,12 @@ local function query(arguments, support, root, root_error)
             getenv = function() return nil end,
             windows = false,
         },
+        -- No progress renderer in this sandbox: only the root query runs.
+        ["titan-compiler.progress"] = {
+            NULL = "null", PLAIN = "plain", LIVE = "live",
+            select = function() return "null" end,
+            locale = function() return nil end,
+        },
     }
     local function stream(output)
         return { write = function(_, ...)

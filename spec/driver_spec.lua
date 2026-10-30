@@ -3210,6 +3210,13 @@ describe("loader resolver ownership", function()
             },
             ["titan-compiler.test_runner"] = {},
             ["titan-compiler.util"] = {},
+            -- No progress renderer in these driver harnesses: the historical
+            -- quiet output is what each assertion below describes.
+            ["titan-compiler.progress"] = {
+                NULL = "null", PLAIN = "plain", LIVE = "live",
+                select = function() return "null" end,
+                locale = function() return nil end,
+            },
             -- titanc requires the native digests before creating its resolver.
             titan = { _sha256_binary = function() return string.rep("\0", 32) end,
                 _sha256_stream = function() error("fixture never streams", 0) end },
@@ -3410,6 +3417,13 @@ describe("loader resolver ownership", function()
                 },
                 ["titan-compiler.test_runner"] = {},
                 ["titan-compiler.util"] = util,
+                -- No progress renderer in these driver harnesses: the historical
+                -- quiet output is what each assertion below describes.
+                ["titan-compiler.progress"] = {
+                    NULL = "null", PLAIN = "plain", LIVE = "live",
+                    select = function() return "null" end,
+                    locale = function() return nil end,
+                },
                 titan = { _sha256_binary = function() return string.rep("\0", 32) end,
                     _sha256_stream = function() error("fixture never streams", 0) end },
             }
