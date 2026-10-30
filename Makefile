@@ -250,7 +250,7 @@ ifeq ($(TITAN_BUILD_PROFILE),production)
   endif
 endif
 CFLAGS    ?= --std=c99 $(TITAN_DEFAULT_OPTFLAGS) -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC $(TITAN_DEFAULT_DEBUGFLAGS)
-LUA_MYCFLAGS  ?= -fPIC $(TITAN_PROFILE_HOST_FLAGS)
+LUA_MYCFLAGS  ?= $(TITAN_PROFILE_HOST_FLAGS)
 LUA_MYLDFLAGS ?= $(TITAN_PROFILE_HOST_FLAGS)
 LUA_MYLIBS    ?=
 LIBBT_CFLAGS  ?= -fPIC -g $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(TITAN_VALIDATION_FLAGS),-O2)

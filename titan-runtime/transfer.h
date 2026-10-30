@@ -640,7 +640,7 @@ static inline int titan_codec_handoff_valid(TValue handoff) {
 /* The reusable object of a request, or nil. */
 static inline TValue titan_codec_kept(lua_State *L,
     const TitanCodecHandoff *request) {
-  TValue kept;
+  TValue kept = {0};
   setnilvalue(&kept);
   if (request->keep >= 0) {
     setobj(L, &kept, s2v(restorestack(L, request->keep)));
@@ -748,7 +748,7 @@ static inline void titan_codec_encode_root(lua_State *L, TValue resources,
     titan_protobuf_buffer *buf,
     const TitanTransferCodec *codec, TValue candidate) {
   TitanCodecState state;
-  TValue none;
+  TValue none = {0};
   setnilvalue(&none);
   ptrdiff_t encoder = titan_codec_encoder_slot(L, &none);
   titan_codec_state(&state, resources, context, none, handoff, none,
@@ -765,7 +765,7 @@ static inline void titan_codec_encode_field(lua_State *L, TValue resources,
     const TitanTransferCodec *codec, TValue candidate, lua_Integer number,
     lua_Integer depth) {
   TitanCodecState state;
-  TValue none;
+  TValue none = {0};
   setnilvalue(&none);
   ptrdiff_t slot = titan_codec_encoder_slot(L, &encoder);
   titan_codec_state(&state, resources, context, active, handoff, none, 0, buf,
@@ -1179,7 +1179,7 @@ static inline void titan_codec_decode_nominal(lua_State *L, TValue resources,
     const TitanTransferCodec *codec, TValue metatable, const void *data,
     size_t length, lua_Integer depth) {
   TitanCodecState state;
-  TValue none;
+  TValue none = {0};
   setnilvalue(&none);
   titan_codec_state(&state, resources, context, none, handoff, holder, 0, NULL,
       -1);

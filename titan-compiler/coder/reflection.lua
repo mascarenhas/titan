@@ -219,7 +219,10 @@ function coder._reflection_constructor(ctx, node, variant)
     }
     if variant then code[#code + 1] = coder._nominal_tag("_rec") .. " = " .. variant.index .. ";" end
     for index, field in ipairs(fields) do
-        code[#code + 1] = "{ TValue _source; titan_array_get(_fields, " .. index .. ", &_source);"
+        -- `titan_array_get` writes only the tag for a negative index, an
+        -- out-of-range index, or an empty slot, and the field conversion may
+        -- copy the value whole.
+        code[#code + 1] = "{ TValue _source = {0}; titan_array_get(_fields, " .. index .. ", &_source);"
         code[#code + 1] = coder._reflection_store(ctx, node.loc, plan, field, "_rec", "&_source")
         code[#code + 1] = "}"
     end

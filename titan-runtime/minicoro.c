@@ -34,7 +34,7 @@ static void titan_coroutine_abort(const char *why) {
 static void titan_coroutine_push_final(lua_State *T, mco_coro *co,
                                        const TValue *payload, int ok) {
   Udata *owner = (Udata *)mco_get_user_data(co);
-  TValue value;
+  TValue value = {0};
   if (payload != NULL) {
     setobj(T, &value, payload);
   } else {

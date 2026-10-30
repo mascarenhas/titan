@@ -71,8 +71,10 @@ classify compiler-only and stdlib-dependent integration files together,
 rejecting missing, stale, or overlapping entries; see [Busted
 partitions](test-runner.md#busted-partitions). Each worker owns a checkout
 extraction, `TMPDIR`, and LuaCov stats, and shares the compiler prefix
-read-only. A runner first runs the ordinary files of its two shards
-concurrently, then each shard's exclusive files (`EXCLUSIVE_SPECS`, which count
+read-only. Workers also share the host's `/tmp` temporary-file namespace,
+because Lua's POSIX `os.tmpname()` ignores `TMPDIR` (same section). A runner
+first runs the ordinary files of its two shards concurrently, then each
+shard's exclusive files (`EXCLUSIVE_SPECS`, which count
 real overlapping compiler processes or drive real Make jobservers) alone, one
 shard after the other and without the nested `MAKEFLAGS=-j1`/`TITAN_JOBS=1`
 caps; LuaCov stats accumulate in the owning shard's extraction across both
@@ -112,8 +114,9 @@ The exclusive files then run alone without those caps, and both workers' stats
 merge into the workspace's `luacov.stats.out`. `plan_ci_stdlib` in
 `compiler_test_groups.lua` balances the ordinary files by LPT over the stdlib
 rows' covered seconds, from a same-host serial four-CPU diagnostic run of this
-step's files. Workers share
-the installed prefix, which these specs read. Their stats name compiler
+step's files. Like compiler shard workers, these workers share the installed
+prefix, which these specs read, and the host's `/tmp` temporary-file
+namespace. Their stats name compiler
 sources by prefix or checkout-relative paths, so the workspace report resolves
 them after the extractions are removed. Compiler integrations that
 import standard-library modules consume the installed provider rather than

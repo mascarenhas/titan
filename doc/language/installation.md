@@ -31,7 +31,7 @@ export PREFIX="$HOME/.local/titan/my-project"
 curl -fL -o lua-titan.tar.gz https://github.com/mascarenhas/lua-5.5.1/archive/refs/tags/v5.5.1-1.tar.gz
 tar zxf lua-titan.tar.gz
 (cd lua-5.5.1-5.5.1-1 &&
-  make linux-readline MYCFLAGS=-fPIC PREFIX="$PREFIX" &&
+  make linux-readline PREFIX="$PREFIX" &&
   make install PREFIX="$PREFIX")
 
 # 2. Stock LuaRocks
@@ -51,8 +51,9 @@ These are the commands that `make lua` and `make luarocks` run in a Titan checko
 
 1. **The Lua build.** The fork's `v5.5.1-1` release offers GitHub's automatic source
    archives, so the command downloads the `tar.gz` for the tag. It unpacks into
-   `lua-5.5.1-5.5.1-1/`. The build compiles the fork with `-fPIC` and installs
-   Lua under `PREFIX`, including its `.c` and `.h` sources in
+   `lua-5.5.1-5.5.1-1/`. The fork compiles with `-fPIC` by default, so the command
+   passes no compiler flags (see [Why a Lua fork](#why-a-lua-fork-and-what-stock-luarocks-means-here)).
+   The build installs Lua under `PREFIX`, including its `.c` and `.h` sources in
    `$PREFIX/src/lua-5.5.1/`. `make install` fails unless `PREFIX` is set.
 2. **The LuaRocks build** installs LuaRocks under `PREFIX`, configured to use that
    Lua and to use `PREFIX` as its rocks tree.
@@ -89,6 +90,10 @@ stock executable-directory expansion and DLL loading. These paths do not change 
 the operating system looks up dependent libraries. Lua's paths do not name Titan's
 library directory: Titan finds compiled modules itself (see
 [How Titan finds its installation](#how-titan-finds-its-installation)).
+
+The fork's build also differs in one flag. Its Linux, macOS, and BSD targets compile
+with `-fPIC`, even when you set `MYCFLAGS`, because Titan links `liblua.a` into shared
+objects. Stock Lua leaves the flag to you ([A stock Lua tree](#a-stock-lua-tree)).
 
 LuaRocks is not modified. Its `configure` options above set both `--prefix` and
 `--rocks-tree` to `PREFIX` and point `--with-lua` at the same prefix. LuaRocks's
@@ -228,9 +233,12 @@ luarocks make
 - `make lua` builds the fork and installs it under `PREFIX`. It picks Lua's
   `linux-readline` target on Linux, `macosx` on macOS, and `linux` elsewhere.
   Override that with `LUA_PLATFORM`. It passes `MYCFLAGS`, `MYLDFLAGS`, and `MYLIBS`
-  from `LUA_MYCFLAGS` (default `-fPIC`), `LUA_MYLDFLAGS`, and `LUA_MYLIBS`, and
-  selects the tools with `LUA_CC`, `LUA_AR`, and `LUA_RANLIB` (defaulting to `CC`,
-  `AR rcu`, and `RANLIB`).
+  from `LUA_MYCFLAGS`, `LUA_MYLDFLAGS`, and `LUA_MYLIBS`, and selects the tools with
+  `LUA_CC`, `LUA_AR`, and `LUA_RANLIB` (defaulting to `CC`, `AR rcu`, and `RANLIB`).
+  `LUA_MYCFLAGS` and `LUA_MYLDFLAGS` default to the build profile's Lua flags: none
+  for `production`, and `-O2 -fno-lto` for `validation` (see
+  [Native build profiles](build-profiles.md)). The fork adds `-fPIC` on its own, so
+  setting `LUA_MYCFLAGS` does not drop it.
 - `make luarocks` downloads LuaRocks 3.13.0 and runs the same stock `configure`,
   `make`, and `make install` shown above. It runs `make lua` first.
 - `luarocks make` builds and installs the rockspec in the current directory
@@ -280,13 +288,12 @@ CA-file selection and the verification contract.
 ### Readline on macOS
 
 Lua's `macosx` target needs Readline. Homebrew's Readline is keg-only, so give Lua its
-paths. `MYCFLAGS=-fPIC` in the default commands is required, so keep `-fPIC` when you
-add the include path:
+paths. The fork adds `-fPIC` on its own, so `MYCFLAGS` carries only the include path:
 
 ```sh
 (cd lua-5.5.1-5.5.1-1 &&
   make macosx PREFIX="$PREFIX" \
-    MYCFLAGS="-fPIC -I$(brew --prefix readline)/include" \
+    MYCFLAGS="-I$(brew --prefix readline)/include" \
     MYLDFLAGS="-L$(brew --prefix readline)/lib" &&
   make install PREFIX="$PREFIX")
 ```
@@ -299,6 +306,22 @@ In a checkout, pass the same values to `make lua` as `LUA_MYCFLAGS` and
 To leave Readline out on Linux, build Lua's plain `linux` target: use `linux` instead
 of `linux-readline` in the default commands, or pass `LUA_PLATFORM=linux` to
 `make lua` in a checkout.
+
+### A stock Lua tree
+
+Titan links `liblua.a` into the shared objects it builds, so that archive must be
+position-independent. Titan's fork compiles it with `-fPIC` by default; stock Lua does
+not. A **stock** Lua 5.5.1 tree whose `liblua.a` Titan links must therefore be built
+with `MYCFLAGS=-fPIC`, for example (use `macosx` on macOS):
+
+```sh
+(cd lua-5.5.1 && make linux-readline MYCFLAGS=-fPIC)
+```
+
+Today that is a tree you pass to a checkout compiler with
+[`titanc --lua`](#how-titan-finds-its-installation). On Linux, an archive built
+without the flag makes the link fail with a relocation error that asks you to
+recompile with `-fPIC`. No build of the fork needs the flag.
 
 ### Your own compiler and flags
 
@@ -535,8 +558,9 @@ Overrides:
 - `--lua <path>` selects another complete Lua source and build tree for one compiler
   run. It works only in a source checkout. If the path matches the installed Lua SDK's
   `src/lua-5.5.1/`, linking uses the SDK's `lib/liblua.a`; otherwise it uses that tree's
-  own `liblua.a`. An installed compiler rejects `--lua`, because its headers,
-  `lib/liblua.a`, and `lib/titan/0.6/libtitan.a` are one matched SDK.
+  own `liblua.a` (for a stock Lua tree, see [A stock Lua tree](#a-stock-lua-tree)). An
+  installed compiler rejects `--lua`, because its headers, `lib/liblua.a`, and
+  `lib/titan/0.6/libtitan.a` are one matched SDK.
 
 A normal prefix install needs none of these overrides.
 

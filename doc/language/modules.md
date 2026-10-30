@@ -497,9 +497,10 @@ fallback](#the-titan-path).
   keep generated files together. See [Output directories](output-directory.md).
 * `--lua <luasrc>` points a source-checkout compiler at a complete Lua
   source/build tree. Checkout developer mode otherwise uses
-  `lua-5.5.1/src`. An installed compiler rejects this override and always
-  uses its matched `<root>/src/lua-5.5.1` headers,
-  `<root>/lib/liblua.a`, and `<root>/lib/titan/0.6/libtitan.a`.
+  `lua-5.5.1/src`. For a stock Lua tree, see
+  [A stock Lua tree](installation.md#a-stock-lua-tree). An installed compiler
+  rejects this override and always uses its matched `<root>/src/lua-5.5.1`
+  headers, `<root>/lib/liblua.a`, and `<root>/lib/titan/0.6/libtitan.a`.
 * `-l/--link`, `-L/--library-dir`, and `--ldflag` add native libraries,
   library directories, and single link arguments to final links, in
   command-line order. `-I/--include-dir`, `-D/--define`, and `--cflag` add
@@ -1007,8 +1008,10 @@ modules. See the [Windows user guide](windows-build.md#the-lua-dll-and-c-helpers
 
 Compiled Titan modules support the stock Lua loader; provider loading does
 not require patched `dlopen` flags. Titan's own Lua build separately patches
-`loadlib.c` to resolve module paths from the running executable, and compiles
-the Lua sources with `-fPIC`. Each DSO and executable links the matched `liblua.a`;
+`loadlib.c` to resolve module paths from the running executable, and its Unix
+targets compile the Lua sources with `-fPIC` by default (for a stock Lua tree
+that Titan links, see [A stock Lua tree](installation.md#a-stock-lua-tree)).
+Each DSO and executable links the matched `liblua.a`;
 a produced static provider deliberately omits that common final input, so its
 consumer supplies the matching Lua archive once. Several logical modules in
 one final native image share that Lua instance.

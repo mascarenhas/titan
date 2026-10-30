@@ -115,7 +115,7 @@ jobs:
         run: |
           readline_prefix="$(brew --prefix readline)"
           make lua LUA_PLATFORM=macosx \
-            LUA_MYCFLAGS="-fPIC -O2 -fno-lto -I$readline_prefix/include" \
+            LUA_MYCFLAGS="-O2 -fno-lto -I$readline_prefix/include" \
             LUA_MYLDFLAGS="-O2 -fno-lto -L$readline_prefix/lib"
 
       # Every generated module and executable links the separate

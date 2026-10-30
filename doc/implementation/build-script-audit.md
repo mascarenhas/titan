@@ -33,6 +33,19 @@ providers, is `ROCKS_TREE` when that is set and `PREFIX` otherwise in the Unix
 `Makefile`; `Makefile.win` always uses `PREFIX`. `make lua` passes only
 `PREFIX` (and the toolchain settings) to the Lua fork's build and install.
 
+The toolchain settings are `LUA_CC`, `LUA_AR`, and `LUA_RANLIB`, and
+`LUA_MYCFLAGS`, `LUA_MYLDFLAGS`, and `LUA_MYLIBS` as the fork's `MYCFLAGS`,
+`MYLDFLAGS`, and `MYLIBS`. `LUA_MYCFLAGS` and `LUA_MYLDFLAGS` default to
+`TITAN_PROFILE_HOST_FLAGS` (`-O2 -fno-lto` under validation, empty under
+production). Neither default carries `-fPIC`. Titan links `liblua.a` into the
+support module and every compiled DSO. The fork's `linux`, `linux-readline`,
+`macosx`, `bsd`, and `freebsd` targets therefore put `-fPIC` in `SYSCFLAGS`,
+separate from the caller-owned `MYCFLAGS`, so setting `MYCFLAGS`
+does not drop it. The fork's `mingw` target is unchanged; `Makefile.win` builds
+its own Lua DLL. A stock Lua tree that a checkout compiler links through
+`--lua` has no such default
+([A stock Lua tree](../language/installation.md#a-stock-lua-tree)).
+
 Ordinary native archives use source/header prerequisites and `ar`/`ranlib`.
 Failed output recipes remove unfinished artifacts before an ordinary retry.
 CMake owns libuv incrementality; upstream configure/make owns libbacktrace and

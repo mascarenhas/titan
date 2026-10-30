@@ -73,7 +73,7 @@ export PREFIX="$HOME/.local/titan/my-project"
 curl -fL -o lua-titan.tar.gz https://github.com/mascarenhas/lua-5.5.1/archive/refs/tags/v5.5.1-1.tar.gz
 tar zxf lua-titan.tar.gz
 (cd lua-5.5.1-5.5.1-1 &&
-  make linux-readline MYCFLAGS=-fPIC PREFIX="$PREFIX" &&
+  make linux-readline PREFIX="$PREFIX" &&
   make install PREFIX="$PREFIX")
 
 curl -fLO https://luarocks.github.io/luarocks/releases/luarocks-3.13.0.tar.gz

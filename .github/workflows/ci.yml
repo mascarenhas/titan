@@ -215,9 +215,11 @@ jobs:
       # Each worker gets a private copy of the prepared checkout, so legacy
       # compiler cleanup and checkout-root fixture names cannot race. Each
       # shard first runs ordinary compiler tests with LuaCov and then its
-      # explicitly tagged stress oracles without LuaCov. They share only the
-      # prepared installed prefix. Each runner executes two shards concurrently
-      # and publishes their merged stats only after both pass.
+      # explicitly tagged stress oracles without LuaCov. They share the
+      # prepared installed prefix and the host's /tmp temporary-file namespace
+      # (Lua's POSIX os.tmpname() ignores the per-worker TMPDIR). Each runner
+      # executes two shards concurrently and publishes their merged stats only
+      # after both pass.
       - name: Run two isolated compiler shards with covered and stress invocations
         env:
           TITAN_EXTRA_CFLAGS: "-O0 -fno-lto"
@@ -442,8 +444,9 @@ jobs:
 
       # Two workers run the integrations concurrently, each in a private
       # extraction of the prepared tree with half of the job's -j4, sharing
-      # this installed prefix; the exclusive files then run alone. Their
-      # LuaCov stats merge into one report.
+      # this installed prefix and the host's /tmp temporary-file namespace;
+      # the exclusive files then run alone. Their LuaCov stats merge into one
+      # report.
       - name: Run compiler integrations that require the installed stdlib
         env:
           TITAN_EXTRA_CFLAGS: "-O0 -fno-lto"
@@ -595,7 +598,7 @@ jobs:
       SANITIZER_FLAGS: "-O0 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       # Keep instrumentation in the job environment so recursive Make and
       # LuaRocks builds receive the same sanitizer flags throughout the job.
-      LUA_MYCFLAGS: "-fPIC -O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      LUA_MYCFLAGS: "-O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LUA_MYLDFLAGS: "-O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LUA_MYLIBS: "-O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       COMPILER_DEPS_CFLAGS: "-O1 -fno-lto -fPIC -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
