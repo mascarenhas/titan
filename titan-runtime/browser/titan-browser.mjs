@@ -112,8 +112,10 @@ export function create(factory, {stdout, stderr, locateFile} = {}) {
     if (settled || !active) return;
     // Fatal Wasm is not a cleanup entrypoint. An intact admitted continuation
     // must instead reach completion and leave every compiled frame first.
-    if (!fatal && called &&
-        (!completion || bridge?.suspensionPending || !bridge?.safe())) return;
+    if (!fatal) {
+      if (!called && !terminal) return;
+      if (called && (!completion || bridge?.suspensionPending || !bridge?.safe())) return;
+    }
     try {
       freeArguments();
     } catch (cause) {
