@@ -8,6 +8,7 @@ local fixtures = require "spec.support.browser_fixtures"
 local gate = require "spec.support.browser_toolchain"
 local platform = require "titan-compiler.platform"
 local cprobe_cache = require "titan-compiler.cprobe_cache"
+local cprobe = require "titan-compiler.cprobe"
 local incremental = require "titan-compiler.incremental"
 local types = require "titan-compiler.types"
 local FAKE_ROOT = platform.windows and "C:/fake" or "/fake"
@@ -34,10 +35,12 @@ local function fake_context(options)
     if options.missing_record then files[paths.lua_record] = nil end
     if options.missing_archive then files[paths.liblua] = nil end
     local calls, serial = {}, 0
+    local directories = { [paths.lua_source] = true }
     local strategy = setmetatable({}, { __index = compiler_io.new_sync() })
     function strategy:cwd() return FAKE_ROOT end
     function strategy:realpath(filename) return filename end
     function strategy:stat(filename)
+        if directories[filename] then return { kind = "directory", size = 0, mode = 0x41ed } end
         local bytes = files[filename]
         if bytes then return { kind = "file", size = #bytes, mode = 0x81ed,
             modified_seconds = 1, changed_seconds = 1, device = 1, inode = 1 } end
@@ -48,13 +51,13 @@ local function fake_context(options)
     function strategy:executable(filename) return files[filename] ~= nil end
     function strategy:read_file(filename) return files[filename], files[filename] == nil and "not found" or nil end
     function strategy:list(filename)
-        if filename ~= paths.lua_source then return nil, "not a directory" end
+        if filename ~= paths.lua_source then return {} end
         return { "luaconf.h", "lua.h", "not-a-header.txt" }
     end
     function strategy:write_file(filename, bytes) files[filename] = bytes; return true end
     function strategy:unlink(filename) files[filename] = nil; return true end
-    function strategy:mkdir() return true end
-    function strategy:rmdir() return true end
+    function strategy:mkdir(filename) directories[filename] = true; return true end
+    function strategy:rmdir(filename) directories[filename] = nil; return true end
     function strategy:tmpname() serial = serial + 1; return FAKE_ROOT .. "/probe-" .. serial end
     function strategy:run(argv)
         calls[#calls + 1] = { table.unpack(argv) }
@@ -317,7 +320,8 @@ describe("browser target descriptor", function()
         local location, key = service:_cache_location("int same_raw_probe;")
         assert.equal(descriptor.probe_cache_directory .. "/" .. key .. ".result", location)
         assert.not_equal(native_cache .. "/" .. key .. ".result", location)
-        assert.same({ inputs.paths.lua_source, inputs.paths.include }, service.include_dirs)
+        assert.same({ inputs.paths.lua_source, inputs.paths.include },
+            service:cdriver_process_options().compiler_include_dirs)
         assert(subject.close_resolver_context(context))
     end)
 
@@ -354,6 +358,31 @@ describe("browser target descriptor", function()
         wire.resolver.target = "linux"
         local rejected, err = subject.new_worker_context(wire, guarded)
         assert.is_nil(rejected); assert.equal("incompatible build worker configuration", err)
+    end)
+    it("never reuses an identical native probe source from the browser cache directory", function()
+        local context, _, calls, contents = fake_context()
+        local source = "int identical_raw_probe_source;"
+        local native_path = FAKE_ROOT .. "/probes/" .. cprobe_cache.VERSION
+        local browser_path = FAKE_ROOT .. "/probes/browser-6.0.13/" .. cprobe_cache.VERSION
+        local function service(directory)
+            return assert(cprobe.new_service({ io = context.io, profile = fixtures.profile(),
+                toolchain = { compiler_argv = { "fake-compiler" }, compile_flags = {},
+                    include_dirs = {}, profile = fixtures.profile() }, cache_directory = directory }))
+        end
+        local native = service(native_path)
+        local first = native:_run_source("baseline", source)
+        assert.equal("success", first.classification, first.diagnostic)
+        local before = #calls
+        local browser_service = service(browser_path)
+        local second = browser_service:_run_source("baseline", source)
+        assert.equal("success", second.classification, second.diagnostic)
+        assert.equal(before + 1, #calls)
+        browser_service:_run_source("baseline", source)
+        assert.equal(before + 1, #calls)
+        local key = browser_service:_digest(source)
+        assert.is_string(contents[native_path .. "/" .. key .. ".result"])
+        assert.is_string(contents[browser_path .. "/" .. key .. ".result"])
+        assert(native:close()); assert(browser_service:close())
     end)
 end)
 

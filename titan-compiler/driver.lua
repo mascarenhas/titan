@@ -8703,6 +8703,12 @@ local function prepare_compile(
         return nil, "split_threshold requires a nonnegative integer"
     end
     local context = options and options.context
+    if context and context.target == "browser" then
+        driver.assert_target_context(context)
+        local supported, flag_error = driver._browser_target.validate_flags(
+            options.extra_compile_flags, "--cflag")
+        if not supported then return nil, flag_error end
+    end
     if not (context and context.target == "browser") then
         local runtime_ok, runtime_err = perf.check_runtime(verbose)
         if not runtime_ok then return nil, runtime_err end

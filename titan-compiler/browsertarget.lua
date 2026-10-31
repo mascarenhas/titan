@@ -5,6 +5,7 @@ local csemantics = require "titan-compiler.csemantics"
 local incremental = require "titan-compiler.incremental"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local sha256 = require "titan-compiler.sha256"
+local util = require "titan-compiler.util"
 local M = {}
 
 M.EMSCRIPTEN_VERSION = "6.0.13"
@@ -210,7 +211,8 @@ local function tools(context)
                 string.format("%q", cc) .. " (EMSDK=" .. string.format("%q", emsdk) .. ")" .. INSTALL
         end
     else
-        for directory in ((platform.getenv("PATH") or "") .. ":"):gmatch("(.-):") do
+        local separator = platform.windows and ";" or ":"
+        for directory in ((platform.getenv("PATH") or "") .. separator):gmatch("(.-)" .. separator) do
             local candidate, err = absolute(strategy,
                 compiler_paths.join(directory == "" and "." or directory, "emcc"))
             if not candidate then return nil, err end
@@ -285,7 +287,7 @@ local function parse_record(bytes, paths)
     if not defines then return nil, record_error(paths, "is malformed", "invalid field \"lua_defines\": " .. split_error) end
     local previous
     for _, flag in ipairs(defines) do
-        if not flag:match("^%-D[A-Za-z_][A-Za-z0-9_]*") or previous and previous >= flag then
+        if not flag:match("^%-D[A-Za-z_][A-Za-z0-9_]*") or previous and not util.bytewise_less(previous, flag) then
             return nil, record_error(paths, "is malformed", "invalid field \"lua_defines\": expected sorted unique -D tokens")
         end
         previous = flag
@@ -305,7 +307,7 @@ local function parse_record(bytes, paths)
             flag == "-s" and (flags[index + 1] or ""):match("^SUPPORT_LONGJMP=(.*)$")
         if mode then longjmp = mode end
     end
-    table.sort(flag_defines)
+    table.sort(flag_defines, util.bytewise_less)
     if table.concat(flag_defines, " ") ~= record.lua_defines then
         return nil, mismatch(paths, record, "lua_defines", table.concat(flag_defines, " "))
     end
@@ -322,7 +324,7 @@ local function header_digest(context, paths)
     if not names then return nil, err end
     local headers = {}
     for _, name in ipairs(names) do if name:match("^[^/\\]+[.]h$") then headers[#headers + 1] = name end end
-    table.sort(headers)
+    table.sort(headers, util.bytewise_less)
     if #headers == 0 then return nil, "no installed Lua headers" end
     local lines = {}
     for _, name in ipairs(headers) do
@@ -393,7 +395,7 @@ function M.build(context, inputs)
         local provisional = { io = context.io, compiler_argv = tool.cc, compile_flags = flags,
             language_mode = "c99", language_flag = false, cppflags = {}, cflags = {}, include_dirs = includes }
         local profile_inputs, profile_error = cdriver.target_profile_inputs({ io = context.io,
-            cache_adapter = context.cache_adapter, toolchain = provisional, language_flag = false,
+            cache_adapter = context.cache_adapter, compiler = tool.cc, language_flag = false,
             compiler_include_dirs = includes, compile_flags = flags, language_mode = "c99" })
         if not profile_inputs then return nil, profile_error end
         local profile

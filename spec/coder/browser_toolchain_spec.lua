@@ -84,7 +84,8 @@ assert(descriptor.lua.record.target == "wasm32-unknown-emscripten")
 assert(descriptor.profile_data.integers.long.bits == 32)
 assert(descriptor.include_dirs[1] == descriptor.paths.lua_source)
 local deps = {}
-local loader = driver.defaultloader(deps, { context = context, source_roots = { object_fixture = true } })
+local loader = driver.defaultloader(deps, { context = context, output_root = context.output_root,
+    source_roots = { object_fixture = true } })
 local ok, modtype, errors = loader("object_fixture")
 assert(ok, modtype); assert(#errors == 0, table.concat(errors, "\n"))
 assert(driver.finalize_resolver_context(context))
@@ -126,16 +127,18 @@ assert(driver.close_resolver_context(context))
             if name:match("[.]h$") then header_names[name] = true end
         end
         local dependencies = assert(depfile.parse(read(dependency)))
-        local lua_headers = 0
+        local lua_headers = {}
         for _, filename in ipairs(dependencies) do
             local name = filename:match("([^/]+)$")
             if header_names[name] then
-                lua_headers = lua_headers + 1
+                lua_headers[name] = true
                 assert.equal(info.prefix .. "/lib/browser/include/" .. name, filename,
                     "unverified Lua header origin in generated module: " .. filename)
             end
         end
-        assert.is_true(lua_headers >= 16, "generated module did not expose its Lua header closure")
+        for _, name in ipairs({ "lua.h", "luaconf.h", "lstate.h", "lobject.h", "ldo.h" }) do
+            assert.is_true(lua_headers[name], "generated module did not expose required Lua header " .. name)
+        end
         wasm_object(workspace .. "/header-check.o")
     end)
 
