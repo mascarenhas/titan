@@ -13233,6 +13233,32 @@ describe("target-aware source resolver", function()
         assert.equal(root .. "/foo.part1.o", driver.part_object_filename(source, 1))
     end)
 
+    it("raises source-name diagnostics through public compiler filename APIs", function()
+        local ctx = context("native")
+        local apis = {
+            driver.module_output_stem,
+            driver.foreign_header_filename,
+            driver.ffi_header_filename,
+            driver.private_header_filename,
+            function(filename) return driver.part_c_filename(filename, 1) end,
+            function(filename) return driver.part_object_filename(filename, 1) end,
+            function(filename) return driver.plan_foreign_header("filename_error", {}, filename) end,
+            function(filename) return driver.prepare_source_ffi_header(ctx, "filename_error", {}, filename) end,
+            function(filename) return ffiheaders.prepare(ctx, "filename_error", {}, filename) end,
+            function(filename) return driver.compile("filename_error", {}, filename, {}, false) end,
+        }
+        for _, case in ipairs({
+            { "x.linux.native.titan", "stacked target labels" },
+            { "x.Linux.titan", "mis-cased target label" },
+        }) do
+            for _, api in ipairs(apis) do
+                local ok, diagnostic = pcall(api, root .. "/" .. case[1])
+                assert.is_false(ok)
+                assert.equal(case[2] .. " in source '" .. case[1] .. "'", diagnostic)
+            end
+        end
+    end)
+
     it("compiles variant mains into logical split objects and private headers", function()
         put("parts.native.titan", [[
 foreign function target_parts_increment(n: int): int return n + 1 end

@@ -41,7 +41,7 @@ function selection.output_stem(native_output, modname)
     native_output = native_output or modname:gsub("[.]", "/") .. ".titan"
     local basename = path.basename(native_output)
     local logical, _, err = selection.classify(basename)
-    assert(not err, err)
+    if err then error(err, 0) end
     if logical then
         native_output = native_output:sub(1, #native_output - #basename) .. logical
     end
