@@ -30,6 +30,7 @@ local source_selection = require "titan-compiler.source_selection"
 local lfs = require "lfs"
 
 local driver = {}
+driver._browser_target = require "titan-compiler.browsertarget"
 
 driver.imported = {}
 
@@ -300,9 +301,20 @@ local function append_path(directory, suffix)
     return directory .. "/" .. suffix
 end
 
-function driver.installed_paths(root)
+function driver.installed_paths(root, target)
     root = normalize_root(root)
     if not root then return nil end
+    if target == "browser" then
+        local titan_lib = root_join(root, "lib/titan-browser/" .. driver.TITAN_LIBRARY_VERSION)
+        return {
+            root = root, lua_source = root_join(root, "lib/browser/include"),
+            include = root_join(root, "include"), lib = root_join(root, "lib/browser"),
+            liblua = root_join(root, "lib/browser/liblua.a"),
+            lua_record = root_join(root, "lib/browser/liblua-config.txt"),
+            libtitan = root_join(titan_lib, "libtitan.a"), titan_bin = titan_lib,
+            sdk_digests = root_join(titan_lib, incremental.SDK_DIGESTS),
+        }
+    end
     local titan_lib = root_join(
         root, "lib/titan/" .. driver.TITAN_LIBRARY_VERSION)
     return {
@@ -509,6 +521,7 @@ function driver.initialize_layout(context)
         error("compiler layout initialization requires a resolver context", 2)
     end
     compiler_io.validate(context.io, 2)
+    driver.assert_target_context(context)
     if context._layout_initialized then return true end
 
     local installation_root
@@ -646,6 +659,75 @@ local function select_platform_defaults(uname, is_darwin, compiler_family)
     driver.IS_DARWIN = is_darwin
 end
 
+-- Browser state is context-owned. Native process globals remain a host profile.
+function driver._finish_target_initialization(context)
+    if context.target == "browser" then
+        if context.host_target ~= "linux" and context.host_target ~= "darwin" then
+            return nil, "browser builds are supported from Linux and macOS hosts (host is " ..
+                tostring(context.host_target) .. ")"
+        end
+        if not context.target_descriptor then
+            for _, item in ipairs({
+                { driver.EXTRA_CPPFLAGS, "TITAN_EXTRA_CPPFLAGS" },
+                { driver.EXTRA_CFLAGS, "TITAN_EXTRA_CFLAGS" },
+                { driver.EXTRA_LDFLAGS, "TITAN_EXTRA_LDFLAGS" },
+                { driver.NATIVE_COMPILE_FLAGS, "--cflag" },
+                { driver.NATIVE_LINK_FLAGS, "--ldflag" },
+            }) do
+                local valid, err = driver._browser_target.validate_flags(item[1], item[2])
+                if not valid then return nil, err end
+            end
+            local paths = driver.installed_paths(driver.TITAN_ROOT, "browser")
+            if not paths then
+                return nil, "cannot locate the Titan installation root; set TITAN_ROOT to the installation prefix"
+            end
+            local cache_root, cache_error = normalize_root(probe_prefix or driver.TITAN_ROOT, context.io)
+            if not cache_root then return nil, cache_error end
+            local runtime_include = driver.SOURCE_CHECKOUT_ROOT and
+                root_join(driver.SOURCE_CHECKOUT_ROOT, "titan-runtime") or paths.include
+            local extras = driver.NATIVE_COMPILE_FLAGS
+            if not extras then
+                extras = {}
+                for _, flag in ipairs(driver.EXTRA_CPPFLAGS or {}) do extras[#extras + 1] = flag end
+                for _, flag in ipairs(driver.EXTRA_CFLAGS or {}) do extras[#extras + 1] = flag end
+            end
+            local descriptor, err = driver._browser_target.build(context, {
+                paths = paths, runtime_include = runtime_include, compile_flags = extras,
+                build_profile = driver.BUILD_PROFILE,
+                probe_cache_directory = not probe_cache_disabled and root_join(cache_root,
+                    "var/cache/titan-probes/browser-6.0.13/" .. cprobe_cache.VERSION) or nil,
+            })
+            if not descriptor then return nil, err end
+            context.target_descriptor = descriptor
+        end
+        if not context.target_profile then
+            local profile, err = csemantics.import_profile(
+                driver._browser_target.export(context.target_descriptor.profile_data))
+            if not profile then return nil, err end
+            context.target_profile = profile
+        end
+    end
+    driver.activate_target_caches(context,
+        context.target_descriptor and context.target_descriptor.identity or context.target)
+    return true
+end
+
+function driver.context_target_descriptor(context)
+    if context == nil then return nil end
+    driver.assert_target_context(context)
+    if context.target ~= "browser" then return nil end
+    local ok, err = driver.initialize_platform(context)
+    if not ok then return nil, err end
+    return context.target_descriptor
+end
+
+function driver.context_target_identity(context)
+    local descriptor, err = driver.context_target_descriptor(context)
+    if err then return nil, err end
+    if descriptor then return descriptor.identity end
+    return driver.context_target(context)
+end
+
 local function initialize_source_target(context)
     context.host_target = context.uname == "Windows" and "windows" or
         context.uname == "Linux" and "linux" or
@@ -659,9 +741,12 @@ function driver.initialize_platform(context)
         error("platform initialization requires a resolver context", 2)
     end
     compiler_io.validate(context.io, 2)
+    driver.assert_target_context(context)
     if context._platform_initialized then
         initialize_source_target(context)
-        select_platform_defaults(context.uname, context.is_darwin)
+        if context.target ~= "browser" then select_platform_defaults(context.uname, context.is_darwin) end
+        local ready, err = driver._finish_target_initialization(context)
+        if not ready then return nil, err end
         return true, context.uname, context.is_darwin
     end
 
@@ -670,7 +755,9 @@ function driver.initialize_platform(context)
         context.is_darwin = false
         context._platform_initialized = true
         initialize_source_target(context)
-        select_platform_defaults(context.uname, false)
+        if context.target ~= "browser" then select_platform_defaults(context.uname, false) end
+        local ready, err = driver._finish_target_initialization(context)
+        if not ready then return nil, err end
         return true, context.uname, false
     end
 
@@ -696,7 +783,9 @@ function driver.initialize_platform(context)
     -- Retain the historical process-visible fields for build/publication APIs.
     -- The subprocess which populates them now belongs to an explicit resolver
     -- context instead of running while this module is loaded.
-    select_platform_defaults(uname, context.is_darwin)
+    if context.target ~= "browser" then select_platform_defaults(uname, context.is_darwin) end
+    local ready, err = driver._finish_target_initialization(context)
+    if not ready then return nil, err end
     return true, uname, context.is_darwin
 end
 
@@ -719,7 +808,11 @@ function driver.validate_target(context, value, origin)
         return nil, prefix .. ": 'native' selects source files for native hosts; " ..
             "it is not a compilation target"
     elseif value == "browser" then
-        return nil, prefix .. " is not available yet"
+        if context.host_target ~= "linux" and context.host_target ~= "darwin" then
+            return nil, "browser builds are supported from Linux and macOS hosts (host is " ..
+                context.host_target .. ")"
+        end
+        return value
     elseif value == "linux" or value == "darwin" or value == "windows" then
         if value == context.host_target then return value end
         return nil, prefix .. ": native cross-compilation is not supported " ..
@@ -735,9 +828,16 @@ function driver.configure_foreign_c(context)
         error("foreign C configuration requires a resolver context", 2)
     end
     compiler_io.validate(context.io, 2)
+    driver.assert_target_context(context)
     local io_strategy = context.io
     local platform_ok, platform_result = driver.initialize_platform(context)
     local platform_err = not platform_ok and platform_result or nil
+    if not platform_ok then return nil, platform_err end
+    if context.target_descriptor then
+        context.foreign_c_profile_error = nil
+        context.foreign_c_configuration_id = driver.FOREIGN_C_CONFIGURATION_ID
+        return true
+    end
 
     -- Configuration is replaceable in embeddings and tests. A profile belongs
     -- to one exact compiler identity and must never survive a reconfiguration.
@@ -1499,6 +1599,13 @@ local WINDOWS_LUA_DLL_IMPORTS = {
 }
 
 local function compiler_argv(include_extra_compile_flags, context, user_c_helper)
+    if context and context.target == "browser" then
+        local descriptor, err = driver.context_target_descriptor(context)
+        if not descriptor then return nil, err end
+        local args = { table.unpack(descriptor.tools.cc) }
+        append_argv(args, descriptor.compile_flags)
+        return args
+    end
     if driver.TOOLCHAIN_ERROR then return nil, driver.TOOLCHAIN_ERROR end
     local supplied_context = context
     if context or not driver.UNAME then
@@ -1549,8 +1656,9 @@ local function compiler_argv(include_extra_compile_flags, context, user_c_helper
     return argv
 end
 
-local function append_compile_includes(args)
-    for _, directory in ipairs(driver.foreign_include_dirs()) do
+local function append_compile_includes(args, context)
+    local descriptor = context and context.target_descriptor
+    for _, directory in ipairs(descriptor and descriptor.include_dirs or driver.foreign_include_dirs()) do
         append_argv(args, { "-I", directory })
     end
 end
@@ -1559,19 +1667,19 @@ end
 -- descriptor below represents this as compiler argv + compile flags + ordered
 -- include roots; cprobe/cdriver reconstruct the same sequence before adding
 -- their private source/output arguments.
-function driver.generated_compile_prefix()
-    local args, err = compiler_argv(true)
+function driver.generated_compile_prefix(context)
+    local args, err = compiler_argv(true, context)
     if not args then return nil, err end
-    append_compile_includes(args)
+    append_compile_includes(args, context)
     return args
 end
 
 -- Authored --c-source helpers are the user's own C: they compile with stock
 -- Lua conventions and never receive Titan's Windows DLL import definitions.
-function driver.authored_c_compile_prefix()
-    local args, err = compiler_argv(true, nil, true)
+function driver.authored_c_compile_prefix(context)
+    local args, err = compiler_argv(true, context, true)
     if not args then return nil, err end
-    append_compile_includes(args)
+    append_compile_includes(args, context)
     return args
 end
 
@@ -1612,7 +1720,11 @@ function driver.output_tool_descriptors(context, kind)
     local descriptor, descriptor_error = driver.toolchain_descriptor(context)
     if not descriptor then return nil, descriptor_error end
     local tools, uncacheable = {}, nil
-    if kind == "library" and not platform.windows then
+    local browser = context.target_descriptor
+    if browser then
+        tools.ar = { table.unpack(browser.tools.ar) }
+        tools.ranlib = { table.unpack(browser.tools.ranlib) }
+    elseif kind == "library" and not platform.windows then
         local ar, ar_error = perf.tool_command(driver.AR, "AR")
         if not ar then return nil, ar_error end
         local ranlib, ranlib_error = perf.tool_command(driver.RANLIB, "RANLIB")
@@ -1624,7 +1736,7 @@ function driver.output_tool_descriptors(context, kind)
         if not rc then return nil, rc_error end
         tools.rc = rc
     end
-    if kind and driver.IS_DARWIN then
+    if kind and driver.IS_DARWIN and not browser then
         local dsymutil, dsymutil_error, dsymutil_status =
             perf.dsymutil_executable(context)
         if not dsymutil then
@@ -1646,8 +1758,8 @@ function driver.output_tool_descriptors(context, kind)
         uncacheable = status == "uncertified" and details or uncacheable,
         directory = context.output_root or
             driver.TITAN_SOURCE_PATH:match("[^;]+") or ".",
-        darwin = driver.IS_DARWIN == true,
-        windows = platform.windows,
+        darwin = not browser and driver.IS_DARWIN == true,
+        windows = not browser and platform.windows,
         tools = tools,
     }
 end
@@ -1671,6 +1783,18 @@ end
 -- `compile_flags` deliberately includes Titan's fixed language selection, so
 -- cprobe is told not to synthesize a second `-std` spelling.
 function driver.toolchain_descriptor(context)
+    if context and context.target == "browser" then
+        local descriptor, err = driver.context_target_descriptor(context)
+        if not descriptor then return nil, err end
+        return {
+            io = context.io, compiler_argv = { table.unpack(descriptor.tools.cc) },
+            compile_flags = { table.unpack(descriptor.compile_flags) },
+            language_mode = "c99", language_flag = false, cppflags = {}, cflags = {},
+            include_dirs = { table.unpack(descriptor.include_dirs) },
+            profile = context.target_profile, profile_identity = descriptor.profile_identity,
+            target_identity = descriptor.identity,
+        }
+    end
     if driver.TOOLCHAIN_ERROR then return nil, driver.TOOLCHAIN_ERROR end
     local cc, err = perf.tool_command(driver.CC, "CC")
     if not cc then return nil, err end
@@ -1851,8 +1975,10 @@ function driver.get_probe_service(context)
     for _, directory in ipairs(toolchain.include_dirs or {}) do
         include_dirs[#include_dirs + 1] = directory
     end
-    for _, directory in ipairs(context.extra_ffi_include_dirs or {}) do
-        include_dirs[#include_dirs + 1] = directory
+    if not context.target_descriptor then
+        for _, directory in ipairs(context.extra_ffi_include_dirs or {}) do
+            include_dirs[#include_dirs + 1] = directory
+        end
     end
     toolchain.include_dirs = include_dirs
     local service
@@ -1887,7 +2013,9 @@ function driver.get_probe_service(context)
         execution_trace = execution_trace,
         toolchain = toolchain,
         verbose = context.probe_verbose,
-        cache_directory = context.transient_caches and "" or driver.PROBE_CACHE_DIRECTORY,
+        cache_directory = context.transient_caches and "" or
+            (context.target_descriptor and context.target_descriptor.probe_cache_directory or
+                (not context.target_descriptor and driver.PROBE_CACHE_DIRECTORY or nil)),
         jobs = driver.probe_batch_jobs(context),
     })
     if not service then
@@ -1902,6 +2030,12 @@ end
 -- without touching a C compiler or SDK. Each checker clones this profile;
 -- every native probe still crosses get_probe_service's live-target boundary.
 function driver.get_target_profile(context)
+    driver.assert_target_context(context)
+    if context.target == "browser" then
+        local descriptor, err = driver.context_target_descriptor(context)
+        if not descriptor then return nil, err end
+        return context.target_profile
+    end
     local provider = available_embedded_interface_provider(context)
     if provider and provider.target_profile then
         context.used_embedded_target_profile_identity =
@@ -4624,7 +4758,7 @@ function incremental_options(context)
         return nil, "cannot certify compiler configuration: " ..
             tostring(root_error)
     end
-    local prefix, prefix_error = driver.generated_compile_prefix()
+    local prefix, prefix_error = driver.generated_compile_prefix(context)
     if not prefix then return nil, prefix_error end
     local toolchain, toolchain_error = driver.toolchain_descriptor(context)
     if not toolchain then return nil, toolchain_error end
@@ -6669,11 +6803,15 @@ function driver.worker_configuration(context)
     -- This is requested lazily, after graph/output preflight and before the
     -- first worker starts. Source-checkout runtime builds belong exclusively
     -- to the coordinator, including a certified hit that falls back to a miss.
-    local runtime_ok, runtime_error = perf.check_runtime(context.probe_verbose)
-    if not runtime_ok then return nil, runtime_error end
+    if not context.target_descriptor then
+        local runtime_ok, runtime_error = perf.check_runtime(context.probe_verbose)
+        if not runtime_ok then return nil, runtime_error end
+    end
     local policy = context.codegen_policy or {}
     return {
         protocol = version.BUILD_WORKER_PROTOCOL,
+        target_descriptor = context.target_descriptor and
+            driver._browser_target.export(context.target_descriptor) or nil,
         driver = {
             source_path = driver.TITAN_SOURCE_PATH,
             bin_path = driver.TITAN_BIN_PATH,
@@ -6727,6 +6865,13 @@ function driver.new_worker_context(configuration, io_strategy)
              type(configuration.uncertified) == "string")) then
         return nil, "incompatible build worker configuration"
     end
+    local target_descriptor
+    if configuration.resolver.target == "browser" then
+        target_descriptor = driver._browser_target.import(configuration.target_descriptor)
+        if not target_descriptor then return nil, "incompatible build worker configuration" end
+    elseif configuration.target_descriptor ~= nil then
+        return nil, "incompatible build worker configuration"
+    end
     local settings = configuration.driver
     driver.TITAN_SOURCE_PATH = settings.source_path
     driver.TITAN_BIN_PATH = settings.bin_path
@@ -6760,6 +6905,7 @@ function driver.new_worker_context(configuration, io_strategy)
         frontend = resolver.frontend,
         extra_ffi_include_dirs = resolver.extra_ffi_include_dirs,
     })
+    context.target_descriptor = target_descriptor
     local function fail(message)
         driver.close_resolver_context(context)
         return nil, message
@@ -7899,6 +8045,7 @@ local function static_flag()
 end
 
 function driver.compile_module(modname, mod, static_deps, verbose, options)
+    if options and options.context then driver.assert_target_context(options.context) end
     if mod.compiled then return true, nil, nil end
     local ok, err, libname, native_references, objects = driver.compile(
         modname, mod.ast, mod.native_output or mod.filename,
@@ -8555,8 +8702,17 @@ local function prepare_compile(
         or split_threshold % 1 ~= 0 then
         return nil, "split_threshold requires a nonnegative integer"
     end
-    local runtime_ok, runtime_err = perf.check_runtime(verbose)
-    if not runtime_ok then return nil, runtime_err end
+    local context = options and options.context
+    if context and context.target == "browser" then
+        driver.assert_target_context(context)
+        local supported, flag_error = driver._browser_target.validate_flags(
+            options.extra_compile_flags, "--cflag")
+        if not supported then return nil, flag_error end
+    end
+    if not (context and context.target == "browser") then
+        local runtime_ok, runtime_err = perf.check_runtime(verbose)
+        if not runtime_ok then return nil, runtime_err end
+    end
     sourcef = sourcef or modname:gsub("[.]", "/") .. ".titan"
     static_deps = static_deps or {}
     local stem = driver.module_output_stem(sourcef, modname)
@@ -8606,7 +8762,6 @@ local function prepare_compile(
     -- a certificate. Producer self digests come from this coder output, so a
     -- fresh producer and its later restored record cannot disagree; consumers
     -- planned in the same invocation read them when their records render.
-    local context = options and options.context
     local certify = context ~= nil and source_entry ~= nil and
         source_entry.source_certificate ~= nil
     if certify then
@@ -8761,7 +8916,7 @@ local function prepare_compile(
         end
     end
 
-    local base_args, flags_err = driver.generated_compile_prefix()
+    local base_args, flags_err = driver.generated_compile_prefix(context)
     if not base_args then return nil, flags_err end
     append_argv(base_args, test_flags)
     append_argv(base_args, options and options.extra_compile_flags)
