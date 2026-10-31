@@ -732,10 +732,14 @@ time: the selected host label, or the descriptor identity for browser.
 
 * `driver.activate_target_caches(context, identity)` first rejects a context
   whose generation is already stale. When `identity` differs from the current
-  owner it replaces `driver.imported` and `types.registry` with fresh tables,
-  advances the process generation, and records the new owner. It stamps the
-  context with the current generation. Same-target contexts keep the warm
-  caches and the existing behavior.
+  owner it advances the process generation and records the new owner. The
+  first activation in a process adopts the `driver.imported`/`types.registry`
+  pair that is installed at that moment, so a host that installed or restored
+  its own pair for the selected owner keeps it; only a later change of target
+  identity replaces both tables with fresh ones. It stamps the context with
+  the current generation. Same-target contexts keep the warm caches and the
+  existing behavior. Hosts may install or restore a pair only for the
+  selected current owner, never across a target change.
 * `driver.assert_target_context(context)` raises `compiler target context is
   not initialized` for a context that was never activated, and `compiler
   caches now belong to target <identity>; create a new context` for a context
@@ -759,10 +763,27 @@ planning and compilation (including their compiled fast paths), captured
 materialization, and the `compile_module` fast path; worker compilation and
 staged publication; object invalidation; output preflight and target-marker
 validation; Windows staging cleanup (including the non-Windows no-op path);
-and both borrowed-context forms of the resolver option adapter. Pure file
-revalidation (`perf.restat_c_header_dependencies`) is not a semantic consumer:
-uncertified publication calls it with a fresh I/O and header memo that carries
-no generation.
+and both borrowed-context forms of the resolver option adapter.
+
+Semantic APIs never construct a context implicitly, so a convenience call
+cannot activate the host label and silently make a live browser context
+stale. Platform and foreign-C initialization, static and dependency provider
+lookup, finalization, the default and table loaders, and external resolution
+(`resolve_external_modules(requests, known, context)` or `{context =
+context}`) require a constructor-made context; the option adapter rejects an
+omitted or raw `{io = ...}` argument (`resolver options require an explicit
+context`) and checks a borrowed context's generation before any work. The
+non-semantic conveniences take a different path: contextless native compiler
+argv, default flags, and `shared_library_flags` detect only the host platform
+through a shared synchronous strategy; contextless
+`validate_generated_objects` uses an I/O- and digest-only memo for the call
+(with a context it checks the generation, even for an empty object list, and
+keeps the descriptor checks); and file revalidation
+(`restat_c_header_dependencies` without a context, and
+`perf.restat_c_header_dependencies`) carries a fresh I/O and header memo with
+no generation. None of them creates a resolver, activates a label, or
+invalidates a browser context. Explicit `new_resolver_context` calls,
+including one with omitted options, remain the way to choose an owner.
 
 ### Cache audit
 
@@ -858,12 +879,13 @@ output root and each held lock domain again and reserves every
   `options` component differs as well. A foreign-format object found at an
   expected path parses and misses.
 * **Links.** The final-link key remains a digest of the output paths only, so
-  a program's key covers both `<stem>.mjs` and `<stem>.wasm`. For browser,
-  `titanc` writes the descriptor identity into `policy.target`, and
-  `linkcertificate.prepare` copies the recipe policy and sets `target` to the
-  identity without mutating the caller's table, so a record written by another
-  target or another browser configuration is a miss. Host `policy.target`
-  remains the native profile identity. The browser policy also records
+  a program's key covers both `<stem>.mjs` and `<stem>.wasm`. `titanc` always
+  supplies its ordinary native profile identity as `policy.target`;
+  `linkcertificate.prepare` is the sole writer of the browser value: for a
+  browser context it copies the recipe policy and sets `target` to the
+  descriptor identity without mutating the caller's table, which covers
+  non-CLI callers too. A record written by another target or another browser
+  configuration is therefore a miss. The browser policy also records
   `browser_profile`, the link profile's `identity_inputs`, and for library
   mode `browser_probe`, the runner's `--probe` report of the Node (and Chrome)
   that the executing check uses. The `runtime` file field lists the seven

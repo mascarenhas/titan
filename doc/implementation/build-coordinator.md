@@ -1068,9 +1068,10 @@ are never part of `spec.outputs`. Each target owns
   darwin, profile, target }`, plus `browser_profile` and, for a browser
   library, `browser_probe`), `bindings` (`resolver_context.native_bindings`),
   `target`, and `environment` (`{ runtime_flags, MACOSX_DEPLOYMENT_TARGET,
-  SDKROOT }`); for a browser context `policy.target` is the browser descriptor
-  identity, which `prepare` also writes into its own copy of the policy, while
-  a host keeps the native profile identity;
+  SDKROOT }`); `titanc` supplies the native profile identity as
+  `policy.target`, and for a browser context `prepare`, the sole writer of the
+  browser value, replaces it with the descriptor identity in its own copy of
+  the policy;
 * `FILE_FIELDS` (`linkcertificate.lua`): `objects` (every linked
   module's primary `.o` and `.part<k>.o` files in bytewise module and part
   order), `c_objects` (`--c-source` objects), `payloads` (`-X` arguments in CLI
