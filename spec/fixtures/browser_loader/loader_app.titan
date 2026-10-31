@@ -3,7 +3,7 @@ foreign import "stdio.h"
 foreign import "loader.h"
 
 local function output(bytes: string)
-  if ffi.fwrite(bytes, #bytes, 1, ffi.stdout) ~= 1 then
+  if (ffi.fwrite(bytes, 1, #bytes, ffi.stdout) as integer) ~= #bytes then
     raise "loader fixture stdout failed"
   end
 end

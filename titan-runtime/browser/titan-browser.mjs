@@ -80,7 +80,6 @@ export function create(factory, {stdout, stderr, locateFile} = {}) {
   let originalTrap;
   let terminal;
   let completion;
-  let completionCount = 0;
   let allocations = [];
   let resolveRun;
   let rejectRun;
@@ -90,7 +89,7 @@ export function create(factory, {stdout, stderr, locateFile} = {}) {
   function fail(error, isFatal = false) {
     if (!terminal) terminal = error;
     fatal ||= isFatal;
-    if (bridge) bridge.blocked = true;
+    if (bridge) bridge.terminalFailure = terminal;
     if (fatal && active && !settled) finish();
   }
 
@@ -169,29 +168,36 @@ export function create(factory, {stdout, stderr, locateFile} = {}) {
         if (late) throw error;
       },
       titanBrowserAttach: state => {
-        bridge = state;
-        bridge.blocked = closed || !!terminal;
+        state.blocked = closed;
+        state.terminalFailure = terminal;
+        if (!closed || active) bridge = state;
       },
       titanBrowserSafePoint: safePoint,
       titanBrowserTrap: cause => {
         originalTrap ||= cause;
         engineFailure(cause);
       },
-      titanBrowserComplete: (kind, status, bytes) => {
-        if (++completionCount !== 1) {
-          fail(failure('PROTOCOL', 'browser entry completed more than once'));
+      titanBrowserComplete: (kind, status, bytes, count) => {
+        let protocol;
+        if (count !== 1) {
+          protocol = failure('PROTOCOL', 'browser entry completed more than once');
         } else if (kind !== 0 && kind !== 1) {
-          fail(failure('PROTOCOL', `browser entry reported invalid completion kind ${kind}`));
+          protocol = failure('PROTOCOL', `browser entry reported invalid completion kind ${kind}`);
           // A malformed completion is still terminal, not a suspended run.
           completion = {kind: 'failed', status: 1, bytes: new Uint8Array(0)};
         } else {
           completion = {kind: kind === 0 ? 'returned' : 'failed', status: status | 0, bytes};
         }
-        if (bridge) bridge.blocked = true;
+        if (protocol) {
+          fail(protocol);
+          if (settled) throw protocol;
+        }
       },
     };
     if (locateFile !== undefined) options.locateFile = locateFile;
-    initialized = Promise.resolve().then(() => factory(options)).then(value => {
+    const instantiate = factory;
+    const incoming = options;
+    initialized = Promise.resolve().then(() => instantiate(incoming)).then(value => {
       if (fatal) throw terminal;
       if (closed && !active) {
         drop();
@@ -268,7 +274,7 @@ export function create(factory, {stdout, stderr, locateFile} = {}) {
       // The call's value is admission, never Titan's status. Some fiber-last
       // paths do not settle this internal Promise: completion + actual stack
       // quiescence own settlement and disposal, not Emscripten keepalive state.
-      Promise.resolve(call).then(() => safePoint(bridge.suspensionPending), cause => {
+      Promise.resolve(call).then(() => safePoint(bridge?.suspensionPending), cause => {
         engineFailure(cause);
       });
     }).catch(cause => {
@@ -284,12 +290,6 @@ export function create(factory, {stdout, stderr, locateFile} = {}) {
 
   function drop() {
     if (bridge) bridge.blocked = true;
-    if (options) {
-      for (const key of ['titanBrowserAttach', 'titanBrowserSafePoint',
-        'titanBrowserTrap', 'titanBrowserComplete', 'onAbort', 'stdout', 'stderr']) {
-        delete options[key];
-      }
-    }
     module = bridge = options = undefined;
     factory = locateFile = undefined;
     out?.clear();
@@ -303,11 +303,9 @@ export function create(factory, {stdout, stderr, locateFile} = {}) {
     if (bridge) bridge.blocked = true;
     disposed = (async () => {
       if (active && !fatal) await quiet;
-      // Pending initialization has no admitted Wasm stack. Its resolution path
-      // checks closed before retaining its Module and drops callbacks itself.
-      if (!active && initialized && !fatal && !settled) {
-        await initialized.catch(() => {});
-      }
+      // A late factory can finish without re-rooting its Module. Observe its
+      // rejection, but disposal of an unstarted instance need not wait for it.
+      initialized?.catch(() => {});
       freeArguments();
       drop();
     })();

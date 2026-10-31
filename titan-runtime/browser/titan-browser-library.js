@@ -8,6 +8,8 @@ addToLibrary({
     liveDepth: 0,
     continuing: 0,
     suspensionPending: false,
+    completionCount: 0,
+    terminalFailure: null,
     blocked: false,
     queued: false,
 
@@ -73,6 +75,12 @@ addToLibrary({
       };
       var rewind = Asyncify.doRewind;
       Asyncify.doRewind = (data) => {
+        // A resolved-Promise wake can beat our queued safe-point microtask.
+        // Deliver the fully unwound batch before its continuation enters C;
+        // nested fiber trampolines are explicitly not safe delivery points.
+        if (TitanBrowser.safe()) {
+          Module['titanBrowserSafePoint']?.(TitanBrowser.suspensionPending);
+        }
         ++TitanBrowser.continuing;
         try {
           return rewind(data);
@@ -92,7 +100,8 @@ addToLibrary({
     // Copy synchronously while C still owns the payload. Never retain a heap
     // view, and never invoke an application sink from a compiled stack.
     Module['titanBrowserComplete'](kind, status,
-      HEAPU8.slice(bytes >>> 0, (bytes >>> 0) + (length >>> 0)));
+      HEAPU8.slice(bytes >>> 0, (bytes >>> 0) + (length >>> 0)),
+      ++TitanBrowser.completionCount);
     TitanBrowser.schedule();
   },
 
@@ -102,7 +111,13 @@ addToLibrary({
     // Rewind/fiber continuations are already admitted. External calls must not
     // enter an active compiled stack, a pending wait, or a retired instance.
     return TitanBrowser.continuing ||
-      (!TitanBrowser.blocked && !TitanBrowser.suspensionPending &&
-       TitanBrowser.liveDepth === 1) ? 1 : 0;
+      (!TitanBrowser.blocked && !TitanBrowser.terminalFailure &&
+       !TitanBrowser.completionCount && !TitanBrowser.suspensionPending &&
+#if ASYNCIFY
+       TitanBrowser.liveDepth === 1
+#else
+       true
+#endif
+      ) ? 1 : 0;
   },
 });
