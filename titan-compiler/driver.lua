@@ -4147,6 +4147,10 @@ end
 -- same relative pathname in all later roots, even when it is a clean nonclaim.
 -- Implementation notes: doc/implementation/multi-module-libraries.md#claim-and-terminal-error-states
 function driver.find_dynamic_interface(paths, modname, context)
+    if context then
+        driver.assert_target_context(context)
+        if driver.context_target(context) == "browser" then return nil end
+    end
     local candidates = driver.module_binary_candidates(modname)
     if #candidates == 0 then return nil end
     local occupied = {}
@@ -4212,7 +4216,10 @@ local function inspect_static_provider(context, filename, relative)
         return cached
     end
 
+    local browser, descriptor_error = driver.context_target_descriptor(context)
+    if descriptor_error then return nil, descriptor_error end
     local options = {
+        target = browser and browser.fingerprint or nil,
         io = context.io,
         expected_abi = driver.TITAN_ABI_VERSION,
         require_layouts = not context.analysis_only,
@@ -4228,14 +4235,18 @@ local function inspect_static_provider(context, filename, relative)
     -- state. Absent, coarse, changed or rejected plan metadata leaves the
     -- archive itself authoritative.
     local provider, scan_err
-    local planned = decoded and decoded.precise and context.planned_archives
-        and context.planned_archives[filename]
+    local planned = not browser and decoded and decoded.precise and
+        context.planned_archives and context.planned_archives[filename]
     if type(planned) == "table" and
        incremental.observations_equal(planned.observation, decoded.precise) then
         provider = staticmetadata.metadata_view(filename, planned.modules, options)
     end
     if not provider then
         provider, scan_err = staticmetadata.scan_archive(filename, options)
+    end
+    if provider and browser then
+        local valid, validation_error = driver.validate_browser_provider(provider)
+        if not valid then provider, scan_err = nil, validation_error end
     end
     context.provider_cache_identity[filename] = decoded
     if not provider then
@@ -4270,12 +4281,19 @@ end
 
 function driver.find_static_interface(paths, modname, context)
     context = context or driver.new_resolver_context()
+    driver.assert_target_context(context)
     local candidates =
         driver.module_compiled_candidates(modname, ".a")
     if #candidates == 0 then return nil end
     local occupied = {}
 
     local roots, roots_error = driver.titan_bin_path_entries(paths)
+    if driver.context_target(context) == "browser" then
+        local descriptor, descriptor_error = driver.context_target_descriptor(context)
+        if not descriptor then return nil, descriptor_error end
+        roots, roots_error = driver.titan_bin_path_entries(paths, ".")
+        if roots then table.insert(roots, 1, descriptor.paths.titan_bin) end
+    end
     if not roots then return nil, roots_error end
     for _, root in ipairs(roots) do
         local absolute_root, root_error = normalize_root(root, context.io)
@@ -4385,10 +4403,11 @@ end
 
 function driver.find_dependency_interface(paths, modname, context)
     context = context or driver.new_resolver_context()
+    driver.assert_target_context(context)
     local embedded = find_embedded_interface(modname, context)
     if embedded then return embedded end
-    local formats = context.prefer_static
-        and { "static", "dynamic" } or { "dynamic", "static" }
+    local formats = driver.context_target(context) == "browser" and { "static" } or
+        (context.prefer_static and { "static", "dynamic" } or { "dynamic", "static" })
 
     for _, format in ipairs(formats) do
         if format == "dynamic" then
@@ -10405,8 +10424,11 @@ end
 -- The first real generated module object is the authoritative target. It must
 -- remain a single-architecture relocatable object and carry its own validated
 -- one-key Titan metadata section.
-function driver.derive_target_fingerprint(filename, expected_module)
-    local parsed, scan_err = scan_native_file(filename, nil, true)
+function driver.derive_target_fingerprint(filename, expected_module, context)
+    local descriptor, descriptor_error = driver.context_target_descriptor(context)
+    if descriptor_error then return nil, descriptor_error end
+    local parsed, scan_err = scan_native_file(
+        filename, descriptor and descriptor.fingerprint or nil, true)
     if not parsed then return nil, scan_err end
     if parsed.kind ~= "object" then
         return nil, "generated module object '" .. tostring(filename) ..
@@ -10431,7 +10453,7 @@ function driver.validate_generated_objects(objects, target, entries, context)
         local expected_module =
             type(input) == "table" and input.modname or nil
         local fingerprint, parsed_or_err =
-            driver.derive_target_fingerprint(filename, expected_module)
+            driver.derive_target_fingerprint(filename, expected_module, context)
         if not fingerprint then return nil, parsed_or_err end
         local matches, mismatch =
             staticmetadata.fingerprint_matches(fingerprint, target)
@@ -10449,6 +10471,12 @@ function driver.validate_generated_objects(objects, target, entries, context)
         local part_objects = type(input) == "table" and input.objects or nil
         for part_idx = 2, #(part_objects or {}) do
             local part_file = part_objects[part_idx]
+            if driver.context_target(context) == "browser" and
+               not context.io:stat(part_file) then
+                return nil, string.format(
+                    "browser provider module %q is missing split part %d",
+                    expected_module, part_idx - 1)
+            end
             local part_fingerprint, part_err =
                 incremental.part_fingerprint(context, part_file)
             if not part_fingerprint then
@@ -10474,6 +10502,21 @@ end
 function driver.prepare_static_providers_for_target(providers, target)
     for _, provider in ipairs(providers or {}) do
         local active = provider
+        if target.format == "wasm" then
+            if not active.members then
+                local scanned, err = staticmetadata.scan_archive(
+                    provider.archive or provider.filename, metadata_scan_options(target))
+                if not scanned then return nil, err end
+                local equal, equality_error = driver.compare_archive_entries(
+                    scanned.entries, provider.entries, "planned browser provider")
+                if not equal then return nil, equality_error end
+                provider.members, provider.records, provider.bytes =
+                    scanned.members, scanned.records, scanned.bytes
+                active = provider
+            end
+            local valid, err = driver.validate_browser_provider(active)
+            if not valid then return nil, err end
+        end
         if provider.kind == "fat_archive" then
             local selected, selection_err =
                 staticmetadata.select_fat_slice(provider, target)
@@ -10612,6 +10655,80 @@ function driver.compare_archive_entries(actual, expected, subject)
            found.payload ~= wanted.payload then
             return nil, subject .. " canonical payload for module '" ..
                 name .. "' differs"
+        end
+    end
+    return true
+end
+
+-- Validate reader evidence only; browser providers are never host-loaded.
+function driver.validate_browser_provider(archive, expected_entries, generated_objects)
+    if expected_entries then
+        local valid, err = driver.compare_archive_entries(
+            archive.entries, expected_entries, "browser provider")
+        if not valid then return nil, err end
+    end
+    local primaries, available = {}, {}
+    for _, member in ipairs(archive.members or {}) do
+        local object = member.object
+        if object.format ~= "wasm" then
+            return nil, tostring(member.origin) ..
+                ": browser provider requires Wasm objects"
+        end
+        available[object.bytes] = (available[object.bytes] or 0) + 1
+        if object.metadata then primaries[object.metadata.module] = member end
+        local function forbidden(name)
+            return name == "dlopen" or name == "dlsym" or
+                type(name) == "string" and
+                (name:match("^backtrace_") or name:match("^__backtrace_"))
+        end
+        for _, import in ipairs(object.imports or {}) do
+            if forbidden(import.name) then
+                return nil, string.format(
+                    "%s: browser provider imports forbidden symbol %q",
+                    member.origin, import.name)
+            end
+        end
+        for _, symbol in ipairs(object.symbols or {}) do
+            if not symbol.defined and forbidden(symbol.name) then
+                return nil, string.format(
+                    "%s: browser provider imports forbidden symbol %q",
+                    member.origin, symbol.name)
+            end
+        end
+    end
+    for _, name in ipairs(archive.key_order or {}) do
+        local primary = primaries[name]
+        local defined = {}
+        for _, symbol in ipairs(primary and primary.object.symbols or {}) do
+            if symbol.defined and symbol.kind == "function" and
+               symbol.binding == "global" then
+                defined[symbol.name] = true
+            end
+        end
+        local prefix = driver.mangle_module_name(name)
+        for _, symbol in ipairs({ prefix .. "_abi", prefix .. "_types",
+                prefix .. "_layouts", prefix .. "_init", "luaopen_" .. prefix }) do
+            if not defined[symbol] then
+                return nil, string.format(
+                    "%s: browser provider module %q requires global non-weak function %q",
+                    primary and primary.origin or archive.origin, name, symbol)
+            end
+        end
+    end
+    for _, generated in ipairs(generated_objects or {}) do
+        for index, filename in ipairs(generated.objects or { generated.filename }) do
+            local bytes = read_binary_file(filename)
+            if bytes and (available[bytes] or 0) > 0 then
+                available[bytes] = available[bytes] - 1
+            elseif index > 1 then
+                return nil, string.format(
+                    "browser provider module %q is missing split part %d",
+                    generated.modname, index - 1)
+            else
+                return nil, string.format(
+                    "browser provider module %q is missing its primary member",
+                    generated.modname)
+            end
         end
     end
     return true
@@ -10840,7 +10957,7 @@ end
 -- receive only uniquely staged ordinary objects.
 -- Implementation notes: doc/implementation/static-compiled-modules.md#native-composition
 function driver.build_static_archive(
-        output, object_inputs, archive_inputs, target, verbose, ordered_inputs)
+        output, object_inputs, archive_inputs, target, verbose, ordered_inputs, context)
     if type(target) ~= "table" then
         return nil, "static archive construction requires a target fingerprint"
     end
@@ -10943,13 +11060,20 @@ function driver.build_static_archive(
         end
     end
 
-    local ar, ar_err = perf.tool_command(driver.AR, "AR")
+    local descriptor, descriptor_error = driver.context_target_descriptor(context)
+    if descriptor_error then return abort(descriptor_error) end
+    local ar, ar_err = descriptor and copy_argv(descriptor.tools.ar) or nil
+    if not ar then ar, ar_err = perf.tool_command(driver.AR, "AR") end
     if not ar then return abort(ar_err) end
-    local ranlib, ranlib_err = perf.tool_command(driver.RANLIB, "RANLIB")
+    local ranlib, ranlib_err = descriptor and copy_argv(descriptor.tools.ranlib) or nil
+    if not ranlib then ranlib, ranlib_err = perf.tool_command(driver.RANLIB, "RANLIB") end
     if not ranlib then return abort(ranlib_err) end
     local capability, capability_err = archive_tool_capabilities(
         ar, ranlib, probe, staged_paths[1], verbose)
     if not capability then return abort(capability_err) end
+    if descriptor and not capability.deterministic then
+        return abort("browser archive tools require deterministic qDc and -D modes")
+    end
 
     os.remove(temporary)
     local archive_prefix = copy_argv(ar)
@@ -11019,6 +11143,25 @@ function driver.build_static_archive(
     }
     remove_path(stage)
     return result
+end
+
+function driver.stage_browser_provider(request)
+    local staged, directory = driver.staged_library_output(request.public_dso)
+    if not staged then return nil, directory end
+    local result, err = driver.build_static_archive(
+        staged, nil, nil, request.target, request.verbose,
+        request.archive_inputs, request.context)
+    if result then
+        local expected = request.expected_entries or {}
+        local valid
+        valid, err = driver.validate_browser_provider(
+            result.archive, expected, request.generated_objects)
+        if valid then
+            return { archive = staged, directory = directory, entries = expected }
+        end
+    end
+    remove_path(directory)
+    return nil, err
 end
 
 -- Build the private archive-backed sibling image through the same DSO link
@@ -11189,6 +11332,9 @@ end
 -- pipeline order is reported. Any failure or interruption drains running
 -- links, discards their output, and removes the whole stage.
 function driver.link_provider_pair(request)
+    if request.context and driver.context_target(request.context) == "browser" then
+        return driver.stage_browser_provider(request)
+    end
     assert(not platform.windows, "Windows DLL providers have no paired archive")
     local provider, verbose = request.provider, request.verbose
     local module_names = request.module_names
@@ -11315,7 +11461,7 @@ function driver.link_provider_pair(request)
         local function build_archive()
             archive_result, archive_err = driver.build_static_archive(
                 archive, nil, nil, request.target, verbose,
-                request.archive_inputs)
+                request.archive_inputs, request.context)
             check_interrupt()
         end
         if overlap then build_archive() end
@@ -12129,9 +12275,16 @@ function driver.validate_program_output_paths(
 end
 
 function driver.validate_provider_output_paths(
-        public_dso, native_inputs, generated_outputs)
-    local public_archive = public_dso and not platform.windows and public_dso:gsub("[.]so$", ".a")
-    if public_dso and platform.windows and not public_dso:match("[.]dll$") then
+        public_dso, native_inputs, generated_outputs, context)
+    local browser = context and driver.context_target(context) == "browser"
+    local public_archive = browser and public_dso or
+        public_dso and not platform.windows and public_dso:gsub("[.]so$", ".a")
+    if browser then
+        if public_dso and not public_dso:match("[.]a$") then
+            return nil, "browser provider path must end in .a"
+        end
+        public_dso = nil
+    elseif public_dso and platform.windows and not public_dso:match("[.]dll$") then
         return nil, "Windows provider path must end in .dll"
     elseif public_dso and public_archive == public_dso then
         return nil, "provider DSO path '" .. tostring(public_dso) ..
@@ -12508,8 +12661,10 @@ function driver.preflight_build_outputs(context, plan, options)
 end
 
 -- The library DSO path of one provider prefix, below output_root if given.
-function driver.provider_output_path(provider, output_root)
-    local provider_path = safe_provider_output_path(provider, platform.windows and ".dll" or ".so")
+function driver.provider_output_path(provider, output_root, context)
+    local extension = context and driver.context_target(context) == "browser" and
+        ".a" or (platform.windows and ".dll" or ".so")
+    local provider_path = safe_provider_output_path(provider, extension)
     if not provider_path then
         return nil, "invalid library provider name '" .. tostring(provider) .. "'"
     end
@@ -12549,6 +12704,31 @@ end
 function driver.publish_provider_bundle(
         staged_dso, staged_archive, public_dso, options)
     options = options or {}
+    if options.archive_only then
+        local valid, err = driver.validate_provider_output_paths(
+            public_dso, options.native_inputs, nil, options.context)
+        if not valid then return nil, err end
+        if lfs.symlinkattributes(staged_archive, "mode") ~= "file" then
+            return nil, "staged provider artifact '" .. tostring(staged_archive) ..
+                "' is not a regular file"
+        end
+        if absolute_filename(staged_archive) == absolute_filename(public_dso) or
+           same_existing_file(staged_archive, public_dso) then
+            return nil, "staged provider artifact '" .. staged_archive ..
+                "' aliases destination/input '" .. public_dso .. "'"
+        end
+        if same_regular_archive_contents(staged_archive, public_dso) then
+            remove_path(staged_archive)
+            return true, public_dso
+        end
+        if options.before_commit then
+            valid, err = options.before_commit()
+            if not valid then return nil, err end
+        end
+        valid, err = rename_output(staged_archive, public_dso)
+        if not valid then return nil, err end
+        return true, public_dso
+    end
     local public_archive = options.public_archive or
         public_dso:gsub("[.]so$", ".a")
     if public_archive == public_dso then
@@ -12745,6 +12925,9 @@ function driver.run_standalone_archive_probe(
         entries, module_names, libnames, static_archives,
         link, verbose, extra_objects, options)
     options = options or {}
+    if options.context and driver.context_target(options.context) == "browser" then
+        return nil, "browser program linking is not available yet"
+    end
     if #module_names == 0 then return true end
     local runtime_ok, runtime_err = perf.check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
@@ -12954,6 +13137,9 @@ function driver.compile_program(modname, libnames, link, verbose, extra_objects,
                                 program_output, static_archives,
                                 entrypoint_output, program_name, options)
     options = options or {}
+    if options.context and driver.context_target(options.context) == "browser" then
+        return nil, "browser program linking is not available yet"
+    end
     local runtime_ok, runtime_err = perf.check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
     if platform.windows then
