@@ -1,26 +1,54 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { spawn, execFile } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { classify, knownTrap, observeFactory, relativePath } from "../../titan-runtime/browser/titan-browser-page.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const runner = process.env.TITAN_BROWSER_RUNNER ?? join(root, "titan-runtime/browser/titan-browser-run");
+const runner = resolve(process.env.TITAN_BROWSER_RUNNER ?? join(root, "titan-runtime/browser/titan-browser-run"));
 const fixture = join(root, "spec/browser/runner-fixtures.mjs");
 const supported = process.platform !== "win32";
 const strict = process.env.TITAN_REQUIRE_BROWSER_TOOLCHAIN === "1";
+const exec = promisify(execFile);
+
+function testImage(t) {
+    const image = process.env.TITAN_BROWSER_RUNNER_IMAGE;
+    if (image) return resolve(image);
+    if (strict) assert.fail("TITAN_BROWSER_RUNNER_IMAGE must name the compiled runner_image fixture");
+    t.skip("TITAN_BROWSER_RUNNER_IMAGE is unset");
+    return null;
+}
+
+function fixtureRoot(image) {
+    let directory = root;
+    while (image) {
+        const rel = relative(directory, image);
+        if (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(".." + sep)) break;
+        directory = dirname(directory);
+    }
+    return directory;
+}
 
 function run(args, env = {}) {
     return new Promise((resolve, reject) => {
-        const child = spawn(runner, args, { env: { ...process.env, TITAN_NODE: process.execPath, ...env } });
+        const child = spawn(runner, args, { cwd: tmpdir(), env: { ...process.env, TITAN_NODE: process.execPath, ...env } });
+        let hard;
+        const deadline = setTimeout(() => {
+            child.kill("SIGTERM");
+            hard = setTimeout(() => child.kill("SIGKILL"), 3000);
+        }, 45000);
         const stdout = [], stderr = [];
         child.stdout.on("data", chunk => stdout.push(chunk));
         child.stderr.on("data", chunk => stderr.push(chunk));
-        child.on("error", reject);
-        child.on("close", (status, signal) => resolve({ status, signal, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) }));
+        child.on("error", error => { clearTimeout(deadline); reject(error); });
+        child.on("close", (status, signal) => {
+            clearTimeout(deadline); clearTimeout(hard);
+            resolve({ status, signal, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) });
+        });
     });
 }
 
@@ -38,7 +66,7 @@ async function chromium(t) {
 
 function cleanProfile(result) {
     const text = result.stderr.toString();
-    const match = /profile ("[^"\n]+")/.exec(text);
+    const match = /profile ("(?:[^"\\]|\\.)*")/.exec(text);
     assert.ok(match, text);
     const path = JSON.parse(match[1]);
     assert.ok(text.includes(`cleanup: profile ${JSON.stringify(path)} removed`), text);
@@ -47,6 +75,15 @@ function cleanProfile(result) {
 
 async function absent(path) {
     await assert.rejects(readFile(path), { code: "ENOENT" });
+}
+
+async function cleanChromium(result) {
+    const path = cleanProfile(result);
+    await absent(path);
+    const pid = /\bpid (\d+); profile/.exec(result.stderr.toString());
+    if (pid) assert.throws(() => process.kill(Number(pid[1]), 0), { code: "ESRCH" });
+    const { stdout } = await exec("ps", ["-axo", "pid=,args="]);
+    assert.equal(stdout.includes(`--user-data-dir=${path}`), false, `Chromium process still owns ${path}`);
 }
 
 test("relative asset paths stay beneath the root", () => {
@@ -132,21 +169,17 @@ for (const engine of ["node", "chromium"]) {
             if (engine === "node") assert.deepEqual(result.stderr, Buffer.from([254, 0, 226, 40, 66]));
             else {
                 assert.ok(result.stderr.includes(Buffer.from([254, 0, 226, 40, 66])));
-                await absent(cleanProfile(result));
+                await cleanChromium(result);
             }
             const args = ["a b", "--option", "λ"];
             const forwarded = await run(["--engine", engine, "--cdp", cdp, "--grace", "0", "--root", root, "--js-test", fixture, "--", "args", ...args]);
             assert.equal(forwarded.status, 0, forwarded.stderr.toString());
             assert.deepEqual(forwarded.stdout, Buffer.from(JSON.stringify(args)));
-            if (engine === "chromium") await absent(cleanProfile(forwarded));
+            if (engine === "chromium") await cleanChromium(forwarded);
         });
         test(`real CLI test image preserves bytes and 0/1/2 status (${engine}/${cdp})`, { skip: !supported }, async t => {
-            const image = process.env.TITAN_BROWSER_RUNNER_IMAGE;
-            if (!image) {
-                if (strict) assert.fail("TITAN_BROWSER_RUNNER_IMAGE must name the compiled runner_image fixture");
-                t.skip("TITAN_BROWSER_RUNNER_IMAGE is unset");
-                return;
-            }
+            const image = testImage(t);
+            if (!image) return;
             if (engine === "chromium" && !await chromium(t)) return;
             const passed = await run(["--engine", engine, "--cdp", cdp, "--grace", "20", image,
                 "--", "--filter=^runner_image[.]test_bytes$"]);
@@ -169,7 +202,126 @@ for (const engine of ["node", "chromium"]) {
             assert.equal(invalid.status, 2, invalid.stderr.toString());
             assert.equal(invalid.stdout.toString(), "error: unknown option '--unknown'\n" +
                 "Usage: <test-executable> [-h|--help] [-v|--verbose] [-f PATTERN|--filter=PATTERN]...\n");
-            if (engine === "chromium") for (const result of [passed, failed, invalid]) await absent(cleanProfile(result));
+            if (engine === "chromium") for (const result of [passed, failed, invalid]) await cleanChromium(result);
+        });
+        test(`failure categories and bounded cleanup (${engine}/${cdp})`, { skip: !supported }, async t => {
+            if (engine === "chromium" && !await chromium(t)) return;
+            const image = process.env.TITAN_BROWSER_RUNNER_IMAGE && resolve(process.env.TITAN_BROWSER_RUNNER_IMAGE);
+            const directory = fixtureRoot(image);
+            const imageArg = image && relative(directory, image).split(sep).join("/");
+            const cases = [
+                ["trap", 71, /titan-browser-run: trap:/],
+                ["abort", 70, /titan-browser-run: abort:/],
+                ["timeout", 72, /titan-browser-run: timed out after 1500 ms/],
+                ["late-trap", 73, /titan-browser-run: late engine failure:.*\(trap\)/],
+                ["late-abort", 73, /titan-browser-run: late engine failure:.*\(abort\)/],
+                ["unhandled", 74, /titan-browser-run: unhandled rejection: runner deliberate rejection/],
+                ["late-unhandled", 74, /titan-browser-run: unhandled rejection: runner late rejection/],
+                ["malformed", 75, /titan-browser-run: harness failure: unknown control message/],
+                ["duplicate", 75, /titan-browser-run: harness failure: duplicate completion/],
+                ["bad-return", 75, /titan-browser-run: harness failure: JS test run\(context\) must return undefined/],
+                ["host-fail", 1, /titan-browser-run: JS test failed: runner host assertion/],
+                ["sink-stdout", 76, /titan-browser-run: sink failure: browser stdout sink failed/],
+                ["sink-stderr", 76, /titan-browser-run: sink failure: browser stderr sink failed/],
+                ["sink-thenable", 76, /titan-browser-run: sink failure: browser stdout sink must return undefined/],
+                ["image-cache", 0, /^(?!.*titan-browser-run: (?:harness|abort|trap))/s],
+            ];
+            if (engine === "node") cases.push(["premature-exit", 75, /titan-browser-run: harness failure: Node worker (?:exited|IPC disconnected)/]);
+            else cases.push(["http-paths", 0, /cleanup: profile/]);
+            for (const [mode, status, diagnostic] of cases) await t.test(mode, async child => {
+                if (["abort", "late-abort", "sink-stdout", "sink-stderr", "sink-thenable", "image-cache"].includes(mode) && !image) {
+                    testImage(child); return;
+                }
+                const before = performance.now();
+                const result = await run(["--engine", engine, "--cdp", cdp, "--timeout", mode === "timeout" ? "1500" : "5000",
+                    "--grace", "200", "--root", directory, "--js-test", fixture, "--", mode, ...(imageArg ? [imageArg] : [])]);
+                assert.equal(result.status, status, result.stderr.toString());
+                assert.equal(result.signal, null);
+                assert.match(result.stderr.toString(), diagnostic);
+                if (mode === "timeout") {
+                    assert.equal(result.stdout.toString(), "hang-entered\n", "deadline expired before Wasm loop began");
+                    assert.ok(performance.now() - before < 10000, "deadline/shutdown was not bounded");
+                }
+                if (engine === "chromium") await cleanChromium(result);
+            });
+            // A failure deliberately scheduled beyond a zero grace window must not
+            // be reported after the worker/page has already been retired.
+            const short = await run(["--engine", engine, "--cdp", cdp, "--grace", "0", "--root", root,
+                "--js-test", fixture, "--", "late-trap"]);
+            assert.equal(short.status, 0, short.stderr.toString());
+            if (engine === "chromium") await cleanChromium(short);
+        });
+        test(`JS module/path isolation and long deadlines (${engine}/${cdp})`, { skip: !supported }, async t => {
+            if (engine === "chromium" && !await chromium(t)) return;
+            const directory = await mkdtemp(join(tmpdir(), "titan runner-"));
+            try {
+                const inside = join(directory, "inside");
+                const outside = join(directory, "outside");
+                await mkdir(inside); await mkdir(outside);
+                await writeFile(join(outside, "secret"), "not a served asset");
+                await writeFile(join(outside, "image.mjs"), "export default function forbidden() {};\n");
+                await symlink(outside, join(inside, "escape"), "dir");
+                const file = join(inside, "fixture unicode λ.mjs");
+                await writeFile(file, `export async function run(context) {
+                    for (const [method, path] of [["bytes", "escape/secret"], ["image", "escape/image.mjs"]]) {
+                        let rejected = false;
+                        try { await context[method](path); } catch { rejected = true; }
+                        context.assert(rejected, "symlink escaped --root");
+                    }
+                }\n`);
+                const isolated = await run(["--engine", engine, "--cdp", cdp, "--grace", "0", "--js-test", file]);
+                assert.equal(isolated.status, 0, isolated.stderr.toString());
+                if (engine === "chromium") await cleanChromium(isolated);
+                await writeFile(file, "export const notRun = true;\n");
+                const missing = await run(["--engine", engine, "--cdp", cdp, "--grace", "0", "--js-test", file]);
+                assert.equal(missing.status, 75, missing.stderr.toString());
+                assert.match(missing.stderr.toString(), /JS test module must export run\(context\)/);
+                if (engine === "chromium") await cleanChromium(missing);
+            } finally { await rm(directory, { recursive: true, force: true }); }
+            const large = await run(["--engine", engine, "--cdp", cdp, "--timeout", "2147483648", "--grace", "2147483648",
+                "--root", root, "--js-test", fixture, "--", "late-trap"]);
+            assert.equal(large.status, 73, large.stderr.toString());
+            assert.doesNotMatch(large.stderr.toString(), /TimeoutOverflowWarning/);
+            if (engine === "chromium") await cleanChromium(large);
+        });
+        test(`application signed status is masked only at CLI exit (${engine}/${cdp})`, { skip: !supported }, async t => {
+            const image = testImage(t);
+            if (!image) return;
+            if (engine === "chromium" && !await chromium(t)) return;
+            const statusImage = join(dirname(image), "runner_status.mjs");
+            for (const [argument, status] of [["", 0], ["negative", 255], ["wide", 1], ["minimum", 0], ["maximum", 255], ["wrap", 1]]) {
+                const result = await run(["--engine", engine, "--cdp", cdp, "--grace", "0", statusImage, "--", ...(argument ? [argument] : [])]);
+                assert.equal(result.status, status, result.stderr.toString());
+                assert.equal(result.stdout.length, 0);
+                assert.doesNotMatch(result.stderr.toString(), /titan-browser-run: (?:abort:|trap:|harness failure:|timed out|sink failure:)/);
+                if (engine === "chromium") await cleanChromium(result);
+            }
         });
     }
+}
+
+for (const cdp of ["pipe", "port"]) {
+    test(`launch/connect failure retires only its own process and profile (${cdp})`, { skip: !supported }, async t => {
+        const directory = await mkdtemp(join(tmpdir(), "titan-chrome-launch-"));
+        const chrome = join(directory, "chrome");
+        const banner = "if [ \"$1\" = --version ]; then printf 'Chromium 156.0.8078.80\\n'; exit 0; fi\n";
+        try {
+            const scripts = [
+                ["exit", banner + "exit 9\n", 75],
+                ["connect", banner + "for arg in \"$@\"; do case \"$arg\" in --user-data-dir=*) profile=${arg#--user-data-dir=} ;; esac; done\n" +
+                    "printf '1\\n/devtools/browser/missing\\n' > \"$profile/DevToolsActivePort\"\nexec /bin/sleep 60\n", cdp === "port" ? 75 : 72],
+                ["spawn", "if [ \"$1\" = --version ]; then printf 'Chromium 156.0.8078.80\\n'; rm -- \"$0\"; exit 0; fi\nexit 9\n", 75],
+            ];
+            for (const [name, script, status] of scripts) await t.test(name, async () => {
+                await writeFile(chrome, "#!/bin/sh\n" + script, { mode: 0o755 });
+                const before = performance.now();
+                const result = await run(["--engine", "chromium", "--chrome", chrome, "--cdp", cdp,
+                    "--timeout", "700", "--grace", "0", "--root", root, "--js-test", fixture]);
+                assert.equal(result.status, status, result.stderr.toString());
+                assert.equal(result.stdout.length, 0);
+                assert.ok(performance.now() - before < 10000, "launch/connect cleanup was not bounded");
+                await cleanChromium(result);
+            });
+        } finally { await rm(directory, { recursive: true, force: true }); }
+    });
 }
