@@ -47,6 +47,8 @@ describe("browser real runtime entry gate", function()
     for _, assertions in ipairs({ 2, 0 }) do
         it("proves all nine items and both real waits with ASSERTIONS=" .. assertions, function()
             local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
+            io.stdout:write(string.format("\nGATE tools emcc=6.0.13 node=%s chrome=%s\n",
+                info.node.version, info.chrome.version))
             workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
             files.write(workspace .. "/entry-gate.mjs", read(fixture .. "/entry-gate.mjs"))
             build(info, assertions, "entry_gate", "gate", true)

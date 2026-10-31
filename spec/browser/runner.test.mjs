@@ -74,6 +74,12 @@ test("launcher rejects absent and wrong-major Node without stdout", { skip: !sup
     assert.equal(result.status, 75);
     assert.equal(result.stdout.length, 0);
     assert.equal(result.stderr.toString(), `titan-browser-run: Node 24 is required (node not executable at "${missing}")\n`);
+    const noPath = await run(["--probe"], { TITAN_NODE: undefined, PATH: "" });
+    assert.equal(noPath.status, 75);
+    assert.equal(noPath.stdout.length, 0);
+    assert.equal(noPath.stderr.toString(), "titan-browser-run: Node 24 is required (node not found (TITAN_NODE unset; not on PATH))\n");
+    const explicit = await run(["--probe"], { PATH: "", TITAN_CHROME: "/missing/chrome-329" });
+    assert.equal(explicit.status, 0, explicit.stderr.toString());
     const dir = await mkdtemp(join(tmpdir(), "titan-node-resolver-"));
     try {
         const node = join(dir, "node");

@@ -222,8 +222,9 @@ class ChromiumEngine {
         await new Promise((resolve, reject) => { this.server.once("error", reject); this.server.listen(0, "127.0.0.1", resolve); });
         if (this.closing) return;
         this.origin = `http://127.0.0.1:${this.server.address().port}`;
-        this.profile = await mkdtemp(join(tmpdir(), "titan-browser-"));
-        if (this.closing) return;
+        const profile = await mkdtemp(join(tmpdir(), "titan-browser-"));
+        if (this.closing) { await rm(profile, { recursive: true, force: true }); return; }
+        this.profile = profile;
         const args = ["--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
             "--disable-background-timer-throttling", "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows",
             `--user-data-dir=${this.profile}`];
@@ -374,12 +375,14 @@ class ChromiumEngine {
     async removeProfileProcesses() {
         // A wrapper or detached Chrome child can outlive the launcher. Only exact
         // unique-profile matches belong to this run; never kill by executable name.
+        const profileArg = `--user-data-dir=${this.profile}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const belongs = new RegExp(`(?:^|\\s)${profileArg}(?=\\s|$)`);
         const matching = async () => {
             const { stdout } = await exec("ps", ["-axo", "pid=,args="], { timeout: 2000, maxBuffer: 4 * 1024 * 1024 });
             return stdout.split("\n").flatMap(line => {
                 const match = /^\s*(\d+)\s+(.*)$/.exec(line);
                 if (!match || Number(match[1]) === process.pid) return [];
-                return match[2].split(/\s+/).some(arg => arg === `--user-data-dir=${this.profile}`) ? [Number(match[1])] : [];
+                return belongs.test(match[2]) ? [Number(match[1])] : [];
             });
         };
         for (const signal of ["SIGTERM", "SIGKILL"]) {
