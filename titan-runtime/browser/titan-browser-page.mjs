@@ -46,7 +46,7 @@ export function observeFactory(factory, control) {
         ...options,
         onAbort(value) {
             try { options.onAbort?.(value); }
-            finally { control({ type: "failure", category: "abort", reason: reason(value) }); }
+            finally { control({ type: "abort", reason: reason(value) }); }
         },
     });
 }
@@ -120,7 +120,8 @@ function base64(bytes) {
 
 export async function startPage(config) {
     const send = message => globalThis.__titanRunner(base64(new TextEncoder().encode(JSON.stringify(message))));
-    const failure = (category, error) => send({ type: "failure", category, reason: reason(error), knownTrap: knownTrap(error) });
+    const failure = (category, error, terminal = false) =>
+        send({ type: "failure", category, reason: reason(error), knownTrap: knownTrap(error), terminal });
     addEventListener("error", event => {
         failure(classify(event.error), event.error ?? event.message);
         event.preventDefault();
@@ -153,7 +154,7 @@ export async function startPage(config) {
                 if (!wrappers.has(module.default)) wrappers.set(module.default, observeFactory(module.default, send));
                 return Object.freeze({
                     factory: wrappers.get(module.default),
-                    locateFile: name => new URL(name, url(path)).href,
+                    locateFile: name => new URL(name.split("/").map(encodeURIComponent).join("/"), url(path)).href,
                 });
             }));
             return images.get(path);
@@ -170,5 +171,5 @@ export async function startPage(config) {
         }),
     };
     // Do not await this in CDP: a CPU-bound Wasm loop must not block its supervisor.
-    execute(config, host).catch(error => failure(classify(error), error));
+    execute(config, host).catch(error => failure(classify(error), error, true));
 }
