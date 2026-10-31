@@ -666,6 +666,13 @@ end
 -- Browser state is context-owned. Native process globals remain a host profile.
 function driver._finish_target_initialization(context)
     if context.target == "browser" then
+        -- Embedded inventories describe native host code and native C facts.
+        -- Drop the complete state at the target boundary, before any browser
+        -- descriptor/probe or resolver consumer can observe it.
+        context.embedded_interface_provider = nil
+        context.embedded_interface_provider_rejected = false
+        context.embedded_interface_provider_overlap = nil
+        context.used_embedded_target_profile_identity = nil
         if context.host_target ~= "linux" and context.host_target ~= "darwin" then
             return nil, "browser builds are supported from Linux and macOS hosts (host is " ..
                 tostring(context.host_target) .. ")"
@@ -1107,9 +1114,11 @@ function driver._new_resolver_context(options, target_descriptor)
     end
     local cache_valid, cache_error = cacheadapter.validate(options.cache_adapter)
     if not cache_valid then error(cache_error, 2) end
-    local embedded_interface_provider, embedded_error =
-        validate_embedded_interface_provider(
-            options.embedded_interface_provider)
+    local embedded_interface_provider, embedded_error
+    if options.target ~= "browser" then
+        embedded_interface_provider, embedded_error =
+            validate_embedded_interface_provider(options.embedded_interface_provider)
+    end
     if embedded_error then
         error("invalid embedded_interface_provider: " .. embedded_error, 2)
     end
@@ -12573,6 +12582,28 @@ function driver.validate_program_output_paths(
     return index.check_inputs(native_inputs)
 end
 
+-- A browser publication cannot safely claim ownership of old native files.
+-- Refuse them, including symlinks and directories, without mutating either
+-- the archive or the unknown companion.
+function perf.check_browser_provider_companions(archive)
+    local stem = archive:sub(1, -3)
+    local filesystem = compiler_io.new_sync()
+    for _, suffix in ipairs({ ".so", ".so.dSYM", ".dll", ".dll.def",
+            ".dylib", ".dylib.dSYM", ".dll.a", ".lib", ".exp", ".pdb" }) do
+        local companion = stem .. suffix
+        local attributes, err = filesystem:lstat(companion)
+        if err then
+            return nil, string.format("cannot inspect browser provider companion %q: %s",
+                companion, tostring(err))
+        elseif attributes then
+            return nil, string.format(
+                "browser provider %q has native companion %q; use a separate --output directory",
+                archive, companion)
+        end
+    end
+    return true
+end
+
 function driver.validate_provider_output_paths(
         public_dso, native_inputs, generated_outputs, context)
     local browser = context and context.target == "browser"
@@ -12581,6 +12612,10 @@ function driver.validate_provider_output_paths(
     if browser then
         if public_dso and not public_dso:match("[.]a$") then
             return nil, "browser provider path must end in .a"
+        end
+        if public_archive then
+            local valid, err = perf.check_browser_provider_companions(public_archive)
+            if not valid then return nil, err end
         end
         public_dso = nil
     elseif public_dso and platform.windows and not public_dso:match("[.]dll$") then
@@ -12907,6 +12942,10 @@ function driver.preflight_build_outputs(context, plan, options)
             driver.provider_output_path(provider, options.output_root, context)
         if not library then return nil, library_err end
         local browser = context.target == "browser"
+        if browser then
+            local valid, err = driver.validate_provider_output_paths(library, nil, nil, context)
+            if not valid then return nil, err end
+        end
         output(library, browser and "provider archive" or "provider DSO")
         if not browser and not platform.windows then
             output((library:gsub("[.]so$", ".a")), "provider archive")
@@ -13038,6 +13077,8 @@ function driver.publish_provider_bundle(
         end
         if options.before_commit then
             valid, err = options.before_commit()
+            if not valid then return nil, err end
+            valid, err = perf.check_browser_provider_companions(public_dso)
             if not valid then return nil, err end
         end
         valid, err = rename_output(staged_archive, public_dso)
