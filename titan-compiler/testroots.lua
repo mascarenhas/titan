@@ -51,14 +51,6 @@ local function source_candidate(driver, target, name)
     return nil
 end
 
--- The spelling before one trailing `.<word>` label. Discovery uses it only to
--- decide whether a symbolic link could name a root without following every
--- unrelated link; the driver owns the actual grammar.
-local function spelled_stem(name)
-    local stem = name:sub(1, -7)
-    return stem:match("^(.*)%.%a+$") or stem
-end
-
 local function append_path(directory, name)
     return platform.join(directory, name)
 end
@@ -376,25 +368,35 @@ function testroots.discover(context, dirs, excludes, explicit_roots,
             end
             local kind = attributes.kind
             local linked = kind == "symlink"
-            local candidate, shaped
-            if kind ~= "directory" and name:sub(1, 1) ~= "." and
+            local hidden = name:sub(1, 1) == "."
+            local candidate
+            if not hidden and kind ~= "directory" and kind ~= "other" and
                name:sub(-6) == ".titan" then
-                shaped = is_root_name(name) or is_root_name(spelled_stem(name))
-                -- A regular file is always classified: an unreadable reserved
-                -- spelling is diagnosed wherever the inventory sees it, while a
-                -- link is followed only when it could name a root.
-                if kind == "file" or shaped then
-                    local candidate_err
-                    candidate, candidate_err = source_candidate(
-                        driver, target, name)
-                    if candidate_err then
+                -- The name decides everything that needs no target access: a
+                -- reserved spelling is diagnosed, an inapplicable variant or a
+                -- non-module stem is excluded, and only an applicable root
+                -- candidate may follow a source link.
+                local candidate_err
+                candidate, candidate_err = source_candidate(driver, target, name)
+                if candidate_err then
+                    if kind == "file" then
                         return nil, "invalid test source '" .. physical ..
                             "': " .. candidate_err
                     end
+                    -- A link is diagnosed like the regular source it stands
+                    -- for: nothing else is read merely because its name ends
+                    -- in `.titan`.
+                    local resolved = context.io:stat(physical)
+                    if resolved and resolved.kind == "file" then
+                        return nil, "invalid test source '" .. physical ..
+                            "': " .. candidate_err
+                    end
+                elseif linked and not (candidate and is_root_name(candidate))
+                then
+                    candidate = nil
                 end
             end
-            if linked and name:sub(1, 1) ~= "." and
-               (is_root_name(name) or shaped or candidate) then
+            if linked and not hidden and (is_root_name(name) or candidate) then
                 local target_attributes, target_err = context.io:stat(physical)
                 if not target_attributes then
                     return nil, "cannot inspect symbolic link '" .. physical ..
@@ -403,7 +405,7 @@ function testroots.discover(context, dirs, excludes, explicit_roots,
                 kind = target_attributes.kind
             end
             if kind == "directory" then
-                if name:sub(1, 1) ~= "." and is_component(name) then
+                if not hidden and is_component(name) then
                     local ok, err = consider(
                         join_components(components, name), physical, "directory", source_root)
                     if not ok then return nil, err end
