@@ -126,11 +126,24 @@ class Monitor {
     }
     control(message) {
         if (!message || typeof message !== "object" || Array.isArray(message)) return this.fail("harness", "malformed control message");
-        if (message.type === "failure") {
+        if (message.type === "abort") {
+            if (typeof message.reason !== "string") return this.fail("harness", "malformed abort observation");
+            this.abortReason ??= message.reason;
+            if (this.completion) this.fail("abort", this.abortReason);
+        } else if (message.type === "failure") {
             if (!["abort", "trap", "unhandled", "sink", "harness"].includes(message.category) || typeof message.reason !== "string") {
                 return this.fail("harness", "malformed failure control");
             }
-            this.fail(message.category, message.reason, message.knownTrap === true);
+            const originalTrap = message.category === "trap" && message.knownTrap === true;
+            if (this.abortReason !== undefined && !this.completion && !originalTrap &&
+                ["abort", "trap", "harness"].includes(message.category)) {
+                // An onAbort callback can be followed by a raw RuntimeError before
+                // the loader's rejection/dispose continuation gets its microtask.
+                // Observation is not cleanup completion: wait for execute's terminal
+                // failure, retaining the ordinary deadline if disposal is broken.
+                if (message.terminal !== true) return;
+                this.fail("abort", this.abortReason);
+            } else this.fail(message.category, message.reason, originalTrap);
         } else if (message.type === "complete") {
             if (this.completion) return this.fail("harness", "duplicate completion");
             if (!["returned", "failed", "host-test"].includes(message.kind) || !Number.isInteger(message.status) ||
@@ -138,6 +151,7 @@ class Monitor {
                 (message.kind === "host-test" && ![0, 1].includes(message.status))) {
                 return this.fail("harness", "malformed completion control");
             }
+            if (this.abortReason !== undefined) return this.fail("abort", this.abortReason);
             this.completion = message;
             this.deadline();
             this.grace = later(() => this.finish(), this.options.grace);

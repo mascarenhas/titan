@@ -36,6 +36,26 @@ export async function run(context) {
         context.assert(false, "CPU-bound Wasm loop returned");
     }
     if (mode === "abort") { await abortImage(context); return; }
+    if (mode === "caught-abort") {
+        try { await abortImage(context); } catch { /* Completion cannot erase onAbort. */ }
+        return;
+    }
+    if (mode === "abort-hang") {
+        // Private control-unit fault: an observed abort is not a disposal ack.
+        privateControl(context, { type: "abort", reason: "runner abort with hung cleanup" });
+        context.stdout(new TextEncoder().encode("hang-entered\n"));
+        await new Promise(() => {});
+    }
+    if (mode === "trap-priority") {
+        try { wasmAction()(); }
+        catch (error) {
+            // Retain the real engine object, using the loader's explicit identity
+            // tag in this private supervisor-protocol precedence test.
+            error.code = "TITAN_BROWSER_TRAP";
+            privateControl(context, { type: "abort", reason: "subsequent abort wrapper" });
+            throw error;
+        }
+    }
     if (mode === "late-abort") {
         // The initialization rejection is deliberately observed. onAbort, not an
         // unhandled Promise rejection, must establish the runner's category.

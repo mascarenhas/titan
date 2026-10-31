@@ -102,7 +102,7 @@ test("classification retains original trap identity and abort evidence", () => {
     const factory = observeFactory(options => options.onAbort("late"), value => events.push(value));
     const sentinel = new Error("caller abort");
     assert.throws(() => factory({ onAbort() { events.push("caller"); throw sentinel; } }), error => error === sentinel);
-    assert.deepEqual(events, ["caller", { type: "failure", category: "abort", reason: "late" }]);
+    assert.deepEqual(events, ["caller", { type: "abort", reason: "late" }]);
 });
 
 test("launcher rejects absent and wrong-major Node without stdout", { skip: !supported }, async () => {
@@ -212,6 +212,9 @@ for (const engine of ["node", "chromium"]) {
             const cases = [
                 ["trap", 71, /titan-browser-run: trap:/],
                 ["abort", 70, /titan-browser-run: abort:/],
+                ["caught-abort", 70, /titan-browser-run: abort:/],
+                ["abort-hang", 72, /titan-browser-run: timed out after 1500 ms/],
+                ["trap-priority", 71, /titan-browser-run: trap:/],
                 ["timeout", 72, /titan-browser-run: timed out after 1500 ms/],
                 ["late-trap", 73, /titan-browser-run: late engine failure:.*\(trap\)/],
                 ["late-abort", 73, /titan-browser-run: late engine failure:.*\(abort\)/],
@@ -229,16 +232,16 @@ for (const engine of ["node", "chromium"]) {
             if (engine === "node") cases.push(["premature-exit", 75, /titan-browser-run: harness failure: Node worker (?:exited|IPC disconnected)/]);
             else cases.push(["http-paths", 0, /cleanup: profile/]);
             for (const [mode, status, diagnostic] of cases) await t.test(mode, async child => {
-                if (["abort", "late-abort", "sink-stdout", "sink-stderr", "sink-thenable", "image-cache"].includes(mode) && !image) {
+                if (["abort", "caught-abort", "late-abort", "sink-stdout", "sink-stderr", "sink-thenable", "image-cache"].includes(mode) && !image) {
                     testImage(child); return;
                 }
                 const before = performance.now();
-                const result = await run(["--engine", engine, "--cdp", cdp, "--timeout", mode === "timeout" ? "1500" : "5000",
+                const result = await run(["--engine", engine, "--cdp", cdp, "--timeout", ["timeout", "abort-hang"].includes(mode) ? "1500" : "5000",
                     "--grace", "200", "--root", directory, "--js-test", fixture, "--", mode, ...(imageArg ? [imageArg] : [])]);
                 assert.equal(result.status, status, result.stderr.toString());
                 assert.equal(result.signal, null);
                 assert.match(result.stderr.toString(), diagnostic);
-                if (mode === "timeout") {
+                if (mode === "timeout" || mode === "abort-hang") {
                     assert.equal(result.stdout.toString(), "hang-entered\n", "deadline expired before Wasm loop began");
                     assert.ok(performance.now() - before < 10000, "deadline/shutdown was not bounded");
                 }
@@ -251,6 +254,25 @@ for (const engine of ["node", "chromium"]) {
             assert.equal(short.status, 0, short.stderr.toString());
             if (engine === "chromium") await cleanChromium(short);
         });
+        test(`fatal abort drops a forever-pending ccall before shutdown (${engine}/${cdp})`, { skip: !supported }, async t => {
+            const named = process.env.TITAN_BROWSER_LOADER_IMAGE;
+            if (!named) {
+                if (strict) assert.fail("TITAN_BROWSER_LOADER_IMAGE must name the compiled fidelity fixture");
+                t.skip("TITAN_BROWSER_LOADER_IMAGE is unset");
+                return;
+            }
+            if (engine === "chromium" && !await chromium(t)) return;
+            const image = resolve(named);
+            const directory = fixtureRoot(image);
+            const before = performance.now();
+            const result = await run(["--engine", engine, "--cdp", cdp, "--timeout", "5000", "--grace", "200", "--root", directory,
+                "--js-test", join(root, "spec/fixtures/browser_loader/abort-dispose.mjs"), "--",
+                relative(directory, image).split(sep).join("/")]);
+            assert.equal(result.status, 70, result.stderr.toString());
+            assert.deepEqual(result.stdout, Buffer.from("dispose-complete\n"), "abort status alone does not prove fatal disposal finished");
+            assert.ok(performance.now() - before < 5000, "fatal disposal waited for the pending internal ccall");
+            if (engine === "chromium") await cleanChromium(result);
+        });
         test(`JS module/path isolation and long deadlines (${engine}/${cdp})`, { skip: !supported }, async t => {
             if (engine === "chromium" && !await chromium(t)) return;
             const directory = await mkdtemp(join(tmpdir(), "titan runner-"));
@@ -262,12 +284,19 @@ for (const engine of ["node", "chromium"]) {
                 await writeFile(join(outside, "image.mjs"), "export default function forbidden() {};\n");
                 await symlink(outside, join(inside, "escape"), "dir");
                 const file = join(inside, "fixture unicode λ.mjs");
+                // Path-only factory fixture: real Wasm execution is exercised above.
+                await writeFile(join(inside, "factory #?.mjs"),
+                    "export default ({locateFile}) => locateFile('sibling #?.wasm');\n");
                 await writeFile(file, `export async function run(context) {
                     for (const [method, path] of [["bytes", "escape/secret"], ["image", "escape/image.mjs"]]) {
                         let rejected = false;
                         try { await context[method](path); } catch { rejected = true; }
                         context.assert(rejected, "symlink escaped --root");
                     }
+                    const image = await context.image("factory #?.mjs");
+                    const located = image.factory({locateFile: image.locateFile});
+                    context.assert(located.endsWith(context.engine === "node" ?
+                        "/sibling #?.wasm" : "/sibling%20%23%3F.wasm"), "locateFile treated filename bytes as a URL query/fragment");
                 }\n`);
                 const isolated = await run(["--engine", engine, "--cdp", cdp, "--grace", "0", "--js-test", file]);
                 assert.equal(isolated.status, 0, isolated.stderr.toString());
