@@ -23,7 +23,7 @@ function M.require_sdk(context, descriptor, install)
             "runner_module", "node_worker", "page" }) do
         local filename = assets[key]
         local stat = context.io:stat(filename)
-        local readable = stat and stat.kind == "file" and context.io:read_file(filename)
+        local readable = stat and stat.kind == "file" and context.io:read_file(filename, 0)
         if not readable then
             local command = "make browser-sdk PREFIX=" .. install.prefix
             if install.rocks_tree then command = command .. " ROCKS_TREE=" .. install.rocks_tree end
@@ -139,10 +139,11 @@ local owned = { SUPPORT_LONGJMP = true, ASYNCIFY = true, STACK_SIZE = true,
     MCO_ASYNCFY_STACK_SIZE = true }
 function M.validate_extras(flags)
     for index, flag in ipairs(flags or {}) do
-        local setting = flag:match("^%-[sD](.+)") or
-            (flag == "-s" or flag == "-D") and flags[index + 1]
+        local setting = flag:match("^%-[sDU](.+)") or
+            (flag == "-s" or flag == "-D" or flag == "-U") and flags[index + 1]
         local key = setting and setting:match("^([%w_]+)")
-        if key and (owned[key] or key:match("^ASYNCIFY_")) or
+        local positive = key and key:gsub("^NO_", "")
+        if key and (owned[positive] or positive:match("^ASYNCIFY_")) or
             flag == "--no-entry" or flag == "--js-library" or flag:match("^%-%-js%-library=") then
             return nil, "browser link profile owns option " .. flag
         end
