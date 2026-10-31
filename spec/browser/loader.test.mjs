@@ -1,25 +1,18 @@
-function collected(chunks) {
-  const size = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const bytes = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return bytes;
-}
-
-async function rejected(context, promise, code, message) {
-  let caught;
-  try { await promise; } catch (error) { caught = error; }
-  context.assert(caught?.name === 'TitanBrowserError', 'operation did not reject with TitanBrowserError');
-  context.assert(caught.code === code, `unexpected error code: ${caught?.code}`);
-  context.assert(caught.message === message, `unexpected error message: ${caught?.message}`);
-}
+import {closed, encode, join, reentry, rejection} from '../fixtures/browser_loader/checks.mjs';
+import {fidelity, names} from '../fixtures/browser_loader/fidelity-tests.mjs';
+import {lifecycle} from '../fixtures/browser_loader/lifecycle-tests.mjs';
 
 export async function run(context) {
-  context.assert(context.args.length > 0, 'pass one or more loader_app.mjs image paths');
-  for (const path of context.args) {
+  const images = [], fidelityImages = [], nameImages = [];
+  let selected = images;
+  for (const argument of context.args) {
+    if (argument === '--fidelity') selected = fidelityImages;
+    else if (argument === '--names') selected = nameImages;
+    else selected.push(argument);
+  }
+  context.assert(images.length > 0 && fidelityImages.length > 0 && nameImages.length > 0,
+    'pass loader_app images, --fidelity fidelity images, and --names loader_names --test images');
+  for (const path of images) {
     const {factory, locateFile} = await context.image(path);
     const expectedOut = new Uint8Array([65, 0, 255, 195, 40, 240, 159, 140, 141]);
     const expectedErr = new Uint8Array([0, 255, 195, 40]);
@@ -35,21 +28,18 @@ export async function run(context) {
       context.assert(first === instance.initialize(), 'initialize did not share its Promise');
       const running = instance.run(['bytes', '', new Uint8Array([65, 0, 255, 195, 40]), '🌍']);
       await first;
-      await rejected(context, instance.run(), 'TITAN_BROWSER_REENTRY',
-        'browser instance is suspended; reentry is not allowed');
+      await rejection(context, instance.run(), reentry);
       const disposing = disposeWhileRunning ? instance.dispose() : undefined;
       if (disposing) {
-        await rejected(context, instance.run(), 'TITAN_BROWSER_STATE',
-          'browser instance has already run or is disposed');
+        await rejection(context, instance.run(), closed);
       }
       const result = await running;
       context.assert(result?.kind === 'returned' && result.status === 23,
         'completion did not preserve the status after a final coroutine resume');
       context.equalBytes(result.bytes, new Uint8Array(0), 'successful completion had payload');
-      context.equalBytes(collected(stdout), expectedOut, 'stdout bytes changed');
-      context.equalBytes(collected(stderr), expectedErr, 'stderr bytes changed');
-      await rejected(context, instance.run(), 'TITAN_BROWSER_STATE',
-        'browser instance has already run or is disposed');
+      context.equalBytes(join(stdout), expectedOut, 'stdout bytes changed');
+      context.equalBytes(join(stderr), expectedErr, 'stderr bytes changed');
+      await rejection(context, instance.run(), closed);
       await (disposing || instance.dispose());
       context.assert(instance.dispose() === instance.dispose(), 'dispose did not share its Promise');
     }
@@ -66,11 +56,15 @@ export async function run(context) {
       const result = await instance.run(['growth', large]);
       context.assert(result.kind === 'returned' && result.status === 23,
         'heap-growing argument run failed');
-      context.equalBytes(collected(stdout), new TextEncoder().encode('growth'),
+      context.equalBytes(join(stdout), encode('growth'),
         'heap-growing argument was not copied intact');
     } finally {
       await instance.dispose();
     }
-    context.stdout(new TextEncoder().encode(`loader phase 1: ${path}: 5 runs passed\n`));
+    context.stdout(encode(`loader bytes: ${path}: 5 runs passed\n`));
   }
+  const fidelityRuns = await fidelity(context, fidelityImages);
+  const nameRuns = await names(context, nameImages);
+  const lifecycleRuns = await lifecycle(context, fidelityImages);
+  context.stdout(encode(`loader suite: ${images.length * 5 + fidelityRuns + nameRuns + lifecycleRuns} completed Titan runs passed\n`));
 }
