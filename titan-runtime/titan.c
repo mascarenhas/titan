@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(TITAN_TARGET_BROWSER)
 #include <dlfcn.h>
 #endif
 #include "lua.h"
@@ -540,14 +540,16 @@ static void titan_bt_addframe(luaL_Buffer *buf, int *wrote_any,
 ** frames); the old execinfo path is kept as a no-DWARF fallback for platforms
 ** without libbacktrace (e.g. musl/Alpine). Define TITAN_NO_LIBBACKTRACE to
 ** force the fallback. */
-#if !defined(TITAN_NO_LIBBACKTRACE)
+#if defined(TITAN_TARGET_BROWSER)
+/* The browser null backend takes precedence over the native fallback. */
+#elif !defined(TITAN_NO_LIBBACKTRACE)
 #include "backtrace.h"
 #define TITAN_HAVE_LIBBACKTRACE 1
 #elif !defined(_WIN32)
 #include <execinfo.h>
 #endif
 
-#ifndef TITAN_HAVE_LIBBACKTRACE
+#if !defined(TITAN_HAVE_LIBBACKTRACE) && !defined(TITAN_TARGET_BROWSER)
 /* Convert a luaL_traceback-style string into Titan's raw traceback value:
 ** remove the leading "stack traceback:" line and strip the presentation tab
 ** from the beginning of each frame line. */
@@ -574,6 +576,23 @@ static void titan_add_raw_lua_trace(luaL_Buffer *buf, int *wrote_any,
 }
 #endif
 
+/* A best-effort function name for a CallInfo, mirroring luaL_traceback's
+** pushfuncname but without the global-name search (which would manipulate the
+** Lua stack while a luaL_Buffer is open at the top). Writes into `out` and
+** returns it; never pushes to the stack. */
+static const char *titan_funcname(lua_Debug *ar, char *out, size_t outsz) {
+    if (ar->namewhat != NULL && ar->namewhat[0] != '\0' && ar->name != NULL) {
+        snprintf(out, outsz, "%s '%s'", ar->namewhat, ar->name);
+    } else if (ar->what != NULL && ar->what[0] == 'm') {
+        snprintf(out, outsz, "main chunk");
+    } else if (ar->what != NULL && ar->what[0] != 'C') {
+        snprintf(out, outsz, "function <%s:%d>", ar->short_src,
+                 ar->linedefined);
+    } else {
+        snprintf(out, outsz, "?");
+    }
+    return out;
+}
 #ifdef TITAN_HAVE_LIBBACKTRACE
 /* libbacktrace snapshots the set of loaded objects ONCE, on the first
 ** symbolization, and never re-scans. Windows uses a PE module snapshot with
@@ -699,6 +718,7 @@ typedef struct {
     int n;
     int cap;
 } titan_native_stack;
+typedef titan_native_stack TitanTraceStorage;
 
 /* Implementation notes: doc/implementation/error-handling.md#libbacktrace-and-frame-merging */
 static int titan_bt_collect_cb(void *data, uintptr_t pc, const char *filename,
@@ -736,33 +756,15 @@ static int titan_bt_collect_cb(void *data, uintptr_t pc, const char *filename,
     return 0;
 }
 
-/* Capture the filtered native stack (Titan frames + entry-wrapper boundaries
-** only) into `st`, innermost->outer. Returns 0 if libbacktrace is unavailable. */
-static int titan_capture_native(lua_State *L, titan_native_stack *st) {
+/* Keep this capture at the historical depth; backtrace_full's skip is
+** unchanged. Storage is supplied by the common CallInfo merge. */
+static size_t titan_trace_capture(lua_State *L, TitanTraceStorage *st) {
     struct backtrace_state *state = titan_backtrace_state(L);
     if (state == NULL) return 0;
-    /* skip=1: drop errorhandler's own frame. */
     backtrace_full(state, 1, titan_bt_collect_cb, titan_bt_error, st);
-    return 1;
+    return (size_t)st->n;
 }
 
-/* A best-effort function name for a CallInfo, mirroring luaL_traceback's
-** pushfuncname but without the global-name search (which would manipulate the
-** Lua stack while a luaL_Buffer is open at the top). Writes into `out` and
-** returns it; never pushes to the stack. */
-static const char *titan_funcname(lua_Debug *ar, char *out, size_t outsz) {
-    if (ar->namewhat != NULL && ar->namewhat[0] != '\0' && ar->name != NULL) {
-        snprintf(out, outsz, "%s '%s'", ar->namewhat, ar->name);
-    } else if (ar->what != NULL && ar->what[0] == 'm') {
-        snprintf(out, outsz, "main chunk");
-    } else if (ar->what != NULL && ar->what[0] != 'C') {
-        snprintf(out, outsz, "function <%s:%d>", ar->short_src,
-                 ar->linedefined);
-    } else {
-        snprintf(out, outsz, "?");
-    }
-    return out;
-}
 
 /* Look up `sym` (a native frame's mangled C symbol) in registry[TITAN_NAMES_KEY]
 ** and copy the qualified Titan source name into `out`, returning it; if the
@@ -811,7 +813,7 @@ static void titan_entry_syminfo_cb(void *data, uintptr_t pc,
     }
 }
 
-static int titan_cfunction_is_entry(lua_State *L, lua_CFunction fn) {
+static int titan_trace_cfunction_is_entry(lua_State *L, lua_CFunction fn) {
     struct backtrace_state *state;
     titan_entry_probe probe;
     probe.is_entry = 0;
@@ -823,20 +825,50 @@ static int titan_cfunction_is_entry(lua_State *L, lua_CFunction fn) {
     return probe.is_entry;
 }
 
+static int titan_trace_frame_is_entry(const TitanTraceStorage *st, size_t i) {
+    return st->frames[i].is_entry;
+}
+
+static void titan_trace_format_frame(lua_State *L, const TitanTraceStorage *st,
+                                      size_t i, char *out, size_t size) {
+    titan_format_native(L, out, size, &st->frames[i]);
+}
+#elif defined(TITAN_TARGET_BROWSER)
+typedef unsigned char TitanTraceStorage;
+static size_t titan_trace_capture(lua_State *L, TitanTraceStorage *storage) {
+    (void)L; (void)storage;
+    return 0;
+}
+static int titan_trace_frame_is_entry(const TitanTraceStorage *st, size_t i) {
+    (void)st; (void)i;
+    return 0;
+}
+static void titan_trace_format_frame(lua_State *L, const TitanTraceStorage *st,
+                                      size_t i, char *out, size_t size) {
+    (void)L; (void)st; (void)i; (void)out; (void)size;
+}
+static int titan_trace_cfunction_is_entry(lua_State *L, lua_CFunction fn) {
+    (void)L; (void)fn;
+    return 0;
+}
+#endif
+
+#if defined(TITAN_HAVE_LIBBACKTRACE) || defined(TITAN_TARGET_BROWSER)
+
 /* Consume the next native Titan run up to and including its entry-wrapper
 ** sentinel. Entry-wrapper frames are boundary markers only (consumed, never
 ** emitted); native function frames are appended in order. Returns nonzero if an
 ** entry sentinel was consumed, proving this run corresponds to a Lua-visible
 ** Titan entry-wrapper CallInfo. */
 static int titan_drain_native_run(lua_State *L, luaL_Buffer *buf,
-                                  titan_native_stack *st, int *ni,
+                                  TitanTraceStorage *st, size_t n, size_t *ni,
                                   int *wrote_any) {
     int consumed_entry = 0;
-    while (*ni < st->n) {
-        int was_entry = st->frames[*ni].is_entry;
+    while (*ni < n) {
+        int was_entry = titan_trace_frame_is_entry(st, *ni);
         if (!was_entry) {
             char line[768];
-            titan_format_native(L, line, sizeof(line), &st->frames[*ni]);
+            titan_trace_format_frame(L, st, *ni, line, sizeof(line));
             titan_bt_addframe(buf, wrote_any, line);
         } else {
             consumed_entry = 1;
@@ -876,24 +908,26 @@ static int titan_drain_native_run(lua_State *L, luaL_Buffer *buf,
 ** symbol if absent.
 */
 static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf) {
+#ifdef TITAN_HAVE_LIBBACKTRACE
     titan_native_frame frames[TITAN_MAX_NATIVE];
-    titan_native_stack st;
-    int ni = 0;          /* next un-emitted native frame index */
+    TitanTraceStorage st = { frames, 0, TITAN_MAX_NATIVE };
+#else
+    TitanTraceStorage st = 0;
+#endif
+    size_t ni = 0;       /* next un-emitted native frame index */
+    size_t n;
     int wrote_any = 0;
     int suppress_next_entry = 0;
     int level = 1;       /* skip errorhandler's own CallInfo (level 0) */
     lua_Debug ar;
 
-    st.frames = frames;
-    st.n = 0;
-    st.cap = TITAN_MAX_NATIVE;
-    titan_capture_native(L, &st);
+    n = titan_trace_capture(L, &st);
 
     /* Drain the deepest native Titan run (the error site) before any CallInfo
     ** so the innermost Titan frames lead. Entry-wrapper frames are boundary
     ** markers only (consumed, never emitted); only native functions are shown. */
     suppress_next_entry =
-        titan_drain_native_run(L, buf, &st, &ni, &wrote_any);
+        titan_drain_native_run(L, buf, &st, n, &ni, &wrote_any);
 
     while (lua_getstack(L, level++, &ar)) {
         lua_CFunction cfunc = NULL;
@@ -901,15 +935,15 @@ static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf) {
         lua_getinfo(L, "Slntf", &ar);           /* pushes function */
         if (ar.what != NULL && ar.what[0] == 'C') {
             cfunc = lua_tocfunction(L, -1);
-            is_titan_entry = (cfunc != NULL && titan_cfunction_is_entry(L, cfunc));
+            is_titan_entry = (cfunc != NULL && titan_trace_cfunction_is_entry(L, cfunc));
         }
         lua_pop(L, 1);                          /* pop function from "f" */
         if (ar.what != NULL && ar.what[0] == 'C') {
             if (is_titan_entry) {
                 if (suppress_next_entry) {
                     suppress_next_entry = 0;    /* deepest run already drained */
-                } else if (ni < st.n) {
-                    titan_drain_native_run(L, buf, &st, &ni, &wrote_any);
+                } else if (ni < n) {
+                    titan_drain_native_run(L, buf, &st, n, &ni, &wrote_any);
                 }
                 /* entry-wrapper CallInfo is a boundary marker only */
             } else {
@@ -939,23 +973,28 @@ static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf) {
     /* Defensive: any native Titan frames the CallInfo walk did not consume
     ** (e.g. native depth exceeding the Lua-visible boundaries) still appear.
     ** Entry-wrapper boundary markers remain suppressed. */
-    while (ni < st.n) {
-        if (!frames[ni].is_entry) {
+    while (ni < n) {
+        if (!titan_trace_frame_is_entry(&st, ni)) {
             char line[768];
-            titan_format_native(L, line, sizeof(line), &frames[ni]);
+            titan_trace_format_frame(L, &st, ni, line, sizeof(line));
             titan_bt_addframe(buf, &wrote_any, line);
         }
         ni++;
     }
 }
-#else
+#endif
+#ifndef TITAN_HAVE_LIBBACKTRACE
 void titan_invalidate_backtrace_state(lua_State *L) {
     (void)L;  /* no cached state to reset */
 }
 #endif
 
 void *loadsym (lua_State *L, void *lib, const char *sym) {
-#if defined(_WIN32)
+#if defined(TITAN_TARGET_BROWSER)
+    (void)lib; (void)sym;
+    luaL_error(L, "browser target symbol lookup requires an explicit provider symbol table");
+    return NULL;
+#elif defined(_WIN32)
     void *f;
     if (lib == NULL) luaL_error(L, "Windows Titan symbol lookup requires an explicit provider");
     f = titan_cast_func(void *, GetProcAddress((HMODULE)lib, sym));
@@ -972,7 +1011,11 @@ void *loadsym (lua_State *L, void *lib, const char *sym) {
 }
 
 void *loadglobalsym (lua_State *L, const char *sym) {
-#if defined(_WIN32)
+#if defined(TITAN_TARGET_BROWSER)
+    luaL_error(L, "browser target cannot resolve global native symbol '%s'; "
+        "use the canonical module provider", sym);
+    return NULL;
+#elif defined(_WIN32)
     luaL_error(L, "Windows Titan cannot resolve global native symbol '%s'; "
         "use the canonical module provider", sym);
     return NULL;
@@ -1000,7 +1043,10 @@ static void *titan_find_module_symbol(TitanModuleProvider provider,
         *error = "module provider is unavailable";
         return NULL;
     }
-#if defined(_WIN32)
+#if defined(TITAN_TARGET_BROWSER)
+    *error = "browser target symbol lookup requires an explicit provider symbol table";
+    raw = NULL;
+#elif defined(_WIN32)
     raw = titan_cast_func(void *, GetProcAddress((HMODULE)provider.handle, sym));
     if (raw == NULL) *error = "export not found in Windows provider";
 #else
@@ -1023,7 +1069,10 @@ void *titan_module_symbol(lua_State *L, TitanModuleProvider provider,
 
 void titan_check_abi(lua_State *L, void *lib, const char *sym,
                      const char *file) {
-#if defined(_WIN32)
+#if defined(TITAN_TARGET_BROWSER)
+    (void)lib; (void)sym; (void)file;
+    luaL_error(L, "browser target symbol lookup requires an explicit provider symbol table");
+#elif defined(_WIN32)
     TitanModuleProvider provider = { lib, NULL };
     titan_check_module_abi(L, provider, sym, file);
 #else
@@ -1171,7 +1220,7 @@ int errorhandler(lua_State *L) {
   lua_pushliteral(L, TITAN_BACKTRACE_KEY);
   luaL_Buffer buf;
   luaL_buffinit(L, &buf);
-#ifdef TITAN_HAVE_LIBBACKTRACE
+#if defined(TITAN_HAVE_LIBBACKTRACE) || defined(TITAN_TARGET_BROWSER)
   /* ONE intermingled, innermost->outer trace: the CallInfo chain
   ** supplies every Lua frame, libbacktrace supplies the Titan native frames
   ** spliced at the entry-wrapper boundaries. No separate "C traceback:" section,

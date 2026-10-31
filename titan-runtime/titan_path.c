@@ -29,7 +29,9 @@
 #include <stdlib.h>
 #include <string.h>
 #if !defined(_WIN32)
+#if !defined(TITAN_TARGET_BROWSER)
 #include <dlfcn.h>
+#endif
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
@@ -150,7 +152,10 @@ static int titan_path_push_nonempty_env(lua_State *L, const char *name) {
 ** Unix (Linux /proc/self/exe, macOS _NSGetExecutablePath plus realpath) and
 ** as GetModuleFileNameW reports it on Windows. */
 static int titan_path_push_executable_dir(lua_State *L) {
-#if defined(_WIN32)
+#if defined(TITAN_TARGET_BROWSER)
+    lua_pushliteral(L, "browser target cannot locate a host executable");
+    return 0;
+#elif defined(_WIN32)
     int top = lua_gettop(L);
     DWORD capacity = 256;
     WCHAR *wide, *cursor, *last = NULL;
@@ -810,6 +815,10 @@ static char **titan_path_push_query_environ(lua_State *L) {
 ** missing-module query again. Push the root it prints, or a diagnostic. No
 ** Lua allocation happens while descriptors, handles, or the child are live. */
 static int titan_path_query_root(lua_State *L) {
+#if defined(TITAN_TARGET_BROWSER)
+    lua_pushliteral(L, "browser target cannot query a host compiler");
+    return 0;
+#else
     char output[TITAN_ROOT_QUERY_CAP];
     size_t length = 0;
     int overflow = 0;
@@ -1082,6 +1091,7 @@ cleanup:
         return 0;
     }
     return titan_path_push_query_output(L, program, output, length);
+#endif
 #endif
 }
 
@@ -1371,7 +1381,7 @@ static void titan_path_push_libs(lua_State *L) {
     }
 }
 
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(TITAN_TARGET_BROWSER)
 /* Push the canonical spelling of an occupied candidate: the per-state cache
 ** key and the exact image to open. Raises when it does not resolve. */
 static const char *titan_path_push_canonical_path(lua_State *L,
@@ -1418,6 +1428,11 @@ static void *titan_path_open_global(lua_State *L, int canonical) {
 
 /* Open an occupied provider candidate for this state; raises on failure. */
 static void *titan_path_open_provider(lua_State *L, const char *filename) {
+#if defined(TITAN_TARGET_BROWSER)
+    (void)filename;
+    luaL_error(L, "browser target does not support dynamic provider loading");
+    return NULL;
+#else
     int top = lua_gettop(L);
     void *lib;
 #if defined(_WIN32)
@@ -1429,10 +1444,14 @@ static void *titan_path_open_provider(lua_State *L, const char *filename) {
 #endif
     lua_settop(L, top);
     return lib;
+#endif
 }
 
 static void *titan_path_symbol(void *lib, const char *symbol) {
-#if defined(_WIN32)
+#if defined(TITAN_TARGET_BROWSER)
+    (void)lib; (void)symbol;
+    return NULL;  /* The dynamic admission path raises before symbol lookup. */
+#elif defined(_WIN32)
     return titan_cast_func(void *, GetProcAddress((HMODULE)lib, symbol));
 #else
     return dlsym(lib, symbol);
@@ -1491,6 +1510,11 @@ void titan_check_abi_entry(lua_State *L, void *raw, const char *sym,
 }
 
 void *loadlib(lua_State *L, const char *file) {
+#if defined(TITAN_TARGET_BROWSER)
+    (void)file;
+    luaL_error(L, "browser target does not support dynamic provider loading");
+    return NULL;
+#else
     int top = lua_gettop(L);
     size_t path_length, entry_length;
     const char *path, *limit, *entry, *filename, *reason;
@@ -1534,6 +1558,7 @@ void *loadlib(lua_State *L, const char *file) {
         file, path, reason != NULL ? "; no Titan SDK fallback: " : "",
         reason != NULL ? reason : "");
     return NULL;
+#endif
 }
 
 /* Implementation notes: doc/implementation/codegen-overview.md#static-vs-dynamic-dependency-wiring */
@@ -1623,6 +1648,10 @@ static void titan_path_add_miss(lua_State *L, int message, int filename) {
 ** plain-C `_abi_value` query). */
 static int titan_path_try_candidate(lua_State *L, const char *filename,
     const char *module, const char *prefix, int exact) {
+#if defined(TITAN_TARGET_BROWSER)
+    (void)filename; (void)module; (void)prefix; (void)exact;
+    return luaL_error(L, "browser target does not support dynamic provider loading");
+#else
     int top = lua_gettop(L);
     const char *abi_name, *types_name, *opener_name, *provider;
     void *lib, *abi, *types;
@@ -1682,6 +1711,7 @@ static int titan_path_try_candidate(lua_State *L, const char *filename,
     lua_replace(L, top + 1);
     lua_settop(L, top + 2);
     return 1;
+#endif
 }
 
 /* Search one directory's candidates not yet occupied in an earlier root. */
