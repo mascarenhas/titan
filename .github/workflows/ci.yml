@@ -405,6 +405,50 @@ jobs:
           echo "TITAN_CHROME=$chrome" >> "$GITHUB_ENV"
           "$chrome" --version
 
+      # Ubuntu 24.04 enables kernel.apparmor_restrict_unprivileged_userns by
+      # default, which kills Chrome's user-namespace sandbox before CDP can
+      # attach ("CDP pipe closed before shutdown"). Chrome keeps its sandbox:
+      # this only relaxes the host restriction, and only when it is present.
+      - name: Allow Chrome's user-namespace sandbox on the CI host
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/browser-chrome-sandbox.log"
+          key=kernel.apparmor_restrict_unprivileged_userns
+          : > "$log"
+          # Small /dev/shm is the other known Chrome-startup failure on hosted
+          # VMs; record both host facts so a failure names the cause.
+          { df -h /dev/shm || true; } | tee -a "$log"
+          clone=/proc/sys/kernel/unprivileged_userns_clone
+          if [ -r "$clone" ]; then
+            echo "unprivileged_userns_clone: $(cat "$clone")" | tee -a "$log"
+          else
+            echo "unprivileged_userns_clone: absent" | tee -a "$log"
+          fi
+          state=$(sysctl -n "$key" 2>/dev/null || true)
+          if [ -z "$state" ]; then
+            echo "$key: absent (host does not restrict unprivileged user namespaces)" | tee -a "$log"
+          else
+            echo "$key: $state before" | tee -a "$log"
+            if [ "$state" != "0" ]; then
+              sudo sysctl -w "$key=0" | tee -a "$log"
+              state=$(sysctl -n "$key")
+              echo "$key: $state after" | tee -a "$log"
+              if [ "$state" != "0" ]; then
+                echo "cannot relax $key; Chrome's sandbox cannot start" >&2
+                exit 1
+              fi
+            fi
+          fi
+          # Prove the sandboxed shell actually launches before the gate spends
+          # minutes building images against a broken host.
+          profile=$(mktemp -d "$RUNNER_TEMP/chrome-sandbox-check.XXXXXX")
+          trap 'rm -rf "$profile"' EXIT
+          "$TITAN_CHROME" --headless --disable-gpu --no-first-run \
+            --no-default-browser-check --user-data-dir="$profile" \
+            --dump-dom 'data:text/html,<p id=sandbox>ok</p>' \
+            2>&1 | tee -a "$log"
+          grep -q 'id="sandbox"' "$log"
+
       - name: Install the fork's browser Lua into the validation prefix
         run: |
           source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
