@@ -38,7 +38,7 @@ local function generate_titan_c(modname, root, stem, source)
         assert.equal(0, #errors, table.concat(errors, "\n"))
         local header_plan = assert(driver.plan_foreign_header(modname, ast, filename))
         assert(driver.validate_foreign_header_plan(header_plan))
-        assert(util.set_file_contents(ffi_header, header_plan.ffi_contents or "/* empty */\n"))
+        assert(util.set_file_contents(ffi_header, header_plan.ffi_contents or "/* empty */\n", "wb"))
         local generated = assert(coder.generate(
             modname, ast, {}, version.TITAN_ABI_VERSION, true, {
                 nominal_layouts = {},
@@ -135,7 +135,7 @@ static const unsigned char wasm_probe_bytes[] = {
 };
 ]]
         local c_path = track_file(root .. "/wasm_alpha.c")
-        assert(util.set_file_contents(c_path, c_code .. "\n" .. probe_tail))
+        assert(util.set_file_contents(c_path, c_code .. "\n" .. probe_tail, "wb"))
 
         local core = require "titan-compiler.coder.core"
         require "titan-compiler.coder.module"
@@ -152,7 +152,7 @@ static const unsigned char wasm_probe_bytes[] = {
         }) .. assert(objectmetadata.render(
             source_payload, "titan_object_source_wasm_alpha")) .. "\n" .. probe_tail
         local clang_c_path = track_file(root .. "/wasm_alpha_clang_fixture.c")
-        assert(util.set_file_contents(clang_c_path, clang_fixture_code))
+        assert(util.set_file_contents(clang_c_path, clang_fixture_code, "wb"))
 
         local include_root = "-I" .. root
         local include_runtime = "-I" .. info.prefix .. "/include"
@@ -238,7 +238,7 @@ x:
 ]]
         local asm_path = track_file(root .. "/reloc64.s")
         local asm_obj = track_file(root .. "/reloc64.o")
-        assert(util.set_file_contents(asm_path, asm_source))
+        assert(util.set_file_contents(asm_path, asm_source, "wb"))
         run_tool(strategy, info.tools.clang, {
             "--target=wasm32-unknown-emscripten", "-x", "assembler",
             "-c", asm_path, "-o", asm_obj,
@@ -261,7 +261,7 @@ x:
         assert(util.set_file_contents(spaced_c, [[
 extern int foo __asm__("foo bar");
 int *p = &foo;
-]]))
+]], "wb"))
         run_tool(strategy, info.tools.clang, {
             "--target=wasm32-unknown-emscripten", "-x", "c",
             "-c", spaced_c, "-o", spaced_obj,
@@ -304,10 +304,10 @@ int *p = &foo;
             "function beta(): integer return 2 end\n")
         track_file(alpha_ffi)
         track_file(beta_ffi)
-        assert(util.set_file_contents(alpha_c, alpha_code))
-        assert(util.set_file_contents(beta_c, beta_code))
+        assert(util.set_file_contents(alpha_c, alpha_code, "wb"))
+        assert(util.set_file_contents(beta_c, beta_code, "wb"))
         assert(util.set_file_contents(helper_c,
-            "int wasm_helper_value(void) { return 42; }\n"))
+            "int wasm_helper_value(void) { return 42; }\n", "wb"))
 
         local alpha_o = track_file(root .. "/wasm_alpha.o")
         local beta_o = track_file(root .. "/wasm_beta.o")
@@ -415,7 +415,7 @@ int *p = &foo;
 enum wasm_signed_enum { WASM_NEG = -1, WASM_POS = 1 };
 enum wasm_u32_enum { WASM_U32 = 4294967295U };
 enum wasm_u64_enum { WASM_U64 = 18446744073709551615ULL };
-]]))
+]], "wb"))
 
         local all_ids = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }
         for _, short_enums in ipairs({ false, true }) do
