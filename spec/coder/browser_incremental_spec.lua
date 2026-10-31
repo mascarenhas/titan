@@ -129,7 +129,7 @@ end
             assert.is_true(result.ok, result.output)
         end
         payload()
-        local arguments = { "--target", "browser", "--incremental", "-v", "-X", archive, "-X", direct, "pair_main" }
+        local arguments = { "--target", "browser", "--incremental", "-v", "pair_main", "-X", archive, direct }
         local result = fixture:compile(arguments)
         assert.is_true(result.ok, result.output)
         local record = record_path(fixture.output)
