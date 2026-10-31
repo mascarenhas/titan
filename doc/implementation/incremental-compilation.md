@@ -429,7 +429,7 @@ does not reject unknown extra keys:
 | --- | --- | --- |
 | `configuration` | `{ digest, compiler, preamble, toolchain, options }` | Invocation-wide configuration digests (all strings). |
 | `layout` | `"flat"` \| `"folder"` | Source module layout from the tagged source resolver. |
-| `sources` | `{ { path, sha256 }, ... }` | Dense ordered own-source list (main first, then bytewise-sorted contributors). |
+| `sources` | `{ { path, sha256 }, ... }` | Dense ordered own-source list (the selected main first, then the selected contributors in bytewise order of logical filenames). |
 | `stem` | `string` | Normalized absolute output stem (`<stem>.o` without `.o`). |
 | `codegen` | `{ c_parts, split_threshold, test_flags, coverage? }` | Per-module code-generation policy (`coverage` is `nil` or `{ enabled, backend }`). |
 | `imports` | `{ { name, source_required, view, interface }, ... }` | Direct imports in declaration/constituent order (`view` is `"source"` or `"public"`). |

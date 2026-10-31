@@ -518,7 +518,7 @@ The closure proceeds in this order:
    saved, contributor roots are appended in descriptor order, contributor
    initializers are rejected, and the saved initializer is appended once.
    The dense AST is recursively checked exactly once and cached with direct
-   source/static dependencies; the canonical main becomes `filename` and the
+   source/static dependencies; the selected main becomes `filename` and the
    descriptor supplies `program_output`.
 5. A DSO hit is cached with dynamic provenance and the selected transient
    relative provider path. A static hit is cached with its one claimed logical
@@ -1190,7 +1190,7 @@ leaving clients to mirror it. These are additive exports under
 | Helper | Contract |
 | --- | --- |
 | `driver.SOURCE_LABELS` | `{ "windows", "darwin", "linux", "browser", "native" }`. |
-| `driver.classify_source_filename(basename)` | For a basename without a directory: `logical_basename, label` for a variant (`"foo.linux.titan"` → `"foo.titan", "linux"`); `logical_basename, nil` for a default or non-variant name (`"linux.titan"`, `"x.y.titan"`); `nil, nil, err` for stacked (`x.linux.native.titan`) or mis-cased (`x.Linux.titan`) labels; no values for a non-`.titan` name. |
+| `driver.classify_source_filename(basename)` | For a basename without a directory: `logical_basename, label` for a variant (`"foo.linux.titan"` → `"foo.titan", "linux"`); `logical_basename, nil` for a default or non-variant name (`"linux.titan"`, `"x.y.titan"`); `nil, nil, err` for stacked (`x.linux.native.titan`) or mis-cased (`x.Linux.titan`) labels; `nil` for a non-`.titan` name. |
 | `driver.target_selection_labels(target)` | The labels that apply to `target`, most specific first, without the always-last default: `{ "linux", "native" }`, `{ "darwin", "native" }`, `{ "windows", "native" }`, `{ "native" }` for a native host without an OS label, or `{ "browser" }`; raises for any other value. |
 | `driver.target_label_applies(target, label)` | Whether `label` appears in that list. |
 | `driver.context_target(context)` | The context's selection target, including the internal `native` target of a label-less native host; returns `nil, err` when the host cannot be determined. |

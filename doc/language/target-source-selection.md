@@ -306,10 +306,12 @@ variant. A module whose selected file is `foo.linux.titan` produces `foo.c`,
 `foo.o`, split parts `foo.part1.c` and `foo.part1.o`, `foo.priv.h`,
 `foo.titan.h`, `foo.ffi.h`, coverage notes and counters, and the executable
 `foo`, or `foo__main` for a folder module; no `*.linux.*` artifact appears.
-This holds with and without `--output`. Without `--output`, the artifacts sit
-beside the canonical path `P.titan` or `P/B.titan`, whether or not a default
-file exists there. See [Output directories](output-directory.md) for the
-locations.
+This holds with and without `--output`. Without `--output`, the generated C,
+objects, and headers sit beside the canonical path `P.titan` or `P/B.titan`,
+whether or not a default file exists there, while the executable and provider
+paths stay relative to the working directory. See [Output
+directories](output-directory.md) and [compiling
+modules](modules.md#compiling-modules-titanc) for the locations.
 
 ## Diagnostics, tracebacks, and coverage name the real file
 
@@ -347,10 +349,12 @@ any other directory that is not a module.
 
 The language server analyzes the host target only. It groups variants under
 their logical module and follows the selection, composition, privacy, and
-precedence rules of this chapter. A variant for another target is not analyzed
-and gets one informational diagnostic that names the file selected instead; it
-receives no semantic completion. `TITAN_TARGET` has no effect on the server,
-and there is no setting to choose another target.
+precedence rules of this chapter. A variant the host target does not select is
+not analyzed and gets one information-severity diagnostic that names the
+selected member, or says that the family has no active variant; the default
+contributors of a folder module absent for the host are reported the same way.
+Such files get no semantic completion. `TITAN_TARGET` has no effect on the
+server, and there is no setting to choose another target.
 
 See [target source selection](../implementation/target-source-selection.md) in
 the implementation manual for the resolver, the driver API, and the build

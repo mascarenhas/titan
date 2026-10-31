@@ -1234,12 +1234,17 @@ discovery](test-runner.md#automatic-test-root-discovery).
   each directory with `context.io:list`, sorts entry names with
   `util.bytewise_less`, calls `context.io:yield(directory)` between entries,
   and inspects each entry with `context.io:lstat`:
-  * entries starting with `"."` (hidden files and directories) and names that
-    are not valid module components are skipped;
-  * a symbolic link whose name, `<stem>.titan` stem, or stem before one
-    trailing alphabetic `.<word>` component (`spelled_stem`) matches the test naming
-    convention is followed with `context.io:stat` (reporting an explicit error
-    on a broken link); unselected broken symlinks are ignored;
+  * entries starting with `"."` (hidden files and directories), names that are
+    not valid module components, and entries of another kind (`other`: FIFOs,
+    sockets, and devices) are skipped;
+  * a symbolic link is classified by name once, before any target access, and
+    is followed with `context.io:stat`, which reports an explicit error on a
+    broken link, only in three cases: its whole name is a root name
+    (`is_root_name`), its name is a root candidate for the selected target, or
+    it carries a reserved spelling, which is diagnosed only if the target
+    resolves to a regular file; a link that classification excludes, such as an
+    inactive variant or a non-label dotted stem, is never followed, so its
+    broken target is never reported;
   * a directory entry is considered as a folder-module candidate, and if it is
     **not** a symbolic link (`not linked`), `walk` recurses into it; directory
     symlinks are never descended recursively (preventing symlink cycles),
@@ -1251,9 +1256,11 @@ discovery](test-runner.md#automatic-test-root-discovery).
 * **Target variants (`source_candidate`, `testroots.lua`).** `discover` reads
   the selection target with `driver.context_target(context)`; `titanc` has
   already initialized the platform, so discovery starts no `uname`. Every
-  non-hidden `*.titan` regular file, and a symlink whose spelling could name a
-  root, is classified with `driver.classify_source_filename`. A stacked or
-  mis-cased label fails discovery with `invalid test source '<path>': <error>`.
+  non-hidden `*.titan` regular file and symbolic link is classified once by
+  name with `driver.classify_source_filename`. A stacked or mis-cased label
+  fails discovery with `invalid test source '<path>': <error>` when the entry
+  is a regular file, or a link that resolves to one; a reserved link to a
+  directory or to a missing target is ignored.
   A variant `<base>.<label>.titan` with a valid component `<base>` names the
   candidate `<base>` only when `driver.target_label_applies(target, label)`;
   an inactive variant is skipped silently. Other dotted stems are not
@@ -1308,7 +1315,7 @@ actual `test_*` case discovery still runs in `test_runner.discover` from
 certified `record.object_metadata.test_functions` (or freshly checked ASTs on
 misses). Selected modules with zero `test_*` functions are valid. While
 `testroots.discover` reports errors from its own `--test-dir` `stat`/`realpath`,
-`list`, entry `lstat`, and candidate-symlink `stat` calls (and reports vanished
+`list`, entry `lstat`, and link `stat` calls (and reports vanished
 selected files), candidate lookup itself uses the shared `driver.resolve_source`
 helper, whose POSIX `regular_file` probe ignores `stat` errors on non-matching
 candidate paths.

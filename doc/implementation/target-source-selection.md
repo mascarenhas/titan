@@ -31,7 +31,7 @@ second copy.
 
 * `LABELS` is `{ "windows", "darwin", "linux", "browser", "native" }`.
 * `classify(basename)` takes a basename without a directory. A name not ending
-  in `.titan` returns no values. Otherwise the stem's last dot-separated
+  in `.titan` returns a single `nil`. Otherwise the stem's last dot-separated
   component is compared with the label set case-insensitively (`^(.+)%.([^.]+)$`
   requires a nonempty base). No label match returns the basename unchanged: it
   is its own logical filename (`linux.titan`, `x.y.titan`). A match whose
@@ -54,7 +54,7 @@ The additions are additive exports on `driver.lua`:
 | Export | Result |
 | --- | --- |
 | `driver.SOURCE_LABELS` | The five labels, in `LABELS` order. |
-| `driver.classify_source_filename(basename)` | `logical_basename, label` (label `nil` for a default member); `nil, nil, err` for a stacked or mis-cased label; no values for a non-Titan name. |
+| `driver.classify_source_filename(basename)` | `logical_basename, label` (label `nil` for a default member); `nil, nil, err` for a stacked or mis-cased label; `nil` for a non-Titan name. |
 | `driver.target_selection_labels(target)` | The target's row without the default, most specific first. |
 | `driver.target_label_applies(target, label)` | Whether `label` is in the target's row. |
 | `driver.new_resolver_context{ target = ... }` | The optional context target; `nil` or `""` means the host. |
@@ -331,17 +331,26 @@ fallback runs that query and must not depend on target settings.
 
 `testroots.discover` obtains the target with `driver.context_target(context)`;
 `titanc` has already initialized the platform, so discovery runs no
-subprocess, and a bare context detects the host once. `walk` classifies every
-non-hidden `*.titan` regular file (and a symlink only when its spelling could
-name a root) through `source_candidate`:
+subprocess, and a bare context detects the host once. `walk` `lstat`s every
+entry, then classifies each non-hidden `*.titan` regular file or symbolic link
+by name once, before any target access, through `source_candidate`:
 
 * a reserved spelling fails discovery with `invalid test source '<path>':
-  <classification error>`;
+  <classification error>`; a link spelling is diagnosed only when the link
+  resolves to a regular file, so a reserved link to a directory or to a
+  missing target is ignored;
 * a variant whose base is a valid module component yields the candidate base
   only when `driver.target_label_applies(target, label)`; an inactive variant
   is skipped silently;
 * a default member yields its stem when it is a valid component; other dotted
   stems stay non-candidates.
+
+Only a root candidate this classification accepts authorizes following a
+symbolic link, so inactive and non-label dotted links are never followed; a
+reserved spelling is stat'ed only to decide whether to diagnose it. `walk`
+also follows a link whose whole name is a root name (`is_root_name`), which
+lets a linked directory stand as a folder-module candidate without being
+descended, and ignores entries of another kind (`other`) whatever their name.
 
 The candidate names the root; the ordinary resolver, not the enumerated
 spelling, decides which member runs. Several variants of one root reach
@@ -365,7 +374,10 @@ groups variants under their logical module with the host selection and follows
 the composition order, privacy, and precedence rules above. Only selected files
 carry unsaved editor text into analysis. An inactive variant is never a module
 file and gets no `invalid-module` issue; it receives one information-severity
-diagnostic that names the file selected instead, and no semantic completion.
+diagnostic that names the selected member, or says that the family has no
+active variant. The default contributors of a folder module absent for the
+host get the same diagnostic, named after the main family. Such files get no
+semantic completion.
 Creating or deleting a variant re-selects and re-analyzes the affected module.
 The server's `source_overrides` descriptors set `native_output` to the
 canonical logical path. `TITAN_TARGET` in the server's environment has no

@@ -56,8 +56,11 @@ Titan preprocesses and parses one ordered C header environment for each logical
 module. Include guards, conditional macros, redefinitions, and `#undef` operate
 across the whole include chain. The resulting `ffi` is available throughout the
 module, including an initializer written before the directives. Folder-module
-contributors share that same environment: the canonical main file comes first,
-followed by contributors in bytewise filename order.
+contributors share that same environment: the selected main file comes first,
+followed by the selected contributors in bytewise order of their logical
+filenames, with the label component removed and `.titan` included. Files the
+target does not select contribute nothing; see [target source
+selection](target-source-selection.md#folder-modules).
 
 An explicit source import, such as `local a = import "A.titan"`, first includes
 A's C environment. Direct source dependencies come first, in Titan import

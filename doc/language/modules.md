@@ -77,8 +77,8 @@ x = 2   -- error: duplicate declaration for x, previous one at example.titan:1:1
 
 Most declarations may appear in any order. A flat module's logical order is
 its file order; a folder module's deterministic combined order is main
-declarations first, then contributors in numeric-byte basename order, then the
-main initializer
+declarations first, then contributors in numeric-byte order of their logical
+filenames, then the main initializer
 ([Folder modules](folder-modules.md#declaration-order)). Visibility is broader
 than that sequence, with one deliberate frontier for module variables:
 
@@ -178,7 +178,7 @@ end
 
 This block must be the final root construct and runs once per Lua state, after
 the module's declarations have been initialized. In a folder module it may
-appear only in the canonical main source; the compiler places it after every
+appear only in the selected main source; the compiler places it after every
 contributor declaration. It may call contributor-local functions because all
 files share one module scope. Ordinary nested `do` statements remain legal in
 every source file.

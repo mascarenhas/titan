@@ -27,7 +27,7 @@ candidates; a `TopLevelVar` also copies the document to its `decl`. A block
 before the first significant token that contains `@module` becomes
 `ast._documentation`. For a [folder module](folder-modules.md),
 `driver.defaultloader` keeps the module block of the first parsed file, the
-canonical main.
+selected main, so a module's `@module` documentation can differ by target.
 
 Consequently a comment placed between a doc block and its declaration, or
 directly after a doc block, changes or detaches the attached document. This

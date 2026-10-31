@@ -41,8 +41,9 @@ binding falls back to the builtin during an earlier initializer.
 Before aliases, signatures, initializers, or bodies are checked, the driver
 prepares one `.ffi.h` for the complete logical module. Direct explicit source
 imports contribute their `.ffi.h` files first, in import order, followed by
-local foreign directives. A folder's canonical main and bytewise-sorted
-contributors share this one ordered plan. Repeated directives are retained;
+local foreign directives. A folder's selected main and its selected
+contributors, in bytewise order of logical filenames, share this one ordered
+plan. Repeated directives are retained;
 real C guards, conditional macros, and `#undef` determine their effect.
 
 `cdriver.resolve_includes` determines quote/angle intent without parsing each
