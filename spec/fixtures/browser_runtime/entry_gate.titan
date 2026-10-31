@@ -75,6 +75,7 @@ function test_01_parked_mixed_frames(context: test.Context)
     test.assert(owners[id]:resume(id) == id)
   end
   test.assert(ffi.gate_frame_peak() >= 16)
+  test.assert(ffi.gate_lua_depth() >= 6, "mixed owner omitted loaded Lua frames")
   wait_both(40)
   test.assert(defers == 0, "parked mixed owner unwound during outer wait")
   for id = 1, 4 do
@@ -82,7 +83,7 @@ function test_01_parked_mixed_frames(context: test.Context)
     test.assert(owners[id]:resume(id + 100) == id + 100)
   end
   test.assert(defers == 4)
-  context:log("GATE item=1 owners=4 Titan_depth=4 Lua_depth=6 FFI_depth=4 waits=2 defers=4")
+  context:log("GATE item=1 owners=4 Titan_recursive_depth=4 loaded_Lua_depth=" .. ffi.gate_lua_depth() .. " CallInfo_C_depth=" .. ffi.gate_callinfo_c_depth() .. " FFI_recursive_depth=4 retained_FFI_frames=" .. ffi.gate_frame_peak() .. " waits=2 defers=4")
 end
 
 local function sequence_owner(id: integer): coroutine.Coroutine
@@ -265,10 +266,13 @@ end
 function test_negative_fiber_internal_sleep_starves_peers(context: test.Context)
   for form = 0, 1 do
     local peer_steps = 0
+    local due_at = ffi.gate_now() + 10
     local peer = coroutine.create(function(_: value): value
+      coroutine.yield("ticker-ready", "peer")
       peer_steps = peer_steps + 1
-      return nil
+      return ffi.gate_now() - due_at
     end, "peer")
+    test.assert(peer:resume(nil) == "ticker-ready")
     local sleeper = coroutine.create(function(_: value): value
       ffi.gate_wait(form, 60)
       test.assert(peer_steps == 0, "fiber-internal sleep unexpectedly scheduled peer")
@@ -277,9 +281,10 @@ function test_negative_fiber_internal_sleep_starves_peers(context: test.Context)
     local before = ffi.gate_now()
     sleeper:resume(nil)
     test.assert(peer_steps == 0 and peer:status() == "suspended")
-    peer:resume(nil)
-    test.assert(peer_steps == 1)
-    context:log("GATE negative=fiber_internal_sleep form=" .. form .. " elapsed_ms=" .. (ffi.gate_now() - before) .. " peer_steps_during_sleep=0 peer_steps_after_resume=1")
+    local lateness: float = peer:resume(nil)
+    test.assert(peer_steps == 1 and lateness >= 40,
+                "fiber-internal negative control did not delay the due ticker")
+    context:log("GATE negative=fiber_internal_sleep form=" .. form .. " elapsed_ms=" .. (ffi.gate_now() - before) .. " ticker_lateness_ms=" .. lateness .. " peer_steps_during_sleep=0 peer_steps_after_resume=1")
   end
 end
 
