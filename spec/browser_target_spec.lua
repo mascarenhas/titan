@@ -644,9 +644,19 @@ describe("browser target descriptor", function()
         subject.EXTRA_CPPFLAGS, subject.EXTRA_CFLAGS, subject.EXTRA_LDFLAGS = {}, {}, {}
         local context = fake_context({ root = subject.TITAN_ROOT })
         context.target, context.host_target = "browser", "linux"
+        context._platform_initialized, context.uname, context.is_darwin = true, "Linux", false
         function context.io:cwd() return nil, "disabled cache prefix must not request cwd" end
         assert(subject._finish_target_initialization(context))
-        assert.is_nil(subject.context_target_descriptor(context).probe_cache_directory)
+        -- The fake context models an initialized supported host. Reentry must
+        -- use that complete observation even when the actual host is Windows.
+        local windows = platform.windows
+        platform.windows = true
+        local ok, descriptor, descriptor_error = pcall(subject.context_target_descriptor, context)
+        platform.windows = windows
+        assert.is_true(ok, descriptor)
+        assert.truthy(descriptor, descriptor_error)
+        assert.equal("linux", context.host_target)
+        assert.is_nil(descriptor.probe_cache_directory)
         assert.is_nil(subject.PROBE_CACHE_DIRECTORY)
         assert(subject.close_resolver_context(context))
     end)
