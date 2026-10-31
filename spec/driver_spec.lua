@@ -20,6 +20,7 @@ local platform = require "titan-compiler.platform"
 local paths = require "titan-compiler.path"
 local version = require "titan-compiler.version"
 local incremental = require "titan-compiler.incremental"
+local browser_fixtures = require "spec.support.browser_fixtures"
 
 describe("compiler-specific production debug defaults", function()
     local function fresh_driver(profile)
@@ -296,7 +297,7 @@ describe("target source selection API", function()
             local context = driver.new_resolver_context({ io = strategy })
             local expected = host == "Linux" and "linux" or
                 host == "Darwin" and "darwin" or "native"
-            assert.is_nil(context.target)
+            assert.equal(expected, context.target)
             assert.equal(expected, driver.context_target(context))
             assert.equal(expected, driver.validate_target(context, nil))
             assert.equal(expected, driver.validate_target(context, ""))
@@ -304,16 +305,20 @@ describe("target source selection API", function()
                     "native", "browser", "wasm32" }) do
                 for _, origin in ipairs({ "--target", "TITAN_TARGET" }) do
                     local target, err = driver.validate_target(context, value, origin)
-                    if value == expected and value ~= "native" then
-                        assert.equal(expected, target)
+                    if value == expected and value ~= "native" or
+                        value == "browser" and expected ~= "native" then
+                        assert.equal(value, target)
                         assert.is_nil(err)
                     else
                         assert.is_nil(target)
-                        assert.matches(origin == "TITAN_TARGET" and
-                            "TITAN_TARGET=" .. value or "--target " .. value,
-                            err, 1, true)
+                        if value == "browser" then
+                            assert.equal("browser builds are supported from Linux and macOS hosts (host is native)", err)
+                        else
+                            assert.matches(origin == "TITAN_TARGET" and
+                                "TITAN_TARGET=" .. value or "--target " .. value, err, 1, true)
+                        end
                         local reason = value == "native" and "not a compilation target" or
-                            value == "browser" and "not available yet" or
+                            value == "browser" and "supported from Linux and macOS hosts" or
                             value == "wasm32" and "unknown target" or
                             "native cross-compilation is not supported"
                         assert.matches(reason, err, 1, true)
@@ -323,9 +328,20 @@ describe("target source selection API", function()
             assert.equal(1, calls)
             assert.is_true(driver.close_resolver_context(context))
 
-            local explicit = driver.new_resolver_context({ io = strategy, target = "browser" })
-            assert.equal("browser", driver.context_target(explicit))
-            assert.is_true(driver.close_resolver_context(explicit))
+            local implementation = driver._browser_target
+            driver._browser_target = setmetatable({ build = function(_, inputs)
+                return assert(implementation.import(browser_fixtures.descriptor(inputs.paths.root)))
+            end }, { __index = implementation })
+            if expected == "native" then
+                assert.has_error(function()
+                    driver.new_resolver_context({ io = strategy, target = "browser" })
+                end, "browser builds are supported from Linux and macOS hosts (host is native)")
+            else
+                local explicit = driver.new_resolver_context({ io = strategy, target = "browser" })
+                assert.equal("browser", driver.context_target(explicit))
+                assert.is_true(driver.close_resolver_context(explicit))
+            end
+            driver._browser_target = implementation
         end)
     end
 

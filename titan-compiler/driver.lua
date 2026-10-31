@@ -525,7 +525,7 @@ function driver.initialize_layout(context)
         error("compiler layout initialization requires a resolver context", 2)
     end
     compiler_io.validate(context.io, 2)
-    driver.assert_target_context(context)
+    if not context._target_initializing then driver.assert_target_context(context) end
     if context._layout_initialized then return true end
 
     local installation_root
@@ -745,7 +745,7 @@ function driver.initialize_platform(context)
         error("platform initialization requires a resolver context", 2)
     end
     compiler_io.validate(context.io, 2)
-    driver.assert_target_context(context)
+    if not context._target_initializing then driver.assert_target_context(context) end
     if context._platform_initialized then
         initialize_source_target(context)
         if context.target ~= "browser" then select_platform_defaults(context.uname, context.is_darwin) end
@@ -795,6 +795,7 @@ end
 
 function driver.context_target(context)
     if type(context) == "table" and context.io and context.target then
+        driver.assert_target_context(context)
         return context.target
     end
     local ok, err = driver.initialize_platform(context)
@@ -1091,7 +1092,7 @@ local function default_digest_adapter()
 end
 
 -- Implementation notes: doc/implementation/driver.md#drivernew_resolver_contextoptions
-function driver.new_resolver_context(options)
+function driver._new_resolver_context(options, target_descriptor)
     options = options or {}
     if type(options) ~= "table" then
         error("resolver context options must be a table", 2)
@@ -1199,6 +1200,8 @@ function driver.new_resolver_context(options)
     end
     local context = {
         _resolver_context = true,
+        _target_initializing = true,
+        target_descriptor = target_descriptor,
         io = io_strategy,
         target = options.target ~= "" and options.target or nil,
         cache_adapter = options.cache_adapter or default_digest_adapter(),
@@ -1242,10 +1245,26 @@ function driver.new_resolver_context(options)
     }
     local initialized, layout_error = driver.initialize_layout(context)
     if not initialized then
-        error("cannot initialize compiler layout: " ..
-            tostring(layout_error), 2)
+        context._target_initializing = nil
+        error("cannot initialize compiler layout: " .. tostring(layout_error), 2)
     end
+    if context.target and context.target ~= "browser" then
+        driver.activate_target_caches(context, context.target)
+    else
+        local target_error
+        initialized, target_error = driver.initialize_platform(context)
+        if not initialized then
+            context._target_initializing = nil
+            driver.close_resolver_context(context)
+            error(target_error, 0)
+        end
+    end
+    context._target_initializing = nil
     return context
+end
+
+function driver.new_resolver_context(options)
+    return driver._new_resolver_context(options)
 end
 
 local function remember_used_compiled_interface(context, modname, modtype)
@@ -1921,6 +1940,7 @@ local function context_file_digest(context)
 end
 
 function driver.get_probe_service(context)
+    driver.assert_target_context(context)
     if context.foreign_c_configuration_id ~=
        driver.FOREIGN_C_CONFIGURATION_ID then
         local configured, configure_err = driver.configure_foreign_c(context)
@@ -4797,6 +4817,7 @@ function driver.incremental_configuration(context)
     if type(context) ~= "table" or context.io == nil then
         error("configuration certification requires a resolver context", 2)
     end
+    driver.assert_target_context(context)
     if context.incremental_configuration then
         return context.incremental_configuration
     end
@@ -6895,7 +6916,7 @@ function driver.new_worker_context(configuration, io_strategy)
             "missing or stale (it lacks _sha256_binary or _sha256_stream)"
     end
     local resolver = configuration.resolver
-    local context = driver.new_resolver_context({
+    local initialized, context = pcall(driver._new_resolver_context, {
         io = io_strategy,
         target = resolver.target,
         cache_adapter = { sha256_binary = support._sha256_binary,
@@ -6908,8 +6929,11 @@ function driver.new_worker_context(configuration, io_strategy)
         jobs = resolver.jobs,
         frontend = resolver.frontend,
         extra_ffi_include_dirs = resolver.extra_ffi_include_dirs,
-    })
-    context.target_descriptor = target_descriptor
+    }, target_descriptor)
+    if not initialized then
+        if type(context) ~= "string" then error(context, 0) end
+        return nil, context
+    end
     local function fail(message)
         driver.close_resolver_context(context)
         return nil, message

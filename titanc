@@ -352,19 +352,25 @@ local function acquire_output_locks()
     end
 end
 
-resolver_context = driver.new_resolver_context({
-    prefer_static = args.static,
-    source_first = args.test or args.source_first,
-    verbose = args.verbose,
-    pretty_print = args.pretty_print,
-    output_root = args.output,
-    cache_adapter = { sha256_binary = support._sha256_binary,
-        sha256_stream = support._sha256_stream },
-    jobs = jobs,
-    -- The real script, not a LuaRocks wrapper: object certificates hash the
-    -- frontend that actually runs.
-    frontend = arg and arg[0] or nil,
-})
+do
+    local constructed, context = pcall(driver.new_resolver_context, {
+        prefer_static = args.static,
+        source_first = args.test or args.source_first,
+        verbose = args.verbose,
+        pretty_print = args.pretty_print,
+        output_root = args.output,
+        cache_adapter = { sha256_binary = support._sha256_binary,
+            sha256_stream = support._sha256_stream },
+        jobs = jobs,
+        -- The real script, not a LuaRocks wrapper.
+        frontend = arg and arg[0] or nil,
+    })
+    if not constructed then
+        if type(context) ~= "string" then error(context, 0) end
+        exit(context)
+    end
+    resolver_context = context
+end
 local target_value, target_origin = args.target, "--target"
 if target_value == nil then
     target_value, target_origin = platform.getenv("TITAN_TARGET"), "TITAN_TARGET"
