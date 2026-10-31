@@ -1283,10 +1283,13 @@ BROWSER_SDK_ENV = PREFIX=$(call make_shell_quote,$(PREFIX)) \
 browser-sdk: ## Build and install the browser target runtime, tools and minimal provider
 	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) set -e; \
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
-	if test -n "$${EMSDK:-}" && test -z "$${TITAN_NODE:-}"; then \
-	  for node_bin in "$$EMSDK"/node/*/bin/node; do \
-	    if test -x "$$node_bin"; then PATH="$$PATH:$${node_bin%/node}"; export PATH; break; fi; \
-	  done; \
+	if test -z "$${TITAN_NODE:-}"; then \
+	  unset TITAN_NODE; \
+	  if test -n "$${EMSDK:-}"; then \
+	    for node_bin in "$$EMSDK"/node/*/bin/node; do \
+	      if test -x "$$node_bin"; then PATH="$${node_bin%/node}:$$PATH"; export PATH; break; fi; \
+	    done; \
+	  fi; \
 	fi; \
 	titanc_bin=$(call make_shell_quote,$(TITAN_INSTALL_TREE)/bin/titanc); \
 	if test ! -x "$$titanc_bin"; then titanc_bin=$(call make_shell_quote,$(PREFIX)/bin/titanc); fi; \
@@ -1295,7 +1298,7 @@ browser-sdk: ## Build and install the browser target runtime, tools and minimal 
 	  exit 1; \
 	fi; \
 	build_dir=$(call make_shell_quote,$(abspath $(TITAN_BROWSER_BUILD_DIR))); \
-	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/browser_sdk.lua prepare "$$build_dir"; \
+	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/browser_sdk.lua prepare "$$build_dir" $(call make_shell_quote,$(CURDIR)); \
 	c_objects=$$($(BROWSER_SDK_ENV) "$$titanc_bin" --target browser \
 	  --output "$$build_dir" -c --incremental -j$(TITAN_JOBS) \
 	  $(if $(filter 1,$(TITAN_VERBOSE)),-v,-q) --print-c-objects \

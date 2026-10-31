@@ -761,9 +761,11 @@ end
 function driver.require_browser_sdk(context)
     local descriptor, err = driver.context_target_descriptor(context)
     if not descriptor then return nil, err end
+    local rocks_tree = platform.getenv("ROCKS_TREE")
+    if rocks_tree == "" then rocks_tree = nil end
     return driver.browserlink.require_sdk(context, descriptor, {
         prefix = driver.INSTALL_PATHS and driver.INSTALL_PATHS.root or descriptor.paths.root,
-        rocks_tree = platform.getenv("ROCKS_TREE"),
+        rocks_tree = rocks_tree,
     })
 end
 

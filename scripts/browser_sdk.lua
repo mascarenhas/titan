@@ -233,9 +233,18 @@ end
 
 if action == "prepare" then
     local build_dir = assert(select(2, ...), "build_dir is required")
+    local repo_root = select(3, ...)
     stage_differing_roots()
     ensure_dir(build_dir)
     local context, descriptor, assets = new_browser_context(build_dir)
+    if repo_root and repo_root ~= "" then
+        local node_ok, node_err = driver.browser_node_ready(context, {
+            runner = repo_root .. "/titan-runtime/browser/titan-browser-run",
+        })
+        if not node_ok then
+            fail(node_err)
+        end
+    end
     if lfs.symlinkattributes(assets.sdk_digests) then
         strategy:unlink(assets.sdk_digests)
     end
@@ -276,6 +285,10 @@ elseif action == "stage-runtime" then
     })
     if not ready then
         fail(ready_err)
+    end
+    local node_ok, node_err = driver.browser_node_ready(context, assets)
+    if not node_ok then
+        fail(node_err)
     end
     assert(driver.close_resolver_context(context))
 elseif action == "finalize" then

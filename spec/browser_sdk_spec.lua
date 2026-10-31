@@ -184,6 +184,15 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
                 string.format('browser SDK is incomplete: missing %q; run \'make browser-sdk PREFIX=%s\'',
                     assets[key], root),
                 err)
+            local ok_empty_tree, err_empty_tree = browserlink.require_sdk({ io = fake_io }, descriptor, {
+                prefix = root,
+                rocks_tree = "",
+            })
+            assert.is_nil(ok_empty_tree)
+            assert.equal(
+                string.format('browser SDK is incomplete: missing %q; run \'make browser-sdk PREFIX=%s\'',
+                    assets[key], root),
+                err_empty_tree)
             local ok_tree, err_tree = browserlink.require_sdk({ io = fake_io }, descriptor, {
                 prefix = root,
                 rocks_tree = root .. "-rocks",
@@ -537,9 +546,62 @@ end
                 no_sdk_root .. "/lib/titan-browser/" .. version.TITAN_LIBRARY_VERSION .. "/libtitan.a",
                 no_sdk_root, no_sdk_root))
 
-        -- 2. Run make browser-sdk into a genuinely empty differing ROCKS_TREE.
-        assert.is_nil(strategy:stat(rocks_tree))
-        local sdk_res = run_with_env(strategy, sdk_env, {
+        local link_empty_rocks_res = run_with_env(strategy, {
+            PATH = sdk_env.PATH,
+            PREFIX = info.prefix,
+            ROCKS_TREE = "",
+            TITAN_ROOT = no_sdk_root,
+            TITAN_PROBE_CACHE_DISABLE = "1",
+        }, {
+            info.prefix .. "/bin/titanc", "--target", "browser",
+            "--tree", app_dir .. ";" .. repository, "--output", app_out,
+            "--exe", paths.join(app_out, "app.mjs"),
+            "--test", "main_app",
+        })
+        assert.is_false(link_empty_rocks_res.ok)
+        contains(link_empty_rocks_res.output,
+            string.format('browser SDK is incomplete: missing %q; run \'make browser-sdk PREFIX=%s\'',
+                no_sdk_root .. "/lib/titan-browser/" .. version.TITAN_LIBRARY_VERSION .. "/libtitan.a",
+                no_sdk_root))
+        assert.is_nil(link_empty_rocks_res.output:find("ROCKS_TREE=", 1, true), link_empty_rocks_res.output)
+
+        -- 1b. Non-24 Node is clearly diagnosed when TITAN_NODE points to it, while EMSDK's
+        -- bundled Node 24 is placed ahead of an earlier non-24 node on PATH when TITAN_NODE is unset.
+        local fake_node_dir = paths.join(root, "fake-node26")
+        local fake_emsdk = paths.join(root, "fake-emsdk")
+        local fake_emsdk_node_dir = paths.join(fake_emsdk, "node/24.19.0_64bit/bin")
+        files.mkdir(fake_node_dir)
+        files.mkdir(fake_emsdk_node_dir)
+        local bad_node = paths.join(fake_node_dir, "node")
+        assert(strategy:write_file(bad_node, "#!/bin/sh\necho 'v26.1.0'\n"))
+        assert(strategy:run({ "chmod", "0755", bad_node }, { stderr_to_stdout = true }).ok)
+        assert(lfs.link(info.node.path, paths.join(fake_emsdk_node_dir, "node"), true))
+        assert(lfs.link(paths.dirname(em_dir), paths.join(fake_emsdk, "upstream"), true))
+
+        local bad_node_res = run_with_env(strategy, {
+            PATH = em_dir .. ":" .. (os.getenv("PATH") or ""),
+            TITAN_NODE = bad_node,
+            CCACHE_DISABLE = "1",
+        }, {
+            "make", "--no-print-directory", "browser-sdk",
+            "PREFIX=" .. info.prefix,
+            "ROCKS_TREE=" .. rocks_tree,
+            "TITAN_BROWSER_BUILD_DIR=" .. build_dir,
+            "TITAN_BUILD_PROFILE=validation",
+        })
+        assert.is_false(bad_node_res.ok)
+        contains(bad_node_res.output,
+            string.format('browser provider validation requires Node 24: %q reports v26.1.0; expected Node 24; set TITAN_NODE to a Node 24 executable',
+                bad_node))
+
+        -- 2. Run make browser-sdk into a genuinely empty differing ROCKS_TREE, with fake Node 26
+        -- first on PATH and TITAN_NODE unset so EMSDK's bundled Node 24 must take precedence.
+        local sdk_res = run_with_env(strategy, {
+            PATH = fake_node_dir .. ":" .. em_dir .. ":" .. (os.getenv("PATH") or ""),
+            EMSDK = fake_emsdk,
+            TITAN_NODE = "",
+            CCACHE_DISABLE = "1",
+        }, {
             "make", "--no-print-directory", "browser-sdk",
             "PREFIX=" .. info.prefix,
             "ROCKS_TREE=" .. rocks_tree,
