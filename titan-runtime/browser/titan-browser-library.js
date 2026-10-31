@@ -40,8 +40,12 @@ addToLibrary({
       TitanBrowser.guarded = new Set();
       var instrumentExports = Asyncify.instrumentWasmExports;
       Asyncify.instrumentWasmExports = (exports) => {
-        for (var name of ['titan_browser_entry', 'titan_browser_gate_guarded']) {
-          if (typeof exports[name] === 'function') TitanBrowser.guarded.add(exports[name]);
+        // Pinned applyImportAndExportNameChanges recognizes static accesses
+        // on wasmExports, and rewrites these keys when -O2/assertions-off
+        // minifies the native exports. Dynamic exports[name] is not rewritten.
+        for (var original of [wasmExports['titan_browser_entry'],
+                              wasmExports['titan_browser_gate_guarded']]) {
+          if (typeof original === 'function') TitanBrowser.guarded.add(original);
         }
         return instrumentExports(exports);
       };
