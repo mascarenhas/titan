@@ -1211,7 +1211,7 @@ int errorhandler(lua_State *L) {
   /* Regenerate the raw traceback slot. luaL_Buffer lives on the stack from
   ** luaL_buffinit on and must stay at the top while in use, so push everything
   ** else first. */
-#if defined(_WIN32) && !defined(TITAN_HAVE_LIBBACKTRACE)
+#if !defined(TITAN_HAVE_LIBBACKTRACE) && !defined(TITAN_TARGET_BROWSER)
   /* Root the Lua trace below the buffer: adding a long trace can grow its
   ** UBox, whose stack slot must remain the topmost value during appends. */
   luaL_traceback(L, L, NULL, 1);
@@ -1237,13 +1237,7 @@ int errorhandler(lua_State *L) {
 #if !defined(_WIN32)
     char **bt;
 #endif
-#if defined(_WIN32)
     titan_add_raw_lua_trace(&buf, &wrote_any, lua_trace);
-#else
-    luaL_traceback(L, L, NULL, 1);
-    titan_add_raw_lua_trace(&buf, &wrote_any, lua_tostring(L, -1));
-    lua_pop(L, 1);
-#endif
 #if defined(_WIN32)
     /* Without libbacktrace, preserve Lua frames and report native addresses. */
     calls = CaptureStackBackTrace(0, sizeof(nbuf) / sizeof(void *), nbuf, NULL);
