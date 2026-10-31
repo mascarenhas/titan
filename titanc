@@ -702,6 +702,7 @@ if not args.compile_only and not args.print_ast then
     if not planned then exit(table.concat(plan_errors, "\n")) end
     local root = args.test and requested_modules[1] or main_module
     local outputs, kind = {}, "library"
+    resolver_context.link_kind = builds_program and (args.test and "test" or "program") or "library"
     if builds_program then
         kind = args.test and "test" or "program"
         if driver.context_target(resolver_context) == "browser" then

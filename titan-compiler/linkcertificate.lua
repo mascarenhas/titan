@@ -284,10 +284,12 @@ end
 function certificate.linker_backend(context, request)
     request = request or {}
     if browser_descriptor(context) then
+        local kind = request.kind or context.link_kind
+        local backend = (kind == "program" or kind == "test") and "wasm" or "archive"
         if request.uncacheable then
-            return "archive", request.uncacheable, "uncertified"
+            return backend, request.uncacheable, "uncertified"
         end
-        return "archive"
+        return backend
     end
     if request.uncacheable then return "none", request.uncacheable, "uncertified" end
     local report
@@ -709,10 +711,10 @@ function certificate.native_library_policy(context, request)
                 reason = "opaque linker input mechanism: " .. flag }
         end
     end
-    if browser_descriptor(context) then
+    if browser_descriptor(context) and backend == "archive" then
         return { cacheable = true, backend = "archive", files = {}, argv = {} }
     end
-    if backend == "gnu" or backend == "lld" then
+    if backend == "gnu" or backend == "lld" or backend == "wasm" then
         need(type(filename) == "string", "link dependency output path is required")
         return { cacheable = true, backend = backend, dependency_file = filename,
             argv = { "-Wl,--dependency-file=" .. filename } }
