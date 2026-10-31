@@ -1556,7 +1556,9 @@ harness failure. Output pipes are drained before the runner returns.
 read-only SDK directory under `/sdk/` on `127.0.0.1` with an ephemeral port,
 correct `.mjs` and `.wasm` types, no caching, and no path traversal or symlink
 escape (only `GET` and `HEAD`). It launches the real executable in its own
-process group with `--headless=new`, `--disable-gpu`, `--no-first-run`,
+process group with `--headless=new`, `--disable-gpu`,
+`--disable-dev-shm-usage` (keeping shared-memory backing files off
+size-limited `/dev/shm` mounts), `--no-first-run`,
 `--no-default-browser-check`, the three background-throttling switches, and a
 unique `--user-data-dir`, and with real-time timers. The default transport is
 `--remote-debugging-pipe` with NUL-delimited CDP JSON written to the child's
@@ -1568,9 +1570,16 @@ page reports through a `Runtime.addBinding` binding as base64-encoded JSON, so
 program bytes cross byte for byte and console text is never parsed. GC
 requests from host tests use `HeapProfiler.collectGarbage`. The runner logs
 `Chromium <version>; executable "<path>"; CDP <pipe|port>; pid <pid>; profile
-"<path>"` and, after cleanup, `cleanup: profile "<path>" removed`. The sandbox
-stays on; `TITAN_BROWSER_ROOT_NO_SANDBOX=1` adds `--no-sandbox` only when the
-runner runs as root, for root containers such as local `act` runs.
+"<path>"` and, after cleanup, `cleanup: profile "<path>" removed`. On an early
+Chromium exit or other Chromium harness failure (`Chromium exited before
+shutdown`, `CDP pipe closed before shutdown`, `CDP WebSocket closed before
+shutdown`), `close()` closes control fds 3 and 4 first and waits up to 1000 ms
+for the child's stdio streams to close so that pipe EOF cannot hide the exit
+status or final stderr bytes, and `reportFailure()` then logs `Chromium child
+status: exit code=<code|null>, signal=<signal|null>` and `Chromium stderr
+tail:` followed by the last 8 KiB of trimmed stderr (or `(empty)`). The
+sandbox stays on; `TITAN_BROWSER_ROOT_NO_SANDBOX=1` adds `--no-sandbox` only
+when the runner runs as root, for root containers such as local `act` runs.
 
 **Status mapping.** A monitor classifies the run:
 
