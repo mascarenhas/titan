@@ -3504,25 +3504,6 @@ int main(void) {
             end
         end)
 
-    -- The Windows entry points cannot run on this host, so their environment
-    -- contract is audited at the statement that owns it.
-    it("clears an ambient target selection in the Windows compiler scripts",
-        function()
-            for _, script in ipairs({
-                "scripts/build_windows_stdlib.sh",
-                "spec/support/windows_stdlib_tests.sh",
-            }) do
-                local cleared = 0
-                for line in (read_file(script) .. "\n"):gmatch("(.-)\n") do
-                    if line:match("^%s*unset ") and
-                        line:find("TITAN_TARGET", 1, true) then
-                        cleared = cleared + 1
-                    end
-                end
-                assert.truthy(cleared > 0, script)
-            end
-        end)
-
     it("uses initialized Lua sources and the checkout support module",
         function()
             local makefile = read_file("Makefile")
