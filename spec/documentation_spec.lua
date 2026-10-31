@@ -6,12 +6,16 @@ local completion = require "titan-compiler.completion"
 local binarycompat = require "titan-compiler.binarycompat"
 
 describe("LDoc documentation metadata", function()
-    local previous_imported, previous_registry
+    local previous_imported, previous_registry, contexts
     before_each(function()
         previous_imported, previous_registry = driver.imported, types.registry
+        contexts = {}
         driver.imported, types.registry = {}, {}
     end)
     after_each(function()
+        for _, context in ipairs(contexts) do
+            assert.is_true(driver.close_resolver_context(context))
+        end
         driver.imported, types.registry = previous_imported, previous_registry
     end)
     local function check(source, modules, request)
@@ -275,7 +279,12 @@ end]]
         assert.is_true(driver.close_loader(loader))
         local sibling=assert(driver.decode_module_interface(binary,"lib"))
         driver.imported={}
-        local catalog=driver.completion_binary_catalog({selected_static_providers={{archive="/tmp/lib.a",entries={lib={type=sibling}}}},source_modules={}})
+        local catalog_context = driver.new_resolver_context({ analysis_only = true })
+        contexts[#contexts + 1] = catalog_context
+        catalog_context.selected_static_providers = {
+            { archive = "/tmp/lib.a", entries = { lib = { type = sibling } } },
+        }
+        local catalog = driver.completion_binary_catalog(catalog_context)
         assert.equal("A documented module.",catalog.lib.documentation.summary)
         catalog.lib.documentation.summary="changed"
         assert.equal("A documented module.",sibling._documentation.summary)

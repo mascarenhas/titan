@@ -40,11 +40,11 @@ end
 -- frozen fixture. Constructors, accessors and cache activation remain real.
 describe("browser semantic cache isolation", function()
     local subject, root, contexts, saved_registry, saved_browser, saved_initialize_platform
-    local function context(target, data)
+    local function context(target, data, analysis_only)
         subject._browser_target = setmetatable({
             build = function() return data or descriptor(root) end,
         }, { __index = browser_target })
-        local ctx = subject.new_resolver_context({ analysis_only = true, target = target,
+        local ctx = subject.new_resolver_context({ analysis_only = analysis_only ~= false, target = target,
             embedded_interface_provider = { provider_file = root .. "/semantic-host",
                 entries = {}, target_profile = fixtures.profile_data() } })
         contexts[#contexts + 1] = ctx
@@ -72,6 +72,122 @@ describe("browser semantic cache isolation", function()
         subject.initialize_platform = saved_initialize_platform
         types.registry = saved_registry
         files.remove(root)
+    end)
+
+    local function stale_compilation(prepare)
+        local native = context(nil, nil, false)
+        files.write(root .. "/frozen.titan",
+            "record Item\n value: integer\nend\nfunction answer(): integer return 1 end\n")
+        loaded(subject.defaultloader({}, { context = native,
+            source_roots = { frozen = true } }), "frozen")
+        local entry = subject.imported.frozen
+        assert.is_table(entry.ast._erased_registry)
+        local request = { modname = "frozen", mod = entry,
+            options = { context = native, c_parts = 1 } }
+        local plans = prepare and assert(subject.plan_compile_requests({ request })) or nil
+        files.write(root .. "/frozen.c", subject.GENERATED_C_MARKER .. "\n/* retained source */\n")
+        files.write(root .. "/frozen.o", "retained object bytes")
+        local retained, past = {}, os.time() - 120
+        for _, suffix in ipairs({ ".c", ".o" }) do
+            local filename = root .. "/frozen" .. suffix
+            assert(lfs.touch(filename, past, past))
+            retained[filename] = files.read(filename)
+        end
+        local browser = context("browser")
+        files.write(root .. "/active.browser.titan", "record Active\n value: string\nend\n")
+        loaded(subject.defaultloader({}, { context = browser,
+            source_roots = { active = true } }), "active")
+        local registry, imported = types.registry, subject.imported
+        local owner, active = registry["active.Active"], imported.active
+        local inventory = assert(browser.io:list(root))
+        table.sort(inventory)
+        local function unchanged()
+            assert.equal(registry, types.registry)
+            assert.equal(imported, subject.imported)
+            assert.equal(owner, types.registry["active.Active"])
+            assert.equal(active, subject.imported.active)
+            assert.is_nil(native.source_modules.unrelated)
+            for filename, bytes in pairs(retained) do
+                assert.equal(bytes, files.read(filename))
+                assert.equal(past, lfs.attributes(filename, "modification"))
+            end
+            local current = assert(browser.io:list(root))
+            table.sort(current)
+            assert.same(inventory, current)
+            assert(subject.assert_target_context(browser))
+        end
+        local message = "compiler caches now belong to target " ..
+            browser.target_descriptor.identity .. "; create a new context"
+        return native, browser, entry, request, plans, unchanged, message
+    end
+
+    it("rejects stale native direct compilation before code generation can replace the browser registry", function()
+        local native, _, entry, _, _, unchanged, message = stale_compilation(false)
+        assert.has_error(function()
+            subject.compile("frozen", entry.ast, entry.filename, {}, false, { context = native })
+        end, message)
+        unchanged()
+        assert(subject.close_resolver_context(native))
+    end)
+
+    it("rejects stale batch requests and captured materializers before fast paths or output mutation", function()
+        local native, browser, entry, request, plans, unchanged, message = stale_compilation(true)
+        local compiled = {}
+        for key, value in pairs(entry) do compiled[key] = value end
+        compiled.compiled, compiled.compiled_objects = root .. "/frozen.o", { root .. "/frozen.o" }
+        local warm = { modname = "frozen", mod = compiled, options = { context = native } }
+        local current = { modname = "frozen", mod = entry, options = { context = browser } }
+        for _, action in ipairs({
+            function() subject.plan_compile_requests({ request }) end,
+            function() subject.plan_compile_requests({ warm }) end,
+            function() subject.compile_modules({ request }, 1) end,
+            function() subject.compile_modules({ warm }, 1, false, {}) end,
+            function() plans[1].materialize() end,
+            function() subject.compile_modules({ current }, 1, false, plans) end,
+        }) do
+            assert.has_error(action, message)
+            unchanged()
+        end
+    end)
+
+    it("rejects stale invalidation, staging and borrowed semantic contexts before any work", function()
+        local native, _, entry, _, _, unchanged, message = stale_compilation(false)
+        for _, action in ipairs({
+            function() subject.invalidate_source_object(native, "frozen", { main = entry.filename }) end,
+            function() subject.cleanup_stale_staging(native, {}) end,
+            function() subject.restat_c_header_dependencies({}, native) end,
+            function() subject.restat_c_header_dependencies({}, { context = native }) end,
+            function() subject.resolve_external_modules({}, { unrelated = true }, native) end,
+            function() subject.resolve_external_modules({}, { unrelated = true }, { context = native }) end,
+            function() subject.language_server_cache_identity({ context = native }) end,
+        }) do
+            assert.has_error(action, message)
+            unchanged()
+        end
+    end)
+
+    it("rejects never-activated contexts at compile and borrowed boundaries but accepts raw I/O constructor options", function()
+        local _, _, entry, _, _, unchanged = stale_compilation(false)
+        local uninitialized = { io = compiler_io.new_sync(), _resolver_context = true }
+        local request = { modname = "frozen", mod = entry, options = { context = uninitialized } }
+        local compiled = { compiled = root .. "/frozen.o", compiled_objects = { root .. "/frozen.o" } }
+        local warm = { modname = "frozen", mod = compiled, options = { context = uninitialized } }
+        for _, action in ipairs({
+            function() subject.compile("frozen", entry.ast, entry.filename, {}, false, request.options) end,
+            function() subject.plan_compile_requests({ request }) end,
+            function() subject.plan_compile_requests({ warm }) end,
+            function() subject.compile_modules({ warm }, 1, false, {}) end,
+            function() subject.invalidate_source_object(uninitialized, "frozen", { main = entry.filename }) end,
+            function() subject.cleanup_stale_staging(uninitialized, {}) end,
+            function() subject.restat_c_header_dependencies({}, uninitialized) end,
+            function() subject.restat_c_header_dependencies({}, { context = uninitialized }) end,
+            function() subject.resolve_external_modules({}, {}, uninitialized) end,
+            function() subject.resolve_external_modules({}, {}, { context = uninitialized }) end,
+        }) do
+            assert.has_error(action, "compiler target context is not initialized")
+            unchanged()
+        end
+        assert.same({}, subject.resolve_external_modules({}, {}, { io = compiler_io.new_sync() }))
     end)
 
     it("rejects a context that has never activated semantic caches", function()
