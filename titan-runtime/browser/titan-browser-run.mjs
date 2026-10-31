@@ -11,6 +11,30 @@ const exec = promisify(execFile);
 const assets = dirname(fileURLToPath(import.meta.url));
 const diagnostic = text => process.stderr.write(`titan-browser-run: ${text}\n`);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function later(callback, milliseconds) {
+    // Node clamps delays above INT32_MAX to 1ms. Preserve the CLI's millisecond
+    // contract by arming bounded slices against a monotonic deadline instead.
+    const end = performance.now() + milliseconds;
+    let timer;
+    function arm() {
+        timer = setTimeout(() => {
+            if (performance.now() >= end) callback();
+            else arm();
+        }, Math.min(Math.max(0, end - performance.now()), 2147483647));
+    }
+    arm();
+    return () => clearTimeout(timer);
+}
+
+async function bounded(promise, milliseconds) {
+    let timer;
+    try {
+        return await Promise.race([promise, new Promise(resolve => {
+            timer = setTimeout(resolve, milliseconds);
+        })]);
+    } finally { clearTimeout(timer); }
+}
 const usage = "usage: titan-browser-run [--engine node|chromium] [--timeout MS] [--grace MS]\n" +
     "                         [--chrome PATH] [--cdp pipe|port] [--root DIR]\n" +
     "                         [--js-test] FILE [-- ARG...]\n";
@@ -36,8 +60,8 @@ function parse(argv) {
     if (!["pipe", "port"].includes(options.cdp)) throw new Error("--cdp must be pipe or port");
     for (const key of ["timeout", "grace"]) {
         if (!/^\d+$/.test(String(options[key])) || !Number.isSafeInteger(Number(options[key])) ||
-            Number(options[key]) > 2147483647 || (key === "timeout" && Number(options[key]) === 0)) {
-            throw new Error(`--${key} must be ${key === "timeout" ? "a positive" : "a nonnegative"} integer number of milliseconds (at most 2147483647)`);
+            (key === "timeout" && Number(options[key]) === 0)) {
+            throw new Error(`--${key} must be ${key === "timeout" ? "a positive" : "a nonnegative"} safe integer number of milliseconds`);
         }
         options[key] = Number(options[key]);
     }
@@ -90,10 +114,7 @@ class Monitor {
     constructor(options) {
         this.options = options;
         this.done = new Promise(resolve => { this.finish = resolve; });
-        this.deadline = setTimeout(() => {
-            this.failure = { category: "timeout", reason: `timed out after ${options.timeout} ms` };
-            this.finish();
-        }, options.timeout);
+        this.deadline = later(() => this.fail("timeout", `timed out after ${options.timeout} ms`), options.timeout);
     }
     fail(category, reason, knownTrap = false) {
         if (this.stopped) return;
@@ -118,11 +139,11 @@ class Monitor {
                 return this.fail("harness", "malformed completion control");
             }
             this.completion = message;
-            clearTimeout(this.deadline);
-            this.grace = setTimeout(() => this.finish(), this.options.grace);
+            this.deadline();
+            this.grace = later(() => this.finish(), this.options.grace);
         } else this.fail("harness", "unknown control message");
     }
-    stop() { this.stopped = true; clearTimeout(this.deadline); clearTimeout(this.grace); }
+    stop() { this.stopped = true; this.deadline(); this.grace?.(); }
     result() {
         const failure = this.failure;
         if (failure) {
@@ -142,7 +163,7 @@ class Monitor {
     }
 }
 
-function exited(child) { return child.exitCode !== null || child.signalCode !== null; }
+function exited(child) { return !child.pid || child.exitCode !== null || child.signalCode !== null; }
 function waitExit(child, ms) {
     if (exited(child)) return Promise.resolve(true);
     return new Promise(resolve => {
@@ -162,12 +183,16 @@ class NodeEngine {
         const child = this.child = spawn(process.execPath, ["--expose-gc", join(assets, "titan-browser-node-worker.mjs")], {
             detached: true, stdio: ["ignore", "pipe", "pipe", "ipc"],
         });
+        this.drained = new Promise(resolve => child.once("close", resolve));
         child.stdout.pipe(process.stdout, { end: false });
         child.stderr.pipe(process.stderr, { end: false });
         child.on("error", error => this.monitor.fail("harness", `cannot start Node worker: ${error.message}`));
         child.on("message", message => this.monitor.control(message));
         child.on("exit", (code, signal) => {
             if (!this.closing) this.monitor.fail("harness", `Node worker exited before shutdown (${signal ?? code})`);
+        });
+        child.on("disconnect", () => {
+            if (!this.closing) this.monitor.fail("harness", "Node worker IPC disconnected before shutdown");
         });
         child.send({ type: "start", config }, error => { if (error && !this.closing) this.monitor.fail("harness", error.message); });
     }
@@ -179,10 +204,9 @@ class NodeEngine {
         if (!await waitExit(child, 500)) { killGroup(child, "SIGTERM"); }
         if (!await waitExit(child, 500)) { killGroup(child, "SIGKILL"); }
         await waitExit(child, 1000);
+        killGroup(child, "SIGTERM");
         // close, unlike exit, follows EOF/drain of both output pipes.
-        if (!child.stdout.readableEnded || !child.stderr.readableEnded) {
-            await Promise.race([new Promise(resolve => child.once("close", resolve)), delay(1000)]);
-        }
+        await bounded(this.drained, 1000);
     }
 }
 
@@ -350,7 +374,7 @@ class ChromiumEngine {
     async close() {
         this.closing = true;
         try {
-            if (this.cdp?.send) await Promise.race([this.cdp.request("Browser.close").catch(() => {}), delay(500)]);
+            if (this.cdp?.send) await bounded(this.cdp.request("Browser.close").catch(() => {}), 500);
             if (this.child) {
                 if (!await waitExit(this.child, 1500)) killGroup(this.child, "SIGTERM");
                 if (!await waitExit(this.child, 500)) killGroup(this.child, "SIGKILL");

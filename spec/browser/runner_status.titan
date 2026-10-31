@@ -1,0 +1,8 @@
+function main(args: {string}): integer
+  if args[1] == "negative" then return -1 end
+  if args[1] == "wide" then return 257 end
+  if args[1] == "minimum" then return -2147483648 end
+  if args[1] == "maximum" then return 2147483647 end
+  if args[1] == "wrap" then return 4294967297 end
+  return 0
+end
