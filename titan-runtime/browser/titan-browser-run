@@ -21,8 +21,10 @@ else
         exit 75
     fi
 fi
-node_dir=$(CDPATH= cd -- "$(dirname -- "$node_path")" 2>/dev/null && pwd -P)
-node_path=$node_dir/$(basename -- "$node_path")
+case "$node_path" in */*) node_dir=${node_path%/*} ;; *) node_dir=. ;; esac
+node_name=${node_path##*/}
+node_dir=$(CDPATH= cd -- "$node_dir" 2>/dev/null && pwd -P)
+node_path=$node_dir/$node_name
 version=$("$node_path" --version 2>/dev/null)
 case "$version" in
     v24.[0-9]*) ;;
@@ -35,7 +37,8 @@ case "$version" in
         exit 75
         ;;
 esac
-asset_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P)
+case "$0" in */*) launcher_dir=${0%/*} ;; *) launcher_dir=. ;; esac
+asset_dir=$(CDPATH= cd -- "$launcher_dir" 2>/dev/null && pwd -P)
 if [ -z "$asset_dir" ] || [ ! -r "$asset_dir/titan-browser-run.mjs" ]; then
     printf '%s\n' 'titan-browser-run: harness failure: runner assets are missing' >&2
     exit 75
