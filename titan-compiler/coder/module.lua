@@ -130,7 +130,7 @@ coder.modmetadata = [[
 #if defined(__APPLE__)
 #define TITAN_META_SECTION \
     __attribute__((used, aligned(1), section("__TEXT,__titanmeta")))
-#elif defined(__ELF__) || defined(_WIN32)
+#elif defined(__ELF__) || defined(_WIN32) || defined(__wasm__)
 #define TITAN_META_SECTION \
     __attribute__((used, aligned(1), section(".titan.meta")))
 #else

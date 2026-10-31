@@ -7,7 +7,7 @@ local toolchain = require "spec.support.browser_toolchain"
 
 local repository = assert(lfs.currentdir())
 local modules = { "bundle.first", "bundle.second" }
-local fixture, info, native_root, browser_root
+local fixture, native_root, browser_root
 
 local function arguments(target, compile_only)
     local argv = { "--target", target, "--incremental", "--source-first",
@@ -81,18 +81,18 @@ local function record_path(output)
 end
 
 describe("browser incremental compilation", function()
-    before_each(function()
-        info = toolchain.require()
-        if not info then return end
+    local function prepare_fixture()
         fixture = fixtures.new()
         fixtures.copy(repository .. "/spec/fixtures/browser_iso/bundle", fixture.source .. "/bundle")
         native_root, browser_root = fixture.root .. "/native-out", fixture.root .. "/browser-out"
-    end)
+    end
     after_each(function()
         if fixture then fixture:close(); fixture = nil end
     end)
 
     it("reuses warm browser objects and archives, recompiles only the edited variant, and leaves the native root unchanged", function()
+        local info, why = toolchain.require(); if not info then pending(why) return end
+        prepare_fixture()
         compiled(fixture.host, native_root)
         local native = remember(native_root)
         local native_archive = fixtures.read(native_root .. "/bundle.a")
@@ -133,7 +133,9 @@ describe("browser incremental compilation", function()
         assert.equal(native_record_bytes, fixtures.read(native_record))
     end)
 
-    it("rejects foreign object and link certificates even when copied into correctly marked browser paths", function()
+    it("rejects transplanted foreign object and link certificates in both target directions", function()
+        local info, why = toolchain.require(); if not info then pending(why) return end
+        prepare_fixture()
         compiled(fixture.host, native_root)
         compiled("browser", browser_root)
         local browser = remember(browser_root)
@@ -149,9 +151,21 @@ describe("browser incremental compilation", function()
         local object = assert(staticmetadata.classify_object(
             fixtures.read(object_path(browser_root, "bundle.first")), "bundle.first"))
         assert.equal("wasm", object.format)
+        local native = remember(native_root)
+        fixtures.write(object_path(native_root, "bundle.first"),
+            fixtures.read(object_path(browser_root, "bundle.first")))
+        fixtures.write(native_record, fixtures.read(browser_record))
+        local host_rebuilt = compiled(fixture.host, native_root)
+        decisions(host_rebuilt, native, "bundle.first")
+        assert.matches("Titan link miss", host_rebuilt, 1, true)
+        local native_object = assert(staticmetadata.classify_object(
+            fixtures.read(object_path(native_root, "bundle.first")), "bundle.first"))
+        assert.not_equal("wasm", native_object.format)
     end)
 
     it("diagnoses missing output and refuses mixed-target roots in either direction, including source-adjacent domains", function()
+        local info, why = toolchain.require(); if not info then pending(why) return end
+        prepare_fixture()
         local missing = fixture:compile({ "--target", "browser", "-c", "bundle.first" }, nil, true)
         assert.is_false(missing.ok)
         assert.matches("--target browser requires --output", missing.output, 1, true)
