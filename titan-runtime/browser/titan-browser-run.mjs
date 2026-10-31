@@ -314,6 +314,19 @@ class CDP {
 
 class ChromiumEngine {
     constructor(monitor, options, chrome) { this.monitor = monitor; this.options = options; this.chrome = chrome; }
+    fail(reason) {
+        if (this.closing) return;
+        this.engineFailure = true;
+        this.monitor.fail("harness", reason);
+    }
+    reportFailure() {
+        if (!this.child || !this.monitor.failure ||
+            (!this.engineFailure && this.monitor.failure.category !== "harness")) return;
+        // Format only after shutdown/drain: pipe EOF can win before the exit
+        // event or the final stderr chunk, but must not hide either diagnostic.
+        diagnostic(`Chromium child status: exit code=${JSON.stringify(this.child.exitCode)}, signal=${JSON.stringify(this.child.signalCode)}`);
+        diagnostic(`Chromium stderr tail:\n${this.engineLog?.trim() || "(empty)"}`);
+    }
     async start(config) {
         this.server = createServer((request, response) => { this.serve(request, response, config).catch(() => { response.writeHead(404); response.end(); }); });
         await new Promise((resolve, reject) => { this.server.once("error", reject); this.server.listen(0, "127.0.0.1", resolve); });
@@ -333,13 +346,12 @@ class ChromiumEngine {
             detached: true, stdio: this.options.cdp === "pipe" ? ["ignore", "ignore", "pipe", "pipe", "pipe"] : ["ignore", "ignore", "pipe"],
         });
         diagnostic(`Chromium ${this.chrome.version}; executable ${JSON.stringify(this.chrome.path)}; CDP ${this.options.cdp}; pid ${child.pid}; profile ${JSON.stringify(this.profile)}`);
-        let engineLog = "";
-        child.stderr.on("data", chunk => { engineLog = (engineLog + chunk.toString()).slice(-8192); });
-        child.on("error", error => this.monitor.fail("harness", `cannot launch Chromium: ${error.message}`));
-        child.on("exit", (code, signal) => {
-            if (!this.closing) this.monitor.fail("harness", `Chromium exited before shutdown (${signal ?? code}): ${engineLog.trim()}`);
-        });
-        const cdp = this.cdp = new CDP((category, reason) => { if (!this.closing) this.monitor.fail(category, reason); });
+        this.drained = new Promise(resolve => child.once("close", resolve));
+        this.engineLog = "";
+        child.stderr.on("data", chunk => { this.engineLog = (this.engineLog + chunk.toString()).slice(-8192); });
+        child.on("error", error => this.fail(`cannot launch Chromium: ${error.message}`));
+        child.on("exit", () => this.fail("Chromium exited before shutdown"));
+        const cdp = this.cdp = new CDP((_category, reason) => this.fail(reason));
         if (this.options.cdp === "pipe") {
             let buffer = "";
             child.stdio[4].setEncoding("utf8");
@@ -351,8 +363,8 @@ class ChromiumEngine {
                     if (text) cdp.dispatch(text);
                 }
             });
-            for (const stream of [child.stdio[3], child.stdio[4]]) stream.on("error", error => { if (!this.closing) this.monitor.fail("harness", error.message); });
-            child.stdio[4].on("end", () => { if (!this.closing) this.monitor.fail("harness", "CDP pipe closed before shutdown"); });
+            for (const stream of [child.stdio[3], child.stdio[4]]) stream.on("error", error => this.fail(error.message));
+            child.stdio[4].on("end", () => this.fail("CDP pipe closed before shutdown"));
             cdp.send = text => child.stdio[3].write(text + "\0");
         } else {
             let endpoint;
@@ -368,7 +380,7 @@ class ChromiumEngine {
             if (!endpoint || this.closing) return;
             const socket = cdp.socket = new WebSocket(endpoint);
             socket.addEventListener("message", event => cdp.dispatch(event.data));
-            socket.addEventListener("close", () => { if (!this.closing) this.monitor.fail("harness", "CDP WebSocket closed before shutdown"); });
+            socket.addEventListener("close", () => this.fail("CDP WebSocket closed before shutdown"));
             await new Promise((resolve, reject) => {
                 socket.addEventListener("open", resolve, { once: true });
                 socket.addEventListener("error", () => reject(new Error("cannot connect CDP WebSocket")), { once: true });
@@ -455,6 +467,11 @@ class ChromiumEngine {
             }
         } finally {
             this.cdp?.close();
+            // Close control fds first, but retain stderr until its final bytes and
+            // the child's exit status have been observed. This wait is bounded.
+            this.child?.stdio[3]?.destroy();
+            this.child?.stdio[4]?.destroy();
+            if (this.drained) await bounded(this.drained, 1000);
             for (const stream of this.child?.stdio ?? []) stream?.destroy?.();
             try {
                 if (this.server) { this.server.closeAllConnections(); await new Promise(resolve => this.server.close(resolve)); }
@@ -537,6 +554,7 @@ async function main() {
             if (monitor.failure) diagnostic(`harness failure: ${reason}`);
             else monitor.failure = { category: "harness", reason };
         }
+        engine.reportFailure?.();
         process.off("SIGINT", sigint); process.off("SIGTERM", sigterm);
     }
     return monitor.result();
