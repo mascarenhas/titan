@@ -1192,11 +1192,12 @@ admitted run. A refusal allocates nothing and switches no fiber.
 
 An admitted run:
 
-1. creates the state with `luaL_newstate` and reserves four stack slots with
-   the boolean `lua_checkstack`, outside any protection; only the nonallocating
-   pushes of `errorhandler`, the worker, and the argument block follow. A
-   failure completes with kind 1, the configured state status, and the static
-   payload `not enough memory for state`;
+1. creates the state with `luaL_newstate`, outside any protection; the fresh
+   state's guaranteed `LUA_MINSTACK` (20) slots cover the three nonallocating
+   setup pushes of `errorhandler`, the worker, and the argument block without
+   a `lua_checkstack` call. A state-allocation failure completes with kind 1,
+   the configured state status, and the static payload `not enough memory for
+   state`;
 2. calls the worker under `lua_pcall` with `errorhandler` as message handler,
    so the Lua libraries, the searcher, the preloads, every module
    initializer, and `main` run inside one protected boundary, and an ordinary
