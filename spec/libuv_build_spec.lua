@@ -5978,6 +5978,8 @@ printf '%s\n' "${schedule[@]}"
                 "chrome-headless-shell-${{ env.TITAN_CHROME_VERSION }}-${{ env.TITAN_CHROME_SHA256 }}-v1",
                 "sha256sum -c --strict -",
                 "python3 scripts/browser_extract_zip.py",
+                "browser-chrome-sandbox.log",
+                'sudo sysctl -w "$key=0"',
                 'rm -f "$PREFIX/bin/titanc"',
                 'rm -rf "$PREFIX/share/lua/5.5/titan-compiler"',
                 "browser-loader.log",
@@ -6022,9 +6024,12 @@ printf '%s\n' "${schedule[@]}"
             local browser_chrome_index = assert(browser_job:find(
                 "- name: Install Chrome for Testing headless shell",
                 browser_node_index, true))
+            local browser_sandbox_index = assert(browser_job:find(
+                "- name: Allow Chrome's user-namespace sandbox on the CI host",
+                browser_chrome_index, true))
             local browser_lua_index = assert(browser_job:find(
                 "- name: Install the fork's browser Lua into the validation " ..
-                "prefix", browser_chrome_index, true))
+                "prefix", browser_sandbox_index, true))
             local browser_rocks_index = assert(browser_job:find(
                 "- name: Install the native runtime and compiler with LuaRocks",
                 browser_lua_index, true))
@@ -6043,7 +6048,8 @@ printf '%s\n' "${schedule[@]}"
             assert.is_true(browser_unpack_index < browser_toolchain_index and
                 browser_toolchain_index < browser_node_index and
                 browser_node_index < browser_chrome_index and
-                browser_chrome_index < browser_lua_index and
+                browser_chrome_index < browser_sandbox_index and
+                browser_sandbox_index < browser_lua_index and
                 browser_lua_index < browser_rocks_index and
                 browser_rocks_index < browser_sdk_index and
                 browser_sdk_index < browser_gate_index and
@@ -6079,6 +6085,25 @@ printf '%s\n' "${schedule[@]}"
                 "Install Chrome for Testing headless shell")
             assert.truthy(browser_extract:find(
                 "scripts/browser_extract_zip.py", 1, true), browser_extract)
+            -- Chrome keeps its sandbox: the host restriction is relaxed instead,
+            -- the step is guarded when the sysctl is absent, and its state lands
+            -- in the failure artifact.
+            local browser_sandbox = named_step(browser_job,
+                "Allow Chrome's user-namespace sandbox on the CI host")
+            assert.truthy(browser_sandbox:find(
+                "key=kernel.apparmor_restrict_unprivileged_userns", 1, true),
+                browser_sandbox)
+            assert.truthy(browser_sandbox:find(
+                'sysctl -n "$key" 2>/dev/null', 1, true), browser_sandbox)
+            assert.truthy(browser_sandbox:find(
+                'if [ "$state" != "0" ]', 1, true), browser_sandbox)
+            assert.truthy(browser_sandbox:find(
+                "browser-chrome-sandbox.log", 1, true), browser_sandbox)
+            assert.truthy(browser_sandbox:find("--dump-dom", 1, true),
+                browser_sandbox)
+            assert.falsy(browser_job:find("--no-sandbox", 1, true), browser_job)
+            assert.falsy(browser_job:find("TITAN_BROWSER_ROOT_NO_SANDBOX", 1, true),
+                browser_job)
             local browser_loader = named_step(browser_job,
                 "Run the portable loader suite under Node and Chromium")
             assert.truthy(browser_loader:find("for engine in node chromium",
