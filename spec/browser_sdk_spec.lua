@@ -1,0 +1,603 @@
+local assert = require "luassert"
+local lfs = require "lfs"
+local browser = require "titan-compiler.browsertarget"
+local browserlink = require "titan-compiler.browserlink"
+local driver = require "titan-compiler.driver"
+local incremental = require "titan-compiler.incremental"
+local staticmetadata = require "titan-compiler.staticmetadata"
+local compiler_io = require "titan-compiler.io"
+local paths = require "titan-compiler.path"
+local platform = require "titan-compiler.platform"
+local version = require "titan-compiler.version"
+local fixtures = require "spec.support.browser_fixtures"
+local toolchain = require "spec.support.browser_toolchain"
+local installed_prefix = require "spec.support.installed_prefix"
+local temporary = require "spec.support.temporary"
+local files = require "spec.fixtures.target_selection.support"
+
+local EXPECTED_RUNTIME_MEMBERS = {
+    "titan.o", "minicoro.o", "titan_path.o", "ltitanlib.o",
+}
+
+local EXPECTED_LPEGLABEL_MEMBERS = {
+    "lplcap.o", "lplcode.o", "lplprint.o", "lpltree.o", "lplvm.o",
+}
+
+local EXPECTED_LPEGLABEL_SYMBOLS = {
+    titan_lpeglabel_checkaux = true,
+    titan_lpeglabel_compile = true,
+    titan_lpeglabel_finddyncap = true,
+    titan_lpeglabel_fixedlen = true,
+    titan_lpeglabel_getcaptures = true,
+    titan_lpeglabel_hascaptures = true,
+    titan_lpeglabel_lp_gc = true,
+    titan_lpeglabel_match = true,
+    titan_lpeglabel_numsiblings = true,
+    titan_lpeglabel_open = true,
+    titan_lpeglabel_realloccode = true,
+    titan_lpeglabel_runtimecap = true,
+    titan_lpeglabel_sizei = true,
+    titan_lpeglabel_tocharset = true,
+}
+
+local EXPECTED_PROVIDER_MODULES = {
+    "titan.coroutine", "titan.gc", "titan.test",
+}
+
+local function contains(text, fragment)
+    assert.is_string(text)
+    assert.truthy(text:find(fragment, 1, true), text)
+end
+
+local function run_with_env(strategy, env, argv)
+    local full_argv = { "env" }
+    local keys = {}
+    for k in pairs(env or {}) do keys[#keys + 1] = k end
+    table.sort(keys)
+    for _, k in ipairs(keys) do
+        full_argv[#full_argv + 1] = k .. "=" .. tostring(env[k])
+    end
+    for _, arg in ipairs(argv) do full_argv[#full_argv + 1] = arg end
+    return strategy:run(full_argv, { stderr_to_stdout = true })
+end
+
+local function copy_tree(strategy, source, destination)
+    local info = assert(strategy:lstat(source), "missing source: " .. source)
+    if info.kind == "file" then
+        files.mkdir(assert(paths.dirname(destination)))
+        local bytes = assert(strategy:read_file(source))
+        assert(strategy:write_file(destination, bytes))
+        if not platform.windows and strategy:executable(source) then
+            assert(strategy:run({ "chmod", "0755", destination }, { stderr_to_stdout = true }).ok)
+        end
+    elseif info.kind == "directory" then
+        files.mkdir(destination)
+        for _, name in ipairs(assert(strategy:list(source))) do
+            copy_tree(strategy, paths.join(source, name), paths.join(destination, name))
+        end
+    end
+end
+
+local function assert_no_forbidden_symbols(archive_name, archive)
+    for _, member in ipairs(archive.members or {}) do
+        local object = member.object
+        assert.equal("wasm", object.format)
+        for _, import in ipairs(object.imports or {}) do
+            assert.not_equal("GOT.mem", import.module, archive_name .. " has PIC GOT.mem import")
+            assert.not_equal("GOT.func", import.module, archive_name .. " has PIC GOT.func import")
+            assert.not_equal("dlopen", import.name)
+            assert.not_equal("dlsym", import.name)
+            assert.not_equal("dlerror", import.name)
+            assert.is_nil(tostring(import.name):match("^_?_?backtrace_"))
+        end
+        for _, symbol in ipairs(object.symbols or {}) do
+            if not symbol.defined then
+                assert.not_equal("dlopen", symbol.name)
+                assert.not_equal("dlsym", symbol.name)
+                assert.not_equal("dlerror", symbol.name)
+                assert.is_nil(tostring(symbol.name):match("^_?_?backtrace_"))
+            end
+        end
+    end
+end
+
+describe("browser SDK layout, Make rules, and bootstrap", function()
+    local strategy = compiler_io.new_sync()
+    local repository = assert(strategy:cwd())
+    local workspace
+
+    after_each(function()
+        if workspace then
+            files.remove(workspace)
+            workspace = nil
+        end
+    end)
+
+    local function new_workspace(suffix)
+        workspace = temporary.name(suffix or "-browser-sdk")
+        os.remove(workspace)
+        files.mkdir(workspace)
+        return workspace
+    end
+
+    it("declares lua-browser and browser-sdk only in POSIX Makefile and keeps Makefile.win free of browser targets", function()
+        local makefile = assert(strategy:read_file(paths.join(repository, "Makefile")))
+        local makefile_win = assert(strategy:read_file(paths.join(repository, "Makefile.win")))
+
+        contains(makefile, "lua-browser:")
+        contains(makefile, "browser-sdk:")
+        contains(makefile, "scripts/lua_browser.sh")
+        contains(makefile, "scripts/browser_sdk.lua")
+        contains(makefile, "--print-c-objects")
+        contains(makefile, "BROWSER_STDLIB_ROOTS := titan.test titan.coroutine titan.gc")
+
+        -- Ordinary Make targets must not invoke lua-browser or browser-sdk or inherit TITAN_TARGET.
+        local all_rule = assert(makefile:match("\nall:[^\n]*\n\t([^\n]+)"))
+        assert.is_nil(all_rule:find("lua-browser", 1, true))
+        assert.is_nil(all_rule:find("browser-sdk", 1, true))
+        contains(makefile, "unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET;")
+
+        assert.is_nil(makefile_win:find("lua%-browser"))
+        assert.is_nil(makefile_win:find("browser%-sdk"))
+    end)
+
+    it("maps browser SDK assets into the sibling lib/titan-browser/<ver>/ tree and diagnoses missing required assets in order", function()
+        local root = platform.windows and "C:/sdk-root" or "/sdk-root"
+        local installed = driver.installed_paths(root, "browser")
+        local native = driver.installed_paths(root, "linux")
+        assert.not_equal(native.titan_bin, installed.titan_bin)
+        assert.equal(root .. "/lib/titan-browser/" .. version.TITAN_LIBRARY_VERSION, installed.titan_bin)
+
+        local assets = browserlink.sdk_assets(installed)
+        assert.same({
+            runtime = installed.titan_bin .. "/libtitan.a",
+            js_library = installed.titan_bin .. "/titan-browser-library.js",
+            loader = installed.titan_bin .. "/titan-browser.mjs",
+            runner = installed.titan_bin .. "/titan-browser-run",
+            runner_module = installed.titan_bin .. "/titan-browser-run.mjs",
+            node_worker = installed.titan_bin .. "/titan-browser-node-worker.mjs",
+            page = installed.titan_bin .. "/titan-browser-page.mjs",
+            lpeglabel = installed.titan_bin .. "/libtitan-lpeglabel.a",
+            provider = installed.titan_bin .. "/titan.a",
+            sdk_digests = installed.titan_bin .. "/sdk-digests",
+        }, assets)
+
+        local descriptor = assert(browser.import(fixtures.descriptor(root)))
+        local present = {}
+        local fake_io = {
+            stat = function(_, filename)
+                if present[filename] then return { kind = "file", size = #present[filename] } end
+                return nil
+            end,
+            read_file = function(_, filename)
+                return present[filename], present[filename] == nil and "missing" or nil
+            end,
+        }
+        local required_order = {
+            "runtime", "js_library", "loader", "runner",
+            "runner_module", "node_worker", "page",
+        }
+        for _, key in ipairs(required_order) do
+            local ok, err = browserlink.require_sdk({ io = fake_io }, descriptor, { prefix = root })
+            assert.is_nil(ok)
+            assert.equal(
+                string.format('browser SDK is incomplete: missing %q; run \'make browser-sdk PREFIX=%s\'',
+                    assets[key], root),
+                err)
+            local ok_tree, err_tree = browserlink.require_sdk({ io = fake_io }, descriptor, {
+                prefix = root,
+                rocks_tree = root .. "-rocks",
+            })
+            assert.is_nil(ok_tree)
+            assert.equal(
+                string.format('browser SDK is incomplete: missing %q; run \'make browser-sdk PREFIX=%s ROCKS_TREE=%s\'',
+                    assets[key], root, root .. "-rocks"),
+                err_tree)
+            present[assets[key]] = "ok"
+        end
+
+        -- lpeglabel, provider, and sdk_digests are not bootstrap readiness prerequisites.
+        local ready, ready_err = browserlink.require_sdk({ io = fake_io }, descriptor, { prefix = root })
+        assert.same(assets, ready, ready_err)
+    end)
+
+    it("writes and reloads browser sdk-digests with schema 1 and invalidates modified entries", function()
+        local root = new_workspace("-sdk-digests-unit")
+        local browser_paths = driver.installed_paths(root, "browser")
+        local assets = browserlink.sdk_assets(browser_paths)
+        files.mkdir(browser_paths.lua_source)
+        files.mkdir(browser_paths.include .. "/titan")
+        files.mkdir(browser_paths.titan_bin)
+
+        local inputs = {
+            browser_paths.liblua,
+            browser_paths.lua_record,
+            browser_paths.lua_source .. "/lua.h",
+            browser_paths.lua_source .. "/luaconf.h",
+            browser_paths.include .. "/minicoro.h",
+            browser_paths.include .. "/titan.h",
+            browser_paths.include .. "/transfer.h",
+            browser_paths.include .. "/titan/ffi.h",
+            assets.runtime,
+            assets.js_library,
+            assets.loader,
+            assets.runner,
+            assets.runner_module,
+            assets.node_worker,
+            assets.page,
+            assets.lpeglabel,
+            assets.provider,
+        }
+        for index, filename in ipairs(inputs) do
+            assert(strategy:write_file(filename, "payload-" .. tostring(index)))
+        end
+
+        local support = require "titan"
+        local ctx = {
+            io = strategy,
+            cache_adapter = {
+                sha256_binary = support._sha256_binary,
+                sha256_stream = support._sha256_stream,
+            },
+        }
+        assert(incremental.write_sdk_digests(ctx, assets.sdk_digests, inputs))
+        assert.equal("file", strategy:stat(assets.sdk_digests).kind)
+
+        local reader_ctx = {
+            io = strategy,
+            cache_adapter = ctx.cache_adapter,
+        }
+        assert(incremental.load_sdk_digests(reader_ctx, assets.sdk_digests))
+        local sdk_state = reader_ctx.incremental and reader_ctx.incremental.sdk
+        assert.is_table(sdk_state)
+        assert.is_nil(sdk_state.files[assert(strategy:realpath(assets.sdk_digests))])
+        local sha256 = require "titan-compiler.sha256"
+        for _, filename in ipairs(inputs) do
+            local real = assert(strategy:realpath(filename))
+            assert.is_table(sdk_state.files[real], "missing sdk-digests entry for " .. filename)
+            assert.equal(
+                sha256.hex_via(support._sha256_binary, assert(strategy:read_file(filename))),
+                sdk_state.files[real].digest)
+        end
+    end)
+
+    it("reuses a warm matching lua-browser installation and rebuilds on config, archive, or header changes", function()
+        local info, why = toolchain.require()
+        if not info then pending(why) return end
+
+        local root = new_workspace("-lua-browser-reuse")
+        local temp_lua = paths.join(root, "lua-5.5.1")
+        local temp_prefix = paths.join(root, "prefix")
+        copy_tree(strategy, paths.join(repository, "lua-5.5.1/Makefile"), paths.join(temp_lua, "Makefile"))
+        copy_tree(strategy, paths.join(repository, "lua-5.5.1/src"), paths.join(temp_lua, "src"))
+        copy_tree(strategy, paths.join(repository, "lua-5.5.1/tools"), paths.join(temp_lua, "tools"))
+
+        local record_bytes = assert(strategy:read_file(info.record_path))
+        local fork_rev = assert(record_bytes:match("fork_revision=([0-9a-f]+)"))
+        local em_dir = paths.dirname(info.tools.cc[1])
+        local base_env = {
+            PATH = em_dir .. ":" .. (os.getenv("PATH") or ""),
+            FORK_REVISION = fork_rev,
+            CCACHE_DISABLE = "1",
+        }
+
+        local function run_lua_browser(extra_args)
+            local argv = {
+                "make", "--no-print-directory", "lua-browser",
+                "PREFIX=" .. temp_prefix,
+                "LUA_DIR=" .. temp_lua,
+                "FORK_REVISION=" .. fork_rev,
+            }
+            for _, arg in ipairs(extra_args or {}) do argv[#argv + 1] = arg end
+            return run_with_env(strategy, base_env, argv)
+        end
+
+        -- 1. Cold build and install into temp_prefix.
+        local first = run_lua_browser()
+        assert.is_true(first.ok, first.output)
+        local liblua = paths.join(temp_prefix, "lib/browser/liblua.a")
+        local record = paths.join(temp_prefix, "lib/browser/liblua-config.txt")
+        local lua_h = paths.join(temp_prefix, "lib/browser/include/lua.h")
+        local lapi_o = paths.join(temp_lua, "src/browser/obj/lapi.o")
+
+        local stat_liblua_1 = assert(strategy:stat(liblua))
+        local stat_record_1 = assert(strategy:stat(record))
+        local stat_luah_1 = assert(strategy:stat(lua_h))
+        local stat_lapio_1 = assert(strategy:stat(lapi_o))
+        local clean_liblua_bytes = assert(strategy:read_file(liblua))
+        local clean_record_bytes = assert(strategy:read_file(record))
+        local clean_luah_bytes = assert(strategy:read_file(lua_h))
+
+        -- 2. Warm matching configuration is reused without touching installed or object files.
+        local warm = run_lua_browser()
+        assert.is_true(warm.ok, warm.output)
+        assert.same(stat_liblua_1, assert(strategy:stat(liblua)))
+        assert.same(stat_record_1, assert(strategy:stat(record)))
+        assert.same(stat_luah_1, assert(strategy:stat(lua_h)))
+        assert.same(stat_lapio_1, assert(strategy:stat(lapi_o)))
+
+        -- 3. Corrupted installed archive (even if record archive_sha256 is forged to match) is rebuilt/reinstalled.
+        local sha256 = require "titan-compiler.sha256"
+        local support = require "titan"
+        local corrupt_archive = "!<arch>\ncorrupted-wasm-archive-bytes"
+        local forged_sha = sha256.hex_via(support._sha256_binary, corrupt_archive)
+        assert(strategy:write_file(liblua, corrupt_archive))
+        assert(strategy:write_file(record, (clean_record_bytes:gsub("archive_sha256=[0-9a-f]+", "archive_sha256=" .. forged_sha))))
+        local after_archive_corrupt = run_lua_browser()
+        assert.is_true(after_archive_corrupt.ok, after_archive_corrupt.output)
+        assert.equal(clean_liblua_bytes, assert(strategy:read_file(liblua)))
+        assert.equal(clean_record_bytes, assert(strategy:read_file(record)))
+
+        -- 4. Corrupted installed header and extra header file are repaired from source.
+        local stale_h = paths.join(temp_prefix, "lib/browser/include/stale_extra.h")
+        assert(strategy:write_file(lua_h, clean_luah_bytes .. "\n/* corrupted header */\n"))
+        assert(strategy:write_file(stale_h, "/* should be removed */\n"))
+        local after_header_corrupt = run_lua_browser()
+        assert.is_true(after_header_corrupt.ok, after_header_corrupt.output)
+        assert.equal(clean_luah_bytes, assert(strategy:read_file(lua_h)))
+        assert.is_nil(strategy:stat(stale_h))
+        assert.equal(clean_record_bytes, assert(strategy:read_file(record)))
+
+        -- 5. Same fork revision with changed configuration rebuilds objects and updates record.
+        local changed_cfg = run_lua_browser({ "LUA_BROWSER_MYCFLAGS=-DLUA_USER_DEFAULT=1" })
+        assert.is_true(changed_cfg.ok, changed_cfg.output)
+        local updated_record = assert(strategy:read_file(record))
+        contains(updated_record, "fork_revision=" .. fork_rev)
+        contains(updated_record, "lua_defines=-DLUA_USER_DEFAULT=1 -DLUA_USE_BROWSER -DLUA_USE_POSIX")
+        contains(updated_record, "cflags=-O2 -Wall -Wextra -DLUA_USE_POSIX -DLUA_USE_BROWSER -sSUPPORT_LONGJMP=emscripten -DLUA_USER_DEFAULT=1")
+    end)
+
+    it("installs browser-sdk into an empty differing ROCKS_TREE, verifies archives/digests/stack size, and keeps compiler SDK emsdk-free", function()
+        local info, why = toolchain.require({ node = true })
+        if not info then pending(why) return end
+
+        local root = new_workspace("-browser-sdk-e2e")
+        local rocks_tree = paths.join(root, "empty-rocks-tree")
+        local build_dir = paths.join(root, "browser-build")
+        local app_dir = paths.join(root, "app")
+        local app_out = paths.join(root, "app-out")
+        files.mkdir(app_dir)
+        files.mkdir(app_out)
+
+        local em_dir = paths.dirname(info.tools.cc[1])
+        local node_dir = paths.dirname(info.node.path)
+        local sdk_env = {
+            PATH = em_dir .. ":" .. node_dir .. ":" .. (os.getenv("PATH") or ""),
+            TITAN_NODE = info.node.path,
+            CCACHE_DISABLE = "1",
+        }
+
+        -- 1. Before browser-sdk: C-only --c-source work succeeds without lib/titan-browser,
+        -- while linking a program fails with the exact missing-SDK diagnostic naming make browser-sdk.
+        assert(strategy:write_file(paths.join(app_dir, "helper.c"), "int browser_sdk_c_only(void) { return 7; }\n"))
+        assert(strategy:write_file(paths.join(app_dir, "main_app.titan"), [[
+local coroutine = import "coroutine"
+local test = import "test"
+foreign import "titan.h"
+
+local function body(): integer
+    local lj = L.errorJmp
+    while lj.previous ~= nil do
+        lj = lj.previous
+    end
+    local floor = lj as foreign *titan_unwind_floor
+    local span = (floor.stack_high as integer) - (floor.stack_low as integer)
+    if span ~= (ffi.TITAN_COROUTINE_STACK_SIZE as integer) then
+        return -1
+    end
+    return span
+end
+
+function test_browser_coroutine_stack(_context: test.Context)
+    local co = coroutine.create(body, "sdk-tag")
+    local res: integer = co:resume()
+    test.assert(res == 262144, "expected 256 KiB browser coroutine stack allocation and macro")
+end
+]]))
+
+        local no_sdk_root = paths.join(root, "no-sdk-tree")
+        copy_tree(strategy, paths.join(info.prefix, "lib/browser"), paths.join(no_sdk_root, "lib/browser"))
+        copy_tree(strategy, paths.join(info.prefix, "include"), paths.join(no_sdk_root, "include"))
+
+        local c_only_res = run_with_env(strategy, {
+            PATH = sdk_env.PATH,
+            TITAN_ROOT = no_sdk_root,
+            TITAN_PROBE_CACHE_DISABLE = "1",
+        }, {
+            info.prefix .. "/bin/titanc", "--target", "browser",
+            "--output", app_out, "-c", "--incremental", "--print-c-objects",
+            "--c-source", paths.join(app_dir, "helper.c"),
+        })
+        assert.is_true(c_only_res.ok, c_only_res.output)
+        local c_obj_path = assert(c_only_res.output:match("([^\r\n]+)[\r\n]*$"))
+        assert.equal("file", strategy:stat(c_obj_path).kind)
+
+        local link_missing_res = run_with_env(strategy, {
+            PATH = sdk_env.PATH,
+            PREFIX = info.prefix,
+            ROCKS_TREE = no_sdk_root,
+            TITAN_ROOT = no_sdk_root,
+            TITAN_PROBE_CACHE_DISABLE = "1",
+        }, {
+            info.prefix .. "/bin/titanc", "--target", "browser",
+            "--tree", app_dir .. ";" .. repository, "--output", app_out,
+            "--exe", paths.join(app_out, "app.mjs"),
+            "--test", "main_app",
+        })
+        assert.is_false(link_missing_res.ok)
+        contains(link_missing_res.output,
+            string.format('browser SDK is incomplete: missing %q; run \'make browser-sdk PREFIX=%s ROCKS_TREE=%s\'',
+                no_sdk_root .. "/lib/titan-browser/" .. version.TITAN_LIBRARY_VERSION .. "/libtitan.a",
+                no_sdk_root, no_sdk_root))
+
+        -- 2. Run make browser-sdk into a genuinely empty differing ROCKS_TREE.
+        assert.is_nil(strategy:stat(rocks_tree))
+        local sdk_res = run_with_env(strategy, sdk_env, {
+            "make", "--no-print-directory", "browser-sdk",
+            "PREFIX=" .. info.prefix,
+            "ROCKS_TREE=" .. rocks_tree,
+            "TITAN_BROWSER_BUILD_DIR=" .. build_dir,
+            "TITAN_BUILD_PROFILE=validation",
+        })
+        assert.is_true(sdk_res.ok, sdk_res.output)
+
+        -- Native provider directory in rocks_tree must remain untouched/absent.
+        assert.is_nil(strategy:stat(paths.join(rocks_tree, "lib/titan")))
+
+        -- Staged browser Lua in rocks_tree matches PREFIX/lib/browser.
+        local browser_paths = driver.installed_paths(rocks_tree, "browser")
+        assert.equal(
+            assert(strategy:read_file(paths.join(info.prefix, "lib/browser/liblua.a"))),
+            assert(strategy:read_file(browser_paths.liblua)))
+        assert.equal(
+            assert(strategy:read_file(paths.join(info.prefix, "lib/browser/liblua-config.txt"))),
+            assert(strategy:read_file(browser_paths.lua_record)))
+
+        -- Common Titan headers were staged without copying native Lua headers into include/.
+        for _, rel in ipairs({ "minicoro.h", "titan.h", "transfer.h", "titan/ffi.h" }) do
+            assert.equal("file", strategy:stat(paths.join(browser_paths.include, rel)).kind, rel)
+        end
+        assert.is_nil(strategy:stat(paths.join(browser_paths.include, "lua.h")))
+
+        -- Inspect libtitan.a, libtitan-lpeglabel.a, and titan.a.
+        local assets = browserlink.sdk_assets(browser_paths)
+        local expected_fp = fixtures.fingerprint()
+
+        local runtime_ar = assert(staticmetadata.scan_archive(assets.runtime, { target = expected_fp }))
+        local runtime_names = {}
+        for i, m in ipairs(runtime_ar.members) do runtime_names[i] = m.display_name end
+        assert.same(EXPECTED_RUNTIME_MEMBERS, runtime_names)
+        assert_no_forbidden_symbols(assets.runtime, runtime_ar)
+
+        local lpeg_ar = assert(staticmetadata.scan_archive(assets.lpeglabel, { target = expected_fp }))
+        local lpeg_names = {}
+        local lpeg_defined = {}
+        for i, m in ipairs(lpeg_ar.members) do
+            lpeg_names[i] = m.display_name
+            for _, sym in ipairs(m.object.symbols or {}) do
+                if sym.defined and sym.binding == "global" then
+                    lpeg_defined[sym.name] = true
+                end
+            end
+        end
+        assert.same(EXPECTED_LPEGLABEL_MEMBERS, lpeg_names)
+        for sym_name in pairs(EXPECTED_LPEGLABEL_SYMBOLS) do
+            assert.is_true(lpeg_defined[sym_name], "missing LPegLabel symbol " .. sym_name)
+        end
+        assert_no_forbidden_symbols(assets.lpeglabel, lpeg_ar)
+
+        local provider_ar = assert(staticmetadata.scan_archive(assets.provider, {
+            expected_abi = version.TITAN_ABI_VERSION,
+            target = expected_fp,
+        }))
+        assert(driver.validate_browser_provider(provider_ar))
+        assert.same(EXPECTED_PROVIDER_MODULES, provider_ar.key_order)
+        assert_no_forbidden_symbols(assets.provider, provider_ar)
+        assert.is_nil(strategy:stat(browser_paths.titan_bin .. "/titan.so"))
+        assert.is_nil(strategy:stat(browser_paths.titan_bin .. "/titan.dll"))
+
+        -- Verify sdk-digests was written last and matches every final installed file's observation and hash.
+        local sha256 = require "titan-compiler.sha256"
+        local support = require "titan"
+        local digest_ctx = {
+            io = strategy,
+            cache_adapter = {
+                sha256_binary = support._sha256_binary,
+                sha256_stream = support._sha256_stream,
+            },
+        }
+        assert(incremental.load_sdk_digests(digest_ctx, assets.sdk_digests))
+        local recorded = assert(digest_ctx.incremental and digest_ctx.incremental.sdk)
+        assert.is_nil(recorded.files[assert(strategy:realpath(assets.sdk_digests))])
+        for _, key in ipairs({
+            "runtime", "js_library", "loader", "runner",
+            "runner_module", "node_worker", "page", "lpeglabel", "provider",
+        }) do
+            local real = assert(strategy:realpath(assets[key]))
+            local entry = assert(recorded.files[real], "missing digest entry for " .. key)
+            assert.equal(sha256.hex_via(support._sha256_binary, assert(strategy:read_file(real))), entry.digest)
+            local live_obs = assert(incremental.observation(digest_ctx, real, false))
+            assert.equal(live_obs.size, entry.observation.size)
+            assert.equal(live_obs.mtime_ns, entry.observation.mtime_ns)
+            assert.equal(live_obs.ino, entry.observation.ino)
+        end
+
+        -- 3. Link and execute the test image against the newly staged ROCKS_TREE SDK.
+        local test_exe = paths.join(app_out, "stack_test.mjs")
+        local build_test = run_with_env(strategy, {
+            PATH = sdk_env.PATH,
+            TITAN_NODE = info.node.path,
+            PREFIX = info.prefix,
+            ROCKS_TREE = rocks_tree,
+            TITAN_ROOT = rocks_tree,
+            TITAN_PROBE_CACHE_DISABLE = "1",
+        }, {
+            info.prefix .. "/bin/titanc", "--target", "browser", "-q",
+            "--tree", app_dir, "--output", app_out, "--exe", test_exe,
+            "--test", "main_app",
+        })
+        assert.is_true(build_test.ok, build_test.output)
+        local run_test = run_with_env(strategy, sdk_env, {
+            assets.runner, "--engine", "node", test_exe,
+        })
+        assert.is_true(run_test.ok, run_test.output)
+        contains(run_test.output, "[       OK ] main_app.test_browser_coroutine_stack")
+        contains(run_test.output, "[  PASSED  ] 1 test.")
+
+        -- 4. Native compiler-SDK installation (used by luarocks make) succeeds without emsdk on PATH or EMSDK.
+        local native_tree = paths.join(root, "native-compiler-sdk")
+        local clean_path = {}
+        for entry in (os.getenv("PATH") or ""):gmatch("[^:]+") do
+            if not entry:find("emsdk", 1, true) and not entry:find("emscripten", 1, true) then
+                clean_path[#clean_path + 1] = entry
+            end
+        end
+        local native_res = run_with_env(strategy, {
+            PATH = table.concat(clean_path, ":"),
+            EMSDK = "",
+        }, {
+            "make", "--no-print-directory", "install-compiler-sdk",
+            "PREFIX=" .. info.prefix,
+            "ROCKS_TREE=" .. native_tree,
+            "TITAN_BUILD_PROFILE=validation",
+        })
+        assert.is_true(native_res.ok, native_res.output)
+        assert.equal("file", strategy:stat(paths.join(native_tree, "bin/titanc")).kind)
+        assert.equal("file", strategy:stat(paths.join(native_tree, "include/titan.h")).kind)
+
+        local native_probe_c = paths.join(root, "native_stack_probe.c")
+        local native_probe_exe = paths.join(root, "native_stack_probe")
+        assert(strategy:write_file(native_probe_c, [[
+#include "lua.h"
+#include "titan.h"
+#include "minicoro.h"
+static void entry(mco_coro *co) { (void)co; }
+int main(void) {
+    if (TITAN_COROUTINE_STACK_SIZE != 2 * 1024 * 1024) return 2;
+    mco_desc desc = mco_desc_init(entry, TITAN_COROUTINE_STACK_SIZE);
+    if (desc.stack_size != 2 * 1024 * 1024) return 3;
+    mco_coro *co = NULL;
+    if (mco_create(&co, &desc) != MCO_SUCCESS || co == NULL) return 4;
+    if (co->stack_size < 2 * 1024 * 1024) return 5;
+    mco_destroy(co);
+    return 0;
+}
+]]))
+        local cc_res = run_with_env(strategy, {
+            PATH = table.concat(clean_path, ":"),
+            EMSDK = "",
+        }, {
+            os.getenv("CC") or "cc", "--std=c99",
+            "-I" .. paths.join(native_tree, "src/lua-5.5.1"),
+            "-I" .. paths.join(native_tree, "include"),
+            native_probe_c,
+            paths.join(native_tree, "lib/titan/" .. version.TITAN_LIBRARY_VERSION .. "/libtitan.a"),
+            paths.join(native_tree, "lib/liblua.a"),
+            paths.join(native_tree, "lib/libbacktrace.a"),
+            "-lm", "-o", native_probe_exe,
+        })
+        assert.is_true(cc_res.ok, cc_res.output)
+        local probe_run = strategy:run({ native_probe_exe }, { stderr_to_stdout = true })
+        assert.is_true(probe_run.ok, probe_run.output)
+    end)
+end)
