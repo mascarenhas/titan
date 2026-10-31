@@ -3,6 +3,7 @@ local browser = require "titan-compiler.browsertarget"
 local cdriver = require "c-parser.cdriver"
 local csemantics = require "titan-compiler.csemantics"
 local compiler_io = require "titan-compiler.io"
+local process = require "titan-compiler.process"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local fixtures = require "spec.support.browser_fixtures"
 local gate = require "spec.support.browser_toolchain"
@@ -824,7 +825,7 @@ describe("browser target descriptor", function()
         local prefix = require("spec.support.installed_prefix").active()
         local code = string.format("package.path=%q..package.path; ", root .. "/?.lua;" .. root .. "/?/init.lua;") ..
             "require('titan-compiler.driver').new_resolver_context=function() error('browser descriptor fixture failure',0) end"
-        local result = strategy:run({ prefix .. "/bin/lua" .. (platform.windows and ".exe" or ""),
+        local result = process.capture({ prefix .. "/bin/lua" .. (platform.windows and ".exe" or ""),
             "-E", "-e", code, root .. "/titanc", "-q", "-c", "never_compiled" },
             { env = { TITAN_ROOT = prefix, TITAN_TARGET = "", TITAN_EXTRA_CPPFLAGS = "",
                 TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "" }, stderr_to_stdout = true })
@@ -871,7 +872,7 @@ end
                 else
                     argv[#argv + 1] = "never_compiled"
                 end
-                local result = strategy:run(argv, {
+                local result = process.capture(argv, {
                     env = { TITAN_ROOT = prefix,
                         TITAN_TARGET = selection == "environment" and "browser" or "",
                         TITAN_EXTRA_CPPFLAGS = "", TITAN_EXTRA_CFLAGS = "",
