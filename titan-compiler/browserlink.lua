@@ -150,4 +150,85 @@ function M.validate_extras(flags)
     return true
 end
 
+-- Final images are not relocatable object metadata. Read only their standard
+-- import/export sections, with section-local bounds; never feed them through
+-- the object classifier's required linking/relocation sections.
+function M.image_inventory(bytes)
+    local ok, result = pcall(function()
+        assert(bytes:sub(1, 8) == "\0asm\1\0\0\0", "invalid browser Wasm image")
+        local pos, limit = 9, #bytes + 1
+        local function byte()
+            assert(pos < limit, "truncated browser Wasm section")
+            local value = bytes:byte(pos)
+            pos = pos + 1
+            return value
+        end
+        local function u32()
+            local value, shift = 0, 0
+            for index = 1, 5 do
+                local part = byte()
+                assert(index < 5 or part < 16, "invalid browser Wasm integer")
+                value = value | ((part & 127) << shift)
+                if part < 128 then return value end
+                shift = shift + 7
+            end
+            error("invalid browser Wasm integer", 0)
+        end
+        local function text()
+            local length = u32()
+            assert(length <= limit - pos, "truncated browser Wasm name")
+            local value = bytes:sub(pos, pos + length - 1)
+            pos = pos + length
+            return value
+        end
+        local function limits()
+            local flags = u32()
+            assert(flags <= 3, "unsupported browser Wasm limits")
+            u32()
+            if flags & 1 ~= 0 then u32() end
+        end
+        local inventory = { imports = {}, exports = {} }
+        while pos < #bytes + 1 do
+            limit = #bytes + 1
+            local id, size = byte(), u32()
+            assert(size <= limit - pos, "truncated browser Wasm section")
+            local finish = pos + size
+            limit = finish
+            if id == 2 then
+                local count = u32()
+                assert(count <= size, "invalid browser Wasm import count")
+                for _ = 1, count do
+                    local module, name, kind = text(), text(), byte()
+                    inventory.imports[#inventory.imports + 1] = { module = module, name = name, kind = kind }
+                    if kind == 0 then u32()
+                    elseif kind == 1 then byte(); limits()
+                    elseif kind == 2 then limits()
+                    elseif kind == 3 then byte(); byte()
+                    elseif kind == 4 then byte(); u32()
+                    else error("invalid browser Wasm import kind", 0) end
+                end
+                assert(pos == finish, "invalid browser Wasm import section")
+            elseif id == 7 then
+                local count = u32()
+                assert(count <= size, "invalid browser Wasm export count")
+                for _ = 1, count do
+                    local name, kind, index = text(), byte(), u32()
+                    inventory.exports[#inventory.exports + 1] = { name = name, kind = kind, index = index }
+                end
+                assert(pos == finish, "invalid browser Wasm export section")
+            end
+            pos = finish
+        end
+        for _, import in ipairs(inventory.imports) do
+            local name = import.name
+            assert(not (name:match("^_?dlopen") or name:match("^_?dlsym") or
+                name:match("^_?dlerror") or name:match("^_*backtrace")),
+                "browser image imports forbidden symbol " .. string.format("%q", name))
+        end
+        return inventory
+    end)
+    if not ok then return nil, tostring(result) end
+    return result
+end
+
 return M

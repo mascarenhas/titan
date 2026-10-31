@@ -31,6 +31,7 @@ local lfs = require "lfs"
 
 local driver = {}
 driver._browser_target = require "titan-compiler.browsertarget"
+driver.browserlink = require "titan-compiler.browserlink"
 
 driver.imported = {}
 
@@ -734,6 +735,31 @@ function driver.context_target_descriptor(context)
     local ok, err = driver.initialize_platform(context)
     if not ok then return nil, err end
     return context.target_descriptor
+end
+
+function driver.browser_link_plan(context, purpose)
+    local descriptor, err = driver.context_target_descriptor(context)
+    if not descriptor then return nil, err end
+    local options = driver.browser_link_options or { purpose = purpose or "program", assertions = 2 }
+    return driver.browserlink.profile(descriptor, options)
+end
+
+function driver.require_browser_sdk(context)
+    local descriptor, err = driver.context_target_descriptor(context)
+    if not descriptor then return nil, err end
+    return driver.browserlink.require_sdk(context, descriptor, {
+        prefix = driver.INSTALL_PATHS and driver.INSTALL_PATHS.root or descriptor.paths.root,
+        rocks_tree = platform.getenv("ROCKS_TREE"),
+    })
+end
+
+function driver.browser_program_path(stem, explicit)
+    local filename = explicit or (stem .. ".mjs")
+    if not filename:match("[.]mjs$") then
+        return nil, "browser executable output " .. string.format("%q", filename) .. " must end in .mjs"
+    end
+    local wasm = filename:gsub("[.]mjs$", ".wasm")
+    return filename, wasm
 end
 
 function driver.context_target_identity(context)
@@ -1640,6 +1666,11 @@ local function compiler_argv(include_extra_compile_flags, context, user_c_helper
         if not descriptor then return nil, err end
         local args = { table.unpack(descriptor.tools.cc) }
         append_argv(args, descriptor.compile_flags)
+        if driver.browser_link_options then
+            local plan, plan_error = driver.browser_link_plan(context)
+            if not plan then return nil, plan_error end
+            append_argv(args, plan.compile_flags)
+        end
         return args
     end
     if driver.TOOLCHAIN_ERROR then return nil, driver.TOOLCHAIN_ERROR end
@@ -10204,6 +10235,75 @@ static void titan_coverage_dump(lua_State *L) { (void)L; __gcov_dump(); }
     return util.render(entrypoint_template, values)
 end
 
+function driver.browser_c_image_contents(worker, options)
+    return require("titan-compiler.browserentry").contents(worker, options)
+end
+
+function driver.browser_entrypoint_contents(modname, program_name, options)
+    options = options or {}
+    local worker = [[
+static char titan_main_array_writer_key;
+static int titan_main_string_array_writer(lua_State *L) {
+    if (lua_type(L, 1) != LUA_TSTRING)
+        return luaL_error(L, "type error, expected string for standalone arguments");
+    lua_settop(L, 1);
+    return 1;
+}
+static int titan_browser_worker(lua_State *L) {
+    struct titan_browser_arguments *args = lua_touserdata(L, 1);
+    lua_Unsigned nargs = (lua_Unsigned)args->argc;
+    Table *array_metatable, *arguments;
+    TValue writer;
+    Udata *proxy;
+    int i;
+    luaL_openlibs(L);
+    titan_install_searcher(L);
+    lua_getglobal(L, "package");
+    lua_getfield(L, -1, "preload");
+    lua_pushcfunction(L, luaopen_titan);
+    lua_setfield(L, -2, "titan");
+    lua_pushcfunction(L, $LUAOPEN);
+    lua_setfield(L, -2, "$MODNAME");
+    lua_settop(L, 0);
+    lua_getglobal(L, "require");
+    lua_pushliteral(L, "$MODNAME");
+    lua_call(L, 1, 1);
+    lua_getfield(L, -1, "main");
+    lua_remove(L, -2);
+    array_metatable = titan_array_metatable(L);
+    lua_pushlightuserdata(L, &titan_main_array_writer_key);
+    lua_pushcclosure(L, titan_main_string_array_writer, 1);
+    writer = lua_totvalue(L, -1);
+    lua_pushnil(L);
+    arguments = titan_array_new(L, array_metatable, nargs, &writer, L->top.p - 1);
+    lua_remove(L, -2);
+    proxy = titan_array_require_proxy(arguments);
+    setuvalue(L, s2v(L->top.p - 1), proxy);
+    for (i = 0; i < args->argc; i++) {
+        lua_pushlstring(L, args->lengths[i] ? (const char *)args->argv[i] : "", args->lengths[i]);
+        titan_array_set_stack(L, arguments, (lua_Integer)i + 1, -1);
+        lua_pop(L, 1);
+    }
+    titan_array_set_length(arguments, nargs);
+    lua_getfield(L, LUA_REGISTRYINDEX, TITAN_MAIN_BOOTSTRAP_KEY);
+    if ($SKIP || lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_call(L, 1, 1);
+    } else {
+        lua_insert(L, 1);
+        lua_call(L, 2, 1);
+    }
+    return 1;
+}
+]]
+    local opener = "luaopen_" .. driver.mangle_module_name(modname)
+    return driver.browser_c_image_contents(util.render(worker, {
+        LUAOPEN = opener, MODNAME = c_string_contents(modname),
+        SKIP = options.no_uv_bootstrap and "1" or "0",
+    }), { declarations = "extern int luaopen_titan(lua_State *L);\nextern int " .. opener .. "(lua_State *L);",
+        program_name = c_string_contents(program_name or modname:gsub(".*[.]", "")) })
+end
+
 local function write_entrypoint(modname, entrypoint_c, program_name,
                                 options, verbose)
     options = options or {}
@@ -10987,7 +11087,7 @@ function driver.validate_browser_provider(archive, expected_entries, generated_o
     end
     local primaries, available = {}, generated_objects and {} or nil
     local function forbidden(name)
-        return name == "dlopen" or name == "dlsym" or
+        return name == "dlopen" or name == "dlsym" or name == "dlerror" or
             type(name) == "string" and
             (name:match("^backtrace_") or name:match("^__backtrace_"))
     end
@@ -12934,11 +13034,15 @@ function driver.preflight_build_outputs(context, plan, options)
         return nil, "--coverage requires a test or standalone executable; use -c for coverage objects"
     end
     if builds_program then
-        if context.target == "browser" then
-            return nil, "browser program linking is not available yet"
-        end
         local root = options.test and options.roots[1] or main
-        if platform.windows then
+        if context.target == "browser" then
+            local stem = options.exe or modules[options.test and options.roots[1] or main].source.program_output or
+                driver.generated_output_path((options.test and options.roots[1] or main):gsub("[.]", "/"), options.output_root)
+            local image, wasm = driver.browser_program_path(stem, options.exe)
+            if not image then return nil, wasm end
+            output(image, "browser executable")
+            output(wasm, "browser Wasm")
+        elseif platform.windows then
             local paths, err = driver.windows_program_paths(
                 options.test and require("titan-compiler.test_runner").MODULE_NAME or main,
                 options.exe, options.test and root or nil, options.output_root)
@@ -13089,6 +13193,18 @@ function driver.publish_provider_bundle(
             return nil, "staged provider artifact '" .. staged_archive ..
                 "' aliases destination/input '" .. public_dso .. "'"
         end
+        if options.context and options.context.target == "browser" then
+            local descriptor, descriptor_error = driver.context_target_descriptor(options.context)
+            if not descriptor then return nil, descriptor_error end
+            local parsed, parse_error = parsed_archive_input(staged_archive, descriptor.fingerprint)
+            if not parsed then return nil, parse_error end
+            valid, err = driver.validate_browser_provider(parsed.archive)
+            if not valid then return nil, err end
+            valid, err = driver.run_standalone_archive_probe(parsed.archive.entries,
+                parsed.archive.key_order, {}, { staged_archive }, nil, options.verbose, nil,
+                { context = options.context })
+            if not valid then return nil, err end
+        end
         if same_regular_archive_contents(staged_archive, public_dso) then
             remove_path(staged_archive)
             return true, public_dso
@@ -13235,7 +13351,7 @@ function driver.publish_provider_bundle(
     return true, public_archive
 end
 
-local function standalone_archive_probe_source(entries, module_names)
+local function standalone_archive_probe_source(entries, module_names, browser)
     local declarations = {}
     local checks = {}
     for index, modname in ipairs(module_names) do
@@ -13274,6 +13390,25 @@ static const unsigned char expected_layouts_%d[] = %s;
 ]], index, index, prefix, #entry.abi, index, prefix, #entry.types, index,
             prefix, #entry.layouts, index)
     end
+    if browser then
+        local worker = [[
+static int titan_browser_protocol(lua_State *L) {
+    const char *value;
+    size_t length;
+]] .. table.concat(checks, "\n") .. [[
+    return 0;
+}
+static int titan_browser_worker(lua_State *L) {
+    int status = titan_browser_protocol(L);
+    lua_pushinteger(L, status);
+    return 1;
+}
+]]
+        return driver.browser_c_image_contents(worker, {
+            declarations = table.concat(declarations, "\n"),
+            program_name = "titan-provider-probe", state_status = 10,
+        })
+    end
     return [[
 #include <stddef.h>
 #include <string.h>
@@ -13299,10 +13434,39 @@ function driver.run_standalone_archive_probe(
         entries, module_names, libnames, static_archives,
         link, verbose, extra_objects, options)
     options = options or {}
-    if options.context and options.context.target == "browser" then
-        return nil, "browser program linking is not available yet"
-    end
     if #module_names == 0 then return true end
+    if options.context and options.context.target == "browser" then
+        local context = options.context
+        local assets, err = driver.require_browser_sdk(context)
+        if not assets then return nil, err end
+        local ready
+        ready, err = driver.browser_node_ready(context, assets)
+        if not ready then return nil, err end
+        local base
+        base, err = create_compile_log()
+        if not base then return nil, err end
+        os.remove(base)
+        local source, image = base .. ".c", base .. ".mjs"
+        local cleanup <close> = setmetatable({}, { __close = function()
+            os.remove(source); os.remove(base .. ".o")
+            os.remove(image); os.remove(base .. ".wasm")
+        end })
+        local linked, term, code = driver.compile_browser_image(
+            standalone_archive_probe_source(entries, module_names, true),
+            source, image, libnames, static_archives, extra_objects, verbose,
+            { context = context, profile = { purpose = "protocol", assertions = 2 } })
+        if not linked then
+            return nil, "selected static provider failed executable-context protocol linking (" ..
+                tostring(term) .. (code and (", exit " .. tostring(code)) or "") .. ")"
+        end
+        local result = context.io:run({ assets.runner, "--engine", "node", image },
+            { stderr_to_stdout = true })
+        if type(result) ~= "table" or not result.ok then
+            return nil, "selected static provider failed executable-context protocol validation " ..
+                "(browser runner exit " .. tostring(type(result) == "table" and result.status or 75) .. ")"
+        end
+        return true
+    end
     local runtime_ok, runtime_err = perf.check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
     local base, base_error = create_compile_log()
@@ -13507,12 +13671,136 @@ __declspec(dllexport) int _titan_coverage_dump(lua_State *L) {
     return true
 end
 
+-- Browser images publish two files under their final basenames. The mjs
+-- rename commits the pair; a failed commit restores the previous Wasm.
+function driver.compile_browser_image(contents, entrypoint, executable,
+        objects, archives, extra_objects, verbose, options)
+    options = options or {}
+    local context = assert(options.context)
+    local assets, err = driver.require_browser_sdk(context)
+    if not assets then return nil, err end
+    local plan
+    if options.profile then
+        plan, err = driver.browserlink.profile(context.target_descriptor, options.profile)
+    else
+        plan, err = driver.browser_link_plan(context, options.purpose or "program")
+    end
+    if not plan then return nil, err end
+    local valid
+    valid, err = driver.browserlink.validate_extras(driver.link_extra_flags())
+    if not valid then return nil, err end
+    local runtime
+    runtime, err = parsed_archive_input(assets.runtime, context.target_descriptor.fingerprint)
+    if not runtime then return nil, err end
+    valid, err = driver.validate_browser_provider(runtime.archive)
+    if not valid then return nil, err end
+    local wasm
+    executable, wasm = driver.browser_program_path(executable, executable)
+    if not executable then return nil, wasm end
+    valid, err = ensure_output_parent(executable)
+    if not valid then return nil, err end
+    valid, err = ensure_output_parent(entrypoint)
+    if not valid then return nil, err end
+    valid, err = util.set_file_contents(entrypoint, contents)
+    if not valid then return nil, err end
+    local object = entrypoint:gsub("[.]c$", ".o")
+    local compile
+    compile, err = driver.generated_compile_prefix(context)
+    if not compile then return nil, err end
+    append_argv(compile, plan.compile_flags)
+    append_argv(compile, { "-c", entrypoint, "-o", object })
+    local compiled, term, code = run_argv(compile, verbose)
+    if not compiled then return nil, term, code end
+    local staged, directory = driver.staged_library_output(executable)
+    if not staged then return nil, directory end
+    local cleanup <close> = setmetatable({}, { __close = function() remove_path(directory) end })
+    local staged_wasm = staged:gsub("[.]mjs$", ".wasm")
+    local command
+    command, err = compiler_argv(false, context)
+    if not command then return nil, err end
+    append_argv(command, plan.link_flags)
+    append_argv(command, { "-o", staged, object })
+    append_argv(command, objects)
+    append_argv(command, archives)
+    append_argv(command, extra_objects)
+    append_argv(command, { "-Wl,--start-group", assets.runtime })
+    append_argv(command, archives)
+    append_argv(command, { context.target_descriptor.paths.liblua, "-Wl,--end-group" })
+    append_argv(command, driver.link_extra_flags())
+    append_argv(command, options.final_link_flags)
+    local linked
+    linked, term, code = driver.run_link_command(command, verbose, staged)
+    if not linked then return nil, term, code end
+    for _, filename in ipairs({ staged, staged_wasm }) do
+        if lfs.symlinkattributes(filename, "mode") ~= "file" then
+            return nil, "staged browser image '" .. filename .. "' is not a regular file"
+        end
+    end
+    local image_bytes
+    image_bytes, err = context.io:read_file(staged_wasm)
+    if not image_bytes then return nil, err end
+    local inventory
+    inventory, err = driver.browserlink.image_inventory(image_bytes)
+    if not inventory then return nil, err end
+    if options.before_commit then
+        valid, err = options.before_commit()
+        if not valid then return nil, err end
+    end
+    local backup
+    local previous = lfs.symlinkattributes(wasm, "mode")
+    if previous then
+        if previous ~= "file" then return nil, "browser Wasm output '" .. wasm .. "' is not a regular file" end
+        backup, err = driver.sibling_temporary_path(wasm .. ".old")
+        if not backup then return nil, err end
+        valid, err = rename_output(wasm, backup)
+        if not valid then return nil, err end
+    end
+    local function rollback(reason)
+        remove_path(wasm)
+        if backup then
+            local restored, restore_error = rename_output(backup, wasm)
+            if not restored then
+                return nil, tostring(reason) .. "\ncannot restore Wasm: " .. tostring(restore_error) ..
+                    "; predecessor retained at " .. backup
+            end
+        end
+        return nil, reason
+    end
+    valid, err = rename_output(staged_wasm, wasm)
+    if not valid then return rollback(err) end
+    valid, err = rename_output(staged, executable)
+    if not valid then return rollback(err) end
+    if backup then
+        valid, err = remove_path(backup)
+        if not valid then return nil, err end
+    end
+    return true
+end
+
+function driver.browser_node_ready(context, assets)
+    local result = context.io:run({ assets.runner, "--probe" }, { stderr_to_stdout = true })
+    if type(result) == "table" and result.ok then return true, nil, result.output end
+    local detail = type(result) == "table" and (result.output or result.diagnostic) or "runner probe failed"
+    local reason = detail and detail:match("Node 24 is required %((.-)%)%s*$")
+    if reason then
+        return nil, "browser provider validation requires Node 24: " .. reason ..
+            "; set TITAN_NODE to a Node 24 executable"
+    end
+    return nil, detail
+end
+
 function driver.compile_program(modname, libnames, link, verbose, extra_objects,
                                 program_output, static_archives,
                                 entrypoint_output, program_name, options)
     options = options or {}
     if options.context and options.context.target == "browser" then
-        return nil, "browser program linking is not available yet"
+        local executable = program_output or driver.generated_output_path(
+            (options.output_module or modname):gsub("[.]", "/"), options.output_root) .. ".mjs"
+        local entrypoint = entrypoint_output or driver.generated_output_path(
+            modname:gsub("[.]", "/") .. "__entrypoint.c", options.output_root)
+        return driver.compile_browser_image(
+            driver.browser_entrypoint_contents(modname, program_name, options),
+            entrypoint, executable, libnames, static_archives, extra_objects, verbose, options)
     end
     local runtime_ok, runtime_err = perf.check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
