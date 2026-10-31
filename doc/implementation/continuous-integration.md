@@ -228,8 +228,9 @@ every `EMSDK_*` variable it does not set itself. The steps are:
    `spec/coder/browser_budgets_spec.lua`, and `spec/minicoro_spec.lua`, with
    output copied to `$RUNNER_TEMP/browser-gate.log`. A missing gate file fails
    with `missing browser real-toolchain spec: <path>` before Busted starts.
-   The gate and fixture specs build their own assertion-on and assertion-off
-   images and run both engines.
+   The entry-gate and budget specs build their own assertion-on and
+   assertion-off images, and the gate, fixture, budget, and minicoro specs run
+   both engines.
 8. **Runner images.** The installed `titanc` builds `runner_image` (a
    `--test` image) and `runner_status` (a program) from `spec/browser` into
    `out/browser/runner`.
