@@ -61,7 +61,8 @@ describe("browser semantic cache isolation", function()
         saved_browser = subject._browser_target
         saved_initialize_platform = subject.initialize_platform
         subject.initialize_platform = function(ctx)
-            if platform.windows and ctx.target == "browser" and not ctx._platform_initialized then
+            if type(ctx) == "table" and ctx.io ~= nil and ctx._target_initializing and
+               platform.windows and ctx.target == "browser" and not ctx._platform_initialized then
                 -- Model the supported host observation, not Windows browser
                 -- support. Keep native Windows provider lookup genuine.
                 ctx.uname, ctx.is_darwin, ctx._platform_initialized = "Linux", false, true
@@ -229,6 +230,51 @@ describe("browser semantic cache isolation", function()
         assert.has_error(function() subject.resolve_external_modules({}, {}) end,
             "resolver options require an explicit context")
         unchanged()
+    end)
+
+    it("guards semantic contexts before Windows host observations", function()
+        local native, _, _, _, _, unchanged, stale = stale_compilation(false)
+        local uninitialized = { io = compiler_io.new_sync(), target = "browser", _resolver_context = true }
+        local function rejected(action, message)
+            local windows = platform.windows
+            local ok, failure = pcall(function()
+                platform.windows = true
+                assert.has_error(action, message)
+            end)
+            platform.windows = windows
+            if not ok then error(failure, 0) end
+            unchanged()
+        end
+        for _, invalid in ipairs({ {}, { value = {} }, { value = false }, { value = "invalid" } }) do
+            rejected(function() subject.initialize_platform(invalid.value) end,
+                "platform initialization requires a resolver context")
+            rejected(function() subject.configure_foreign_c(invalid.value) end,
+                "foreign C configuration requires a resolver context")
+        end
+        for _, ctx in ipairs({ uninitialized, native }) do
+            local message = ctx == native and stale or "compiler target context is not initialized"
+            for _, action in ipairs({
+                function() subject.initialize_platform(ctx) end,
+                function() subject.configure_foreign_c(ctx) end,
+                function() subject.find_static_interface("", "unused", ctx) end,
+                function() subject.find_dependency_interface("", "unused", ctx) end,
+                function() subject.defaultloader({}, { context = ctx }) end,
+                function() subject.tableloader({}, {}, {}, { context = ctx }) end,
+                function() subject.finalize_resolver_context(ctx) end,
+                function() subject.resolve_external_modules({}, {}, ctx) end,
+                function() subject.resolve_external_modules({}, {}, { context = ctx }) end,
+                function() subject.restat_c_header_dependencies({}, ctx) end,
+                function() subject.restat_c_header_dependencies({}, { context = ctx }) end,
+                function() subject.generated_compile_prefix(ctx) end,
+                function() subject.shared_library_flags(ctx) end,
+                function() subject.validate_generated_objects({}, fixtures.fingerprint(), {}, ctx) end,
+            }) do
+                rejected(action, message)
+            end
+        end
+        assert.is_nil(uninitialized._platform_initialized)
+        assert.is_nil(uninitialized.uname)
+        assert.is_nil(uninitialized.is_darwin)
     end)
 
     it("keeps contextless native flags and file verification nonactivating", function()

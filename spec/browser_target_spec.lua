@@ -678,9 +678,15 @@ describe("browser target descriptor", function()
             subject.CC, subject.CFLAGS, subject.AR, subject.RANLIB, subject.TARGET_PROFILE
         local initialize = subject.initialize_platform
         subject.initialize_platform = function(ctx)
-            ctx._platform_initialized, ctx.uname, ctx.is_darwin = true, "Linux", false
+            if type(ctx) == "table" and ctx.io ~= nil and ctx._target_initializing then
+                ctx._platform_initialized, ctx.uname, ctx.is_darwin = true, "Linux", false
+            end
             return initialize(ctx)
         end
+        assert.has_error(function() subject.initialize_platform() end,
+            "platform initialization requires a resolver context")
+        assert.has_error(function() subject.initialize_platform({}) end,
+            "platform initialization requires a resolver context")
         local context = subject.new_resolver_context({ io = template.io, target = "browser" })
         local descriptor = assert(subject.context_target_descriptor(context))
         assert.equal(descriptor, subject.context_target_descriptor(context))
@@ -741,10 +747,17 @@ describe("browser target descriptor", function()
         subject._browser_target = setmetatable({ build = function(_, inputs)
             return assert(browser.import(fixtures.descriptor(inputs.paths.root)))
         end }, { __index = browser })
+        local initialize = subject.initialize_platform
         subject.initialize_platform = function(ctx)
-            ctx.host_target, ctx.uname, ctx.is_darwin = "linux", "Linux", false
-            return subject._finish_target_initialization(ctx)
+            if type(ctx) == "table" and ctx.io ~= nil and ctx._target_initializing then
+                ctx._platform_initialized, ctx.uname, ctx.is_darwin = true, "Linux", false
+            end
+            return initialize(ctx)
         end
+        assert.has_error(function() subject.initialize_platform() end,
+            "platform initialization requires a resolver context")
+        assert.has_error(function() subject.initialize_platform({}) end,
+            "platform initialization requires a resolver context")
         local context = subject.new_resolver_context({ io = guarded, target = "browser" })
         local driver_source = assert(debug.getinfo(subject.new_worker_context, "S").source:match("^@(.*)$"))
         local compiler_root = assert(strategy:realpath(path.dirname(path.dirname(driver_source))))
@@ -807,9 +820,15 @@ describe("browser target descriptor", function()
         end }, { __index = browser })
         local initialize = subject.initialize_platform
         subject.initialize_platform = function(ctx)
-            ctx._platform_initialized, ctx.uname, ctx.is_darwin = true, "Linux", false
+            if type(ctx) == "table" and ctx.io ~= nil and ctx._target_initializing then
+                ctx._platform_initialized, ctx.uname, ctx.is_darwin = true, "Linux", false
+            end
             return initialize(ctx)
         end
+        assert.has_error(function() subject.initialize_platform() end,
+            "platform initialization requires a resolver context")
+        assert.has_error(function() subject.initialize_platform({}) end,
+            "platform initialization requires a resolver context")
         local template = fake_context({ root = subject.TITAN_ROOT })
         assert.has_error(function()
             subject.new_resolver_context({ io = template.io, target = "browser" })

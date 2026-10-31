@@ -13043,7 +13043,8 @@ describe("target-aware source resolver", function()
             return assert(saved_browser_target.import(browser_fixtures.descriptor(inputs.paths.root)))
         end }, { __index = saved_browser_target })
         driver.initialize_platform = function(ctx)
-            if ctx.target == "browser" and platform.windows then
+            if type(ctx) == "table" and ctx.io ~= nil and ctx._target_initializing and
+               ctx.target == "browser" and platform.windows then
                 ctx._platform_initialized, ctx.uname, ctx.is_darwin = true, "Linux", false
             end
             return saved_initialize_platform(ctx)
@@ -13056,6 +13057,25 @@ describe("target-aware source resolver", function()
         driver._browser_target, driver.initialize_platform =
             saved_browser_target, saved_initialize_platform
         fixtures.remove(root)
+    end)
+
+    it("keeps context validation ahead of the Windows browser host model", function()
+        local uninitialized = { io = compiler_io.new_sync(), target = "browser", _resolver_context = true }
+        local windows = platform.windows
+        local ok, failure = pcall(function()
+            platform.windows = true
+            assert.has_error(function() driver.initialize_platform() end,
+                "platform initialization requires a resolver context")
+            assert.has_error(function() driver.initialize_platform({}) end,
+                "platform initialization requires a resolver context")
+            assert.has_error(function() driver.initialize_platform(uninitialized) end,
+                "compiler target context is not initialized")
+        end)
+        platform.windows = windows
+        if not ok then error(failure, 0) end
+        assert.is_nil(uninitialized._platform_initialized)
+        assert.is_nil(uninitialized.uname)
+        assert.is_nil(uninitialized.is_darwin)
     end)
 
     it("selects every target row, including target-only modules and canonical paths", function()
