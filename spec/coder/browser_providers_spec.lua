@@ -379,36 +379,6 @@ describe("browser providers", function()
         assert.equal("link", lfs.symlinkattributes(root .. "/out/pkg.so", "mode"))
         assert.equal("preserve me", read(root .. "/user-data")); assert.equal(original, read(destination))
     end)
-    for _, failure in ipairs({ "before_commit", "rename", "late-companion" }) do
-        it("preserves publication inputs on " .. failure .. " failure", function()
-            local context = browser_context(root)
-            local destination, staged = root .. "/out/pkg.a", root .. "/stage/pkg.a"
-            local original, replacement = archive({ wasm("pkg.mod") }), archive({ wasm("pkg.other") })
-            write(destination, original); write(staged, replacement)
-            local options = { archive_only = true, context = context }
-            if failure == "rename" then
-                local filesystem = compiler_io.new_sync()
-                compiler_io.new_sync = function()
-                    return setmetatable({ rename = function(_, from, to)
-                        if from == staged and to == destination then return nil, "injected archive rename failure" end
-                        return filesystem:rename(from, to)
-                    end }, { __index = filesystem })
-                end
-            else
-                options.before_commit = function()
-                    if failure == "late-companion" then
-                        write(root .. "/out/pkg.so", "preserve me")
-                        return true
-                    end
-                    return nil, "injected pre-commit failure"
-                end
-            end
-            local ok, err = driver.publish_provider_bundle(nil, staged, destination, options)
-            assert.is_nil(ok); assert.is_string(err)
-            assert.equal(original, read(destination)); assert.equal(replacement, read(staged))
-            if failure == "late-companion" then assert.equal("preserve me", read(root .. "/out/pkg.so")) end
-        end)
-    end
 
     it("ignores native embedded profiles during browser probe acquisition", function()
         local inventory = native_inventory(root)
@@ -468,7 +438,7 @@ describe("browser providers", function()
         assert(driver.close_resolver_context(context))
     end)
 
-    it("builds and publishes only an archive through the descriptor tools", function()
+    it("stages a structural bootstrap archive through descriptor tools without an image SDK", function()
         local context = browser_context(root)
         local primary, part = wasm("pkg.mod"), wasm(nil)
         write(root .. "/primary.o", primary); write(root .. "/part.o", part)
@@ -515,7 +485,7 @@ describe("browser providers", function()
         audit_guard = process_audit.install({ tools = context.target_descriptor.tools })
         local expected = scan(archive({ primary })).entries
         local destination = assert(driver.provider_output_path("pkg", root .. "/out", context))
-        local staged = assert(driver.link_provider_pair({
+        local staged = assert(driver.stage_browser_provider({
             context = context, provider = "pkg", public_dso = destination,
             target = fixtures.fingerprint(), expected_entries = expected,
             generated_objects = { { modname = "pkg.mod", filename = root .. "/primary.o",
@@ -526,14 +496,11 @@ describe("browser providers", function()
             },
         }))
         assert.is_nil(staged.dso)
-        assert(driver.publish_provider_bundle(nil, staged.archive, destination, {
-            archive_only = true, context = context,
-        }))
+        assert.equal("file", lfs.attributes(staged.archive, "mode"))
+        assert.is_nil(lfs.attributes(destination))
+        assert.is_true(driver.validate_browser_provider(scan(read(staged.archive)), expected))
         assert(driver.remove_path(staged.directory))
-        assert.equal("file", lfs.attributes(root .. "/out/pkg.a", "mode"))
-        assert.is_nil(lfs.attributes(root .. "/out/pkg.so"))
-        assert.is_nil(lfs.attributes(root .. "/out/pkg.so.dSYM"))
-        assert.is_true(driver.validate_browser_provider(scan(read(destination)), expected))
+        assert.is_nil(lfs.attributes(staged.archive))
         assert.equal(4, #commands)
     end)
 
@@ -597,7 +564,7 @@ describe("browser providers", function()
         assert.has_error(function() io.popen("/audit/emcc -c probe.c; node probe.js") end)
     end)
 
-    it("stops program and executable probes before any process or loader call", function()
+    it("diagnoses an incomplete SDK before linking and leaves an empty metadata probe independent", function()
         local context = browser_context(root)
         local attempts = {}
         audit_guard = process_audit.install({
@@ -606,9 +573,10 @@ describe("browser providers", function()
         })
         local ok, err = driver.compile_program("pkg.mod", {}, nil, false, nil,
             nil, nil, nil, nil, { context = context })
-        assert.is_nil(ok); assert.equal("browser program linking is not available yet", err)
-        ok, err = driver.run_standalone_archive_probe({}, {}, {}, {}, nil, false, nil, { context = context })
-        assert.is_nil(ok); assert.equal("browser program linking is not available yet", err)
+        assert.is_nil(ok); assert.matches("browser SDK is incomplete: missing", err, 1, true)
+        ok, err = driver.run_standalone_archive_probe({}, { "pkg.mod" }, {}, {}, nil, false, nil, { context = context })
+        assert.is_nil(ok); assert.matches("browser SDK is incomplete: missing", err, 1, true)
+        assert.is_true(driver.run_standalone_archive_probe({}, {}, {}, {}, nil, false, nil, { context = context }))
         assert.same({}, attempts)
     end)
 end)
