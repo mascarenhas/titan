@@ -1,0 +1,171 @@
+local assert = require "luassert"
+local lfs = require "lfs"
+local objectmetadata = require "titan-compiler.objectmetadata"
+local staticmetadata = require "titan-compiler.staticmetadata"
+local fixtures = require "spec.fixtures.target_selection.support"
+local toolchain = require "spec.support.browser_toolchain"
+
+local repository = assert(lfs.currentdir())
+local modules = { "bundle.first", "bundle.second" }
+local fixture, info, native_root, browser_root
+
+local function arguments(target, compile_only)
+    local argv = { "--target", target, "--incremental", "--source-first",
+        "--jobs", "1", "--c-parts", "1", "-v" }
+    if compile_only then argv[#argv + 1] = "-c" end
+    for _, name in ipairs(modules) do argv[#argv + 1] = name end
+    return argv
+end
+
+local function compile(target, output, compile_only)
+    fixture.output = output
+    -- This target's compile flags are selected by the compiler, never copied
+    -- from host CC/CFLAGS. The fixture helper otherwise uses native defaults.
+    return fixture:compile(arguments(target, compile_only), {
+        TITAN_EXTRA_CFLAGS = "-O0 -fno-lto", TITAN_EXTRA_LDFLAGS = "-fno-lto" })
+end
+
+local function compiled(target, output, compile_only)
+    local result = compile(target, output, compile_only)
+    assert.is_true(result.ok, result.output)
+    return result.output
+end
+
+local function object_path(output, name)
+    return output .. "/" .. name:gsub("%.", "/") .. ".o"
+end
+
+local function remember(output)
+    local saved, past = {}, os.time() - 120
+    for _, name in ipairs(modules) do
+        local filename = object_path(output, name)
+        assert(lfs.touch(filename, past, past))
+        saved[name] = { filename = filename, bytes = fixtures.read(filename), time = past }
+    end
+    return saved
+end
+
+local function decisions(output, saved, edited)
+    local seen = {}
+    for line in output:gmatch("[^\n]+") do
+        local status, name = line:match("^Titan object (%w+) ([^:]+):")
+        if saved[name] then
+            assert.is_nil(seen[name], line)
+            seen[name] = status
+        end
+    end
+    for name, old in pairs(saved) do
+        assert.equal(name == edited and "miss" or "hit", seen[name], output)
+        if name == edited then
+            assert.not_equal(old.time, lfs.attributes(old.filename, "modification"), name)
+        else
+            assert.equal(old.time, lfs.attributes(old.filename, "modification"), name)
+            assert.equal(old.bytes, fixtures.read(old.filename), name)
+        end
+    end
+end
+
+local function record_path(output)
+    local directory = output .. "/.titan-links"
+    local found
+    for name in lfs.dir(directory) do
+        if name ~= "." and name ~= ".." then
+            local filename = directory .. "/" .. name .. "/record"
+            if lfs.attributes(filename, "mode") == "file" then
+                assert.is_nil(found, "unexpected second library link record")
+                found = filename
+            end
+        end
+    end
+    return assert(found, "library did not publish a link record")
+end
+
+describe("browser incremental compilation", function()
+    before_each(function()
+        info = toolchain.require()
+        if not info then return end
+        fixture = fixtures.new()
+        fixtures.copy(repository .. "/spec/fixtures/browser_iso/bundle", fixture.source .. "/bundle")
+        native_root, browser_root = fixture.root .. "/native-out", fixture.root .. "/browser-out"
+    end)
+    after_each(function()
+        if fixture then fixture:close(); fixture = nil end
+    end)
+
+    it("reuses warm browser objects and archives, recompiles only the edited variant, and leaves the native root unchanged", function()
+        compiled(fixture.host, native_root)
+        local native = remember(native_root)
+        local native_archive = fixtures.read(native_root .. "/bundle.a")
+        local native_record = record_path(native_root)
+        local native_record_bytes = fixtures.read(native_record)
+        compiled("browser", browser_root)
+        assert.equal("browser\n", fixtures.read(browser_root .. "/.titan-target"))
+        assert.is_nil(lfs.attributes(native_root .. "/.titan-target"))
+        assert.is_nil(lfs.attributes(browser_root .. "/bundle.so"))
+        local browser = remember(browser_root)
+        for _, name in ipairs(modules) do
+            local bytes = fixtures.read(object_path(browser_root, name))
+            local object = assert(staticmetadata.classify_object(bytes, name))
+            assert.equal("wasm", object.format)
+            local record = assert(objectmetadata.read(bytes, name))
+            assert.is_string(record.object_metadata.certificate.configuration.toolchain)
+            assert.not_equal(native[name].bytes, bytes)
+        end
+        local archive = fixtures.read(browser_root .. "/bundle.a")
+        local link_record = record_path(browser_root)
+        local record_bytes = fixtures.read(link_record)
+        local warm = compiled("browser", browser_root)
+        decisions(warm, browser)
+        assert.matches("Titan link hit", warm, 1, true)
+        assert.equal(archive, fixtures.read(browser_root .. "/bundle.a"))
+        assert.equal(record_bytes, fixtures.read(link_record))
+        fixtures.write(fixture.source .. "/bundle/first.browser.titan",
+            "function answer(): integer\n    return 43\nend\n")
+        local edited = compiled("browser", browser_root)
+        decisions(edited, browser, "bundle.first")
+        assert.not_equal(browser["bundle.first"].bytes,
+            fixtures.read(object_path(browser_root, "bundle.first")))
+        assert.matches("Titan link miss", edited, 1, true)
+        local host_warm = compiled(fixture.host, native_root)
+        decisions(host_warm, native)
+        assert.matches("Titan link hit", host_warm, 1, true)
+        assert.equal(native_archive, fixtures.read(native_root .. "/bundle.a"))
+        assert.equal(native_record_bytes, fixtures.read(native_record))
+    end)
+
+    it("rejects foreign object and link certificates even when copied into correctly marked browser paths", function()
+        compiled(fixture.host, native_root)
+        compiled("browser", browser_root)
+        local browser = remember(browser_root)
+        local native_record = record_path(native_root)
+        local browser_record = record_path(browser_root)
+        fixtures.write(object_path(browser_root, "bundle.first"),
+            fixtures.read(object_path(native_root, "bundle.first")))
+        fixtures.write(browser_record, fixtures.read(native_record))
+        local rebuilt = compiled("browser", browser_root)
+        decisions(rebuilt, browser, "bundle.first")
+        assert.matches("Titan link miss", rebuilt, 1, true)
+        assert.not_equal(fixtures.read(native_record), fixtures.read(browser_record))
+        local object = assert(staticmetadata.classify_object(
+            fixtures.read(object_path(browser_root, "bundle.first")), "bundle.first"))
+        assert.equal("wasm", object.format)
+    end)
+
+    it("diagnoses missing output and refuses mixed-target roots in either direction, including source-adjacent domains", function()
+        local missing = fixture:compile({ "--target", "browser", "-c", "bundle.first" }, nil, true)
+        assert.is_false(missing.ok)
+        assert.matches("--target browser requires --output", missing.output, 1, true)
+        compiled(fixture.host, native_root, true)
+        local browser_into_host = compile("browser", native_root, true)
+        assert.is_false(browser_into_host.ok)
+        assert.matches("is not empty and has no .titan-target marker", browser_into_host.output, 1, true)
+        compiled("browser", browser_root, true)
+        local host_into_browser = compile(fixture.host, browser_root, true)
+        assert.is_false(host_into_browser.ok)
+        assert.matches('belongs to target "browser", not "' .. fixture.host .. '"', host_into_browser.output, 1, true)
+        fixtures.write(fixture.source .. "/.titan-target", "browser\n")
+        local adjacent = fixture:compile({ "--target", fixture.host, "-c", "bundle.first" }, nil, true)
+        assert.is_false(adjacent.ok)
+        assert.matches('belongs to target "browser", not "' .. fixture.host .. '"', adjacent.output, 1, true)
+    end)
+end)
