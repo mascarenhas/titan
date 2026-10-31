@@ -513,6 +513,11 @@ local function preflight_outputs(plan)
     })
 end
 
+if args.test and not args.compile_only and
+   driver.context_target(resolver_context) == "browser" then
+    exit("browser program linking is not available yet")
+end
+
 local loader
 if c_source_only then
     local ready, preflight_error = preflight_outputs({ order = {}, modules = {} })
@@ -603,6 +608,9 @@ if args.test then
 end
 local builds_program = main_module ~= nil or
     (args.test and not args.compile_only)
+if builds_program and driver.context_target(resolver_context) == "browser" then
+    exit("browser program linking is not available yet")
+end
 if args.exe and not builds_program then
     exit("--exe is only valid when compiling a standalone or test executable")
 end
@@ -719,10 +727,11 @@ if not args.compile_only and not args.print_ast then
                 tostring(left) .. "' and '" .. tostring(right) ..
                 "' have no common module prefix")
         end
-        local library_output, library_err = driver.provider_output_path(library, args.output)
+        local library_output, library_err = driver.provider_output_path(
+            library, args.output, resolver_context)
         if not library_output then exit(library_err) end
         outputs[1] = { path = library_output }
-        if not platform.windows then
+        if driver.context_target(resolver_context) ~= "browser" and not platform.windows then
             outputs[#outputs + 1] = { path = (library_output:gsub("[.]so$", ".a")) }
             if driver.IS_DARWIN then
                 outputs[#outputs + 1] = { path = library_output .. ".dSYM", kind = "directory" }
@@ -755,11 +764,13 @@ if not args.compile_only and not args.print_ast then
         archives[#archives + 1] = static_provider.archive
     end
     local runtime, runtime_flags = {}, {}
-    for _, input in ipairs(driver.INSTALLED and
-            driver.installed_link_inputs(driver.INSTALL_PATHS, driver.IS_DARWIN) or
-            driver.source_link_inputs()) do
-        if input:find("[/\\]") then runtime[#runtime + 1] = input
-        else runtime_flags[#runtime_flags + 1] = input end
+    if driver.context_target(resolver_context) ~= "browser" then
+        for _, input in ipairs(driver.INSTALLED and
+                driver.installed_link_inputs(driver.INSTALL_PATHS, driver.IS_DARWIN) or
+                driver.source_link_inputs()) do
+            if input:find("[/\\]") then runtime[#runtime + 1] = input
+            else runtime_flags[#runtime_flags + 1] = input end
+        end
     end
     if coverage_build and builds_program then
         local inventory_error
@@ -1145,14 +1156,15 @@ if not main_module and not args.compile_only then
 
     if #errors == 0 then
         local provider_err
-        provider_output, provider_err = driver.provider_output_path(provider, args.output)
+        provider_output, provider_err = driver.provider_output_path(
+            provider, args.output, resolver_context)
         if not provider_output then table.insert(errors, provider_err) end
     end
     if #errors == 0 then
         local generated_outputs = { table.unpack(compile_plans.outputs) }
         local outputs_ok, outputs_err =
             driver.validate_provider_output_paths(
-                provider_output, native_inputs, generated_outputs)
+                provider_output, native_inputs, generated_outputs, resolver_context)
         if not outputs_ok then table.insert(errors, outputs_err) end
     end
 end
@@ -1205,11 +1217,12 @@ for _, name in ipairs(linked_names) do
 end
 local native_target, target_or_err =
     driver.derive_target_fingerprint(
-        generated_objects[1].filename, generated_objects[1].modname)
+        generated_objects[1].filename, generated_objects[1].modname, resolver_context)
 if not native_target then
     exit("failed to derive generated native target: " .. tostring(target_or_err))
 end
-local generated_entries = platform.windows and {} or nil
+local generated_entries =
+    (platform.windows or driver.context_target(resolver_context) == "browser") and {} or nil
 local objects_valid, objects_err =
     driver.validate_generated_objects(
         generated_objects, native_target, generated_entries, resolver_context)
@@ -1242,7 +1255,7 @@ if main_module then
         probe_ok, probe_err = driver.run_standalone_archive_probe(
             archive_entries, archive_names, ofiles, selected_static_archives,
             nil, args.verbose, extra_objects,
-            { pretty_print = args.pretty_print })
+            { pretty_print = args.pretty_print, context = resolver_context })
     end
     if not probe_ok then
         table.insert(errors, probe_err)
@@ -1254,6 +1267,7 @@ if main_module then
             test_entrypoint_output,
             args.test and requested_modules[1]:gsub(".*[.]", "") or nil,
             {
+                context = resolver_context,
                 no_uv_bootstrap = args.no_uv_bootstrap,
                 pretty_print = args.pretty_print,
                 exe = args.exe,
@@ -1355,7 +1369,25 @@ else
             }
         end
 
+        local expected_entries
+        if driver.context_target(resolver_context) == "browser" then
+            expected_entries = {}
+            for name, entry in pairs(physical_entries) do expected_entries[name] = entry end
+            for _, name in ipairs(linked_names) do
+                local mod = driver.imported[name]
+                local native = assert(mod.object_metadata,
+                    "browser source module has no coordinator object record")
+                expected_entries[name] = {
+                    abi = driver.TITAN_ABI_VERSION,
+                    types = require("titan-compiler.types").serialize(mod.type),
+                    layouts = native.layouts,
+                }
+            end
+        end
         local pair, pair_err, pair_signal = driver.link_provider_pair({
+            context = resolver_context,
+            expected_entries = expected_entries,
+            generated_objects = generated_objects,
             provider = provider,
             public_dso = provider_output,
             final_link_flags = link_ticket and link_ticket.dependency_argv,
@@ -1384,6 +1416,8 @@ else
                 driver.publish_provider_bundle(
                     pair.dso, pair.archive, provider_output,
                     {
+                        archive_only = driver.context_target(resolver_context) == "browser",
+                        context = resolver_context,
                         native_inputs = native_inputs,
                     })
             driver.remove_path(pair.directory)
