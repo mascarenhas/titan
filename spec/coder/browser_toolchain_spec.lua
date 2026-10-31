@@ -457,10 +457,20 @@ print("malformed-ok")
             assert.truthy(output:find("malformed%-ok"), case.name .. ": " .. output)
         end
 
-        -- Nothing corrupt was cached: a repaired probe reads normally.
-        files.write(directory .. "/probe.json", probe_json(NODE_OK, CHROME_OK))
-        local repaired_ok, repaired_output = helper_child(fixture_environment(root), [[
+        -- Nothing corrupt is cached: the same process repairs the probe and
+        -- reads it normally on the very next call.
+        files.write(directory .. "/probe.json",
+            '{"node":' .. cases[#cases].node .. ',"chrome":' ..
+            '{"path":null,"version":null,"ok":false,"reason":"chromium missing"}}\n')
+        local repaired_ok, repaired_output = helper_child(
+            { strict = false, PREFIX = root, ROCKS_TREE = "", EMSDK = root .. "/emsdk",
+                PROBE_JSON = probe_json(NODE_OK, CHROME_OK) }, [[
 local toolchain = require "spec.support.browser_toolchain"
+local corrupt, _, malformed = toolchain.detect({ node = true })
+assert(corrupt == nil and malformed == true, "the corrupt probe must fail first")
+local file = assert(io.open(os.getenv("PREFIX") .. "/lib/titan-browser/]] ..
+            version.TITAN_LIBRARY_VERSION .. [[/probe.json", "wb"))
+assert(file:write(os.getenv("PROBE_JSON"))); assert(file:close())
 local info = assert(toolchain.detect({ node = true }))
 assert(info.node.version == "v24.19.0", tostring(info.node.version))
 print("repaired-ok")
