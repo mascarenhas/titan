@@ -1,0 +1,427 @@
+local unwind_gc = import "gc"
+
+-- Collecting an abandoned suspended coroutine, or closing its Lua state,
+-- unwinds it: defers run innermost first, catch blocks do not run, and nothing
+-- after the suspension point runs. Every case is named test_unwind_* so that
+-- one filter selects them for the sanitizer lanes.
+
+local function unwind_log_text(log: {string}): string
+  local text = ""
+  for index = 1, #log do
+    if index > 1 then text = text .. " " end
+    text = text .. log[index]
+  end
+  return text
+end
+
+local function unwind_collect()
+  for _ = 1, 4 do unwind_gc.collect() end
+end
+
+local function unwind_step(limit: integer, n: integer): integer?
+  if n >= limit then return nil end
+  return n + 1
+end
+
+local function unwind_innermost_frame(log: {string}, tag: value)
+  defer log[#log + 1] = "frame3"
+  local close_loop: function (integer): () = function (_: integer)
+    log[#log + 1] = "for-close"
+  end
+  for _: integer in unwind_step, 2, 0, close_loop do
+    do
+      defer log[#log + 1] = "inner"
+      coroutine.yield("parked", tag)
+      log[#log + 1] = "after-yield"
+    catch
+      log[#log + 1] = "catch"
+    end
+  end
+  log[#log + 1] = "after-loop"
+end
+
+local function unwind_middle_frame(log: {string}, tag: value)
+  defer log[#log + 1] = "frame2"
+  unwind_innermost_frame(log, tag)
+  log[#log + 1] = "after-frame3"
+end
+
+local function unwind_abandon_nested_defers(log: {string})
+  local tag: value = {}
+  local co = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "frame1"
+    unwind_middle_frame(log, tag)
+    log[#log + 1] = "after-frame2"
+    return nil
+  end, tag)
+  test.assert(co:resume(nil, tag) == "parked")
+end
+
+function test_unwind_runs_suspended_defers_innermost_first(_context: test.Context)
+  local log: {string} = {}
+  unwind_abandon_nested_defers(log)
+  unwind_collect()
+  local text = unwind_log_text(log)
+  test.assert(text == "inner for-close frame3 frame2 frame1", "unwind log: " .. text)
+end
+
+-- A <- B <- C, C yields past B and A. Creation order decides finalizer order:
+-- newest first.
+local function unwind_abandon_chain_stacked_first(log: {string})
+  local tag_main: value = {}
+  local tag_b: value = {}
+  local tag_c: value = {}
+  local a = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "a"
+    local b = coroutine.create(function (_: value): value
+      defer log[#log + 1] = "b"
+      local c = coroutine.create(function (_: value): value
+        defer log[#log + 1] = "c"
+        return coroutine.yield("from-c", tag_main)
+      end, tag_c)
+      return c:resume(nil, tag_c)
+    end, tag_b)
+    return b:resume(nil, tag_b)
+  end, tag_main)
+  test.assert(a:resume(nil, tag_main) == "from-c")
+end
+
+local function unwind_abandon_chain_handler_first(log: {string})
+  local tag_main: value = {}
+  local tag_b: value = {}
+  local tag_c: value = {}
+  local c = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "c"
+    return coroutine.yield("from-c", tag_main)
+  end, tag_c)
+  local b = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "b"
+    return c:resume(nil, tag_c)
+  end, tag_b)
+  local a = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "a"
+    return b:resume(nil, tag_b)
+  end, tag_main)
+  test.assert(a:resume(nil, tag_main) == "from-c")
+end
+
+function test_unwind_stacked_chain_from_innermost(context: test.Context)
+  context:run("stacked_member_finalized_first", function (_: test.Context)
+    local log: {string} = {}
+    unwind_abandon_chain_stacked_first(log)
+    unwind_collect()
+    local text = unwind_log_text(log)
+    test.assert(text == "c b a", "unwind log: " .. text)
+  end)
+  context:run("handler_finalized_first", function (_: test.Context)
+    local log: {string} = {}
+    unwind_abandon_chain_handler_first(log)
+    unwind_collect()
+    local text = unwind_log_text(log)
+    test.assert(text == "c b a", "unwind log: " .. text)
+  end)
+end
+
+-- Created after the handler A and before the stacked member B, so its
+-- finalizer runs after B's and before A's. It resurrects both records.
+record UnwindResurrection
+  log: {string}
+  kept: {coroutine.Coroutine}
+  handler: coroutine.Coroutine?
+  stacked: coroutine.Coroutine?
+end
+
+local function unwind_resurrect(candidate: value)
+  local holder: UnwindResurrection = candidate
+  local handler = holder.handler as coroutine.Coroutine
+  local stacked = holder.stacked as coroutine.Coroutine
+  holder.log[#holder.log + 1] = "handler=" .. handler:status()
+  holder.log[#holder.log + 1] = "stacked=" .. stacked:status()
+  holder.kept[1] = handler
+  holder.kept[2] = stacked
+end
+
+local function unwind_abandon_resurrected_chain(log: {string}, kept: {coroutine.Coroutine})
+  local tag_main: value = {}
+  local tag_b: value = {}
+  local a: coroutine.Coroutine? = nil
+  a = coroutine.create(function (_: value): value
+    local holder = UnwindResurrection(log, kept, a, nil)
+    unwind_gc.finalizable<|value|>(holder, unwind_resurrect)
+    local b = coroutine.create(function (_: value): value
+      defer log[#log + 1] = "b"
+      return coroutine.yield("from-b", tag_main)
+    end, tag_b)
+    holder.stacked = b
+    return b:resume(nil, tag_b)
+  end, tag_main)
+  test.assert((a as coroutine.Coroutine):resume(nil, tag_main) == "from-b")
+end
+
+local function unwind_expect_invalid(co: coroutine.Coroutine, label: string)
+  test.assert(co:status() == "dead", label .. " status: " .. co:status())
+  local caught = false
+  do
+    co:resume(nil, "after-collection")
+  catch
+    caught = true
+    local message = support.caught_string(error)
+    test.assert(support.contains(message, "Invalid coroutine"), label .. ": " .. message)
+  end
+  test.assert(caught, label .. " resumed after collection")
+end
+
+function test_unwind_releases_stacked_coroutine_stack(_context: test.Context)
+  local log: {string} = {}
+  local kept: {coroutine.Coroutine} = {}
+  unwind_abandon_resurrected_chain(log, kept)
+  unwind_collect()
+  local text = unwind_log_text(log)
+  test.assert(text == "b handler=dead stacked=dead", "unwind log: " .. text)
+  test.assert(#kept == 2, "the holder did not resurrect both records")
+  unwind_expect_invalid(kept[1], "handler")
+  unwind_expect_invalid(kept[2], "stacked member")
+end
+
+local function unwind_abandon_failing_cleanup(log: {string})
+  local tag: value = {}
+  local co = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "outer"
+    defer raise "cleanup failure"
+    defer log[#log + 1] = "inner"
+    return coroutine.yield("parked", tag)
+  end, tag)
+  test.assert(co:resume(nil, tag) == "parked")
+end
+
+-- The host state comes from luaL_newstate, whose warnings are on, so the
+-- cleanup error appears on standard error as a Lua warning.
+function test_unwind_continues_after_cleanup_error(context: test.Context)
+  local log: {string} = {}
+  unwind_abandon_failing_cleanup(log)
+  context:log("BEGIN expected coroutine cleanup warning")
+  unwind_collect()
+  context:log("END expected coroutine cleanup warning")
+  local text = unwind_log_text(log)
+  test.assert(text == "inner outer", "unwind log: " .. text)
+end
+
+function test_unwind_runs_suspended_defers_in_generational_mode(_context: test.Context)
+  local was_generational = unwind_gc.generational()
+  defer do
+    if not was_generational then unwind_gc.incremental() end
+  end
+  local log: {string} = {}
+  unwind_abandon_nested_defers(log)
+  unwind_abandon_chain_stacked_first(log)
+  unwind_collect()
+  local text = unwind_log_text(log)
+  test.assert(text == "c b a inner for-close frame3 frame2 frame1" or
+              text == "inner for-close frame3 frame2 frame1 c b a", "unwind log: " .. text)
+end
+
+-- Lua code on a Titan coroutine's own thread closes that thread
+-- (coroutine.close() with no argument): Lua closes its variables and jumps to
+-- the coroutine floor, which ends the coroutine as returning nil.
+function test_unwind_floor_ends_self_closed_coroutine(_context: test.Context)
+  local log: {string} = {}
+  local close_self = common.lua_helper([==[
+    return function(append)
+      local c <close> = setmetatable({}, { __close = function(_, err)
+        append("closed:" .. tostring(err))
+      end })
+      coroutine.close()
+      append("after-close")
+    end
+  ]==]) as function (function (string): ()): ()
+  local co = coroutine.create(function (_: value): value
+    close_self(function (entry: string) log[#log + 1] = entry end)
+    log[#log + 1] = "after-call"
+    return "returned"
+  end, "self-close")
+  test.assert(co:resume(nil) == nil, "a self-closed coroutine returned a value")
+  test.assert(co:status() == "dead", "status: " .. co:status())
+  local text = unwind_log_text(log)
+  test.assert(text == "closed:nil", "log: " .. text)
+end
+
+local function unwind_abandon_yielding_cleanup(log: {string})
+  local tag: value = {}
+  local co = coroutine.create(function (_: value): value
+    defer do
+      coroutine.yield("from-cleanup", tag)
+    catch
+      log[#log + 1] = error as string
+    end
+    return coroutine.yield("parked", tag)
+  end, tag)
+  test.assert(co:resume(nil, tag) == "parked")
+end
+
+function test_unwind_cleanup_cannot_yield(_context: test.Context)
+  local log: {string} = {}
+  unwind_abandon_yielding_cleanup(log)
+  unwind_collect()
+  test.assert(#log == 1 and support.contains(log[1], "cannot yield from a finalizer"),
+              "unwind log: " .. unwind_log_text(log))
+end
+
+record UnwindFinalizerProbe
+  log: {string}
+  target: coroutine.Coroutine
+end
+
+local function unwind_probe_finalize(candidate: value)
+  local probe: UnwindFinalizerProbe = candidate
+  do
+    coroutine.yield(nil, "unwind-probe")
+  catch
+    probe.log[#probe.log + 1] = error as string
+  end
+  do
+    probe.target:resume(nil, "unwind-probe")
+  catch
+    probe.log[#probe.log + 1] = error as string
+  end
+  do
+    probe.target:error("injected", "unwind-probe")
+  catch
+    probe.log[#probe.log + 1] = error as string
+  end
+  if coroutine.is_yieldable("unwind-probe") then
+    probe.log[#probe.log + 1] = "yieldable"
+  end
+end
+
+local function unwind_register_probe(log: {string})
+  local target = coroutine.create(function (_: value): value return nil end, "unwind-probe")
+  local probe = UnwindFinalizerProbe(log, target)
+  unwind_gc.finalizable<|value|>(probe, unwind_probe_finalize)
+end
+
+-- The probe is finalized by a collection inside a coroutine whose resumer
+-- accepts the probe's tag, so only the finalizer prohibition stops the yield.
+function test_unwind_finalizer_cannot_yield_or_resume(_context: test.Context)
+  local log: {string} = {}
+  local collector = coroutine.create(function (_: value): value
+    test.assert(coroutine.is_yieldable("unwind-probe"), "the collector cannot yield")
+    unwind_register_probe(log)
+    unwind_collect()
+    return "collected"
+  end, "unwind-probe")
+  test.assert(collector:resume(nil, "unwind-probe") == "collected")
+  test.assert(#log == 3 and support.contains(log[1], "cannot yield from a finalizer") and
+              support.contains(log[2], "cannot resume a coroutine from a finalizer") and
+              support.contains(log[3], "cannot resume a coroutine from a finalizer"),
+              "finalizer log: " .. unwind_log_text(log))
+end
+
+local function unwind_abandon_unstarted(log: {string})
+  local tag: value = {}
+  local idle = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "idle-defer"
+    log[#log + 1] = "idle-body"
+    return nil
+  end, tag)
+  local injected = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "injected-defer"
+    log[#log + 1] = "injected-body"
+    return nil
+  end, tag)
+  local caught = false
+  do
+    injected:error("injected before start", tag)
+  catch
+    caught = error == "injected before start"
+  end
+  test.assert(caught, "the preloaded error did not reach the caller")
+  test.assert(idle:status() == "suspended" and injected:status() == "dead")
+end
+
+function test_unwind_never_started_coroutine_runs_nothing(_context: test.Context)
+  local log: {string} = {}
+  unwind_abandon_unstarted(log)
+  unwind_collect()
+  test.assert(#log == 0, "unwind log: " .. unwind_log_text(log))
+end
+
+local function unwind_abandon_inside_defer(log: {string})
+  local tag: value = {}
+  local co = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "outer"
+    do
+      defer do
+        log[#log + 1] = "cleanup-start"
+        coroutine.yield("parked-in-cleanup", tag)
+        log[#log + 1] = "cleanup-rest"
+      end
+      log[#log + 1] = "body"
+    catch
+      log[#log + 1] = "catch"
+    end
+    log[#log + 1] = "after-block"
+    return nil
+  end, tag)
+  test.assert(co:resume(nil, tag) == "parked-in-cleanup")
+end
+
+function test_unwind_abandons_suspended_defer_body(_context: test.Context)
+  local log: {string} = {}
+  unwind_abandon_inside_defer(log)
+  unwind_collect()
+  local text = unwind_log_text(log)
+  test.assert(text == "body cleanup-start outer", "unwind log: " .. text)
+end
+
+record UnwindHolder
+  inner: coroutine.Coroutine?
+end
+
+-- A resumes B through a mutable field. Once the field is cleared, only A's
+-- suspended resume frame keeps B reachable.
+local function unwind_park_through_field(log: {string}, holder: UnwindHolder,
+                                         tag_main: value): coroutine.Coroutine
+  local tag_b: value = {}
+  holder.inner = coroutine.create(function (_: value): value
+    defer log[#log + 1] = "b-defer"
+    local got = coroutine.yield("from-b", tag_main)
+    log[#log + 1] = "b-resumed"
+    return got
+  end, tag_b)
+  local a = coroutine.create(function (_: value): value
+    return (holder.inner as coroutine.Coroutine):resume(nil, tag_b)
+  end, tag_main)
+  test.assert(a:resume(nil, tag_main) == "from-b")
+  return a
+end
+
+function test_unwind_resumer_roots_resumed_coroutine(_context: test.Context)
+  local log: {string} = {}
+  local holder = UnwindHolder(nil)
+  local tag_main: value = {}
+  local a = unwind_park_through_field(log, holder, tag_main)
+  holder.inner = nil
+  unwind_collect()
+  test.assert(#log == 0, "a live chain was unwound: " .. unwind_log_text(log))
+  test.assert(a:status() == "suspended", "handler status: " .. a:status())
+  test.assert(a:resume("answer", tag_main) == "answer")
+  test.assert(a:status() == "dead")
+  local text = unwind_log_text(log)
+  test.assert(text == "b-resumed b-defer", "completion log: " .. text)
+end
+
+function test_unwind_resumed_error_runs_defer_once(_context: test.Context)
+  local log = ""
+  local co = coroutine.create(function(_: value): value
+    defer log = log .. "defer;"
+    coroutine.yield("parked", "resumed-error")
+    raise "resumed failure"
+    return nil
+  end, "resumed-error")
+  test.assert(co:resume(nil) == "parked")
+  local failed, result, trace? = co:transfer(nil, nil, false)
+  test.assert(failed and result == "resumed failure" and trace ~= nil)
+  test.assert(co:status() == "dead" and log == "defer;")
+  unwind_collect()
+  test.assert(log == "defer;", "dead coroutine cleanup ran twice")
+end
