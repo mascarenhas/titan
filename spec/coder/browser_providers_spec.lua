@@ -2,9 +2,11 @@ local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
 local compiler_io = require "titan-compiler.io"
 local driver = require "titan-compiler.driver"
+local filesystem = require "spec.support.filesystem"
 local fixtures = require "spec.support.browser_fixtures"
 local lfs = require "lfs"
 local layouts = require "titan-compiler.nominallayout"
+local path = require "titan-compiler.path"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local temporary = require "spec.support.temporary"
 local toolchain = require "spec.support.browser_toolchain"
@@ -360,6 +362,11 @@ describe("browser providers", function()
         end
     end
     it("refuses symlink companions without touching their target", function()
+        local available, message = filesystem.symlink_capability()
+        if not available then
+            pending(message)
+            return
+        end
         local context = browser_context(root)
         local destination, staged = root .. "/out/pkg.a", root .. "/stage/pkg.a"
         local original = archive({ wasm("pkg.mod") })
@@ -539,7 +546,7 @@ describe("browser providers", function()
         assert.is_nil(driver.find_static_interface(root .. "/empty", "pkg.mod", context))
         assert.is_nil(driver.find_dependency_interface(root .. "/empty", "pkg.mod", context))
         local expected = require("titan-compiler.platform").windows and ".dll" or ".so"
-        assert.equal(root .. "/pkg" .. expected, driver.provider_output_path("pkg", root, context))
+        assert.equal(path.join(root, "pkg" .. expected), driver.provider_output_path("pkg", root, context))
     end)
 
     for _, transport in ipairs({ "execute", "popen", "sync", "start", "run", "capture",
