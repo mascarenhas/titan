@@ -78,17 +78,34 @@ end
 
 local function argv(value)
     if type(value) ~= "table" or getmetatable(value) ~= nil then return false end
-    for key, item in pairs(value) do
-        if math.type(key) ~= "integer" or key < 1 or key > #value or not text(item) then return false end
+    for index = 1, #value do if not text(value[index]) then return false end end
+    for key in pairs(value) do
+        if math.type(key) ~= "integer" or key < 1 or key > #value then return false end
     end
     return true
 end
+
+local function normalized_absolute(value)
+    return text(value) and platform.is_absolute(value) and
+        compiler_paths.to_slash(compiler_paths.normalize(value)) == compiler_paths.to_slash(value)
+end
+
+local function longjmp_mode(flags, index)
+    local flag = flags[index]
+    if flag == "-sSUPPORT_LONGJMP" or
+        flag == "-s" and flags[index + 1] == "SUPPORT_LONGJMP" then return "emscripten" end
+    local mode = flag:match("^%-sSUPPORT_LONGJMP=(.*)$") or
+        flag == "-s" and (flags[index + 1] or ""):match("^SUPPORT_LONGJMP=(.*)$")
+    return mode == "1" and "emscripten" or mode
+end
+
+local validate_record
 
 local function descriptor_identity(data, context)
     return "browser:sha256:" .. incremental.digest(context or {}, "browser-target", data)
 end
 
-local function validate(data)
+local function validate(data, context)
     if not fields(data, { "label", "triple", "memory_bits", "tools", "compile_flags",
             "include_dirs", "target_defines", "paths", "lua", "profile_data", "profile_identity",
             "fingerprint", "output_policy", "provider_policy", "identity" }, { "probe_cache_directory" }) or
@@ -99,30 +116,50 @@ local function validate(data)
     local tools = data.tools
     if not fields(tools, { "cc", "ar", "ranlib", "version", "source", "location", "version_output" }) or
         tools.version ~= M.EMSCRIPTEN_VERSION or (tools.source ~= "EMSDK" and tools.source ~= "PATH") or
-        not text(tools.location) or type(tools.version_output) ~= "string" then
+        not normalized_absolute(tools.location) or type(tools.version_output) ~= "string" then
         return nil, "invalid browser toolchain descriptor"
     end
-    for _, key in ipairs({ "cc", "ar", "ranlib" }) do
-        if not argv(tools[key]) or #tools[key] ~= 1 or not platform.is_absolute(tools[key][1]) then
+    for _, item in ipairs({ { "cc", "emcc" }, { "ar", "emar" }, { "ranlib", "emranlib" } }) do
+        local command = tools[item[1]]
+        if not argv(command) or #command ~= 1 or not normalized_absolute(command[1]) or
+            compiler_paths.to_slash(command[1]) ~=
+                compiler_paths.to_slash(compiler_paths.join(tools.location, item[2])) then
             return nil, "invalid browser tool argv"
         end
     end
     if not fields(data.paths, { "root", "lua_source", "include", "lib", "libtitan", "liblua",
             "lua_record", "titan_bin", "sdk_digests" }) then return nil, "invalid browser paths" end
     for _, value in pairs(data.paths) do
-        if not text(value) or not platform.is_absolute(value) then return nil, "invalid browser path" end
+        if not normalized_absolute(value) then return nil, "invalid browser path" end
     end
     if not fields(data.lua, { "path", "record", "record_sha256" }) or
         data.lua.path ~= data.paths.lua_record or not hex(data.lua.record_sha256, 64) or
         not fields(data.lua.record, RECORD_KEYS) then return nil, "invalid browser Lua descriptor" end
-    for _, value in pairs(data.lua.record) do if not text(value) then return nil, "invalid browser Lua record" end end
-    if not hex(data.lua.record.fork_revision, 40) or not hex(data.lua.record.archive_sha256, 64) or
-        not hex(data.lua.record.headers_sha256, 64) then return nil, "invalid browser Lua digest or revision" end
-    if data.lua.record.emscripten_version ~= M.EMSCRIPTEN_VERSION or
-        data.lua.record.target ~= data.triple or data.lua.record.sjlj ~= "emscripten" or
-        data.lua.record.wasm_features ~= FEATURES or #data.target_defines ~= 1 or
-        data.target_defines[1] ~= "-DTITAN_TARGET_BROWSER=1" then
-        return nil, "inconsistent browser Lua descriptor"
+    local record, defines = validate_record(data.lua.record, data.paths)
+    if not record then return nil, defines end
+    if #data.target_defines ~= 1 or data.target_defines[1] ~= "-DTITAN_TARGET_BROWSER=1" then
+        return nil, "inconsistent browser target defines"
+    end
+    local supported, flag_error = M.validate_flags(data.compile_flags, "compile_flags")
+    if not supported then return nil, flag_error end
+    local seen, longjmp = {}, false
+    for index, flag in ipairs(data.compile_flags) do
+        seen[flag] = true
+        if longjmp_mode(data.compile_flags, index) == "emscripten" then longjmp = true end
+    end
+    local required = { "--std=c99", "-DTITAN_TARGET_BROWSER=1", table.unpack(defines) }
+    for _, flag in ipairs(required) do
+        if not seen[flag] then
+            return nil, "browser target descriptor is missing required compile flag " .. string.format("%q", flag)
+        end
+    end
+    if not longjmp then return nil, "browser target descriptor is missing required SUPPORT_LONGJMP setting" end
+    if #data.include_dirs < 2 or data.include_dirs[1] ~= data.paths.lua_source or
+        data.include_dirs[2] == data.paths.lua_source then
+        return nil, "browser include roots must put verified Lua first and Titan runtime second"
+    end
+    for _, directory in ipairs(data.include_dirs) do
+        if not normalized_absolute(directory) then return nil, "invalid browser include path" end
     end
     if not fields(data.fingerprint, { "format", "word_size", "linking_version", "features" }) or
         data.fingerprint.format ~= "wasm" or data.fingerprint.word_size ~= 32 or
@@ -135,8 +172,9 @@ local function validate(data)
         not fields(data.provider_policy, { "archive_only", "sdk_first", "dynamic" }) or
         data.provider_policy.archive_only ~= true or data.provider_policy.sdk_first ~= true or
         data.provider_policy.dynamic ~= false then return nil, "invalid browser target policy" end
-    if data.probe_cache_directory ~= nil and (not text(data.probe_cache_directory) or
-        not platform.is_absolute(data.probe_cache_directory)) then return nil, "invalid browser probe cache path" end
+    if data.probe_cache_directory ~= nil and not normalized_absolute(data.probe_cache_directory) then
+        return nil, "invalid browser probe cache path"
+    end
     local profile, err = csemantics.import_profile(data.profile_data)
     if not profile then return nil, err end
     if data.profile_identity ~= profile.identity then return nil, "invalid browser profile identity" end
@@ -145,7 +183,7 @@ local function validate(data)
     end
     local identity = data.identity
     data.identity = nil
-    local expected = descriptor_identity(data)
+    local expected = descriptor_identity(data, context)
     data.identity = identity
     if identity ~= expected then return nil, "invalid browser target identity" end
     return true
@@ -175,23 +213,26 @@ local UNSUPPORTED = { ["-fPIC"] = true, ["-fpic"] = true, ["-fPIE"] = true,
     ["-m32"] = true, ["-m64"] = true, ["-fwasm-exceptions"] = true }
 
 function M.validate_flags(flags, origin)
+    if flags ~= nil and not argv(flags) then
+        return nil, "invalid browser " .. origin .. " flags: expected a dense array of strings"
+    end
     for index, flag in ipairs(flags or {}) do
-        local longjmp = flag:match("^%-sSUPPORT_LONGJMP=(.*)$") or
-            flag == "-s" and (flags[index + 1] or ""):match("^SUPPORT_LONGJMP=(.*)$")
+        local longjmp = longjmp_mode(flags, index)
         if UNSUPPORTED[flag] or flag == "-flto" or flag:match("^%-flto=") or
             flag:match("^%-march=") or flag:match("^%-mcpu=") or flag:match("^%-mtune=") or
             longjmp and longjmp ~= "emscripten" then
-            return nil, "browser target does not support " .. origin .. " flag " .. string.format("%q", flag)
+            local rejected = longjmp and flag == "-s" and flag .. " " .. flags[index + 1] or flag
+            return nil, "browser target does not support " .. origin .. " flag " .. string.format("%q", rejected)
         end
     end
     return true
 end
 
 local function absolute(strategy, filename)
-    if platform.is_absolute(filename) then return compiler_paths.normalize(filename) end
+    if platform.is_absolute(filename) then return compiler_paths.to_slash(compiler_paths.normalize(filename)) end
     local cwd, err = strategy:cwd()
     if not cwd then return nil, err end
-    return compiler_paths.normalize(compiler_paths.join(cwd, filename))
+    return compiler_paths.to_slash(compiler_paths.normalize(compiler_paths.join(cwd, filename)))
 end
 
 local function executable(strategy, filename)
@@ -254,6 +295,71 @@ local function mismatch(paths, record, key, expected, recorded)
         ", expected " .. string.format("%q", expected) .. " (fork_revision=" .. record.fork_revision .. ")")
 end
 
+local function record_list(record, paths, key)
+    local words, err = cdriver.split_shell_words(record[key])
+    if not words then
+        return nil, record_error(paths, "is malformed", "invalid field " .. string.format("%q", key) .. ": " .. err)
+    end
+    if table.concat(words, " ") ~= record[key] then
+        return nil, record_error(paths, "is malformed", "invalid field " .. string.format("%q", key) .. ": noncanonical list")
+    end
+    return words
+end
+
+validate_record = function(record, paths)
+    for _, key in ipairs(RECORD_KEYS) do
+        local value = record[key]
+        local detail
+        if value == nil then detail = "missing field " .. string.format("%q", key)
+        elseif not text(value) or not utf8.len(value) then
+            detail = "invalid field " .. string.format("%q", key) .. ": text encoding"
+        elseif value == "" then detail = "invalid field " .. string.format("%q", key) .. ": empty value" end
+        if detail then return nil, record_error(paths, "is malformed", detail) end
+    end
+    for _, item in ipairs({ { "fork_revision", 40 }, { "archive_sha256", 64 }, { "headers_sha256", 64 } }) do
+        if not hex(record[item[1]], item[2]) then
+            return nil, record_error(paths, "is malformed", "invalid field " .. string.format("%q", item[1]) .. ": invalid hexadecimal value")
+        end
+    end
+    for _, item in ipairs({ { "sjlj", "emscripten" }, { "target", "wasm32-unknown-emscripten" },
+            { "emscripten_version", M.EMSCRIPTEN_VERSION } }) do
+        if record[item[1]] ~= item[2] then return nil, mismatch(paths, record, item[1], item[2]) end
+    end
+    local features, feature_error = record_list(record, paths, "wasm_features")
+    if not features then return nil, feature_error end
+    if record.wasm_features ~= FEATURES then return nil, mismatch(paths, record, "wasm_features", FEATURES) end
+    local defines, split_error = record_list(record, paths, "lua_defines")
+    if not defines then return nil, split_error end
+    local previous
+    for _, flag in ipairs(defines) do
+        if not flag:match("^%-D[A-Za-z_][A-Za-z0-9_]*") or previous and not util.bytewise_less(previous, flag) then
+            return nil, record_error(paths, "is malformed", "invalid field \"lua_defines\": expected sorted unique -D tokens")
+        end
+        previous = flag
+    end
+    local flags, flags_error = record_list(record, paths, "cflags")
+    if not flags then return nil, flags_error end
+    local flag_defines, seen, longjmp = {}, {}, nil
+    for index, flag in ipairs(flags) do
+        if flag:sub(1, 2) == "-D" and not seen[flag] then
+            flag_defines[#flag_defines + 1] = flag
+            seen[flag] = true
+        end
+        local mode = longjmp_mode(flags, index)
+        if mode then longjmp = mode end
+    end
+    table.sort(flag_defines, util.bytewise_less)
+    if table.concat(flag_defines, " ") ~= record.lua_defines then
+        return nil, mismatch(paths, record, "lua_defines", table.concat(flag_defines, " "))
+    end
+    if longjmp ~= record.sjlj then
+        return nil, mismatch(paths, record, "sjlj", longjmp or "<missing in cflags>")
+    end
+    local supported, unsupported = M.validate_flags(flags, "cflags")
+    if not supported then return nil, record_error(paths, "is malformed", "invalid field \"cflags\": " .. unsupported) end
+    return record, defines
+end
+
 local function parse_record(bytes, paths)
     if bytes:sub(1, #BANNER) ~= BANNER or bytes:find("[%z\r]") or
         not utf8.len(bytes) or bytes:sub(-1) ~= "\n" then
@@ -270,53 +376,7 @@ local function parse_record(bytes, paths)
         if detail then return nil, record_error(paths, "is malformed", detail) end
         record[key] = value
     end
-    for _, key in ipairs(RECORD_KEYS) do
-        if record[key] == nil then
-            return nil, record_error(paths, "is malformed", "missing field " .. string.format("%q", key))
-        end
-        if record[key] == "" then
-            return nil, record_error(paths, "is malformed", "invalid field " .. string.format("%q", key) .. ": empty value")
-        end
-    end
-    for _, item in ipairs({ { "fork_revision", 40 }, { "archive_sha256", 64 }, { "headers_sha256", 64 } }) do
-        if not hex(record[item[1]], item[2]) then
-            return nil, record_error(paths, "is malformed", "invalid field " .. string.format("%q", item[1]) .. ": invalid hexadecimal value")
-        end
-    end
-    local defines, split_error = cdriver.split_shell_words(record.lua_defines)
-    if not defines then return nil, record_error(paths, "is malformed", "invalid field \"lua_defines\": " .. split_error) end
-    local previous
-    for _, flag in ipairs(defines) do
-        if not flag:match("^%-D[A-Za-z_][A-Za-z0-9_]*") or previous and not util.bytewise_less(previous, flag) then
-            return nil, record_error(paths, "is malformed", "invalid field \"lua_defines\": expected sorted unique -D tokens")
-        end
-        previous = flag
-    end
-    if table.concat(defines, " ") ~= record.lua_defines then
-        return nil, record_error(paths, "is malformed", "invalid field \"lua_defines\": noncanonical list")
-    end
-    local flags, flags_error = cdriver.split_shell_words(record.cflags)
-    if not flags then return nil, record_error(paths, "is malformed", "invalid field \"cflags\": " .. flags_error) end
-    local flag_defines, seen, longjmp = {}, {}, nil
-    for index, flag in ipairs(flags) do
-        if flag:sub(1, 2) == "-D" and not seen[flag] then
-            flag_defines[#flag_defines + 1] = flag
-            seen[flag] = true
-        end
-        local mode = flag:match("^%-sSUPPORT_LONGJMP=(.*)$") or
-            flag == "-s" and (flags[index + 1] or ""):match("^SUPPORT_LONGJMP=(.*)$")
-        if mode then longjmp = mode end
-    end
-    table.sort(flag_defines, util.bytewise_less)
-    if table.concat(flag_defines, " ") ~= record.lua_defines then
-        return nil, mismatch(paths, record, "lua_defines", table.concat(flag_defines, " "))
-    end
-    if longjmp ~= record.sjlj then
-        return nil, mismatch(paths, record, "sjlj", longjmp or "<missing in cflags>")
-    end
-    local supported, unsupported = M.validate_flags(flags, "cflags")
-    if not supported then return nil, record_error(paths, "is malformed", "invalid field \"cflags\": " .. unsupported) end
-    return record, defines
+    return validate_record(record, paths)
 end
 
 local function header_digest(context, paths)
@@ -362,6 +422,8 @@ end
 
 function M.build(context, inputs)
     local ok, descriptor, failure = pcall(function()
+        local valid, flag_error = M.validate_flags(inputs.compile_flags, "compile_flags")
+        if not valid then return nil, flag_error end
         local paths = inputs.paths
         local tool, tool_error = tools(context)
         if not tool then return nil, tool_error end
@@ -369,10 +431,6 @@ function M.build(context, inputs)
         if not bytes then return nil, record_error(paths, "is unavailable", tostring(read_error)) end
         local record, defines = parse_record(bytes, paths)
         if not record then return nil, defines end
-        for key, expected in pairs({ emscripten_version = M.EMSCRIPTEN_VERSION,
-                target = "wasm32-unknown-emscripten", sjlj = "emscripten", wasm_features = FEATURES }) do
-            if record[key] ~= expected then return nil, mismatch(paths, record, key, expected) end
-        end
         local archive_ok, archive = pcall(incremental.file_digest, context, paths.liblua)
         if not archive_ok then
             if type(archive) ~= "string" then error(archive, 0) end
@@ -390,8 +448,16 @@ function M.build(context, inputs)
         local target_defines = { "-DTITAN_TARGET_BROWSER=1" }
         for _, define in ipairs(target_defines) do flags[#flags + 1] = define end
         for _, flag in ipairs(inputs.compile_flags or {}) do flags[#flags + 1] = flag end
-        local includes = { paths.lua_source, inputs.runtime_include or paths.include }
-        for _, directory in ipairs(context.extra_ffi_include_dirs or {}) do includes[#includes + 1] = directory end
+        local includes, include_error = cdriver.resolve_compiler_include_dirs(context.extra_ffi_include_dirs or {})
+        if not includes then return nil, "invalid extra_ffi_include_dirs: " .. include_error end
+        table.insert(includes, 1, inputs.runtime_include or paths.include)
+        table.insert(includes, 1, paths.lua_source)
+        for index, directory in ipairs(includes) do
+            if not text(directory) or directory == "" then return nil, "invalid browser include path" end
+            local resolved, resolve_error = absolute(context.io, directory)
+            if not resolved then return nil, resolve_error end
+            includes[index] = resolved
+        end
         local provisional = { io = context.io, compiler_argv = tool.cc, compile_flags = flags,
             language_mode = "c99", language_flag = false, cppflags = {}, cflags = {}, include_dirs = includes }
         local profile_inputs, profile_error = cdriver.target_profile_inputs({ io = context.io,
@@ -417,6 +483,8 @@ function M.build(context, inputs)
             output_policy = { requires_output = true, marker = ".titan-target", marker_contents = "browser\n" },
             provider_policy = { archive_only = true, sdk_first = true, dynamic = false } }
         data.identity = descriptor_identity(data, context)
+        local validated, validation_error = validate(data, context)
+        if not validated then return nil, validation_error end
         return freeze(data)
     end)
     if not ok then
