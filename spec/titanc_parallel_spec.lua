@@ -64,6 +64,7 @@ local function run_titanc(arguments, environment_jobs, customize, expect)
     end
     function driver.configure_foreign_c() return true end
     function driver.validate_target() return "native" end
+    function driver.context_target(context) return context.target end
     function driver.default_c_parts() return 4 end
     function driver.prepare_output_root(dir) return dir end
     function driver.validate_output_target(context)
