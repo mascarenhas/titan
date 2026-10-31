@@ -102,6 +102,28 @@ assert(driver.close_resolver_context(context))
         assert.equal("object_fixture", entry.type.name)
     end)
 
+    it("compiles real standard stream macro values through emcc", function()
+        local info, why = toolchain.require(); if not info then pending(why) return end
+        prepare()
+        files.write(workspace .. "/source/stdio_fixture.titan", [[
+foreign import "stdio.h"
+function write_stdout(): integer
+    return ffi.fwrite("out", 1, 3, ffi.stdout)
+end
+function write_stderr(): integer
+    return ffi.fwrite("err", 1, 3, ffi.stderr)
+end
+]])
+        local ok, output = cli(info, "-c", "stdio_fixture")
+        assert.is_true(ok, output)
+        local object = wasm_object(workspace .. "/out/stdio_fixture.o")
+        assert.equal("stdio_fixture", object.metadata.module)
+        local generated = read(workspace .. "/out/stdio_fixture.c")
+        for _, name in ipairs({ "fwrite", "stdout", "stderr" }) do
+            assert.truthy(generated:find(name, 1, true), name)
+        end
+    end)
+
     it("transports a verified descriptor to build workers and preserves every Lua header origin", function()
         local info, why = toolchain.require(); if not info then pending(why) return end
         prepare()
