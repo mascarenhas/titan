@@ -26,7 +26,9 @@ function M.require_sdk(context, descriptor, install)
         local readable = stat and stat.kind == "file" and context.io:read_file(filename, 0)
         if not readable then
             local command = "make browser-sdk PREFIX=" .. install.prefix
-            if install.rocks_tree then command = command .. " ROCKS_TREE=" .. install.rocks_tree end
+            if install.rocks_tree and install.rocks_tree ~= "" then
+                command = command .. " ROCKS_TREE=" .. install.rocks_tree
+            end
             return nil, "browser SDK is incomplete: missing " .. string.format("%q", filename) ..
                 "; run '" .. command .. "'"
         end
