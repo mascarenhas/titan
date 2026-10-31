@@ -124,12 +124,11 @@ describe("titanc installation root query", function()
         assert.matches("cannot locate the Titan installation root: " ..
             "cannot load the Titan support module", stderr, 1, true)
 
-        for _, arguments in ipairs({ { "--print-root", "example" }, {} }) do
-            status, stdout, stderr = query(arguments, support, "/selected/SDK")
-            assert.equal(1, status)
-            assert.equal("", stdout)
-            assert.matches("module name", stderr, 1, true)
-        end
+        status, stdout, stderr = query({ "--print-root", "example" },
+            support, "/selected/SDK")
+        assert.equal(1, status)
+        assert.equal("", stdout)
+        assert.matches("module name", stderr, 1, true)
     end)
 end)
 
@@ -194,6 +193,21 @@ describe("titanc installation root in a process", function()
         assert(lfs.chdir(previous))
         return resolved
     end
+
+    it("validates the target before reporting a non-query invocation with no roots", function()
+        -- Unlike --print-root, an empty invocation must validate its target.
+        -- Exercise the real frontend instead of the root-only driver sandbox.
+        for _, case in ipairs({
+            { "", "at least one module name is required" },
+            { "bogus", "TITAN_TARGET=bogus: unknown target" },
+        }) do
+            local result = run_titanc(lua, {}, { "TITAN_TARGET=" .. case[1] }, nil, true)
+            assert.is_true(result.started, result.diagnostic)
+            assert.is_false(result.ok)
+            assert.equal(1, result.status)
+            assert.matches(case[2], result.output, 1, true)
+        end
+    end)
 
     it("derives the root from the running interpreter when TITAN_ROOT is unset or empty",
     function()

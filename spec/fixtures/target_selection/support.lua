@@ -59,9 +59,10 @@ function M.new()
     M.copy(repository .. "/titanc", self.frontend .. "/titanc")
     M.copy(repository .. "/titan-config.lua", self.frontend .. "/titan-config.lua")
     self.collector = children.new(repository, self.frontend, root .. "/luacov")
-    function self:run(argv, env)
+    function self:run(argv, env, provider_root)
+        provider_root = provider_root or self.output
         local environment = { TITAN_ROOT = prefix, TITAN_TARGET = "", TERM = "dumb",
-            TITAN_PATH_0_6 = self.output .. ";" .. prefix .. "/lib/titan/0.6",
+            TITAN_PATH_0_6 = provider_root .. ";" .. prefix .. "/lib/titan/0.6",
             TITAN_PROBE_CACHE_DISABLE = "1", TITAN_EXTRA_CPPFLAGS = "",
             TITAN_EXTRA_CFLAGS = "-O0 -fno-lto", TITAN_EXTRA_LDFLAGS = "-fno-lto",
             PATH = prefix .. "/bin" .. (platform.windows and ";" or ":") .. (os.getenv("PATH") or "") }
@@ -77,7 +78,7 @@ function M.new()
             self.frontend .. "/titanc", "--tree", self.source }
         if not adjacent then argv[#argv + 1] = "--output"; argv[#argv + 1] = self.output end
         for _, value in ipairs(arguments) do argv[#argv + 1] = value end
-        local result = self:run(argv, env)
+        local result = self:run(argv, env, adjacent and self.root or self.output)
         self.collector:collect()
         return result
     end
@@ -91,7 +92,8 @@ function M.new()
         local executable = platform.windows and
             assert(driver.windows_program_paths(name, nil, nil, output)).executable or
             output .. "/" .. (relative or name:gsub("%.", "/"))
-        return self:run({ executable })
+        local provider_root = platform.windows and output .. "/lib/titan/0.6" or output
+        return self:run({ executable }, nil, provider_root)
     end
     function self:close() self.collector:collect(); M.remove(self.root) end
     return self
