@@ -595,6 +595,7 @@ lua-browser: ## Build and install the fork's WebAssembly Lua library with config
 	PREFIX=$(call make_shell_quote,$(PREFIX)) \
 	LUA_DIR=$(call make_shell_quote,$(LUA_DIR)) \
 	MAKE=$(call make_shell_quote,$(MAKE)) \
+	FORK_REVISION=$(call make_shell_quote,$(FORK_REVISION)) \
 	LUA_BROWSER_CC=$(call make_shell_quote,$(LUA_BROWSER_CC)) \
 	LUA_BROWSER_AR=$(call make_shell_quote,$(LUA_BROWSER_AR)) \
 	LUA_BROWSER_RANLIB=$(call make_shell_quote,$(LUA_BROWSER_RANLIB)) \
@@ -1275,7 +1276,9 @@ BROWSER_SDK_ENV = PREFIX=$(call make_shell_quote,$(PREFIX)) \
 	TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(CURDIR)) \
 	TITAN_PATH= \
 	TITAN_BUILD_PROFILE=$(call make_shell_quote,$(TITAN_BUILD_PROFILE)) \
-	TITAN_VERBOSE=$(call make_shell_quote,$(TITAN_VERBOSE))
+	TITAN_VERBOSE=$(call make_shell_quote,$(TITAN_VERBOSE)) \
+	$(if $(strip $(ROCKS_TREE)),LUA_PATH=$(call make_shell_quote,$(TITAN_INSTALL_TREE)/share/lua/5.5/?.lua;$(TITAN_INSTALL_TREE)/share/lua/5.5/?/init.lua;;)) \
+	$(if $(strip $(ROCKS_TREE)),LUA_CPATH=$(call make_shell_quote,$(TITAN_INSTALL_TREE)/lib/lua/5.5/?.so;;))
 
 browser-sdk: ## Build and install the browser target runtime, tools and minimal provider
 	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) set -e; \
@@ -1293,12 +1296,12 @@ browser-sdk: ## Build and install the browser target runtime, tools and minimal 
 	fi; \
 	build_dir=$(call make_shell_quote,$(abspath $(TITAN_BROWSER_BUILD_DIR))); \
 	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/browser_sdk.lua prepare "$$build_dir"; \
-	runtime_objects=$$($(BROWSER_SDK_ENV) "$$titanc_bin" --target browser \
+	c_objects=$$($(BROWSER_SDK_ENV) "$$titanc_bin" --target browser \
 	  --output "$$build_dir" -c --incremental -j$(TITAN_JOBS) \
 	  $(if $(filter 1,$(TITAN_VERBOSE)),-v,-q) --print-c-objects \
-	  $(foreach source,$(TITAN_RUNTIME_SOURCES),--c-source $(call make_shell_quote,$(abspath $(source))))); \
+	  $(foreach source,$(TITAN_RUNTIME_SOURCES) $(LPEGLABEL_SOURCES),--c-source $(call make_shell_quote,$(abspath $(source))))); \
 	nl="$$(printf '\nX')"; nl="$${nl%X}"; \
-	set -f; IFS="$$nl"; set -- $$runtime_objects; set +f; unset IFS; \
+	set -f; IFS="$$nl"; set -- $$c_objects; set +f; unset IFS; \
 	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/browser_sdk.lua stage-runtime \
 	  "$$build_dir" $(call make_shell_quote,$(CURDIR)) "$$@"; \
 	$(BROWSER_SDK_ENV) "$$titanc_bin" --target browser \
