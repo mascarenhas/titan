@@ -81,11 +81,12 @@ addToLibrary({
         if (TitanBrowser.safe()) {
           Module['titanBrowserSafePoint']?.(TitanBrowser.suspensionPending);
         }
-        ++TitanBrowser.continuing;
+        var previous = TitanBrowser.continuing;
+        TitanBrowser.continuing = TitanBrowser.liveDepth + 1;
         try {
           return rewind(data);
         } finally {
-          --TitanBrowser.continuing;
+          TitanBrowser.continuing = previous;
           TitanBrowser.schedule();
         }
       };
@@ -110,7 +111,8 @@ addToLibrary({
   titan_browser_entry_allowed: () => {
     // Rewind/fiber continuations are already admitted. External calls must not
     // enter an active compiled stack, a pending wait, or a retired instance.
-    return TitanBrowser.continuing ||
+    return (TitanBrowser.continuing &&
+            TitanBrowser.liveDepth === TitanBrowser.continuing) ||
       (!TitanBrowser.blocked && !TitanBrowser.terminalFailure &&
        !TitanBrowser.completionCount && !TitanBrowser.suspensionPending &&
 #if ASYNCIFY
