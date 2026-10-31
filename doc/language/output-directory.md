@@ -55,7 +55,9 @@ For Linux and macOS, these examples show the paths relative to `out/`:
 The library columns apply when no requested root defines the program's exact
 `main` signature. Multiple library roots still share the provider named from
 their longest common dotted prefix: `titanc -o out app.left app.right` emits
-`out/app.so` and `out/app.a`. Library builds write no Lua files.
+`out/app.so` and `out/app.a`. Library builds write no Lua files. A [browser
+target](browser-target.md) library build writes only the archive, such as
+`out-browser/app/main.a`, and a browser build always requires `--output`.
 
 A large module may be split into several C translation units
 ([split modules](build-profiles.md#split-modules)). Its first unit keeps the
@@ -186,6 +188,9 @@ Inside the selected output directory, `titanc` maintains:
   keyed by its set of final outputs. Application and test binaries sharing
   `out/` keep separate link records and synthetic intermediates while reusing
   unchanged production module objects.
+* `out/.titan-target`: the target that owns the directory, written only by
+  the first [browser](browser-target.md) build; see [the target
+  marker](#the-target-marker).
 
 Without `--output`, `titanc` locks every `--tree` source root and the working
 directory, and keeps preamble, linker-feature, native, and link metadata in
@@ -209,6 +214,28 @@ An explicit `--coverage-output DIRECTORY` still selects that report destination
 directly. Probe results retain their separate SDK probe-cache location;
 `--output` does not relocate or clear that cache. See
 [Native source coverage](native-coverage.md).
+
+### The target marker
+
+An output directory holds the generated files of one compilation target. A
+[browser](browser-target.md) build records its target in `.titan-target`,
+which contains the line `browser`. The first browser build writes it when the
+directory is empty apart from `.titan-build.lock`; a browser build refuses a
+nonempty directory without the marker. Native builds never write the marker,
+but every build reads it and refuses a directory that belongs to another
+target:
+
+```text
+browser output root "out" is not empty and has no .titan-target marker; use a separate --output directory
+output root "out-browser" belongs to target "browser", not "linux"; use a separate --output directory
+```
+
+A native build without `--output` checks the source roots and the working
+directory the same way. Keep one output directory per target, such as `out/`
+and `out-browser/`; objects, link records, and caches are never shared between
+them. The marker names only the target: changing browser compiler settings
+inside the same directory recompiles and relinks instead of refusing the
+directory. Remove the directory to change its target.
 
 ## Repository builds and compatibility
 

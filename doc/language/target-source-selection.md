@@ -44,8 +44,10 @@ other operating system, such as a BSD, has no OS label of its own. It compiles
 for a native host without an OS label and selects `name.native.titan`, then
 `name.titan`. Existing source trees keep building there unchanged.
 
-`titanc` does not compile for the browser target. The `browser` label is
-reserved, and `.browser.titan` files are never selected by a native build; see
+`titanc` compiles for the browser target with `--target browser`, as described
+in [Compiling for the browser target](browser-target.md). A native build never
+selects a `.browser.titan` file, and a browser build never selects a
+`.native.titan` or OS-labeled file; see
 [choosing the target](#choosing-the-target--t--target-and-titan_target).
 
 ## Variant filenames
@@ -268,7 +270,8 @@ variants are siblings of their default, so that directory does not change.
 `titanc -T <label>` or `titanc --target <label>` selects the target, as a
 separate argument; `--target=<label>` is accepted too. The short `-t` remains
 `--tree`. Without the option, `titanc` reads the `TITAN_TARGET` environment
-variable. Only native compilation for the host is available:
+variable. Native compilation is available only for the host, and the browser
+target only from Linux and macOS hosts:
 
 | `-T`/`--target` or `TITAN_TARGET` | Result |
 | --- | --- |
@@ -276,12 +279,12 @@ variable. Only native compilation for the host is available:
 | the host's own OS label, such as `linux` on Linux | accepted; the same as absent |
 | another OS label | error, for example `--target windows: native cross-compilation is not supported (host is linux)` |
 | `native` | error: `--target native: 'native' selects source files for native hosts; it is not a compilation target` |
-| `browser` | error: `--target browser is not available yet` |
+| `browser` | the [browser target](browser-target.md) on Linux and macOS hosts; on any other host, error: `browser builds are supported from Linux and macOS hosts (host is windows)` |
 | anything else | error, for example `--target wasm32: unknown target 'wasm32': expected linux, darwin, windows or browser` |
 
 On a native host without an OS label, there is no own label to accept, so every
 nonempty value is an error; the cross-compilation message then reports
-`(host is native)`.
+`(host is native)`, and so does the browser message.
 
 * The option wins over the environment, including an explicitly empty option:
   `--target ''` selects the host and ignores `TITAN_TARGET`. An empty
@@ -290,7 +293,8 @@ nonempty value is an error; the cross-compilation message then reports
   `TITAN_TARGET=wasm32: unknown target 'wasm32': ...`.
 * The target is validated on every invocation before any source lookup,
   including `-c --c-source` invocations without Titan modules, and before the
-  usage error for an invocation without modules.
+  usage error for an invocation without modules. `--target browser` then also
+  requires `--output` (`--target browser requires --output`).
 * `titanc --print-root` ignores both the option and `TITAN_TARGET`, whatever
   their values. The run-time [SDK fallback](modules.md#the-titan-path) runs that
   query and must not depend on the caller's target settings.
