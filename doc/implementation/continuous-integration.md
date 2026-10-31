@@ -12,11 +12,13 @@ coverage reports upload from `out/coverage/report`.
 
 ## Linux job graph and concurrency
 
-Linux runs on pushes. Four job definitions produce five runner executions:
+Linux runs on pushes. Five job definitions produce six runner executions:
 `build-compiler` and `sanitizer` start independently; after `build-compiler`,
-two `test-linux-compiler` shard pairs and `native-coverage` start in parallel.
-Preparation has a 30-minute timeout, compiler pairs 45 minutes, native coverage
-60 minutes, and the independent cold sanitizer build 75 minutes.
+two `test-linux-compiler` shard pairs, `native-coverage`, and the
+[`browser-toolchain`](#browser-toolchain-job) gate start in parallel.
+Preparation and the browser gate have 30-minute timeouts, compiler pairs 45
+minutes, native coverage 60 minutes, and the independent cold sanitizer build
+75 minutes.
 
 Linux defaults to `MAKEFLAGS=-j2` and `TITAN_JOBS=2` for its two-vCPU runners.
 The native coverage and sanitizer jobs each use a four-vCPU runner with 16GB RAM
@@ -169,6 +171,58 @@ failing-on-error OIDC uploads. The "Retain local reports" step uploads
 `out/coverage` as an artifact with `include-hidden-files: true`, because the
 compiler keeps generated coverage files in hidden `.coverage` directories.
 Local reporting never uploads.
+
+## `browser-toolchain` job
+
+`browser-toolchain` runs the [browser target](browser-target.md)'s
+real-toolchain gate on one two-vCPU runner, separately from the compiler
+shards and the stdlib build. It consumes the same prepared
+`titan-linux-prepared.tar.gz` artifact and `$GITHUB_PATH` setup as the
+compiler shards, so its validation prefix is the compiler SDK installed from
+this commit and nothing is rebuilt. That prepared prefix is SDK-only: it holds
+the installed compiler and `lib/titan/0.6/libtitan.a`, with no native
+`titan.so`/`titan.a` standard-library provider and no `lib/titan-browser`
+contents, so browser and isolation specs that exercise a warm native provider
+compile their own self-contained fixture provider instead of assuming an
+installed standard library. The checkout includes submodules, because the
+fork's installer reads the gitlinked revision to write the record; the
+workflow hardcodes no fork revision.
+
+1. **Emscripten.** `ubicloud/cache@v4` restores `.emsdk` under the key
+   `ubuntu-24.04-<arch>-emsdk-6.0.13-v1`. A missing installation clones emsdk
+   (the installer, not the pin); `emsdk install 6.0.13` and `emsdk activate
+   6.0.13` are idempotent, so a restored installation only re-verifies. The
+   step sources `emsdk_env.sh` and requires `emcc --version` to report exactly
+   6.0.13. The pin and root use `TITAN_EMSDK_VERSION`/`TITAN_EMSDK_ROOT`,
+   because `emsdk_env.sh` unsets every `EMSDK_*` variable it does not set
+   itself.
+2. **Browser Lua.** `make -C lua-5.5.1 install-browser PREFIX="$PREFIX"`
+   installs the archive, record, and headers with the fork's own command. The
+   step asserts `lib/browser/liblua.a`, `liblua-config.txt`, and the core
+   headers, and asserts that `lib/titan-browser` is absent or empty, so the
+   gate proves the compile-only scope with an empty browser SDK.
+3. **Strict gate (installed profile).** With `TITAN_ROOT=$PREFIX`,
+   `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1`, and `TITAN_PROBE_CACHE_DISABLE=1`, the
+   prefix's installed `"$PREFIX/bin/busted"` (without `--run=checkout`,
+   matching the compiler shards because the prepared prefix already installs
+   this commit's compiler) runs `spec/wasm_toolchain_spec.lua`,
+   `spec/coder/browser_toolchain_spec.lua`,
+   `spec/coder/browser_providers_spec.lua`, and
+   `spec/coder/browser_incremental_spec.lua`. A missing gate file fails with
+   `missing browser real-toolchain spec: <path>` before Busted starts.
+
+The job installs no apt packages and does not set `CC`; the gate's only host
+compilation is the native control build in the incremental spec, which uses
+the compiler's default `cc`. It runs no Node and produces no browser SDK.
+
+The same six browser spec files (`spec/browser_isolation_spec.lua`,
+`spec/browser_target_spec.lua`, `spec/wasm_toolchain_spec.lua`, and the three
+`spec/coder/browser_*_spec.lua` files) are ordinary rows of
+`spec/support/ci_compiler_test_groups.txt` and also run in the covered
+compiler shards against the same SDK-only prefix; there, without Emscripten,
+every real-toolchain case is pending and the synthesized cases run. #329
+extends this job with the browser SDK, the loader, the runner, and Node
+execution.
 
 ## Cache ownership
 

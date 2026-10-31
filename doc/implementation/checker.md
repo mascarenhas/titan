@@ -1094,6 +1094,12 @@ The principal process-global containers that outlive a `checker.check` call are:
 * `driver.imported`, the import cache, including any `CIRCULAR_MARK`
   sentinels left by a failed run.
 
+Both belong to one compilation target at a time. Activating a resolver context
+of another target (a different host label, or a [browser](browser-target.md)
+descriptor identity) replaces both tables at once and advances a generation
+that older contexts check before any semantic use
+([Semantic-cache ownership](browser-target.md#semantic-cache-ownership)).
+
 A rejected speculative pass restores registry entries in place before its
 authoritative recheck. Its journaled writes to shared imported type objects
 are put back before reparsing; authoritative writes persist. See

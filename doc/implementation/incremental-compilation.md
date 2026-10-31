@@ -124,18 +124,19 @@ Filesystem and decode failures are classified by where they occur:
 
 Each compiled primary object `<stem>.o` carries two metadata sections:
 
-1. the public `.titan.meta` (ELF and COFF) or `__TEXT,__titanmeta` (Mach-O)
-   section consumed by archive and provider readers; and
-2. the compiler-private `.titan.source` (ELF and COFF) or `__TEXT,__titansrc`
-   (Mach-O) section (`titan-compiler/objectmetadata.lua`, symbol
-   `titan_object_source_<mangled>`), appended to part 0's generated C after
-   `#line` normalization or coverage marker conversion.
+1. the public `.titan.meta` (ELF, COFF, and Wasm) or `__TEXT,__titanmeta`
+   (Mach-O) section consumed by archive and provider readers; and
+2. the compiler-private `.titan.source` (ELF, COFF, and Wasm) or
+   `__TEXT,__titansrc` (Mach-O) section (`titan-compiler/objectmetadata.lua`,
+   symbol `titan_object_source_<mangled>`), appended to part 0's generated C
+   after `#line` normalization or coverage marker conversion.
 
 Sidecar `.part<k>.o` objects from a split module carry neither section. Both
 sections use the same byte alignment, `used` attribute retention,
 relocation-free string representation, and Clang AddressSanitizer exclusion,
 and are located in-process by `staticmetadata.read_object_section` (including
-COFF long section names via the string table).
+COFF long section names via the string table, and Wasm DATA segments named in
+the `linking` segment info).
 
 ### Record envelope and version gates
 
@@ -350,7 +351,14 @@ plus two tables:
   without disturbing the others; a missing fact is recomputed, and a kind fact
   never substitutes for the metadata-free part scan. The facts contain no
   paths, observations, or module views; callers still compare a fingerprint
-  with the primary object's target.
+  with the primary object's target. A persisted fingerprint must have the
+  closed shape of its format: an ELF, Mach-O, or COFF table, or the Wasm
+  table `{ format = "wasm", word_size = 32, linking_version = 2, features }`
+  with a canonical feature list. `native_input_kind` classifies a relocatable
+  Wasm object (version 1, with a `linking` custom section and no `dylink.0`)
+  as a non-LTO `object` and an archive of them as `archive`; a linked or
+  side-module Wasm file, another version, or a truncated one is `unknown`, and
+  LLVM bitcode keeps reporting `object` with the LTO flag.
 
 A `files` entry vouches for its digest only while the file's precise
 observation is unchanged. A missing, unreadable,
@@ -401,7 +409,10 @@ per-output cache, and `files[realpath] = { digest, observation }` validated
 like the cache's `files`. An installed `titanc` loads it read-only with
 `incremental.load_sdk_digests` right after the per-output cache. A missing,
 unreadable, oversized, malformed, or foreign-schema manifest contributes no
-entries, and `titanc` never writes it.
+entries, and `titanc` never writes it. A [browser](browser-target.md)
+invocation loads only the browser manifest path
+`lib/titan-browser/<ver>/sdk-digests` from its descriptor, never the native
+manifest; while no browser SDK is installed it contributes nothing.
 
 `titanc` applies no admission filter of its own: every valid entry is one
 more recorded digest, trusted exactly like a cache entry in every context,
@@ -534,6 +545,16 @@ reports the exact component:
    Both probes run through `cpp.cached_command` and are memoized per resolver
    context by description argv; the complete identity is memoized by command,
    flags, target profile, and executable path.
+
+   For the [browser target](browser-target.md) the described compiler is
+   the descriptor's `emcc` launcher, whose `-E -v` banner carries the
+   Emscripten and Clang versions, and the toolchain descriptor carries
+   `target_identity`, the descriptor identity. `toolchain_identity` adds it
+   to the hashed details as `target_identity`, not only to its memo key, so
+   every browser object certificate depends on the complete descriptor
+   (tools, record, flags, include roots, profile, and policies). A host
+   toolchain descriptor has no `target_identity`, and its details keep their
+   original fields, so native certificates are unchanged.
 
    Executable admission follows the operating system's own choice. On POSIX,
    a name containing `/` is an explicit path and is checked directly, while
@@ -967,7 +988,9 @@ repacking preserve the member bytes, so the final compiler-driver link can
 optimize across source objects or selected archive members. LTO does not
 change the public provider protocol or dynamic binding boundaries. Do not replace
 these objects with bitcode-only containers or disable native metadata gates to
-accommodate an incompatible toolchain.
+accommodate an incompatible toolchain. Emscripten has no fat Wasm objects, so
+the [browser target](browser-target.md#unsupported-flags) never adds LTO,
+rejects user LTO flags, and rejects bitcode objects and archive members.
 
 Normalized compile extras (`TITAN_EXTRA_CPPFLAGS`, `TITAN_EXTRA_CFLAGS`, and
 CLI `-I`, `-D`, `--cflag`) enter `driver.generated_compile_prefix()` and are

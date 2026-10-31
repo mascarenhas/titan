@@ -71,20 +71,26 @@ its row is `native`, then the default.
 
 `new_resolver_context` accepts `target` as `nil`, `""`, or one of the five
 label strings, and raises `invalid source selection target '<value>'` for
-anything else. It stores `nil` for `""`. The driver option is a source-selection
-choice: it does not consult the host, so an embedding may select another
-target's files, and it changes no toolchain, link policy, or probe identity.
-Only `titanc` applies the narrower CLI vocabulary.
+anything else. It stores `nil` for `""`. For a host label the driver option is
+a source-selection choice: it does not consult the host, so an embedding may
+select another host's files, and it changes no toolchain, link policy, or probe
+identity. `"browser"` additionally selects the [browser
+target](browser-target.md): construction builds the target descriptor, which
+owns the toolchain, probe cache, provider lookup, and output policy. Only
+`titanc` applies the narrower CLI vocabulary.
 
 `driver.initialize_platform(context)` sets `context.host_target` from the
 platform it detects (`Windows` → `windows`, `Linux` → `linux`, a `uname`
 containing `Darwin` → `darwin`, any other `uname` → `native`) and fills
 `context.target` with the host target when no target was given. It continues to
 accept any `uname`. `driver.context_target(context)` returns an explicit
-target without initializing the platform, so an offline embedding that names
-its target performs no `uname` subprocess for source selection; otherwise it
-initializes the platform through the context's own I/O strategy and returns the
-host target.
+target without initializing the platform. Every constructor returns an
+activated context: an explicit host label activates without a `uname`
+subprocess, so an offline embedding that names its target performs none for
+source selection, while an omitted target initializes the platform through
+the context's own I/O strategy during construction and activates the host
+target ([Context initialization and
+activation](browser-target.md#context-initialization-and-activation)).
 
 The driver library never reads `TITAN_TARGET`. Semantic clients that omit the
 option get the host target.
@@ -96,7 +102,9 @@ platform first, so it knows the host. `nil` or `""` returns the host target.
 `origin` is `"--target"` or `"TITAN_TARGET"`; diagnostics start with
 `--target <value>` or `TITAN_TARGET=<value>`. Explicit `native` is always
 rejected (`'native' selects source files for native hosts; it is not a
-compilation target`), `browser` is rejected as `is not available yet`, an OS
+compilation target`), `browser` is returned on a Linux or macOS host and
+otherwise rejected as `browser builds are supported from Linux and macOS
+hosts (host is <host>)` (without the origin prefix), an OS
 label equal to `context.host_target` is returned, another OS label is rejected
 as `native cross-compilation is not supported (host is <host>)`, and anything
 else is `unknown target '<value>': expected linux, darwin, windows or browser`.
@@ -230,8 +238,11 @@ filename yields the logical stem.
 The coordinator passes the target to workers as closed data:
 `driver.worker_configuration` stores `resolver.target =
 driver.context_target(context)`, and `driver.new_worker_context` passes it
-back as the worker context's `target` option. Coordinator and workers are one
-installation, so the closed configuration needs no protocol change.
+back as the worker context's `target` option. A browser configuration also
+carries the closed descriptor as `target_descriptor`
+([Worker transport](browser-target.md#worker-transport)). Coordinator and
+workers are one installation, so the closed configuration needs no protocol
+change.
 
 Publication re-resolves through `current_source_descriptor` and revalidates the
 staged object's record against the fresh descriptor
