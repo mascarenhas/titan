@@ -178,6 +178,9 @@ local function decode_probe(bytes)
                     position = position + 2
                 end
             else
+                if char:byte() < 32 or char:byte() == 127 then
+                    fail("raw control byte in string")
+                end
                 parts[#parts + 1] = char
                 position = position + 1
             end
@@ -243,6 +246,14 @@ end
 
 local record_keys = { path = true, version = true, ok = true, reason = true }
 
+-- A capability value must be real, nonempty text: an empty or control-bearing
+-- path is a malformed probe result, not a usable tool, and must never be
+-- cached or downgraded to an absence.
+local function usable(value)
+    return type(value) == "string" and value ~= "" and
+        not value:find("[%z\1-\31\127]")
+end
+
 local function probe_record(records, name)
     local record = records[name]
     if type(record) ~= "table" then
@@ -260,6 +271,28 @@ local function probe_record(records, name)
     for _, key in ipairs({ "path", "version", "reason" }) do
         if record[key] ~= NULL and type(record[key]) ~= "string" then
             return nil, name .. " record has a wrongly typed " .. key
+        end
+    end
+    -- The runner's frozen contract: a success names both tools and carries no
+    -- reason; a refusal always explains itself. Anything else is corruption.
+    if record.ok then
+        if record.reason ~= NULL then
+            return nil, name .. " record reports success with a reason"
+        end
+        if not usable(record.path) then
+            return nil, name .. " record reports success without a usable path"
+        end
+        if not usable(record.version) then
+            return nil, name .. " record reports success without a usable version"
+        end
+    else
+        if not usable(record.reason) then
+            return nil, name .. " record reports failure without a usable reason"
+        end
+        for _, key in ipairs({ "path", "version" }) do
+            if record[key] ~= NULL and not usable(record[key]) then
+                return nil, name .. " record reports failure with an unusable " .. key
+            end
         end
     end
     return record
@@ -283,13 +316,9 @@ end
 
 local function capability(record)
     if record.ok then
-        if type(record.path) ~= "string" or type(record.version) ~= "string" then
-            return nil, "browser runner reported a usable capability without a path and version"
-        end
         return { path = record.path, version = record.version }
     end
-    if type(record.reason) == "string" then return nil, record.reason end
-    return nil, "browser runner could not verify a required capability"
+    return nil, record.reason
 end
 
 local function run_probe(strategy)

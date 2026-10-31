@@ -210,8 +210,15 @@ end)
 -- Capability discovery is exercised in fresh processes: the helper caches a
 -- successful compile-only discovery, so one spec process cannot switch the
 -- prefix under it. Each child below owns a fake installed tree whose record,
--- launcher and SDK assets stay entirely inside the temporary directory.
+-- launcher and SDK assets stay entirely inside the temporary directory, and a
+-- fake Emscripten install whose `emcc` only reports the pinned version. That
+-- keeps these cases runnable in the ordinary SDK-only shards instead of
+-- pending on a real cross toolchain.
 local version = require "titan-compiler.version"
+local installed = require "spec.support.installed_prefix"
+local baseline_json = require "spec.support.browser_baseline_json"
+
+local validation_prefix = installed.active()
 
 local SDK_ASSETS = { "libtitan.a", "titan-browser-library.js", "titan-browser.mjs",
     "titan-browser-run", "titan-browser-run.mjs", "titan-browser-node-worker.mjs",
@@ -219,9 +226,6 @@ local SDK_ASSETS = { "libtitan.a", "titan-browser-library.js", "titan-browser.mj
 local NODE_OK = { path = "/opt/node24/bin/node", version = "v24.19.0", ok = true }
 local CHROME_OK = { path = "/opt/chrome/chrome-headless-shell",
     version = "Google Chrome for Testing 156.0.8078.80", ok = true }
-local CHROME_ABSENT = { ok = false,
-    reason = "titan-browser-run: headless Chromium not found; " ..
-        "set TITAN_CHROME to a Chrome executable" }
 
 describe("browser toolchain capabilities", function()
     local prefixes
@@ -231,21 +235,40 @@ describe("browser toolchain capabilities", function()
         prefixes = nil
     end)
 
+    -- lfs in this toolchain has no chmod; these fixtures are POSIX shell
+    -- scripts and the cases pend on Windows before reaching them.
+    local function make_executable(filename)
+        local quoted = "'" .. filename:gsub("'", "'\\''") .. "'"
+        local ok, how, status = os.execute("chmod 755 " .. quoted)
+        assert(ok == true, "chmod failed: " .. tostring(how or status))
+    end
+
     local function fixture_prefix()
         local root = temporary.name()
         assert(os.remove(root))
+        files.mkdir(root)
         for _, relative in ipairs({ "lib/browser/liblua.a",
                 "lib/browser/liblua-config.txt", "lib/browser/include/lua.h",
                 "lib/browser/include/luaconf.h", "lib/browser/include/lstate.h" }) do
             files.write(root .. "/" .. relative, "")
         end
+        local em = root .. "/emsdk/upstream/emscripten"
+        files.write(em .. "/emcc", "#!/bin/sh\n" ..
+            "echo 'emcc (Emscripten gcc/clang-like replacement) 6.0.13'\n")
+        make_executable(em .. "/emcc")
+        for _, name in ipairs({ "emar", "emranlib" }) do
+            files.write(em .. "/" .. name, "#!/bin/sh\nexit 0\n")
+            make_executable(em .. "/" .. name)
+        end
+        files.write(root .. "/emsdk/upstream/bin/clang", "#!/bin/sh\nexit 0\n")
+        make_executable(root .. "/emsdk/upstream/bin/clang")
         prefixes = prefixes or {}
         prefixes[#prefixes + 1] = root
         return root
     end
 
-    local function sdk_directory(prefix)
-        return prefix .. "/lib/titan-browser/" .. version.TITAN_LIBRARY_VERSION
+    local function sdk_directory(root)
+        return root .. "/lib/titan-browser/" .. version.TITAN_LIBRARY_VERSION
     end
 
     local function probe_json(node, chrome)
@@ -260,39 +283,38 @@ describe("browser toolchain capabilities", function()
         return '{"node":' .. record(node) .. ',"chrome":' .. record(chrome) .. "}\n"
     end
 
-    -- lfs in this toolchain has no chmod; the fixture probes are POSIX shell
-    -- scripts and these cases pend on Windows before reaching them.
-    local function make_executable(filename)
-        local quoted = "'" .. filename:gsub("'", "'\\''") .. "'"
-        local ok, how, status = os.execute("chmod 755 " .. quoted)
-        assert(ok == true, "chmod failed: " .. tostring(how or status))
-    end
-
-    local function install_probe(prefix, node, chrome)
-        local directory = sdk_directory(prefix)
+    local function install_probe(root, node, chrome, counter)
+        local directory = sdk_directory(root)
         files.write(directory .. "/probe.json", probe_json(node, chrome))
-        files.write(directory .. "/titan-browser-run",
-            '#!/bin/sh\ncat "$(dirname "$0")/probe.json"\n')
+        local script = "#!/bin/sh\n"
+        if counter then
+            script = script .. "echo probe >> '" .. counter .. "'\n"
+        end
+        script = script .. 'cat "$(dirname "$0")/probe.json"\n'
+        files.write(directory .. "/titan-browser-run", script)
         make_executable(directory .. "/titan-browser-run")
         return directory
     end
 
-    local function install_sdk(prefix)
-        local directory = sdk_directory(prefix)
+    local function install_sdk(root)
+        local directory = sdk_directory(root)
         for _, name in ipairs(SDK_ASSETS) do
             files.write(directory .. "/" .. name, "")
         end
         return directory
     end
 
-    local function helper_child(info, prefix, strict, environment, code)
-        local argv = { "env", "TITAN_ROOT=" .. info.prefix, "PREFIX=" .. prefix,
-            "ROCKS_TREE=", "CCACHE_DISABLE=1", "TITAN_PROBE_CACHE_DISABLE=1",
-            "TITAN_REQUIRE_BROWSER_TOOLCHAIN=" .. (strict and "1" or "") }
-        for key, value in pairs(environment or {}) do
-            argv[#argv + 1] = key .. "=" .. value
+    -- The child keeps the validation prefix for its Lua interpreter and
+    -- TITAN_ROOT, and points EMSDK/PREFIX at the fixture tree.
+    local function helper_child(environment, code)
+        local argv = { "env", "TITAN_ROOT=" .. validation_prefix,
+            "CCACHE_DISABLE=1", "TITAN_PROBE_CACHE_DISABLE=1",
+            "TITAN_REQUIRE_BROWSER_TOOLCHAIN=" ..
+                (environment.strict and "1" or "") }
+        for key, value in pairs(environment) do
+            if key ~= "strict" then argv[#argv + 1] = key .. "=" .. value end
         end
-        argv[#argv + 1] = info.prefix .. "/bin/lua"
+        argv[#argv + 1] = validation_prefix .. "/bin/lua"
         argv[#argv + 1] = "-E"
         argv[#argv + 1] = "-e"
         argv[#argv + 1] = string.format(
@@ -302,11 +324,15 @@ describe("browser toolchain capabilities", function()
         return result.started and result.ok, result.output or result.diagnostic or ""
     end
 
+    local function fixture_environment(root, strict)
+        return { strict = strict, PREFIX = root, ROCKS_TREE = "",
+            EMSDK = root .. "/emsdk" }
+    end
+
     it("reports Node and Chrome from the installed runner probe without changing the compile-only result", function()
-        local info, why = toolchain.require(); if not info then pending(why) return end
-        local prefix = fixture_prefix()
-        install_probe(prefix, NODE_OK, CHROME_OK)
-        local ok, output = helper_child(info, prefix, false, nil, [[
+        local root = fixture_prefix()
+        install_probe(root, NODE_OK, CHROME_OK)
+        local ok, output = helper_child(fixture_environment(root), [[
 local toolchain = require "spec.support.browser_toolchain"
 local base = assert(toolchain.detect())
 assert(base.prefix == os.getenv("PREFIX"), "compile-only detection used the wrong prefix")
@@ -328,24 +354,26 @@ print("capabilities-ok")
         assert.truthy(output:find("capabilities%-ok"), output)
     end)
 
-    it("pends on an unavailable capability and raises it under the strict variable", function()
-        local info, why = toolchain.require(); if not info then pending(why) return end
-        local prefix = fixture_prefix()
-        install_probe(prefix, { path = "/usr/bin/node", version = "v22.23.4",
+    it("pends on an unavailable capability, raises it under the strict variable, and retries after it appears", function()
+        local root = fixture_prefix()
+        install_probe(root, { path = "/usr/bin/node", version = "v22.23.4",
             ok = false, reason = "\"/usr/bin/node\" reports v22.23.4; expected Node 24" },
             CHROME_OK)
-        local ok, output = helper_child(info, prefix, false, nil, [[
+        local ok, output = helper_child(fixture_environment(root), [[
 local toolchain = require "spec.support.browser_toolchain"
-local found, reason = toolchain.require({ node = true })
+local found, reason, malformed = toolchain.detect({ node = true })
 assert(found == nil, "an unusable Node must not be a capability")
-assert(reason:match("^browser toolchain unavailable: "), tostring(reason))
+assert(malformed == nil, "an explained refusal is an absence, not corruption")
 assert(reason:find("expected Node 24", 1, true), tostring(reason))
+local pending_info, pending_reason = toolchain.require({ node = true })
+assert(pending_info == nil, "non-strict require must pend")
+assert(pending_reason:match("^browser toolchain unavailable: "), tostring(pending_reason))
 print("pend-ok")
 ]])
         assert.is_true(ok, output)
         assert.truthy(output:find("pend%-ok"), output)
 
-        local strict_ok, strict_output = helper_child(info, prefix, true, nil, [[
+        local strict_ok, strict_output = helper_child(fixture_environment(root, true), [[
 local toolchain = require "spec.support.browser_toolchain"
 toolchain.require({ node = true })
 print("unreachable-strict")
@@ -354,47 +382,101 @@ print("unreachable-strict")
         assert.is_nil(strict_output:find("unreachable%-strict"))
         assert.truthy(strict_output:find("browser toolchain unavailable", 1, true),
             strict_output)
+
+        -- The absence is not cached: the same process sees the fixed probe.
+        local retry_ok, retry_output = helper_child(fixture_environment(root), [[
+local toolchain = require "spec.support.browser_toolchain"
+local missing = toolchain.detect({ node = true })
+assert(missing == nil, "the refusal must be reported first")
+local path = os.getenv("PREFIX") .. "/lib/titan-browser/]] ..
+            version.TITAN_LIBRARY_VERSION .. [[/titan-browser-run"
+local file = assert(io.open(path, "wb"))
+assert(file:write('#!/bin/sh\ncat "$(dirname "$0")/probe.json"\n')); assert(file:close())
+assert(os.execute("chmod 755 '" .. path .. "'"))
+local probe = assert(io.open(os.getenv("PREFIX") .. "/lib/titan-browser/]] ..
+            version.TITAN_LIBRARY_VERSION .. [[/probe.json", "wb"))
+assert(probe:write('{"node":{"path":"/opt/node24/bin/node","version":"v24.19.0",' ..
+    '"ok":true,"reason":null},"chrome":{"path":null,"version":null,' ..
+    '"ok":false,"reason":"chromium missing"}}\n'))
+assert(probe:close())
+local found = assert(toolchain.detect({ node = true }))
+assert(found.node.version == "v24.19.0", tostring(found.node.version))
+print("retry-ok")
+]])
+        assert.is_true(retry_ok, retry_output)
+        assert.truthy(retry_output:find("retry%-ok"), retry_output)
     end)
 
-    it("fails a present but malformed probe result instead of skipping it", function()
-        local info, why = toolchain.require(); if not info then pending(why) return end
-        local prefix = fixture_prefix()
-        local directory = install_probe(prefix, NODE_OK, CHROME_OK)
-        local shapes = {
-            '{"node":{"path":"/n","version":"v24.19.0","ok":true,"reason":null},"chrome":{}}\n',
-            '{"node":{"path":"/n","version":"v24.19.0","ok":true,"reason":null},' ..
-                '"chrome":{"path":null,"version":null,"ok":false,"reason":null},"extra":1}\n',
-            '{"node":{"path":"/n","version":"v24.19.0","ok":"yes","reason":null},' ..
-                '"chrome":{"path":null,"version":null,"ok":false,"reason":null}}\n',
-            '{"node":{"path":"/n","version":"v24.19.0","ok":true,"reason":null},' ..
-                '"chrome":{"path":null,"version":null,"ok":false,"reason":null}}',
-            '{"node":{"path":"/n","version":"v24.19.0","ok":true,"reason":null},' ..
-                '"chrome":{"path":null,"version":null,"ok":false,"reason":null}}\n\n',
+    it("treats a malformed probe record as corruption instead of an absence or a success", function()
+        local root = fixture_prefix()
+        install_probe(root, NODE_OK, CHROME_OK)
+        local directory = sdk_directory(root)
+        local cases = {
+            { name = "success without a path",
+                node = '{"path":null,"version":"v24.19.0","ok":true,"reason":null}',
+                requested = "node" },
+            { name = "success with an empty version",
+                node = '{"path":"/opt/node","version":"","ok":true,"reason":null}',
+                requested = "node" },
+            { name = "success with a reason",
+                node = '{"path":"/opt/node","version":"v24.19.0","ok":true,"reason":"why"}',
+                requested = "node" },
+            { name = "failure without a reason",
+                node = '{"path":null,"version":null,"ok":false,"reason":null}',
+                requested = "node" },
+            { name = "failure with an empty reason",
+                node = '{"path":null,"version":null,"ok":false,"reason":""}',
+                requested = "node" },
+            { name = "unrequested peer is corrupt",
+                node = '{"path":"/opt/node","version":"v24.19.0","ok":true,"reason":null}',
+                chrome = '{"path":"/opt/chrome","version":null,"ok":true,"reason":null}',
+                requested = "node" },
+            { name = "raw control byte in a string",
+                node = '{"path":"/opt/\1node","version":"v24.19.0","ok":true,"reason":null}',
+                requested = "node" },
         }
-        for index, bytes in ipairs(shapes) do
-            files.write(directory .. "/probe.json", bytes)
-            local ok, output = helper_child(info, prefix, false, nil, [[
+        for _, case in ipairs(cases) do
+            local chrome = case.chrome or
+                '{"path":null,"version":null,"ok":false,"reason":"chromium missing"}'
+            files.write(directory .. "/probe.json",
+                '{"node":' .. case.node .. ',"chrome":' .. chrome .. "}\n")
+            local ok, output = helper_child(fixture_environment(root),
+                string.format([[
 local toolchain = require "spec.support.browser_toolchain"
-local called, failure = pcall(toolchain.require, { node = true })
-assert(not called, "a malformed probe result must not pend")
+local found, reason, malformed = toolchain.detect({ %s = true })
+assert(found == nil, "a malformed record must not be a capability")
+assert(malformed == true, "a malformed record must be reported as corruption")
+assert(reason:find("malformed browser runner probe result", 1, true), tostring(reason))
+local called, failure = pcall(function() toolchain.require({ %s = true }) end)
+assert(not called, "a malformed probe result must raise without the strict variable")
 assert(tostring(failure):find("malformed browser runner probe result", 1, true),
     tostring(failure))
 print("malformed-ok")
-]])
-            assert.is_true(ok, "shape " .. index .. ": " .. output)
-            assert.truthy(output:find("malformed%-ok"), "shape " .. index .. ": " .. output)
+]], case.requested, case.requested))
+            assert.is_true(ok, case.name .. ": " .. output)
+            assert.truthy(output:find("malformed%-ok"), case.name .. ": " .. output)
         end
+
+        -- Nothing corrupt was cached: a repaired probe reads normally.
+        files.write(directory .. "/probe.json", probe_json(NODE_OK, CHROME_OK))
+        local repaired_ok, repaired_output = helper_child(fixture_environment(root), [[
+local toolchain = require "spec.support.browser_toolchain"
+local info = assert(toolchain.detect({ node = true }))
+assert(info.node.version == "v24.19.0", tostring(info.node.version))
+print("repaired-ok")
+]])
+        assert.is_true(repaired_ok, repaired_output)
+        assert.truthy(repaired_output:find("repaired%-ok"), repaired_output)
     end)
 
     it("reports a probe that cannot start Node as an unavailable capability", function()
-        local info, why = toolchain.require(); if not info then pending(why) return end
-        local prefix = fixture_prefix()
-        files.write(sdk_directory(prefix) .. "/titan-browser-run",
-            '#!/bin/sh\n' ..
-            'echo "titan-browser-run: Node 24 is required (node not found)" >&2\n' ..
-            'exit 75\n')
-        make_executable(sdk_directory(prefix) .. "/titan-browser-run")
-        local ok, output = helper_child(info, prefix, false, nil, [[
+        local root = fixture_prefix()
+        files.write(sdk_directory(root) .. "/titan-browser-run",
+            "#!/bin/sh\n" ..
+            "echo 'titan-browser-run: Node 24 is required (node not found)' >&2\n" ..
+            "exit 75\n")
+        make_executable(sdk_directory(root) .. "/titan-browser-run")
+        local ok, output = helper_child(fixture_environment(root), [[
 local toolchain = require "spec.support.browser_toolchain"
 local found, reason = toolchain.require({ node = true })
 assert(found == nil, "a failed probe must not be a capability")
@@ -406,9 +488,8 @@ print("probe-failure-ok")
     end)
 
     it("distinguishes an absent browser SDK from a present but incomplete one", function()
-        local info, why = toolchain.require(); if not info then pending(why) return end
-        local prefix = fixture_prefix()
-        local ok, output = helper_child(info, prefix, false, nil, [[
+        local root = fixture_prefix()
+        local ok, output = helper_child(fixture_environment(root), [[
 local toolchain = require "spec.support.browser_toolchain"
 local found, reason, malformed = toolchain.detect({ sdk = true })
 assert(found == nil, "an absent SDK must not be a capability")
@@ -421,8 +502,8 @@ print("sdk-absent-ok")
         assert.is_true(ok, output)
         assert.truthy(output:find("sdk%-absent%-ok"), output)
 
-        files.write(sdk_directory(prefix) .. "/libtitan.a", "")
-        local broken_ok, broken_output = helper_child(info, prefix, false, nil, [[
+        files.write(sdk_directory(root) .. "/libtitan.a", "")
+        local broken_ok, broken_output = helper_child(fixture_environment(root), [[
 local toolchain = require "spec.support.browser_toolchain"
 local called, failure = pcall(toolchain.require, { sdk = true })
 assert(not called, "an incomplete installed SDK must fail, not pend")
@@ -433,9 +514,10 @@ print("sdk-incomplete-ok")
         assert.is_true(broken_ok, broken_output)
         assert.truthy(broken_output:find("sdk%-incomplete%-ok"), broken_output)
 
-        local directory = install_sdk(prefix)
-        local complete_ok, complete_output = helper_child(info, prefix, false,
-            { SDK_ROOT = directory }, [[
+        local directory = install_sdk(root)
+        local complete_ok, complete_output = helper_child(
+            { strict = false, PREFIX = root, ROCKS_TREE = "", EMSDK = root .. "/emsdk",
+                SDK_ROOT = directory }, [[
 local toolchain = require "spec.support.browser_toolchain"
 local found = assert(toolchain.detect({ sdk = true }))
 assert(found.sdk_root == os.getenv("SDK_ROOT"), tostring(found.sdk_root))
@@ -446,34 +528,33 @@ print("sdk-complete-ok")
         assert.truthy(complete_output:find("sdk%-complete%-ok"), complete_output)
     end)
 
-    it("caches a successful capability after the probe environment changes", function()
-        local info, why = toolchain.require(); if not info then pending(why) return end
-        local prefix = fixture_prefix()
-        local directory = install_probe(prefix, NODE_OK, CHROME_OK)
-        local ok, output = helper_child(info, prefix, false,
-            { PROBE = directory .. "/probe.json" }, [[
+    it("resolves the browser SDK under an explicit ROCKS_TREE", function()
+        local root = fixture_prefix()
+        local rocks = temporary.name()
+        assert(os.remove(rocks))
+        files.mkdir(rocks)
+        prefixes[#prefixes + 1] = rocks
+        local directory = install_sdk(rocks)
+        local ok, output = helper_child(
+            { strict = false, PREFIX = root, ROCKS_TREE = rocks,
+                EMSDK = root .. "/emsdk", SDK_ROOT = directory }, [[
 local toolchain = require "spec.support.browser_toolchain"
-local first = assert(toolchain.detect({ node = true }))
-assert(first.node.version == "v24.19.0", tostring(first.node.version))
-local file = assert(io.open(os.getenv("PROBE"), "wb"))
-assert(file:write('{"node":{"path":"/opt/node24/bin/node","version":"v24.99.0",' ..
-    '"ok":true,"reason":null},"chrome":{"path":null,"version":null,' ..
-    '"ok":false,"reason":null}}\n'))
-assert(file:close())
-local second = assert(toolchain.detect({ node = true }))
-assert(second.node.version == "v24.19.0", "a successful capability must be cached")
-print("cache-ok")
+local found = assert(toolchain.detect({ sdk = true }))
+assert(found.sdk_root == os.getenv("SDK_ROOT"), tostring(found.sdk_root))
+assert(found.sdk_root:find(os.getenv("ROCKS_TREE"), 1, true),
+    "the SDK must live in the install tree: " .. tostring(found.sdk_root))
+print("rocks-tree-ok")
 ]])
         assert.is_true(ok, output)
-        assert.truthy(output:find("cache%-ok"), output)
+        assert.truthy(output:find("rocks%-tree%-ok"), output)
     end)
 
     it("rechecks an absent SDK instead of caching the absence", function()
-        local info, why = toolchain.require(); if not info then pending(why) return end
-        local prefix = fixture_prefix()
-        files.mkdir(prefix .. "/lib/titan-browser")
-        local ok, output = helper_child(info, prefix, false,
-            { SDK_DIRECTORY = sdk_directory(prefix) }, [[
+        local root = fixture_prefix()
+        files.mkdir(root .. "/lib/titan-browser")
+        local ok, output = helper_child(
+            { strict = false, PREFIX = root, ROCKS_TREE = "", EMSDK = root .. "/emsdk",
+                SDK_DIRECTORY = sdk_directory(root) }, [[
 local toolchain = require "spec.support.browser_toolchain"
 local missing, reason = toolchain.detect({ sdk = true })
 assert(missing == nil and reason:find("browser SDK is incomplete", 1, true),
@@ -495,13 +576,153 @@ print("sdk-retry-ok")
         assert.truthy(output:find("sdk%-retry%-ok"), output)
     end)
 
-    it("rejects unknown and non-boolean requirements before detecting anything", function()
-        local ok, message = pcall(toolchain.require, { nope = true })
-        assert.is_false(ok)
-        assert.truthy(tostring(message):find(
-            'unknown browser toolchain requirement "nope"', 1, true), tostring(message))
-        ok, message = pcall(toolchain.detect, { node = "yes" })
-        assert.is_false(ok)
-        assert.truthy(tostring(message):find("must be true", 1, true), tostring(message))
+    it("caches successful capabilities separately and re-probes a missing peer", function()
+        local root = fixture_prefix()
+        local counter = root .. "/probe-count"
+        install_probe(root, NODE_OK,
+            { path = nil, version = nil, ok = false, reason = "chromium missing" }, counter)
+        local ok, output = helper_child(
+            { strict = false, PREFIX = root, ROCKS_TREE = "", EMSDK = root .. "/emsdk",
+                COUNTER = counter }, [[
+local toolchain = require "spec.support.browser_toolchain"
+local function probes()
+    local file = io.open(os.getenv("COUNTER"), "rb")
+    if not file then return 0 end
+    local text = assert(file:read("a")); assert(file:close())
+    local count = 0
+    for _ in text:gmatch("probe") do count = count + 1 end
+    return count
+end
+local node = assert(toolchain.detect({ node = true }))
+assert(node.node.version == "v24.19.0", tostring(node.node.version))
+assert(probes() == 1, "the first query probes once: " .. probes())
+local missing, reason = toolchain.detect({ chrome = true })
+assert(missing == nil and reason == "chromium missing", tostring(reason))
+assert(probes() == 2, "an unavailable peer is probed again: " .. probes())
+-- The node success stays cached while chrome is repaired and re-read.
+local directory = os.getenv("PREFIX") .. "/lib/titan-browser/]] ..
+            version.TITAN_LIBRARY_VERSION .. [["
+local probe = assert(io.open(directory .. "/probe.json", "wb"))
+assert(probe:write('{"node":{"path":"/opt/node24/bin/node","version":"v24.19.0",' ..
+    '"ok":true,"reason":null},"chrome":{"path":"/opt/chrome/chrome-headless-shell",' ..
+    '"version":"Google Chrome for Testing 156.0.8078.80","ok":true,"reason":null}}\n'))
+assert(probe:close())
+local chrome = assert(toolchain.detect({ chrome = true }))
+assert(chrome.chrome.version == "Google Chrome for Testing 156.0.8078.80")
+assert(probes() == 3, "a repaired peer is probed once: " .. probes())
+toolchain.detect({ node = true })
+assert(probes() == 3, "cached capabilities never probe again: " .. probes())
+print("cache-ok")
+]])
+        assert.is_true(ok, output)
+        assert.truthy(output:find("cache%-ok"), output)
+    end)
+
+    it("accepts empty requirements and rejects malformed requirement tables", function()
+        local root = fixture_prefix()
+        install_probe(root, NODE_OK, CHROME_OK)
+        local ok, output = helper_child(fixture_environment(root), [[
+local toolchain = require "spec.support.browser_toolchain"
+local base = assert(toolchain.detect())
+local empty = assert(toolchain.detect({}))
+assert(empty.prefix == base.prefix and empty.tools.cc[1] == base.tools.cc[1])
+assert(empty.node == nil and empty.chrome == nil and empty.sdk_root == nil)
+print("empty-ok")
+]])
+        assert.is_true(ok, output)
+        assert.truthy(output:find("empty%-ok"), output)
+
+        for _, literal in ipairs({ "true", '{ node = "yes" }', '{ nope = true }' }) do
+            local code = [[
+local toolchain = require "spec.support.browser_toolchain"
+local called = pcall(toolchain.detect, REQUIREMENT)
+assert(not called, "invalid requirements must raise before detection")
+local called_require = pcall(toolchain.require, REQUIREMENT)
+assert(not called_require, "invalid requirements must raise through require too")
+print("invalid-ok")
+]]
+            local invalid_ok, invalid_output = helper_child(fixture_environment(root),
+                (code:gsub("REQUIREMENT", literal)))
+            assert.is_true(invalid_ok, literal .. ": " .. invalid_output)
+            assert.truthy(invalid_output:find("invalid%-ok"), literal .. ": " .. invalid_output)
+        end
+    end)
+
+    it("falls back to the source runner before the SDK exists", function()
+        local info, why = toolchain.require({ node = true })
+        if not info then pending(why) return end
+        local root = fixture_prefix()
+        local ok, output = helper_child({ strict = false, PREFIX = root,
+            ROCKS_TREE = "", EMSDK = root .. "/emsdk",
+            TITAN_NODE = os.getenv("TITAN_NODE") or "" }, [[
+local toolchain = require "spec.support.browser_toolchain"
+local found, reason = toolchain.detect({ node = true })
+assert(found, tostring(reason))
+assert(found.node.version:match("^v24%."), tostring(found.node.version))
+print("source-fallback-ok")
+]])
+        assert.is_true(ok, output)
+        assert.truthy(output:find("source%-fallback%-ok"), output)
+    end)
+
+    it("preserves ordered arrays and computes medians for asymmetric samples", function()
+        local encoded = baseline_json.encode({
+            "n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8", "n9", "n10", "n11", "n12" })
+        local previous = 0
+        for index = 1, 12 do
+            local position = assert(encoded:find('"n' .. index .. '"', 1, true),
+                "missing array element " .. index .. " in " .. encoded)
+            assert.is_true(position > previous,
+                "array element " .. index .. " was reordered")
+            previous = position
+        end
+        -- Paired CLI arguments keep adjacency and order.
+        local flags = baseline_json.encode({ "-sEXIT_RUNTIME=0", "--js-library", "path" })
+        local first = assert(flags:find('"-sEXIT_RUNTIME=0"', 1, true), flags)
+        local second = assert(flags:find('"--js-library"', 1, true), flags)
+        local third = assert(flags:find('"path"', 1, true), flags)
+        assert.is_true(first < second and second < third,
+            "paired arguments were reordered: " .. flags)
+        assert.truthy(baseline_json.encode({ b = 1, a = 2 }):find('"a": 2', 1, true))
+        assert.is_equal(2, baseline_json.median({ 3, 1, 2 }))
+        assert.is_equal(2.5, baseline_json.median({ 4, 1, 3, 2 }))
+        assert.is_nil(baseline_json.median({}))
+        assert.is_equal(2, baseline_json.median({ 3, 1, 2, "ignored" }))
+    end)
+
+    it("restores executable modes from a pinned ZIP", function()
+        local python = compiler_io.new_sync():run({ "python3", "--version" })
+        if not python or not python.started or not python.ok then
+            pending("python3 is required for the archive fixture")
+            return
+        end
+        local root = temporary.name()
+        assert(os.remove(root))
+        files.mkdir(root)
+        prefixes = prefixes or {}
+        prefixes[#prefixes + 1] = root
+        local archive = root .. "/artifact.zip"
+        local builder = root .. "/build.py"
+        files.write(builder, [[
+import zipfile
+archive = zipfile.ZipFile(sys.argv[1], "w")
+info = zipfile.ZipInfo("chrome-headless-shell-linux64/chrome-headless-shell")
+info.external_attr = (0o755 << 16)
+archive.writestr(info, "#!/bin/sh\nexit 0\n")
+readme = zipfile.ZipInfo("chrome-headless-shell-linux64/README")
+readme.external_attr = (0o644 << 16)
+archive.writestr(readme, "readme\n")
+archive.close()
+]])
+        assert.is_true(compiler_io.new_sync():run({ "python3", "-c",
+            "import sys; sys.argv = ['build', " .. string.format("%q", archive) .. "]; " ..
+            "exec(open(" .. string.format("%q", builder) .. ").read())" }).ok)
+        local destination = root .. "/extracted"
+        local result = compiler_io.new_sync():run({ "python3",
+            repository .. "/scripts/browser_extract_zip.py", archive, destination })
+        assert.is_true(result.started and result.ok, result.output or result.diagnostic)
+        local binary = destination .. "/chrome-headless-shell-linux64/chrome-headless-shell"
+        local executable = compiler_io.new_sync():run({ "test", "-x", binary })
+        assert.is_true(executable.ok, "the extracted shell must be executable")
     end)
 end)
