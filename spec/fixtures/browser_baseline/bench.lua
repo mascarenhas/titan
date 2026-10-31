@@ -53,3 +53,6 @@ measure("lua.coroutine_switch", function()
 end)
 
 io.write("lua.done=1\n")
+-- The interpreter image keeps stdio buffered after main returns, so the host
+-- sees nothing without an explicit flush.
+io.flush()

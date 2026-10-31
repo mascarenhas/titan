@@ -1,30 +1,40 @@
 #!/usr/bin/env lua
 -- #329 size/speed baseline harness. This is a measurement, never a gate.
 --
--- It builds the same micro-benchmark program at -O1 and -O2, each with and
--- without Asyncify, records image sizes, instantiate/run times under Node and
--- headless Chromium, the per-suspension cost, the final import lists and whether
--- the linker kept the Titan metadata segments, then records native and
--- fork-interpreter reference rows.
+-- Titan cells: the micro-benchmark program at -O1 and -O2, each with and without
+-- Asyncify, measured under Node and headless Chromium, with image sizes,
+-- instantiate/run times, the per-suspension cost, import lists and whether the
+-- linker kept the Titan metadata sections.
+--
+-- Lua cells: the fork interpreter built through the shared `baseline` profile
+-- with entry `lua-main`, at the same four configurations, executed in both
+-- engines with an explicit argv marshalled into the werean heap.
+--
+-- Native rows and the fork's own `lua.js` interpreter provide scale.
+-- Published aggregates are medians of the raw repeats; the raw repeats stay in
+-- the receipt.
 --
 -- Required environment (the slice's validation environment):
---   TITAN_ROOT=<prefix>       installed compiler, runtime and browser SDK
+--   PREFIX=<prefix>           installed compiler, runtime and browser SDK
+--   TITAN_ROOT=<prefix>       the same installed tree
 --   EMSDK=<emsdk root>         Emscripten 6.0.13
---   TITAN_NODE=<node>          Node 24 for the runner and the metadata report
+--   TITAN_NODE=<node>          Node 24 for the runner and the reports
 --   TITAN_CHROME=<chrome>      headless Chromium for the Chromium cells
 --
 -- Usage: lua -E scripts/browser_baseline.lua [--out PATH] [--repeats N]
 -- Exit status is nonzero when a cell failed; a receipt is still written.
+local lfs = require "lfs"
+local repository = assert(lfs.currentdir())
 -- Resolve the compiler from the checkout while TITAN_ROOT keeps the installed
 -- headers, runtime and browser SDK: the recorded profile must be the exact one
 -- that built the images, including its identity inputs.
-local lfs = require "lfs"
-local repository = assert(lfs.currentdir())
 package.path = repository .. "/?.lua;" .. repository .. "/?/init.lua;" .. package.path
 
 local compiler_io = require "titan-compiler.io"
 local platform = require "titan-compiler.platform"
 local version = require "titan-compiler.version"
+local sha256 = require "titan-compiler.sha256"
+local json = require "spec.support.browser_baseline_json"
 
 local strategy = compiler_io.new_sync()
 local fixtures = repository .. "/spec/fixtures/browser_baseline"
@@ -32,8 +42,10 @@ local prefix = assert(os.getenv("PREFIX") and os.getenv("PREFIX") ~= "" and
     os.getenv("PREFIX"), "PREFIX must name the validation prefix")
 local emsdk = assert(os.getenv("EMSDK") and os.getenv("EMSDK") ~= "" and
     os.getenv("EMSDK"), "EMSDK must name the Emscripten SDK root")
+local emcc = emsdk .. "/upstream/emscripten/emcc"
 local node = os.getenv("TITAN_NODE")
 if not node or node == "" then node = "node" end
+local chrome = os.getenv("TITAN_CHROME")
 local runner = prefix .. "/lib/titan-browser/" .. version.TITAN_LIBRARY_VERSION ..
     "/titan-browser-run"
 
@@ -83,6 +95,10 @@ local function must(argv)
     return output
 end
 
+local function trimmed(text)
+    return (tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
 local function rows(output)
     local values = {}
     for line in tostring(output or ""):gmatch("[^\n]+") do
@@ -97,50 +113,37 @@ end
 local function version_line(argv)
     local output = run(argv)
     if not output then return nil end
-    return (output:match("^%s*(.-)%s*$"))
+    return trimmed(output)
 end
 
-local function read_record()
-    local filename = prefix .. "/lib/browser/liblua-config.txt"
-    local file = io.open(filename, "rb")
-    if not file then return nil, "browser Lua record is missing at " .. filename end
-    local text = assert(file:read("a")); assert(file:close())
-    return text
+local function digest(filename)
+    local result = run({ "sha256sum", filename })
+    local value = result and result:match("^(%x+)")
+    if not value then
+        result = run({ "shasum", "-a", "256", filename })
+        value = result and result:match("^(%x+)")
+    end
+    return value
 end
 
 local record_fields = {}
 do
-    local text, failure = read_record()
-    if text then
+    local filename = prefix .. "/lib/browser/liblua-config.txt"
+    local file = io.open(filename, "rb")
+    if file then
+        local text = assert(file:read("a")); assert(file:close())
         for line in text:gmatch("[^\n]+") do
             local name, value = line:match("^([%w_]+)=(.*)$")
             if name then record_fields[name] = value end
         end
     else
-        record_fields.unavailable = failure
+        record_fields.unavailable = "browser Lua record is missing at " .. filename
     end
 end
 
--- The build selects the cell through the internal measurement seam, exactly as
--- the link-profile contract requires; the harness never duplicates flag lists.
-local function build_cell(cell, out)
-    local preamble = string.format(
-        "package.path=%q..package.path; require('titan-compiler.driver')" ..
-        ".browser_link_options={purpose='baseline',assertions=2," ..
-        "optimization=%q,asyncify=%s}",
-        repository .. "/?.lua;" .. repository .. "/?/init.lua;",
-        cell.optimization, tostring(cell.asyncify))
-    return must({ prefix .. "/bin/lua", "-E", "-e", preamble,
-        repository .. "/titanc", "-q", "--target", "browser",
-        "--tree", fixtures, "-o", out, "--exe", out .. "/baseline.mjs",
-        "--c-source", fixtures .. "/baseline.c", "baseline" })
-end
-
-local function identity(descriptor_plan)
-    return descriptor_plan and descriptor_plan.identity_inputs or nil
-end
-
-local function profile_plan(cell, out)
+-- Build selects the cell through the internal measurement seam, exactly as the
+-- link-profile contract requires; the harness never duplicates flag lists.
+local function plan_for(cell, out, entry)
     local driver = require "titan-compiler.driver"
     local browserlink = require "titan-compiler.browserlink"
     mkdirp(out)
@@ -158,9 +161,55 @@ local function profile_plan(cell, out)
     end
     local plan, plan_error = browserlink.profile(descriptor, {
         purpose = "baseline", assertions = 2,
-        optimization = cell.optimization, asyncify = cell.asyncify })
+        optimization = cell.optimization, asyncify = cell.asyncify,
+        entry = entry })
     driver.close_resolver_context(context)
     return plan, plan_error
+end
+
+local function preamble(cell, entry)
+    return string.format(
+        "package.path=%q..package.path; require('titan-compiler.driver')" ..
+        ".browser_link_options={purpose='baseline',assertions=2," ..
+        "optimization=%q,asyncify=%s,entry=%q}",
+        repository .. "/?.lua;" .. repository .. "/?/init.lua;",
+        cell.optimization, tostring(cell.asyncify), entry)
+end
+
+local function build_titan_cell(cell, out, plan)
+    return must({ prefix .. "/bin/lua", "-E", "-e", preamble(cell, "titan"),
+        repository .. "/titanc", "-q", "--target", "browser",
+        "--tree", fixtures, "-o", out, "--exe", out .. "/baseline.mjs",
+        "--c-source", fixtures .. "/baseline.c", "baseline" })
+end
+
+local lua_sources
+local function sources_for_interpreter()
+    if lua_sources then return lua_sources end
+    local directory = repository .. "/lua-5.5.1/src"
+    local names = {}
+    for name in lfs.dir(directory) do
+        if name:match("%.c$") and name ~= "luac.c" and name ~= "onelua.c" then
+            names[#names + 1] = directory .. "/" .. name
+        end
+    end
+    table.sort(names)
+    lua_sources = names
+    return names
+end
+
+local function build_lua_cell(cell, out, plan)
+    mkdirp(out)
+    local argv = { emcc, "-I", repository .. "/lua-5.5.1/src",
+        "-DLUA_USE_POSIX", "-DLUA_USE_BROWSER" }
+    for _, source in ipairs(sources_for_interpreter()) do
+        argv[#argv + 1] = source
+    end
+    for _, flag in ipairs(plan.compile_flags) do argv[#argv + 1] = flag end
+    for _, flag in ipairs(plan.link_flags) do argv[#argv + 1] = flag end
+    argv[#argv + 1] = "-o"
+    argv[#argv + 1] = out .. "/lua.mjs"
+    return must(argv)
 end
 
 local metadata_script = [[
@@ -173,22 +222,86 @@ const imports=WebAssembly.Module.imports(module_)
 console.log("wasm_bytes="+bytes.length);
 console.log("mjs_bytes="+readFileSync(mjs).length);
 for (const name of imports) console.log("import="+name);
-const text=bytes.toString("latin1");
-for (const marker of [".titan.meta",".titan.source",".titan.cprobe"])
-  if (text.indexOf(marker)>=0) console.log("metadata="+marker);
+function readVaruint(buffer, position) {
+  let value = 0, shift = 0, byte;
+  do { byte = buffer[position++]; value += (byte & 0x7f) * Math.pow(2, shift); shift += 7; }
+  while (byte & 0x80);
+  return [value, position];
+}
+// Metadata was emitted as custom sections in the relocatable objects. In the
+// final image the payloads are ordinary data segments and the names survive in
+// the link name table, so report both byte costs instead of a bare marker.
+const markers = [".titan.meta", ".titan.source", ".titan.cprobe"];
+const sourceMarker = "benchmark changed its";
+const segments = [];
+const metadataSections = new Map();
+let dataBytes = 0;
+let sourceBytes = 0;
+let position = 8;
+while (position < bytes.length) {
+  const id = bytes[position++];
+  let size; [size, position] = readVaruint(bytes, position);
+  const body = position;
+  const end = body + size;
+  if (id === 11) {
+    dataBytes += size;
+    let count; [count, position] = readVaruint(bytes, position);
+    for (let index = 0; index < count; index++) {
+      let flags; [flags, position] = readVaruint(bytes, position);
+      if (flags === 2) { let ignored; [ignored, position] = readVaruint(bytes, position); }
+      if (flags === 0 || flags === 2) {
+        // Active segment offset expression: i32.const N, end.
+        position += 1;
+        let offset; [offset, position] = readVaruint(bytes, position);
+        position += 1;
+      }
+      let length; [length, position] = readVaruint(bytes, position);
+      segments.push({ start: position, size: length });
+      position += length;
+    }
+  } else if (id === 0) {
+    let length; [length, position] = readVaruint(bytes, position);
+    const name = bytes.toString("latin1", position, position + length);
+    for (const marker of markers) {
+      const offset = bytes.indexOf(marker, body);
+      if (offset >= 0 && offset < end) {
+        metadataSections.set(marker, { section: name, bytes: size });
+      }
+    }
+  }
+  position = end;
+}
+console.log("data_bytes="+dataBytes);
+for (const segment of segments) {
+  if (bytes.indexOf(sourceMarker, segment.start) >= 0 &&
+      bytes.indexOf(sourceMarker, segment.start) < segment.start + segment.size) {
+    sourceBytes = segment.size;
+    break;
+  }
+}
+console.log("source_payload_bytes="+sourceBytes);
+for (const [marker, where] of metadataSections) {
+  console.log("metadata="+marker+":"+where.section+":"+where.bytes);
+}
 ]]
 
 local forbidden = { "dlopen", "dlsym", "dlerror", "backtrace" }
 
-local function image_report(out)
+local function image_report(out, image)
     local output, failure = run({ node, "-e", metadata_script,
-        out .. "/baseline.wasm", out .. "/baseline.mjs" })
+        out .. "/" .. image .. ".wasm", out .. "/" .. image .. ".mjs" })
     if not output then return { error = failure } end
-    local report = { imports = {} }
+    local report = { imports = {}, metadata_bytes = {}, metadata_sections = {} }
     for line in output:gmatch("[^\n]+") do
         local name, value = line:match("^([%w%._%-]+)=(.*)$")
         if name == "import" then
             report.imports[#report.imports + 1] = value
+        elseif name == "metadata" then
+            local marker, section, size = value:match("^([^:]+):([^:]+):(%d+)$")
+            if marker then
+                report.metadata_bytes[marker] = tonumber(size)
+                report.metadata_sections[marker] = section
+            end
         elseif name then
             report[name] = tonumber(value) or value
         end
@@ -212,18 +325,23 @@ local function copy(from, to)
     assert(output:write(bytes)); assert(output:close())
 end
 
-local function engine_run(engine, out, asyncify)
-    -- The runner imports --js-test from beneath --root, so the portable host
-    -- module is copied into the cell's root before every run.
-    copy(fixtures .. "/bench.mjs", out .. "/bench.mjs")
+local function engine_run(engine, out, module, image, asynchronous)
+    -- The runner imports --js-test from beneath --root, so the host module is
+    -- copied into the cell's root before every run.
+    copy(fixtures .. "/" .. module, out .. "/" .. module)
+    if module == "lua-bench.mjs" then copy(fixtures .. "/bench.lua", out .. "/bench.lua") end
     local argv = { runner, "--engine", engine, "--timeout", "180000",
-        "--grace", "200", "--root", out, "--js-test", out .. "/bench.mjs",
-        "--", "baseline.mjs" }
-    if asyncify then argv[#argv + 1] = "asyncify" end
+        "--grace", "200", "--root", out, "--js-test", out .. "/" .. module,
+        "--", image }
+    if asynchronous then argv[#argv + 1] = "asyncify" end
     local output, failure = run(argv)
     if not output then return { error = failure } end
     local values = rows(output)
-    if values["browser.kind"] ~= "returned" or values["browser.status"] ~= 0 then
+    if module == "lua-bench.mjs" then
+        if values["lua.status"] ~= 0 then
+            return { error = "unexpected interpreter status: " .. tostring(output) }
+        end
+    elseif values["browser.kind"] ~= "returned" or values["browser.status"] ~= 0 then
         return { error = "unexpected completion: " .. tostring(output) }
     end
     return values
@@ -239,29 +357,50 @@ local function repeat_runs(count, action)
     return results
 end
 
-local function minimum(results, name)
-    local best
-    for _, result in ipairs(results) do
-        local value = result[name]
-        if type(value) == "number" and (not best or value < best) then best = value end
+-- One published statistic for every reported metric: the median of the raw
+-- repeats. Raw samples stay in the receipt.
+local metric_fields = {
+    "browser.instantiate_ms", "browser.run_ms", "browser.total_ms",
+    "bench.calls", "bench.closures", "bench.arrays", "bench.strings",
+    "bench.coroutine_switch", "bench.suspend_average", "bench.suspend_total",
+    "lua.instantiate_ms", "lua.run_ms", "lua.total_ms",
+    "lua.calls", "lua.closures", "lua.arrays", "lua.strings",
+    "lua.coroutine_switch",
+}
+
+local function metrics(results)
+    local summary = {}
+    for _, field in ipairs(metric_fields) do
+        local values = {}
+        for _, result in ipairs(results) do
+            if type(result[field]) == "number" then values[#values + 1] = result[field] end
+        end
+        summary[field] = json.median(values)
     end
-    return best
+    return summary
 end
 
 local receipt = {
-    format = "titan-browser-baseline-1",
+    format = "titan-browser-baseline-2",
     date = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    statistic = "median",
     toolchain = {
-        emscripten = version_line({ emsdk .. "/upstream/emscripten/emcc", "--version" }),
+        host = version_line({ "uname", "-srm" }),
+        commit = version_line({ "git", "-C", repository, "rev-parse", "HEAD" }),
+        emcc = version_line({ emcc, "--version" }),
+        emcc_path = emcc,
         node = version_line({ node, "--version" }),
-        chrome = os.getenv("TITAN_CHROME") and
-            version_line({ os.getenv("TITAN_CHROME"), "--version" }) or nil,
+        node_path = node,
+        chrome = chrome and version_line({ chrome, "--version" }) or nil,
+        chrome_path = chrome,
+        chrome_sha256 = chrome and digest(chrome) or nil,
         record = record_fields,
         library_version = version.TITAN_LIBRARY_VERSION,
     },
     cells = {},
+    lua_cells = {},
     native = {},
-    lua = {},
+    fork_interpreter = {},
     failures = {},
 }
 
@@ -283,49 +422,80 @@ for _, optimization in ipairs({ "O1", "O2" }) do
 end
 
 for _, cell in ipairs(cells) do
-    local out = out_root .. "/" .. cell.name
-    mkdirp(out)
-    local plan, plan_error = profile_plan(cell, out)
+    local out = out_root .. "/titan/" .. cell.name
+    local plan, plan_error = plan_for(cell, out, "titan")
     if not plan then
         fail(cell.name .. ": link profile refused: " .. tostring(plan_error))
     else
-        local ok, build_failure = pcall(build_cell, cell, out)
+        local ok, build_failure = pcall(build_titan_cell, cell, out, plan)
         if not ok then
             fail(cell.name .. ": build failed: " .. tostring(build_failure))
         else
-            local image = image_report(out)
             local report = {
                 name = cell.name,
                 optimization = cell.optimization,
                 asyncify = cell.asyncify,
                 compile_flags = plan.compile_flags,
                 link_flags = plan.link_flags,
-                identity = identity(plan),
-                image = image,
+                identity = plan.identity_inputs,
+                image = image_report(out, "baseline"),
                 engine = {},
             }
             for _, engine in ipairs({ "node", "chromium" }) do
                 local results = repeat_runs(options.repeats, function()
-                    local values = engine_run(engine, out, cell.asyncify)
+                    local values = engine_run(engine, out, "bench.mjs", "baseline.mjs",
+                        cell.asyncify)
                     if values.error then
                         fail(cell.name .. "/" .. engine .. ": " .. values.error)
                         return nil
                     end
                     return values
                 end)
-                if results then
-                    report.engine[engine] = {
-                        repeats = results,
-                        instantiate_ms = minimum(results, "browser.instantiate_ms"),
-                        run_ms = minimum(results, "browser.run_ms"),
-                        suspension_ms = minimum(results, "bench.suspend_average") and
-                            minimum(results, "bench.suspend_average") * 1000 or nil,
-                    }
-                else
-                    report.engine[engine] = { error = "run failed; see failures" }
-                end
+                report.engine[engine] = results and {
+                    repeats = results, metrics = metrics(results),
+                } or { error = "run failed; see failures" }
             end
             receipt.cells[#receipt.cells + 1] = report
+        end
+    end
+end
+
+for _, cell in ipairs(cells) do
+    local out = out_root .. "/lua/" .. cell.name
+    local plan, plan_error = plan_for(cell, out, "lua-main")
+    if not plan then
+        fail("lua " .. cell.name .. ": link profile refused: " .. tostring(plan_error))
+    else
+        local ok, build_failure = pcall(build_lua_cell, cell, out, plan)
+        if not ok then
+            fail("lua " .. cell.name .. ": build failed: " .. tostring(build_failure))
+        else
+            local report = {
+                name = cell.name,
+                optimization = cell.optimization,
+                asyncify = cell.asyncify,
+                entry = "lua-main",
+                compile_flags = plan.compile_flags,
+                link_flags = plan.link_flags,
+                identity = plan.identity_inputs,
+                image = image_report(out, "lua"),
+                engine = {},
+            }
+            for _, engine in ipairs({ "node", "chromium" }) do
+                local results = repeat_runs(options.repeats, function()
+                    local values = engine_run(engine, out, "lua-bench.mjs", "lua.mjs",
+                        false)
+                    if values.error then
+                        fail("lua " .. cell.name .. "/" .. engine .. ": " .. values.error)
+                        return nil
+                    end
+                    return values
+                end)
+                report.engine[engine] = results and {
+                    repeats = results, metrics = metrics(results),
+                } or { error = "run failed; see failures" }
+            end
+            receipt.lua_cells[#receipt.lua_cells + 1] = report
         end
     end
 end
@@ -347,10 +517,7 @@ do
             end
             return rows(output)
         end)
-        receipt.native = {
-            repeats = results or {},
-            calls = results and minimum(results, "bench.calls") or nil,
-        }
+        receipt.native = { repeats = results or {}, metrics = results and metrics(results) or {} }
     end
 end
 
@@ -360,88 +527,34 @@ do
         local path = emsdk .. "/upstream/emscripten:" .. (os.getenv("PATH") or "")
         local built, failure = run({ "env", "PATH=" .. path, "make",
             "-C", repository .. "/lua-5.5.1/src", "browser-js" })
-        if not built then fail("lua: browser-js build failed: " .. tostring(failure)) end
+        if not built then fail("lua.js: browser-js build failed: " .. tostring(failure)) end
     end
     if lfs.attributes(script, "mode") == "file" then
+        local source = assert(io.open(fixtures .. "/bench.lua", "rb"))
+        local code = assert(source:read("a")); assert(source:close())
         local results = repeat_runs(options.repeats, function()
-            local source = assert(io.open(fixtures .. "/bench.lua", "rb"))
-            local code = assert(source:read("a")); assert(source:close())
             -- The standalone interpreter parses any argument that starts with
             -- "-" as another option, so a leading newline keeps a comment-first
             -- benchmark chunk out of its option scan.
             local output, run_error = run({ node, script, "-e", "\n" .. code })
             if not output then
-                fail("lua: " .. tostring(run_error))
+                fail("lua.js: " .. tostring(run_error))
                 return nil
             end
             return rows(output)
         end)
-        receipt.lua = {
+        receipt.fork_interpreter = {
             interpreter = "lua-5.5.1/src/browser/lua.js",
             repeats = results or {},
-            calls = results and minimum(results, "lua.calls") or nil,
+            metrics = results and metrics(results) or {},
         }
     end
-end
-
--- Receipt writer: closed tables only, so a tiny encoder is enough.
-local function quote(text)
-    local escaped = tostring(text):gsub('[%z\1-\31\\"]', function(char)
-        if char == '"' then return '\\"' end
-        if char == "\\" then return "\\\\" end
-        if char == "\n" then return "\\n" end
-        if char == "\r" then return "\\r" end
-        if char == "\t" then return "\\t" end
-        return string.format("\\u%04x", char:byte())
-    end)
-    return '"' .. escaped .. '"'
-end
-
-local function encode(value, indent)
-    local kind = type(value)
-    indent = indent or ""
-    if kind == "number" then
-        if value ~= value or value == math.huge or value == -math.huge then
-            return "null"
-        end
-        return string.format("%.9g", value)
-    elseif kind == "string" then
-        return quote(value)
-    elseif kind == "boolean" then
-        return tostring(value)
-    elseif kind == "table" then
-        local keys = {}
-        local count = #value
-        local array = count > 0
-        for key in pairs(value) do
-            if type(key) ~= "number" then array = false end
-            keys[#keys + 1] = key
-        end
-        table.sort(keys, function(left, right)
-            return tostring(left) < tostring(right)
-        end)
-        if #keys == 0 then return "{}" end
-        local inner = indent .. "  "
-        local parts = {}
-        for _, key in ipairs(keys) do
-            local rendered = encode(value[key], inner)
-            if array then
-                parts[#parts + 1] = inner .. rendered
-            else
-                parts[#parts + 1] = inner .. quote(tostring(key)) .. ": " .. rendered
-            end
-        end
-        local brackets = array and { "[", "]" } or { "{", "}" }
-        return brackets[1] .. "\n" .. table.concat(parts, ",\n") .. "\n" ..
-            indent .. brackets[2]
-    end
-    return "null"
 end
 
 mkdirp(options.out:match("^(.*)/[^/]+$") or ".")
 local filename = absolute(options.out)
 local file = assert(io.open(filename, "wb"))
-assert(file:write(encode(receipt) .. "\n"))
+assert(file:write(json.encode(receipt) .. "\n"))
 assert(file:close())
 io.stdout:write(filename, "\n")
 if #receipt.failures > 0 then os.exit(1) end
