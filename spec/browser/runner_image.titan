@@ -1,0 +1,20 @@
+local test = import "test"
+local coroutine = import "coroutine"
+foreign import "stdio.h"
+
+function test_bytes(_context: test.Context)
+  local child = coroutine.create(function(_input: value): value
+    coroutine.yield("parked", "runner")
+    return 42
+  end, "runner")
+  test.assert(child:resume(nil) == "parked")
+  local stdout = "\0\255\195(tail"
+  local stderr = "\0\254\226(tail"
+  test.assert((ffi.fwrite(stdout, 1, #stdout, ffi.stdout) as integer) == #stdout)
+  test.assert((ffi.fwrite(stderr, 1, #stderr, ffi.stderr) as integer) == #stderr)
+  test.assert(child:resume(nil) == 42)
+end
+
+function test_failure(_context: test.Context)
+  test.assert(false, "runner deliberate failure")
+end
