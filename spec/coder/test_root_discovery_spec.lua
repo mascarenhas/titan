@@ -866,12 +866,17 @@ describe("automatic test-root discovery", function()
         end)
 
         it("ignores a non-regular entry whatever its name spells", function()
-            local root = make({ ["alpha_test.titan"] = "" })
+            local root = make({
+                ["alpha_test.titan"] = "",
+                ["fifo.linux.native.titan"] = "",
+            })
             local fifo = joined(root, "fifo.linux.native.titan")
             local base = compiler_io.new_sync()
+            local inspected = false
             local strategy, calls = observed({
                 lstat = function(filename)
                     if slashed(filename) == slashed(fifo) then
+                        inspected = true
                         return { kind = "other" }
                     end
                     return base:lstat(filename)
@@ -881,6 +886,8 @@ describe("automatic test-root discovery", function()
             local roots = testroots.discover(discovery_context(strategy),
                 { root }, {}, {}, root)
 
+            assert.is_true(inspected,
+                "the non-regular entry was never enumerated or inspected")
             assert.same({ "alpha_test" }, roots)
             for _, path in ipairs(calls.stats) do
                 assert.not_equal(slashed(fifo), slashed(path))
