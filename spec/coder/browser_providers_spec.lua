@@ -622,8 +622,7 @@ function require(name)
         module._loadlib = function() error("browser must not call _loadlib") end
     elseif name == "titan-compiler.driver" and not hooked then
         hooked = true
-        for _, field in ipairs({ "compile_program", "run_standalone_archive_probe",
-                "compile_library_output", "compile_archive_validation_image",
+        for _, field in ipairs({ "compile_library_output", "compile_archive_validation_image",
                 "validate_library_image", "validate_library_image_fresh" }) do
             module[field] = function() error("browser entered executable path " .. field) end
         end
@@ -647,6 +646,8 @@ function require(name)
         local process = original_require("titan-compiler.process")
         original_require("spec.support.browser_process_audit").install({
             active = function() return browser_active end,
+            images = true,
+            runner = module.browserlink.sdk_assets(module.installed_paths(assert(os.getenv("TITAN_ROOT")), "browser")).runner,
             tools = { cc = { assert(os.getenv("BROWSER_CC")) },
                 ar = { assert(os.getenv("BROWSER_AR")) },
                 ranlib = { assert(os.getenv("BROWSER_RANLIB")) } },
@@ -729,6 +730,8 @@ describe("browser providers real toolchain", function()
         return compiler_io.new_sync():run(argv, { stderr_to_stdout = true })
     end
     local function prepare(real_info)
+        -- Only runtime/JS assets are bootstrap prerequisites; deliberately omit
+        -- the provider and manifest in this isolated publication destination.
         info = real_info
         root = temporary.name("-browser-real-provider"); mkdir(root)
         repo = assert(lfs.currentdir()); prefix = root .. "/prefix"
@@ -741,16 +744,28 @@ describe("browser providers real toolchain", function()
         write(root .. "/src/pkg/left.titan", "function answer(): integer return 42 end\n")
         write(root .. "/src/pkg/right.titan", "function twice(n: integer): integer return n * 2 end\n")
     end
+    local function stage_sdk()
+        local assets = require("titan-compiler.browserlink").sdk_assets(fixtures.paths(prefix))
+        local source = require("titan-compiler.browserlink").sdk_assets(fixtures.paths(info.prefix))
+        for _, key in ipairs({ "runtime", "js_library", "loader", "runner", "runner_module", "node_worker", "page" }) do
+            assert(lfs.link(source[key], assets[key], true))
+        end
+    end
     after_each(function()
         if root then remove(root) end
         root = nil
     end)
-    it("publishes an archive-only multi-module provider with an empty SDK", function()
-        local info, why = toolchain.require(); if not info then pending(why) return end
+    it("diagnoses an empty SDK, then publishes without an installed provider or manifest", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         prepare(info)
         local entries = {}; for entry in lfs.dir(sdk) do entries[#entries + 1] = entry end
         table.sort(entries); assert.same({ ".", ".." }, entries)
         local result = run_cli(nil, "--c-parts", "3", "pkg.left", "pkg.right")
+        assert.is_false(result.ok, result.output)
+        assert.matches("browser SDK is incomplete: missing", result.output, 1, true)
+        assert.is_nil(lfs.attributes(root .. "/out/pkg.a"))
+        stage_sdk()
+        result = run_cli(nil, "--c-parts", "3", "pkg.left", "pkg.right")
         assert.is_true(result.ok, result.output)
         local output = root .. "/out/pkg.a"
         assert.equal("file", lfs.attributes(output, "mode"))
@@ -765,6 +780,8 @@ describe("browser providers real toolchain", function()
         assert.matches("emranlib archive", commands, 1, true)
         local allowed = { ["emcc compile"] = true, ["emcc preprocess"] = true, ["emcc query"] = true,
             ["emar archive"] = true, ["emranlib archive"] = true, ["compiler-worker frontend"] = true }
+        allowed["emcc link"] = true
+        allowed["browser-runner execute"] = true
         for operation in commands:gmatch("[^\n]+") do assert.is_true(allowed[operation], operation) end
         write(root .. "/providers/pkg.a", read(output))
         write(root .. "/src/consumer.titan",
@@ -803,8 +820,9 @@ assert(driver.close_resolver_context(context))
         assert.is_true(result.ok, result.output)
     end)
     it("refuses a stale native companion before a warm archive certificate hit", function()
-        local info, why = toolchain.require(); if not info then pending(why) return end
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         prepare(info)
+        stage_sdk()
         local result = run_cli(nil, "--incremental", "pkg.left")
         assert.is_true(result.ok, result.output)
         local archive_path, companion = root .. "/out/pkg/left.a", root .. "/out/pkg/left.so"
@@ -823,8 +841,9 @@ assert(driver.close_resolver_context(context))
         { mode = "lto", message = "LLVM bitcode (LTO) object is not supported" },
     }) do
         it("rejects " .. case.mode .. " and publishes nothing", function()
-            local info, why = toolchain.require(); if not info then pending(why) return end
+            local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
             prepare(info)
+            stage_sdk()
             local result = run_cli(case.mode, "pkg.left")
             assert.is_false(result.ok)
             assert.matches(case.message, result.output, 1, true)
@@ -836,7 +855,7 @@ assert(driver.close_resolver_context(context))
         end)
     end
     for _, mode in ipairs({ "program", "test" }) do
-        it("stops " .. mode .. " linking before executable synthesis", function()
+        it("diagnoses missing browser SDK for " .. mode .. " linking before executable synthesis", function()
             local info, why = toolchain.require(); if not info then pending(why) return end
             prepare(info)
             write(root .. "/src/pkg/program.titan",
@@ -844,7 +863,7 @@ assert(driver.close_resolver_context(context))
             local result = mode == "test" and run_cli(nil, "--test", "pkg.left") or
                 run_cli(nil, "pkg.program")
             assert.is_false(result.ok)
-            assert.matches("browser program linking is not available yet", result.output, 1, true)
+            assert.matches("browser SDK is incomplete: missing", result.output, 1, true)
             assert.is_nil(lfs.attributes(root .. "/out/.titan-links"))
         end)
     end

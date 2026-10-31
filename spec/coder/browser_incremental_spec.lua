@@ -100,7 +100,7 @@ describe("browser incremental compilation", function()
     end)
 
     it("reuses warm browser objects and archives, recompiles only the edited variant, and leaves the native root unchanged", function()
-        local info, why = toolchain.require(); if not info then pending(why) return end
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         prepare_fixture()
         compiled(fixture.host, native_root)
         local native = remember(native_root)
@@ -143,7 +143,7 @@ describe("browser incremental compilation", function()
     end)
 
     it("rejects transplanted foreign object and link certificates in both target directions", function()
-        local info, why = toolchain.require(); if not info then pending(why) return end
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         prepare_fixture()
         compiled(fixture.host, native_root)
         compiled("browser", browser_root)
