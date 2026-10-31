@@ -5616,7 +5616,9 @@ printf '%s\n' "${schedule[@]}"
                 "\n  build%-compiler:(.-)" ..
                 "\n  test%-linux%-compiler:"))
             local compiler_job = assert(linux_workflow:match(
-                "\n  test%-linux%-compiler:(.-)\n  native%-coverage:"))
+                "\n  test%-linux%-compiler:(.-)\n  browser%-toolchain:"))
+            local browser_job = assert(linux_workflow:match(
+                "\n  browser%-toolchain:(.-)\n  native%-coverage:"))
             local native_coverage_job = assert(linux_workflow:match(
                 "\n  native%-coverage:(.-)\n  sanitizer:"))
             local macos_job = assert(macos_workflow:match(
@@ -5631,17 +5633,17 @@ printf '%s\n' "${schedule[@]}"
             local macos_events = assert(macos_workflow:match("\non:(.-)\nenv:"))
             assert.truthy(macos_events:match("^%s*workflow_dispatch:%s*$"),
                 macos_events)
-            assert.equal(4, count_literal(linux_workflow,
+            assert.equal(5, count_literal(linux_workflow,
                 "if: github.event_name == 'push'"), linux_workflow)
             assert.equal(1, count_literal(macos_workflow,
                 "if: github.event_name == 'workflow_dispatch'"), macos_workflow)
-            assert.equal(4, count_literal(linux_workflow, "\n    runs-on:"),
+            assert.equal(5, count_literal(linux_workflow, "\n    runs-on:"),
                 linux_workflow)
             assert.equal(1, count_literal(macos_workflow, "\n    runs-on:"),
                 macos_workflow)
             for _, job_name in ipairs({
-                "build-compiler", "test-linux-compiler", "native-coverage",
-                "sanitizer",
+                "build-compiler", "test-linux-compiler", "browser-toolchain",
+                "native-coverage", "sanitizer",
             }) do
                 assert.equal(1, count_literal(linux_workflow,
                     "\n  " .. job_name .. ":"), job_name)
@@ -5796,7 +5798,7 @@ printf '%s\n' "${schedule[@]}"
                 "- name: Upload prepared Linux tree", pack_index, true))
             assert.is_true(build_index < pack_index and pack_index < upload_index)
 
-            assert.equal(7, count_literal(workflow,
+            assert.equal(8, count_literal(workflow,
                 "uses: ubicloud/cache@v4"), workflow)
             assert.equal(2, count_literal(workflow,
                 "uses: ubicloud/cache/restore@v4"), workflow)
@@ -5805,11 +5807,13 @@ printf '%s\n' "${schedule[@]}"
             assert.equal(4, count_literal(workflow,
                 "path: .lua/var/cache/titan-probes/2"), workflow)
             assert.falsy(workflow:find("TITAN_PROBE_CACHE_IDENTITY", 1, true))
-            assert.equal(4, count_literal(workflow,
+            assert.equal(5, count_literal(workflow,
                 "TITAN_PREFIX: ${{ github.workspace }}/.lua"), workflow)
             -- Keep the existing regular cache identity when moving its owner.
             assert.truthy(native_coverage_job:find("-test-linux-stdlib-", 1, true))
-            for _, job in ipairs({ build_job, compiler_job, sanitizer_job }) do
+            for _, job in ipairs({
+                build_job, compiler_job, browser_job, sanitizer_job,
+            }) do
                 assert.falsy(job:find("-test-linux-stdlib-", 1, true))
             end
             assert.truthy(sanitizer_job:find("-sanitizer-", 1, true))
@@ -5958,6 +5962,48 @@ printf '%s\n' "${schedule[@]}"
             assert.falsy(compiler_report:find("grep -Fxq titanc.lua", 1, true))
             assert.truthy(read_file(".codecov.yml"):find(
                 '"^titanc[.]lua$::titanc"', 1, true))
+
+            for _, contract in ipairs({
+                "name: browser target real toolchain (ubuntu-24.04, emsdk 6.0.13)",
+                "needs: build-compiler", "runs-on: ubicloud-standard-2",
+                "timeout-minutes: 30", "\n      CC: gcc-14\n",
+                'EMSDK_VERSION: "6.0.13"',
+                "emsdk-${{ env.EMSDK_VERSION }}-v1",
+                "git clone --depth 1 https://github.com/emscripten-core/emsdk.git",
+                '"$EMSDK_ROOT/emsdk" install "$EMSDK_VERSION"',
+                '"$EMSDK_ROOT/emsdk" activate "$EMSDK_VERSION"',
+                "actions/download-artifact@v8",
+                "name: titan-linux-prepared.tar.gz",
+                'echo "$PWD/.lua/bin" >> "$GITHUB_PATH"',
+                'make -C lua-5.5.1 install-browser PREFIX="$PREFIX"',
+                "TITAN_ROOT: ${{ github.workspace }}/.lua",
+                'TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"',
+                'TITAN_PROBE_CACHE_DISABLE: "1"',
+                "spec/wasm_toolchain_spec.lua",
+                "spec/coder/browser_toolchain_spec.lua",
+                "spec/coder/browser_providers_spec.lua",
+                "spec/coder/browser_incremental_spec.lua",
+            }) do
+                assert.equal(1, count_literal(browser_job, contract), contract)
+            end
+            local browser_unpack_index = assert(browser_job:find(
+                "- name: Restore prepared Linux tree and environment", 1, true))
+            local browser_toolchain_index = assert(browser_job:find(
+                "- name: Install Emscripten", browser_unpack_index, true))
+            local browser_lua_index = assert(browser_job:find(
+                "- name: Install the fork's browser Lua into the validation " ..
+                "prefix", browser_toolchain_index, true))
+            local browser_gate_index = assert(browser_job:find(
+                "- name: Run the browser real-toolchain gate",
+                browser_lua_index, true))
+            assert.is_true(browser_unpack_index < browser_toolchain_index and
+                browser_toolchain_index < browser_lua_index and
+                browser_lua_index < browser_gate_index)
+            -- The gate runs the installed compiler of this commit, like every
+            -- other Linux job that consumes the prepared tree.
+            assert.truthy(named_step(browser_job,
+                "Run the browser real-toolchain gate"):find(
+                '"$PREFIX/bin/busted"', 1, true))
 
             for _, contract in ipairs({
                 "name: stdlib build, tests and coverage (ubuntu-24.04, GCC 14)",

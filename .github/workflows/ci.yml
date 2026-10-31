@@ -260,6 +260,111 @@ jobs:
           name: compiler-${{ matrix.shard-pair }}
           use_oidc: true
 
+  # The browser target's real-toolchain gate. It stays separate from the shard
+  # jobs and from the stdlib build: the Emscripten SDK installation is cached
+  # under the pinned version, the fork's browser Lua is installed into this
+  # job's own validation prefix, and only the four real-toolchain spec files
+  # run. #329 extends this job with the browser SDK and the runner.
+  # Implementation notes: doc/implementation/continuous-integration.md#linux-job-graph-and-concurrency
+  browser-toolchain:
+    name: browser target real toolchain (ubuntu-24.04, emsdk 6.0.13)
+    needs: build-compiler
+    if: github.event_name == 'push'
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      CC: gcc-14
+      # One pin for the toolchain, its cache key and the build record the
+      # fork's install-browser writes.
+      EMSDK_VERSION: "6.0.13"
+      EMSDK_ROOT: ${{ github.workspace }}/.emsdk
+      PREFIX: ${{ github.workspace }}/.lua
+      TITAN_PREFIX: ${{ github.workspace }}/.lua
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # The fork's install-browser reads the gitlink revision from the
+          # submodule checkout to write the build record.
+          submodules: true
+
+      - name: Download prepared Linux tree
+        uses: actions/download-artifact@v8
+        with:
+          name: titan-linux-prepared.tar.gz
+          path: ${{ runner.temp }}
+
+      - name: Restore prepared Linux tree and environment
+        run: |
+          tar -xzf "$RUNNER_TEMP/titan-linux-prepared.tar.gz" \
+            -C "$GITHUB_WORKSPACE"
+          test "$(cat .ci-prepared-workspace)" = "$GITHUB_WORKSPACE"
+          echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
+          .lua/bin/lua -v
+
+      - name: Restore the pinned Emscripten SDK
+        uses: ubicloud/cache@v4
+        with:
+          path: ${{ github.workspace }}/.emsdk
+          key: ubuntu-24.04-${{ runner.arch }}-emsdk-${{ env.EMSDK_VERSION }}-v1
+          restore-keys: |
+            ubuntu-24.04-${{ runner.arch }}-emsdk-${{ env.EMSDK_VERSION }}-
+
+      - name: Install Emscripten ${{ env.EMSDK_VERSION }}
+        run: |
+          if [ ! -x "$EMSDK_ROOT/emsdk" ]; then
+            # The clone is the installer, not the pin: the pin is the release
+            # tag that install activates and the record names.
+            rm -rf "$EMSDK_ROOT"
+            git clone --depth 1 https://github.com/emscripten-core/emsdk.git \
+              "$EMSDK_ROOT"
+          fi
+          # Both commands are idempotent, so a restored installation only
+          # verifies the pinned version instead of downloading it again.
+          "$EMSDK_ROOT/emsdk" install "$EMSDK_VERSION"
+          "$EMSDK_ROOT/emsdk" activate "$EMSDK_VERSION"
+          source "$EMSDK_ROOT/emsdk_env.sh"
+          emcc --version | head -n 1
+          installed=$(emcc --version |
+            sed -n 's/.*) \([0-9][0-9.]*\).*/\1/p' | head -n 1)
+          test "$installed" = "$EMSDK_VERSION"
+
+      - name: Install the fork's browser Lua into the validation prefix
+        run: |
+          source "$EMSDK_ROOT/emsdk_env.sh"
+          make -C lua-5.5.1 install-browser PREFIX="$PREFIX"
+          for installed in liblua.a liblua-config.txt \
+              include/lua.h include/luaconf.h include/lstate.h; do
+            test -f "$PREFIX/lib/browser/$installed"
+          done
+          # This milestone is compile-only: the gate must pass with no browser
+          # SDK installed. #329 creates the SDK in this same job.
+          test -z "$(ls -A "$PREFIX/lib/titan-browser" 2>/dev/null || true)"
+
+      - name: Run the browser real-toolchain gate
+        env:
+          TITAN_ROOT: ${{ github.workspace }}/.lua
+          TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"
+          TITAN_PROBE_CACHE_DISABLE: "1"
+        run: |
+          source "$EMSDK_ROOT/emsdk_env.sh"
+          gate_specs=(
+            spec/wasm_toolchain_spec.lua
+            spec/coder/browser_toolchain_spec.lua
+            spec/coder/browser_providers_spec.lua
+            spec/coder/browser_incremental_spec.lua
+          )
+          for gate_spec in "${gate_specs[@]}"; do
+            if [[ ! -f $gate_spec ]]; then
+              echo "missing browser real-toolchain spec: $gate_spec" >&2
+              exit 1
+            fi
+          done
+          "$PREFIX/bin/busted" "${gate_specs[@]}"
+
   native-coverage:
     name: stdlib build, tests and coverage (ubuntu-24.04, GCC 14)
     needs: build-compiler
