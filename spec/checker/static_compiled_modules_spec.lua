@@ -12,6 +12,9 @@ local staticmetadata = require "titan-compiler.staticmetadata"
 local types = require "titan-compiler.types"
 local util = require "titan-compiler.util"
 local titan = require "titan"
+local _, close_contexts, resolver_options =
+    require("spec.support.resolver_contexts")(driver)
+after_each(close_contexts)
 
 local function provider_path(path)
     return (path:gsub("%.so$", platform.windows and ".dll" or ".so"))
@@ -256,16 +259,14 @@ describe("static compiled-module checker provenance", function()
         local prefix = 'local sibling = import "pkg.sibling"\n' ..
             'function f() local x = sibling.'
         local prepared = assert(completion.prepare(filename, prefix .. " end", #prefix))
-        loader = driver.defaultloader({}, {
-            analysis_only = true, completion_closed_world = true,
-            transient_caches = true, completion = prepared.request,
-            cached_binary_interfaces = captured,
-            source_roots = { consumer = true },
-            source_overrides = { consumer = {
-                kind = "generated", main = filename, files = { filename },
-                contents = { [filename] = prepared.text },
-            } },
-        })
+        loader = driver.defaultloader({}, resolver_options({ analysis_only = true, completion_closed_world = true,
+        transient_caches = true, completion = prepared.request,
+        cached_binary_interfaces = captured,
+        source_roots = { consumer = true },
+        source_overrides = { consumer = {
+            kind = "generated", main = filename, files = { filename },
+            contents = { [filename] = prepared.text },
+        } }, }))
         ok, modtype = loader("consumer")
         assert.is_true(ok, tostring(modtype))
         local result = assert(driver.imported.consumer.completion)

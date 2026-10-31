@@ -8,6 +8,9 @@ local cdriver = require "c-parser.cdriver"
 local compiler_io = require "titan-compiler.io"
 local platform = require "titan-compiler.platform"
 local driver = require "titan-compiler.driver"
+local _, close_contexts, resolver_options =
+    require("spec.support.resolver_contexts")(driver)
+after_each(close_contexts)
 
 local function run_argv(argv)
     local result = compiler_io.new_sync():run(argv)
@@ -2129,23 +2132,23 @@ describe("interfaces (end-to-end)", function()
                 record Box
                     item: integer
                 end
-
+            
                 function Box:add(x: integer): integer
                     return self.item + x
                 end
             ]],
                 interface_bridge = [[
                 local provider = import "interface_provider"
-
+            
                 interface Adder
                     function add(x: integer): integer
                 end
-
+            
                 function wrap(box: provider.Box): Adder
                     return box
                 end
             ]],
-            }, imported, {}, { interface = "source" })
+            }, imported, {}, resolver_options({ interface = "source" }))
             local ok, err = driver.with_loader(loader, function(load)
                 local typ, errs = checker.checkimport("interface_bridge", load)
                 if not typ then return false, errs end

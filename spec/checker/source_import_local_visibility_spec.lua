@@ -4,6 +4,9 @@ local driver = require "titan-compiler.driver"
 local parser = require "titan-compiler.parser"
 local types = require "titan-compiler.types"
 local h = require "spec.support.helpers"
+local _, close_contexts, resolver_options =
+    require("spec.support.resolver_contexts")(driver)
+after_each(close_contexts)
 
 local function check_modules(modules, main)
     local ok, err = h.run_checker_modules(modules, main)
@@ -384,8 +387,7 @@ describe("source-import local visibility (checker)", function()
             ]],
         }
         local imported = {}
-        local source_loader = driver.tableloader(
-            modules, imported, nil, { interface = "source" })
+        local source_loader = driver.tableloader(modules, imported, nil, resolver_options({ interface = "source" }))
         local facade_type, facade_errors = checker.checkimport(
             "source_registry_facade", source_loader)
         assert.truthy(facade_type, table.concat(facade_errors or {}, "\n"))

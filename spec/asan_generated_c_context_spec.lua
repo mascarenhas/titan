@@ -141,8 +141,10 @@ local function asan_log(provider, offset, id, additional_frames)
     return table.concat(lines, "\n")
 end
 
+local platform_context = driver.new_resolver_context()
 local platform_ok, platform_or_error, is_darwin =
-    driver.initialize_platform()
+    driver.initialize_platform(platform_context)
+assert(driver.close_resolver_context(platform_context))
 assert.truthy(platform_ok, platform_or_error)
 
 describe("ASan generated-C context diagnostics", function()

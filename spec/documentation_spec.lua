@@ -18,6 +18,11 @@ describe("LDoc documentation metadata", function()
         end
         driver.imported, types.registry = previous_imported, previous_registry
     end)
+    local function resolver_options(options)
+        options.context = driver.new_resolver_context(options)
+        contexts[#contexts + 1] = options.context
+        return options
+    end
     local function check(source, modules, request)
         driver.imported, types.registry = {}, {}
         local sources, entries = {sample = source}, {}
@@ -27,10 +32,8 @@ describe("LDoc documentation metadata", function()
             local filename = name == "sample" and "/tmp/titan-ldoc-sample.titan" or "/tmp/titan-ldoc-" .. name .. ".titan"
             overrides[name] = {kind="generated", main=filename, files={filename}, contents={[filename]=text}}
         end
-        local loader = driver.defaultloader({}, {
-            analysis_only = true, interface = "source", transient_caches = true,
-            source_roots = {sample = true}, source_overrides = overrides, completion = request,
-        })
+        local loader = driver.defaultloader({}, resolver_options({ analysis_only = true, interface = "source", transient_caches = true,
+        source_roots = {sample = true}, source_overrides = overrides, completion = request, }))
         local ok, result, errors = loader("sample")
         assert.is_true(ok, tostring(result))
         if not request then assert.equal(0, #errors, table.concat(errors, "\n")) end
@@ -241,15 +244,14 @@ end]]
         local filename = "/tmp/titan-ldoc-consumer.titan"
         -- Rebase a provider's module identity by checking it under that name.
         local files = {["/tmp/titan-ldoc-lib.titan"] = source}
-        local provider_loader = driver.defaultloader({}, {analysis_only=true,
-            source_overrides={lib={kind="generated",main="/tmp/titan-ldoc-lib.titan",files={"/tmp/titan-ldoc-lib.titan"},contents=files}}})
+        local provider_loader = driver.defaultloader({}, resolver_options({ analysis_only = true, source_overrides={lib={kind="generated",main="/tmp/titan-ldoc-lib.titan",files={"/tmp/titan-ldoc-lib.titan"},contents=files}} }))
         assert.is_true(provider_loader("lib"))
         binary = types.serialize(driver.imported.lib.type)
         assert.is_true(driver.close_loader(provider_loader))
         driver.imported, types.registry = {}, {}
-        local loader = driver.defaultloader({}, {analysis_only=true,completion_closed_world=true,
+        local loader = driver.defaultloader({}, resolver_options({ analysis_only = true, completion_closed_world=true,
             source_roots={consumer=true}, source_overrides={consumer={kind="generated",main=filename,files={filename},contents={[filename]=text}}},
-            cached_binary_interfaces={lib={serialized=binary,kind="static",filename="/tmp/lib.a"}}})
+            cached_binary_interfaces={lib={serialized=binary,kind="static",filename="/tmp/lib.a"}} }))
         local ok, _, errors = loader("consumer")
         assert.is_true(ok)
         assert.equal(0,#errors,table.concat(errors,"\n"))
