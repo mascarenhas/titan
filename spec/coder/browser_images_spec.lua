@@ -1,6 +1,7 @@
 local assert = require "luassert"
 local browserlink = require "titan-compiler.browserlink"
 local driver = require "titan-compiler.driver"
+local linkcertificate = require "titan-compiler.linkcertificate"
 local fixtures = require "spec.support.browser_fixtures"
 local toolchain = require "spec.support.browser_toolchain"
 local compiler_io = require "titan-compiler.io"
@@ -106,6 +107,18 @@ describe("browser image profile and SDK readiness", function()
         assert.truthy(flags:find('-sEXPORTED_FUNCTIONS=["_main","_malloc","_free"]', 1, true))
     end)
 
+    it("uses Wasm's supported input trace instead of an ELF-only dependency flag", function()
+        local context = { target_descriptor = fixtures.descriptor(), link_kind = "test" }
+        local backend = linkcertificate.linker_backend(context)
+        assert.equal("wasm", backend)
+        local policy = linkcertificate.native_library_policy(context,
+            { backend = backend, dependency_file = "/out/link.d" })
+        assert.is_true(policy.cacheable)
+        assert.is_true(policy.capture_trace)
+        assert.equal("/out/link.d", policy.dependency_file)
+        assert.same({ "-Wl,--trace" }, policy.argv)
+    end)
+
     it("rejects trailing attempts to override profile-owned settings", function()
         for _, flags in ipairs({ { "-sASYNCIFY=0" }, { "-s", "ASYNCIFY_IGNORE_INDIRECT=1" },
             { "-DTITAN_COROUTINE_STACK_SIZE=1" }, { "-UTITAN_TARGET_BROWSER" }, { "-sNO_ASYNCIFY=1" },
@@ -170,7 +183,7 @@ end
         assert.is_true(exports.free)
         assert.is_nil(exports.titan_browser_gate_guarded)
         result = run({ info.sdk_root .. "/titan-browser-run", "--engine", "node", "--grace", "0",
-            workspace .. "/out/image_case.mjs", "--", "--filter", "^image_case[.]test_trivial$" })
+            workspace .. "/out/image_case.mjs", "--", "--filter=^image_case[.]test_trivial$" })
         assert.is_true(result.ok, result.output or result.diagnostic)
         assert.truthy(result.output:find("[==========] 1 test ran.", 1, true), result.output)
         assert.truthy(result.output:find("[  PASSED  ] 1 test.", 1, true), result.output)
