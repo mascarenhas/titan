@@ -700,9 +700,6 @@ function certificate.native_library_policy(context, request)
     if request.uncacheable then
         return { cacheable = false, backend = backend or "none", argv = {}, reason = request.uncacheable }
     end
-    if browser_descriptor(context) then
-        return { cacheable = true, backend = "archive", files = {}, argv = {} }
-    end
     for _, flag in ipairs(link_arguments(request.argv)) do
         if flag:sub(1, 1) == "@" or flag:match("^%-fplugin") or
             flag:match("^%-%-?plugin") or flag == "-Xlinker" or
@@ -711,6 +708,9 @@ function certificate.native_library_policy(context, request)
             return { cacheable = false, backend = backend or "none", argv = {},
                 reason = "opaque linker input mechanism: " .. flag }
         end
+    end
+    if browser_descriptor(context) then
+        return { cacheable = true, backend = "archive", files = {}, argv = {} }
     end
     if backend == "gnu" or backend == "lld" then
         need(type(filename) == "string", "link dependency output path is required")

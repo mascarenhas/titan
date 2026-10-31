@@ -3252,6 +3252,11 @@ describe("loader resolver ownership", function()
             deduplicate_module_names = function(modules) return modules end,
             new_resolver_context = function() return fake_context end,
             validate_target = function() return "native" end,
+            validate_output_target = function(context)
+                assert.equal(fake_context, context)
+                assert.same({ 17 }, context.io._process_inherit)
+                return true
+            end,
             apply_native_inputs = function() end,
             configure_foreign_c = function() end,
             default_c_parts = function() return 1 end,
@@ -3398,6 +3403,11 @@ describe("loader resolver ownership", function()
                 new_resolver_context = function() return fake_context end,
                 validate_target = function() return "native" end,
                 prepare_output_root = function(dir) return dir end,
+                validate_output_target = function(context)
+                    assert.equal(fake_context, context)
+                    assert.same({ 19 }, context.io._process_inherit)
+                    return true
+                end,
                 apply_native_inputs = function() end,
                 initialize_platform = function(context)
                     assert.equal(fake_context, context)
