@@ -5,6 +5,7 @@ local cdriver = require "c-parser.cdriver"
 local coder = require "titan-compiler.coder"
 local coder_names = require "titan-compiler.coder.names"
 local compiler_io = require "titan-compiler.io"
+local driver = require "titan-compiler.driver"
 local installed_prefix = require "spec.support.installed_prefix"
 local lfs = require "lfs"
 local module_symbols = require "spec.support.module_symbols"
@@ -467,6 +468,32 @@ local function parsed_source(path)
     return ast
 end
 
+-- One `<module>.titan.h` per module whose selected source declares a foreign
+-- function. An inactive variant is never a selected source, so it cannot
+-- predict a header. `root` names the prefix of a fixture tree whose paths are
+-- absolute.
+local function predicted_foreign_headers(sources, root)
+    local expected = {}
+    local prefix = root and (root .. "/") or ""
+    for _, source in ipairs(sources) do
+        local relative = source
+        if prefix ~= "" then
+            assert(source:sub(1, #prefix) == prefix,
+                "fixture source outside its root: " .. source)
+            relative = source:sub(#prefix + 1)
+        end
+        local module = assert(relative:match("^titan/([^/.]+)"))
+        for _, node in ipairs(parsed_source(source)) do
+            if node._tag == "Ast.TopLevelForeignFunc" then
+                local stem = relative:match("^(titan/[^/]+/)[^/]+[.]titan$")
+                stem = stem and (stem .. module) or ("titan/" .. module)
+                expected["out/" .. stem .. ".titan.h"] = true
+            end
+        end
+    end
+    return expected
+end
+
 local function public_declarations(path)
     local declarations = {}
     for _, node in ipairs(parsed_source(path)) do
@@ -593,7 +620,7 @@ local function declared_spec_paths(filename)
     return paths
 end
 
-local function stdlib_source_files()
+local function stdlib_source_files(filename)
     local sources = {}
     local source_ensembles = {
         ["$(UV_TITAN_SOURCES)"] = "UV_TITAN_SOURCES",
@@ -605,10 +632,10 @@ local function stdlib_source_files()
         ["$(LUA_TITAN_SOURCES)"] = "LUA_TITAN_SOURCES",
         ["$(THREAD_TITAN_SOURCES)"] = "THREAD_TITAN_SOURCES",
     }
-    for _, source in ipairs(makefile_words("STDLIB_TITAN_SOURCES")) do
+    for _, source in ipairs(makefile_words("STDLIB_TITAN_SOURCES", filename)) do
         local ensemble = source_ensembles[source]
         if ensemble then
-            for _, constituent in ipairs(makefile_words(ensemble)) do
+            for _, constituent in ipairs(makefile_words(ensemble, filename)) do
                 sources[#sources + 1] = constituent
             end
         else
@@ -618,30 +645,101 @@ local function stdlib_source_files()
     return sources
 end
 
-local function discovered_uv_sources()
+-- The host's own source label, which selects a family's variant. A native
+-- host without an OS label selects `native` first and the default last.
+local host_label
+local function host_source_label()
+    if host_label then return host_label end
+    if platform.windows then
+        host_label = "windows"
+    else
+        local pipe = io.popen("uname -s 2>/dev/null")
+        local uname = pipe and pipe:read("*l")
+        if pipe then pipe:close() end
+        if uname == "Linux" then host_label = "linux"
+        elseif uname == "Darwin" then host_label = "darwin"
+        else host_label = "native" end
+    end
+    return host_label
+end
+
+-- Group an inventory into one family per logical filename. A variant is its
+-- own declaration beside the default it replaces; the compiler owns the
+-- spelling rule and the selection rows, so the audit asks it instead of
+-- keeping a second copy.
+local function source_families(sources)
+    local families, by_logical = {}, {}
+    for _, source in ipairs(sources) do
+        local directory, basename = source:match("^(.*/)([^/]+)$")
+        local logical, label = driver.classify_source_filename(basename)
+        local path = logical and label and ((directory or "") .. logical) or source
+        local family = by_logical[path]
+        if not family then
+            family = { logical = path, files = {} }
+            by_logical[path] = family
+            families[#families + 1] = family
+        end
+        family.files[#family.files + 1] = { path = source, label = label }
+    end
+    return families
+end
+
+-- The file one compiled module reads: the most specific declared variant that
+-- applies to the host, then `native`, then the default. A target-only family
+-- with no applicable member selects nothing.
+local function selected_host_source(family)
+    local by_label, default = {}, nil
+    for _, entry in ipairs(family.files) do
+        if entry.label then by_label[entry.label] = entry.path
+        else default = entry.path end
+    end
+    for _, label in ipairs(driver.target_selection_labels(host_source_label())) do
+        if by_label[label] then return by_label[label] end
+    end
+    return default
+end
+
+-- One selected file per family: the output-predicting audits' view, which
+-- never sees an inactive variant.
+local function host_selected_sources(sources)
+    local selected = {}
+    for _, family in ipairs(source_families(sources)) do
+        local path = selected_host_source(family)
+        if path then selected[#selected + 1] = path end
+    end
+    return selected
+end
+
+local function titan_sources_in(directory, prefix)
     local sources = {}
-    for entry in lfs.dir("titan/uv") do
-        local path = "titan/uv/" .. entry
+    for entry in lfs.dir(directory) do
+        local path = directory .. "/" .. entry
         if entry:match("%.titan$") and
             lfs.attributes(path, "mode") == "file" then
-            sources[#sources + 1] = path
+            sources[#sources + 1] = (prefix or (directory .. "/")) .. entry
         end
     end
     table.sort(sources)
     return sources
 end
 
-local function discovered_http_sources()
-    local sources = {}
-    for entry in lfs.dir("titan/http") do
-        local path = "titan/http/" .. entry
-        if entry:match("%.titan$") and
-            lfs.attributes(path, "mode") == "file" then
-            sources[#sources + 1] = path
-        end
+-- A folder file the inventory never declares. Every variant spelling counts:
+-- an unlisted variant is a missing declaration, not a file to ignore.
+local function undeclared_folder_sources(declared, directory, prefix)
+    local listed, undeclared = {}, {}
+    for _, source in ipairs(declared) do listed[source] = true end
+    for _, source in ipairs(titan_sources_in(directory, prefix)) do
+        if not listed[source] then undeclared[#undeclared + 1] = source end
     end
-    table.sort(sources)
-    return sources
+    return undeclared
+end
+
+local function discovered_uv_sources(directory, prefix)
+    return titan_sources_in(directory or "titan/uv", prefix or "titan/uv/")
+end
+
+local function discovered_http_sources()
+    return titan_sources_in("titan/http", "titan/http/")
 end
 
 local function file_exists(path)
@@ -1158,23 +1256,101 @@ end
     end
 
     it("requires source foreign headers only for modules declaring foreign functions", function()
-        local expected = {}
-        for _, source in ipairs(stdlib_source_files()) do
-            local module = assert(source:match("^titan/([^/.]+)"))
-            for _, node in ipairs(parsed_source(source)) do
-                if node._tag == "Ast.TopLevelForeignFunc" then
-                    local stem = source:match("^(titan/[^/]+/)[^/]+[.]titan$")
-                    stem = stem and (stem .. module) or ("titan/" .. module)
-                    expected["out/" .. stem .. ".titan.h"] = true
-                end
-            end
-        end
+        local expected = predicted_foreign_headers(
+            host_selected_sources(stdlib_source_files()))
         local actual = {}
         for _, path in ipairs(makefile_words("STDLIB_GENERATED_FOREIGN_HEADERS")) do
             if path:match("[.]titan[.]h$") then actual[path] = true end
         end
         assert.same(expected, actual)
     end)
+
+    it("predicts output from the host's selected variant, not a listed variant", function()
+        local root = make_temp_dir()
+        local tested, test_error = pcall(function()
+            local sources = {}
+            for _, fixture in ipairs({
+                { "titan/fam/fam.titan", false },
+                { "titan/fam/fam.native.titan", true },
+                { "titan/fam2/fam2.windows.titan", true },
+                { "titan/plain/plain.titan", true },
+                { "titan/plain/plain.native.titan", false },
+            }) do
+                local path, foreign = fixture[1], fixture[2]
+                local parent = path:match("^(.*)/")
+                assert.truthy(run_argv({ "mkdir", "-p", root .. "/" .. parent }))
+                write_file(root .. "/" .. path, foreign and
+                    'foreign import "fixture.h"\n\n' ..
+                    "foreign function fixture_entry(raw: *void)\n" ..
+                    "  if raw == nil then return end\nend\n" or
+                    "function fixture_marker(): integer\n  return 0\nend\n")
+                sources[#sources + 1] = root .. "/" .. path
+            end
+            local selected = {}
+            for _, family in ipairs(source_families(sources)) do
+                local path = selected_host_source(family)
+                if path then selected[#selected + 1] = path end
+            end
+            local predicted = predicted_foreign_headers(selected, root)
+            -- `native` applies to every native host; the Windows-only family
+            -- exists only there; the otherwise-foreign default is replaced.
+            assert.is_true(predicted["out/titan/fam/fam.titan.h"])
+            assert.equal(host_source_label() == "windows",
+                predicted["out/titan/fam2/fam2.titan.h"] == true)
+            assert.is_nil(predicted["out/titan/plain/plain.titan.h"])
+        end)
+        remove_tree(root)
+        if not tested then error(test_error, 0) end
+    end)
+
+    it("audits every declared variant and fails on an unlisted folder variant",
+        function()
+            local root = make_temp_dir()
+            local tested, test_error = pcall(function()
+                write_file(root .. "/Makefile", table.concat({
+                    "UV_TITAN_SOURCES := titan/uv/tcp.titan titan/uv/tcp.linux.titan",
+                    "STDLIB_TITAN_SOURCES := $(UV_TITAN_SOURCES) " ..
+                    "titan/fs.titan titan/fs.native.titan",
+                    "",
+                }, "\n"))
+                local files = stdlib_source_files(root .. "/Makefile")
+                assert.same({
+                    "titan/uv/tcp.titan", "titan/uv/tcp.linux.titan",
+                    "titan/fs.titan", "titan/fs.native.titan",
+                }, files)
+                local families = source_families(files)
+                assert.equal(2, #families)
+                assert.equal("titan/uv/tcp.titan", families[1].logical)
+                assert.equal("titan/fs.titan", families[2].logical)
+                local expected = {
+                    linux = "titan/uv/tcp.linux.titan",
+                    darwin = "titan/uv/tcp.titan",
+                    windows = "titan/uv/tcp.titan",
+                    native = "titan/uv/tcp.titan",
+                }
+                assert.equal(expected[host_source_label()],
+                    selected_host_source(families[1]))
+                assert.equal("titan/fs.native.titan",
+                    selected_host_source(families[2]))
+
+                local folder = root .. "/titan/uv"
+                assert.truthy(run_argv({ "mkdir", "-p", folder }))
+                for _, name in ipairs({ "tcp.titan", "tcp.linux.titan",
+                        "tcp.browser.titan" }) do
+                    write_file(folder .. "/" .. name, "")
+                end
+                local declared = {
+                    "titan/uv/tcp.titan", "titan/uv/tcp.browser.titan",
+                }
+                assert.same({ "titan/uv/tcp.linux.titan" },
+                    undeclared_folder_sources(declared, folder, "titan/uv/"))
+                declared[#declared + 1] = "titan/uv/tcp.linux.titan"
+                assert.same({}, undeclared_folder_sources(declared, folder,
+                    "titan/uv/"))
+            end)
+            remove_tree(root)
+            if not tested then error(test_error, 0) end
+        end)
 
     it("always invokes one compiler for each complete stdlib target without deleting objects", function()
         if platform.windows then pending("Unix Make command contract"); return end
@@ -1193,9 +1369,13 @@ end
 set -eu
 test "$(cat out/titan/math.o)" = "retained object"
 printf '%s\n' "$*" >> calls
+printf 'target=[%s]\n' "${TITAN_TARGET-<unset>}" >> environment
 ]])
+            -- An ambient target selection must never reach the compiler; the
+            -- stdlib recipes clear it themselves.
             local arguments = { "env", "-u", "MAKEFLAGS", "-u", "MFLAGS",
                 "-u", "GNUMAKEFLAGS", "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES",
+                "TITAN_TARGET=bogus",
                 "make", "--no-print-directory", "-s", "-C", root,
                 "PREFIX=" .. root, "TITAN_JOBS=4", "MAKE=false",
                 "STDLIB_USE_INSTALLED_RUNTIME=0", "OPENSSL_MODE=system",
@@ -1210,11 +1390,14 @@ printf '%s\n' "$*" >> calls
                     (target == "stdlib" and " -X first.o second.a" or "") .. "\n"
                 for _ = 1, 2 do
                     write_file(root .. "/calls", "")
+                    write_file(root .. "/environment", "")
                     local argv = { table.unpack(arguments) }
                     argv[#argv + 1] = target
                     local built, log = run_argv(argv)
                     assert.truthy(built, log)
                     assert.equal(expected, read_file(root .. "/calls"))
+                    assert.equal("target=[<unset>]\n",
+                        read_file(root .. "/environment"), target)
                     assert.equal("retained object\n", read_file(root .. "/out/titan/math.o"))
                 end
                 for _, mode in ipairs({ "-n", "-q", "-t" }) do
@@ -1592,9 +1775,11 @@ done
 set -eu
 test "$(cat test/tests.o)" = "retained object"
 printf '%s\n' "$*" >> ../../calls
+printf 'target=[%s]\n' "${TITAN_TARGET-<unset>}" >> ../../environment
 ]])
             local arguments = { "env", "-u", "MAKEFLAGS", "-u", "MFLAGS",
                 "-u", "GNUMAKEFLAGS", "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES",
+                "TITAN_TARGET=bogus",
                 "make", "--no-print-directory", "-s", "-C", root,
                 "PREFIX=" .. root, "TITAN_JOBS=4", "MAKE=false",
                 "TEST_LUA=true", "TEST_TITANC=sh ../../record-compiler",
@@ -1613,12 +1798,15 @@ printf '%s\n' "$*" >> ../../calls
                 end
                 for _, filter in ipairs({ "", "TITAN_FILTER=runtime-only" }) do
                     write_file(root .. "/calls", "")
+                    write_file(root .. "/environment", "")
                     local argv = { table.unpack(arguments) }
                     argv[#argv + 1] = target
                     if filter ~= "" then argv[#argv + 1] = filter end
                     local built, log = run_argv(argv)
                     assert.truthy(built, log)
                     assert.equal(expected .. "\n", read_file(root .. "/calls"))
+                    assert.equal("target=[<unset>]\n",
+                        read_file(root .. "/environment"), target)
                 end
                 for _, mode in ipairs({ "-n", "-q", "-t" }) do
                     write_file(root .. "/calls", "")
@@ -1639,6 +1827,65 @@ printf '%s\n' "$*" >> ../../calls
         remove_tree(root)
         if not tested then error(failure, 0) end
     end)
+
+    it("clears an ambient target selection for the coverage and fixture recipes",
+        function()
+            if platform.windows then
+                pending("Unix Make command contracts")
+                return
+            end
+            local root = make_temp_dir()
+            local tested, failure = xpcall(function()
+                local ok, output = run_argv({ "mkdir", "-p", root .. "/scripts",
+                    root .. "/spec/support",
+                    root .. "/spec/fixtures/stdlib/native",
+                    root .. "/lib/titan/0.6", root .. "/build" })
+                assert.truthy(ok, output)
+                for _, path in ipairs({ "Makefile", "scripts/install_compiler.mk",
+                        "spec/support/stdlib_test_modules.mk" }) do
+                    write_file(root .. "/" .. path, read_file(path))
+                end
+                write_file(root .. "/lib/titan/0.6/titan.so",
+                    "installed provider\n")
+                write_file(root .. "/spec/fixtures/stdlib/native/" ..
+                    "uv_stdio_probe.c", "int titan_fixture;\n")
+                local recorded = "printf 'target=[%s]\\n' " ..
+                    "\"${TITAN_TARGET-<unset>}\" >> " .. root .. "/environment\n"
+                write_file(root .. "/record-compiler", "#!/bin/sh\nset -eu\n" ..
+                    recorded)
+                write_file(root .. "/record-native-compiler",
+                    "#!/bin/sh\nset -eu\n" .. recorded ..
+                    "mkdir -p " .. root .. "/native\n" ..
+                    ": > " .. root .. "/native/uv_stdio_probe.o\n" ..
+                    "printf '%s\\n' " .. root .. "/native/uv_stdio_probe.o\n")
+                local function target_argv(compiler, target)
+                    return { "env", "-u", "MAKEFLAGS", "-u", "MFLAGS",
+                        "-u", "GNUMAKEFLAGS", "-u", "MAKELEVEL",
+                        "-u", "MAKEOVERRIDES", "TITAN_TARGET=bogus",
+                        "make", "--no-print-directory", "-s", "-C", root,
+                        "PREFIX=" .. root, "TITAN_JOBS=4", "MAKE=false",
+                        "TEST_LUA=true", "TITAN_TEST_INSTALL_ROOT=" .. root,
+                        "STDLIB_NATIVE_PREREQS=", "TITAN_TEST_FIXTURE_OUTPUTS=",
+                        "TITAN_TEST_BUILD_DIR=" .. root .. "/build",
+                        "TITAN_COVERAGE_BUILD_DIR=" .. root .. "/coverage",
+                        "TEST_TITANC=sh " .. root .. "/" .. compiler, target }
+                end
+                for _, recipe in ipairs({
+                    { "record-compiler", "titan-native-coverage-build" },
+                    { "record-native-compiler",
+                        root .. "/build/uv_stdio_probe.o" },
+                }) do
+                    write_file(root .. "/environment", "")
+                    local built, log = run_argv(
+                        target_argv(recipe[1], recipe[2]))
+                    assert.truthy(built, log)
+                    assert.equal("target=[<unset>]\n",
+                        read_file(root .. "/environment"), recipe[2])
+                end
+            end, debug.traceback)
+            remove_tree(root)
+            if not tested then error(failure, 0) end
+        end)
 
     it("builds a minimal aggregate through the real compile-only and final-link recipes", function()
         if platform.windows then pending("Unix Make aggregate command contract"); return end
@@ -1959,6 +2206,8 @@ printf '%s/%s\n' "$directory" "$object"
             end
             table.sort(normalized)
             assert.same(discovered_uv_sources(), normalized)
+            assert.same({}, undeclared_folder_sources(listed, "titan/uv",
+                "titan/uv/"))
             assert.same({
                 "titan/uv/address-native.h",
                 "titan/uv/callback.h",
@@ -3252,6 +3501,25 @@ int main(void) {
                 'RANLIB = "$(RANLIB)"',
             }) do
                 assert.truthy(rockspec:find(contract, 1, true), contract)
+            end
+        end)
+
+    -- The Windows entry points cannot run on this host, so their environment
+    -- contract is audited at the statement that owns it.
+    it("clears an ambient target selection in the Windows compiler scripts",
+        function()
+            for _, script in ipairs({
+                "scripts/build_windows_stdlib.sh",
+                "spec/support/windows_stdlib_tests.sh",
+            }) do
+                local cleared = 0
+                for line in (read_file(script) .. "\n"):gmatch("(.-)\n") do
+                    if line:match("^%s*unset ") and
+                        line:find("TITAN_TARGET", 1, true) then
+                        cleared = cleared + 1
+                    end
+                end
+                assert.truthy(cleared > 0, script)
             end
         end)
 

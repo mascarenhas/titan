@@ -238,7 +238,7 @@ if [[ $mode == build ]]; then
         "TITAN_TEST_BUILD_DIR=$(cygpath -m "$work")" )
     export TITAN_ROOT="$winprefix" TITAN_RUNTIME_PREBUILT=1 TITAN_JOBS="${TITAN_JOBS:-4}"
     export TITAN_PROBE_CACHE_DISABLE=1 TITAN_PATH_0_6="$winprefix/lib/titan/0.6"
-    unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 LUA_INIT LUA_INIT_5_5 ROCKS_TREE
+    unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 LUA_INIT LUA_INIT_5_5 ROCKS_TREE TITAN_TARGET
     export PATH="$work/sdk/bin:$PATH"
     # Fresh child programs need fixed object paths, including the UV helper
     # also compiled into the aggregate. Certify each native source separately.
@@ -326,7 +326,7 @@ export TITAN_ROOT="$winprefix" TITAN_RUNTIME_PREBUILT=1 TITAN_JOBS=1
 # Preserve the controlled provider first and each child launcher's default
 # executable-relative provider directory for fresh-process fixture programs.
 export TITAN_PROBE_CACHE_DISABLE=1 TITAN_PATH_0_6="$winprefix/lib/titan/0.6;;"
-unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 LUA_INIT LUA_INIT_5_5 ROCKS_TREE
+unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 LUA_INIT LUA_INIT_5_5 ROCKS_TREE TITAN_TARGET
 export PATH="$work/sdk/bin:$PATH"
 export TITAN_TEST_ROOT=$(cygpath -w "$work/scratch")
 export TITAN_PROCESS_CHILD=$(cygpath -w "$work/sdk/bin/process child ação 東京.exe")

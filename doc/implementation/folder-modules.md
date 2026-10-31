@@ -256,8 +256,11 @@ module-private scope, one generated C/object pair, and one logical Lua entry.
 Contributor filenames never become modules or archive metadata keys.
 
 `titan.uv` is the largest. Its sources are enumerated explicitly by the
-Makefile's `UV_TITAN_SOURCES`, not by a wildcard, and every listed source is a
-prerequisite of the standard-library build. The canonical `uv.titan` shares one
+Makefile's `UV_TITAN_SOURCES`, not by a wildcard. The list is the source
+inventory the Busted audits read; the compiler's own incremental build
+certifies the module graph, so no listed source is a Make prerequisite of the
+standard-library build. Its variants, when a source gains them, are listed
+beside their default. The canonical `uv.titan` shares one
 logical module with contributors for callbacks, constants, data records,
 addresses, descriptors, streams, TCP/UDP, DNS, processes, threading,
 synchronization, dynamic libraries, startup, and utilities. Exported records

@@ -87,12 +87,14 @@ authored runtime objects (`titan-runtime/`) and the remaining native trees
 below when changing tools, flags, profile, or OpenSSL mode.
 
 Run full validation without ambient `ROCKS_TREE`, `TITAN_ROOT`, `TITANC`,
-`TITAN_PATH_0_6`, `TITAN_PATH`, `TITAN_EXTRA_CPPFLAGS`, or
+`TITAN_PATH_0_6`, `TITAN_PATH`, `TITAN_EXTRA_CPPFLAGS`, `TITAN_TARGET`, or
 `TITAN_NO_LINE_DIRECTIVES`. These alter SDK/provider selection, the run-time
-SDK fallback, fixture preprocessing, or traceback attribution. Make unsets
+SDK fallback, fixture preprocessing, target source selection, or traceback
+attribution. Make unsets
 `LUA_PATH`, `LUA_CPATH`, and their Lua 5.5 variants for its test and compiler
-invocations; clear them for manual prefix-tool invocations too, especially
-after a shell used `luarocks init`. Native test builds use `TITAN_EXTRA_*FLAGS`
+invocations; it also unsets `TITAN_TARGET` for those invocations. Clear them
+for manual prefix-tool invocations too, especially after a shell used
+`luarocks init`. Native test builds use `TITAN_EXTRA_*FLAGS`
 when set and otherwise `TITAN_TEST_EXTRA_*FLAGS` (`Makefile`
 `TITAN_TEST_CFLAGS`); other explicit build-policy inputs are caller-owned.
 
