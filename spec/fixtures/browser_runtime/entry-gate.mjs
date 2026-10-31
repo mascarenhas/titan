@@ -8,14 +8,33 @@ export async function run(context) {
   const finalImage = await context.image(finalPath);
   const emit = record => context.stdout(encoder.encode(JSON.stringify({engine: context.engine, ...record}) + "\n"));
 
-  async function execute(image, args, selected, inspect = false, timer = false) {
+  async function execute(image, args, selected, inspect = false, timer = null) {
     let module;
     let bridge;
     let output = "";
+    const tickTimes = [];
+    let waitStart;
+    let frames = 0;
+    let raf;
+    let interval;
+    function startTimers() {
+      interval = setInterval(() => tickTimes.push(performance.now()), 10);
+      if (context.engine === "chromium") {
+        const frame = () => { frames++; raf = requestAnimationFrame(frame); };
+        raf = requestAnimationFrame(frame);
+      }
+    }
     const factory = async options => {
       module = await image.factory({...options, titanBrowserAttach(state) {
         bridge = state;
         options.titanBrowserAttach(state);
+      }, titanBrowserSafePoint(pending) {
+        if (timer === "responsive" && pending && waitStart === undefined) {
+          context.assert(bridge.safe(), "responsiveness window began on a live compiled stack");
+          waitStart = performance.now();
+          startTimers();
+        }
+        return options.titanBrowserSafePoint(pending);
       }});
       return module;
     };
@@ -26,17 +45,7 @@ export async function run(context) {
     });
     await instance.initialize();
     const before = performance.now();
-    const tickTimes = [];
-    let frames = 0;
-    let raf;
-    let interval;
-    if (timer) {
-      interval = setInterval(() => tickTimes.push(performance.now()), 10);
-      if (context.engine === "chromium") {
-        const frame = () => { frames++; raf = requestAnimationFrame(frame); };
-        raf = requestAnimationFrame(frame);
-      }
-    }
+    if (timer === "busy") startTimers();
     let settled = false;
     let running;
     try {
@@ -75,7 +84,12 @@ export async function run(context) {
         }, 5));
       }
       const result = await running;
-      const elapsed = performance.now() - before;
+      const finished = performance.now();
+      const hostElapsed = finished - before;
+      if (timer === "responsive") context.assert(waitStart !== undefined,
+        "responsiveness case never reached a fully-unwound outer wait");
+      const waitElapsed = waitStart === undefined ? null : finished - waitStart;
+      const elapsed = timer === "responsive" ? waitElapsed : hostElapsed;
       context.assert(result.kind === "returned" && result.status === 0, "native gate did not complete successfully");
       if (selected !== null) {
         context.assert(output.includes(`[==========] ${selected} test${selected === 1 ? "" : "s"} ran.`),
@@ -91,7 +105,8 @@ export async function run(context) {
         context.assert((observed >>> 16) === 2578, "gate did not perform exactly 2578 real waits");
         emit({item: 9, closeMask: (observed >>> 8) & 63, duplicateOrContinuation: 0, waits: observed >>> 16});
       }
-      return {elapsed, tickTimes, frames, output};
+      return {elapsed, hostElapsed, waitElapsed, windowStart: waitStart, windowEnd: finished,
+        tickTimes, frames, output};
     } finally {
       clearInterval(interval);
       if (raf !== undefined) cancelAnimationFrame(raf);
@@ -113,11 +128,13 @@ export async function run(context) {
   await execute(gateImage, ["--filter=^entry_gate%.test_0[1-9]_"], 9, true);
 
   // Isolate responsiveness from busy work and from initialization time.
-  const responsive = await execute(gateImage, ["--filter=^entry_gate%.test_07_"], 1, false, true);
+  const responsive = await execute(gateImage, ["--filter=^entry_gate%.test_07_"], 1, false, "responsive");
   const ideal = responsive.elapsed / 10;
-  const gaps = responsive.tickTimes.slice(1).map((time, index) => time - responsive.tickTimes[index]);
+  const boundaries = [responsive.windowStart, ...responsive.tickTimes, responsive.windowEnd];
+  const gaps = boundaries.slice(1).map((time, index) => time - boundaries[index]);
   const maxGap = Math.max(0, ...gaps);
-  emit({item: 7, elapsedMs: responsive.elapsed, ticks: responsive.tickTimes.length, idealTicks: ideal,
+  emit({item: 7, elapsedMs: responsive.elapsed, fullHostWindowMs: responsive.hostElapsed,
+    waitWindowMs: responsive.waitElapsed, ticks: responsive.tickTimes.length, idealTicks: ideal,
     ratio: responsive.tickTimes.length / ideal, maxGapMs: maxGap, animationFrames: responsive.frames,
     thresholds: {minimumRatio: 0.75, maximumRatio: 1.25, maximumGapMs: 100}});
   context.assert(responsive.tickTimes.length >= ideal * 0.75 && responsive.tickTimes.length <= ideal * 1.25,
@@ -125,7 +142,7 @@ export async function run(context) {
   context.assert(maxGap <= 100, "outer suspension left a host timer gap above 100ms");
   if (context.engine === "chromium") context.assert(responsive.frames >= 2, "requestAnimationFrame did not advance");
 
-  const busy = await execute(gateImage, ["--filter=^entry_gate%.test_negative_busy_"], 1, false, true);
+  const busy = await execute(gateImage, ["--filter=^entry_gate%.test_negative_busy_"], 1, false, "busy");
   emit({negative: "busy_wait", elapsedMs: busy.elapsed, ticks: busy.tickTimes.length, animationFrames: busy.frames});
   context.assert(busy.elapsed >= 140 && busy.tickTimes.length === 0, "busy-wait control did not block timers");
   await execute(gateImage, ["--filter=^entry_gate%.test_negative_fiber_"], 1);

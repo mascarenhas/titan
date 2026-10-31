@@ -1586,6 +1586,9 @@ return {
                     extra_sections_before_linking = { wasm_custom("reloc.DATA", "\0\0") },
                 }), '"fixture with spaces": out-of-order Wasm section 0' },
                 { wasm_object(PAYLOAD, {
+                    extra_sections_before_data = { wasm_sec(14, "\0") },
+                }), '"fixture with spaces": unsupported Wasm section 14' },
+                { wasm_object(PAYLOAD, {
                     extra_sections_before_data = { wasm_sec(3, "\0"), wasm_sec(3, "\0") },
                 }), '"fixture with spaces": duplicate Wasm section 3' },
                 { wasm_object(PAYLOAD, {
@@ -1831,6 +1834,83 @@ return {
                 assert.is_nil(bad_obj, "sleb error case #" .. tostring(index))
                 assert.equal(scase[3], bad_err, "sleb error case #" .. tostring(index))
             end
+
+            -- OP328-M1: many DATA segments and DATA relocations must scan in
+            -- O((relocs + segments) log segments) time rather than quadratically.
+            local count = 16000
+            local bulk_segments = {}
+            local bulk_relocs = {}
+            local running_offset = #uleb(count + 1)
+            for i = 1, count do
+                local body_offset = running_offset + 5
+                bulk_segments[i] = {
+                    name = ".data.g",
+                    payload = "1234",
+                    mode = 0,
+                    offset = 0,
+                    align_exp = 2,
+                    flags = 0,
+                }
+                bulk_relocs[i] = {
+                    type = 5,
+                    offset = body_offset,
+                    symbol = 0,
+                    addend = 0,
+                }
+                running_offset = body_offset + 4
+            end
+            local meta_body_offset = running_offset + 4 + #uleb(#PAYLOAD)
+            bulk_segments[count + 1] = {
+                name = ".titan.meta",
+                payload = PAYLOAD,
+                mode = 0,
+                offset = 0,
+                align_exp = 0,
+                flags = 0,
+            }
+            local bulk_valid = wasm_object(nil, {
+                segments = bulk_segments,
+                relocations = {
+                    {
+                        name = "reloc.DATA",
+                        target = 1,
+                        entries = bulk_relocs,
+                    },
+                },
+            })
+            local start_clock = os.clock()
+            local bulk_obj = assert(scan(bulk_valid))
+            local elapsed_valid = os.clock() - start_clock
+            assert.equal("pkg.mod", bulk_obj.metadata.module)
+            assert.equal(count + 1, #bulk_obj.sections)
+            assert.is_true(elapsed_valid < 2.0,
+                "expected sub-linear scan per relocation, took " .. tostring(elapsed_valid) .. "s")
+
+            bulk_relocs[count + 1] = {
+                type = 5,
+                offset = meta_body_offset,
+                symbol = 0,
+                addend = 0,
+            }
+            local bulk_relocated = wasm_object(nil, {
+                segments = bulk_segments,
+                relocations = {
+                    {
+                        name = "reloc.DATA",
+                        target = 1,
+                        entries = bulk_relocs,
+                    },
+                },
+            })
+            start_clock = os.clock()
+            local rejected_bulk, rejected_bulk_err = scan(bulk_relocated)
+            local elapsed_rejected = os.clock() - start_clock
+            assert.is_nil(rejected_bulk)
+            assert.equal(
+                '"fixture with spaces": Wasm payload segment ".titan.meta" is targeted by a DATA relocation',
+                rejected_bulk_err)
+            assert.is_true(elapsed_rejected < 2.0,
+                "expected sub-linear rejection scan, took " .. tostring(elapsed_rejected) .. "s")
         end)
 
         it("reports Wasm fingerprint mismatches field by field and rejects mixed archives", function()
