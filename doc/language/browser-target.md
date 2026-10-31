@@ -154,7 +154,8 @@ root:
 
 The directory is a sibling of the native `lib/titan/0.6/`, never inside it,
 and native builds never search it. `make browser-sdk` works into an empty
-directory and is the only Titan Make target that needs Emscripten. In a
+directory and, apart from `make lua-browser`, is the only Titan Make target
+that needs Emscripten. In a
 [separate rocks tree](installation.md#a-separate-rocks-tree), pass both roots,
 `make browser-sdk PREFIX="$PREFIX" ROCKS_TREE="$ROCKS_TREE"`; it first copies
 the verified browser Lua from `PREFIX` into `ROCKS_TREE`.

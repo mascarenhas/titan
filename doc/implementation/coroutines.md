@@ -344,8 +344,10 @@ described above.
   room for the error handler, whose libbacktrace scratch state exceeds
   minicoro's default 56 KiB stack, while physical memory stays lazy on
   platforms with virtual memory. The browser's allocator commits each stack
-  eagerly and never returns it, and the browser has no libbacktrace, so the
-  smaller size bounds memory per coroutine instead. minicoro's own default
+  eagerly and reclaims it (`munmap`) for reuse when the coroutine is destroyed,
+  while the grown WebAssembly linear memory never shrinks back to the host, and
+  the browser has no libbacktrace, so the smaller size bounds memory per
+  coroutine instead. minicoro's own default
   and minimum stack sizes are not redefined.
 * The Binaryen `MCO_USE_ASYNCIFY` backend cannot express Titan's tagged
   semantics and is removed from the vendored copy. Local Linux tests cover the

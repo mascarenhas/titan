@@ -250,8 +250,9 @@ check, and in `make browser-sdk` itself; object compilation never runs it.
 
 ### `make browser-sdk`
 
-`make browser-sdk PREFIX=<prefix> [ROCKS_TREE=<tree>]` is the only Titan Make
-step that needs emsdk. It requires the installed compiler and common headers
+`make browser-sdk PREFIX=<prefix> [ROCKS_TREE=<tree>]` is, apart from `make
+lua-browser`, the only Titan Make step that needs emsdk. It requires the
+installed compiler and common headers
 and the browser Lua; it never invokes `lua-browser`, the native standard
 library, or the native SDK build, and it clears ambient `LUA_PATH`,
 `LUA_CPATH`, and `TITAN_TARGET`. It runs the installed `titanc` from
@@ -1138,7 +1139,7 @@ and `dependency_output`) links one image:
    `dlerror`, or `backtrace` (with or without a leading underscore): `browser
    image imports forbidden symbol "<name>"`;
 6. run `before_commit` (which invalidates the link record);
-7. move an existing Wasm (`Wasm output '<path>' is not a regular file`) and,
+7. move an existing Wasm (`browser Wasm output '<path>' is not a regular file`) and,
    when `after_publish` is set, an existing `.mjs` (`browser module output
    '<path>' is not a regular file`) aside, rename the staged Wasm into place,
    rename the staged `.mjs` over the destination, and run `after_publish`
@@ -1273,7 +1274,7 @@ identity:
 | Budget | Setting | Emscripten 6.0.13 default | Notes |
 | --- | --- | --- | --- |
 | Main C stack | `-sSTACK_SIZE=1048576` | 64 KiB | The shadow stack for Lua C recursion and compiled Titan frames; native frames also use the engine's own stack. |
-| Coroutine C stack | `-DTITAN_COROUTINE_STACK_SIZE=262144` (target define) | `titan.h` default 2 MiB | minicoro's virtual-memory allocator commits each stack eagerly when a coroutine is created and never returns it. |
+| Coroutine C stack | `-DTITAN_COROUTINE_STACK_SIZE=262144` (target define) | `titan.h` default 2 MiB | minicoro's virtual-memory allocator commits each stack eagerly when a coroutine is created and reclaims it (`munmap`) for reuse when the coroutine is destroyed; the grown WebAssembly linear memory does not shrink. |
 | Outer Asyncify data | `-sASYNCIFY_STACK_SIZE=65536` | 4096 B | Allocated with `malloc` for each outer suspension. |
 | Fiber Asyncify data | `-DMCO_ASYNCFY_STACK_SIZE=65536` (target define) | 16384 B | Added to every coroutine's allocation and to one static main-context buffer. |
 | Linear memory | `-sINITIAL_MEMORY=16777216`, growth on, `-sMAXIMUM_MEMORY=2147483648` | growth off; 2 GiB maximum | The heap never shrinks after coroutines are destroyed, although freed blocks are reused. |

@@ -353,7 +353,7 @@ with `+` and `RECURSIVE_WRAPPER_GUARD`, and delegates native parallelism to
 | `install` (no `INST_PREFIX`) | `install-compiler`, `publish-titan-sdk`, `publish-stdlib`. |
 | `install` (LuaRocks pass) | `install-compiler`, `install-rock-tools`, `stage-rock-payload`. |
 | `binary-rock` | `luarocks pack titan`, renaming the `.all.rock` result to the suffix from `luarocks config arch`. |
-| `browser-sdk` | After the compiler is installed, build the browser runtime and LPegLabel archives through the installed `titanc --target browser -c --incremental --print-c-objects`, stage the loader and runner assets, publish the browser standard provider `titan.a` (`titan.test`, `titan.coroutine`, `titan.gc`) through ordinary library mode, and write `sdk-digests` last, all into `$(TITAN_INSTALL_TREE)/lib/titan-browser/<ver>/` ([The browser SDK](browser-target.md#the-browser-sdk)). Unix only; the only Titan target that needs emsdk. |
+| `browser-sdk` | After the compiler is installed, build the browser runtime and LPegLabel archives through the installed `titanc --target browser -c --incremental --print-c-objects`, stage the loader and runner assets, publish the browser standard provider `titan.a` (`titan.test`, `titan.coroutine`, `titan.gc`) through ordinary library mode, and write `sdk-digests` last, all into `$(TITAN_INSTALL_TREE)/lib/titan-browser/<ver>/` ([The browser SDK](browser-target.md#the-browser-sdk)). Unix only; apart from `make lua-browser`, the only Titan target that needs emsdk. |
 
 Standard-library installation copies the built provider pair, licenses, and
 optional symbols. SDK installation also publishes Titan's own `LICENSE` at
