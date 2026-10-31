@@ -1,6 +1,6 @@
-local io = import "io"
+foreign import "stdio.h"
 
 function main(args: {string}): integer
-    io.print("default")
+    ffi.puts("default")
     return 0
 end
