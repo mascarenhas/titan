@@ -20,7 +20,7 @@ local function run(argv)
 end
 
 local function cli(info, ...)
-    local argv = { "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=", "TITAN_PATH_0_6=",
+    local argv = { "env", "TITAN_ROOT=" .. (info.sdk_prefix or info.prefix), "TITAN_TARGET=", "TITAN_PATH_0_6=",
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
         info.prefix .. "/bin/lua", "-E", "-e", string.format("package.path=%q..package.path;",
             repository .. "/?.lua;" .. repository .. "/?/init.lua;"), repository .. "/titanc",
@@ -108,7 +108,8 @@ describe("browser image profile and SDK readiness", function()
 
     it("rejects trailing attempts to override profile-owned settings", function()
         for _, flags in ipairs({ { "-sASYNCIFY=0" }, { "-s", "ASYNCIFY_IGNORE_INDIRECT=1" },
-            { "-DTITAN_COROUTINE_STACK_SIZE=1" }, { "--js-library=x.js" }, { "--no-entry" } }) do
+            { "-DTITAN_COROUTINE_STACK_SIZE=1" }, { "-UTITAN_TARGET_BROWSER" }, { "-sNO_ASYNCIFY=1" },
+            { "--js-library=x.js" }, { "--no-entry" } }) do
             assert.is_nil(browserlink.validate_extras(flags))
         end
         assert.is_true(browserlink.validate_extras({ "-lm", "-sWASM_BIGINT=1" }))
@@ -123,6 +124,31 @@ describe("real browser test image", function()
     after_each(function()
         if workspace then files.remove(workspace); workspace = nil end
     end)
+    it("permits objects without the SDK and diagnoses image readiness and suffixes precisely", function()
+        local info, why = toolchain.require(); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        files.write(workspace .. "/src/image_main.titan", read(repository .. "/spec/fixtures/browser_images/program.titan"))
+        local prefix = workspace .. "/prefix"
+        files.mkdir(prefix); files.mkdir(prefix .. "/lib")
+        assert(lfs.link(info.prefix .. "/lib/browser", prefix .. "/lib/browser", true))
+        assert(lfs.link(info.prefix .. "/include", prefix .. "/include", true))
+        local isolated = { prefix = info.prefix, sdk_prefix = prefix }
+        local result = cli(isolated, "-c", "--incremental", "image_main")
+        assert.is_true(result.ok, result.output or result.diagnostic)
+        assert.equal("file", lfs.attributes(workspace .. "/out/image_main.o", "mode"))
+        result = cli(isolated, "--exe", workspace .. "/out/app.js", "image_main")
+        assert.is_false(result.ok)
+        assert.truthy(result.output:find("must end in .mjs", 1, true), result.output)
+        result = cli(isolated, "image_main")
+        assert.is_false(result.ok)
+        local runtime = browserlink.sdk_assets(fixtures.paths(prefix)).runtime
+        assert.truthy(result.output:find("browser SDK is incomplete: missing " .. string.format("%q", runtime) ..
+            "; run 'make browser-sdk PREFIX=" .. prefix .. "'", 1, true), result.output)
+        assert.is_nil(lfs.attributes(workspace .. "/out/image_main.mjs"))
+        assert.is_nil(lfs.attributes(workspace .. "/out/image_main.wasm"))
+    end)
+
     it("links the normal CLI test runner and executes one selected case through the installed loader", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
