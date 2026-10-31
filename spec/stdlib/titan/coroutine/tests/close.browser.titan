@@ -1,0 +1,37 @@
+foreign import "browser_close.h"
+
+local browser_close_owners: {coroutine.Coroutine} = {}
+
+-- Called in an independently initialized state by the test-owned C probe.
+-- The helper snapshots actual production preload descriptors from its parent;
+-- this is the ordinary module provider path, not hand-authored preloading.
+function browser_retained_close()
+  local inner = coroutine.create(function(_: value): value
+    defer ffi.browser_close_record(1)
+    do
+      coroutine.yield("retained", "close-outer")
+      ffi.browser_close_record(2)
+    catch
+      ffi.browser_close_record(2)
+    end
+    return nil
+  end, "close-inner")
+  local outer = coroutine.create(function(_: value): value
+    defer ffi.browser_close_record(0)
+    do
+      inner:resume(nil)
+      ffi.browser_close_record(2)
+    catch
+      ffi.browser_close_record(2)
+    end
+    return nil
+  end, "close-outer")
+  test.assert(outer:resume(nil) == "retained")
+  browser_close_owners = {outer, inner}
+end
+
+function test_unwind_browser_lua_close(context: test.Context)
+  test.assert(ffi.browser_close_probe(L) == 3,
+              "lua_close omitted/repeated a defer or entered an abandoned catch/continuation")
+  context:log("FIXTURE category=retained_close nested=2 defers=2 exact_once=true abandoned=0")
+end
