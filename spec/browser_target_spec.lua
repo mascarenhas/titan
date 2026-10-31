@@ -271,8 +271,14 @@ describe("browser target descriptor", function()
                 local function build(directory)
                     local context, inputs = fake_context()
                     local fixture_stat = context.io.stat
+                    local fixture_realpath = context.io.realpath
                     function context.io:cwd() return workspace end
-                    function context.io:realpath(filename) return real:realpath(filename) end
+                    function context.io:realpath(filename)
+                        if filename:sub(1, #workspace + 1) == workspace .. "/" then
+                            return real:realpath(filename)
+                        end
+                        return fixture_realpath(self, filename)
+                    end
                     function context.io:stat(filename)
                         if filename:sub(1, #workspace + 1) == workspace .. "/" then
                             return real:stat(filename)
@@ -310,9 +316,13 @@ describe("browser target descriptor", function()
                 local context, inputs = fake_context()
                 local raw = FAKE_ROOT .. "/unresolved/../include"
                 local looked_up = {}
+                local fixture_realpath = context.io.realpath
                 function context.io:realpath(filename)
-                    looked_up[#looked_up + 1] = filename
-                    return nil, "injected realpath failure"
+                    if filename == raw then
+                        looked_up[#looked_up + 1] = filename
+                        return nil, "injected realpath failure"
+                    end
+                    return fixture_realpath(self, filename)
                 end
                 local fixture_stat = context.io.stat
                 function context.io:stat(filename)
