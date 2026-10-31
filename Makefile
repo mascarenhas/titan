@@ -318,7 +318,7 @@ LPEGLABEL_BUILD_CFLAGS ?= $(TITAN_PROFILE_HOST_FLAGS)
 # (`name.titan`) it replaces; there are no wildcards. Only the selected
 # variant of a family compiles, so the Busted source-policy audits read this
 # inventory family by family and fail on a folder file no entry declares.
-# Implementation notes: doc/implementation/repository-workflow.md
+# Implementation notes: doc/implementation/target-source-selection.md#make-inventories-and-audits
 UV_TITAN_SOURCES := \
 	titan/uv/uv.titan \
 	titan/uv/address.titan \
