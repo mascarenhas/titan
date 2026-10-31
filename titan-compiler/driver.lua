@@ -2182,6 +2182,7 @@ local function resolver_context_from_options(options, level)
     elseif type(options) ~= "table" then
         error("resolver options must be a table", level)
     elseif options._resolver_context == true then
+        driver.assert_target_context(options)
         compiler_io.validate(options.io, level)
         return options, false
     elseif options.context ~= nil then
@@ -2189,6 +2190,7 @@ local function resolver_context_from_options(options, level)
         if type(context) ~= "table" or context.io == nil then
             error("options.context must be a resolver context", level)
         end
+        driver.assert_target_context(context)
         compiler_io.validate(context.io, level)
         return context, false
     end
@@ -2297,35 +2299,16 @@ function driver.serialize_source_interface(entry)
     return sourceinterface.serialize(normalized)
 end
 
--- Recompute the identities of an already-resolved module header closure. This
--- never searches for a different header wholesale: `search` entries are the
--- exact ordered candidates cdriver consulted, including misses, so a new
--- earlier shadow changes identity without walking an include tree. `origin`
--- entries recheck the realpath that names a C declaration's nominal scope.
--- The fourth result classifies the first changed input as
--- `c-input <path>: content|provenance|missing|unreadable|candidate|changed-during-read`.
--- Implementation notes: doc/implementation/driver.md#driverrestat_c_header_dependenciesdependencies-options
-function driver.restat_c_header_dependencies(value, options)
-    local context, owns_context =
-        resolver_context_from_options(options, 2)
+-- File-only verification also serves publication's fresh digest/header memo;
+-- that memo is not a semantic resolver and must not activate a target.
+function perf.restat_c_header_dependencies(value, validation_options)
     local dependencies, err = copy_c_header_dependencies(value)
-    if not dependencies then
-        if owns_context then driver.close_resolver_context(context) end
-        return nil, err
-    end
+    if not dependencies then return nil, err end
     local result, changed, classified = {}, false, nil
-    local validation_options = {
-        io = context.io,
-        cache_adapter = context.cache_adapter,
-        header_observations = context.header_observations,
-        header_validation = options and options.header_validation
-            or context.header_validation or {},
-    }
     for index, dependency in ipairs(dependencies) do
         local current, identity_error, input_changed, reason =
             cdriver.revalidate_header_input(dependency, validation_options)
         if not current then
-            if owns_context then driver.close_resolver_context(context) end
             return nil, "cannot fingerprint C header input '" ..
                 dependency.path .. "': " .. tostring(identity_error),
                 input_changed == true,
@@ -2339,11 +2322,33 @@ function driver.restat_c_header_dependencies(value, options)
         end
         changed = changed or input_changed
     end
+    return result, nil, changed, classified
+end
+
+-- Recompute the identities of an already-resolved module header closure. This
+-- never searches for a different header wholesale: `search` entries are the
+-- exact ordered candidates cdriver consulted, including misses, so a new
+-- earlier shadow changes identity without walking an include tree. `origin`
+-- entries recheck the realpath that names a C declaration's nominal scope.
+-- The fourth result classifies the first changed input as
+-- `c-input <path>: content|provenance|missing|unreadable|candidate|changed-during-read`.
+-- Implementation notes: doc/implementation/driver.md#driverrestat_c_header_dependenciesdependencies-options
+function driver.restat_c_header_dependencies(value, options)
+    local context, owns_context =
+        resolver_context_from_options(options, 2)
+    local result, err, changed, classified =
+        perf.restat_c_header_dependencies(value, {
+            io = context.io,
+            cache_adapter = context.cache_adapter,
+            header_observations = context.header_observations,
+            header_validation = options and options.header_validation
+                or context.header_validation or {},
+        })
     if owns_context then
         local closed, close_error = driver.close_resolver_context(context)
-        if not closed then return nil, close_error end
+        if result and not closed then return nil, close_error end
     end
-    return result, nil, changed, classified
+    return result, err, changed, classified
 end
 
 function driver.close_loader(loader)
@@ -7020,6 +7025,7 @@ end
 -- unlinked first; then the higher parts and coverage notes its record names.
 -- An interruption at any later point leaves no acceptable object.
 function driver.invalidate_source_object(context, modname, source)
+    driver.assert_target_context(context)
     local stem = driver.module_output_stem(
         source.native_output or source.main, modname)
     local primary = stem .. ".o"
@@ -7253,7 +7259,7 @@ local function revalidate_uncertified_module(context, modname, source, record, s
             record.ffi_header_descriptor and
                 record.ffi_header_descriptor.search_inputs or {} }) do
         local headers, header_error, changed, reason =
-            driver.restat_c_header_dependencies(inputs, { context = fresh })
+            perf.restat_c_header_dependencies(inputs, fresh)
         if not headers or changed then return nil, reason or header_error end
     end
     return true
@@ -8755,6 +8761,8 @@ driver.GENERATED_C_MARKER = "/* Generated by Titan: module C translation unit. *
 local function prepare_compile(
         modname, ast, sourcef, static_deps, verbose, options, source_entry,
         header_plan)
+    local context = options and options.context
+    if context then driver.assert_target_context(context) end
     if not staticmetadata.valid_module_name(modname) then
         return nil, "invalid logical Titan module name " ..
             string.format("%q", modname)
@@ -8768,9 +8776,7 @@ local function prepare_compile(
         or split_threshold % 1 ~= 0 then
         return nil, "split_threshold requires a nonnegative integer"
     end
-    local context = options and options.context
     if context and context.target == "browser" then
-        driver.assert_target_context(context)
         local supported, flag_error = driver._browser_target.validate_flags(
             options.extra_compile_flags, "--cflag")
         if not supported then return nil, flag_error end
@@ -9067,6 +9073,7 @@ local function prepare_compile(
         inputs[#inputs + 1] = input
     end
     local function materialize()
+        if context then driver.assert_target_context(context) end
         local output_ok, output_err = ensure_output_parent(filename)
         if not output_ok then return nil, output_err end
         if header_plan and owns_header_plan then
@@ -9531,6 +9538,14 @@ end -- native batch helpers
 -- Implementation notes: doc/implementation/driver.md#parallel-generated-c-compilation
 driver.run_prepared_compiles = run_prepared_compiles
 
+function perf.assert_compile_request_contexts(requests)
+    for _, request in ipairs(requests) do
+        assert(type(request) == "table", "each compilation request must be a table")
+        local context = request.options and request.options.context
+        if context then driver.assert_target_context(context) end
+    end
+end
+
 local function validate_compile_requests(requests)
     local module_indices = {}
     local outputs = {}
@@ -9583,6 +9598,7 @@ end
 -- extend this plan with provider/entrypoint outputs before materialization.
 function driver.plan_compile_requests(
         requests, verbose, native_inputs, symbol_owners, header_plans)
+    perf.assert_compile_request_contexts(requests)
     validate_compile_requests(requests)
     local plans, outputs, inputs, symbols, errors = {}, {}, {}, {}, {}
     local input_seen, headers_by_name = {}, {}
@@ -9659,6 +9675,7 @@ function driver.compile_modules(requests, parallelism, verbose, plans)
     assert(type(requests) == "table", "requests must be a table")
     assert(type(parallelism) == "number" and parallelism >= 1 and
         parallelism % 1 == 0, "parallelism must be a positive integer")
+    perf.assert_compile_request_contexts(requests)
     local results, plan_err = {}
     if not plans then plans, plan_err = driver.plan_compile_requests(requests, verbose) end
     if not plans then
@@ -10421,6 +10438,7 @@ end
 -- library policy; `protection.compiler_tools` (nil when uncertified) and
 -- `protection.output_tools` are the compiler and output-tool identities.
 function driver.cleanup_stale_staging(context, outputs, locks, protection)
+    driver.assert_target_context(context)
     if not platform.windows then return true end
     if not locks or not locks.entries or #locks.entries == 0 then
         return nil, "stale staging cleanup requires held output locks"

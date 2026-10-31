@@ -390,7 +390,7 @@ end
 
 describe("Windows compiler path integration", function()
     local platform = require "titan-compiler.platform"
-    local originals
+    local originals, resolver, resolver_io
     before_each(function()
         originals = {
             windows = platform.windows,
@@ -399,6 +399,8 @@ describe("Windows compiler path integration", function()
             lfs_attributes = lfs.attributes,
             lfs_symlinkattributes = lfs.symlinkattributes,
         }
+        resolver = driver.new_resolver_context()
+        resolver_io = resolver.io
         platform.windows = true
         platform.native = function(name)
             error("unexpected native call in injected path test: " .. name)
@@ -410,7 +412,14 @@ describe("Windows compiler path integration", function()
         compiler_io.new_sync = originals.new_sync
         lfs.attributes = originals.lfs_attributes
         lfs.symlinkattributes = originals.lfs_symlinkattributes
+        resolver.io = resolver_io
+        assert.is_true(driver.close_resolver_context(resolver))
     end)
+
+    local function staging_context(strategy)
+        resolver.io = strategy
+        return resolver
+    end
 
     local function header_manifest(paths, kind)
         kind = kind or "file"
@@ -681,7 +690,7 @@ describe("Windows compiler path integration", function()
             inputs = { directory .. "/app.dll.stage.tmp.link/source.titan" },
             order = {},
         }
-        assert(driver.cleanup_stale_staging({ io = strategy },
+        assert(driver.cleanup_stale_staging(staging_context(strategy),
             { { path = directory .. "/app.dll" } }, locks,
             { plan = plan, native_objects = {}, link_inputs = {},
                 native_policy = { cacheable = true, backend = "compiler", files = {} },
@@ -696,9 +705,9 @@ describe("Windows compiler path integration", function()
     end)
 
     it("rejects stale cleanup without the matching output lock before touching disk", function()
-        local context = { io = setmetatable({}, {
+        local context = staging_context(setmetatable({}, {
             __index = function() error("cleanup touched an unlocked filesystem") end,
-        }) }
+        }))
         local outputs = { { path = "C:/build/app.dll" } }
         local ok, err = driver.cleanup_stale_staging(context, outputs)
         assert.is_nil(ok)
@@ -884,7 +893,7 @@ describe("Windows compiler path integration", function()
                 local model = staging_model(nodes)
                 driver.imported = case.imported or {}
                 local ok, err = driver.cleanup_stale_staging(
-                    { io = model.io }, outputs, locks, case.protection)
+                    staging_context(model.io), outputs, locks, case.protection)
                 assert.is_nil(ok)
                 assert.matches("refusing to retire stale Windows staging: staging path '" ..
                     authored, err, 1, true)
@@ -905,7 +914,7 @@ describe("Windows compiler path integration", function()
                 if filename == authored then return nil, "list: access denied" end
                 return list(strategy, filename)
             end
-            local ok, err = driver.cleanup_stale_staging({ io = model.io }, outputs, locks,
+            local ok, err = driver.cleanup_stale_staging(staging_context(model.io), outputs, locks,
                 staging_protection({}))
             assert.is_nil(ok)
             assert.matches("cannot list '" .. authored .. "': list: access denied", err, 1, true)
@@ -917,7 +926,7 @@ describe("Windows compiler path integration", function()
                 if filename == "C:/src/denied.h" then return nil, "lstat: access denied" end
                 return lstat(strategy, filename)
             end
-            ok, err = driver.cleanup_stale_staging({ io = model.io }, outputs, locks,
+            ok, err = driver.cleanup_stale_staging(staging_context(model.io), outputs, locks,
                 staging_protection({ inputs = { "C:/src/denied.h" } }))
             assert.is_nil(ok)
             assert.matches("refusing to retire stale Windows staging: lstat: access denied",
@@ -940,7 +949,7 @@ describe("Windows compiler path integration", function()
                 app = { source_files = { "C:/src/app.titan" },
                     c_header_dependencies = { { kind = "file", path = "C:/src/target.h" } } },
             }
-            assert(driver.cleanup_stale_staging({ io = model.io }, outputs, locks,
+            assert(driver.cleanup_stale_staging(staging_context(model.io), outputs, locks,
                 staging_protection({
                     order = { "app" },
                     reservations = { { path = bin .. "/app.exe" } },
@@ -981,7 +990,7 @@ describe("Windows compiler path integration", function()
                 local nodes = layout("helper.o")
                 local model = staging_model(nodes)
                 local ok, err = driver.cleanup_stale_staging(
-                    { io = model.io }, outputs, locks, staging_protection(case.fields))
+                    staging_context(model.io), outputs, locks, staging_protection(case.fields))
                 assert.is_nil(ok)
                 assert.matches("refusing to retire stale Windows staging '" .. abandoned ..
                     "': the native link and tool inventory is incomplete (" .. case.reason .. ")",
@@ -999,7 +1008,7 @@ describe("Windows compiler path integration", function()
                 }
                 local model = staging_model(nodes)
                 assert(driver.cleanup_stale_staging(
-                    { io = model.io }, outputs, locks, staging_protection(case.fields)))
+                    staging_context(model.io), outputs, locks, staging_protection(case.fields)))
                 assert.same({}, model.removed)
                 assert.equal("directory", nodes[bin .. "/other.exe.stage.tmp.kept"].kind)
             end)
@@ -1030,7 +1039,7 @@ describe("Windows compiler path integration", function()
         it("retires a stage reached through another spelling of the held lock file", function()
             local model = staging_model(layout(held))
             assert(driver.cleanup_stale_staging(
-                { io = model.io }, outputs, locks, staging_protection({})))
+                staging_context(model.io), outputs, locks, staging_protection({})))
             assert.same({ stage .. "/app.exe", stage }, model.removed)
         end)
 
@@ -1051,7 +1060,7 @@ describe("Windows compiler path integration", function()
                 end
                 local model = staging_model(nodes)
                 local ok, err = driver.cleanup_stale_staging(
-                    { io = model.io }, outputs, locks, staging_protection({}))
+                    staging_context(model.io), outputs, locks, staging_protection({}))
                 assert.is_nil(ok)
                 assert.matches("no output lock for 'C:/alias/bin/app.exe'", err, 1, true)
                 assert.same({}, model.removed)
@@ -1072,7 +1081,7 @@ describe("Windows compiler path integration", function()
                 return lstat(strategy, filename)
             end
             local ok, err = driver.cleanup_stale_staging(
-                { io = model.io }, outputs, locks, staging_protection({}))
+                staging_context(model.io), outputs, locks, staging_protection({}))
             assert.is_nil(ok)
             assert.matches("lstat: access denied", err, 1, true)
             assert.same({}, model.removed)

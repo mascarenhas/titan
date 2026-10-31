@@ -206,8 +206,8 @@ describe("browser incremental compilation", function()
         assert.is_true(ok, subject)
         semantic_driver, semantic_contexts, saved_registry = subject, {}, types.registry
         subject.TITAN_SOURCE_PATH = fixture.source
-        local function context(target)
-            local value = subject.new_resolver_context({ target = target, analysis_only = true })
+        local function context(target, analysis_only)
+            local value = subject.new_resolver_context({ target = target, analysis_only = analysis_only ~= false })
             semantic_contexts[#semantic_contexts + 1] = value
             return value
         end
@@ -217,9 +217,11 @@ describe("browser incremental compilation", function()
             assert.equal(0, #errors, table.concat(errors, "\n"))
             return modtype
         end
-        local native = context()
+        local native = context(nil, false)
         local native_loader = subject.defaultloader({}, { context = native, source_roots = { sequence = true } })
         load(native_loader, "sequence")
+        local native_entry = subject.imported.sequence
+        assert.is_table(native_entry.ast._erased_registry)
         local owner = types.registry["sequence.Item"]
         assert.is_table(owner)
         local provider = load(native_loader, "titan.math")
@@ -239,6 +241,15 @@ describe("browser incremental compilation", function()
         assert.equal("source", subject.imported["titan.math"].kind)
         assert.has_error(function() native_loader("titan.math") end,
             "compiler caches now belong to target " .. browser.target_descriptor.identity .. "; create a new context")
+        local browser_registry, browser_imported = types.registry, subject.imported
+        assert.has_error(function()
+            subject.compile("sequence", native_entry.ast, native_entry.filename,
+                {}, false, { context = native })
+        end, "compiler caches now belong to target " .. browser.target_descriptor.identity .. "; create a new context")
+        assert.equal(browser_registry, types.registry)
+        assert.equal(browser_imported, subject.imported)
+        assert.is_table(types.registry["sequence.Item"])
+        assert(subject.assert_target_context(browser))
         subject.TITAN_BIN_PATH = native_path
         local final = context()
         local final_loader = subject.defaultloader({}, { context = final, source_roots = { sequence = true } })
