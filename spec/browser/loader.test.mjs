@@ -33,13 +33,13 @@ export async function run(context) {
       });
       const first = instance.initialize();
       context.assert(first === instance.initialize(), 'initialize did not share its Promise');
-      await first;
       const running = instance.run(['bytes', '', new Uint8Array([65, 0, 255, 195, 40]), '🌍']);
+      await first;
       await rejected(context, instance.run(), 'TITAN_BROWSER_REENTRY',
         'browser instance is suspended; reentry is not allowed');
       const disposing = disposeWhileRunning ? instance.dispose() : undefined;
       const result = await running;
-      context.assert(result.kind === 'returned' && result.status === 23,
+      context.assert(result?.kind === 'returned' && result.status === 23,
         'completion did not preserve the status after a final coroutine resume');
       context.equalBytes(result.bytes, new Uint8Array(0), 'successful completion had payload');
       context.equalBytes(collected(stdout), expectedOut, 'stdout bytes changed');
