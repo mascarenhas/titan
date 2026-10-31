@@ -728,6 +728,9 @@ function incremental.toolchain_identity(context, descriptor)
     end
     local details = { preprocessor = preprocessor, banner = banner, tools = tools,
         stage_policy = stage_policy }
+    if descriptor.target_identity ~= nil then
+        details.target_identity = descriptor.target_identity
+    end
     local digest = incremental.digest(context, "toolchain", details)
     memo.toolchains[key] = { digest = digest, details = details }
     return digest, details

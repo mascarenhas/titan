@@ -456,6 +456,11 @@ if not platform.windows then
     locked_io = resolver_context.io
     locked_io._process_inherit = output_locks:descriptors()
 end
+for _, directory in ipairs(lock_directories) do
+    local valid, target_error = driver.validate_output_target(
+        resolver_context, directory, directory == args.output)
+    if not valid then exit(target_error) end
+end
 incremental.load_digest_cache(resolver_context, args.output)
 if driver.INSTALLED and driver.INSTALL_PATHS then
     incremental.load_sdk_digests(resolver_context, driver.INSTALL_PATHS.sdk_digests)
@@ -801,7 +806,9 @@ if not args.compile_only and not args.print_ast then
         policy = {
             uname = driver.UNAME or "", darwin = driver.IS_DARWIN == true,
             profile = driver.BUILD_PROFILE,
-            target = driver.TARGET_PROFILE and driver.TARGET_PROFILE.identity or "",
+            target = resolver_context.target_descriptor and
+                resolver_context.target_descriptor.identity or
+                (driver.TARGET_PROFILE and driver.TARGET_PROFILE.identity or ""),
         },
         bindings = resolver_context.native_bindings,
         environment = {

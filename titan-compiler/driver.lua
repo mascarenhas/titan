@@ -34,6 +34,36 @@ driver._browser_target = require "titan-compiler.browsertarget"
 
 driver.imported = {}
 
+-- Logical module names and FQTNs have one process-wide nominal closure.
+-- Contexts survive only while that closure belongs to their target generation.
+local semantic_target_identity
+local semantic_cache_generation = 0
+
+function driver.assert_target_context(context)
+    if context._semantic_cache_generation ~= nil and
+       context._semantic_cache_generation ~= semantic_cache_generation then
+        error("compiler caches now belong to target " ..
+            semantic_target_identity .. "; create a new context", 0)
+    end
+    return true
+end
+
+function driver.activate_target_caches(context, identity)
+    driver.assert_target_context(context)
+    assert(type(identity) == "string" and identity ~= "",
+        "semantic cache target identity is required")
+    if semantic_target_identity ~= identity then
+        -- Rebind the complete closure, rather than pruning individual owners.
+        -- Same-target contexts intentionally keep the existing warm caches.
+        driver.imported = {}
+        types.registry = {}
+        semantic_cache_generation = semantic_cache_generation + 1
+        semantic_target_identity = identity
+    end
+    context._semantic_cache_generation = semantic_cache_generation
+    return true
+end
+
 -- Compiled-module metadata encodes the monotonic ABI integer as its canonical
 -- decimal string. The semantic release and its major/minor library namespace
 -- are deliberately independent from that compatibility marker.
@@ -1819,6 +1849,7 @@ end
 -- No filesystem discovery is performed here; provider precedence is already
 -- settled by this resolver's complete source inventory.
 function driver.completion_binary_catalog(context)
+    driver.assert_target_context(context)
     local result = {}
     -- Finalization selects whole archives, including siblings that ordinary
     -- imports never loaded. Capture their interfaces without selecting any
@@ -4476,6 +4507,7 @@ end
 -- enough for the loader's whole-provider overlap rebind to replace them (or
 -- report that no compatible disk fallback exists).
 local function reconcile_embedded_import_cache(context, static_deps)
+    driver.assert_target_context(context)
     local provider = available_embedded_interface_provider(context)
     local configured = context.embedded_interface_provider
     if provider and static_deps then
@@ -4795,6 +4827,7 @@ end
 -- or (type recovery only, without selecting anything) the provider ordinary
 -- lookup would choose, which an exposer can reach only through globals.
 local function certificate_dependency(context, name, linked_names)
+    driver.assert_target_context(context)
     local mod = driver.imported[name]
     if mod and mod ~= CIRCULAR_MARK then
         return mod, linked_names[name] == true
@@ -4830,6 +4863,7 @@ local function resolver_plan(context, linked_names)
         return linked
     end
     function plan.provider_file(name)
+        driver.assert_target_context(context)
         local mod = driver.imported[name]
         if not mod or mod == CIRCULAR_MARK or mod.kind ~= "dynamic" then
             return nil
@@ -4864,6 +4898,7 @@ function driver.defaultloader(static_deps, options)
     options = options or {}
     local owns_context = options.context == nil
     local context = options.context or driver.new_resolver_context(options)
+    driver.assert_target_context(context)
     local source_roots = options.source_roots or {}
     -- The object code-generation policy certification compares records
     -- against; compilation requests of the same invocation use these values.
@@ -6154,6 +6189,7 @@ function driver.defaultloader(static_deps, options)
     end
 
     local function loader(modname, request)
+        driver.assert_target_context(context)
         if not staticmetadata.valid_module_name(modname) then
             return false, "invalid logical Titan module name " ..
                 string.format("%q", modname)
@@ -6479,6 +6515,7 @@ function driver.restore_source_object(context, modname, source, record, options)
     if type(context) ~= "table" or context.io == nil then
         error("restoring an object requires a resolver context", 2)
     end
+    driver.assert_target_context(context)
     local binding = context.loader and loader_contexts[context.loader]
     if not binding or binding.context ~= context or not binding.restore then
         error("restoring an object requires a loader bound to its " ..
@@ -6500,6 +6537,7 @@ function driver.resolve_source(context, modname, source_path)
     if type(context) ~= "table" or context.io == nil then
         error("source lookup requires a resolver context", 2)
     end
+    driver.assert_target_context(context)
     return resolve_source(source_path or driver.TITAN_SOURCE_PATH, modname,
         context)
 end
@@ -6564,6 +6602,7 @@ function driver.resolution_plan(context)
     if type(context) ~= "table" or context.io == nil then
         error("a resolution plan requires a resolver context", 2)
     end
+    driver.assert_target_context(context)
     local binding = context.loader and loader_contexts[context.loader]
     local planning = binding and binding.planning
     if not planning or not planning.open then
@@ -6661,6 +6700,7 @@ function driver.resolution_plan(context)
     local accepted = {}
     local plan = { modules = modules, order = order, archives = archives }
     function plan.linked(name)
+        driver.assert_target_context(context)
         local module = modules[name]
         if module and module.kind == "unavailable" then return nil end
         local mod, is_linked = certificate_dependency(context, name, linked)
@@ -6668,10 +6708,12 @@ function driver.resolution_plan(context)
         return is_linked
     end
     function plan.provider_file(name)
+        driver.assert_target_context(context)
         local module = modules[name]
         return module and module.kind == "dynamic" and module.provider_file or nil
     end
     function plan.digest(name, view)
+        driver.assert_target_context(context)
         local module = modules[name]
         if module and module.kind == "unavailable" then
             return nil, "unavailable"
@@ -6685,6 +6727,7 @@ function driver.resolution_plan(context)
         return incremental.interface_digest(context, mod, view)
     end
     function plan.update(name, certified)
+        driver.assert_target_context(context)
         local module = modules[name]
         if not module or module.kind ~= "source" then
             error("only planned source modules accept a certified record", 2)
@@ -6694,6 +6737,7 @@ function driver.resolution_plan(context)
         accepted[name] = certified
     end
     function plan.accepted(name)
+        driver.assert_target_context(context)
         return accepted[name]
     end
     return plan
@@ -6958,6 +7002,7 @@ end
 -- coordinator publishes. Returns `{ modname, object, objects, staged =
 -- {{from, to, role}}, diagnostics = {} }` or `nil, diagnostics text`.
 function driver.compile_planned_module(context, modname, options)
+    driver.assert_target_context(context)
     options = options or {}
     local plan = options.plan
     if type(plan) ~= "table" or plan.protocol ~= version.BUILD_WORKER_PROTOCOL
@@ -7159,6 +7204,7 @@ end
 -- Returns the published metadata (`status`, `record`, `object`, `objects`,
 -- `imports`), with status `built` rather than `hit` when uncertified.
 function driver.publish_staged_module(context, result)
+    driver.assert_target_context(context)
     local modname = result.modname
     local primary, parts = nil, {}
     for _, staged in ipairs(result.staged or {}) do
@@ -7433,6 +7479,7 @@ end
 
 function driver.finalize_resolver_context(context)
     context = context or driver.new_resolver_context()
+    driver.assert_target_context(context)
     reconcile_embedded_import_cache(context)
     if context.finalized_selection and
        perf.resolver_selection(context, context.finalized_selection) then
@@ -7809,6 +7856,7 @@ function driver.tableloader(modtable, imported, deps, options)
     options = options or {}
     local owns_context = options.context == nil
     local context = options.context or driver.new_resolver_context(options)
+    driver.assert_target_context(context)
     local source_view = options.interface == "source"
 
     local function source_requested(request)
@@ -7849,6 +7897,7 @@ function driver.tableloader(modtable, imported, deps, options)
     end
 
     local function loader(modname, request)
+        driver.assert_target_context(context)
         if not staticmetadata.valid_module_name(modname) then
             return false, "invalid logical Titan module name " ..
                 string.format("%q", modname)
@@ -10143,6 +10192,54 @@ function driver.prepare_output_root(directory)
     return output
 end
 
+-- Called under the output-domain lock. A host only observes markers; only an
+-- explicitly owned, empty browser root can acquire one.
+function driver.validate_output_target(context, directory, create)
+    driver.assert_target_context(context)
+    local strategy = context.io
+    local selected = driver.context_target(context)
+    local marker = path.join(directory, ".titan-target")
+    local function read_error(reason)
+        return nil, string.format("cannot read target marker %q: %s",
+            marker, tostring(reason))
+    end
+    local stat, stat_error = strategy:lstat(marker)
+    if stat_error then return read_error(stat_error) end
+    if stat then
+        if stat.kind ~= "file" or stat.size > 16 then
+            return read_error("invalid target marker")
+        end
+        local contents, err = strategy:read_file(marker)
+        if not contents then return read_error(err) end
+        local marked = contents:match("^([a-z]+)\n$")
+        if not marked or not source_labels[marked] then
+            return read_error("invalid target marker")
+        end
+        if marked ~= selected then
+            return nil, string.format(
+                "output root %q belongs to target %q, not %q; use a separate --output directory",
+                directory, marked, selected)
+        end
+        return true
+    end
+    if selected ~= "browser" or not create then return true end
+    local entries, list_error = strategy:list(directory)
+    if not entries then return read_error(list_error) end
+    for _, name in ipairs(entries) do
+        if name ~= "." and name ~= ".." and name ~= ".titan-build.lock" then
+            return nil, string.format(
+                "browser output root %q is not empty and has no .titan-target marker; use a separate --output directory",
+                directory)
+        end
+    end
+    local written, write_error = strategy:write_file(marker, "browser\n")
+    if not written then
+        return nil, string.format("cannot write target marker %q: %s",
+            marker, tostring(write_error))
+    end
+    return true
+end
+
 function driver.sibling_temporary_path(filename, strategy)
     strategy = strategy or compiler_io.new_sync()
     local unique, temporary_error = strategy:tmpname()
@@ -12322,6 +12419,12 @@ end
 -- ownership markers only; fresh C-header discovery belongs to the workers.
 -- Success records `plan.reservations` and the validated `plan.inputs`.
 function driver.preflight_build_outputs(context, plan, options)
+    driver.assert_target_context(context)
+    if options.output_root then
+        local valid, target_error = driver.validate_output_target(
+            context, options.output_root, true)
+        if not valid then return nil, target_error end
+    end
     local inputs, input_seen, outputs, modules = {}, {}, {}, {}
     local output_owners, c_outputs = {}, {}
     local function input(filename)
@@ -12345,7 +12448,7 @@ function driver.preflight_build_outputs(context, plan, options)
         input(entry.path)
     end
     if options.metadata_root then
-        for _, name in ipairs({ ".titan", ".titan-links", ".native" }) do
+        for _, name in ipairs({ ".titan", ".titan-links", ".native", ".titan-target" }) do
             input(path.join(options.metadata_root, name))
         end
     end

@@ -17,6 +17,11 @@ local RECIPE_FIELDS = {
 }
 local FILE_FIELDS = { "objects", "c_objects", "payloads", "providers", "archives", "runtime" }
 
+local function browser_descriptor(context)
+    local descriptor = context.target_descriptor
+    return descriptor and descriptor.label == "browser" and descriptor or nil
+end
+
 local function need(value, err)
     if value == nil or value == false then error(err or "certificate operation failed", 0) end
     return value
@@ -278,6 +283,12 @@ end
 
 function certificate.linker_backend(context, request)
     request = request or {}
+    if browser_descriptor(context) then
+        if request.uncacheable then
+            return "archive", request.uncacheable, "uncertified"
+        end
+        return "archive"
+    end
     if request.uncacheable then return "none", request.uncacheable, "uncertified" end
     local report
     local function discard_report()
@@ -460,18 +471,27 @@ function certificate.output_tools(context, request)
             need(status == "uncertified", reason)
             return { uncertified = reason }
         end
-        local selected, reason, status = selected_linker(context, request)
-        if not selected then return uncertified(reason, status) end
-        local result = { linker = { argv = { selected.name },
-            driver_argv = selected.argv, identity = selected.linker } }
+        local selected, result
+        if browser_descriptor(context) then
+            result = {}
+        else
+            local reason, status
+            selected, reason, status = selected_linker(context, request)
+            if not selected then return uncertified(reason, status) end
+            result = { linker = { argv = { selected.name },
+                driver_argv = selected.argv, identity = selected.linker } }
+        end
         for role, argv in pairs(request.tools or {}) do
             need(role ~= "linker" and role ~= "uncertified", "reserved native tool role: " .. tostring(role))
             local identity, reason, status = incremental.physical_executable(context, argv)
             if not identity then return uncertified(reason, status) end
             result[role] = { argv = { table.unpack(argv) }, identity = identity }
         end
-        local resolved, reason, status = selected_link_stages(context, request, selected, result)
-        if not resolved then return uncertified(reason, status) end
+        if selected then
+            local resolved, reason, status =
+                selected_link_stages(context, request, selected, result)
+            if not resolved then return uncertified(reason, status) end
+        end
         return result
     end)
     if not ok then
@@ -680,6 +700,9 @@ function certificate.native_library_policy(context, request)
     if request.uncacheable then
         return { cacheable = false, backend = backend or "none", argv = {}, reason = request.uncacheable }
     end
+    if browser_descriptor(context) then
+        return { cacheable = true, backend = "archive", files = {}, argv = {} }
+    end
     for _, flag in ipairs(link_arguments(request.argv)) do
         if flag:sub(1, 1) == "@" or flag:match("^%-fplugin") or
             flag:match("^%-%-?plugin") or flag == "-Xlinker" or
@@ -783,6 +806,12 @@ function certificate.prepare(context, spec)
     local directory = paths.join(canonical(context, spec.output_root), ".titan-links", key)
     local input = { outputs = outputs }
     for _, field in ipairs(RECIPE_FIELDS) do input[field] = spec[field] end
+    local browser = browser_descriptor(context)
+    if browser then
+        input.policy = {}
+        for name, value in pairs(spec.policy or {}) do input.policy[name] = value end
+        input.policy.target = browser.identity
+    end
     for _, field in ipairs(FILE_FIELDS) do input[field] = certificate.files(context, spec[field]) end
     need(data_only(input), "link recipe must contain only acyclic data")
     local native_request = {}
