@@ -1,0 +1,33 @@
+local coroutine = import "coroutine"
+foreign import "stdio.h"
+foreign import "loader.h"
+
+local function output(bytes: string)
+  if ffi.fwrite(bytes, #bytes, 1, ffi.stdout) ~= 1 then
+    raise "loader fixture stdout failed"
+  end
+end
+
+function main(args: {string}): integer
+  local child = coroutine.create(function(_input: value): value
+    coroutine.yield("parked", "loader")
+    return 23
+  end, "loader")
+  if child:resume(nil) ~= "parked" then raise "loader fixture did not park" end
+  if args[1] == "growth" then
+    local bytes = args[2]
+    if ffi.browser_loader_pattern(bytes, #bytes) ~= 1 then
+      raise "loader fixture argument changed across heap growth"
+    end
+    output("growth")
+  else
+    for index = 2, #args do output(args[index]) end
+  end
+  if ffi.fwrite("\0\255\195(", 4, 1, ffi.stderr) ~= 1 then
+    raise "loader fixture stderr failed"
+  end
+  ffi.browser_loader_wait(0)
+  ffi.browser_loader_wait(1)
+  -- No output flush here: the real browser entry owns the final libc drain.
+  return child:resume(nil)
+end
