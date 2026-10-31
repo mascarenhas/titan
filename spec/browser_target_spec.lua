@@ -11,6 +11,9 @@ local cprobe_cache = require "titan-compiler.cprobe_cache"
 local cprobe = require "titan-compiler.cprobe"
 local incremental = require "titan-compiler.incremental"
 local types = require "titan-compiler.types"
+local lfs = require "lfs"
+local files = require "spec.fixtures.target_selection.support"
+local temporary = require "spec.support.temporary"
 local FAKE_ROOT = platform.windows and "C:/fake" or "/fake"
 
 local function fresh_driver()
@@ -89,6 +92,7 @@ end
 
 describe("browser target descriptor", function()
     local saved_getenv, saved_profile, saved_classify, saved_registry
+    local workspace
     before_each(function()
         saved_registry = types.registry
         saved_getenv, saved_profile, saved_classify = platform.getenv,
@@ -105,6 +109,7 @@ describe("browser target descriptor", function()
         platform.getenv, cdriver.target_profile_inputs, staticmetadata.classify_object =
             saved_getenv, saved_profile, saved_classify
         types.registry = saved_registry
+        if workspace then files.remove(workspace); workspace = nil end
     end)
 
     it("builds a verified closed descriptor, retains all record facts, and freezes every level", function()
@@ -245,6 +250,103 @@ describe("browser target descriptor", function()
         assert.same(data, browser.export(assert(browser.import(data))))
         assert.same({ "./nested/../extra-ffi", "headers/../other-ffi" }, context.extra_ffi_include_dirs)
     end)
+
+    for _, role in ipairs({ "runtime", "extra FFI" }) do
+        for _, spelling in ipairs({ "absolute", "relative" }) do
+            it("preserves " .. spelling .. " symlink-parent " .. role .. " lookup and transport", function()
+                if platform.windows then pending("POSIX symlink-parent include lookup"); return end
+                workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+                files.mkdir(workspace .. "/physical/nested")
+                files.mkdir(workspace .. "/physical/include")
+                files.mkdir(workspace .. "/include")
+                files.write(workspace .. "/physical/include/selected.h",
+                    "typedef int titan_browser_symlink_parent_value;\n")
+                files.write(workspace .. "/include/selected.h",
+                    "typedef double titan_browser_symlink_parent_value;\n")
+                assert(lfs.link("physical/nested", workspace .. "/sdk-link", true))
+                local real = compiler_io.new_sync()
+                local raw = workspace .. "/sdk-link/../include"
+                local relative = "sdk-link/../include"
+                local root_index = role == "runtime" and 2 or 3
+                local function build(directory)
+                    local context, inputs = fake_context()
+                    local fixture_stat = context.io.stat
+                    local fixture_realpath = context.io.realpath
+                    function context.io:cwd() return workspace end
+                    function context.io:realpath(filename)
+                        if filename:sub(1, #workspace + 1) == workspace .. "/" then
+                            return real:realpath(filename)
+                        end
+                        return fixture_realpath(self, filename)
+                    end
+                    function context.io:stat(filename)
+                        if filename:sub(1, #workspace + 1) == workspace .. "/" then
+                            return real:stat(filename)
+                        end
+                        return fixture_stat(self, filename)
+                    end
+                    if role == "runtime" then inputs.runtime_include = directory
+                    else context.extra_ffi_include_dirs = { directory } end
+                    return assert(browser.build(context, inputs))
+                end
+                local descriptor = build(spelling == "absolute" and raw or relative)
+                assert.equal(assert(real:realpath(workspace .. "/physical/include")),
+                    descriptor.include_dirs[root_index])
+                local native_types, native_error = cdriver.process_file("selected.h", {
+                    source_dir = workspace, compiler_include_dirs = { raw },
+                })
+                assert.truthy(native_types, native_error)
+                local selected_types, selected_error = cdriver.process_file("selected.h", {
+                    source_dir = workspace, compiler_include_dirs = browser.export(descriptor.include_dirs),
+                })
+                assert.truthy(selected_types, selected_error)
+                assert.same({ "int" }, selected_types.titan_browser_symlink_parent_value.def)
+                assert.same(native_types.titan_browser_symlink_parent_value.def,
+                    selected_types.titan_browser_symlink_parent_value.def)
+                local other = build(spelling == "absolute" and relative or raw)
+                assert.equal(descriptor.identity, other.identity)
+                local data = browser.export(descriptor)
+                assert.same(data, browser.export(assert(browser.import(data))))
+            end)
+        end
+
+        it("matches native missing-root and resolution-error handling for " .. role .. " roots", function()
+            if platform.windows then pending("POSIX filesystem-aware root resolution"); return end
+            for _, state in ipairs({ "missing", "existing", "stat failure" }) do
+                local context, inputs = fake_context()
+                local raw = FAKE_ROOT .. "/unresolved/../include"
+                local looked_up = {}
+                local fixture_realpath = context.io.realpath
+                function context.io:realpath(filename)
+                    if filename == raw then
+                        looked_up[#looked_up + 1] = filename
+                        return nil, "injected realpath failure"
+                    end
+                    return fixture_realpath(self, filename)
+                end
+                local fixture_stat = context.io.stat
+                function context.io:stat(filename)
+                    if filename == raw then
+                        if state == "existing" then return { kind = "directory" } end
+                        if state == "stat failure" then return nil, "injected stat failure" end
+                        return nil
+                    end
+                    return fixture_stat(self, filename)
+                end
+                if role == "runtime" then inputs.runtime_include = raw
+                else context.extra_ffi_include_dirs = { raw } end
+                local descriptor, err = browser.build(context, inputs)
+                if state == "missing" then
+                    assert.truthy(descriptor, err)
+                    assert.equal(FAKE_ROOT .. "/include", descriptor.include_dirs[role == "runtime" and 2 or 3])
+                else
+                    assert.is_nil(descriptor)
+                    assert.equal(state == "existing" and "injected realpath failure" or "injected stat failure", err)
+                end
+                assert.same({ raw }, looked_up)
+            end
+        end)
+    end
 
     it("validates direct build compile extras before tool discovery", function()
         for _, flags in ipairs({
