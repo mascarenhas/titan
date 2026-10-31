@@ -511,13 +511,17 @@ jobs:
         run: |
           set -euo pipefail
           runner="$PREFIX/lib/titan-browser/0.6/titan-browser-run"
-          root="$GITHUB_WORKSPACE/out/browser/loader"
+          # Image paths are slash-separated relative paths beneath --root, so the
+          # suite is rooted at the workspace and never sees host absolute paths.
           images=(
-            "$root/assertions-2/loader_app.mjs" "$root/assertions-0/loader_app.mjs"
+            out/browser/loader/assertions-2/loader_app.mjs
+            out/browser/loader/assertions-0/loader_app.mjs
             --fidelity
-            "$root/assertions-2/fidelity.mjs" "$root/assertions-0/fidelity.mjs"
+            out/browser/loader/assertions-2/fidelity.mjs
+            out/browser/loader/assertions-0/fidelity.mjs
             --names
-            "$root/assertions-2/loader_names.mjs" "$root/assertions-0/loader_names.mjs"
+            out/browser/loader/assertions-2/loader_names.mjs
+            out/browser/loader/assertions-0/loader_names.mjs
           )
           for engine in node chromium; do
             echo "loader suite: $engine"

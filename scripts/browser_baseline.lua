@@ -15,13 +15,18 @@
 --
 -- Usage: lua -E scripts/browser_baseline.lua [--out PATH] [--repeats N]
 -- Exit status is nonzero when a cell failed; a receipt is still written.
+-- Resolve the compiler from the checkout while TITAN_ROOT keeps the installed
+-- headers, runtime and browser SDK: the recorded profile must be the exact one
+-- that built the images, including its identity inputs.
+local lfs = require "lfs"
+local repository = assert(lfs.currentdir())
+package.path = repository .. "/?.lua;" .. repository .. "/?/init.lua;" .. package.path
+
 local compiler_io = require "titan-compiler.io"
 local platform = require "titan-compiler.platform"
 local version = require "titan-compiler.version"
-local lfs = require "lfs"
 
 local strategy = compiler_io.new_sync()
-local repository = assert(lfs.currentdir())
 local fixtures = repository .. "/spec/fixtures/browser_baseline"
 local prefix = assert(os.getenv("PREFIX") and os.getenv("PREFIX") ~= "" and
     os.getenv("PREFIX"), "PREFIX must name the validation prefix")
