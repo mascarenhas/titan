@@ -65,10 +65,10 @@ When Emscripten or Clang compiles for `wasm32`, `__ELF__`, `__APPLE__`, and
 and the enum-carrier `.titan.cprobe` emitter already used the generic name.
 Clang emits each array as a named DATA segment recorded in the `linking`
 section's segment info. Byte alignment and the absence of relocations keep the
-segment length equal to the payload. Whether `used` retains the segments in a
-final linked Wasm image is a link-profile question for
-[#329](https://github.com/mascarenhas/titan/issues/329); metadata reading
-never depends on it.
+segment length equal to the payload. The final browser image link keeps the
+`.titan.source` segment and drops `.titan.meta` and `.titan.cprobe`; no image
+reads any of them at run time, and metadata reading never depends on the
+linked image.
 
 The standalone entrypoint, runtime objects, `ltitanlib.o`, ordinary native
 payload, and the part objects of split modules do not carry logical metadata.
@@ -223,7 +223,8 @@ formats, reads the input once, and starts no subprocess.
   (`Wasm section is outside the input (offset <offset>, size <size>, input size
   <size>)`). Known sections appear at most once and in canonical order, with
   DATACOUNT in its position before CODE (`duplicate Wasm section <id>`,
-  `out-of-order Wasm section <id>`). A custom section's name lies inside the
+  `out-of-order Wasm section <id>`); an id that is not a known section is
+  `unsupported Wasm section <id>`. A custom section's name lies inside the
   section (`Wasm custom section name is outside its section`). `linking`
   follows every known section, including DATA, and each `reloc.*` section
   follows `linking`.
@@ -232,9 +233,9 @@ formats, reads the input once, and starts no subprocess.
   (`unsupported Wasm linking version <version>`). `dylink.0` marks a side
   module (`Wasm dylink.0 side module is not supported`) and imports from
   `GOT.mem`/`GOT.func` mark PIC code (`Wasm GOT import is not supported`). The
-  word size comes from the `env.__linear_memory` import; memory64 and shared
-  memory fail with `Wasm memory64 is not supported` and `Wasm shared memory is
-  not supported`.
+  reader supports only wasm32: the fingerprint's word size is the constant 32,
+  and memory64 and shared memory fail with `Wasm memory64 is not supported`
+  and `Wasm shared memory is not supported`.
 * **DATA.** Each segment's flags (active memory 0 with an `i32.const` offset,
   passive, or an explicit memory index), size, and bounds are checked, and
   DATACOUNT must agree with the segment count (`Wasm DATACOUNT does not match
@@ -284,16 +285,24 @@ segment and entry, the linking symbols in order (`kind`, `name`, `binding` of
 answers from Wasm objects through the same accessor.
 
 The Wasm target fingerprint is `{ format = "wasm", word_size = 32,
-linking_version = 2, features = "<canonical list>" }`. Fingerprints are
-compared field by field in the order `word_size`, `linking_version`,
-`features`, reporting `Wasm <field> <actual> does not match target
-<expected>`; a different format reports `object format <actual> does not
-match target format <expected>`. Features match exactly: a subset is not
-compatible, and `-x` never matches `+x`. A regular archive that contains any
-Wasm member requires every member to be Wasm with the same fingerprint, even
-when the caller supplies no expected target, and names the offending member.
-In real `emar` archives the symbol index is record #1, so the first object is
-`archive member #2`.
+linking_version = 2, features = "<canonical list>" }`, where `features` keeps
+the object's exact canonical `target_features` list. Fingerprints are compared
+field by field in the order `word_size`, `linking_version`, `features`,
+reporting `Wasm <field> <actual> does not match target <expected>`; a
+different format reports `object format <actual> does not match target format
+<expected>`. Features match when the lists are equal, or when both are
+canonical and become equal after dropping the standalone `-shared-mem` token
+from each, provided neither carries any other `shared-mem` or `atomics` entry
+(`+shared-mem`, `=shared-mem`, `+atomics`, `-atomics`, or `=atomics`). LLVM's
+`WebAssemblyLowerEmscriptenEHSjLj` pass emits that standalone token per object,
+in each translation unit that calls `setjmp` or `longjmp`, so a `catch`-bearing
+module and a plain one in the same non-threaded target must match. Every other
+feature matches exactly: a subset is not compatible, `-x` never matches `+x`,
+and a lookalike name such as `-shared-mem+atomics` is an ordinary feature. A
+regular archive that contains any Wasm member requires every member to be Wasm
+with a matching fingerprint, even when the caller supplies no expected target,
+and names the offending member. In real `emar` archives the symbol index is
+record #1, so the first object is `archive member #2`.
 
 ## Target selection
 
@@ -644,9 +653,9 @@ arguments; publication supplies both.
    (`driver.compare_archive_entries`).
 2. Every member must be a Wasm object:
    `<member-origin>: browser provider requires Wasm objects`.
-3. No member may import, or leave undefined, `dlopen`, `dlsym`, or any name
-   beginning `backtrace_` or `__backtrace_`, whatever the symbol kind; both
-   the Wasm import list and the undefined linking symbols are checked:
+3. No member may import, or leave undefined, `dlopen`, `dlsym`, `dlerror`, or
+   any name beginning `backtrace_` or `__backtrace_`, whatever the symbol kind;
+   both the Wasm import list and the undefined linking symbols are checked:
    `<member-origin>: browser provider imports forbidden symbol "<symbol>"`.
 4. For each logical key, the member that carries its metadata (the primary
    member) must itself define `<prefix>_abi`, `<prefix>_types`,
@@ -663,7 +672,9 @@ arguments; publication supplies both.
 Generated-object validation reports a split part file that does not exist
 with the same split-part diagnostic. This check replaces the host
 `_loadlib` inspection that native publication performs; it is not a disabled
-check, and #329 adds an executing check (link and run under Node) on top.
+check, and publication then runs the [executing protocol
+check](browser-target.md#the-executing-protocol-runner), which links a probe
+image against the staged archive and runs it under Node.
 
 ### Archive-only publication and native companions
 

@@ -1983,9 +1983,10 @@ original `modname:gsub("[.]", "/")` default for programmatic callers and
 self-describing providers. The optional entrypoint path and display name let
 `titanc` place synthetic runner and entrypoint files inside the target's
 `.titan-links/<key>/synthetic/` directory without changing the logical main
-identity. The optional `options` table carries `no_uv_bootstrap`,
+identity. The optional `options` table carries `context`, `no_uv_bootstrap`,
 `pretty_print`, `exe`, `final_link_flags` (the final-link certificate's linker
 dependency-report flag, appended only to the final Unix executable link),
+`dependency_output` (where a browser link writes its captured linker trace),
 `before_commit` (invalidating the link certificate record before mutating
 public outputs), `output_module`, `output_root`, `coverage_runtime`,
 `module_names`, `archive_entries`, and `archive_names`. On Windows,
@@ -1995,6 +1996,8 @@ process, and publishes them as one recoverable set via
 `windows_publication.publish_program` (committing the `.dll` before the `.exe`
 after `before_commit`); staging cleanup failures and stale-stage retirement
 are described in [Windows DLL publication](windows-build.md#windows-dll-publication).
+A browser `options.context` takes a separate path, described in [Browser
+images](#browser-images) below.
 Filesystem source descriptors cache:
 
 | Form for `foo.bar` | `program_output` |
@@ -2123,6 +2126,42 @@ of one of those initialized logical names calls its `luaopen_*` entry, recovers
 the canonical registry module value, and applies the normal `package.loaded`
 policy.
 
+### Browser images
+
+For a browser context, `driver.compile_program` neither checks the native
+runtime nor renders `entrypoint_template`. It writes
+`<mod>__entrypoint.c` (or the synthetic entrypoint path) from
+`driver.browser_entrypoint_contents(modname, program_name, options)` and
+passes it, with `libnames` as objects and `static_archives`, to
+`driver.compile_browser_image`; the default executable is the logical output
+path with `.mjs` appended. The details are in the browser-target chapter:
+
+* **The browser entrypoint** replaces `main(argc, argv)` with one exported
+  `titan_browser_entry(argc, argv, lengths)`, which admits one run, creates
+  the state outside protection, runs a worker under one `lua_pcall` with
+  `errorhandler`, reports an uncaught error in the standalone format,
+  closes the state, drains `stdout` and `stderr`, and reports the result
+  through the `titan_browser_complete` import. It never calls `exit`, and its
+  return value is admission only. The program worker opens the libraries,
+  installs the searcher, preloads `titan` and the main module, builds the
+  byte-string argument Array, and calls `main` directly or through the
+  bootstrap hook, as `pmain` does
+  ([The browser entrypoint](browser-target.md#the-browser-entrypoint)).
+  `driver.browser_c_image_contents(worker, options)` exposes the same
+  protected wrapper for C-only images.
+* **Linking** uses `browserlink.profile`, compiles the entrypoint with the
+  descriptor's prefix, links with `emcc` into a staging directory, checks the
+  final image's imports, and publishes `<stem>.wasm` and then `<stem>.mjs` as
+  one pair with Wasm rollback
+  ([Program and test images](browser-target.md#program-and-test-images),
+  [The link profile](browser-target.md#the-link-profile)).
+* **The protocol runner.** Before a browser program or test links, `titanc`
+  calls `driver.run_standalone_archive_probe` with a browser context, which
+  links the same protocol checks as a browser C image, runs it with the SDK's
+  `titan-browser-run --engine node`, and requires exit 0
+  ([The executing protocol runner](browser-target.md#the-executing-protocol-runner)).
+  Library publication runs the same check on the staged archive.
+
 ## The `titanc` command line
 
 ```sh
@@ -2245,9 +2284,15 @@ marker. With `--output` it then loads the
 [persistent digest cache](incremental-compilation.md#persistent-digest-cache)
 unless the browser path already did; an installed compiler also loads the
 native SDK digest manifest, and a browser context loads only its descriptor's
-browser manifest. A browser `--test` without `-c` stops here, and a browser
-build whose plan has a `main` stops after planning, both with `browser program
-linking is not available yet`.
+browser manifest. A browser invocation has already rejected `--coverage`
+(before target validation) and owned link-profile options in the normalized
+compile and link extras (`browserlink.validate_extras`); before link
+certification, a browser link requires the SDK (`driver.require_browser_sdk`)
+and its link profile (`program` for programs and tests, `protocol` for
+libraries), and a library build also requires a working Node 24
+(`driver.browser_node_ready`). A browser program's output set is the `.mjs`
+and its sibling `.wasm` ([Program and test
+images](browser-target.md#program-and-test-images)).
 It runs `build.run`, whose coordinator-side pre-dispatch
 [output preflight](build-coordinator.md#pre-dispatch-output-preflight)
 rejects output collisions and graph-dependent option errors (`--exe` or
@@ -2355,7 +2400,7 @@ all-hit build shows `[total/total]`.
   libuv's reopen replaces that private descriptor and never fd 2; an exported
   `COLUMNS`; otherwise 80. `close()` closes the private handle. Widths are
   measured in terminal cells over visible text only, never escape sequences,
-  under a conservative rule (#324). An ASCII byte is one cell. Every other
+  under a conservative rule. An ASCII byte is one cell. Every other
   character is two cells: a lead byte followed by the continuation bytes it
   declares counts as one character. Any byte outside such a sequence (a stray
   continuation byte, an invalid lead, a cut-short sequence) is charged as one
@@ -2540,6 +2585,15 @@ headers. Reinstalling in the default system OpenSSL mode removes only the
 bundled OpenSSL headers so subsequent OpenSSL checks use the system headers.
 Checkout developer mode selects the corresponding local archive and headers so
 runtime edits can be tested before reinstalling.
+
+The browser target links a separate `libtitan.a` from the same four sources,
+installed by `make browser-sdk` in `<root>/lib/titan-browser/0.6/`. Under
+`TITAN_TARGET_BROWSER` the runtime compiles out `dlopen`/`dlsym`, executable
+discovery, the compiler-root query, the `SIGPIPE` guard, and libbacktrace, and
+the dynamic paths raise browser errors instead ([Runtime
+guards](browser-target.md#runtime-guards)). `titan.h` also supplies the
+default `TITAN_COROUTINE_STACK_SIZE` of 2 MiB that the browser target
+overrides.
 
 ### `titan.h`
 
@@ -2902,6 +2956,9 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `TITAN_JOBS` | `titanc` | `4` | Local job cap when `--jobs` is absent. |
 | `TITAN_TARGET` | `titanc` | unset (empty means unset) | Source-selection target when `-T`/`--target` is absent; same vocabulary, with diagnostics naming `TITAN_TARGET=<value>`. Ignored by `--print-root`; never read by the driver library, build workers, or the language server. Make's native `titanc` recipes unset it. |
 | `EMSDK` | `browsertarget.lua` | unset (empty means unset) | Emscripten SDK root for the browser target: its `upstream/emscripten/{emcc,emar,emranlib}` are the only tools tried; otherwise `emcc` is found on `PATH`. |
+| `TITAN_NODE` | `titan-browser-run` (through the browser executing check and `make browser-sdk`) | unset | One Node 24 executable path (a bare name is looked up on `PATH`) for the browser runner; otherwise `node` on `PATH`. See [The runner](browser-target.md#the-runner). |
+| `TITAN_CHROME` | `titan-browser-run` | unset | Chrome or Chromium executable for `--engine chromium` and `--probe`, overridden by `--chrome`; otherwise the runner tries `google-chrome`, `google-chrome-stable`, `chromium`, `chromium-browser`, and `chrome-headless-shell` on `PATH`. |
+| `TITAN_BROWSER_ROOT_NO_SANDBOX` | `titan-browser-run` | unset | Exact value `1` adds `--no-sandbox` to Chromium, and only when the runner runs as root (root containers). |
 | `MAKEFLAGS` | `jobs.lua` `open_slots` (Unix), `titanc` (`progress.select`) | unset | A parent GNU Make's jobserver authorization and `-j1`; see [GNU Make jobserver participation](#gnu-make-jobserver-participation). An advertised jobserver (`--jobserver-auth`/`--jobserver-fds`) also selects the plain progress form. |
 | `TERM` | `titanc` (`progress.select`, `progress.colour`) | unset | `dumb` selects the plain progress form and disables colour. |
 | `NO_COLOR` | `titanc` (`progress.colour`) | unset | Non-empty disables progress colour only; the live region stays. |
@@ -2979,8 +3036,10 @@ transport](build-coordinator.md#build-worker-transport).
 ## Experimental Windows process transports
 
 `titan-compiler.platform` reads the Lua host separator without filesystem or
-process operations at import. `initialize_platform` retains lazy Unix `uname`
-through the injected strategy, while native Windows initializes as `Windows`
+process operations at import. On Unix, `initialize_platform` runs `uname` once
+through the injected strategy: a target-less or browser constructor does so
+eagerly, and a context constructed with an explicit host label does so only
+when a later step needs the platform. Native Windows initializes as `Windows`
 without that subprocess. This host choice does not replace the generated
 object's authoritative target fingerprint.
 
