@@ -85,7 +85,7 @@ The installation writes only below `PREFIX/lib/browser/`:
 
 It does not change the native Lua installation. Every browser invocation
 checks the record against the installed archive, the headers, and the running
-Emscripten before compiling. If anything disagrees, the error names the
+Emscripten before compiling. An inconsistent Lua installation reports the
 record, the field, both values, and the command that repairs it:
 
 ```text
@@ -245,6 +245,11 @@ browser target does not support TITAN_EXTRA_CFLAGS flag "-flto"
 `TITAN_EXTRA_CFLAGS=-O0 -fno-lto -march=native`, must be cleared for browser
 invocations.
 
+Flags that change the Wasm feature set, such as `--cflag=-msimd128`, are
+reported separately from Lua record errors. The diagnostic lists the supplied
+compile flags and the actual versus required target features. Remove the
+feature-changing flag; reinstalling browser Lua does not repair that mismatch.
+
 ## Current limits
 
 * Programs and tests cannot be linked, and nothing built for the browser can
@@ -253,6 +258,8 @@ invocations.
   modules have no browser provider (#329).
 * Only Linux and macOS hosts are supported.
 * The language server analyzes the host target only.
+* Native source coverage (`--coverage` and its backend/report options) is not
+  supported for the browser target.
 
 See [the browser target](../implementation/browser-target.md) in the
 implementation manual for the target descriptor, the record checks, cache and

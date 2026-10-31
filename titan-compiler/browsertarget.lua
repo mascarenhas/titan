@@ -504,7 +504,21 @@ function M.build(context, inputs)
         if not fingerprint then return nil, fingerprint_error end
         local expected = { format = "wasm", word_size = 32, linking_version = 2, features = FEATURES }
         local matches, mismatch_error = staticmetadata.fingerprint_matches(fingerprint, expected)
-        if not matches then return nil, mismatch(paths, record, "wasm_features", FEATURES, tostring(mismatch_error)) end
+        if not matches then
+            local diagnostic = "browser target compiler probe does not match the required Wasm target: " ..
+                tostring(mismatch_error)
+            if inputs.compile_flags and #inputs.compile_flags > 0 then
+                local extras = {}
+                for _, flag in ipairs(inputs.compile_flags) do
+                    extras[#extras + 1] = string.format("%q", flag)
+                end
+                diagnostic = diagnostic .. "; user compile flags: " .. table.concat(extras, " ") ..
+                    "; remove feature-changing flags from TITAN_EXTRA_CPPFLAGS/TITAN_EXTRA_CFLAGS/--cflag"
+            else
+                diagnostic = diagnostic .. "; check the selected Emscripten " .. M.EMSCRIPTEN_VERSION .. " installation"
+            end
+            return nil, diagnostic
+        end
         local data = { label = "browser", triple = "wasm32-unknown-emscripten", memory_bits = 32,
             tools = tool, compile_flags = flags, include_dirs = includes, target_defines = target_defines,
             paths = paths, lua = { path = paths.lua_record, record = record,

@@ -22,6 +22,7 @@ local function drain()
 end
 
 function main(args: {string}): integer
+  if ffi.browser_loader_buffer_stdio() ~= 0 then raise "could not buffer fidelity stdio" end
   local mode = args[1]
   if mode == "abort_wait" then ffi.browser_loader_abort_wait() end
   local owner = coroutine.create(function(_input: value): value
