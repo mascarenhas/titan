@@ -84,9 +84,10 @@ int titan_browser_entry(int argc, const unsigned char *const *argv,
     if (!titan_browser_entry_allowed()) return -1;
     titan_browser_active = titan_browser_used = 1;
     L = luaL_newstate();
-    /* lua_pushcfunction/lightuserdata cannot allocate after this boolean
-    ** reservation. No Lua library or allocating setup escapes protection. */
-    if (L == NULL || !lua_checkstack(L, 4)) {
+    /* A fresh state already provides LUA_MINSTACK slots. The three pushes
+    ** establishing protection cannot allocate and need no stack growth.
+    ** Keep allocation and raising reservations inside the protected call. */
+    if (L == NULL) {
         kind = 1; status = $STATE_STATUS;
         bytes = state_error; length = sizeof(state_error) - 1;
     } else {
