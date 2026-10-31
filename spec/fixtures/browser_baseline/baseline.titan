@@ -1,0 +1,104 @@
+-- Measurement-only micro-benchmarks for the #329 size/speed baseline.
+--
+-- Every row reports seconds, written as `bench.<name>=<seconds>` so the harness
+-- can parse stdout without a browser-only encoder. `baseline_now` is the
+-- engine's wall clock; the suspension row is the only place where wall time and
+-- CPU time differ materially.
+local coroutine = import "coroutine"
+foreign import "stdio.h"
+foreign import "baseline.h"
+
+local function emit(name: string, value: float): ()
+  local text = name .. "=" .. value .. "\n"
+  if (ffi.fwrite(text, 1, #text, ffi.stdout) as integer) ~= #text then
+    raise "baseline stdout failed"
+  end
+end
+
+local function measure(name: string, action: function(): ()): ()
+  local before = ffi.baseline_now()
+  action()
+  emit(name, ffi.baseline_now() - before)
+end
+
+local function increment(value: integer): integer
+  return value + 1
+end
+
+-- `extra` arrives from the process arguments, so no optimizer can replace the
+-- loop with its closed form; a compile-time constant would make this row
+-- measure nothing.
+local function bench_calls(extra: integer): ()
+  local limit = 200000 + extra
+  local value = 0
+  for _index = 1, limit do value = increment(value) end
+  if value ~= limit then raise "calls benchmark changed its value" end
+end
+
+local function make_adder(base: integer): (function(integer): (integer))
+  return function(value: integer): integer
+    return value + base
+  end
+end
+
+local function bench_closures(extra: integer): ()
+  local total = 0
+  for index = 1, 50000 + extra do
+    local add = make_adder(index)
+    total = add(total)
+  end
+  if total <= 0 then raise "closures benchmark changed its value" end
+end
+
+local function bench_arrays(extra: integer): ()
+  local values: {integer} = {}
+  for _round = 1, 100 + extra do
+    for index = 1, 1000 do values[#values + 1] = index end
+  end
+  if #values ~= (100 + extra) * 1000 then raise "arrays benchmark changed its size" end
+end
+
+local function bench_strings(extra: integer): ()
+  local text = ""
+  for _index = 1, 5000 + extra do text = text .. "x" end
+  if #text ~= 5000 + extra then raise "strings benchmark changed its length" end
+end
+
+local function bench_coroutine_switch(extra: integer): ()
+  local limit = 20000 + extra
+  local child = coroutine.create(function(_input: value): value
+    for _index = 1, limit do coroutine.yield("tick", "bench") end
+    return "done"
+  end, "bench")
+  for _index = 1, limit do
+    if child:resume(nil) ~= "tick" then
+      raise "coroutine switch lost its sequence"
+    end
+  end
+end
+
+local function bench_suspensions(): ()
+  local count = 200
+  local before = ffi.baseline_now()
+  for _index = 1, count do ffi.baseline_sleep(0) end
+  local total = ffi.baseline_now() - before
+  emit("bench.suspend_total", total)
+  emit("bench.suspend_count", count)
+  emit("bench.suspend_average", total / count)
+end
+
+function main(args: {string}): integer
+  local extra = #args + 1
+  measure("bench.calls", function(): () bench_calls(extra) end)
+  measure("bench.closures", function(): () bench_closures(extra) end)
+  measure("bench.arrays", function(): () bench_arrays(extra) end)
+  measure("bench.strings", function(): () bench_strings(extra) end)
+  -- An Asyncify-off cell cannot create a fiber or return to JavaScript, so the
+  -- harness omits the argument there.
+  if args[1] == "asyncify" then
+    measure("bench.coroutine_switch", function(): () bench_coroutine_switch(extra) end)
+    bench_suspensions()
+  end
+  emit("bench.done", 1)
+  return 0
+end

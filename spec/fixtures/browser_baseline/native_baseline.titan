@@ -1,0 +1,82 @@
+-- Native scale row for the #329 size/speed baseline.
+--
+-- It runs the same workloads as the browser fixture so the browser numbers have
+-- a native scale reference. The browser suspension rows have no native
+-- counterpart, and the browser fixture measures with a wall clock while this one
+-- uses os.clock (CPU time), so only same-name rows are compared.
+local coroutine = import "coroutine"
+local io = import "io"
+local os = import "os"
+
+local function emit(name: string, value: float): ()
+  io.print(name .. "=" .. value)
+end
+
+local function measure(name: string, action: function(): ()): ()
+  local before = os.clock()
+  action()
+  emit(name, os.clock() - before)
+end
+
+local function increment(value: integer): integer
+  return value + 1
+end
+
+local function bench_calls(extra: integer): ()
+  local limit = 200000 + extra
+  local value = 0
+  for _index = 1, limit do value = increment(value) end
+  if value ~= limit then raise "calls benchmark changed its value" end
+end
+
+local function make_adder(base: integer): (function(integer): (integer))
+  return function(value: integer): integer
+    return value + base
+  end
+end
+
+local function bench_closures(extra: integer): ()
+  local total = 0
+  for index = 1, 50000 + extra do
+    local add = make_adder(index)
+    total = add(total)
+  end
+  if total <= 0 then raise "closures benchmark changed its value" end
+end
+
+local function bench_arrays(extra: integer): ()
+  local values: {integer} = {}
+  for _round = 1, 100 + extra do
+    for index = 1, 1000 do values[#values + 1] = index end
+  end
+  if #values ~= (100 + extra) * 1000 then raise "arrays benchmark changed its size" end
+end
+
+local function bench_strings(extra: integer): ()
+  local text = ""
+  for _index = 1, 5000 + extra do text = text .. "x" end
+  if #text ~= 5000 + extra then raise "strings benchmark changed its length" end
+end
+
+local function bench_coroutine_switch(extra: integer): ()
+  local limit = 20000 + extra
+  local child = coroutine.create(function(_input: value): value
+    for _index = 1, limit do coroutine.yield("tick", "bench") end
+    return "done"
+  end, "bench")
+  for _index = 1, limit do
+    if child:resume(nil) ~= "tick" then
+      raise "coroutine switch lost its sequence"
+    end
+  end
+end
+
+function main(args: {string}): integer
+  local extra = #args + 1
+  measure("bench.calls", function(): () bench_calls(extra) end)
+  measure("bench.closures", function(): () bench_closures(extra) end)
+  measure("bench.arrays", function(): () bench_arrays(extra) end)
+  measure("bench.strings", function(): () bench_strings(extra) end)
+  measure("bench.coroutine_switch", function(): () bench_coroutine_switch(extra) end)
+  return 0
+end

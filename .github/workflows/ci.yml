@@ -261,27 +261,35 @@ jobs:
           use_oidc: true
 
   # The browser target's real-toolchain gate. It stays separate from the shard
-  # jobs and from the stdlib build: the Emscripten SDK installation is cached
-  # under the pinned version, the fork's browser Lua is installed into this
-  # job's own validation prefix, and only the four real-toolchain spec files
-  # run. #329 extends this job with the browser SDK and the runner.
+  # jobs and from the stdlib build: the Emscripten SDK, Node 24 and the pinned
+  # Chrome for Testing headless shell are cached under their pinned versions,
+  # the fork's browser Lua, the native runtime and the browser SDK are installed
+  # into this job's own validation prefix, and the real-toolchain spec files and
+  # portable JS suites run under Node and headless Chromium.
   # Implementation notes: doc/implementation/continuous-integration.md#linux-job-graph-and-concurrency
   browser-toolchain:
-    name: browser target real toolchain (ubuntu-24.04, emsdk 6.0.13)
+    name: browser target real toolchain (ubuntu-24.04, emsdk 6.0.13, Node 24)
     needs: build-compiler
     if: github.event_name == 'push'
-    runs-on: ubicloud-standard-2
-    timeout-minutes: 30
+    runs-on: ubicloud-standard-4
+    timeout-minutes: 60
     permissions:
       contents: read
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      MAKEFLAGS: "-j4"
+      TITAN_JOBS: "4"
       # emsdk_env.sh unsets every EMSDK_* input it does not set itself, so the
       # pin and the installation root must not use that prefix.
       TITAN_EMSDK_VERSION: "6.0.13"
       TITAN_EMSDK_ROOT: ${{ github.workspace }}/.emsdk
       PREFIX: ${{ github.workspace }}/.lua
       TITAN_PREFIX: ${{ github.workspace }}/.lua
+      # Chrome for Testing 156.0.8078.80, the version verified for #329. The
+      # ZIP digest is pinned because CfT publishes no .sha256 sidecar.
+      TITAN_CHROME_VERSION: "156.0.8078.80"
+      TITAN_CHROME_SHA256: "547dcd374e02961bf998f6046a267644f8502225c36bb78ca307dab32a0b3eb4"
+      TITAN_CHROME_ROOT: ${{ github.workspace }}/.chrome
 
     steps:
       - uses: actions/checkout@v6
@@ -331,17 +339,96 @@ jobs:
             sed -n 's/.*) \([0-9][0-9.]*\).*/\1/p' | head -n 1)
           test "$installed" = "$TITAN_EMSDK_VERSION"
 
+      # FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 only affects action runtimes, so the
+      # job selects Node 24 explicitly and states the major it will use.
+      - name: Select Node 24 from the pinned Emscripten SDK
+        run: |
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          node_bin=$(find "$TITAN_EMSDK_ROOT/node" -maxdepth 3 -type f \
+            -name node -perm -u+x | sort | head -n 1)
+          test -n "$node_bin" || {
+            echo "no bundled Node under $TITAN_EMSDK_ROOT/node" >&2; exit 1; }
+          version=$("$node_bin" --version)
+          case $version in
+            v24.*) ;;
+            *) echo "$node_bin reports $version; expected Node 24" >&2; exit 1 ;;
+          esac
+          echo "TITAN_NODE=$node_bin" >> "$GITHUB_ENV"
+          echo "$(dirname "$node_bin")" >> "$GITHUB_PATH"
+          "$node_bin" --version
+
+      - name: Restore the pinned Chrome for Testing headless shell
+        uses: ubicloud/cache@v4
+        with:
+          path: ${{ env.TITAN_CHROME_ROOT }}
+          key: ubuntu-24.04-${{ runner.arch }}-chrome-headless-shell-${{ env.TITAN_CHROME_VERSION }}-v1
+          restore-keys: |
+            ubuntu-24.04-${{ runner.arch }}-chrome-headless-shell-${{ env.TITAN_CHROME_VERSION }}-
+
+      # act has no browser, so the executable and its runtime libraries are
+      # provisioned here rather than assumed from the runner image.
+      - name: Install Chrome for Testing headless shell ${{ env.TITAN_CHROME_VERSION }}
+        run: |
+          set -euo pipefail
+          chrome="$TITAN_CHROME_ROOT/chrome-headless-shell-linux64/chrome-headless-shell"
+          if [ ! -x "$chrome" ]; then
+            archive="$RUNNER_TEMP/chrome-headless-shell-$TITAN_CHROME_VERSION.zip"
+            curl -fsSL -o "$archive" \
+              "https://storage.googleapis.com/chrome-for-testing-public/$TITAN_CHROME_VERSION/linux64/chrome-headless-shell-linux64.zip"
+            echo "$TITAN_CHROME_SHA256  $archive" | sha256sum -c --strict -
+            rm -rf "$TITAN_CHROME_ROOT"
+            mkdir -p "$TITAN_CHROME_ROOT"
+            unzip -q "$archive" -d "$TITAN_CHROME_ROOT"
+            rm -f "$archive"
+          fi
+          test -x "$chrome"
+          if ! ldd "$chrome" | grep -q "not found"; then
+            echo "Chrome for Testing runtime libraries are present"
+          else
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends \
+              libnss3 libnspr4 libatk1.0-0t64 libatk-bridge2.0-0t64 \
+              libatspi2.0-0t64 libcups2t64 libdrm2 libxkbcommon0 \
+              libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 \
+              libpango-1.0-0 libcairo2 libasound2t64 libxshmfence1 \
+              fonts-liberation
+          fi
+          if ldd "$chrome" | grep -q "not found"; then
+            echo "missing Chrome for Testing runtime libraries:" >&2
+            ldd "$chrome" | grep "not found" >&2
+            exit 1
+          fi
+          echo "TITAN_CHROME=$chrome" >> "$GITHUB_ENV"
+          "$chrome" --version
+
       - name: Install the fork's browser Lua into the validation prefix
         run: |
           source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
-          make -C lua-5.5.1 install-browser PREFIX="$PREFIX"
+          make lua-browser PREFIX="$PREFIX"
           for installed in liblua.a liblua-config.txt \
               include/lua.h include/luaconf.h include/lstate.h; do
             test -f "$PREFIX/lib/browser/$installed"
           done
-          # This milestone is compile-only: the gate must pass with no browser
-          # SDK installed. #329 creates the SDK in this same job.
+
+      # The rockspec builds the native runtime and stdlib. Emscripten must not
+      # be visible here, so this step proves the browser toolchain stays out of
+      # the ordinary native build.
+      - name: Install the native runtime and compiler with LuaRocks (no Emscripten)
+        run: |
+          test -z "${EMSDK:-}"
+          ! command -v emcc >/dev/null 2>&1
+          "$PREFIX/bin/luarocks" make
+
+      - name: Build and install the browser SDK
+        run: |
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
           test -z "$(ls -A "$PREFIX/lib/titan-browser" 2>/dev/null || true)"
+          make browser-sdk PREFIX="$PREFIX"
+          for installed in libtitan.a titan.a titan-browser.mjs \
+              titan-browser-library.js titan-browser-run titan-browser-run.mjs \
+              titan-browser-node-worker.mjs titan-browser-page.mjs sdk-digests; do
+            test -f "$PREFIX/lib/titan-browser/0.6/$installed"
+          done
 
       - name: Run the browser real-toolchain gate
         env:
@@ -349,12 +436,20 @@ jobs:
           TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"
           TITAN_PROBE_CACHE_DISABLE: "1"
         run: |
+          set -euo pipefail
           source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
           gate_specs=(
             spec/wasm_toolchain_spec.lua
             spec/coder/browser_toolchain_spec.lua
             spec/coder/browser_providers_spec.lua
             spec/coder/browser_incremental_spec.lua
+            spec/coder/browser_images_spec.lua
+            spec/coder/browser_protocol_spec.lua
+            spec/browser_sdk_spec.lua
+            spec/coder/browser_entry_gate_spec.lua
+            spec/coder/browser_fixtures_spec.lua
+            spec/coder/browser_budgets_spec.lua
+            spec/minicoro_spec.lua
           )
           for gate_spec in "${gate_specs[@]}"; do
             if [[ ! -f $gate_spec ]]; then
@@ -362,7 +457,77 @@ jobs:
               exit 1
             fi
           done
-          "$PREFIX/bin/busted" "${gate_specs[@]}"
+          "$PREFIX/bin/busted" "${gate_specs[@]}" \
+            2>&1 | tee "$RUNNER_TEMP/browser-gate.log"
+
+      - name: Build the browser runner images
+        run: |
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          output="$GITHUB_WORKSPACE/out/browser/runner"
+          mkdir -p "$output"
+          "$PREFIX/bin/titanc" -q --target browser --test \
+            --tree spec/browser -o "$output" \
+            --exe "$output/runner_image.mjs" runner_image
+          "$PREFIX/bin/titanc" -q --target browser \
+            --tree spec/browser -o "$output" \
+            --exe "$output/runner_status.mjs" runner_status
+          echo "TITAN_BROWSER_RUNNER_IMAGE=$output/runner_image.mjs" >> "$GITHUB_ENV"
+          echo "TITAN_BROWSER_RUNNER_STATUS_IMAGE=$output/runner_status.mjs" >> "$GITHUB_ENV"
+          echo "TITAN_BROWSER_RUNNER=$PREFIX/lib/titan-browser/0.6/titan-browser-run" >> "$GITHUB_ENV"
+          for image in runner_image runner_status; do
+            test -f "$output/$image.mjs"
+            test -f "$output/$image.wasm"
+          done
+
+      # The loader suite takes image paths relative to --root, so both
+      # assertion profiles are built into one isolated root.
+      - name: Build the portable loader images for both assertion profiles
+        run: |
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          root="$GITHUB_WORKSPACE/out/browser/loader"
+          for assertions in 2 0; do
+            output="$root/assertions-$assertions"
+            mkdir -p "$output"
+            TITAN_ROOT="$PREFIX" "$PREFIX/bin/lua" -E -e \
+              "package.path='$GITHUB_WORKSPACE/?.lua;$GITHUB_WORKSPACE/?/init.lua;'..package.path; require('titan-compiler.driver').browser_link_options={purpose='program',assertions=$assertions}" \
+              "$GITHUB_WORKSPACE/titanc" -q --target browser --no-uv-bootstrap \
+              --tree spec/fixtures/browser_loader -o "$output" \
+              --exe "$output/loader_app.mjs" \
+              --c-source spec/fixtures/browser_loader/loader.c loader_app
+            test -f "$output/loader_app.mjs"
+            test -f "$output/loader_app.wasm"
+          done
+
+      - name: Run the portable loader suite under Node and Chromium
+        run: |
+          set -euo pipefail
+          runner="$PREFIX/lib/titan-browser/0.6/titan-browser-run"
+          for engine in node chromium; do
+            echo "loader suite: $engine"
+            "$runner" --engine "$engine" \
+              --root "$GITHUB_WORKSPACE/out/browser/loader" \
+              --js-test spec/browser/loader.test.mjs -- \
+              assertions-2/loader_app.mjs assertions-0/loader_app.mjs
+          done
+
+      - name: Run the browser runner supervisor suite
+        env:
+          TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"
+        run: |
+          set -euo pipefail
+          node --test spec/browser/runner.test.mjs \
+            2>&1 | tee "$RUNNER_TEMP/browser-runner.log"
+
+      - name: Upload browser failure logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-toolchain-failure
+          path: |
+            ${{ runner.temp }}/browser-*.log
+            out/browser
+          if-no-files-found: warn
+          retention-days: 7
 
   native-coverage:
     name: stdlib build, tests and coverage (ubuntu-24.04, GCC 14)
