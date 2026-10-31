@@ -766,7 +766,40 @@ local function digest_string(value)
     return type(value) == "string" and #value == 64 and not value:find("[^0-9a-f]")
 end
 
+local function bytewise_less(a, b)
+    for index = 1, math.min(#a, #b) do
+        local left, right = a:byte(index), b:byte(index)
+        if left ~= right then return left < right end
+    end
+    return #a < #b
+end
+
+local function valid_wasm_features(features)
+    if type(features) ~= "string" then return false end
+    if features == "" then return true end
+    local seen, previous, position = {}, nil, 1
+    while true do
+        local space = features:find(" ", position, true)
+        local token = features:sub(position, space and space - 1 or #features)
+        local name = token:match("^[+%-=]([^%s%z]+)$")
+        if not name or seen[name] or (previous and not bytewise_less(previous, token)) then
+            return false
+        end
+        seen[name], previous = true, token
+        if not space then return true end
+        position = space + 1
+    end
+end
+
 local function valid_fingerprint(value)
+    if type(value) ~= "table" or getmetatable(value) ~= nil then return false end
+    if value.format == "wasm" then
+        return closed_cache_table(value, { format = true, word_size = true,
+                linking_version = true, features = true })
+            and math.type(value.word_size) == "integer" and value.word_size == 32
+            and math.type(value.linking_version) == "integer" and value.linking_version == 2
+            and valid_wasm_features(value.features)
+    end
     if not closed_cache_table(value, { format = true, class = true, word_size = true,
         endian = true, machine = true, flags = true, cputype = true, cpusubtype = true }) then
         return false
@@ -962,6 +995,41 @@ local function native_format(bytes, first, last, depth)
     end
     local magic = bytes:sub(first, first + 3)
     if magic == "BC\192\222" or magic == "\222\192\023\011" then return "object", true end
+    if magic == "\0asm" then
+        if last - first + 1 < 8 or uint(first + 4, 4, true) ~= 1 then return "unknown", false end
+        local position, linked = first + 8, false
+        while position <= last do
+            local id, count, size, shift = bytes:byte(position), 0, 0, 1
+            position = position + 1
+            if id > 13 then return "unknown", false end
+            while true do
+                if position > last or count == 5 then return "unknown", false end
+                local digit = bytes:byte(position)
+                position, count = position + 1, count + 1
+                if count == 5 and digit > 0x0f then return "unknown", false end
+                size, shift = size + (digit & 0x7f) * shift, shift * 128
+                if digit < 0x80 then break end
+            end
+            if size > last - position + 1 then return "unknown", false end
+            if id == 0 then
+                local np, ncount, nsize, nshift = position, 0, 0, 1
+                while true do
+                    if np >= position + size or ncount == 5 then return "unknown", false end
+                    local digit = bytes:byte(np)
+                    np, ncount = np + 1, ncount + 1
+                    if ncount == 5 and digit > 0x0f then return "unknown", false end
+                    nsize, nshift = nsize + (digit & 0x7f) * nshift, nshift * 128
+                    if digit < 0x80 then break end
+                end
+                if nsize > position + size - np then return "unknown", false end
+                local name = bytes:sub(np, np + nsize - 1)
+                if name == "dylink.0" or name == "dylink" then return "unknown", false end
+                if name == "linking" then linked = true end
+            end
+            position = position + size
+        end
+        return linked and "object" or "unknown", false
+    end
     local archive = bytes:sub(first, math.min(last, first + 7))
     if archive == "!<thin>\n" then return "thin", false end
     if archive == "!<arch>\n" then
